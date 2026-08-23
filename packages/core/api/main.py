@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from packages.core.api.routers import discover_routers
 from packages.core.config import Settings, get_settings
 from packages.core.db import apply_migrations
 from packages.core.logging_config import configure_logging, get_logger
@@ -75,6 +76,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/")
     def root() -> dict[str, str]:
         return {"service": "novelos", "version": __version__, "docs": "/docs"}
+
+    # Sprint 1：自动发现并挂载业务路由到 /api 前缀。
+    # discover_routers() 扫描 packages.core.api.routers 包内所有模块，
+    # 收集名为 `router` 的 APIRouter 对象；此处统一挂到 /api 前缀下。
+    for r in discover_routers():
+        app.include_router(r, prefix="/api")
 
     return app
 
