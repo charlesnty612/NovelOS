@@ -94,6 +94,13 @@ MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通�
 | S3 Agent Runtime | ✅ 验收通过 | 90c9275 / eb3e945 | 149 |
 | S4 Workflow + Eval | ✅ 验收通过 | c563bba / e243564 | 161；golden 回归 1/1 |
 | S5 Workbench UI | ✅ 验收通过 | 34b23c4 / 90937f7 | 后端 184 + 前端 vitest 77 |
+| S6 Quality | ✅ 验收通过 | 90f4d6a / 4a05a5e | 后端 270 + 前端 83 |
+| S7 Version 分支 | ✅ 验收通过（P0×2 修复后复验） | aa21985 / 6d4b321 | 后端 330 |
+| S8 Model Router 补全 | ✅ 验收通过 | aa21985 | 后端 326（合并基线） |
+| S9 Hooks/Debts UI | ✅ 验收通过 | aa21985 | 前端 124（合并基线） |
+| S10 Simulation | ✅ 验收通过 | e614002 / cce0abf | 后端 369 |
+| S11 参照系与合规 | ✅ 验收通过 | 4b47582 / e614002 / cce0abf | 后端 369 + 前端 133 |
+| S12 Tauri 壳（Phase B） | ⏸ 待用户确认（需 Rust 工具链） | — | — |
 
 ### 4.2 已知 deviation 登记（随版本关闭）
 
@@ -102,3 +109,8 @@ MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通�
 3. **eval 内容正确性断言缺口**（S4 审查 P2-3）：golden runner 目前做流程+结构断言，observer 内容语义（before/after 与正文一致性、HIGH 误标对抗用例）归入 S6 范围。
 4. **model-configs 列表返回 params_json 明文**（S5 审查记录）：本地单用户 MVP 可接受；发布前（S8 或 S12）加脱敏。
 5. **连续两次 Human pause 的 human_input 覆盖语义**（S4 审查 P2-4）：`dict.update` 语义已写入 README，连续 pause 场景缺专项测试，后续补。
+6. **promote 按序重放而非单合并 commit**（S7 审查 P0 修复）：state-delta-v0 §6.3 字面为「单一合并 commit」，因 applier 固定应用顺序会破坏分支内 add→resolve 时序，改为逐 commit 重放（main state_version 单次跳 N）。记录于 `packages/core/story_state/README.md` §6.5。
+7. **quality_gate 默认 report 模式**（S6）：commit 门禁默认只落库不阻断；`NOVELOS_QUALITY_GATE=enforce` 或请求体 `quality_gate_mode:"enforce"` 才硬阻断。接入真实模型生产使用前建议切 enforce 并先跑一轮校准。
+8. **deconstruct-book MVP defer 清单**（S11）：epub 不支持、T1 失败无 Human 补切分、多参照系加权（OV-2）、embedding 轨道、同步长任务无超时/异步队列。记录于 `packages/workflows/deconstruct_book/README.md`。
+9. **checkpoint_exclude 与 resume 的交互**（S11 修复遗留）：被剔除键（如拆书原文 text）在 resume 时不恢复；deconstruct 无 Human 节点暂不显现，未来加 Human 节点需注入机制。
+10. **Simulation 限制**（S10）：纯状态推演（无 LLM 叙事推演）；`_skip_approval` 仅 simulation 路径可用且有审计字段；chapter_id 必填。记录于 `packages/core/simulation/README.md`。
