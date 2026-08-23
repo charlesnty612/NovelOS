@@ -1,48 +1,98 @@
 # NovelOS
 
 > 本地优先的小说写作操作系统（Local-first novel writing OS）。
-> Sprint 0：项目基础设施（git 仓库、§70 目录、迁移 runner、FastAPI 健康端点、Vite+React 骨架）。
+> 章节生产全链路：计划 → 写作 → 评审 → 提交（plan → write → review → commit），全部数据保存在本机 SQLite。
+
+## 项目简介
+
+NovelOS 面向长篇小说作者：在本地运行完整的小说生产闭环。作者创建项目、人物与章节后，
+系统以四段工作流驱动章节生产（director 计划 → writer 写作 → 人工评审 → observer 提取
+状态变化并提交），并持续维护一份「Canonical Story State」快照作为全书的唯一事实源。
+
+## 当前能力清单
+
+- **章节生产四工作流**：`chapter-plan`（director 计划）→ `chapter-write`（writer 草稿）→
+  `chapter-review`（作者人工评审，Human 节点可暂停/恢复）→ `chapter-commit`（observer 提取
+  状态变化 → state delta 校验 → 质量门禁 → 提交）。端点见 `packages/core/api/routers/workflows.py`。
+- **状态版本与分支**：Story State 版本化（v1 快照 + delta 提交），支持分支（What-if 推演用
+  临时分支，可归档）。见 `packages/core/story_state/` 与 `packages/core/api/routers/story_state.py`。
+- **质量引擎与爽感体检**：`QualityEngine` 按规则评分并产出 `quality_reports`；commit 流程内置
+  quality gate（`report` 不阻断 / `enforce` 阻断两种模式）。见 `packages/core/quality/`。
+- **伏笔债务台账**：hooks（伏笔）与 narrative_debts（叙事债务）的创建、兑现、检索，配套
+  REST 端点。见 `packages/core/api/routers/ledger.py`。
+- **参照系拆书**：reference canons（参照作品）管理 + `deconstruct-book` 工作流（逐章拆解、
+  聚合、schema 校验）。见 `packages/core/api/routers/reference.py`。
+- **What-if 推演**：`SimulationService` 在临时分支上跑假设 delta、计算 diff 并归档。
+  见 `packages/core/simulation/` 与 `packages/core/api/routers/simulation.py`。
+- **多模型路由**：按 capability（`reasoning` / `creative_writing`）路由到 mock / OpenAI 兼容 /
+  Anthropic / Ollama provider，支持失败转移链。见 `packages/core/model_router/`。
 
 ## 仓库结构
 
-- `packages/core/` — 后端核心（config / logging / db 迁移 / api / story-state / workflow-runtime / agent-runtime / model-router / evaluation / versioning）
-- `packages/domain/` — 领域服务（world / character / plot / timeline / relationship / hooks）
-- `packages/agents/` — 智能体（director / planner / writer / observer / critic / integrator）
-- `packages/workflows/` — 工作流（project_init / chapter_plan / chapter_write / chapter_review / chapter_commit / simulation）
-- `apps/desktop/` — React + TypeScript 前端（Vite）
-- `database/migrations/` — 唯一 DDL 来源
-- `tests/{unit,integration,workflow,evals}/` — pytest
-- `scripts/` — `migrate.py`、`serve.py`
-- `docs/` — 设计文档、PRD
-- `prompts/` — Agent prompt 文件
+```
+apps/web/                前端（React 18 + TypeScript + Vite；构建产物 dist/ 由后端托管）
+packages/core/           后端核心（api / agent_runtime / model_router / quality / story_state /
+                         workflow_runtime / simulation / context_engine / evaluation / versioning）
+packages/domain/         领域服务（project / character / chapter / world / plot / timeline /
+                         relationship / hooks / ledger）
+packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
+                         deconstruct_book / project_init / simulation）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0005，31 张业务表）
+tests/                   pytest（unit / integration / workflow / api / evals）
+scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
+docs/                    设计文档、PRD、实现计划（docs/impl/IMPLEMENTATION-PLAN-v0.md）
+prompts/                 Agent prompt 源文件（agents/sync 会同步到库内）
+```
+
+> 注：`apps/desktop/` 是 S0 时代的桌面骨架（未随 Sprint 推进维护）；当前唯一前端为 `apps/web/`。
 
 ## 快速开始
 
-```bash
-# 1) 安装依赖（Python>=3.11；前端另装）
-pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    fastapi 'uvicorn[standard]' pydantic jsonschema httpx pytest ruff
+前置：Python >= 3.11、Node >= 18。后端依赖见 `pyproject.toml`（fastapi / uvicorn / pydantic /
+jsonschema / httpx；测试另需 pytest / ruff）。
 
-# 2) 执行数据库迁移（生成 data/novelos.db，业务表 28 + 1 张 _migrations）
+```bash
+# 1) 安装依赖
+pip install -e ".[dev]"
+
+# 2) 执行数据库迁移（生成 data/novelos.db；31 张业务表 + _migrations）
 python scripts/migrate.py
 
-# 3) 启动后端（默认 127.0.0.1:8000）
-python scripts/serve.py
-
-# 4) 前端开发 / 构建
-cd apps/desktop
+# 3) 前端构建（构建产物 apps/web/dist，后端会自动托管）
+cd apps/web
 npm install
-npm run dev      # http://127.0.0.1:5173
-npm run build    # 生成 dist/
+npm run build
+cd ../..
+
+# 4) 启动后端（默认 http://127.0.0.1:18081）
+python -m packages.core.api.main
 ```
 
-健康检查：`curl http://127.0.0.1:8000/api/health`
+浏览器打开 http://127.0.0.1:18081 即可使用（后端同时托管 SPA 与 `/api`）。
 
-## 测试与静态检查
+端口差异说明：
+
+- `python -m packages.core.api.main` 默认端口 **18081**（8000 在开发者本机常被占用），
+  可用 `NOVELOS_PORT` 覆盖。
+- `python scripts/serve.py` 走 `Settings.api_port`，默认 **8000**，可用
+  `NOVELOS_API_PORT` 覆盖（`NOVELOS_PORT` 优先级更高，两者都设时以 `NOVELOS_PORT` 为准）。
+
+健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=31`）。
+
+## 测试
 
 ```bash
+# 后端全量（当前基线 369 passed）
 python -m pytest tests/ -q
-ruff check packages tests scripts
+
+# Golden 回归 eval（当前 1/1）
+python scripts/eval_regression.py
+
+# 端到端 HTTP smoke（真实起服务，临时库，跑完自清理）
+python scripts/smoke_e2e.py
+
+# 前端单测（vitest；当前 133）
+cd apps/web && npm run test
 ```
 
 ## 配置（环境变量，前缀 `NOVELOS_`）
@@ -53,10 +103,23 @@ ruff check packages tests scripts
 | `NOVELOS_DB_PATH` | `{data_dir}/novelos.db` | 覆盖默认 db 路径 |
 | `NOVELOS_LOG_LEVEL` | `INFO` | 日志级别 |
 | `NOVELOS_API_HOST` | `127.0.0.1` | 后端监听地址 |
-| `NOVELOS_API_PORT` | `8000` | 后端监听端口 |
+| `NOVELOS_API_PORT` | `8000` | 后端监听端口（`scripts/serve.py` 使用） |
+| `NOVELOS_PORT` | `18081` | 便捷端口变量（`python -m packages.core.api.main` 使用；优先级高于 `NOVELOS_API_PORT`） |
+| `NOVELOS_WEB_DIST` | `apps/web/dist` | SPA 构建产物目录（存在 `index.html` 才启用托管） |
+| `NOVELOS_QUALITY_GATE` | `report` | quality gate 模式：`report`（不阻断）/ `enforce`（error 级阻断） |
+| `NOVELOS_API_KEY_<PROVIDER>` | — | provider API Key（`<PROVIDER>` 大写，如 `NOVELOS_API_KEY_OPENAI`）；也可在 model_configs 的 `params_json.api_key` 配置 |
 
 ## Sprint 状态
 
-- [x] S0 基础设施（当前）
+逐 Sprint 进度、关键 commit 与测试基线见 `docs/impl/IMPLEMENTATION-PLAN-v0.md` §4.1 台账
+（S0 基础设施 ~ S11 参照系与合规已验收，S12 Tauri 壳待用户确认）；已知 deviation 见同文档 §4.2。
+
+## AI 使用声明
+
+- **本地优先**：默认所有数据与运算在本机完成，SQLite 落盘，不依赖云端服务。
+- **数据不出本机**：默认不发起任何外部网络调用；仅当作者显式配置外部模型 provider
+  （OpenAI 兼容 / Anthropic / Ollama 等，见「多模型路由」）时，模型调用请求才会按作者
+  配置发送到对应服务（对齐 PRD §102：默认 Local Only，云端调用需 Explicit Consent）。
+- mock provider 开箱即用，无需任何密钥即可跑通全链路与测试。
 
 更多上下文见 `docs/impl/IMPLEMENTATION-PLAN-v0.md`、`#NovelOS.md`。
