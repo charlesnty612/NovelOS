@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import Response
 
 from packages.domain.world import (
     NotFoundError,
@@ -21,16 +22,14 @@ router = APIRouter(tags=["world"])
 
 
 # ---------------------------------------------------------------------------
-# 依赖：每请求新开连接（避免 SQLite 跨线程问题，同时与并行代理 A 的写法一致）
+# 依赖：每请求传 db_path，Service 内部按方法开/关连接
 # ---------------------------------------------------------------------------
 
 
 def _service(request: Request) -> WorldService:
-    """每请求新建 ``WorldService``（内含独立 sqlite 连接）。"""
+    """每请求新建 ``WorldService``；连接在其内部按方法生命周期管理。"""
     settings = request.app.state.settings
-    from packages.core.db import get_connection
-
-    return WorldService(get_connection(settings.db_path))
+    return WorldService(settings.db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +52,7 @@ def _handle_world_error(exc: Exception) -> HTTPException:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/projects/{pid}/locations")
+@router.post("/projects/{pid}/locations", status_code=status.HTTP_201_CREATED)
 def create_location(pid: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
     svc = _service(request)
     try:
@@ -104,14 +103,14 @@ def update_location(
     return ent.to_dict()
 
 
-@router.delete("/locations/{location_id}")
-def delete_location(location_id: str, request: Request) -> dict[str, str]:
+@router.delete("/locations/{location_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_location(location_id: str, request: Request) -> Response:
     svc = _service(request)
     try:
         svc.delete_location(location_id)
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle_world_error(exc) from exc
-    return {"status": "deleted", "id": location_id}
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +118,7 @@ def delete_location(location_id: str, request: Request) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/projects/{pid}/factions")
+@router.post("/projects/{pid}/factions", status_code=status.HTTP_201_CREATED)
 def create_faction(pid: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
     svc = _service(request)
     try:
@@ -170,14 +169,14 @@ def update_faction(
     return ent.to_dict()
 
 
-@router.delete("/factions/{faction_id}")
-def delete_faction(faction_id: str, request: Request) -> dict[str, str]:
+@router.delete("/factions/{faction_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_faction(faction_id: str, request: Request) -> Response:
     svc = _service(request)
     try:
         svc.delete_faction(faction_id)
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle_world_error(exc) from exc
-    return {"status": "deleted", "id": faction_id}
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +184,7 @@ def delete_faction(faction_id: str, request: Request) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/projects/{pid}/world-rules")
+@router.post("/projects/{pid}/world-rules", status_code=status.HTTP_201_CREATED)
 def create_world_rule(pid: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
     svc = _service(request)
     try:
@@ -236,11 +235,11 @@ def update_world_rule(
     return ent.to_dict()
 
 
-@router.delete("/world-rules/{world_rule_id}")
-def delete_world_rule(world_rule_id: str, request: Request) -> dict[str, str]:
+@router.delete("/world-rules/{world_rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_world_rule(world_rule_id: str, request: Request) -> Response:
     svc = _service(request)
     try:
         svc.delete_world_rule(world_rule_id)
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle_world_error(exc) from exc
-    return {"status": "deleted", "id": world_rule_id}
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

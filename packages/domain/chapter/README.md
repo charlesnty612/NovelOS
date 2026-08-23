@@ -1,6 +1,6 @@
 # domain.chapter（章节领域）
 
-> 职责：Chapter 聚合根的 CRUD + 状态机迁移约束，对应 ``chapters`` 表（``database/migrations/0001_init.sql`` line 240-254）。
+> 职责：Chapter 聚合根的 CRUD + 状态机迁移约束，对应 ``chapters`` 表（DDL 权威见 ``database/migrations/0001_init.sql``）。
 > 状态：已实现 Sprint 1。
 
 ## 职责与边界
@@ -19,24 +19,24 @@
 
 | 名称 | 来源 | 说明 |
 |---|---|---|
-| `Chapter` | `packages/domain/chapter/models.py:75` | 完整表示，含 ``plan_json / status / visibility / who_knows`` |
-| `ChapterCreate` | `packages/domain/chapter/models.py:39` | 创建请求体；status 默认 PLANNED，不暴露 |
-| `ChapterUpdate` | `packages/domain/chapter/models.py:50` | 部分更新请求体，所有字段可选 |
-| `ChapterStatus` | `packages/domain/chapter/models.py:14` | 字面量枚举（5 个） |
-| `ALLOWED_NEXT` | `packages/domain/chapter/models.py:20` | 状态机迁移白名单（dict） |
-| `ChapterService` | `packages/domain/chapter/service.py:55` | 领域服务类，构造需 ``db_path`` |
-| `ChapterService.create(project_id, payload)` | `packages/domain/chapter/service.py:100` | status=PLANNED；number 重复抛 ``ChapterNumberConflict`` |
-| `ChapterService.get(chapter_id)` | `packages/domain/chapter/service.py:137` | 不存在返回 ``None`` |
-| `ChapterService.list_by_project(project_id)` | `packages/domain/chapter/service.py:144` | 按 number ASC |
-| `ChapterService.update(chapter_id, payload)` | `packages/domain/chapter/service.py:154` | status 非法跳变抛 ``ChapterTransitionError`` |
-| `ChapterService.delete(chapter_id)` | `packages/domain/chapter/service.py:213` | 子记录存在时抛 ``sqlite3.IntegrityError`` |
-| `ChapterNumberConflict` | `packages/domain/chapter/service.py:38` | number 重复异常（业务异常，409） |
-| `ChapterTransitionError` | `packages/domain/chapter/service.py:46` | 状态机非法跳变异常（409） |
-| `POST /api/projects/{pid}/chapters` | `packages/core/api/routers/chapters.py:38` | 201/404/409 |
-| `GET /api/projects/{pid}/chapters` | `packages/core/api/routers/chapters.py:64` | 200/404 |
-| `GET /api/chapters/{id}` | `packages/core/api/routers/chapters.py:72` | 200/404 |
-| `PATCH /api/chapters/{id}` | `packages/core/api/routers/chapters.py:79` | 200/404/409/422 |
-| `DELETE /api/chapters/{id}` | `packages/core/api/routers/chapters.py:99` | 204/404/409 |
+| `Chapter` | `packages/domain/chapter/models.py` | 完整表示，含 ``plan_json / status / visibility / who_knows`` |
+| `ChapterCreate` | `packages/domain/chapter/models.py` | 创建请求体；status 默认 PLANNED，不暴露 |
+| `ChapterUpdate` | `packages/domain/chapter/models.py` | 部分更新请求体，所有字段可选 |
+| `ChapterStatus` | `packages/domain/chapter/models.py` | 字面量枚举（5 个） |
+| `ALLOWED_NEXT` | `packages/domain/chapter/models.py` | 状态机迁移白名单（dict） |
+| `ChapterService` | `packages/domain/chapter/service.py` | 领域服务类，构造需 ``db_path`` |
+| `ChapterService.create(project_id, payload)` | `packages/domain/chapter/service.py` | status=PLANNED；number 重复抛 ``ChapterNumberConflict`` |
+| `ChapterService.get(chapter_id)` | `packages/domain/chapter/service.py` | 不存在返回 ``None`` |
+| `ChapterService.list_by_project(project_id)` | `packages/domain/chapter/service.py` | 按 number ASC |
+| `ChapterService.update(chapter_id, payload)` | `packages/domain/chapter/service.py` | status 非法跳变抛 ``ChapterTransitionError`` |
+| `ChapterService.delete(chapter_id)` | `packages/domain/chapter/service.py` | 子记录存在时抛 ``sqlite3.IntegrityError`` |
+| `ChapterNumberConflict` | `packages/domain/chapter/service.py` | number 重复异常（业务异常，409） |
+| `ChapterTransitionError` | `packages/domain/chapter/service.py` | 状态机非法跳变异常（409） |
+| `POST /api/projects/{pid}/chapters` | `packages/core/api/routers/chapters.py` | 201/404/409 |
+| `GET /api/projects/{pid}/chapters` | `packages/core/api/routers/chapters.py` | 200/404 |
+| `GET /api/chapters/{id}` | `packages/core/api/routers/chapters.py` | 200/404 |
+| `PATCH /api/chapters/{id}` | `packages/core/api/routers/chapters.py` | 200/404/409/422 |
+| `DELETE /api/chapters/{id}` | `packages/core/api/routers/chapters.py` | 204/404/409 |
 
 ## 依赖
 
@@ -79,4 +79,4 @@ curl -X PATCH http://127.0.0.1:8000/api/chapters/ch_xxx \
   产生重复行（极小概率），Sprint 4 工作流驱动时再考虑 DB 唯一索引升级。
 - **JSON 列**：`plan_json` 默认 `{}`；写入前 `json.dumps(ensure_ascii=False)`，读出后 `json.loads`。
 - **删除 409**：依赖 SQLite FK 约束（scenes / drafts），由 router 转 409；Service 不吞异常。
-- **权威文档**：`database/migrations/0001_init.sql` line 240-254、PRD §44 Chapter Planner。
+- **权威文档**：`database/migrations/0001_init.sql`、PRD §44 Chapter Planner。

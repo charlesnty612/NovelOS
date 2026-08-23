@@ -10,7 +10,7 @@
 ## 对外接口
 
 ### Python（`packages.domain.world.service.WorldService`）
-构造函数：`WorldService(conn: sqlite3.Connection)`。
+构造函数：`WorldService(db_path: Path | str)`；每个方法内部开/关连接。
 
 locations：
 - `create_location(project_id, name, statement='', data=None, visibility=None, who_knows=None) -> WorldEntity`
@@ -45,11 +45,9 @@ ID 前缀：`loc_` / `fac_` / `wrule_`（12 位 hex）。
 
 ## 使用 / 入口
 ```python
-from packages.core.db import get_connection
 from packages.domain.world import WorldService
 
-conn = get_connection("data/novelos.db")
-svc = WorldService(conn)
+svc = WorldService("data/novelos.db")
 loc = svc.create_location(project_id="prj_x", name="云海城", statement="...")
 ```
 
@@ -57,9 +55,9 @@ REST 入口：`POST /api/projects/{pid}/locations` 等（由 `packages/core/api/
 
 ## 维护注意点
 - `*_json` 列：写入用 `json.dumps(ensure_ascii=False)`，读出用 `json.loads`。
-- `created_at` / `updated_at`：使用本包自建的 `now_iso()`（UTC ISO-8601），不依赖 `packages.core.ids`（并行代理 A 正在创建）。
+- `created_at` / `updated_at`：复用 `packages.core.ids.now_iso()`（UTC ISO-8601）。
 - 删除 location 前会检查 `plot_events.location_id`，避免悬空 FK。
-- DDL 权威在 `database/migrations/0001_init.sql`（line 86-134），本服务不修改 DDL。
+- DDL 权威在 `database/migrations/0001_init.sql`，本服务不修改 DDL。
 - WorldEntity.id_field / id_prefix 字段便于通用方法按实体类型构造 SQL 列名。
 
 ## 测试

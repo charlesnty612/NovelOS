@@ -21,9 +21,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from ._util import new_id, now_iso
+from packages.core.ids import new_id, now_iso
+
 from .models import VISIBILITY_VALUES, WorldEntity
 
 # ---------------------------------------------------------------------------
@@ -98,13 +100,16 @@ class WorldService:
 
     用法::
 
-        svc = WorldService(conn)
+        svc = WorldService(db_path)
         loc = svc.create_location(project_id="prj_x", name="云海城")
         svc.delete_location(loc.id)   # 被 plot_events 引用时抛 ReferencedError
+
+    构造接收 ``db_path``；每个方法内部用 ``packages.core.db.get_connection`` 开连接、
+    ``try / finally`` 关闭。
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self.conn = conn
+    def __init__(self, db_path: Path | str) -> None:
+        self.db_path = str(db_path)
 
     # ------------------------------------------------------------------ locations
 
@@ -269,6 +274,7 @@ class WorldService:
         visibility: str | None,
         who_knows: list[str] | None,
     ) -> WorldEntity:
+        # 同步前置校验（在开连接前完成，避免持有连接时校验失败）
         self._require_project(project_id)
         name = self._require_nonempty_str(name, "name")
         statement = statement or ""
@@ -283,8 +289,11 @@ class WorldService:
         data_json = json.dumps(data, ensure_ascii=False)
         who_knows_json = json.dumps(who_knows, ensure_ascii=False) if who_knows is not None else None
 
+        from packages.core.db import get_connection
+
+        conn = get_connection(self.db_path)
         try:
-            self.conn.execute(
+            conn.execute(
                 f"""
                 INSERT INTO {cfg.table}
                     ({cfg.id_field}, project_id, name, statement, data_json,
@@ -296,9 +305,11 @@ class WorldService:
                     visibility, who_knows_json, now, now,
                 ),
             )
-            self.conn.commit()
+            conn.commit()
         except sqlite3.IntegrityError as exc:
             raise ValidationError(f"插入失败: {exc}") from exc
+        finally:
+            conn.close()
 
         return WorldEntity(
             id=eid,
@@ -315,18 +326,30 @@ class WorldService:
         )
 
     def _get(self, cfg: _EntityConfig, eid: str) -> WorldEntity | None:
-        row = self.conn.execute(
-            f"SELECT * FROM {cfg.table} WHERE {cfg.id_field} = ?", (eid,)
-        ).fetchone()
+        from packages.core.db import get_connection
+
+        conn = get_connection(self.db_path)
+        try:
+            row = conn.execute(
+                f"SELECT * FROM {cfg.table} WHERE {cfg.id_field} = ?", (eid,)
+            ).fetchone()
+        finally:
+            conn.close()
         if row is None:
             return None
         return self._row_to_entity(cfg, row)
 
     def _list(self, cfg: _EntityConfig, project_id: str) -> list[WorldEntity]:
-        rows = self.conn.execute(
-            f"SELECT * FROM {cfg.table} WHERE project_id = ? ORDER BY created_at",
-            (project_id,),
-        ).fetchall()
+        from packages.core.db import get_connection
+
+        conn = get_connection(self.db_path)
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM {cfg.table} WHERE project_id = ? ORDER BY created_at",
+                (project_id,),
+            ).fetchall()
+        finally:
+            conn.close()
         return [self._row_to_entity(cfg, r) for r in rows]
 
     def _update(
@@ -374,36 +397,47 @@ class WorldService:
         params.append(now_iso())
         params.append(eid)
 
+        from packages.core.db import get_connection
+
+        conn = get_connection(self.db_path)
         try:
-            self.conn.execute(
+            conn.execute(
                 f"UPDATE {cfg.table} SET {', '.join(sets)} WHERE {cfg.id_field} = ?",
                 params,
             )
-            self.conn.commit()
+            conn.commit()
         except sqlite3.IntegrityError as exc:
             raise ValidationError(f"更新失败: {exc}") from exc
+        finally:
+            conn.close()
 
         updated = self._get(cfg, eid)
         assert updated is not None  # 刚刚更新过
         return updated
 
     def _delete(self, cfg: _EntityConfig, eid: str) -> None:
-        # 引用检查：locations 被 plot_events.location_id 引用时拒绝
-        if cfg.table == "locations":
-            in_use = self.conn.execute(
-                "SELECT 1 FROM plot_events WHERE location_id = ? LIMIT 1", (eid,)
-            ).fetchone()
-            if in_use is not None:
-                raise ReferencedError(
-                    f"location#{eid} 被 plot_events 引用，无法删除"
-                )
+        from packages.core.db import get_connection
 
-        cur = self.conn.execute(
-            f"DELETE FROM {cfg.table} WHERE {cfg.id_field} = ?", (eid,)
-        )
-        if cur.rowcount == 0:
-            raise NotFoundError(f"{cfg.table}#{eid} 不存在")
-        self.conn.commit()
+        conn = get_connection(self.db_path)
+        try:
+            # 引用检查：locations 被 plot_events.location_id 引用时拒绝
+            if cfg.table == "locations":
+                in_use = conn.execute(
+                    "SELECT 1 FROM plot_events WHERE location_id = ? LIMIT 1", (eid,)
+                ).fetchone()
+                if in_use is not None:
+                    raise ReferencedError(
+                        f"location#{eid} 被 plot_events 引用，无法删除"
+                    )
+
+            cur = conn.execute(
+                f"DELETE FROM {cfg.table} WHERE {cfg.id_field} = ?", (eid,)
+            )
+            if cur.rowcount == 0:
+                raise NotFoundError(f"{cfg.table}#{eid} 不存在")
+            conn.commit()
+        finally:
+            conn.close()
 
     # -------------------------------------------------------------------- 辅助
 
@@ -428,9 +462,15 @@ class WorldService:
     def _require_project(self, project_id: str) -> None:
         if not project_id:
             raise ValidationError("project_id 不能为空")
-        exists = self.conn.execute(
-            "SELECT 1 FROM projects WHERE project_id = ?", (project_id,)
-        ).fetchone()
+        from packages.core.db import get_connection
+
+        conn = get_connection(self.db_path)
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+        finally:
+            conn.close()
         if exists is None:
             raise ValidationError(f"project#{project_id} 不存在")
 

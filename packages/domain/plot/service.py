@@ -5,8 +5,10 @@ plot_events / timeline_events / relationships 的 CRUD + 一致性检查，
 
 设计要点
 ========
+- 构造接收 ``db_path``；每个方法内部用 ``packages.core.db.get_connection`` 开连接、
+  ``try / finally`` 关闭。
 - ``plot_events.create`` 时若 ``time.timeline_day`` 存在 → 同事务插入对应 ``timeline_events``
-  （PRD §20 时间线索引自动同步）。
+  （同事务，任一失败整体回滚）。
 - 引用完整性：
   * ``cause`` / ``effects`` 中每个 event_id 必须已存在（否则 422）。
   * ``participants`` 中每个 character_id 必须已存在（否则 422）。
@@ -21,9 +23,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 from typing import Any
 
-from ._util import new_id
+from packages.core.db import get_connection
+from packages.core.ids import new_id
+
 from .models import (
     PLOT_EVENT_STATUSES,
     PLOT_EVENT_TYPES,
@@ -57,6 +62,13 @@ class ValidationError(PlotServiceError):
 
 
 # ---------------------------------------------------------------------------
+# time 默认值（PRD §19；与 models.PlotEvent.time 默认字段保持一致）
+# ---------------------------------------------------------------------------
+
+_TIME_DEFAULT: dict[str, Any] = {"timeline_day": 1, "in_story_date": None}
+
+
+# ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 
@@ -66,14 +78,14 @@ class PlotService:
 
     用法::
 
-        svc = PlotService(conn)
+        svc = PlotService(db_path)
         ev = svc.create_event(project_id="prj_x", type="revelation",
                               participants=["char_a"], time={"timeline_day": 3})
         # 此时 timeline_events 也同步出现一条 day_index=3 的索引行
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self.conn = conn
+    def __init__(self, db_path: Path | str) -> None:
+        self.db_path = str(db_path)
 
     # ============================================================== plot_events
 
@@ -92,6 +104,7 @@ class PlotService:
         visibility: str | None = None,
         who_knows: list[str] | None = None,
     ) -> PlotEvent:
+        # 前置校验（多数在开连接前完成，避免持有连接时校验失败）
         self._require_project(project_id)
         if type not in PLOT_EVENT_TYPES:
             raise ValidationError(
@@ -109,9 +122,9 @@ class PlotService:
 
         visibility = self._validate_visibility(visibility)
 
-        # time 默认值（PRD §19）
+        # time 默认值（PRD §19；与 models 默认字段一致）
         if time is None:
-            time = {"timeline_day": 1, "in_story_date": None}
+            time = dict(_TIME_DEFAULT)
         self._validate_time(time)
 
         # location_id 引用校验
@@ -146,8 +159,11 @@ class PlotService:
             if who_knows is not None else None
         )
 
+        # 同一事务：plot_events INSERT + （若有 timeline_day）timeline_events INSERT，
+        # 任一失败整体回滚。任何 INSERT 失败统一由外层 except 转 ValidationError。
+        conn = get_connection(self.db_path)
         try:
-            self.conn.execute(
+            conn.execute(
                 """
                 INSERT INTO plot_events (
                     event_id, project_id, type,
@@ -163,26 +179,25 @@ class PlotService:
                     introduced_chapter_id, visibility, who_knows_json,
                 ),
             )
-            self.conn.commit()
-        except sqlite3.IntegrityError as exc:
-            raise ValidationError(f"插入 plot_event 失败: {exc}") from exc
 
-        # PRD §20：若 time.timeline_day 存在 → 自动同步插入 timeline_events
-        timeline_day = self._extract_timeline_day(time)
-        if timeline_day is not None:
-            try:
+            # PRD §20：若 time.timeline_day 存在 → 自动同步插入 timeline_events
+            timeline_day = self._extract_timeline_day(time)
+            if timeline_day is not None:
                 self._insert_timeline_event(
+                    conn,
                     project_id=project_id,
                     event_id=eid,
                     day_index=timeline_day,
                     time_ref=None,
                     description=None,
                 )
-            except sqlite3.IntegrityError as exc:
-                # 同步插入失败时回滚主表插入（同一个连接，按调用顺序 commit，
-                # 但 plot_events 已 commit；此处仅记录错误，不强行回滚主表 —
-                # 实际场景中此分支几乎不会触发，因为前置引用校验已通过）
-                raise ValidationError(f"同步 timeline_events 失败: {exc}") from exc
+
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            raise ValidationError(f"插入 plot_event 失败: {exc}") from exc
+        finally:
+            conn.close()
 
         return PlotEvent(
             id=eid,
@@ -200,9 +215,13 @@ class PlotService:
         )
 
     def get_event(self, event_id: str) -> PlotEvent | None:
-        row = self.conn.execute(
-            "SELECT * FROM plot_events WHERE event_id = ?", (event_id,)
-        ).fetchone()
+        conn = get_connection(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT * FROM plot_events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        finally:
+            conn.close()
         if row is None:
             return None
         return self._row_to_event(row)
@@ -232,7 +251,12 @@ class PlotService:
             params.append(status)
         # 稳定排序：按 event_id 保证顺序确定（DDL 无 created_at 列）
         sql += " ORDER BY event_id"
-        rows = self.conn.execute(sql, params).fetchall()
+
+        conn = get_connection(self.db_path)
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
         return [self._row_to_event(r) for r in rows]
 
     def update_event(
@@ -311,68 +335,76 @@ class PlotService:
 
         if sets:
             params.append(event_id)
+            conn = get_connection(self.db_path)
             try:
-                self.conn.execute(
+                conn.execute(
                     f"UPDATE plot_events SET {', '.join(sets)} WHERE event_id = ?",
                     params,
                 )
-                self.conn.commit()
+                conn.commit()
             except sqlite3.IntegrityError as exc:
+                conn.rollback()
                 raise ValidationError(f"更新 plot_event 失败: {exc}") from exc
+            finally:
+                conn.close()
 
         updated = self.get_event(event_id)
         assert updated is not None  # 刚刚存在
         return updated
 
     def delete_event(self, event_id: str) -> None:
-        # 引用检查：被其他事件的 cause / effects 引用？
-        in_cause = self.conn.execute(
-            """
-            SELECT 1 FROM plot_events
-            WHERE event_id != ?
-              AND EXISTS (
-                  SELECT 1 FROM json_each(cause_json) WHERE value = ?
-              )
-            LIMIT 1
-            """,
-            (event_id, event_id),
-        ).fetchone()
-        if in_cause is not None:
-            raise ReferencedError(
-                f"event#{event_id} 被其他事件的 cause 引用，无法删除"
-            )
-        in_effects = self.conn.execute(
-            """
-            SELECT 1 FROM plot_events
-            WHERE event_id != ?
-              AND EXISTS (
-                  SELECT 1 FROM json_each(effects_json) WHERE value = ?
-              )
-            LIMIT 1
-            """,
-            (event_id, event_id),
-        ).fetchone()
-        if in_effects is not None:
-            raise ReferencedError(
-                f"event#{event_id} 被其他事件的 effects 引用，无法删除"
-            )
-        # 引用检查：被 timeline_events 引用？
-        in_timeline = self.conn.execute(
-            "SELECT 1 FROM timeline_events WHERE event_id = ? LIMIT 1",
-            (event_id,),
-        ).fetchone()
-        if in_timeline is not None:
-            # 直接级联删除 timeline_events 中的索引（PRD §20 时间线是 event 的派生索引）
-            self.conn.execute(
-                "DELETE FROM timeline_events WHERE event_id = ?", (event_id,)
-            )
+        conn = get_connection(self.db_path)
+        try:
+            # 引用检查：被其他事件的 cause / effects 引用？
+            in_cause = conn.execute(
+                """
+                SELECT 1 FROM plot_events
+                WHERE event_id != ?
+                  AND EXISTS (
+                      SELECT 1 FROM json_each(cause_json) WHERE value = ?
+                  )
+                LIMIT 1
+                """,
+                (event_id, event_id),
+            ).fetchone()
+            if in_cause is not None:
+                raise ReferencedError(
+                    f"event#{event_id} 被其他事件的 cause 引用，无法删除"
+                )
+            in_effects = conn.execute(
+                """
+                SELECT 1 FROM plot_events
+                WHERE event_id != ?
+                  AND EXISTS (
+                      SELECT 1 FROM json_each(effects_json) WHERE value = ?
+                  )
+                LIMIT 1
+                """,
+                (event_id, event_id),
+            ).fetchone()
+            if in_effects is not None:
+                raise ReferencedError(
+                    f"event#{event_id} 被其他事件的 effects 引用，无法删除"
+                )
+            # 引用检查：被 timeline_events 引用？
+            in_timeline = conn.execute(
+                "SELECT 1 FROM timeline_events WHERE event_id = ? LIMIT 1",
+                (event_id,),
+            ).fetchone()
+            if in_timeline is not None:
+                # 直接级联删除 timeline_events 中的索引（PRD §20 时间线是 event 的派生索引）
+                conn.execute(
+                    "DELETE FROM timeline_events WHERE event_id = ?", (event_id,)
+                )
 
-        cur = self.conn.execute(
-            "DELETE FROM plot_events WHERE event_id = ?", (event_id,)
-        )
-        if cur.rowcount == 0:
-            raise NotFoundError(f"event#{event_id} 不存在")
-        self.conn.commit()
+            cur = conn.execute(
+                "DELETE FROM plot_events WHERE event_id = ?", (event_id,)
+            )
+            if cur.rowcount == 0:
+                raise NotFoundError(f"event#{event_id} 不存在")
+            conn.commit()
+        finally:
+            conn.close()
 
     # ============================================================ timeline_events
 
@@ -393,8 +425,9 @@ class PlotService:
             raise ValidationError("day_index 不能为负")
 
         tid = new_id("tle")
+        conn = get_connection(self.db_path)
         try:
-            self.conn.execute(
+            conn.execute(
                 """
                 INSERT INTO timeline_events (
                     timeline_event_id, project_id, event_id, day_index,
@@ -403,9 +436,12 @@ class PlotService:
                 """,
                 (tid, project_id, event_id, day_index, time_ref, description),
             )
-            self.conn.commit()
+            conn.commit()
         except sqlite3.IntegrityError as exc:
+            conn.rollback()
             raise ValidationError(f"插入 timeline_event 失败: {exc}") from exc
+        finally:
+            conn.close()
 
         return TimelineEvent(
             id=tid,
@@ -417,38 +453,51 @@ class PlotService:
         )
 
     def list_timeline_events(self, project_id: str) -> list[TimelineEvent]:
-        rows = self.conn.execute(
-            """
-            SELECT * FROM timeline_events
-            WHERE project_id = ?
-            ORDER BY day_index, timeline_event_id
-            """,
-            (project_id,),
-        ).fetchall()
+        conn = get_connection(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM timeline_events
+                WHERE project_id = ?
+                ORDER BY day_index, timeline_event_id
+                """,
+                (project_id,),
+            ).fetchall()
+        finally:
+            conn.close()
         return [self._row_to_timeline(r) for r in rows]
 
     def delete_timeline_event(self, timeline_event_id: str) -> None:
-        cur = self.conn.execute(
-            "DELETE FROM timeline_events WHERE timeline_event_id = ?",
-            (timeline_event_id,),
-        )
-        if cur.rowcount == 0:
-            raise NotFoundError(f"timeline_event#{timeline_event_id} 不存在")
-        self.conn.commit()
+        conn = get_connection(self.db_path)
+        try:
+            cur = conn.execute(
+                "DELETE FROM timeline_events WHERE timeline_event_id = ?",
+                (timeline_event_id,),
+            )
+            if cur.rowcount == 0:
+                raise NotFoundError(f"timeline_event#{timeline_event_id} 不存在")
+            conn.commit()
+        finally:
+            conn.close()
 
     # ============================================================== relationships (只读)
 
     def list_relationships(self, project_id: str) -> list[Relationship]:
-        rows = self.conn.execute(
-            "SELECT * FROM relationships WHERE project_id = ? ORDER BY relationship_id",
-            (project_id,),
-        ).fetchall()
+        conn = get_connection(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM relationships WHERE project_id = ? ORDER BY relationship_id",
+                (project_id,),
+            ).fetchall()
+        finally:
+            conn.close()
         return [self._row_to_relationship(r) for r in rows]
 
     # ====================================================================== 辅助
 
+    @staticmethod
     def _insert_timeline_event(
-        self,
+        conn: sqlite3.Connection,
         *,
         project_id: str,
         event_id: str,
@@ -456,8 +505,9 @@ class PlotService:
         time_ref: str | None,
         description: str | None,
     ) -> None:
+        """插入 timeline_events 行；不 commit，由调用方统一提交（同事务）。"""
         tid = new_id("tle")
-        self.conn.execute(
+        conn.execute(
             """
             INSERT INTO timeline_events (
                 timeline_event_id, project_id, event_id, day_index,
@@ -466,7 +516,6 @@ class PlotService:
             """,
             (tid, project_id, event_id, day_index, time_ref, description),
         )
-        self.conn.commit()
 
     @staticmethod
     def _extract_timeline_day(time: dict[str, Any]) -> int | None:
@@ -494,26 +543,38 @@ class PlotService:
     def _require_project(self, project_id: str) -> None:
         if not project_id:
             raise ValidationError("project_id 不能为空")
-        exists = self.conn.execute(
-            "SELECT 1 FROM projects WHERE project_id = ?", (project_id,)
-        ).fetchone()
+        conn = get_connection(self.db_path)
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+        finally:
+            conn.close()
         if exists is None:
             raise ValidationError(f"project#{project_id} 不存在")
 
     def _require_exists(self, table: str, id_field: str, eid: str, label: str) -> None:
-        exists = self.conn.execute(
-            f"SELECT 1 FROM {table} WHERE {id_field} = ?", (eid,)
-        ).fetchone()
+        conn = get_connection(self.db_path)
+        try:
+            exists = conn.execute(
+                f"SELECT 1 FROM {table} WHERE {id_field} = ?", (eid,)
+            ).fetchone()
+        finally:
+            conn.close()
         if exists is None:
             raise ValidationError(f"{label}#{eid} 不存在")
 
     def _require_events_exist(self, ids: list[str], field_name: str) -> None:
         # 一次性 SELECT 预检查，避免 N 次查询
         placeholders = ",".join("?" for _ in ids)
-        rows = self.conn.execute(
-            f"SELECT event_id FROM plot_events WHERE event_id IN ({placeholders})",
-            ids,
-        ).fetchall()
+        conn = get_connection(self.db_path)
+        try:
+            rows = conn.execute(
+                f"SELECT event_id FROM plot_events WHERE event_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        finally:
+            conn.close()
         existing = {r["event_id"] for r in rows}
         missing = [i for i in ids if i not in existing]
         if missing:
@@ -523,10 +584,14 @@ class PlotService:
 
     def _require_characters_exist(self, ids: list[str]) -> None:
         placeholders = ",".join("?" for _ in ids)
-        rows = self.conn.execute(
-            f"SELECT character_id FROM characters WHERE character_id IN ({placeholders})",
-            ids,
-        ).fetchall()
+        conn = get_connection(self.db_path)
+        try:
+            rows = conn.execute(
+                f"SELECT character_id FROM characters WHERE character_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        finally:
+            conn.close()
         existing = {r["character_id"] for r in rows}
         missing = [i for i in ids if i not in existing]
         if missing:
@@ -569,7 +634,7 @@ class PlotService:
             effects=json.loads(row["effects_json"]) if row["effects_json"] else [],
             participants=json.loads(row["participants_json"]) if row["participants_json"] else [],
             location_id=row["location_id"],
-            time=json.loads(row["time_json"]) if row["time_json"] else {"timeline_day": 1},
+            time=json.loads(row["time_json"]) if row["time_json"] else dict(_TIME_DEFAULT),
             status=row["status"],
             introduced_chapter_id=row["introduced_chapter_id"],
             visibility=row["visibility"],

@@ -2,8 +2,8 @@
 
 写法参考 ``tests/integration/test_world_api.py``：
 - httpx.ASGITransport + 自管事件循环
-- 最小 app（create_app + include_router(..., prefix="/api")）确保不依赖并行代理 A 的 discover_routers
 - 每个用例用 ``tmp_path`` 注入独立 SQLite
+- ``create_app(settings)`` 构建应用，``discover_routers`` 自动挂载 ``plots.py``
 
 覆盖：
 - event 主链路 create→get→list→update→delete
@@ -105,7 +105,7 @@ def test_event_crud_happy_path(tmp_path: Path):
                         "visibility": "RESTRICTED",
                     },
                 )
-                assert r.status_code == 200, r.text
+                assert r.status_code == 201, r.text
                 ev = r.json()
                 assert ev["id"].startswith("event_")
                 assert ev["type"] == "revelation"
@@ -129,9 +129,10 @@ def test_event_crud_happy_path(tmp_path: Path):
                 assert r.status_code == 200
                 assert r.json()["status"] == "recorded"
 
-                # delete（无引用 → 成功）
+                # delete（无引用 → 成功；204 No Content）
                 r = await c.delete(f"/api/events/{eid}")
-                assert r.status_code == 200
+                assert r.status_code == 204
+                assert r.text == ""
 
                 r = await c.get(f"/api/events/{eid}")
                 assert r.status_code == 404
@@ -193,7 +194,7 @@ def test_event_create_auto_inserts_timeline(tmp_path: Path):
                         "time": {"timeline_day": 7},
                     },
                 )
-                assert r.status_code == 200, r.text
+                assert r.status_code == 201, r.text
 
                 r = await c.get(f"/api/projects/{pid}/timeline")
                 assert r.status_code == 200
@@ -274,7 +275,7 @@ def test_event_delete_referenced_409(tmp_path: Path):
                         "time": {"timeline_day": 2},
                     },
                 )
-                assert r2.status_code == 200, r2.text
+                assert r2.status_code == 201, r2.text
 
                 # 尝试删除 A 应失败
                 r = await c.delete(f"/api/events/{a_id}")
@@ -307,7 +308,7 @@ def test_timeline_explicit_create_and_delete(tmp_path: Path):
                         "description": "深夜追加",
                     },
                 )
-                assert r.status_code == 200, r.text
+                assert r.status_code == 201, r.text
                 tle = r.json()
                 assert tle["day_index"] == 99
                 tle_id = tle["id"]
@@ -319,7 +320,8 @@ def test_timeline_explicit_create_and_delete(tmp_path: Path):
                 assert any(x["id"] == tle_id for x in rows)
 
                 r = await c.delete(f"/api/timeline/{tle_id}")
-                assert r.status_code == 200
+                assert r.status_code == 204
+                assert r.text == ""
 
                 r = await c.delete(f"/api/timeline/{tle_id}")
                 assert r.status_code == 404

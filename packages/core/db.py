@@ -21,10 +21,12 @@ _TABLE_COUNT_QUERY = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND 
 
 
 def get_connection(db_path: Path | str) -> sqlite3.Connection:
-    """开启外键 PRAGMA 的连接；row_factory 设为 Row 便于查询。"""
+    """开启外键 PRAGMA 与 WAL 日志模式的连接；row_factory 设为 Row 便于查询。"""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL 模式：读写并发更高；对测试库（tmp_path）同样适用，sqlite 自动忽略失败
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 

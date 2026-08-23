@@ -41,7 +41,10 @@ class PlotEvent:
     effects: list[str] = field(default_factory=list)      # 引用 event_id
     participants: list[str] = field(default_factory=list) # 引用 character_id
     location_id: str | None = None
-    time: dict[str, Any] = field(default_factory=lambda: {"timeline_day": 1, "in_story_date": None})
+    # 默认 time：与 PlotService._TIME_DEFAULT 保持一致
+    time: dict[str, Any] = field(
+        default_factory=lambda: {"timeline_day": 1, "in_story_date": None}
+    )
     status: str = "planned"
     introduced_chapter_id: str | None = None
     visibility: str = "RESTRICTED"

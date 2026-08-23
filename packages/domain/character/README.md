@@ -21,25 +21,25 @@
 
 | 名称 | 来源 | 说明 |
 |---|---|---|
-| `Character` | `packages/domain/character/models.py:79` | 完整表示，含 ``latest_state_version / latest_state_json`` |
-| `CharacterCreate` | `packages/domain/character/models.py:34` | 创建请求体；role 默认 supporting |
-| `CharacterUpdate` | `packages/domain/character/models.py:64` | 部分更新请求体；只允许定义侧字段 |
-| `CharacterState` | `packages/domain/character/models.py:99` | 单个 state 快照行 |
-| `CharacterRole` | `packages/domain/character/models.py:18` | role 枚举（7 个） |
-| `VisibilityLevel` | `packages/domain/character/models.py:25` | visibility 枚举（4 个） |
-| `CharacterService` | `packages/domain/character/service.py:64` | 领域服务类，构造需 ``db_path`` |
-| `CharacterService.create(project_id, payload)` | `packages/domain/character/service.py:117` | 一事务插两表，返回含 latest state |
-| `CharacterService.get(character_id)` | `packages/domain/character/service.py:147` | JOIN latest state，不存在返回 None |
-| `CharacterService.list_by_project(project_id)` | `packages/domain/character/service.py:170` | 按 created_at 升序，含 latest state |
-| `CharacterService.update(character_id, payload)` | `packages/domain/character/service.py:213` | 仅改定义侧；core_json 直接覆盖（S2 应走 Delta） |
-| `CharacterService.delete(character_id)` | `packages/domain/character/service.py:241` | 一事务级联删除 states + character |
-| `CharacterService.list_states(character_id)` | `packages/domain/character/service.py:262` | 全 state 历史；角色不存在返回 None |
-| `POST /api/projects/{pid}/characters` | `packages/core/api/routers/characters.py:42` | 201 创建（自动写 state v1） |
-| `GET /api/projects/{pid}/characters` | `packages/core/api/routers/characters.py:62` | 200 列表 |
-| `GET /api/characters/{id}` | `packages/core/api/routers/characters.py:74` | 200/404 |
-| `PATCH /api/characters/{id}` | `packages/core/api/routers/characters.py:81` | 200/404/422 |
-| `DELETE /api/characters/{id}` | `packages/core/api/routers/characters.py:94` | 204/404 |
-| `GET /api/characters/{id}/states` | `packages/core/api/routers/characters.py:104` | 200/404 |
+| `Character` | `packages/domain/character/models.py` | 完整表示，含 ``latest_state_version / latest_state_json`` |
+| `CharacterCreate` | `packages/domain/character/models.py` | 创建请求体；role 默认 supporting |
+| `CharacterUpdate` | `packages/domain/character/models.py` | 部分更新请求体；只允许定义侧字段 |
+| `CharacterState` | `packages/domain/character/models.py` | 单个 state 快照行 |
+| `CharacterRole` | `packages/domain/character/models.py` | role 枚举（7 个） |
+| `VisibilityLevel` | `packages/domain/character/models.py` | visibility 枚举（4 个） |
+| `CharacterService` | `packages/domain/character/service.py` | 领域服务类，构造需 ``db_path`` |
+| `CharacterService.create(project_id, payload)` | `packages/domain/character/service.py` | 一事务插两表，返回含 latest state |
+| `CharacterService.get(character_id)` | `packages/domain/character/service.py` | JOIN latest state，不存在返回 None |
+| `CharacterService.list_by_project(project_id)` | `packages/domain/character/service.py` | 按 created_at 升序，含 latest state |
+| `CharacterService.update(character_id, payload)` | `packages/domain/character/service.py` | 仅改定义侧；core_json 直接覆盖（S2 应走 Delta） |
+| `CharacterService.delete(character_id)` | `packages/domain/character/service.py` | 一事务级联删除 states + character |
+| `CharacterService.list_states(character_id)` | `packages/domain/character/service.py` | 全 state 历史；角色不存在返回 None |
+| `POST /api/projects/{pid}/characters` | `packages/core/api/routers/characters.py` | 201 创建（自动写 state v1） |
+| `GET /api/projects/{pid}/characters` | `packages/core/api/routers/characters.py` | 200 列表 |
+| `GET /api/characters/{id}` | `packages/core/api/routers/characters.py` | 200/404 |
+| `PATCH /api/characters/{id}` | `packages/core/api/routers/characters.py` | 200/404/422 |
+| `DELETE /api/characters/{id}` | `packages/core/api/routers/characters.py` | 204/404 |
+| `GET /api/characters/{id}/states` | `packages/core/api/routers/characters.py` | 200/404 |
 
 ## 依赖
 

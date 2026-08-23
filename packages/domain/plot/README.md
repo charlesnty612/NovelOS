@@ -10,7 +10,7 @@
 ## 对外接口
 
 ### Python（`packages.domain.plot.service.PlotService`）
-构造函数：`PlotService(conn: sqlite3.Connection)`。
+构造函数：`PlotService(db_path: Path | str)`；每个方法内部开/关连接。
 
 plot_events：
 - `create_event(project_id, type, *, cause=None, effects=None, participants=None, location_id=None, time=None, status=None, introduced_chapter_id=None, visibility=None, who_knows=None) -> PlotEvent`
@@ -56,11 +56,9 @@ ID 前缀：`event_` / `tle_` / `rel_`（12 位 hex）。
 
 ## 使用 / 入口
 ```python
-from packages.core.db import get_connection
 from packages.domain.plot import PlotService
 
-conn = get_connection("data/novelos.db")
-svc = PlotService(conn)
+svc = PlotService("data/novelos.db")
 ev = svc.create_event(project_id="prj_x", type="revelation",
                        time={"timeline_day": 3})
 # 此时 timeline_events 自动出现一条 day_index=3 的索引行
@@ -73,8 +71,8 @@ REST 入口：`POST /api/projects/{pid}/events` 等（由 `packages/core/api/mai
 - `time.timeline_day` 是触发自动 timeline_events 同步的唯一信号（PRD §20）。
 - cause / effects / participants 删除引用检查用 `json_each`（DDL 中 json_* 列已在 SQLite 内置）。
 - relationships 的写入由 S2 State Delta 驱动；S1 仅暴露只读端点。
-- DDL 权威在 `database/migrations/0001_init.sql`（line 142-192），本服务不修改 DDL。
-- 本包自建 `_util.new_id` / `now_iso`，不依赖 `packages.core.ids`（并行代理 A 正在创建）。
+- DDL 权威在 `database/migrations/0001_init.sql`，本服务不修改 DDL。
+- `new_id` / `now_iso` 复用 `packages.core.ids`，不维护包内 `_util`。
 
 ## 测试
 - `tests/integration/test_plot_api.py`：覆盖 event 主链路、引用完整性（cause/participants 422）、自动 timeline 同步、过滤参数、删除引用 409、timeline 显式增删、relationships 只读。

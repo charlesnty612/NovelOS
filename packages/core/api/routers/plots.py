@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import Response
 
 from packages.domain.plot import (
     NotFoundError,
@@ -32,11 +33,9 @@ router = APIRouter(tags=["plot"])
 
 
 def _service(request: Request) -> PlotService:
-    """每请求新建 ``PlotService``（内含独立 sqlite 连接，避免跨线程问题）。"""
+    """每请求新建 ``PlotService``；连接在其内部按方法生命周期管理。"""
     settings = request.app.state.settings
-    from packages.core.db import get_connection
-
-    return PlotService(get_connection(settings.db_path))
+    return PlotService(settings.db_path)
 
 
 def _handle(exc: Exception) -> HTTPException:
@@ -54,7 +53,7 @@ def _handle(exc: Exception) -> HTTPException:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/projects/{pid}/events")
+@router.post("/projects/{pid}/events", status_code=status.HTTP_201_CREATED)
 def create_event(
     pid: str, payload: dict[str, Any], request: Request
 ) -> dict[str, Any]:
@@ -126,14 +125,14 @@ def update_event(
     return ev.to_dict()
 
 
-@router.delete("/events/{event_id}")
-def delete_event(event_id: str, request: Request) -> dict[str, str]:
+@router.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_event(event_id: str, request: Request) -> Response:
     svc = _service(request)
     try:
         svc.delete_event(event_id)
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle(exc) from exc
-    return {"status": "deleted", "id": event_id}
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +146,7 @@ def list_timeline(pid: str, request: Request) -> list[dict[str, Any]]:
     return [t.to_dict() for t in svc.list_timeline_events(pid)]
 
 
-@router.post("/projects/{pid}/timeline")
+@router.post("/projects/{pid}/timeline", status_code=status.HTTP_201_CREATED)
 def create_timeline(
     pid: str, payload: dict[str, Any], request: Request
 ) -> dict[str, Any]:
@@ -165,14 +164,14 @@ def create_timeline(
     return te.to_dict()
 
 
-@router.delete("/timeline/{timeline_event_id}")
-def delete_timeline(timeline_event_id: str, request: Request) -> dict[str, str]:
+@router.delete("/timeline/{timeline_event_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_timeline(timeline_event_id: str, request: Request) -> Response:
     svc = _service(request)
     try:
         svc.delete_timeline_event(timeline_event_id)
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle(exc) from exc
-    return {"status": "deleted", "id": timeline_event_id}
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # domain.project（项目领域）
 
-> 职责：Project 聚合根的 CRUD 与业务规则，对应 ``projects`` 表（``database/migrations/0001_init.sql`` line 34-44）。
+> 职责：Project 聚合根的 CRUD 与业务规则，对应 ``projects`` 表（DDL 权威见 ``database/migrations/0001_init.sql``）。
 > 状态：已实现 Sprint 1。
 
 ## 职责与边界
@@ -19,22 +19,22 @@
 
 | 名称 | 来源 | 说明 |
 |---|---|---|
-| `Project` | `packages/domain/project/models.py:39` | 完整表示，含 8 个 DB 列 |
-| `ProjectCreate` | `packages/domain/project/models.py:19` | 创建请求体；status 默认 ACTIVE，不暴露 |
-| `ProjectUpdate` | `packages/domain/project/models.py:29` | 部分更新请求体，所有字段可选 |
-| `ProjectStatus` | `packages/domain/project/models.py:14` | 字面量枚举 ``ACTIVE/PAUSED/ARCHIVED`` |
-| `ProjectService` | `packages/domain/project/service.py:42` | 领域服务类，构造需 ``db_path`` |
-| `ProjectService.create(payload)` | `packages/domain/project/service.py:49` | 返回完整行 dict |
-| `ProjectService.get(project_id)` | `packages/domain/project/service.py:69` | 不存在返回 ``None`` |
-| `ProjectService.list()` | `packages/domain/project/service.py:80` | 按 created_at 升序 |
-| `ProjectService.update(project_id, payload)` | `packages/domain/project/service.py:91` | 仅更新 payload 中提供的字段 |
-| `ProjectService.delete(project_id)` | `packages/domain/project/service.py:124` | 子记录存在时抛 ``sqlite3.IntegrityError`` |
-| `ProjectService.has_children(project_id)` | `packages/domain/project/service.py:140` | 是否有 characters / chapters 子记录 |
-| `POST /api/projects` | `packages/core/api/routers/projects.py:23` | 201 创建 |
-| `GET /api/projects` | `packages/core/api/routers/projects.py:35` | 200 列表 |
-| `GET /api/projects/{project_id}` | `packages/core/api/routers/projects.py:40` | 200/404 |
-| `PATCH /api/projects/{project_id}` | `packages/core/api/routers/projects.py:48` | 200/404/422 |
-| `DELETE /api/projects/{project_id}` | `packages/core/api/routers/projects.py:58` | 204/404/409 |
+| `Project` | `packages/domain/project/models.py` | 完整表示，含 8 个 DB 列 |
+| `ProjectCreate` | `packages/domain/project/models.py` | 创建请求体；status 默认 ACTIVE，不暴露 |
+| `ProjectUpdate` | `packages/domain/project/models.py` | 部分更新请求体，所有字段可选 |
+| `ProjectStatus` | `packages/domain/project/models.py` | 字面量枚举 ``ACTIVE/PAUSED/ARCHIVED`` |
+| `ProjectService` | `packages/domain/project/service.py` | 领域服务类，构造需 ``db_path`` |
+| `ProjectService.create(payload)` | `packages/domain/project/service.py` | 返回完整行 dict |
+| `ProjectService.get(project_id)` | `packages/domain/project/service.py` | 不存在返回 ``None`` |
+| `ProjectService.list()` | `packages/domain/project/service.py` | 按 created_at 升序 |
+| `ProjectService.update(project_id, payload)` | `packages/domain/project/service.py` | 仅更新 payload 中提供的字段 |
+| `ProjectService.delete(project_id)` | `packages/domain/project/service.py` | 子记录存在时抛 ``sqlite3.IntegrityError`` |
+| `ProjectService.has_children(project_id)` | `packages/domain/project/service.py` | 是否有 characters / chapters 子记录 |
+| `POST /api/projects` | `packages/core/api/routers/projects.py` | 201 创建 |
+| `GET /api/projects` | `packages/core/api/routers/projects.py` | 200 列表 |
+| `GET /api/projects/{project_id}` | `packages/core/api/routers/projects.py` | 200/404 |
+| `PATCH /api/projects/{project_id}` | `packages/core/api/routers/projects.py` | 200/404/422 |
+| `DELETE /api/projects/{project_id}` | `packages/core/api/routers/projects.py` | 204/404/409 |
 
 ## 依赖
 

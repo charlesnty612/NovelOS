@@ -4,9 +4,9 @@
 - httpx.ASGITransport + 自管事件循环（不引入 pytest-asyncio）
 - 每个用例用 ``tmp_path`` 注入独立 SQLite，避免迁移状态污染
 
-由于 Sprint 1 多方并行交付，本测试不依赖自动发现的完整路由注册——
-使用 ``create_app`` + ``include_router(..., prefix="/api")`` 的最小应用，
-验证 Service → Router → HTTP 主链路。
+测试方式：
+- ``create_app(settings)`` 构建 FastAPI 应用，``discover_routers`` 自动挂载 ``worlds.py`` 路由。
+- 验证 Service → Router → HTTP 主链路。
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def test_locations_crud_happy_path(tmp_path: Path):
                         "visibility": "PUBLIC",
                     },
                 )
-                assert r.status_code == 200, r.text
+                assert r.status_code == 201, r.text
                 loc = r.json()
                 assert loc["id"].startswith("loc_")
                 assert loc["name"] == "云海城"
@@ -100,9 +100,10 @@ def test_locations_crud_happy_path(tmp_path: Path):
                 assert r.status_code == 200
                 assert r.json()["statement"].startswith("更新")
 
-                # delete
+                # delete (204 No Content)
                 r = await c.delete(f"/api/locations/{loc_id}")
-                assert r.status_code == 200
+                assert r.status_code == 204
+                assert r.text == ""
 
                 r = await c.get(f"/api/locations/{loc_id}")
                 assert r.status_code == 404
@@ -193,7 +194,7 @@ def test_factions_and_world_rules_basic(tmp_path: Path):
                     f"/api/projects/{pid}/factions",
                     json={"name": "青云宗", "statement": "正道之首"},
                 )
-                assert r.status_code == 200, r.text
+                assert r.status_code == 201, r.text
                 fac = r.json()
                 assert fac["id"].startswith("fac_")
                 assert fac["visibility"] == "VISIBLE"
@@ -207,7 +208,7 @@ def test_factions_and_world_rules_basic(tmp_path: Path):
                     f"/api/projects/{pid}/world-rules",
                     json={"name": "灵力法则", "statement": "灵气稀薄者不可越境"},
                 )
-                assert r.status_code == 200, r.text
+                assert r.status_code == 201, r.text
                 wr = r.json()
                 assert wr["id"].startswith("wrule_")
                 assert wr["visibility"] == "PUBLIC"
@@ -220,7 +221,8 @@ def test_factions_and_world_rules_basic(tmp_path: Path):
                 assert r.status_code == 200
 
                 r = await c.delete(f"/api/world-rules/{wr['id']}")
-                assert r.status_code == 200
+                assert r.status_code == 204
+                assert r.text == ""
 
     _run(main())
 
