@@ -48,12 +48,19 @@ class Settings:
 
     @classmethod
     def load(cls) -> "Settings":
-        """从环境变量加载，NOVELOS_ 前缀。"""
+        """从环境变量加载，NOVELOS_ 前缀。
+
+        端口优先级（任务书 Sprint 5 给死）：
+        - ``NOVELOS_PORT``（通用便捷变量） > ``NOVELOS_API_PORT``（旧精细变量）> 默认 8000。
+        旧精细变量保留兼容：仅设置 ``NOVELOS_API_PORT`` 时仍按其值生效（基线测试断言）。
+        """
         data_dir = _env("NOVELOS_DATA_DIR", "./data")
         db_path = _env("NOVELOS_DB_PATH", "")  # 空则按 data_dir 推导
         log_level = _env("NOVELOS_LOG_LEVEL", "INFO")
         api_host = _env("NOVELOS_API_HOST", "127.0.0.1")
-        api_port = int(_env("NOVELOS_API_PORT", "8000"))
+        # 端口优先级：NOVELOS_PORT > NOVELOS_API_PORT > 8000
+        port_env = _env("NOVELOS_PORT", "") or _env("NOVELOS_API_PORT", "")
+        api_port = int(port_env) if port_env else 8000
         return cls(
             data_dir=data_dir,
             db_path=db_path or None,

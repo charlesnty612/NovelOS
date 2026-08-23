@@ -1,7 +1,9 @@
-"""ChapterService（Sprint 1）。
+"""ChapterService（Sprint 1 + Sprint 5 drafts 扩展）。
 
-职责：chapters 表 CRUD + 状态机迁移约束 + 同项目内 number 唯一。
-对齐 ``database/migrations/0001_init.sql`` 中 ``chapters`` 表结构（line 240-254）。
+职责：chapters 表 CRUD + 状态机迁移约束 + 同项目内 number 唯一 +
+Sprint 5 起的 chapter drafts 人工改稿能力（list / create）。
+对齐 ``database/migrations/0001_init.sql`` 中 ``chapters`` 表结构（line 240-254）、
+``drafts`` 表结构（line 270-280）。
 
 设计要点：
 - 构造接收 ``db_path``；每个方法内部用 ``packages.core.db.get_connection`` 开连接、
@@ -15,6 +17,14 @@
   重复则抛 ``ChapterNumberConflict``，router 转 409。CHECK 违反（status 枚举外值）则
   透传 ``sqlite3.IntegrityError``，router 转 422。
 - ``create`` / ``update`` 中的 ``status`` 变更：create 默认 ``PLANNED``，update 走状态机。
+- Sprint 5 drafts：
+  - ``list_drafts(chapter_id)``：按 ``version DESC``；chapter 不存在返回 ``None``
+    （让 router 转 404，与 ``ChapterService.get`` 一致）。
+  - ``create_draft(chapter_id, content)``：仅当 chapter.status ∈ {DRAFTED, REVIEWED}
+    时允许；其余状态抛 ``DraftStatusNotAllowed``（router 转 409，detail 携带当前 status）。
+  - ``version`` 计算：``COALESCE(MAX(version), 0) + 1``，在 INSERT 同事务内执行，
+    避免并发竞态下产生重复 version。
+  - ``created_by`` 固定 ``"human"``；``prompt_version`` / ``model_id`` 写 NULL。
 """
 
 from __future__ import annotations
@@ -48,6 +58,22 @@ class ChapterTransitionError(ChapterError):
         super().__init__(f"illegal chapter status transition {current!r} -> {target!r}")
         self.current = current
         self.target = target
+
+
+class DraftStatusNotAllowed(ChapterError):
+    """当前 chapter.status 不允许新增 draft（仅 DRAFTED / REVIEWED 允许）。
+
+    Sprint 5 任务书给死：人工改稿只能在 chapter 已进入「已写 / 已审」状态时追加；
+    PLANNED 阶段不允许手写（应在 chapter 推进到 DRAFTED 之后），COMMITTED/RELEASED
+    阶段正文已锁定。
+    """
+
+    def __init__(self, current: str) -> None:
+        super().__init__(
+            f"draft creation not allowed when chapter status is {current!r} "
+            f"(only 'DRAFTED' or 'REVIEWED' accepted)"
+        )
+        self.current = current
 
 
 class ChapterService:
@@ -214,10 +240,115 @@ class ChapterService:
         finally:
             conn.close()
 
+    # ============================================================== Sprint 5
+    # drafts：人工改稿能力（task A1）。
+    # ----------------------------------------------------------------------
+
+    # 仅 DRAFTED / REVIEWED 状态允许新增 draft（任务书给死）。
+    _DRAFT_ALLOWED_STATUS: frozenset[str] = frozenset({"DRAFTED", "REVIEWED"})
+
+    def list_drafts(self, chapter_id: str) -> list[dict] | None:
+        """返回该 chapter 下全部 draft，按 ``version`` 降序。
+
+        - chapter 不存在 → ``None``（router 转 404）。
+        - 存在但无 draft → ``[]``。
+        """
+        conn = get_connection(self.db_path)
+        try:
+            cur = conn.execute(
+                "SELECT 1 FROM chapters WHERE chapter_id = ?",
+                (chapter_id,),
+            )
+            if cur.fetchone() is None:
+                return None
+            cur = conn.execute(
+                "SELECT * FROM drafts WHERE chapter_id = ? ORDER BY version DESC",
+                (chapter_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
+    def create_draft(self, chapter_id: str, content: str) -> dict | None:
+        """在 chapter 下新增一份 draft（人工改稿入口）。
+
+        - chapter 不存在 → ``None``（router 转 404，与 ``ChapterService.get`` 风格一致）。
+        - chapter.status ∉ {DRAFTED, REVIEWED} → ``DraftStatusNotAllowed``（router 转 409）。
+        - ``version`` = ``COALESCE(MAX(version), 0) + 1``，在 INSERT 同事务内执行，
+          避免并发竞态下产生重复 version。
+        - ``created_by`` 固定 ``"human"``；``prompt_version`` / ``model_id`` 为 ``None``。
+        - ``draft_id`` 用 ``new_id("dr")``；``created_at`` 用 ``now_iso()``。
+        """
+        if not content:
+            # 防御性二次校验：router 层已用 pydantic ``min_length=1`` 拦截；此处兜底
+            raise ValueError("content must be non-empty")
+
+        now = now_iso()
+        conn = get_connection(self.db_path)
+        try:
+            # 1) chapter 存在性 & 当前 status 校验
+            cur = conn.execute(
+                "SELECT status FROM chapters WHERE chapter_id = ?",
+                (chapter_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            current_status = row["status"]
+            if current_status not in self._DRAFT_ALLOWED_STATUS:
+                raise DraftStatusNotAllowed(current_status)
+
+            # 2) 计算下一 version（COALESCE 处理「尚无 draft」的情况）
+            cur = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) AS v FROM drafts WHERE chapter_id = ?",
+                (chapter_id,),
+            )
+            next_version = int(cur.fetchone()["v"]) + 1
+
+            # 3) INSERT
+            draft_id = new_id("dr")
+            conn.execute(
+                """
+                INSERT INTO drafts
+                    (draft_id, chapter_id, version, content,
+                     created_by, prompt_version, model_id, created_at)
+                VALUES
+                    (:draft_id, :chapter_id, :version, :content,
+                     :created_by, :prompt_version, :model_id, :created_at)
+                """,
+                {
+                    "draft_id": draft_id,
+                    "chapter_id": chapter_id,
+                    "version": next_version,
+                    "content": content,
+                    "created_by": "human",
+                    "prompt_version": None,
+                    "model_id": None,
+                    "created_at": now,
+                },
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # 走读路径返回完整行（保证字段类型一致）
+        return {
+            "draft_id": draft_id,
+            "chapter_id": chapter_id,
+            "version": next_version,
+            "content": content,
+            "created_by": "human",
+            "prompt_version": None,
+            "model_id": None,
+            "created_at": now,
+        }
+
 
 __all__ = [
     "ChapterService",
     "ChapterNumberConflict",
     "ChapterTransitionError",
+    "DraftStatusNotAllowed",
     "ChapterError",
 ]

@@ -61,3 +61,34 @@ class Chapter(BaseModel):
     who_knows: list[str] | None
     created_at: str
     updated_at: str
+
+
+# ---------------------------------------------------------------------------
+# Sprint 5：drafts 表（人工改稿能力，对齐 ``database/migrations/0001_init.sql``
+# line 270-280）。
+# ---------------------------------------------------------------------------
+
+
+class DraftCreate(BaseModel):
+    """创建草稿请求体（人工改稿入口）。
+
+    - ``content`` 必填且长度 ≥ 1（pydantic 校验）。
+    - 不暴露 ``version / created_by / created_at``：version 由 Service 按
+      ``max(version)+1`` 计算；created_by 在人工改稿场景下固定为 ``"human"``；
+      created_at 由 ``now_iso()`` 写入。
+    """
+
+    content: str = Field(..., min_length=1)
+
+
+class Draft(BaseModel):
+    """草稿完整表示，对应 ``drafts`` 表行。"""
+
+    draft_id: str
+    chapter_id: str
+    version: int
+    content: str
+    created_by: str
+    prompt_version: str | None
+    model_id: str | None
+    created_at: str

@@ -9,6 +9,7 @@ import asyncio
 from pathlib import Path
 
 import httpx
+import pytest
 
 from packages.core.api.main import create_app
 from packages.core.config import Settings
@@ -38,7 +39,13 @@ def test_health_endpoint_returns_ok(tmp_path: Path):
     assert data["tables"] == 28
 
 
-def test_root_endpoint(tmp_path: Path):
+def test_root_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Sprint 5 起：当 ``apps/web/dist/index.html`` 真实存在时 SPA 自动启用，
+    # ``GET /`` 会被 SPA fallback 接管返回 HTML（见 tests/api/test_spa_hosting.py）。
+    # 本测试断言的是「SPA 关闭时 GET / 仍返回服务信息 JSON」——纯后端入口语义。
+    # 因此显式 monkeypatch ``NOVELOS_WEB_DIST`` 指向不含 index.html 的 tmp 路径。
+    monkeypatch.setenv("NOVELOS_WEB_DIST", str(tmp_path / "no_spa_dist"))
+
     settings = Settings(data_dir=tmp_path, log_level="WARNING")
     app = create_app(settings)
 

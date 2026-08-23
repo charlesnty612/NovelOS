@@ -1,9 +1,11 @@
-"""Chapters REST 路由（Sprint 1）。
+"""Chapters REST 路由（Sprint 1 + Sprint 5 drafts 扩展）。
 
-挂在 ``/api`` 前缀下。对齐 ``chapters`` 表（``database/migrations/0001_init.sql`` line 240-254）。
+挂在 ``/api`` 前缀下。对齐 ``chapters`` 表（``database/migrations/0001_init.sql`` line 240-254）
+与 ``drafts`` 表（line 270-280）。
 
 状态机约束（任务书给死）：PLANNED→DRAFTED→REVIEWED→COMMITTED→RELEASED 顺序推进，
 或回退到 PLANNED；非法跳变由 router 转 409。
+Sprint 5 drafts：仅 chapter.status ∈ {DRAFTED, REVIEWED} 允许新增 draft，其余状态 409。
 """
 
 from __future__ import annotations
@@ -13,11 +15,18 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Request, status
 
 from packages.core.logging_config import get_logger
-from packages.domain.chapter.models import Chapter, ChapterCreate, ChapterUpdate
+from packages.domain.chapter.models import (
+    Chapter,
+    ChapterCreate,
+    ChapterUpdate,
+    Draft,
+    DraftCreate,
+)
 from packages.domain.chapter.service import (
     ChapterNumberConflict,
     ChapterService,
     ChapterTransitionError,
+    DraftStatusNotAllowed,
 )
 
 log = get_logger("novelos.routers.chapters")
@@ -100,3 +109,47 @@ def delete_chapter(chapter_id: str, request: Request) -> None:
     if not ok:
         raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
     return None
+
+
+# =============================================================================
+# Sprint 5：drafts（人工改稿能力）。
+# 契约见 packages/domain/chapter/service.py 中的 list_drafts / create_draft。
+# =============================================================================
+
+
+@router.get(
+    "/chapters/{chapter_id}/drafts",
+    response_model=list[Draft],
+)
+def list_chapter_drafts(chapter_id: str, request: Request) -> list[dict]:
+    rows = _service(request).list_drafts(chapter_id)
+    if rows is None:
+        raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
+    return rows
+
+
+@router.post(
+    "/chapters/{chapter_id}/drafts",
+    response_model=Draft,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_chapter_draft(
+    chapter_id: str,
+    payload: DraftCreate,
+    request: Request,
+) -> dict:
+    try:
+        row = _service(request).create_draft(chapter_id, payload.content)
+    except DraftStatusNotAllowed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"chapter {chapter_id!r} status is {exc.current!r}; "
+                f"draft creation only allowed when status is 'DRAFTED' or 'REVIEWED'"
+            ),
+        ) from exc
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
+    return row

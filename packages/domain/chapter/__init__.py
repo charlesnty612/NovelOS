@@ -1,4 +1,4 @@
-"""Chapter 领域包（Sprint 1）。"""
+"""Chapter 领域包（Sprint 1 + Sprint 5 drafts 扩展）。"""
 
 from __future__ import annotations
 
@@ -8,12 +8,15 @@ from .models import (
     ChapterCreate,
     ChapterStatus,
     ChapterUpdate,
+    Draft,
+    DraftCreate,
 )
 from .service import (
     ChapterError,
     ChapterNumberConflict,
     ChapterService,
     ChapterTransitionError,
+    DraftStatusNotAllowed,
 )
 
 __all__ = [
@@ -26,4 +29,7 @@ __all__ = [
     "ChapterTransitionError",
     "ChapterUpdate",
     "ChapterService",
+    "Draft",
+    "DraftCreate",
+    "DraftStatusNotAllowed",
 ]
