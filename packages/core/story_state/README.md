@@ -1,6 +1,6 @@
 # Story State 引擎（Sprint 2）
 
-> 状态：**已实现并通过测试**（42 既有 + 新增）。核心入口 ``StoryStateService``。
+> 状态：**已实现并通过测试**（Sprint 2 修复后：76 既有 + 新增回归 + 新增 spec 用例）。核心入口 ``StoryStateService``。
 
 本目录是 NovelOS State Delta 引擎——Observer / Validator / State Committer 三步之间的
 完整数据契约与落库实现。对齐 ``docs/state-model/state-delta-v0.md`` 的全部语义。
@@ -16,7 +16,9 @@
 - 乐观锁（state_version 单调 +1）保证并发提交不污染前一状态。
 - HIGH 风险 change 必须经 author_approval.approved=True 才允许 Commit。
 - 支持「逆 Delta + 新 Commit」模式回滚；``commits`` 表不可变，「已回滚」由
-  ``commits.rollback_of`` 字段表达。
+  ``commits.rollback_of`` 字段表达。回滚在 ``commit_delta`` 单一事务内完成：写透领域表 +
+  撤销领域表行（plot_events / hooks / timeline_events）+ mutate 快照 JSON +
+  落 ``commits.rollback_of`` 一次性 commit，无 post-facto 分离连接（修复后口径）。
 
 ---
 
@@ -126,16 +128,51 @@ DDL 权威定义在 ``database/migrations/0001_init.sql``；本模块不修改 s
 6. **resolved_hooks 不可回滚边界**：若原 commit 的 ``resolved_hooks`` 条目 ``from_status``
    缺失（schema 允许 null），生成逆 Delta 时无法确定回退目标状态——``rollback_commit`` 直接
    抛 ``StateConflictError``，拒绝回滚。这是任务书给死的硬性限制。
-7. **new_events 不可逆**：schema 规定 ``new_events.op`` 必须为 ``add``，故逆 Delta 中无法放
-   「删除事件」op。Sprint 2 采用 service 兜底：``rollback_commit`` 在逆 delta commit 完成后，
-   通过 ``apply_delta`` 之外的路径 mutate 最新快照，剔除原 commit 引入的 ``event_id`` 与对应
-   ``events[event_id]``，以及 ``new_hooks`` 引入的 hook 元素。详见
-   ``service.rollback_commit`` 中的 ``post_apply`` hints。
-8. **Validator 路径**：「Schema 不通过时跳过业务校验」——避免对缺失字段二次报错。修改
-   ``validator._business_errors`` 时确保它对 schema 不报错的 delta 才执行。
-9. **JSON 列读写**：所有 JSON 列写入前 ``json.dumps(ensure_ascii=False)``；读出后
-   ``json.loads``（空字符串兜底为 ``{}`` / ``None``）。
-10. **测试断言**：
+7. **rollback 单一事务保证**：``rollback_commit`` 走「逆 Delta + 单 commit」路径——
+   - 逆 Delta 只承载 schema 合法 change（character / world / relationship / hook / debt）。
+   - ``new_events`` / ``new_hooks`` 的逆无法走 schema（``op`` 强制 add），由调用方从
+     原 delta 收集 event_id / hook_id，作为 ``_inverse_cleanup`` 私有参数传给
+     ``commit_delta``，在 **同事务** 内：
+     1. 先 DELETE ``timeline_events`` 解除 FK，再 DELETE ``plot_events`` / ``hooks``。
+     2. 通过 ``_apply_inverse_cleanup_to_state`` 同步 mutate ``new_state``
+        （剔除 recent_events / events / hooks[] 中的对应项）。
+     3. ``materialize_snapshot`` 把 mutate 后的 state 落盘。
+     4. 落 ``commits.rollback_of = 原 commit_id``（同一事务）。
+   - 因此 rollback 后无残留领域表行（plot_events / hooks 行被 DELETE），快照层
+     recent_events / events / hooks 也已剔除，无 post-facto 兜底连接（修复后口径）。
+8. **逆 debt_changes 合法化**（修复后）：逆条目禁用 ``before`` / ``after`` 键，改用
+   schema 合法字段：
+   - ``op=remove``（逆 add）：``status_after`` 必填（兜底 ``forgiven``），``reason`` 必填。
+   - ``op=update``（逆 update）：``status_before`` / ``status_after`` 互换，
+     ``severity_before`` / ``severity_after`` 互换。
+   - ``op=add``（逆 remove）：用原 ``description`` / ``severity_after`` / ``status_after``
+     重建（兜底 ``"open"`` / ``0.5``）。
+9. **逆 resolved_hooks payoff_summary**：必填（schema ``minLength=1``），
+   填 ``"reverted by rollback of <commit_id>"``。同时逆条目 ``notes`` 携带哨兵
+   ``__CLEAR_PAYOFF_CHAPTER__``，``_write_through`` 检测到哨兵即把
+   ``hooks.payoff_chapter_id`` 显式置 NULL（修复后口径）。
+10. **回滚可逆性边界**（对齐逆操作语义）：
+    - 严格可逆：character_changes / world_changes / relationship_changes / debt_changes
+      （add/update/remove 三态互换）。
+    - 「软」可逆（领域表行被物理删除）：new_events / new_hooks —— 撤销后
+      ``plot_events`` / ``hooks`` 表对应行不再存在（业务上等同于「该 event/hook
+      未发生 / 未被引入」）。
+    - 半可逆：resolved_hooks —— status 还原、payoff_chapter_id 清 NULL；hook 行本身保留。
+11. **Validator 路径**：「Schema 不通过时跳过业务校验」——避免对缺失字段二次报错。修改
+    ``validator._business_errors`` 时确保它对 schema 不报错的 delta 才执行。
+12. **JSON 列读写**：所有 JSON 列写入前 ``json.dumps(ensure_ascii=False)``；读出后
+    ``json.loads``（空字符串兜底为 ``{}`` / ``None``）。
+13. **who_knows 三态语义**（修复后）：对齐 ``knowledge-permission-v0.md §6``——
+    - ``None``（缺失）→ DB 列置 ``NULL``（沿用实体现状，不参与合并）。
+    - ``[]`` → DB 列置 ``'[]'``（显式清空）。
+    - 非空 list → JSON 字符串（``ensure_ascii=False``）。
+    ``_write_through`` 内所有 INSERT/UPDATE 走 ``_encode_who_knows`` helper。
+14. **HIGH 风险门扩展**（修复后）：除 ``risk_level=HIGH`` 外，``character_changes.facet
+    =definition`` 与 ``world_changes.world_kind=rule`` 也强制 author_approval.approved=True
+    （对齐 ``state-delta-v0.md §2.5.1/2.5.2`` 末段）。
+15. **applier update after=None → delete key**（修复后）：``op=update`` 且 ``after=None``
+    时调用 ``bucket.pop(key, None)``，使回滚后快照与原状态严格等价。
+16. **测试断言**：
     - 单测 ``tests/unit/test_applier.py`` 覆盖 7 数组每类至少 1 条 apply 断言（纯函数，
       无 DB 依赖）。
     - 单测 ``tests/unit/test_validator.py`` 覆盖合法通过 + 缺 required / 非法枚举 /

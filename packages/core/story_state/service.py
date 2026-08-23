@@ -89,6 +89,57 @@ def _parse_required_json(raw: Any, default: Any = None) -> Any:
     return parsed
 
 
+def _encode_who_knows(value: list | None) -> str | None:
+    """三态语义编码（对齐 knowledge-permission-v0.md §6 / state-delta-v0.md §2.6）：
+    - ``None`` → ``NULL``（沿用实体现状，不参与合并）
+    - ``[]`` → ``'[]'``（显式置空）
+    - 非空 list → JSON（``ensure_ascii=False``）
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False)
+    return None
+
+
+def _read_who_knows(change: dict) -> list | None:
+    """从 change 条目读 who_knows；缺失视为 None（沿用）。"""
+    return change.get("who_knows")
+
+
+def _read_visibility(change: dict, default: str | None = None) -> str | None:
+    """从 change 条目读 visibility；缺失 = 沿用（None）。"""
+    return change.get("visibility") or default
+
+
+def _apply_inverse_cleanup_to_state(state: dict, cleanup: dict) -> None:
+    """Rollback 路径下 mutate ``state``（in place）：
+    - 剔除 ``recent_events`` 中出现在 ``remove_event_ids`` 的 event_id；
+    - 剔除 ``events`` 中相同 key；
+    - 剔除 ``hooks`` 中 ``hook_id`` 在 ``remove_hook_ids`` 里的元素。
+
+    必须在 ``commit_delta`` 同一事务内调用（在 materialize_snapshot 之前），这样落盘
+    的 story_states 即「回滚后」语义；rollback 后 GET state 直接拿到该快照，无需 post-facto
+    修改。
+    """
+    remove_event_ids = set(cleanup.get("remove_event_ids") or [])
+    remove_hook_ids = set(cleanup.get("remove_hook_ids") or [])
+    if remove_event_ids:
+        recent = state.get("recent_events") or []
+        if isinstance(recent, list):
+            state["recent_events"] = [eid for eid in recent if eid not in remove_event_ids]
+        events = state.get("events") or {}
+        if isinstance(events, dict):
+            for eid in list(events.keys()):
+                if eid in remove_event_ids:
+                    del events[eid]
+            state["events"] = events
+    if remove_hook_ids:
+        hooks = state.get("hooks") or []
+        if isinstance(hooks, list):
+            state["hooks"] = [h for h in hooks if not (isinstance(h, dict) and h.get("hook_id") in remove_hook_ids)]
+
+
 def _ensure_branch(conn: sqlite3.Connection, project_id: str) -> str:
     """确保 (project_id, name='main') 行存在；返回 branch_id。"""
     row = conn.execute(
@@ -122,11 +173,31 @@ def _latest_snapshot_version(conn: sqlite3.Connection, project_id: str) -> tuple
 
 
 def _high_risk_change_ids(delta: dict) -> list[str]:
-    """扫描 delta 所有 change 数组，提取 risk_level=HIGH 的 change_id。"""
+    """扫描 delta 所有 change 数组，提取需要 author_approval 的 change_id。
+
+    触发条件（state-delta-v0.md §2.5）：
+    1. ``risk_level == "HIGH"``。
+    2. ``character_changes[].facet == "definition"``（Character 长期定义变更，PRD §89 HIGH）。
+    3. ``world_changes[].world_kind == "rule"``（World Rule 变更，PRD §89 HIGH）。
+    """
     out: list[str] = []
+    for ch in delta.get("character_changes") or []:
+        if not isinstance(ch, dict):
+            continue
+        needs_approval = ch.get("risk_level") == "HIGH" or ch.get("facet") == "definition"
+        if needs_approval:
+            cid = ch.get("change_id")
+            if isinstance(cid, str):
+                out.append(cid)
+    for w in delta.get("world_changes") or []:
+        if not isinstance(w, dict):
+            continue
+        needs_approval = w.get("risk_level") == "HIGH" or w.get("world_kind") == "rule"
+        if needs_approval:
+            cid = w.get("change_id")
+            if isinstance(cid, str):
+                out.append(cid)
     for array_name in (
-        "character_changes",
-        "world_changes",
         "relationship_changes",
         "new_events",
         "resolved_hooks",
@@ -472,31 +543,32 @@ class StoryStateService:
         delta_id: str,
         author_approval: dict,
         workflow_run_id: str,
+        *,
+        _inverse_cleanup: dict | None = None,
+        _rollback_of: str | None = None,
     ) -> dict:
         """执行 Commit。
 
         流程（同一事务）：
         1. 读 delta；必须 status='validated'，否则 ``StateConflictError``（409 语义）。
         2. 乐观锁：``delta.previous_state_version == 最新快照 version``；否则 ``OptimisticLockError``。
-        3. HIGH 风险门：delta 任何 change risk_level=HIGH 且 ``author_approval.get("approved") is not True``
-           → ``ApprovalRequiredError``。
+        3. HIGH 风险门：delta 任何 change risk_level=HIGH / character facet=definition /
+           world_kind=rule 且 ``author_approval.get("approved") is not True``
+           → ``ApprovalRequiredError``（对齐 state-delta-v0.md §2.5）。
         4. ``apply_delta(current_state, delta)`` → 新 state，state_version+1。
-        5. **写透领域表**：
-           - character_changes（facet=state）→ INSERT character_states 行（该角色 max(state_version)+1）。
-           - character_changes（facet=definition）→ UPDATE characters.core_json（顶层 key 替换）。
-           - world_changes（location）→ locations.data_json 顶层 key 替换；name/statement 来自 after。
-           - world_changes（faction）→ 同上。
-           - world_changes（rule）→ world_rules.data_json 顶层 key 替换。
-           - world_changes（politics/economy/event/time）→ 只进 story_states 快照（不写领域表）。
-           - relationship_changes → relationships upsert（按 from+to+relation_type 查）；
-             state_json=after，last_state_version=新 state_version。
-           - new_events → INSERT plot_events（status='recorded'，introduced_chapter_id=delta.chapter_id）。
-           - resolved_hooks → UPDATE hooks.status / payoff_chapter_id（=delta.chapter_id）。
-           - new_hooks → INSERT hooks（status='OPEN'，introduced_chapter_id=delta.chapter_id）。
-           - debt_changes → INSERT/UPDATE/DELETE narrative_debts（add/remove 时 created_chapter_id=delta.chapter_id）。
-        6. 落 commits 行（validation_json + author_approval_json）。
+        5. **写透领域表**（见 ``_write_through`` 注释）。
+        6. 落 commits 行（validation_json + author_approval_json + 可选 rollback_of）。
         7. 落 story_states 新快照。
         8. UPDATE state_deltas.status='applied'。
+        9. **逆路径清理**（仅 rollback 触发）：
+           - DELETE FROM plot_events WHERE event_id IN (hints["remove_event_ids"])
+             —— 先 DELETE FROM timeline_events WHERE event_id IN (...) 解除 FK。
+           - DELETE FROM hooks WHERE hook_id IN (hints["remove_hook_ids"])。
+           - 同步 mutate 最新快照（new_state 副本）：剔除 recent_events / events / hooks[] 中对应项。
+
+        ``_inverse_cleanup`` 是私有入参（仅 rollback_commit 使用）：
+        - ``remove_event_ids: list[str]`` —— 需在领域表删除的 event_id 列表。
+        - ``remove_hook_ids: list[str]`` —— 需在领域表删除的 hook_id 列表。
 
         返回 ``{"commit_id": str, "state_version": int, "delta_id": str, "snapshot_ref": str}``。
         """
@@ -599,7 +671,7 @@ class StoryStateService:
                      delta_id, validation_json, author_approval_json,
                      timestamp, workflow_run_id, rollback_of)
                 VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     commit_id,
@@ -613,10 +685,22 @@ class StoryStateService:
                     _dump(author_approval_norm),
                     now,
                     workflow_run_id,
+                    _rollback_of,
                 ),
             )
 
-            # 7) story_states 新快照
+            # 7) 逆路径清理（仅 rollback 触发）：与 _write_through 同一事务。
+            # 先把 new_state 中要剔除的项清掉，再 materialize 时就用剔除后的 state 落盘。
+            if _inverse_cleanup:
+                _apply_inverse_cleanup_to_state(new_state, _inverse_cleanup)
+                # 领域表清理：先清 FK 引用（timeline_events → plot_events）再清主表。
+                for eid in _inverse_cleanup.get("remove_event_ids") or []:
+                    conn.execute("DELETE FROM timeline_events WHERE event_id = ?", (eid,))
+                    conn.execute("DELETE FROM plot_events WHERE event_id = ?", (eid,))
+                for hid in _inverse_cleanup.get("remove_hook_ids") or []:
+                    conn.execute("DELETE FROM hooks WHERE hook_id = ?", (hid,))
+
+            # 8) story_states 新快照
             snapshot_ref, _digest = materialize_snapshot(
                 conn,
                 project_id=project_id,
@@ -626,7 +710,7 @@ class StoryStateService:
                 created_at=now,
             )
 
-            # 8) delta.status = applied
+            # 9) delta.status = applied
             conn.execute(
                 "UPDATE state_deltas SET status = 'applied' WHERE delta_id = ?",
                 (delta_id,),
@@ -648,31 +732,19 @@ class StoryStateService:
         """生成逆 Delta 并走 submit + commit 全流程；新 commit.rollback_of = commit_id。
 
         逆 Delta 规则（state-delta-v0.md §5.4 + 任务书口径）：
-        - add → remove（target_id 不变，op=remove，after=null，reason="rollback of <commit_id>"）。
-        - update → update（after 与 before 互换；如 before 为 null 则按 update(after=before=null) 处理）。
-        - remove → add（用原 after 重建；after 必须非 null，否则抛错）。
-        - new_events → 逆 add 一个"删除事件"在快照层不被直接表达——但 apply_delta 中
-          add 仅 append 到 recent_events 与 events；没有 remove 路径。Sprint 2 简化：把
-          新事件从快照 recent_events / events 中标记为「已撤回」（通过 insert 一个反向
-          resolved_hook 不可得；此处采用「逆 new_event = 移除该 event_id」——但 schema
-          中 new_events.op 必须为 add，故采用变通：在逆 delta 中作为 ``debt_changes`` 加
-          一条 ``forgiven`` 标记，并在 commit 阶段通过 service 在快照层面手动剔除）。
-        - 上述限制导致严格可逆性只在 character / world / relationship / hook / debt 上成立；
-          new_events 的撤销通过在 service 层额外维护快照层 recent_events 剔除实现。
-        - resolved_hooks 逆：to_status 回 from_status；from_status 为 null → 抛错拒绝回滚。
+        - add → remove（target_id 不变，op=remove；用 schema 合法字段 status_after 必填）。
+        - update → update（after 与 before 互换）。
+        - remove → add（用原 description/severity_after/status_after 重建）。
+        - new_events → schema 禁止「删除事件」op；逆条目走 ``_inverse_cleanup`` hints
+          （同事务内 DELETE plot_events + mutate snapshot JSON）。
+        - new_hooks → 同上；同事务内 DELETE hooks + mutate snapshot JSON。
+        - resolved_hooks 逆：to_status 回 from_status；from_status 为 null → 抛错拒绝回滚；
+          payoff_summary 填回滚说明；hooks.payoff_chapter_id 显式置 NULL（哨兵）。
+        - debt_changes 逆：用 status_before/status_after/severity_before/severity_after 等
+          schema 合法字段互换（无 before/after 键）。
 
-        实际采用更稳的「service 层处理快照逆向剔除 + Delta 走 schema 合法形式」策略：
-        - 逆 Delta 中只承载 schema 合法 change（character / world / relationship / hook / debt）；
-          resolved_hooks 的逆以 resolved_hooks 形式表达（to_status=from_status）；
-          new_hooks 的逆 = 删除对应 hook（用 debt_changes 不可表达——hook 删除走
-          ``new_events``? 不可行；改用：原 new_hooks 在快照层手工剔除）。
-        - 快照层 recent_events / events 中的新事件，由 ``_post_apply_rollback`` 在 service 层
-          直接 mutate new_state 完成（绕开 schema）。
-
-        为保证可读性，这里把「逆 Delta 走 schema 合法路径」与「快照层手工剔除」两件事合并：
-        - ``_build_inverse_delta`` 产出 schema 合法的逆 Delta（5 类 change）。
-        - ``_apply_inverse_post_state`` 在 commit 阶段 mutate new_state：剔除 recent_events 中
-          原 commit 引入的 event_id、剔除 events 中对应 key、剔除 new_hooks 引入的 hook 元素。
+        单一事务保证：逆 Delta 的写透、领域表清理（DELETE plot_events/hooks/timeline_events）、
+        rollback_of 落 commits 行、快照 mutate 全部在 ``commit_delta`` 同一个 DB 连接上完成。
         """
         conn = get_connection(self.db_path)
         try:
@@ -706,7 +778,25 @@ class StoryStateService:
             workflow_run_id=workflow_run_id,
             current_version=current_version,
         )
-        post_apply = inverse["post_apply"]
+
+        # 从逆 delta 收集「需在领域表删除」的事件 / hook ID；
+        # 逆 Delta 的 new_events / new_hooks 数组保持空（schema 禁止 remove op），
+        # 这里从原始 delta 收集要被清除的 ID（因为回滚是「撤销原 commit」语义）。
+        cleanup: dict[str, list[str]] = {
+            "remove_event_ids": [
+                ev.get("event_id")
+                for ev in (original_delta.get("new_events") or [])
+                if ev.get("event_id")
+            ],
+            "remove_hook_ids": [
+                nh.get("hook_id")
+                for nh in (original_delta.get("new_hooks") or [])
+                if nh.get("hook_id")
+            ],
+        }
+        # 过滤空值
+        cleanup["remove_event_ids"] = [x for x in cleanup["remove_event_ids"] if x]
+        cleanup["remove_hook_ids"] = [x for x in cleanup["remove_hook_ids"] if x]
 
         # 走 submit + commit 全流程（author_approval.approved=True 由调用方/UI 强制）
         ap = dict(author_approval or {})
@@ -719,91 +809,17 @@ class StoryStateService:
                 f"inverse delta rejected by validator: {submit_result['errors']}",
                 delta_id=submit_result["delta_id"],
             )
-        # 用 commit_delta 完成；rollback_of 在 commit_delta 之后 patch（commit 表无
-        # pre-commit 字段，所以先 commit 再 UPDATE rollback_of）。
+        # 用 commit_delta 完成；rollback_of 在 commit_delta 同一事务内落 commits 行；
+        # inverse_cleanup 在同一事务内清理领域表 + mutate 快照。
         commit_result = self.commit_delta(
             submit_result["delta_id"],
             ap,
             f"system:rollback:{commit_id}",
+            _inverse_cleanup=cleanup,
+            _rollback_of=commit_id,
         )
-
-        # 在 commit 完成后 mutate 最新快照（剔除 recent_events / events / hooks[]）
-        if post_apply:
-            self._post_process_inverse_commit(
-                project_id=project_id,
-                version=commit_result["state_version"],
-                hints=post_apply,
-            )
-
-        # patch rollback_of
-        conn = get_connection(self.db_path)
-        try:
-            conn.execute(
-                "UPDATE commits SET rollback_of = ? WHERE commit_id = ?",
-                (commit_id, commit_result["commit_id"]),
-            )
-            conn.commit()
-        finally:
-            conn.close()
         commit_result["rollback_of"] = commit_id
         return commit_result
-
-    def _post_process_inverse_commit(
-        self,
-        *,
-        project_id: str,
-        version: int,
-        hints: list[dict],
-    ) -> None:
-        """Rollback 后处理：从最新快照 JSON 中剔除 new_events / new_hooks 引入项。
-
-        原因：schema 不允许 ``new_events.op != 'add'`` 与 ``new_hooks.op != 'add'``，故
-        逆 Delta 不承载「删除事件/删除 hook」op；通过直接 mutate 快照 JSON 实现快照级可逆。
-        """
-        conn = get_connection(self.db_path)
-        try:
-            row = conn.execute(
-                "SELECT snapshot_json FROM story_states WHERE project_id = ? AND state_version = ?",
-                (project_id, version),
-            ).fetchone()
-            if row is None:
-                return
-            snap = _parse_required_json(row["snapshot_json"], {}) or {}
-            if not isinstance(snap, dict):
-                return
-            changed = False
-            for hint in hints:
-                if hint.get("type") == "remove_event":
-                    eid = hint.get("event_id")
-                    if not eid:
-                        continue
-                    recent = snap.get("recent_events") or []
-                    if eid in recent:
-                        snap["recent_events"] = [x for x in recent if x != eid]
-                        changed = True
-                    events = snap.get("events") or {}
-                    if eid in events:
-                        del events[eid]
-                        snap["events"] = events
-                        changed = True
-                elif hint.get("type") == "remove_hook":
-                    hid = hint.get("hook_id")
-                    if not hid:
-                        continue
-                    hooks = snap.get("hooks") or []
-                    new_hooks = [h for h in hooks if h.get("hook_id") != hid]
-                    if len(new_hooks) != len(hooks):
-                        snap["hooks"] = new_hooks
-                        changed = True
-            if not changed:
-                return
-            conn.execute(
-                "UPDATE story_states SET snapshot_json = ? WHERE project_id = ? AND state_version = ?",
-                (_dump(snap), project_id, version),
-            )
-            conn.commit()
-        finally:
-            conn.close()
 
     # -------------------------------------------------------------- helpers (private)
 
@@ -828,7 +844,24 @@ class StoryStateService:
             facet = ch.get("facet")
             field = ch.get("field") or ""
             after = ch.get("after")
+            who_knows_enc = _encode_who_knows(_read_who_knows(ch))
+            vis_value = _read_visibility(ch)
             if facet == "state":
+                # P2-2: 若该角色无任何 state 行，先补 v1 行（空 state_json）再追加
+                # 否则后续引用 max(state_version)+1 直接落到 (cid, 2) 跳过了 v1。
+                seed_row = conn.execute(
+                    "SELECT 1 FROM character_states WHERE character_id = ? LIMIT 1",
+                    (cid,),
+                ).fetchone()
+                if seed_row is None:
+                    conn.execute(
+                        """
+                        INSERT INTO character_states
+                            (character_id, state_version, state_json, visibility, who_knows, created_at)
+                        VALUES (?, 1, '{}', 'VISIBLE', NULL, ?)
+                        """,
+                        (cid, now_iso()),
+                    )
                 # 找到 max(state_version)
                 row = conn.execute(
                     "SELECT MAX(state_version) AS v FROM character_states WHERE character_id = ?",
@@ -849,13 +882,15 @@ class StoryStateService:
                     base[key] = after
                 elif op == "remove":
                     base.pop(key, None)
+                # visibility：None → 沿用 VISIBLE；显式值 → 使用
+                vis_final = vis_value or "VISIBLE"
                 conn.execute(
                     """
                     INSERT INTO character_states
                         (character_id, state_version, state_json, visibility, who_knows, created_at)
-                    VALUES (?, ?, ?, 'VISIBLE', NULL, ?)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (cid, next_v, _dump(base), now_iso()),
+                    (cid, next_v, _dump(base), vis_final, who_knows_enc, now_iso()),
                 )
             elif facet == "definition":
                 # UPDATE characters.core_json 顶层 key 替换
@@ -870,10 +905,20 @@ class StoryStateService:
                     base[key] = after
                 elif op == "remove":
                     base.pop(key, None)
-                conn.execute(
-                    "UPDATE characters SET core_json = ?, updated_at = ? WHERE character_id = ?",
-                    (_dump(base), now_iso(), cid),
-                )
+                # who_knows：缺失=沿用（不 UPDATE 该列）；非 None=显式覆盖
+                if who_knows_enc is not None:
+                    conn.execute(
+                        """
+                        UPDATE characters SET core_json = ?, who_knows = ?, updated_at = ?
+                        WHERE character_id = ?
+                        """,
+                        (_dump(base), who_knows_enc, now_iso(), cid),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE characters SET core_json = ?, updated_at = ? WHERE character_id = ?",
+                        (_dump(base), now_iso(), cid),
+                    )
 
         # world_changes
         for w in delta.get("world_changes") or []:
@@ -882,6 +927,8 @@ class StoryStateService:
             wid = w.get("world_id")
             field = w.get("field") or ""
             after = w.get("after")
+            who_knows_enc = _encode_who_knows(_read_who_knows(w))
+            vis_value = _read_visibility(w)
             if kind == "location":
                 cur = conn.execute(
                     "SELECT name, statement, data_json FROM locations WHERE location_id = ?",
@@ -891,14 +938,16 @@ class StoryStateService:
                     base_name = (after or {}).get("name") if isinstance(after, dict) else wid
                     base_stmt = (after or {}).get("statement") if isinstance(after, dict) else ""
                     base_data = (after or {}).get("data_json") if isinstance(after, dict) else {}
+                    vis_final = vis_value or "PUBLIC"
                     conn.execute(
                         """
                         INSERT INTO locations
                             (location_id, project_id, name, statement, data_json,
                              visibility, who_knows, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, 'PUBLIC', NULL, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (wid, project_id, base_name, base_stmt, _dump(base_data), now_iso(), now_iso()),
+                        (wid, project_id, base_name, base_stmt, _dump(base_data),
+                         vis_final, who_knows_enc, now_iso(), now_iso()),
                     )
                     continue
                 if cur is None:
@@ -911,10 +960,17 @@ class StoryStateService:
                     base_data[key] = after
                 elif op == "remove":
                     base_data.pop(key, None)
-                conn.execute(
-                    "UPDATE locations SET data_json = ?, updated_at = ? WHERE location_id = ?",
-                    (_dump(base_data), now_iso(), wid),
-                )
+                # who_knows 缺失=沿用（不更新该列）；非 None=显式覆盖
+                if who_knows_enc is not None:
+                    conn.execute(
+                        "UPDATE locations SET data_json = ?, who_knows = ?, updated_at = ? WHERE location_id = ?",
+                        (_dump(base_data), who_knows_enc, now_iso(), wid),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE locations SET data_json = ?, updated_at = ? WHERE location_id = ?",
+                        (_dump(base_data), now_iso(), wid),
+                    )
             elif kind == "faction":
                 cur = conn.execute(
                     "SELECT data_json FROM factions WHERE faction_id = ?", (wid,)
@@ -923,14 +979,16 @@ class StoryStateService:
                     base_data = (after or {}).get("data_json") if isinstance(after, dict) else {}
                     base_name = (after or {}).get("name") if isinstance(after, dict) else wid
                     base_stmt = (after or {}).get("statement") if isinstance(after, dict) else ""
+                    vis_final = vis_value or "VISIBLE"
                     conn.execute(
                         """
                         INSERT INTO factions
                             (faction_id, project_id, name, statement, data_json,
                              visibility, who_knows, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, 'VISIBLE', NULL, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (wid, project_id, base_name, base_stmt, _dump(base_data), now_iso(), now_iso()),
+                        (wid, project_id, base_name, base_stmt, _dump(base_data),
+                         vis_final, who_knows_enc, now_iso(), now_iso()),
                     )
                     continue
                 if cur is None:
@@ -943,10 +1001,16 @@ class StoryStateService:
                     base_data[key] = after
                 elif op == "remove":
                     base_data.pop(key, None)
-                conn.execute(
-                    "UPDATE factions SET data_json = ?, updated_at = ? WHERE faction_id = ?",
-                    (_dump(base_data), now_iso(), wid),
-                )
+                if who_knows_enc is not None:
+                    conn.execute(
+                        "UPDATE factions SET data_json = ?, who_knows = ?, updated_at = ? WHERE faction_id = ?",
+                        (_dump(base_data), who_knows_enc, now_iso(), wid),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE factions SET data_json = ?, updated_at = ? WHERE faction_id = ?",
+                        (_dump(base_data), now_iso(), wid),
+                    )
             elif kind == "rule":
                 cur = conn.execute(
                     "SELECT data_json FROM world_rules WHERE world_rule_id = ?", (wid,)
@@ -955,14 +1019,16 @@ class StoryStateService:
                     base_data = (after or {}).get("data_json") if isinstance(after, dict) else {}
                     base_name = (after or {}).get("name") if isinstance(after, dict) else wid
                     base_stmt = (after or {}).get("statement") if isinstance(after, dict) else ""
+                    vis_final = vis_value or "PUBLIC"
                     conn.execute(
                         """
                         INSERT INTO world_rules
                             (world_rule_id, project_id, name, statement, data_json,
                              visibility, who_knows, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, 'PUBLIC', NULL, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (wid, project_id, base_name, base_stmt, _dump(base_data), now_iso(), now_iso()),
+                        (wid, project_id, base_name, base_stmt, _dump(base_data),
+                         vis_final, who_knows_enc, now_iso(), now_iso()),
                     )
                     continue
                 if cur is None:
@@ -975,10 +1041,16 @@ class StoryStateService:
                     base_data[key] = after
                 elif op == "remove":
                     base_data.pop(key, None)
-                conn.execute(
-                    "UPDATE world_rules SET data_json = ?, updated_at = ? WHERE world_rule_id = ?",
-                    (_dump(base_data), now_iso(), wid),
-                )
+                if who_knows_enc is not None:
+                    conn.execute(
+                        "UPDATE world_rules SET data_json = ?, who_knows = ?, updated_at = ? WHERE world_rule_id = ?",
+                        (_dump(base_data), who_knows_enc, now_iso(), wid),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE world_rules SET data_json = ?, updated_at = ? WHERE world_rule_id = ?",
+                        (_dump(base_data), now_iso(), wid),
+                    )
             elif kind in ("politics", "economy", "event", "time"):
                 # 不写领域表（无对应表），仅在快照中体现
                 pass
@@ -1023,12 +1095,14 @@ class StoryStateService:
 
         # new_events
         for ev in delta.get("new_events") or []:
+            ev_who = _encode_who_knows(_read_who_knows(ev))
+            ev_vis = _read_visibility(ev) or "RESTRICTED"
             conn.execute(
                 """
                 INSERT INTO plot_events
                     (event_id, project_id, type, cause_json, effects_json, participants_json,
                      location_id, time_json, status, introduced_chapter_id, visibility, who_knows)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recorded', ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recorded', ?, ?, ?)
                 """,
                 (
                     ev["event_id"],
@@ -1040,30 +1114,47 @@ class StoryStateService:
                     ev.get("location"),
                     _dump(ev.get("time") or {"timeline_day": 1}),
                     chapter_id,
-                    ev.get("visibility") or "RESTRICTED",
+                    ev_vis,
+                    ev_who,
                 ),
             )
 
         # resolved_hooks
+        # 哨兵：notes 含 ``__CLEAR_PAYOFF_CHAPTER__`` → 显式把 hooks.payoff_chapter_id 置 NULL
+        # （用于逆 Delta；schema 不允许新字段，只能用 notes 字符串携带标记）。
         for rh in delta.get("resolved_hooks") or []:
-            conn.execute(
-                """
-                UPDATE hooks
-                SET status = ?, payoff_chapter_id = COALESCE(?, payoff_chapter_id), updated_at = ?
-                WHERE hook_id = ?
-                """,
-                (rh["to_status"], rh.get("payoff_chapter_id") or chapter_id, now_iso(), rh["hook_id"]),
-            )
+            notes = rh.get("notes") or ""
+            clear_payoff = "__CLEAR_PAYOFF_CHAPTER__" in notes
+            if clear_payoff:
+                conn.execute(
+                    """
+                    UPDATE hooks
+                    SET status = ?, payoff_chapter_id = NULL, updated_at = ?
+                    WHERE hook_id = ?
+                    """,
+                    (rh["to_status"], now_iso(), rh["hook_id"]),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE hooks
+                    SET status = ?, payoff_chapter_id = COALESCE(?, payoff_chapter_id), updated_at = ?
+                    WHERE hook_id = ?
+                    """,
+                    (rh["to_status"], rh.get("payoff_chapter_id") or chapter_id, now_iso(), rh["hook_id"]),
+                )
 
         # new_hooks
         for nh in delta.get("new_hooks") or []:
+            nh_who = _encode_who_knows(_read_who_knows(nh))
+            nh_vis = _read_visibility(nh) or "RESTRICTED"
             conn.execute(
                 """
                 INSERT INTO hooks
                     (hook_id, project_id, name, introduced_chapter_id, status, importance,
                      expected_payoff_chapter_id, payoff_chapter_id, visibility, who_knows,
                      created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'OPEN', ?, ?, NULL, ?, NULL, ?, ?)
+                VALUES (?, ?, ?, ?, 'OPEN', ?, ?, NULL, ?, ?, ?, ?)
                 """,
                 (
                     nh["hook_id"],
@@ -1072,7 +1163,8 @@ class StoryStateService:
                     chapter_id,
                     float(nh.get("importance") or 0.5),
                     nh.get("expected_payoff_chapter_id"),
-                    nh.get("visibility") or "RESTRICTED",
+                    nh_vis,
+                    nh_who,
                     now_iso(),
                     now_iso(),
                 ),
@@ -1082,6 +1174,8 @@ class StoryStateService:
         for db in delta.get("debt_changes") or []:
             op = db.get("op")
             did = db.get("debt_id")
+            db_who = _encode_who_knows(_read_who_knows(db))
+            db_vis = _read_visibility(db) or "RESTRICTED"
             existing = conn.execute("SELECT debt_id FROM narrative_debts WHERE debt_id = ?", (did,)).fetchone()
             if op == "add":
                 if existing is None:
@@ -1091,7 +1185,7 @@ class StoryStateService:
                             (debt_id, project_id, description, created_chapter_id, severity,
                              deadline_chapter_id, status, visibility, who_knows,
                              created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             did,
@@ -1101,30 +1195,53 @@ class StoryStateService:
                             float(db.get("severity_after") or 0.5),
                             db.get("deadline_chapter_id"),
                             db.get("status_after") or "open",
-                            db.get("visibility") or "RESTRICTED",
+                            db_vis,
+                            db_who,
                             now_iso(),
                             now_iso(),
                         ),
                     )
             elif op == "update":
                 if existing is not None:
-                    conn.execute(
-                        """
-                        UPDATE narrative_debts
-                        SET severity = COALESCE(?, severity),
-                            status = COALESCE(?, status),
-                            deadline_chapter_id = COALESCE(?, deadline_chapter_id),
-                            updated_at = ?
-                        WHERE debt_id = ?
-                        """,
-                        (
-                            db.get("severity_after"),
-                            db.get("status_after"),
-                            db.get("deadline_chapter_id"),
-                            now_iso(),
-                            did,
-                        ),
-                    )
+                    # 3-state who_knows：缺失=不更新该列（沿用），非 None=覆盖
+                    if db_who is not None:
+                        conn.execute(
+                            """
+                            UPDATE narrative_debts
+                            SET severity = COALESCE(?, severity),
+                                status = COALESCE(?, status),
+                                deadline_chapter_id = COALESCE(?, deadline_chapter_id),
+                                who_knows = ?,
+                                updated_at = ?
+                            WHERE debt_id = ?
+                            """,
+                            (
+                                db.get("severity_after"),
+                                db.get("status_after"),
+                                db.get("deadline_chapter_id"),
+                                db_who,
+                                now_iso(),
+                                did,
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE narrative_debts
+                            SET severity = COALESCE(?, severity),
+                                status = COALESCE(?, status),
+                                deadline_chapter_id = COALESCE(?, deadline_chapter_id),
+                                updated_at = ?
+                            WHERE debt_id = ?
+                            """,
+                            (
+                                db.get("severity_after"),
+                                db.get("status_after"),
+                                db.get("deadline_chapter_id"),
+                                now_iso(),
+                                did,
+                            ),
+                        )
             elif op == "remove":
                 if existing is not None:
                     conn.execute("DELETE FROM narrative_debts WHERE debt_id = ?", (did,))
@@ -1139,10 +1256,12 @@ class StoryStateService:
         workflow_run_id: str,
         current_version: int,
     ) -> dict:
-        """生成 schema 合法的逆 Delta；返回 ``{"delta": ..., "post_apply": [...]}``。
+        """生成 schema 合法的逆 Delta；返回 ``{"delta": <dict>}``。
 
-        ``post_apply`` 是需要在 commit 后 mutate new_state 的指令列表（用于剔除 recent_events
-        / events / new_hooks 的新增项——schema 不允许「删除事件」op，故走 service 兜底）。
+        逆 Delta 中 ``new_events`` 与 ``new_hooks`` 数组保持空——schema 禁止 remove op。
+        原 delta 的 event_id / hook_id 由调用方（rollback_commit）从原 delta 收集并通过
+        ``_inverse_cleanup`` 私有参数传给 commit_delta，commit_delta 在同事务内
+        DELETE 领域表行 + mutate 快照 JSON。
 
         ``current_version`` 为当前最新快照 version（用于填 ``previous_state_version`` 满足
         schema `minimum=1` 约束）。
@@ -1150,7 +1269,6 @@ class StoryStateService:
         # 用于 audit 的占位：scheduler 当前不接受 timestamp；直接生成
         now_ts = datetime.now(timezone.utc).isoformat()
         delta_id = new_id("dlt")
-        post_apply: list[dict] = []
 
         # character_changes：add→remove；update→update(after↔before)；remove→add(after)
         inv_char: list[dict] = []
@@ -1255,7 +1373,9 @@ class StoryStateService:
                     }
                 )
 
-        # resolved_hooks：update 反向 = update(to_status=from_status)；from_status 缺失则抛错
+        # resolved_hooks：update 反向 = update(to_status=from_status)；from_status 缺失则抛错。
+        # 逆条目必须显式置 payoff_chapter_id=NULL —— 用 ``notes`` 携带哨兵
+        # ``__CLEAR_PAYOFF_CHAPTER__``（schema 允许的字符串字段），由 _write_through 识别并清列。
         inv_rh: list[dict] = []
         for h in original.get("resolved_hooks") or []:
             from_status = h.get("from_status")
@@ -1273,23 +1393,23 @@ class StoryStateService:
                     "from_status": h.get("to_status"),
                     "to_status": from_status,
                     "payoff_chapter_id": None,
-                    "payoff_summary": "",
+                    # payoff_summary 必填（schema minLength=1）。填回滚说明。
+                    "payoff_summary": f"reverted by rollback of {original.get('delta_id')}",
                     "confidence": h.get("confidence"),
                     "evidence": h.get("evidence"),
                     "risk_level": h.get("risk_level"),
-                    "notes": f"inverse of {h.get('change_id')}",
+                    # notes 携带哨兵：_write_through 检测到此标记即把 hooks.payoff_chapter_id 显式置 NULL。
+                    "notes": f"inverse of {h.get('change_id')};__CLEAR_PAYOFF_CHAPTER__",
                 }
             )
 
-        # new_hooks → 删除 hook（schema 中没有 hook 删除 op，走 post_apply 标记）
-        for nh in original.get("new_hooks") or []:
-            post_apply.append({"type": "remove_hook", "hook_id": nh.get("hook_id")})
-
-        # new_events → 标记剔除
-        for ne in original.get("new_events") or []:
-            post_apply.append({"type": "remove_event", "event_id": ne.get("event_id")})
+        # new_hooks 与 new_events 不在逆 Delta 中承载（schema 禁止 remove op）；
+        # 调用方 rollback_commit 会从原 delta 收集 event_id / hook_id 并通过
+        # _inverse_cleanup 私有参数传给 commit_delta，在同事务内清理领域表与 mutate 快照。
 
         # debt_changes
+        # Schema-legal fields only: status_before/status_after/severity_before/severity_after/description/reason.
+        # No `before`/`after` keys (debt_change schema doesn't define them).
         inv_debt: list[dict] = []
         for d in original.get("debt_changes") or []:
             base = {
@@ -1302,26 +1422,25 @@ class StoryStateService:
                 "notes": f"inverse of {d.get('change_id')}",
             }
             op = d.get("op")
+            rollback_reason = f"rollback of {original.get('delta_id')}"
             if op == "add":
+                # Inverse add → op=remove；remove 时 status_after 必填（schema）——
+                # 用原 status_after 或兜底 "forgiven"（合法枚举）。
                 inv_debt.append(
                     {
                         **base,
                         "op": "remove",
-                        "before": {
-                            "status": d.get("status_after"),
-                            "severity": d.get("severity_after"),
-                        },
-                        "after": None,
-                        "reason": f"rollback of {original.get('delta_id')}",
+                        "status_after": d.get("status_after") or "forgiven",
+                        "reason": rollback_reason,
                     }
                 )
             elif op == "update":
+                # Inverse update → status_before/status_after 互换；severity 同理。
+                # status_after 必填；兜底 "open"。
                 inv_debt.append(
                     {
                         **base,
                         "op": "update",
-                        "before": {"status": d.get("status_after"), "severity": d.get("severity_after")},
-                        "after": {"status": d.get("status_before"), "severity": d.get("severity_before")},
                         "status_before": d.get("status_after"),
                         "status_after": d.get("status_before") or "open",
                         "severity_before": d.get("severity_after"),
@@ -1329,14 +1448,15 @@ class StoryStateService:
                     }
                 )
             elif op == "remove":
+                # Inverse remove → op=add；用原值重建（description/severity_after/status_after）。
+                # 若原 delta 缺这些字段，兜底为合法值。
                 inv_debt.append(
                     {
                         **base,
                         "op": "add",
-                        "before": None,
-                        "after": {"status": "open", "severity": 0.5},
-                        "description": d.get("reason") or f"re-add of {d.get('change_id')}",
-                        "status_after": "open",
+                        "description": d.get("description") or f"re-add of {d.get('change_id')}",
+                        "severity_after": d.get("severity_after") if d.get("severity_after") is not None else 0.5,
+                        "status_after": d.get("status_after") or "open",
                         "reason": f"re-add of {d.get('change_id')}",
                     }
                 )
@@ -1361,7 +1481,7 @@ class StoryStateService:
             "debt_changes": inv_debt,
         }
         # previous_state_version 在 submit 后会被 commit 路径重新校验；这里保留 0 由 Service 兜底
-        return {"delta": inverse_delta, "post_apply": post_apply}
+        return {"delta": inverse_delta}
 
     # -------------------------------------------------------------- list_commits
     def list_commits(self, project_id: str, *, branch_id: str | None = None) -> list[dict]:

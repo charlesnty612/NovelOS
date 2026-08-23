@@ -24,7 +24,6 @@ httpx ASGI + tmp_path db；不引入 pytest-asyncio。
 from __future__ import annotations
 
 import asyncio
-import json
 import sqlite3
 from pathlib import Path
 
@@ -102,12 +101,15 @@ def _make_meta(delta_id: str, chapter_id: str, prev_version: int) -> dict:
 def test_full_lifecycle_commit_and_rollback(tmp_path: Path):
     """主链路：project → character → chapter → init → submit → commit → rollback。"""
     app = _create_app(tmp_path)
+    captured: dict[str, str] = {}
 
     async def run():
         async with app.router.lifespan_context(app):
             pid = await _make_project(app)
             cid = await _make_character(app, pid)
             chap = await _make_chapter(app, pid)
+            captured["pid"] = pid
+            captured["cid"] = cid
 
             # init genesis（v1）
             r = await _request(app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap})
@@ -135,7 +137,7 @@ def test_full_lifecycle_commit_and_rollback(tmp_path: Path):
                         "character_id": cid,
                         "facet": "state",
                         "field": "state.location",
-                        "before": None,
+                        "before": "Unknown",
                         "after": "Cave",
                         "confidence": 0.95,
                         "evidence": _evidence(chap),
@@ -245,38 +247,37 @@ def test_full_lifecycle_commit_and_rollback(tmp_path: Path):
             assert rollback_commit["state_version"] == 3
             assert rollback_commit["rollback_of"] == commit_v2["commit_id"]
 
-            # GET state v3（应回到 v1 语义：location 回退为 None 或被移除；hooks 中无 hook_mystery）
+            # GET state v3（应回到 v1 语义：location 回退为 before 的原值；hooks 中无 hook_mystery）
             r = await _request(app, "GET", f"/api/projects/{pid}/state")
             assert r.status_code == 200
             state_v3 = r.json()
             assert state_v3["state_version"] == 3
             char_v3 = next(c for c in state_v3["characters"] if c["character_id"] == cid)
-            # 逆 update 语义：location 被设回 before=None（字段被设为 None）
-            assert char_v3["current_state"].get("location") is None
+            # 逆 update 语义：location 被设回 before="Unknown"（P2-6 要求 update 必有 before）
+            assert char_v3["current_state"].get("location") == "Unknown"
             assert not any(h["hook_id"] == "hook_mystery" for h in state_v3["hooks"])
-            # recent_events 在快照层 post_apply 移除
+            # recent_events 在快照层 mutate 移除
             assert "event_first" not in state_v3.get("recent_events", [])
 
-            # 关库重开 GET state 仍是 v3（持久化断言）
-            # 在已存在 loop 中直接验证 story_states 表的最新快照（无须重启 app）
-            conn = sqlite3.connect(str(tmp_path / "novelos.db"))
-            conn.row_factory = sqlite3.Row
-            try:
-                row = conn.execute(
-                    "SELECT state_version, snapshot_json FROM story_states "
-                    "WHERE project_id = ? ORDER BY state_version DESC LIMIT 1",
-                    (pid,),
-                ).fetchone()
-                assert row is not None
-                assert row["state_version"] == 3
-                snap = json.loads(row["snapshot_json"])
-                char_v3 = next(c for c in snap["characters"] if c["character_id"] == cid)
-                assert char_v3["current_state"].get("location") is None
-                assert not any(h["hook_id"] == "hook_mystery" for h in snap["hooks"])
-            finally:
-                conn.close()
-
     asyncio.run(run())
+
+    # P2-7：真实「重启」断言——新建 create_app 实例（同 tmp_path 即同 db）后 GET state。
+    # 旧实现仅 sqlite3.connect 直接读表不算重启（同一进程），改为新 ASGI app 上下文。
+    app_restart = _create_app(tmp_path)
+    pid_captured = captured["pid"]
+    cid_captured = captured["cid"]
+
+    async def restart_check():
+        async with app_restart.router.lifespan_context(app_restart):
+            r = await _request(app_restart, "GET", f"/api/projects/{pid_captured}/state")
+            assert r.status_code == 200
+            snap = r.json()
+            assert snap["state_version"] == 3
+            char_v3 = next(c for c in snap["characters"] if c["character_id"] == cid_captured)
+            assert char_v3["current_state"].get("location") == "Unknown"
+            assert not any(h["hook_id"] == "hook_mystery" for h in snap["hooks"])
+
+    asyncio.run(restart_check())
 
 
 # ----------------------------------------------------------------- optimistic lock
@@ -306,7 +307,7 @@ def test_optimistic_lock_conflict_returns_409(tmp_path: Path):
                         "character_id": cid,
                         "facet": "state",
                         "field": "state.location",
-                        "before": None,
+                        "before": "Unknown",
                         "after": "Cave",
                         "confidence": 0.9,
                         "evidence": _evidence(chap),

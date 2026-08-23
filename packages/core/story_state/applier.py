@@ -105,7 +105,12 @@ def _apply_character_changes(state: dict, items: list[dict]) -> None:
         if op in ("add", "update"):
             key = field.split(".", 1)[-1] if field.startswith("state.") or field.startswith("core.") else field
             # 若 field 含点号（如 state.location），取最后一段作为 key（顶层替换语义）。
-            bucket[key] = after
+            # P2-1：op=update 且 after=None 时，删除该 key（保证回滚后与原快照严格等价）；
+            # op=add 且 after=None 时保持原行为（写入 None）。
+            if op == "update" and after is None:
+                bucket.pop(key, None)
+            else:
+                bucket[key] = after
         elif op == "remove":
             key = field.split(".", 1)[-1] if field.startswith("state.") or field.startswith("core.") else field
             bucket.pop(key, None)
