@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+node_modules/
+dist/
+data/
+*.db
+*.db-shm
+*.db-wal
+.venv/
+.ruff_cache/
+.DS_Store
+.idea/
+.vscode/
+*.log
+.env
