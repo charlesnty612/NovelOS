@@ -462,6 +462,49 @@ def test_q6_rate_error():
     )
 
 
+def test_q6_repeated_shingle_overlap_rate_doubles():
+    """F1 修复：同一 13 字 shingle 在 draft 出现多次时，重叠率应反映所有出现位置。
+
+    验证：把同一段公共 13 字串在 draft 中重复 2 次 vs 1 次，去空白后字符总数
+    也近 2 倍 ⇒ 修复后的重叠率应近 2 倍；修复前两次几乎相同（均只计入首个位置）。
+    """
+    # 25 字确保含 ≥ 13 个连续公共 shingles；ref 重复以避免 ref 端容量瓶颈
+    shared = "一二三四五六七八九十百千万测字"  # 15 字
+    ref = shared * 10  # ref 端大量相同片段
+
+    # 关键设计：保持 1x 和 2x 总字符数相同（N），仅 shared 出现次数不同。
+    # 修复前：1x overlap=13 → 13/N；2x overlap=13（find 仅首个位置）→ 13/N，两版比例**完全相等**。
+    # 修复后：1x overlap=13；2x overlap=26（两处不重叠区间）→ 26/N = 2 × 13/N，比例严格翻倍。
+    n_total = 615
+    draft_1x = shared + "甲" * (n_total - len(shared))              # 615 chars
+    draft_2x = shared + shared + "甲" * (n_total - 2 * len(shared))  # 615 chars
+
+    issues_1x = g.req_q6(draft_1x, [ref])
+    issues_2x = g.req_q6(draft_2x, [ref])
+
+    def _rate(issues):
+        for it in issues:
+            if it.rule_id == "RULE_Q6_OVERLAP_RATE":
+                # message 形如 "重叠字符占比 X.XX% > 2.00%"
+                pct = float(
+                    it.message.split("重叠字符占比 ")[1].split("%")[0]
+                )
+                return pct
+        return None
+
+    rate_1x = _rate(issues_1x)
+    rate_2x = _rate(issues_2x)
+
+    # 修复前：rate_1x 与 rate_2x 几乎相同；修复后：rate_2x ≈ 2 × rate_1x
+    assert rate_1x is not None, "1x 必须触发 RULE_Q6_OVERLAP_RATE"
+    assert rate_2x is not None, "2x 必须触发 RULE_Q6_OVERLAP_RATE"
+    # 修复前比例近似 1.0；修复后应 >= 1.5（理论 2.0，去空白后偏差极小）
+    assert rate_2x >= rate_1x * 1.5, (
+        f"修复失败：2x 比例={rate_2x} 未明显高于 1x 比例={rate_1x} "
+        f"（修复前两者近似相等）"
+    )
+
+
 def test_q6_pass_no_overlap():
     draft = "完全无关的文字内容" * 5
     ref = "另一段完全不同的参照书文字" * 5

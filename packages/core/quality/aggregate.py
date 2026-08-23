@@ -42,18 +42,6 @@ WEIGHTS: dict[str, float] = {
 SUBSCORE_NAMES: tuple[str, ...] = tuple(WEIGHTS.keys())
 """六子分固定顺序。"""
 
-# 任一这些 category 的 error ⇒ overall = 0
-_ERROR_BLOCKING_CATEGORIES: frozenset[str] = frozenset(
-    {
-        "schema_validity",
-        "timeline_consistency",
-        "character_contradiction",
-        "world_rule_contradiction",
-        "knowledge_leakage",
-        "compliance",
-    }
-)
-
 
 # ============================================================================
 # 公式字符串 + 哈希（_meta.scoring_formula_hash 字段）
@@ -117,6 +105,10 @@ def compute_overall(
         )
 
     # 2) 任意 error 阻断（来自 guardrail / compliance / subscore-missing 等）
+    # 实现口径：任何 severity=="error" 的 issue 都把 overall 设为 0；
+    # 比 quality-scoring-v0 §2.1 "Guardrail error" 的描述更宽（v0 只点名 Guardrail 五条 + compliance）。
+    # 当前所有 error 产出确实来自 Guardrail/合规类与 scoring_missing_subscore，
+    # 与 v0 口径无行为偏差；若未来子分规则产出 error，须重新评估此分支语义。
     blocked = any(
         isinstance(it, Issue) and it.severity == "error" for it in issues
     )

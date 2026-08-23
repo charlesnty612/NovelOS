@@ -565,8 +565,6 @@ def knowledge_leakage(snapshot: dict, delta: dict) -> list[Issue]:
 
     return out
 
-    return out
-
 
 # ============================================================================
 # 4.6 REQ-Q6 参照书相似度
@@ -613,11 +611,18 @@ def req_q6(draft: str, reference_texts: list[str], whitelist: list[str] | None =
         if common:
             ngram_issue_count += 1
             # 标记重叠字符位置（按 norm 后的 offset）
+            # 同一 shingle 在 draft 中可能出现多次，遍历所有出现位置
+            # 以避免低估总重叠字符数（之前 find 只返回首个位置）
+            norm_draft = _norm(draft or "")
             for sh in common:
-                idx = _norm(draft or "").find(sh)
-                if idx >= 0:
+                start = 0
+                while True:
+                    idx = norm_draft.find(sh, start)
+                    if idx < 0:
+                        break
                     for k in range(idx, idx + Q6_SHINGLE_LEN):
                         overlap_chars.add(k)
+                    start = idx + 1  # 偏移 1 以继续扫描重叠区间
 
     if ngram_issue_count > 0:
         out.append(

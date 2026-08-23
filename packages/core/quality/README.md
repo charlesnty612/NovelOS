@@ -190,7 +190,12 @@ class Issue(BaseModel):
 3. **Issue dataclass 已合并为唯一 pydantic 类**：`packages.core.quality.issues.Issue` 与 `models.Issue` 是同一类。
    不要在代码里出现 `dataclass`-based Issue 占位——会让 QualityReport 序列化报错。
 4. **`_meta` 用 pydantic alias**：Python 端属性名是 `meta`；JSON / dump 时通过 `model_dump(by_alias=True)` 输出 `_meta`。
-5. **issue 严重性升级路径明确**：把 `_make_issue(severity="error")` 改为 `"warning"` 即降低；改 matrix 不需要改引擎逻辑。
+5. **issue 严重性升级路径明确**：在 `guardrails` / `payoff` 等具体规则处把
+   `_make_issue(severity="error")` 改为 `"warning"` 即降低；升级到 error 也是同样在
+   规则产出处修改。阻断语义是「任何 `severity=="error"` 的 issue ⇒ overall=0」
+   （见 `aggregate.compute_overall` 注释），因此"改 matrix 不改引擎"是误判——
+   matrix 仅用于自检/文档化展示，规则是否产出 error 由规则本身决定。
+   注意：扩大 error 产出类别（如子分规则也产出 error）会改变阻断范围，需重新评估。
 6. **本包零数据库迁移**：所有评估均为纯函数，State Delta 字段以 dict 形态传入。
 7. **新加 rule_id 必须以 `RULE_` 开头**（除 SCHEMA_VALIDATION_FAILED / scoring_missing_subscore 等系统级）。
 
