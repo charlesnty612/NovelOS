@@ -60,6 +60,20 @@ def _dump_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _scrub_ctx_for_checkpoint(
+    ctx: dict[str, Any], exclude: list[str] | None
+) -> dict[str, Any]:
+    """对 ctx 做浅拷贝并剔除 ``exclude`` 顶层键；用于落盘，避免敏感数据进
+    ``workflow_runs.checkpoint_json``。
+
+    非 dict ctx / ``exclude`` 为空/None → 原样返回（调用方兼容性）。
+    """
+    if not exclude or not isinstance(ctx, dict):
+        return ctx
+    scrubbed = {k: v for k, v in ctx.items() if k not in exclude}
+    return scrubbed
+
+
 def _parse_json(raw: Any) -> Any:
     if raw is None:
         return None
@@ -168,6 +182,7 @@ class WorkflowEngine:
         chapter_id: str | None = None,
         initial_ctx: dict[str, Any] | None = None,
         mock_providers: dict[str, list[str]] | None = None,
+        checkpoint_exclude: list[str] | None = None,
     ) -> str:
         """启动并顺序执行 nodes 列表；返回 run_id。
 
@@ -175,6 +190,10 @@ class WorkflowEngine:
         - 全部节点完成 → run.status=COMPLETED。
         - 任意节点抛 :class:`PauseRequested` → 节点行 PENDING、run PAUSED、checkpoint 落盘、返回 run_id。
         - 任意节点抛其他异常 → 节点行 FAILED、run FAILED、checkpoint 落盘、返回 run_id。
+
+        ``checkpoint_exclude``（可选）：落盘到 ``workflow_runs.checkpoint_json`` 之前剔除的 ctx
+        顶层键列表（浅拷贝，不修改内存 ctx）。用于硬边界：参考书原文 ``ctx["text"]`` 等敏感
+        数据不应落 workflow_runs / Pause 后被 audit export。
         """
         if not nodes:
             raise ValueError("nodes must be a non-empty list")
@@ -182,6 +201,7 @@ class WorkflowEngine:
         ctx: dict[str, Any] = dict(initial_ctx or {})
         if mock_providers is not None:
             ctx["mock_providers"] = mock_providers
+        self._checkpoint_exclude = list(checkpoint_exclude or [])
 
         conn = get_connection(self.db_path)
         try:
@@ -400,6 +420,7 @@ class WorkflowEngine:
         *,
         current_node: str,
     ) -> None:
+        scrubbed = _scrub_ctx_for_checkpoint(ctx, getattr(self, "_checkpoint_exclude", None))
         conn = get_connection(self.db_path)
         try:
             conn.execute(
@@ -408,7 +429,7 @@ class WorkflowEngine:
                 SET checkpoint_json = ?, current_node = ?
                 WHERE run_id = ?
                 """,
-                (_dump_json(ctx), current_node, run_id),
+                (_dump_json(scrubbed), current_node, run_id),
             )
             conn.commit()
         finally:
@@ -423,6 +444,7 @@ class WorkflowEngine:
         current_node: str | None,
         error: str | None = None,
     ) -> None:
+        scrubbed = _scrub_ctx_for_checkpoint(ctx or {}, getattr(self, "_checkpoint_exclude", None))
         conn = get_connection(self.db_path)
         try:
             if status in ("COMPLETED", "FAILED", "CANCELLED"):
@@ -432,7 +454,7 @@ class WorkflowEngine:
                     SET status = ?, ended_at = ?, checkpoint_json = ?, current_node = ?, error = ?
                     WHERE run_id = ?
                     """,
-                    (status, now_iso(), _dump_json(ctx or {}), current_node, error, run_id),
+                    (status, now_iso(), _dump_json(scrubbed), current_node, error, run_id),
                 )
             else:  # PAUSED: 保留 ended_at = NULL（仍可 resume）
                 conn.execute(
@@ -441,7 +463,7 @@ class WorkflowEngine:
                     SET status = ?, checkpoint_json = ?, current_node = ?, error = ?
                     WHERE run_id = ?
                     """,
-                    (status, _dump_json(ctx or {}), current_node, error, run_id),
+                    (status, _dump_json(scrubbed), current_node, error, run_id),
                 )
             conn.commit()
         finally:

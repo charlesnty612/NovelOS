@@ -380,7 +380,11 @@ class SimulationService:
     def get_simulation(self, project_id: str, simulation_id: str) -> SimulationResult | None:
         """重放某次推演：从分支 commits 推导 final_state，返回完整 SimulationResult。
 
-        找不到对应 branch（不属于该项目或非 sim-* 命名）→ 返回 None。
+        Sprint 11 审查修：base_state 走 ``branches.base_state_version`` 处的快照（与
+        ``simulate`` 当时取的 base 严格一致），而非 main 当前最新——避免 main 在推演后
+        又有新 commit 造成 replay diff 漂移；缺失该版本快照时退化为 ``get_current_state``
+        与 ``simulate`` 当初行为对齐（main 当前）。找不到对应 branch（不属于该项目或
+        非 sim-* 命名）→ 返回 None。
         """
         conn = get_connection(self.db_path)
         try:
@@ -398,7 +402,12 @@ class SimulationService:
             return None
 
         base_version = int(row["base_state_version"] or 0)
-        base_state = self._state_service.get_current_state(project_id)  # main 当前
+        # Sprint 11 fix：用 base_state_version 处的快照作为 base（避免 main drift）
+        snap_at_base = self._state_service.get_snapshot(project_id, base_version)
+        if isinstance(snap_at_base, dict):
+            base_state = snap_at_base
+        else:
+            base_state = self._state_service.get_current_state(project_id)
         final_state = self._state_service.get_current_state(project_id, branch_id=simulation_id)
         final_version = int(final_state.get("state_version") or base_version)
         diff = _diff_snapshots(

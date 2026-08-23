@@ -1,8 +1,15 @@
 # Director Agent Prompt — `director:v1`
 
-> 版本：`director:v1`
+> 版本：`director:v1`（Sprint 11 审查：增 `reference_canon` 可选键）
 > 对齐：PRD §29（Director）、§40（主 Workflow）、§44（Chapter Planner 结构）、§62（Prompt 九段结构）、§113（Agent 十问）
 > 状态：Canonical Prompt 文本。本文件是发给 LLM 的完整指令，不做元描述。
+
+## 变更记录
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| `director:v1` | 2026-08-23 (Sprint 10) | 初版；9 段结构 + 输入契约 §5 + 输出 schema §7 + 验收 §9 |
+| `director:v1` | 2026-08-23 (Sprint 11 审查) | §5 输入契约增 `reference_canon`（可选键）；引入「参照系只借结构不借表达」约束；不动其他节 |
 
 ---
 
@@ -148,9 +155,39 @@
     "forbidden_topics": ["string, ..."],
     "must_include": ["string, ..."],
     "style_constraints_id": "string 或 null"
+  },
+  "reference_canon": {
+    "canon_id": "string 或 null（参照系 ID；缺席 = 本项目无参照系）",
+    "logline": "string 或 null（参照系的一句话风格锚）",
+    "spine": [
+      {
+        "chapter_index": "integer",
+        "function_tag": "hook | setup | escalation | turn | climax | resolution",
+        "title_pattern": "string（章节标题的抽象模式，如『主角类型 1 在某类型场景中完成类型行为』）"
+      }
+    ],
+    "payoff_list": [
+      {
+        "payoff_id": "string",
+        "chapter_index": "integer",
+        "type": "string（抽象爽点类型，如 face_slap / level_up）",
+        "intensity": "number 0-1"
+      }
+    ],
+    "rhythm": {
+      "mini_climax_interval": "{ median: integer, p25: integer, p75: integer }",
+      "major_climax_interval": "{ median: integer, p25: integer, p75: integer }",
+      "chapter_end_hook_rate": "number 0-1",
+      "golden_three_compliance": "object"
+    }
   }
 }
 ```
+
+> **关于 `reference_canon`（Sprint 11 增）**：
+> - **缺席语义**：`reference_canon` 字段不存在或 `canon_id == null` ⇒ 当前项目尚未生成参照系（未跑 deconstruct-book / 未加载 canon）；按 `author_intent + story_state_snapshot` 自行规划，不报错。
+> - **存在语义**：参照系是**结构锚点**，用于 `chapter_goal` / `expected_role` 的方向对齐（function_tag 节奏是否合理、payoff 强度档位是否过满）。它**不**是情节抄写源：禁止在 `chapter_goal` / `key_beats[].purpose` / `character_changes_planned[].from|to` 中复制参照系 `title_pattern` / `chapter_digest` 之外的具象表达（人名/地名/场景描述/对话句）。
+> - 唯一可借用：参照系中的**结构模式短语**（如「主角类型 1 在某类型场景中完成类型行为」「`min=N-median=M-p75=P`」），其余皆视为越界。
 
 > **层概念引用**：上述输入字段对应 `docs/architecture/context-engine-v0.md` 的分层（Project / Story State / Character State / Plot Context / Chapter Context / Memory / Agent Private Context）。本 Prompt 不复制层定义，只声明消费哪些字段。
 

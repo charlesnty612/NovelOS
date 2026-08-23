@@ -166,6 +166,7 @@ def start_deconstruct(
             chapter_id=None,
             initial_ctx=initial_ctx,
             mock_providers=mock_providers,
+            checkpoint_exclude=["text"],
         )
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc

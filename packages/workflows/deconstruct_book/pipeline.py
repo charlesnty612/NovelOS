@@ -7,10 +7,14 @@
 节点列表：
 - ``T1_split_chapters`` (Transform)  —— 正则切分 ``第[0-9…]章`` 标题行；
   切不出 → 抛 ValueError ⇒ run FAILED（README 记录 MVP deviation：不走 Human 补切分）。
+  输出 segments 仅保留 ``chapter_index / title / start_offset / end_offset``（B-3：原文不落 ctx）。
 - ``T2_extract_chapters`` (Transform) —— 对每章调
   :func:`packages.core.agent_runtime.runner.run_agent` 跑 ``deconstructor_chapter``
-  agent；输入按 prompt §A.5 构造（chapter.raw_text + 滑动窗口 chapter_digest ≤200 字）；
-  产物 ChapterExtract 累积进 ``ctx["chapter_extracts"]``。
+  agent；按 T1 offsets 从 ``ctx["text"]`` 切片取每章 raw_text（仅作为 LLM 输入用，
+  不写回 ctx 顶层键）；输入按 prompt §A.5 构造（chapter.raw_text + 滑动窗口 chapter_digest ≤200 字）；
+  输出走 :func:`_validate_chapter_extract` 校验（§3.2：string 字段 ≤80、禁 raw_text_excerpt / self_check / warnings、
+  function_tag ∈ 枚举、valence ∈ [-9, 9]）；校验失败 → run_agent 1 次重试（payload 追加错误提示）；
+  仍失败 ⇒ run FAILED。产物 ChapterExtract 累积进 ``ctx["chapter_extracts"]``。
 - ``T3_aggregate`` (AI)              —— 调 ``deconstructor_aggregate`` 聚合；
   输出过 :func:`_validate_canon_schema`（jsonschema Draft202012Validator，
   schema = ``docs/reference-canon/schemas/reference-canon.schema.json``）；
@@ -20,6 +24,9 @@
   任一公共 shingle ⇒ run FAILED（B-2 边界）。
 - ``T4_persist`` (State)             —— 生成 ``canon_id``、注入 metadata 五字段、
   渲染 ``report_md``、写 ``reference_canons`` 行 + ``canon_extracts`` 逐章行。
+
+注：本 workflow 启动时（见 ``packages.core.api.routers.reference``）要求传入
+``checkpoint_exclude=["text"]``—— ``ctx["text"]`` 不写进 ``workflow_runs.checkpoint_json``。
 
 参考：
 - :mod:`packages.workflows.chapter_plan.pipeline`（节点范式 + workflow 注册）
@@ -72,6 +79,27 @@ _T2_LARGE_BOOK_THRESHOLD = 50
 # T3 hierarchical_digest 切片阈值（< 100 章单轮；≥ 100 章按 50 章聚合摘要）
 _T3_AGGREGATION_THRESHOLD = 100
 _T3_BUCKET_SIZE = 50
+# T2 轻量校验常量（reference-canon-v0 §3.2 / §1.2 B-1）
+_T2_STRING_FIELDS = (
+    "schema_version",
+    "event_pattern",
+    "function_tag",
+    "hook_marker",
+    "chapter_digest",
+)
+_T2_BANNED_KEYS = ("raw_text_excerpt", "self_check", "warnings")
+_T2_FUNCTION_TAGS = ("hook", "setup", "escalation", "turn", "climax", "resolution")
+_T2_MAX_STRING_LEN = 80
+_T2_RETRY_HINT_TEMPLATE = (
+    "\n\n[Validation note] 上一次输出违反字段约束：{err}。"
+    "请重新组织后只输出合法 JSON（不超过 80 字、不含 raw_text_excerpt / self_check / warnings 键、"
+    "function_tag ∈ hook/setup/escalation/turn/climax/resolution、valence ∈ [-9, 9]）。"
+)
+# T3 schema 校验 retry 提示模板
+_T3_RETRY_HINT_TEMPLATE = (
+    "\n\n[Schema note] 上一次输出违反 ReferenceCanon Schema：{err}。"
+    "请按 docs/reference-canon/schemas/reference-canon.schema.json 重新组织后只输出合法 JSON。"
+)
 
 
 # =============================================================================
@@ -118,7 +146,12 @@ def _validate_canon_schema(canon_json: dict[str, Any], schema_path: Path | None 
 
 
 def _t1_split_chapters_node(ctx: dict[str, Any]) -> dict[str, Any]:
-    """按 ``第N章`` 行匹配切分章节；空文本 / 无匹配 → ValueError。"""
+    """按 ``第N章`` 行匹配切分章节；空文本 / 无匹配 → ValueError。
+
+    边界（B-3）：T1 不落 raw_text 到 ctx（segments 仅保留 chapter_index/title/start_offset/end_offset）。
+    原文 text 留在 ctx["text"]（在调用方通过 ``checkpoint_exclude=["text"]`` 落盘时剔除），
+    T2 节点按 offset 切片取 raw_text。
+    """
     text = ctx.get("text") or ""
     if not text.strip():
         raise ValueError("T1 split_chapters failed: empty text")
@@ -126,7 +159,7 @@ def _t1_split_chapters_node(ctx: dict[str, Any]) -> dict[str, Any]:
     matches = list(_CHAPTER_HEAD_RE.finditer(text))
     if not matches:
         raise ValueError(
-            "T1 split_chapters failed: no '第N章' 标题行命中（regex: 第[0-9一二…]章）；"
+            "T1 split_chapters failed: no '第N章' 标题行命中（regex: 第[0-9…]章）；"
             "MVP 不做 Human 补切分"
         )
 
@@ -135,12 +168,13 @@ def _t1_split_chapters_node(ctx: dict[str, Any]) -> dict[str, Any]:
         start = m.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         title_line = m.group(0).strip()
-        raw_text = text[start:end]
+        # 仅保留 offsets；raw_text 由 T2 节点用 ctx["text"][start:end] 切片获取
         segments.append(
             {
                 "chapter_index": i + 1,
                 "title": title_line,
-                "raw_text": raw_text,
+                "start_offset": start,
+                "end_offset": end,
             }
         )
     return {
@@ -203,11 +237,13 @@ def _truncate_digest(s: str, limit: int = 200) -> str:
 def _t2_extract_chapters_node(ctx: dict[str, Any]) -> dict[str, Any]:
     """循环对每章调 deconstructor_chapter agent；产物 ChapterExtract 累积 ctx。
 
-    注：raw_text 只在本节点内部使用（§1.2 B-3 边界），不写入 ctx 顶层 key 持久化；
-    本节点返回的 ``chapter_extracts`` 仅为业务载荷列表（含 chapter_digest 等）。
+    边界（B-3 修，Sprint 11 审查）：segments 仅保留 offsets；本节点按 offsets 从
+    ``ctx["text"]`` 切片取每章 raw_text（仅作为 run_agent 的 LLM 输入用，不写回 ctx）。
+    返回的 ``chapter_extracts`` 仅含抽象 ChapterExtract 字段（不含原文）。
     """
     db_path = ctx["db_path"]
     run_id = ctx["run_id"]
+    raw_text_full: str = ctx.get("text") or ""
     segments: list[dict[str, Any]] = ctx.get("segments") or []
     reader_profile = ctx.get("reader_profile") or "male_fantasy"
     mock_providers = ctx.get("mock_providers") or {}
@@ -233,7 +269,14 @@ def _t2_extract_chapters_node(ctx: dict[str, Any]) -> dict[str, Any]:
         # next_digest 取下一章 chapter_digest 尚未生成；MVP 简化取下一章 raw_text 截 200 字
         # （生产应由 LLM 在 T2 循环内先摘要；MVP 用 raw_text 截断兜底，调用方通过 mock 可控）
         if next_seg is not None:
-            next_digest = _truncate_digest(next_seg.get("raw_text") or "", 200)
+            next_start = int(next_seg.get("start_offset") or 0)
+            next_end = int(next_seg.get("end_offset") or len(raw_text_full))
+            next_digest = _truncate_digest(raw_text_full[next_start:next_end], 200)
+
+        # 按 offset 切片取本章节 raw_text（仅作 LLM 输入，不进 ctx）
+        seg_start = int(seg.get("start_offset") or 0)
+        seg_end = int(seg.get("end_offset") or len(raw_text_full))
+        chapter_raw_text = raw_text_full[seg_start:seg_end]
 
         # 逐章分发 mock_script（仅 list 模式；None / 单值 / callable 透传）
         per_chapter_script: Any = mock_script
@@ -248,21 +291,63 @@ def _t2_extract_chapters_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
         payload = _build_chapter_extract_input(
             chapter_index=int(seg["chapter_index"]),
-            raw_text=str(seg.get("raw_text") or ""),
+            raw_text=chapter_raw_text,
             prev_digest=_truncate_digest(prev_digest or "", 200) if prev_digest else None,
             next_digest=next_digest,
             target_reader_profile=reader_profile,
         )
-        # run_agent 自带 1 次重试；仍失败 → AgentOutputError 抛到节点 → run FAILED
-        extract = run_agent(
-            db_path,
-            "deconstructor_chapter",
-            payload,
-            run_id,
-            node_run_id=ctx.get("_current_node_run_id"),
-            expected=None,
-            mock_script=per_chapter_script,
-        )
+
+        # T2 轻量校验：先调一次 + 校验；失败重试一次；仍失败 → FAILED
+        # retry 时既回灌错误提示到 payload，又尝试切换 mock_script（list 模式取下一条），
+        # 让跨 run_agent 实例的 MockProvider 拿到不同响应。
+        attempt_errors: list[str] = []
+        extract: dict[str, Any] | None = None
+        current_script = per_chapter_script
+        for attempt in range(2):
+            extract = run_agent(
+                db_path,
+                "deconstructor_chapter",
+                payload,
+                run_id,
+                node_run_id=ctx.get("_current_node_run_id"),
+                expected=None,
+                mock_script=current_script,
+            )
+            attempt_errors = _validate_chapter_extract(extract)
+            if not attempt_errors:
+                break
+            if attempt == 0:
+                # 第 1 次校验失败 → 把错误回灌 payload 准备重试；切到 mock_script 下一条
+                payload = _build_chapter_extract_input(
+                    chapter_index=int(seg["chapter_index"]),
+                    raw_text=chapter_raw_text,
+                    prev_digest=_truncate_digest(prev_digest or "", 200) if prev_digest else None,
+                    next_digest=next_digest,
+                    target_reader_profile=reader_profile,
+                )
+                payload["_retry_hint"] = _T2_RETRY_HINT_TEMPLATE.format(
+                    err="; ".join(attempt_errors)
+                )
+                # 仅当原始 mock_script 是 list 且 i < len-1 时切到下一条。
+                # 这样测试可注入 [bad, good, good_for_ch2, good_for_ch3] 让 retry 走 good；
+                # 单条 list → 保持原样（retry 仍同响应 → 仍失败）。
+                if (
+                    isinstance(mock_script, list)
+                    and len(mock_script) >= 2
+                    and i < len(mock_script) - 1
+                ):
+                    next_picked = mock_script[i + 1]
+                    if isinstance(next_picked, str):
+                        current_script = [next_picked]
+                    else:
+                        current_script = next_picked
+                continue
+        if extract is None or attempt_errors:
+            raise ValueError(
+                f"T2 extract_chapters failed: chapter_index={int(seg['chapter_index'])} "
+                f"validation failed after retry: {'; '.join(attempt_errors)}"
+            )
+
         # chapter_index 回填（prompt A §A.7.2 强调）
         extract.setdefault("chapter_index", int(seg["chapter_index"]))
         chapter_extracts.append(extract)
@@ -278,6 +363,43 @@ def _t2_extract_chapters_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "chapter_count": len(chapter_extracts),
         "warnings": warnings,
     }
+
+
+# T2 轻量校验（§3.2）：每个 ChapterExtract：
+# - string 字段值长度 ≤80 字（prompt A §A.6）
+# - 禁止键 raw_text_excerpt / self_check / warnings（reference-canon-v0 §1.2 B-1）
+# - function_tag ∈ {hook, setup, escalation, turn, climax, resolution}
+# - valence 整数 ∈ [-9, 9]
+
+
+def _validate_chapter_extract(extract: dict[str, Any]) -> list[str]:
+    """T2 轻量校验：返回错误列表（空 = 通过）。常量见文件顶部。"""
+    if not isinstance(extract, dict):
+        return ["extract must be a JSON object"]
+    errs: list[str] = []
+
+    banned = [k for k in extract if k in _T2_BANNED_KEYS]
+    if banned:
+        errs.append(f"banned keys present: {banned}")
+
+    for field_name in _T2_STRING_FIELDS:
+        val = extract.get(field_name)
+        if isinstance(val, str) and len(val) > _T2_MAX_STRING_LEN:
+            errs.append(
+                f"field {field_name!r} length {len(val)} > {_T2_MAX_STRING_LEN}"
+            )
+
+    tag = extract.get("function_tag")
+    if isinstance(tag, str) and tag not in _T2_FUNCTION_TAGS:
+        errs.append(f"function_tag {tag!r} not in {_T2_FUNCTION_TAGS}")
+
+    valence = extract.get("valence")
+    if not isinstance(valence, int) or isinstance(valence, bool):
+        errs.append("valence must be integer")
+    elif not (-9 <= valence <= 9):
+        errs.append(f"valence {valence} outside [-9, 9]")
+
+    return errs
 
 
 # =============================================================================
@@ -358,7 +480,10 @@ def _build_aggregate_input(
 def _t3_aggregate_node(ctx: dict[str, Any]) -> dict[str, Any]:
     """调 deconstructor_aggregate agent；产物过 schema 校验。
 
-    run_agent 自带 1 次重试；schema 校验失败抛 ValueError → run FAILED。
+    失败语义（Sprint 11 审查修）：
+    1) ``run_agent`` 失败（解析/契约 1 次重试后仍失败） → run FAILED；
+    2) schema 校验失败 → 调 ``run_agent`` 1 次重试（payload 追加 schema 错误提示）；
+       仍失败 ⇒ run FAILED。
     """
     db_path = ctx["db_path"]
     run_id = ctx["run_id"]
@@ -375,32 +500,44 @@ def _t3_aggregate_node(ctx: dict[str, Any]) -> dict[str, Any]:
     if not book_title:
         raise ValueError("T3 aggregate failed: missing book_title in ctx")
 
-    payload = _build_aggregate_input(
-        chapter_extracts=chapter_extracts,
-        book_title=book_title,
-        reader_profile=reader_profile,
-        deconstruct_date=deconstruct_date,
-        deconstruct_version=deconstruct_version,
-    )
-
-    canon_json = run_agent(
-        db_path,
-        "deconstructor_aggregate",
-        payload,
-        run_id,
-        node_run_id=ctx.get("_current_node_run_id"),
-        expected=None,
-        mock_script=mock_script,
-    )
-
-    # T3 schema 校验：失败立即抛错（run FAILED）
-    schema_errors = _validate_canon_schema(canon_json)
-    if schema_errors:
-        raise ValueError(
-            "T3 aggregate schema invalid: " + "; ".join(schema_errors[:5])
+    def _build_payload(_err_hint: str | None = None) -> dict[str, Any]:
+        p = _build_aggregate_input(
+            chapter_extracts=chapter_extracts,
+            book_title=book_title,
+            reader_profile=reader_profile,
+            deconstruct_date=deconstruct_date,
+            deconstruct_version=deconstruct_version,
         )
+        if _err_hint:
+            p["_retry_hint"] = _err_hint
+        return p
 
-    return {"canon_json": canon_json}
+    payload = _build_payload()
+    canon_json: dict[str, Any] | None = None
+    schema_errors: list[str] = []
+    for attempt in range(2):
+        canon_json = run_agent(
+            db_path,
+            "deconstructor_aggregate",
+            payload,
+            run_id,
+            node_run_id=ctx.get("_current_node_run_id"),
+            expected=None,
+            mock_script=mock_script,
+        )
+        schema_errors = _validate_canon_schema(canon_json)
+        if not schema_errors:
+            return {"canon_json": canon_json}
+        # schema 失败：第 1 次 → 把错误回灌 payload 准备重试
+        if attempt == 0:
+            payload = _build_payload(
+                _T3_RETRY_HINT_TEMPLATE.format(err="; ".join(schema_errors[:5]))
+            )
+            continue
+    raise ValueError(
+        "T3 aggregate schema invalid after 1 retry: "
+        + "; ".join(schema_errors[:5])
+    )
 
 
 # =============================================================================

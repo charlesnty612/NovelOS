@@ -38,10 +38,18 @@ G-sim 校验阻断相似度 → 落库 `reference_canons` + `canon_extracts` + �
 | 节点 | 触发条件 | run 状态 |
 |---|---|---|
 | T1 | 无 `第N章` 标题行 / 空文本 | FAILED |
-| T2 | 单章 agent 输出不合规（run_agent 1 次重试后仍失败） | FAILED |
+| T2 | 单章 agent 输出不合规（run_agent 1 次重试后仍失败）或 T2 轻量校验不通过（string>80 / 禁键 / function_tag 越枚举 / valence 越界，重试 1 次后仍失败） | FAILED |
 | T3 | aggregate 输出 schema 不合规（run_agent 1 次重试后仍失败） | FAILED |
 | G-sim | canon_json 与原书存在 ≥13 字公共 shingle | FAILED（B-2 边界） |
 | T4 | reader_profile 不在 schema 枚举 / DB 写失败 | FAILED |
+
+## 硬边界原文隔离（Sprint 11 审查）
+
+| 数据 | 落库位置 | 隔离策略 |
+|---|---|---|
+| `ctx["text"]`（原文） | **不**落 `workflow_runs.checkpoint_json` | workflow 启动时调用方传 `checkpoint_exclude=["text"]`；engine `_update_run_checkpoint` / `_finalize_run` 落盘前浅拷贝剔除 |
+| T1 segments | **不**含 `raw_text`：仅 `{chapter_index, title, start_offset, end_offset}` | T1 节点不写 raw_text 到 ctx；T2 节点按 offset 在 `ctx["text"]` 切片获取（仅作 LLM 输入） |
+| `ai_call_logs.input_context_ids_json` | 仅抽 `*_id` 键（不存原文） | runner.py 现成口径天然不落原文 |
 
 ## 硬边界落实点（reference-canon-v0.md §1.2）
 

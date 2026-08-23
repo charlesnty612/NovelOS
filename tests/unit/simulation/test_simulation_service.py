@@ -612,3 +612,122 @@ def test_simulate_default_name_format(tmp_path: Path):
     result = sim.simulate(pid, deltas)
     assert result.name.startswith("sim-")
     assert len(result.name) >= len("sim-YYYYMMDDTHHMMSSZ")
+
+
+# --------------------------------------------------------------------- F4 fix: replay base snapshot
+
+
+def test_get_simulation_replay_uses_base_snapshot_not_current_main(tmp_path: Path):
+    """F4（Sprint 11 审查）：推演后 main 再 commit 一次 → get_simulation 的 diff 必须与
+    推演当时一致（即 base_state 走 branches.base_state_version 的快照，不漂移到 main 当前）。
+
+    验证路径：
+    1) 推演前 main version=1（genesis v1）。
+    2) 跑 simulate(pid, [delta]) → base_version=1，分支 base_state = main v1。
+    3) get_simulation(pid, sim_id) → 第一次读 base_state = main v1 快照。
+    4) main 再 commit 一次 → main version=2；当前 get_current_state 走 v2 快照。
+    5) 再次 get_simulation(pid, sim_id) → 与第 3 步完全一致（base_version=1 仍指向 v1）。
+    """
+    db_path = _fresh_db(tmp_path)
+    uid = uuid.uuid4().hex[:8]
+    seed = _seed_project_with_char_chapter(db_path, uid=uid)
+    pid, cid, chap = seed["project_id"], seed["character_id"], seed["chapter_id"]
+
+    sim = SimulationService(db_path)
+    deltas = [
+        {
+            **_make_meta(f"dlt_{uid}_F4", chap, 1),
+            "character_changes": [
+                {
+                    "change_id": f"cc_{uid}_F4",
+                    "op": "update",
+                    "target_id": cid,
+                    "character_id": cid,
+                    "facet": "state",
+                    "field": "state.location",
+                    "before": "Village",
+                    "after": "Cave",
+                    "confidence": 0.9,
+                    "evidence": _evidence(chap),
+                    "risk_level": "LOW",
+                }
+            ],
+            "world_changes": [],
+            "relationship_changes": [],
+            "new_events": [],
+            "resolved_hooks": [],
+            "new_hooks": [],
+            "debt_changes": [],
+        }
+    ]
+    result = sim.simulate(pid, deltas, name=f"sim-{uid}-F4")
+    base_version = result.base_version
+
+    # 推演时拿一次 diff（baseline）
+    first_replay = sim.get_simulation(pid, result.simulation_id)
+    assert first_replay is not None
+    assert first_replay.base_version == base_version
+    assert first_replay.base_state.get("state_version") == base_version
+
+    # main 再 commit 一次（直接走 StoryStateService.commit_delta）
+    state_svc = StoryStateService(db_path)
+    new_delta_meta = {
+        "delta_id": f"dlt_{uid}_F4_extra",
+        "delta_version": 1,
+        "schema_version": "state-delta-v0",
+        "chapter_id": chap,
+        "workflow_run_id": f"wfr_{uid}_F4_extra",
+        "previous_state_version": 1,
+        "created_by": "observer:v1",
+        "created_at": _now_iso(),
+        "supersedes": None,
+        "notes": None,
+    }
+    extra_delta = {
+        **new_delta_meta,
+        "character_changes": [
+            {
+                "change_id": f"cc_{uid}_F4_extra",
+                "op": "update",
+                "target_id": cid,
+                "character_id": cid,
+                "facet": "state",
+                "field": "state.location",
+                "before": "Cave",
+                "after": "Mountain",
+                "confidence": 0.9,
+                "evidence": _evidence(chap),
+                "risk_level": "LOW",
+            }
+        ],
+        "world_changes": [],
+        "relationship_changes": [],
+        "new_events": [],
+        "resolved_hooks": [],
+        "new_hooks": [],
+        "debt_changes": [],
+    }
+    submit_extra = state_svc.submit_delta(extra_delta)
+    assert submit_extra["status"] == "validated"
+    state_svc.commit_delta(
+        submit_extra["delta_id"],
+        {"approver": "system:test", "notes": "main commit after simulation"},
+        workflow_run_id=f"wfr_{uid}_F4_extra",
+        _skip_approval=True,
+    )
+    # 确认 main 已前进
+    main_now = state_svc.get_current_state(pid)
+    assert int(main_now.get("state_version") or 0) == 2
+
+    # 重放应与推演时一致（base_version=1，base_state.version=1）
+    second_replay = sim.get_simulation(pid, result.simulation_id)
+    assert second_replay is not None
+    assert second_replay.base_version == base_version
+    assert second_replay.base_state.get("state_version") == base_version, (
+        f"base_state 应仍指向 base_version={base_version} 处的快照，"
+        f"实际 {second_replay.base_state.get('state_version')}"
+    )
+    # diff 也必须完全一致（base/final 不漂移）
+    assert second_replay.diff == first_replay.diff
+    assert second_replay.final_state == first_replay.final_state
+
