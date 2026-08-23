@@ -395,6 +395,91 @@ export interface SyncPromptsResult {
 }
 
 // ---------------------------------------------------------------------------
+// Sprint 9：Hooks（伏笔台账）+ Narrative Debts（叙事债务）
+// 与 packages/domain/ledger/models.py + routers/ledger.py 对齐。
+// ---------------------------------------------------------------------------
+
+export type HookStatus =
+  | 'OPEN'
+  | 'ACTIVE'
+  | 'ESCALATED'
+  | 'RESOLVED'
+  | 'ABANDONED';
+
+export type DebtStatus = 'open' | 'acknowledged' | 'paid' | 'forgiven';
+
+export interface Hook {
+  hook_id: string;
+  project_id: string;
+  name: string;
+  introduced_chapter_id: string | null;
+  status: HookStatus;
+  importance: number;
+  expected_payoff_chapter_id: string | null;
+  payoff_chapter_id: string | null;
+  visibility: VisibilityLevel;
+  who_knows: string[] | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HookCreatePayload {
+  name: string;
+  introduced_chapter_id?: string | null;
+  expected_payoff_chapter_id?: string | null;
+  payoff_chapter_id?: string | null;
+  status?: HookStatus | null;
+  importance?: number | null;
+  visibility?: VisibilityLevel | null;
+  who_knows?: string[] | null;
+}
+
+export interface HookUpdatePayload {
+  name?: string | null;
+  introduced_chapter_id?: string | null;
+  expected_payoff_chapter_id?: string | null;
+  payoff_chapter_id?: string | null;
+  status?: HookStatus | null;
+  importance?: number | null;
+  visibility?: VisibilityLevel | null;
+  who_knows?: string[] | null;
+}
+
+export interface Debt {
+  debt_id: string;
+  project_id: string;
+  description: string;
+  created_chapter_id: string | null;
+  severity: number;
+  deadline_chapter_id: string | null;
+  status: DebtStatus;
+  visibility: VisibilityLevel;
+  who_knows: string[] | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DebtCreatePayload {
+  description: string;
+  created_chapter_id?: string | null;
+  deadline_chapter_id?: string | null;
+  status?: DebtStatus | null;
+  severity?: number | null;
+  visibility?: VisibilityLevel | null;
+  who_knows?: string[] | null;
+}
+
+export interface DebtUpdatePayload {
+  description?: string | null;
+  created_chapter_id?: string | null;
+  deadline_chapter_id?: string | null;
+  status?: DebtStatus | null;
+  severity?: number | null;
+  visibility?: VisibilityLevel | null;
+  who_knows?: string[] | null;
+}
+
+// ---------------------------------------------------------------------------
 // Sprint 6 下半：Quality 评估报告（packages.core.quality.service）
 //   与 packages/core/api/routers/quality.py + quality_reports 表对齐。
 //   - QualityReport.scores_json 含六子分 + _meta；

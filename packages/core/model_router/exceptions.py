@@ -30,4 +30,19 @@ class ProviderError(ModelRouterError):
         self.status_code = status_code
 
 
-__all__ = ["ModelRouterError", "ModelNotConfiguredError", "ProviderError"]
+class AggregateProviderError(ModelRouterError):
+    """所有候选 provider 都失败的聚合异常（Sprint 8 回退链用）。
+
+    ``attempts`` 为有序列表，每项 ``(config_id, error_repr)``；调用方可遍历用于定位。
+    """
+
+    def __init__(self, capability: str, attempts: list[tuple[str, str]]) -> None:
+        joined = "; ".join(f"{cid}={err}" for cid, err in attempts)
+        super().__init__(
+            f"all providers failed for capability={capability!r}: {joined}"
+        )
+        self.capability = capability
+        self.attempts: list[tuple[str, str]] = list(attempts)
+
+
+__all__ = ["ModelRouterError", "ModelNotConfiguredError", "ProviderError", "AggregateProviderError"]

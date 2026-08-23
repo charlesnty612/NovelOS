@@ -232,8 +232,10 @@ def run_agent(
             capability = capability_for(agent_name)
         else:
             capability = capability_for(agent_name)
-            config_row = ModelRouter(db_path).resolve(capability)
-            provider = ModelRouter(db_path).get_provider(config_row)
+            # Sprint 8：走失败转移链（单配置时与旧 resolve+get_provider 等价）。
+            # provider 与 config_row 在主调循环内首次获取；后续重试沿用同一 provider。
+            provider = None
+            config_row = None
 
         model_id = (
             f"{config_row['provider']}/{config_row['model']}"
@@ -273,7 +275,14 @@ def run_agent(
                 # 重试：在 user 末尾追加提示，再次调用
                 messages[1]["content"] = user_payload_text + _RETRY_HINT.format(err=last_error or "无法解析")
             try:
-                completion = provider.complete(messages)
+                # mock_script 路径直接调 mock provider；否则走失败转移（首次/retry 各取一次）
+                if provider is not None:
+                    completion = provider.complete(messages)
+                else:
+                    completion, config_row = ModelRouter(db_path).call_with_fallback(
+                        capability, messages
+                    )
+                    model_id = f"{config_row['provider']}/{config_row['model']}"
             except Exception as exc:  # noqa: BLE001
                 # Provider 失败：不重试，直接记日志并抛
                 latency = int((time.monotonic() - start) * 1000)

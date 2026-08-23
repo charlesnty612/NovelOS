@@ -66,12 +66,39 @@ class ApprovalRequiredError(StoryStateError):
 
 
 class StateNotFoundError(StoryStateError):
-    """目标不存在（delta / commit / snapshot）。"""
+    """目标不存在（delta / commit / snapshot / branch）。"""
 
     def __init__(self, message: str, *, resource: str | None = None, resource_id: str | None = None) -> None:
         super().__init__(message)
         self.resource = resource
         self.resource_id = resource_id
+
+
+class BranchNotFound(StateNotFoundError):
+    """指定 branch 不存在或不属于该项目（404 语义）。
+
+    继承 :class:`StateNotFoundError`（resource 固定为 ``"branch"``），便于上层
+    ``except StateNotFoundError`` 统一捕获后映射到 404。
+    """
+
+
+class BranchClosed(StoryStateError):
+    """分支已 MERGED / DISCARDED，状态机拒绝继续写入（409 语义）。
+
+    直接继承 :class:`StoryStateError`（不复用 StateNotFoundError，避免被 router
+    误归为 404）。携带 ``status`` / ``branch_id`` 供 router / 测试断言。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        branch_id: str | None = None,
+        status: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.branch_id = branch_id
+        self.status = status
 
 
 __all__ = [
@@ -80,4 +107,6 @@ __all__ = [
     "OptimisticLockError",
     "ApprovalRequiredError",
     "StateNotFoundError",
+    "BranchNotFound",
+    "BranchClosed",
 ]

@@ -3,8 +3,9 @@ import { useParams } from 'react-router-dom';
 import { CharacterTab } from './bible/CharacterTab';
 import { WorldTab } from './bible/WorldTab';
 import { PlotTab } from './bible/PlotTab';
+import { LedgerTab } from './bible/LedgerTab';
 
-type BibleTab = 'characters' | 'world' | 'plot';
+type BibleTab = 'characters' | 'world' | 'plot' | 'ledger';
 
 export function StoryBiblePage() {
   const { pid } = useParams();
@@ -40,11 +41,19 @@ export function StoryBiblePage() {
         >
           剧情
         </div>
+        <div
+          className={`tabs__tab ${tab === 'ledger' ? 'tabs__tab--active' : ''}`}
+          onClick={() => setTab('ledger')}
+          data-testid="tab-ledger"
+        >
+          伏笔与债务
+        </div>
       </div>
 
       {tab === 'characters' ? <CharacterTab projectId={projectId} /> : null}
       {tab === 'world' ? <WorldTab projectId={projectId} /> : null}
       {tab === 'plot' ? <PlotTab projectId={projectId} /> : null}
+      {tab === 'ledger' ? <LedgerTab projectId={projectId} /> : null}
     </div>
   );
 }

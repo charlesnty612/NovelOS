@@ -49,6 +49,8 @@ from packages.core.ids import new_id, now_iso
 from .applier import apply_delta
 from .exceptions import (
     ApprovalRequiredError,
+    BranchClosed,
+    BranchNotFound,
     OptimisticLockError,
     StateConflictError,
     StateNotFoundError,
@@ -160,6 +162,56 @@ def _ensure_branch(conn: sqlite3.Connection, project_id: str) -> str:
     return branch_id
 
 
+def _resolve_branch(
+    conn: sqlite3.Connection, project_id: str, branch_id: str | None
+) -> str:
+    """解析并校验 branch_id；None → 返回 main branch_id（不创建）。
+
+    - ``branch_id`` 为 None：返回 ``branches`` 表中 (project_id, name='main') 的
+      ``branch_id``；不存在则抛 :class:`StateNotFoundError`（resource='branch'）。
+    - ``branch_id`` 非 None：必须满足
+      1. 该 branch 存在；
+      2. ``branch.project_id == project_id``；
+      3. ``branch.status == 'ACTIVE'``（分支已 MERGED / DISCARDED → BranchClosed）。
+      任一失败抛对应异常。
+    """
+    if branch_id is None:
+        row = conn.execute(
+            "SELECT branch_id, status FROM branches WHERE project_id = ? AND name = ?",
+            (project_id, "main"),
+        ).fetchone()
+        if row is None:
+            raise StateNotFoundError(
+                f"main branch for project {project_id!r} not found",
+                resource="branch",
+                resource_id=f"main:{project_id}",
+            )
+        return row["branch_id"]
+    row = conn.execute(
+        "SELECT branch_id, project_id, status FROM branches WHERE branch_id = ?",
+        (branch_id,),
+    ).fetchone()
+    if row is None:
+        raise BranchNotFound(
+            f"branch {branch_id!r} not found",
+            resource="branch",
+            resource_id=branch_id,
+        )
+    if row["project_id"] != project_id:
+        raise BranchNotFound(
+            f"branch {branch_id!r} does not belong to project {project_id!r}",
+            resource="branch",
+            resource_id=branch_id,
+        )
+    if row["status"] != "ACTIVE":
+        raise BranchClosed(
+            f"branch {branch_id!r} is {row['status']!r}; only ACTIVE branches accept writes",
+            branch_id=branch_id,
+            status=row["status"],
+        )
+    return row["branch_id"]
+
+
 def _latest_snapshot_version(conn: sqlite3.Connection, project_id: str) -> tuple[int, dict] | tuple[int, None]:
     """返回 ``(version, snapshot_json_or_None)``，无快照时 version=0, snapshot=None。"""
     row = conn.execute(
@@ -170,6 +222,69 @@ def _latest_snapshot_version(conn: sqlite3.Connection, project_id: str) -> tuple
     if row is None:
         return 0, None
     return row["state_version"], _parse_required_json(row["snapshot_json"], {})
+
+
+def _branch_current_state(
+    conn: sqlite3.Connection, project_id: str, branch_id: str
+) -> tuple[int, dict | None]:
+    """推导分支当前 state。
+
+    语义（对齐任务书 Sprint 7）：
+    - base：取 ``branches.base_state_version`` 处的 main 快照（即
+      ``story_states`` 表中 ``state_version == base_state_version`` 的快照）。
+      无该快照 → 兜底 ``build_initial_state``，version=base_state_version。
+    - 在 base 之上按 ``commits.branch_id == branch_id`` 顺序（resulting_state_version ASC）
+      重放每条 delta（delta_id 关联 state_deltas），复用 ``apply_delta``。
+    - version 序列：base_state_version 起递增，分支内独立编号（与 main 主键空间
+      不冲突，因为分支不写 story_states 行）。
+    """
+    branch_row = conn.execute(
+        "SELECT base_state_version FROM branches WHERE branch_id = ?", (branch_id,)
+    ).fetchone()
+    if branch_row is None:
+        raise StateNotFoundError(
+            f"branch {branch_id!r} disappeared mid-transaction",
+            resource="branch",
+            resource_id=branch_id,
+        )
+    base_version = int(branch_row["base_state_version"] or 0)
+
+    if base_version <= 0:
+        base_snap = build_initial_state(conn, project_id)
+        base_snap["state_version"] = base_version
+    else:
+        base_row = conn.execute(
+            "SELECT state_version, snapshot_json FROM story_states "
+            "WHERE project_id = ? AND state_version = ?",
+            (project_id, base_version),
+        ).fetchone()
+        if base_row is None:
+            base_snap = build_initial_state(conn, project_id)
+            base_snap["state_version"] = base_version
+        else:
+            base_snap = _parse_required_json(base_row["snapshot_json"], {})
+            base_snap["state_version"] = base_row["state_version"]
+
+    rows = conn.execute(
+        """
+        SELECT c.commit_id, c.resulting_state_version, c.delta_id, d.payload_json
+        FROM commits c
+        JOIN state_deltas d ON c.delta_id = d.delta_id
+        WHERE c.branch_id = ? AND c.project_id = ?
+        ORDER BY c.resulting_state_version ASC
+        """,
+        (branch_id, project_id),
+    ).fetchall()
+
+    current_state = base_snap
+    current_version = base_version
+    for r in rows:
+        payload = _parse_required_json(r["payload_json"], {}) or {}
+        delta = _restore_delta_from_row_payload(r["delta_id"], payload)
+        current_state = apply_delta(current_state, delta)
+        current_version = int(r["resulting_state_version"])
+
+    return current_version, current_state
 
 
 def _high_risk_change_ids(delta: dict) -> list[str]:
@@ -257,6 +372,36 @@ def _restore_delta_from_row(row: sqlite3.Row) -> dict:
     }
 
 
+def _restore_delta_from_row_payload(delta_id: str, payload: dict) -> dict:
+    """分支重放路径专用：从已解析 payload 还原 7 数组（最小元信息即可）。
+
+    ``_branch_current_state`` 在重放时不需要全部 10 元信息字段，仅 7 数组；
+    本函数提供最小可被 ``apply_delta`` 使用的 delta 形态（chapter_id 等设为
+    占位符，不参与 apply）。
+    """
+    return {
+        "delta_id": delta_id,
+        "delta_version": 1,
+        "schema_version": "state-delta-v0",
+        "chapter_id": "",
+        "workflow_run_id": "",
+        "previous_state_version": 0,
+        "created_by": "branch:replay",
+        "created_at": "",
+        "supersedes": None,
+        "notes": None,
+        **{k: payload.get(k, []) for k in (
+            "character_changes",
+            "world_changes",
+            "relationship_changes",
+            "new_events",
+            "resolved_hooks",
+            "new_hooks",
+            "debt_changes",
+        )},
+    }
+
+
 # ----------------------------------------------------------------------------- service
 
 
@@ -267,25 +412,64 @@ class StoryStateService:
         self.db_path = str(db_path)
 
     # -------------------------------------------------------------- get_current
-    def get_current_state(self, project_id: str) -> dict:
+    def get_current_state(self, project_id: str, *, branch_id: str | None = None) -> dict:
         """返回当前 Canonical State。
 
-        有 story_states：取最新 snapshot。
-        无 snapshot：返回 ``build_initial_state``（state_version=0，**不落库**）。
+        ``branch_id``（Sprint 7 新增）：
+        - None（默认）：返回 main 当前 state；语义与 Sprint 2/4 逐字节一致——
+          取 ``story_states`` 最新快照；无快照时 ``build_initial_state`` 并填
+          ``state_version=0``。
+        - 非 None：返回该分支当前 state——
+          1) 取 ``branches.base_state_version`` 处的 main 快照作为 base；
+          2) 按 ``commits.branch_id`` 顺序重放本分支 delta，复用 ``apply_delta``。
+          分支不写 ``story_states`` 新行，state_version 为分支内独立编号。
+
+        分支不存在 / 不属于该项目 → :class:`BranchNotFound`。
         """
+        if branch_id is None:
+            conn = get_connection(self.db_path)
+            try:
+                version, snap = _latest_snapshot_version(conn, project_id)
+            finally:
+                conn.close()
+            if snap is None:
+                conn = get_connection(self.db_path)
+                try:
+                    initial = build_initial_state(conn, project_id)
+                finally:
+                    conn.close()
+                initial["state_version"] = 0
+                return initial
+            snap["state_version"] = version
+            return snap
+
         conn = get_connection(self.db_path)
         try:
-            version, snap = _latest_snapshot_version(conn, project_id)
+            row = conn.execute(
+                "SELECT project_id, status FROM branches WHERE branch_id = ?", (branch_id,)
+            ).fetchone()
+            if row is None:
+                raise BranchNotFound(
+                    f"branch {branch_id!r} not found",
+                    resource="branch",
+                    resource_id=branch_id,
+                )
+            if row["project_id"] != project_id:
+                raise BranchNotFound(
+                    f"branch {branch_id!r} does not belong to project {project_id!r}",
+                    resource="branch",
+                    resource_id=branch_id,
+                )
+            version, snap = _branch_current_state(conn, project_id, branch_id)
         finally:
             conn.close()
         if snap is None:
-            # 无快照：直接返回初始 state（state_version=0，调用方按需展示）
             conn = get_connection(self.db_path)
             try:
                 initial = build_initial_state(conn, project_id)
             finally:
                 conn.close()
-            initial["state_version"] = 0
+            initial["state_version"] = version
             return initial
         snap["state_version"] = version
         return snap
@@ -438,19 +622,39 @@ class StoryStateService:
         return self.get_current_state(project_id)
 
     # -------------------------------------------------------------- submit_delta
-    def submit_delta(self, delta: dict) -> dict:
+    def submit_delta(self, delta: dict, *, branch_id: str | None = None) -> dict:
         """落 state_deltas 行（proposed → validated/rejected）。
 
+        ``branch_id``（Sprint 7 新增）：可选，标识 Delta 归属分支。
+        - None：现有行为不变（落 main），与 Sprint 2/4 字节级一致。
+        - 非 None：先通过 ``_resolve_branch`` 校验归属 + ACTIVE 状态；校验失败抛
+          :class:`BranchNotFound` / :class:`BranchClosed`。
+          **state_deltas 表本身无 branch_id 列**（设计沿用 state-delta-v0.md §2.2），
+          此参数仅用于本方法在落 validated 行前做"前置守卫"——拒绝向 closed branch
+          写入；实际 commit 时再用同名参数决定 commits.branch_id。
+
         流程（不在事务中——状态机允许 intermediate row）：
-        1. ``validate_delta`` 全量校验（含 10 元信息字段 + 业务规则）。
-        2. 校验失败：若 ``chapter_id`` 非空（FK 可满足）落 ``status='rejected'`` 行；
+        1. ``branch_id`` 非 None 时校验 branch（前置守卫）。
+        2. ``validate_delta`` 全量校验（含 10 元信息字段 + 业务规则）。
+        3. 校验失败：若 ``chapter_id`` 非空（FK 可满足）落 ``status='rejected'`` 行；
            否则因 FK 约束无法落库，仅返回错误。两种情形均返回 ``status='rejected'``。
-        3. 校验通过：落 ``status='proposed'`` 行，立即 UPDATE 为 ``status='validated'``。
-        4. ``supersedes`` 非空：把被指向 delta（同 chapter_id + workflow_run_id 上下文）
+        4. 校验通过：落 ``status='proposed'`` 行，立即 UPDATE 为 ``status='validated'``。
+        5. ``supersedes`` 非空：把被指向 delta（同 chapter_id + workflow_run_id 上下文）
            UPDATE 为 ``status='superseded'``。
 
         返回 ``{"delta_id": str, "status": str, "errors": list}``。
         """
+        # 分支归属校验（前置守卫）：在 validate 之后插入，避免先报告校验错误又因分支失败
+        # 二次抛错。失败时直接抛出（不会写 state_deltas 行）。
+        if branch_id is not None:
+            conn = get_connection(self.db_path)
+            try:
+                project_id = self._project_id_for_chapter(conn, delta["chapter_id"])
+                if project_id is not None:
+                    _resolve_branch(conn, project_id, branch_id)
+            finally:
+                conn.close()
+
         errors = validate_delta(delta)
         if errors:
             delta_id = delta.get("delta_id") or new_id("dlt")
@@ -544,33 +748,44 @@ class StoryStateService:
         author_approval: dict,
         workflow_run_id: str,
         *,
+        branch_id: str | None = None,
         _inverse_cleanup: dict | None = None,
         _rollback_of: str | None = None,
     ) -> dict:
         """执行 Commit。
 
+        ``branch_id``（Sprint 7 新增）：可选，标识 commit 归属分支。
+        - None（默认）：现有 main 行为，逐字节保持 Sprint 2/4 兼容。
+          main branch 行由 ``_ensure_branch`` 兜底创建；乐观锁基于
+          ``story_states`` 全局最新 version（与 Sprint 2/4 一致）。
+        - 非 None：分支 commit **不写 ``story_states`` 新快照**（对齐任务书口径；
+          分支当前状态由 ``get_current_state(branch_id=...)`` 在读路径推导：
+          ``branches.base_state_version`` 处的快照 + 按 ``branch_id`` 过滤 commits
+          顺序重放 delta）。``commits.resulting_state_version`` 取分支内独立递增
+          序列（max(commits.resulting_state_version WHERE branch_id=X)+1）。
+          领域表写透仍执行；rollback 触发时同样在 commit_delta 内完成逆路径清理。
+
         流程（同一事务）：
         1. 读 delta；必须 status='validated'，否则 ``StateConflictError``（409 语义）。
-        2. 乐观锁：``delta.previous_state_version == 最新快照 version``；否则 ``OptimisticLockError``。
-        3. HIGH 风险门：delta 任何 change risk_level=HIGH / character facet=definition /
+        2. 解析 branch（None → ensure main；否则 ``_resolve_branch`` 校验）。
+        3. 乐观锁：main → story_states 最新 version；branch → 本分支 commits 最新 version。
+        4. HIGH 风险门：delta 任何 change risk_level=HIGH / character facet=definition /
            world_kind=rule 且 ``author_approval.get("approved") is not True``
-           → ``ApprovalRequiredError``（对齐 state-delta-v0.md §2.5）。
-        4. ``apply_delta(current_state, delta)`` → 新 state，state_version+1。
-        5. **写透领域表**（见 ``_write_through`` 注释）。
-        6. 落 commits 行（validation_json + author_approval_json + 可选 rollback_of）。
-        7. 落 story_states 新快照。
-        8. UPDATE state_deltas.status='applied'。
-        9. **逆路径清理**（仅 rollback 触发）：
-           - DELETE FROM plot_events WHERE event_id IN (hints["remove_event_ids"])
-             —— 先 DELETE FROM timeline_events WHERE event_id IN (...) 解除 FK。
-           - DELETE FROM hooks WHERE hook_id IN (hints["remove_hook_ids"])。
-           - 同步 mutate 最新快照（new_state 副本）：剔除 recent_events / events / hooks[] 中对应项。
+           → ``ApprovalRequiredError``。
+        5. ``apply_delta(current_state, delta)`` → 新 state，state_version+1。
+        6. **写透领域表**。
+        7. 落 commits 行（validation_json + author_approval_json + 可选 rollback_of）。
+        8. main 路径：落 story_states 新快照；branch 路径：不写 story_states。
+        9. UPDATE state_deltas.status='applied'。
+        10. **逆路径清理**（仅 rollback 触发）：
+            - DELETE FROM plot_events WHERE event_id IN (hints["remove_event_ids"])
+              —— 先 DELETE FROM timeline_events WHERE event_id IN (...) 解除 FK。
+            - DELETE FROM hooks WHERE hook_id IN (hints["remove_hook_ids"])。
+            - 同步 mutate 当前 state（new_state 副本）：剔除 recent_events / events / hooks[]。
 
-        ``_inverse_cleanup`` 是私有入参（仅 rollback_commit 使用）：
-        - ``remove_event_ids: list[str]`` —— 需在领域表删除的 event_id 列表。
-        - ``remove_hook_ids: list[str]`` —— 需在领域表删除的 hook_id 列表。
+        ``_inverse_cleanup`` 是私有入参（仅 rollback_commit 使用）。
 
-        返回 ``{"commit_id": str, "state_version": int, "delta_id": str, "snapshot_ref": str}``。
+        返回 ``{"commit_id": str, "state_version": int, "delta_id": str, "snapshot_ref": str|None}``。
         """
         conn = get_connection(self.db_path)
         try:
@@ -591,7 +806,7 @@ class StoryStateService:
                 )
             delta = _restore_delta_from_row(delta_row)
 
-            # 2) 乐观锁
+            # 2) project / branch 解析 + 乐观锁
             project_id = self._project_id_for_chapter(conn, delta_row["chapter_id"])
             if project_id is None:
                 conn.rollback()
@@ -601,7 +816,23 @@ class StoryStateService:
                     resource="chapter",
                     resource_id=delta_row["chapter_id"],
                 )
-            current_version, current_state = _latest_snapshot_version(conn, project_id)
+            if branch_id is None:
+                # main 路径：保留 _ensure_branch 兜底创建 main 行（与 Sprint 2/4 字节级一致）
+                branch_id = _ensure_branch(conn, project_id)
+                current_version, current_state = _latest_snapshot_version(conn, project_id)
+            else:
+                # branch 路径：前置守卫（BranchNotFound / BranchClosed）
+                branch_id = _resolve_branch(conn, project_id, branch_id)
+                # 即使显式传 branch_id，若该 branch 是 main（名称 = 'main'），也走 main 路径
+                # —— main 是项目根分支，必须保持与 Sprint 2/4 一致的快照行为；
+                # 分支 commit 仅在非 main 的「feature branch」上走 _branch_current_state 推导路径。
+                row = conn.execute(
+                    "SELECT name FROM branches WHERE branch_id = ?", (branch_id,)
+                ).fetchone()
+                if row is not None and row["name"] == "main":
+                    current_version, current_state = _latest_snapshot_version(conn, project_id)
+                else:
+                    current_version, current_state = _branch_current_state(conn, project_id, branch_id)
             if delta_row["previous_state_version"] != current_version:
                 conn.rollback()
                 conn.close()
@@ -634,12 +865,26 @@ class StoryStateService:
             new_state["state_version"] = new_version
 
             # 5) 写透领域表
-            self._write_through(conn, project_id, delta, new_version)
+            #   分支 commit 与 main 走同一套领域表（character_states / locations /
+            #   factions / world_rules / relationships / narrative_debts），副作用可见；
+            #   但 new_events / new_hooks 在分支路径下**不写主表**——避免与 main 重复 add
+            #   （同一 event_id 在 promote 时第二次插入会撞 UNIQUE 约束）。分支的
+            #   new_events / new_hooks 由 ``promote_branch`` 合并后在 main commit 时
+            #   统一写入领域表（与 main 直接 add 走同一路径）。
+            is_main_branch_for_write = branch_id is None or (
+                (lambda r: r["name"] == "main" if r is not None else False)(
+                    conn.execute("SELECT name FROM branches WHERE branch_id = ?", (branch_id,)).fetchone()
+                )
+            )
+            self._write_through(
+                conn, project_id, delta, new_version,
+                skip_new_events_hooks=(not is_main_branch_for_write),
+            )
 
             # 6) commits
             commit_id = new_id("cmt")
             now = now_iso()
-            branch_id = _ensure_branch(conn, project_id)
+            # branch_id 在步骤 2 已解析（main 路径 ensure main，分支路径 _resolve_branch）
             validation_json = {
                 "schema_valid": True,
                 "guardrail_results": [
@@ -663,6 +908,11 @@ class StoryStateService:
                 "high_risk_change_ids": high_ids,
                 "notes": (author_approval or {}).get("notes") if isinstance(author_approval, dict) else None,
             }
+            # 分支 commit 时把 promoted_from 标记（仅 promote_branch 显式设置）
+            promoted_from = None
+            if isinstance(author_approval, dict) and author_approval.get("promoted_from"):
+                promoted_from = author_approval["promoted_from"]
+                validation_json["promoted_from"] = promoted_from
             conn.execute(
                 """
                 INSERT INTO commits
@@ -690,7 +940,6 @@ class StoryStateService:
             )
 
             # 7) 逆路径清理（仅 rollback 触发）：与 _write_through 同一事务。
-            # 先把 new_state 中要剔除的项清掉，再 materialize 时就用剔除后的 state 落盘。
             if _inverse_cleanup:
                 _apply_inverse_cleanup_to_state(new_state, _inverse_cleanup)
                 # 领域表清理：先清 FK 引用（timeline_events → plot_events）再清主表。
@@ -700,15 +949,23 @@ class StoryStateService:
                 for hid in _inverse_cleanup.get("remove_hook_ids") or []:
                     conn.execute("DELETE FROM hooks WHERE hook_id = ?", (hid,))
 
-            # 8) story_states 新快照
-            snapshot_ref, _digest = materialize_snapshot(
-                conn,
-                project_id=project_id,
-                state_version=new_version,
-                snapshot_json=new_state,
-                commit_id=commit_id,
-                created_at=now,
-            )
+            # 8) story_states 新快照：仅 main 路径写（分支不写）
+            snapshot_ref: str | None = None
+            is_main_branch = False
+            row = conn.execute(
+                "SELECT name FROM branches WHERE branch_id = ?", (branch_id,)
+            ).fetchone()
+            if row is not None and row["name"] == "main":
+                is_main_branch = True
+            if is_main_branch:
+                snapshot_ref, _digest = materialize_snapshot(
+                    conn,
+                    project_id=project_id,
+                    state_version=new_version,
+                    snapshot_json=new_state,
+                    commit_id=commit_id,
+                    created_at=now,
+                )
 
             # 9) delta.status = applied
             conn.execute(
@@ -728,15 +985,20 @@ class StoryStateService:
         }
 
     # -------------------------------------------------------------- rollback_commit
-    def rollback_commit(self, commit_id: str, author_approval: dict) -> dict:
+    def rollback_commit(self, commit_id: str, author_approval: dict, *, branch_id: str | None = None) -> dict:
         """生成逆 Delta 并走 submit + commit 全流程；新 commit.rollback_of = commit_id。
+
+        ``branch_id``（Sprint 7 新增）：可选，指定 rollback 在哪个分支上生成
+        逆 commit。None（默认）=原 commit 所在分支（Sprint 2/4 兼容行为）。
+        - 若原 commit 在 main 上：rollback 也在 main（无论 branch_id 传什么；防御性
+          强制，避免跨分支回滚语义混乱）。
+        - 若原 commit 在分支上：rollback 默认也在同分支。
 
         逆 Delta 规则（state-delta-v0.md §5.4 + 任务书口径）：
         - add → remove（target_id 不变，op=remove；用 schema 合法字段 status_after 必填）。
         - update → update（after 与 before 互换）。
         - remove → add（用原 description/severity_after/status_after 重建）。
-        - new_events → schema 禁止「删除事件」op；逆条目走 ``_inverse_cleanup`` hints
-          （同事务内 DELETE plot_events + mutate snapshot JSON）。
+        - new_events → schema 禁止「删除事件」op；逆条目走 ``_inverse_cleanup`` hints。
         - new_hooks → 同上；同事务内 DELETE hooks + mutate snapshot JSON。
         - resolved_hooks 逆：to_status 回 from_status；from_status 为 null → 抛错拒绝回滚；
           payoff_summary 填回滚说明；hooks.payoff_chapter_id 显式置 NULL（哨兵）。
@@ -766,9 +1028,22 @@ class StoryStateService:
                 )
             original_delta = _restore_delta_from_row(delta_row)
             project_id = row["project_id"]
+            original_branch_id = row["branch_id"]
             chapter_id = row["chapter_id"]
             workflow_run_id = row["workflow_run_id"]
-            current_version, _snap = _latest_snapshot_version(conn, project_id)
+            # 取原 commit 所在分支的当前 version 作为逆 delta 的 previous_state_version
+            if original_branch_id is None:
+                current_version, _snap = _latest_snapshot_version(conn, project_id)
+            else:
+                branch_row = conn.execute(
+                    "SELECT name FROM branches WHERE branch_id = ?", (original_branch_id,)
+                ).fetchone()
+                if branch_row is not None and branch_row["name"] == "main":
+                    current_version, _snap = _latest_snapshot_version(conn, project_id)
+                else:
+                    current_version, _snap = _branch_current_state(conn, project_id, original_branch_id)
+            # 决定本次 rollback 落点：默认原分支（branch_id 仅作接口占位；当前实现维持原分支）
+            _ = branch_id
         finally:
             conn.close()
 
@@ -803,7 +1078,7 @@ class StoryStateService:
         ap["approved"] = True
         ap.setdefault("notes", f"rollback of {commit_id}")
 
-        submit_result = self.submit_delta(inverse["delta"])
+        submit_result = self.submit_delta(inverse["delta"], branch_id=original_branch_id)
         if submit_result["status"] != "validated":
             raise StateConflictError(
                 f"inverse delta rejected by validator: {submit_result['errors']}",
@@ -815,6 +1090,7 @@ class StoryStateService:
             submit_result["delta_id"],
             ap,
             f"system:rollback:{commit_id}",
+            branch_id=original_branch_id,
             _inverse_cleanup=cleanup,
             _rollback_of=commit_id,
         )
@@ -833,8 +1109,17 @@ class StoryStateService:
         project_id: str,
         delta: dict,
         new_version: int,
+        *,
+        skip_new_events_hooks: bool = False,
     ) -> None:
-        """把 delta 的 7 数组写透到对应领域表。"""
+        """把 delta 的 7 数组写透到对应领域表。
+
+        ``skip_new_events_hooks``（Sprint 7 新增）：分支 commit 路径下为 True，
+        跳过 ``new_events`` / ``new_hooks`` 写主表（plot_events / hooks）——
+        避免与 main 重复 add 同一 event_id / hook_id（UNIQUE 约束冲突）。分支
+        的 new_events / new_hooks 由 ``promote_branch`` 在合并到 main 时统一写入。
+        character / world / relationship / debt 等其他数组仍按原语义写透。
+        """
         chapter_id = delta["chapter_id"]
 
         # character_changes
@@ -1094,30 +1379,31 @@ class StoryStateService:
                     conn.execute("DELETE FROM relationships WHERE relationship_id = ?", (existing["relationship_id"],))
 
         # new_events
-        for ev in delta.get("new_events") or []:
-            ev_who = _encode_who_knows(_read_who_knows(ev))
-            ev_vis = _read_visibility(ev) or "RESTRICTED"
-            conn.execute(
-                """
-                INSERT INTO plot_events
-                    (event_id, project_id, type, cause_json, effects_json, participants_json,
-                     location_id, time_json, status, introduced_chapter_id, visibility, who_knows)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recorded', ?, ?, ?)
-                """,
-                (
-                    ev["event_id"],
-                    project_id,
-                    ev["type"],
-                    _dump(ev.get("cause") or []),
-                    _dump(ev.get("effects") or []),
-                    _dump(ev.get("participants") or []),
-                    ev.get("location"),
-                    _dump(ev.get("time") or {"timeline_day": 1}),
-                    chapter_id,
-                    ev_vis,
-                    ev_who,
-                ),
-            )
+        if not skip_new_events_hooks:
+            for ev in delta.get("new_events") or []:
+                ev_who = _encode_who_knows(_read_who_knows(ev))
+                ev_vis = _read_visibility(ev) or "RESTRICTED"
+                conn.execute(
+                    """
+                    INSERT INTO plot_events
+                        (event_id, project_id, type, cause_json, effects_json, participants_json,
+                         location_id, time_json, status, introduced_chapter_id, visibility, who_knows)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recorded', ?, ?, ?)
+                    """,
+                    (
+                        ev["event_id"],
+                        project_id,
+                        ev["type"],
+                        _dump(ev.get("cause") or []),
+                        _dump(ev.get("effects") or []),
+                        _dump(ev.get("participants") or []),
+                        ev.get("location"),
+                        _dump(ev.get("time") or {"timeline_day": 1}),
+                        chapter_id,
+                        ev_vis,
+                        ev_who,
+                    ),
+                )
 
         # resolved_hooks
         # 哨兵：notes 含 ``__CLEAR_PAYOFF_CHAPTER__`` → 显式把 hooks.payoff_chapter_id 置 NULL
@@ -1145,30 +1431,31 @@ class StoryStateService:
                 )
 
         # new_hooks
-        for nh in delta.get("new_hooks") or []:
-            nh_who = _encode_who_knows(_read_who_knows(nh))
-            nh_vis = _read_visibility(nh) or "RESTRICTED"
-            conn.execute(
-                """
-                INSERT INTO hooks
-                    (hook_id, project_id, name, introduced_chapter_id, status, importance,
-                     expected_payoff_chapter_id, payoff_chapter_id, visibility, who_knows,
-                     created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'OPEN', ?, ?, NULL, ?, ?, ?, ?)
-                """,
-                (
-                    nh["hook_id"],
-                    project_id,
-                    nh["name"],
-                    chapter_id,
-                    float(nh.get("importance") or 0.5),
-                    nh.get("expected_payoff_chapter_id"),
-                    nh_vis,
-                    nh_who,
-                    now_iso(),
-                    now_iso(),
-                ),
-            )
+        if not skip_new_events_hooks:
+            for nh in delta.get("new_hooks") or []:
+                nh_who = _encode_who_knows(_read_who_knows(nh))
+                nh_vis = _read_visibility(nh) or "RESTRICTED"
+                conn.execute(
+                    """
+                    INSERT INTO hooks
+                        (hook_id, project_id, name, introduced_chapter_id, status, importance,
+                         expected_payoff_chapter_id, payoff_chapter_id, visibility, who_knows,
+                         created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'OPEN', ?, ?, NULL, ?, ?, ?, ?)
+                    """,
+                    (
+                        nh["hook_id"],
+                        project_id,
+                        nh["name"],
+                        chapter_id,
+                        float(nh.get("importance") or 0.5),
+                        nh.get("expected_payoff_chapter_id"),
+                        nh_vis,
+                        nh_who,
+                        now_iso(),
+                        now_iso(),
+                    ),
+                )
 
         # debt_changes
         for db in delta.get("debt_changes") or []:
@@ -1523,6 +1810,405 @@ class StoryStateService:
             d["status"] = r["status"]
             out.append(d)
         return out
+
+    # -------------------------------------------------------------- branches (Sprint 7)
+
+    def create_branch(
+        self,
+        project_id: str,
+        name: str,
+        *,
+        base_state_version: int | None = None,
+    ) -> dict:
+        """创建分支（state-delta-v0.md §6.3）。
+
+        流程：
+        1. 确保 main branch 行存在（``_ensure_branch``）。
+        2. 同 project 下 name 唯一：重名 → :class:`StateConflictError`（409）。
+        3. ``base_state_version`` 缺省 = main 当前最新 version（``story_states``
+           全局最大 version；无 story_states 视为 0）。
+        4. 插入 ``branches`` 行：``parent_branch_id`` = main.branch_id，``status='ACTIVE'``。
+
+        返回 ``dict`` 包含 ``branch_id`` / ``name`` / ``parent_branch_id`` /
+        ``base_state_version`` / ``status`` / ``created_at``。
+        """
+        if not isinstance(name, str) or not name or name == "main":
+            raise StateConflictError(
+                f"branch name {name!r} invalid: must be non-empty and != 'main'",
+                delta_id=None,
+            )
+        conn = get_connection(self.db_path)
+        try:
+            main_branch_id = _ensure_branch(conn, project_id)
+            dup = conn.execute(
+                "SELECT branch_id FROM branches WHERE project_id = ? AND name = ?",
+                (project_id, name),
+            ).fetchone()
+            if dup is not None:
+                raise StateConflictError(
+                    f"branch name {name!r} already exists for project {project_id!r}",
+                    delta_id=None,
+                )
+            if base_state_version is None:
+                v, _ = _latest_snapshot_version(conn, project_id)
+                base = int(v)
+            else:
+                base = int(base_state_version)
+            branch_id = new_id("br")
+            now = now_iso()
+            conn.execute(
+                """
+                INSERT INTO branches
+                    (branch_id, project_id, name, parent_branch_id, base_state_version, status, created_at)
+                VALUES
+                    (?, ?, ?, ?, ?, 'ACTIVE', ?)
+                """,
+                (branch_id, project_id, name, main_branch_id, base, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {
+            "branch_id": branch_id,
+            "project_id": project_id,
+            "name": name,
+            "parent_branch_id": main_branch_id,
+            "base_state_version": base,
+            "status": "ACTIVE",
+            "created_at": now,
+        }
+
+    def list_branches(self, project_id: str) -> list[dict]:
+        """列项目下所有分支（main 优先，其余按 created_at ASC）。"""
+        conn = get_connection(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM branches
+                WHERE project_id = ?
+                ORDER BY (name = 'main') DESC, created_at ASC
+                """,
+                (project_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
+    def promote_branch(
+        self,
+        project_id: str,
+        branch_id: str,
+        *,
+        chapter_id: str | None = None,
+    ) -> dict:
+        """把分支全部 commits 合并为单个 delta，在 main 上走一次完整 validate+commit。
+
+        流程（state-delta-v0.md §6.3 + 任务书）：
+        1. 校验 branch 存在 + 属于同 project + ``status='ACTIVE'``。
+        2. 收集该 branch 所有 ``commits``（按 ``resulting_state_version ASC``），
+           按 delta_id 顺序拼出 merged delta 的 7 数组（concat）。
+        3. ``chapter_id`` 缺省：取分支首个 commit 的 chapter_id。
+        4. ``submit_delta`` 验证 merged delta；通过后 ``commit_delta(branch_id=None)``
+           走 main 路径，``author_approval['promoted_from'] = branch_id``；
+           写入 commits.validation_json 标记 ``{"promoted_from": branch_id}``。
+        5. 成功后 ``UPDATE branches SET status='MERGED'``。
+        6. 原 branch commits 仅读不动。
+
+        返回 ``commit_delta`` 的结果 dict（含 ``commit_id`` / ``state_version`` 等）。
+        """
+        conn = get_connection(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT branch_id, project_id, status, base_state_version FROM branches WHERE branch_id = ?",
+                (branch_id,),
+            ).fetchone()
+            if row is None:
+                raise BranchNotFound(
+                    f"branch {branch_id!r} not found",
+                    resource="branch",
+                    resource_id=branch_id,
+                )
+            if row["project_id"] != project_id:
+                raise BranchNotFound(
+                    f"branch {branch_id!r} does not belong to project {project_id!r}",
+                    resource="branch",
+                    resource_id=branch_id,
+                )
+            if row["status"] != "ACTIVE":
+                raise BranchClosed(
+                    f"branch {branch_id!r} is {row['status']!r}; only ACTIVE branches can be promoted",
+                    branch_id=branch_id,
+                    status=row["status"],
+                )
+
+            commit_rows = conn.execute(
+                """
+                SELECT commit_id, chapter_id, resulting_state_version, delta_id
+                FROM commits
+                WHERE branch_id = ? AND project_id = ?
+                ORDER BY resulting_state_version ASC
+                """,
+                (branch_id, project_id),
+            ).fetchall()
+
+            if not commit_rows:
+                # 空分支：直接 MERGED，返回最小结果
+                now = now_iso()
+                conn.execute(
+                    "UPDATE branches SET status = 'MERGED' WHERE branch_id = ?",
+                    (branch_id,),
+                )
+                conn.commit()
+                return {
+                    "branch_id": branch_id,
+                    "status": "MERGED",
+                    "promoted_commits": 0,
+                    "commit_id": None,
+                    "state_version": int(row["base_state_version"] or 0),
+                }
+
+            promote_chapter_id = chapter_id or commit_rows[0]["chapter_id"]
+
+            merged_arrays: dict = {
+                "character_changes": [],
+                "world_changes": [],
+                "relationship_changes": [],
+                "new_events": [],
+                "resolved_hooks": [],
+                "new_hooks": [],
+                "debt_changes": [],
+            }
+            for cr in commit_rows:
+                d_row = conn.execute(
+                    "SELECT payload_json FROM state_deltas WHERE delta_id = ?",
+                    (cr["delta_id"],),
+                ).fetchone()
+                if d_row is None:
+                    continue
+                payload = _parse_required_json(d_row["payload_json"], {}) or {}
+                for k in merged_arrays:
+                    merged_arrays[k].extend(payload.get(k) or [])
+
+            current_version, _snap = _latest_snapshot_version(conn, project_id)
+        finally:
+            conn.close()
+
+        merged_delta_id = new_id("dlt")
+        now_ts = datetime.now(timezone.utc).isoformat()
+        merged_delta = {
+            "delta_id": merged_delta_id,
+            "delta_version": 1,
+            "schema_version": "state-delta-v0",
+            "chapter_id": promote_chapter_id,
+            "workflow_run_id": f"system:promote:{branch_id}",
+            "previous_state_version": current_version,
+            "created_by": f"system:promote:{branch_id}",
+            "created_at": now_ts,
+            "supersedes": None,
+            "notes": f"promoted from branch {branch_id}",
+            **merged_arrays,
+        }
+
+        submit_result = self.submit_delta(merged_delta)
+        if submit_result["status"] != "validated":
+            raise StateConflictError(
+                f"promote merged delta rejected by validator: {submit_result['errors']}",
+                delta_id=submit_result["delta_id"],
+            )
+        ap: dict = {
+            "approver": f"system:promote:{branch_id}",
+            "notes": f"promoted from branch {branch_id}",
+            "promoted_from": branch_id,
+        }
+        commit_result = self.commit_delta(
+            submit_result["delta_id"],
+            ap,
+            f"system:promote:{branch_id}",
+        )
+
+        conn = get_connection(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE branches SET status = 'MERGED' WHERE branch_id = ?",
+                (branch_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        commit_result["promoted_from"] = branch_id
+        commit_result["promoted_commits"] = len(commit_rows)
+        # promote 落 main：commit_result 中补上 branch_id（=main branch_id）便于 router / 测试断言
+        _conn = get_connection(self.db_path)
+        try:
+            _row = _conn.execute(
+                "SELECT branch_id FROM branches WHERE project_id = ? AND name = 'main'",
+                (project_id,),
+            ).fetchone()
+            commit_result["branch_id"] = _row["branch_id"] if _row is not None else None
+        finally:
+            _conn.close()
+        return commit_result
+
+    def diff_versions(
+        self,
+        project_id: str,
+        version_a: int,
+        version_b: int,
+        *,
+        branch_id: str | None = None,
+    ) -> dict:
+        """返回两个 state_version 之间结构化 diff。
+
+        口径（任务书）：基于 ``story_states`` 表的快照对比；分支 commit 不写
+        ``story_states``，因此 ``diff_versions`` 仅支持 main 路径。``branch_id``
+        仅作为审计字段记入返回结构；不参与快照读取。
+
+        若调用方需要分支视角的 diff，应在外部用 ``get_current_state`` 两次取
+        分支快照 JSON 自行 diff；本接口不直接支撑。
+
+        返回结构（递归 dict diff，list 按 id/name 键匹配）：
+        .. code-block:: python
+
+            {
+              "characters": {"changed": [...], "added": [...], "removed": [...]},
+              "world":     {"locations": {...}, "factions": {...}, ...},
+              "hooks":     {"changed": [...], "added": [...], "removed": [...]},
+              "debts":     {"changed": [...], "added": [...], "removed": [...]},
+              "events_changed":  {"<event_id>": {...}},
+              "recent_events":   {"added"/"removed"/"changed"},
+              "version_a": int,
+              "version_b": int,
+              "branch_id": str | None,
+            }
+        """
+        # 分支视角的 diff 不在本接口范围（MVP 限制）
+        if branch_id is not None:
+            raise StateConflictError(
+                "diff_versions does not support branch_id; use get_current_state twice to diff branches externally",
+                delta_id=None,
+            )
+        conn = get_connection(self.db_path)
+        try:
+            snap_a = self.get_snapshot(project_id, version_a)
+            snap_b = self.get_snapshot(project_id, version_b)
+        finally:
+            conn.close()
+
+        if snap_a is None or snap_b is None:
+            raise StateNotFoundError(
+                f"snapshot not found: a={version_a} exists={snap_a is not None}, "
+                f"b={version_b} exists={snap_b is not None}",
+                resource="snapshot",
+            )
+        a = _strip_state_version(snap_a)
+        b = _strip_state_version(snap_b)
+        return _diff_snapshots(a, b, version_a=version_a, version_b=version_b, branch_id=None)
+
+
+# ----------------------------------------------------------------------------- diff helpers (Sprint 7)
+
+
+def _strip_state_version(snap: dict) -> dict:
+    """去掉 ``state_version`` 字段以便 diff。"""
+    if isinstance(snap, dict) and "state_version" in snap:
+        out = dict(snap)
+        out.pop("state_version", None)
+        return out
+    return snap
+
+
+def _list_key(item: dict) -> str | None:
+    """提取列表元素的稳定 key（id/name/hook_id/debt_id/event_id 等）。"""
+    if not isinstance(item, dict):
+        return None
+    for k in ("character_id", "location_id", "faction_id", "world_rule_id",
+              "hook_id", "debt_id", "event_id", "relationship_id", "id", "name"):
+        v = item.get(k)
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
+def _diff_lists(a: list, b: list) -> dict:
+    """按稳定 key 配对 diff 两个列表。
+
+    返回 ``{"added": [...], "removed": [...], "changed": [{...}, ...]}``；仅在确有差异时返回非空。
+    """
+    a_keys = {_list_key(x): x for x in a if isinstance(x, dict)}
+    b_keys = {_list_key(x): x for x in b if isinstance(x, dict)}
+    a_set = set(a_keys.keys())
+    b_set = set(b_keys.keys())
+    added_keys = b_set - a_set
+    removed_keys = a_set - b_set
+    common = a_set & b_set
+    changed: list = []
+    for k in sorted(common):
+        if a_keys[k] != b_keys[k]:
+            sub = _diff_dicts(a_keys[k], b_keys[k])
+            changed.append({"id": k, **({"changes": sub} if sub else {})})
+    out: dict = {}
+    if added_keys:
+        out["added"] = [b_keys[k] for k in sorted(added_keys)]
+    if removed_keys:
+        out["removed"] = [a_keys[k] for k in sorted(removed_keys)]
+    if changed:
+        out["changed"] = changed
+    return out
+
+
+def _diff_dicts(a: dict, b: dict) -> dict:
+    """递归 diff 两个 dict：仅返回 b 中与 a 不同（含 key 存在/值不同）的字段。
+
+    list 元素按稳定 key 配对（``_list_key``）；非 dict/list 直接 ``{before, after}``。
+    """
+    diff: dict = {}
+    keys = set(a.keys()) | set(b.keys())
+    for k in keys:
+        av = a.get(k)
+        bv = b.get(k)
+        if isinstance(av, dict) and isinstance(bv, dict):
+            sub = _diff_dicts(av, bv)
+            if sub:
+                diff[k] = sub
+        elif isinstance(av, list) and isinstance(bv, list):
+            ld = _diff_lists(av, bv)
+            if ld:
+                diff[k] = ld
+        elif av != bv:
+            diff[k] = {"before": av, "after": bv}
+    return diff
+
+
+def _diff_snapshots(a: dict, b: dict, *, version_a: int, version_b: int, branch_id: str | None) -> dict:
+    """按 snapshot 结构组装 diff。"""
+    out: dict = {
+        "version_a": version_a,
+        "version_b": version_b,
+        "branch_id": branch_id,
+    }
+    chars_diff = _diff_lists(a.get("characters") or [], b.get("characters") or [])
+    if chars_diff:
+        out["characters"] = chars_diff
+    world_a = a.get("world") or {}
+    world_b = b.get("world") or {}
+    world_diff = _diff_dicts(world_a, world_b)
+    if world_diff:
+        out["world"] = world_diff
+    hooks_diff = _diff_lists(a.get("hooks") or [], b.get("hooks") or [])
+    if hooks_diff:
+        out["hooks"] = hooks_diff
+    debts_diff = _diff_lists(a.get("debts") or [], b.get("debts") or [])
+    if debts_diff:
+        out["debts"] = debts_diff
+    events_a = a.get("events") or {}
+    events_b = b.get("events") or {}
+    events_diff = _diff_dicts(events_a, events_b)
+    if events_diff:
+        out["events_changed"] = events_diff
+    recent_diff = _diff_lists(a.get("recent_events") or [], b.get("recent_events") or [])
+    if recent_diff:
+        out["recent_events"] = recent_diff
+    return out
 
 
 __all__ = ["StoryStateService"]

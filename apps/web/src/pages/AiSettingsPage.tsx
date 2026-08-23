@@ -20,6 +20,8 @@ import { ApiError } from '../api/client';
 
 const PROVIDER_OPTIONS = [
   { value: 'openai_compatible', label: 'OpenAI 兼容（OpenAI / DeepSeek / Ollama 等）' },
+  { value: 'anthropic', label: 'Anthropic（Claude 原生 Messages API）' },
+  { value: 'ollama', label: 'Ollama（本地 /api/chat，无需密钥）' },
   { value: 'mock', label: 'Mock（本地兜底）' },
 ];
 
@@ -392,6 +394,16 @@ function ModelConfigFormModal({
   const [err, setErr] = useState<string | null>(null);
 
   const isMock = provider === 'mock';
+  const isAnthropic = provider === 'anthropic';
+  const isOllama = provider === 'ollama';
+  // base_url 必填：仅 mock / anthropic / ollama 可省（Provider 自带默认值），
+  // 其余 provider（openai_compatible 等）仍走 Sprint 3 强制必填口径。
+  const requireBaseUrl = !isMock && !isAnthropic && !isOllama;
+  const baseUrlPlaceholder = isAnthropic
+    ? '留空 = 官方 api.anthropic.com'
+    : isOllama
+      ? '留空 = 本地 http://127.0.0.1:11434'
+      : 'https://api.openai.com/v1';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -400,14 +412,18 @@ function ModelConfigFormModal({
       setErr('model 不能为空');
       return;
     }
-    if (!isMock && !params.baseUrl.trim()) {
-      setErr('非 mock provider 需要 base_url');
+    if (requireBaseUrl && !params.baseUrl.trim()) {
+      setErr('该 provider 需要 base_url');
       return;
     }
     const params_json: Record<string, unknown> = {};
     if (!isMock) {
-      params_json['base_url'] = params.baseUrl.trim();
-      if (params.apiKey.trim() !== '') {
+      const trimmedUrl = params.baseUrl.trim();
+      if (trimmedUrl) {
+        params_json['base_url'] = trimmedUrl;
+      }
+      // Ollama 本地不需要 api_key：即便用户填了也丢弃，不写入 params_json。
+      if (!isOllama && params.apiKey.trim() !== '') {
         params_json['api_key'] = params.apiKey.trim();
       }
     }
@@ -492,33 +508,41 @@ function ModelConfigFormModal({
         {!isMock ? (
           <div className="form-grid">
             <div className="form-row">
-              <label>base_url *</label>
+              <label>base_url {requireBaseUrl ? '*' : ''}</label>
               <input
                 value={params.baseUrl}
                 onChange={(e) =>
                   setParams((p) => ({ ...p, baseUrl: e.target.value }))
                 }
-                placeholder="https://api.openai.com/v1"
+                placeholder={baseUrlPlaceholder}
                 data-testid="cfg-base-url"
               />
             </div>
-            <div className="form-row">
-              <label>api_key</label>
-              <input
-                type="password"
-                value={params.apiKey}
-                onChange={(e) =>
-                  setParams((p) => ({ ...p, apiKey: e.target.value }))
-                }
-                placeholder="（可选；若不填，运行时由 resolve_api_key 从 env 解析）"
-                data-testid="cfg-api-key"
-              />
-              {initial ? (
-                <div className="muted small" data-testid="cfg-api-key-hint">
-                  留空保存将清除已保存的密钥。
-                </div>
-              ) : null}
-            </div>
+            {isOllama ? (
+              <InfoBanner>Ollama 本地服务无需 API Key —— 表单不接收 key。</InfoBanner>
+            ) : (
+              <div className="form-row">
+                <label>api_key</label>
+                <input
+                  type="password"
+                  value={params.apiKey}
+                  onChange={(e) =>
+                    setParams((p) => ({ ...p, apiKey: e.target.value }))
+                  }
+                  placeholder={
+                    isAnthropic
+                      ? '（可选；留空则由 resolve_api_key 从 NOVELOS_API_KEY_ANTHROPIC 解析）'
+                      : '（可选；若不填，运行时由 resolve_api_key 从 env 解析）'
+                  }
+                  data-testid="cfg-api-key"
+                />
+                {initial ? (
+                  <div className="muted small" data-testid="cfg-api-key-hint">
+                    留空保存将清除已保存的密钥。
+                  </div>
+                ) : null}
+              </div>
+            )}
           </div>
         ) : (
           <InfoBanner>Mock provider 不需要 base_url / api_key。</InfoBanner>

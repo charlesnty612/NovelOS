@@ -1,8 +1,11 @@
-"""Model Router 路由层（Sprint 3）。
+"""Model Router 路由层（Sprint 3 + Sprint 8）。
 
 职责：
 - 按 capability 查询 ``model_configs`` 表，命中第一条 ``enabled=1`` 行。
-- 按 ``provider`` 字段分发到 :class:`MockProvider` / :class:`OpenAICompatibleProvider`。
+- 按 ``provider`` 字段分发到 :class:`MockProvider` / :class:`OpenAICompatibleProvider` /
+  :class:`AnthropicProvider` / :class:`OllamaProvider`。
+- 失败转移链：:meth:`ModelRouter.call_with_fallback` 按 rowid 顺序逐个尝试，全失败抛
+  :class:`AggregateProviderError`。
 
 设计要点：
 - 单一入口 :class:`ModelRouter`；构造接收 ``db_path``，每个方法内部开连接、try/finally 关闭。
@@ -13,6 +16,8 @@
 - ``get_provider(config_row)`` 按 provider 字段工厂化；mock 不传脚本（每次回显空 JSON），
   实际测试 / 手工触发时由 ``runner`` 注入 ``mock_script`` 直接构造 MockProvider，
   此处的 mock 仅作为「最小兜底」。
+- Anthropic / Ollama 的 ``base_url`` 可省略（分别用官方默认 / 本地默认），其余 provider
+  仍要求 ``params_json.base_url`` 必填（沿用 Sprint 3 行为）。
 """
 
 from __future__ import annotations
@@ -22,13 +27,22 @@ from pathlib import Path
 from typing import Any
 
 from packages.core.db import get_connection
+from packages.core.logging_config import get_logger
 
-from .exceptions import ModelNotConfiguredError
+from .exceptions import (
+    AggregateProviderError,
+    ModelNotConfiguredError,
+    ProviderError,
+)
 from .providers import (
+    AnthropicProvider,
     MockProvider,
+    OllamaProvider,
     OpenAICompatibleProvider,
     resolve_api_key,
 )
+
+log = get_logger("novelos.model_router")
 
 # ---------------------------------------------------------------------------
 # Agent → Capability 映射
@@ -93,6 +107,29 @@ class ModelRouter:
             raise ModelNotConfiguredError(capability)
         return dict(row)
 
+    # -------------------------------------------------------------- list_enabled
+    def list_enabled(self, capability: str) -> list[dict[str, Any]]:
+        """返回 ``model_configs`` 中 capability 匹配且 enabled=1 的全部行（按 rowid 升序）。
+
+        无命中 → 返回空列表（不抛）。用于 ``call_with_fallback`` 的候选链。
+        """
+        if not capability:
+            return []
+        conn = get_connection(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT config_id, capability, provider, model, params_json, enabled
+                FROM model_configs
+                WHERE capability = ? AND enabled = 1
+                ORDER BY rowid ASC
+                """,
+                (capability,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
     # -------------------------------------------------------------- get_provider
     def get_provider(
         self,
@@ -103,7 +140,9 @@ class ModelRouter:
         """按 ``config_row['provider']`` 字段分发构造 Provider。
 
         - ``"mock"`` → :class:`MockProvider`（``scripted`` 透传；默认 None，回显空 JSON）。
-        - 其它（``openai`` / ``openai_compatible`` / ``ollama`` / ``deepseek`` 等）→
+        - ``"anthropic"`` → :class:`AnthropicProvider`（``base_url`` 可省，默认官方）。
+        - ``"ollama"`` → :class:`OllamaProvider`（``base_url`` 可省，默认本地）。
+        - 其它（``openai`` / ``openai_compatible`` / ``deepseek`` 等）→
           :class:`OpenAICompatibleProvider`，``base_url`` 来自 ``params_json.base_url``，
           ``api_key`` 通过 :func:`resolve_api_key` 解析。
         """
@@ -121,6 +160,21 @@ class ModelRouter:
             except (TypeError, ValueError):
                 params = {}
 
+        if provider_name == "anthropic":
+            api_key = resolve_api_key(provider_name, params)
+            return AnthropicProvider(
+                base_url=params.get("base_url") or None,
+                api_key=api_key,
+                model=config_row["model"],
+            )
+
+        if provider_name == "ollama":
+            return OllamaProvider(
+                base_url=params.get("base_url") or None,
+                model=config_row["model"],
+            )
+
+        # 其它 → OpenAI 兼容（OpenAI / DeepSeek / 通义 等）
         base_url = params.get("base_url")
         if not base_url:
             raise ValueError(
@@ -133,6 +187,64 @@ class ModelRouter:
             api_key=api_key,
             model=config_row["model"],
         )
+
+    # -------------------------------------------------------------- call_with_fallback
+    def call_with_fallback(
+        self,
+        capability: str,
+        messages: list[dict[str, Any]],
+        *,
+        params: dict[str, Any] | None = None,
+        scripted: Any | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """失败转移：按 rowid 顺序逐个尝试该 capability 的 enabled configs。
+
+        返回 ``(completion, used_config_row)``；任一 ProviderError 或网络异常则记 warn 并试下一个。
+        全部失败抛 :class:`AggregateProviderError`，携带各次错误的 ``(config_id, error_repr)``。
+        无任何候选 → 抛 :class:`ModelNotConfiguredError`（与 ``resolve`` 行为一致）。
+
+        注：单配置时与 :meth:`resolve` + :meth:`get_provider` 的旧路径行为等价。
+        """
+        candidates = self.list_enabled(capability)
+        if not candidates:
+            raise ModelNotConfiguredError(capability)
+
+        attempts: list[tuple[str, str]] = []
+        last_exc: Exception | None = None
+        for row in candidates:
+            cid = row.get("config_id") or "<unknown>"
+            try:
+                provider = self.get_provider(row, scripted=scripted)
+            except Exception as exc:  # noqa: BLE001 —— 构造失败也视为一次尝试失败
+                msg = f"construct failed: {exc}"
+                log.warning("model_router.fallback.construct_failed", extra={
+                    "capability": capability, "config_id": cid, "error": msg,
+                })
+                attempts.append((cid, msg))
+                last_exc = exc
+                continue
+            try:
+                completion = provider.complete(messages, params=params)
+                return completion, row
+            except ProviderError as exc:
+                msg = f"{exc} (status_code={exc.status_code})"
+                log.warning("model_router.fallback.provider_error", extra={
+                    "capability": capability, "config_id": cid, "error": str(exc),
+                    "status_code": exc.status_code,
+                })
+                attempts.append((cid, msg))
+                last_exc = exc
+                continue
+            except Exception as exc:  # noqa: BLE001 —— 网络/超时等非 ProviderError 也吞
+                msg = f"unexpected error: {exc}"
+                log.warning("model_router.fallback.unexpected", extra={
+                    "capability": capability, "config_id": cid, "error": msg,
+                })
+                attempts.append((cid, msg))
+                last_exc = exc
+                continue
+        # 全部失败 → 聚合异常
+        raise AggregateProviderError(capability, attempts) from last_exc
 
 
 __all__ = ["ModelRouter", "AGENT_CAPABILITY", "capability_for"]

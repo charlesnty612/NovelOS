@@ -12,9 +12,15 @@ import type {
   CharacterState,
   CharacterUpdatePayload,
   Commit,
+  Debt,
+  DebtCreatePayload,
+  DebtUpdatePayload,
   Draft,
   DraftCreatePayload,
   HealthResponse,
+  Hook,
+  HookCreatePayload,
+  HookUpdatePayload,
   ModelConfig,
   ModelConfigCreatePayload,
   ModelConfigTestResult,
@@ -280,4 +286,32 @@ export const qualityApi = {
     api.post<QualityReport>(`/chapters/${cid}/quality/evaluate`, {}),
   listByProject: (pid: string) =>
     api.get<QualityReport[]>(`/projects/${pid}/quality`),
+};
+
+// -------------------------------------------------------------- hooks / debts
+// 对应 packages/core/api/routers/ledger.py：
+//   POST/GET   /projects/{pid}/hooks           创建 / 列表（?status= 过滤）
+//   GET/PATCH/DELETE /hooks/{id}               详情 / 更新 / 删除
+//   POST/GET   /projects/{pid}/debts           创建 / 列表
+//   GET/PATCH/DELETE /debts/{id}               详情 / 更新 / 删除
+export const hooksApi = {
+  listByProject: (pid: string, query?: { status?: string }) =>
+    api.get<Hook[]>(`/projects/${pid}/hooks`, query),
+  create: (pid: string, payload: HookCreatePayload) =>
+    api.post<Hook>(`/projects/${pid}/hooks`, payload),
+  get: (id: string) => api.get<Hook>(`/hooks/${id}`),
+  update: (id: string, payload: HookUpdatePayload) =>
+    api.patch<Hook>(`/hooks/${id}`, payload),
+  delete: (id: string) => api.delete<void>(`/hooks/${id}`),
+};
+
+export const debtsApi = {
+  listByProject: (pid: string, query?: { status?: string }) =>
+    api.get<Debt[]>(`/projects/${pid}/debts`, query),
+  create: (pid: string, payload: DebtCreatePayload) =>
+    api.post<Debt>(`/projects/${pid}/debts`, payload),
+  get: (id: string) => api.get<Debt>(`/debts/${id}`),
+  update: (id: string, payload: DebtUpdatePayload) =>
+    api.patch<Debt>(`/debts/${id}`, payload),
+  delete: (id: string) => api.delete<void>(`/debts/${id}`),
 };

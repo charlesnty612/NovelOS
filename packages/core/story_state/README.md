@@ -1,6 +1,7 @@
-# Story State 引擎（Sprint 2）
+# Story State 引擎（Sprint 2 + Sprint 7 分支能力）
 
-> 状态：**已实现并通过测试**（Sprint 2 修复后：76 既有 + 新增回归 + 新增 spec 用例）。核心入口 ``StoryStateService``。
+> 状态：**已实现并通过测试**（Sprint 2 主链路 + Sprint 4 / 4-B / 6 修复 + Sprint 7 分支能力）。
+> 核心入口 ``StoryStateService``。
 
 本目录是 NovelOS State Delta 引擎——Observer / Validator / State Committer 三步之间的
 完整数据契约与落库实现。对齐 ``docs/state-model/state-delta-v0.md`` 的全部语义。
@@ -27,11 +28,11 @@
 ```
 packages/core/story_state/
 ├── __init__.py            # 公共 API（service / applier / validator / snapshot / exceptions）
-├── exceptions.py          # StateConflictError / OptimisticLockError / ApprovalRequiredError / StateNotFoundError
+├── exceptions.py          # StateConflictError / OptimisticLockError / ApprovalRequiredError / StateNotFoundError / BranchNotFound / BranchClosed
 ├── validator.py           # validate_delta(delta) -> list[str]（jsonschema + 业务规则）
 ├── snapshot.py            # build_initial_state / materialize_snapshot
 ├── applier.py             # apply_delta(state, delta) -> state（纯函数）
-└── service.py             # StoryStateService（DB 主入口）
+└── service.py             # StoryStateService（DB 主入口；Sprint 7 增 create_branch / promote_branch / diff_versions / 分支推导 helper）
 ```
 
 API 路由：``packages/core/api/routers/story_state.py``（自动发现挂载到 ``/api``）。
@@ -44,14 +45,18 @@ API 路由：``packages/core/api/routers/story_state.py``（自动发现挂载�
 
 | 方法 | 输入 | 输出 | 失败语义 |
 |------|------|------|---------|
-| ``get_current_state(project_id)`` | project_id | dict（state_version + 全量 JSON） | 无 |
+| ``get_current_state(project_id, *, branch_id=None)`` | project_id, 可选 branch_id | dict（state_version + 全量 JSON） | ``branch_id`` 不存在 → ``BranchNotFound`` |
 | ``get_snapshot(project_id, version)`` | project_id, version | dict / None | 不存在 → None |
 | ``init_genesis(project_id, chapter_id)`` | project_id, chapter_id | dict（v1 state） | 已存在 → 直接返回当前 |
-| ``submit_delta(delta)`` | 完整 delta dict | ``{delta_id, status, errors}`` | 校验失败 → ``status='rejected'`` 仍落表 |
-| ``commit_delta(delta_id, author_approval, workflow_run_id)`` | delta_id, dict, str | ``{commit_id, delta_id, state_version, snapshot_ref}`` | ``StateConflictError`` / ``OptimisticLockError`` / ``ApprovalRequiredError`` |
-| ``rollback_commit(commit_id, author_approval)`` | commit_id, dict | ``{commit_id, state_version, rollback_of}`` | 同 commit 失败语义 |
-| ``list_commits(project_id)`` | project_id | list[dict] | 无 |
+| ``submit_delta(delta, *, branch_id=None)`` | 完整 delta dict, 可选 branch_id | ``{delta_id, status, errors}`` | 校验失败 → ``status='rejected'`` 仍落表；``branch_id`` 非 ACTIVE → ``BranchNotFound`` / ``BranchClosed`` |
+| ``commit_delta(delta_id, author_approval, workflow_run_id, *, branch_id=None)`` | delta_id, dict, str, 可选 branch_id | ``{commit_id, delta_id, state_version, snapshot_ref}`` | ``StateConflictError`` / ``OptimisticLockError`` / ``ApprovalRequiredError`` / ``BranchNotFound`` / ``BranchClosed`` |
+| ``rollback_commit(commit_id, author_approval, *, branch_id=None)`` | commit_id, dict, 可选 branch_id | ``{commit_id, state_version, rollback_of}`` | 同 commit 失败语义 |
+| ``list_commits(project_id, *, branch_id=None)`` | project_id, 可选 branch_id | list[dict] | 无 |
 | ``list_deltas(chapter_id)`` | chapter_id | list[dict] | 无 |
+| ``create_branch(project_id, name, *, base_state_version=None)`` | project_id, str, 可选 int | ``{branch_id, name, parent_branch_id, base_state_version, status, created_at}`` | 重名 → ``StateConflictError``（409）；name='main' 拒绝 |
+| ``list_branches(project_id)`` | project_id | list[dict]（main 优先，其余按 created_at ASC） | 无 |
+| ``promote_branch(project_id, branch_id, *, chapter_id=None)`` | project_id, str, 可选 chapter_id | ``{commit_id, state_version, promoted_from, promoted_commits, branch_id, snapshot_ref}`` | branch 非 ACTIVE → ``BranchClosed``；合并 delta 校验失败 → ``StateConflictError`` |
+| ``diff_versions(project_id, version_a, version_b, *, branch_id=None)`` | project_id, int, int, 可选 branch_id | 结构化 diff dict | snapshot 缺失 → ``StateNotFoundError``；``branch_id`` 非 None → ``StateConflictError``（MVP 不支持分支 diff） |
 
 ### 3.2 ``validate_delta(delta) -> list[str]``
 
@@ -77,19 +82,26 @@ API 路由：``packages/core/api/routers/story_state.py``（自动发现挂载�
 | 方法 | 路径 | 行为 |
 |------|------|------|
 | POST | ``/projects/{pid}/state/init`` | 创建 genesis（201） |
-| GET | ``/projects/{pid}/state`` | 当前 Canonical State |
+| GET | ``/projects/{pid}/state`` | 当前 Canonical State（main）；可选 ``?branch_id=<id>`` 取分支视角 |
 | GET | ``/projects/{pid}/state/versions/{n}`` | 指定版本快照（404 不存在） |
-| POST | ``/projects/{pid}/deltas`` | submit（201 通过 / 422 校验失败） |
-| POST | ``/projects/{pid}/commits`` | commit（201 通过 / 409 状态机/乐观锁/HIGH / 404 delta 不存在） |
+| POST | ``/projects/{pid}/deltas`` | submit（201 通过 / 422 校验失败）；body 可选 ``branch_id`` |
+| POST | ``/projects/{pid}/commits`` | commit（201 通过 / 409 状态机/乐观锁/HIGH/branch_closed / 404 delta 不存在 / 404 branch 不存在）；body 可选 ``branch_id`` |
 | POST | ``/commits/{cid}/rollback`` | 回滚（201；同 commit 失败语义） |
 | GET | ``/projects/{pid}/commits`` | 列 commits |
 | GET | ``/projects/{pid}/chapters/{cid}/deltas`` | 列 deltas |
+| POST | ``/projects/{pid}/branches`` | 创建分支（201；重名 / 'main' → 409） |
+| GET | ``/projects/{pid}/branches`` | 列分支（main 优先） |
+| POST | ``/projects/{pid}/branches/{bid}/promote`` | 分支 promote 到 main（201；非 ACTIVE → 409 branch_closed） |
+| GET | ``/projects/{pid}/state/diff?a=&b=&branch_id=`` | 两版本 diff（200；snapshot 缺失 → 404；``branch_id`` 非空 → 409 diff_conflict） |
 
 错误码：
 - **422**：Delta 校验失败（``detail.errors`` 含 schema + 业务错误字符串列表）。
-- **404**：project / chapter / delta / commit / snapshot 不存在。
+- **404**：project / chapter / delta / commit / snapshot / branch 不存在。
 - **409**：状态机非法（``StateConflictError``）/ 乐观锁失败（``OptimisticLockError``）/
-  HIGH 风险无审批（``ApprovalRequiredError``）。
+  HIGH 风险无审批（``ApprovalRequiredError``）/ 分支已关闭（``BranchClosed``，
+  ``detail.error = "branch_closed"``）/ 分支重名（``StateConflictError``，
+  ``detail.error = "branch_name_conflict"``）/ 分支视角 diff 不支持（``StateConflictError``，
+  ``detail.error = "diff_conflict"``）。
 
 ---
 
@@ -187,9 +199,63 @@ DDL 权威定义在 ``database/migrations/0001_init.sql``；本模块不修改 s
 - 五条 guardrail（``timeline_consistency`` / ``character_contradiction`` /
   ``world_rule_contradiction`` / ``knowledge_leakage``）的具体检测尚未实现；当前
   ``validation_json.guardrail_results`` 全部 ``status='pass'`` 占位。属后续 Sprint。
-- ``Branch 隔离不严``（``state-delta-v0.md §11``）：本 Sprint 所有 Commit 走 ``main`` 分支，
-  Branch 隔离（``branch_id`` 校验）属 v1+ 工作。
 - ``Rollback 链式复杂度``（同上）：本 Sprint 不实现级联回退（PRD §5.5 已声明未规定）。
+
+---
+
+## 6.5 分支能力（Sprint 7）
+
+对齐 ``docs/state-model/state-delta-v0.md §6.3`` 与 PRD §48 的 Story Branch 语义。
+**核心原则**：
+
+1. **分支 commit 不写新快照**。分支的当前状态由读路径推导：
+   - 取 ``branches.base_state_version`` 处的 main 快照作为 base；
+   - 按 ``commits.branch_id == branch_id`` 顺序（``resulting_state_version ASC``）重放
+     本分支 delta，复用 ``apply_delta``；
+   - ``state_version`` 取分支内独立递增（base + 1, + 2, ...），与 main 序列正交。
+
+2. **Promote 把分支全部 commits 合并为一个新 delta**，在 main 上走完整
+   validate+commit；新 commit 的 ``commits.validation_json`` 携带
+   ``{"promoted_from": "<branch_id>"}`` 标记；成功后 ``branches.status = 'MERGED'``。
+   原 branch 上的 commits 仅读不动。
+
+3. **领域表写透**（character / world / relationship / debt）在 main 与 branch 路径
+   都执行；但 **new_events / new_hooks 仅 main 路径写主表**（``plot_events`` /
+   ``hooks``），分支路径跳过——避免 promote 时对同一 event_id / hook_id 二次
+   ``INSERT`` 撞 ``UNIQUE`` 约束。分支引入的 event / hook 由 promote 时统一写入。
+
+4. **乐观锁**：main 用 ``story_states`` 全局最新 version 作锚点；分支用本分支 commits
+   最新 ``resulting_state_version`` 作锚点。
+
+5. **分支状态机**：``status='ACTIVE'`` → 接受写入；``'MERGED'`` / ``'DISCARDED'`` →
+   拒绝（``BranchClosed``，HTTP 409 ``error='branch_closed'``）。
+
+### 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | ``/projects/{pid}/branches`` | body ``{name, base_state_version?}``；重名 / ``name='main'`` → 409 |
+| GET  | ``/projects/{pid}/branches`` | 列分支（main 优先） |
+| POST | ``/projects/{pid}/branches/{bid}/promote`` | body ``{chapter_id?}``；非 ACTIVE → 409 |
+| GET  | ``/projects/{pid}/state/diff?a=&b=&branch_id=`` | ``branch_id`` 非空 → 409（MVP 限制） |
+
+### 已知 MVP 限制
+
+- **不支持跨分支三章以上合并冲突检测**（``state-delta-v0.md §10 Q6``）：promote 时
+  按 7 数组 concat 合并 delta，不做字段级冲突检查。后 commit 在 promote 时**覆盖**
+  先 commit 涉及的同字段（如 character state.location），但**不报错**——这是任务书
+  给死的 MVP 口径。v1 应升级为「冲突字段级提示 + 作者决策」流程。
+- **分支 commit 不支持跨 project**（``BranchNotFound``，HTTP 404）。
+- **分支视角的 diff 不在 ``diff_versions`` 范围**：调用方需在外部用
+  ``get_current_state`` 两次取分支快照后自行 diff（详见 ``diff_versions`` docstring）。
+- **新分支的 commits.resulting_state_version 与 main 主键 (project_id, state_version)
+  共享空间**：main version=N 时，分支首个 commit 的 resulting_state_version=N+1，
+  下个 main commit 写入 story_states 时若取 N+2 会撞——本 Sprint 实现里**分支不写
+  story_states 行**（按任务书口径），因此两序列不冲突。后续 v1 若需分支也写快照，
+  需在 branches 上引入独立 ``branch_state_version`` 字段。
+- **rollback 默认在原 commit 所在分支**（main commit 在 main 回滚，分支 commit
+  在分支回滚）；``rollback_commit(branch_id=...)`` 参数当前保留为接口占位，未启用
+  跨分支回滚语义。
 
 ---
 

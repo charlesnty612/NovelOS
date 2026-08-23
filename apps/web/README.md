@@ -84,7 +84,9 @@ apps/web/
     │   ├── format.ts          # 日期/JSON 格式化 + JSON 解析校验
     │   ├── format.test.ts
     │   ├── chapterState.ts    # 章节状态机按钮可用性 + run 过滤（纯函数）
-    │   └── chapterState.test.ts
+    │   ├── chapterState.test.ts
+    │   ├── ledgerState.ts     # Hook 五态机 + Debt 四态机 + 逾期判定（纯函数，Sprint 9）
+    │   └── ledgerState.test.ts
     ├── components/
     │   ├── ErrorBanner.tsx    # 错误/信息条
     │   ├── EmptyState.tsx     # 空态
@@ -99,11 +101,12 @@ apps/web/
     └── pages/
         ├── ProjectsListPage.tsx       # /  项目卡片列表 + 新建/编辑/归档
         ├── ProjectOverviewPage.tsx    # /projects/:pid/overview
-        ├── StoryBiblePage.tsx         # /projects/:pid/bible（三个 Tab）
+        ├── StoryBiblePage.tsx         # /projects/:pid/bible（四个 Tab）
         ├── bible/
         │   ├── CharacterTab.tsx       # 角色：列表 + 详情 + 表单
         │   ├── WorldTab.tsx           # 世界：locations/factions/world-rules
-        │   └── PlotTab.tsx            # 剧情：events + timeline
+        │   ├── PlotTab.tsx            # 剧情：events + timeline
+        │   └── LedgerTab.tsx          # 伏笔与债务：hooks + debts（Sprint 9）
         ├── ChaptersPage.tsx           # /projects/:pid/chapters  章节列表 + 新建
         ├── ChapterDetailPage.tsx      # /projects/:pid/chapters/:cid
         │                             # 头部状态机按钮 + plan / drafts / workflow 面板
@@ -247,6 +250,10 @@ apps/web/
 | GET | `/chapters/{cid}/quality` | 该 chapter 最新一份 QualityReport；尚无报告 → 404 |
 | POST | `/chapters/{cid}/quality/evaluate` | 现场组装 ctx + 评估 + 落库，返回 QualityReport（201） |
 | GET | `/projects/{pid}/quality` | 项目全部 QualityReport 列表（created_at DESC） |
+| GET/POST | `/projects/{pid}/hooks` | Hook 伏笔台账列表 / 创建（支持 `?status=` 过滤；status 5 态 OPEN/ACTIVE/ESCALATED/RESOLVED/ABANDONED） |
+| GET/PATCH/DELETE | `/hooks/{id}` | Hook 详情 / 更新（含状态机迁移校验，非法跳变 → 409） / 删除 |
+| GET/POST | `/projects/{pid}/debts` | Narrative Debt 列表 / 创建（status 4 态 open/acknowledged/paid/forgiven） |
+| GET/PATCH/DELETE | `/debts/{id}` | Debt 详情 / 更新（含状态机迁移校验，非法跳变 → 409） / 删除 |
 
 > 注：本期不修改任何 `packages/` 下 Python 文件。
 

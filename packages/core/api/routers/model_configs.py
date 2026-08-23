@@ -210,12 +210,15 @@ def delete_model_config(config_id: str, request: Request):
 
 @router.post("/model-configs/{config_id}/test", status_code=status.HTTP_200_OK)
 def test_model_config(config_id: str, request: Request) -> dict:
-    """ping：用该配置发一条「回复 ok」请求，返回延迟（ms）与首 100 字。
+    """ping：用该配置做一次轻量级健康检查，返回 ``{ok, latency_ms, detail, status_code?}``。
 
-    真实外网调用请勿在 CI / 测试中触发；任务书边界已说明。
-
-    P2-5 修订：``enabled=0`` 的 config 不允许 ``/test``，返回 422（业务规则不通过）。
-    与 :class:`ModelRouter.resolve` 的语义保持一致（不返回 disabled 行）。
+    行为契约（Sprint 8）：
+    - ``mock`` provider → 直接 ``ok=True``（不发起真实调用，与既有 mock 语义一致）。
+    - 其它 provider → 调 :meth:`Provider.health_check`：OpenAI 兼容 ``GET /models``、
+      Ollama ``GET /api/tags``、Anthropic 极小 ``POST /v1/messages``（401/200 都算通）。
+    - 健康检查失败 → 200 但 ``ok=False``（前端可区分「端点不可达」与「鉴权失败」）；
+      仅 ProviderError 透传到 502 兜底保留。
+    - ``enabled=0`` 仍返回 422（P2-5 业务规则）。
     """
     settings = request.app.state.settings
     config_row = _get_config(settings.db_path, config_id)
@@ -228,25 +231,21 @@ def test_model_config(config_id: str, request: Request) -> dict:
         )
 
     provider = ModelRouter(settings.db_path).get_provider(config_row)
-    messages = [
-        {"role": "system", "content": "你是一个测试助手。"},
-        {"role": "user", "content": "回复 ok"},
-    ]
-    start = time.monotonic()
+    # mock provider 走 health_check（恒 ok），与既有 mock 语义一致；
+    # 其它 provider 也优先走 health_check，避免向真模型发完整 prompt。
     try:
-        completion = provider.complete(messages, params={"max_tokens": 16, "temperature": 0})
+        result = provider.health_check()
     except ProviderError as exc:
         raise HTTPException(
             status_code=502,
             detail={"error": "provider_error", "message": str(exc), "status_code": exc.status_code},
         ) from exc
-    latency_ms = int((time.monotonic() - start) * 1000)
-    text = completion.get("text") or ""
     return {
         "config_id": config_id,
-        "latency_ms": latency_ms,
-        "preview": text[:100],
-        "usage": completion.get("usage"),
+        "ok": bool(result.get("ok")),
+        "latency_ms": int(result.get("latency_ms") or 0),
+        "detail": result.get("detail") or "",
+        "status_code": result.get("status_code"),
     }
 
 
