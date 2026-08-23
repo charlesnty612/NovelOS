@@ -35,8 +35,8 @@ def test_health_endpoint_returns_ok(tmp_path: Path):
     data = r.json()
     assert data["status"] == "ok"
     assert data["version"] == "0.1.0"
-    # Sprint 6 下半：0003_quality_reports.sql 已落地 → 29 业务表
-    assert data["tables"] == 29
+    # Sprint 11 上半：0004_reference_canon.sql 已落地 → 31 业务表（29 + reference_canons + canon_extracts）
+    assert data["tables"] == 31
 
 
 def test_root_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

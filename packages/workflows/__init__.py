@@ -37,5 +37,6 @@ from packages.workflows.chapter_commit import pipeline as _commit  # noqa: E402,
 from packages.workflows.chapter_plan import pipeline as _plan  # noqa: E402, F401
 from packages.workflows.chapter_review import pipeline as _review  # noqa: E402, F401
 from packages.workflows.chapter_write import pipeline as _write  # noqa: E402, F401
+from packages.workflows.deconstruct_book import pipeline as _deconstruct_book  # noqa: E402, F401
 
 __all__ = ["all_workflows", "get_workflow", "register_workflow"]
