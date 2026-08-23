@@ -160,8 +160,30 @@ apps/web/
 - `src/utils/chapterState.test.ts`（37 例）：按钮可用性 / 状态机白名单 / run 过滤 / 高风险变更计数。
 - `src/components/ApprovalCard.test.tsx`（7 例）：review_report 渲染 / commit.high_risk_approval 渲染 /
   warnings 列表 / 提交回调。
+- `src/components/QualityPanel.test.tsx`（6 例，Sprint 6 下半）：overall 着色阈值（<70 红色 /
+  70-85 黄 / >85 绿）、六子分条形宽度、issue 分组（payoff 单列）、evaluate 按钮回调、空态。
 - `src/hooks/usePoll.test.ts`（8 例）：enabled 切换 / stopWhen 触发停止 / 错误处理 / 卸载清理 /
   onResult 回调。
+
+### Sprint 6 下半 — 质量评估面板
+
+章节详情页（`pages/ChapterDetailPage.tsx`）在「计划（plan_json）」面板下方挂载 `QualityPanel`：
+
+- 顶部 `运行质量评估` 按钮触发 `POST /chapters/{cid}/quality/evaluate`；调用成功后
+  立即刷新面板 + 重拉 chapter（commit 节点可能已用 enforce 模式触发阻断）。
+- 主展示区：
+  - `overall` 大数字（按阈值染色：<70 红色 `--color-error` / 70-85 黄色
+    `--color-warning` / >85 绿色 `--color-success`）。
+  - 六子分条形（`plot/character/continuity/style/pacing/foreshadowing`）：纯 CSS div 宽度
+    百分比，0-100 区间。
+  - `Issues` 列表：severity 着色徽章 + category + rule_id + message + suggestion；
+    `category == 'payoff'` 的 issue 单独组成「爽感问题（H-1 ~ H-5）」段落。
+  - 底部 `scoring_version` / `formula_hash` / `evaluated_at` 小字脚注（来自
+    `scores_json._meta`）。
+- 错误处理：evaluate API 报错显示在顶部 ErrorBanner；GET 404（无 report）视作空态
+  （「暂无评估报告」），不算错误。
+- 数据流：每次 chapter 切换都重拉 `GET /chapters/{cid}/quality`；evaluate 成功后
+  直接用返回值更新本地 state（避免再拉一次）。
 
 
 ## 与后端契约对接说明
@@ -222,6 +244,9 @@ apps/web/
 | GET | `/agents` | 已注册 agent 列表 |
 | GET | `/agents/{name}/prompts` | agent 的所有 prompt 版本 |
 | POST | `/agents/sync` | 从 `docs/agents/prompts` 同步 |
+| GET | `/chapters/{cid}/quality` | 该 chapter 最新一份 QualityReport；尚无报告 → 404 |
+| POST | `/chapters/{cid}/quality/evaluate` | 现场组装 ctx + 评估 + 落库，返回 QualityReport（201） |
+| GET | `/projects/{pid}/quality` | 项目全部 QualityReport 列表（created_at DESC） |
 
 > 注：本期不修改任何 `packages/` 下 Python 文件。
 

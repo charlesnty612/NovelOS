@@ -393,3 +393,68 @@ export interface SyncPromptsResult {
   updated: Array<[string, number]>;
   agents: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 6 下半：Quality 评估报告（packages.core.quality.service）
+//   与 packages/core/api/routers/quality.py + quality_reports 表对齐。
+//   - QualityReport.scores_json 含六子分 + _meta；
+//   - QualityReport.issues_json 是 Issue[]（severity / category / rule_id 等）。
+// ---------------------------------------------------------------------------
+
+export type QualitySeverity = 'error' | 'warning' | 'info';
+
+export type QualityCategory =
+  | 'schema_validity'
+  | 'timeline_consistency'
+  | 'character_contradiction'
+  | 'world_rule_contradiction'
+  | 'knowledge_leakage'
+  | 'compliance'
+  | 'plot'
+  | 'character'
+  | 'continuity'
+  | 'style'
+  | 'pacing'
+  | 'foreshadowing'
+  | 'payoff';
+
+export interface QualityIssue {
+  severity: QualitySeverity;
+  category: QualityCategory;
+  location: string;
+  rule_id: string;
+  message: string;
+  suggestion?: string | null;
+  evidence_refs?: string[] | null;
+  judge_trace?: Record<string, unknown> | null;
+}
+
+export interface QualityScoresMeta {
+  scoring_version: string;
+  llm_judge: string;
+  evaluated_at: string;
+  scoring_formula_hash: string;
+}
+
+export interface QualityScores {
+  overall: number;
+  plot: number;
+  character: number;
+  continuity: number;
+  style: number;
+  pacing: number;
+  foreshadowing: number;
+  _meta: QualityScoresMeta;
+}
+
+export interface QualityReport {
+  report_id: string;
+  project_id: string;
+  chapter_id: string;
+  commit_id: string | null;
+  run_id: string | null;
+  overall: number;
+  scores_json: QualityScores;
+  issues_json: QualityIssue[];
+  created_at: string;
+}

@@ -47,6 +47,10 @@ class StartWorkflowRequest(BaseModel):
     expected_role: str | None = None
     target_word_count: int | None = Field(default=None, ge=100, le=100_000)
     mock_providers: dict[str, list[str]] | None = None
+    # Sprint 6 下半：chapter_commit pipeline 的 quality_gate 节点拦截模式
+    # （"enforce" 阻断 / "report" 不阻断）；任务书拍板默认 report；
+    # 显式注入便于测试覆盖两种模式。
+    quality_gate_mode: str | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -126,6 +130,8 @@ def _start_workflow(
         initial_ctx["target_word_count"] = body.target_word_count
     if body.mock_providers:
         initial_ctx["mock_providers"] = body.mock_providers
+    if body.quality_gate_mode is not None:
+        initial_ctx["quality_gate_mode"] = body.quality_gate_mode
 
     engine = _engine(request)
     try:

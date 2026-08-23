@@ -25,6 +25,7 @@ import type {
   ProjectCreatePayload,
   ProjectUpdatePayload,
   PromptVersion,
+  QualityReport,
   ResumeRequestPayload,
   SnapshotResponse,
   SyncPromptsResult,
@@ -266,4 +267,17 @@ export const agentsApi = {
   listPrompts: (name: string) =>
     api.get<PromptVersion[]>(`/agents/${name}/prompts`),
   sync: () => api.post<SyncPromptsResult>('/agents/sync', {}),
+};
+
+// -------------------------------------------------------------- quality
+// 对应 packages/core/api/routers/quality.py：
+//   GET /chapters/{cid}/quality           —— 最新一份；404 表示该 chapter 还没有 report
+//   POST /chapters/{cid}/quality/evaluate —— 现场组装 ctx + 评估 + 落库（201）
+//   GET /projects/{pid}/quality           —— 项目全部 quality_reports（created_at DESC）
+export const qualityApi = {
+  latest: (cid: string) => api.get<QualityReport>(`/chapters/${cid}/quality`),
+  evaluate: (cid: string) =>
+    api.post<QualityReport>(`/chapters/${cid}/quality/evaluate`, {}),
+  listByProject: (pid: string) =>
+    api.get<QualityReport[]>(`/projects/${pid}/quality`),
 };

@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { chaptersApi, workflowsApi } from '../api/endpoints';
+import { chaptersApi, qualityApi, workflowsApi } from '../api/endpoints';
 import type {
   Chapter,
   Draft,
+  QualityReport,
   WorkflowRun,
   WorkflowStartResponse,
 } from '../api/types';
+import { QualityPanel } from '../components/QualityPanel';
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
 import {
@@ -45,6 +47,33 @@ export function ChapterDetailPage() {
     () => chaptersApi.listDrafts(chapterId),
     [chapterId],
   );
+
+  // ---- 最新 quality report（不带 NotFound 报错；404 容错为 null） ----
+  const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
+  const [qualityLoading, setQualityLoading] = useState(false);
+  const [qualityError, setQualityError] = useState<string | null>(null);
+  const reloadQuality = useCallback(async () => {
+    setQualityLoading(true);
+    setQualityError(null);
+    try {
+      const r = await qualityApi.latest(chapterId);
+      setQualityReport(r);
+    } catch (e: unknown) {
+      // 404 → 该 chapter 尚无 report，不视作错误
+      if (e instanceof ApiError && e.status === 404) {
+        setQualityReport(null);
+        setQualityError(null);
+      } else {
+        setQualityError(e instanceof Error ? e.message : '加载 quality 失败');
+      }
+    } finally {
+      setQualityLoading(false);
+    }
+  }, [chapterId]);
+
+  useEffect(() => {
+    void reloadQuality();
+  }, [reloadQuality]);
 
   // ---- workflow runs（按 started_at DESC） ----
   const runsCall = useApiCall<WorkflowRun[]>(
@@ -221,6 +250,21 @@ export function ChapterDetailPage() {
       {chapter ? (
         <div style={{ marginTop: 16 }}>
           <PlanPanel chapter={chapter} onUpdated={() => chapterCall.reload()} />
+        </div>
+      ) : null}
+
+      {chapter ? (
+        <div style={{ marginTop: 16 }}>
+          <QualityPanel
+            chapterId={chapterId}
+            report={qualityReport}
+            loading={qualityLoading}
+            error={qualityError}
+            onEvaluated={(rep) => {
+              setQualityReport(rep);
+              void chapterCall.reload();
+            }}
+          />
         </div>
       ) : null}
 
