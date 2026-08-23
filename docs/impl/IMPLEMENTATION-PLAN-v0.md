@@ -82,7 +82,7 @@ MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通�
 ## 4. 当前状态
 
 - [x] 计划定稿（本文档）
-- [ ] S0-S12 逐 Sprint 执行（进展由主会话 todo 跟踪，每 Sprint 验收后更新本节）
+- [x] S0-S12 逐 Sprint 执行：S0-S11 全部验收通过；S12 由用户拍板关闭（2026-08-23，Web 版交付即目标达成）
 
 ### 4.1 Sprint 进度台账（2026-08-23）
 
@@ -100,7 +100,7 @@ MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通�
 | S9 Hooks/Debts UI | ✅ 验收通过 | aa21985 | 前端 124（合并基线） |
 | S10 Simulation | ✅ 验收通过 | e614002 / cce0abf | 后端 369 |
 | S11 参照系与合规 | ✅ 验收通过 | 4b47582 / e614002 / cce0abf | 后端 369 + 前端 133 |
-| S12 Tauri 壳（Phase B） | ⏸ 待用户确认（需 Rust 工具链） | — | — |
+| S12 Tauri 壳（Phase B） | ❎ 已关闭（用户拍板 2026-08-23：Web 版交付即达成目标，不做桌面壳；日后需要可重开） | — | — |
 
 ### 4.2 已知 deviation 登记（随版本关闭）
 
