@@ -83,3 +83,22 @@ MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通�
 
 - [x] 计划定稿（本文档）
 - [ ] S0-S12 逐 Sprint 执行（进展由主会话 todo 跟踪，每 Sprint 验收后更新本节）
+
+### 4.1 Sprint 进度台账（2026-08-23）
+
+| Sprint | 状态 | 关键 commit | 测试基线 |
+|---|---|---|---|
+| S0 基础设施 | ✅ 验收通过 | 5556e6c / 0976b60 | 12 |
+| S1 Story Domain | ✅ 验收通过 | 461e203 / bf13c75 | 42 |
+| S2 Story State | ✅ 验收通过 | fd791d7 / 0160274 / 2585f26 | 84 |
+| S3 Agent Runtime | ✅ 验收通过 | 90c9275 / eb3e945 | 149 |
+| S4 Workflow + Eval | ✅ 验收通过 | c563bba / e243564 | 161；golden 回归 1/1 |
+| S5 Workbench UI | ✅ 验收通过 | 34b23c4 / 90937f7 | 后端 184 + 前端 vitest 77 |
+
+### 4.2 已知 deviation 登记（随版本关闭）
+
+1. **review reject 即终局**（S4 审查 P1-1）：PRD §59/§87 的「人工修改后重审」循环 MVP 未实现；当前最小闭环 = reject 后 run FAILED、章节保持 DRAFTED、可人工改稿（POST drafts）后重跑 write/review。已记录于 `packages/workflows/chapter_review/README.md`。后续版本补 `revise` 语义。
+2. **Context Engine MVP 全量装配**（S4）：L0-L9 裁剪/token 预算未实现，`plot_graph_excerpt.unresolved_branches` 恒空、`world_state_excerpts` 缺 sensory_anchors。记录于 `packages/core/context_engine/README.md`。
+3. **eval 内容正确性断言缺口**（S4 审查 P2-3）：golden runner 目前做流程+结构断言，observer 内容语义（before/after 与正文一致性、HIGH 误标对抗用例）归入 S6 范围。
+4. **model-configs 列表返回 params_json 明文**（S5 审查记录）：本地单用户 MVP 可接受；发布前（S8 或 S12）加脱敏。
+5. **连续两次 Human pause 的 human_input 覆盖语义**（S4 审查 P2-4）：`dict.update` 语义已写入 README，连续 pause 场景缺专项测试，后续补。
