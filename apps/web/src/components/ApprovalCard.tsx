@@ -3,10 +3,23 @@
 //   - chapter-review  → 显示 review_report（字数偏离 / 禁用词 / warnings）
 //   - chapter-commit.high_risk_approval → 显示 changes 待审批条数
 //
+// chapter-review 分支有三态决议（对齐 PRD §59/§87 的「人工修改后重审」闭环）：
+//   - 批准        → onApprove(true)
+//   - 驳回        → onApprove(false)              （run FAILED，章节保持 DRAFTED）
+//   - 驳回并改稿  → onApprove(false, {revise:true, note})（run FAILED(rejected-for-revision)，
+//                    章节保持 DRAFTED，note 落 plan_json.revision_note，可改稿后重跑 write/review）
+//
 // 通过 props 注入决定 / 拒绝动作，由父组件负责调 resume API。
 
 import { useState } from 'react';
 import { ErrorBanner, InfoBanner } from './ErrorBanner';
+
+export interface ApproveOptions {
+  /** 驳回并改稿（仅 chapter-review 分支）：run 以 FAILED(rejected-for-revision) 收尾 */
+  revise?: boolean;
+  /** 改稿意见，落 plan_json.revision_note 供下次 write 参考 */
+  note?: string;
+}
 
 export interface ApprovalCardProps {
   runId: string;
@@ -20,7 +33,7 @@ export interface ApprovalCardProps {
   /** 当前错误信息（resume 失败时显示） */
   error: string | null;
   /** 提交审批（approved=true/false）；由父组件负责调 /runs/{id}/resume */
-  onApprove: (approved: boolean) => Promise<void> | void;
+  onApprove: (approved: boolean, opts?: ApproveOptions) => Promise<void> | void;
 }
 
 interface ReviewReportShape {
@@ -43,6 +56,8 @@ export function ApprovalCard(props: ApprovalCardProps) {
     onApprove,
   } = props;
   const [pendingApprove, setPendingApprove] = useState<boolean | null>(null);
+  const [pendingRevise, setPendingRevise] = useState(false);
+  const [reviseNote, setReviseNote] = useState('');
 
   const reviewReport = pausePayload['review_report'] as
     | ReviewReportShape
@@ -76,7 +91,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
 
       <InfoBanner>
         {stage === 'chapter-review'
-          ? '请作者审查后批准（继续推进到 REVIEWED）或驳回则该 run 结束（FAILED），章节保持 DRAFTED，可改稿后重新发起写正文/审校。'
+          ? '请作者审查后批准（继续推进到 REVIEWED）；驳回则该 run 结束（FAILED）、章节保持 DRAFTED，可改稿后重新发起写正文/审校；「驳回并改稿」会附上意见（落 plan_json.revision_note），同样保持 DRAFTED，改稿后重新发起写正文/审校即可。'
           : stage === 'chapter-commit.high_risk_approval'
           ? 'Observer 检测到高风险 / definition / world_kind=rule 变更，请人工审批。'
           : '请人工决议以恢复 workflow。'}
@@ -115,7 +130,55 @@ export function ApprovalCard(props: ApprovalCardProps) {
         >
           {submitting && pendingApprove === false ? '提交中…' : '驳回'}
         </button>
+        {stage === 'chapter-review' ? (
+          <button
+            className="btn"
+            disabled={submitting}
+            data-testid="approval-revise"
+            onClick={async () => {
+              setPendingRevise(true);
+              try {
+                await onApprove(false, {
+                  revise: true,
+                  note: reviseNote.trim() || undefined,
+                });
+              } finally {
+                setPendingRevise(false);
+              }
+            }}
+          >
+            {submitting && pendingRevise ? '提交中…' : '驳回并改稿'}
+          </button>
+        ) : null}
       </div>
+
+      {stage === 'chapter-review' ? (
+        <div style={{ marginTop: 8 }}>
+          <label
+            className="muted small"
+            htmlFor="approval-revise-note"
+          >
+            改稿意见（可选，落 plan_json.revision_note 供下次写正文参考）
+          </label>
+          <textarea
+            id="approval-revise-note"
+            data-testid="approval-revise-note"
+            value={reviseNote}
+            onChange={(e) => setReviseNote(e.target.value)}
+            rows={2}
+            disabled={submitting}
+            style={{
+              width: '100%',
+              marginTop: 4,
+              padding: 6,
+              borderRadius: 6,
+              border: '1px solid var(--color-border-strong)',
+              fontFamily: 'inherit',
+              fontSize: 12,
+            }}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

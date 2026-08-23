@@ -12,7 +12,8 @@
 //   - plan   ：生成计划（director）。仅 PLANNED 状态可启；
 //              后端 chapter-write 校验要求 plan_json 已落；启动 plan 任务本身可在 PLANNED/DRAFTED/... 都启，
 //              但 UI 上只在 PLANNED 暴露，避免覆盖已有计划。
-//   - write  ：写正文（writer）。仅 PLANNED 或 DRAFTED 可启（write 节点在非 PLANNED/DRAFTED 会抛错）。
+//   - write  ：写正文（writer）。仅 PLANNED 或 DRAFTED 可启（write 节点在非 PLANNED/DRAFTED 会抛错）；
+//              DRAFTED 重跑允许追加新 draft 版本（支撑「驳回并改稿」后的人工改稿循环）。
 //   - review ：审校（review）。仅 DRAFTED 可启（mark_reviewed 节点会校验）。
 //   - commit ：提交（commit）。仅 REVIEWED 可启（commit 节点会校验）。
 //
@@ -52,7 +53,8 @@ const ACTION_LABEL: Record<WorkflowAction, string> = {
  * 给定章节状态 + 是否有活跃 run，判断指定 workflow 按钮是否可点击。
  *
  * - activeRun.status ∈ {RUNNING, PENDING} → 全部禁用（等待当前 run 完成 / 即将运行）。
- * - activeRun.status === 'PAUSED'  → 允许继续：resume 走审批卡片；按钮仍按状态机决定。
+ * - activeRun.status === 'PAUSED'  → 允许继续：resume 走审批卡片（批准/驳回/驳回并改稿三态，
+ *   revise 分支 run 以 FAILED(rejected-for-revision) 收尾、chapter 保持 DRAFTED）；按钮仍按状态机决定。
  * - 其它终态（COMPLETED/FAILED/CANCELLED）→ 不阻止。
  */
 export function getButtonAvailability(

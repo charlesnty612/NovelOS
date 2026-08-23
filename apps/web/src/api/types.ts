@@ -295,7 +295,14 @@ export interface WorkflowStartResponse {
 }
 
 export interface ResumeRequestPayload {
-  human_input: { approved: boolean } & Record<string, unknown>;
+  /**
+   * 三态决议（chapter-review Human 节点，PRD §59/§87 改稿重审闭环）：
+   * - { approved: true }                    → 通过，chapter → REVIEWED
+   * - { approved: false }                   → 拒绝，run FAILED，chapter 保持 DRAFTED
+   * - { approved: false, revise: true, note? } → 驳回并改稿，run FAILED(rejected-for-revision)，
+   *   chapter 保持 DRAFTED，note 落 plan_json.revision_note
+   */
+  human_input: { approved: boolean; revise?: boolean; note?: string };
 }
 
 // ---- pause payloads --------------------------------------------------------

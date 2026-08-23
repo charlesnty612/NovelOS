@@ -167,14 +167,24 @@ export function ChapterDetailPage() {
   );
 
   const handleResume = useCallback(
-    async (approved: boolean) => {
+    async (
+      approved: boolean,
+      opts?: { revise?: boolean; note?: string },
+    ) => {
       if (!selectedRunSummary) return;
       setActionErr(null);
       setSubmitting(true);
       try {
-        await workflowsApi.resume(selectedRunSummary.run_id, {
-          human_input: { approved },
-        });
+        // 三态：approve / reject / revise（revise 时 run 以 FAILED(rejected-for-revision) 收尾，
+        // chapter 保持 DRAFTED，note 落 plan_json.revision_note，改稿后可重跑 write/review）
+        const human_input: { approved: boolean; revise?: boolean; note?: string } = {
+          approved,
+        };
+        if (opts?.revise) {
+          human_input['revise'] = true;
+          if (opts.note) human_input['note'] = opts.note;
+        }
+        await workflowsApi.resume(selectedRunSummary.run_id, { human_input });
         await Promise.all([chapterCall.reload(), runsCall.reload(), draftsCall.reload(), detail.reload()]);
       } catch (e: unknown) {
         setActionErr(e instanceof Error ? e.message : '审批失败');
@@ -493,7 +503,10 @@ function WorkflowPanel({
   pollError: string | null;
   pausePayload: Record<string, unknown> | undefined;
   submitting: boolean;
-  onApprove: (approved: boolean) => Promise<void> | void;
+  onApprove: (
+    approved: boolean,
+    opts?: { revise?: boolean; note?: string },
+  ) => Promise<void> | void;
 }) {
   return (
     <div className="panel" data-testid="workflow-panel">

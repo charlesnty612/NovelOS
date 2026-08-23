@@ -327,6 +327,166 @@ def test_chapter_review_rejected_results_in_failed(tmp_path: Path):
     asyncio.run(run())
 
 
+def test_chapter_review_revise_loop_end_to_end(tmp_path: Path):
+    """review 驳回并改稿闭环（PRD §59/§87 / deviation #1 关闭）：
+
+    review PAUSED → resume {approved:false, revise:true, note} → run FAILED
+    (error='rejected-for-revision')、chapter 保持 DRAFTED、note 落 plan_json.revision_note
+    → 人工改稿（POST drafts）→ 重跑 write（新 draft 版本）→ 再 review → approve → REVIEWED。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            mock_providers = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+            }
+
+            # 1) plan + write
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "意图", "mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.json()["status"] == "DRAFTED"
+
+            # 2) review → PAUSED
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201
+            paused = r.json()
+            assert paused["status"] == "PAUSED"
+
+            # 3) resume revise:true + note → run FAILED(rejected-for-revision)
+            r = await _request(
+                app, "POST", f"/api/runs/{paused['run_id']}/resume",
+                json={"human_input": {"approved": False, "revise": True, "note": "禁用词命中，请改写后重审"}},
+            )
+            assert r.status_code == 200, r.text
+            final = r.json()
+            assert final["status"] == "FAILED", final
+            # resume 响应不含 error 字段（router 只回 run_id/status/current_node），经 GET /runs/{id} 校验
+            r = await _request(app, "GET", f"/api/runs/{paused['run_id']}")
+            assert r.status_code == 200
+            assert r.json()["error"] == "rejected-for-revision", r.json()["error"]
+
+            # chapter 保持 DRAFTED；plan_json.revision_note 已落
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.status_code == 200
+            ch = r.json()
+            assert ch["status"] == "DRAFTED"
+            assert ch["plan_json"]["revision_note"] == "禁用词命中，请改写后重审"
+
+            # 4) 人工改稿（POST drafts）
+            r = await _request(
+                app, "POST", f"/api/chapters/{cid}/drafts",
+                json={"content": "修订后的草稿内容：林渊闻言沉默良久，终是轻轻点头。"},
+            )
+            assert r.status_code == 201, r.text
+
+            # 5) 重跑 write（DRAFTED 允许）→ 新 draft 版本落库（v1=write、v2=人工改稿、v3=重跑 write）
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            write_run = r.json()
+            assert write_run["status"] == "COMPLETED", write_run
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                drafts = conn.execute(
+                    "SELECT version, created_by FROM drafts WHERE chapter_id = ? ORDER BY version",
+                    (cid,),
+                ).fetchall()
+            finally:
+                conn.close()
+            assert [d["version"] for d in drafts] == [1, 2, 3], drafts
+
+            # 6) 再 review → approve → REVIEWED
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201
+            paused2 = r.json()
+            assert paused2["status"] == "PAUSED"
+            r = await _request(
+                app, "POST", f"/api/runs/{paused2['run_id']}/resume",
+                json={"human_input": {"approved": True}},
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "COMPLETED"
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.json()["status"] == "REVIEWED"
+
+    asyncio.run(run())
+
+
+def test_chapter_review_revise_without_note_clears_revision_note(tmp_path: Path):
+    """revise:true 但无 note → plan_json.revision_note 键被移除（幂等清理）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            mock_providers = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+            }
+            for path in ("plan", "write"):
+                r = await _request(
+                    app, "POST", f"/api/projects/{pid}/chapters/{cid}/{path}",
+                    json={"mock_providers": mock_providers},
+                )
+                assert r.status_code == 201, r.text
+
+            # 预置旧 revision_note，模拟上一轮 revise 残留
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            plan = dict(r.json()["plan_json"])
+            plan["revision_note"] = "旧意见"
+            r = await _request(app, "PATCH", f"/api/chapters/{cid}", json={"plan_json": plan})
+            assert r.status_code == 200, r.text
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock_providers},
+            )
+            paused = r.json()
+            r = await _request(
+                app, "POST", f"/api/runs/{paused['run_id']}/resume",
+                json={"human_input": {"approved": False, "revise": True}},
+            )
+            assert r.status_code == 200
+            assert r.json()["status"] == "FAILED"
+            r = await _request(app, "GET", f"/api/runs/{paused['run_id']}")
+            assert r.status_code == 200
+            assert r.json()["error"] == "rejected-for-revision"
+
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.json()["status"] == "DRAFTED"
+            assert "revision_note" not in r.json()["plan_json"]
+
+    asyncio.run(run())
+
+
 def test_chapter_commit_without_review_fails(tmp_path: Path):
     """commit 在 chapter 仍为 DRAFTED 时（未跑 review）应 FAILED。"""
     app = _create_app(tmp_path)

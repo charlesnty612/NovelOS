@@ -66,7 +66,17 @@ class CheckResult:
 
 @dataclass
 class RunResult:
-    """单个 case 的运行结果。"""
+    """单个 case 的运行结果。
+
+    除 ``checks`` 外，还暴露四个「基线签名」观察字段（quality-scoring-v0 §6
+    Regression 基线判定的数据面映射，由 ``run_case`` 填充；断言失败时取实际值，
+    供 ``tests/evals/regression_baseline.py`` 与基线比对）：
+    - ``state_version``：最新 ``story_states.state_version``（int）；
+    - ``delta_arrays``：observer 业务载荷中非空且为 list 的数组名（sorted list）；
+    - ``hooks``：最新快照 ``snapshot_json.hooks[].name``（sorted list）；
+    - ``guardrails_pass``：本 case 是否触发 MVP 阻断级 Guardrail
+      （schema_validity fail / observer 7 数组结构缺失）。
+    """
 
     case_name: str
     passed: bool = False
@@ -76,6 +86,10 @@ class RunResult:
     project_id: str | None = None
     chapter_id: str | None = None
     db_path: str | None = None
+    state_version: int = 0
+    delta_arrays: list[str] = field(default_factory=list)
+    hooks: list[str] = field(default_factory=list)
+    guardrails_pass: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -469,27 +483,63 @@ def _check_state_version(
 def _check_delta_arrays_nonempty(
     observer_payload: dict[str, Any] | None,
     array_names: list[str],
-) -> CheckResult:
-    if observer_payload is None:
-        return CheckResult(
+) -> tuple[CheckResult, list[str]]:
+    """断言 observer 业务载荷中指定数组全部非空；同时返回实际非空数组名列表。
+
+    返回值第二项供 Regression 基线比对（实际非空数组名集合变化即结构回归）。
+    """
+    actual: list[str] = []
+    if observer_payload is not None:
+        for name in array_names:
+            arr = observer_payload.get(name)
+            if isinstance(arr, list) and len(arr) > 0:
+                actual.append(name)
+    missing_or_empty = [n for n in array_names if n not in actual]
+    return (
+        CheckResult(
             check=f"observer.delta_arrays_nonempty=={array_names}",
-            pass_=False,
-            detail="observer_payload missing",
-        )
-    missing_or_empty: list[str] = []
-    for name in array_names:
-        arr = observer_payload.get(name)
-        if not isinstance(arr, list) or len(arr) == 0:
-            missing_or_empty.append(name)
-    return CheckResult(
-        check=f"observer.delta_arrays_nonempty=={array_names}",
-        pass_=not missing_or_empty,
-        detail=(
-            "all non-empty"
-            if not missing_or_empty
-            else f"empty/missing arrays: {missing_or_empty}"
+            pass_=not missing_or_empty,
+            detail=(
+                "all non-empty"
+                if not missing_or_empty
+                else f"empty/missing arrays: {missing_or_empty}"
+            ),
         ),
+        sorted(actual),
     )
+
+
+def _query_latest_state_version(db_path: Path, project_id: str) -> int:
+    """查询最新 ``story_states.state_version``（int，无快照为 0）。"""
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT MAX(state_version) AS v FROM story_states WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row["v"] or 0)
+
+
+def _query_snapshot_hook_names(db_path: Path, project_id: str) -> list[str]:
+    """查询最新快照 ``snapshot_json.hooks[].name``（sorted list，供基线比对）。"""
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT snapshot_json FROM story_states WHERE project_id = ? "
+            "ORDER BY state_version DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    snap = _parse_json(row["snapshot_json"]) if row else None
+    hooks = snap.get("hooks") if isinstance(snap, dict) else None
+    names = []
+    for h in hooks or []:
+        if isinstance(h, dict) and isinstance(h.get("name"), str):
+            names.append(h["name"])
+    return sorted(names)
 
 
 def _check_snapshot_hooks_named(
@@ -722,25 +772,30 @@ def run_case(case_dir: Path | str) -> RunResult:
                 _check_final_chapter_status(db_path, chapter_id, expected_status)
             )
             min_state_v = int(expected.get("state_version_min") or 2)
-            result.checks.append(
-                _check_state_version(db_path, project_id, min_state_v)
-            )
+            state_version_check = _check_state_version(db_path, project_id, min_state_v)
+            result.checks.append(state_version_check)
+            result.state_version = _query_latest_state_version(db_path, project_id)
             observer_payload = _collect_observer_payload(db_path, chapter_id)
             delta_arrays = list(expected.get("delta_arrays_nonempty") or [])
             if delta_arrays:
-                result.checks.append(
-                    _check_delta_arrays_nonempty(observer_payload, delta_arrays)
+                delta_check, actual_delta_arrays = _check_delta_arrays_nonempty(
+                    observer_payload, delta_arrays
                 )
+                result.checks.append(delta_check)
+                result.delta_arrays = actual_delta_arrays
             snap_contains = expected.get("snapshot_contains") or {}
             hook_names = list(snap_contains.get("hooks_named") or [])
             if hook_names:
                 result.checks.append(
                     _check_snapshot_hooks_named(db_path, project_id, hook_names)
                 )
+            result.hooks = _query_snapshot_hook_names(db_path, project_id)
             if expected.get("no_guardrail_block"):
-                result.checks.append(
-                    _check_no_guardrail_block(db_path, project_id, observer_payload)
+                guardrail_check = _check_no_guardrail_block(
+                    db_path, project_id, observer_payload
                 )
+                result.checks.append(guardrail_check)
+                result.guardrails_pass = guardrail_check.passed
 
             # 收尾：checkpoint WAL 让 tmp dir cleanup 不被 Windows 文件锁挡住
             _force_wal_checkpoint(db_path)

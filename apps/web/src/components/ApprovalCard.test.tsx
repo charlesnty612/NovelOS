@@ -41,13 +41,16 @@ describe('ApprovalCard', () => {
     expect(screen.getByText('-9.1%')).toBeInTheDocument();
   });
 
-  it('chapter-review 分支 InfoBanner 文案明确「驳回 → FAILED + 章节保持 DRAFTED」', () => {
-    // Sprint 5 review F3：驳回语义文案必须明确 run 终止/章节保持/允许重新发起。
+  it('chapter-review 分支 InfoBanner 文案明确「驳回 → FAILED + 章节保持 DRAFTED」及「驳回并改稿」', () => {
+    // Sprint 5 review F3：驳回语义文案必须明确 run 终止/章节保持/允许重新发起；revise 闭环。
     render(<ApprovalCard {...baseProps} />);
     expect(
       screen.getByText(
-        /驳回则该 run 结束（FAILED），章节保持 DRAFTED，可改稿后重新发起写正文\/审校/,
+        /驳回则该 run 结束（FAILED）、章节保持 DRAFTED，可改稿后重新发起写正文\/审校/,
       ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/「驳回并改稿」会附上意见（落 plan_json\.revision_note）/),
     ).toBeInTheDocument();
   });
 
@@ -70,6 +73,55 @@ describe('ApprovalCard', () => {
     render(<ApprovalCard {...baseProps} submitting={true} />);
     expect(screen.getByTestId('approval-approve')).toBeDisabled();
     expect(screen.getByTestId('approval-reject')).toBeDisabled();
+    expect(screen.getByTestId('approval-revise')).toBeDisabled();
+  });
+
+  it('chapter-review 分支渲染第三个按钮「驳回并改稿」+ 改稿意见输入框', () => {
+    render(<ApprovalCard {...baseProps} />);
+    expect(
+      screen.getByTestId('approval-revise'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('驳回并改稿')).toBeInTheDocument();
+    expect(screen.getByTestId('approval-revise-note')).toBeInTheDocument();
+  });
+
+  it('非 chapter-review 分支不渲染「驳回并改稿」按钮', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        stage="chapter-commit.high_risk_approval"
+        message="高风险变更待审批"
+        pausePayload={{ stage: 'chapter-commit.high_risk_approval', message: '高风险变更待审批' }}
+      />,
+    );
+    expect(screen.queryByTestId('approval-revise')).not.toBeInTheDocument();
+  });
+
+  it('点击「驳回并改稿」触发 onApprove(false, {revise:true, note})', async () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(<ApprovalCard {...baseProps} onApprove={onApprove} />);
+    fireEvent.change(screen.getByTestId('approval-revise-note'), {
+      target: { value: '禁用词命中，请改写后重审' },
+    });
+    fireEvent.click(screen.getByTestId('approval-revise'));
+    await waitFor(() =>
+      expect(onApprove).toHaveBeenCalledWith(false, {
+        revise: true,
+        note: '禁用词命中，请改写后重审',
+      }),
+    );
+  });
+
+  it('点击「驳回并改稿」且意见为空 → note 为 undefined', async () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(<ApprovalCard {...baseProps} onApprove={onApprove} />);
+    fireEvent.click(screen.getByTestId('approval-revise'));
+    await waitFor(() =>
+      expect(onApprove).toHaveBeenCalledWith(false, {
+        revise: true,
+        note: undefined,
+      }),
+    );
   });
 
   it('commit.high_risk_approval 模式下展示变更条数', () => {
