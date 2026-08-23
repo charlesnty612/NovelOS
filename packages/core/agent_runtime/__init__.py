@@ -27,6 +27,7 @@ from .structured_output import (
     OBSERVER_FORBIDDEN_KEYS,
     extract_json,
     strip_code_fence,
+    strip_observer_violations,
     validate_contract,
 )
 
@@ -37,6 +38,7 @@ __all__ = [
     "extract_json",
     "strip_code_fence",
     "validate_contract",
+    "strip_observer_violations",
     "OBSERVER_ALLOWED_KEYS",
     "OBSERVER_FORBIDDEN_KEYS",
     "AgentRuntimeError",

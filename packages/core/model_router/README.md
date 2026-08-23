@@ -23,7 +23,10 @@
 | director | `reasoning` |
 | observer | `reasoning` |
 | writer | `creative_writing` |
-| 其它（arbiter / deconstructor / critic / planner / integrator 等）| 默认 `reasoning` |
+| arbiter | `reasoning` |
+| deconstructor_chapter | `reasoning` |
+| deconstructor_aggregate | `reasoning` |
+| 其它（critic / planner / integrator 等）| 默认 `reasoning` |
 
 源代码常驻 `AGENT_CAPABILITY` 与函数 `capability_for(agent_name)`；未知 agent 默认 `reasoning`。
 
@@ -79,14 +82,14 @@ test_provider = router.get_provider({"provider": "mock", "model": "x", "params_j
 - `GET /model-configs/{id}` ——单条；404 不存在。
 - `PATCH /model-configs/{id}` ——部分更新（capability / provider / model / params_json / enabled），200 / 404。
 - `DELETE /model-configs/{id}` ——删除，204 / 404。
-- `POST /model-configs/{id}/test` ——ping；发「回复 ok」返回 `{latency_ms, preview, usage}`；Provider 失败 → 502。
+- `POST /model-configs/{id}/test` ——ping；发「回复 ok」返回 `{latency_ms, preview, usage}`；**`enabled=0` 的 config 返回 422**（P2-5 业务规则）；Provider 失败 → 502。
 
 `params_json` 字段接受 dict 或 JSON 字符串（前端友好）；写入时统一 `json.dumps`。
 
 ## 维护注意点
 - 测试一律用 `MockProvider` 或 `httpx.MockTransport` 注入；不依赖外网（`docs/impl/IMPLEMENTATION-PLAN-v0.md` D-I4）。
 - OpenAI 兼容 Provider 必须有 `params_json.base_url`；缺则 `ValueError`（在 `get_provider` 时抛）。
-- `enabled=0` 行 Router 不返回也不能 `/test`（待 V0.1 决定是否允许）。
+- `enabled=0` 行 Router 不返回；`/test` 端点对 enabled=0 直接返回 422（P2-5 业务规则）。
 - Provider 错误透传 status_code；上层 `agents.py` router 转 502。
 
 ## Sprint 8 计划

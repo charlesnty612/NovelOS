@@ -7,17 +7,16 @@ r"""Prompt Registry（Sprint 3）。
 
 设计要点：
 - 幂等：同名同 ``version`` 重复 sync 时更新 ``content`` 与 ``updated_at``，不新建行。
-- 全部 prompt 都注册（director / writer / observer / arbiter / deconstructor 等）。
-- 文件名解析正则：``^(?P<agent>[a-zA-Z_-]+)-v(?P<n>\d+)\.md$``。
-- ``get_active_prompt(agent_name)``：取该 agent 所有 ACTIVE 行的最高 ``version``。
-  ``version`` 字段形如 ``"director:v3"``，按冒号后缀数字比大小（与 S2 prompts.version
-  字段一致——DDL 提示说 ``v7``，但 agent-contracts §7 用 ``writer:v7`` 风格；
-  本 Sprint 实际写入 ``version`` 列时只存 ``"v<N>"`` 数字形式，与 DDL CHECK 行为一致）。
-  ``prompt_version`` 字段（在 ai_call_logs 中使用）拼接为 ``f"{agent}:v{n}"``。
-
-  注：主会话口径要求 ``version`` 形如 ``"<agent>:v<N>"``（与现有 prompts.version 字段 TEXT 不
-  冲突）；实际写入 DDL 列为 ``"<agent>:v<N>"`` 字符串。Sprint 3 与 S2 保持一致：version 列
-  接受任意 TEXT，DDL 仅在 status 上有 CHECK。
+- 全部 prompt 都注册（director / writer / observer / arbiter / deconstructor_chapter /
+  deconstructor_aggregate 等）。
+- 文件名解析正则：``^(?P<agent>[a-zA-Z][a-zA-Z_-]*)-v(?P<n>\d+)\.md$``；含连字符的
+  agent 名（如 ``deconstructor-chapter``）注册时**规范化**为下划线
+  （``deconstructor_chapter``），与文件内 Prompt 声明的 ``"agent": "..."`` 字段一致。
+- ``get_active_prompt(agent_name)``：取该 agent 所有 ACTIVE 行的最高 ``version``，按
+  ``CAST(substr(version, 2) AS INTEGER) DESC`` 数字排序（而非字典序），确保
+  ``v9 > v10`` 不被字典误判。
+  ``version`` 字段形如 ``"v9"`` / ``"v10"``（DB prompts.version 列存数字形式）；
+  ``prompt_version`` 字段（在 ai_call_logs 中使用）拼接为 ``f"{agent_name}:v{n}"``。
 """
 
 from __future__ import annotations
@@ -41,12 +40,24 @@ _AGENT_TO_CAPABILITY: dict[str, str] = {
     "director": "reasoning",
     "observer": "reasoning",
     "writer": "creative_writing",
+    "arbiter": "reasoning",
+    "deconstructor_chapter": "reasoning",
+    "deconstructor_aggregate": "reasoning",
     # 其它 agent 默认 reasoning（Sprint 3 MVP 不细化）
 }
 
 
 def _capability_for(agent_name: str) -> str:
     return _AGENT_TO_CAPABILITY.get(agent_name, "reasoning")
+
+
+def _normalize_agent_name(raw: str) -> str:
+    """把文件名解析出的 agent 名（可能含连字符）规范化为下划线形式。
+
+    例：``deconstructor-chapter`` → ``deconstructor_chapter``，
+    ``deconstructor-aggregate`` → ``deconstructor_aggregate``。
+    """
+    return raw.replace("-", "_")
 
 
 # ---------------------------------------------------------------------------
@@ -65,10 +76,10 @@ class PromptRegistry:
         """扫描 ``docs_dir`` 下 ``*-v<N>.md``，upsert agents / prompts。
 
         返回：
-        - ``scanned``：扫到的 (agent, version) 元组列表。
+        - ``scanned``：扫到的 (agent, version) 元组列表（agent 名已规范化）。
         - ``registered``：(agent, version) 元组列表（含已有 / 新增）。
         - ``updated``：(agent, version) 元组列表（content 变化的子集）。
-        - ``agents``：agent 名列表（去重）。
+        - ``agents``：agent 名列表（去重，按字母升序）。
         """
         docs_path = Path(docs_dir)
         scanned: list[tuple[str, int]] = []
@@ -83,7 +94,7 @@ class PromptRegistry:
                 m = _FILE_RE.match(entry.name)
                 if not m:
                     continue
-                agent = m.group("agent")
+                agent = _normalize_agent_name(m.group("agent"))
                 n = int(m.group("n"))
                 content = entry.read_text(encoding="utf-8")
                 scanned.append((agent, n))
@@ -104,6 +115,9 @@ class PromptRegistry:
     def get_active_prompt(self, agent_name: str) -> tuple[str, str, str]:
         """返回 ``(prompt_id, version_label, content)``：取该 agent 的 ACTIVE 行最高版本。
 
+        ``version`` 形如 ``"v3"`` / ``"v10"``，按 ``CAST(substr(version,2) AS INTEGER)``
+        数字排序取最大——避免字典序下 ``"v9" > "v10"`` 的误判。
+
         ``version_label`` 形如 ``"director:v3"``，与 ai_call_logs.prompt_version 一致。
         无任何 ACTIVE 行 → :class:`PromptNotFoundError`。
         """
@@ -117,7 +131,7 @@ class PromptRegistry:
                 SELECT prompt_id, version, content
                 FROM prompts
                 WHERE agent_id = ? AND status = 'ACTIVE'
-                ORDER BY version DESC
+                ORDER BY CAST(substr(version, 2) AS INTEGER) DESC
                 LIMIT 1
                 """,
                 (agent_id,),
@@ -146,7 +160,7 @@ class PromptRegistry:
 
     # -------------------------------------------------------------- list_prompts
     def list_prompts(self, agent_name: str) -> list[dict[str, Any]]:
-        """列出指定 agent 的所有 prompts（按 version 降序）。"""
+        """列出指定 agent 的所有 prompts（按 version 数字降序）。"""
         conn = get_connection(self.db_path)
         try:
             agent_id = self._get_agent_id(conn, agent_name)
@@ -157,7 +171,7 @@ class PromptRegistry:
                 SELECT prompt_id, agent_id, version, content, status, created_at, updated_at
                 FROM prompts
                 WHERE agent_id = ?
-                ORDER BY version DESC
+                ORDER BY CAST(substr(version, 2) AS INTEGER) DESC
                 """,
                 (agent_id,),
             ).fetchall()
@@ -234,4 +248,18 @@ class PromptRegistry:
             conn.close()
 
 
-__all__ = ["PromptRegistry"]
+__all__ = ["PromptRegistry", "AGENT_TO_CAPABILITY", "capability_for", "normalize_agent_name"]
+
+
+def capability_for(agent_name: str) -> str:
+    """公开接口：按 agent 名取 capability（与 :func:`packages.core.model_router.capability_for` 对齐）。"""
+    return _capability_for(agent_name)
+
+
+def normalize_agent_name(raw: str) -> str:
+    """公开接口：把文件名解析出的 agent 名（可能含连字符）规范化为下划线形式。"""
+    return _normalize_agent_name(raw)
+
+
+AGENT_TO_CAPABILITY: dict[str, str] = dict(_AGENT_TO_CAPABILITY)
+"""Agent 名 → capability 名（与 :data:`packages.core.model_router.AGENT_CAPABILITY` 必须相等）。"""

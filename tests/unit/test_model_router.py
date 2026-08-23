@@ -204,6 +204,34 @@ def test_capability_for_unknown_defaults_reasoning():
     assert capability_for("unknown_agent") == "reasoning"
 
 
+def test_agent_capability_matches_agent_runtime_prompts():
+    """P2-8：model_router.AGENT_CAPABILITY 与 agent_runtime.prompts.AGENT_TO_CAPABILITY
+    必须严格相等（两边独立维护；新增 agent 时必须同步）。"""
+    from packages.core.agent_runtime.prompts import (
+        AGENT_TO_CAPABILITY as PROMPTS_AGENT_TO_CAPABILITY,
+    )
+
+    assert AGENT_CAPABILITY == PROMPTS_AGENT_TO_CAPABILITY, (
+        f"AGENT_CAPABILITY drift detected.\n"
+        f"  model_router.AGENT_CAPABILITY: {AGENT_CAPABILITY}\n"
+        f"  agent_runtime.prompts.AGENT_TO_CAPABILITY: {PROMPTS_AGENT_TO_CAPABILITY}"
+    )
+
+
+def test_capability_for_known_agents_via_prompts_module():
+    """P2-8：agent_runtime.prompts.capability_for 与 model_router.capability_for 行为一致。"""
+    from packages.core.agent_runtime.prompts import (
+        capability_for as prompts_capability_for,
+    )
+
+    for name in ("director", "observer", "writer", "arbiter",
+                 "deconstructor_chapter", "deconstructor_aggregate"):
+        assert capability_for(name) == prompts_capability_for(name), (
+            f"capability_for({name!r}) mismatch: "
+            f"router={capability_for(name)!r}, prompts={prompts_capability_for(name)!r}"
+        )
+
+
 def test_router_resolve_returns_first_enabled(tmp_path: Path):
     apply_migrations(tmp_path / "test.db")
     db_path = str(tmp_path / "test.db")

@@ -61,7 +61,8 @@ def _valid_observer_output() -> dict:
 
 
 def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
-    """sync 后 GET /agents 应含 director / writer / observer（以及 arbiter / deconstructor）。"""
+    """sync 后 GET /agents 应含 6 个 agent（director / writer / observer / arbiter /
+    deconstructor_chapter / deconstructor_aggregate）。P2-2 拆分后下划线名注册。"""
     app = _create_app(tmp_path)
 
     async def run():
@@ -74,13 +75,21 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
             assert r.status_code == 200, r.text
             payload = r.json()
             assert payload["agents"] == sorted(payload["agents"])  # sorted
-            assert {"director", "writer", "observer", "arbiter", "deconstructor"}.issubset(set(payload["agents"]))
+            expected = {
+                "director", "writer", "observer", "arbiter",
+                "deconstructor_chapter", "deconstructor_aggregate",
+            }
+            assert expected == set(payload["agents"]), (
+                f"agents mismatch: got {payload['agents']}"
+            )
 
             # GET /agents
             r = await _request(app, "GET", "/api/agents")
             assert r.status_code == 200
             names = [a["name"] for a in r.json()]
             assert "director" in names and "observer" in names and "writer" in names
+            assert "deconstructor_chapter" in names
+            assert "deconstructor_aggregate" in names
 
             # GET /agents/observer/prompts → 至少 1 个 ACTIVE
             r = await _request(app, "GET", "/api/agents/observer/prompts")
@@ -88,6 +97,14 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
             prompts = r.json()
             assert len(prompts) >= 1
             assert prompts[0]["status"] == "ACTIVE"
+
+            # P2-2：deconstructor_chapter / deconstructor_aggregate 均能取到 prompt
+            for name in ("deconstructor_chapter", "deconstructor_aggregate"):
+                r = await _request(app, "GET", f"/api/agents/{name}/prompts")
+                assert r.status_code == 200
+                ps = r.json()
+                assert len(ps) >= 1
+                assert ps[0]["status"] == "ACTIVE"
 
     asyncio.run(run())
 
@@ -180,6 +197,42 @@ def test_model_configs_create_validation_errors(tmp_path: Path):
                 json={"capability": "reasoning", "provider": "openai", "model": "m", "params_json": "{not json"},
             )
             assert r.status_code == 422
+
+    asyncio.run(run())
+
+
+def test_model_configs_test_endpoint_disabled_returns_422(tmp_path: Path):
+    """P2-5：enabled=0 的 config 不可 /test，返回 422。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(
+                app, "POST", "/api/model-configs",
+                json={
+                    "capability": "reasoning",
+                    "provider": "mock",
+                    "model": "mock-1",
+                    "enabled": 0,
+                },
+            )
+            assert r.status_code == 201
+            cid = r.json()["config_id"]
+
+            r = await _request(app, "POST", f"/api/model-configs/{cid}/test")
+            assert r.status_code == 422, r.text
+            assert "disabled" in r.json()["detail"].lower() or "enabled=0" in r.json()["detail"]
+
+            # 重新打开 enabled=1 后 /test 可走通（mock provider）
+            r = await _request(app, "PATCH", f"/api/model-configs/{cid}", json={"enabled": 1})
+            assert r.status_code == 200
+            assert r.json()["enabled"] == 1
+
+            r = await _request(app, "POST", f"/api/model-configs/{cid}/test")
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["config_id"] == cid
+            assert "latency_ms" in body
 
     asyncio.run(run())
 
@@ -292,8 +345,9 @@ def test_run_observer_with_bad_then_good_script_retries(tmp_path: Path):
     asyncio.run(run())
 
 
-def test_run_observer_with_forbidden_metadata_raises_agent_output_error(tmp_path: Path):
-    """mock_script 给含 delta_id 元信息的 observer 输出 → 契约校验失败 → 502。"""
+def test_run_observer_strips_forbidden_keys_and_succeeds(tmp_path: Path):
+    """P2-1 修订：mock_script 给含 delta_id / schema_version / deviations 的 observer 输出
+    → 越权字段剥离（不重试，不抛错） → 201 成功，ai_call_logs.error 含 warn 前缀。"""
     app = _create_app(tmp_path)
 
     async def run():
@@ -306,12 +360,20 @@ def test_run_observer_with_forbidden_metadata_raises_agent_output_error(tmp_path
                 json={"capability": "reasoning", "provider": "mock", "model": "mock-1"},
             )
 
-            # 含 delta_id + 缺 new_events：两次都坏 → 502
-            bad = {
+            # 含越权字段（10 元信息 + 3 辅助，sample）
+            dirty = {
                 "delta_id": "dlt_evil",
+                "schema_version": "chapter-extract.v0",
+                "chapter_id": "ch_003",
+                "created_at": "2026-08-23T00:00:00Z",
+                "notes": "should be stripped",
+                "deviations": [{"x": 1}],
+                "self_check": "ok",
+                "unresolved_plan_intents": [],
                 "character_changes": [],
                 "world_changes": [],
                 "relationship_changes": [],
+                "new_events": [],
                 "resolved_hooks": [],
                 "new_hooks": [],
                 "debt_changes": [],
@@ -321,14 +383,19 @@ def test_run_observer_with_forbidden_metadata_raises_agent_output_error(tmp_path
                 json={
                     "input_payload": {"chapter_id": "ch_003"},
                     "expected": "observer",
-                    "mock_script": [json.dumps(bad), json.dumps(bad)],
+                    "mock_script": [json.dumps(dirty)],  # 只 1 次就够：剥离后通过
                 },
             )
-            assert r.status_code == 502, r.text
-            detail = r.json()["detail"]
-            assert detail["error"] == "agent_output_invalid"
+            assert r.status_code == 201, r.text
+            body = r.json()
+            assert body["output"]["character_changes"] == []
+            # 输出不含越权字段
+            assert "delta_id" not in body["output"]
+            assert "schema_version" not in body["output"]
+            assert "deviations" not in body["output"]
+            assert "notes" not in body["output"]
 
-            # ai_call_logs retry_count=1
+            # ai_call_logs retry_count=0（不重试） + error 含 warn 前缀 + 列出被剥键
             settings = app.state.settings
             conn = get_connection(settings.db_path)
             try:
@@ -337,19 +404,72 @@ def test_run_observer_with_forbidden_metadata_raises_agent_output_error(tmp_path
                 ).fetchone()
             finally:
                 conn.close()
-            assert row["retry_count"] == 1
+            assert row["retry_count"] == 0
             assert row["error"] is not None
+            assert row["error"].startswith("warn: stripped keys=")
+            stripped = row["error"]
+            for k in ("delta_id", "schema_version", "chapter_id", "created_at",
+                      "notes", "deviations", "self_check", "unresolved_plan_intents"):
+                assert k in stripped
 
-            # workflow_runs 收尾为 FAILED
+            # workflow_runs 收尾为 COMPLETED
             conn = get_connection(settings.db_path)
             try:
                 wf = conn.execute(
-                    "SELECT status, error FROM workflow_runs WHERE status = 'FAILED' ORDER BY started_at DESC LIMIT 1"
+                    "SELECT status FROM workflow_runs ORDER BY started_at DESC LIMIT 1"
                 ).fetchone()
             finally:
                 conn.close()
-            assert wf is not None
-            assert wf["status"] == "FAILED"
+            assert wf["status"] == "COMPLETED"
+
+    asyncio.run(run())
+
+
+def test_run_observer_strips_when_missing_arrays_auto_filled(tmp_path: Path):
+    """P2-1 边界：剥离函数自动补齐缺失的 7 数组为 []（不计入 stripped_keys）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            docs_dir = Path.cwd().resolve() / "docs" / "agents" / "prompts"
+            await _request(app, "POST", f"/api/agents/sync?docs_dir={docs_dir.as_posix()}")
+
+            await _request(
+                app, "POST", "/api/model-configs",
+                json={"capability": "reasoning", "provider": "mock", "model": "mock-1"},
+            )
+
+            # 只给部分数组 + 1 个越权字段
+            dirty = {
+                "delta_id": "dlt_xyz",
+                "character_changes": [],
+                "new_events": [],
+            }
+            r = await _request(
+                app, "POST", "/api/agents/observer/run",
+                json={
+                    "input_payload": {"chapter_id": "ch_007"},
+                    "expected": "observer",
+                    "mock_script": [json.dumps(dirty)],
+                },
+            )
+            assert r.status_code == 201, r.text
+            body = r.json()
+            # 缺省 5 数组被自动补为 []
+            for k in ("world_changes", "relationship_changes",
+                      "resolved_hooks", "new_hooks", "debt_changes"):
+                assert body["output"][k] == []
+
+            # stripped_keys 仅含越权 delta_id（不包含自动补的 5 个空数组）
+            settings = app.state.settings
+            conn = get_connection(settings.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT error FROM ai_call_logs ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+            assert row["error"] == "warn: stripped keys=['delta_id']"
 
     asyncio.run(run())
 

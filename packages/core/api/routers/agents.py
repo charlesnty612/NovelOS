@@ -12,7 +12,7 @@
 - 422：请求体缺字段或 mock_script 形态非法。
 - 404：prompt / agent 不存在。
 - 502：LLM 输出经 1 次重试仍不合规（``AgentOutputError``）。
-- 500：provider 错误（``ProviderError``）。
+- 502：provider 错误（``ProviderError``）。
 
 设计要点：
 - 复跑式 ``run_agent``：每次都 ``create_adhoc_run`` 新建 run，避免 workflow_runs 行冲突；

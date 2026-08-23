@@ -41,7 +41,7 @@ from packages.core.model_router import MockProvider, ModelRouter, capability_for
 
 from .exceptions import AgentOutputError
 from .prompts import PromptRegistry
-from .structured_output import extract_json, validate_contract
+from .structured_output import extract_json, strip_observer_violations, validate_contract
 
 _ID_KEY_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*_id$")
 _RETRY_HINT = "\n\n[System note] 上次输出无法解析/不合规：{err}。请只输出合法 JSON，不要附加解释。"
@@ -215,60 +215,110 @@ def run_agent(
     - :class:`ModelNotConfiguredError`（来自 :class:`ModelRouter`）——无 model config。
     - :class:`ProviderError`（来自 provider）——HTTP / 解析失败（不重试，因属 Provider 错误）。
     - :class:`AgentOutputError` ——解析 / 契约重试 1 次仍失败。
+
+    注：所有异常出口都会把 ``workflow_runs`` 收尾为 ``FAILED``（孤儿 RUNNING 行兜底）。
     """
     db_path = str(db_path)
-    registry = PromptRegistry(db_path)
-    prompt_id, prompt_version, prompt_content = registry.get_active_prompt(agent_name)
-
-    # 决定 provider
-    if mock_script is not None:
-        provider = MockProvider(scripted=mock_script)
-        config_row: dict | None = None
-        capability = capability_for(agent_name)
-    else:
-        capability = capability_for(agent_name)
-        config_row = ModelRouter(db_path).resolve(capability)
-        provider = ModelRouter(db_path).get_provider(config_row)
-
-    model_id = (
-        f"{config_row['provider']}/{config_row['model']}"
-        if config_row
-        else "mock/mock"
-    )
-
-    # agent_id（落 ai_call_logs 用）
-    conn = get_connection(db_path)
+    # 兜底：任何异常路径都把 workflow_runs 收尾为 FAILED
+    finalised = False
     try:
-        agent_id = _get_agent_id(conn, agent_name)
-    finally:
-        conn.close()
+        registry = PromptRegistry(db_path)
+        prompt_id, prompt_version, prompt_content = registry.get_active_prompt(agent_name)
 
-    context_ids = _collect_context_ids(input_payload)
+        # 决定 provider
+        if mock_script is not None:
+            provider = MockProvider(scripted=mock_script)
+            config_row: dict | None = None
+            capability = capability_for(agent_name)
+        else:
+            capability = capability_for(agent_name)
+            config_row = ModelRouter(db_path).resolve(capability)
+            provider = ModelRouter(db_path).get_provider(config_row)
 
-    user_payload_text = _dump_json(input_payload)
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": prompt_content},
-        {"role": "user", "content": user_payload_text},
-    ]
+        model_id = (
+            f"{config_row['provider']}/{config_row['model']}"
+            if config_row
+            else "mock/mock"
+        )
 
-    # 调用 + 重试循环
-    start = time.monotonic()
-    retry_count = 0
-    last_error: str | None = None
-    parsed: dict[str, Any] | None = None
-    token_usage: dict[str, int] | None = None
-    raw_text: str | None = None
-    output_log: dict[str, Any] | None = None
-
-    for attempt in range(2):  # 0 = 首次，1 = 1 次重试
-        if attempt > 0:
-            retry_count = 1
-            # 重试：在 user 末尾追加提示，再次调用
-            messages[1]["content"] = user_payload_text + _RETRY_HINT.format(err=last_error or "无法解析")
+        # agent_id（落 ai_call_logs 用）
+        conn = get_connection(db_path)
         try:
-            completion = provider.complete(messages)
-        except Exception as exc:  # noqa: BLE001
-            # Provider 失败：不重试，直接记日志并抛
+            agent_id = _get_agent_id(conn, agent_name)
+        finally:
+            conn.close()
+
+        context_ids = _collect_context_ids(input_payload)
+
+        user_payload_text = _dump_json(input_payload)
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": prompt_content},
+            {"role": "user", "content": user_payload_text},
+        ]
+
+        # 调用 + 重试循环
+        start = time.monotonic()
+        retry_count = 0
+        last_error: str | None = None
+        parsed: dict[str, Any] | None = None
+        token_usage: dict[str, int] | None = None
+        raw_text: str | None = None
+        output_log: dict[str, Any] | None = None
+        # observer 剥离累积（仅在 expected=="observer" 路径下生效；非 observer 一律 None）
+        observer_warn: str | None = None
+
+        for attempt in range(2):  # 0 = 首次，1 = 1 次重试
+            if attempt > 0:
+                retry_count = 1
+                # 重试：在 user 末尾追加提示，再次调用
+                messages[1]["content"] = user_payload_text + _RETRY_HINT.format(err=last_error or "无法解析")
+            try:
+                completion = provider.complete(messages)
+            except Exception as exc:  # noqa: BLE001
+                # Provider 失败：不重试，直接记日志并抛
+                latency = int((time.monotonic() - start) * 1000)
+                _record_call(
+                    db_path,
+                    call_id=new_id("aic"),
+                    run_id=run_id,
+                    node_run_id=node_run_id,
+                    agent_id=agent_id,
+                    model_id=model_id,
+                    prompt_version=prompt_version,
+                    input_context_ids=context_ids,
+                    output=None,
+                    token_usage=None,
+                    latency_ms=latency,
+                    error=f"provider error: {exc}",
+                    retry_count=0,
+                )
+                _update_workflow_run(db_path, run_id, status="FAILED", error=str(exc))
+                finalised = True
+                raise
+
+            raw_text = completion.get("text") or ""
+            token_usage = completion.get("usage") or {"prompt": 0, "completion": 0, "total": 0}
+            try:
+                parsed = extract_json(raw_text)
+            except AgentOutputError as exc:
+                last_error = str(exc)
+                continue  # 进入重试
+            # Observer 越权字段 → 剥离（不抛错，不重试；契约 §5.3）
+            if expected == "observer":
+                cleaned, stripped = strip_observer_violations(parsed)
+                if stripped:
+                    observer_warn = f"warn: stripped keys={stripped}"
+                parsed = cleaned
+            try:
+                validate_contract(expected, parsed)
+            except AgentOutputError as exc:
+                last_error = str(exc)
+                continue  # 进入重试
+            # 成功
+            output_log = parsed
+            break
+        else:
+            # 两次都失败
             latency = int((time.monotonic() - start) * 1000)
             _record_call(
                 db_path,
@@ -280,31 +330,19 @@ def run_agent(
                 prompt_version=prompt_version,
                 input_context_ids=context_ids,
                 output=None,
-                token_usage=None,
+                token_usage=token_usage,
                 latency_ms=latency,
-                error=f"provider error: {exc}",
-                retry_count=0,
+                error=f"output invalid after retry: {last_error}",
+                retry_count=retry_count,
             )
-            _update_workflow_run(db_path, run_id, status="FAILED", error=str(exc))
-            raise
+            _update_workflow_run(db_path, run_id, status="FAILED", error=last_error)
+            finalised = True
+            raise AgentOutputError(
+                f"agent {agent_name!r} output invalid after 1 retry: {last_error}",
+                raw_output=raw_text,
+            )
 
-        raw_text = completion.get("text") or ""
-        token_usage = completion.get("usage") or {"prompt": 0, "completion": 0, "total": 0}
-        try:
-            parsed = extract_json(raw_text)
-        except AgentOutputError as exc:
-            last_error = str(exc)
-            continue  # 进入重试
-        try:
-            validate_contract(expected, parsed)
-        except AgentOutputError as exc:
-            last_error = str(exc)
-            continue  # 进入重试
-        # 成功
-        output_log = parsed
-        break
-    else:
-        # 两次都失败
+        # 成功落库
         latency = int((time.monotonic() - start) * 1000)
         _record_call(
             db_path,
@@ -315,37 +353,25 @@ def run_agent(
             model_id=model_id,
             prompt_version=prompt_version,
             input_context_ids=context_ids,
-            output=None,
+            output=output_log,
             token_usage=token_usage,
             latency_ms=latency,
-            error=f"output invalid after retry: {last_error}",
+            error=observer_warn,  # observer 越权剥离 → 写 ai_call_logs.error 为 warn 前缀
             retry_count=retry_count,
         )
-        _update_workflow_run(db_path, run_id, status="FAILED", error=last_error)
-        raise AgentOutputError(
-            f"agent {agent_name!r} output invalid after 1 retry: {last_error}",
-            raw_output=raw_text,
-        )
-
-    # 成功落库
-    latency = int((time.monotonic() - start) * 1000)
-    _record_call(
-        db_path,
-        call_id=new_id("aic"),
-        run_id=run_id,
-        node_run_id=node_run_id,
-        agent_id=agent_id,
-        model_id=model_id,
-        prompt_version=prompt_version,
-        input_context_ids=context_ids,
-        output=output_log,
-        token_usage=token_usage,
-        latency_ms=latency,
-        error=None,
-        retry_count=retry_count,
-    )
-    _update_workflow_run(db_path, run_id, status="COMPLETED")
-    return output_log  # type: ignore[return-value]
+        _update_workflow_run(db_path, run_id, status="COMPLETED")
+        finalised = True
+        return output_log  # type: ignore[return-value]
+    except BaseException:
+        if not finalised:
+            # 兜底：任何未走 finalize 的异常（如 PromptNotFoundError /
+            # ModelNotConfiguredError / Provider 构造异常）一律收尾为 FAILED
+            try:
+                _update_workflow_run(db_path, run_id, status="FAILED", error="unhandled exception")
+            except Exception:  # noqa: BLE001
+                # finalize 本身失败也不能吞掉原异常
+                pass
+        raise
 
 
 __all__ = ["run_agent", "create_adhoc_run"]

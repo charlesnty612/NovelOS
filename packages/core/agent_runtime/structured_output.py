@@ -10,14 +10,13 @@ r"""结构化输出提取（Sprint 3）。
   3. ``json.loads``；失败抛 :class:`AgentOutputError`（由 runner 捕获并决定是否重试）。
 - 契约校验：三档 ``expected``（``"observer"`` / ``"director"`` / ``"writer"``）按
   ``agent-contracts-v0.md`` §5.2 / §3.2 / §4.2 给出最小集断言。
-  - ``observer``：顶层必须恰为 7 个 change 数组键；不得含 10 个元信息字段
-    （``delta_id / delta_version / schema_version / chapter_id / workflow_run_id /
-    previous_state_version / created_by / created_at / supersedes / notes``），
-    亦不得含 Prompt 辅助字段（``deviations / self_check / unresolved_plan_intents``）。
+  - ``observer``：顶层必须恰为 7 个 change 数组键（结构错误仍抛 :class:`AgentOutputError`）；
+    含 10 元信息字段或 3 辅助字段（**越权字段**）时**剥离后继续**，不抛错、不触发重试。
   - ``director``：必须含 ``schema_version == "director-plan.v1"``。
   - ``writer``：必须含 ``schema_version == "writer-output.v1"`` 与 ``prose`` / ``self_report``。
   - ``None``：只要求合法 JSON。
 - 校验失败抛 :class:`AgentOutputError`，由 runner 捕获并重试 1 次（按 agent-contracts §6 重试原则）。
+  **剥离策略** 是 observer 的特殊路径（不重试，仅剥离）；见 :func:`strip_observer_violations`。
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ OBSERVER_ALLOWED_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Observer 越权字段（agent-contracts §5.2.2 + §5.2.3）
+# Observer 越权字段（agent-contracts §5.2.2 + §5.2.3）—— 剥离目标，不抛错
 OBSERVER_FORBIDDEN_KEYS: frozenset[str] = frozenset(
     {
         # 元信息 10 字段
@@ -101,13 +100,12 @@ def extract_json(text: str) -> dict[str, Any]:
 
 
 def _validate_observer(payload: dict[str, Any]) -> None:
-    """Observer 契约：顶层必须恰为 7 个 change 数组；不得含越权字段。"""
+    """Observer 契约：仅校验**结构**（缺数组键 / 非 list）；越权字段不在此抛错。
+
+    越权字段（10 元信息 + 3 辅助）由 :func:`strip_observer_violations` 剥离——本函数
+    职责收缩为「结构合法即视为合规」，剥离与重试决策统一在 runner 层完成。
+    """
     keys = set(payload.keys())
-    extra = keys - OBSERVER_ALLOWED_KEYS
-    if extra:
-        raise AgentOutputError(
-            f"observer output contains forbidden top-level keys: {sorted(extra)}"
-        )
     missing = OBSERVER_ALLOWED_KEYS - keys
     if missing:
         # 7 数组即便为空也必须存在为 []（agent-contracts §5.2.1）
@@ -116,6 +114,39 @@ def _validate_observer(payload: dict[str, Any]) -> None:
     for k in OBSERVER_ALLOWED_KEYS:
         if not isinstance(payload[k], list):
             raise AgentOutputError(f"observer array {k!r} must be a list, got {type(payload[k]).__name__}")
+
+
+def strip_observer_violations(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """剥离 observer 输出中的越权顶层字段（不抛错，不重试）。
+
+    返回 ``(cleaned, stripped_keys)``：
+    - ``cleaned``：仅含 7 数组键的 dict（如果输入缺某数组键，会**自动补**为 ``[]``，
+      以便下游 schema 校验 / 落库不被结构错误阻断；补字段不计入 stripped_keys）。
+    - ``stripped_keys``：实际被剥除的越权键名（按字母升序）。
+
+    契约说明（agent-contracts §5.3）：
+    - 越权字段一律剥除，不抛错；
+    - 若剥除后仍缺必备 7 数组（输入未提供），自动补空数组并**不**记入 stripped_keys；
+    - 数组必须为 list，否则视为结构错误（交由 :func:`_validate_observer` 抛错，
+      本函数仅做剥除与补全，不做类型断言）。
+    """
+    keys = set(payload.keys())
+    # 补齐缺失的 7 数组（不计入 stripped）
+    cleaned: dict[str, Any] = {k: [] for k in OBSERVER_ALLOWED_KEYS}
+    for k in OBSERVER_ALLOWED_KEYS:
+        if k in payload:
+            cleaned[k] = payload[k]
+    # 剥离越权字段
+    stripped: list[str] = []
+    for k in keys & OBSERVER_FORBIDDEN_KEYS:
+        stripped.append(k)
+        # 不复制到 cleaned
+    # 保留任何「既非白名单也非越权」的字段——但本契约下不应存在；若存在同样剥除
+    # （与原 _validate_observer 的「extra 抛错」语义等价：从严，统一按越权处理）
+    extras = keys - OBSERVER_ALLOWED_KEYS - OBSERVER_FORBIDDEN_KEYS
+    for k in extras:
+        stripped.append(k)
+    return cleaned, sorted(stripped)
 
 
 def _validate_director(payload: dict[str, Any]) -> None:
@@ -158,6 +189,7 @@ __all__ = [
     "extract_json",
     "strip_code_fence",
     "validate_contract",
+    "strip_observer_violations",
     "OBSERVER_ALLOWED_KEYS",
     "OBSERVER_FORBIDDEN_KEYS",
 ]

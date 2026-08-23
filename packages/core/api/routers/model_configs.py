@@ -213,11 +213,19 @@ def test_model_config(config_id: str, request: Request) -> dict:
     """ping：用该配置发一条「回复 ok」请求，返回延迟（ms）与首 100 字。
 
     真实外网调用请勿在 CI / 测试中触发；任务书边界已说明。
+
+    P2-5 修订：``enabled=0`` 的 config 不允许 ``/test``，返回 422（业务规则不通过）。
+    与 :class:`ModelRouter.resolve` 的语义保持一致（不返回 disabled 行）。
     """
     settings = request.app.state.settings
     config_row = _get_config(settings.db_path, config_id)
     if config_row is None:
         raise HTTPException(status_code=404, detail=f"model_config {config_id!r} not found")
+    if config_row.get("enabled") == 0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"model_config {config_id!r} is disabled (enabled=0); cannot /test",
+        )
 
     provider = ModelRouter(settings.db_path).get_provider(config_row)
     messages = [

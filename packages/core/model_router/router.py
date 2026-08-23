@@ -38,10 +38,13 @@ AGENT_CAPABILITY: dict[str, str] = {
     "director": "reasoning",
     "observer": "reasoning",
     "writer": "creative_writing",
+    "arbiter": "reasoning",
+    "deconstructor_chapter": "reasoning",
+    "deconstructor_aggregate": "reasoning",
 }
 """Agent 名 → capability 名（对齐 agent-contracts §7）。
 
-不在此映射的 agent（arbiter / deconstructor / critic / planner / integrator 等）
+不在此映射的 agent（critic / planner / integrator 等）
 默认走 ``reasoning``——Sprint 3 MVP 仅在 README 中声明，不强约束。
 """
 

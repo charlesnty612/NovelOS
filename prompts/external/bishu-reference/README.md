@@ -113,4 +113,4 @@ grep -rE "prompts/external/bishu-reference" docs/agents/prompts/ docs/agents/age
 - PRD §103「许可证策略」—— 使用策略 v1.2 主会话裁决三条
 - `docs/reference-canon/reference-canon-v0.md` §1.3「AGPL 与外部资产策略」
 - `docs/v1.2-调研综合与设计决策-2026-08-23.md` D7「许可证与知识产权边界重申」
-- `docs/agents/prompts/deconstructor-v0.md` —— Canonical 拆书 Prompt 自写落地（不引用本目录）
+- `docs/agents/prompts/deconstructor-chapter-v0.md` + `docs/agents/prompts/deconstructor-aggregate-v0.md` —— Canonical 拆书 Prompt 自写落地（P2-2 拆分；T2 / T3 各一份，不引用本目录）
