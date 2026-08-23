@@ -1,0 +1,82 @@
+# NovelOS 实现总计划 v0
+
+> 主会话设计定稿，2026-08-23。本文档是 PRD v1.2 → 代码实现的总指挥方案：所有 Sprint 派发以此为准。
+> 上游权威：`#NovelOS.md`（PRD v1.2）、`docs/` 下全部 v0 设计文档与 Schema。
+
+---
+
+## 1. 关键决策（主控拍板）
+
+### D-I1 产品形态：本地优先桌面应用，分两阶段交付
+
+PRD §71 已定技术栈（Tauri + React/TS + FastAPI + SQLite + LanceDB/Chroma），§102 定 Local Only。用户授权形态自行决断，拍板如下：
+
+- **Phase A（本次实现目标）**：本地 Web 应用——FastAPI 后端（localhost 服务）+ React/TS 前端（Vite 构建，后端托管静态文件）。浏览器访问 `http://127.0.0.1:<port>` 即用；数据全部落本地 SQLite。**理由**：本机无 Rust 工具链，Tauri 无法构建；且 Web 形态开发与验证成本最低，功能与桌面壳完全等价。
+- **Phase B（后续）**：Tauri 桌面壳打包，包裹同一前端产物 + sidecar 后端。需用户安装 Rust 工具链后进行，记 ADR-0002。
+
+### D-I2 目录结构：遵循 PRD §70
+
+严格按 PRD §70 monorepo 结构落地。`packages/` 下各子目录为 Python 包（后端代码），`apps/desktop/` 为 React+TS 前端。后端通过根目录 `pyproject.toml` 统一管理依赖与包发现。
+
+### D-I3 Workflow 引擎：内置轻量 Runtime + Adapter 隔离
+
+DeterminFlow 为 AGPL-3.0 且处于 v0.1 早期（调研已确认），**不集成、不复制**。MVP 在 `packages/core/workflow-runtime/` 自研最小 DAG 执行器（节点五类：AI / State / Transform / Human / Simulation，对齐 PRD §55-60），对外只暴露 `Runtime Adapter` 接口（PRD §72），未来可替换。
+
+### D-I4 模型接入：OpenAI-Compatible 优先
+
+MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通义 / Ollama 等绝大多数服务，Ollama 本身提供 OpenAI 兼容端点），Anthropic 原生协议留 Sprint 8。测试一律用内置 `mock` Provider（确定性回显），不依赖外网。
+
+### D-I5 验证策略：每 Sprint 有 DoD + pytest
+
+- 后端：pytest（unit / integration / workflow / evals 四级目录对齐 PRD §70 tests/）。
+- Schema 权威：`docs/**/schemas/*.json` 直接作为运行时代码的校验基准（jsonschema 库），代码不另造结构定义。
+- 数据库：`database/migrations/0001_init.sql`（28 表，已验证）由迁移 runner 执行，作为唯一 DDL 来源。
+- 每个 Sprint 完成后：smart 审查（Standards + Spec 双轴）→ 主控验收 → 才进入下一 Sprint。
+
+### D-I6 执行协议（派发纪律）
+
+- 主控：方案设计、Sprint 任务书（含给死口径）、验收定夺。
+- general：按任务书执行，禁止自行发明设计。
+- smart：只读审查每个 Sprint 的产出。
+- 铁律：**禁止 Python 整文件重写做块级修改**（2026-08-23 事故教训），编辑一律用 Edit 锚点替换；跨文件块移动前先备份。
+
+---
+
+## 2. Sprint 计划（对齐 PRD §109，含依赖与 DoD）
+
+| Sprint | 范围 | 依赖 | DoD（可机检） |
+|---|---|---|---|
+| S0 基础设施 | git 仓库、§70 目录、pyproject、配置/日志、SQLite 迁移 runner（跑通 0001_init.sql 28 表）、pytest 骨架、FastAPI 健康检查端点、Vite+React 骨架 | 无 | `pytest` 绿；`uvicorn` 启动 `/health` 200；迁移后 sqlite 库 28 表；前端 `npm run build` 成功 |
+| S1 Story Domain | Project/Character/World/Plot/Chapter 五个领域 Service + REST API + 28 表中相关表的 CRUD | S0 | 五实体 CRUD API 集成测试绿；UI 不经过 DB（Service 层隔离）有测试证明 |
+| S2 Story State | State Delta 应用器（Delta→Validate→Commit→Rollback→Snapshot），Schema 用 state-delta.schema.json 校验，state_version 单调递增 | S1 | delta 提交/回滚/快照恢复单测绿；schema 违规 delta 被拒测试绿；关库重开状态恢复 |
+| S3 Agent Runtime | Prompt 加载（docs/agents/prompts/*.md）、Model Router（mock + openai_compatible）、结构化输出（JSON 提取 + schema 校验 + 重试）、ai_call_logs 落库 | S2 | mock provider 下 director/writer/observer 三 prompt 端到端调用测试绿；调用日志落库可查 |
+| S4 Workflow 主流程 | chapter-plan / chapter-write / chapter-review / chapter-commit 四条工作流 + Observer→Delta→Commit 串联 + Evaluation Harness 骨架（golden 数据集 + 回归 runner） | S3 | PRD §110 验收链路前 12 步在无头模式（API 级）跑通；golden 回归 runner 可执行 |
+| S5 Workbench UI | 项目管理、Story Bible（人物/世界/伏笔/债务）、章节编辑器、AI Panel（Director Plan 审批）、Workflow Panel（运行状态/Human Node 处理） | S4 | 浏览器内完成 §110 全链路人工走查；构建产物由后端托管 |
+| S6 Quality | quality-scoring-v0 六子分 + MVP Guardrail 五条（3 硬 + Q6/Q8）+ 爽感 H-1~H-5 | S4 | 评分管线单测绿；Guardrail 阻断/警告行为测试绿 |
+| S7 Version | 章节/State 的分支、diff、回滚（基于 S2 Snapshot 机制，非 git） | S2 | 分支/回滚 API 测试绿 |
+| S8 Model Router 补全 | Anthropic 原生、Ollama 本地、Provider 健康检查与路由策略 | S3 | 各 Provider 适配器单测绿（mock 服务器） |
+| S9 Hooks/Debts UI 深化 | Hook Ledger 时间线视图、Narrative Debt 面板、expected_payoff 校准（参照系） | S5 | UI 走查通过 |
+| S10 Simulation | What-if 分支推演（Plot Graph + State 快照副本） | S7 | 推演不污染主 State 的测试绿 |
+| S11 参照系与合规 | deconstruct-book 工作流（deconstructor-chapter/aggregate）+ G-sim 双轨检测 + 黄金三章机检 | S4, S6 | 对一本测试书跑通拆书工作流；REQ-Q6/Q7/Q8 三 Guardrail 生效 |
+| S12 Tauri 壳（Phase B） | 需 Rust 工具链，用户确认后进行 | S5 | 桌面窗口启动 |
+
+> 顺序说明：S11 提前于 PRD §109 之外补入（PRD v1.2 §123/§125 是合规矩阵的一部分，发布番茄前必须可用）；S10 按 PRD 顺序。S7/S8 可按依赖情况与 S5/S6 部分并行派发。
+
+---
+
+## 3. 风险登记
+
+| 风险 | 缓解 |
+|---|---|
+| Sprint 任务书口径不够死导致返工 | 每 Sprint 派发前主控 Read 相关设计文档，把字段/路径/验收命令写死 |
+| 子代理改坏既有文件 | 铁律 D-I6；git 仓库每 Sprint 结束打 commit，损坏可回滚 |
+| LLM 无外网 key 时无法真机验证 | mock Provider 全覆盖；真实 provider 留用户配置后手动验证项 |
+| LanceDB/Chroma 依赖重 | MVP 向量检索用 SQLite + numpy 余弦兜底，LanceDB 作可选增强（Sprint 3 定） |
+| 前端工作量膨胀 | UI 以「能用」为先：管理台风格，不做复杂可视化（PRD §111 禁止项） |
+
+---
+
+## 4. 当前状态
+
+- [x] 计划定稿（本文档）
+- [ ] S0-S12 逐 Sprint 执行（进展由主会话 todo 跟踪，每 Sprint 验收后更新本节）

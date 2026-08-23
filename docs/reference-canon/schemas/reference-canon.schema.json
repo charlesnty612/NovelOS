@@ -1,0 +1,363 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novelos.local/schemas/reference-canon.schema.json",
+  "title": "Reference Canon",
+  "description": "NovelOS Reference Canon v0 — 拆书工作流产出的结构化参照系（抽象模式，无原文片段）。对齐 PRD v1.2 D1；消费侧挂 Context Engine L4 Plot Context 之下。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "logline",
+    "spine",
+    "faction_map",
+    "emotion_curve",
+    "payoff_list",
+    "techniques",
+    "rhythm",
+    "style_params",
+    "metadata"
+  ],
+  "properties": {
+    "logline": {
+      "type": "string",
+      "maxLength": 80,
+      "description": "一句话梗概；抽象模式描述（例：\"草根少年获逆袭金手指→碾压同辈→势力洗牌\"），禁止原文片段。"
+    },
+    "spine": {
+      "type": "array",
+      "description": "起承转合骨架；逐章条目；每章一个功能标注（hook/setup/escalation/turn/climax/resolution 六选一）。",
+      "items": { "$ref": "#/$defs/SpineChapter" }
+    },
+    "faction_map": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["factions", "relations", "power_layers"],
+      "properties": {
+        "factions": {
+          "type": "array",
+          "description": "势力列表；仅含势力类型（type_pattern），不含原名。",
+          "items": { "$ref": "#/$defs/Faction" }
+        },
+        "relations": {
+          "type": "array",
+          "description": "势力关系列表；relation_type 限定为枚举。",
+          "items": { "$ref": "#/$defs/FactionRelation" }
+        },
+        "power_layers": {
+          "type": "array",
+          "description": "力量层级列表；layer 限定为 high/mid/low。",
+          "items": { "$ref": "#/$defs/PowerLayer" }
+        }
+      }
+    },
+    "emotion_curve": {
+      "type": "array",
+      "description": "情绪折线；逐章一个 valence ∈ [-9, +9] + marker_type 枚举。",
+      "items": { "$ref": "#/$defs/EmotionPoint" }
+    },
+    "payoff_list": {
+      "type": "array",
+      "description": "爽点钩子清单；type 限定枚举；intensity ∈ [1, 5]。",
+      "items": { "$ref": "#/$defs/PayoffItem" }
+    },
+    "techniques": {
+      "type": "array",
+      "description": "技法落点；name_pattern/location_pattern/effect_pattern 均为抽象短语。",
+      "items": { "$ref": "#/$defs/TechniqueItem" }
+    },
+    "rhythm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mini_climax_interval",
+        "major_climax_interval",
+        "chapter_end_hook_rate",
+        "golden_three_compliance"
+      ],
+      "properties": {
+        "mini_climax_interval": { "$ref": "#/$defs/IntervalDistribution" },
+        "major_climax_interval": { "$ref": "#/$defs/IntervalDistribution" },
+        "chapter_end_hook_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "章末钩子率；建议锚定值 ≥ 0.85。"
+        },
+        "golden_three_compliance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "first_300_chars_conflict",
+            "ch1_end_hook",
+            "ch2_end_hook",
+            "ch3_end_hook",
+            "mini_climax_in_first_three"
+          ],
+          "properties": {
+            "first_300_chars_conflict": { "type": "boolean" },
+            "ch1_end_hook": { "type": "boolean" },
+            "ch2_end_hook": { "type": "boolean" },
+            "ch3_end_hook": { "type": "boolean" },
+            "mini_climax_in_first_three": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "style_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sentence_length_distribution",
+        "dialogue_ratio",
+        "action_ratio",
+        "pov",
+        "paragraph_length_distribution",
+        "psychological_ratio",
+        "environment_ratio"
+      ],
+      "description": "文风参数；字段名映射 PRD §97 Style System。",
+      "properties": {
+        "sentence_length_distribution": { "$ref": "#/$defs/LengthDistribution" },
+        "dialogue_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "对白比例；映射 PRD §97「对白比例」。"
+        },
+        "action_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "动作比例；映射 PRD §97「动作比例」。"
+        },
+        "pov": {
+          "type": "string",
+          "enum": ["first_person", "third_limited", "third_omniscient"],
+          "description": "叙述视角；映射 PRD §97「叙述视角」。"
+        },
+        "paragraph_length_distribution": { "$ref": "#/$defs/LengthDistribution" },
+        "psychological_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "心理描写占比；映射 PRD §97「心理描写」。"
+        },
+        "environment_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "环境描写占比；映射 PRD §97「环境描写」。"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_book_title",
+        "deconstruct_date",
+        "deconstruct_version",
+        "target_reader_profile",
+        "license_check_status"
+      ],
+      "properties": {
+        "source_book_title": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "参照书内部追踪名（仅元数据中保留，不写入对外报告）。"
+        },
+        "deconstruct_date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "拆书执行日期（ISO-8601）。"
+        },
+        "deconstruct_version": {
+          "type": "string",
+          "description": "拆书工作流版本号。"
+        },
+        "target_reader_profile": {
+          "type": "string",
+          "enum": [
+            "male_fantasy",
+            "male_urban",
+            "male_system",
+            "female_romance",
+            "female_palace",
+            "female_suspense",
+            "general"
+          ],
+          "description": "目标读者档；男频首期覆盖 fantasy/urban/system 三档。"
+        },
+        "license_check_status": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["checked", "license", "compatible"],
+          "properties": {
+            "checked": { "type": "boolean" },
+            "license": { "type": "string" },
+            "compatible": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "SpineChapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chapter_index", "title_pattern", "function_tag", "summary_pattern"],
+      "properties": {
+        "chapter_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "title_pattern": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "章名模板（抽象短语，如\"主角受辱-意外获宝\"）；禁止原文章名。"
+        },
+        "function_tag": {
+          "type": "string",
+          "enum": ["hook", "setup", "escalation", "turn", "climax", "resolution"]
+        },
+        "summary_pattern": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "本章事件模式描述；禁止原文摘要。"
+        }
+      }
+    },
+    "Faction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["faction_id", "type_pattern", "power_layer"],
+      "properties": {
+        "faction_id": { "type": "string" },
+        "type_pattern": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "势力类型（abstract），如\"主角派\"\"反派门阀\"\"中立组织\"；禁止原势力名。"
+        },
+        "power_layer": {
+          "type": "string",
+          "enum": ["high", "mid", "low"]
+        }
+      }
+    },
+    "FactionRelation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_faction_id", "to_faction_id", "relation_type"],
+      "properties": {
+        "from_faction_id": { "type": "string" },
+        "to_faction_id": { "type": "string" },
+        "relation_type": {
+          "type": "string",
+          "enum": ["ally", "rival", "neutral", "subordinate", "hostile"]
+        }
+      }
+    },
+    "PowerLayer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layer", "count"],
+      "properties": {
+        "layer": { "type": "string", "enum": ["high", "mid", "low"] },
+        "count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "EmotionPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chapter_index", "valence", "marker_type"],
+      "properties": {
+        "chapter_index": { "type": "integer", "minimum": 1 },
+        "valence": {
+          "type": "integer",
+          "minimum": -9,
+          "maximum": 9,
+          "description": "情绪值；负=压抑/屈辱，正=释放/爽感。"
+        },
+        "marker_type": {
+          "type": "string",
+          "enum": ["suppress", "release", "buildup", "twist", "aftermath", "neutral"]
+        }
+      }
+    },
+    "PayoffItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["payoff_id", "chapter_index", "type", "intensity", "setup_chapter", "payoff_chapter"],
+      "properties": {
+        "payoff_id": { "type": "string" },
+        "chapter_index": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "爽点发生在第几章（兑现章）。"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["face_slap", "level_up", "lucky_find", "identity_reveal", "cheat_burst", "other"]
+        },
+        "intensity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "description": "强度 1-5；5=大高潮。"
+        },
+        "setup_chapter": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "伏笔所在章；用于埋-收距离统计。"
+        },
+        "payoff_chapter": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "兑现章。"
+        }
+      }
+    },
+    "TechniqueItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["technique_id", "name_pattern", "location_pattern", "effect_pattern"],
+      "properties": {
+        "technique_id": { "type": "string" },
+        "name_pattern": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "技法名称抽象短语；禁止原文。"
+        },
+        "location_pattern": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "落点位置模式（abstract）；如\"开篇 300 字\"\"章末末段\"。"
+        },
+        "effect_pattern": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "效果描述（abstract）。"
+        }
+      }
+    },
+    "IntervalDistribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["median", "p25", "p75"],
+      "properties": {
+        "median": { "type": "integer", "minimum": 1 },
+        "p25": { "type": "integer", "minimum": 1 },
+        "p75": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "LengthDistribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mean", "median", "max"],
+      "properties": {
+        "mean": { "type": "number", "minimum": 0 },
+        "median": { "type": "number", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

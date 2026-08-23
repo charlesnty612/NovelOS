@@ -1,0 +1,45 @@
+#root {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem;
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #1f2937;
+}
+
+.container h1 {
+  margin: 0 0 0.25rem;
+  font-size: 2.25rem;
+}
+
+.subtitle {
+  color: #6b7280;
+  margin-top: 0;
+}
+
+.card {
+  margin-top: 1.5rem;
+  padding: 1.25rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.card ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.card li {
+  padding: 0.25rem 0;
+}
+
+code {
+  background: #e5e7eb;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.err {
+  color: #b91c1c;
+}
