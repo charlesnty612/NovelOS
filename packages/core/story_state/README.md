@@ -55,7 +55,7 @@ API 路由：``packages/core/api/routers/story_state.py``（自动发现挂载�
 | ``list_deltas(chapter_id)`` | chapter_id | list[dict] | 无 |
 | ``create_branch(project_id, name, *, base_state_version=None)`` | project_id, str, 可选 int | ``{branch_id, name, parent_branch_id, base_state_version, status, created_at}`` | 重名 → ``StateConflictError``（409）；name='main' 拒绝 |
 | ``list_branches(project_id)`` | project_id | list[dict]（main 优先，其余按 created_at ASC） | 无 |
-| ``promote_branch(project_id, branch_id, *, chapter_id=None)`` | project_id, str, 可选 chapter_id | ``{commit_id, state_version, promoted_from, promoted_commits, branch_id, snapshot_ref}`` | branch 非 ACTIVE → ``BranchClosed``；合并 delta 校验失败 → ``StateConflictError`` |
+| ``promote_branch(project_id, branch_id, *, chapter_id=None)`` | project_id, str, 可选 chapter_id | ``{commit_id, delta_id, state_version, promoted_from, promoted_commits, branch_id, replayed_delta_ids, snapshot_ref}`` | branch 非 ACTIVE → ``BranchClosed``；按序重放时单个 delta 校验失败 → ``StateConflictError``（详见 §6.5 deviation） |
 | ``diff_versions(project_id, version_a, version_b, *, branch_id=None)`` | project_id, int, int, 可选 branch_id | 结构化 diff dict | snapshot 缺失 → ``StateNotFoundError``；``branch_id`` 非 None → ``StateConflictError``（MVP 不支持分支 diff） |
 
 ### 3.2 ``validate_delta(delta) -> list[str]``
@@ -214,15 +214,20 @@ DDL 权威定义在 ``database/migrations/0001_init.sql``；本模块不修改 s
      本分支 delta，复用 ``apply_delta``；
    - ``state_version`` 取分支内独立递增（base + 1, + 2, ...），与 main 序列正交。
 
-2. **Promote 把分支全部 commits 合并为一个新 delta**，在 main 上走完整
-   validate+commit；新 commit 的 ``commits.validation_json`` 携带
-   ``{"promoted_from": "<branch_id>"}`` 标记；成功后 ``branches.status = 'MERGED'``。
-   原 branch 上的 commits 仅读不动。
+2. **Promote 按序重放分支全部 commits 到 main**（Sprint 7 审查 P0 修订）：
+   不再 concat 成单个 merged delta。对分支每个 commit 按 ``resulting_state_version ASC``
+   依次在 main 上走 ``submit_delta + commit_delta(branch_id=None)``，每次产生一个
+   main commit（state_version 逐次 +1），``commits.validation_json`` 注入
+   ``{"promoted_from": "<branch_id>", "source_commit_id": "<branch_commit_id>"}``。
+   全部成功后 ``branches.status = 'MERGED'``；中途失败已重放的 main commits 保留
+   （与正常 commit 一致的事务语义），branch 保持 ACTIVE，错误向上抛。
+   详细 deviation 见下方 §6.5 deviation 段。
 
-3. **领域表写透**（character / world / relationship / debt）在 main 与 branch 路径
-   都执行；但 **new_events / new_hooks 仅 main 路径写主表**（``plot_events`` /
-   ``hooks``），分支路径跳过——避免 promote 时对同一 event_id / hook_id 二次
-   ``INSERT`` 撞 ``UNIQUE`` 约束。分支引入的 event / hook 由 promote 时统一写入。
+3. **领域表写透**：分支 commit 路径**整体跳过**领域表写透（含 character /
+   world / relationship / debt / new_events / new_hooks / resolved_hooks）——
+   避免分支未 promote 即污染 main 领域表。**仅 main commit 路径**执行领域表
+   写透（含 promote 重放时 main 上的 commit）。原 ``_write_through`` 的
+   ``skip_new_events_hooks`` 语义已被 ``skip_all`` 取代（兼容参数保留）。
 
 4. **乐观锁**：main 用 ``story_states`` 全局最新 version 作锚点；分支用本分支 commits
    最新 ``resulting_state_version`` 作锚点。
@@ -256,6 +261,44 @@ DDL 权威定义在 ``database/migrations/0001_init.sql``；本模块不修改 s
 - **rollback 默认在原 commit 所在分支**（main commit 在 main 回滚，分支 commit
   在分支回滚）；``rollback_commit(branch_id=...)`` 参数当前保留为接口占位，未启用
   跨分支回滚语义。
+
+### Promote 按序重放（deviation from ``state-delta-v0.md §6.3``）
+
+``state-delta-v0.md §6.3`` 字面口径是「单一合并 commit（7 数组 concat）」，
+Sprint 7 审查复现该方案存在致命缺陷（见下方根因）后被否决，本 Sprint 改用
+**按序重放**：
+
+- **根因（applier 固定顺序破坏）**：``applier.apply_delta`` 固定顺序为
+  ``character_changes → world_changes → relationship_changes → new_events
+  → resolved_hooks → new_hooks → debt_changes``（``applier.py:60-66``）。
+  对同一 ``hook_id``，若分支内某 commit 顺序为「先 new_hook 后
+  resolved_hooks」，concat 合并后会变成「resolved_hooks 先于 new_hooks」——
+  此时 resolved UPDATE 找不到行（hook 尚未 INSERT），被静默丢弃，hook 以
+  OPEN 落 main。
+- **新语义（按序重放）**：
+  1. 对分支每个 commit 读 ``payload_json``（7 数组），
+  2. 构造 replay delta（新 ``delta_id``，``chapter_id`` 沿用该 commit 原
+     chapter_id 或 ``chapter_id`` 参数覆盖，``previous_state_version``
+     重写为 main 当前最新 version；注意 ``state_deltas`` 表无 notes 列，
+     溯源标记落于 commit 侧，见下一条），
+  3. ``submit_delta`` 校验 + ``commit_delta(branch_id=None)`` 走 main 路径，
+     ``validation_json.promoted_from = <branch_id>``，且
+     ``commits.author_approval_json.notes`` 标记
+     ``"replay from branch <bid> (source_commit=<src_cmt_id>)"``
+     （含 ``source_commit_id`` 溯源），
+  4. 全部成功后 ``branches.status='MERGED'``；中途失败保留已重放 commits。
+- **新 delta 行不复用原 delta_id**：原 state_deltas 行（status=applied、
+  归属分支 commit）只读不动；重放生成**新 delta 行**（新 delta_id、status=
+  applied、归属新 main commit）。``state_deltas.delta_id`` 是 PK 必须唯一。
+- **影响**：
+  - ``promote_branch`` 返回结构多 ``replayed_delta_ids``（本次重放在 main 上
+    产生的新 delta_id 列表，按序）与 ``delta_id``（最后一个新 delta_id）；
+    ``promoted_commits`` 与 ``state_version`` 语义不变。
+  - 单次 promote 会在 main 上产生 N 个 commits（N = 分支 commits 数），
+    main 的 ``state_version`` 单次跳 N+1，与 Sprint 2/4 单 commit 跳 1 不
+    一致——后续 v1 可考虑把 promote 视作「批量 commit」返回 commit_id 列表。
+  - 字段级冲突检测仍不做：若分支内后 commit 改了同一字段，后值覆盖前值，
+    与 concat 方案语义等价。
 
 ---
 

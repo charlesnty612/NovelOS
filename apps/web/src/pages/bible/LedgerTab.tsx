@@ -15,11 +15,12 @@ import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
 import {
   DEBT_STATUS_LABEL,
-  DEBT_STATUS_VALUES,
   HOOK_STATUS_LABEL,
   HOOK_STATUS_VALUES,
+  getNextDebtStatuses,
   getNextHookStatuses,
   isHookOverdue,
+  safeGetNextDebtStatuses,
   safeGetNextHookStatuses,
 } from '../../utils/ledgerState';
 
@@ -614,7 +615,7 @@ function DebtFormModal({ title, chapters, initial, onSubmit, onCancel }: DebtFor
             onChange={(e) => setStatus(e.target.value as DebtStatus)}
             data-testid="debt-status-select"
           >
-            {(initial ? DEBT_STATUS_VALUES : DEBT_STATUS_VALUES).map((s) => (
+            {(initial ? getNextDebtStatuses(initial.status) : safeGetNextDebtStatuses(null)).map((s) => (
               <option key={s} value={s}>
                 {DEBT_STATUS_LABEL[s]} ({s})
               </option>

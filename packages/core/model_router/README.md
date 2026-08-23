@@ -163,7 +163,7 @@ completion, used_config_row = router.call_with_fallback(
 - `GET /model-configs/{id}` ——单条；404 不存在。
 - `PATCH /model-configs/{id}` ——部分更新（capability / provider / model / params_json / enabled），200 / 404。
 - `DELETE /model-configs/{id}` ——删除，204 / 404。
-- `POST /model-configs/{id}/test` ——ping；发「回复 ok」返回 `{latency_ms, preview, usage}`；**`enabled=0` 的 config 返回 422**（P2-5 业务规则）；Provider 失败 → 502。
+- `POST /model-configs/{id}/test` ——ping；调 `Provider.health_check` 返回 `{config_id, ok, latency_ms, detail, status_code?}`；**`enabled=0` 的 config 返回 422**（P2-5 业务规则）；Provider 错误 → 502。
 
 `params_json` 字段接受 dict 或 JSON 字符串（前端友好）；写入时统一 `json.dumps`。
 

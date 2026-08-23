@@ -646,10 +646,14 @@ class StoryStateService:
         """
         # 分支归属校验（前置守卫）：在 validate 之后插入，避免先报告校验错误又因分支失败
         # 二次抛错。失败时直接抛出（不会写 state_deltas 行）。
+        # Sprint 7 审查 P1 修复：使用 ``delta.get("chapter_id")``（缺省 None），
+        # 缺失时 ``_project_id_for_chapter`` 返回 None 即跳过前置守卫——之后
+        # ``validate_delta`` 会因 chapter_id 缺失返回 422 校验错误，与不带
+        # branch_id 的行为一致，避免 KeyError 导致 500。
         if branch_id is not None:
             conn = get_connection(self.db_path)
             try:
-                project_id = self._project_id_for_chapter(conn, delta["chapter_id"])
+                project_id = self._project_id_for_chapter(conn, delta.get("chapter_id"))
                 if project_id is not None:
                     _resolve_branch(conn, project_id, branch_id)
             finally:
@@ -865,12 +869,12 @@ class StoryStateService:
             new_state["state_version"] = new_version
 
             # 5) 写透领域表
-            #   分支 commit 与 main 走同一套领域表（character_states / locations /
-            #   factions / world_rules / relationships / narrative_debts），副作用可见；
-            #   但 new_events / new_hooks 在分支路径下**不写主表**——避免与 main 重复 add
-            #   （同一 event_id 在 promote 时第二次插入会撞 UNIQUE 约束）。分支的
-            #   new_events / new_hooks 由 ``promote_branch`` 合并后在 main commit 时
-            #   统一写入领域表（与 main 直接 add 走同一路径）。
+            #   Sprint 7 审查 P0 修复：分支 commit 路径**整体跳过**领域表写透
+            #   （含 character / world / relationship / debt / new_events / new_hooks
+            #   / resolved_hooks）——避免分支未 promote 即污染 main 领域表。
+            #   分支的所有副作用由 promote 时按序重放在 main commit 路径下统一
+            #   写入（commit_delta 走 main 路径时不传 skip_all）。仅 main commit
+            #   路径（branch_id 为 None 或 branches.name = 'main'）执行领域表写透。
             is_main_branch_for_write = branch_id is None or (
                 (lambda r: r["name"] == "main" if r is not None else False)(
                     conn.execute("SELECT name FROM branches WHERE branch_id = ?", (branch_id,)).fetchone()
@@ -878,7 +882,7 @@ class StoryStateService:
             )
             self._write_through(
                 conn, project_id, delta, new_version,
-                skip_new_events_hooks=(not is_main_branch_for_write),
+                skip_all=(not is_main_branch_for_write),
             )
 
             # 6) commits
@@ -1111,15 +1115,27 @@ class StoryStateService:
         new_version: int,
         *,
         skip_new_events_hooks: bool = False,
+        skip_all: bool = False,
     ) -> None:
         """把 delta 的 7 数组写透到对应领域表。
 
-        ``skip_new_events_hooks``（Sprint 7 新增）：分支 commit 路径下为 True，
-        跳过 ``new_events`` / ``new_hooks`` 写主表（plot_events / hooks）——
-        避免与 main 重复 add 同一 event_id / hook_id（UNIQUE 约束冲突）。分支
-        的 new_events / new_hooks 由 ``promote_branch`` 在合并到 main 时统一写入。
-        character / world / relationship / debt 等其他数组仍按原语义写透。
+        ``skip_new_events_hooks``（Sprint 7 兼容）：仅跳过 ``new_events`` /
+        ``new_hooks`` 写主表（plot_events / hooks）。
+
+        ``skip_all``（Sprint 7 修订，Sprint 7 审查 P0 修复引入）：
+        分支 commit 路径下为 True，**整体跳过**领域表写透（含 character /
+        world / relationship / debt / new_events / new_hooks / resolved_hooks）。
+        分支路径不应污染 main 领域表——分支的所有 7 数组副作用由 promote 时
+        按序重放在 main commit 路径下统一写入。
+        优先级：``skip_all=True`` 时跳过整个方法体；
+        ``skip_all=False`` 时再按 ``skip_new_events_hooks`` 决定是否写
+        ``new_events`` / ``new_hooks``。
         """
+        if skip_all:
+            # 分支 commit：领域表写透不在此路径执行；副作用由 promote 按序重放
+            # 在 main commit 时统一落库（commit_delta 走 main 路径时不传
+            # skip_all）。
+            return
         chapter_id = delta["chapter_id"]
 
         # character_changes
@@ -1901,20 +1917,45 @@ class StoryStateService:
         *,
         chapter_id: str | None = None,
     ) -> dict:
-        """把分支全部 commits 合并为单个 delta，在 main 上走一次完整 validate+commit。
+        """把分支 commits 按序重放到 main（Sprint 7 审查 P0 修订）。
 
-        流程（state-delta-v0.md §6.3 + 任务书）：
+        旧实现（被否决）：把分支全部 commits 的 7 数组 concat 成单个 merged
+        delta，在 main 上提交一次。该方案的**致命缺陷**在于：applier.py
+        固定顺序 ``resolved_hooks → new_hooks``（与 character / world 等
+        顺序无关），合并时若分支内某 commit 顺序为「先 new_hook 后
+        resolved_hooks 同 hook_id」，concat 后新顺序会变成「resolved 先于
+        add」，导致 resolved 静默丢失——hook 以 OPEN 落 main。
+
+        新语义（Sprint 7 审查拍板）：
         1. 校验 branch 存在 + 属于同 project + ``status='ACTIVE'``。
-        2. 收集该 branch 所有 ``commits``（按 ``resulting_state_version ASC``），
-           按 delta_id 顺序拼出 merged delta 的 7 数组（concat）。
-        3. ``chapter_id`` 缺省：取分支首个 commit 的 chapter_id。
-        4. ``submit_delta`` 验证 merged delta；通过后 ``commit_delta(branch_id=None)``
-           走 main 路径，``author_approval['promoted_from'] = branch_id``；
-           写入 commits.validation_json 标记 ``{"promoted_from": branch_id}``。
-        5. 成功后 ``UPDATE branches SET status='MERGED'``。
-        6. 原 branch commits 仅读不动。
+        2. 取分支全部 commits 按 ``resulting_state_version ASC``。
+        3. 对每个分支 commit：
+           - 读原 delta 的 ``payload_json``（7 数组）；
+           - 构造 replay delta：**新 delta_id**（避免撞 PK），``chapter_id``
+             取该 commit 的原 chapter_id（参数 ``chapter_id`` 仅作「兜底
+             补充」，不强制覆盖），``previous_state_version`` 重写为 main
+             当前最新 version（每次重放递增 +1），``workflow_run_id`` /
+             ``created_by`` / ``notes`` 标记 ``"replay-from-branch"``；
+           - ``submit_delta`` 校验，通过后 ``commit_delta(branch_id=None)``
+             走 main 路径；``author_approval['promoted_from']`` + ``source_commit_id``
+             注入 ``validation_json`` 便于审计。
+        4. 全部成功后 ``UPDATE branches SET status='MERGED'``；中途失败：
+           已成功重放的 main commits 保留（与正常 commit 一致的事务语义），
+           branch 保持 ``ACTIVE``，错误向上抛（router 按异常类型映射到
+           422 / 409 / 500）。
+        5. **新 delta 行不复用原 delta_id**：原 state_deltas 行（status=
+           applied、归属分支）只读不动；重放生成**新 delta 行**（新 delta_id，
+           同样 ``status='applied'``，归属 main commits）。
 
-        返回 ``commit_delta`` 的结果 dict（含 ``commit_id`` / ``state_version`` 等）。
+        偏离 ``state-delta-v0.md §6.3``「单一合并 commit」字面——详见
+        ``packages/core/story_state/README.md §6.5`` deviation 段落（采用
+        按序重放保留每条 delta 顺序语义与写透正确性；单合并 commit 的
+        concat 方案被否决以避免 resolved_hooks/new_hooks 应用顺序破坏）。
+
+        返回 dict：``commit_id`` / ``state_version`` / ``delta_id``（最后一个
+        重放产生的 main delta_id）/ ``promoted_from`` / ``promoted_commits`` /
+        ``branch_id``（main.branch_id）/ ``replayed_delta_ids``（本次重放
+        在 main 上产生的新 delta_id 列表，便于测试断言）。
         """
         conn = get_connection(self.db_path)
         try:
@@ -1965,67 +2006,82 @@ class StoryStateService:
                     "promoted_commits": 0,
                     "commit_id": None,
                     "state_version": int(row["base_state_version"] or 0),
+                    "delta_id": None,
+                    "replayed_delta_ids": [],
                 }
 
-            promote_chapter_id = chapter_id or commit_rows[0]["chapter_id"]
-
-            merged_arrays: dict = {
-                "character_changes": [],
-                "world_changes": [],
-                "relationship_changes": [],
-                "new_events": [],
-                "resolved_hooks": [],
-                "new_hooks": [],
-                "debt_changes": [],
-            }
-            for cr in commit_rows:
-                d_row = conn.execute(
-                    "SELECT payload_json FROM state_deltas WHERE delta_id = ?",
-                    (cr["delta_id"],),
-                ).fetchone()
-                if d_row is None:
-                    continue
-                payload = _parse_required_json(d_row["payload_json"], {}) or {}
-                for k in merged_arrays:
-                    merged_arrays[k].extend(payload.get(k) or [])
-
-            current_version, _snap = _latest_snapshot_version(conn, project_id)
+            # 收集分支所有 (commit_id, chapter_id, delta_id) 用于按序重放
+            ordered: list[tuple[str, str, str]] = [
+                (cr["commit_id"], cr["chapter_id"] or chapter_id, cr["delta_id"])
+                for cr in commit_rows
+            ]
         finally:
             conn.close()
 
-        merged_delta_id = new_id("dlt")
-        now_ts = datetime.now(timezone.utc).isoformat()
-        merged_delta = {
-            "delta_id": merged_delta_id,
-            "delta_version": 1,
-            "schema_version": "state-delta-v0",
-            "chapter_id": promote_chapter_id,
-            "workflow_run_id": f"system:promote:{branch_id}",
-            "previous_state_version": current_version,
-            "created_by": f"system:promote:{branch_id}",
-            "created_at": now_ts,
-            "supersedes": None,
-            "notes": f"promoted from branch {branch_id}",
-            **merged_arrays,
-        }
+        # 按序重放：每次 main commit +1，不复用原 delta 行（避免 PK 冲突与
+        # 跨分支溯源混乱）；中途失败保留已重放的 main commits，错误向上抛。
+        replayed: list[dict] = []  # [{delta_id, commit_id, state_version, source_commit_id}, ...]
+        try:
+            for source_commit_id, source_chapter_id, source_delta_id in ordered:
+                replay_payload = self._load_branch_commit_payload(source_delta_id)
+                # 取 main 当前最新 version（每次重放后 +1）
+                conn = get_connection(self.db_path)
+                try:
+                    current_version, _ = _latest_snapshot_version(conn, project_id)
+                finally:
+                    conn.close()
 
-        submit_result = self.submit_delta(merged_delta)
-        if submit_result["status"] != "validated":
-            raise StateConflictError(
-                f"promote merged delta rejected by validator: {submit_result['errors']}",
-                delta_id=submit_result["delta_id"],
-            )
-        ap: dict = {
-            "approver": f"system:promote:{branch_id}",
-            "notes": f"promoted from branch {branch_id}",
-            "promoted_from": branch_id,
-        }
-        commit_result = self.commit_delta(
-            submit_result["delta_id"],
-            ap,
-            f"system:promote:{branch_id}",
-        )
+                replay_delta_id = new_id("dlt")
+                now_ts = datetime.now(timezone.utc).isoformat()
+                # chapter_id：优先使用参数 ``chapter_id``（任务书「可选章节归属」）；
+                # 否则沿用该 commit 在分支上的原 chapter_id（保持重放与原 delta
+                # 的章节归属语义一致，便于审计）。
+                replay_chapter_id = chapter_id or source_chapter_id
+                replay_delta = {
+                    "delta_id": replay_delta_id,
+                    "delta_version": 1,
+                    "schema_version": "state-delta-v0",
+                    "chapter_id": replay_chapter_id,
+                    "workflow_run_id": f"system:promote:{branch_id}",
+                    "previous_state_version": current_version,
+                    "created_by": f"system:promote:{branch_id}",
+                    "created_at": now_ts,
+                    "supersedes": None,
+                    "notes": f"replay-from-branch:{branch_id}:source_commit:{source_commit_id}",
+                    **replay_payload,
+                }
 
+                submit_result = self.submit_delta(replay_delta)
+                if submit_result["status"] != "validated":
+                    raise StateConflictError(
+                        f"promote replay delta rejected by validator: {submit_result['errors']}",
+                        delta_id=submit_result["delta_id"],
+                    )
+                ap: dict = {
+                    "approver": f"system:promote:{branch_id}",
+                    "notes": f"replay from branch {branch_id} (source_commit={source_commit_id})",
+                    "promoted_from": branch_id,
+                    "source_commit_id": source_commit_id,
+                }
+                commit_result = self.commit_delta(
+                    submit_result["delta_id"],
+                    ap,
+                    f"system:promote:{branch_id}",
+                    branch_id=None,  # 走 main 路径
+                )
+                replayed.append({
+                    "delta_id": replay_delta_id,
+                    "commit_id": commit_result["commit_id"],
+                    "state_version": commit_result["state_version"],
+                    "source_commit_id": source_commit_id,
+                })
+        except Exception:
+            # 中途失败：保留已成功重放的 main commits（与正常 commit 一致
+            # 的事务语义：每次 commit_delta 独立事务、已 commit 不回滚），
+            # branch 保持 ACTIVE，错误向上抛。
+            raise
+
+        # 全部成功 → UPDATE branches.status='MERGED'
         conn = get_connection(self.db_path)
         try:
             conn.execute(
@@ -2035,19 +2091,61 @@ class StoryStateService:
             conn.commit()
         finally:
             conn.close()
-        commit_result["promoted_from"] = branch_id
-        commit_result["promoted_commits"] = len(commit_rows)
-        # promote 落 main：commit_result 中补上 branch_id（=main branch_id）便于 router / 测试断言
+
+        last = replayed[-1]
+        # 取 main.branch_id 便于 router / 测试断言
         _conn = get_connection(self.db_path)
         try:
             _row = _conn.execute(
                 "SELECT branch_id FROM branches WHERE project_id = ? AND name = 'main'",
                 (project_id,),
             ).fetchone()
-            commit_result["branch_id"] = _row["branch_id"] if _row is not None else None
+            main_branch_id = _row["branch_id"] if _row is not None else None
         finally:
             _conn.close()
-        return commit_result
+
+        return {
+            "commit_id": last["commit_id"],
+            "delta_id": last["delta_id"],
+            "state_version": last["state_version"],
+            "promoted_from": branch_id,
+            "promoted_commits": len(replayed),
+            "branch_id": main_branch_id,
+            "replayed_delta_ids": [r["delta_id"] for r in replayed],
+            "snapshot_ref": None,
+        }
+
+    def _load_branch_commit_payload(self, source_delta_id: str) -> dict:
+        """从 state_deltas 行读 ``payload_json``，还原 7 数组用于重放。
+
+        重放路径专用：仅读 payload_json 列（7 数组），不依赖元信息字段；
+        元信息（chapter_id / previous_state_version / created_by 等）由
+        promote_branch 按 main 当前上下文重写。
+        """
+        conn = get_connection(self.db_path)
+        try:
+            d_row = conn.execute(
+                "SELECT payload_json FROM state_deltas WHERE delta_id = ?",
+                (source_delta_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if d_row is None:
+            raise StateConflictError(
+                f"promote replay source delta {source_delta_id!r} not found in state_deltas",
+                delta_id=source_delta_id,
+            )
+        payload = _parse_required_json(d_row["payload_json"], {}) or {}
+        keys = (
+            "character_changes",
+            "world_changes",
+            "relationship_changes",
+            "new_events",
+            "resolved_hooks",
+            "new_hooks",
+            "debt_changes",
+        )
+        return {k: list(payload.get(k) or []) for k in keys}
 
     def diff_versions(
         self,

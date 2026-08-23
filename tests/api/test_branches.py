@@ -17,6 +17,7 @@ httpx ASGI + tmp_path db；不引入 pytest-asyncio。
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 
@@ -593,5 +594,303 @@ def test_commit_without_branch_id_uses_main(tmp_path: Path):
                 assert row["name"] == "main"
             finally:
                 conn.close()
+
+    asyncio.run(run())
+
+
+# -------------------------------------------------------------- Sprint 7 审查 P0/P1 修复测试
+
+
+def test_promote_replay_resolves_hook_in_branch_order(tmp_path: Path):
+    """P0-1：分支内 commit1 new_hook h1 → commit2 resolved_hooks h1 → promote 后
+    main 快照 h1 status=RESOLVED，领域表 hooks.h1 status=RESOLVED 且
+    payoff_chapter_id 正确。
+
+    旧 concat 方案因 applier 固定顺序（resolved_hooks 先于 new_hooks）导致
+    resolved 静默丢失；按序重放后正确。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            _cid = await _make_character(app, pid)
+            chap = await _make_chapter(app, pid, number=1)
+            r = await _request(app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap})
+            assert r.status_code == 201
+
+            # 建分支
+            r = await _request(app, "POST", f"/api/projects/{pid}/branches", json={"name": "hook-order"})
+            bid = r.json()["branch_id"]
+
+            # 分支 commit 1: new_hook h1
+            delta1 = {
+                **_make_meta("dlt_bh1", chap, 1),
+                "character_changes": [], "world_changes": [], "relationship_changes": [],
+                "new_events": [], "resolved_hooks": [],
+                "new_hooks": [{
+                    "change_id": "nh1", "op": "add", "target_id": "h1",
+                    "hook_id": "h1", "name": "钩子1",
+                    "importance": 0.7, "description": "x",
+                    "confidence": 0.9, "evidence": _evidence(chap), "risk_level": "LOW",
+                }],
+                "debt_changes": [],
+            }
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json={**delta1, "branch_id": bid})
+            assert r.status_code == 201, r.text
+            r = await _request(app, "POST", f"/api/projects/{pid}/commits",
+                               json={"delta_id": "dlt_bh1", "author_approval": {"approver": "u"},
+                                     "workflow_run_id": "w1", "branch_id": bid})
+            assert r.status_code == 201, r.text
+
+            # 分支 commit 2: resolved_hooks h1 → RESOLVED，payoff 在 chap1
+            delta2 = {
+                **_make_meta("dlt_bh2", chap, 2),
+                "character_changes": [], "world_changes": [], "relationship_changes": [],
+                "new_events": [], "new_hooks": [],
+                "resolved_hooks": [{
+                    "change_id": "rh1", "op": "update", "target_id": "h1",
+                    "hook_id": "h1", "from_status": "OPEN", "to_status": "RESOLVED",
+                    "payoff_chapter_id": chap, "payoff_summary": "promote branch 兑现",
+                    "confidence": 0.9, "evidence": _evidence(chap), "risk_level": "LOW",
+                }],
+                "debt_changes": [],
+            }
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json={**delta2, "branch_id": bid})
+            assert r.status_code == 201, r.text
+            r = await _request(app, "POST", f"/api/projects/{pid}/commits",
+                               json={"delta_id": "dlt_bh2", "author_approval": {"approver": "u"},
+                                     "workflow_run_id": "w2", "branch_id": bid})
+            assert r.status_code == 201, r.text
+
+            # promote 前：领域表 hooks 表里**无 h1 行**（P0-2 修复：分支 commit
+            # 完全跳过领域表写透，避免污染 main）
+            conn = sqlite3.connect(str(tmp_path / "novelos.db"))
+            conn.row_factory = sqlite3.Row
+            try:
+                h1_before = conn.execute("SELECT * FROM hooks WHERE hook_id = 'h1'").fetchone()
+                assert h1_before is None, "分支 commit 不应污染 main.hooks 表"
+            finally:
+                conn.close()
+
+            # promote：按序重放 2 个分支 commit → main 上产生 2 个新 commit
+            r = await _request(app, "POST", f"/api/projects/{pid}/branches/{bid}/promote",
+                               json={"chapter_id": chap})
+            assert r.status_code == 201, r.text
+            result = r.json()
+            assert result["promoted_commits"] == 2
+            assert result["state_version"] == 3  # main: v1 → +2 = v3
+            assert len(result["replayed_delta_ids"]) == 2
+            # 重放产生新 delta_id，不复用原 delta_id
+            assert "dlt_bh1" not in result["replayed_delta_ids"]
+            assert "dlt_bh2" not in result["replayed_delta_ids"]
+
+            # main 快照：h1 status=RESOLVED
+            r = await _request(app, "GET", f"/api/projects/{pid}/state")
+            assert r.status_code == 200
+            main_state = r.json()
+            assert main_state["state_version"] == 3
+            h1_in_state = next((h for h in main_state["hooks"] if h["hook_id"] == "h1"), None)
+            assert h1_in_state is not None
+            assert h1_in_state["status"] == "RESOLVED"
+
+            # 领域表 hooks.h1 恰好一行（不重复），status=RESOLVED + payoff_chapter_id 正确
+            conn = sqlite3.connect(str(tmp_path / "novelos.db"))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute("SELECT * FROM hooks WHERE hook_id = 'h1'").fetchall()
+                assert len(rows) == 1, f"hooks.h1 应恰好一行，实际 {len(rows)}"
+                assert rows[0]["status"] == "RESOLVED"
+                assert rows[0]["payoff_chapter_id"] == chap
+                # commits 表：1 genesis + 2 分支 + 2 重放 = 5
+                cmt_count = conn.execute(
+                    "SELECT COUNT(*) AS n FROM commits WHERE project_id = ?", (pid,)
+                ).fetchone()["n"]
+                assert cmt_count == 5, f"应 5 commits（1 genesis + 2 分支 + 2 重放），实际 {cmt_count}"
+                # 重放 commit 应在 main 上且 validation_json 含 promoted_from + source_commit_id
+                main_branch_id = conn.execute(
+                    "SELECT branch_id FROM branches WHERE project_id = ? AND name = 'main'",
+                    (pid,),
+                ).fetchone()["branch_id"]
+                replay_rows = conn.execute(
+                    """
+                    SELECT validation_json FROM commits
+                    WHERE project_id = ? AND branch_id = ? AND delta_id != 'dlt_main'
+                    """,
+                    (pid, main_branch_id),
+                ).fetchall()
+                # 两条重放 commit 都含 promoted_from + source_commit_id
+                replayed_main = [
+                    r for r in replay_rows
+                    if "replay-from-branch" in (r["validation_json"] or "")
+                    or "promoted_from" in (r["validation_json"] or "")
+                ]
+                assert len(replayed_main) >= 2, "应有 2 条 main 上的 replay commit"
+            finally:
+                conn.close()
+
+    asyncio.run(run())
+
+
+def test_branch_commit_does_not_pollute_main_domain_tables(tmp_path: Path):
+    """P0-2：分支 commit（character 变更）不写领域表（character_states）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            cid = await _make_character(app, pid)
+            chap = await _make_chapter(app, pid)
+            r = await _request(app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap})
+            assert r.status_code == 201
+
+            # 初始状态：character_states 表里 cid 没有任何 state_version=2 行
+            conn = sqlite3.connect(str(tmp_path / "novelos.db"))
+            conn.row_factory = sqlite3.Row
+            try:
+                before = conn.execute(
+                    "SELECT COUNT(*) AS n FROM character_states WHERE character_id = ? AND state_version >= 2",
+                    (cid,),
+                ).fetchone()["n"]
+                assert before == 0
+            finally:
+                conn.close()
+
+            # 建分支 + 分支 commit（character state.location）
+            r = await _request(app, "POST", f"/api/projects/{pid}/branches", json={"name": "no-pollute"})
+            bid = r.json()["branch_id"]
+            delta = {
+                **_make_meta("dlt_np", chap, 1),
+                "character_changes": [{
+                    "change_id": "cc_np", "op": "update", "target_id": cid,
+                    "character_id": cid, "facet": "state", "field": "state.location",
+                    "before": "Unknown", "after": "BranchTown",
+                    "confidence": 0.9, "evidence": _evidence(chap), "risk_level": "LOW",
+                }],
+                "world_changes": [], "relationship_changes": [],
+                "new_events": [], "resolved_hooks": [], "new_hooks": [], "debt_changes": [],
+            }
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json={**delta, "branch_id": bid})
+            assert r.status_code == 201
+            r = await _request(app, "POST", f"/api/projects/{pid}/commits",
+                               json={"delta_id": "dlt_np", "author_approval": {"approver": "u"},
+                                     "workflow_run_id": "w", "branch_id": bid})
+            assert r.status_code == 201
+
+            # 关键断言：分支 commit 后 main.character_states **无 state_version>=2 行**
+            conn = sqlite3.connect(str(tmp_path / "novelos.db"))
+            conn.row_factory = sqlite3.Row
+            try:
+                pol = conn.execute(
+                    "SELECT COUNT(*) AS n FROM character_states WHERE character_id = ? AND state_version >= 2",
+                    (cid,),
+                ).fetchone()["n"]
+                assert pol == 0, "分支 commit 不应污染 main.character_states 表"
+            finally:
+                conn.close()
+
+            # main 状态：v1，location 仍为 Unknown
+            r = await _request(app, "GET", f"/api/projects/{pid}/state")
+            assert r.status_code == 200
+            main_state = r.json()
+            assert main_state["state_version"] == 1
+            char = next(c for c in main_state["characters"] if c["character_id"] == cid)
+            assert char["current_state"].get("location") in (None, "Unknown")
+
+    asyncio.run(run())
+
+
+def test_promote_writes_through_domain_exactly_once(tmp_path: Path):
+    """promote 后领域表恰好写透一次（无重复 state 行）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            cid = await _make_character(app, pid)
+            chap = await _make_chapter(app, pid)
+            r = await _request(app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap})
+            assert r.status_code == 201
+
+            r = await _request(app, "POST", f"/api/projects/{pid}/branches", json={"name": "once"})
+            bid = r.json()["branch_id"]
+
+            delta = {
+                **_make_meta("dlt_once", chap, 1),
+                "character_changes": [{
+                    "change_id": "cc_o", "op": "update", "target_id": cid,
+                    "character_id": cid, "facet": "state", "field": "state.location",
+                    "before": "Unknown", "after": "OnceTown",
+                    "confidence": 0.9, "evidence": _evidence(chap), "risk_level": "LOW",
+                }],
+                "world_changes": [], "relationship_changes": [],
+                "new_events": [], "resolved_hooks": [], "new_hooks": [], "debt_changes": [],
+            }
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json={**delta, "branch_id": bid})
+            assert r.status_code == 201
+            r = await _request(app, "POST", f"/api/projects/{pid}/commits",
+                               json={"delta_id": "dlt_once", "author_approval": {"approver": "u"},
+                                     "workflow_run_id": "w", "branch_id": bid})
+            assert r.status_code == 201
+
+            # promote
+            r = await _request(app, "POST", f"/api/projects/{pid}/branches/{bid}/promote",
+                               json={"chapter_id": chap})
+            assert r.status_code == 201
+
+            # character_states 表里 cid 应恰好一行 state_version=2（不重复）
+            conn = sqlite3.connect(str(tmp_path / "novelos.db"))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM character_states WHERE character_id = ? AND state_version = 2",
+                    (cid,),
+                ).fetchall()
+                assert len(rows) == 1
+                body = json.loads(rows[0]["state_json"])
+                assert body.get("location") == "OnceTown"
+            finally:
+                conn.close()
+
+    asyncio.run(run())
+
+
+def test_submit_delta_missing_chapter_id_returns_422(tmp_path: Path):
+    """P1-1：submit_delta body 缺 chapter_id 且带 branch_id 时返回 422（不是 500）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            chap = await _make_chapter(app, pid)
+            r = await _request(app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap})
+            assert r.status_code == 201
+
+            r = await _request(app, "POST", f"/api/projects/{pid}/branches", json={"name": "no-chap"})
+            bid = r.json()["branch_id"]
+
+            # body 缺 chapter_id + 带 branch_id → 走 validate_delta 校验失败 → 422
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/deltas",
+                json={
+                    "delta_id": "dlt_nochap",
+                    "delta_version": 1,
+                    "schema_version": "state-delta-v0",
+                    # chapter_id missing
+                    "workflow_run_id": "w",
+                    "previous_state_version": 1,
+                    "created_by": "u",
+                    "created_at": "2026-08-23T10:00:00+00:00",
+                    "supersedes": None,
+                    "notes": None,
+                    "character_changes": [], "world_changes": [], "relationship_changes": [],
+                    "new_events": [], "resolved_hooks": [], "new_hooks": [], "debt_changes": [],
+                    "branch_id": bid,
+                },
+            )
+            assert r.status_code == 422, r.text
+            detail = r.json()["detail"]
+            assert "errors" in detail
+            assert "chapter_id" in str(detail["errors"])
 
     asyncio.run(run())
