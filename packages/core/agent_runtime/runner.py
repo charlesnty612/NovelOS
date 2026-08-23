@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -257,6 +258,14 @@ def run_agent(
             {"role": "system", "content": prompt_content},
             {"role": "user", "content": user_payload_text},
         ]
+        if os.environ.get("NOVELOS_DEBUG_OBSERVER_PAYLOAD") == "1" and agent_name == "observer":
+            debug_dir = Path(os.environ.get("NOVELOS_DEBUG_DIR", "data"))
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            (debug_dir / "observer_payload_debug.json").write_text(
+                json.dumps({"body_bytes": len(json.dumps(messages, ensure_ascii=False).encode("utf-8")),
+                            "system_chars": len(prompt_content), "user_chars": len(user_payload_text),
+                            "payload": input_payload}, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
 
         # 调用 + 重试循环
         start = time.monotonic()

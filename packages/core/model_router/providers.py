@@ -114,7 +114,7 @@ class OpenAICompatibleProvider:
         api_key: str | None,
         model: str,
         *,
-        timeout: float = 60.0,
+        timeout: float = 240.0,
         client: httpx.Client | None = None,
     ) -> None:
         if not base_url:
@@ -142,13 +142,16 @@ class OpenAICompatibleProvider:
 
     def complete(self, messages: Messages, params: dict | None = None) -> CompletionResult:
         body: dict[str, Any] = {"model": self.model, "messages": list(messages)}
-        if params:
-            # params 透传 temperature / top_p / seed / max_tokens 等
-            body.update(params)
+        request_params = dict(params or {})
+        request_timeout = request_params.pop("timeout_s", self.timeout)
+        if not isinstance(request_timeout, (int, float)) or request_timeout <= 0:
+            raise ValueError("params_json.timeout_s must be a positive number of seconds")
+        if request_params:
+            body.update(request_params)
         url = f"{self.base_url}/chat/completions"
         client = self._ensure_client()
         try:
-            resp = client.post(url, json=body, headers=self._headers())
+            resp = client.post(url, json=body, headers=self._headers(), timeout=request_timeout)
         except httpx.HTTPError as exc:
             raise ProviderError(self.name, f"network error: {exc}") from exc
 

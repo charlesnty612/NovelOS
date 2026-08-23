@@ -17,6 +17,7 @@ from packages.core.agent_runtime.structured_output import (
     OBSERVER_FORBIDDEN_KEYS,
     extract_json,
     strip_code_fence,
+    strip_think_blocks,
     strip_observer_violations,
     validate_contract,
 )
@@ -70,6 +71,21 @@ def test_strip_code_fence_removes_both_markers():
     cleaned = strip_code_fence("```json\nfoo\n```")
     assert "```" not in cleaned
     assert "foo" in cleaned
+
+
+def test_extract_json_removes_think_block():
+    raw = "<think>internal reasoning\nwith a newline</think>\n```json\n{\"ok\": true}\n```"
+    assert extract_json(raw) == {"ok": True}
+
+
+def test_strip_think_blocks_is_multiline_and_case_insensitive():
+    raw = "前文<think>\nFirst line\nsecond line\n</think>正文"
+    cleaned = strip_think_blocks(raw)
+    assert cleaned == "前文正文"
+
+
+def test_strip_think_blocks_preserves_literal_unclosed_tag():
+    assert strip_think_blocks("正文<think>未结束") == "正文<think>未结束"
 
 
 # ---------------------------------------------------------------------------

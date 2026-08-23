@@ -182,10 +182,14 @@ class ModelRouter:
                 f"(config_id={config_row.get('config_id')})"
             )
         api_key = resolve_api_key(provider_name, params)
+        timeout = params.get("timeout_s", 240.0)
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("params_json.timeout_s must be a positive number of seconds")
         return OpenAICompatibleProvider(
             base_url=base_url,
             api_key=api_key,
             model=config_row["model"],
+            timeout=timeout,
         )
 
     # -------------------------------------------------------------- call_with_fallback

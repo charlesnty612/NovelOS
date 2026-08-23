@@ -76,7 +76,7 @@ def _director_script():
 
 
 def _writer_script():
-    prose = "夜色。灯芯闪了一下花。"
+    prose = "<think>这是内部推理，不应进入正文。</think>夜色。灯芯闪了一下花。"
     return [
         json.dumps(
             {
@@ -156,6 +156,9 @@ def test_smoke_full_chain(tmp_path: Path):
             )
             assert r.status_code == 201
             statuses["write"] = r.json()["status"]
+            drafts = (await _request(app, "GET", f"/api/chapters/{cid}/drafts")).json()
+            assert drafts and "<think>" not in drafts[0]["content"]
+            assert "夜色。灯芯闪了一下花。" in drafts[0]["content"]
 
             # 3. review (PAUSED → resume approved)
             r = await _request(

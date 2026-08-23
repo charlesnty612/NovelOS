@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
+from packages.core.agent_runtime.structured_output import strip_think_blocks
 from packages.core.context_engine import build_writer_input
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
@@ -134,7 +135,7 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
     chapter_id = ctx["chapter_id"]
     run_id = ctx["run_id"]
     writer_output = ctx.get("writer_output") or {}
-    prose = writer_output.get("prose") or ""
+    prose = strip_think_blocks(writer_output.get("prose") or "")
     self_report = writer_output.get("self_report") or {}
     word_count = int(self_report.get("word_count") or len(prose))
     prompt_version = writer_output.get("prompt_version") or "writer:v1"

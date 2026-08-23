@@ -91,11 +91,14 @@ python scripts/eval_regression.py
 # 端到端 HTTP smoke（真实起服务，临时库，跑完自清理）
 python scripts/smoke_e2e.py
 
+# 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
+python scripts/real_llm_e2e.py
+
 # 前端单测（vitest；当前 133）
 cd apps/web && npm run test
 ```
 
-## 配置（环境变量，前缀 `NOVELOS_`）
+- OpenAI 兼容 Provider 的请求超时默认 240 秒，可在 `model_configs.params_json.timeout_s` 覆盖为正数秒数。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|

@@ -63,6 +63,7 @@ OBSERVER_FORBIDDEN_KEYS: frozenset[str] = frozenset(
 
 
 _FENCE_RE = re.compile(r"```(?:json|JSON)?\s*|\s*```", flags=re.MULTILINE)
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", flags=re.IGNORECASE | re.DOTALL)
 _OPEN_BRACE_RE = re.compile(r"\{")
 _CLOSE_BRACE_RE = re.compile(r"\}")
 
@@ -70,6 +71,15 @@ _CLOSE_BRACE_RE = re.compile(r"\}")
 def strip_code_fence(text: str) -> str:
     r"""去除 ``\`\`\`json / \`\`\``` 围栏（首末各一次）。多段围栏不做递归处理。"""
     return _FENCE_RE.sub("", text)
+
+
+def strip_think_blocks(text: str) -> str:
+    """移除推理模型可能附带的 ``<think>...</think>`` 文本块。
+
+    只移除完整、跨行、区分大小写不敏感的思考块；不会把普通正文中的字样
+    ``<think>`` 误删。该函数位于结构化输出边界，散文正文也会自然复用。
+    """
+    return _THINK_RE.sub("", text).strip()
 
 
 def extract_json(text: str) -> dict[str, Any]:
@@ -82,7 +92,7 @@ def extract_json(text: str) -> dict[str, Any]:
     """
     if not isinstance(text, str):
         raise AgentOutputError(f"output is not a string: {type(text).__name__}")
-    cleaned = strip_code_fence(text).strip()
+    cleaned = strip_think_blocks(strip_code_fence(text))
     if not cleaned:
         raise AgentOutputError("empty output after stripping fences")
     first = cleaned.find("{")
@@ -188,6 +198,7 @@ def validate_contract(expected: str | None, payload: dict[str, Any]) -> None:
 __all__ = [
     "extract_json",
     "strip_code_fence",
+    "strip_think_blocks",
     "validate_contract",
     "strip_observer_violations",
     "OBSERVER_ALLOWED_KEYS",

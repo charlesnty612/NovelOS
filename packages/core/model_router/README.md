@@ -131,7 +131,7 @@ test_provider = router.get_provider({"provider": "mock", "model": "x", "params_j
 | `AnthropicProvider` | `POST {base_url}/v1/messages`，`max_tokens=1`、`messages=[{"role":"user","content":" "}]` | `200` 或 `401`（鉴权失败但 endpoint 通）→ `ok=True`；其它 4xx/5xx 或网络异常 → `ok=False`；401 时 `detail` 标注 `reachable (401 auth failed, but endpoint reachable)` |
 | `OllamaProvider` | `GET {base_url}/api/tags` | 任意 2xx → `ok=True`；其它 4xx/5xx 或网络异常 → `ok=False` |
 
-实现位置：`packages/core/model_router/providers.py` 各 Provider 的 `health_check(*, timeout=None)`。
+- `OpenAICompatibleProvider.complete` 的 HTTP 请求默认 timeout 为 240 秒；可在 `model_configs.params_json.timeout_s` 配置正数秒数。
 
 ## Sprint 8：失败转移链（`ModelRouter.call_with_fallback`）
 

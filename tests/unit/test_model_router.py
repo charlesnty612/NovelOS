@@ -80,6 +80,20 @@ def _make_handler(payload: dict, status_code: int = 200):
     return captured, handler
 
 
+def test_openai_provider_uses_params_timeout_and_omits_it_from_body():
+    payload = {"choices": [{"message": {"content": "hello"}}]}
+    captured = {}
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=payload)
+    p = OpenAICompatibleProvider(
+        base_url="https://api.example.com", api_key=None, model="m",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    p.complete([], params={"timeout_s": 321.5})
+    assert captured["body"] == {"model": "m", "messages": []}
+
+
 def test_openai_provider_sends_correct_request_and_parses_response():
     payload = {
         "choices": [{"message": {"role": "assistant", "content": "hello"}}],
