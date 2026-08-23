@@ -44,8 +44,16 @@ npm run test
 npm run preview
 ```
 
-> 后端开发服务器（Sprint 5 端口：18081）需单独启动：
-> `python scripts/serve.py` 或通过项目约定的命令。前端的 `/api` 代理会自动转发。
+> 后端开发服务器需单独启动：
+>
+> - `python -m packages.core.api.main`：入口默认端口 **18081**（8000 开发者本机常被占用），
+>   `NOVELOS_PORT` 环境变量覆盖（也可用 `NOVELOS_API_PORT`，向后兼容旧精细变量）；
+> - `python scripts/serve.py`：使用 `packages/core/config.py` 的 `settings.api_port`，
+>   **默认端口 8000**（优先级 `NOVELOS_PORT` > `NOVELOS_API_PORT` > 8000）；
+> - 前端的 `/api` 代理目标固定 `http://127.0.0.1:18081`（见 `vite.config.ts`），
+>   因此若用 `scripts/serve.py` 启动需 `NOVELOS_PORT=18081 python scripts/serve.py`。
+>
+> 前端开发期 `/api` 代理会自动转发到后端。
 
 ## 目录结构
 

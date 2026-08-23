@@ -41,6 +41,16 @@ describe('ApprovalCard', () => {
     expect(screen.getByText('-9.1%')).toBeInTheDocument();
   });
 
+  it('chapter-review 分支 InfoBanner 文案明确「驳回 → FAILED + 章节保持 DRAFTED」', () => {
+    // Sprint 5 review F3：驳回语义文案必须明确 run 终止/章节保持/允许重新发起。
+    render(<ApprovalCard {...baseProps} />);
+    expect(
+      screen.getByText(
+        /驳回则该 run 结束（FAILED），章节保持 DRAFTED，可改稿后重新发起写正文\/审校/,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('点击「批准」触发 onApprove(true)', async () => {
     const onApprove = vi.fn().mockResolvedValue(undefined);
     render(<ApprovalCard {...baseProps} onApprove={onApprove} />);

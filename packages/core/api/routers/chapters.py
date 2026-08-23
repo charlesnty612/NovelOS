@@ -27,6 +27,7 @@ from packages.domain.chapter.service import (
     ChapterService,
     ChapterTransitionError,
     DraftStatusNotAllowed,
+    DraftVersionConflict,
 )
 
 log = get_logger("novelos.routers.chapters")
@@ -147,6 +148,12 @@ def create_chapter_draft(
                 f"chapter {chapter_id!r} status is {exc.current!r}; "
                 f"draft creation only allowed when status is 'DRAFTED' or 'REVIEWED'"
             ),
+        ) from exc
+    except DraftVersionConflict as exc:
+        # Sprint 5 review F2：idx_drafts_chapter_version 唯一约束触发。
+        raise HTTPException(
+            status_code=409,
+            detail=f"draft version {exc.version} already exists for chapter {chapter_id!r}",
         ) from exc
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc

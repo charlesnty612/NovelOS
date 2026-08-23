@@ -16,7 +16,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -145,6 +145,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         @app.get("/{full_path:path}", include_in_schema=False)
         def spa_fallback(full_path: str):  # noqa: ANN202 - FastAPI handler
+            # Sprint 5 修复（S5 review F1）：``/api`` 未匹配路径必须返 404 JSON，
+            # 不能被 SPA fallback 兜住返回 index.html（前端据此判断 ApiError）。
+            if full_path == "api" or full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="Not Found")
             # 仅在 GET 时返回 SPA index；这里整个端点已是 GET。
             # 真实静态文件（已在 dist 根下但不在 assets/ 下）由浏览器直接请求时会落到这里，
             # 一律返回 index.html（前端 SPA 路由自行处理）。

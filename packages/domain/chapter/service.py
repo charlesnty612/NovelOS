@@ -76,6 +76,20 @@ class DraftStatusNotAllowed(ChapterError):
         self.current = current
 
 
+class DraftVersionConflict(ChapterError):
+    """同 chapter 下 (chapter_id, version) 重复。
+
+    Sprint 5 review F2：0002 迁移加了 ``idx_drafts_chapter_version`` 唯一索引，
+    手工/并发 INSERT 触发 ``sqlite3.IntegrityError`` 时被本类吞下，由 router 转 409。
+    """
+
+    def __init__(self, version: int) -> None:
+        super().__init__(
+            f"draft version {version} already exists for this chapter"
+        )
+        self.version = version
+
+
 class ChapterService:
     """章节领域服务（chapters 表 CRUD）。"""
 
@@ -308,27 +322,33 @@ class ChapterService:
 
             # 3) INSERT
             draft_id = new_id("dr")
-            conn.execute(
-                """
-                INSERT INTO drafts
-                    (draft_id, chapter_id, version, content,
-                     created_by, prompt_version, model_id, created_at)
-                VALUES
-                    (:draft_id, :chapter_id, :version, :content,
-                     :created_by, :prompt_version, :model_id, :created_at)
-                """,
-                {
-                    "draft_id": draft_id,
-                    "chapter_id": chapter_id,
-                    "version": next_version,
-                    "content": content,
-                    "created_by": "human",
-                    "prompt_version": None,
-                    "model_id": None,
-                    "created_at": now,
-                },
-            )
-            conn.commit()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO drafts
+                        (draft_id, chapter_id, version, content,
+                         created_by, prompt_version, model_id, created_at)
+                    VALUES
+                        (:draft_id, :chapter_id, :version, :content,
+                         :created_by, :prompt_version, :model_id, :created_at)
+                    """,
+                    {
+                        "draft_id": draft_id,
+                        "chapter_id": chapter_id,
+                        "version": next_version,
+                        "content": content,
+                        "created_by": "human",
+                        "prompt_version": None,
+                        "model_id": None,
+                        "created_at": now,
+                    },
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                # idx_drafts_chapter_version UNIQUE 违反：手工/并发导致的版本冲突。
+                # 转领域异常，router 层映射 409。
+                conn.rollback()
+                raise DraftVersionConflict(next_version) from exc
         finally:
             conn.close()
 
@@ -350,5 +370,6 @@ __all__ = [
     "ChapterNumberConflict",
     "ChapterTransitionError",
     "DraftStatusNotAllowed",
+    "DraftVersionConflict",
     "ChapterError",
 ]

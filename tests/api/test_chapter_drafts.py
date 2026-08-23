@@ -15,9 +15,11 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 
 import httpx
+import pytest
 
 from packages.core.api.main import create_app
 from packages.core.config import Settings
@@ -222,5 +224,91 @@ def test_create_draft_empty_content_returns_422(tmp_path: Path):
                 json={"content": ""},
             )
             assert r.status_code == 422
+
+    asyncio.run(run())
+
+
+# =============================================================================
+# Sprint 5 review F2：(chapter_id, version) 唯一索引 — 自增路径不退化 + 直插重复触发 IntegrityError
+# =============================================================================
+
+
+def test_create_draft_after_manual_v1_still_yields_v2(tmp_path: Path):
+    """手工 INSERT version=1 后，``create_draft`` 仍能拿到 version=2
+    （COALESCE(MAX)+1 自增路径不被 F2 唯一索引破坏）。"""
+    from packages.core.db import get_connection
+
+    app = _create_app(tmp_path)
+    db_path = tmp_path / "novelos.db"
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid, status="DRAFTED")
+
+            # 手工 SQL 直插一份 version=1
+            conn = get_connection(db_path)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO drafts
+                        (draft_id, chapter_id, version, content,
+                         created_by, prompt_version, model_id, created_at)
+                    VALUES (?, ?, 1, ?, 'human', NULL, NULL, ?)
+                    """,
+                    ("dr_manual_v1", cid, "手工 v1", "2025-01-01T00:00:00Z"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            # 再走 API create_draft → 应得 version=2（COALESCE MAX+1）
+            r = await _request(
+                app, "POST", f"/api/chapters/{cid}/drafts",
+                json={"content": "API v2"},
+            )
+            assert r.status_code == 201, r.text
+            draft = r.json()
+            assert draft["version"] == 2
+            assert draft["content"] == "API v2"
+
+    asyncio.run(run())
+
+
+def test_duplicate_chapter_version_triggers_integrity_error(tmp_path: Path):
+    """直接 SQL 插入重复 (chapter_id, version) 触发 idx_drafts_chapter_version 唯一约束 → IntegrityError。"""
+    from packages.core.db import get_connection
+
+    app = _create_app(tmp_path)
+    db_path = tmp_path / "novelos.db"
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid, status="DRAFTED")
+
+            # 通过 API 创建一份 version=1 的 draft
+            r = await _request(
+                app, "POST", f"/api/chapters/{cid}/drafts",
+                json={"content": "API v1"},
+            )
+            assert r.status_code == 201
+            assert r.json()["version"] == 1
+
+            # 手工再 INSERT 一份 version=1（重复），期望 IntegrityError
+            conn = get_connection(db_path)
+            try:
+                with pytest.raises(sqlite3.IntegrityError):
+                    conn.execute(
+                        """
+                        INSERT INTO drafts
+                            (draft_id, chapter_id, version, content,
+                             created_by, prompt_version, model_id, created_at)
+                        VALUES (?, ?, 1, ?, 'human', NULL, NULL, ?)
+                        """,
+                        ("dr_duplicate", cid, "dup", "2025-01-01T00:00:00Z"),
+                    )
+            finally:
+                conn.close()
 
     asyncio.run(run())

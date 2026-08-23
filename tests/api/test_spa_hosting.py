@@ -199,3 +199,57 @@ def test_resolve_web_dist_unset_uses_default(tmp_path: Path, monkeypatch):
         assert resolved.resolve() == _DEFAULT_WEB_DIST.resolve()
     else:
         assert resolved is None
+
+
+# ============================================================================
+# Sprint 5 review F1：SPA catch-all 必须把 ``/api`` 未知路径放回 404 JSON，
+# 而非用 index.html 兜住（前端 ApiError 期待 JSON detail）。
+# ============================================================================
+
+
+def test_spa_fallback_api_unknown_returns_404_json(tmp_path: Path, monkeypatch):
+    """dist 存在时 GET /api/does-not-exist 不应返回 SPA index.html，
+    必须 404 且响应是 JSON（content-type 非 HTML）。"""
+    dist = _make_fake_dist(tmp_path)
+    monkeypatch.setenv("NOVELOS_WEB_DIST", str(dist))
+    from packages.core import config as config_mod
+
+    config_mod.reset_settings()
+
+    settings = Settings(data_dir=tmp_path, log_level="WARNING")
+    app = create_app(settings)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(app, "GET", "/api/does-not-exist")
+            return r
+
+    r = asyncio.run(run())
+    assert r.status_code == 404, r.text
+    # 必须 JSON 形态（FastAPI HTTPException 默认 application/json）
+    assert "text/html" not in r.headers["content-type"], r.headers.get("content-type")
+    body = r.json()
+    assert body["detail"] == "Not Found"
+
+
+def test_spa_fallback_api_root_returns_404_json(tmp_path: Path, monkeypatch):
+    """dist 存在时 GET /api（精确路径）也必须 404 JSON，不被 SPA fallback 兜住。"""
+    dist = _make_fake_dist(tmp_path)
+    monkeypatch.setenv("NOVELOS_WEB_DIST", str(dist))
+    from packages.core import config as config_mod
+
+    config_mod.reset_settings()
+
+    settings = Settings(data_dir=tmp_path, log_level="WARNING")
+    app = create_app(settings)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(app, "GET", "/api")
+            return r
+
+    r = asyncio.run(run())
+    assert r.status_code == 404, r.text
+    assert "text/html" not in r.headers["content-type"], r.headers.get("content-type")
+    body = r.json()
+    assert body["detail"] == "Not Found"

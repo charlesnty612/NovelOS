@@ -106,7 +106,21 @@ function ModelConfigsPanel() {
               <span style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
                 <button
                   className="btn btn--sm"
-                  onClick={() => setEditing(m)}
+                  onClick={async () => {
+                    // Sprint 5 review F5：编辑时先 GET 详情拿最新 params_json（含 api_key），
+                    // 避免编辑后误以为有值而漏填。
+                    try {
+                      const detail = await modelConfigsApi.get(m.config_id);
+                      setEditing(detail);
+                    } catch (e: unknown) {
+                      const msg =
+                        e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
+                      setTestResult({
+                        config_id: m.config_id,
+                        detail: `加载详情失败 · ${msg}`,
+                      });
+                    }
+                  }}
                   data-testid={`model-config-edit-${m.config_id}`}
                 >
                   编辑
@@ -499,6 +513,11 @@ function ModelConfigFormModal({
                 placeholder="（可选；若不填，运行时由 resolve_api_key 从 env 解析）"
                 data-testid="cfg-api-key"
               />
+              {initial ? (
+                <div className="muted small" data-testid="cfg-api-key-hint">
+                  留空保存将清除已保存的密钥。
+                </div>
+              ) : null}
             </div>
           </div>
         ) : (

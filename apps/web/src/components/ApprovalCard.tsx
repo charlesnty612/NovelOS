@@ -76,7 +76,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
 
       <InfoBanner>
         {stage === 'chapter-review'
-          ? '请作者审查后批准（继续推进到 REVIEWED）或驳回（留在 DRAFTED 继续改）。'
+          ? '请作者审查后批准（继续推进到 REVIEWED）或驳回则该 run 结束（FAILED），章节保持 DRAFTED，可改稿后重新发起写正文/审校。'
           : stage === 'chapter-commit.high_risk_approval'
           ? 'Observer 检测到高风险 / definition / world_kind=rule 变更，请人工审批。'
           : '请人工决议以恢复 workflow。'}
