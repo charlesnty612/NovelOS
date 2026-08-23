@@ -39,6 +39,7 @@ MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通�
 - general：按任务书执行，禁止自行发明设计。
 - smart：只读审查每个 Sprint 的产出。
 - 铁律：**禁止 Python 整文件重写做块级修改**（2026-08-23 事故教训），编辑一律用 Edit 锚点替换；跨文件块移动前先备份。
+- 模块 README 强制（用户要求 2026-08-23）：每个被创建或实质改动的模块目录必须自带 `README.md`（职责 / 对外接口 / 依赖 / 使用入口 / 维护注意点），列入每个 Sprint 的交付清单与 DoD，smart 审查加「README 真实性」一项；Sprint 0 已建模块回溯补齐。
 
 ---
 
@@ -46,7 +47,9 @@ MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通�
 
 | Sprint | 范围 | 依赖 | DoD（可机检） |
 |---|---|---|---|
-| S0 基础设施 | git 仓库、§70 目录、pyproject、配置/日志、SQLite 迁移 runner（跑通 0001_init.sql 28 表）、pytest 骨架、FastAPI 健康检查端点、Vite+React 骨架 | 无 | `pytest` 绿；`uvicorn` 启动 `/health` 200；迁移后 sqlite 库 28 表；前端 `npm run build` 成功 |
+| S0 基础设施 | git 仓库、§70 目录、pyproject、配置/日志、SQLite 迁移 runner（跑通 0001_init.sql 28 表）、pytest 骨架、FastAPI 健康检查端点、Vite+React 骨架 | 无 | `pytest` 绿；`uvicorn` 启动 `/api/health` 200；迁移后 sqlite 库 28 表；前端 `npm run build` 成功 |
+
+> S0 说明：PRD §70 中的 `database/schemas/`、`docs/ui/`、`docs/workflows/` 为预留目录，非 S0 交付（schema 权威按 D-I5 在 `docs/**/schemas/*.json`）。
 | S1 Story Domain | Project/Character/World/Plot/Chapter 五个领域 Service + REST API + 28 表中相关表的 CRUD | S0 | 五实体 CRUD API 集成测试绿；UI 不经过 DB（Service 层隔离）有测试证明 |
 | S2 Story State | State Delta 应用器（Delta→Validate→Commit→Rollback→Snapshot），Schema 用 state-delta.schema.json 校验，state_version 单调递增 | S1 | delta 提交/回滚/快照恢复单测绿；schema 违规 delta 被拒测试绿；关库重开状态恢复 |
 | S3 Agent Runtime | Prompt 加载（docs/agents/prompts/*.md）、Model Router（mock + openai_compatible）、结构化输出（JSON 提取 + schema 校验 + 重试）、ai_call_logs 落库 | S2 | mock provider 下 director/writer/observer 三 prompt 端到端调用测试绿；调用日志落库可查 |

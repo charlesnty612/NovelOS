@@ -5,9 +5,10 @@
 - ``apply_migrations(db_path, migrations_dir=None)``：按文件名升序执行
   ``migrations_dir`` 下所有 ``*.sql``；通过 ``_migrations`` 表幂等追踪。
 
-幂等策略：执行前先查 ``_migrations``，跳过已记录的脚本。脚本执行后
-无论成功失败都尝试写入记录；只对真正成功的脚本写入。重复执行不会
-重复跑 DDL（脚本整体 SQL 已被 ``executescript`` 一次性跑完）。
+幂等策略：执行前先查 ``_migrations``，跳过已记录的脚本。脚本执行成功
+后才写入记录。重复执行不会重复跑 DDL。
+已知限制：DDL 脚本自身不带 ``IF NOT EXISTS``，若脚本执行成功但写记录
+前进程崩溃，重跑会因「表已存在」报错，需人工处置（删除半成品 db 重来）。
 """
 
 from __future__ import annotations
@@ -100,10 +101,12 @@ def apply_migrations(
 
 
 def count_tables(db_path: Path | str) -> int:
-    """查询业务表数量（不含 sqlite_* 与 _migrations）。"""
+    """查询总表数量（不含 sqlite_*，含 _migrations）。
+
+    业务表固定 28 张；含 _migrations 时总数为 29，调用方按需减一。
+    """
     conn = get_connection(db_path)
     try:
-        # 不排除 _migrations：业务表数固定为 28（含 _migrations 则为 29，调用方按需减一）
         return conn.execute(_TABLE_COUNT_QUERY).fetchone()[0]
     finally:
         conn.close()
