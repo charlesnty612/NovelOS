@@ -1,0 +1,329 @@
+"""Delta 应用器（Sprint 2）。
+
+职责：
+- :func:`apply_delta(state: dict, delta: dict) -> dict`：纯函数，把 Delta 的 7 个数组
+  依次应用到 ``state``（深拷贝），返回新 state。不修改入参。
+
+字段路径约定（对齐 ``state-delta-v0.md §2.5``）：
+- ``character_changes.field`` 形如 ``state.location`` / ``core.personality[2]``：
+  - ``facet=state`` 写入 ``characters[cid].current_state[key]``（顶层 key 替换）。
+  - ``facet=definition`` 写入 ``characters[cid].definition[key]``（顶层 key 替换）。
+  - 列表整体替换：``knowledge`` / ``beliefs`` 数组整体替换为 ``after``（直接覆盖）。
+- ``world_changes``：
+  - ``world_kind in {location, faction, rule}`` → ``world.<world_kind>s[id] = merged``
+    （顶层 key 替换 ``after``；rule 走 ``world_rules`` 列表，append/remove 同步）。
+  - ``world_kind in {politics, economy, event, time}`` → ``world[world_kind] = merged``
+    （顶层 key 替换 ``after``，无则创建空 dict/对象）。
+- ``relationship_changes``：按 ``from_character_id + to_character_id + relation_type``
+  在 ``characters[].relationships`` 与顶层索引中匹配；``after`` 整体替换。
+- ``new_events``：
+  - ``state.recent_events`` append ``event_id``；超过 50 条截断保留最新 50。
+  - ``state.events[event_id] = {type, participants, time, description}``（轻量字典，避免
+    重复 event 详情；``event_id`` 即 ``target_id``）。
+- ``resolved_hooks``：按 ``hook_id`` 更新 ``state.hooks`` 元素的 ``status`` / ``payoff_summary``。
+- ``new_hooks``：append 到 ``state.hooks``（status 默认 OPEN）。
+- ``debt_changes``：按 ``op`` 处理 ``state.debts``（add/update/remove）。
+
+设计要点：
+- 纯函数：不读不写 DB；只对入参做深拷贝再修改；返回新 state。
+- 失败安全：找不到目标对象时（update/remove）静默忽略——与「不污染前一状态」原则一致：
+  apply 阶段不抛错，由 validator 与 commit 阶段提前拦截；本函数只保证「给定合法 delta」
+  能产出「与领域意图一致」的新 state。
+- ``world_changes.field`` 中允许点号路径（如 ``state.location``）；本实现按顶层 key 替换
+  （schema §2.5 中 field 是字符串但未限定为 dotted path；与 PRD §17「facet 字段粒度」同
+  程度简化——粒度细化属 v1 工作）。
+"""
+
+from __future__ import annotations
+
+import copy
+from typing import Any
+
+# recent_events 最大保留条数（对齐任务书口径 50）。
+RECENT_EVENTS_CAP = 50
+
+# world_kind 属于"基础实体" → 写入对应 dict（key = world_id）。
+_LOCATION_KIND = "location"
+_FACTION_KIND = "faction"
+_RULE_KIND = "rule"
+
+# world_kind 属于"运行时维度" → 写入 world[<world_kind>]（不挂 location_id）。
+_RUNTIME_KINDS = {"politics", "economy", "event", "time"}
+
+
+# ----------------------------------------------------------------------------- public
+
+
+def apply_delta(state: dict, delta: dict) -> dict:
+    """应用 Delta 到 state，返回新 state（不修改入参）。"""
+    new_state = copy.deepcopy(state)
+    _apply_character_changes(new_state, delta.get("character_changes") or [])
+    _apply_world_changes(new_state, delta.get("world_changes") or [])
+    _apply_relationship_changes(new_state, delta.get("relationship_changes") or [])
+    _apply_new_events(new_state, delta.get("new_events") or [])
+    _apply_resolved_hooks(new_state, delta.get("resolved_hooks") or [])
+    _apply_new_hooks(new_state, delta.get("new_hooks") or [])
+    _apply_debt_changes(new_state, delta.get("debt_changes") or [])
+    return new_state
+
+
+# ----------------------------------------------------------------------------- arrays
+
+
+def _apply_character_changes(state: dict, items: list[dict]) -> None:
+    characters = state.setdefault("characters", [])
+    by_id = {c.get("character_id"): c for c in characters}
+    for change in items:
+        cid = change.get("character_id")
+        op = change.get("op")
+        field = change.get("field") or ""
+        after = change.get("after")
+        char = by_id.get(cid)
+        if char is None:
+            # update/remove 但角色不在快照中：按静默忽略处理（apply 阶段不抛错）。
+            continue
+
+        facet = change.get("facet")
+        # 兼容顶层字段 knowledge/beliefs：整体替换为 after（after 必须是 list）。
+        if field in ("knowledge", "beliefs"):
+            if op in ("update", "add"):
+                char[field] = list(after) if isinstance(after, list) else []
+            elif op == "remove":
+                char[field] = []
+            continue
+
+        # facet=state → current_state[key] 顶层 key 替换
+        # facet=definition → definition[key] 顶层 key 替换（首次出现自动创建 dict）
+        target_root = "current_state" if facet == "state" else "definition"
+        bucket = char.setdefault(target_root, {}) if target_root in char else char.setdefault(
+            target_root, {}
+        )
+        # 若 char 已存在 current_state 为非 dict（比如初始化时缺省 {}），保证是 dict
+        if not isinstance(bucket, dict):
+            bucket = {}
+            char[target_root] = bucket
+        if op in ("add", "update"):
+            key = field.split(".", 1)[-1] if field.startswith("state.") or field.startswith("core.") else field
+            # 若 field 含点号（如 state.location），取最后一段作为 key（顶层替换语义）。
+            bucket[key] = after
+        elif op == "remove":
+            key = field.split(".", 1)[-1] if field.startswith("state.") or field.startswith("core.") else field
+            bucket.pop(key, None)
+
+
+def _apply_world_changes(state: dict, items: list[dict]) -> None:
+    world = state.setdefault("world", {})
+    for change in items:
+        kind = change.get("world_kind")
+        op = change.get("op")
+        wid = change.get("world_id")
+        field = change.get("field") or ""
+        after = change.get("after")
+
+        if kind in (_LOCATION_KIND, _FACTION_KIND):
+            bucket_key = "locations" if kind == _LOCATION_KIND else "factions"
+            bucket = world.setdefault(bucket_key, {})
+            entry = bucket.get(wid)
+            if op in ("add", "update"):
+                if entry is None:
+                    # 新建条目：用 after 整体填充（允许 after 为 dict 含 name/statement/...）
+                    entry = {}
+                    bucket[wid] = entry
+                _set_top_level(entry, field, after)
+            elif op == "remove":
+                bucket.pop(wid, None)
+            continue
+
+        if kind == _RULE_KIND:
+            rules = world.setdefault("world_rules", [])
+            if op == "add":
+                rules.append(
+                    {
+                        "world_rule_id": wid,
+                        "name": (after or {}).get("name") if isinstance(after, dict) else None,
+                        "statement": (after or {}).get("statement") if isinstance(after, dict) else "",
+                        "data_json": (after or {}).get("data_json") if isinstance(after, dict) else {},
+                    }
+                )
+            elif op == "update":
+                for r in rules:
+                    if r.get("world_rule_id") == wid:
+                        if isinstance(after, dict):
+                            _set_top_level(r, "name", after.get("name"))
+                            _set_top_level(r, "statement", after.get("statement"))
+                            _set_top_level(r, "data_json", after.get("data_json"))
+                        break
+            elif op == "remove":
+                world["world_rules"] = [r for r in rules if r.get("world_rule_id") != wid]
+            continue
+
+        if kind in _RUNTIME_KINDS:
+            slot = world.setdefault(kind, {})
+            if op in ("add", "update"):
+                if isinstance(after, dict):
+                    slot[wid] = after
+                else:
+                    slot[wid] = {"value": after}
+            elif op == "remove":
+                slot.pop(wid, None)
+            continue
+
+        # 未识别 kind：静默忽略（schema 校验已保证合法枚举）。
+
+
+def _set_top_level(entry: dict, field: str, value: Any) -> None:
+    """设置 entry[field]。
+
+    路径语义：
+    - 形如 ``"data_json.population"`` → 进入 entry["data_json"]["population"] 子 dict。
+    - 形如 ``"name"`` / ``"statement"`` → 顶层 key 替换。
+    - 形如 ``"state.location"`` → 取最后一段 ``location`` 作为顶层 key（与 character_changes
+      facet=state 同一语义，对齐 state-delta-v0.md §2.5.1 示例）。
+    """
+    if not field:
+        return
+    parts = field.split(".")
+    # 显式两层：data_json.<key> → 进入子 dict（保证子 dict 存在）
+    if len(parts) == 2 and parts[0] == "data_json" and parts[1]:
+        bucket = entry.setdefault("data_json", {})
+        if not isinstance(bucket, dict):
+            bucket = {}
+            entry["data_json"] = bucket
+        bucket[parts[1]] = value
+        return
+    # 顶层 key 替换（field 含点号则取最后一段，与 character_changes 对齐）
+    entry[parts[-1]] = value
+
+
+def _apply_relationship_changes(state: dict, items: list[dict]) -> None:
+    characters = state.setdefault("characters", [])
+    by_id = {c.get("character_id"): c for c in characters}
+    for change in items:
+        from_id = change.get("from_character_id")
+        to_id = change.get("to_character_id")
+        rel_type = change.get("relation_type")
+        op = change.get("op")
+        after = change.get("after")
+        char = by_id.get(from_id)
+        if char is None:
+            continue
+        rels = char.setdefault("relationships", [])
+        match_idx = None
+        for i, r in enumerate(rels):
+            if (
+                r.get("from_character_id") == from_id
+                and r.get("to_character_id") == to_id
+                and r.get("relation_type") == rel_type
+            ):
+                match_idx = i
+                break
+        if op in ("add", "update"):
+            entry = {
+                "relationship_id": change.get("target_id"),
+                "from_character_id": from_id,
+                "to_character_id": to_id,
+                "relation_type": rel_type,
+                "state_json": after if isinstance(after, dict) else {},
+            }
+            if match_idx is None:
+                rels.append(entry)
+            else:
+                rels[match_idx] = entry
+        elif op == "remove":
+            if match_idx is not None:
+                rels.pop(match_idx)
+
+
+def _apply_new_events(state: dict, items: list[dict]) -> None:
+    recent = state.setdefault("recent_events", [])
+    events = state.setdefault("events", {})
+    for ev in items:
+        eid = ev.get("event_id")
+        if not eid:
+            continue
+        recent.append(eid)
+        events[eid] = {
+            "type": ev.get("type"),
+            "participants": ev.get("participants") or [],
+            "time": ev.get("time") or {},
+            "description": ev.get("description"),
+        }
+    # 截断：保留最新 RECENT_EVENTS_CAP 条
+    if len(recent) > RECENT_EVENTS_CAP:
+        del recent[: len(recent) - RECENT_EVENTS_CAP]
+
+
+def _apply_resolved_hooks(state: dict, items: list[dict]) -> None:
+    hooks = state.setdefault("hooks", [])
+    by_id = {h.get("hook_id"): h for h in hooks}
+    for change in items:
+        hid = change.get("hook_id")
+        h = by_id.get(hid)
+        if h is None:
+            continue
+        to_status = change.get("to_status")
+        if to_status:
+            h["status"] = to_status
+        if change.get("payoff_summary"):
+            h["payoff_summary"] = change["payoff_summary"]
+        if change.get("payoff_chapter_id"):
+            h["payoff_chapter_id"] = change["payoff_chapter_id"]
+
+
+def _apply_new_hooks(state: dict, items: list[dict]) -> None:
+    hooks = state.setdefault("hooks", [])
+    for change in items:
+        hooks.append(
+            {
+                "hook_id": change.get("hook_id"),
+                "name": change.get("name"),
+                "introduced_chapter_id": change.get("chapter_id"),
+                "status": "OPEN",
+                "importance": change.get("importance"),
+                "expected_payoff_chapter_id": change.get("expected_payoff_chapter_id"),
+                "payoff_chapter_id": None,
+                "visibility": change.get("visibility") or "RESTRICTED",
+                "description": change.get("description"),
+            }
+        )
+
+
+def _apply_debt_changes(state: dict, items: list[dict]) -> None:
+    debts = state.setdefault("debts", [])
+    by_id = {d.get("debt_id"): i for i, d in enumerate(debts)}
+    for change in items:
+        op = change.get("op")
+        did = change.get("debt_id")
+        idx = by_id.get(did)
+        if op == "add":
+            debts.append(
+                {
+                    "debt_id": did,
+                    "description": change.get("description"),
+                    "created_chapter_id": change.get("chapter_id"),
+                    "severity": change.get("severity_after"),
+                    "deadline_chapter_id": change.get("deadline_chapter_id"),
+                    "status": change.get("status_after"),
+                    "visibility": change.get("visibility") or "RESTRICTED",
+                }
+            )
+            by_id[did] = len(debts) - 1
+        elif op == "update":
+            if idx is None:
+                continue
+            existing = debts[idx]
+            if change.get("severity_after") is not None:
+                existing["severity"] = change["severity_after"]
+            if change.get("status_after") is not None:
+                existing["status"] = change["status_after"]
+            if change.get("deadline_chapter_id") is not None:
+                existing["deadline_chapter_id"] = change["deadline_chapter_id"]
+            if change.get("description") is not None:
+                existing["description"] = change["description"]
+        elif op == "remove":
+            if idx is not None:
+                debts.pop(idx)
+                by_id = {d.get("debt_id"): i for i, d in enumerate(debts)}
+
+
+__all__ = ["apply_delta", "RECENT_EVENTS_CAP"]
