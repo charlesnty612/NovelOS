@@ -271,8 +271,14 @@ def _apply_resolved_hooks(state: dict, items: list[dict]) -> None:
             h["status"] = to_status
         if change.get("payoff_summary"):
             h["payoff_summary"] = change["payoff_summary"]
-        if change.get("payoff_chapter_id"):
-            h["payoff_chapter_id"] = change["payoff_chapter_id"]
+        # 逆 Delta（rollback）哨兵：显式清除 payoff_chapter_id，与领域表写透的置 NULL 对齐
+        if "__CLEAR_PAYOFF_CHAPTER__" in (change.get("notes") or ""):
+            h.pop("payoff_chapter_id", None)
+        else:
+            # 兑现章节缺省时回退到 evidence.chapter_id，与领域表写透（payoff_chapter_id=delta.chapter_id）对齐
+            payoff_ch = change.get("payoff_chapter_id") or (change.get("evidence") or {}).get("chapter_id")
+            if payoff_ch:
+                h["payoff_chapter_id"] = payoff_ch
 
 
 def _apply_new_hooks(state: dict, items: list[dict]) -> None:
