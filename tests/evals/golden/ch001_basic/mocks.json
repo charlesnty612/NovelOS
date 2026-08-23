@@ -1,0 +1,284 @@
+{
+  "director": [
+    {
+      "schema_version": "director-plan.v1",
+      "prompt_version": "director:v1",
+      "chapter_id": "ch_识海古镜",
+      "chapter_goal": "林轩在洞府禁地意外触发识海古镜的传承，觉醒血脉记忆，与同门周元第一次正面冲突埋下伏笔",
+      "core_conflict": "林轩的求存本能 vs 古镜传承试炼的代价",
+      "turning_point": "林轩握碎古镜外层封印的瞬间，引动禁地异象，恰好被路过的周元察觉",
+      "expected_role": "setup",
+      "key_beats": [
+        {
+          "beat_id": "beat_001",
+          "purpose": "林轩夜入洞府禁地，触发古镜外层封印",
+          "involved_characters": ["char_林轩_0"],
+          "involved_locations": [],
+          "involved_hooks": [],
+          "involved_debts": [],
+          "risk_level": "LOW",
+          "narrative_question_served": "主角动机：复仇与求证"
+        },
+        {
+          "beat_id": "beat_002",
+          "purpose": "古镜试炼，林轩以杀伐意志破第一重境，识海中浮现古法残篇",
+          "involved_characters": ["char_林轩_0"],
+          "involved_locations": [],
+          "involved_hooks": ["hook_ancient_mirror"],
+          "involved_debts": [],
+          "risk_level": "MEDIUM",
+          "narrative_question_served": "金手指解锁"
+        },
+        {
+          "beat_id": "beat_003",
+          "purpose": "周元悄然抵达禁地外，察觉异动，未介入但起疑",
+          "involved_characters": ["char_周元_1", "char_林轩_0"],
+          "involved_locations": [],
+          "involved_hooks": ["hook_zhou_yuan_suspicion"],
+          "involved_debts": [],
+          "risk_level": "LOW",
+          "narrative_question_served": "伏笔：反派侧写"
+        },
+        {
+          "beat_id": "beat_004",
+          "purpose": "林轩识海剧痛中握碎古镜外层封印，引动禁地异象，章末戛然而止",
+          "involved_characters": ["char_林轩_0"],
+          "involved_locations": [],
+          "involved_hooks": ["hook_ancient_mirror", "hook_cave_anomaly"],
+          "involved_debts": [],
+          "risk_level": "HIGH",
+          "narrative_question_served": "章末钩子：异象悬念"
+        }
+      ],
+      "character_changes_planned": [
+        {
+          "character_id": "char_林轩_0",
+          "field": "goal",
+          "from": "查明父母死因，复仇雪恨",
+          "to": "查明父母死因并参悟古镜传承",
+          "rationale": "金手指觉醒带来新目标",
+          "risk_level": "LOW"
+        },
+        {
+          "character_id": "char_林轩_0",
+          "field": "knowledge",
+          "from": "父母死因存疑",
+          "to": "父母死因存疑，并初步识得古法残篇",
+          "rationale": "古镜试炼触发血脉记忆",
+          "risk_level": "LOW"
+        }
+      ],
+      "information_releases": [
+        {
+          "audience": "reader",
+          "target_id": "reader",
+          "content_summary": "识海古镜传承的暗示与代价",
+          "source_visibility": "AUTHOR",
+          "knowledge_permission_compliant": true
+        }
+      ],
+      "hook_handling": [
+        {
+          "hook_id": "hook_ancient_mirror",
+          "action": "introduce",
+          "rationale": "本章引入核心金手指"
+        },
+        {
+          "hook_id": "hook_zhou_yuan_suspicion",
+          "action": "introduce",
+          "rationale": "埋下周元反派人设"
+        },
+        {
+          "hook_id": "hook_cave_anomaly",
+          "action": "introduce",
+          "rationale": "章末异象钩子"
+        }
+      ],
+      "debt_handling": [],
+      "proposed_new_entities": [
+        {
+          "kind": "item",
+          "rationale": "本章金手指",
+          "draft": {"name": "识海古镜", "kind": "传承类", "rarity": "上古"}
+        },
+        {
+          "kind": "location",
+          "rationale": "本章关键场景",
+          "draft": {"name": "洞府禁地", "kind": "禁地"}
+        }
+      ],
+      "deviations": [],
+      "knowledge_leakage_check": {
+        "uses_hidden_knowledge": false,
+        "leakage_details": null
+      },
+      "open_questions": [],
+      "notes_for_planner": "建议场景 2-3；末段必须停在异象瞬间，不要收尾。"
+    }
+  ],
+  "writer": [
+    {
+      "schema_version": "writer-output.v1",
+      "prompt_version": "writer:v1",
+      "chapter_id": "ch_识海古镜",
+      "prose": "夜雨如针，落入青云宗后山的石径。林轩踏过湿滑的青苔，衣袍下摆在泥泞中沾染数点。他停在洞府禁地入口，仰头望去，黑黢黢的山体被一线雷光劈开。\n\n禁地深处，一枚巴掌大的古镜静悬于石台之上，镜面无光却似吞尽周遭月华。林轩深吸一口气，伸手握住镜缘。刹那间识海剧痛，一道苍老的声音自血脉深处响起：「以杀止杀，方得此镜。」他咬牙将体内仅余的灵气压入掌心。\n\n镜面浮现第一重残篇，蝇头小字如蚁群般涌入神识。林轩周身骨骼咯咯作响，皮肤泛起暗金色的纹路，旋即被一股剧痛击退三步，撞上石壁。\n\n石壁之外，雨幕之中，周元负手而立，眯起眼望向禁地方向，嘴角勾出一丝不易察觉的弧度。\n\n异变陡生。古镜外层封印炸裂，一道青光自洞府深处直冲云霄，照亮半山。",
+      "self_report": {
+        "slots_filled": ["slot_001", "slot_002", "slot_003", "slot_004"],
+        "word_count": 312,
+        "scene_count": 2,
+        "deviations": [],
+        "forbidden_word_hits": [],
+        "self_check_notes": "末段戛然而止于异象，未收束；符合章末钩子要求。"
+      }
+    }
+  ],
+  "observer": [
+    {
+      "character_changes": [
+        {
+          "change_id": "cc_001",
+          "op": "add",
+          "target_id": "char_林轩_0",
+          "character_id": "char_林轩_0",
+          "facet": "state",
+          "field": "goal",
+          "before": null,
+          "after": "查明父母死因并参悟古镜传承",
+          "confidence": 0.85,
+          "evidence": {
+            "chapter_id": "ch_识海古镜",
+            "scene_id": "scene_002",
+            "excerpt": "识海剧痛，一道苍老的声音自血脉深处响起",
+            "span": {"start": 80, "end": 110}
+          },
+          "risk_level": "LOW",
+          "notes": "本章金手指觉醒带来的目标变化",
+          "visibility": "VISIBLE",
+          "who_knows": ["char_林轩_0"],
+          "reason": null
+        }
+      ],
+      "world_changes": [],
+      "relationship_changes": [],
+      "new_events": [
+        {
+          "change_id": "ev_001",
+          "op": "add",
+          "target_id": "evt_ancient_mirror_awaken",
+          "event_id": "evt_ancient_mirror_awaken",
+          "type": "revelation",
+          "cause": [],
+          "effects": ["evt_cave_anomaly"],
+          "participants": ["char_林轩_0"],
+          "location": null,
+          "time": {"timeline_day": 1, "in_story_date": "沧历三百一十二年 三月初七"},
+          "status": "recorded",
+          "description": "林轩在洞府禁地握碎识海古镜外层封印，觉醒血脉传承",
+          "confidence": 0.9,
+          "evidence": {
+            "chapter_id": "ch_识海古镜",
+            "scene_id": "scene_002",
+            "excerpt": "古镜外层封印炸裂，一道青光自洞府深处直冲云霄",
+            "span": {"start": 280, "end": 320}
+          },
+          "risk_level": "HIGH",
+          "notes": "本章高潮事件",
+          "visibility": "VISIBLE",
+          "who_knows": ["char_林轩_0"]
+        },
+        {
+          "change_id": "ev_002",
+          "op": "add",
+          "target_id": "evt_cave_anomaly",
+          "event_id": "evt_cave_anomaly",
+          "type": "transition",
+          "cause": ["evt_ancient_mirror_awaken"],
+          "effects": [],
+          "participants": ["char_林轩_0", "char_周元_1"],
+          "location": null,
+          "time": {"timeline_day": 1, "in_story_date": "沧历三百一十二年 三月初七"},
+          "status": "recorded",
+          "description": "禁地异象：青光冲霄，惊动宗门巡夜弟子与周元",
+          "confidence": 0.9,
+          "evidence": {
+            "chapter_id": "ch_识海古镜",
+            "scene_id": "scene_002",
+            "excerpt": "一道青光自洞府深处直冲云霄，照亮半山",
+            "span": {"start": 310, "end": 340}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "章末钩子",
+          "visibility": "RESTRICTED",
+          "who_knows": ["char_周元_1"]
+        }
+      ],
+      "resolved_hooks": [],
+      "new_hooks": [
+        {
+          "change_id": "nh_001",
+          "op": "add",
+          "target_id": "hook_ancient_mirror",
+          "hook_id": "hook_ancient_mirror",
+          "name": "识海古镜传承",
+          "importance": 0.9,
+          "expected_payoff_chapter_id": "ch_030",
+          "description": "林轩在禁地获得的识海古镜残篇，第一重已破，后续传承代价与全貌未明",
+          "confidence": 0.9,
+          "evidence": {
+            "chapter_id": "ch_识海古镜",
+            "scene_id": "scene_002",
+            "excerpt": "镜面浮现第一重残篇，蝇头小字如蚁群般涌入神识",
+            "span": {"start": 130, "end": 170}
+          },
+          "risk_level": "HIGH",
+          "notes": "本章核心金手指伏笔",
+          "visibility": "RESTRICTED",
+          "who_knows": ["char_林轩_0"]
+        },
+        {
+          "change_id": "nh_002",
+          "op": "add",
+          "target_id": "hook_zhou_yuan_suspicion",
+          "hook_id": "hook_zhou_yuan_suspicion",
+          "name": "周元的窥伺",
+          "importance": 0.7,
+          "expected_payoff_chapter_id": "ch_005",
+          "description": "周元目睹禁地异动，疑心林轩获传承，埋下后续陷害",
+          "confidence": 0.85,
+          "evidence": {
+            "chapter_id": "ch_识海古镜",
+            "scene_id": "scene_002",
+            "excerpt": "周元负手而立，眯起眼望向禁地方向，嘴角勾出一丝不易察觉的弧度",
+            "span": {"start": 250, "end": 280}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "反派侧写伏笔",
+          "visibility": "RESTRICTED",
+          "who_knows": ["char_周元_1"]
+        },
+        {
+          "change_id": "nh_003",
+          "op": "add",
+          "target_id": "hook_cave_anomaly",
+          "hook_id": "hook_cave_anomaly",
+          "name": "禁地异象惊宗门",
+          "importance": 0.8,
+          "expected_payoff_chapter_id": "ch_002",
+          "description": "青光冲霄，宗门高层必将追查，林轩需在下一章做出应对",
+          "confidence": 0.85,
+          "evidence": {
+            "chapter_id": "ch_识海古镜",
+            "scene_id": "scene_002",
+            "excerpt": "一道青光自洞府深处直冲云霄，照亮半山",
+            "span": {"start": 310, "end": 340}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "章末钩子，连贯下一章",
+          "visibility": "PUBLIC",
+          "who_knows": ["char_周元_1"]
+        }
+      ],
+      "debt_changes": []
+    }
+  ]
+}

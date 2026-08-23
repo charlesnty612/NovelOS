@@ -1,22 +1,54 @@
 # workflows.chapter_review（章节评审）
 
-> 职责：Observer 抽取 delta 提案 + Critic 评审 + Evaluation Harness 评分 → 输出 review verdict（pass / warn / block）；为 chapter_commit 提供放行决策。
-> 状态：空骨架（规划 Sprint 4 端到端，Sprint 6 评分管线完整）。
+> 职责：对本章草稿做最小基本检查（字数偏离 ±15%、禁用词扫描）+ Human 审批。完成后 chapters.status DRAFTED→REVIEWED。
+> 状态：Sprint 4-A 已实现（MVP 简化版）。
 
-## 职责与边界
-做：调 Observer / Critic，组装 verdict；Human Node 可驳回重写。
-不做：状态提交（属 chapter_commit）。
+## 节点列表
 
-## 对外接口（规划中）
-- `run(inputs: ChapterReviewInputs) -> ReviewVerdict`
+| node_id | kind | 说明 |
+|---|---|---|
+| `basic_checks` | Transform | 校验草稿存在性；字数偏离 target ±15% 记 warning；扫描 forbidden_words（默认 `["仿佛", "如同", "本章目标"]`）。输出 `review_report` 进 ctx |
+| `author_review` | Human | 抛 `PauseRequested(payload=review_report)` 等 author 决议；`human_input={"approved": true}` 通过 |
+| `mark_reviewed` | State | chapters.status DRAFTED→REVIEWED（仅当 author_review 通过） |
+
+注册名：`chapter-review`
+
+## 输入 / 输出
+
+- 输入：`chapter_id`（必须有 draft）。
+- 输出：`run_id` + status。PAUSED 时返回 `pause_payload`（含 review_report）；resume approved=true → COMPLETED + status=REVIEWED。
+
+## 失败语义
+
+- 无 draft → basic_checks 抛错 → run FAILED。
+- resume approved=false → mark_reviewed 抛错 → run FAILED，chapters.status 保持 DRAFTED。
+- chapters.status 非 DRAFTED → mark_reviewed 抛错 → run FAILED。
 
 ## 依赖
-- 上游：`packages/agents/observer/`、`packages/agents/critic/`、`packages/core/evaluation/`
+
+- `packages/core/workflow_runtime/`
+- `packages/core/db.py`
 
 ## 使用 / 入口
-待实现（Sprint 4 端到端，Sprint 6 完整评分）。
+
+API：
+
+```http
+POST /api/projects/{project_id}/chapters/{chapter_id}/review
+Content-Type: application/json
+
+{ "mock_providers": {} }   # 本工作流无需 agent
+
+# 审查报告返回后：
+POST /api/runs/{run_id}/resume
+Content-Type: application/json
+
+{ "human_input": { "approved": true } }
+```
 
 ## 维护注意点
-- verdict 必含可机检字段：`guardrail_violations / quality_scores / delta_proposal`。
-- 五硬门槛（PRD §86）阻断不可绕过。
-- 权威文档：PRD §40、§82-86；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4/6。
+
+- `review_report.warnings` 是信息性提示，不阻断 run（FATAL 仅在无 draft / author 拒绝 / status 不合法时）。
+- 字数检查基于字符数 `len(prose)`；中文按字符计算，不做分词。
+- Critic / Evaluation 评分管线属 Sprint 6；本 Sprint 仅 MVP 基本检查。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4/6、`docs/agents/agent-contracts-v0.md` §7.4。

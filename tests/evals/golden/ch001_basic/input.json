@@ -1,0 +1,37 @@
+{
+  "project": {
+    "name": "九幽仙途",
+    "premise": "修仙少年意外获上古传承，以杀伐证道",
+    "genre": "玄幻",
+    "target_words": 2200
+  },
+  "characters": [
+    {
+      "name": "林轩",
+      "role": "protagonist",
+      "core": {
+        "personality": "坚毅果决，重情义，逆境中求生",
+        "background": "青云宗外门弟子，筑基初期，父母早亡",
+        "goal": "查明父母死因，复仇雪恨，证道飞升",
+        "speech_pattern": "句短少修饰，常以反问收尾",
+        "appearance": "清瘦少年，眉宇带煞"
+      }
+    },
+    {
+      "name": "周元",
+      "role": "supporting",
+      "core": {
+        "personality": "圆滑市侩，表面热络实则趋利避害",
+        "background": "林轩同门师兄，筑基中期",
+        "goal": "在宗门内步步高升，攀附权贵",
+        "speech_pattern": "用词圆熟，喜用敬语暗藏机锋",
+        "appearance": "面如冠玉，眼带笑意"
+      }
+    }
+  ],
+  "chapter": {
+    "number": 1,
+    "title": "识海古镜"
+  },
+  "author_intent": "本章要让主角林轩意外在洞府禁地获得一枚上古识海古镜，触发觉醒；埋下宗门内部暗流与周元伏笔；末尾以异象收尾，营造开局悬念。需严格遵守番茄男频爽感：开局 300 字内出现冲突，三章内首次小高潮。"
+}
