@@ -349,6 +349,84 @@ def test_chapter_commit_without_review_fails(tmp_path: Path):
     asyncio.run(run())
 
 
+def test_chapter_write_on_committed_chapter_fails(tmp_path: Path):
+    """对已 COMMITTED 的 chapter 再次启动 chapter-write 应 FAILED，drafts 行数不增。
+
+    F1：chapter_write 仅允许 PLANNED/DRAFTED 启动；REVIEWED/COMMITTED 重跑被拒。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            mock_providers = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+                "observer": _observer_noop_script(),
+            }
+
+            # 完整跑到 COMMITTED
+            for path in ("plan", "write", "review", "commit"):
+                if path == "review":
+                    r = await _request(
+                        app, "POST", f"/api/projects/{pid}/chapters/{cid}/{path}",
+                        json={"mock_providers": mock_providers},
+                    )
+                    assert r.status_code == 201, r.text
+                    paused = r.json()
+                    assert paused["status"] == "PAUSED"
+                    r = await _request(
+                        app, "POST", f"/api/runs/{paused['run_id']}/resume",
+                        json={"human_input": {"approved": True}},
+                    )
+                    assert r.status_code == 200, r.text
+                    assert r.json()["status"] == "COMPLETED"
+                else:
+                    r = await _request(
+                        app, "POST", f"/api/projects/{pid}/chapters/{cid}/{path}",
+                        json={"mock_providers": mock_providers},
+                    )
+                    assert r.status_code == 201, r.text
+                    assert r.json()["status"] == "COMPLETED"
+
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.json()["status"] == "COMMITTED"
+
+            # 记录 COMMITTED 时的 drafts 行数
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                before = conn.execute(
+                    "SELECT COUNT(*) AS n FROM drafts WHERE chapter_id = ?", (cid,)
+                ).fetchone()["n"]
+            finally:
+                conn.close()
+            assert before == 1
+
+            # 再跑 chapter-write，期望 FAILED 且 drafts 行数不增
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            write_run = r.json()
+            assert write_run["status"] == "FAILED", write_run
+
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                after = conn.execute(
+                    "SELECT COUNT(*) AS n FROM drafts WHERE chapter_id = ?", (cid,)
+                ).fetchone()["n"]
+            finally:
+                conn.close()
+            assert after == before, f"drafts 行数应不变（before={before}, after={after}）"
+
+    asyncio.run(run())
+
+
 def test_list_runs_endpoint(tmp_path: Path):
     """GET /projects/{pid}/runs 列出该项目下的所有 workflow runs。"""
     app = _create_app(tmp_path)

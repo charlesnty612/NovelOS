@@ -161,10 +161,17 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
         cur = conn.execute("SELECT status FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()
         if cur is None:
             raise ValueError(f"chapter {chapter_id!r} not found")
-        if cur["status"] == "PLANNED":
+        status = cur["status"]
+        if status == "PLANNED":
             conn.execute(
                 "UPDATE chapters SET status = 'DRAFTED', updated_at = ? WHERE chapter_id = ?",
                 (now, chapter_id),
+            )
+        elif status != "DRAFTED":
+            # 与 chapter_commit 硬校验口径一致：仅 PLANNED / DRAFTED 允许 write；
+            # DRAFTED 重跑允许追加新 draft 版本（支撑人工改稿循环）。
+            raise ValueError(
+                f"chapter {chapter_id} status={status} 不允许 write，仅 PLANNED/DRAFTED 可写"
             )
         conn.commit()
     finally:

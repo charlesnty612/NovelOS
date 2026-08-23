@@ -221,7 +221,7 @@
           "hook_id": "hook_ancient_mirror",
           "name": "识海古镜传承",
           "importance": 0.9,
-          "expected_payoff_chapter_id": "ch_030",
+          "expected_payoff_chapter_id": "ch_识海古镜",
           "description": "林轩在禁地获得的识海古镜残篇，第一重已破，后续传承代价与全貌未明",
           "confidence": 0.9,
           "evidence": {
@@ -242,7 +242,7 @@
           "hook_id": "hook_zhou_yuan_suspicion",
           "name": "周元的窥伺",
           "importance": 0.7,
-          "expected_payoff_chapter_id": "ch_005",
+          "expected_payoff_chapter_id": "ch_识海古镜",
           "description": "周元目睹禁地异动，疑心林轩获传承，埋下后续陷害",
           "confidence": 0.85,
           "evidence": {
@@ -263,7 +263,7 @@
           "hook_id": "hook_cave_anomaly",
           "name": "禁地异象惊宗门",
           "importance": 0.8,
-          "expected_payoff_chapter_id": "ch_002",
+          "expected_payoff_chapter_id": "ch_识海古镜",
           "description": "青光冲霄，宗门高层必将追查，林轩需在下一章做出应对",
           "confidence": 0.85,
           "evidence": {

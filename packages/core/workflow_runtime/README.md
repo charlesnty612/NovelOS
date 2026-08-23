@@ -8,7 +8,7 @@
 做：
 - 工作流定义 = 有序 `WorkflowNode` 列表，每节点 `{"node_id", "kind", "fn", "agent_name"}`。
 - `WorkflowEngine(db_path).start_with_nodes(name, nodes, chapter_id, initial_ctx, mock_providers)`：插 `workflow_runs` 行，顺序执行每节点（插 `workflow_run_nodes`），每节点完成后写 checkpoint_json + 更新 `current_node`。
-- `WorkflowEngine.resume(run_id, nodes, human_input)`：从 checkpoint 恢复 ctx，合并 human_input，从 current_node 下一节点继续；旧的 PENDING 节点行收尾为 SKIPPED。
+- `WorkflowEngine.resume(run_id, nodes, human_input)`：从 checkpoint 恢复 ctx，human_input 以同名 key 覆盖方式并入 checkpoint 上下文（`dict.update` 语义）；从 current_node 下一节点继续。连续两次 pause 的场景中，前一次的输入会留存，再次 resume 未传同 key 时沿用旧值。旧的 PENDING 节点行收尾为 SKIPPED。
 - Human 节点：fn 抛 `PauseRequested(payload)` → 节点行 PENDING、run PAUSED、checkpoint 落盘。
 - AI 节点 fn 内部调 `packages.core.agent_runtime.runner.run_agent(...)`（run_id/node_run_id 传入），`mock_providers` 透传 run_agent 的 mock_script。
 - 查询辅助：`runs.list_runs(db_path, project_id)` / `runs.get_run(db_path, run_id)`。

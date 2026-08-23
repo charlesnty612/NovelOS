@@ -52,3 +52,7 @@ Content-Type: application/json
 - 字数检查基于字符数 `len(prose)`；中文按字符计算，不做分词。
 - Critic / Evaluation 评分管线属 Sprint 6；本 Sprint 仅 MVP 基本检查。
 - 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4/6、`docs/agents/agent-contracts-v0.md` §7.4。
+
+## 已知 deviation
+
+- **review reject 即终局**：当前 MVP 实现中，author 拒绝（`approved=false`）会让 `mark_reviewed` 抛错 → run FAILED，chapter 保持 `DRAFTED`；新 draft 版本可在 `chapter-write` 流程内追加（参见 `packages/workflows/chapter_write/README.md` 维护注意点）。PRD §59 / §87 描述的「人工修改后重审」闭环（`revise` 语义、自动回到 `author_review` 节点）本 Sprint **未实现**，将于后续版本补齐。
