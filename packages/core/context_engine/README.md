@@ -52,3 +52,18 @@ from packages.core.context_engine import (
 - 字段缺失（无 character / 无 location）允许返回空列表 / None；调用方（Director / Writer / Observer Prompt）按空态处理。
 - 知识权限过滤（`knowledge-permission-v0.md`）MVP 简化：仅按 visibility 透传；后续 Sprint 加 per-layer 过滤。
 - 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 3/4、`docs/agents/agent-contracts-v0.md` §3.1 / §4.1 / §5.1、`docs/architecture/context-engine-v0.md`。
+
+## Sprint 11 下半扩展：Reference Canon 注入（Director）
+
+`build_director_input` 在 `docs/agents/agent-contracts-v0.md` §3.1 之外额外加 2 个键（属于 MVP 扩展键；缺字段容错跳过，无 canon 时不加）：
+
+| 键 | 注入位置 | 说明 |
+| --- | --- | --- |
+| `reference_canon` | director_input 顶层 | `{canon_id, logline, spine[:20], payoff_list[:30], rhythm}`；取该项目最新 active reference_canon（按 `created_at DESC` 取 1）。来源：`packages/core/api/routers/reference.py` GET 端点返回的 `canon_json`。 |
+| `_reference_canon_consumed` | director_input 顶层 | 溯源审计 `{canon_id, consumed_fields: [...]}`；由 chapter_plan pipeline 把 ctx dict 整体写入 `workflow_runs.checkpoint_json`，对齐 `docs/reference-canon/reference-canon-v0.md` §6.3 溯源要求。 |
+
+约束：
+
+- 多参照系加权策略：MVP 暂只取最新 1 条 active canon；多书加权合并（OV-2）defer。
+- `status='archived'` 的 canon 不注入（SQL WHERE 过滤）。
+- 字段缺失：`logline` / `spine` / `payoff_list` / `rhythm` 任意一项缺失时跳过该项，且 `consumed_fields` 不计该字段名。

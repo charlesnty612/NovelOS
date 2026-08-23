@@ -33,3 +33,64 @@ export function tryParseJsonObject(input: string):
     return { ok: false, error: e instanceof Error ? e.message : 'JSON 解析失败' };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Report Markdown 轻量格式化（Sprint 11 下半，参照系面板用）
+//
+// 白名单渲染：只识别以 `#` / `##` / `###` 开头的标题与以 `- ` 开头的无序列表；
+// 其它行按段落原样输出。不引第三方 markdown 库。
+//
+// 设计要点：
+// - 每行独立解析；不跨行合并（保留作者换行）。
+// - 行内不做 bold/italic/code 等富文本处理——`canon.report_md` 是机器渲染的纯文本，
+//   仅需层级结构（章节标题 / 列表），不引入 XSS 风险。
+// ---------------------------------------------------------------------------
+
+export type ReportBlock =
+  | { kind: 'heading'; level: 1 | 2 | 3; text: string }
+  | { kind: 'list-item'; text: string }
+  | { kind: 'paragraph'; text: string };
+
+export function parseReportMarkdown(input: string | null | undefined): ReportBlock[] {
+  if (!input) return [];
+  const blocks: ReportBlock[] = [];
+  const lines = input.split(/\r?\n/);
+  let currentParagraph: string[] = [];
+
+  const flushParagraph = () => {
+    const text = currentParagraph.join(' ').trim();
+    if (text) blocks.push({ kind: 'paragraph', text });
+    currentParagraph = [];
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (line.trim() === '') {
+      flushParagraph();
+      continue;
+    }
+    if (line.startsWith('### ')) {
+      flushParagraph();
+      blocks.push({ kind: 'heading', level: 3, text: line.slice(4).trim() });
+      continue;
+    }
+    if (line.startsWith('## ')) {
+      flushParagraph();
+      blocks.push({ kind: 'heading', level: 2, text: line.slice(3).trim() });
+      continue;
+    }
+    if (line.startsWith('# ')) {
+      flushParagraph();
+      blocks.push({ kind: 'heading', level: 1, text: line.slice(2).trim() });
+      continue;
+    }
+    if (line.startsWith('- ') || line.startsWith('* ')) {
+      flushParagraph();
+      blocks.push({ kind: 'list-item', text: line.slice(2).trim() });
+      continue;
+    }
+    currentParagraph.push(line);
+  }
+  flushParagraph();
+  return blocks;
+}

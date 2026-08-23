@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useParams } from 'react-router-dom';
+import { CanonTab } from './bible/CanonTab';
 import { CharacterTab } from './bible/CharacterTab';
 import { WorldTab } from './bible/WorldTab';
 import { PlotTab } from './bible/PlotTab';
 import { LedgerTab } from './bible/LedgerTab';
 
-type BibleTab = 'characters' | 'world' | 'plot' | 'ledger';
+type BibleTab = 'characters' | 'world' | 'plot' | 'ledger' | 'canon';
 
 export function StoryBiblePage() {
   const { pid } = useParams();
@@ -48,12 +49,20 @@ export function StoryBiblePage() {
         >
           伏笔与债务
         </div>
+        <div
+          className={`tabs__tab ${tab === 'canon' ? 'tabs__tab--active' : ''}`}
+          onClick={() => setTab('canon')}
+          data-testid="tab-canon"
+        >
+          参照系
+        </div>
       </div>
 
       {tab === 'characters' ? <CharacterTab projectId={projectId} /> : null}
       {tab === 'world' ? <WorldTab projectId={projectId} /> : null}
       {tab === 'plot' ? <PlotTab projectId={projectId} /> : null}
       {tab === 'ledger' ? <LedgerTab projectId={projectId} /> : null}
+      {tab === 'canon' ? <CanonTab projectId={projectId} /> : null}
     </div>
   );
 }

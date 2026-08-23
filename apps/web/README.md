@@ -101,12 +101,13 @@ apps/web/
     └── pages/
         ├── ProjectsListPage.tsx       # /  项目卡片列表 + 新建/编辑/归档
         ├── ProjectOverviewPage.tsx    # /projects/:pid/overview
-        ├── StoryBiblePage.tsx         # /projects/:pid/bible（四个 Tab）
+        ├── StoryBiblePage.tsx         # /projects/:pid/bible（五个 Tab）
         ├── bible/
         │   ├── CharacterTab.tsx       # 角色：列表 + 详情 + 表单
         │   ├── WorldTab.tsx           # 世界：locations/factions/world-rules
         │   ├── PlotTab.tsx            # 剧情：events + timeline
-        │   └── LedgerTab.tsx          # 伏笔与债务：hooks + debts（Sprint 9）
+        │   ├── LedgerTab.tsx          # 伏笔与债务：hooks + debts（Sprint 9）
+        │   └── CanonTab.tsx           # 参照系：拆书 + 列表 + 详情（Sprint 11 下半）
         ├── ChaptersPage.tsx           # /projects/:pid/chapters  章节列表 + 新建
         ├── ChapterDetailPage.tsx      # /projects/:pid/chapters/:cid
         │                             # 头部状态机按钮 + plan / drafts / workflow 面板
@@ -254,6 +255,34 @@ apps/web/
 | GET/PATCH/DELETE | `/hooks/{id}` | Hook 详情 / 更新（含状态机迁移校验，非法跳变 → 409） / 删除 |
 | GET/POST | `/projects/{pid}/debts` | Narrative Debt 列表 / 创建（status 4 态 open/acknowledged/paid/forgiven） |
 | GET/PATCH/DELETE | `/debts/{id}` | Debt 详情 / 更新（含状态机迁移校验，非法跳变 → 409） / 删除 |
+| POST | `/projects/{pid}/deconstruct` | 启动 deconstruct-book（同步执行，返回 canon_id + status） |
+| GET | `/projects/{pid}/canons` | 该项目下 active canon 摘要列表 |
+| GET | `/canons/{canon_id}` | canon 全文（canon_json + report_md + extracts） |
+| DELETE | `/canons/{canon_id}` | 级联删除 canon + extracts（204） |
+
+### Sprint 11 下半 — 参照系面板（Reference Canon）
+
+Story Bible 第五个 Tab「参照系」由 `pages/bible/CanonTab.tsx` 实现：
+
+- 顶部「拆书」表单：book_title + reader_profile 下拉（male_fantasy / male_urban /
+  male_system / female_general / general）+ 大 textarea 粘贴全文 → 调
+  `POST /projects/{pid}/deconstruct`；deconstruct 是同步长任务（无 Human 节点），
+  不需要轮询；返回 canon_id 时直接刷新列表。
+- 列表：title / reader_profile / created_at / logline 摘要 + 删除按钮
+  （走 `DELETE /canons/{id}` + `window.confirm` 二次确认）。
+- 详情抽屉：report_md 用 `utils/format.ts: parseReportMarkdown` 白名单渲染（仅
+  `# / ## / ###` 标题 + `- / *` 列表，不引第三方 markdown 库）；canon_json 展示关键
+  字段（logline / spine 条数 / rhythm 中位数 + 章末钩子率 / style_params 摘要），全文
+  走 `<pre class="json-block">` 折叠块。
+- 类型与端点：见 `api/types.ts` (`CanonSummary` / `CanonDetail` / `DeconstructStartResponse`
+  / `DeconstructPayload` / `ReaderProfile`) + `api/endpoints.ts` (`referenceApi`)。
+- 测试：`pages/bible/CanonTab.test.tsx`（冒烟 3 例：渲染 + 选中加载详情 + 拆书提交）
+  + `utils/format.test.ts` 新增 `parseReportMarkdown` 5 例。
+- 上下文消费：`packages/core/context_engine/builders.py: build_director_input` 自动取
+  最新 active canon 注入 director_input 的 `reference_canon` 键
+  （logline / spine[:20] / payoff_list[:30] / rhythm），并写顶层
+  `_reference_canon_consumed` 溯源审计；该审计随 ctx 落 `workflow_runs.checkpoint_json`，
+  对齐 `docs/reference-canon/reference-canon-v0.md` §6.3 溯源要求。
 
 > 注：本期不修改任何 `packages/` 下 Python 文件。
 

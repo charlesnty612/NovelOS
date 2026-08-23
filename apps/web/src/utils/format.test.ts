@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatDateTime, formatJson, tryParseJsonObject } from './format';
+import { formatDateTime, formatJson, parseReportMarkdown, tryParseJsonObject } from './format';
 
 describe('formatDateTime', () => {
   it('ISO 时间截到分钟', () => {
@@ -43,5 +43,54 @@ describe('tryParseJsonObject', () => {
   it('非法 JSON 报错', () => {
     const r = tryParseJsonObject('{not json}');
     expect(r.ok).toBe(false);
+  });
+});
+
+describe('parseReportMarkdown', () => {
+  it('空 / null / undefined → 空数组', () => {
+    expect(parseReportMarkdown('')).toEqual([]);
+    expect(parseReportMarkdown(null)).toEqual([]);
+    expect(parseReportMarkdown(undefined)).toEqual([]);
+  });
+  it('# / ## / ### 解析为 heading 块', () => {
+    const md = '# 一级\n## 二级\n### 三级';
+    const blocks = parseReportMarkdown(md);
+    expect(blocks).toEqual([
+      { kind: 'heading', level: 1, text: '一级' },
+      { kind: 'heading', level: 2, text: '二级' },
+      { kind: 'heading', level: 3, text: '三级' },
+    ]);
+  });
+  it('- 列表项解析为 list-item 块', () => {
+    const md = '- 第一条\n- 第二条\n* 第三条';
+    const blocks = parseReportMarkdown(md);
+    expect(blocks).toEqual([
+      { kind: 'list-item', text: '第一条' },
+      { kind: 'list-item', text: '第二条' },
+      { kind: 'list-item', text: '第三条' },
+    ]);
+  });
+  it('普通行 → 段落；连续行合并为同一段（用空格拼接）', () => {
+    const md = '第一行\n第二行';
+    const blocks = parseReportMarkdown(md);
+    expect(blocks).toEqual([{ kind: 'paragraph', text: '第一行 第二行' }]);
+  });
+  it('空行作段落分隔', () => {
+    const md = '段落 A\n\n段落 B';
+    const blocks = parseReportMarkdown(md);
+    expect(blocks).toEqual([
+      { kind: 'paragraph', text: '段落 A' },
+      { kind: 'paragraph', text: '段落 B' },
+    ]);
+  });
+  it('混合：标题 + 段落 + 列表', () => {
+    const md = '# 标题\n正文第一行\n正文第二行\n\n- 列表 1\n- 列表 2';
+    const blocks = parseReportMarkdown(md);
+    expect(blocks).toEqual([
+      { kind: 'heading', level: 1, text: '标题' },
+      { kind: 'paragraph', text: '正文第一行 正文第二行' },
+      { kind: 'list-item', text: '列表 1' },
+      { kind: 'list-item', text: '列表 2' },
+    ]);
   });
 });

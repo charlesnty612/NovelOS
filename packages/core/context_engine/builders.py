@@ -273,6 +273,77 @@ def _director_plan_summary(plan_json: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Reference canon 注入（Sprint 11 下半）
+# ---------------------------------------------------------------------------
+
+# 顶层 director_input 注入键 + 截断上限；缺字段容错跳过。
+_REFERENCE_CANON_SPINE_CAP = 20
+_REFERENCE_CANON_PAYOFF_CAP = 30
+
+
+def _reference_canon_excerpt(conn: sqlite3.Connection, project_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """查该项目最新 active reference_canon（按 created_at DESC）。
+
+    返回 (director_inject, audit_payload) 元组：
+    - director_inject：注入到 director_input 的 reference_canon 键（None 表示无 canon）。
+    - audit_payload：溯源审计 dict（含 canon_id + consumed_fields），落到 ctx 顶层
+      ``_reference_canon_consumed``，随 ctx 进入 workflow run 的 checkpoint_json。
+
+    设计：
+    - MVP 单参照系（多书加权合并策略见 docs/reference-canon/reference-canon-v0.md §4.1 OV-2，defer）。
+    - canon_json 解析失败 → 容错返回 (None, None)，不抛错。
+    - 缺字段（logline/spine/payoff_list/rhythm）→ 跳过该字段，consumed_fields 不计。
+    """
+    row = conn.execute(
+        """
+        SELECT canon_id, canon_json
+        FROM reference_canons
+        WHERE project_id = ? AND status = 'active'
+        ORDER BY created_at DESC, canon_id DESC
+        LIMIT 1
+        """,
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        return None, None
+
+    canon_id = row["canon_id"]
+    raw_canon_json = row["canon_json"] or "{}"
+    try:
+        cj = json.loads(raw_canon_json)
+    except (TypeError, ValueError):
+        return None, None
+    if not isinstance(cj, dict):
+        return None, None
+
+    consumed: list[str] = []
+    inject: dict[str, Any] = {"canon_id": canon_id}
+
+    logline = cj.get("logline")
+    if isinstance(logline, str) and logline.strip():
+        inject["logline"] = logline
+        consumed.append("logline")
+
+    spine = cj.get("spine")
+    if isinstance(spine, list):
+        inject["spine"] = spine[:_REFERENCE_CANON_SPINE_CAP]
+        consumed.append("spine")
+
+    payoff_list = cj.get("payoff_list")
+    if isinstance(payoff_list, list):
+        inject["payoff_list"] = payoff_list[:_REFERENCE_CANON_PAYOFF_CAP]
+        consumed.append("payoff_list")
+
+    rhythm = cj.get("rhythm")
+    if isinstance(rhythm, dict):
+        inject["rhythm"] = rhythm
+        consumed.append("rhythm")
+
+    audit = {"canon_id": canon_id, "consumed_fields": consumed}
+    return inject, audit
+
+
+# ---------------------------------------------------------------------------
 # Public builders
 # ---------------------------------------------------------------------------
 
@@ -288,6 +359,17 @@ def build_director_input(
     """组装 Director 输入（agent-contracts §3.1）。
 
     返回 dict 可直接 ``json.dumps`` 后作为 user message 传给 :func:`run_agent`。
+
+    Sprint 11 下半扩展（不在 contracts §3.1 权威契约内；参见
+    ``docs/reference-canon/reference-canon-v0.md`` §4.1）：
+
+    - 若该项目存在 active reference_canon（按 created_at DESC 取 1），则 director
+      输入 JSON 增加顶层键 ``reference_canon``：含 ``canon_id`` / ``logline`` /
+      ``spine``（截前 20 条）/ ``payoff_list``（截前 30 条）/ ``rhythm``。
+      缺字段容错跳过，无 canon 时行为与现状完全一致（不加键）。
+    - 顶层键 ``_reference_canon_consumed`` 记溯源审计 ``{canon_id, consumed_fields}``，
+      由 chapter_plan pipeline 把整个 ctx dict 写入 workflow run 的
+      ``checkpoint_json``，对齐 §6.3 溯源审计要求。
     """
     conn = get_connection(db_path)
     try:
@@ -311,10 +393,11 @@ def build_director_input(
         plot_excerpt = _plot_graph_excerpt(conn, project_id)
         hook_excerpt = _hook_ledger_excerpt(conn, project_id)
         debt_excerpt = _narrative_debt_excerpt(conn, project_id)
+        reference_canon_inject, reference_canon_audit = _reference_canon_excerpt(conn, project_id)
     finally:
         conn.close()
 
-    return {
+    payload: dict[str, Any] = {
         "agent": "director",
         "prompt_version": "director:v1",
         "chapter": {
@@ -355,6 +438,13 @@ def build_director_input(
             "style_constraints_id": None,
         },
     }
+
+    if reference_canon_inject is not None:
+        payload["reference_canon"] = reference_canon_inject
+    if reference_canon_audit is not None:
+        payload["_reference_canon_consumed"] = reference_canon_audit
+
+    return payload
 
 
 def build_writer_input(

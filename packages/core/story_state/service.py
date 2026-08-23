@@ -755,6 +755,7 @@ class StoryStateService:
         branch_id: str | None = None,
         _inverse_cleanup: dict | None = None,
         _rollback_of: str | None = None,
+        _skip_approval: bool = False,
     ) -> dict:
         """执行 Commit。
 
@@ -788,6 +789,13 @@ class StoryStateService:
             - 同步 mutate 当前 state（new_state 副本）：剔除 recent_events / events / hooks[]。
 
         ``_inverse_cleanup`` 是私有入参（仅 rollback_commit 使用）。
+
+        ``_skip_approval``（Sprint 10 新增，私有）：当 ``True`` 时绕过 HIGH 风险
+        审批门（不抛 :class:`ApprovalRequiredError`）。**仅 What-if Simulation
+        路径使用**——见 :mod:`packages.core.simulation` 的 README；推演不产生
+        真实状态（领域表写透由 S7 ``skip_all=True`` 整体跳过；分支最终标记
+        ``ARCHIVED``），因此人工审批门无意义；调用方需保证 ``author_approval``
+        中 ``high_risk_change_ids`` 的审计字段仍被记录，便于审计。
 
         返回 ``{"commit_id": str, "state_version": int, "delta_id": str, "snapshot_ref": str|None}``。
         """
@@ -850,7 +858,12 @@ class StoryStateService:
 
             # 3) HIGH 风险门
             high_ids = _high_risk_change_ids(delta)
-            if high_ids and not (isinstance(author_approval, dict) and author_approval.get("approved") is True):
+            # Sprint 10：What-if Simulation 路径下显式绕过审批门——
+            # 推演不产生真实状态（领域表整体跳过 + 分支归档），因此 author_approval
+            # 无意义。审计字段仍记录在 author_approval_json.high_risk_change_ids 里。
+            if high_ids and not _skip_approval and not (
+                isinstance(author_approval, dict) and author_approval.get("approved") is True
+            ):
                 conn.rollback()
                 conn.close()
                 raise ApprovalRequiredError(
@@ -912,6 +925,13 @@ class StoryStateService:
                 "high_risk_change_ids": high_ids,
                 "notes": (author_approval or {}).get("notes") if isinstance(author_approval, dict) else None,
             }
+            # Sprint 10：Simulation 路径下 HIGH 风险被绕过审批门，但审计字段需如实
+            # 记录——用 status='simulation_bypassed' + bypass_reason 标记，便于审计回溯
+            # 「这条 HIGH 风险是 Simulation 推演路径带的，不是人工批的」。
+            if high_ids and _skip_approval:
+                author_approval_norm["status"] = "simulation_bypassed"
+                author_approval_norm["approved_at"] = None
+                author_approval_norm["bypass_reason"] = "what_if_simulation"
             # 分支 commit 时把 promoted_from 标记（仅 promote_branch 显式设置）
             promoted_from = None
             if isinstance(author_approval, dict) and author_approval.get("promoted_from"):

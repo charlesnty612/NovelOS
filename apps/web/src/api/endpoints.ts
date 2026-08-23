@@ -4,6 +4,8 @@ import { api } from './client';
 import { coerceJson } from './client';
 import type {
   Agent,
+  CanonDetail,
+  CanonSummary,
   Chapter,
   ChapterCreatePayload,
   ChapterUpdatePayload,
@@ -15,6 +17,8 @@ import type {
   Debt,
   DebtCreatePayload,
   DebtUpdatePayload,
+  DeconstructPayload,
+  DeconstructStartResponse,
   Draft,
   DraftCreatePayload,
   HealthResponse,
@@ -314,4 +318,23 @@ export const debtsApi = {
   update: (id: string, payload: DebtUpdatePayload) =>
     api.patch<Debt>(`/debts/${id}`, payload),
   delete: (id: string) => api.delete<void>(`/debts/${id}`),
+};
+
+// -------------------------------------------------------------- reference canon
+// 对应 packages/core/api/routers/reference.py：
+//   POST   /projects/{pid}/deconstruct    —— 启动拆书（同步执行到底，返回完整 status）
+//   GET    /projects/{pid}/canons         —— 列表 active canon 摘要
+//   GET    /canons/{canon_id}             —— 全文 + report_md + extracts
+//   DELETE /canons/{canon_id}             —— 级联删除（204）
+//
+// 设计要点：
+// - deconstruct 是同步长任务（无 Human 节点），无需轮询；返回 canon_id 时直接刷新列表。
+// - 失败 / FAILED：响应含 error 字段；前端展示 ErrorBanner。
+export const referenceApi = {
+  deconstruct: (pid: string, payload: DeconstructPayload) =>
+    api.post<DeconstructStartResponse>(`/projects/${pid}/deconstruct`, payload),
+  listCanons: (pid: string) =>
+    api.get<CanonSummary[]>(`/projects/${pid}/canons`),
+  getCanon: (canonId: string) => api.get<CanonDetail>(`/canons/${canonId}`),
+  deleteCanon: (canonId: string) => api.delete<void>(`/canons/${canonId}`),
 };

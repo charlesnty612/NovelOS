@@ -19,6 +19,7 @@ def test_apply_migrations_creates_31_business_tables(tmp_path: Path):
     result = apply_migrations(db_path, MIGRATIONS_DIR)
     # 业务表 = 总表 - _migrations
     # Sprint 11 上半：新增 0004_reference_canon（reference_canons + canon_extracts）→ 业务表 31（29+2），总数 32。
+    # Sprint 10：0005 是「表重建」（不改表数），仍 32。
     assert result["tables"] == 32, f"expected 32 (31+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
@@ -28,17 +29,20 @@ def test_apply_migrations_creates_31_business_tables(tmp_path: Path):
     assert "0003_quality_reports.sql" in result["applied"]
     # Sprint 11 上半：0004_reference_canon.sql 也应被应用
     assert "0004_reference_canon.sql" in result["applied"]
+    # Sprint 10：0005_branches_archived_status.sql（不增表，扩展 CHECK）也应被应用
+    assert "0005_branches_archived_status.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     first = apply_migrations(db_path, MIGRATIONS_DIR)
-    # Sprint 11 上半：迁移目录下四份脚本都应被首次应用
+    # Sprint 11 上半：迁移目录下四份脚本都应被首次应用；Sprint 10 增加 0005
     assert first["applied"] == [
         "0001_init.sql",
         "0002_drafts_unique.sql",
         "0003_quality_reports.sql",
         "0004_reference_canon.sql",
+        "0005_branches_archived_status.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -47,6 +51,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0002_drafts_unique.sql" in second["skipped"]
     assert "0003_quality_reports.sql" in second["skipped"]
     assert "0004_reference_canon.sql" in second["skipped"]
+    assert "0005_branches_archived_status.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -58,13 +63,14 @@ def test_migrations_table_records_filename(tmp_path: Path):
         rows = conn.execute("SELECT filename, applied_at FROM _migrations").fetchall()
     finally:
         conn.close()
-    # Sprint 11 上半：四条迁移都应记录
+    # Sprint 10：五条迁移都应记录
     filenames = {r["filename"] for r in rows}
     assert filenames == {
         "0001_init.sql",
         "0002_drafts_unique.sql",
         "0003_quality_reports.sql",
         "0004_reference_canon.sql",
+        "0005_branches_archived_status.sql",
     }
     for r in rows:
         assert r["applied_at"]

@@ -543,3 +543,70 @@ export interface QualityReport {
   issues_json: QualityIssue[];
   created_at: string;
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 11 下半：Reference Canon（参照系）
+//   对齐 packages/core/api/routers/reference.py + reference_canons / canon_extracts 表。
+//   - CanonSummary：list 端点返回的轻量摘要（GET /projects/{pid}/canons）。
+//   - CanonDetail ：GET /canons/{canon_id} 全文 + report_md + extracts。
+//   - DeconstructStartResponse：POST /projects/{pid}/deconstruct 同步返回（含 canon_id）。
+//   - ExtractEntry：canon_extracts 行的解包结构。
+// ---------------------------------------------------------------------------
+
+export type ReaderProfile =
+  | 'male_fantasy'
+  | 'male_urban'
+  | 'male_system'
+  | 'female_general'
+  | 'general';
+
+export interface CanonSummary {
+  canon_id: string;
+  project_id: string;
+  title: string;
+  reader_profile: ReaderProfile | string;
+  status: 'active' | 'archived';
+  created_at: string;
+  logline: string;
+  spine_count: number;
+  rhythm_chapter_count: number;
+}
+
+export interface ExtractEntry {
+  extract_id: string;
+  chapter_index: number;
+  /** 后端在 GET /canons/{id} 返回时已 json.loads；前端不二次解析。 */
+  extract_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface CanonDetail {
+  canon_id: string;
+  project_id: string;
+  title: string;
+  reader_profile: ReaderProfile | string;
+  status: 'active' | 'archived';
+  /** 与后端 Pydantic 对齐：GET /canons/{id} 返回 dict（非字符串）。 */
+  canon_json: Record<string, unknown>;
+  /** T4 渲染的 Markdown 报告（人读）。 */
+  report_md: string;
+  created_at: string;
+  extracts: ExtractEntry[];
+}
+
+export interface DeconstructStartResponse {
+  run_id: string;
+  status: 'COMPLETED' | 'FAILED' | 'PAUSED' | 'RUNNING' | 'PENDING' | 'CANCELLED';
+  current_node: string | null;
+  project_id: string;
+  book_title: string;
+  canon_id?: string;
+  extracts_count?: number;
+  error?: string;
+}
+
+export interface DeconstructPayload {
+  book_title: string;
+  text: string;
+  reader_profile?: ReaderProfile;
+}
