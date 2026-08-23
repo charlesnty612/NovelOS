@@ -1256,9 +1256,9 @@ class StoryStateService:
                     (wid,),
                 ).fetchone()
                 if cur is None and op == "add":
-                    base_name = (after or {}).get("name") if isinstance(after, dict) else wid
-                    base_stmt = (after or {}).get("statement") if isinstance(after, dict) else ""
-                    base_data = (after or {}).get("data_json") if isinstance(after, dict) else {}
+                    base_name = ((after or {}).get("name") if isinstance(after, dict) else None) or wid
+                    base_stmt = ((after or {}).get("statement") if isinstance(after, dict) else None) or ""
+                    base_data = ((after or {}).get("data_json") if isinstance(after, dict) else None) or {}
                     vis_final = vis_value or "PUBLIC"
                     conn.execute(
                         """
@@ -1297,9 +1297,9 @@ class StoryStateService:
                     "SELECT data_json FROM factions WHERE faction_id = ?", (wid,)
                 ).fetchone()
                 if cur is None and op == "add":
-                    base_data = (after or {}).get("data_json") if isinstance(after, dict) else {}
-                    base_name = (after or {}).get("name") if isinstance(after, dict) else wid
-                    base_stmt = (after or {}).get("statement") if isinstance(after, dict) else ""
+                    base_data = ((after or {}).get("data_json") if isinstance(after, dict) else None) or {}
+                    base_name = ((after or {}).get("name") if isinstance(after, dict) else None) or wid
+                    base_stmt = ((after or {}).get("statement") if isinstance(after, dict) else None) or ""
                     vis_final = vis_value or "VISIBLE"
                     conn.execute(
                         """
@@ -1337,9 +1337,9 @@ class StoryStateService:
                     "SELECT data_json FROM world_rules WHERE world_rule_id = ?", (wid,)
                 ).fetchone()
                 if cur is None and op == "add":
-                    base_data = (after or {}).get("data_json") if isinstance(after, dict) else {}
-                    base_name = (after or {}).get("name") if isinstance(after, dict) else wid
-                    base_stmt = (after or {}).get("statement") if isinstance(after, dict) else ""
+                    base_data = ((after or {}).get("data_json") if isinstance(after, dict) else None) or {}
+                    base_name = ((after or {}).get("name") if isinstance(after, dict) else None) or wid
+                    base_stmt = ((after or {}).get("statement") if isinstance(after, dict) else None) or ""
                     vis_final = vis_value or "PUBLIC"
                     conn.execute(
                         """

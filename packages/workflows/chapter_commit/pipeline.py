@@ -32,7 +32,18 @@ from packages.core.ids import new_id, now_iso
 from packages.core.quality.engine import QualityEngine
 from packages.core.quality.service import QualityService, build_quality_context
 from packages.core.story_state.service import StoryStateService
+from packages.core.story_state.validator import validate_delta
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
+
+
+# Observer delta 校验失败重试提示模板（注入 payload._retry_hint 引导 LLM 修正）。
+# 真实 LLM（如 MiniMax-M3）曾出现 ``character_changes[0].op='update' 但 before 为 None``
+# 这类业务校验失败：让 observer 修正后重新完整输出 7 个 change 数组 JSON。
+_OBSERVER_RETRY_HINT_TEMPLATE = (
+    "\n\n[Validation note] 上一次输出的 delta 未通过业务校验：{errors}。"
+    "请按反馈修正后重新完整输出 7 个 change 数组的合法 JSON（保持 schema_version="
+    "state-delta-v0 外的其它元信息字段由后续节点注入，无需在本次输出中包含）。"
+)
 
 
 def _build_observer_ctx_node(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -79,25 +90,16 @@ def _has_high_risk_change(observer_payload: dict[str, Any]) -> bool:
     return False
 
 
-def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
-    db_path = ctx["db_path"]
-    chapter_id = ctx["chapter_id"]
-    run_id = ctx["run_id"]
-    observer_payload = ctx.get("observer_payload") or {}
-
-    # 取当前 state_version 作 previous_state_version
-    svc = StoryStateService(db_path)
-    project_id = svc._project_id_for_chapter(  # noqa: SLF001
-        get_connection(db_path), chapter_id
-    )
-    if project_id is None:
-        raise ValueError(f"chapter {chapter_id!r} not found")
-    current_state = svc.get_current_state(project_id)
-    previous_state_version = int(current_state.get("state_version") or 1)
-
-    delta_id = new_id("dlt")
-    delta = {
-        "delta_id": delta_id,
+def _build_delta(
+    observer_payload: dict[str, Any],
+    *,
+    chapter_id: str,
+    run_id: str,
+    previous_state_version: int,
+) -> dict[str, Any]:
+    """由 observer 业务载荷注入 10 元信息字段构造完整 delta（不含 created_at 之外的 DB 行为）。"""
+    return {
+        "delta_id": new_id("dlt"),
         "delta_version": 1,
         "schema_version": "state-delta-v0",
         "chapter_id": chapter_id,
@@ -116,17 +118,94 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "new_hooks": observer_payload.get("new_hooks", []),
         "debt_changes": observer_payload.get("debt_changes", []),
     }
+
+
+def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
+    """注入元信息 → validate_delta（纯函数，无落库副作用）→ 失败带错误重试 observer 一次。
+
+    重试范围（与 deconstruct_book 的 T2/T3 retry 范式对齐）：
+    - 校验失败后构造新 payload = ``dict(ctx["observer_input"])`` + ``_retry_hint``；
+    - mock_script 取 ``ctx["mock_providers"]["observer"]``：list 且长度 >1 时取 ``mock_script[1]``，
+      否则保持原样（让生产 / 单条 mock 走同一响应，retry 仅靠 _retry_hint 修正）；
+    - 两次都失败 ⇒ ``raise ValueError("observer delta rejected by validator: errors=...")``。
+    - submit_delta 仅在最终通过的 delta 上调一次（service.py:662-680 失败会落 rejected 行，
+      重试循环内禁止反复调）。
+    """
+    db_path = ctx["db_path"]
+    chapter_id = ctx["chapter_id"]
+    run_id = ctx["run_id"]
+    observer_payload = ctx.get("observer_payload") or {}
+
+    # 取当前 state_version 作 previous_state_version（不依赖 observer_payload，原口径）
+    svc = StoryStateService(db_path)
+    project_id = svc._project_id_for_chapter(  # noqa: SLF001
+        get_connection(db_path), chapter_id
+    )
+    if project_id is None:
+        raise ValueError(f"chapter {chapter_id!r} not found")
+    current_state = svc.get_current_state(project_id)
+    previous_state_version = int(current_state.get("state_version") or 1)
+
+    # 第一次：基于 _observer_node 注入的 observer_payload 构造 delta → validate
+    delta = _build_delta(
+        observer_payload,
+        chapter_id=chapter_id,
+        run_id=run_id,
+        previous_state_version=previous_state_version,
+    )
+    errors = validate_delta(delta)
+    if errors:
+        # 构造重试 payload（在 observer_input 副本上注入 _retry_hint）
+        retry_payload = dict(ctx.get("observer_input") or {})
+        retry_payload["_retry_hint"] = _OBSERVER_RETRY_HINT_TEMPLATE.format(
+            errors="; ".join(errors)
+        )
+        # mock_script list 模式：第二次取下一条以让 MockProvider 返回不同响应。
+        # 注意 MockProvider(scripted=str) 会把 str 当 iterable 取字符（runner 测试通用行为），
+        # 因此弹出的 str 必须用 list[str]（单元素）包一层，与 deconstruct_book T2 retry
+        # 处理一致。
+        original_mock_script = (ctx.get("mock_providers") or {}).get("observer")
+        if isinstance(original_mock_script, list) and len(original_mock_script) > 1:
+            picked = original_mock_script[1]
+            retry_mock_script = [picked] if isinstance(picked, str) else picked
+        else:
+            retry_mock_script = original_mock_script
+
+        observer_payload = run_agent(
+            db_path,
+            "observer",
+            retry_payload,
+            run_id,
+            node_run_id=ctx.get("_current_node_run_id"),
+            expected="observer",
+            mock_script=retry_mock_script,
+        )
+        # 第二次：基于 retry 后 observer_payload 重建 delta → 再次 validate
+        delta = _build_delta(
+            observer_payload,
+            chapter_id=chapter_id,
+            run_id=run_id,
+            previous_state_version=previous_state_version,
+        )
+        errors = validate_delta(delta)
+        if errors:
+            raise ValueError(
+                f"observer delta rejected by validator: errors={errors}"
+            )
+
     submit_result = svc.submit_delta(delta)
     if submit_result.get("status") != "validated":
+        # 防御保留：理论上 validate_delta 通过后 service 也会通过；若仍失败按原口径报错
         raise ValueError(
             f"observer delta rejected by validator: errors={submit_result.get('errors')}"
         )
 
-    # 标记是否需 high_risk 审批（供下一节点判断）
+    # 标记是否需 high_risk 审批（基于最终采用的 observer_payload 计算）
     needs_high_risk_approval = _has_high_risk_change(observer_payload)
     return {
-        "delta_id": delta_id,
+        "delta_id": delta["delta_id"],
         "delta": delta,
+        "observer_payload": observer_payload,
         "snapshot_pre": current_state,
         "project_id": project_id,
         "needs_high_risk_approval": needs_high_risk_approval,

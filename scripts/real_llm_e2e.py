@@ -54,7 +54,7 @@ def run() -> int:
     timings: dict[str, float] = {}
     try:
         wait_port(port)
-        c = httpx.Client(base_url=f"http://{HOST}:{port}", timeout=120)
+        c = httpx.Client(base_url=f"http://{HOST}:{port}", timeout=1200)
         check(c.get("/api/health"), "health")
         project = check(c.post("/api/projects", json={"name":"测试：少年登山寻宝", "premise":"温和的少年在山谷中寻宝，沿途记录地形与矿石", "genre":"温和冒险", "target_words":100000}), "project")["project_id"]
         check(c.post(f"/api/projects/{project}/world-rules", json={"name":"境界体系","statement":"淬体、开脉、灵海、神藏，每境分九重；主角只能越级而战。"}), "world-rule")
@@ -84,6 +84,7 @@ def run() -> int:
         quality = check(c.get(f"/api/chapters/{chapter_id}/quality"), "quality")
         # 读取真实调用日志，报告不记录任何密钥
         conn = __import__("sqlite3").connect(db)
+        conn.row_factory = __import__("sqlite3").Row
         try:
             logs = [dict(r) for r in conn.execute("select model_id, latency_ms from ai_call_logs where run_id in (%s)" % ",".join("?"*len(workflow_ids)), workflow_ids)]
         finally: conn.close()
@@ -106,6 +107,11 @@ def run() -> int:
         for p in (db, Path(str(db)+"-wal"), Path(str(db)+"-shm")):
             try: p.unlink()
             except FileNotFoundError: pass
+            except PermissionError:
+                time.sleep(2)
+                try: p.unlink()
+                except OSError: pass
+
 
 def _busy(port):
     try:
