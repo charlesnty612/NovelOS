@@ -62,7 +62,10 @@ function ModelConfigsPanel() {
   const [creating, setCreating] = useState(false);
   const [testResult, setTestResult] = useState<{
     config_id: string;
+    ok: boolean;
+    latency_ms: number;
     detail: string;
+    status_code: number | null;
   } | null>(null);
 
   return (
@@ -119,7 +122,10 @@ function ModelConfigsPanel() {
                         e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
                       setTestResult({
                         config_id: m.config_id,
+                        ok: false,
+                        latency_ms: 0,
                         detail: `加载详情失败 · ${msg}`,
+                        status_code: null,
                       });
                     }
                   }}
@@ -135,14 +141,21 @@ function ModelConfigsPanel() {
                       const r = await modelConfigsApi.test(m.config_id);
                       setTestResult({
                         config_id: m.config_id,
-                        detail: `OK · ${r.latency_ms}ms · preview=${JSON.stringify(r.preview)}`,
+                        ok: r.ok,
+                        latency_ms: r.latency_ms,
+                        detail: r.detail ?? '',
+                        status_code: r.status_code ?? null,
                       });
                     } catch (e: unknown) {
+                      // 后端 /test 失败时抛 HTTPException：502 等。
                       const msg =
                         e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
                       setTestResult({
                         config_id: m.config_id,
+                        ok: false,
+                        latency_ms: 0,
                         detail: `FAIL · ${msg}`,
+                        status_code: null,
                       });
                     }
                     void list.reload();
@@ -170,7 +183,18 @@ function ModelConfigsPanel() {
       {testResult ? (
         <InfoBanner>
           <code data-testid="model-config-test-result">
-            {testResult.config_id}：{testResult.detail}
+            {testResult.config_id}：
+            <span
+              className={
+                testResult.ok ? 'badge badge--chapter-committed' : 'badge badge--chapter-failed'
+              }
+              style={{ marginRight: 6 }}
+            >
+              {testResult.ok ? '成功' : '失败'}
+            </span>
+            {testResult.latency_ms}ms
+            {testResult.status_code != null ? ` · HTTP ${testResult.status_code}` : ''}
+            {testResult.detail ? ` · ${testResult.detail}` : ''}
           </code>
         </InfoBanner>
       ) : null}

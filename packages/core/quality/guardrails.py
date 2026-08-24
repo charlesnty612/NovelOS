@@ -126,7 +126,7 @@ def _norm(text: str) -> str:
     return _DROP_WS_RE.sub("", text or "")
 
 
-def _shingles(text: str, n: int) -> list[str]:
+def compute_shingles(text: str, n: int) -> list[str]:
     """返回长度恰好 ``n`` 的连续字符切片列表（按去空白归一化）。"""
     t = _norm(text)
     if len(t) < n:
@@ -594,9 +594,9 @@ def req_q6(draft: str, reference_texts: list[str], whitelist: list[str] | None =
     white_shingles: set[str] = set()
     for w in whitelist or []:
         if isinstance(w, str):
-            white_shingles.update(_shingles(w, Q6_SHINGLE_LEN))
+            white_shingles.update(compute_shingles(w, Q6_SHINGLE_LEN))
 
-    draft_shingles = _shingles(draft or "", Q6_SHINGLE_LEN)
+    draft_shingles = compute_shingles(draft or "", Q6_SHINGLE_LEN)
     if not draft_shingles:
         return out
 
@@ -605,7 +605,7 @@ def req_q6(draft: str, reference_texts: list[str], whitelist: list[str] | None =
 
     ngram_issue_count = 0
     for ref in reference_texts:
-        ref_shingles = _shingles(ref or "", Q6_SHINGLE_LEN)
+        ref_shingles = compute_shingles(ref or "", Q6_SHINGLE_LEN)
         ref_set = set(ref_shingles) - white_shingles
         common = set(draft_shingles) & ref_set
         if common:

@@ -20,7 +20,7 @@
   schema = ``docs/reference-canon/schemas/reference-canon.schema.json``）；
   不合规 → run_agent 1 次重试后再失败 ⇒ run FAILED。
 - ``G_sim_check`` (Transform)        —— 对 T3 产物的 ``canon_json`` 全部 string 值拼接
-  与原始 text 跑 13 字 shingle 检测（复用 ``packages.core.quality.guardrails._shingles``）；
+  与原始 text 跑 13 字 shingle 检测（复用 ``packages.core.quality.guardrails.compute_shingles``）；
   任一公共 shingle ⇒ run FAILED（B-2 边界）。
 - ``T4_persist`` (State)             —— 生成 ``canon_id``、注入 metadata 五字段、
   渲染 ``report_md``、写 ``reference_canons`` 行 + ``canon_extracts`` 逐章行。
@@ -49,7 +49,7 @@ from jsonschema import Draft202012Validator
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
-from packages.core.quality.guardrails import _shingles
+from packages.core.quality.guardrails import compute_shingles
 from packages.core.workflow_runtime.engine import WorkflowNode
 
 
@@ -569,8 +569,8 @@ def _g_sim_node(ctx: dict[str, Any]) -> dict[str, Any]:
     if not canon_text.strip():
         return {"g_sim_passed": True, "overlaps": []}
 
-    text_shingles = set(_shingles(original_text, _Q6_SHINGLE_LEN))
-    canon_shingles = set(_shingles(canon_text, _Q6_SHINGLE_LEN))
+    text_shingles = set(compute_shingles(original_text, _Q6_SHINGLE_LEN))
+    canon_shingles = set(compute_shingles(canon_text, _Q6_SHINGLE_LEN))
 
     if not text_shingles or not canon_shingles:
         return {"g_sim_passed": True, "overlaps": []}

@@ -12,7 +12,7 @@
 
 - 创建临时分支（``name`` 默认 ``sim-<ts>``，base_state_version = main 当前 version）。
 - 在该分支上顺序走 ``submit_delta → commit_delta(branch_id=temp, _skip_approval=True)``。
-- 计算分支终态 vs base 快照的结构化 diff（复用 ``story_state._diff_snapshots``）。
+- 计算分支终态 vs base 快照的结构化 diff（复用 ``story_state.diff_snapshots`` 公共 helper，配合 ``strip_state_version``）。
 - 归档分支（``status='ARCHIVED'``），保留 commits 供 ``GET /simulations/{id}`` 重放。
 - 失败时同样归档分支、抛 ``SimulationError``（含已应用步数 + 错误上下文）。
 

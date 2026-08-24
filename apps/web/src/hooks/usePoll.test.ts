@@ -160,6 +160,35 @@ describe('usePoll', () => {
     expect(onResult.mock.calls.length).toBeGreaterThanOrEqual(4);
   });
 
+  it('document.hidden=true 时跳过 tick，不调用 fn', async () => {
+    const fn = vi.fn().mockResolvedValue({ status: 'RUNNING' });
+    const originalHidden = Object.getOwnPropertyDescriptor(document, 'hidden');
+    // jsdom 默认 hidden=false；测试期间改写为 true 模拟切到后台。
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => true,
+    });
+    try {
+      renderHook(() =>
+        usePoll({
+          fn,
+          intervalMs: 50,
+          enabled: true,
+          stopWhen: () => false,
+        }),
+      );
+      // 等若干个 interval 周期，期间 fn 都不应被调用
+      await new Promise((r) => setTimeout(r, 250));
+      expect(fn).not.toHaveBeenCalled();
+    } finally {
+      if (originalHidden) {
+        Object.defineProperty(document, 'hidden', originalHidden);
+      } else {
+        delete (document as { hidden?: unknown }).hidden;
+      }
+    }
+  });
+
   it('stopWhen 在初次返回值上即为 true 时，不应继续 interval', async () => {
     const fn = vi.fn().mockResolvedValue({ status: 'COMPLETED' });
     const { result } = renderHook(() =>

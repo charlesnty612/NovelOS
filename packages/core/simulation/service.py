@@ -18,7 +18,7 @@
   _skip_approval=True)` 提交。``branch_id`` 非 main → S7 ``skip_all=True`` 整体跳过领域表写透；
   ``_skip_approval=True`` 绕过 HIGH 风险审批门（理由见 ``README.md §3``）。
 - diff 计算走 :func:`StoryStateService.get_current_state` 两次：base（main）vs branch。
-  当前实现复用 ``_diff_snapshots``（私有 helper，对外是 ``diff_versions``）；simulation
+  当前实现复用 ``diff_snapshots``（story_state 公共 helper，对外接口是 ``diff_versions``）；simulation
   直接 import 该 helper 避免给 :class:`StoryStateService` 加公开分支 diff 接口（MVP 简化）。
 - 失败语义：
   - 入参 ``deltas`` 为空 → :class:`SimulationError`（reason='empty_deltas'）。
@@ -52,7 +52,8 @@ from packages.core.story_state.exceptions import (
 )
 from packages.core.story_state.service import (
     StoryStateService,
-    _diff_snapshots,
+    diff_snapshots,
+    strip_state_version,
 )
 
 log = get_logger("novelos.simulation")
@@ -318,9 +319,9 @@ class SimulationService:
         try:
             final_state = self._state_service.get_current_state(project_id, branch_id=branch_id)
             final_version = int(final_state.get("state_version") or base_version)
-            diff = _diff_snapshots(
-                _strip_state_version(base_state),
-                _strip_state_version(final_state),
+            diff = diff_snapshots(
+                strip_state_version(base_state),
+                strip_state_version(final_state),
                 version_a=base_version,
                 version_b=final_version,
                 branch_id=branch_id,
@@ -410,9 +411,9 @@ class SimulationService:
             base_state = self._state_service.get_current_state(project_id)
         final_state = self._state_service.get_current_state(project_id, branch_id=simulation_id)
         final_version = int(final_state.get("state_version") or base_version)
-        diff = _diff_snapshots(
-            _strip_state_version(base_state),
-            _strip_state_version(final_state),
+        diff = diff_snapshots(
+            strip_state_version(base_state),
+            strip_state_version(final_state),
             version_a=base_version,
             version_b=final_version,
             branch_id=simulation_id,
@@ -455,15 +456,6 @@ class SimulationService:
                 conn.close()
         except Exception as exc:  # noqa: BLE001
             log.warning("simulation cleanup failed for branch %s: %s", branch_id, exc)
-
-
-def _strip_state_version(snap: dict) -> dict:
-    """去掉 ``state_version`` 字段以便 diff（与 story_state.service._strip_state_version 同义）。"""
-    if isinstance(snap, dict) and "state_version" in snap:
-        out = dict(snap)
-        out.pop("state_version", None)
-        return out
-    return snap
 
 
 __all__ = ["SimulationError", "SimulationResult", "SimulationService"]

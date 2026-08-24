@@ -7,7 +7,7 @@
 - 构造接收 ``db_path``；每个方法内部用 ``packages.core.db.get_connection`` 开连接、
   ``try / finally`` 关闭。
 - 主键由 ``new_id("prj")`` 生成；时间戳由 ``now_iso()`` 生成。
-- 列表端点不按 status 过滤，按需由 router 层加 query 参数（Sprint 1 不实现过滤）。
+- 列表端点默认过滤 ``status = 'ARCHIVED'``，可选参数 ``include_archived=True`` 时不过滤。
 - 删除策略：当存在子记录（characters / chapters 等）时拒绝删除，由 router 转 409。
 - 查询不存在 → 返回 ``None``，由 router 转 404；CHECK/FK 违反 → 抛出 ``sqlite3.IntegrityError``，
   router 转 422 并带 ``detail``。
@@ -71,11 +71,24 @@ class ProjectService:
         return dict(row) if row else None
 
     # -------------------------------------------------------------------- list
-    def list(self) -> list[dict]:
-        """列出所有项目，按 created_at 升序（创建顺序）。"""
+    def list(self, include_archived: bool = False) -> list[dict]:
+        """列出项目，按 created_at 升序（创建顺序）。
+
+        - 默认排除 ``status = 'ARCHIVED'``（与前端「归档后不再出现在主列表」文案一致）。
+        - ``include_archived=True`` 不过滤，全量返回（含归档）。
+        """
         conn = get_connection(self.db_path)
         try:
-            cur = conn.execute("SELECT * FROM projects ORDER BY created_at ASC, project_id ASC")
+            if include_archived:
+                cur = conn.execute(
+                    "SELECT * FROM projects ORDER BY created_at ASC, project_id ASC"
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM projects "
+                    "WHERE status != 'ARCHIVED' "
+                    "ORDER BY created_at ASC, project_id ASC"
+                )
             rows = cur.fetchall()
         finally:
             conn.close()

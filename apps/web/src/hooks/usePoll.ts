@@ -83,6 +83,8 @@ export function usePoll<T>(opts: UsePollOptions<T>): UsePollResult<T> {
     let stopped = false;
     const tick = async () => {
       if (stopped || !aliveRef.current) return;
+      // 页面隐藏（切到后台 tab / 最小化）时跳过本次 tick，减少无意义请求；恢复可见时下一 tick 自然触发。
+      if (typeof document !== 'undefined' && document.hidden) return;
       if (inFlightRef.current) return; // 上一次还没回来
       inFlightRef.current = true;
       setLoading(true);

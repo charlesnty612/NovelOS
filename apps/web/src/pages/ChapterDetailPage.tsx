@@ -27,6 +27,7 @@ import {
   pickLatestRun,
 } from '../utils/chapterState';
 import { formatDateTime, formatJson, tryParseJsonObject } from '../utils/format';
+import { extractPausePayload } from '../utils/pausePayload';
 import { ApiError } from '../api/client';
 
 export function ChapterDetailPage() {
@@ -133,10 +134,7 @@ export function ChapterDetailPage() {
     [selectedRunId],
   );
   const detailRun = detail.data;
-  const pausePayload =
-    (detailRun?.checkpoint_json as Record<string, unknown> | undefined)?.['__pause_payload__'] as
-      | Record<string, unknown>
-      | undefined;
+  const pausePayload = extractPausePayload(detailRun?.checkpoint_json) ?? undefined;
 
   // ---- 顶部工作流按钮 ----
   const [actionErr, setActionErr] = useState<string | null>(null);

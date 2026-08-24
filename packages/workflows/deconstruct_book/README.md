@@ -56,7 +56,7 @@ G-sim 校验阻断相似度 → 落库 `reference_canons` + `canon_extracts` + �
 | 边界 | 落实位置 |
 |---|---|
 | **B-1** 只输出抽象模式 | T2 / T3 prompt 已约束；本 workflow 不二次强制（依赖 prompt 自检 + schema `maxLength`） |
-| **B-2** 产出须过相似度检测 | `G_sim_check` 节点：13 字 shingle 重叠即阻断（与 `quality.guardrails._shingles` 一致） |
+| **B-2** 产出须过相似度检测 | `G_sim_check` 节点：13 字 shingle 重叠即阻断（与 `quality.guardrails.compute_shingles` 一致） |
 | **B-3** 不含原文片段 | T2 / T3 prompt 约束 string 字段 ≤80 字；schema `maxLength: 80` 强制；本 workflow 仅检查长度不越界 |
 
 ## metadata 五字段（T4 注入）

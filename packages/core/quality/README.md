@@ -16,7 +16,7 @@ packages/core/quality/
 ├── issues.py            # Issue 构造器 / severity 矩阵常量
 ├── aggregate.py         # §2.1 公式 compute_overall + scoring_formula_hash
 ├── scoring.py           # 六子分 rule-based
-├── guardrails.py        # 8 条 Guardrail（spec §4.1-§4.8）
+├── guardrails.py        # 8 条 Guardrail（spec §4.1-§4.8）；公共 helper compute_shingles
 ├── payoff.py            # 爽感 H-1~H-5（spec §3.7）
 └── engine.py            # QualityEngine.evaluate(ctx) -> QualityReport
 ```
@@ -35,6 +35,9 @@ from packages.core.quality import (
     MVP_SEVERITY_MATRIX,    # severity 矩阵常量（自检/文档用）
     guardrails, scoring,    # 子模块（内部 helper）
 )
+
+# 公共 helper：13 字滑动 shingle 计算（spec §4.6 / Q6 复用入口）
+from packages.core.quality.guardrails import compute_shingles
 ```
 
 `QualityEngine.evaluate(ctx: QualityContext) -> QualityReport`：

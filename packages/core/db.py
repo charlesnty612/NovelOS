@@ -27,6 +27,8 @@ def get_connection(db_path: Path | str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     # WAL 模式：读写并发更高；对测试库（tmp_path）同样适用，sqlite 自动忽略失败
     conn.execute("PRAGMA journal_mode = WAL")
+    # 写锁竞争时等待 5s，避免并发写入触发 SQLITE_BUSY 报错
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 

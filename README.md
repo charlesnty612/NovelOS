@@ -37,7 +37,7 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0005，31 张业务表）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0006，31 张业务表）
 tests/                   pytest（unit / integration / workflow / api / evals）
 scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
 docs/                    设计文档、PRD、实现计划（docs/impl/IMPLEMENTATION-PLAN-v0.md）
@@ -82,7 +82,7 @@ python -m packages.core.api.main
 ## 测试
 
 ```bash
-# 后端全量（当前基线 369 passed）
+# 后端全量（当前基线 392 passed）
 python -m pytest tests/ -q
 
 # Golden 回归 eval（当前 1/1）
@@ -94,7 +94,7 @@ python scripts/smoke_e2e.py
 # 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
 python scripts/real_llm_e2e.py
 
-# 前端单测（vitest；当前 133）
+# 前端单测（vitest；当前 141）
 cd apps/web && npm run test
 ```
 
@@ -112,10 +112,14 @@ cd apps/web && npm run test
 | `NOVELOS_QUALITY_GATE` | `report` | quality gate 模式：`report`（不阻断）/ `enforce`（error 级阻断） |
 | `NOVELOS_API_KEY_<PROVIDER>` | — | provider API Key（`<PROVIDER>` 大写，如 `NOVELOS_API_KEY_OPENAI`）；也可在 model_configs 的 `params_json.api_key` 配置 |
 
-## Sprint 状态
+## 版本与更新日志
+
+当前版本 **V1.0.0**（git tag `v1.0.0`）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
+追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x 路线登记在同文件
+「Known Issues / 路线登记」一节。
 
 逐 Sprint 进度、关键 commit 与测试基线见 `docs/impl/IMPLEMENTATION-PLAN-v0.md` §4.1 台账
-（S0 基础设施 ~ S11 参照系与合规已验收，S12 Tauri 壳待用户确认）；已知 deviation 见同文档 §4.2。
+（S0 ~ S11 已验收，S12 Tauri 壳经用户拍板关闭——Web 版即交付形态）；已知 deviation 见同文档 §4.2。
 
 ## AI 使用声明
 

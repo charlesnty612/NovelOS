@@ -35,8 +35,12 @@ def create_project(payload: ProjectCreate, request: Request) -> dict:
 
 
 @router.get("/projects", response_model=list[Project])
-def list_projects(request: Request) -> list[dict]:
-    return _service(request).list()
+def list_projects(
+    request: Request,
+    include_archived: bool = False,
+) -> list[dict]:
+    """默认排除归档项目；``?include_archived=true`` 时全量返回。"""
+    return _service(request).list(include_archived=include_archived)
 
 
 @router.get("/projects/{project_id}", response_model=Project)

@@ -150,3 +150,55 @@ def test_list_empty_returns_empty_array(tmp_path: Path):
             assert r.json() == []
 
     asyncio.run(run())
+
+
+def test_list_excludes_archived_by_default(tmp_path: Path):
+    """默认列表应排除 status='ARCHIVED' 的项目（与前端文案对齐）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            # 建两个项目
+            r1 = await _request(app, "POST", "/api/projects", json={"name": "keep"})
+            assert r1.status_code == 201
+            pid_keep = r1.json()["project_id"]
+
+            r2 = await _request(app, "POST", "/api/projects", json={"name": "drop"})
+            assert r2.status_code == 201
+            pid_drop = r2.json()["project_id"]
+
+            # 归档其一
+            r = await _request(
+                app, "PATCH", f"/api/projects/{pid_drop}",
+                json={"status": "ARCHIVED"},
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "ARCHIVED"
+
+            # 默认 GET /api/projects 应只含未归档项目
+            r = await _request(app, "GET", "/api/projects")
+            assert r.status_code == 200
+            ids = {p["project_id"] for p in r.json()}
+            assert pid_keep in ids
+            assert pid_drop not in ids
+
+            # ?include_archived=true 时两者都在
+            r = await _request(
+                app, "GET", "/api/projects",
+                params={"include_archived": "true"},
+            )
+            assert r.status_code == 200
+            ids = {p["project_id"] for p in r.json()}
+            assert {pid_keep, pid_drop} <= ids
+
+            # ?include_archived=false 显式关闭：与默认一致
+            r = await _request(
+                app, "GET", "/api/projects",
+                params={"include_archived": "false"},
+            )
+            assert r.status_code == 200
+            ids = {p["project_id"] for p in r.json()}
+            assert pid_keep in ids
+            assert pid_drop not in ids
+
+    asyncio.run(run())

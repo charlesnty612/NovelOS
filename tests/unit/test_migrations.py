@@ -43,6 +43,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0003_quality_reports.sql",
         "0004_reference_canon.sql",
         "0005_branches_archived_status.sql",
+        "0006_quality_reports_project_idx.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -71,6 +72,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0003_quality_reports.sql",
         "0004_reference_canon.sql",
         "0005_branches_archived_status.sql",
+        "0006_quality_reports_project_idx.sql",
     }
     for r in rows:
         assert r["applied_at"]

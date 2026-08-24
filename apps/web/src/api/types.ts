@@ -368,9 +368,10 @@ export interface ModelConfigUpdatePayload {
 
 export interface ModelConfigTestResult {
   config_id: string;
+  ok: boolean;
   latency_ms: number;
-  preview: string;
-  usage: Record<string, unknown> | null;
+  detail?: string | null;
+  status_code?: number | null;
 }
 
 // ---- agents / prompts ------------------------------------------------------

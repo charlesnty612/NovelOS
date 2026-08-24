@@ -2218,15 +2218,15 @@ class StoryStateService:
                 f"b={version_b} exists={snap_b is not None}",
                 resource="snapshot",
             )
-        a = _strip_state_version(snap_a)
-        b = _strip_state_version(snap_b)
-        return _diff_snapshots(a, b, version_a=version_a, version_b=version_b, branch_id=None)
+        a = strip_state_version(snap_a)
+        b = strip_state_version(snap_b)
+        return diff_snapshots(a, b, version_a=version_a, version_b=version_b, branch_id=None)
 
 
 # ----------------------------------------------------------------------------- diff helpers (Sprint 7)
 
 
-def _strip_state_version(snap: dict) -> dict:
+def strip_state_version(snap: dict) -> dict:
     """去掉 ``state_version`` 字段以便 diff。"""
     if isinstance(snap, dict) and "state_version" in snap:
         out = dict(snap)
@@ -2297,7 +2297,7 @@ def _diff_dicts(a: dict, b: dict) -> dict:
     return diff
 
 
-def _diff_snapshots(a: dict, b: dict, *, version_a: int, version_b: int, branch_id: str | None) -> dict:
+def diff_snapshots(a: dict, b: dict, *, version_a: int, version_b: int, branch_id: str | None) -> dict:
     """按 snapshot 结构组装 diff。"""
     out: dict = {
         "version_a": version_a,

@@ -32,7 +32,7 @@ packages/core/story_state/
 ├── validator.py           # validate_delta(delta) -> list[str]（jsonschema + 业务规则）
 ├── snapshot.py            # build_initial_state / materialize_snapshot
 ├── applier.py             # apply_delta(state, delta) -> state（纯函数）
-└── service.py             # StoryStateService（DB 主入口；Sprint 7 增 create_branch / promote_branch / diff_versions / 分支推导 helper）
+└── service.py             # StoryStateService（DB 主入口；Sprint 7 增 create_branch / promote_branch / diff_versions / 分支推导 helper）；公共 helper diff_snapshots / strip_state_version
 ```
 
 API 路由：``packages/core/api/routers/story_state.py``（自动发现挂载到 ``/api``）。
@@ -74,6 +74,17 @@ API 路由：``packages/core/api/routers/story_state.py``（自动发现挂载�
 ### 3.5 ``materialize_snapshot(conn, *, project_id, state_version, snapshot_json, commit_id, created_at)``
 
 把 state JSON 写入 ``story_states``，返回 ``(snapshot_ref, sha256)``。
+
+### 3.6 ``diff_snapshots(a, b, *, version_a, version_b, branch_id) -> dict``
+
+公共 helper（模块级纯函数），``diff_versions`` 的底层实现；外部模块（如
+``packages.core.simulation``）需要结构化 diff 时可直接 import。``a`` / ``b`` 应为已
+``strip_state_version`` 处理过的 dict（避免 ``state_version`` 字段被视为差异）。
+
+### 3.7 ``strip_state_version(snap: dict) -> dict``
+
+公共 helper（模块级纯函数）；去除 ``snap["state_version"]`` 字段以便 diff；非 dict
+或不含该键时直接返回原值。供 ``diff_snapshots`` 及外部调用方在 diff 前统一预处理。
 
 ---
 
