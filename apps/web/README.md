@@ -259,6 +259,8 @@ apps/web/
 | GET | `/projects/{pid}/canons` | 该项目下 active canon 摘要列表 |
 | GET | `/canons/{canon_id}` | canon 全文（canon_json + report_md + extracts） |
 | DELETE | `/canons/{canon_id}` | 级联删除 canon + extracts（204） |
+| GET | `/projects/{pid}/backup` | 下载项目备份 JSON（22 张业务表 + metadata 自证字段，不含 API key；V1.4 Sprint 16 / MVP） |
+| POST | `/projects/import-backup` | 接收 JSON 包导入为**新项目**；坏 format/version/表名 → 422（V1.4 Sprint 16 / MVP） |
 
 ### Sprint 11 下半 — 参照系面板（Reference Canon）
 

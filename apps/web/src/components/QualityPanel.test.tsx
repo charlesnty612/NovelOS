@@ -220,4 +220,160 @@ describe('QualityPanel', () => {
     await waitFor(() => expect(qualityApi.evaluate).toHaveBeenCalledWith('ch_1'));
     await waitFor(() => expect(onEvaluated).toHaveBeenCalledWith(baseReport));
   });
+
+  // ---------- V1.4：参照系消费可观测 + enforce 改稿引导 ----------
+
+  it('V1.4: 缺 reference_consumption / revision_guidance 时不渲染区块', () => {
+    render(
+      <QualityPanel
+        chapterId="ch_1"
+        report={baseReport}
+        loading={false}
+        error={null}
+        onEvaluated={() => {}}
+      />,
+    );
+    expect(screen.queryByTestId('reference-consumption')).toBeNull();
+    expect(screen.queryByTestId('revision-guidance')).toBeNull();
+  });
+
+  it('V1.4: qualityGateCheckpoint 携带 reference_consumption.files>0 时渲染参照系区块', () => {
+    render(
+      <QualityPanel
+        chapterId="ch_1"
+        report={baseReport}
+        loading={false}
+        error={null}
+        onEvaluated={() => {}}
+        qualityGateCheckpoint={{
+          blocked: false,
+          mode: 'report',
+          reference_consumption: {
+            source: 'project_refs_dir',
+            files_count: 2,
+            total_chars: 1234,
+            files: [
+              { name: 'ref_a.txt', chars: 1200 },
+              { name: 'ref_b.txt', chars: 34 },
+            ],
+          },
+          revision_guidance: [],
+        }}
+      />,
+    );
+    const block = screen.getByTestId('reference-consumption');
+    expect(block).toBeInTheDocument();
+    expect(block).toHaveTextContent('ref_a.txt');
+    expect(block).toHaveTextContent('ref_b.txt');
+    expect(block).toHaveTextContent('1,200 字');
+    expect(block).toHaveTextContent('共 2 份');
+    expect(block).toHaveTextContent('1,234 字');
+  });
+
+  it('V1.4: reference_consumption.files_count=0 时不渲染区块', () => {
+    render(
+      <QualityPanel
+        chapterId="ch_1"
+        report={baseReport}
+        loading={false}
+        error={null}
+        onEvaluated={() => {}}
+        qualityGateCheckpoint={{
+          blocked: false,
+          mode: 'report',
+          reference_consumption: {
+            source: 'project_refs_dir',
+            files_count: 0,
+            total_chars: 0,
+            files: [],
+          },
+          revision_guidance: [],
+        }}
+      />,
+    );
+    expect(screen.queryByTestId('reference-consumption')).toBeNull();
+  });
+
+  it('V1.4: qualityGateCheckpoint.revision_guidance 非空时渲染改稿引导（guardrails + 低分子分）', () => {
+    render(
+      <QualityPanel
+        chapterId="ch_1"
+        report={baseReport}
+        loading={false}
+        error={null}
+        onEvaluated={() => {}}
+        qualityGateCheckpoint={{
+          blocked: true,
+          mode: 'enforce',
+          reference_consumption: {
+            source: 'project_refs_dir',
+            files_count: 0,
+            total_chars: 0,
+            files: [],
+          },
+          revision_guidance: [
+            {
+              dimension: 'guardrails',
+              score: 0,
+              threshold: 60,
+              rule_hint: '不要让已死亡角色在本章发生 action/location/goal 等活跃状态变更',
+              top_issues: [
+                {
+                  severity: 'error',
+                  category: 'character_contradiction',
+                  location: 'ch_1',
+                  rule_id: 'RULE_CHAR_DEAD_ACTIVE',
+                  message: '已死亡角色仍在活动',
+                  suggestion: null,
+                  evidence_refs: null,
+                  judge_trace: null,
+                },
+              ],
+            },
+            {
+              dimension: 'style',
+              score: 55,
+              threshold: 60,
+              rule_hint: '替换高频套用词为角色专属表达',
+              top_issues: [],
+            },
+          ],
+        }}
+      />,
+    );
+    const block = screen.getByTestId('revision-guidance');
+    expect(block).toBeInTheDocument();
+    expect(screen.getByTestId('revision-guardrails')).toBeInTheDocument();
+    expect(screen.getByTestId('revision-style')).toBeInTheDocument();
+    expect(block).toHaveTextContent('RULE_CHAR_DEAD_ACTIVE');
+    expect(block).toHaveTextContent('当前分 55 / 阈值 60');
+    expect(block).toHaveTextContent('替换高频套用词');
+  });
+
+  it('V1.4: qualityGateCheckpoint 优先于 report._meta.* 字段', () => {
+    // 当两者都给时，以 checkpoint（更新值）为准；UI 直接展示。
+    render(
+      <QualityPanel
+        chapterId="ch_1"
+        report={baseReport}
+        loading={false}
+        error={null}
+        onEvaluated={() => {}}
+        qualityGateCheckpoint={{
+          blocked: false,
+          mode: 'report',
+          reference_consumption: {
+            source: 'project_refs_dir',
+            files_count: 1,
+            total_chars: 7,
+            files: [{ name: 'from-checkpoint.txt', chars: 7 }],
+          },
+          revision_guidance: [],
+        }}
+      />,
+    );
+    expect(screen.getByTestId('reference-consumption')).toHaveTextContent(
+      'from-checkpoint.txt',
+    );
+  });
 });

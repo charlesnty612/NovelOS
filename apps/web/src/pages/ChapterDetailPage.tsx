@@ -4,6 +4,7 @@ import { chaptersApi, qualityApi, workflowsApi } from '../api/endpoints';
 import type {
   Chapter,
   Draft,
+  QualityGateCheckpoint,
   QualityReport,
   WorkflowRun,
   WorkflowStartResponse,
@@ -136,6 +137,27 @@ export function ChapterDetailPage() {
   );
   const detailRun = detail.data;
   const pausePayload = extractPausePayload(detailRun?.checkpoint_json) ?? undefined;
+
+  // V1.4：从选中 run 的 checkpoint_json 中提取 quality_gate 节点暴露字段（参照系消费
+  // + 改稿引导）。无 quality_gate 节点时为 null；QualityPanel 按空态处理。
+  const qualityGateCheckpoint = useMemo<QualityGateCheckpoint | null>(() => {
+    const ckpt = detailRun?.checkpoint_json;
+    if (!ckpt || typeof ckpt !== 'object') return null;
+    const qg = (ckpt as Record<string, unknown>)['quality_gate'];
+    if (!qg || typeof qg !== 'object') return null;
+    const obj = qg as Record<string, unknown>;
+    return {
+      blocked: Boolean(obj['blocked']),
+      mode: (typeof obj['mode'] === 'string' ? (obj['mode'] as string) : 'report'),
+      reference_consumption:
+        (obj['reference_consumption'] as QualityGateCheckpoint['reference_consumption']) ??
+        { source: 'project_refs_dir', files: [], total_chars: 0, files_count: 0 },
+      revision_guidance:
+        (Array.isArray(obj['revision_guidance'])
+          ? (obj['revision_guidance'] as QualityGateCheckpoint['revision_guidance'])
+          : []) ?? [],
+    };
+  }, [detailRun?.checkpoint_json]);
 
   // ---- 顶部工作流按钮 ----
   const [actionErr, setActionErr] = useState<string | null>(null);
@@ -273,6 +295,7 @@ export function ChapterDetailPage() {
               setQualityReport(rep);
               void chapterCall.reload();
             }}
+            qualityGateCheckpoint={qualityGateCheckpoint}
           />
         </div>
       ) : null}

@@ -33,6 +33,9 @@
 | `GET /api/projects/{pid}/style-samples` | `packages/core/api/routers/author_style_samples.py`（Sprint 15 / V1.3） | 列出项目级作者文风样例（按 `created_at DESC`）。注入 writer 上下文用，详见 `packages/core/context_engine/README.md`。 |
 | `POST /api/projects/{pid}/style-samples` | 同上 | 新增文风样例（201）。`content` ≤ 5000 字 / 单项目 ≤ 10 篇（超限 422）。 |
 | `DELETE /api/projects/{pid}/style-samples/{sample_id}` | 同上 | 删除单条（204）；不存在 / 不属于该项目 → 404。 |
+| `GET /api/projects/{pid}/backup` | `packages/core/api/routers/backup.py`（V1.4 / Sprint 16 / MVP） | 下载项目备份 JSON 包（22 张业务表行 + metadata 自证字段，含 `api_keys_stripped=true` 等）；`Content-Type: application/json; charset=utf-8` + `Content-Disposition: attachment; filename="backup-<pid>.json"`。项目不存在 → 404。详见 `packages/core/backup/README.md`。 |
+| `POST /api/projects/import-backup` | 同上 | 接收 JSON body（备份包），导入为**新项目**（不覆盖源项目）；返回 201 + 新 `projects` 行 dict。坏 `format / version / 表名 / 缺字段 / 事务失败` → 422。事务失败整体回滚，不残留半成品。 |
+| `GET /api/projects/{pid}/export?format={txt\|docx\|fanqie}[&chapter_no=...]` | `packages/core/api/routers/export.py`（V1.4 / Sprint 16） | 整书 / 单章 / 番茄投稿包导出。`fanqie` 忽略 `chapter_no`；`chapter_no` 缺省=整书。404=项目不存在；400=非法 format 或单章缺参。文件名走 RFC 5987（ASCII 兜底 + `filename*=UTF-8''…`）。详见 `packages/core/exporter/README.md`。 |
 | `GET /`（SPA 关闭时） | `packages/core/api/main.py` | 返回 `{service, version, docs}` |
 | `GET /`、`GET /{path}`（SPA 启用时） | `packages/core/api/main.py` | catch-all 返回 `dist/index.html`（SPA fallback） |
 | `resolve_web_dist()` | `packages/core/api/main.py` | 解析 SPA dist 路径（`NOVELOS_WEB_DIST` > `<repo>/apps/web/dist`） |

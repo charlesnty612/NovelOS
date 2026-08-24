@@ -26,6 +26,11 @@ NovelOS 面向长篇小说作者：在本地运行完整的小说生产闭环。
   见 `packages/core/simulation/` 与 `packages/core/api/routers/simulation.py`。
 - **多模型路由**：按 capability（`reasoning` / `creative_writing`）路由到 mock / OpenAI 兼容 /
   Anthropic / Ollama provider，支持失败转移链。见 `packages/core/model_router/`。
+- **项目导出发布（V1.4 Sprint 16）**：整书 / 单章 txt 与 docx、番茄投稿包（前 ~1 万字正文 + 全书大纲）一键导出。
+  docx 用最小 OOXML 手工打包（无 `python-docx` 依赖）；只读、不调 LLM、不改 schema。
+  见 `packages/core/exporter/README.md` 与 `packages/core/api/routers/export.py`。
+- **项目备份 / 恢复（V1.4 Sprint 16 / MVP）**：整项目导出为单 JSON 包（22 张业务表 + metadata 自证字段，不含 API key），支持导入为新项目（不覆盖源项目），单事务整体回环。
+  见 `packages/core/backup/` 与 `packages/core/api/routers/backup.py`。
 
 ## 仓库结构
 
@@ -82,7 +87,7 @@ python -m packages.core.api.main
 ## 测试
 
 ```bash
-# 后端全量（当前基线 488 passed）
+# 后端全量（当前基线 537 passed）
 python -m pytest tests/ -q
 
 # Golden 回归 eval（当前 1/1）
@@ -94,7 +99,7 @@ python scripts/smoke_e2e.py
 # 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
 python scripts/real_llm_e2e.py
 
-# 前端单测（vitest；当前 162）
+# 前端单测（vitest；当前 181）
 cd apps/web && npm run test
 ```
 
@@ -114,7 +119,7 @@ cd apps/web && npm run test
 
 ## 版本与更新日志
 
-当前版本 **V1.3.0**（git tag `v1.3.0`）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
+当前版本 **V1.4.0**（git tag `v1.4.0`）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x 路线登记在同文件
 「Known Issues / 路线登记」一节。
 

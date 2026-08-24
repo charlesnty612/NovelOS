@@ -30,7 +30,12 @@ from packages.core.context_engine import build_observer_input
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.quality.engine import QualityEngine
-from packages.core.quality.service import QualityService, build_quality_context
+from packages.core.quality.models import Issue, QualityReport as _QualityReport
+from packages.core.quality.service import (
+    QualityService,
+    build_quality_context,
+    capture_reference_consumption,
+)
 from packages.core.story_state.service import StoryStateService
 from packages.core.story_state.validator import validate_delta
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
@@ -44,6 +49,189 @@ _OBSERVER_RETRY_HINT_TEMPLATE = (
     "请按反馈修正后重新完整输出 7 个 change 数组的合法 JSON（保持 schema_version="
     "state-delta-v0 外的其它元信息字段由后续节点注入，无需在本次输出中包含）。"
 )
+
+# -----------------------------------------------------------------------
+# Sprint V1.4：enforce 改稿引导（revision_guidance）
+# -----------------------------------------------------------------------
+
+# 维度阈值（与 docs/evaluation/quality-scoring-v0.md §1.1 八字段对齐）。
+# 任一子分 < _REVISION_SCORE_THRESHOLD ⇒ 进入 revision_guidance。
+_REVISION_SCORE_THRESHOLD = 60
+# 阻断 rule_id / category → 可执行改稿建议（纯规则映射；不调 LLM，按 task spec）。
+# 缺失时退化为通用「按 issue.message / suggestion 改稿」兜底。
+_RULE_REVISION_HINTS: dict[str, str] = {
+    # 顶层规范（REQ-Q6/Q7/Q8）
+    "REQ-Q6": "降低与参照书重合的句段；优先替换高频套用词为角色专属表达；保留设定但改叙事结构。",
+    "REQ-Q7": "补齐缺失的章节/伏笔/角色状态；对照 plan_json.key_beats 检查是否覆盖每个 beat。",
+    "REQ-Q8": "调整 AI / 人类作者字符占比；避免全章由 AI 单调产出，关键转折需 human 改稿痕迹。",
+    # Payoff（H-*）
+    "H-1": "本章 payoff 不足——为已 resolved_hooks / paid debts 留出可感知的展示窗口（不是仅后台登记）。",
+    "H-2": "本章 hook 兑现节奏失衡——把过密 hook 拆到后续章节，或在前文补充兑现铺垫。",
+    "H-3": "本章角色变化过于剧烈——拆解为多章过渡；每章 character_changes 控制在 1-2 项。",
+    "H-4": "本章世界规则变更未铺垫——先埋 rule change 的前因后果，再正式推进到本章。",
+    "H-5": "本章与前章状态衔接断裂——补一段承接句或回忆钩，确保读者认知连续。",
+    # Guardrail rule_id 兜底（与 packages/core/quality/guardrails.py 对齐）
+    "RULE_CHAR_DEAD_ACTIVE": "不要让已死亡角色在本章发生 action/location/goal 等活跃状态变更；先在故事层处理复活情节，或换其它角色承担该情节。",
+    "RULE_CHAR_BEFORE_MISMATCH": "character_changes[*].before 必须与 snapshot 当前 canonical state 一致；不要在没有先写状态变更的情况下直接 update。",
+    "RULE_WORLD_BEFORE_MISMATCH": "world_changes[*].before 必须与 snapshot 当前 world 状态一致；先核对当前 location/faction/rule 再 update。",
+    "RULE_TIMELINE_REGRESSION": "本章 effective_at 不能早于上一个已 commit state 的 effective_at；调整时序或在更早章节埋点。",
+    "RULE_KNOWLEDGE_LEAK": "actor.knowledge 不能引用 visibility<HIDDEN 的知识；改用 actor 自身可见的线索。",
+    "RULE_SCHEMA_VALIDATION_FAILED": "Observer delta payload 不通过业务校验；按 payload._retry_hint / 阻断信息修正字段后再提交。",
+    "scoring_missing_subscore": "至少 1 个子分未算出（plan / snapshot / delta 不完整）；补全 chapters.plan_json 或 StoryStateService.submit_delta 后重跑。",
+}
+# guardrail category → 可执行改稿建议（覆盖 RULE_* 没在 _RULE_REVISION_HINTS 命中的情形）
+_CATEGORY_REVISION_HINTS: dict[str, str] = {
+    "character_contradiction": "character_changes 与 canonical character state 冲突；先核对角色当前 status/location/goal 再下发 update。",
+    "world_rule_contradiction": "world_changes 与 world canonical state 冲突；先核对当前 world rule / faction / location 再下发 update。",
+    "timeline_consistency": "本章 effective_at 或事件顺序与已 commit state 矛盾；调整时序或在更早章节先埋。",
+    "knowledge_leakage": "actor 引用的 knowledge 超出其 visibility；改用 actor 自身可见的线索，或先提升 actor.visibility。",
+    "schema_validity": "Observer delta payload 字段不合法；按错误信息逐条修复后重跑。",
+    "payoff": "本章 payoff 计数偏低（<H-1 阈值）；对照 plan.debt_handling / hook_handling 检查是否漏兑现。",
+    "consistency": "本章与前章状态衔接断裂；补一段承接句或回忆钩，确保读者认知连续。",
+    "continuity": "本章与前章状态衔接断裂；补一段承接句或回忆钩，确保读者认知连续。",
+    "completeness": "plan.key_beats / character_changes_planned 未覆盖；对照 plan 与 delta 补齐。",
+}
+
+
+def _build_revision_guidance(report: _QualityReport, issues: list[Issue]) -> list[dict[str, Any]]:
+    """从 quality_report 生成结构化 revision_guidance。
+
+    返回 ``[{"dimension", "score", "threshold", "top_issues", "rule_hint"}]``。
+
+    生成规则（V1.4）：
+    1. 任一子分 < ``_REVISION_SCORE_THRESHOLD`` ⇒ 进入列表（按低分子分维度）。
+    2. 任一 ``severity == 'error'`` issue 的 rule_id 在 ``_RULE_REVISION_HINTS`` 内
+       ⇒ 进入列表（标记 dimension='guardrail'），保证 enforce 阻断时一定有可执行建议。
+    3. 1+2 同 key 时合并 top_issues，按 dimension 去重。
+
+    设计动机：subscore 不一定随单个 error 落到阈值以下（rule-based scoring 与
+    guardrail 是两条独立通道），enforce 阻断时如果只看低分子分会得到空列表——但
+    作者实际需要的是「按 blocking rule 怎么改稿」。所以同时携带 guardrail 维度。
+    """
+    subscores: dict[str, int] = {
+        "plot": int(report.plot),
+        "character": int(report.character),
+        "continuity": int(report.continuity),
+        "style": int(report.style),
+        "pacing": int(report.pacing),
+        "foreshadowing": int(report.foreshadowing),
+        "ai_trace": int(report.ai_trace),
+    }
+
+    # 按 category 反推所属子分维度（用于「低分子分 → 关联 error」粗匹配）。
+    issues_by_dim: dict[str, list[dict[str, Any]]] = {k: [] for k in subscores}
+    error_issues: list[Issue] = [i for i in issues if i.severity == "error"]
+
+    for iss in error_issues:
+        entry = {
+            "rule_id": iss.rule_id,
+            "category": iss.category,
+            "message": iss.message,
+            "suggestion": iss.suggestion,
+            "location": iss.location,
+        }
+        # 已知规则的 guardrail 维度先归入 "guardrails" 桶（与下面 step 2 合并）
+        if iss.rule_id in _RULE_REVISION_HINTS:
+            issues_by_dim.setdefault("guardrails", []).append(entry)
+        # 按 category 做粗匹配，落到具体子分
+        cat = (iss.category or "").lower()
+        for dim in ("plot", "character", "continuity", "style", "pacing", "foreshadowing"):
+            if dim in cat:
+                issues_by_dim.setdefault(dim, []).append(entry)
+                break
+        # continuity 子分涵盖 guardrail 大类
+        if iss.category in {
+            "character_contradiction", "world_rule_contradiction",
+            "timeline_consistency", "knowledge_leakage", "schema_validity",
+        }:
+            issues_by_dim.setdefault("continuity", []).append(entry)
+        # plot 子分覆盖 payoff 类
+        if iss.category == "payoff":
+            issues_by_dim.setdefault("plot", []).append(entry)
+
+    guidance: list[dict[str, Any]] = []
+    seen_dims: set[str] = set()
+
+    # Step 1: 低分子分优先进入
+    for dim, score in subscores.items():
+        if score >= _REVISION_SCORE_THRESHOLD:
+            continue
+        if dim in seen_dims:
+            continue
+        seen_dims.add(dim)
+        dim_issues = issues_by_dim.get(dim, [])
+        # 兜底默认建议（每条要有可执行建议动作）
+        hint = _RULE_REVISION_HINTS.get(
+            dim,
+            f"{dim} 子分={score}，低于阈值{_REVISION_SCORE_THRESHOLD}；"
+            "请按 issues 清单逐条修复后重跑 quality_gate。",
+        )
+        guidance.append({
+            "dimension": dim,
+            "score": int(score),
+            "threshold": int(_REVISION_SCORE_THRESHOLD),
+            "top_issues": dim_issues[:5],
+            "rule_hint": hint,
+        })
+
+    # Step 2: blocking rule 维度（即便 subscore 没低于阈值也要进；保证 enforce 阻断时
+    # 必有可执行建议）。优先按 rule_id 命中；rule_id 未命中时按 category 兜底。
+    # 同 (rule_id, category) 只生成一条；同一 rule_id 重复出现在 step 1 中已被合并。
+    if error_issues:
+        seen_keys: set[tuple[str, str]] = set()
+        guardrail_entries: list[dict[str, Any]] = []
+        for iss in error_issues:
+            key = (iss.rule_id, iss.category or "")
+            if key in seen_keys:
+                continue
+            hint = _RULE_REVISION_HINTS.get(iss.rule_id)
+            if hint is None:
+                hint = _CATEGORY_REVISION_HINTS.get(iss.category or "")
+            if hint is None:
+                # 既不在 rule 也不在 category 表，跳过；下一步兜底统一加 generic
+                continue
+            seen_keys.add(key)
+            guardrail_entries.append({
+                "rule_id": iss.rule_id,
+                "category": iss.category,
+                "message": iss.message,
+                "suggestion": iss.suggestion,
+                "location": iss.location,
+                "rule_hint": hint,
+            })
+        # 兜底：若所有 blocking issue 都没命中任何 hint（极少见），仍输出一条
+        # 通用 guardrail 条目，让作者至少知道有阻断；top_issues 列出所有阻断 issue。
+        if not guardrail_entries and error_issues:
+            first = error_issues[0]
+            guardrail_entries.append({
+                "rule_id": first.rule_id,
+                "category": first.category,
+                "message": first.message,
+                "suggestion": first.suggestion,
+                "location": first.location,
+                "rule_hint": "本章 quality_gate 触发 error 阻断；按 issue.message / suggestion 修复后重跑。",
+            })
+        if guardrail_entries and "guardrails" not in seen_dims:
+            # 用第 1 条的 hint 作 guardrails 主 hint（list 形式供前端展开）
+            primary_hint = guardrail_entries[0]["rule_hint"]
+            guidance.append({
+                "dimension": "guardrails",
+                "score": 0,
+                "threshold": int(_REVISION_SCORE_THRESHOLD),
+                "top_issues": guardrail_entries[:5],
+                "rule_hint": primary_hint,
+            })
+            seen_dims.add("guardrails")
+
+    return guidance
+
+
+# quality_gate 节点抛 ValueError 阻断时一并把 revision_guidance 注入到 WorkflowEngine
+# 写进 runs.error 的字符串里（后端 format）；让前端 QualityPanel / 错误提示能直接拿到
+# 结构化改稿引导。阻断时无法走节点返回 dict，故用 error_info + checkpoint 两条路径：
+# - runs.error = "quality gate blocked: <rule_ids> | guidance=<json>"
+# - ctx['quality_gate']={'blocked': True, 'revision_guidance': [...]}（已被 _update_run_checkpoint
+#   落盘到 checkpoint_json）
 
 
 def _build_observer_ctx_node(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -252,6 +440,11 @@ def _quality_gate_node(ctx: dict[str, Any]) -> dict[str, Any]:
     delta = ctx.get("delta") or {}
     snapshot_pre = ctx.get("snapshot_pre") or {}
 
+    # Sprint V1.4：参照系消费可观测——quality_gate 现场采集本节点消费的 *.txt 清单
+    # 写到节点返回 dict，供 checkpoint_json 暴露给前端；与 quality 评估同一时机，
+    # 阻断时也会随 ctx 落盘（_update_run_checkpoint 在每节点完成后写一次）。
+    reference_consumption = capture_reference_consumption(db_path, project_id)
+
     quality_ctx = build_quality_context(
         db_path,
         project_id=project_id,
@@ -261,6 +454,11 @@ def _quality_gate_node(ctx: dict[str, Any]) -> dict[str, Any]:
         run_id=ctx.get("run_id"),
     )
     report = QualityEngine().evaluate(quality_ctx)
+    # Sprint V1.4：把参照系消费清单持久化到 quality_reports._meta.reference_consumption，
+    # 让 /api/chapters/{cid}/quality 端点直接返回，UI 不必再回查 runs.checkpoint_json。
+    meta = dict(report.meta or {})
+    meta["reference_consumption"] = reference_consumption
+    report.meta = meta
     QualityService(db_path).save_report(
         report,
         project_id=project_id,
@@ -271,11 +469,34 @@ def _quality_gate_node(ctx: dict[str, Any]) -> dict[str, Any]:
     mode = _quality_gate_mode(ctx)
     error_issues = [i for i in report.issues if i.severity == "error"]
     error_rule_ids = [i.rule_id for i in error_issues]
+
+    # Sprint V1.4：enforce 模式阻断时，把每低分维度的可执行改稿建议结构化带上。
+    # revision_guidance 写进 ctx['quality_gate']（checkpoint_json 会自动收录），
+    # 同时把整段结构化 payload JSON 化追加到 ValueError 信息里——run FAILED 时
+    # runs.error 已包含它，前端 QualityPanel 可直接从错误字符串里解析。
+    revision_guidance: list[dict[str, Any]] = []
+    if error_issues:
+        revision_guidance = _build_revision_guidance(report, report.issues)
+    ctx["quality_gate"] = {
+        "blocked": bool(error_issues) and mode == "enforce",
+        "mode": mode,
+        "reference_consumption": reference_consumption,
+        "revision_guidance": revision_guidance,
+    }
+
     if error_issues and mode == "enforce":
         # 与现有 _commit_node 失败语义一致：抛 ValueError 让 run FAILED，
         # chapter 保持当前状态（当前章节 status=REVIEWED；error 阻断不会推到 COMMITTED）。
+        # 在错误信息里把 revision_guidance 序列化为可解析段：
+        #   "quality gate blocked: <rule_ids> | guidance=<json>"
+        # 前端 / 测试可按 "| guidance=" 分隔；JSON 解析失败也不影响主信息。
+        import json as _json
+        try:
+            guidance_json = _json.dumps(revision_guidance, ensure_ascii=False)
+        except (TypeError, ValueError):
+            guidance_json = "[]"
         raise ValueError(
-            f"quality gate blocked: {error_rule_ids}"
+            f"quality gate blocked: {error_rule_ids} | guidance={guidance_json}"
         )
 
     return {
@@ -284,6 +505,8 @@ def _quality_gate_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "quality_report_id": report.report_id,
         "quality_overall": int(report.overall),
         "quality_error_count": len(error_issues),
+        "reference_consumption": reference_consumption,
+        "revision_guidance": revision_guidance,
     }
 
 

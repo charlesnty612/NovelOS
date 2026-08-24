@@ -7,6 +7,7 @@ import type {
   AiCallLogDetail,
   AiCallLogSummary,
   AiCallLogTokenUsage,
+  BackupPackage,
   CanonDetail,
   CanonSummary,
   Chapter,
@@ -403,4 +404,74 @@ export const aiCallLogsApi = {
     ),
   get: (id: string) =>
     api.get<AiCallLogDetail>(`/ai-call-logs/${id}`).then(normalizeAiLogDetail),
+};
+
+// -------------------------------------------------------------- project backup
+// 对应 packages/core/api/routers/backup.py（V1.4 Sprint 16 / MVP）：
+//   GET  /projects/{pid}/backup      —— 下载 JSON 包（含 Content-Disposition attachment）
+//   POST /projects/import-backup     —— 接收 JSON 包，导入为新项目（返回新 Project）
+//
+// 设计要点：
+// - downloadBackup 直接用浏览器 fetch + Blob 触发下载；后端已经在响应头放好
+//   filename，由 <a download> 兜底兼容。
+// - importBackup 直接 POST JSON；服务端校验 format/version/表白名单；坏包 422。
+export const backupApi = {
+  /** 触发浏览器下载项目备份 JSON；后端响应头含 Content-Disposition。 */
+  downloadBackup: async (projectId: string): Promise<void> => {
+    const resp = await fetch(
+      `/api/projects/${projectId}/backup`,
+      { method: 'GET', credentials: 'same-origin' },
+    );
+    if (!resp.ok) {
+      // 解析错误 detail 抛出 ApiError 与 api.* 风格一致
+      const text = await resp.text().catch(() => '');
+      let detail = resp.statusText || `HTTP ${resp.status}`;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === 'object' && 'detail' in parsed) {
+          const d = (parsed as { detail: unknown }).detail;
+          detail = typeof d === 'string' ? d : JSON.stringify(d);
+        }
+      } catch {
+        detail = text || detail;
+      }
+      const { ApiError } = await import('./client');
+      throw new ApiError(resp.status, detail);
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `backup-${projectId}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
+
+  /** 导入备份包；返回新项目 dict。坏 format/version/表名 → 422 由后端转 ApiError。 */
+  importBackup: (payload: BackupPackage): Promise<Project> =>
+    api.post<Project>('/projects/import-backup', payload),
+};
+
+// -------------------------------------------------------------- export (V1.4 / Sprint 16)
+// 对应 packages/core/api/routers/export.py：
+//   GET /projects/{pid}/export?format={txt|docx|fanqie}[&chapter_no=...]
+// 仅暴露类型契约；实际下载由 ExportPanel 直接 fetch + blob 触发。
+export type ExportFormat = 'txt' | 'docx' | 'fanqie';
+
+export interface ExportQuery {
+  format: ExportFormat;
+  chapter_no?: number;
+}
+
+export const exportApi = {
+  /** 拼下载 URL（不发起请求；ExportPanel 用 fetch + blob 下载）。 */
+  url(projectId: string, query: ExportQuery): string {
+    const params = new URLSearchParams({ format: query.format });
+    if (query.format !== 'fanqie' && query.chapter_no !== undefined) {
+      params.set('chapter_no', String(query.chapter_no));
+    }
+    return `/api/projects/${projectId}/export?${params.toString()}`;
+  },
 };

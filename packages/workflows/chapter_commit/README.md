@@ -39,6 +39,88 @@
     调用方/测试显式覆盖，按 call 控制。
   - ``NOVELOS_QUALITY_GATE`` 环境变量：``"enforce"`` 或 ``"report"``，默认 ``"report"``。
 
+## Sprint V1.4 增强
+
+### 1. 参照系消费可观测（reference_consumption）
+
+``quality_gate`` 节点现场采集本次评估消费的参照文本清单（项目级
+``<db 父目录>/references/<project_id>/*.txt``），由
+:func:`packages.core.quality.service.capture_reference_consumption` 提供。
+
+落点（双路径）：
+
+- 节点返回 dict（report 模式不阻断时）：``{"reference_consumption": {...}}``
+- ``workflow_runs.checkpoint_json["quality_gate"].reference_consumption``
+  （即 ``GET /api/runs/{run_id}`` 的返回；enforce 阻断时也随 ctx 落盘）
+- ``quality_reports._meta.reference_consumption``
+  （即 ``GET /api/chapters/{cid}/quality`` 的返回；前端可直接读）
+- API 触发评估 ``POST /api/chapters/{cid}/quality/evaluate`` 同样把同一字段写入
+  ``_meta.reference_consumption``，口径与 pipeline 同源。
+
+字段形状：
+
+```json
+{
+  "source": "project_refs_dir",
+  "files": [{"name": "ref_a.txt", "chars": 1200}, {"name": "ref_b.txt", "chars": 34}],
+  "total_chars": 1234,
+  "files_count": 2
+}
+```
+
+无参照目录或 ``project_id`` 不在白名单时 → ``files=[] / total_chars=0 / files_count=0``；
+前端 QualityPanel 在 ``files_count > 0`` 时才渲染「本章消费参照系」区块。
+
+### 2. enforce 改稿引导（revision_guidance）
+
+``enforce`` 模式阻断时，``quality_gate`` 节点把每条阻断建议整理为结构化
+``revision_guidance``：
+
+```json
+[{
+  "dimension": "guardrails",       // 或子分维度（plot / character / ... / ai_trace）
+  "score": 0,                       // guardrails 维度固定 0（不是低分子分）
+  "threshold": 60,
+  "top_issues": [<QualityIssue>...],
+  "rule_hint": "不要让已死亡角色在本章发生 action/location/goal 等活跃状态变更"
+}]
+```
+
+生成规则：
+
+1. 任一子分 < 60 ⇒ 进入列表（按低分子分维度）。
+2. 任一 ``severity=='error'`` issue 的 ``rule_id`` 命中 :data:`packages.workflows.chapter_commit.pipeline._RULE_REVISION_HINTS`
+   ⇒ 进入列表（``dimension='guardrails'``）。
+3. ``rule_id`` 未命中时按 ``category`` 命中 :data:`packages.workflows.chapter_commit.pipeline._CATEGORY_REVISION_HINTS`
+   兜底。
+4. 全部未命中（极少见）⇒ 1 条通用 guardrail 引导，至少保证作者拿得到「按 issue.message 修复」。
+
+落点（双路径）：
+
+- 节点返回 dict（report 模式不阻断时也写入）：``{"revision_guidance": [...]}``
+- ``workflow_runs.checkpoint_json["quality_gate"].revision_guidance``
+- ``runs.error``（enforce 阻断时）：``"quality gate blocked: <rule_ids> | guidance=<json>"``
+  —— 前端 / 测试按 ``| guidance=`` 分隔即可拿到 JSON。
+
+前端 QualityPanel 在 ``revision_guidance.length > 0`` 时渲染「改稿引导」区块：
+``dimension='guardrails'`` 展示「当前阻断 rule」+ rule_hint；
+低分子分维度展示「当前分 X / 阈值 60」+ rule_hint + top_issues（≤ 3 条 issue 摘要）。
+
+### 3. summarizer 注册验证固化
+
+原 ad-hoc 脚本 ``docs/agents/scripts/verify_summarizer_sync.py`` 的核心断言已固化为
+``tests/integration/test_summarizer_prompt_registration.py``（3 个测试）：
+
+- ``test_summarizer_prompt_registered_after_sync`` —— scanned/registered/agents/ACTIVE
+  行 + content 与源文件一致 + ``get_active_prompt('summarizer')`` 一致。
+- ``test_summarizer_prompt_sync_is_idempotent`` —— 第二次 sync 不应有 updated，
+  prompts 行数 / status 不漂移。
+- ``test_summarizer_get_active_prompt_returns_non_empty`` —— ACTIVE prompt content 非空
+  且与 ``docs/agents/prompts/summarizer-v1.md`` 完全一致。
+
+CI 集成后可防止 summarizer prompt 漂移（capability / prompt 内容 / ACTIVE 行 缺失）
+而悄悄 FAILED。
+
 ## 依赖
 
 - `packages/core/context_engine/builders.build_observer_input`

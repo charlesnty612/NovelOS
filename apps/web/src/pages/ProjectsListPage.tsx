@@ -1,11 +1,17 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ApiError } from '../api/client';
 import { ErrorBanner } from '../components/ErrorBanner';
 import { StatusBadge } from '../components/StatusBadge';
 import { EmptyState } from '../components/EmptyState';
 import { useApiCall } from '../hooks/useApiCall';
-import { projectsApi } from '../api/endpoints';
-import type { Project, ProjectCreatePayload, ProjectStatus } from '../api/types';
+import { backupApi, projectsApi } from '../api/endpoints';
+import type {
+  BackupPackage,
+  Project,
+  ProjectCreatePayload,
+  ProjectStatus,
+} from '../api/types';
 import { formatDateTime } from '../utils/format';
 
 export function ProjectsListPage() {
@@ -16,6 +22,9 @@ export function ProjectsListPage() {
   );
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<Project | null>(null);
+  const [showImport, setShowImport] = useState(false);
+  const [importErr, setImportErr] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
 
   return (
     <div>
@@ -24,6 +33,14 @@ export function ProjectsListPage() {
           我的项目
         </h1>
         <div className="toolbar__spacer" />
+        <button
+          className="btn"
+          onClick={() => setShowImport(true)}
+          data-testid="import-backup-btn"
+          title="从备份 JSON 包导入为新项目"
+        >
+          导入备份
+        </button>
         <button
           className="btn btn--primary"
           onClick={() => setShowCreate(true)}
@@ -148,6 +165,148 @@ export function ProjectsListPage() {
           }
         />
       ) : null}
+
+      {showImport ? (
+        <ImportBackupModal
+          importing={importing}
+          error={importErr}
+          onCancel={() => {
+            if (importing) return;
+            setShowImport(false);
+            setImportErr(null);
+          }}
+          onSubmit={async (file) => {
+            setImporting(true);
+            setImportErr(null);
+            try {
+              const text = await file.text();
+              const parsed = JSON.parse(text) as BackupPackage;
+              const newProject = await backupApi.importBackup(parsed);
+              setShowImport(false);
+              reload();
+              // 导入成功后直接跳到新项目总览
+              navigate(`/projects/${newProject.project_id}/overview`);
+            } catch (e: unknown) {
+              if (e instanceof ApiError) {
+                setImportErr(`${e.status}: ${e.detail}`);
+              } else if (e instanceof Error) {
+                setImportErr(e.message);
+              } else {
+                setImportErr('导入失败');
+              }
+            } finally {
+              setImporting(false);
+            }
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------- import modal
+interface ImportBackupModalProps {
+  importing: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onSubmit: (file: File) => Promise<void>;
+}
+
+function ImportBackupModal({
+  importing,
+  error,
+  onCancel,
+  onSubmit,
+}: ImportBackupModalProps) {
+  const [file, setFile] = useState<File | null>(null);
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLocalErr(null);
+    if (!file) {
+      setLocalErr('请选择备份 JSON 文件');
+      return;
+    }
+    if (!file.name.endsWith('.json')) {
+      setLocalErr('文件必须是 .json 后缀');
+      return;
+    }
+    await onSubmit(file);
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(15,20,35,0.4)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 100,
+      }}
+      onClick={() => {
+        if (!importing) onCancel();
+      }}
+    >
+      <form
+        className="card"
+        style={{ width: 480, maxWidth: '90vw' }}
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={handleSubmit}
+        data-testid="import-backup-modal"
+      >
+        <div className="section-title">从备份导入项目</div>
+        <p className="muted small" style={{ marginTop: 4 }}>
+          选择一份此前导出的 NovelOS 备份 JSON（format = <code>novelos-backup</code>，
+          version = 1）。导入会创建一份**新**项目，不影响原项目。
+        </p>
+        <ErrorBanner>{error ?? localErr}</ErrorBanner>
+        <div className="form-row">
+          <label>备份文件 *</label>
+          <input
+            type="file"
+            accept="application/json,.json"
+            disabled={importing}
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            data-testid="import-backup-file"
+          />
+          {file ? (
+            <div className="muted small" style={{ marginTop: 4 }}>
+              已选择：{file.name}（{Math.round(file.size / 1024)} KB）
+            </div>
+          ) : null}
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            gap: 8,
+            marginTop: 12,
+            justifyContent: 'flex-end',
+          }}
+        >
+          <button
+            type="button"
+            className="btn"
+            onClick={onCancel}
+            disabled={importing}
+            data-testid="import-backup-cancel"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            className="btn btn--primary"
+            disabled={importing || !file}
+            data-testid="import-backup-submit"
+          >
+            {importing ? '导入中…' : '导入为新项目'}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

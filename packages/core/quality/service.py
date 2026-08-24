@@ -42,6 +42,7 @@ __all__ = [
     "compute_char_stats",
     "build_quality_context",
     "load_reference_texts",
+    "capture_reference_consumption",
     "compute_payoff_history",
 ]
 
@@ -295,6 +296,46 @@ def load_reference_texts(db_path: str | Path, project_id: str) -> list[str]:
         except OSError:
             continue
     return out
+
+
+def capture_reference_consumption(db_path: str | Path, project_id: str) -> dict[str, Any]:
+    """收集 quality 评估消费的参照文本清单（项目级 ``<db 父目录>/references/<project_id>/*.txt``）。
+
+    Sprint V1.4：参照系消费可观测。
+
+    返回 ``{"source": "project_refs_dir", "files": [{"name", "chars"}],
+    "total_chars": int, "files_count": int}``；目录不存在或无文件时
+    ``files=[] / total_chars=0 / files_count=0``。与
+    :func:`load_reference_texts` 一致：``project_id`` 不在白名单内也按"无目录"返回
+    ``files=[]``，避免路径穿越。
+
+    调用方：chapter_commit pipeline 的 quality_gate 节点 + API evaluate 端点，
+    把结果写入 ``checkpoint_json.quality_gate.reference_consumption`` 与
+    ``quality_reports._meta.reference_consumption`` 双路径。
+    """
+    if re.fullmatch(r"[A-Za-z0-9_\-]+", str(project_id)) is None:
+        return {
+            "source": "project_refs_dir",
+            "files": [],
+            "total_chars": 0,
+            "files_count": 0,
+        }
+    db_p = Path(db_path)
+    refs_dir = db_p.parent / "references" / project_id
+    files: list[dict[str, Any]] = []
+    if refs_dir.is_dir():
+        for txt in sorted(refs_dir.glob("*.txt")):
+            try:
+                chars = len(txt.read_text(encoding="utf-8"))
+            except OSError:
+                chars = 0
+            files.append({"name": txt.name, "chars": chars})
+    return {
+        "source": "project_refs_dir",
+        "files": files,
+        "total_chars": sum(f["chars"] for f in files),
+        "files_count": len(files),
+    }
 
 
 def compute_payoff_history(db_path: str | Path, project_id: str, limit: int = 5) -> list[int]:

@@ -29,6 +29,31 @@ export interface ProjectUpdatePayload {
   status?: ProjectStatus;
 }
 
+// --- V1.4 Sprint 16 / MVP：项目备份 / 恢复 -----------------------------------
+// 对应 packages/core/backup/schema.py 顶层契约；前端仅使用部分字段做 UI 提示。
+export interface BackupMetadata {
+  schema_migrations: string[];
+  table_count_exported: number;
+  exported_table_names: string[];
+  exported_at_iso: string;
+  api_keys_stripped: boolean;
+  ai_call_logs_excluded: boolean;
+  evaluations_excluded: boolean;
+  workflow_runs_excluded: boolean;
+  model_configs_excluded: boolean;
+  reference_canons_excluded: boolean;
+}
+
+export interface BackupPackage {
+  format: 'novelos-backup';
+  version: 1;
+  exported_at: string;
+  exported_from_project_id: string;
+  metadata: BackupMetadata;
+  project: Project;
+  tables: Record<string, unknown[]>;
+}
+
 export type CharacterRole =
   | 'protagonist'
   | 'antagonist'
@@ -586,6 +611,13 @@ export interface QualityScoresMeta {
   llm_judge: string;
   evaluated_at: string;
   scoring_formula_hash: string;
+  // V1.4：参照系消费清单（quality_gate 节点 + evaluate 端点都写入）。
+  // 缺失时整字段 undefined，前端按空态处理（不渲染区块）。
+  reference_consumption?: ReferenceConsumption;
+  // V1.4：enforce 改稿引导（仅 enforce 模式阻断时写入；report 模式可能缺失）。
+  // 默认从 checkpoint_json['quality_gate'].revision_guidance 取（QualityPanel.props
+  // 的 qualityGateCheckpoint 优先）。
+  revision_guidance?: RevisionGuidance[];
 }
 
 export interface QualityScores {
@@ -610,6 +642,68 @@ export interface QualityReport {
   scores_json: QualityScores;
   issues_json: QualityIssue[];
   created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// V1.4：参照系消费可观测（Sprint 16）。
+//   对齐 packages/core/quality/service.capture_reference_consumption 与
+//   packages/workflows/chapter_commit/pipeline._quality_gate_node。
+//   - ``source``：固定 ``"project_refs_dir"``（项目级 ``<db 父目录>/references/<pid>/*.txt``）
+//   - ``files``：[{ name, chars }]；空数组表示项目下没有参照书
+//   - ``files_count / total_chars``：冗余汇总字段（便于前端不必 reduce）
+// ---------------------------------------------------------------------------
+
+export interface ReferenceFileEntry {
+  name: string;
+  chars: number;
+}
+
+export interface ReferenceConsumption {
+  source: string;
+  files: ReferenceFileEntry[];
+  total_chars: number;
+  files_count: number;
+}
+
+// ---------------------------------------------------------------------------
+// V1.4：enforce 改稿引导（revision_guidance）。
+//   对齐 packages/workflows/chapter_commit/pipeline._build_revision_guidance。
+//   每条引导：维度 + 当前分 + 阈值 + top_issues + 可执行建议（rule_hint）。
+//   dimension='guardrails' 时 score=0（不是低分子分），rule_hint 直接来自阻断 rule。
+// ---------------------------------------------------------------------------
+
+export type RevisionDimension =
+  | 'plot'
+  | 'character'
+  | 'continuity'
+  | 'style'
+  | 'pacing'
+  | 'foreshadowing'
+  | 'ai_trace'
+  | 'guardrails';
+
+export interface RevisionGuidance {
+  dimension: RevisionDimension;
+  score: number;
+  threshold: number;
+  top_issues: QualityIssue[];
+  rule_hint: string;
+}
+
+// ---------------------------------------------------------------------------
+// V1.4：quality_gate 节点 checkpoint 暴露字段。
+//   对齐 packages/workflows/chapter_commit/pipeline._quality_gate_node 返回 dict + 阻断时 ctx 顶层。
+//   - blocked：是否 enforce 阻断（true ⇒ run FAILED）
+//   - mode：'enforce' | 'report'
+//   - reference_consumption：本节点消费的参照文本清单
+//   - revision_guidance：enforce 阻断时给作者的结构化改稿建议（report 模式可能为空）
+// ---------------------------------------------------------------------------
+
+export interface QualityGateCheckpoint {
+  blocked: boolean;
+  mode: 'enforce' | 'report' | string;
+  reference_consumption: ReferenceConsumption;
+  revision_guidance: RevisionGuidance[];
 }
 
 // ---------------------------------------------------------------------------
@@ -753,4 +847,16 @@ export interface AiCallLogDetail extends AiCallLogSummary {
   input_context_ids: string[];
   /** 仅详情端点返回：output_json 解析后的对象/数组/字符串等。 */
   output: Record<string, unknown> | unknown[] | string | number | boolean | null;
+}
+
+// ---------------------------------------------------------------------------
+// V1.4 / Sprint 16：导出（packages/core/api/routers/export.py）
+//   GET /projects/{pid}/export?format={txt|docx|fanqie}[&chapter_no=...]
+// ---------------------------------------------------------------------------
+
+export type ExportFormat = 'txt' | 'docx' | 'fanqie';
+
+export interface ExportQuery {
+  format: ExportFormat;
+  chapter_no?: number;
 }

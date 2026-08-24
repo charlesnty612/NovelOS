@@ -148,3 +148,46 @@ token 预算与截断策略：
 新实现（Sprint 15）：`ORDER BY overdue_flag DESC, importance DESC, introduced_chapter_no ASC, hook_id ASC LIMIT 20` 全部下推 SQL；直接返回 20 条最终结果，伏笔 > 60 条时 overdue 项不再丢失。V1.2 已发布的「预取 + 内存排序」两段式彻底退役。
 
 测试：`tests/unit/test_sprint15_v13.py::test_open_foreshadow_keeps_overdue_when_total_exceeds_cap`（60 条非 overdue + 1 条 overdue → overdue 必现）与 `test_open_foreshadow_sql_order_strict_at_large_volume`（100 条伏笔 → overdue 必现且排第一）。
+
+## Sprint V1.4 扩展：参照系消费可观测（reference_consumption）
+
+V1.4 在 quality 评估链路上加观测能力：评估消费的项目级参照书（`<db 父目录>/references/<project_id>/*.txt`，由
+:func:`packages.core.quality.service.load_reference_texts` 读取）的清单 + 字符数被显式记入报告与
+checkpoint，便于作者判断"本章是否对齐了哪份爆款参照"。
+
+新接口：
+
+```python
+from packages.core.quality.service import capture_reference_consumption
+out = capture_reference_consumption(db_path, project_id)
+# out == {"source": "project_refs_dir",
+#         "files": [{"name": "ref_a.txt", "chars": 1200}, ...],
+#         "total_chars": 1234, "files_count": 2}
+```
+
+落点（双路径）：
+
+- ``chapter_commit`` 工作流 ``quality_gate`` 节点的 checkpoint_json / 节点返回 dict：
+  ``checkpoint_json["quality_gate"].reference_consumption``（enforce 阻断时也随 ctx 落盘）。
+- ``quality_reports._meta.reference_consumption``：与 ``chapter_commit`` pipeline 同源（chapter 详情
+  页 QualityPanel 可直接从 ``/api/chapters/{cid}/quality`` 读取，无需再回查 runs.checkpoint）。
+
+约束：
+
+- ``project_id`` 不在 ``[A-Za-z0-9_-]`` 白名单内 → 按"无目录"返回 ``files=[]``，避免路径穿越。
+- 目录不存在 → ``files=[] / files_count=0 / total_chars=0``；前端按空态处理（不渲染区块）。
+- 文件读取异常 → 跳过该文件（log warning 但不阻断）。
+
+与 ``reference_canon`` 的关系：
+
+- ``reference_canon``（Director / chapter_plan 阶段）= ``reference_canons`` 表中的 active canon
+  （结构化 logline / spine / payoff_list / rhythm），注入到 ``director_input`` 顶层，供 Director 规划。
+- ``reference_consumption``（quality_gate / chapter_commit 阶段）= ``references/<pid>/*.txt`` 项目级
+  参照文本清单，注入到 ``quality_reports._meta`` 与 ``checkpoint_json['quality_gate']``，供 REQ-Q6
+  风格对齐评估。
+
+两条链路完全独立、各自观测；不互相覆盖。
+
+测试：`tests/integration/test_v1_4_reference_and_revision.py::test_v1_4_reference_consumption_persists_to_checkpoint_and_meta`
+（happy path）+ `test_v1_4_reference_consumption_empty_when_no_refs_dir`（无目录空态）+ 
+`test_v1_4_evaluate_endpoint_also_emits_reference_consumption`（API 端点同源）。

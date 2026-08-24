@@ -1,9 +1,13 @@
+import { useState } from 'react';
 import { useParams } from 'react-router-dom';
+import { ApiError } from '../api/client';
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
+import { ExportPanel } from '../components/ExportPanel';
 import { StatusBadge } from '../components/StatusBadge';
 import { StyleSamplesPanel } from '../components/StyleSamplesPanel';
 import { useApiCall } from '../hooks/useApiCall';
 import {
+  backupApi,
   commitsApi,
   healthApi,
   projectsApi,
@@ -22,6 +26,8 @@ import { formatDateTime } from '../utils/format';
 export function ProjectOverviewPage() {
   const { pid } = useParams();
   const projectId = pid!;
+  const [backupErr, setBackupErr] = useState<string | null>(null);
+  const [backingUp, setBackingUp] = useState(false);
 
   const { data: project, error: projectErr } = useApiCall<Project>(
     () => projectsApi.get(projectId),
@@ -45,6 +51,24 @@ export function ProjectOverviewPage() {
     [projectId],
   );
 
+  const handleBackup = async () => {
+    setBackupErr(null);
+    setBackingUp(true);
+    try {
+      await backupApi.downloadBackup(projectId);
+    } catch (e: unknown) {
+      if (e instanceof ApiError) {
+        setBackupErr(`${e.status}: ${e.detail}`);
+      } else if (e instanceof Error) {
+        setBackupErr(e.message);
+      } else {
+        setBackupErr('备份下载失败');
+      }
+    } finally {
+      setBackingUp(false);
+    }
+  };
+
   return (
     <div>
       <h1 className="section-title">项目总览</h1>
@@ -53,6 +77,7 @@ export function ProjectOverviewPage() {
       </p>
 
       <ErrorBanner>{projectErr}</ErrorBanner>
+      <ErrorBanner>{backupErr}</ErrorBanner>
 
       {project ? (
         <div className="card" style={{ marginBottom: 16 }}>
@@ -60,6 +85,16 @@ export function ProjectOverviewPage() {
             <div style={{ fontSize: 18, fontWeight: 600 }}>{project.name}</div>
             <StatusBadge status={project.status} />
             <div style={{ flex: 1 }} />
+            <button
+              type="button"
+              className="btn btn--sm"
+              disabled={backingUp}
+              onClick={() => void handleBackup()}
+              data-testid="project-backup-btn"
+              title="下载整项目 JSON 备份（含 22 张业务表；不含 API key）"
+            >
+              {backingUp ? '备份中…' : '下载备份'}
+            </button>
             <span className="muted small">ID：{project.project_id}</span>
           </div>
           <div className="spacer" />
@@ -94,6 +129,9 @@ export function ProjectOverviewPage() {
           initialSamples={styleSamples ?? []}
         />
       ) : null}
+
+      {/* V1.4 / Sprint 16：导出（整书 / 单章 / 番茄投稿包） */}
+      {project ? <ExportPanel projectId={projectId} /> : null}
 
       <div className="form-grid">
         <div className="card">

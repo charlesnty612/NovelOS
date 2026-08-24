@@ -37,6 +37,7 @@ from packages.core.quality.engine import QualityEngine
 from packages.core.quality.service import (
     QualityService,
     build_quality_context,
+    capture_reference_consumption,
     compute_char_stats,
 )
 from packages.core.db import get_connection
@@ -137,6 +138,13 @@ def evaluate_chapter_quality(chapter_id: str, request: Request) -> dict:
     except ValueError as exc:
         # 理论 compute_overall 内部就会抛错；这里兜底让 router 转 422。
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Sprint V1.4：参照系消费可观测——与 chapter_commit pipeline 同口径，把
+    # 本次评估消费的 *.txt 清单写入 _meta.reference_consumption，便于前端复用。
+    ref_consumption = capture_reference_consumption(db_path, project_id)
+    meta = dict(report.meta or {})
+    meta["reference_consumption"] = ref_consumption
+    report.meta = meta
 
     try:
         QualityService(db_path).save_report(
