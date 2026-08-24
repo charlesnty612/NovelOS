@@ -29,6 +29,7 @@ NovelOS 面向长篇小说作者：在本地运行完整的小说生产闭环。
 - **项目导出发布（V1.4 Sprint 16）**：整书 / 单章 txt 与 docx、番茄投稿包（前 ~1 万字正文 + 全书大纲）一键导出。
   docx 用最小 OOXML 手工打包（无 `python-docx` 依赖）；只读、不调 LLM、不改 schema。
   见 `packages/core/exporter/README.md` 与 `packages/core/api/routers/export.py`。
+- **番茄签约体检（V2.1）**：纯规则体检（无 LLM / 无新依赖 / 无 schema 变更），覆盖黄金三章（开篇 300 字冲突 / 主角 500 字出场 / 金手指前两章前 1000 字亮相 / 第三章小高潮）、逐章章末钩子、单章字数区间、高频副词堆叠、签约窗口 2万/5万/8万共 3 次机会提示；REST 端点 `GET /api/projects/{project_id}/signing-check`，番茄投稿包导出末尾自动追加摘要段。见 `packages/core/signing_check/`。
 - **项目备份 / 恢复（V1.4 Sprint 16 / MVP）**：整项目导出为单 JSON 包（22 张业务表 + metadata 自证字段，不含 API key），支持导入为新项目（不覆盖源项目），单事务整体回环。
   见 `packages/core/backup/` 与 `packages/core/api/routers/backup.py`。
 

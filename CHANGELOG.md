@@ -5,6 +5,19 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [2.1.0] - 2026-08-24
+
+### Added（番茄签约体检包）
+- **新模块 packages/core/signing_check/**：面向番茄男频投稿的纯规则体检（无 LLM / 无新依赖 / 无 schema 变更）。检查项：第一章前 300 字冲突（ch1_conflict_300）、主角前 500 字出场（ch1_protagonist_500）、金手指前 1000 字亮相（ch2_golden_finger）、第三章小高潮/打脸（ch3_climax）、逐章章末钩子（chapter_hooks_chN）、单章字数区间 1200-2600 warn（chapter_length_chN，1500-2200 最佳）、高频副词堆叠检测 echo_words（>5 次/千字告警，对抗 AI 低质文的"复读词"问题）、签约窗口提示 signing_window（2万/5万/8万共 3 次机会）。
+- **REST 端点**：`GET /api/projects/{project_id}/signing-check`，返回 items + summary 计数；项目不存在 404。见 packages/core/api/routers/signing_check.py。
+- **番茄投稿包集成**：build_fanqie_package 导出末尾追加「===== 签约体检摘要 =====」段；摘要生成异常时跳过不阻断导出。
+- 设计依据：2026 番茄平台 AI 低质文严打（黄金三章硬标准/签约窗口规则）与竞品调研（NovelCrafter Codex/Sudowrite Story Bible 的一致性治理已由 Story State 覆盖，本模块补齐平台规则体检缺口）。词典为模块级常量可扩展；启发式非保证，边界见 packages/core/signing_check/README.md。
+
+### Known Issues / 路线登记（新增候选）
+- signing_check 词典为子串匹配，存在误命中可能（如单字词「打」「血」）；后续可引入白名单或窗口规则校准。
+- signing_check 暂无前端 UI 面板（API-first）；候选项：web 端体检报告面板。
+- scripts 下 e2e/smoke 临时数据库建议改用系统临时目录，避免与主库同目录。
+
 ## [2.0.1] - 2026-08-24
 
 ### Fixed（全维度检修包）

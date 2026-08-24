@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from packages.core.db import get_connection
+from packages.core.logging_config import get_logger
 from packages.domain.chapter.service import ChapterService
 
 from .docx import build_minimal_docx
@@ -39,6 +40,8 @@ from .docx import build_minimal_docx
 # ---------------------------------------------------------------------------
 # Scope
 # ---------------------------------------------------------------------------
+
+log = get_logger("novelos.exporter.builder")
 
 
 @dataclass(frozen=True)
@@ -267,6 +270,20 @@ def build_fanqie_package(db_path: str, project_id: str) -> bytes:
         pieces.append(body)
     pieces.append(FANQIE_DELIMITER.rstrip())
     pieces.append(outline_md)
+    # V2.0 Wave D：番茄签约体检摘要（最小侵入拼接；异常时回退纯空摘要，
+    # 不阻断主导出流）。服务层读 DB 与 checks 同源，确保摘要与端点一致。
+    signing_summary = ""
+    try:
+        from packages.core.signing_check.service import (
+            format_summary,
+            run_signing_check,
+        )
+
+        signing_summary = format_summary(run_signing_check(db_path, project_id))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("signing check summary skipped: %s", exc)
+    if signing_summary:
+        pieces.append(signing_summary.rstrip())
     text = "\n\n".join(pieces).rstrip() + "\n"
     return ("\ufeff" + text).encode("utf-8")
 
