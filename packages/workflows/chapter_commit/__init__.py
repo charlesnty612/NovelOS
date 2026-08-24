@@ -1,7 +1,15 @@
-"""chapter_commit 包入口。"""
+"""chapter_commit 包入口。
 
-from .pipeline import WORKFLOW, register_workflow
+- :data:`WORKFLOW` dict 由 :mod:`pipeline` 定义。
+- Sprint V1.5：注册到 :mod:`packages.core.workflow_registry`（core 侧注册中心）。
+"""
 
-register_workflow(WORKFLOW)
+from __future__ import annotations
 
-__all__ = ["WORKFLOW", "register_workflow"]
+from packages.core.workflow_registry import register_workflow
+
+from .pipeline import WORKFLOW
+
+register_workflow(WORKFLOW["name"], lambda: WORKFLOW)
+
+__all__ = ["WORKFLOW"]

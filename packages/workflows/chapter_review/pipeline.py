@@ -373,13 +373,25 @@ WORKFLOW = {
         "(DRAFTED→REVIEWED)；revise 驳回改稿闭环；critic 仅做建议、不拦截"
     ),
     "nodes": _build_nodes(),
+    # V1.0 checkpoint 写放大优化（Sprint V1.5）：author_review 是 Human 节点（可 PAUSE）；
+    # PAUSE 时 checkpoint 落盘整张 ctx，下游 mark_reviewed 节点**不读** review_report / critic_*
+    # 字段（mark_reviewed 仅依赖 human_input + _author_approved + _revision_note）。
+    # 这两个字段较大（critic_report 含 issues/strengths/revision_guidance；review_report 含
+    # 完整字数/禁用词扫描结果），落盘只增体积不影响 resume——可安全 exclude。
+    # 注：author_review 的 __pause_payload__ 单独存在 ctx['author_review'] 内，不受 exclude 影响，
+    # 前端仍可读到 review_report / critic_report（reviewer UI 必需）。
+    "checkpoint_exclude": [
+        "review_report",
+        "critic_report",
+        "critic_status",
+        "critic_error",
+    ],
 }
 
 
-def register_workflow(workflow: dict[str, Any] = WORKFLOW) -> None:
-    from packages.workflows import register_workflow as _register
+# 注意（Sprint V1.5）：注册动作统一在 :mod:`packages.workflows.chapter_review.__init__`
+# 调用 :func:`packages.core.workflow_registry.register_workflow`；本模块不再暴露
+# ``register_workflow`` 函数。
 
-    _register(workflow)
 
-
-__all__ = ["WORKFLOW", "register_workflow"]
+__all__ = ["WORKFLOW"]

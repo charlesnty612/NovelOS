@@ -204,10 +204,9 @@ WORKFLOW = {
 }
 
 
-def register_workflow(workflow: dict[str, Any] = WORKFLOW) -> None:
-    from packages.workflows import register_workflow as _register
+# 注意（Sprint V1.5）：注册动作统一在 :mod:`packages.workflows.chapter_write.__init__`
+# 调用 :func:`packages.core.workflow_registry.register_workflow`；本模块不再暴露
+# ``register_workflow`` 函数。
 
-    _register(workflow)
 
-
-__all__ = ["WORKFLOW", "register_workflow"]
+__all__ = ["WORKFLOW"]

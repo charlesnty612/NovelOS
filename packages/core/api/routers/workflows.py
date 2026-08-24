@@ -1,4 +1,4 @@
-"""Workflow REST 路由（Sprint 4-A）。
+"""Workflow REST 路由（Sprint 4-A + V1.5 架构整理）。
 
 端点（挂在 ``/api`` 前缀下）：
 - ``POST /projects/{project_id}/chapters/{chapter_id}/plan``    — 启动 chapter-plan
@@ -8,6 +8,7 @@
 - ``GET  /runs/{run_id}``                                          — run + 节点明细
 - ``POST /runs/{run_id}/resume``                                   — 恢复 PAUSED run
 - ``GET  /projects/{project_id}/runs``                             — list runs
+- ``GET  /chapters/{chapter_id}/context-preview``                  — Sprint 13 下半 dry-run
 
 请求体：
 - ``{author_intent?: str, mock_providers?: {agent_name: [str, ...]}}`` — start
@@ -16,6 +17,10 @@
 返回：
 - 201（start）→ ``{run_id, status, ...}``；若 PAUSED 则附加 ``pause_payload``
 - 200（get/list/resume）→ run dict（含 nodes 数组）或 list
+
+V1.5 越层整改：
+- 路由不再直接写 SQL——chapter 校验走 :class:`ChapterService.get_project_id`，
+  resume 的 workflow_name 反查走 :func:`packages.core.workflow_runtime.runs.get_workflow_name_for_run`。
 """
 
 from __future__ import annotations
@@ -26,11 +31,15 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from packages.core.db import get_connection
 from packages.core.logging_config import get_logger
+from packages.core.workflow_registry import get_workflow
 from packages.core.workflow_runtime.engine import WorkflowEngine
-from packages.core.workflow_runtime.runs import get_run, list_runs
-from packages.workflows import get_workflow
+from packages.core.workflow_runtime.runs import (
+    get_run,
+    get_workflow_name_for_run,
+    list_runs,
+)
+from packages.domain.chapter.service import ChapterService
 
 log = get_logger("novelos.routers.workflows")
 
@@ -68,23 +77,21 @@ def _engine(request: Request) -> WorkflowEngine:
 
 
 def _check_chapter(request: Request, project_id: str, chapter_id: str) -> tuple[str, str]:
-    """校验 chapter 属于该 project；返回 (project_id, chapter_id)。"""
+    """校验 chapter 属于该 project；返回 (project_id, chapter_id)。
+
+    V1.5 起：通过 :class:`ChapterService.get_project_id` 取 project_id；
+    chapter 不存在 → 404；chapter 不属于该 project → 400。
+    """
     settings = request.app.state.settings
-    conn = get_connection(settings.db_path)
-    try:
-        row = conn.execute(
-            "SELECT project_id FROM chapters WHERE chapter_id = ?", (chapter_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-    if row is None:
+    chapter_pid = ChapterService(settings.db_path).get_project_id(chapter_id)
+    if chapter_pid is None:
         raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
-    if row["project_id"] != project_id:
+    if chapter_pid != project_id:
         raise HTTPException(
             status_code=400,
             detail=f"chapter {chapter_id!r} does not belong to project {project_id!r}",
         )
-    return row["project_id"], chapter_id
+    return chapter_pid, chapter_id
 
 
 def _init_genesis_if_needed(db_path: str, project_id: str, chapter_id: str) -> None:
@@ -141,6 +148,7 @@ def _start_workflow(
             chapter_id=chapter_id,
             initial_ctx=initial_ctx,
             mock_providers=body.mock_providers,
+            checkpoint_exclude=workflow.get("checkpoint_exclude"),
         )
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
@@ -270,23 +278,10 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
             detail=f"run {run_id!r} status={run['status']!r}，must be PAUSED to resume",
         )
 
-    workflow_name = run.get("workflow_name")  # 见 get_run 输出（无 workflow_name，需查表）
-    # 从 workflows 表反查 workflow 名（通过 run.workflow_id）
-    conn = get_connection(db_path)
-    try:
-        wf_row = conn.execute(
-            """
-            SELECT w.name FROM workflow_runs wr
-            JOIN workflows w ON w.workflow_id = wr.workflow_id
-            WHERE wr.run_id = ?
-            """,
-            (run_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if wf_row is None:
+    # V1.5 越层整改：通过 service 反查 workflow_name（替换原 JOIN SQL）
+    workflow_name = get_workflow_name_for_run(db_path, run_id)
+    if workflow_name is None:
         raise HTTPException(status_code=500, detail="workflow not found for run")
-    workflow_name = wf_row["name"]
     workflow = get_workflow(workflow_name)
     if workflow is None:
         raise HTTPException(status_code=500, detail=f"workflow {workflow_name!r} not registered")
@@ -343,20 +338,12 @@ def get_chapter_context_preview(chapter_id: str, request: Request) -> dict[str, 
     settings = request.app.state.settings
     db = settings.db_path
 
-    # 拿 chapter.project_id；同时校验 chapter 存在 → 404
-    conn = get_connection(db)
-    try:
-        row = conn.execute(
-            "SELECT project_id FROM chapters WHERE chapter_id = ?",
-            (chapter_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if row is None:
+    # V1.5 越层整改：通过 ChapterService 取 chapter.project_id + 404 校验
+    project_id = ChapterService(db).get_project_id(chapter_id)
+    if project_id is None:
         raise HTTPException(
             status_code=404, detail=f"chapter {chapter_id!r} not found"
         )
-    project_id = row["project_id"]
 
     try:
         return preview_context(db, project_id, chapter_id)

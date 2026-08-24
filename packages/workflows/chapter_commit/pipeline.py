@@ -785,13 +785,27 @@ WORKFLOW = {
         "(HIGH) Human Approval → commit_delta; status REVIEWED→COMMITTED"
     ),
     "nodes": _build_nodes(),
+    # V1.0 checkpoint 写放大优化（Sprint V1.5）：high_risk_approval 是 Human 节点（仅当
+    # observer_payload 含 HIGH/definition/rule change 时 PAUSE）。PAUSE 时 checkpoint
+    # 落盘，下游 commit 节点**只读** delta_id / needs_high_risk_approval / human_input /
+    # _high_risk_approved。observer_input（含 previous_state 完整快照 1-10KB）、
+    # observer_payload（observer 7 数组 0.5-2KB）、delta（与 observer_payload 同步 7 数组）、
+    # submit_result / snapshot_pre 均不被 commit 节点读——可安全 exclude。
+    # 必保留：delta_id（commit 节点调 StoryStateService.commit_delta 用作入参；service 自己
+    # 按 delta_id 从 state_deltas 表读回 delta 行，不依赖 ctx['delta'] 内容）。
+    "checkpoint_exclude": [
+        "observer_input",
+        "observer_payload",
+        "delta",
+        "submit_result",
+        "snapshot_pre",
+    ],
 }
 
 
-def register_workflow(workflow: dict[str, Any] = WORKFLOW) -> None:
-    from packages.workflows import register_workflow as _register
+# 注意（Sprint V1.5）：注册动作统一在 :mod:`packages.workflows.chapter_commit.__init__`
+# 调用 :func:`packages.core.workflow_registry.register_workflow`；本模块不再暴露
+# ``register_workflow`` 函数。
 
-    _register(workflow)
 
-
-__all__ = ["WORKFLOW", "register_workflow"]
+__all__ = ["WORKFLOW"]

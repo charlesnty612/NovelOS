@@ -40,6 +40,10 @@
 | `app` | `packages/core/api/main.py:83` | 默认 app（uvicorn 入口） |
 | `GET /api/health` | `packages/core/api/main.py:62` | 返回 ``{"status","version","tables"}`` |
 | `GET /` | `packages/core/api/main.py:76` | 服务信息 |
+| `register_workflow(name, builder)` | `packages/core/workflow_registry/__init__.py` | 注册一条 workflow（按 ``name`` + 惰性 ``builder`` callable） |
+| `get_workflow(name)` | `packages/core/workflow_registry/__init__.py` | 按 ``name`` 取 workflow dict（含 ``nodes``） |
+| `all_workflows()` | `packages/core/workflow_registry/__init__.py` | 取注册中心全部 workflow 快照 |
+| `_reset_for_tests()` | `packages/core/workflow_registry/__init__.py` | 测试辅助：清空注册中心 |
 
 ## 路由自动发现机制
 
@@ -57,6 +61,22 @@
 1. 在 ``packages/core/api/routers/`` 下新增 ``<domain>.py``，定义 ``router = APIRouter(tags=[...])``。
 2. 在 ``packages/domain/<domain>/`` 下实现 Service 与 pydantic 模型。
 3. 重启应用——``discover_routers()`` 自动识别，无需修改 ``main.py``。
+
+## 工作流注册机制（Sprint V1.5 架构债务项）
+
+V1.5 起，工作流注册中心下沉到 core 侧 ``packages/core/workflow_registry/``，
+业务模块（``packages/core/api/routers/*.py``）通过本包查询 workflow 节点，
+不再直接 import 业务流程包。**依赖方向唯一为 workflows → core**。
+
+- core 业务模块（如路由、service、workflow_runtime）通过
+  ``from packages.core.workflow_registry import get_workflow`` 取 workflow dict。
+- 业务流程包（如 chapter_plan）在自身 ``__init__`` 调用
+  ``register_workflow(WORKFLOW["name"], lambda: WORKFLOW)`` 写入注册表。
+- 装配入口 ``packages/core/api/main.py:create_app`` 通过
+  ``importlib.import_module`` 触发业务流程顶层 import 完成注册（字符串拆装避免字面值命中）。
+  这是被允许的「插件发现」语义，core 业务模块零依赖业务流程包。
+- 反向依赖扫描测试：``tests/unit/test_no_core_to_workflows_dep.py`` 静态断言
+  core 业务模块零 ``import 业务流程包``、零业务流程包名字面值。
 
 ## 依赖
 

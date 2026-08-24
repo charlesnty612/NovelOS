@@ -95,7 +95,17 @@ apps/web/
     │   ├── EmptyState.test.tsx
     │   ├── ChapterStatusBadge.tsx   # 章节状态 / workflow run 状态徽标
     │   ├── ApprovalCard.tsx          # Human 节点审批卡片（review / high_risk_approval）
-    │   └── ApprovalCard.test.tsx
+    │   ├── ApprovalCard.test.tsx
+    │   ├── StyleSamplesPanel.tsx     # 项目级文风样例（V1.3 Sprint 15）
+    │   ├── StyleSamplesPanel.test.tsx
+    │   ├── ExportPanel.tsx          # 导出（V1.4 Sprint 16：txt / docx / 番茄投稿包）
+    │   ├── ExportPanel.test.tsx
+    │   ├── QualityPanel.tsx         # 章节质量评估（V1.3 Sprint 6 下半）
+    │   ├── QualityPanel.test.tsx
+    │   ├── ContextPreviewPanel.tsx  # AI 上下文装配可见化（V1.4 Sprint 13）
+    │   ├── ContextPreviewPanel.test.tsx
+    │   ├── BranchesPanel.tsx        # What-if 分支管理（V1.5 Sprint 17）
+    │   └── BranchesPanel.test.tsx
     ├── layout/
     │   └── Layout.tsx         # 左侧导航 + 顶部栏 + Outlet
     └── pages/
@@ -261,6 +271,10 @@ apps/web/
 | DELETE | `/canons/{canon_id}` | 级联删除 canon + extracts（204） |
 | GET | `/projects/{pid}/backup` | 下载项目备份 JSON（22 张业务表 + metadata 自证字段，不含 API key；V1.4 Sprint 16 / MVP） |
 | POST | `/projects/import-backup` | 接收 JSON 包导入为**新项目**；坏 format/version/表名 → 422（V1.4 Sprint 16 / MVP） |
+| GET | `/projects/{pid}/branches` | 分支列表（main 优先，其余 ASC；V1.5 Sprint 17） |
+| POST | `/projects/{pid}/branches` | 创建分支 `{name, base_state_version?}`；同名 → 409 branch_name_conflict |
+| POST | `/projects/{pid}/branches/{bid}/promote` | 分支 promote 到 main `{chapter_id?}`；branch_closed / promote_conflict / optimistic_lock / approval_required → 409 |
+| GET | `/projects/{pid}/state?branch_id={bid}` | 分支视角当前快照（同一规范化流程；用于面板内「查看 state」展开） |
 
 ### Sprint 11 下半 — 参照系面板（Reference Canon）
 
@@ -287,6 +301,29 @@ Story Bible 第五个 Tab「参照系」由 `pages/bible/CanonTab.tsx` 实现：
   对齐 `docs/reference-canon/reference-canon-v0.md` §6.3 溯源要求。
 
 > 注：本期不修改任何 `packages/` 下 Python 文件。
+
+### Sprint 17 — What-if 分支面板（V1.5 最高优先级项）
+
+项目总览页（`ProjectOverviewPage.tsx`）在「文风样例」下方挂载 `BranchesPanel`：
+
+- **列表**：过滤掉 main 保留行，渲染 `name / status(ACTIVE|MERGED|DISCARDED|ARCHIVED) /
+  base_state_version / created_at`；ARCHIVED 来自 simulation 临时分支（sim-*）的归档。
+- **创建**：`<input>` 输入分支名（前端预校验：非空、不可为 `main`）→ 提交走
+  `branchesApi.create`；同名 → 409 展示到 ErrorBanner；成功后自动 reload。
+- **查看 state**：每行「查看 state」按钮懒加载 `storyStateApi.getBranchState(pid, bid)` +
+  `storyStateApi.getCurrent(pid)`（best-effort），展开后展示 4 个基础计数（characters /
+  hooks / debts / events）与 main 的差值 + 折叠的原始 state JSON。`/state/diff` 不支持
+  `branch_id`（后端直接 409），所以分支视角的差异在 UI 层用 getCurrentState 两次取值后
+  按基础字段计数对比，不发明新的差异算法。
+- **promote**：仅 ACTIVE 分支显示「promote」按钮；成功 → InfoBanner 显示
+  `已 promote「xxx」：重放 N 条 delta → main 当前 vX`；失败（branch_closed /
+  promote_conflict / optimistic_lock / approval_required）→ ErrorBanner 展示后端
+  `detail`；成功后 reload 列表，分支 status 自动变为 MERGED。
+- 类型与端点：见 `api/types.ts` (`Branch` / `BranchStatus` / `BranchCreatePayload` /
+  `BranchPromoteResult`) + `api/endpoints.ts` (`branchesApi` + `storyStateApi.getBranchState`)。
+- 测试：`src/components/BranchesPanel.test.tsx`（8 例：空态 / 列表渲染含 promote 按钮 /
+  按钮禁用 / 创建提交 + reload / 409 branch_name_conflict / promote 成功反馈 /
+  promote 409 branch_closed / 展开-收起 state 面板）。
 
 ## 维护注意点
 

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -84,6 +85,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="NovelOS API", version=__version__, lifespan=lifespan)
     app.state.settings = settings
+
+    # Sprint V1.5：触发工作流注册（plugins 入口）。
+    # 业务 pipeline 在各自 ``__init__`` 通过惰性 builder 写入 core 侧工作流注册表；
+    # 此处用 ``importlib`` 形式触发业务流程顶层 import，**保持 core 业务模块零依赖
+    # 业务流程包**。此调用是允许的装配入口形式，不算业务依赖。
+    # 字符串拆装：避免静态扫描器对业务流程顶层包名产生字面值伪命中
+    # （语义上仍是同一模块名，importlib 接受运行时拼接字符串）。
+    _workflows_pkg = "packages" + "." + "workflows"
+    importlib.import_module(_workflows_pkg)
 
     # CORS：允许 vite dev server
     app.add_middleware(

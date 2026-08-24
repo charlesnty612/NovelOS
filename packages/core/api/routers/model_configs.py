@@ -1,4 +1,4 @@
-"""Model Configs REST 路由（Sprint 3）。
+"""Model Configs REST 路由（Sprint 3 + V1.5 架构整理）。
 
 挂在 ``/api`` 前缀下。对齐 ``model_configs`` 表（``database/migrations/0001_init.sql`` line 464-471）。
 
@@ -11,6 +11,8 @@
 - ``POST /model-configs/{id}/test`` ——ping：发「回复 ok」，返回延迟（ms）与首 100 字。
 
 设计要点：
+- V1.5 起，路由层不再直接写 SQL——所有 CRUD 调用 ``ModelConfigService``（位于
+  :mod:`packages.core.model_router.configs`），路由只做参数校验 + 错误映射。
 - ``params_json`` 字段接受 JSON 字符串或 dict（前端友好）；写入时统一 ``json.dumps``。
 - ``/test`` 端点直接构造对应 Provider，发一条最小消息；真实外网调用不要测（任务书边界）。
   失败抛 ``ProviderError``（→ 502）——与 ``agents.py`` 一致。
@@ -30,16 +32,12 @@ P1-1 密钥脱敏（Sprint 12）：
 from __future__ import annotations
 
 import json
-import sqlite3
-import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from packages.core.db import get_connection
-from packages.core.ids import new_id
 from packages.core.logging_config import get_logger
-from packages.core.model_router import ModelRouter, ProviderError
+from packages.core.model_router import ModelConfigService, ModelRouter, ProviderError
 
 log = get_logger("novelos.routers.model_configs")
 
@@ -89,21 +87,6 @@ def _mask_response(row: dict) -> dict:
     out["params_json"] = masked
     out["has_api_key"] = has_key
     return out
-
-
-def _row_to_dict(row: sqlite3.Row) -> dict:
-    return {k: row[k] for k in row.keys()}
-
-
-def _get_config(db_path: str, config_id: str) -> dict | None:
-    conn = get_connection(db_path)
-    try:
-        row = conn.execute(
-            "SELECT * FROM model_configs WHERE config_id = ?", (config_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-    return _row_to_dict(row) if row else None
 
 
 def _normalize_params(params_json) -> dict:
@@ -194,31 +177,28 @@ def create_model_config(payload: dict, request: Request) -> dict:
         raise HTTPException(status_code=422, detail="model required")
     raw_params = _normalize_params(payload.get("params_json"))
     params_dict = _prepare_post_params(raw_params)
-    params_str = _dump_params_json(params_dict)
     enabled = payload.get("enabled", 1)
     if enabled not in (0, 1, True, False):
         raise HTTPException(status_code=422, detail="enabled must be 0 or 1")
     enabled_int = 1 if enabled in (1, True) else 0
 
-    config_id = new_id("mcf")
     settings = request.app.state.settings
-    conn = get_connection(settings.db_path)
+    svc = ModelConfigService(settings.db_path)
     try:
-        try:
-            conn.execute(
-                """
-                INSERT INTO model_configs (config_id, capability, provider, model, params_json, enabled)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (config_id, capability, provider, model, params_str, enabled_int),
-            )
-            conn.commit()
-        except sqlite3.IntegrityError as exc:
+        row = svc.create(
+            capability=capability,
+            provider=provider,
+            model=model,
+            params=params_dict,
+            enabled=enabled_int,
+        )
+    except Exception as exc:
+        # FK / 唯一性约束等：转 422（与既有路由契约一致）
+        from sqlite3 import IntegrityError
+
+        if isinstance(exc, IntegrityError):
             raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
-    finally:
-        conn.close()
-    row = _get_config(settings.db_path, config_id)
-    assert row is not None
+        raise
     return _mask_response(row)
 
 
@@ -229,30 +209,16 @@ def list_model_configs(
     provider: str | None = None,
 ) -> list[dict]:
     settings = request.app.state.settings
-    clauses: list[str] = []
-    params: list = []
-    if capability:
-        clauses.append("capability = ?")
-        params.append(capability)
-    if provider:
-        clauses.append("provider = ?")
-        params.append(provider)
-    sql = "SELECT * FROM model_configs"
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY rowid ASC"
-    conn = get_connection(settings.db_path)
-    try:
-        rows = conn.execute(sql, params).fetchall()
-    finally:
-        conn.close()
-    return [_mask_response(_row_to_dict(r)) for r in rows]
+    svc = ModelConfigService(settings.db_path)
+    rows = svc.list(capability=capability, provider=provider)
+    return [_mask_response(r) for r in rows]
 
 
 @router.get("/model-configs/{config_id}")
 def get_model_config(config_id: str, request: Request) -> dict:
     settings = request.app.state.settings
-    row = _get_config(settings.db_path, config_id)
+    svc = ModelConfigService(settings.db_path)
+    row = svc.get(config_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"model_config {config_id!r} not found")
     return _mask_response(row)
@@ -270,6 +236,7 @@ def patch_model_config(config_id: str, payload: dict, request: Request) -> dict:
     其余字段（capability / provider / model / enabled）沿用既有非空校验。
     """
     settings = request.app.state.settings
+    svc = ModelConfigService(settings.db_path)
     fields: dict = {}
     if "capability" in payload:
         v = payload["capability"]
@@ -288,7 +255,7 @@ def patch_model_config(config_id: str, payload: dict, request: Request) -> dict:
         fields["model"] = v
     if "params_json" in payload:
         # 合并入参与 DB 原值，按 api_key 特殊语义处理
-        existing = _get_config(settings.db_path, config_id)
+        existing = svc.get(config_id)
         if existing is None:
             raise HTTPException(status_code=404, detail=f"model_config {config_id!r} not found")
         raw_params = _normalize_params(payload["params_json"])
@@ -302,39 +269,23 @@ def patch_model_config(config_id: str, payload: dict, request: Request) -> dict:
 
     if not fields:
         # 无字段 → 直接返回当前行
-        row = _get_config(settings.db_path, config_id)
+        row = svc.get(config_id)
         if row is None:
             raise HTTPException(status_code=404, detail=f"model_config {config_id!r} not found")
         return _mask_response(row)
 
-    set_clause = ", ".join(f"{k} = ?" for k in fields)
-    values = list(fields.values()) + [config_id]
-    conn = get_connection(settings.db_path)
-    try:
-        cur = conn.execute(
-            f"UPDATE model_configs SET {set_clause} WHERE config_id = ?", values
-        )
-        if cur.rowcount == 0:
-            conn.close()
-            raise HTTPException(status_code=404, detail=f"model_config {config_id!r} not found")
-        conn.commit()
-    finally:
-        conn.close()
-    row = _get_config(settings.db_path, config_id)
-    assert row is not None
+    row = svc.update_partial(config_id, fields)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"model_config {config_id!r} not found")
     return _mask_response(row)
 
 
 @router.delete("/model-configs/{config_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_model_config(config_id: str, request: Request):
     settings = request.app.state.settings
-    conn = get_connection(settings.db_path)
-    try:
-        cur = conn.execute("DELETE FROM model_configs WHERE config_id = ?", (config_id,))
-        conn.commit()
-    finally:
-        conn.close()
-    if cur.rowcount == 0:
+    svc = ModelConfigService(settings.db_path)
+    ok = svc.delete(config_id)
+    if not ok:
         raise HTTPException(status_code=404, detail=f"model_config {config_id!r} not found")
     return None
 
@@ -352,7 +303,8 @@ def test_model_config(config_id: str, request: Request) -> dict:
     - ``enabled=0`` 仍返回 422（P2-5 业务规则）。
     """
     settings = request.app.state.settings
-    config_row = _get_config(settings.db_path, config_id)
+    svc = ModelConfigService(settings.db_path)
+    config_row = svc.get(config_id)
     if config_row is None:
         raise HTTPException(status_code=404, detail=f"model_config {config_id!r} not found")
     if config_row.get("enabled") == 0:

@@ -87,7 +87,7 @@ python -m packages.core.api.main
 ## 测试
 
 ```bash
-# 后端全量（当前基线 537 passed）
+# 后端全量（当前基线 545 passed）
 python -m pytest tests/ -q
 
 # Golden 回归 eval（当前 1/1）
@@ -99,7 +99,7 @@ python scripts/smoke_e2e.py
 # 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
 python scripts/real_llm_e2e.py
 
-# 前端单测（vitest；当前 181）
+# 前端单测（vitest；当前 194）
 cd apps/web && npm run test
 ```
 
@@ -119,7 +119,7 @@ cd apps/web && npm run test
 
 ## 版本与更新日志
 
-当前版本 **V1.4.0**（git tag `v1.4.0`）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
+当前版本 **V1.5.0**（git tag `v1.5.0`）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x 路线登记在同文件
 「Known Issues / 路线登记」一节。
 

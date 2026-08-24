@@ -163,7 +163,8 @@ class WorkflowEngine:
     ) -> str:
         """启动一个 workflow run。
 
-        必须传入 ``nodes`` 的方式：调用方负责从业务流（packages.workflows.*）按 workflow_name 查到
+        必须传入 ``nodes`` 的方式：调用方负责从
+        :mod:`packages.core.workflow_registry`（按 workflow_name）查到
         ``nodes: list[WorkflowNode]``，再调 :meth:`_run_nodes` 完成执行。本方法只负责 run 行与
         ctx 初始化，避免循环依赖。
 

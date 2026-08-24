@@ -860,3 +860,48 @@ export interface ExportQuery {
   format: ExportFormat;
   chapter_no?: number;
 }
+
+// ---------------------------------------------------------------------------
+// V1.5 / Sprint 17：What-if 分支（branches 表 + story_state 分支路由）
+//   对齐 packages/core/api/routers/story_state.py：
+//   - GET    /projects/{pid}/branches                       列表（main 优先）
+//   - POST   /projects/{pid}/branches                       创建（{name, base_state_version?}）
+//   - POST   /projects/{pid}/branches/{bid}/promote         promote（{chapter_id?}）
+//   - GET    /projects/{pid}/state?branch_id={bid}          分支视角当前 state
+//
+//   字段语义：
+//   - status: 'ACTIVE' / 'MERGED' / 'DISCARDED' / 'ARCHIVED'
+//     ARCHIVED 来自 simulation 临时分支（sim-*）的归档状态。
+//   - base_state_version: 分支基于 main 的快照版本号。
+//   - promote 返回：commit_id / state_version / delta_id / promoted_from /
+//     promoted_commits / branch_id / replayed_delta_ids[]。
+//   - 前端不直接调 diff_versions（不支持 branch_id，会 409）；分支视角差异在
+//     面板内通过 getCurrentState(branch_id) 与 main 快照在 UI 层对比。
+// ---------------------------------------------------------------------------
+
+export type BranchStatus = 'ACTIVE' | 'MERGED' | 'DISCARDED' | 'ARCHIVED';
+
+export interface Branch {
+  branch_id: string;
+  project_id: string;
+  name: string;
+  parent_branch_id: string | null;
+  base_state_version: number;
+  status: BranchStatus;
+  created_at: string;
+}
+
+export interface BranchCreatePayload {
+  name: string;
+  base_state_version?: number | null;
+}
+
+export interface BranchPromoteResult {
+  commit_id: string;
+  state_version: number;
+  delta_id: string;
+  promoted_from: string;
+  promoted_commits: number;
+  branch_id: string;
+  replayed_delta_ids: string[];
+}

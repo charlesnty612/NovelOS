@@ -5,9 +5,11 @@ import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { ExportPanel } from '../components/ExportPanel';
 import { StatusBadge } from '../components/StatusBadge';
 import { StyleSamplesPanel } from '../components/StyleSamplesPanel';
+import { BranchesPanel } from '../components/BranchesPanel';
 import { useApiCall } from '../hooks/useApiCall';
 import {
   backupApi,
+  branchesApi,
   commitsApi,
   healthApi,
   projectsApi,
@@ -15,6 +17,7 @@ import {
   styleSamplesApi,
 } from '../api/endpoints';
 import type {
+  Branch,
   Commit,
   HealthResponse,
   Project,
@@ -48,6 +51,11 @@ export function ProjectOverviewPage() {
   // Sprint 15 / V1.3：项目级文风样例（初始注入；面板内部自己 refetch）。
   const { data: styleSamples, error: styleErr } = useApiCall<StyleSample[]>(
     () => styleSamplesApi.list(projectId),
+    [projectId],
+  );
+  // V1.5 / Sprint 17：What-if 分支（初始注入；面板内部自己 refetch）。
+  const { data: branches, error: branchesErr } = useApiCall<Branch[]>(
+    () => branchesApi.list(projectId),
     [projectId],
   );
 
@@ -127,6 +135,15 @@ export function ProjectOverviewPage() {
         <StyleSamplesPanel
           projectId={projectId}
           initialSamples={styleSamples ?? []}
+        />
+      ) : null}
+
+      {/* V1.5 / Sprint 17：What-if 分支（创建/查看/promote） */}
+      <ErrorBanner>{branchesErr}</ErrorBanner>
+      {project ? (
+        <BranchesPanel
+          projectId={projectId}
+          initialBranches={branches ?? []}
         />
       ) : null}
 

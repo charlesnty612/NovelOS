@@ -810,15 +810,12 @@ WORKFLOW = {
 }
 
 
-def register_workflow(workflow: dict[str, Any] = WORKFLOW) -> None:
-    """由 :mod:`packages.workflows.__init__` 调用；注册到全局中心。"""
-    from packages.workflows import register_workflow as _register
-
-    _register(workflow)
+# 注意（Sprint V1.5）：注册动作统一在 :mod:`packages.workflows.deconstruct_book.__init__`
+# 调用 :func:`packages.core.workflow_registry.register_workflow`；本模块不再暴露
+# ``register_workflow`` 函数。
 
 
 __all__ = [
     "WORKFLOW",
-    "register_workflow",
     "_validate_canon_schema",
 ]

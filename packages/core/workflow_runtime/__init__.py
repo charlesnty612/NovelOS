@@ -4,7 +4,9 @@
   对齐 PRD §55-60。
 - :class:`PauseRequested` — Human 节点用于请求挂起的异常。
 - :func:`list_runs` / :func:`get_run` — workflow_runs + workflow_run_nodes 查询辅助。
-- 对外只暴露 :class:`WorkflowEngine` 与查询函数；具体业务流在 :mod:`packages.workflows.*`。
+- 对外只暴露 :class:`WorkflowEngine` 与查询函数；具体业务流通过
+  :mod:`packages.core.workflow_registry` 查询并传入 ``start_with_nodes``。
+  本包不依赖业务流程包（V1.5 架构债务项已消除反向依赖）。
 """
 
 from .engine import PauseRequested, WorkflowEngine, WorkflowNode

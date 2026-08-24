@@ -291,7 +291,7 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
 - 表 ``quality_reports``（``report_id`` 主键 + ``scores_json`` + ``issues_json``）
 - 索引 ``idx_quality_reports_chapter (chapter_id, created_at)``
 
-### 11.3 门禁位置：``packages.workflows.chapter_commit.pipeline``
+### 11.3 门禁位置：chapter_commit 业务流程 pipeline 模块
 
 节点列表新增 ``quality_gate``（位于 ``inject_validate`` 之后、``high_risk_approval`` 之前）：
 

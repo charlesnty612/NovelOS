@@ -8,6 +8,9 @@ import type {
   AiCallLogSummary,
   AiCallLogTokenUsage,
   BackupPackage,
+  Branch,
+  BranchCreatePayload,
+  BranchPromoteResult,
   CanonDetail,
   CanonSummary,
   Chapter,
@@ -172,6 +175,33 @@ export const storyStateApi = {
         recent_events: normArr(snap.recent_events),
       };
     }),
+  // V1.5 / Sprint 17：分支视角 state。复用了与 main 完全一致的 normalize 流程；
+  // 形态与 getCurrent 同构；404 时 BranchNotFound 抛 ApiError。
+  getBranchState: (pid: string, branchId: string) =>
+    api
+      .get<SnapshotResponse>(`/projects/${pid}/state`, { branch_id: branchId })
+      .then((snap) => {
+        const normArr = (v: unknown): unknown[] => {
+          const x = coerceJson(v);
+          return Array.isArray(x) ? x : [];
+        };
+        const normObj = (v: unknown): Record<string, unknown> => {
+          const x = coerceJson(v);
+          if (x && typeof x === 'object' && !Array.isArray(x)) {
+            return x as Record<string, unknown>;
+          }
+          return {};
+        };
+        return {
+          ...snap,
+          characters: normObj(snap.characters),
+          world: normObj(snap.world),
+          hooks: normArr(snap.hooks),
+          debts: normArr(snap.debts),
+          events: normArr(snap.events),
+          recent_events: normArr(snap.recent_events),
+        };
+      }),
 };
 
 export const commitsApi = {
@@ -474,4 +504,32 @@ export const exportApi = {
     }
     return `/api/projects/${projectId}/export?${params.toString()}`;
   },
+};
+
+// -------------------------------------------------------------- branches (V1.5 / Sprint 17)
+// 对应 packages/core/api/routers/story_state.py：
+//   GET    /projects/{pid}/branches                       —— 列分支（main 优先，其余 ASC）
+//   POST   /projects/{pid}/branches                       —— 创建分支（{name, base_state_version?}）
+//   POST   /projects/{pid}/branches/{bid}/promote         —— 分支 promote（{chapter_id?}）
+//
+// 错误码（直接走 ApiError 由 UI 处理）：
+// - 422: name 为空 / base_state_version 非法
+// - 409: branch_name_conflict / branch_closed / promote_conflict / optimistic_lock / approval_required
+// - 404: project / branch 不存在
+//
+// 设计要点：
+// - promote 走 POST body {chapter_id?: string}；缺省由后端用首个分支 commit 的 chapter_id 兜底。
+// - 不在 endpoints 层封装"获取分支 state"——面板直接复用 storyStateApi.getBranchState。
+export const branchesApi = {
+  list: (pid: string) => api.get<Branch[]>(`/projects/${pid}/branches`),
+  create: (pid: string, payload: BranchCreatePayload) =>
+    api.post<Branch>(`/projects/${pid}/branches`, payload),
+  promote: (
+    pid: string,
+    branchId: string,
+    payload: { chapter_id?: string | null } = {},
+  ) => api.post<BranchPromoteResult>(
+    `/projects/${pid}/branches/${branchId}/promote`,
+    payload,
+  ),
 };

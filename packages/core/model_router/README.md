@@ -167,11 +167,45 @@ completion, used_config_row = router.call_with_fallback(
 
 `params_json` 字段接受 dict 或 JSON 字符串（前端友好）；写入时统一 `json.dumps`。
 
+## ModelConfigService（V1.5 数据访问层）
+
+V1.5 起把 `model_configs` 表的 SQL 从 router 下沉到独立 service（`packages/core/model_router/configs.py`），与既有 chapter/character 等 service 层风格一致。
+
+### 职责
+
+- `model_configs` 表 CRUD：`get` / `list` / `create` / `update_partial` / `delete`。
+- 写入语义：`create` 接收调用方已剥离 mask/空 `api_key` 后的纯 `params` dict，仅做 `json.dumps`；
+  `update_partial` 接收调用方已按 PATCH 合并语义处理过的 `fields` dict，`params_json` 字段值
+  直接落库不再合并。
+- 读路径统一返回 `sqlite3.Row` 转 dict；**不脱敏**——脱敏由 router 层 `_mask_*` 负责（保持
+  service 语义纯粹、路由层负责对外契约）。
+- 异常：`IntegrityError` 由调用方按业务映射（router 转 422）。
+
+### 分层
+
+- **service**（`configs.py`）：全部 SQL、id 生成（`new_id("mcf")`）、json 序列化。
+- **router**（`routers/model_configs.py`）：仅做参数校验（Pydantic schema）、脱敏
+  （`_mask_response` 派生 `api_key=***` + `has_api_key`）、错误映射（IntegrityError→422、
+  ProviderError→502）、HTTP 状态码。
+- **API 契约零变化**：对外端点、请求体、响应体与 V1.4 完全一致。
+
+### 脱敏边界
+
+- service 层 `get` / `list` / `create` / `update_partial` 返回的 dict **含明文 `api_key`**
+  （或由调用方传入的形态）；脱敏是 router 层 `_mask_response` 的职责，不在 service。
+- 这样 service 既能被 router 调用，也能被未来需要明文的链路（如备份排除、调试工具）
+  安全使用，避免脱敏逻辑分散到多处。
+- router 对入参 `api_key` 也做 mask 剥离：mask 哨兵 `***` → 不改 DB；空串 `""` → 清空 DB；
+  这层逻辑仍在 router（属于请求体语义），service 只看最终 dict。
+
 ## 维护注意点
 - 测试一律用 `MockProvider` 或 `httpx.MockTransport` 注入；不依赖外网（`docs/impl/IMPLEMENTATION-PLAN-v0.md` D-I4）。
 - OpenAI 兼容 Provider 必须有 `params_json.base_url`；缺则 `ValueError`（在 `get_provider` 时抛）。
 - `enabled=0` 行 Router 不返回；`/test` 端点对 enabled=0 直接返回 422（P2-5 业务规则）。
 - Provider 错误透传 status_code；上层 `agents.py` router 转 502。
+- **脱敏边界（V1.5 起）**：`model_configs` 读路径脱敏（`api_key` → `***` + `has_api_key` 布尔）
+  只在 router 层 `_mask_response` 做；service 层返回明文。备份链路有意绕过脱敏取原始行。
+  改 service 时不要顺手加脱敏，否则备份/导入会丢 key（虽然备份刻意排除该表，但同口径要保留）。
 
 ## Sprint 8 计划
 - `AnthropicProvider`（Anthropic 原生 Messages API）—— 已完成，详见上文。

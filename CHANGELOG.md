@@ -5,6 +5,25 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [1.5.0] - 2026-08-24
+
+架构债务与 UI 补缺包（路线图：`docs/roadmap/v1.3-v2.x-plan.md`）。
+
+### Added
+
+- What-if 分支 UI：项目总览页新增 `BranchesPanel`（分支列表 / 创建 / 分支状态查看 / promote 一键重放，409 冲突反馈）；纯前端落地（后端 `branches` / `state` 端点此前已齐备），补 `branchesApi` 封装与 `getBranchState`。
+- workflow 注册表下沉 core：新增 `packages/core/workflow_registry/`（惰性 builder 注册中心），core 业务模块对 `packages.workflows` 零引用（AST + 字面值双重静态扫描测试守护）；`api/main.py` 以 `importlib` 装配触发注册；`packages/workflows` 保留兼容 façade。
+- 前端「清除已存密钥」按钮：`AiSettingsPage` 编辑对话框显式清除入口（`clearKeyRequested` 机制，提交 `api_key=''` 触发后端清除；重新输入自动取消清除意图）。
+
+### Changed
+
+- router 越层 SQL 清零：`reference` / `workflows` / `model_configs` 三路由的 SQL 全部下沉——新增 `domain/reference/service.py`（`ReferenceService`）与 `core/model_router/configs.py`（`ModelConfigService`），`chapter` / `workflow_runtime` 各补一个查询函数；路由只留参数校验 + 脱敏 + 错误映射，API 契约零变化。
+- `checkpoint_exclude` 推广到章节工作流（resume 影响已逐字段论证并测试守护）：`chapter-review` 剔除 `review_report` / `critic_*`；`chapter-commit` 剔除 `observer_input` / `observer_payload` / `delta` / `submit_result` / `snapshot_pre`；`pause_payload` 独立不受影响，checkpoint 写放大下降。
+
+### Fixed
+
+- （无用户可见修复；两项代码健壮性整理：`delete_canon_cascade` 连接关闭统一 finally、`runs.py` 函数定义位置规范）
+
 ## [1.4.0] - 2026-08-24
 
 发布链路与可观测包（路线图：`docs/roadmap/v1.3-v2.x-plan.md`）。

@@ -424,6 +424,10 @@ function ModelConfigFormModal({
   const [enabled, setEnabled] = useState<boolean>(initial ? initial.enabled === 1 : true);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // V1.1 修补（V1.0 Known Issues）：编辑模式下显式「清除已存密钥」入口。
+  // 点击后 handleSubmit 会显式传 api_key="" 给后端（PATCH 语义：空串=清空）；
+  // 输入框留空本身不会触发清除（保留 DB 原值），因此需要独立标志位。
+  const [clearKeyRequested, setClearKeyRequested] = useState(false);
 
   const isMock = provider === 'mock';
   const isAnthropic = provider === 'anthropic';
@@ -439,12 +443,19 @@ function ModelConfigFormModal({
 
   // P1-1：编辑且后端标记 has_api_key=true 时显示「已配置」，否则按 provider 性质区分。
   const hasApiKey = !!initial?.has_api_key;
+  // 「清除已存密钥」按钮：仅在编辑模式 + has_api_key=true + 需要 key 的 provider 时可用。
+  // mock / ollama 本就没有 key 概念，故隐藏。
+  const canShowClearKeyButton = !!initial && hasApiKey && !isMock && !isOllama;
   const apiKeyPlaceholder = isAnthropic
     ? hasApiKey
-      ? '已配置（留空则不修改）'
+      ? clearKeyRequested
+        ? '清除已请求（点击保存生效）'
+        : '已配置（留空则不修改）'
       : '（可选；留空则由 resolve_api_key 从 NOVELOS_API_KEY_ANTHROPIC 解析）'
     : hasApiKey
-      ? '已配置（留空则不修改）'
+      ? clearKeyRequested
+        ? '清除已请求（点击保存生效）'
+        : '已配置（留空则不修改）'
       : '（可选；若不填，运行时由 resolve_api_key 从 env 解析）';
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -468,8 +479,13 @@ function ModelConfigFormModal({
       // P1-1：编辑 + has_api_key=true 时，若用户留空 → 不传 api_key 字段
       // （后端 _prepare_patch_params 会保留 DB 原值）；若用户填了新值 → 传明文。
       // 新建场景下用户留空同样不传 key。
-      if (!isOllama && params.apiKey.trim() !== '') {
-        params_json['api_key'] = params.apiKey.trim();
+      // V1.1 修补：若用户点击了「清除已存密钥」→ 显式传 api_key="" 触发后端清除分支。
+      if (!isOllama) {
+        if (clearKeyRequested) {
+          params_json['api_key'] = '';
+        } else if (params.apiKey.trim() !== '') {
+          params_json['api_key'] = params.apiKey.trim();
+        }
       }
     }
     setSubmitting(true);
@@ -568,19 +584,41 @@ function ModelConfigFormModal({
             ) : (
               <div className="form-row">
                 <label>api_key</label>
-                <input
-                  type="password"
-                  value={params.apiKey}
-                  onChange={(e) =>
-                    setParams((p) => ({ ...p, apiKey: e.target.value }))
-                  }
-                  placeholder={apiKeyPlaceholder}
-                  data-testid="cfg-api-key"
-                />
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <input
+                    type="password"
+                    value={params.apiKey}
+                    onChange={(e) => {
+                      // 用户重新输入则自动取消「清除」请求（让填写的新值生效）。
+                      setClearKeyRequested(false);
+                      setParams((p) => ({ ...p, apiKey: e.target.value }));
+                    }}
+                    placeholder={apiKeyPlaceholder}
+                    data-testid="cfg-api-key"
+                    style={{ flex: 1 }}
+                  />
+                  {canShowClearKeyButton ? (
+                    <button
+                      type="button"
+                      className="btn btn--sm btn--danger"
+                      onClick={() => {
+                        setClearKeyRequested(true);
+                        setParams((p) => ({ ...p, apiKey: '' }));
+                      }}
+                      disabled={clearKeyRequested}
+                      data-testid="cfg-clear-api-key"
+                      title="点击后保存将清空已存的 api_key"
+                    >
+                      {clearKeyRequested ? '已请求清除' : '清除已存密钥'}
+                    </button>
+                  ) : null}
+                </div>
                 {initial ? (
                   <div className="muted small" data-testid="cfg-api-key-hint">
                     {hasApiKey
-                      ? '已配置密钥。留空保存将保留原值；填入新值则覆盖。'
+                      ? clearKeyRequested
+                        ? '清除已请求：点击保存将清空已存的 api_key；如想保留请改填新值。'
+                        : '已配置密钥。留空保存将保留原值；填入新值则覆盖；点右侧按钮可显式清除。'
                       : '当前未配置密钥。留空保存保持未配置。'}
                   </div>
                 ) : null}

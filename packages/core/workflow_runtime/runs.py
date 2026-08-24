@@ -1,7 +1,9 @@
-"""Workflow runs 查询辅助（Sprint 4-A）。
+"""Workflow runs 查询辅助（Sprint 4-A + V1.5 越层整改）。
 
 - :func:`list_runs(db_path, project_id)` → 列出某项目的所有 workflow_runs（按 started_at DESC）。
 - :func:`get_run(db_path, run_id)` → 单 run + 节点明细（input/output/prompt_version/latency/error）。
+- :func:`get_workflow_name_for_run(db_path, run_id)` → 反查 run 对应的 workflow 名
+  （JOIN workflow_runs + workflows）；被 workflows router 的 resume 端点调用。
 """
 
 from __future__ import annotations
@@ -93,4 +95,25 @@ def _row_to_node(row) -> dict[str, Any]:
     return d
 
 
-__all__ = ["list_runs", "get_run"]
+def get_workflow_name_for_run(db_path: str | Path, run_id: str) -> str | None:
+    """返回 run 对应的 workflow.name；run/workflow 不存在 → None。
+
+    注：workflow_runs 表存的是 workflow_id；本函数负责 JOIN workflows 反查 name。
+    被 workflows router 的 resume 端点调用；V1.5 越层整改后路由层不再直接写 SQL。
+    """
+    conn = _get_connection(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT w.name FROM workflow_runs wr
+            JOIN workflows w ON w.workflow_id = wr.workflow_id
+            WHERE wr.run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["name"] if row else None
+
+
+__all__ = ["list_runs", "get_run", "get_workflow_name_for_run"]

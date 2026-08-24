@@ -254,6 +254,26 @@ class ChapterService:
         finally:
             conn.close()
 
+    # ---------------------------------------------------- V1.5 越层整改
+    # 轻量查询：仅取 project_id；不存在 → None。被 workflows router 的
+    # _check_chapter 与 context-preview 端点调用，避免路由层直接写 SQL。
+    # ------------------------------------------------------------ get_project_id
+    def get_project_id(self, chapter_id: str) -> str | None:
+        """返回该 chapter 所属 project_id；chapter 不存在 → None。
+
+        比 ``get`` 更轻量——只 SELECT project_id，避免反序列化 plan_json / who_knows。
+        """
+        conn = get_connection(self.db_path)
+        try:
+            cur = conn.execute(
+                "SELECT project_id FROM chapters WHERE chapter_id = ?",
+                (chapter_id,),
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+        return row["project_id"] if row else None
+
     # ============================================================== Sprint 5
     # drafts：人工改稿能力（task A1）。
     # ----------------------------------------------------------------------

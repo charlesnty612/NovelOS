@@ -8,6 +8,11 @@
 **做**：
 - 构造 FastAPI 应用并配置 CORS（允许 `http://127.0.0.1:5173` 与 `http://localhost:5173`）
 - lifespan 启动：确保 `data_dir` 存在、执行迁移、记录迁移结果到 `app.state.migration_result`
+- V1.5：**通过 `importlib.import_module` 触发 `packages.workflows` 顶层导入**，让业务流程包
+  在各自 `__init__` 把 workflow builder 写入 `packages.core.workflow_registry` 注册中心
+  （注册中心位于 core 侧，详情见 `packages/core/workflow_registry/README.md`）。
+  这是允许的装配入口形式（plugin discovery），**core 业务模块零依赖 `packages.workflows`**，
+  反向依赖被注册表切断；业务流程包 → core 单向依赖。
 - 提供 `GET /api/health`（状态 / 版本 / 业务表数）端点
 - Sprint 5：检测 SPA 构建产物（`apps/web/dist` 或 `NOVELOS_WEB_DIST` 覆盖），存在则挂载静态资源与 SPA fallback；不存在时保留 `GET /`（服务信息 JSON）作为纯后端入口
 - 暴露 `create_app(settings)` 工厂函数供测试注入临时 `Settings`
@@ -45,6 +50,7 @@
 ## 依赖
 
 - 上游：`packages.core.config`（`Settings`, `get_settings`）、`packages.core.db`（`apply_migrations`, `count_tables`）、`packages.core.logging_config`（`configure_logging`, `get_logger`）
+- V1.5 注册中心装配：`packages.core.workflow_registry`（位于 core 侧，提供 `register_workflow` / `get_workflow` / `all_workflows`；`main.py` 通过 `importlib.import_module("packages.workflows")` 触发业务流程包顶层注册）。业务流程包 → core 单向依赖；core 业务模块零依赖 `packages.workflows`。
 - 外部库：fastapi、uvicorn（运行）
 
 ## 使用 / 入口
