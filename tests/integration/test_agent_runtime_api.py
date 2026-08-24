@@ -61,9 +61,9 @@ def _valid_observer_output() -> dict:
 
 
 def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
-    """sync 后 GET /agents 应含 7 个 agent（director / writer / observer / arbiter /
-    deconstructor_chapter / deconstructor_aggregate / summarizer）。P2-2 拆分后下划线名注册；
-    V1.2.0 新增 summarizer（章节摘要链生产路径）。"""
+    """sync 后 GET /agents 应含 8 个 agent（director / writer / observer / arbiter /
+    deconstructor_chapter / deconstructor_aggregate / summarizer / critic）。P2-2 拆分后下划线名注册；
+    V1.2.0 新增 summarizer（章节摘要链生产路径）；V1.3 新增 critic（LLM 评审员，advisory only）。"""
     app = _create_app(tmp_path)
 
     async def run():
@@ -79,7 +79,7 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
             expected = {
                 "director", "writer", "observer", "arbiter",
                 "deconstructor_chapter", "deconstructor_aggregate",
-                "summarizer",
+                "summarizer", "critic",
             }
             assert expected == set(payload["agents"]), (
                 f"agents mismatch: got {payload['agents']}"
@@ -93,6 +93,7 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
             assert "deconstructor_chapter" in names
             assert "deconstructor_aggregate" in names
             assert "summarizer" in names
+            assert "critic" in names
 
             # GET /agents/observer/prompts → 至少 1 个 ACTIVE
             r = await _request(app, "GET", "/api/agents/observer/prompts")
@@ -116,6 +117,14 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
             assert len(summarizer_prompts) >= 1
             assert summarizer_prompts[0]["status"] == "ACTIVE"
             assert summarizer_prompts[0]["version"] == "v1"
+
+            # V1.3：critic:v1 ACTIVE prompt 已注册（LLM 评审员落地）
+            r = await _request(app, "GET", "/api/agents/critic/prompts")
+            assert r.status_code == 200
+            critic_prompts = r.json()
+            assert len(critic_prompts) >= 1
+            assert critic_prompts[0]["status"] == "ACTIVE"
+            assert critic_prompts[0]["version"] == "v1"
 
     asyncio.run(run())
 

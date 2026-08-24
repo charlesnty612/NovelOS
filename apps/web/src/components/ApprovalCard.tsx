@@ -1,6 +1,7 @@
 // 审批卡片：当 workflow run PAUSED 在 Human 节点时展示。
 // 支持两种 stage：
 //   - chapter-review  → 显示 review_report（字数偏离 / 禁用词 / warnings）
+//                        + V1.3 critic_report（LLM 评审员建议；advisory only）
 //   - chapter-commit.high_risk_approval → 显示 changes 待审批条数
 //
 // chapter-review 分支有三态决议（对齐 PRD §59/§87 的「人工修改后重审」闭环）：
@@ -13,6 +14,12 @@
 
 import { useState } from 'react';
 import { ErrorBanner, InfoBanner } from './ErrorBanner';
+import type {
+  CriticIssue,
+  CriticIssueCategory,
+  CriticIssueSeverity,
+  CriticReport,
+} from '../api/types';
 
 export interface ApproveOptions {
   /** 驳回并改稿（仅 chapter-review 分支）：run 以 FAILED(rejected-for-revision) 收尾 */
@@ -45,6 +52,21 @@ interface ReviewReportShape {
   warnings?: string[];
 }
 
+const CRITIC_CATEGORY_LABEL: Record<CriticIssueCategory, string> = {
+  pacing: '节奏',
+  character: '人物',
+  logic: '逻辑',
+  foreshadowing: '伏笔',
+  ai_flavor: 'AI 腔',
+  other: '其他',
+};
+
+const CRITIC_SEVERITY_LABEL: Record<CriticIssueSeverity, string> = {
+  high: '高',
+  medium: '中',
+  low: '低',
+};
+
 export function ApprovalCard(props: ApprovalCardProps) {
   const {
     stage,
@@ -62,6 +84,10 @@ export function ApprovalCard(props: ApprovalCardProps) {
   const reviewReport = pausePayload['review_report'] as
     | ReviewReportShape
     | undefined;
+  // V1.3：critic_report 仅作建议性参考；critic_status != 'ok' 时 critic_report 为 null，
+  // UI 仅显示弱提示，不影响审批按钮可用性。
+  const criticStatus = (pausePayload['critic_status'] as string | undefined) ?? 'skipped';
+  const criticReport = pausePayload['critic_report'] as CriticReport | null | undefined;
 
   return (
     <div
@@ -80,6 +106,13 @@ export function ApprovalCard(props: ApprovalCardProps) {
 
       {stage === 'chapter-review' && reviewReport ? (
         <ReviewReportSummary report={reviewReport} />
+      ) : null}
+
+      {stage === 'chapter-review' ? (
+        <CriticReportSummary
+          status={criticStatus}
+          report={criticReport ?? null}
+        />
       ) : null}
 
       {stage === 'chapter-commit.high_risk_approval' ? (
@@ -270,5 +303,116 @@ function Field({ label, value }: { label: string; value: string }) {
       <div className="muted small">{label}</div>
       <div>{value}</div>
     </div>
+  );
+}
+
+// V1.3：LLM 评审员（advisory only）。
+// - status='ok' 且 report 非空 → 渲染总评 / 亮点 / 问题（带分类 + severity 徽标）。
+// - 其他（failed / skipped / 报告缺失）→ 显示弱提示「AI 审稿不可用」，不阻塞审批按钮。
+function CriticReportSummary({
+  status,
+  report,
+}: {
+  status: string;
+  report: CriticReport | null;
+}) {
+  if (status !== 'ok' || !report) {
+    return (
+      <div
+        className="muted small"
+        style={{ marginTop: 6 }}
+        data-testid="critic-report-degraded"
+      >
+        AI 审稿不可用（不影响审批）
+      </div>
+    );
+  }
+
+  const issues = Array.isArray(report.issues) ? report.issues : [];
+  const strengths = Array.isArray(report.strengths) ? report.strengths : [];
+
+  return (
+    <div
+      style={{ marginTop: 8 }}
+      data-testid="critic-report"
+      data-issue-count={issues.length}
+    >
+      <div className="muted small">AI 审稿（建议性，仅供参考）</div>
+      {report.overall_comment ? (
+        <div style={{ marginTop: 4 }}>{report.overall_comment}</div>
+      ) : null}
+      {strengths.length > 0 ? (
+        <div style={{ marginTop: 6 }}>
+          <div className="muted small">亮点</div>
+          <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+            {strengths.map((s, i) => (
+              <li key={`s-${i}`}>{s}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {issues.length > 0 ? (
+        <div style={{ marginTop: 6 }}>
+          <div className="muted small">问题（{issues.length}）</div>
+          <ul style={{ listStyle: 'none', padding: 0, margin: '4px 0 0 0' }}>
+            {issues.map((it, i) => (
+              <CriticIssueRow key={`i-${i}`} issue={it} />
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <div className="muted small" style={{ marginTop: 4 }}>
+          未发现明显问题
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CriticIssueRow({ issue }: { issue: CriticIssue }) {
+  const category = (issue.category ?? 'other') as CriticIssueCategory;
+  const severity = (issue.severity ?? 'low') as CriticIssueSeverity;
+  return (
+    <li
+      data-testid="critic-issue"
+      data-severity={severity}
+      data-category={category}
+      style={{
+        borderLeft: '3px solid var(--color-border-strong)',
+        paddingLeft: 8,
+        marginTop: 4,
+      }}
+    >
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <span
+          className="badge"
+          data-testid="critic-issue-severity"
+          title={`severity=${severity}`}
+        >
+          {CRITIC_SEVERITY_LABEL[severity] ?? severity}
+        </span>
+        <span
+          className="badge"
+          data-testid="critic-issue-category"
+          title={`category=${category}`}
+        >
+          {CRITIC_CATEGORY_LABEL[category] ?? category}
+        </span>
+      </div>
+      {issue.quote ? (
+        <div
+          className="muted small"
+          data-testid="critic-issue-quote"
+          style={{ marginTop: 2 }}
+        >
+          「{issue.quote}」
+        </div>
+      ) : null}
+      {issue.suggestion ? (
+        <div data-testid="critic-issue-suggestion" style={{ marginTop: 2 }}>
+          {issue.suggestion}
+        </div>
+      ) : null}
+    </li>
   );
 }

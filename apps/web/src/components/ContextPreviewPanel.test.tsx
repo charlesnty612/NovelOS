@@ -46,7 +46,9 @@ const basePreview: ContextPreviewResponse = {
       id: 'L2',
       label: '章节专属',
       token_estimate: 60,
-      items: [],
+      items: [
+        { kind: 'author_style_sample', id: 'asty_a1', name: '雨夜散文', excerpt_len: 320 },
+      ],
       truncated: false,
     },
   ],
@@ -86,8 +88,19 @@ describe('ContextPreviewPanel', () => {
     render(<ContextPreviewPanel chapterId="ch_1" />);
 
     await waitFor(() => {
-      expect(screen.getByText(/该项目暂无上下文数据/)).toBeInTheDocument();
+      expect(screen.getByText(/该章节暂无已装配的上下文条目/)).toBeInTheDocument();
     });
+  });
+
+  it('renders author_style_sample label in L2 items (Sprint 15 / V1.3)', async () => {
+    vi.mocked(contextPreviewApi.preview).mockResolvedValue(basePreview);
+    render(<ContextPreviewPanel chapterId="ch_1" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('context-preview-layer-L2')).toBeInTheDocument();
+    });
+    // KIND_LABEL 新增 author_style_sample → "作者文风样例"
+    expect(screen.getByText(/\[作者文风样例\]/)).toBeInTheDocument();
   });
 
   it('treats 404 as empty preview (no error banner)', async () => {

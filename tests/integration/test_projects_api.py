@@ -152,6 +152,39 @@ def test_list_empty_returns_empty_array(tmp_path: Path):
     asyncio.run(run())
 
 
+def test_patch_foreshadow_overdue_chapters_roundtrip(tmp_path: Path):
+    """PATCH 设置 foreshadow_overdue_chapters 后 GET 回读一致（V1.3 P2-3 回归）。
+
+    回归背景：0008 迁移为 projects 增加 foreshadow_overdue_chapters 列，
+    ProjectUpdate 模型虽已声明字段，但需验证 service.update 实际落库
+    并能被 GET 读回——避免「字段在 model 但 update 漏处理」的回归。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            # 1) 建项目（不指定 overdue → DDL 默认 30）
+            r = await _request(app, "POST", "/api/projects", json={"name": "v13-fix"})
+            assert r.status_code == 201
+            pid = r.json()["project_id"]
+            assert r.json()["foreshadow_overdue_chapters"] == 30
+
+            # 2) PATCH 设置为 5
+            r = await _request(
+                app, "PATCH", f"/api/projects/{pid}",
+                json={"foreshadow_overdue_chapters": 5},
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["foreshadow_overdue_chapters"] == 5
+
+            # 3) GET 回读一致
+            r = await _request(app, "GET", f"/api/projects/{pid}")
+            assert r.status_code == 200
+            assert r.json()["foreshadow_overdue_chapters"] == 5
+
+    asyncio.run(run())
+
+
 def test_list_excludes_archived_by_default(tmp_path: Path):
     """默认列表应排除 status='ARCHIVED' 的项目（与前端文案对齐）。"""
     app = _create_app(tmp_path)

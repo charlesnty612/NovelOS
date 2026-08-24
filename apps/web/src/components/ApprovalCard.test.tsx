@@ -174,4 +174,120 @@ describe('ApprovalCard', () => {
       '禁用词命中：仿佛、如同',
     );
   });
+
+  // -------- V1.3 critic_report（LLM 评审员，advisory only）--------
+
+  it('critic_status=ok 且有 critic_report 时渲染总评 / 亮点 / 问题列表（含分类 + severity 徽标）', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        pausePayload={{
+          ...baseProps.pausePayload,
+          critic_status: 'ok',
+          critic_report: {
+            schema_version: 'critic-report.v1',
+            prompt_version: 'critic:v1',
+            chapter_id: 'ch_a',
+            overall_comment: '节奏整体尚可，但末段伏笔推进不足。',
+            strengths: ['女主情绪位移有锚点'],
+            issues: [
+              {
+                category: 'foreshadowing',
+                severity: 'high',
+                quote: '「好」的时候，答得太轻',
+                suggestion: '让男主主动提一句父亲遗物中的玉佩。',
+              },
+              {
+                category: 'ai_flavor',
+                severity: 'low',
+                quote: '竹影斜斜地落在青石地砖上',
+                suggestion: '删除或换成具体动作描写。',
+              },
+            ],
+          },
+        }}
+      />,
+    );
+    expect(screen.getByTestId('critic-report')).toBeInTheDocument();
+    expect(
+      screen.getByText(/节奏整体尚可，但末段伏笔推进不足/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/女主情绪位移有锚点/)).toBeInTheDocument();
+    // issue 数量徽标
+    expect(screen.getByText(/问题（2）/)).toBeInTheDocument();
+    // issue 行 + 引用 + 建议
+    expect(screen.getAllByTestId('critic-issue')).toHaveLength(2);
+    expect(screen.getByText(/「好」的时候，答得太轻/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/让男主主动提一句父亲遗物中的玉佩/),
+    ).toBeInTheDocument();
+    // severity / category 徽标渲染了「高」「伏笔」「低」「AI 腔」
+    expect(screen.getByText('高')).toBeInTheDocument();
+    expect(screen.getByText('伏笔')).toBeInTheDocument();
+    expect(screen.getByText('低')).toBeInTheDocument();
+    expect(screen.getByText('AI 腔')).toBeInTheDocument();
+  });
+
+  it('critic_status=failed 时显示「AI 审稿不可用」弱提示，不影响审批按钮', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        pausePayload={{
+          ...baseProps.pausePayload,
+          critic_status: 'failed',
+          critic_report: null,
+        }}
+      />,
+    );
+    expect(screen.getByTestId('critic-report-degraded')).toBeInTheDocument();
+    expect(
+      screen.getByText(/AI 审稿不可用/),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId('critic-report')).not.toBeInTheDocument();
+    // 审批按钮仍可用
+    expect(screen.getByTestId('approval-approve')).not.toBeDisabled();
+    expect(screen.getByTestId('approval-reject')).not.toBeDisabled();
+  });
+
+  it('critic_status=skipped 或缺省时同样降级显示，不渲染 critic_report', () => {
+    render(<ApprovalCard {...baseProps} />);
+    expect(screen.getByTestId('critic-report-degraded')).toBeInTheDocument();
+    expect(screen.queryByTestId('critic-report')).not.toBeInTheDocument();
+  });
+
+  it('critic_report.issues=[] 且 strengths=[] 时显示「未发现明显问题」', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        pausePayload={{
+          ...baseProps.pausePayload,
+          critic_status: 'ok',
+          critic_report: {
+            overall_comment: '本章表现稳定。',
+            strengths: [],
+            issues: [],
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText(/未发现明显问题/)).toBeInTheDocument();
+  });
+
+  it('commit.high_risk_approval 不渲染 critic_report 相关节点', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        stage="chapter-commit.high_risk_approval"
+        message="高风险"
+        pausePayload={{
+          stage: 'chapter-commit.high_risk_approval',
+          message: '高风险',
+          critic_status: 'ok',
+          critic_report: { overall_comment: 'x', strengths: [], issues: [] },
+        }}
+      />,
+    );
+    expect(screen.queryByTestId('critic-report')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('critic-report-degraded')).not.toBeInTheDocument();
+  });
 });

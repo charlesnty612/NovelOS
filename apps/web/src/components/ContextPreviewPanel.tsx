@@ -30,6 +30,8 @@ const KIND_LABEL: Record<string, string> = {
   director_plan: 'Director 计划',
   scene_plan: '场景计划',
   recent_prose: '上一章末尾',
+  // Sprint 15 / V1.3
+  author_style_sample: '作者文风样例',
   style_constraints: '风格约束',
   draft_text: '本章草稿',
   director_plan_summary: '计划摘要',
@@ -129,8 +131,8 @@ function ContextPreviewView({ preview }: { preview: ContextPreviewResponse }) {
 
       {totalItems === 0 ? (
         <EmptyState
-          title="该项目暂无上下文数据"
-          hint="尚无 character/world/hook/debt 等被纳入装配。"
+          title="该章节暂无已装配的上下文条目"
+          hint="项目可能尚无状态数据。"
         />
       ) : (
         preview.layers.map((layer) => (

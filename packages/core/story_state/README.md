@@ -237,16 +237,18 @@ DDL 权威定义在 ``database/migrations/0001_init.sql``；本模块不修改 s
 ``packages/core/context_engine/builders._open_foreshadow_list`` 提供装配函数：
 
 - planted = status ∈ {OPEN, ACTIVE, ESCALATED}；RESOLVED / ABANDONED 不入清单。
-- 排序：``overdue`` 优先 → ``importance DESC`` → introduced 早的优先；最多 20 条。
+- 排序（Sprint 15 / V1.3 SQL 修复后全部下推 SQL）：``overdue_flag DESC → importance DESC → introduced 早的优先 → hook_id ASC``；直接 ``LIMIT 20`` 返回最终条数。
 - overdue 计算属性（非落库字段）：
 
 ```python
 chapters_since_introduced = max(0, current_chapter_no - introduced_chapter_no)
-overdue = chapters_since_introduced > _FORESHADOW_OVERDUE_CHAPTERS  # 默认 30
+overdue = chapters_since_introduced > _FORESHADOW_OVERDUE_CHAPTERS  # 默认 30；项目级可配
 ```
 
-阈值常量在 ``packages/core/context_engine/builders.py``；后续若需项目可配，由
-``project_settings`` 表 + 读取 fallback 至该常量（MVP 暂用常量）。
+阈值常量在 ``packages/core/context_engine/builders.py``；Sprint 15 / V1.3 起
+**项目级可配**：从 ``projects.foreshadow_overdue_chapters`` 列读取（迁移 0008 加列，
+DDL DEFAULT 30）；列缺失 / NULL → fallback 常量 ``_FORESHADOW_OVERDUE_CHAPTERS = 30``。
+项目创建 / 更新时可通过 ``POST/PATCH /api/projects`` 设置。
 
 ### 7.5.3 与 Ledger CRUD（人工维护）的状态机口径差异
 

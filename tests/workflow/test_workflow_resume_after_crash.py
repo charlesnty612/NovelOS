@@ -141,7 +141,7 @@ def test_resume_via_new_engine_instance(tmp_path: Path):
             assert paused["status"] == "PAUSED"
             run_id = paused["run_id"]
 
-            # 校验：workflow_run_nodes 含 1 行 PENDING（author_review）+ 1 行 COMPLETED（basic_checks）
+            # 校验：workflow_run_nodes 含 3 行（V1.3：basic_checks + critic_review + author_review PENDING）
             conn = get_connection(db_path)
             try:
                 rows = conn.execute(
@@ -150,9 +150,10 @@ def test_resume_via_new_engine_instance(tmp_path: Path):
                 ).fetchall()
             finally:
                 conn.close()
-            assert len(rows) == 2
+            assert len(rows) == 3, rows
             statuses = {r["node_id"]: r["status"] for r in rows}
             assert statuses["basic_checks"] == "COMPLETED"
+            assert statuses["critic_review"] in ("COMPLETED", "FAILED")
             assert statuses["author_review"] == "PENDING"
 
             # 校验 checkpoint_json 含 author_review pause payload

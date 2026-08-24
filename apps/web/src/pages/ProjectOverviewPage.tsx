@@ -1,18 +1,21 @@
 import { useParams } from 'react-router-dom';
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { StatusBadge } from '../components/StatusBadge';
+import { StyleSamplesPanel } from '../components/StyleSamplesPanel';
 import { useApiCall } from '../hooks/useApiCall';
 import {
   commitsApi,
   healthApi,
   projectsApi,
   storyStateApi,
+  styleSamplesApi,
 } from '../api/endpoints';
 import type {
   Commit,
   HealthResponse,
   Project,
   SnapshotResponse,
+  StyleSample,
 } from '../api/types';
 import { formatDateTime } from '../utils/format';
 
@@ -34,6 +37,11 @@ export function ProjectOverviewPage() {
   );
   const { data: commits, error: commitErr } = useApiCall<Commit[]>(
     () => commitsApi.list(projectId),
+    [projectId],
+  );
+  // Sprint 15 / V1.3：项目级文风样例（初始注入；面板内部自己 refetch）。
+  const { data: styleSamples, error: styleErr } = useApiCall<StyleSample[]>(
+    () => styleSamplesApi.list(projectId),
     [projectId],
   );
 
@@ -76,6 +84,15 @@ export function ProjectOverviewPage() {
             </>
           ) : null}
         </div>
+      ) : null}
+
+      {/* Sprint 15 / V1.3：项目级文风样例管理 */}
+      <ErrorBanner>{styleErr}</ErrorBanner>
+      {project ? (
+        <StyleSamplesPanel
+          projectId={projectId}
+          initialSamples={styleSamples ?? []}
+        />
       ) : null}
 
       <div className="form-grid">

@@ -42,6 +42,8 @@ import type {
   QualityReport,
   ResumeRequestPayload,
   SnapshotResponse,
+  StyleSample,
+  StyleSampleCreatePayload,
   SyncPromptsResult,
   TimelineEvent,
   WorldEntity,
@@ -59,6 +61,20 @@ export const projectsApi = {
   update: (id: string, payload: ProjectUpdatePayload) =>
     api.patch<Project>(`/projects/${id}`, payload),
   delete: (id: string) => api.delete<void>(`/projects/${id}`),
+};
+
+// ------------------------------------------------------------- style samples
+// 对应 packages/core/api/routers/author_style_samples.py：
+//   GET    /projects/{pid}/style-samples              列表（created_at DESC）
+//   POST   /projects/{pid}/style-samples              新增（content ≤ 5000 字；项目 ≤ 10 篇）
+//   DELETE /projects/{pid}/style-samples/{sample_id}  删除（204）
+export const styleSamplesApi = {
+  list: (pid: string) =>
+    api.get<StyleSample[]>(`/projects/${pid}/style-samples`),
+  create: (pid: string, payload: StyleSampleCreatePayload) =>
+    api.post<StyleSample>(`/projects/${pid}/style-samples`, payload),
+  remove: (pid: string, sampleId: string) =>
+    api.delete<void>(`/projects/${pid}/style-samples/${sampleId}`),
 };
 
 // -------------------------------------------------------------- characters

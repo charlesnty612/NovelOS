@@ -89,7 +89,7 @@ REST 端点：`GET /api/chapters/{chapter_id}/context-preview`（挂在 `routers
 | --- | --- | --- | --- |
 | `recent_chapter_summaries` | director_input 顶层 | `[{chapter_no, summary, chapter_id}]` | 按 `chapter_no` 倒序取最近 5 章摘要（来自 `chapter_summaries` 表，迁移 `0007_chapter_summaries.sql` 落地）。每条 ≤ 200 字。token 超预算时按"先砍最旧"截断。 |
 | `previous_chapter_tail` | director_input 顶层 | `{chapter_no, chapter_id, tail_text}` | 前一章（chapter_no - 1）最新 draft 末尾 300 字原文；无前章 → `{}`。 |
-| `open_foreshadow_list` | director_input 顶层 | `[{hook_id, name, status, introduced_chapter_no, importance, overdue, chapters_since_introduced}]` | planted 状态伏笔清单（status ∈ {OPEN, ACTIVE, ESCALATED}）。排序：overdue 优先 → importance DESC → introduced 早的优先；最多 20 条。overdue 计算：(current_chapter_no − introduced_chapter_no) > 30 即视为逾期。 |
+| `open_foreshadow_list` | director_input 顶层 | `[{hook_id, name, status, introduced_chapter_no, importance, overdue, chapters_since_introduced}]` | planted 状态伏笔清单（status ∈ {OPEN, ACTIVE, ESCALATED}）。排序（Sprint 15 / V1.3 SQL 修复后全部下推 SQL）：`overdue_flag DESC → importance DESC → introduced 早的优先 → hook_id ASC`；`LIMIT 20`。**SQL 直接截断**——伏笔 > 20 条时 overdue 项不再被预取 + 内存排序截断丢失。overdue 阈值 **项目级可配**：从 `projects.foreshadow_overdue_chapters` 读取，缺失 / NULL 回退 30。 |
 
 token 预算与截断策略：
 
@@ -102,7 +102,7 @@ token 预算与截断策略：
 - `chapter_summaries` 表（迁移 `0007_chapter_summaries.sql`）——由 `chapter_commit` 工作流的 `summarize` 节点在 commit 成功后写入；commit 失败 / 摘要生成失败时该章可能无摘要行（详见 `packages/workflows/chapter_commit/README.md`）。
 - `hooks` 表（已有，PRD §21）——open_foreshadow_list 直接查询。
 
-伏笔 overdue 阈值为常量 `_FORESHADOW_OVERDUE_CHAPTERS = 30`；后续若需项目可配，由 `project_settings` 表 + 读取 fallback 至该常量（MVP 暂用常量）。
+伏笔 overdue 阈值 **Sprint 15 / V1.3 项目级可配**：从 `projects.foreshadow_overdue_chapters` 读取（迁移 `0008_author_style_samples_and_overdue.sql` 通过 `ALTER TABLE ... ADD COLUMN ... DEFAULT 30` 加列）；列缺失 / NULL → fallback 常量 `_FORESHADOW_OVERDUE_CHAPTERS = 30`。项目创建 / 更新时可通过 `POST/PATCH /api/projects` 设置。
 
 ## 维护注意点
 
@@ -124,3 +124,27 @@ token 预算与截断策略：
 - 多参照系加权策略：MVP 暂只取最新 1 条 active canon；多书加权合并（OV-2）defer。
 - `status='archived'` 的 canon 不注入（SQL WHERE 过滤）。
 - 字段缺失：`logline` / `spine` / `payoff_list` / `rhythm` 任意一项缺失时跳过该项，且 `consumed_fields` 不计该字段名。
+
+## Sprint 15 / V1.3 扩展：作者文风样例注入（Writer）
+
+`build_writer_input` 在 `docs/agents/agent-contracts-v0.md` §4.1 之外额外加 1 个键（MVP 扩展键；无样例时给空 list，调用方按空态处理）：
+
+| 键 | 注入位置 | 说明 |
+| --- | --- | --- |
+| `author_style_samples` | writer_input 顶层 | `{instruction, samples}`：`instruction` 为常量引导语「以下为作者本人散文样例，请模仿其句式、用词与节奏（非内容）。」；`samples` 为该项目最近创建的 ≤ 2 篇样例，每篇 `[{sample_id, title, excerpt}]`，`excerpt` 截断到 ≤ 1000 字（DB 原字段 ≤ 5000 字，路由器层强制）。 |
+
+数据来源：`author_style_samples` 表（迁移 `0008_author_style_samples_and_overdue.sql`）；REST 端点见 `packages/core/api/routers/author_style_samples.py`（`GET /projects/{pid}/style-samples`、`POST`、`DELETE /projects/{pid}/style-samples/{sid}`）；前端管理面板 `apps/web/src/components/StyleSamplesPanel.tsx`（嵌入项目总览页）。
+
+约束：
+
+- 单篇 `content` ≤ 5000 字；单项目 ≤ 10 篇（均 422 拒绝，路由器层强制）。
+- Writer 输入不做 token 预算分配（与现有 MVP 一致）：靠「最近 ≤ 2 篇 + 每篇 ≤ 1000 字」硬截断保证可控；后续若引入逐项预算可在此扩展。
+- preview (`preview_context`) 的 L2 `token_estimate` 把 `author_style_samples` 计入；每条以 `kind=author_style_sample` 显示在 items 数组中（前端标签「作者文风样例」）。
+
+## Sprint 15 / V1.3 修复：开放伏笔清单 SQL 截断（V1.2 审查 P2）
+
+旧实现：`ORDER BY importance DESC, created_at ASC LIMIT 60` 预取 → Python 内存 `sort(overdue_first, ...)` → `[:20]`。当伏笔 > 60 条且 overdue 项排在后段时，会被预取 60 条截断边界丢掉（V1.2 审查遗留 P2-1）。
+
+新实现（Sprint 15）：`ORDER BY overdue_flag DESC, importance DESC, introduced_chapter_no ASC, hook_id ASC LIMIT 20` 全部下推 SQL；直接返回 20 条最终结果，伏笔 > 60 条时 overdue 项不再丢失。V1.2 已发布的「预取 + 内存排序」两段式彻底退役。
+
+测试：`tests/unit/test_sprint15_v13.py::test_open_foreshadow_keeps_overdue_when_total_exceeds_cap`（60 条非 overdue + 1 条 overdue → overdue 必现）与 `test_open_foreshadow_sql_order_strict_at_large_volume`（100 条伏笔 → overdue 必现且排第一）。

@@ -306,8 +306,37 @@ export interface ResumeRequestPayload {
 }
 
 // ---- pause payloads --------------------------------------------------------
-// chapter-review: author_review 节点 → {stage, message, review_report}
+// chapter-review: author_review 节点 → {stage, message, review_report, critic_report?}
 // chapter-commit: high_risk_approval 节点 → {stage, message, delta_id, changes}
+//
+// V1.3 新增 critic_report：LLM 评审员生成的建议性结构化报告，**仅做参考**、不拦截。
+// critic_status='ok' 时 critic_report 必有；'failed'/'skipped' 时为 null。
+export type CriticIssueCategory =
+  | 'pacing'
+  | 'character'
+  | 'logic'
+  | 'foreshadowing'
+  | 'ai_flavor'
+  | 'other';
+
+export type CriticIssueSeverity = 'high' | 'medium' | 'low';
+
+export interface CriticIssue {
+  category: CriticIssueCategory;
+  severity: CriticIssueSeverity;
+  quote: string;
+  suggestion: string;
+}
+
+export interface CriticReport {
+  schema_version?: string;
+  prompt_version?: string;
+  chapter_id?: string;
+  overall_comment: string;
+  strengths: string[];
+  issues: CriticIssue[];
+}
+
 export interface ChapterReviewPausePayload {
   stage: 'chapter-review';
   message: string;
@@ -320,6 +349,10 @@ export interface ChapterReviewPausePayload {
     forbidden_word_hits: string[];
     warnings: string[];
   };
+  /** V1.3：'ok' = 有 critic_report；'failed' = AI 评审不可用（不阻断）；'skipped' = 未跑（兼容老 run） */
+  critic_status?: 'ok' | 'failed' | 'skipped' | string;
+  /** V1.3：critic_status='ok' 时为结构化报告；其余为 null。UI 须容忍 null。 */
+  critic_report?: CriticReport | null;
 }
 
 export interface ChapterCommitPausePayload {
@@ -404,6 +437,28 @@ export interface SyncPromptsResult {
   registered: Array<[string, number]>;
   updated: Array<[string, number]>;
   agents: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 15 / V1.3：作者文风样例（author_style_samples）
+//   对齐 packages/core/api/routers/author_style_samples.py。
+//   - sample_id：asty_<12hex>
+//   - 单篇 content ≤ 5000 字；单项目 ≤ 10 篇
+//   - 服务端默认按 created_at DESC 返回
+// ---------------------------------------------------------------------------
+
+export interface StyleSample {
+  sample_id: string;
+  project_id: string;
+  title: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StyleSampleCreatePayload {
+  title: string;
+  content: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +696,7 @@ export interface ContextPreviewItem {
   severity?: number;
   type?: string;
   source_len?: number;
+  excerpt_len?: number;
   beats?: number;
   spine_count?: number;
   payoff_count?: number;

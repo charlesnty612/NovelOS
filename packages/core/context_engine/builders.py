@@ -1,4 +1,4 @@
-"""Context builders（Sprint 4-A）。
+"""Context builders（Sprint 4-A + Sprint 15/V1.3）。
 
 按 ``docs/agents/agent-contracts-v0.md`` §3.1 / §4.1 / §5.1 组装 Director / Writer / Observer 输入。
 
@@ -9,6 +9,15 @@
 - ``recent_prose`` 取上一章最新 draft 末尾 500 字（无 draft → 空字符串）。
 - ``draft_text`` 取该章最新 draft 的 ``content`` 列（drafts 表 DDL line 274）。
 - 全部按章节 DB 状态实时组装；不缓存。
+
+Sprint 15 / V1.3 新增：
+- Writer 注入 ``author_style_samples``：取该项目最近创建的 ≤2 篇、每篇截断 ≤1000 字，
+  引导 writer 模仿「句式 / 用词 / 节奏」（非内容）。
+- Director 注入 ``open_foreshadow_list`` 的 overdue 阈值项目级可配：
+  从 ``projects.foreshadow_overdue_chapters`` 读取，取不到 / NULL 回退 30。
+- SQL 截断修复：open_foreshadow_list 直接 ``ORDER BY overdue_first, importance DESC,
+  introduced ASC LIMIT 20``，把 overdue 判定推到 SQL，去掉旧「预取 60 再内存排序」
+  截断边界 bug（>60 条伏笔时 overdue 项不再丢失）。
 """
 
 from __future__ import annotations
@@ -271,12 +280,59 @@ _RECENT_SUMMARY_CAP = 5
 _RECENT_SUMMARY_PER_CHARS = 200
 # 开放伏笔清单最大条数（按 overdue 优先 + 重要性降序）。
 _OPEN_HOOKS_CAP = 20
-# overdue 阈值：引入章节距当前 chapter_no > 阈值即视为逾期；任务书给死 30。
-# 后续若需项目可配，由 project_settings 表 + 读取 fallback 至此常量（沿用现有常量+README 声明）。
+# overdue 阈值（fallback 常量）：引入章节距当前 chapter_no > 阈值即视为逾期。
+# Sprint 15 升级为项目级可配：见 ``_project_overdue_chapters``；该常量保留为 fallback
+# 与 DDL DEFAULT 30 对齐。
 _FORESHADOW_OVERDUE_CHAPTERS = 30
 # hook 状态机语义分组（planted = OPEN/ACTIVE/ESCALATED；paid_off = RESOLVED）。
 # ABANDONED 不进开放清单。
 _PLANTED_HOOK_STATUSES = ("OPEN", "ACTIVE", "ESCALATED")
+
+
+# ---------------------------------------------------------------------------
+# Sprint 15 / V1.3：项目级 overdue 阈值读取
+# ---------------------------------------------------------------------------
+
+
+def _project_overdue_chapters(
+    conn: sqlite3.Connection, project_id: str,
+) -> int:
+    """读 ``projects.foreshadow_overdue_chapters``；列缺失 / NULL → fallback 30。
+
+    与 0008 DDL DEFAULT 30 + ``_FORESHADOW_OVERDUE_CHAPTERS`` 对齐：
+    旧库升级（0001~0007 已有库）走 0008 ALTER ADD COLUMN DEFAULT 30 → 取数无 NULL。
+    """
+    try:
+        row = conn.execute(
+            "SELECT foreshadow_overdue_chapters FROM projects WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # 极老库（0008 未跑）可能没列 → fallback 常量。
+        return _FORESHADOW_OVERDUE_CHAPTERS
+    if row is None:
+        return _FORESHADOW_OVERDUE_CHAPTERS
+    val = row["foreshadow_overdue_chapters"]
+    if val is None:
+        return _FORESHADOW_OVERDUE_CHAPTERS
+    try:
+        ival = int(val)
+    except (TypeError, ValueError):
+        return _FORESHADOW_OVERDUE_CHAPTERS
+    return ival if ival > 0 else _FORESHADOW_OVERDUE_CHAPTERS
+
+
+# ---------------------------------------------------------------------------
+# Sprint 15 / V1.3：作者文风样例注入 writer
+# ---------------------------------------------------------------------------
+
+# writer 输入注入样例条数（取最近 N 篇）；每篇截断上限。
+_STYLE_SAMPLES_CAP = 2
+_STYLE_SAMPLE_PER_CHARS = 1000
+# 引导语：注入 writer 输入时前缀；常量便于对齐测试与未来 i18n。
+_AUTHOR_STYLE_SAMPLES_INSTRUCTION = (
+    "以下为作者本人散文样例，请模仿其句式、用词与节奏（非内容）。"
+)
 
 
 def _recent_chapter_summaries(
@@ -323,30 +379,60 @@ def _open_foreshadow_list(
     project_id: str,
     *,
     current_chapter_no: int | None,
+    overdue_chapters: int | None = None,
 ) -> list[dict[str, Any]]:
     """开放伏笔清单（planted 状态伏笔）。
 
-    排序：
-    1. overdue 优先（逾期伏笔最需要提醒，任务书 §B 给死）；
-    2. 然后按 importance DESC；
-    3. 最后按 introduced_chapter_no ASC（埋设更早的优先）。
+    Sprint 15 / V1.3 SQL 修复：
+    - overdue 判定 + 排序全部下推 SQL（``CASE WHEN overdue THEN 0 ELSE 1 END``），
+      LIMIT 直接取 ``_OPEN_HOOKS_CAP``；不再「预取 60 再内存排序」——伏笔 > 60 条时
+      overdue 项不再被截断丢失（V1.2 审查遗留 P2-1）。
+    - overdue 阈值 ``overdue_chapters`` 优先从调用方传入（项目级可配）；None → fallback
+      ``_FORESHADOW_OVERDUE_CHAPTERS``（30）。
+
+    排序（全部 SQL ORDER BY）：
+    1. overdue 优先（逾期伏笔最需要提醒）；
+    2. importance DESC；
+    3. introduced_chapter_no ASC（埋设更早的优先）；
+    4. hook_id ASC（兜底稳定）。
 
     返回 ``[{"hook_id": str, "name": str, "status": str,
            "introduced_chapter_no": int|None, "importance": float,
            "overdue": bool, "chapters_since_introduced": int|None}]``。
     """
+    threshold = (
+        int(overdue_chapters)
+        if overdue_chapters is not None and int(overdue_chapters) > 0
+        else _FORESHADOW_OVERDUE_CHAPTERS
+    )
     placeholders = ",".join("?" for _ in _PLANTED_HOOK_STATUSES)
+    # 用 CASE 把 overdue 推到 SQL（章节号比较而非 julianday）。
+    # SQLite 无 IF 表达式，CASE WHEN 是官方支持的等效语法。
     sql = f"""
         SELECT h.hook_id, h.name, h.status, h.importance, h.introduced_chapter_id,
-               ch.number AS introduced_chapter_no
+               ch.number AS introduced_chapter_no,
+               CASE
+                   WHEN ch.number IS NULL OR ? IS NULL
+                       THEN 0
+                   WHEN (? - ch.number) > ?
+                       THEN 1
+                   ELSE 0
+               END AS overdue_flag
         FROM hooks h
         LEFT JOIN chapters ch ON ch.chapter_id = h.introduced_chapter_id
         WHERE h.project_id = ?
           AND h.status IN ({placeholders})
-        ORDER BY h.importance DESC, h.created_at ASC
+        ORDER BY overdue_flag DESC,
+                 h.importance DESC,
+                 CASE WHEN ch.number IS NULL THEN 1 ELSE 0 END ASC,
+                 ch.number ASC,
+                 h.hook_id ASC
         LIMIT ?
     """
-    params: list[Any] = [project_id, *_PLANTED_HOOK_STATUSES, _OPEN_HOOKS_CAP * 3]
+    params: list[Any] = [
+        current_chapter_no, current_chapter_no, threshold,
+        project_id, *_PLANTED_HOOK_STATUSES, _OPEN_HOOKS_CAP,
+    ]
     rows = conn.execute(sql, params).fetchall()
 
     out: list[dict[str, Any]] = []
@@ -355,10 +441,9 @@ def _open_foreshadow_list(
         intro_no = d.get("introduced_chapter_no")
         intro_no_int = int(intro_no) if intro_no is not None else None
         chapters_since: int | None = None
-        overdue = False
+        overdue = bool(d.get("overdue_flag"))
         if intro_no_int is not None and current_chapter_no is not None:
             chapters_since = max(0, int(current_chapter_no) - intro_no_int)
-            overdue = chapters_since > _FORESHADOW_OVERDUE_CHAPTERS
         out.append({
             "hook_id": d["hook_id"],
             "name": d.get("name") or d["hook_id"],
@@ -368,16 +453,36 @@ def _open_foreshadow_list(
             "overdue": overdue,
             "chapters_since_introduced": chapters_since,
         })
+    return out
 
-    # 排序：overdue 优先 + importance DESC + introduced 早的优先
-    out.sort(
-        key=lambda x: (
-            0 if x["overdue"] else 1,
-            -float(x["importance"]),
-            int(x["introduced_chapter_no"]) if x["introduced_chapter_no"] is not None else 1 << 30,
-        ),
-    )
-    return out[:_OPEN_HOOKS_CAP]
+
+def _author_style_samples(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """取该项目最近 ``_STYLE_SAMPLES_CAP`` 篇文风样例，每篇截断 ≤ ``_STYLE_SAMPLE_PER_CHARS`` 字。
+
+    返回 ``[{"sample_id": str, "title": str, "excerpt": str}]``；
+    无样例时返回空 list（writer 装配按空态处理）。
+    """
+    rows = conn.execute(
+        "SELECT sample_id, title, content FROM author_style_samples "
+        "WHERE project_id = ? "
+        "ORDER BY created_at DESC, sample_id DESC "
+        "LIMIT ?",
+        (project_id, _STYLE_SAMPLES_CAP),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        content = d.get("content") or ""
+        excerpt = content[:_STYLE_SAMPLE_PER_CHARS] if len(content) > _STYLE_SAMPLE_PER_CHARS else content
+        out.append({
+            "sample_id": d["sample_id"],
+            "title": d.get("title") or d["sample_id"],
+            "excerpt": excerpt,
+        })
+    return out
 
 
 def _previous_chapter_tail(
@@ -584,6 +689,8 @@ def build_director_input(
         # previous_chapter_tail 是 L1 「前章尾段原文」补充（与 writer.recent_prose 互补，
         # director 用以规划下章衔接）。三源均按 token 预算截断：摘要链按"先砍最旧"。
         current_chapter_no = int(chapter.get("number") or 0)
+        # Sprint 15 / V1.3：项目级 overdue 阈值（projects.foreshadow_overdue_chapters）。
+        overdue_threshold = _project_overdue_chapters(conn, project_id)
         recent_summaries_raw = _recent_chapter_summaries(
             conn, project_id, current_chapter_no=current_chapter_no or None,
         )
@@ -592,7 +699,9 @@ def build_director_input(
             recent_summaries_raw, available_tokens=800,
         )
         open_foreshadow = _open_foreshadow_list(
-            conn, project_id, current_chapter_no=current_chapter_no or None,
+            conn, project_id,
+            current_chapter_no=current_chapter_no or None,
+            overdue_chapters=overdue_threshold,
         )
         previous_chapter_tail = _previous_chapter_tail(
             conn, project_id=project_id, current_chapter_no=current_chapter_no,
@@ -664,7 +773,7 @@ def build_writer_input(
     *,
     target_word_count: int = _DEFAULT_TARGET_WORD_COUNT,
 ) -> dict[str, Any]:
-    """组装 Writer 输入（agent-contracts §4.1）。"""
+    """组装 Writer 输入（agent-contracts §4.1 + Sprint 15/V1.3 author_style_samples）。"""
     conn = get_connection(db_path)
     try:
         chap_row = conn.execute("SELECT * FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()
@@ -674,6 +783,8 @@ def build_writer_input(
         project_id = chapter["project_id"]
         character_excerpts = _character_state_excerpts(conn, project_id)
         world_excerpts = _world_state_excerpts(conn, project_id)
+        # Sprint 15 / V1.3：取项目最近 ≤2 篇文风样例，每篇截断 ≤1000 字。
+        style_samples = _author_style_samples(conn, project_id)
     finally:
         conn.close()
 
@@ -701,6 +812,12 @@ def build_writer_input(
         "recent_prose": {
             "last_chapter_excerpt": recent_prose_tail,
             "last_scene_excerpt": "",
+        },
+        # Sprint 15 / V1.3：作者文风样例注入。空 list 时 writer 按空态处理。
+        # 引导语作为顶层 instruction，与 sample 列表解耦，便于测试 / 未来 i18n。
+        "author_style_samples": {
+            "instruction": _AUTHOR_STYLE_SAMPLES_INSTRUCTION,
+            "samples": style_samples,
         },
         "retrieved_memory": [],
         "knowledge_permissions": {

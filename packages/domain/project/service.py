@@ -33,6 +33,14 @@ class ProjectService:
     def create(self, payload: ProjectCreate) -> dict:
         """创建项目，返回完整行 dict（含 project_id / created_at / updated_at）。"""
         now = now_iso()
+        # Sprint 15：foreshadow_overdue_chapters 默认 30（与 DDL DEFAULT 对齐）；None 也走默认。
+        from .models import _DEFAULT_FORESHADOW_OVERDUE_CHAPTERS
+
+        overdue = (
+            int(payload.foreshadow_overdue_chapters)
+            if payload.foreshadow_overdue_chapters is not None
+            else _DEFAULT_FORESHADOW_OVERDUE_CHAPTERS
+        )
         row = {
             "project_id": new_id("prj"),
             "name": payload.name,
@@ -40,6 +48,7 @@ class ProjectService:
             "genre": payload.genre,
             "target_words": payload.target_words,
             "status": "ACTIVE",
+            "foreshadow_overdue_chapters": overdue,
             "created_at": now,
             "updated_at": now,
         }
@@ -48,9 +57,11 @@ class ProjectService:
             conn.execute(
                 """
                 INSERT INTO projects
-                    (project_id, name, premise, genre, target_words, status, created_at, updated_at)
+                    (project_id, name, premise, genre, target_words, status,
+                     foreshadow_overdue_chapters, created_at, updated_at)
                 VALUES
-                    (:project_id, :name, :premise, :genre, :target_words, :status, :created_at, :updated_at)
+                    (:project_id, :name, :premise, :genre, :target_words, :status,
+                     :foreshadow_overdue_chapters, :created_at, :updated_at)
                 """,
                 row,
             )

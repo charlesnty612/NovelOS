@@ -63,8 +63,8 @@ SERVER_START_TIMEOUT_S = 30
 ENDPOINT_READY_TIMEOUT_S = 30
 HTTP_TIMEOUT_S = 60.0
 
-# health.tables = 业务表数（31 业务表；含 _migrations 总表 32，health 返回减 1 后的业务表数）
-EXPECTED_BUSINESS_TABLES = 32  # Sprint 14：0007_chapter_summaries.sql 加 1 表（chapter_summaries）
+# health.tables = 业务表数（32 业务表；含 _migrations 总表 33，health 返回减 1 后的业务表数）
+EXPECTED_BUSINESS_TABLES = 33  # Sprint 15 / V1.3：0008_author_style_samples_and_overdue.sql 加 1 表
 
 
 # ---------------------------------------------------------------------------

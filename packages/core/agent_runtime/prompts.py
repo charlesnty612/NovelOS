@@ -43,6 +43,8 @@ _AGENT_TO_CAPABILITY: dict[str, str] = {
     "arbiter": "reasoning",
     "deconstructor_chapter": "reasoning",
     "deconstructor_aggregate": "reasoning",
+    "summarizer": "reasoning",  # Sprint 14-A 章节摘要链
+    "critic": "reasoning",       # V1.3 LLM 评审员
     # 其它 agent 默认 reasoning（Sprint 3 MVP 不细化）
 }
 

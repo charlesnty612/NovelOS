@@ -548,3 +548,62 @@ def test_end_to_end_director_payload_has_all_sprint14_keys(tmp_path: Path):
     assert out["previous_chapter_tail"]["chapter_no"] == 7
     assert len(out["open_foreshadow_list"]) == 1
     assert out["open_foreshadow_list"][0]["name"] == "重要伏笔"
+
+
+# ---------------------------------------------------------------------------
+# Sprint 15 / V1.3：summarize 真实降级路径（V1.2 审查遗留 P2-2）
+#
+# 设计：故意不注册 summarizer agent + ACTIVE prompt，让 run_agent 自然抛
+# PromptNotFoundError；_summarize_node 的 ``except Exception`` 兜底应返回
+# ``summary_status='failed'`` 且不抛错。同时验证 chapter.status 在降级路径下
+# 保持 COMMITTED（commit 已完成，summarize 仅是附加动作）。
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_node_real_degradation_without_prompt(tmp_path: Path):
+    """summarize 真实降级：未注册 summarizer ACTIVE prompt → PromptNotFoundError →
+    summary_status='failed'，chapter.status 仍为 COMMITTED，chapter_summaries 无新行。
+
+    与 ``test_summarize_node_degrades_on_provider_failure`` 的关键区别：本测试
+    不传 mock_script（mock_provider 路径会绕过 prompt 查找），让真实 Runner 走
+    prompt 查找 → 命中「无 ACTIVE prompt」分支，验证降级兜底覆盖真实失败模式。
+    """
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid, number=1, status="COMMITTED")
+    _insert_draft(db_path, cid, "本章正文" * 100)
+
+    # 故意不调 _register_summarizer_agent —— 让 PromptNotFoundError 自然抛
+    from packages.workflows.chapter_commit.pipeline import _summarize_node
+
+    ctx = {
+        "db_path": db_path,
+        "chapter_id": cid,
+        "run_id": "wfr_real_degrade",
+        # 不传 _current_node_run_id / mock_providers；runner 走 prompt 查找
+    }
+    result = _summarize_node(ctx)
+
+    # 1) summary_status='failed'（真实降级兜底）
+    assert result["summary_status"] == "failed", result
+    assert result["summary_id"] is None
+    # 2) 不抛错（chapter-commit 不会因此 FAILED）
+    # 3) chapter.status 仍为 COMMITTED
+    conn = get_connection(db_path)
+    try:
+        chap_row = conn.execute(
+            "SELECT status FROM chapters WHERE chapter_id = ?", (cid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert dict(chap_row)["status"] == "COMMITTED", chap_row
+    # 4) chapter_summaries 无新行（失败时不落库）
+    conn = get_connection(db_path)
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM chapter_summaries WHERE chapter_id = ?",
+            (cid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert dict(n)["n"] == 0

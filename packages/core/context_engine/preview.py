@@ -248,6 +248,20 @@ def _extract_l2(
             name="上一章末尾 500 字", source_len=len(tail),
         )
 
+    # Sprint 15 / V1.3：作者文风样例注入 writer；preview 在 L2 同步展示。
+    style_samples = writer.get("author_style_samples") or {}
+    if isinstance(style_samples, dict):
+        for s in (style_samples.get("samples") or []):
+            if not isinstance(s, dict):
+                continue
+            _push_item(
+                items,
+                kind="author_style_sample",
+                id_=str(s.get("sample_id") or "_sty"),
+                name=str(s.get("title") or s.get("sample_id") or "文风样例"),
+                excerpt_len=len(s.get("excerpt") or ""),
+            )
+
     style = writer.get("style_constraints")
     if style:
         _push_item(
@@ -360,13 +374,14 @@ def preview_context(
         },
         {
             "id": "L2",
-            "label": "章节专属（计划 / 草稿 / 最近正文 / 风格约束）",
+            "label": "章节专属（计划 / 草稿 / 最近正文 / 文风样例 / 风格约束）",
             "token_estimate": _token_estimate({
                 "author_intent": director.get("author_intent"),
                 "story_state_snapshot": director.get("story_state_snapshot"),
                 "director_plan": writer.get("director_plan"),
                 "scene_plan": writer.get("scene_plan"),
                 "recent_prose": writer.get("recent_prose"),
+                "author_style_samples": writer.get("author_style_samples"),
                 "style_constraints": writer.get("style_constraints"),
                 "chapter_draft": (observer.get("chapter") or {}).get("draft_text"),
                 "director_plan_summary": observer.get("director_plan_summary"),

@@ -36,7 +36,8 @@ def test_health_endpoint_returns_ok(tmp_path: Path):
     assert data["status"] == "ok"
     assert data["version"] == "0.1.0"
     # Sprint 14：0007_chapter_summaries.sql 已落地 → 32 业务表（31 + chapter_summaries）
-    assert data["tables"] == 32
+    # Sprint 15 / V1.3：0008_author_style_samples_and_overdue.sql 加 author_style_samples → 33 业务表
+    assert data["tables"] == 33
 
 
 def test_root_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

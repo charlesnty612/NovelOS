@@ -177,10 +177,62 @@ def _validate_writer(payload: dict[str, Any]) -> None:
         raise AgentOutputError("writer output missing required field 'self_report'")
 
 
+_VALIDATOR_ALLOWED_CATEGORIES = frozenset(
+    {"pacing", "character", "logic", "foreshadowing", "ai_flavor", "other"}
+)
+_VALIDATOR_ALLOWED_SEVERITIES = frozenset({"high", "medium", "low"})
+
+
+def _validate_critic(payload: dict[str, Any]) -> None:
+    """Critic（V1.3 评审员）契约：结构合规 + 枚举合法。
+
+    Schema 与 `docs/agents/prompts/critic-v1.md` §7 对齐：
+    - required: schema_version, prompt_version, chapter_id, overall_comment, strengths, issues
+    - strengths / issues 必须是 list
+    - issues[].category ∈ 6 枚举；issues[].severity ∈ 3 枚举
+
+    ``quote`` 可溯源 / 长度上限由调用方（chapter_review._critic_review_node）做软校验；
+    本契约只校验**结构层**，不校验语义层。
+    """
+    for key in ("schema_version", "prompt_version", "chapter_id", "overall_comment"):
+        if key not in payload:
+            raise AgentOutputError(f"critic output missing required field: {key!r}")
+    if payload.get("schema_version") != "critic-report.v1":
+        raise AgentOutputError(
+            f"critic schema_version must be 'critic-report.v1', got {payload.get('schema_version')!r}"
+        )
+    if not isinstance(payload["overall_comment"], str):
+        raise AgentOutputError("critic overall_comment must be a string")
+    for arr_key in ("strengths", "issues"):
+        if arr_key not in payload:
+            raise AgentOutputError(f"critic output missing required array: {arr_key!r}")
+        if not isinstance(payload[arr_key], list):
+            raise AgentOutputError(
+                f"critic {arr_key} must be a list, got {type(payload[arr_key]).__name__}"
+            )
+    for idx, issue in enumerate(payload["issues"]):
+        if not isinstance(issue, dict):
+            raise AgentOutputError(f"critic issues[{idx}] must be an object")
+        for k in ("category", "severity", "quote", "suggestion"):
+            if k not in issue:
+                raise AgentOutputError(f"critic issues[{idx}] missing required field: {k!r}")
+        if issue["category"] not in _VALIDATOR_ALLOWED_CATEGORIES:
+            raise AgentOutputError(
+                f"critic issues[{idx}].category {issue['category']!r} not in "
+                f"{sorted(_VALIDATOR_ALLOWED_CATEGORIES)}"
+            )
+        if issue["severity"] not in _VALIDATOR_ALLOWED_SEVERITIES:
+            raise AgentOutputError(
+                f"critic issues[{idx}].severity {issue['severity']!r} not in "
+                f"{sorted(_VALIDATOR_ALLOWED_SEVERITIES)}"
+            )
+
+
 _VALIDATORS = {
     "observer": _validate_observer,
     "director": _validate_director,
     "writer": _validate_writer,
+    "critic": _validate_critic,
 }
 
 
