@@ -265,6 +265,8 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
 - ``GET /api/chapters/{chapter_id}/quality`` —— 最新一份；404 表示尚无 report。
 - ``GET /api/projects/{project_id}/quality`` —— 项目全部（created_at DESC）。
 - ``POST /api/chapters/{chapter_id}/quality/evaluate`` —— 现场组装 ctx + 评估 + 落库；201。
+- ``GET /api/projects/{project_id}/quality/q8-export`` —— 全章节「人工加工占比」CSV
+  导出（PRD §125 合规自证）。详见 §12。
 - 该 router 由 ``discover_routers()`` 自动发现（模块顶层 ``router`` 变量即可被挂载到 ``/api``）。
 
 ### 11.5 前端入口
@@ -284,3 +286,51 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
 - ``tests/unit/test_migrations.py`` —— 计数更新到 29（28 business + quality_reports）。
 - ``tests/integration/test_health.py`` —— ``data["tables"]`` 从 28 升到 29。
 - ``apps/web/src/components/QualityPanel.test.tsx`` —— 6 例覆盖前端面板行为。
+
+---
+
+## 12. Q8 自证导出 & 合规立场
+
+### 12.1 端点
+
+``GET /api/projects/{project_id}/quality/q8-export``
+
+- **目的**：按 PRD §125「人工加工占比统计 + 可导出自证」要求，把每章的 AI / 人工字符
+  数与「人工占比」一次性导出 CSV，供作者在番茄平台投稿时附作自证材料。
+- **数据源**：按章节实时调 :func:`packages.core.quality.service.compute_char_stats`
+  （与 ``guardrails.req_q8`` 用同一函数——保证「导出数字 ≡ 评估口径」）；``evaluated_at``
+  字段取该章 ``quality_reports.created_at`` 最新一行；未跑过评估的章节 ``evaluated_at``
+  为空串。
+- **响应**：
+  - ``Content-Type: text/csv; charset=utf-8``
+  - ``Content-Disposition: attachment; filename="q8-report-<project_id>.csv"``
+  - UTF-8 with BOM（Excel 直接打开中文不乱码）
+  - 表头：`chapter_number, chapter_title, chapter_status, ai_chars, human_chars,
+    human_ratio, evaluated_at`
+  - 按 ``chapter_number`` 升序；``human_ratio`` 为百分比保留 1 位小数；``total=0`` 时
+    输出 ``0.0``（与 ``req_q8`` 给出 ``RULE_Q8_NO_DATA`` info 对齐——作者仍能看清章节存在但
+    还没贡献字数，不是 bug）。
+- **错误码**：project 不存在 → 404（与 ``GET /projects/{pid}/quality`` 一致）。
+
+### 12.2 合规立场
+
+NovelOS 是**本地单机写作工具**，既不是「向公众提供生成式人工智能服务」的网络服务提供者，
+也不是「提供网络信息服务的内容传播平台」——按《人工智能生成合成内容标识办法》（2025-09-01
+施行）的「显式 + 隐式」标识义务主体划分，两类义务**均不直接落在 NovelOS 自身**。
+
+故本产品 V1 不在正文内嵌「AI 生成」水印/标识——而是把合规责任落到**两条更轻、边界更清晰的接口**：
+
+1. **侧通道自证**：本端点导出 CSV，让作者一次性取得「每章人工占比 + 该章评估时间」的
+   可审计记录，应对番茄等平台审核时的「是否使用 AI / 占比多少」询问。
+2. **作者投稿时如实声明**：作者把章节投到平台时，须自行勾选/声明「是否使用 AI」以及
+   相应占比——这是平台规则定义下的作者侧义务，不在本地工具能力范围内。
+
+未来若 NovelOS 上线**托管 / SaaS 版本**，或与番茄等平台做更深度集成（如内嵌标识、单章
+水印、平台级报告回传），需重新评估本立场并按当时监管口径追加能力。
+
+### 12.3 references 路径防护
+
+:func:`load_reference_texts` 在拼 ``<db 父目录>/references/<project_id>/*.txt`` 之前会
+用 ``re.fullmatch(r"[A-Za-z0-9_\-]+", project_id)`` 校验：不匹配（含 ``..``/``/`` 等）
+直接返回空列表，**不抛错**——保持「无参照目录」既有容错语义同时关闭路径穿越面
+（安全审计 P2-2；当前调用链不可达但属公共函数防御缺口）。

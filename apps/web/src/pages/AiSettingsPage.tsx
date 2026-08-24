@@ -112,8 +112,10 @@ function ModelConfigsPanel() {
                 <button
                   className="btn btn--sm"
                   onClick={async () => {
-                    // Sprint 5 review F5：编辑时先 GET 详情拿最新 params_json（含 api_key），
+                    // Sprint 5 review F5：编辑时先 GET 详情拿最新 params_json，
                     // 避免编辑后误以为有值而漏填。
+                    // P1-1：读路径 api_key 已被后端脱敏（"***"），前端只用
+                    // has_api_key 字段判断「已配置」状态，不回填明文到输入框。
                     try {
                       const detail = await modelConfigsApi.get(m.config_id);
                       setEditing(detail);
@@ -403,15 +405,14 @@ function ModelConfigFormModal({
     initial?.provider ?? PROVIDER_OPTIONS[0].value,
   );
   const [model, setModel] = useState<string>(initial?.model ?? '');
+  // P1-1：编辑模式下不再回填 api_key 明文到输入框（后端读路径已脱敏）。
+  // 始终以空串进入；placeholder 与提示文案由 has_api_key 决定。
   const [params, setParams] = useState<ParamsState>({
     baseUrl:
       typeof initialParams['base_url'] === 'string'
         ? String(initialParams['base_url'])
         : '',
-    apiKey:
-      typeof initialParams['api_key'] === 'string'
-        ? String(initialParams['api_key'])
-        : '',
+    apiKey: '',
   });
   const [enabled, setEnabled] = useState<boolean>(initial ? initial.enabled === 1 : true);
   const [submitting, setSubmitting] = useState(false);
@@ -428,6 +429,16 @@ function ModelConfigFormModal({
     : isOllama
       ? '留空 = 本地 http://127.0.0.1:11434'
       : 'https://api.openai.com/v1';
+
+  // P1-1：编辑且后端标记 has_api_key=true 时显示「已配置」，否则按 provider 性质区分。
+  const hasApiKey = !!initial?.has_api_key;
+  const apiKeyPlaceholder = isAnthropic
+    ? hasApiKey
+      ? '已配置（留空则不修改）'
+      : '（可选；留空则由 resolve_api_key 从 NOVELOS_API_KEY_ANTHROPIC 解析）'
+    : hasApiKey
+      ? '已配置（留空则不修改）'
+      : '（可选；若不填，运行时由 resolve_api_key 从 env 解析）';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -447,6 +458,9 @@ function ModelConfigFormModal({
         params_json['base_url'] = trimmedUrl;
       }
       // Ollama 本地不需要 api_key：即便用户填了也丢弃，不写入 params_json。
+      // P1-1：编辑 + has_api_key=true 时，若用户留空 → 不传 api_key 字段
+      // （后端 _prepare_patch_params 会保留 DB 原值）；若用户填了新值 → 传明文。
+      // 新建场景下用户留空同样不传 key。
       if (!isOllama && params.apiKey.trim() !== '') {
         params_json['api_key'] = params.apiKey.trim();
       }
@@ -553,16 +567,14 @@ function ModelConfigFormModal({
                   onChange={(e) =>
                     setParams((p) => ({ ...p, apiKey: e.target.value }))
                   }
-                  placeholder={
-                    isAnthropic
-                      ? '（可选；留空则由 resolve_api_key 从 NOVELOS_API_KEY_ANTHROPIC 解析）'
-                      : '（可选；若不填，运行时由 resolve_api_key 从 env 解析）'
-                  }
+                  placeholder={apiKeyPlaceholder}
                   data-testid="cfg-api-key"
                 />
                 {initial ? (
                   <div className="muted small" data-testid="cfg-api-key-hint">
-                    留空保存将清除已保存的密钥。
+                    {hasApiKey
+                      ? '已配置密钥。留空保存将保留原值；填入新值则覆盖。'
+                      : '当前未配置密钥。留空保存保持未配置。'}
                   </div>
                 ) : null}
               </div>

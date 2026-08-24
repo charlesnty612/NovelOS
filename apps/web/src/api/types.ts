@@ -345,9 +345,13 @@ export interface ModelConfig {
   capability: string;
   provider: string;
   model: string;
-  /** DB 端存的是 JSON 字符串；前端拿到后 coerceJson 会把它解析成对象。 */
+  /** DB 端存的是 JSON 字符串；前端拿到后 coerceJson 会把它解析成对象。
+   *  P1-1：读路径出口由后端脱敏，``api_key`` 会被替换为 ``"***"``；不要回填到输入框 value。
+   *  用 ``has_api_key`` 判断「已配置 / 未配置」。 */
   params_json: Record<string, unknown>;
   enabled: 0 | 1;
+  /** 后端在 GET/POST/PATCH 响应顶层附的字段：true 表示 DB 中存有非空 api_key。 */
+  has_api_key?: boolean;
 }
 
 export interface ModelConfigCreatePayload {

@@ -82,7 +82,7 @@ python -m packages.core.api.main
 ## 测试
 
 ```bash
-# 后端全量（当前基线 392 passed）
+# 后端全量（当前基线 409 passed）
 python -m pytest tests/ -q
 
 # Golden 回归 eval（当前 1/1）

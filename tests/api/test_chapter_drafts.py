@@ -228,6 +228,34 @@ def test_create_draft_empty_content_returns_422(tmp_path: Path):
     asyncio.run(run())
 
 
+def test_create_draft_over_max_length_returns_422(tmp_path: Path):
+    """content 长度超过 500_000 → 422（pydantic max_length=500_000，防超大 body）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid, status="DRAFTED")
+
+            # 500_001 字符（> 上限 500_000）；用 ASCII 字符避免编码差异
+            oversized = "a" * 500_001
+            r = await _request(
+                app, "POST", f"/api/chapters/{cid}/drafts",
+                json={"content": oversized},
+            )
+            assert r.status_code == 422, r.text
+
+            # 边界：恰好 500_000 字符应通过
+            boundary = "b" * 500_000
+            r2 = await _request(
+                app, "POST", f"/api/chapters/{cid}/drafts",
+                json={"content": boundary},
+            )
+            assert r2.status_code == 201, r2.text
+
+    asyncio.run(run())
+
+
 # =============================================================================
 # Sprint 5 review F2：(chapter_id, version) 唯一索引 — 自增路径不退化 + 直插重复触发 IntegrityError
 # =============================================================================

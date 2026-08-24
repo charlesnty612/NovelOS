@@ -238,11 +238,14 @@ export const workflowsApi = {
 
 // -------------------------------------------------------------- model configs
 // model_configs 行字段：config_id / capability / provider / model / params_json /
-// enabled。params_json 在 DB 中存为 JSON 字符串，统一在此解析为对象便于前端表单读写。
+// enabled / has_api_key（Sprint 12 P1-1 后端响应顶层附）。params_json 在 DB 中存为
+// JSON 字符串，统一在此解析为对象便于前端表单读写。注意：读路径下 params_json.api_key
+// 已被后端替换为 "***"，不要回填到 <input value>。
 function normalizeModelConfig(row: ModelConfig): ModelConfig {
   return {
     ...row,
     params_json: (coerceJson(row.params_json) as Record<string, unknown>) ?? {},
+    has_api_key: row.has_api_key ?? false,
   };
 }
 

@@ -81,6 +81,10 @@ def run() -> int:
         prose = drafts[0]["content"]
         if "<think>" in prose: raise AssertionError("draft 含 think 块")
         state = check(c.get(f"/api/projects/{project}/state"), "state")
+        # §110 第 3 步「创建世界」：state.world.world_rules 必须非空
+        world_rules = (state.get("world") or {}).get("world_rules") or []
+        if not (isinstance(world_rules, list) and len(world_rules) >= 1):
+            raise AssertionError(f"state.world.world_rules empty: {world_rules!r}")
         quality = check(c.get(f"/api/chapters/{chapter_id}/quality"), "quality")
         # 读取真实调用日志，报告不记录任何密钥
         conn = __import__("sqlite3").connect(db)

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -274,10 +275,14 @@ def compute_char_stats(db_path: Path | str, chapter_id: str) -> tuple[int, int]:
 def load_reference_texts(db_path: str | Path, project_id: str) -> list[str]:
     """从项目目录 ``<db 父目录>/references/<project_id>/*.txt`` 读参照书。
 
+    - ``project_id`` 不在 ``[A-Za-z0-9_-]`` 白名单内 → 视为「无参照目录」返回空列表
+      （安全审计 P2-2：避免任意路径穿越如 ``../evil``）。
     - 目录不存在 → 空列表（info）。
     - 文件以 UTF-8 文本逐行累加到返回 list（每文件一整个 str 条目）。
     - 文件读取异常 → 跳过该文件（log warning 但不阻断）。
     """
+    if re.fullmatch(r"[A-Za-z0-9_\-]+", project_id) is None:
+        return []
     db_p = Path(db_path)
     refs_dir = db_p.parent / "references" / project_id
     if not refs_dir.is_dir():

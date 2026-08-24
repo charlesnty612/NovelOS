@@ -8,13 +8,15 @@ project → character → model_config → chapter → 四工作流
 2. GET /api/health                              → 200，tables=31（31 业务表 + _migrations = 32 总表）
 3. POST /api/projects                           → 201 + project_id
 4. POST /api/projects/{pid}/characters          → 201 + character_id（1 个主角）
-5. POST /api/model-configs                      → 201（capability=reasoning 与 creative_writing 各 1 条 mock）
-6. POST /api/projects/{pid}/chapters            → 201 + chapter_id（第 1 章）
-7. 四条工作流端点（plan → write → review → commit）→ 201；
+5. POST /api/projects/{pid}/world-rules         → 201 + world_rule_id（1 条世界规则；PRD §110 第 3 步「创建世界」）
+6. POST /api/model-configs                      → 201（capability=reasoning 与 creative_writing 各 1 条 mock）
+7. POST /api/projects/{pid}/chapters            → 201 + chapter_id（第 1 章）
+8. 四条工作流端点（plan → write → review → commit）→ 201；
    review / commit 若返回 PAUSED → POST /runs/{rid}/resume {"human_input":{"approved":true}}
-8. 最终断言：
+9. 最终断言：
    - chapters.status == "COMMITTED"
    - GET /projects/{pid}/state 快照含 observer 新增内容（hook / event / character state）
+   - GET /projects/{pid}/state 快照含 world_rules（创建的世界规则进入快照）
    - GET /chapters/{cid}/drafts 至少 1 条 AI 草稿
    - GET /chapters/{cid}/quality 200 + report（report 模式）
 
@@ -401,7 +403,32 @@ def run_smoke() -> int:
             except AssertionError as e:
                 failures.append(f"create character: {e}")
 
-        # ---- (5) POST /api/model-configs（capability=reasoning 与 creative_writing 各 1 条 mock）
+        # ---- (5) POST /api/projects/{pid}/world-rules（PRD §110 第 3 步「创建世界」）
+        world_rule_id = None
+        world_rule_name = "smoke_jingjie_tixi"
+        if project_id:
+            try:
+                r = client.post(
+                    f"/api/projects/{project_id}/world-rules",
+                    json={
+                        "name": world_rule_name,
+                        "statement": "淬体、开脉、灵海、神藏，每境分九重；主角只能越级而战。",
+                    },
+                )
+                _assert(
+                    r.status_code == 201,
+                    f"create world-rule status={r.status_code} body={r.text[:200]}",
+                )
+                world_rule_id = r.json()["id"]
+                _assert(
+                    r.json().get("name") == world_rule_name,
+                    f"world_rule.name={r.json().get('name')!r} != {world_rule_name!r}",
+                )
+                print(f"[smoke] OK POST .../world-rules  (world_rule_id={world_rule_id}, name={world_rule_name})")
+            except AssertionError as e:
+                failures.append(f"create world-rule: {e}")
+
+        # ---- (6) POST /api/model-configs（capability=reasoning 与 creative_writing 各 1 条 mock）
         try:
             cfg_ids: dict[str, str] = {}
             for capability in ("reasoning", "creative_writing"):
@@ -427,7 +454,7 @@ def run_smoke() -> int:
         except AssertionError as e:
             failures.append(f"create model_configs: {e}")
 
-        # ---- (6) POST /api/projects/{pid}/chapters（第 1 章）
+        # ---- (7) POST /api/projects/{pid}/chapters（第 1 章）
         chapter_id = None
         if project_id:
             try:
@@ -450,7 +477,7 @@ def run_smoke() -> int:
         except Exception as exc:  # noqa: BLE001
             failures.append(f"agents/sync: {exc}")
 
-        # ---- (7) 四个工作流端点（plan → write → review → commit）
+        # ---- (8) 四个工作流端点（plan → write → review → commit）
         mocks: dict[str, list[str]] = {}
         if chapter_id and character_id:
             payloads = _build_mock_payloads(chapter_id, character_id)
@@ -498,7 +525,7 @@ def run_smoke() -> int:
             except AssertionError as e:
                 failures.append(f"workflow {wf}: {e}")
 
-        # ---- (8) 断言最终态
+        # ---- (9) 断言最终态
         if chapter_id:
             try:
                 r = client.get(f"/api/chapters/{chapter_id}")
@@ -520,6 +547,27 @@ def run_smoke() -> int:
                 print("[smoke] OK /projects/{pid}/state contains observer content (hook/event/character)")
             except AssertionError as e:
                 failures.append(f"state snapshot: {e}")
+
+            try:
+                r = client.get(f"/api/projects/{project_id}/state")
+                _assert(r.status_code == 200, f"GET state status={r.status_code} (world_rules)")
+                snap = r.json()
+                world = snap.get("world") or {}
+                world_rules = world.get("world_rules") or []
+                _assert(
+                    isinstance(world_rules, list) and len(world_rules) >= 1,
+                    f"state.world.world_rules={world_rules!r} (expected list with >=1 entry)",
+                )
+                names = [r.get("name") for r in world_rules if isinstance(r, dict)]
+                _assert(
+                    world_rule_name in names,
+                    f"world_rule {world_rule_name!r} not in state.world.world_rules names={names!r}",
+                )
+                print(
+                    f"[smoke] OK /projects/{project_id}/state.world.world_rules contains {world_rule_name!r}  (n={len(world_rules)})"
+                )
+            except AssertionError as e:
+                failures.append(f"state snapshot world_rules: {e}")
 
             try:
                 r = client.get(f"/api/chapters/{chapter_id}/drafts")
@@ -551,7 +599,7 @@ def run_smoke() -> int:
             for f in failures:
                 print(f"  - {f}")
             return 1
-        print("\n[smoke] PASS  (PRD §110 全链路 8 组断言全绿)")
+        print("\n[smoke] PASS  (PRD §110 全链路 9 组断言全绿)")
         return 0
 
     finally:

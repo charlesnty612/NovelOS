@@ -5,6 +5,43 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [1.1.0] - 2026-08-24
+
+PRD 全量符合性核对（§1–§125 逐节追溯）+ 全维度检修（安全 / 数据完整性 / 测试盲区 /
+文档一致性，叠加 V1.0 的性能 / 业务闭环 / 架构三轴）后的修复版本。
+§110 MVP 验收链由 12/13 补齐为 **13/13**。
+
+### Added
+
+- **Q8 人工占比 CSV 导出**（PRD §125 合规自证）：`GET /api/projects/{pid}/quality/q8-export`
+  按章导出 ai_chars/human_chars/human_ratio（utf-8-sig BOM，Excel 兼容）；数字口径与评估链路
+  同源（`compute_char_stats`）。合规立场已调研定调并写入 `packages/core/quality/README.md` §12：
+  《人工智能生成合成内容标识办法》（2025-09-01 施行）的显式/隐式标识义务主体是面向公众的
+  生成服务提供者与传播平台（番茄已在投稿环节要求作者勾选是否使用 AI）；NovelOS 是本地单机
+  工具，V1 不在正文内嵌标识，产品侧提供统计与导出自证，投稿声明义务在作者侧。
+- smoke_e2e §110 验收链补齐第 3 步「创建世界」断言（9 组断言全绿）。
+
+### Fixed
+
+- **API key 读路径脱敏**：model_configs 的 GET/PATCH/POST 响应统一脱敏（`api_key` → `***` +
+  `has_api_key` 布尔）；PATCH 传 `***` 保留原 key、空串清空；前端编辑弹窗不再回填明文，
+  留空=不修改。DB 写路径保持明文存储不变。
+- **零外呼回归锁定**：无 model_configs 时断言 `ModelNotConfiguredError` 且 ai_call_logs 零新增；
+  deconstruct 端点未配置模型时返回 422（原漏成 500），并前置 capability 预检。
+- **拆书文本上限**：deconstruct `text` 超过 5MB → 422。
+- **草稿体长上限**：`DraftCreate.content` max_length=500_000。
+- **references 路径防护**：`load_reference_texts` 对 project_id 做字符白名单校验（防路径穿越）。
+- **文档修正**：`packages/core/api/README.md` 健康端点表数 28→31（三处）。
+
+### Known Issues / 路线登记更新
+
+- V1.x 清单移除「model-configs 列表 api_key 脱敏」（本版已完成）；其余 V1.x/V2.x 项维持
+  V1.0.0 登记不变。新增登记：前端无「清空密钥」UI 入口（仅能覆盖/保留）；`***` 为保留哨兵值；
+  PRD 符合性核对发现的中长期缺口（Intent Engine §41、Impact Analysis §42、Event System §68、
+  reveal_policies 运行时 §23.2、Timeline 冲突检测 §20、Dashboard 健康度 §14、Workflow DAG
+  可视化 §61、Style System §97、Export/备份 §100/§101 等）按 PRD 自标的 V1/V2 阶段推进，
+  明细见检修结论（各节判定矩阵已在审查记录归档）。
+
 ## [1.0.0] - 2026-08-24
 
 首个正式版本。交付形态：**本地部署 Web 应用**（FastAPI 托管 React SPA，SQLite 落盘，单端口 18081）。
@@ -59,7 +96,8 @@ S0–S12 全部收官（S12 Tauri 壳经用户拍板关闭，Web 版即交付形
 
 - **V1.x**：simulation/branches 仅 API 无 UI 入口；ai_call_logs 无查看通道（PRD §93）；
   enforce 阻断后的改稿引导；参照系消费可观测（`_reference_canon_consumed` 未进 checkpoint）；
-  model-configs 列表 api_key 脱敏；checkpoint_exclude 推广到章节工作流（需先论证 resume 影响）；
+  ~~model-configs 列表 api_key 脱敏~~（V1.1.0 已完成）；checkpoint_exclude 推广到章节工作流
+  （需先论证 resume 影响）；
   workflow 注册表下沉 core；router 越层 SQL（reference/workflows/model_configs）抽 service。
 - **V2.x**：story_state/service.py（2300+ 行）按职责拆分；分支读路径 O(N²) 重放的快照物化；
   story_state 写透与 domain CRUD 的双写面统一；context engine 装配缓存；端口变量收敛。

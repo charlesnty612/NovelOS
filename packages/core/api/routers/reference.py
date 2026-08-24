@@ -32,6 +32,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from packages.core.db import get_connection
 from packages.core.logging_config import get_logger
+from packages.core.model_router import ModelNotConfiguredError, ModelRouter
 from packages.core.workflow_runtime.engine import WorkflowEngine
 from packages.core.workflow_runtime.runs import get_run
 from packages.domain.project.service import ProjectService
@@ -40,6 +41,13 @@ from packages.workflows import get_workflow
 log = get_logger("novelos.routers.reference")
 
 router = APIRouter(tags=["reference"])
+
+# 拆书文本硬上限：5 MB 字符。超过则 422 拒绝（防 DoS 与内存放大）。
+_MAX_DECONSTRUCT_TEXT_LEN = 5_000_000
+
+# 拆书工作流涉及的 capability 集合（deconstructor_chapter / deconstructor_aggregate
+# 在 packages.core.model_router.AGENT_CAPABILITY 均映射到 "reasoning"）。
+_DECONSTRUCT_REQUIRED_CAPABILITIES: tuple[str, ...] = ("reasoning",)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +147,15 @@ def start_deconstruct(
             status_code=422,
             detail="text must be a non-empty string",
         )
+    # P1-2：文本硬上限（5 MB 字符），防止超大 body / 内存放大 / DoS。
+    if len(text) > _MAX_DECONSTRUCT_TEXT_LEN:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"text exceeds {_MAX_DECONSTRUCT_TEXT_LEN} chars (got {len(text)}); "
+                f"split into smaller chunks"
+            ),
+        )
     reader_profile = payload.get("reader_profile") or "male_fantasy"
     mock_providers = payload.get("mock_providers") or None
 
@@ -148,6 +165,22 @@ def start_deconstruct(
             status_code=500,
             detail="workflow 'deconstruct-book' not registered",
         )
+
+    # P1-4：拆书工作流启动前预检查 capability 是否有可用模型。
+    # mock 路径（请求体带 ``mock_providers``）不依赖 model_config，跳过此检查；
+    # 生产路径（无 mock_providers）必须预检查 capability 是否可用，
+    # 在启动 run 之前就 422 拒绝，避免启动一个注定 FAILED 的 run + 兜底 ai_call_logs。
+    if not mock_providers:
+        router = ModelRouter(_db_path(request))
+        for cap in _DECONSTRUCT_REQUIRED_CAPABILITIES:
+            if not router.list_enabled(cap):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"no enabled model configured for capability={cap!r}; "
+                        f"请先在 AI 设置里启用模型"
+                    ),
+                )
 
     initial_ctx: dict[str, Any] = {
         "db_path": _db_path(request),
@@ -172,6 +205,10 @@ def start_deconstruct(
         raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # P1-4：未配置可用模型时（deconstructor_* 走 ModelRouter.resolve），从 500 兜成 422
+    # 让前端明确「未配置模型」而非不可恢复的服务错误。
+    except ModelNotConfiguredError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     run = get_run(_db_path(request), run_id)
     if run is None:

@@ -72,13 +72,14 @@ class Chapter(BaseModel):
 class DraftCreate(BaseModel):
     """创建草稿请求体（人工改稿入口）。
 
-    - ``content`` 必填且长度 ≥ 1（pydantic 校验）。
+    - ``content`` 必填且长度 ≥ 1（pydantic 校验）；上限 500_000 字符（约 50 万字，
+      远大于单章实际目标 ~2200 字；用于防止超大 body DoS）。
     - 不暴露 ``version / created_by / created_at``：version 由 Service 按
       ``max(version)+1`` 计算；created_by 在人工改稿场景下固定为 ``"human"``；
       created_at 由 ``now_iso()`` 写入。
     """
 
-    content: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1, max_length=500_000)
 
 
 class Draft(BaseModel):

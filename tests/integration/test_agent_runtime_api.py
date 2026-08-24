@@ -151,17 +151,23 @@ def test_model_configs_crud_happy_path(tmp_path: Path):
             cfg = r.json()
             cid = cfg["config_id"]
             assert cfg["capability"] == "reasoning"
-            assert cfg["params_json"] == json.dumps({"base_url": "https://api.openai.com/v1"}, ensure_ascii=False)
+            # P1-1：读路径响应 params_json 是 dict（已 json.loads），
+            # 不含 api_key 时直接等于入参 dict；附 has_api_key 顶层字段。
+            assert cfg["params_json"] == {"base_url": "https://api.openai.com/v1"}
+            assert cfg["has_api_key"] is False
 
             # list
             r = await _request(app, "GET", "/api/model-configs")
             assert r.status_code == 200
-            assert any(c["config_id"] == cid for c in r.json())
+            listed = next(c for c in r.json() if c["config_id"] == cid)
+            assert listed["params_json"] == {"base_url": "https://api.openai.com/v1"}
+            assert listed["has_api_key"] is False
 
             # get one
             r = await _request(app, "GET", f"/api/model-configs/{cid}")
             assert r.status_code == 200
             assert r.json()["config_id"] == cid
+            assert r.json()["has_api_key"] is False
 
             # patch（关掉 enabled）
             r = await _request(app, "PATCH", f"/api/model-configs/{cid}", json={"enabled": 0})

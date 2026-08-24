@@ -1,4 +1,4 @@
-"""Quality API 集成测试（Sprint 6 下半）。
+"""Quality API 集成测试（Sprint 6 下半 + Sprint 11 合规补丁）。
 
 覆盖（任务书给死）：
 - POST /api/chapters/{cid}/quality/evaluate — 全 pass 场景落库可查
@@ -8,6 +8,11 @@
 - chapter_commit pipeline：enforce 模式 error 阻断 + report 模式 error 不阻断
 - 前置：调用方构造「会触发 quality error」的死角色 delta 通过 observer mock 注入。
 
+新增（Sprint 11 PRD §125 合规）：
+- GET /api/projects/{pid}/quality/q8-export — CSV 导出 happy path（含 BOM/表头/
+  ratio 校验）+ project 不存在 → 404
+- load_reference_texts 路径白名单防护（``../evil`` → 空列表不抛错）
+
 测试模式与 ``tests/api/test_chapter_drafts.py`` 一致：httpx.ASGITransport +
 ``Settings(data_dir=tmp_path)`` 拉临时 db。
 """
@@ -15,7 +20,10 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -23,6 +31,8 @@ import httpx
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
+from packages.core.ids import new_id, now_iso
+from packages.core.quality.service import load_reference_texts
 
 
 def _make_client(app) -> httpx.AsyncClient:
@@ -463,3 +473,224 @@ def test_quality_gate_report_mode_does_not_block(tmp_path: Path):
             )
 
     asyncio.run(run())
+
+
+# =============================================================================
+# Sprint 11 合规补丁：Q8 CSV 导出 + references 路径防护
+# =============================================================================
+
+
+def _insert_drafts(
+    db_path: Path,
+    chapter_id: str,
+    drafts: list[tuple[int, str, str]],
+) -> None:
+    """直接 INSERT drafts 避开 create_draft 状态机校验；测试专用 helper。
+
+    ``drafts`` 每个元素 ``(version, content, created_by)``。``created_at`` 由这里统一
+    设一个固定的 ISO 串便于断言。
+    """
+    conn = get_connection(db_path)
+    try:
+        for version, content, created_by in drafts:
+            conn.execute(
+                """
+                INSERT INTO drafts
+                    (draft_id, chapter_id, version, content, created_by,
+                     prompt_version, model_id, created_at)
+                VALUES
+                    (:draft_id, :chapter_id, :version, :content, :created_by,
+                     :prompt_version, :model_id, :created_at)
+                """,
+                {
+                    "draft_id": new_id("dr"),
+                    "chapter_id": chapter_id,
+                    "version": int(version),
+                    "content": content,
+                    "created_by": created_by,
+                    "prompt_version": None,
+                    "model_id": None,
+                    "created_at": now_iso(),
+                },
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_q8_export_happy_path_two_chapters(tmp_path: Path):
+    """q8-export：2 章各自已有 drafts + 1 章挂 report → CSV 头/列/比例/evaluated_at 全对。
+
+    Chapter A 字数手算（与 ``compute_char_stats`` 算法一致）：
+    - v1=agent: "人工智能写作工具辅助生成"   len=12 → ai 全量计 12
+    - v2=human: 在该 12 字 prefix 后插入 ",并补充一段人工润色文字"（12 字）
+      → human diff=12
+    - ratio = 12/(12+12) = 50.0%
+
+    Chapter B 字数手算：
+    - v1=human: "" → human 全量=0（content 为空）
+    - v2=agent: "AI 完全重写整章正文十八字"  len=14 → ai 全部 14
+    - ratio = 0/(0+14) = 0.0%
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+
+            # chapter A：v1=agent 12 字 → ai=12；v2=human diff 增量 12 字 → human=12
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters",
+                json={"number": 1, "title": "第一章 测试"},
+            )
+            assert r.status_code == 201, r.text
+            cid_a = r.json()["chapter_id"]
+            _insert_drafts(
+                app.state.settings.db_path,
+                cid_a,
+                [
+                    (1, "人工智能写作工具辅助生成", "agent:writer:v1"),
+                    (2, "人工智能写作工具辅助生成，并补充一段人工润色文字", "human"),
+                ],
+            )
+
+            # chapter B：v1=human 空 → human=0；v2=agent 全 14 字 → ai=14
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters",
+                json={"number": 2, "title": "第二章"},
+            )
+            assert r.status_code == 201, r.text
+            cid_b = r.json()["chapter_id"]
+            _insert_drafts(
+                app.state.settings.db_path,
+                cid_b,
+                [
+                    (1, "", "human"),
+                    (2, "AI 完全重写整章正文十八字", "agent:writer:v1"),
+                ],
+            )
+
+            # 给 chapter A 灌一份 report，验证 evaluated_at 非空；B 不灌，验证空串
+            r = await _request(
+                app, "POST", f"/api/chapters/{cid_a}/quality/evaluate",
+            )
+            assert r.status_code == 201, r.text
+
+            r = await _request(
+                app, "GET", f"/api/projects/{pid}/quality/q8-export"
+            )
+            assert r.status_code == 200, r.text
+            assert "text/csv" in r.headers["content-type"]
+            assert "charset=utf-8" in r.headers["content-type"]
+            assert r.headers["content-disposition"] == (
+                f'attachment; filename="q8-report-{pid}.csv"'
+            )
+
+            # 解码（剥 UTF-8 BOM）→ 按 csv.reader 解析
+            raw = r.content
+            assert raw.startswith(b"\xef\xbb\xbf"), "CSV 必须以 UTF-8 BOM 开头"
+            text = raw.decode("utf-8-sig")
+            reader = csv.reader(io.StringIO(text))
+            rows = list(reader)
+            assert rows[0] == [
+                "chapter_number", "chapter_title", "chapter_status",
+                "ai_chars", "human_chars", "human_ratio", "evaluated_at",
+            ]
+            data_rows = rows[1:]
+            assert len(data_rows) == 2
+
+            # 章节按 number 升序：A(#1) 在前，B(#2) 在后
+            row_a = data_rows[0]
+            assert row_a[0] == "1"
+            assert row_a[1] == "第一章 测试"
+            assert int(row_a[3]) == 12  # ai_chars
+            assert int(row_a[4]) == 12  # human_chars
+            assert float(row_a[5]) == 50.0  # human_ratio %
+            assert row_a[6] != ""  # 有 evaluate → evaluated_at 非空
+
+            row_b = data_rows[1]
+            assert row_b[0] == "2"
+            assert row_b[1] == "第二章"
+            assert int(row_b[3]) == 14  # ai_chars
+            assert int(row_b[4]) == 0   # human_chars
+            assert float(row_b[5]) == 0.0  # human_ratio %
+            assert row_b[6] == ""  # 未评估 → 空串
+
+    asyncio.run(run())
+
+
+def test_q8_export_404_for_unknown_project(tmp_path: Path):
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(
+                app, "GET", "/api/projects/prj_nope/quality/q8-export"
+            )
+            assert r.status_code == 404
+            assert "prj_nope" in r.json()["detail"]
+
+    asyncio.run(run())
+
+
+def test_q8_export_empty_project_returns_header_only(tmp_path: Path):
+    """项目存在但无章节 → 只返回表头（让作者一眼看清「项目存在但还没章节」）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+
+            r = await _request(
+                app, "GET", f"/api/projects/{pid}/quality/q8-export"
+            )
+            assert r.status_code == 200, r.text
+            text = r.content.decode("utf-8-sig")
+            lines = [ln for ln in text.split("\n") if ln.strip()]
+            assert len(lines) == 1
+            assert "chapter_number" in lines[0]
+            assert "human_ratio" in lines[0]
+
+    asyncio.run(run())
+
+
+def test_load_reference_texts_rejects_path_traversal(tmp_path: Path):
+    """``load_reference_texts`` 在 project_id 不在白名单时返回空列表不抛错。
+
+    安全审计 P2-2：避免任意路径穿越（例如 ``../evil``）。
+    """
+    refs_root = tmp_path / "references"
+    refs_root.mkdir()
+    # 假定一个意图穿越的目录确实存在；白名单校验在路径拼之前，不应读到它
+    (refs_root / "evil").mkdir()
+    (refs_root / "evil" / "secret.txt").write_text("不应被读到", encoding="utf-8")
+
+    fake_db = tmp_path / "fake.sqlite"
+    fake_db.write_bytes(b"")  # placeholder：路径校验在 db 打开前发生
+
+    # 横线/字母数字字符仍可正常解析（接口兼容历史正例）
+    assert load_reference_texts(fake_db, "good-id_123") == []  # 目录不存在 → 空列表
+    # 白名单不匹配的输入全数返回空列表（容错语义保持）
+    assert load_reference_texts(fake_db, "../evil") == []
+    assert load_reference_texts(fake_db, "a/b") == []
+    assert load_reference_texts(fake_db, "") == []
+    # 白名单字符集在标准 Python re ``fullmatch`` 下严格：中文、点、空格均失败
+    assert load_reference_texts(fake_db, "项目") == []
+
+
+def test_load_reference_texts_reads_valid_project(tmp_path: Path):
+    """白名单匹配的 project_id 仍正常读取参照书（不破坏既有功能）。"""
+    refs_root = tmp_path / "references" / "good-id_123"
+    refs_root.mkdir(parents=True)
+    (refs_root / "a.txt").write_text("参照书内容A", encoding="utf-8")
+    (refs_root / "b.txt").write_text("参照书内容B", encoding="utf-8")
+    # 同目录下一个非白名单命名 .md 文件不应被读取
+    (refs_root / "note.md").write_text("不读", encoding="utf-8")
+
+    fake_db = tmp_path / "fake.sqlite"
+    fake_db.write_bytes(b"")
+
+    out = load_reference_texts(fake_db, "good-id_123")
+    assert out == ["参照书内容A", "参照书内容B"]

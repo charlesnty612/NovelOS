@@ -4,6 +4,7 @@
 - ``GET  /chapters/{chapter_id}/quality``       —— 最新一份 report；不存在 → 404
 - ``GET  /projects/{project_id}/quality``       —— 项目全部 report 列表（created_at DESC，limit 默认 50）
 - ``POST /chapters/{chapter_id}/quality/evaluate`` —— 现场组装 ctx + 评估 + 落库 + 返回；201
+- ``GET  /projects/{project_id}/quality/q8-export`` —— 全章节人工加工占比 CSV（PRD §125 合规自证）
 
 错误码映射：
 - 404 — chapter / project 不存在；
@@ -17,20 +18,28 @@
 - 评估不经过 chapter_commit pipeline；该端点对应「人工触发一次最新评估」的轻量入口，
   与门禁节点同语义但不对 chapter 状态 / commit 产生副作用（最多落一份新 report）。
 - ``discover_routers`` 自动发现：模块顶层 ``router`` 即被 ``main.py`` 挂载。
+- ``q8-export`` 端点：按章节实时调 :func:`packages.core.quality.service.compute_char_stats`
+  计算 ai/human 字符数（与 :func:`guardrails.req_q8` 算法一致）；输出 csv（utf-8-sig）
+  供番茄平台审核自证。
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import sqlite3
 
 from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import Response
 
 from packages.core.logging_config import get_logger
 from packages.core.quality.engine import QualityEngine
 from packages.core.quality.service import (
     QualityService,
     build_quality_context,
+    compute_char_stats,
 )
+from packages.core.db import get_connection
 from packages.core.story_state.service import StoryStateService
 from packages.domain.chapter.service import ChapterService
 
@@ -142,3 +151,86 @@ def evaluate_chapter_quality(chapter_id: str, request: Request) -> dict:
         ) from exc
 
     return _service(request).latest_report(chapter_id) or {}
+
+
+@router.get("/projects/{project_id}/quality/q8-export")
+def export_q8_csv(project_id: str, request: Request) -> Response:
+    """导出全章节「人工加工占比」CSV（PRD §125 合规自证）。
+
+    - 数据源：按章节实时调 :func:`compute_char_stats` 读 ``drafts`` 表重算 ai/human
+      字符数（与 ``guardrails.req_q8`` 用同一函数，保证「导出数字 ≡ 评估口径」）。
+      并对该章 ``quality_reports`` 取 ``MAX(created_at)`` 作为 ``evaluated_at``（未评估
+      → 空串）。
+    - 输出 CSV 列：``chapter_number, chapter_title, chapter_status, ai_chars,
+      human_chars, human_ratio, evaluated_at``。按 chapter_number 升序。``human_ratio``
+      是百分比（保留 1 位小数），total=0 时输出 ``0.0``。
+    - 响应头 ``Content-Type: text/csv; charset=utf-8`` + ``Content-Disposition: attachment;
+      filename="q8-report-<project_id>.csv"``；UTF-8 BOM 以兼容 Excel 中文显示。
+    - project 不存在 → 404。
+    """
+    settings = request.app.state.settings
+    db_path = _db_path(request)
+    from packages.domain.project.service import ProjectService
+
+    if ProjectService(settings.db_path).get(project_id) is None:
+        raise HTTPException(
+            status_code=404, detail=f"project {project_id!r} not found"
+        )
+
+    chapters = ChapterService(db_path).list_by_project(project_id)
+    # 取每章最新一次评估的 created_at（evaluated_at 显示口径）。
+    conn = get_connection(db_path)
+    try:
+        latest_per_chapter: dict[str, str] = {}
+        for row in conn.execute(
+            """
+            SELECT chapter_id, MAX(created_at) AS evaluated_at
+            FROM quality_reports
+            WHERE project_id = ?
+            GROUP BY chapter_id
+            """,
+            (project_id,),
+        ).fetchall():
+            latest_per_chapter[row["chapter_id"]] = row["evaluated_at"] or ""
+    finally:
+        conn.close()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "chapter_number",
+            "chapter_title",
+            "chapter_status",
+            "ai_chars",
+            "human_chars",
+            "human_ratio",
+            "evaluated_at",
+        ]
+    )
+    for ch in chapters:
+        ai, human = compute_char_stats(db_path, ch["chapter_id"])
+        total = ai + human
+        ratio_pct = (human / total * 100) if total > 0 else 0.0
+        writer.writerow(
+            [
+                ch.get("number", 0),
+                ch.get("title") or "",
+                ch.get("status") or "",
+                int(ai),
+                int(human),
+                f"{ratio_pct:.1f}",
+                latest_per_chapter.get(ch["chapter_id"], ""),
+            ]
+        )
+
+    body = ("\ufeff" + buf.getvalue()).encode("utf-8")  # UTF-8 BOM for Excel
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="q8-report-{project_id}.csv"'
+            ),
+        },
+    )
