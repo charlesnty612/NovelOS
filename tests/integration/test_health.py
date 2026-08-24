@@ -37,7 +37,9 @@ def test_health_endpoint_returns_ok(tmp_path: Path):
     assert data["version"] == "0.1.0"
     # Sprint 14：0007_chapter_summaries.sql 已落地 → 32 业务表（31 + chapter_summaries）
     # Sprint 15 / V1.3：0008_author_style_samples_and_overdue.sql 加 author_style_samples → 33 业务表
-    assert data["tables"] == 33
+    # V2.0 Wave B 任务一：0009_branch_snapshots.sql 加 branch_snapshots → 34 业务表
+    # V2.0 Wave B 任务二：0010_trigger_keys.sql 仅 ALTER TABLE 加列，不增表 → 仍 34 业务表
+    assert data["tables"] == 34
 
 
 def test_root_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

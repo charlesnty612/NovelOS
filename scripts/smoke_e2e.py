@@ -63,8 +63,10 @@ SERVER_START_TIMEOUT_S = 30
 ENDPOINT_READY_TIMEOUT_S = 30
 HTTP_TIMEOUT_S = 60.0
 
-# health.tables = 业务表数（32 业务表；含 _migrations 总表 33，health 返回减 1 后的业务表数）
-EXPECTED_BUSINESS_TABLES = 33  # Sprint 15 / V1.3：0008_author_style_samples_and_overdue.sql 加 1 表
+# health.tables = 业务表数（34 业务表；含 _migrations 总表 35，health 返回减 1 后的业务表数）
+EXPECTED_BUSINESS_TABLES = 34
+# V2.0 Wave B 任务一：0009_branch_snapshots.sql 加 branch_snapshots → 34 业务表
+# V2.0 Wave B 任务二：0010_trigger_keys.sql 仅 ALTER TABLE 加列，不增表 → 仍 34 业务表
 
 
 # ---------------------------------------------------------------------------

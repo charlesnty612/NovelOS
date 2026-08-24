@@ -40,6 +40,12 @@ const KIND_LABEL: Record<string, string> = {
   chapter_summary: '历史章节摘要',
   previous_chapter_tail: '上一章结尾原文',
   open_foreshadow: '开放伏笔',
+  // V2.0 Wave B 任务二：条件触发动态注入（never 模式仅预览可见）
+  suppressed_character: '角色(已剔除)',
+  suppressed_location: '地点(已剔除)',
+  suppressed_faction: '势力(已剔除)',
+  // V2.0 Wave C 任务一：FTS5 召回片段（章节正文跨长程呼应）
+  recalled_passage: '召回片段',
 };
 
 /**
@@ -179,12 +185,37 @@ function PreviewItemRow({ item }: { item: ContextPreviewItem }) {
   const label = KIND_LABEL[item.kind] ?? item.kind;
   // Sprint 14-B：开放伏笔的 overdue 标记优先展示在最显眼的位置（沿用 badge 视觉约定）。
   const isOverdue = (item as { overdue?: boolean }).overdue === true;
+  // V2.0 Wave B 任务二：条件触发动态注入状态徽标（full / summary / suppressed）。
+  const injection = item.injection ?? 'full';
   return (
     <li className="kv-list__row">
       <span className="kv-list__title" data-testid={`preview-item-${item.kind}`}>
         [{label}] {item.name}
       </span>
       <span className="muted small">{item.id}</span>
+      {injection !== 'full' ? (
+        <span
+          className="badge badge--chapter-planned"
+          data-testid={`preview-item-injection-${item.kind}-${injection}`}
+          style={
+            injection === 'suppressed'
+              ? { background: '#888', color: '#fff' }
+              : { background: '#f5a623', color: '#000' }
+          }
+          title={
+            injection === 'summary'
+              ? '本章未触发该实体，仅注入一行摘要'
+              : '该实体已配置为不注入'
+          }
+        >
+          {injection === 'summary' ? '摘要' : '已剔除'}
+        </span>
+      ) : null}
+      {item.summary_line && injection === 'summary' ? (
+        <span className="muted small" data-testid={`preview-item-summary-line-${item.kind}`}>
+          {item.summary_line}
+        </span>
+      ) : null}
       {isOverdue ? (
         <span
           className="badge badge--chapter-planned"

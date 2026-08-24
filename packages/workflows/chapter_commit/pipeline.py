@@ -587,7 +587,53 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
         conn.commit()
     finally:
         conn.close()
-    return {"commit_result": commit_result, "status_after": "COMMITTED"}
+
+    # V2.0 Wave C P1-1：commit 成功后显式失效本章装配缓存（兜底）。
+    # 正常情况下 state_version 已推进，缓存键自然失效；此处对"plan_json
+    # 被 UPDATE 但 state_version 未变"的边界场景提供最后一道防线。
+    # 任何异常均吞掉——失效失败绝不能阻断 commit。
+    try:
+        from packages.core.context_engine.builders import (
+            _invalidate_cache_for_chapter,
+            _peek_project_id_from_chapter,
+        )
+        _proj_id = _peek_project_id_from_chapter(db_path, chapter_id)
+        _chap_row = get_connection(db_path).execute(
+            "SELECT number FROM chapters WHERE chapter_id = ?", (chapter_id,),
+        ).fetchone()
+        if _proj_id is not None and _chap_row is not None:
+            _invalidate_cache_for_chapter(_proj_id, int(_chap_row["number"] or 0))
+    except Exception:  # noqa: BLE001 —— 失效失败不阻断 commit
+        pass
+
+    # V2.0 Wave C 任务一：commit 成功后 upsert 本章正文进 chapter_fts（FTS5 全文检索虚表）。
+    # 失败按 summarize 节点相同语义降级：log warning，不阻断 commit。
+    # 兜底触发是因为 0011_fts_index.sql 的 trigger 在某些边界场景下可能被 SQLite
+    # 跳过（例如 EXTERNAL content 模式 + UPDATE 时 old.content 为 NULL）；显式
+    # upsert_chapter 保证下次召回能拿到最新章节。
+    fts_upsert_ok: bool = True
+    fts_upsert_error: str | None = None
+    try:
+        from packages.core.retrieval import upsert_chapter
+        ok = upsert_chapter(db_path, chapter_id)
+        if not ok:
+            fts_upsert_ok = False
+            fts_upsert_error = "upsert_chapter returned False"
+    except Exception as exc:  # noqa: BLE001 —— 降级：失败不抛
+        fts_upsert_ok = False
+        fts_upsert_error = str(exc)
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "chapter_commit.fts_upsert degraded: chapter_id=%s err=%s",
+            chapter_id, exc,
+        )
+
+    return {
+        "commit_result": commit_result,
+        "status_after": "COMMITTED",
+        "fts_upsert_ok": fts_upsert_ok,
+        "fts_upsert_error": fts_upsert_error,
+    }
 
 
 # ============================================================================

@@ -1,4 +1,4 @@
-"""Context Engine dry-run 预览（Sprint 13 下半）。
+"""Context Engine dry-run 预览（Sprint 13 下半 + V2.0 Wave C 任务一/二）。
 
 - :func:`preview_context` —— 复用 ``build_director_input`` /
   ``build_writer_input`` / ``build_observer_input`` 的纯装配结果，按 L0/L1/L2
@@ -11,6 +11,9 @@
   4 字节 ≈ 1 token；中文场景粗略近似，足以做上限告警）。
 - ``token_budget`` 硬编码 8000（与 PRD §124 target_word_count=2200 × ~3.6 对齐，
   MVP 估算口径；后续若引入真实分词器再替换）。
+- V2.0 Wave C 任务二：preview dry-run 同样受益于 builders 的进程内缓存；
+  连续两次预览第二次命中缓存，token 估算完全一致。
+- V2.0 Wave C 任务一：L1 增加 ``recalled_passage`` 新 kind（FTS5 召回片段）展示。
 - 异常透传：chapter / project 不存在 → ``ValueError``（由 router 转 404）。
 """
 
@@ -100,7 +103,16 @@ def _extract_l1(
     director: dict[str, Any],
     writer: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """L1 业务摘要：角色 / 世界 / 伏笔 / 债务 / 参照系。"""
+    """L1 业务摘要：角色 / 世界 / 伏笔 / 债务 / 参照系。
+
+    V2.0 Wave B 任务二：每条目带 ``injection`` 状态标记（full / summary / suppressed）。
+    - ``full``：完整注入（标记同原文）；
+    - ``summary``：仅一行摘要（name + role/statement），不展开 data_json / current_state；
+    - ``suppressed``：never 模式不注入（仅 preview 列表保留可见）。
+
+    suppressed 项被 ``_apply_injection_policy`` 统一汇集到顶层 ``_suppressed_*`` 列表；
+    这里也展示（kind=suppressed_character / suppressed_location / suppressed_faction）。
+    """
     items: list[dict[str, Any]] = []
 
     # 角色：director 与 writer 同源；以 director 为准（保留 source 标记）。
@@ -111,30 +123,104 @@ def _extract_l1(
             if not cid or cid in seen_chars:
                 continue
             seen_chars.add(cid)
+            injection = c.get("_injection", "full")
+            if injection == "summary":
+                _push_item(
+                    items,
+                    kind="character",
+                    id_=cid,
+                    name=str(c.get("name") or cid),
+                    role=c.get("role"),
+                    source=src_name,
+                    injection="summary",
+                    summary_line=str(c.get("summary_line") or "")[:80],
+                )
+            else:
+                _push_item(
+                    items,
+                    kind="character",
+                    id_=cid,
+                    name=str(c.get("name") or cid),
+                    role=c.get("role"),
+                    source=src_name,
+                    injection="full",
+                )
+    # suppressed 角色（director 集中后转发）
+    world = director.get("world_state_excerpts") or {}
+    char_world = writer.get("character_state_excerpts") or []
+    # suppressed 角色可能在任一 source 中；以 director 为准（其 trigger corpus 更广）
+    for c in char_world:
+        if c.get("_injection") == "suppressed":
             _push_item(
                 items,
-                kind="character",
-                id_=cid,
-                name=str(c.get("name") or cid),
-                role=c.get("role"),
-                source=src_name,
+                kind="suppressed_character",
+                id_=str(c.get("character_id") or ""),
+                name=str(c.get("name") or ""),
+                injection="suppressed",
+            )
+    # 兼容 director 写入 _suppressed_characters 列表
+    for c in director.get("character_state_excerpts") or []:
+        for sub in (c.get("_suppressed_characters") or []):
+            _push_item(
+                items,
+                kind="suppressed_character",
+                id_=str(sub.get("character_id") or sub.get("name") or ""),
+                name=str(sub.get("name") or ""),
+                injection="suppressed",
             )
 
-    world = director.get("world_state_excerpts") or {}
     for loc in world.get("locations") or []:
-        _push_item(
-            items, kind="location", id_=str(loc.get("location_id")),
-            name=str(loc.get("name") or loc.get("location_id")),
-        )
+        injection = loc.get("_injection", "full")
+        if injection == "summary":
+            _push_item(
+                items, kind="location", id_=str(loc.get("location_id")),
+                name=str(loc.get("name") or loc.get("location_id")),
+                injection="summary",
+                summary_line=str(loc.get("summary_line") or "")[:80],
+            )
+        else:
+            _push_item(
+                items, kind="location", id_=str(loc.get("location_id")),
+                name=str(loc.get("name") or loc.get("location_id")),
+                injection="full",
+            )
     for fac in world.get("active_factions") or []:
+        injection = fac.get("_injection", "full")
+        if injection == "summary":
+            _push_item(
+                items, kind="faction", id_=str(fac.get("faction_id")),
+                name=str(fac.get("name") or fac.get("faction_id")),
+                injection="summary",
+                summary_line=str(fac.get("summary_line") or "")[:80],
+            )
+        else:
+            _push_item(
+                items, kind="faction", id_=str(fac.get("faction_id")),
+                name=str(fac.get("name") or fac.get("faction_id")),
+                injection="full",
+            )
+    # suppressed 地点 / 势力（director 顶层 _suppressed_*）
+    for sub in world.get("_suppressed_locations") or []:
         _push_item(
-            items, kind="faction", id_=str(fac.get("faction_id")),
-            name=str(fac.get("name") or fac.get("faction_id")),
+            items,
+            kind="suppressed_location",
+            id_=str(sub.get("location_id") or sub.get("name") or ""),
+            name=str(sub.get("name") or ""),
+            injection="suppressed",
+        )
+    for sub in world.get("_suppressed_factions") or []:
+        _push_item(
+            items,
+            kind="suppressed_faction",
+            id_=str(sub.get("faction_id") or sub.get("name") or ""),
+            name=str(sub.get("name") or ""),
+            injection="suppressed",
         )
     for rule in world.get("world_rules_relevant") or []:
         _push_item(
             items, kind="world_rule", id_=str(rule.get("world_rule_id")),
             name=str(rule.get("name") or rule.get("world_rule_id")),
+            injection="full",
         )
 
     plot = director.get("plot_graph_excerpt") or {}
@@ -199,6 +285,24 @@ def _extract_l1(
             overdue=bool(h.get("overdue")),
             importance=h.get("importance"),
         )
+
+    # V2.0 Wave C 任务一：FTS5 召回片段（章节正文跨长程呼应）。
+    # director 与 writer 共享同一关键词召回，preview 在 L1 各展示一次（去重）。
+    seen_recall: set[str] = set()
+    for src in (director, writer):
+        for r in src.get("recalled_passages") or []:
+            cid = str(r.get("chapter_id") or "")
+            if not cid or cid in seen_recall:
+                continue
+            seen_recall.add(cid)
+            _push_item(
+                items,
+                kind="recalled_passage",
+                id_=cid,
+                name=f"第 {r.get('chapter_no')} 章命中片段（rank={r.get('rank', 0):.2f}）",
+                chapter_no=r.get("chapter_no"),
+                snippet_len=len(str(r.get("snippet") or "")),
+            )
 
     return items
 
@@ -357,7 +461,7 @@ def preview_context(
         },
         {
             "id": "L1",
-            "label": "业务摘要（角色 / 世界 / 伏笔 / 债务 / 参照系 / 摘要链 / 前章尾段 / 开放伏笔）",
+            "label": "业务摘要（角色 / 世界 / 伏笔 / 债务 / 参照系 / 摘要链 / 前章尾段 / 开放伏笔 / 召回片段）",
             "token_estimate": _token_estimate({
                 "character_state_excerpts": director.get("character_state_excerpts"),
                 "world_state_excerpts": director.get("world_state_excerpts"),
@@ -368,6 +472,7 @@ def preview_context(
                 "recent_chapter_summaries": director.get("recent_chapter_summaries"),
                 "previous_chapter_tail": director.get("previous_chapter_tail"),
                 "open_foreshadow_list": director.get("open_foreshadow_list"),
+                "recalled_passages": director.get("recalled_passages"),
             }),
             "items": l1_items,
             "truncated": False,

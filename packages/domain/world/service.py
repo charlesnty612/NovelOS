@@ -1,4 +1,4 @@
-"""WorldService（Sprint 1）。
+"""WorldService（Sprint 1 + V2.0 Wave B 双写面统一）。
 
 三类世界实体（locations / factions / world_rules）的 CRUD + 一致性检查，
 对齐 ``database/migrations/0001_init.sql`` 与 PRD §18。
@@ -12,6 +12,9 @@
 - ``IntegrityError`` → 抛出 ``WorldServiceError``（422 语义）。
 - 删除 location 被 plot_events 引用 → 409。
 - visibility 取值校验在 Service 层完成；非法值 → 422。
+- V2.0 Wave B 双写面统一：JSON 列序列化与 who_knows 三态语义改调
+  ``packages.core.story_state.write_helpers`` 共享助手，与 canon
+  ``write_through`` 写透口径逐字节一致；散落 ``json.dumps`` 调用收敛到共享实现。
 
 不在本服务范围：地理拓扑计算、规则冲突推理（属后续 AI 增强）。
 """
@@ -26,7 +29,50 @@ from typing import Any
 
 from packages.core.ids import new_id, now_iso
 
+# V2.0 Wave B：双写面共享写入助手（与 write_through 同源）
+from packages.core.story_state.write_helpers import (
+    decode_who_knows as _decode_who_knows,
+    dump_json as _dump_json,
+    dump_json_or_null as _dump_json_or_null,
+    now_iso_for_db,
+)
+
 from .models import VISIBILITY_VALUES, WorldEntity
+
+# ---------------------------------------------------------------------------
+# V2.0 Wave B 任务二：触发键助手（与 character service 同源语义）
+# ---------------------------------------------------------------------------
+
+_VALID_INJECT_MODES: tuple[str, ...] = ("auto", "always", "never")
+
+
+def _dump_aliases(value: list[str] | None) -> str:
+    """``aliases`` 列：始终写入 JSON 字符串（默认 ``'[]'``，与 0010 DEFAULT 对齐）。"""
+    if not value:
+        return "[]"
+    return json.dumps(
+        [str(x) for x in value if isinstance(x, (str, int, float))],
+        ensure_ascii=False,
+    )
+
+
+def _load_aliases(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, list):
+        return [str(x) for x in parsed if isinstance(x, (str, int, float))]
+    return []
+
+
+def _load_inject_mode(raw: str | None) -> str:
+    if isinstance(raw, str) and raw in _VALID_INJECT_MODES:
+        return raw
+    return "auto"
+
 
 # ---------------------------------------------------------------------------
 # 异常（router 层据此映射 HTTP 状态码）
@@ -121,6 +167,8 @@ class WorldService:
         data: dict[str, Any] | None = None,
         visibility: str | None = None,
         who_knows: list[str] | None = None,
+        aliases: list[str] | None = None,
+        inject_mode: str | None = None,
     ) -> WorldEntity:
         return self._create(
             _LOCATIONS,
@@ -130,6 +178,8 @@ class WorldService:
             data=data,
             visibility=visibility,
             who_knows=who_knows,
+            aliases=aliases,
+            inject_mode=inject_mode,
         )
 
     def get_location(self, location_id: str) -> WorldEntity | None:
@@ -147,6 +197,8 @@ class WorldService:
         data: dict[str, Any] | None = None,
         visibility: str | None = None,
         who_knows: list[str] | None = None,
+        aliases: list[str] | None = None,
+        inject_mode: str | None = None,
     ) -> WorldEntity:
         return self._update(
             _LOCATIONS,
@@ -156,6 +208,8 @@ class WorldService:
             data=data,
             visibility=visibility,
             who_knows=who_knows,
+            aliases=aliases,
+            inject_mode=inject_mode,
         )
 
     def delete_location(self, location_id: str) -> None:
@@ -171,6 +225,8 @@ class WorldService:
         data: dict[str, Any] | None = None,
         visibility: str | None = None,
         who_knows: list[str] | None = None,
+        aliases: list[str] | None = None,
+        inject_mode: str | None = None,
     ) -> WorldEntity:
         return self._create(
             _FACTIONS,
@@ -180,6 +236,8 @@ class WorldService:
             data=data,
             visibility=visibility,
             who_knows=who_knows,
+            aliases=aliases,
+            inject_mode=inject_mode,
         )
 
     def get_faction(self, faction_id: str) -> WorldEntity | None:
@@ -197,6 +255,8 @@ class WorldService:
         data: dict[str, Any] | None = None,
         visibility: str | None = None,
         who_knows: list[str] | None = None,
+        aliases: list[str] | None = None,
+        inject_mode: str | None = None,
     ) -> WorldEntity:
         return self._update(
             _FACTIONS,
@@ -206,6 +266,8 @@ class WorldService:
             data=data,
             visibility=visibility,
             who_knows=who_knows,
+            aliases=aliases,
+            inject_mode=inject_mode,
         )
 
     def delete_faction(self, faction_id: str) -> None:
@@ -273,6 +335,8 @@ class WorldService:
         data: dict[str, Any] | None,
         visibility: str | None,
         who_knows: list[str] | None,
+        aliases: list[str] | None = None,
+        inject_mode: str | None = None,
     ) -> WorldEntity:
         # 同步前置校验（在开连接前完成，避免持有连接时校验失败）
         self._require_project(project_id)
@@ -283,28 +347,50 @@ class WorldService:
             raise ValidationError("data 必须是 JSON 对象或数组")
         visibility = self._validate_visibility(visibility, cfg)
         who_knows = self._validate_who_knows(who_knows)
+        # V2.0 Wave B 任务二：触发键字段（仅 locations/factions；world_rules 不参与触发）
+        inject_mode = self._validate_inject_mode(inject_mode)
 
         eid = new_id(cfg.id_prefix)
         now = now_iso()
-        data_json = json.dumps(data, ensure_ascii=False)
-        who_knows_json = json.dumps(who_knows, ensure_ascii=False) if who_knows is not None else None
+        # V2.0 Wave B：JSON 列写入走 write_helpers 共享助手，与 canon write_through 同源
+        data_json = _dump_json(data)
+        who_knows_json = _dump_json_or_null(who_knows)
+        aliases_json = _dump_aliases(aliases)
 
         from packages.core.db import get_connection
 
         conn = get_connection(self.db_path)
         try:
-            conn.execute(
-                f"""
-                INSERT INTO {cfg.table}
-                    ({cfg.id_field}, project_id, name, statement, data_json,
-                     visibility, who_knows, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    eid, project_id, name, statement, data_json,
-                    visibility, who_knows_json, now, now,
-                ),
-            )
+            if cfg.table in ("locations", "factions"):
+                # V2.0 Wave B 任务二：locations / factions 加了 aliases + inject_mode 列
+                conn.execute(
+                    f"""
+                    INSERT INTO {cfg.table}
+                        ({cfg.id_field}, project_id, name, statement, data_json,
+                         visibility, who_knows, created_at, updated_at,
+                         aliases, inject_mode)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        eid, project_id, name, statement, data_json,
+                        visibility, who_knows_json, now, now,
+                        aliases_json, inject_mode,
+                    ),
+                )
+            else:
+                # world_rules：原 9 列（不带 aliases/inject_mode）
+                conn.execute(
+                    f"""
+                    INSERT INTO {cfg.table}
+                        ({cfg.id_field}, project_id, name, statement, data_json,
+                         visibility, who_knows, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        eid, project_id, name, statement, data_json,
+                        visibility, who_knows_json, now, now,
+                    ),
+                )
             conn.commit()
         except sqlite3.IntegrityError as exc:
             raise ValidationError(f"插入失败: {exc}") from exc
@@ -321,6 +407,8 @@ class WorldService:
             data=data,
             visibility=visibility,
             who_knows=who_knows,
+            aliases=_load_aliases(aliases_json) if cfg.table in ("locations", "factions") else [],
+            inject_mode=inject_mode if cfg.table in ("locations", "factions") else "auto",
             created_at=now,
             updated_at=now,
         )
@@ -362,6 +450,8 @@ class WorldService:
         data: dict[str, Any] | None,
         visibility: str | None,
         who_knows: list[str] | None,
+        aliases: list[str] | None = None,
+        inject_mode: str | None = None,
     ) -> WorldEntity:
         existing = self._get(cfg, eid)
         if existing is None:
@@ -379,15 +469,23 @@ class WorldService:
             if not isinstance(data, (dict, list)):
                 raise ValidationError("data 必须是 JSON 对象或数组")
             sets.append("data_json = ?")
-            params.append(json.dumps(data, ensure_ascii=False))
+            params.append(_dump_json(data))
         if visibility is not None:
             sets.append("visibility = ?")
             params.append(self._validate_visibility(visibility, cfg))
         if who_knows is not None:
             sets.append("who_knows = ?")
             params.append(
-                json.dumps(self._validate_who_knows(who_knows), ensure_ascii=False)
+                _dump_json_or_null(self._validate_who_knows(who_knows))
             )
+        # V2.0 Wave B 任务二：触发键字段（仅 locations/factions）
+        if cfg.table in ("locations", "factions"):
+            if aliases is not None:
+                sets.append("aliases = ?")
+                params.append(_dump_aliases(aliases))
+            if inject_mode is not None:
+                sets.append("inject_mode = ?")
+                params.append(self._validate_inject_mode(inject_mode))
 
         if not sets:
             # 全部字段为 None：相当于 noop，直接返回现有实体
@@ -442,9 +540,15 @@ class WorldService:
     # -------------------------------------------------------------------- 辅助
 
     def _row_to_entity(self, cfg: _EntityConfig, row: sqlite3.Row) -> WorldEntity:
+        # V2.0 Wave B：data_json 走标准 json.loads（dict 语义，未抽到 write_helpers
+        # ——保持简单）；who_knows 走 write_helpers._decode_who_knows 与
+        # canon 写透读侧统一（list[str] | None 类型约束）。
         data = json.loads(row["data_json"]) if row["data_json"] else {}
         who_knows_raw = row["who_knows"]
-        who_knows = json.loads(who_knows_raw) if who_knows_raw else None
+        who_knows = _decode_who_knows(who_knows_raw)
+        # V2.0 Wave B 任务二：触发键字段（locations/factions；world_rules 走默认）
+        aliases = _load_aliases(row["aliases"]) if cfg.table in ("locations", "factions") else []
+        inject_mode = _load_inject_mode(row["inject_mode"]) if cfg.table in ("locations", "factions") else "auto"
         return WorldEntity(
             id=row[cfg.id_field],
             id_field=cfg.id_field,
@@ -455,6 +559,8 @@ class WorldService:
             data=data,
             visibility=row["visibility"],
             who_knows=who_knows,
+            aliases=aliases,
+            inject_mode=inject_mode,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -479,6 +585,17 @@ class WorldService:
         if not isinstance(value, str) or not value.strip():
             raise ValidationError(f"{field_name} 必须是非空字符串")
         return value
+
+    @staticmethod
+    def _validate_inject_mode(inject_mode: str | None) -> str:
+        """V2.0 Wave B 任务二：inject_mode 校验，非法值 → ``auto``（保行为一致）。"""
+        if inject_mode is None:
+            return "auto"
+        if inject_mode not in _VALID_INJECT_MODES:
+            raise ValidationError(
+                f"inject_mode 非法: {inject_mode!r}，允许 {_VALID_INJECT_MODES}"
+            )
+        return inject_mode
 
     @staticmethod
     def _validate_visibility(visibility: str | None, cfg: _EntityConfig) -> str:

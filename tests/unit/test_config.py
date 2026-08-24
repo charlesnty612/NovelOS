@@ -1,4 +1,4 @@
-"""配置测试（Sprint 0）。"""
+"""配置测试（Sprint 0 + V2.0 Wave C 任务三）。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ def test_defaults():
     assert s.db_path.parent.resolve() == Path("./data").resolve()
     assert s.log_level == "INFO"
     assert s.api_host == "127.0.0.1"
-    assert s.api_port == 8000
+    # V2.0 Wave C 任务三：端口统一收敛 → 默认 18081（取代原 8000）
+    assert s.api_port == 18081
 
 
 def test_explicit_db_path_overrides_default():
@@ -56,7 +57,7 @@ def test_reset_clears_singleton():
 
 
 # ---------------------------------------------------------------------------
-# Sprint 5：端口优先级 — NOVELOS_PORT > NOVELOS_API_PORT > 8000。
+# Sprint 5 + V2.0 Wave C 任务三：端口优先级 — NOVELOS_PORT > NOVELOS_API_PORT > 18081。
 # 任务书给死：``NOVELOS_PORT`` 是便捷变量，``NOVELOS_API_PORT`` 保留兼容。
 # ---------------------------------------------------------------------------
 
@@ -87,8 +88,8 @@ def test_novelos_api_port_still_works_when_novelos_port_unset(
     assert s.api_port == 9999
 
 
-def test_default_port_is_8000_when_no_env(monkeypatch: pytest.MonkeyPatch):
-    """两个端口变量均未设置时，默认 8000（基线 test_defaults 已断言）。"""
+def test_default_port_is_18081_when_no_env(monkeypatch: pytest.MonkeyPatch):
+    """两个端口变量均未设置时，默认 18081（V2.0 Wave C 任务三统一收敛）。"""
     monkeypatch.delenv("NOVELOS_PORT", raising=False)
     monkeypatch.delenv("NOVELOS_API_PORT", raising=False)
     reset_settings()
@@ -96,4 +97,4 @@ def test_default_port_is_8000_when_no_env(monkeypatch: pytest.MonkeyPatch):
         s = config_mod.get_settings()
     finally:
         reset_settings()
-    assert s.api_port == 8000
+    assert s.api_port == 18081

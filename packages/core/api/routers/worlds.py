@@ -63,6 +63,8 @@ def create_location(pid: str, payload: dict[str, Any], request: Request) -> dict
             data=payload.get("data"),
             visibility=payload.get("visibility"),
             who_knows=payload.get("who_knows"),
+            aliases=payload.get("aliases"),
+            inject_mode=payload.get("inject_mode"),
         )
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle_world_error(exc) from exc
@@ -97,6 +99,8 @@ def update_location(
             data=payload.get("data"),
             visibility=payload.get("visibility"),
             who_knows=payload.get("who_knows"),
+            aliases=payload.get("aliases"),
+            inject_mode=payload.get("inject_mode"),
         )
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle_world_error(exc) from exc
@@ -129,6 +133,8 @@ def create_faction(pid: str, payload: dict[str, Any], request: Request) -> dict[
             data=payload.get("data"),
             visibility=payload.get("visibility"),
             who_knows=payload.get("who_knows"),
+            aliases=payload.get("aliases"),
+            inject_mode=payload.get("inject_mode"),
         )
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle_world_error(exc) from exc
@@ -163,6 +169,8 @@ def update_faction(
             data=payload.get("data"),
             visibility=payload.get("visibility"),
             who_knows=payload.get("who_knows"),
+            aliases=payload.get("aliases"),
+            inject_mode=payload.get("inject_mode"),
         )
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle_world_error(exc) from exc

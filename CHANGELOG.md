@@ -5,6 +5,35 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [2.0.0] - 2026-08-24
+
+结构性升级（路线图：`docs/roadmap/v1.3-v2.x-plan.md`）。含内部架构破坏性调整，对外 API 契约保持兼容。
+
+### Changed（架构）
+
+- story_state god-object 拆分：`service.py` 2332→138 行 façade（`StoryStateService` 全委派 + 私有符号兼容 re-export），按职责拆为 `snapshots` / `deltas` / `write_through` / `commits` / `branches` / `queries` 六模块；调用方零改动、零行为变化（545 项回归全绿证明）。
+- 分支读路径快照物化：迁移 `0009` 新增 `branch_snapshots` 表；创建分支物化基线、`promote` 后物化新基线；分支读取 = 最近物化快照 + 增量重放（回退全量重放），消除 O(N) 全量重放；增量计数有 spy 断言守护（增量 2 次 vs 全量 5 次）。
+- 双写面统一：canon 写透与 domain CRUD 的实体写入收敛到 `story_state/write_helpers.py` 共享助手（`who_knows` 三态 / JSON 序列化 / 时间戳 / NULL 守卫两路逐字节一致）；`plot_events` / `timeline_events` 因派生索引语义差异保留双写（README 已声明口径：canon 以 observer delta 为权威）。
+- 上下文装配缓存：`(project_id, state_version, chapter_no, role, 内容指纹)` 五元键进程内缓存（线程安全、256 上限）；失效三维——`state_version` 推进 + `plan_json` / `scene_plan` 内容指纹变化 + commit 后显式失效兜底。
+- 端口收敛：唯一配置源 `Settings.api_port`（`NOVELOS_PORT` > `NOVELOS_API_PORT` > 默认 18081）；`main.py` / `vite.config` / smoke 脚本统一走配置。
+
+### Added
+
+- 设定条件触发动态注入（对标 Lorebook / Codex）：迁移 `0010` 给 `characters` / `locations` / `factions` 加 `aliases` + `inject_mode`（`auto` / `always` / `never`）；命中实体完整注入、未命中降级一行摘要、`never` 剔除；L0 世界规则常驻；`context-preview` 与前端面板带 `full` / `summary` / `suppressed` 徽标。
+- FTS5 召回混合层：迁移 `0011` 建 `chapter_fts` 虚表（CJK bigram 索引化，零第三方依赖）；commit 成功后 upsert 索引（失败降级不阻断）；装配注入 `recalled_passages`（按章节计划关键词召回 top3 历史片段 × ≤300 字，跨长程呼应）；新模块 `packages/core/retrieval/`。
+
+### Fixed
+
+- 装配缓存脏命中（审查 P1）：`plan_json` 更新或 `scene_plan` 变化但 `state_version` 不变时返回陈旧上下文——键补内容指纹 + commit 后显式失效。
+- FTS 查询含引号 token 静默降级；纯 CJK 长串不再作为无效整词 token 进入召回。
+
+### Known Issues / 路线登记
+
+- vitest 全量并发偶发单测顺序敏感（V1.5 起观察到 2 次，重跑即绿），待定位根因。
+- `plot_events` / `timeline_events` 双写面未统一（派生索引语义差异，见 `story_state` README）。
+- 物化按 N commit 间隔多次物化未启用（MVP 仅分叉点 / promote 两点）。
+- 召回为 FTS5 关键词基线；向量 embedding 召回留待后续（需先选型论证）。
+
 ## [1.5.0] - 2026-08-24
 
 架构债务与 UI 补缺包（路线图：`docs/roadmap/v1.3-v2.x-plan.md`）。

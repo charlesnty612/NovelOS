@@ -1,4 +1,4 @@
-"""Pydantic 模型：Character（Sprint 1）。
+"""Pydantic 模型：Character（Sprint 1 + V2.0 Wave B 任务二）。
 
 对齐 ``database/migrations/0001_init.sql`` 中两张表：
 
@@ -9,6 +9,10 @@
   ``PRIMARY KEY (character_id, state_version)``。
   对齐 PRD §17：Definition 与 State 分离——性格/价值观/背景/核心创伤/基本能力 长期不变
   写在 ``core_json``；当前地点/情绪/目标/认知/关系/伤势/资源 写在 ``state_json`` 快照。
+
+V2.0 Wave B 任务二：characters 表新增 ``aliases`` / ``inject_mode`` 两列（迁移 0010）。
+- ``aliases``：JSON 字符串数组，命中扫描的别名集合（默认空）。
+- ``inject_mode``：注入模式 ``auto|always|never``（默认 auto）。
 
 PR #§16 原则：所有角色对象必须能挂「权限字段」（visibility + who_knows）；Sprint 1
 由 Service 层在 JSON 内部做字段级过滤（属后续 context_engine），不在本 Sprint 范围。
@@ -28,6 +32,14 @@ CharacterRole = Literal[
 VisibilityLevel = Literal["PUBLIC", "VISIBLE", "RESTRICTED", "HIDDEN"]
 """Characters / character_states 共享 visibility 枚举（与 DDL CHECK 对齐）。"""
 
+InjectMode = Literal["auto", "always", "never"]
+"""V2.0 Wave B 任务二：条件触发注入模式（与 0010 DDL CHECK 对齐）。
+
+- ``auto``：默认；命中 name/aliases → 完整注入，未命中 → 降级为一行摘要
+- ``always``：无视命中，永远完整注入（用于主角 / 全局规则类实体）
+- ``never``：不注入；仅在 preview 列表中标记 ``suppressed``
+"""
+
 
 class CharacterCreate(BaseModel):
     """创建角色请求体。
@@ -37,6 +49,8 @@ class CharacterCreate(BaseModel):
     - ``core_json`` 默认 ``{}``（性格/价值观/背景/核心创伤/基本能力）。
     - ``visibility`` 默认 ``PUBLIC``（与 DB DEFAULT 一致）。
     - ``who_knows`` 默认 ``None``（沿用默认）。
+    - ``aliases`` 默认 ``[]``；存入 characters.aliases（JSON 字符串）。
+    - ``inject_mode`` 默认 ``auto``。
 
     创建时同时插入 ``character_states`` 首行（v1，state_json={}，visibility=VISIBLE），
     由 Service 同一事务完成——对齐 PRD §17 Definition/State 分离。
@@ -47,12 +61,14 @@ class CharacterCreate(BaseModel):
     core_json: dict | None = None  # None → {}
     visibility: VisibilityLevel | None = None  # None → PUBLIC
     who_knows: list[str] | None = None  # JSON 数组；None → NULL
+    aliases: list[str] | None = None  # V2.0 Wave B 任务二：None → []
+    inject_mode: InjectMode | None = None  # V2.0 Wave B 任务二：None → auto
 
 
 class CharacterUpdate(BaseModel):
     """部分更新请求体——所有字段均可选。
 
-    只允许修改定义侧字段：``name / role / core_json / visibility / who_knows``。
+    只允许修改定义侧字段：``name / role / core_json / visibility / who_knows / aliases / inject_mode``。
     不允许通过本接口修改 ``character_id / project_id / created_at``。
 
     注：``core_json`` 的更新在概念上属于「Definition 变更」；Sprint 2 起应走 State Delta
@@ -64,6 +80,8 @@ class CharacterUpdate(BaseModel):
     core_json: dict | None = None
     visibility: VisibilityLevel | None = None
     who_knows: list[str] | None = None
+    aliases: list[str] | None = None  # V2.0 Wave B 任务二
+    inject_mode: InjectMode | None = None  # V2.0 Wave B 任务二
 
 
 class Character(BaseModel):
@@ -83,6 +101,9 @@ class Character(BaseModel):
     updated_at: str
     latest_state_version: int  # 0 表示尚无 state 行（理论上不应发生：create 时已插 v1）
     latest_state_json: dict
+    # V2.0 Wave B 任务二：触发键字段（0010 加列）
+    aliases: list[str] = Field(default_factory=list)
+    inject_mode: InjectMode = "auto"
 
 
 class CharacterState(BaseModel):

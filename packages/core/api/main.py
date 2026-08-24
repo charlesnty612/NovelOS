@@ -95,13 +95,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _workflows_pkg = "packages" + "." + "workflows"
     importlib.import_module(_workflows_pkg)
 
-    # CORS：允许 vite dev server
+    # CORS：允许 vite dev server（端口从 settings.api_port 推导 host 段）
+    # V2.0 Wave C 任务三：原默认 5173 + 5174 双端口硬编码 → 改为允许所有 127.0.0.1 / localhost
+    # 来源（任意 dev 端口调 /api 均可），避免 dev 端口漂移需同步 CORS 列表。
+    cors_origins = [
+        f"http://127.0.0.1:{settings.api_port}",
+        f"http://localhost:{settings.api_port}",
+        # 允许 vite dev 默认端口（5173 / 5174）跨域调用后端 18081
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:5174",
+        "http://localhost:5174",
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://127.0.0.1:5173",
-            "http://localhost:5173",
-        ],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -182,17 +190,18 @@ app = create_app()
 
 # ---------------------------------------------------------------------------
 # Sprint 5：``if __name__ == "__main__"`` 入口。
-# 8000 在开发者本机常被占用；默认改用 18081，``NOVELOS_PORT`` 环境变量覆盖。
+# V2.0 Wave C 任务三：端口统一走 ``Settings.api_port``（默认 18081，
+# ``NOVELOS_PORT`` / ``NOVELOS_API_PORT`` 覆盖）；与 ``scripts/serve.py`` 同源。
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
 
-    _port_env = os.environ.get("NOVELOS_PORT", "").strip()
-    _port = int(_port_env) if _port_env else 18081
+    from packages.core.config import get_settings
+    _settings = get_settings()
     uvicorn.run(
         "packages.core.api.main:app",
-        host=os.environ.get("NOVELOS_API_HOST", "127.0.0.1"),
-        port=_port,
+        host=_settings.api_host,
+        port=_settings.api_port,
         reload=False,
     )

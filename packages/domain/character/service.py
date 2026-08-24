@@ -1,4 +1,4 @@
-"""CharacterService（Sprint 1）。
+"""CharacterService（Sprint 1 + V2.0 Wave B 双写面统一）。
 
 职责：characters + character_states 两张表的 CRUD 与业务规则。
 对齐 ``database/migrations/0001_init.sql``：
@@ -18,6 +18,11 @@
   core_json 更新 = Definition 变更，注释说明 S2 起应走 Delta。
 - ``delete``：同一事务级联删除 ``character_states`` 行后删除 ``characters`` 行。
 - 列表端点按 project_id 过滤；查询不存在 → 返回 None，由 router 转 404。
+- V2.0 Wave B 双写面统一：本 service 的 JSON 列序列化、who_knows 三态语义
+  全部走 ``packages.core.story_state.write_helpers`` 共享助手，与 canon
+  ``write_through`` 写透口径逐字节一致（who_knows None/[]/非空 三态、JSON 序列化）。
+  原 ``_dump_json`` / ``_dump_json_or_null`` / ``_load_who_knows`` 已删除，
+  改 import ``write_helpers``；保留本模块的局部 alias 以最小化函数体内调用面。
 """
 
 from __future__ import annotations
@@ -29,33 +34,55 @@ from pathlib import Path
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 
+# V2.0 Wave B：双写面共享写入助手（与 write_through 同源）
+from packages.core.story_state.write_helpers import (
+    dump_json as _dump_json,
+    dump_json_or_null as _dump_json_or_null,
+    decode_who_knows as _load_who_knows,
+    now_iso_for_db,
+)
+
 from .models import (
     CharacterCreate,
     CharacterUpdate,
 )
 
 
-def _dump_json(value: dict | list | None) -> str:
-    return json.dumps(value if value is not None else {}, ensure_ascii=False)
+# V2.0 Wave B 任务二：触发键助手（aliases 解析 + inject_mode 三态 fallback）。
+# 与 packages/core/context_engine/builders._load_aliases / _load_inject_mode 同源语义，
+# 但此处独立实现，避免 context_engine 被 domain 反向依赖。
+_VALID_INJECT_MODES = ("auto", "always", "never")
 
 
-def _dump_json_or_null(value: list | None) -> str | None:
-    """``who_knows`` 列：None → NULL；list → JSON 字符串。"""
-    if value is None:
-        return None
-    return json.dumps(value, ensure_ascii=False)
+def _dump_aliases(value: list[str] | None) -> str:
+    """``aliases`` 列：始终写入 JSON 字符串（默认 ``'[]'``，与 0010 DEFAULT 对齐）。
+
+    None / 空 list → ``'[]'``；非空 → JSON 数组字符串。
+    """
+    if not value:
+        return "[]"
+    return json.dumps(
+        [str(x) for x in value if isinstance(x, (str, int, float))],
+        ensure_ascii=False,
+    )
 
 
-def _load_who_knows(raw: str | None) -> list[str] | None:
-    if raw is None:
-        return None
+def _load_aliases(raw: str | None) -> list[str]:
+    if not raw:
+        return []
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        return None
+        return []
     if isinstance(parsed, list):
-        return parsed
-    return None
+        return [str(x) for x in parsed if isinstance(x, (str, int, float))]
+    return []
+
+
+def _load_inject_mode(raw: str | None) -> str:
+    if isinstance(raw, str) and raw in _VALID_INJECT_MODES:
+        return raw
+    return "auto"
 
 
 class CharacterService:
@@ -72,6 +99,10 @@ class CharacterService:
         if "core_json" in d and isinstance(d["core_json"], str):
             d["core_json"] = json.loads(d["core_json"]) if d["core_json"] else {}
         d["who_knows"] = _load_who_knows(d.get("who_knows"))
+        # V2.0 Wave B 任务二：0010 加的 aliases / inject_mode 列。
+        # 旧库升级时若读不到列（极老库）→ fallback（与 builder 行为一致）。
+        d["aliases"] = _load_aliases(d.get("aliases"))
+        d["inject_mode"] = _load_inject_mode(d.get("inject_mode"))
 
         if state_row is not None:
             d["latest_state_version"] = state_row["state_version"]
@@ -99,6 +130,9 @@ class CharacterService:
         visibility = payload.visibility or "PUBLIC"
         core_json = _dump_json(payload.core_json)
         who_knows = _dump_json_or_null(payload.who_knows)
+        # V2.0 Wave B 任务二：触发键字段（0010 加列；缺字段 → fallback）。
+        aliases_json = _dump_aliases(payload.aliases)
+        inject_mode = payload.inject_mode or "auto"
 
         conn = get_connection(self.db_path)
         try:
@@ -106,10 +140,12 @@ class CharacterService:
                 """
                 INSERT INTO characters
                     (character_id, project_id, name, role, core_json,
-                     visibility, who_knows, created_at, updated_at)
+                     visibility, who_knows, created_at, updated_at,
+                     aliases, inject_mode)
                 VALUES
                     (:character_id, :project_id, :name, :role, :core_json,
-                     :visibility, :who_knows, :created_at, :updated_at)
+                     :visibility, :who_knows, :created_at, :updated_at,
+                     :aliases, :inject_mode)
                 """,
                 {
                     "character_id": character_id,
@@ -121,6 +157,8 @@ class CharacterService:
                     "who_knows": who_knows,
                     "created_at": now,
                     "updated_at": now,
+                    "aliases": aliases_json,
+                    "inject_mode": inject_mode,
                 },
             )
             # state v1：state_json={}, visibility=VISIBLE（DB DEFAULT 也是 VISIBLE；这里显式写出）
@@ -210,6 +248,7 @@ class CharacterService:
 
         core_json 更新：Sprint 1 直接覆盖（Definition 变更）；S2 起应走 State Delta。
         who_knows：None 显式置空；未提供（exclude_unset）则不动。
+        aliases / inject_mode：V2.0 Wave B 任务二新增（expose_unset=True 时才写入）。
         """
         fields = payload.model_dump(exclude_unset=True)
         if not fields:
@@ -220,6 +259,12 @@ class CharacterService:
             fields["core_json"] = _dump_json(fields["core_json"])
         if "who_knows" in fields:
             fields["who_knows"] = _dump_json_or_null(fields["who_knows"])
+        # V2.0 Wave B 任务二：aliases 序列化（None/空 list → '[]'，与 DB DEFAULT 对齐）。
+        if "aliases" in fields:
+            fields["aliases"] = _dump_aliases(fields["aliases"])
+        if "inject_mode" in fields and fields["inject_mode"] not in _VALID_INJECT_MODES:
+            # 非法值 fallback auto；不在此处抛错，保证 PATCH 不会因为单字段错失败整请求。
+            fields["inject_mode"] = "auto"
 
         fields["updated_at"] = now_iso()
 

@@ -191,3 +191,141 @@ out = capture_reference_consumption(db_path, project_id)
 测试：`tests/integration/test_v1_4_reference_and_revision.py::test_v1_4_reference_consumption_persists_to_checkpoint_and_meta`
 （happy path）+ `test_v1_4_reference_consumption_empty_when_no_refs_dir`（无目录空态）+ 
 `test_v1_4_evaluate_endpoint_also_emits_reference_consumption`（API 端点同源）。
+
+## V2.0 Wave B 任务二扩展：条件触发动态注入（Codex 3 态）
+
+对标 NovelAI Lorebook 关键词触发 + NovelCrafter Codex 4 态，Context Engine 不再全量注入
+canon 实体（characters / locations / factions），而是按"本章相关才注入"：
+
+- 每实体新增两列（迁移 ``0010_trigger_keys.sql`` 落地）：
+  - ``aliases``（TEXT，JSON 字符串数组，默认 ``'[]'``）—— 别名命中词面集合
+  - ``inject_mode``（TEXT，默认 ``auto``；CHECK in ``auto|always|never``）—— 注入模式
+- L0 ``world_rules`` **不参与触发**（PRD 视其为硬设定；常驻完整注入）
+- 实体 API 同步扩展：``PATCH /characters/{cid}`` / ``PATCH /locations/{lid}`` /
+  ``PATCH /factions/{fid}`` 接受 ``aliases`` / ``inject_mode`` 字段；
+  ``GET`` 返回同样字段（向后兼容，旧库升级读不到列 → fallback ``[]`` / ``auto``）
+
+### 三态语义（Codex 3 态）
+
+| `inject_mode` | 命中 plan/前章尾段？ | 注入形态 |
+| --- | --- | --- |
+| `auto`（默认） | 命中 | 完整 excerpt（含 `core_json` / `current_state` / `data_json` 等） |
+| `auto`（默认） | 未命中 | 一行摘要（name + role 或 statement），剥离冗余字段 |
+| `always` | 任意 | 完整 excerpt（无视命中；适合主角 / 全局规则类） |
+| `never` | 任意 | 不注入；preview 列表保留可见（kind=`suppressed_*`） |
+
+注入策略对 Director (`build_director_input`) 与 Writer (`build_writer_input`) **同源生效**：
+- Director 触发扫描面 = 当前章节 `plan_json`（`chapter_goal` / `core_conflict` /
+  `turning_point` / `key_beats` / `character_changes_planned` / `notes_for_planner`）
+  + 前一章尾段 300 字（`previous_chapter_tail`）
+- Writer 触发扫描面 = `director_plan` + `scene_plan` + `recent_prose`（上一章末尾 500 字）
+
+### 命中检测算法
+
+- 对每个 canon 实体，候选词 = `name` ∪ `aliases`；任一词面在 corpus 中
+  出现（大小写不敏感子串匹配）即"触发"。
+- `aliases` 词面长度 < ``_MIN_ALIAS_LEN = 2`` 跳过（避免「的」「是」等常用词误命中）。
+- 中文直接子串匹配；英文自动 lower()。
+
+### 回退策略（保兼容）
+
+- **章节 `plan_json` 为空** → auto 默认全部按 full 注入（README 「无计划文本场景」保兼容）。
+- **always / never** 严格按配置执行（即使无 plan 文本也按模式生效；never 永远不注入）。
+- **极老库（未跑 0010）**：SELECT 读不到 `aliases` / `inject_mode` 列 → fallback `[]` /
+  `auto`；不抛错。
+
+### Preview 标记
+
+`preview_context` 在 L1 items 上展示注入状态（`injection` 字段）：
+
+```jsonc
+{
+  "kind": "character",
+  "id": "char_x",
+  "name": "林昭",
+  "injection": "summary",         //  full | summary | suppressed
+  "summary_line": "林昭（protagonist）"  // 仅 summary 状态
+}
+```
+
+never 模式另起独立条目 `kind=suppressed_character` / `suppressed_location` /
+`suppressed_faction`，便于面板区分"已剔除"与"未命中降级"两类。前端
+`apps/web/src/components/ContextPreviewPanel.tsx` 用徽标「摘要 / 已剔除」+ 颜色
+（橙 / 灰）展示。
+
+### 体积与相关性提升
+
+- **相关性强**：always / auto+命中 实体全量注入，未相关实体降级为一行摘要或剔除，
+  避免把不相关角色的全套背景拖入 prompt。
+- **prompt 体积下降**：20 个 auto 实体 + 完整 `core_json` 场景下，全部未命中时
+  `character_state_excerpts` 体积降至全注入的 < 80%（测试断言）。
+
+### 维护注意点
+
+- 字段缺失（无 character / 无 plan_json）允许返回空列表 / None；调用方（Director / Writer
+  / Observer Prompt）按空态处理。
+- 知识权限过滤（`knowledge-permission-v0.md`）MVP 简化：仅按 visibility 透传；后续 Sprint
+  加 per-layer 过滤。
+- 测试：`tests/unit/test_v2_wave_b_trigger_keys.py`（35 用例；覆盖 3 态矩阵 / 别名命中 /
+  回退 / 体积下降 / 预览标记 / Service 读写）。
+
+## V2.0 Wave C 任务一：召回混合层（FTS5）
+
+对标社区"状态库定事实 + 检索召回供呼应"的混合方案：
+
+- 状态库（story_state）定事实，避免 LLM 幻觉；
+- 全文检索（FTS5）召回历史正文片段，让 writer/director 看到具体叙事语境。
+
+详见 [`packages/core/retrieval/README.md`](../retrieval/README.md)。
+
+装配集成：
+
+- `build_director_input` / `build_writer_input` 顶层新增 `recalled_passages` 键：
+  ```python
+  [
+    {"chapter_id": "ch_xxx", "chapter_no": 3, "snippet": "林轩握碎古镜外层封印...", "rank": -2.5},
+    ...
+  ]
+  ```
+  按当前章节计划文本（`chapter_goal` / `core_conflict` / `key_beats` /
+  `character_changes_planned`）从 `chapter_fts` 召回 top-3 片段，每段截断
+  ≤300 字。无索引 / 无命中 → 空 list（不阻断装配）。
+- `preview_context` L1 增加 `recalled_passage` 新 kind；前端
+  `ContextPreviewPanel` `KIND_LABEL` 已补"召回片段"。
+- chapter_commit 流程：commit 成功后由 `_commit_node` 钩子调
+  `packages.core.retrieval.upsert_chapter`（失败按 summarize 节点相同语义
+  降级 log warning，不阻断 commit）。
+
+## V2.0 Wave C 任务二：装配缓存（L0/L1）
+
+`build_director_input` / `build_writer_input` 的 L0/L1 装配结果按
+`(project_id, state_version, chapter_no, role, content_fp)` 做进程内缓存：
+
+- 键必须含 `state_version` —— state 推进后自然失效；
+- `role ∈ {"director", "writer"}` —— L2 (observer) 不缓存（commit 期间持续变化）；
+- **V2.0 Wave C P1-1 修复**：第 5 元 `content_fp` = 内容指纹
+  - `director`：`sha256(chapters.plan_json 原文)[:16]`（`NULL → 'none'`）
+  - `writer`：`sha256(json.dumps(scene_plan, sort_keys=True))[:16]`（`None → 'none'`）
+  - 不可序列化 → `'uncached'` → 跳过缓存（直接走 uncached），
+    避免脏命中场景下缓存可用性反而下降。
+  - **解决脏命中**：plan_json 被 UPDATE 但 state_version 不变时，键自然失效；
+    writer 传不同 scene_plan 时，键也自然失效。
+- 线程安全：`threading.Lock` 保护 dict 读写；
+- 上限 256 条（dict 插入顺序淘汰最旧）；
+- 仅缓存纯装配 dict，不缓存连接 / 副作用对象；
+- 显式失效接口：`_invalidate_cache_for_chapter(project_id, chapter_no)` 用于
+  commit 完成后兜底失效（state_version 推进通常已带走它；P1-1 修复后此兜底主要
+  覆盖"plan_json 被 UPDATE 但 state_version 未变"的边界场景）。
+- 失效调用点：`packages/workflows/chapter_commit/pipeline.py:_commit_node` 末尾
+  commit 成功后显式调 `_invalidate_cache_for_chapter(project_id, chapter_no)`
+  （任一异常吞掉——失效失败不阻断 commit）。
+
+测试（`tests/unit/test_v2_wave_c_retrieval.py`）：
+- 连续两次装配第二次命中缓存（`p1 is p2`）；
+- state_version 变化后重装（`p1 is not p2`）；
+- 多线程并发读同一键最终命中缓存；
+- **P1-1 新增**：`test_director_cache_does_not_hit_stale_plan_json`（plan_json
+  UPDATE 后必须返回新对象）、`test_writer_cache_distinguishes_scene_plan`
+  （同 chapter 不同 scene_plan 返回不同对象）、
+  `test_chapter_commit_invalidate_clears_cache` /
+  `test_chapter_commit_node_invalidates_cache_in_pipeline`（commit 后显式失效）。

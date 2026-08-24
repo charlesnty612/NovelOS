@@ -36,6 +36,14 @@ from pathlib import Path
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 
+# V2.0 Wave B：双写面共享写入助手（与 write_through 同源）；
+# who_knows 三态语义与 JSON 列序列化与 canon 写透统一。
+from packages.core.story_state.write_helpers import (
+    decode_who_knows as _decode_who_knows,
+    dump_json_or_null as _dump_json_or_null,
+    now_iso_for_db,
+)
+
 from .models import (
     DEBT_ALLOWED_NEXT,
     HOOK_ALLOWED_NEXT,
@@ -116,11 +124,7 @@ class LedgerService:
         visibility = (payload.visibility or "RESTRICTED").strip()
         if visibility not in ("PUBLIC", "VISIBLE", "RESTRICTED", "HIDDEN"):
             raise ValidationError(f"visibility illegal: {visibility!r}")
-        who_knows_json = (
-            json.dumps(payload.who_knows, ensure_ascii=False)
-            if payload.who_knows is not None
-            else None
-        )
+        who_knows_json = _dump_json_or_null(payload.who_knows)
         hook_id = new_id("hook")
 
         conn = get_connection(self.db_path)
@@ -230,7 +234,7 @@ class LedgerService:
             v = payload.who_knows
             if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
                 raise ValidationError("who_knows must be list[str] or null")
-            fields["who_knows"] = json.dumps(v, ensure_ascii=False)
+            fields["who_knows"] = _dump_json_or_null(v)
 
         if not fields:
             return existing
@@ -288,11 +292,7 @@ class LedgerService:
         visibility = (payload.visibility or "RESTRICTED").strip()
         if visibility not in ("PUBLIC", "VISIBLE", "RESTRICTED", "HIDDEN"):
             raise ValidationError(f"visibility illegal: {visibility!r}")
-        who_knows_json = (
-            json.dumps(payload.who_knows, ensure_ascii=False)
-            if payload.who_knows is not None
-            else None
-        )
+        who_knows_json = _dump_json_or_null(payload.who_knows)
         debt_id = new_id("debt")
 
         conn = get_connection(self.db_path)
@@ -442,25 +442,16 @@ class LedgerService:
     @staticmethod
     def _row_to_hook(row: sqlite3.Row) -> dict:
         d = dict(row)
-        if d.get("who_knows"):
-            try:
-                d["who_knows"] = json.loads(d["who_knows"])
-            except json.JSONDecodeError:
-                d["who_knows"] = None
-        else:
-            d["who_knows"] = None
+        # V2.0 Wave B：who_knows 走 write_helpers._decode_who_knows 与
+        # canon 写透读侧统一（list[str] | None 类型约束、解析失败兜底为 None）。
+        d["who_knows"] = _decode_who_knows(d.get("who_knows"))
         return d
 
     @staticmethod
     def _row_to_debt(row: sqlite3.Row) -> dict:
         d = dict(row)
-        if d.get("who_knows"):
-            try:
-                d["who_knows"] = json.loads(d["who_knows"])
-            except json.JSONDecodeError:
-                d["who_knows"] = None
-        else:
-            d["who_knows"] = None
+        # V2.0 Wave B：同上（narrative_debts.who_knows）
+        d["who_knows"] = _decode_who_knows(d.get("who_knows"))
         return d
 
     def _require_chapter(self, chapter_id: str) -> None:

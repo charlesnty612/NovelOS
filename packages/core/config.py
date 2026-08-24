@@ -36,7 +36,7 @@ class Settings:
         db_path: Path | str | None = None,
         log_level: str = "INFO",
         api_host: str = "127.0.0.1",
-        api_port: int = 8000,
+        api_port: int = 18081,
     ) -> None:
         self.data_dir = Path(data_dir)
         if db_path is None:
@@ -50,17 +50,19 @@ class Settings:
     def load(cls) -> "Settings":
         """从环境变量加载，NOVELOS_ 前缀。
 
-        端口优先级（任务书 Sprint 5 给死）：
-        - ``NOVELOS_PORT``（通用便捷变量） > ``NOVELOS_API_PORT``（旧精细变量）> 默认 8000。
+        端口优先级（V2.0 Wave C 任务三 统一收敛）：
+        - ``NOVELOS_PORT``（通用便捷变量） > ``NOVELOS_API_PORT``（旧精细变量）> 默认 18081。
         旧精细变量保留兼容：仅设置 ``NOVELOS_API_PORT`` 时仍按其值生效（基线测试断言）。
+        默认 18081 由 ``main.py`` 的 ``__main__`` 入口 + ``Settings.api_port`` 共同承载；
+        任何位置调 ``Settings.load()`` 均得到同一默认值。
         """
         data_dir = _env("NOVELOS_DATA_DIR", "./data")
         db_path = _env("NOVELOS_DB_PATH", "")  # 空则按 data_dir 推导
         log_level = _env("NOVELOS_LOG_LEVEL", "INFO")
         api_host = _env("NOVELOS_API_HOST", "127.0.0.1")
-        # 端口优先级：NOVELOS_PORT > NOVELOS_API_PORT > 8000
+        # 端口优先级：NOVELOS_PORT > NOVELOS_API_PORT > 18081
         port_env = _env("NOVELOS_PORT", "") or _env("NOVELOS_API_PORT", "")
-        api_port = int(port_env) if port_env else 8000
+        api_port = int(port_env) if port_env else 18081
         return cls(
             data_dir=data_dir,
             db_path=db_path or None,

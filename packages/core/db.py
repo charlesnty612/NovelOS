@@ -17,7 +17,14 @@ import sqlite3
 from pathlib import Path
 
 _DEFAULT_MIGRATIONS_DIR = Path("database") / "migrations"
-_TABLE_COUNT_QUERY = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+# V2.0 Wave C 任务一：FTS5 虚表（chapter_fts 及其内部表 chapter_fts_config/data/docsize/idx）
+# 在 sqlite_master 中均登记为 ``type='table'``；``count_tables`` / health.tables 的
+# "业务表"口径只关心真业务表，故排除 ``chapter_fts%`` 前缀的所有表。虚表本身（1 张）
+# + 内部表（4 张，共 5 张）统一被这一条排除规则覆盖。
+_TABLE_COUNT_QUERY = (
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+    "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'chapter_fts%'"
+)
 
 
 def get_connection(db_path: Path | str) -> sqlite3.Connection:

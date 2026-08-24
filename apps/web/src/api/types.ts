@@ -794,6 +794,15 @@ export interface ContextPreviewItem {
   beats?: number;
   spine_count?: number;
   payoff_count?: number;
+  /**
+   * V2.0 Wave B 任务二：条件触发动态注入状态。
+   * - 'full'      — 完整注入实体全字段（默认）
+   * - 'summary'   — 仅一行摘要（name + role/statement），auto + 未命中降级
+   * - 'suppressed'— never 模式不注入，仅 preview 列表可见
+   */
+  injection?: 'full' | 'summary' | 'suppressed';
+  /** 当 injection='summary' 时附带的一行摘要文本（≤ 80 字） */
+  summary_line?: string;
 }
 
 export interface ContextPreviewLayer {

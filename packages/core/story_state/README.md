@@ -1,6 +1,6 @@
-# Story State 引擎（Sprint 2 + Sprint 7 分支能力）
+# Story State 引擎（Sprint 2 + Sprint 7 分支能力 + V2.0 拆分 + V2.0 Wave B 物化）
 
-> 状态：**已实现并通过测试**（Sprint 2 主链路 + Sprint 4 / 4-B / 6 修复 + Sprint 7 分支能力）。
+> 状态：**已实现并通过测试**（Sprint 2 主链路 + Sprint 4 / 4-B / 6 修复 + Sprint 7 分支能力 + V2.0 god-object 拆分 + V2.0 Wave B 任务一 分支物化与双写面统一）。
 > 核心入口 ``StoryStateService``。
 
 本目录是 NovelOS State Delta 引擎——Observer / Validator / State Committer 三步之间的
@@ -29,13 +29,51 @@
 packages/core/story_state/
 ├── __init__.py            # 公共 API（service / applier / validator / snapshot / exceptions）
 ├── exceptions.py          # StateConflictError / OptimisticLockError / ApprovalRequiredError / StateNotFoundError / BranchNotFound / BranchClosed
-├── validator.py           # validate_delta(delta) -> list[str]（jsonschema + 业务规则）
+├── validator.py           # validate_delta(delta) -> list[str]（jsonschema + 业务规则；Sprint 14 伏笔状态机迁移校验）
 ├── snapshot.py            # build_initial_state / materialize_snapshot
 ├── applier.py             # apply_delta(state, delta) -> state（纯函数）
-└── service.py             # StoryStateService（DB 主入口；Sprint 7 增 create_branch / promote_branch / diff_versions / 分支推导 helper）；公共 helper diff_snapshots / strip_state_version
+├── snapshots.py           # ★ V2.0：snapshot I/O 读路径 + diff 工具
+│                          # - strip_state_version / diff_snapshots（公共 helper）
+│                          # - latest_snapshot_version（无下划线，供跨模块调用）
+├── deltas.py              # ★ V2.0：delta 序列化 / 反序列化 / HIGH 风险门 / 逆 Delta
+│                          # - payload_json_from_delta / restore_delta_from_row / restore_delta_from_row_payload
+│                          # - high_risk_change_ids / build_inverse_delta（rollback 用）
+├── write_through.py       # ★ V2.0：写透（7 数组 → 领域表）+ who_knows 三态编码 + 逆路径清理
+│                          # - write_through / apply_inverse_cleanup_to_state
+│                          # - encode_who_knows / read_who_knows / read_visibility
+├── commits.py             # ★ V2.0：commit / submit / rollback / init_genesis 事务主体
+│                          # - init_genesis / submit_delta / commit_delta / rollback_commit
+│                          # - project_id_for_chapter
+├── branches.py            # ★ V2.0：分支解析 / 创建 / 重放 / promote
+│                          # - ensure_branch / resolve_branch / branch_current_state
+│                          # - create_branch / list_branches / promote_branch / load_branch_commit_payload
+├── queries.py             # ★ V2.0：纯读 / 查询
+│                          # - get_current_state / get_snapshot / list_commits / list_deltas / diff_versions
+└── service.py             # ★ V2.0 重写为 Façade：StoryStateService（仅重导出，0 业务逻辑）
+                           # - 所有方法体委派到上述子模块
+                           # - 私有符号（_encode_who_knows / _project_id_for_chapter / _write_through /
+                           #   _apply_inverse_cleanup_to_state / _build_inverse_delta / _ensure_branch /
+                           #   _resolve_branch / _branch_current_state / _load_branch_commit_payload /
+                           #   _payload_json_from_delta / _restore_delta_from_row* / _high_risk_change_ids）
+                           #   作为兼容别名 re-export，便于历史 / 测试 / 调用方深路径 import 0 改动
+                           # - service.py 行数 < 150（V2.0 拆分 DoD）
 ```
 
 API 路由：``packages/core/api/routers/story_state.py``（自动发现挂载到 ``/api``）。
+
+### 2.1 V2.0 拆分后模块依赖图（无循环）
+
+```
+service.py (façade)
+    ├─→ queries.py ─→ branches.py ─→ deltas.py
+    │              └→ snapshots.py
+    ├─→ commits.py ─→ branches.py / deltas.py / write_through.py / snapshots.py
+    ├─→ branches.py ─→ deltas.py / snapshots.py / snapshot.py / applier.py
+    ├─→ write_through.py ─→ snapshots.py
+    └─→ deltas.py
+
+跨模块调用全部用显式 import；模块内部函数无循环依赖。
+```
 
 ---
 
@@ -203,6 +241,41 @@ DDL 权威定义在 ``database/migrations/0001_init.sql``；本模块不修改 s
     - 集成测试 ``tests/integration/test_story_state_api.py`` 覆盖主链路 + 乐观锁 / HIGH /
       schema 失败 / 持久化五条负例。
 
+### V2.0 维护注意点（god-object 拆分后）
+
+17. **新代码按职责进对应模块，``service.py`` 只做 re-export**：
+    - 写透逻辑 → ``write_through.py``（``write_through(conn, project_id, delta, new_version)``）。
+    - delta 序列化 / HIGH 风险门 / 逆 Delta → ``deltas.py``。
+    - commit / submit / rollback / init_genesis 事务主体 → ``commits.py``。
+    - 分支解析 / 创建 / 重放 / promote → ``branches.py``。
+    - 纯读 / 查询 → ``queries.py``。
+    - 快照读 / diff 工具 → ``snapshots.py``。
+    - ``service.StoryStateService`` 仅作 façade；新增方法先在职责模块实现，再在
+      ``StoryStateService`` 加一行委派调用。
+18. **私有符号兼容**：
+    - 历史 / 测试 / 调用方仍可能以 ``from packages.core.story_state.service
+      import _<name>`` 深路径 import 私有符号——``service.py`` 顶部有 re-export 块
+      保证兼容。
+    - ``StoryStateService`` 类仍暴露 ``_project_id_for_chapter`` / ``_write_through`` /
+      ``_apply_inverse_cleanup_to_state`` / ``_build_inverse_delta`` 实例方法（委派到
+      职责模块），保持历史代码 ``svc._<method>(...)`` 调用形式 0 改动。
+    - 新代码应直接 import 职责模块的无下划线公开函数（如 ``from
+      packages.core.story_state.write_through import write_through``）。
+19. **模块依赖纪律**：
+    - 跨模块调用全部用显式 import；禁止 ``import *`` 与延迟到函数内 import（除少数
+      为避免循环的局部 import，如 ``branches.branch_current_state`` 内的
+      ``from .deltas import restore_delta_from_row_payload``）。
+    - 模块内部函数无循环依赖。如新增模块发现循环，调整职责边界而非用 import 技巧硬拆。
+    - 公共 helper 命名统一无下划线（``strip_state_version`` / ``diff_snapshots`` /
+      ``latest_snapshot_version`` / ``write_through`` / ``encode_who_knows`` /
+      ``apply_inverse_cleanup_to_state`` / ``build_inverse_delta`` 等）。
+20. **拆分测试纪律**：迁移函数后必须先跑 story_state 相关测试子集
+    （``tests/unit/test_story_state*`` / ``tests/api/test_story_state*`` /
+    ``tests/integration/test_story_state_api.py`` / ``tests/integration/test_story_state_rollback_fixes.py``
+    / ``tests/unit/test_story_state_write_through_null_guard.py`` /
+    ``tests/api/test_branches.py`` / ``tests/workflow/test_chapter_commit_observer_retry.py``）
+    确认 0 回归，再跑全量 pytest 545 / vitest 194 / smoke 9 / eval 14。
+
 ---
 
 ## 7. 已知 Open Questions（继承自 ``state-delta-v0.md §10``）
@@ -318,6 +391,92 @@ DDL DEFAULT 30）；列缺失 / NULL → fallback 常量 ``_FORESHADOW_OVERDUE_C
 - **rollback 默认在原 commit 所在分支**（main commit 在 main 回滚，分支 commit
   在分支回滚）；``rollback_commit(branch_id=...)`` 参数当前保留为接口占位，未启用
   跨分支回滚语义。
+
+---
+
+## §6.6 V2.0 Wave B 任务一：分支快照物化与双写面统一
+
+### 1. 分支读路径快照物化
+
+**目标**：消除分支当前状态读取的 O(N) 全量 delta 重放——分支越长，每次
+``get_current_state(branch_id=...)`` 调用成本越高。
+
+**机制**（``database/migrations/0009_branch_snapshots.sql``）：
+
+- 新建 ``branch_snapshots`` 表：
+    - 列：``branch_id``（FK → branches.branch_id）/ ``state_version`` /
+      ``snapshot_json`` / ``created_at``
+    - PK：``(branch_id, state_version)``；索引：``(branch_id, state_version DESC)``
+- 物化时机：
+    - ``create_branch`` 创建成功后 → 物化 ``base_state_version`` 处的 main 快照到
+      新分支行（``state_version=base_state_version``）。
+    - ``promote_branch`` 全部重放成功后 → 把 main 分支当前 ``story_states`` 最新
+      快照物化到 ``branch_snapshots``（``state_version=新 main latest version``）。
+- 读路径（``branches.branch_current_state``）：
+    1) 取 ``branches.base_state_version`` 处的 main 快照作为 fallback base；
+    2) 查 ``branch_snapshots`` 最近一次物化（按 state_version DESC LIMIT 1）；
+       - 若存在且物化点 ``>= base_version`` → 从物化点开始**增量重放**本分支
+         ``resulting_state_version > 物化点`` 的 commits；
+       - 否则（无物化行 / 旧分支 / 升级前分支）→ 兜底**全量重放**，与 Sprint 7
+         原行为逐字节一致。
+- 兼容性：分支 commit 仍不写 ``story_states``；主线（``branch_id=None``）仍走
+  ``story_states`` 最新版本快照，行为零变化。
+- 扩展空间：``(branch_id, state_version)`` 复合 PK 允许未来按每 N commit 间隔
+  多次物化（MVN 不启用）。
+
+**对外契约**：
+
+- ``StoryStateService`` 公共方法签名零变化；
+- ``branch_snapshots`` 表是「推导缓存」——可丢可重建，无审计必要；
+- 主线读路径行为零变化（API 契约零变化）。
+
+### 2. 双写面统一（write_helpers）
+
+**目标**：把 ``write_through.write_through``（canon 写透）与 ``packages.domain.*.service``
+（管理面直写）共用的字段语义、JSON 序列化、who_knows 三态语义抽到唯一权威实现，
+消除散落 ``_dump_json`` / ``_load_who_knows`` 实现差异。
+
+**机制**（``packages/core/story_state/write_helpers.py``，V2.0 Wave B 新建）：
+
+- 公开 API：
+    - ``encode_who_knows`` / ``decode_who_knows``——三态语义（None / [] / list）
+      编码与解码，唯一权威实现；
+    - ``resolve_visibility``——``None`` → 表默认 visibility；
+    - ``dump_json`` / ``dump_json_or_null``——JSON 列写入（ensure_ascii=False）；
+    - ``now_iso_for_db``——时间戳（``packages.core.ids.now_iso``）；
+    - ``build_set_clause`` / ``who_knows_update_clause``——UPDATE SET 子句生成
+      与「缺失=不更新该列」vs「非 None=覆盖」三态子句生成。
+- 调用方迁移：
+    - ``write_through.encode_who_knows`` / ``_dump`` / ``_dump_or_null`` 现为
+      ``write_helpers`` 共享实现的 re-export，保留 façade 兼容；
+    - ``domain.character.CharacterService`` /
+      ``domain.world.WorldService`` /
+      ``domain.ledger.LedgerService`` 内部 ``_dump_json`` /
+      ``_dump_json_or_null`` / ``_load_who_knows`` 删除，改 ``from
+      packages.core.story_state.write_helpers import ...``；
+    - ``domain.plot.PlotService`` 仍独立（plot_events / timeline_events 在 write_through
+      不写 timeline_events 派生索引，与 domain 路径语义差异大，本任务不强行统一，
+      由后续任务视 PRD 决策调整）。
+- 状态一致性单向口径（README 写明）：
+    - **canon commit 路径**（``commit_delta`` → ``write_through``）→ 领域表行
+      由 ``state_version`` 推进，与 ``story_states`` 快照同事务落库，权威来源；
+    - **domain CRUD 路径**（``CharacterService.create`` 等）→ 领域表行由人工维护
+      入口直接写入，**不产生 canon commit**，``state_version`` 不自动推进；
+    - 读路径以 ``canon`` 写透的 ``story_states`` 快照为权威；domain 直写修改在
+      下次 ``init_genesis`` / ``build_initial_state`` 时被吸收进快照（通过
+      ``state_deltas`` delta 重新 apply 覆盖领域表）；用户若需让 domain 修改
+      立即进入 canon 快照，应走 ``commit_delta`` 路径。
+- 主线行为零变化（API 契约零变化）；不回填历史数据（双写面之前可能存在的不一致
+  视为既成事实，由「canon 快照为权威」语义自然收敛——任何 stale 领域表行
+  在下次 ``commit_delta`` 时被覆盖）。
+
+**未来扩展**（不在本任务内）：
+
+- ``commit_delta`` 时若检测到 ``domain`` 直写与 ``canon`` 快照冲突（例如同一
+  character_definition key 被两边都改了）→ 抛 ``StateConflictError`` 并附冲突
+  详情，便于上层（router / UI）决定「保留 canon」还是「回滚 canon」。
+- ``PlotService`` 与 write_through 在 ``new_events`` 写透上的不一致（timeline_events
+  派生）由 Sprint 后续统一抽 plot_write_through 共享助手。
 
 ### Promote 按序重放（deviation from ``state-delta-v0.md §6.3``）
 

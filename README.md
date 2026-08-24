@@ -42,7 +42,7 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0008，33 张业务表）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0011_fts_index.sql，34 张物理业务表 + 1 张虚表 chapter_fts；V2.0 Wave B 三连迁移：0009_branch_snapshots / 0010_trigger_keys / 0011_fts_index）
 tests/                   pytest（unit / integration / workflow / api / evals）
 scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
 docs/                    设计文档、PRD、实现计划（docs/impl/IMPLEMENTATION-PLAN-v0.md）
@@ -60,7 +60,7 @@ jsonschema / httpx；测试另需 pytest / ruff）。
 # 1) 安装依赖
 pip install -e ".[dev]"
 
-# 2) 执行数据库迁移（生成 data/novelos.db；33 张业务表 + _migrations）
+# 2) 执行数据库迁移（生成 data/novelos.db；34 张业务表 + _migrations）
 python scripts/migrate.py
 
 # 3) 前端构建（构建产物 apps/web/dist，后端会自动托管）
@@ -75,19 +75,22 @@ python -m packages.core.api.main
 
 浏览器打开 http://127.0.0.1:18081 即可使用（后端同时托管 SPA 与 `/api`）。
 
-端口差异说明：
+端口差异说明（V2.0 Wave C 任务三 统一收敛）：
 
-- `python -m packages.core.api.main` 默认端口 **18081**（8000 在开发者本机常被占用），
-  可用 `NOVELOS_PORT` 覆盖。
-- `python scripts/serve.py` 走 `Settings.api_port`，默认 **8000**，可用
-  `NOVELOS_API_PORT` 覆盖（`NOVELOS_PORT` 优先级更高，两者都设时以 `NOVELOS_PORT` 为准）。
+- **统一默认端口 18081**（8000 在开发者本机常被占用）。单一配置源
+  `packages/core/config.py:Settings.api_port`，`python -m packages.core.api.main`
+  与 `python scripts/serve.py` 都通过该字段读取。
+- 优先级：`NOVELOS_PORT` > `NOVELOS_API_PORT` > 默认 18081（兼容旧变量）。
+- 前端 dev 代理从 `NOVELOS_PORT` / `NOVELOS_API_PORT` 读后端端口（见
+  `apps/web/vite.config.ts` / `apps/desktop/vite.config.ts`）；改端口后需重启
+  vite dev 才生效。
 
-健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=33`）。
+健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=34`，业务表数）。
 
 ## 测试
 
 ```bash
-# 后端全量（当前基线 545 passed）
+# 后端全量（当前基线 621 passed）
 python -m pytest tests/ -q
 
 # Golden 回归 eval（当前 1/1）
@@ -99,7 +102,7 @@ python scripts/smoke_e2e.py
 # 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
 python scripts/real_llm_e2e.py
 
-# 前端单测（vitest；当前 194）
+# 前端单测（vitest；当前 195）
 cd apps/web && npm run test
 ```
 
@@ -119,7 +122,7 @@ cd apps/web && npm run test
 
 ## 版本与更新日志
 
-当前版本 **V1.5.0**（git tag `v1.5.0`）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
+当前版本 **V2.0.0**（git tag `v2.0.0`）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x 路线登记在同文件
 「Known Issues / 路线登记」一节。
 

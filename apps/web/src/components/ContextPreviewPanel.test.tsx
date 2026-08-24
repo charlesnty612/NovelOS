@@ -115,4 +115,63 @@ describe('ContextPreviewPanel', () => {
     });
     expect(screen.queryByText(/加载上下文预览失败/)).not.toBeInTheDocument();
   });
+
+  // ---------------------------------------------------------------------------
+  // V2.0 Wave B 任务二：条件触发动态注入（preview 标记展示）
+  // - full：默认；无徽标
+  // - summary：徽标「摘要」+ summary_line 文本
+  // - suppressed：徽标「已剔除」+ kind=suppressed_*
+  // ---------------------------------------------------------------------------
+  it('renders full/summary/suppressed injection badges (V2.0 Wave B 任务二)', async () => {
+    const previewWithInjection: ContextPreviewResponse = {
+      ...basePreview,
+      layers: [
+        basePreview.layers[0],
+        {
+          ...basePreview.layers[1],
+          items: [
+            { kind: 'character', id: 'char_full', name: '林昭', role: 'protagonist', injection: 'full' },
+            { kind: 'character', id: 'char_sum', name: '陈风', role: 'antagonist', injection: 'summary', summary_line: '陈风（antagonist）' },
+            { kind: 'location', id: 'loc_full', name: '王城', injection: 'full' },
+            { kind: 'location', id: 'loc_sum', name: '荒原', injection: 'summary', summary_line: '荒原 — 边境荒野' },
+            { kind: 'suppressed_character', id: 'char_supp', name: '隐者', injection: 'suppressed' },
+            { kind: 'suppressed_location', id: 'loc_supp', name: '禁地', injection: 'suppressed' },
+            { kind: 'suppressed_faction', id: 'fac_supp', name: '刺客会', injection: 'suppressed' },
+          ],
+        },
+        basePreview.layers[2],
+      ],
+    };
+    vi.mocked(contextPreviewApi.preview).mockResolvedValue(previewWithInjection);
+    render(<ContextPreviewPanel chapterId="ch_1" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('context-preview-layer-L1')).toBeInTheDocument();
+    });
+    // full：默认无徽标（不应有 summary/suppressed 徽标）
+    expect(
+      screen.queryByTestId('preview-item-injection-character-suppressed'),
+    ).not.toBeInTheDocument();
+    // summary：徽标 + summary_line
+    expect(
+      screen.getByTestId('preview-item-injection-character-summary'),
+    ).toHaveTextContent('摘要');
+    expect(
+      screen.getByTestId('preview-item-summary-line-character'),
+    ).toHaveTextContent('陈风（antagonist）');
+    // suppressed（角色 / 地点 / 势力 三类）
+    expect(
+      screen.getByTestId('preview-item-injection-suppressed_character-suppressed'),
+    ).toHaveTextContent('已剔除');
+    expect(
+      screen.getByTestId('preview-item-injection-suppressed_location-suppressed'),
+    ).toHaveTextContent('已剔除');
+    expect(
+      screen.getByTestId('preview-item-injection-suppressed_faction-suppressed'),
+    ).toHaveTextContent('已剔除');
+    // KIND_LABEL 新增项：suppressed_character 显示「角色(已剔除)」
+    expect(screen.getByText(/\[角色\(已剔除\)\]/)).toBeInTheDocument();
+    expect(screen.getByText(/\[地点\(已剔除\)\]/)).toBeInTheDocument();
+    expect(screen.getByText(/\[势力\(已剔除\)\]/)).toBeInTheDocument();
+  });
 });
