@@ -367,6 +367,181 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
     return {"commit_result": commit_result, "status_after": "COMMITTED"}
 
 
+# ============================================================================
+# Sprint 14：summarize 节点（commit 成功后追加，失败降级不阻塞）
+# ============================================================================
+
+
+# 摘要最大字符数（中文按字符）；超长由 service 层截断 + 标 degraded。
+_SUMMARY_MAX_CHARS = 200
+# tail_text 取已提交正文末尾字符数（不调 LLM）。
+_TAIL_TEXT_CHARS = 300
+
+
+def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
+    """summarize 节点（Sprint 14）—— commit 成功后追加。
+
+    行为：
+    1. 取最新 draft content（已 commit 的草稿正文）；若为空 → summary_status='skipped'。
+    2. tail_text = content[-300:]（不调 LLM）。
+    3. 调 ``run_agent(..., agent_name='summarizer', mock_script=...)`` 输出 JSON ``{"summary": "..."}``。
+    4. 写 ``chapter_summaries`` 行（summary_id / project_id / chapter_id / chapter_no /
+       summary ≤ 200 字 / tail_text / created_at）；摘要超长则截断并标记 degraded。
+    5. 任何异常（LLM 失败 / JSON 解析失败 / DB 写入失败）→ 降级：warning 日志 +
+       summary_status='failed' + 不抛错（保证 chapter 提交不因摘要失败而 FAILED）。
+
+    返回 ``{"summary_status": "ok|failed|skipped", "summary_id": str|None, "degraded": bool}``。
+    """
+    db_path = ctx["db_path"]
+    chapter_id = ctx["chapter_id"]
+    mock_script = (ctx.get("mock_providers") or {}).get("summarizer")
+
+    # 1) 章节 + 项目 + chapter_no
+    conn = get_connection(db_path)
+    try:
+        chap_row = conn.execute(
+            "SELECT project_id, number FROM chapters WHERE chapter_id = ?",
+            (chapter_id,),
+        ).fetchone()
+        if chap_row is None:
+            return {"summary_status": "skipped", "summary_id": None, "degraded": False}
+        project_id = chap_row["project_id"]
+        chapter_no = int(chap_row["number"] or 0)
+        draft_row = conn.execute(
+            """
+            SELECT content FROM drafts
+            WHERE chapter_id = ?
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (chapter_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    # sqlite3.Row 不支持 .get；用 dict(draft_row) 兜底（draft_row 为 None 时返回空 dict）
+    content = (dict(draft_row) if draft_row else {}).get("content") or ""
+    if not content.strip():
+        return {"summary_status": "skipped", "summary_id": None, "degraded": False}
+
+    # 2) tail_text（不调 LLM）
+    tail_text = content[-_TAIL_TEXT_CHARS:] if len(content) > _TAIL_TEXT_CHARS else content
+
+    # 3) 构造输入 payload + 调 summarizer
+    plan_goal = ""
+    try:
+        conn = get_connection(db_path)
+        try:
+            pj = conn.execute(
+                "SELECT plan_json FROM chapters WHERE chapter_id = ?", (chapter_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if pj:
+            import json as _json
+            raw = pj["plan_json"] or "{}"
+            try:
+                pj_d = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+            except (TypeError, ValueError):
+                pj_d = {}
+            plan_goal = (pj_d or {}).get("chapter_goal") or ""
+    except Exception:  # noqa: BLE001 —— 计划读取失败不阻塞 summarize
+        plan_goal = ""
+
+    summary_payload = {
+        "agent": "summarizer",
+        "prompt_version": "summarizer:v1",
+        "chapter": {
+            "chapter_id": chapter_id,
+            "chapter_no": chapter_no,
+            "chapter_goal": plan_goal,
+        },
+        "prose_excerpt": content[:4000],  # 取前 4000 字足够上下文（避免超长 prompt）
+        "tail_text": tail_text,
+    }
+
+    degraded = False
+    summary_text = ""
+    summary_status = "failed"
+    try:
+        # summarizer 无 ACTIVE prompt 时 runner 会抛 PromptNotFoundError → 降级。
+        out = run_agent(
+            db_path,
+            "summarizer",
+            summary_payload,
+            ctx.get("run_id") or "",
+            node_run_id=ctx.get("_current_node_run_id"),
+            expected="summarizer",
+            mock_script=mock_script,
+        )
+        if not isinstance(out, dict):
+            raise ValueError(f"summarizer output not dict: {type(out).__name__}")
+        candidate = out.get("summary")
+        if not isinstance(candidate, str):
+            raise ValueError("summarizer output missing 'summary' string")
+        summary_text = candidate.strip()
+        if not summary_text:
+            raise ValueError("summarizer output 'summary' empty")
+        if len(summary_text) > _SUMMARY_MAX_CHARS:
+            summary_text = summary_text[:_SUMMARY_MAX_CHARS]
+            degraded = True
+        summary_status = "ok"
+    except Exception as exc:  # noqa: BLE001 —— 降级：任何失败不抛
+        import logging
+        logging.getLogger(__name__).warning(
+            "chapter_commit.summarize degraded: chapter_id=%s err=%s",
+            chapter_id, exc,
+        )
+        return {
+            "summary_status": "failed",
+            "summary_id": None,
+            "degraded": False,
+            "summary_error": str(exc),
+        }
+
+    # 4) 落库 chapter_summaries
+    summary_id = new_id("sum")
+    try:
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO chapter_summaries
+                    (summary_id, project_id, chapter_id, chapter_no,
+                     summary, tail_text, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    summary_id,
+                    project_id,
+                    chapter_id,
+                    chapter_no,
+                    summary_text,
+                    tail_text,
+                    now_iso(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            "chapter_commit.summarize DB insert failed: summary_id=%s err=%s",
+            summary_id, exc,
+        )
+        return {
+            "summary_status": "failed",
+            "summary_id": None,
+            "degraded": False,
+            "summary_error": str(exc),
+        }
+
+    return {
+        "summary_status": summary_status,
+        "summary_id": summary_id,
+        "degraded": degraded,
+    }
+
+
 def _build_nodes() -> list[WorkflowNode]:
     return [
         WorkflowNode("build_observer_ctx", "Transform", _build_observer_ctx_node),
@@ -375,6 +550,7 @@ def _build_nodes() -> list[WorkflowNode]:
         WorkflowNode("quality_gate", "State", _quality_gate_node),
         WorkflowNode("high_risk_approval", "Human", _high_risk_approval_node),
         WorkflowNode("commit", "State", _commit_node),
+        WorkflowNode("summarize", "State", _summarize_node),
     ]
 
 

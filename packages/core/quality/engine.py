@@ -25,6 +25,7 @@ from __future__ import annotations
 from packages.core.ids import new_id, now_iso
 
 from .aggregate import compute_overall
+from .ai_trace import compute_ai_trace
 from .guardrails import (
     character_contradiction,
     knowledge_leakage,
@@ -115,6 +116,12 @@ class QualityEngine:
         fore_score, fore_issues = score_foreshadowing(ctx.snapshot_pre, ctx.delta or {})
         issues.extend(fore_issues)
 
+        # ---- ai_trace 子分（章内/跨章重复 + AI 套话命中；详见 ai_trace.py）----
+        ai_trace_score, _ = compute_ai_trace(
+            ctx.draft or "",
+            list(ctx.previous_drafts or []),
+        )
+
         # ---- 聚合（compute_overall 会原地补 missing + error 阻断）----
         subscores = {
             "plot": plot_score,
@@ -123,6 +130,7 @@ class QualityEngine:
             "style": style_score,
             "pacing": pacing_score,
             "foreshadowing": fore_score,
+            "ai_trace": ai_trace_score,
         }
         overall, issues = compute_overall(subscores, issues)
 
@@ -145,6 +153,7 @@ class QualityEngine:
             style=style_score,
             pacing=pacing_score,
             foreshadowing=fore_score,
+            ai_trace=ai_trace_score,
             issues=issues,
             meta=meta,
             chapter_id=ctx.chapter_id,

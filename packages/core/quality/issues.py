@@ -37,10 +37,11 @@ Category = Literal[
     "style",
     "pacing",
     "foreshadowing",
+    "ai_trace",
     "payoff",
     "compliance",
 ]
-"""Issue category 枚举，固定 13 个；与 spec §1.3 / §3.7 / §4.x 对齐。"""
+"""Issue category 枚举，固定 14 个；与 spec §1.3 / §3.7 / §4.x / ai_trace 对齐。"""
 
 # ----------------------------------------------------------------------------- location helpers
 
@@ -129,6 +130,7 @@ MVP_SEVERITY_MATRIX: dict[str, dict[str, str]] = {
     "style": {"mvp_max": "warning"},
     "pacing": {"mvp_max": "warning"},
     "foreshadowing": {"mvp_max": "warning"},
+    "ai_trace": {"mvp_max": "warning"},
     "payoff": {"mvp_max": "warning"},
 }
 

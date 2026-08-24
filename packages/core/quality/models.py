@@ -79,6 +79,9 @@ class QualityContext(BaseModel):
     whitelist: list[str] = Field(default_factory=list)
     ai_chars: int = 0
     human_chars: int = 0
+    # ai_trace 跨章子信号：同项目最近 N 章正文（章节号降序）。
+    # service / pipeline 现场拉取后传入；engine 不直接读 DB。
+    previous_drafts: list[str] = Field(default_factory=list)
     commit_id: Optional[str] = None
     run_id: Optional[str] = None
 
@@ -99,7 +102,7 @@ class QualityReport(BaseModel):
 
     model_config = {"populate_by_name": True}
 
-    # 八字段
+    # 九字段（七子分 + overall + issues；ai_trace 与 plot/character/.../foreshadowing 并列）
     overall: int = 0
     plot: int = 0
     character: int = 0
@@ -107,6 +110,7 @@ class QualityReport(BaseModel):
     style: int = 0
     pacing: int = 0
     foreshadowing: int = 0
+    ai_trace: int = 0
     issues: list[Issue] = Field(default_factory=list)
 
     # 元信息（§2.2）—— Python 端属性名 ``meta``；JSON 序列化为 ``"_meta"``。

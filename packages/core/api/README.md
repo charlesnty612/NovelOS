@@ -27,6 +27,9 @@
 | `__version__ = "0.1.0"` | `packages/core/api/main.py` | API 版本号 |
 | `lifespan(app)` | `packages/core/api/main.py` | 异步上下文管理器，启动时执行迁移 |
 | `GET /api/health` | `packages/core/api/main.py` | 返回 `{status:"ok", version, tables:31}` |
+| `GET /api/chapters/{chapter_id}/context-preview` | `packages/core/api/routers/workflows.py`（Sprint 13 下半新增） | dry-run，返回 context 装配预览（layers + token 估算 + items；只读、不调 LLM、不写库） |
+| `GET /api/ai-call-logs` | `packages/core/api/routers/ai_call_logs.py`（Sprint 13 下半新增） | 分页列出 ai_call_logs 摘要（默认 limit=50，上限 200；支持 `?project_id=`（JOIN workflow_runs + chapters）、`?node=` 过滤）；不含 API key |
+| `GET /api/ai-call-logs/{log_id}` | 同上 | 单条详情（含 `input_context_ids` + `output` 解析后 JSON） |
 | `GET /`（SPA 关闭时） | `packages/core/api/main.py` | 返回 `{service, version, docs}` |
 | `GET /`、`GET /{path}`（SPA 启用时） | `packages/core/api/main.py` | catch-all 返回 `dist/index.html`（SPA fallback） |
 | `resolve_web_dist()` | `packages/core/api/main.py` | 解析 SPA dist 路径（`NOVELOS_WEB_DIST` > `<repo>/apps/web/dist`） |

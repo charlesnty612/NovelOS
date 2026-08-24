@@ -6,6 +6,7 @@ import { StoryBiblePage } from './pages/StoryBiblePage';
 import { ChaptersPage } from './pages/ChaptersPage';
 import { ChapterDetailPage } from './pages/ChapterDetailPage';
 import { AiSettingsPage } from './pages/AiSettingsPage';
+import { AiCallLogsPage } from './pages/AiCallLogsPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 
 export function App() {
@@ -20,6 +21,7 @@ export function App() {
           <Route path=":pid/chapters/:cid" element={<ChapterDetailPage />} />
           <Route path=":pid/ai" element={<AiSettingsPage />} />
         </Route>
+        <Route path="ai-logs" element={<AiCallLogsPage />} />
         <Route path="*" element={<NotFoundPage />} />
         <Route path="index" element={<Navigate to="/" replace />} />
       </Route>

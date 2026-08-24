@@ -541,6 +541,7 @@ export interface QualityScores {
   style: number;
   pacing: number;
   foreshadowing: number;
+  ai_trace: number;
   _meta: QualityScoresMeta;
 }
 
@@ -621,4 +622,79 @@ export interface DeconstructPayload {
   book_title: string;
   text: string;
   reader_profile?: ReaderProfile;
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 13：Context preview（dry-run，AI 上下文装配可见化）
+//   对齐 packages/core/context_engine/preview.py + workflows 路由 context-preview 端点。
+//   只读、不调 LLM、不写库；用于章节详情页"AI 本次读了什么"面板。
+// ---------------------------------------------------------------------------
+
+export interface ContextPreviewItem {
+  kind: string;
+  id: string;
+  name: string;
+  role?: string;
+  source?: string;
+  status?: string;
+  importance?: number;
+  severity?: number;
+  type?: string;
+  source_len?: number;
+  beats?: number;
+  spine_count?: number;
+  payoff_count?: number;
+}
+
+export interface ContextPreviewLayer {
+  id: string;
+  label: string;
+  token_estimate: number;
+  items: ContextPreviewItem[];
+  truncated: boolean;
+}
+
+export interface ContextPreviewResponse {
+  chapter_id: string;
+  project_id: string;
+  agents: string[];
+  layers: ContextPreviewLayer[];
+  total_tokens: number;
+  token_budget: number;
+  within_budget: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 13：AI 调用日志（ai_call_logs）查询契约
+//   对齐 packages/core/api/routers/ai_call_logs.py。
+//   列表只含摘要；详情含 input_context_ids（list）+ output（结构化）。
+//   **不含任何 API key 字段**（后端 schema 与路由层双重防御）。
+// ---------------------------------------------------------------------------
+
+export interface AiCallLogTokenUsage {
+  prompt: number;
+  completion: number;
+  total: number;
+}
+
+export interface AiCallLogSummary {
+  call_id: string;
+  run_id: string;
+  node_run_id: string | null;
+  agent_id: string | null;
+  model_id: string | null;
+  prompt_version: string | null;
+  latency_ms: number | null;
+  retry_count: number;
+  error: string | null;
+  token_usage: AiCallLogTokenUsage | null;
+  cost: number | null;
+  created_at: string;
+}
+
+export interface AiCallLogDetail extends AiCallLogSummary {
+  /** 仅详情端点返回：从 input_context_ids_json 解析。原文不落 DB（runner.py L52-69）。 */
+  input_context_ids: string[];
+  /** 仅详情端点返回：output_json 解析后的对象/数组/字符串等。 */
+  output: Record<string, unknown> | unknown[] | string | number | boolean | null;
 }

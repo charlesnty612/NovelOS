@@ -9,6 +9,7 @@ import type {
   WorkflowStartResponse,
 } from '../api/types';
 import { QualityPanel } from '../components/QualityPanel';
+import { ContextPreviewPanel } from '../components/ContextPreviewPanel';
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
 import {
@@ -273,6 +274,12 @@ export function ChapterDetailPage() {
               void chapterCall.reload();
             }}
           />
+        </div>
+      ) : null}
+
+      {chapter ? (
+        <div style={{ marginTop: 16 }}>
+          <ContextPreviewPanel chapterId={chapterId} />
         </div>
       ) : null}
 

@@ -212,6 +212,50 @@ DDL 权威定义在 ``database/migrations/0001_init.sql``；本模块不修改 s
   ``validation_json.guardrail_results`` 全部 ``status='pass'`` 占位。属后续 Sprint。
 - ``Rollback 链式复杂度``（同上）：本 Sprint 不实现级联回退（PRD §5.5 已声明未规定）。
 
+## 7.5 Sprint 14-B：伏笔状态机迁移校验 + 开放伏笔清单装配
+
+复用现有 ``hooks`` 表（PRD §21 五态：OPEN / ACTIVE / ESCALATED / RESOLVED / ABANDONED），
+本 Sprint 不新增实体，只扩展两条契约：
+
+### 7.5.1 ``validate_delta`` 端点合法性 + ABANDONED 复活拦截
+
+``packages/core/story_state/validator.py`` 新增 ``resolved_hooks`` 校验：
+
+- ``to_status`` 不在 PRD §21 五态枚举 → 拒绝（schema 已先拦；此处业务兜底）。
+- ``from_status=null``（回滚 / 跨分支场景）→ 跳过迁移校验（schema 允许 null，
+  service 侧兜底）。
+- ``from_status`` 非 null 且不在枚举 → 拒绝。
+- ``from_status == 'ABANDONED'`` 且 ``to_status != 'ABANDONED'`` → 拒绝（已放弃不可复活）。
+
+**不做严格白名单**：observer 端允许任何 planted→其它合法状态的结算（如
+``OPEN→RESOLVED`` / ``ACTIVE→ESCALATED`` / ``ESCALATED→OPEN`` 等），与人工维护口径
+（``packages/domain/ledger/models.HOOK_ALLOWED_NEXT``）刻意不同——前者面向自动抽取
+要求宽松，后者面向人工编辑要求保守。两套白名单并存不冲突。
+
+### 7.5.2 开放伏笔清单（planted）与 overdue 计算
+
+``packages/core/context_engine/builders._open_foreshadow_list`` 提供装配函数：
+
+- planted = status ∈ {OPEN, ACTIVE, ESCALATED}；RESOLVED / ABANDONED 不入清单。
+- 排序：``overdue`` 优先 → ``importance DESC`` → introduced 早的优先；最多 20 条。
+- overdue 计算属性（非落库字段）：
+
+```python
+chapters_since_introduced = max(0, current_chapter_no - introduced_chapter_no)
+overdue = chapters_since_introduced > _FORESHADOW_OVERDUE_CHAPTERS  # 默认 30
+```
+
+阈值常量在 ``packages/core/context_engine/builders.py``；后续若需项目可配，由
+``project_settings`` 表 + 读取 fallback 至该常量（MVP 暂用常量）。
+
+### 7.5.3 与 Ledger CRUD（人工维护）的状态机口径差异
+
+| 操作路径 | 校验口径 | 适用场景 |
+| --- | --- | --- |
+| ``LedgerService.update_hook``（``packages/domain/ledger/service.py``） | ``HOOK_ALLOWED_NEXT`` 白名单（保守） | 人工 PATCH |
+| ``validate_delta``（``packages/core/story_state/validator.py``） | 端点合法 + ABANDONED 不可复活（宽松） | Observer 自动抽取 → ``commit_delta`` 写透 |
+| StoryStateService ``_write_through`` 中 ``resolved_hooks`` 写透 | 不做迁移校验；依赖 validator 层 | service 不重复校验 |
+
 ---
 
 ## 6.5 分支能力（Sprint 7）

@@ -324,3 +324,42 @@ def list_runs_endpoint(project_id: str, request: Request) -> list[dict[str, Any]
     settings = request.app.state.settings
     runs = list_runs(settings.db_path, project_id)
     return runs
+
+
+# ---------------------------------------------------------------------------
+# Sprint 13 下半：context-preview（dry-run；只读、不调 LLM、不写库）。
+# ---------------------------------------------------------------------------
+
+
+@router.get("/chapters/{chapter_id}/context-preview")
+def get_chapter_context_preview(chapter_id: str, request: Request) -> dict[str, Any]:
+    """dry-run：返回 chapter 关联的 LLM context 装配预览。
+
+    按 L0/L1/L2 分层，每层包含 ``token_estimate`` + ``items`` 条目清单 +
+    ``total_tokens`` + ``token_budget``。**只读**，不调 LLM，不写 ai_call_logs。
+    """
+    from packages.core.context_engine import preview_context
+
+    settings = request.app.state.settings
+    db = settings.db_path
+
+    # 拿 chapter.project_id；同时校验 chapter 存在 → 404
+    conn = get_connection(db)
+    try:
+        row = conn.execute(
+            "SELECT project_id FROM chapters WHERE chapter_id = ?",
+            (chapter_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"chapter {chapter_id!r} not found"
+        )
+    project_id = row["project_id"]
+
+    try:
+        return preview_context(db, project_id, chapter_id)
+    except ValueError as exc:
+        # builder 抛的 project/chapter 不存在 → 404
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

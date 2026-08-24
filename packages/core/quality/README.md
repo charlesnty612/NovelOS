@@ -14,7 +14,8 @@ packages/core/quality/
 ├── README.md            # 本文件
 ├── models.py            # pydantic：Issue / QualityContext / QualityReport
 ├── issues.py            # Issue 构造器 / severity 矩阵常量
-├── aggregate.py         # §2.1 公式 compute_overall + scoring_formula_hash
+├── aggregate.py         # 七维平均 compute_overall + scoring_formula_hash
+├── ai_trace.py          # AI 痕迹子分（章内/跨章重复 + 套话命中）
 ├── scoring.py           # 六子分 rule-based
 ├── guardrails.py        # 8 条 Guardrail（spec §4.1-§4.8）；公共 helper compute_shingles
 ├── payoff.py            # 爽感 H-1~H-5（spec §3.7）
@@ -36,8 +37,9 @@ from packages.core.quality import (
     guardrails, scoring,    # 子模块（内部 helper）
 )
 
-# 公共 helper：13 字滑动 shingle 计算（spec §4.6 / Q6 复用入口）
+# 公共 helper：13 字滑动 shingle 计算（spec §4.6 / Q6 / ai_trace 复用入口）
 from packages.core.quality.guardrails import compute_shingles
+from packages.core.quality.ai_trace import compute_ai_trace
 ```
 
 `QualityEngine.evaluate(ctx: QualityContext) -> QualityReport`：
@@ -64,9 +66,10 @@ from packages.core.quality.guardrails import compute_shingles
 | `reference_texts` | list[str] | 否 | REQ-Q6 参照书。 |
 | `whitelist` | list[str] | 否 | REQ-Q6 公共 shingle 白名单。 |
 | `ai_chars` / `human_chars` | int | 否 | REQ-Q8 字符数。 |
+| `previous_drafts` | list[str] | 否 | ai_trace 跨章子信号：同项目最近 N 章正文（章节号降序），由 `build_quality_context` 现场拉取；缺失则跨章子信号降级满分。 |
 | `commit_id` / `run_id` | str \| None | 否 | 仅做回显。 |
 
-**输出 `QualityReport`**（pydantic）：八字段 + `_meta` + 回显字段；`_meta` 使用 JSON 别名 `_meta`（Python 属性名 `meta`）。
+**输出 `QualityReport`**（pydantic）：九字段（七子分 + overall + issues） + `_meta` + 回显字段；`_meta` 使用 JSON 别名 `_meta`（Python 属性名 `meta`）。
 
 ---
 
@@ -143,6 +146,42 @@ class Issue(BaseModel):
 | H-4 | 仅 `chapter_number ∈ {1,2,3}` 启用：前 300 字无 CONFLICT_MARKERS ⇒ warning；末段无钩子 ⇒ warning；`chapter_number == 3` 三章 payoff 全 0 ⇒ warning。 | warning |
 | H-5 | 境界类实体（name 命中"境/期/阶/层/重天"任一）跨 statement 不一致 ⇒ RULE_H5_REALM_INCONSISTENT warning；越级碾压检测 MVP 不实现。 | warning |
 
+### 5.4 AI 痕迹子分（ai_trace）
+
+为对抗番茄等平台的低质 AI 文检测（章节连续性重复率、文风机械性），新增 ai_trace 维度；
+分数越高越"像人写"，扣分制。三个子信号合成（详见 `packages/core/quality/ai_trace.py`）：
+
+| 子信号 | 算法 | 扣分阶梯（ratio → 扣分） |
+|---|---|---|
+| 章内重复 `intra_chapter` | 13 字 shingle（复用 `compute_shingles`）；重复 shingle 占比 = `extras / total` | <5% 0；5-15% 20；15-50% 50；≥50% 70 |
+| 跨章重复 `cross_chapter` | 当前章节 shingle 集合 ∩ 最近 3 章 shingle 池 / 当前集合大小 | <10% 0；10-25% 20；25-45% 40；≥45% 60 |
+| 套话命中 `cliche` | 内置默认 ~30 条中文 AI 高频套话（"不禁""嘴角勾起""眼中闪过一丝""深吸一口气""空气仿佛凝固"等），每千字命中数 → 阶梯扣分 | <0.5/千字 0；0.5-1.5 12；1.5-3.0 28；≥3.0 45 |
+
+合成公式（见 `ai_trace._FORMULA_TEXT`）：
+
+```
+ai_trace = round(100 - 0.40 * in_deduct - 0.35 * cross_deduct - 0.25 * cliche_deduct)
+```
+
+权重（`ai_trace.WEIGHTS`）：in 0.40 / cross 0.35 / cliche 0.25。校准基线（任务书）：
+
+- 普通人工章节：≥ 80；
+- 明显灌水（章内 + 跨章 + 套话三路同触发）：≤ 60。
+
+overall 公式（`aggregate.compute_overall`）：七维平均。
+
+```
+overall = round((plot + character + continuity + style + pacing + foreshadowing + ai_trace) / 7)
+```
+
+**已知局限（ai_trace）**：
+
+1. 套话表是默认中文（~30 条）；跨语言 / 细分题材（如玄幻特定套话）需扩展 `AI_CLICHES` 常量。
+2. shingle 窗口固定 13 字（与 Q6 一致）；短句散文比例高时敏感度下降。
+3. 跨章子信号在 `previous_drafts` 为空时降级满分（不阻断）；项目首章 / 单章节评测不扣分。
+4. 不引入新第三方依赖；不读 LLM；纯确定性 rule-based。
+5. 不产出 error 级 issue —— ai_trace 是 score 子分，不阻断提交（与 continuity / style / pacing 同档）。
+
 ---
 
 ## 6. MVP 收窄与 defer 清单（**显著声明**）
@@ -162,6 +201,10 @@ class Issue(BaseModel):
    接入路径：在 `guardrails.knowledge_leakage` 把检查后的 Issue severity 由 `warning` 改为 `error`，并同步更新 `MVP_SEVERITY_MATRIX["knowledge_leakage"]["mvp_max"]`。
 6. **§4.2 timeline_consistency V1 升级 error**；MVP 仅 warning。同上路径。
 7. **未建模字段一律 pass**（spec §3.3 / §4.5 收窄）：连续性规则严格按已建模字段生效，未建模字段不报告；Hook Ledger 未落地前 foreshadowing 数据源回退到 `plot_event`。
+8. **ai_trace 套话表是中文默认**（~30 条）；跨语言 / 细分题材（如玄幻特定套话）需扩展 `AI_CLICHES`。
+   接入路径：在 `packages/core/quality/ai_trace.py` 中追加 / 替换 `AI_CLICHES` 元组。
+9. **ai_trace 跨章子信号取最近 3 章**（`PREVIOUS_CHAPTERS_LIMIT=3`）；项目首章（无历史）该子信号降级满分不阻断。
+   接入路径：调整 `ai_trace.PREVIOUS_CHAPTERS_LIMIT`。
 
 ---
 
@@ -169,10 +212,11 @@ class Issue(BaseModel):
 
 所有数字均为"建议值待校准"，**未经首批 golden 章节评测前禁止用作产品口径**：
 
-- §2.1 权重 `plot/character/continuity = 0.20; style/pacing = 0.15; foreshadowing = 0.10`
+- §2.1 overall：七维平均（`plot + character + continuity + style + pacing + foreshadowing + ai_trace) / 7`）
 - Q6：13 字 shingles / 2% 重叠率
 - Q7：每千字 5 marker / 20% 段落首词 / 3.0 标准差 / 1000 字阈值
 - Q8：30% 红线 / 40% 缓冲
+- ai_trace：见 §5.4；三子信号权重 0.40 / 0.35 / 0.25；shingle 窗口 13；跨章取最近 3 章
 - §3.3 扣分表见 `scoring._CONTINUITY_DEDUCTIONS`
 - §3.4/§3.5 风格与节奏常量集中在 `scoring.py` 模块顶
 
@@ -232,12 +276,13 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
 
 - 持久化由 :mod:`packages.core.quality.service` 提供：
   - :class:`QualityService.save_report` —— 把 :class:`QualityReport` 落 ``quality_reports``（含
-    六子分 + ``_meta`` + ``Issue[]``）。
+    七子分 + ``_meta`` + ``Issue[]``）。
   - :class:`QualityService.latest_report` / :class:`QualityService.list_reports` —— 按 chapter /
     project 查询；按 ``created_at`` 降序。
   - :func:`compute_char_stats` —— REQ-Q8 字符数统计（按 ``drafts.version`` 升序、首个版本
     ``len(content)``、后续 ``difflib.SequenceMatcher`` 算 ``replace+insert`` 增量）。
-  - :func:`build_quality_context` —— 现场组装 :class:`QualityContext`（pipeline 与 API 共用）。
+  - :func:`build_quality_context` —— 现场组装 :class:`QualityContext`（pipeline 与 API 共用；
+    自动拉取最近 3 章正文填充 ``previous_drafts`` 供 ai_trace 跨章子信号使用）。
   - :func:`load_reference_texts` / :func:`compute_payoff_history` —— 组装 helper。
 
 ### 11.2 数据库迁移
@@ -272,20 +317,25 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
 ### 11.5 前端入口
 
 - ``apps/web/src/api/endpoints.ts``：``qualityApi.{latest, evaluate, listByProject}``。
-- ``apps/web/src/api/types.ts``：``QualityReport/Issue/Scores/Meta`` 类型。
+- ``apps/web/src/api/types.ts``：``QualityReport/Issue/Scores/Meta`` 类型（``Scores`` 含
+  ``ai_trace`` 字段）。
 - ``apps/web/src/components/QualityPanel.tsx``：章节详情页质量评估面板（数据流见
-  ``apps/web/README.md`` 的「Sprint 6 下半 — 质量评估面板」节）。
-- ``apps/web/src/components/QualityPanel.test.tsx``：6 例覆盖 overall 着色阈值、六子分
-  渲染、issue 分组（payoff 单列）、evaluate 按钮回调、空态。
+  ``apps/web/README.md`` 的「Sprint 6 下半 — 质量评估面板」节）；七子分条形渲染（含
+  ``ai_trace`` 中文标签"AI 痕迹"）。
+- ``apps/web/src/components/QualityPanel.test.tsx``：7 例覆盖 overall 着色阈值、七子分
+  渲染（``quality-subscores.children.length === 7``）、ai_trace 标签与条形、issue
+  分组（payoff 单列）、evaluate 按钮回调、空态。
 
-### 11.6 测试覆盖（Sprint 6 下半增量）
+### 11.6 测试覆盖（Sprint 6 下半增量 + ai_trace 增量）
 
 - ``tests/api/test_quality.py`` —— 8 例：evaluate / latest 404 / list 降序 / list 404 /
   unknown chapter / chapter-commit enforce 阻断 / chapter-commit report 不阻断 / payload
-  完整性（六子分 + _meta）。
+  完整性（七子分 + _meta）。
+- ``tests/unit/quality/test_ai_trace.py`` —— 15 例覆盖子信号 + 集成路径（高分 / 低分 /
+  套话 / 无历史 / 报告含 ai_trace / 七维平均）。
 - ``tests/unit/test_migrations.py`` —— 计数更新到 29（28 business + quality_reports）。
 - ``tests/integration/test_health.py`` —— ``data["tables"]`` 从 28 升到 29。
-- ``apps/web/src/components/QualityPanel.test.tsx`` —— 6 例覆盖前端面板行为。
+- ``apps/web/src/components/QualityPanel.test.tsx`` —— 7 例覆盖前端面板行为。
 
 ---
 

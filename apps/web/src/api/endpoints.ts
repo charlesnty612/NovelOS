@@ -4,6 +4,9 @@ import { api } from './client';
 import { coerceJson } from './client';
 import type {
   Agent,
+  AiCallLogDetail,
+  AiCallLogSummary,
+  AiCallLogTokenUsage,
   CanonDetail,
   CanonSummary,
   Chapter,
@@ -14,6 +17,7 @@ import type {
   CharacterState,
   CharacterUpdatePayload,
   Commit,
+  ContextPreviewResponse,
   Debt,
   DebtCreatePayload,
   DebtUpdatePayload,
@@ -340,4 +344,47 @@ export const referenceApi = {
     api.get<CanonSummary[]>(`/projects/${pid}/canons`),
   getCanon: (canonId: string) => api.get<CanonDetail>(`/canons/${canonId}`),
   deleteCanon: (canonId: string) => api.delete<void>(`/canons/${canonId}`),
+};
+
+// -------------------------------------------------------------- context preview
+// 对应 packages/core/api/routers/workflows.py：
+//   GET /chapters/{cid}/context-preview  —— dry-run，返回分层 token + items
+//   只读、不调 LLM、不写 ai_call_logs。
+export const contextPreviewApi = {
+  preview: (cid: string) =>
+    api.get<ContextPreviewResponse>(`/chapters/${cid}/context-preview`),
+};
+
+// -------------------------------------------------------------- AI call logs
+// 对应 packages/core/api/routers/ai_call_logs.py：
+//   GET  /ai-call-logs        —— 分页摘要（?project_id= &node= &limit= &offset=）
+//   GET  /ai-call-logs/{id}   —— 单条详情（含 input_context_ids + output）
+// 不暴露任何 api_key 字段（后端 schema + 路由白名单 + 前端类型三重防御）。
+function normalizeAiLogSummary(row: AiCallLogSummary): AiCallLogSummary {
+  return {
+    ...row,
+    token_usage: (coerceJson(row.token_usage) as AiCallLogTokenUsage | null) ?? null,
+  };
+}
+function normalizeAiLogDetail(row: AiCallLogDetail): AiCallLogDetail {
+  return {
+    ...normalizeAiLogSummary(row),
+    input_context_ids: Array.isArray(row.input_context_ids) ? row.input_context_ids : [],
+    output:
+      (coerceJson(row.output) as
+        | Record<string, unknown>
+        | unknown[]
+        | string
+        | number
+        | boolean
+        | null) ?? null,
+  };
+}
+export const aiCallLogsApi = {
+  list: (query?: { project_id?: string; node?: string; limit?: number; offset?: number }) =>
+    api.get<AiCallLogSummary[]>('/ai-call-logs', query).then((rows) =>
+      rows.map(normalizeAiLogSummary),
+    ),
+  get: (id: string) =>
+    api.get<AiCallLogDetail>(`/ai-call-logs/${id}`).then(normalizeAiLogDetail),
 };

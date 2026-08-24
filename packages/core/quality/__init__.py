@@ -52,13 +52,14 @@ from .aggregate import (
     formula_hash,
     formula_text,
 )
+from .ai_trace import compute_ai_trace
 from .engine import QualityEngine
 from .issues import MVP_SEVERITY_MATRIX, Issue, Severity, Category, make_issue, loc, mvp_max_severity
 from .models import Issue as IssueModel, QualityContext, QualityReport
 from .payoff import PayoffContext, evaluate as payoff_evaluate
 
 # 暴露常用 guardrails / scorings 便于测试 / 集成
-from . import guardrails, scoring
+from . import ai_trace, guardrails, scoring
 
 # 兼容两种别名
 Issue = IssueModel

@@ -1,10 +1,17 @@
-"""Overall 聚合公式（§2.1）。
+"""Overall 聚合公式（§2.1 + ai_trace 增量）。
 
-按权威文档 ``docs/evaluation/quality-scoring-v0.md`` §2.1：
-
+权威文档 ``docs/evaluation/quality-scoring-v0.md`` §2.1 原口径（六子分加权）：
 ```
 overall = round(0.20*plot + 0.20*character + 0.20*continuity +
                 0.15*style + 0.15*pacing + 0.10*foreshadowing)
+```
+
+任务书「AI 痕迹（ai_trace）维度」扩展为七子分后，公式改为**七维平均**（任务书拍板；
+不保留旧版加权和，原因是 ai_trace 是新增维度，权重重新分配会引入主观偏好，
+而平均权重对作者/平台解释成本最低、易对齐验收基线）：
+
+```
+overall = round((plot + character + continuity + style + pacing + foreshadowing + ai_trace) / 7)
 ```
 
 规则：
@@ -26,21 +33,22 @@ from .issues import Issue, make_issue
 
 
 # ============================================================================
-# 权重（§2.1 固定；不得在调用方覆盖）
+# 权重（七子分固定；不得在调用方覆盖）
 # ============================================================================
 
 WEIGHTS: dict[str, float] = {
-    "plot": 0.20,
-    "character": 0.20,
-    "continuity": 0.20,
-    "style": 0.15,
-    "pacing": 0.15,
-    "foreshadowing": 0.10,
+    "plot": 1.0,
+    "character": 1.0,
+    "continuity": 1.0,
+    "style": 1.0,
+    "pacing": 1.0,
+    "foreshadowing": 1.0,
+    "ai_trace": 1.0,
 }
-"""六子分聚合权重，与 spec §2.1 字面对齐。"""
+"""七子分聚合权重（七维平均：每个 1.0，除以 7）。"""
 
 SUBSCORE_NAMES: tuple[str, ...] = tuple(WEIGHTS.keys())
-"""六子分固定顺序。"""
+"""七子分固定顺序。"""
 
 
 # ============================================================================
@@ -49,18 +57,18 @@ SUBSCORE_NAMES: tuple[str, ...] = tuple(WEIGHTS.keys())
 
 
 _FORMULA_TEXT: str = (
-    "overall = round(0.20*plot + 0.20*character + 0.20*continuity + "
-    "0.15*style + 0.15*pacing + 0.10*foreshadowing)"
+    "overall = round((plot + character + continuity + style + pacing + "
+    "foreshadowing + ai_trace) / 7)"
 )
 
 
 def formula_hash() -> str:
-    """返回 §2.1 公式字符串的 sha256 前 16 位 hex。"""
+    """返回 §2.1 + ai_trace 公式字符串的 sha256 前 16 位 hex。"""
     return hashlib.sha256(_FORMULA_TEXT.encode("utf-8")).hexdigest()[:16]
 
 
 def formula_text() -> str:
-    """返回 §2.1 公式原文（仅供自检 / 文档化使用）。"""
+    """返回 overall 公式原文（仅供自检 / 文档化使用）。"""
     return _FORMULA_TEXT
 
 
@@ -116,16 +124,18 @@ def compute_overall(
     if blocked or missing:
         return 0, issues
 
-    # 3) 加权聚合
+    # 3) 七维平均（任务书拍板；详见 _FORMULA_TEXT 注释）
     total = 0.0
-    for name, w in WEIGHTS.items():
+    count = 0
+    for name in SUBSCORE_NAMES:
         v = subscores.get(name)
         if not isinstance(v, (int, float)):
             # 防御性：这里理论上已被前面的 missing 处理过滤掉
             return 0, issues
-        total += w * float(v)
+        total += float(v)
+        count += 1
 
-    overall = int(round(total))
+    overall = int(round(total / count))
     return max(0, min(100, overall)), issues
 
 

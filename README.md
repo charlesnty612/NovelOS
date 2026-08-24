@@ -37,7 +37,7 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0006，31 张业务表）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0007，32 张业务表）
 tests/                   pytest（unit / integration / workflow / api / evals）
 scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
 docs/                    设计文档、PRD、实现计划（docs/impl/IMPLEMENTATION-PLAN-v0.md）
@@ -55,7 +55,7 @@ jsonschema / httpx；测试另需 pytest / ruff）。
 # 1) 安装依赖
 pip install -e ".[dev]"
 
-# 2) 执行数据库迁移（生成 data/novelos.db；31 张业务表 + _migrations）
+# 2) 执行数据库迁移（生成 data/novelos.db；32 张业务表 + _migrations）
 python scripts/migrate.py
 
 # 3) 前端构建（构建产物 apps/web/dist，后端会自动托管）
@@ -82,7 +82,7 @@ python -m packages.core.api.main
 ## 测试
 
 ```bash
-# 后端全量（当前基线 409 passed）
+# 后端全量（当前基线 469 passed）
 python -m pytest tests/ -q
 
 # Golden 回归 eval（当前 1/1）
@@ -94,7 +94,7 @@ python scripts/smoke_e2e.py
 # 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
 python scripts/real_llm_e2e.py
 
-# 前端单测（vitest；当前 141）
+# 前端单测（vitest；当前 150）
 cd apps/web && npm run test
 ```
 
@@ -114,7 +114,7 @@ cd apps/web && npm run test
 
 ## 版本与更新日志
 
-当前版本 **V1.0.0**（git tag `v1.0.0`）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
+当前版本 **V1.2.0**（git tag `v1.2.0`）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x 路线登记在同文件
 「Known Issues / 路线登记」一节。
 

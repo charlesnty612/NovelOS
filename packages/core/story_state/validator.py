@@ -26,6 +26,19 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+# Sprint 14：resolved_hooks 状态机迁移校验。
+# 设计要点（任务书 §B）：
+# - 仅校验「端点合法性」（from_status / to_status 必须在 PRD §21 五态枚举内）；
+#   schema 已校验端点枚举，此处为业务兜底（防止 schema 放宽时仍守住语义）。
+# - 不做严格白名单校验（如 OPEN→RESOLVED）——observer 可在任何 planted 状态直接结算
+#   伏笔；这是 state-delta-v0 §2.5.3 的实际口径（与 domain/ledger.HOOK_ALLOWED_NEXT
+#   人工维护口径不一致；后者是为人工编辑加保守约束；observer 自动抽取允许更宽）。
+# - from_status=null 视为「不校验迁移」——回滚 / 跨分支场景由 service 兜底；
+#   schema 允许 null（state-delta-v0 §2.5.3）。
+# - ABANDONED 是终态，**显式拒绝 from_status==ABANDONED 且 to_status≠ABANDONED**——
+#   防止 observer 误输出「复活已放弃伏笔」（业务上不应发生）。
+_HOOK_VALID_STATUSES: tuple[str, ...] = ("OPEN", "ACTIVE", "ESCALATED", "RESOLVED", "ABANDONED")
+
 # 指向 docs/state-model/schemas/state-delta.schema.json
 # 路径以项目根为基准；服务运行 cwd 即项目根（uvicorn / pytest 启动目录一致）。
 _DEFAULT_SCHEMA_PATH = (
@@ -183,6 +196,40 @@ def _business_errors(delta: dict[str, Any]) -> list[str]:
                 )
             else:
                 seen[cid] = f"{array_name}[{idx}]"
+
+    # Sprint 14：resolved_hooks 状态机迁移校验（任务书 §B）。
+    # 校验语义：
+    # - to_status 必须 ∈ PRD §21 五态枚举；不在枚举 → reject。
+    # - from_status=null → 跳过（回滚 / 跨分支场景）。
+    # - from_status 非 null 时若不在枚举 → reject。
+    # - from_status == 'ABANDONED' 且 to_status != 'ABANDONED' → reject（已放弃不可复活）。
+    # - 其他（如 OPEN→RESOLVED / ESCALATED→OPEN）合法；observer 可在任何 planted 状态直接结算。
+    valid_hook_statuses = set(_HOOK_VALID_STATUSES)
+    for idx, item in enumerate(delta.get("resolved_hooks") or []):
+        if not isinstance(item, dict):
+            continue
+        hook_id = item.get("hook_id")
+        from_status = item.get("from_status")
+        to_status = item.get("to_status")
+        # from_status null → 跳过
+        if from_status is None:
+            continue
+        if not isinstance(from_status, str) or from_status not in valid_hook_statuses:
+            out.append(
+                f"[business] resolved_hooks[{idx}] (hook_id={hook_id!r}).from_status "
+                f"{from_status!r} 不在合法枚举 {sorted(valid_hook_statuses)}"
+            )
+            continue
+        if not isinstance(to_status, str) or to_status not in valid_hook_statuses:
+            out.append(
+                f"[business] resolved_hooks[{idx}] (hook_id={hook_id!r}).to_status "
+                f"{to_status!r} 不在合法枚举 {sorted(valid_hook_statuses)}"
+            )
+            continue
+        if from_status == "ABANDONED" and to_status != "ABANDONED":
+            out.append(
+                f"[business] resolved_hooks[{idx}] (hook_id={hook_id!r}) ABANDONED 不可复活为 {to_status!r}"
+            )
 
     return out
 

@@ -104,6 +104,7 @@ class QualityService:
             "style": dump.get("style"),
             "pacing": dump.get("pacing"),
             "foreshadowing": dump.get("foreshadowing"),
+            "ai_trace": dump.get("ai_trace"),
             "_meta": dump.get("_meta", {}),
         }
         issues = dump.get("issues", []) or []
@@ -405,6 +406,66 @@ def _read_chapter_number(db_path: str | Path, chapter_id: str) -> int:
     return int(row["number"]) if row else 0
 
 
+def _read_previous_drafts(
+    db_path: str | Path,
+    project_id: str,
+    chapter_id: str,
+    *,
+    limit: int = 3,
+) -> list[str]:
+    """取同项目最近 N 章最新一份 draft 的 content（按章节 number 降序、不含当前章）。
+
+    - 用于 ai_trace 跨章重复子信号；engine 不直接读 DB，由本 helper 现场拉取。
+    - 当前章节没有 number 时（如刚创建未入库），视为无历史章节 → 返回空列表。
+    - 空 draft / 缺 drafts 表的 row → 跳过该章。
+    """
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT number FROM chapters WHERE chapter_id = ?",
+            (chapter_id,),
+        )
+        row = cur.fetchone()
+        current_number = int(row["number"]) if row else 0
+        if current_number <= 0:
+            return []
+        rows = conn.execute(
+            """
+            SELECT c.chapter_id FROM chapters c
+            WHERE c.project_id = ? AND c.number < ?
+            ORDER BY c.number DESC LIMIT ?
+            """,
+            (project_id, current_number, int(limit)),
+        ).fetchall()
+        chap_ids = [r["chapter_id"] for r in rows]
+        if not chap_ids:
+            return []
+        # 一次取所有章节最新一份 draft；drafts 表 chapter_id + version
+        placeholders = ",".join("?" for _ in chap_ids)
+        draft_rows = conn.execute(
+            f"""
+            SELECT d.chapter_id, d.content FROM drafts d
+            INNER JOIN (
+                SELECT chapter_id, MAX(version) AS v FROM drafts
+                WHERE chapter_id IN ({placeholders}) GROUP BY chapter_id
+            ) m ON m.chapter_id = d.chapter_id AND m.v = d.version
+            """,
+            chap_ids,
+        ).fetchall()
+    finally:
+        conn.close()
+    out: list[str] = []
+    # 按章节 number 降序（chap_ids 已是 number desc）
+    content_by_id = {
+        r["chapter_id"]: (r["content"] or "") for r in draft_rows
+    }
+    for cid in chap_ids:
+        c = content_by_id.get(cid, "")
+        if c:
+            out.append(c)
+    return out
+
+
 def build_quality_context(
     db_path: str | Path,
     *,
@@ -430,6 +491,7 @@ def build_quality_context(
     reference_texts = load_reference_texts(db_path, project_id)
     payoff_history = compute_payoff_history(db_path, project_id, limit=5)
     chapter_number = _read_chapter_number(db_path, chapter_id)
+    previous_drafts = _read_previous_drafts(db_path, project_id, chapter_id, limit=3)
 
     return QualityContext(
         chapter_id=chapter_id,
@@ -443,5 +505,6 @@ def build_quality_context(
         whitelist=[],
         ai_chars=ai_chars,
         human_chars=human_chars,
+        previous_drafts=previous_drafts,
         run_id=run_id,
     )

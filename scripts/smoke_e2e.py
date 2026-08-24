@@ -5,7 +5,7 @@ project → character → model_config → chapter → 四工作流
 （plan → write → review → commit）的端到端链路，断言：
 
 1. GET /                                        → 200 + HTML（SPA 托管 apps/web/dist）
-2. GET /api/health                              → 200，tables=31（31 业务表 + _migrations = 32 总表）
+2. GET /api/health                              → 200，tables=32（32 业务表 + _migrations = 33 总表）
 3. POST /api/projects                           → 201 + project_id
 4. POST /api/projects/{pid}/characters          → 201 + character_id（1 个主角）
 5. POST /api/projects/{pid}/world-rules         → 201 + world_rule_id（1 条世界规则；PRD §110 第 3 步「创建世界」）
@@ -64,7 +64,7 @@ ENDPOINT_READY_TIMEOUT_S = 30
 HTTP_TIMEOUT_S = 60.0
 
 # health.tables = 业务表数（31 业务表；含 _migrations 总表 32，health 返回减 1 后的业务表数）
-EXPECTED_BUSINESS_TABLES = 31
+EXPECTED_BUSINESS_TABLES = 32  # Sprint 14：0007_chapter_summaries.sql 加 1 表（chapter_summaries）
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +361,7 @@ def run_smoke() -> int:
         except AssertionError as e:
             failures.append(f"GET /: {e}")
 
-        # ---- (2) GET /api/health → 200，tables=31（31 业务表 + _migrations = 32 总表）
+        # ---- (2) GET /api/health → 200，tables=32（32 业务表 + _migrations = 33 总表）
         try:
             r = client.get("/api/health")
             _assert(r.status_code == 200, f"/api/health status={r.status_code}")

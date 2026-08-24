@@ -32,6 +32,7 @@ const baseReport: QualityReport = {
     style: 80,
     pacing: 75,
     foreshadowing: 70,
+    ai_trace: 86,
     _meta: {
       scoring_version: 'quality-scoring-v0',
       llm_judge: 'deferred',
@@ -132,7 +133,7 @@ describe('QualityPanel', () => {
     );
   });
 
-  it('renders six subscores with bars', () => {
+  it('renders seven subscores with bars', () => {
     render(
       <QualityPanel
         chapterId="ch_1"
@@ -142,13 +143,31 @@ describe('QualityPanel', () => {
         onEvaluated={() => {}}
       />,
     );
-    expect(screen.getByTestId('quality-subscores').children.length).toBe(6);
+    expect(screen.getByTestId('quality-subscores').children.length).toBe(7);
     expect(screen.getByTestId('quality-sub-plot')).toBeInTheDocument();
     const plotFill = screen.getByTestId('quality-sub-plot').querySelector(
       '.quality-subscore__fill',
     ) as HTMLElement;
     expect(plotFill).toBeTruthy();
     expect(plotFill.style.width).toBe('90%'); // plot=90
+  });
+
+  it('renders ai_trace subscore with label "AI 痕迹"', () => {
+    render(
+      <QualityPanel
+        chapterId="ch_1"
+        report={baseReport}
+        loading={false}
+        error={null}
+        onEvaluated={() => {}}
+      />,
+    );
+    expect(screen.getByTestId('quality-sub-ai_trace')).toBeInTheDocument();
+    expect(screen.getByTestId('quality-sub-ai_trace')).toHaveTextContent('AI 痕迹');
+    const fill = screen.getByTestId('quality-sub-ai_trace').querySelector(
+      '.quality-subscore__fill',
+    ) as HTMLElement;
+    expect(fill.style.width).toBe('86%'); // ai_trace=86
   });
 
   it('groups payoff issues under 爽感 section; others under Issues', () => {

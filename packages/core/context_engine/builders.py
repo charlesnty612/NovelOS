@@ -261,6 +261,190 @@ def _recent_prose_tail(db_path: str | Path, chapter_id: str, length: int = 500) 
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Sprint 14：摘要链 + 前章尾段 + 开放伏笔清单（Context Engine L1 扩展）
+# ---------------------------------------------------------------------------
+
+# 摘要链最近章数；超预算截断时优先砍最旧摘要。
+_RECENT_SUMMARY_CAP = 5
+# 摘要每条字符上限（与 chapter_summaries.summary 列口径对齐）。
+_RECENT_SUMMARY_PER_CHARS = 200
+# 开放伏笔清单最大条数（按 overdue 优先 + 重要性降序）。
+_OPEN_HOOKS_CAP = 20
+# overdue 阈值：引入章节距当前 chapter_no > 阈值即视为逾期；任务书给死 30。
+# 后续若需项目可配，由 project_settings 表 + 读取 fallback 至此常量（沿用现有常量+README 声明）。
+_FORESHADOW_OVERDUE_CHAPTERS = 30
+# hook 状态机语义分组（planted = OPEN/ACTIVE/ESCALATED；paid_off = RESOLVED）。
+# ABANDONED 不进开放清单。
+_PLANTED_HOOK_STATUSES = ("OPEN", "ACTIVE", "ESCALATED")
+
+
+def _recent_chapter_summaries(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    current_chapter_no: int | None,
+) -> list[dict[str, Any]]:
+    """取当前章之前最近 ``_RECENT_SUMMARY_CAP`` 章的摘要（chapter_no 倒序）。
+
+    返回 ``[{"chapter_no": int, "summary": str, "chapter_id": str}]``。
+    ``current_chapter_no`` 用于排除当前章自身（避免「自己摘要自己」）；传 None 时不过滤。
+    超预算截断在调用方（按总 token 配额）执行，本函数只负责取数。
+    """
+    sql = """
+        SELECT chapter_id, chapter_no, summary
+        FROM chapter_summaries
+        WHERE project_id = ?
+          AND {extra}
+        ORDER BY chapter_no DESC
+        LIMIT ?
+    """.format(extra=("(chapter_no < ?)" if current_chapter_no is not None else "1=1"))
+    params: list[Any] = [project_id]
+    if current_chapter_no is not None:
+        params.append(int(current_chapter_no))
+    params.append(_RECENT_SUMMARY_CAP)
+    rows = conn.execute(sql, params).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        row_d = dict(r)
+        text = (row_d.get("summary") or "").strip()
+        if not text:
+            continue
+        out.append({
+            "chapter_id": row_d["chapter_id"],
+            "chapter_no": int(row_d["chapter_no"]),
+            "summary": text[:_RECENT_SUMMARY_PER_CHARS],
+        })
+    return out
+
+
+def _open_foreshadow_list(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    current_chapter_no: int | None,
+) -> list[dict[str, Any]]:
+    """开放伏笔清单（planted 状态伏笔）。
+
+    排序：
+    1. overdue 优先（逾期伏笔最需要提醒，任务书 §B 给死）；
+    2. 然后按 importance DESC；
+    3. 最后按 introduced_chapter_no ASC（埋设更早的优先）。
+
+    返回 ``[{"hook_id": str, "name": str, "status": str,
+           "introduced_chapter_no": int|None, "importance": float,
+           "overdue": bool, "chapters_since_introduced": int|None}]``。
+    """
+    placeholders = ",".join("?" for _ in _PLANTED_HOOK_STATUSES)
+    sql = f"""
+        SELECT h.hook_id, h.name, h.status, h.importance, h.introduced_chapter_id,
+               ch.number AS introduced_chapter_no
+        FROM hooks h
+        LEFT JOIN chapters ch ON ch.chapter_id = h.introduced_chapter_id
+        WHERE h.project_id = ?
+          AND h.status IN ({placeholders})
+        ORDER BY h.importance DESC, h.created_at ASC
+        LIMIT ?
+    """
+    params: list[Any] = [project_id, *_PLANTED_HOOK_STATUSES, _OPEN_HOOKS_CAP * 3]
+    rows = conn.execute(sql, params).fetchall()
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        intro_no = d.get("introduced_chapter_no")
+        intro_no_int = int(intro_no) if intro_no is not None else None
+        chapters_since: int | None = None
+        overdue = False
+        if intro_no_int is not None and current_chapter_no is not None:
+            chapters_since = max(0, int(current_chapter_no) - intro_no_int)
+            overdue = chapters_since > _FORESHADOW_OVERDUE_CHAPTERS
+        out.append({
+            "hook_id": d["hook_id"],
+            "name": d.get("name") or d["hook_id"],
+            "status": d.get("status") or "OPEN",
+            "introduced_chapter_no": intro_no_int,
+            "importance": float(d.get("importance") or 0.5),
+            "overdue": overdue,
+            "chapters_since_introduced": chapters_since,
+        })
+
+    # 排序：overdue 优先 + importance DESC + introduced 早的优先
+    out.sort(
+        key=lambda x: (
+            0 if x["overdue"] else 1,
+            -float(x["importance"]),
+            int(x["introduced_chapter_no"]) if x["introduced_chapter_no"] is not None else 1 << 30,
+        ),
+    )
+    return out[:_OPEN_HOOKS_CAP]
+
+
+def _previous_chapter_tail(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    current_chapter_no: int,
+    length: int = 300,
+) -> dict[str, Any]:
+    """取前一章（chapter_no 小一号）的最新 draft 末尾 length 字（用于 L1 "前章尾段原文"）。
+
+    返回 ``{"chapter_no": int, "chapter_id": str, "tail_text": str}``；
+    无前章 → 空 dict（与 _recent_prose_tail 行为对齐，避免上游判空复杂度）。
+    """
+    prev = conn.execute(
+        """
+        SELECT chapter_id, number FROM chapters
+        WHERE project_id = ? AND number < ?
+        ORDER BY number DESC LIMIT 1
+        """,
+        (project_id, current_chapter_no),
+    ).fetchone()
+    if prev is None:
+        return {}
+    pd = dict(prev)
+    draft = conn.execute(
+        """
+        SELECT content FROM drafts
+        WHERE chapter_id = ?
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (pd["chapter_id"],),
+    ).fetchone()
+    if draft is None:
+        return {}
+    text = (dict(draft).get("content") or "")
+    if not text:
+        return {}
+    return {
+        "chapter_no": int(pd["number"]),
+        "chapter_id": pd["chapter_id"],
+        "tail_text": text[-length:] if len(text) > length else text,
+    }
+
+
+def _truncate_summaries_to_token_budget(
+    items: list[dict[str, Any]],
+    *,
+    available_tokens: int,
+    token_divisor: int = 4,
+) -> tuple[list[dict[str, Any]], bool]:
+    """按 token 预算截断摘要链。
+
+    策略：先砍最旧摘要（index 末尾 → 即 chapter_no 最小）。
+    返回 ``(items_kept, truncated_bool)``。
+    """
+    if available_tokens <= 0:
+        return [], bool(items)
+    kept = list(items)
+    while kept:
+        cost = max(1, len(json.dumps(kept, ensure_ascii=False)) // token_divisor)
+        if cost <= available_tokens:
+            return kept, len(kept) < len(items)
+        kept.pop()  # 砍最旧（最末尾）
+    return kept, bool(items)
+
+
 def _director_plan_summary(plan_json: dict[str, Any]) -> dict[str, Any]:
     """从 chapters.plan_json 抽取 director_plan_summary（给 observer 用）。"""
     return {
@@ -394,6 +578,26 @@ def build_director_input(
         hook_excerpt = _hook_ledger_excerpt(conn, project_id)
         debt_excerpt = _narrative_debt_excerpt(conn, project_id)
         reference_canon_inject, reference_canon_audit = _reference_canon_excerpt(conn, project_id)
+        # Sprint 14：摘要链 + 前章尾段 + 开放伏笔清单（任务书 §A / §B）。
+        # recent_chapter_summaries 按 chapter_no 倒序，最多 _RECENT_SUMMARY_CAP；
+        # open_foreshadow_list 按 overdue 优先 + importance DESC；含 overdue 计算属性。
+        # previous_chapter_tail 是 L1 「前章尾段原文」补充（与 writer.recent_prose 互补，
+        # director 用以规划下章衔接）。三源均按 token 预算截断：摘要链按"先砍最旧"。
+        current_chapter_no = int(chapter.get("number") or 0)
+        recent_summaries_raw = _recent_chapter_summaries(
+            conn, project_id, current_chapter_no=current_chapter_no or None,
+        )
+        # MVP token 预算：摘要链单独按 800 token 上限截断（≈ 3200 字符；保守避免抢 L2 配额）。
+        recent_summaries, _ = _truncate_summaries_to_token_budget(
+            recent_summaries_raw, available_tokens=800,
+        )
+        open_foreshadow = _open_foreshadow_list(
+            conn, project_id, current_chapter_no=current_chapter_no or None,
+        )
+        previous_chapter_tail = _previous_chapter_tail(
+            conn, project_id=project_id, current_chapter_no=current_chapter_no,
+            length=300,
+        )
     finally:
         conn.close()
 
@@ -443,6 +647,12 @@ def build_director_input(
         payload["reference_canon"] = reference_canon_inject
     if reference_canon_audit is not None:
         payload["_reference_canon_consumed"] = reference_canon_audit
+    # Sprint 14：摘要链 + 前章尾段 + 开放伏笔清单。
+    # 沿用 agent-contracts §3.1「不在权威契约内」的扩展键惯例；无 chapter_summaries 行 /
+    # 无 planted 状态伏笔 / 无前章 → 给空列表 / 空 dict，调用方按空态处理。
+    payload["recent_chapter_summaries"] = recent_summaries
+    payload["previous_chapter_tail"] = previous_chapter_tail
+    payload["open_foreshadow_list"] = open_foreshadow
 
     return payload
 

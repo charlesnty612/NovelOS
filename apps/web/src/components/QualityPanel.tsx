@@ -10,7 +10,8 @@ type SubscoreKey =
   | 'continuity'
   | 'style'
   | 'pacing'
-  | 'foreshadowing';
+  | 'foreshadowing'
+  | 'ai_trace';
 
 const SUBSCORE_KEYS: SubscoreKey[] = [
   'plot',
@@ -19,6 +20,7 @@ const SUBSCORE_KEYS: SubscoreKey[] = [
   'style',
   'pacing',
   'foreshadowing',
+  'ai_trace',
 ];
 
 const SUBSCORE_LABELS: Record<SubscoreKey, string> = {
@@ -28,6 +30,7 @@ const SUBSCORE_LABELS: Record<SubscoreKey, string> = {
   style: '风格',
   pacing: '节奏',
   foreshadowing: '伏笔',
+  ai_trace: 'AI 痕迹',
 };
 
 function overallClass(score: number): string {

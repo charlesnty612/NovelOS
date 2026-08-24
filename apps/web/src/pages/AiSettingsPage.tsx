@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import {
   agentsApi,
   modelConfigsApi,
@@ -38,6 +38,13 @@ export function AiSettingsPage() {
         模型路由（按 capability 选 provider）与 Agent prompt 版本管理。本期页面挂在项目
         路由下，仅展示该 scope 内可配置项；模型配置是项目无关的全局表，这里仍展示完整列表。
       </p>
+
+      <InfoBanner>
+        <span data-testid="ai-settings-logs-link">
+          想查看每次 AI 调用的 prompt/response？前往{' '}
+          <Link to="/ai-logs">AI 调用日志</Link>。
+        </span>
+      </InfoBanner>
 
       <div className="panel-grid">
         <ModelConfigsPanel />
