@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from packages.core.quality.payoff import evaluate as payoff_evaluate, PayoffContext
+from packages.core.quality.payoff import PayoffContext
+from packages.core.quality.payoff import evaluate as payoff_evaluate
 
 
 def _ctx(

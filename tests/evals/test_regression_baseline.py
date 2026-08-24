@@ -28,7 +28,6 @@ from tests.evals.regression_baseline import (
 )
 from tests.evals.runner import RunResult
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------

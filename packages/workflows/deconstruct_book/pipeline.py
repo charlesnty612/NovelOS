@@ -52,7 +52,6 @@ from packages.core.ids import new_id, now_iso
 from packages.core.quality.guardrails import compute_shingles
 from packages.core.workflow_runtime.engine import WorkflowNode
 
-
 # =============================================================================
 # 常量
 # =============================================================================

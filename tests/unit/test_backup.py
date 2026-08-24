@@ -30,7 +30,6 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
 
-
 # ---------------------------------------------------------------------------
 # fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -893,7 +892,6 @@ def test_export_filters_timeline_events_by_plot_event_project(db_path: str) -> N
     """timeline_events 间接过滤：源项目 plot_event 关联的 timeline_events 应在包内，
     无关项目的 timeline_events 应被剔除。
     """
-    now = now_iso()
     pid = _seed_minimal_project(db_path)
 
     # 源项目造一个 plot_event + 两条 timeline_events（都挂到源 plot_event）

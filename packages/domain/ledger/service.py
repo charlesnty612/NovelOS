@@ -40,8 +40,9 @@ from packages.core.ids import new_id, now_iso
 # who_knows 三态语义与 JSON 列序列化与 canon 写透统一。
 from packages.core.story_state.write_helpers import (
     decode_who_knows as _decode_who_knows,
+)
+from packages.core.story_state.write_helpers import (
     dump_json_or_null as _dump_json_or_null,
-    now_iso_for_db,
 )
 
 from .models import (

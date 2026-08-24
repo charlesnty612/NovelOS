@@ -17,8 +17,8 @@ from packages.core.agent_runtime.structured_output import (
     OBSERVER_FORBIDDEN_KEYS,
     extract_json,
     strip_code_fence,
-    strip_think_blocks,
     strip_observer_violations,
+    strip_think_blocks,
     validate_contract,
 )
 

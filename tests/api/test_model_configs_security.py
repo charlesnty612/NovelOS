@@ -27,7 +27,6 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 from packages.core.model_router import ModelNotConfiguredError, ModelRouter
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

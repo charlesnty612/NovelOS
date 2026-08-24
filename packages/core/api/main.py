@@ -26,7 +26,7 @@ from packages.core.config import Settings, get_settings
 from packages.core.db import apply_migrations
 from packages.core.logging_config import configure_logging, get_logger
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
 log = get_logger("novelos.api")
 
 

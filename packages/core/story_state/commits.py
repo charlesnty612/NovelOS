@@ -23,15 +23,13 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
-from typing import Any
 
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 
 from .applier import apply_delta
-from .branches import ensure_branch, resolve_branch, branch_current_state
+from .branches import branch_current_state, ensure_branch, resolve_branch
 from .deltas import (
     build_inverse_delta,
     high_risk_change_ids,

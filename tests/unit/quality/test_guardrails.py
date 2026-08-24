@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 from packages.core.quality import guardrails as g
-from packages.core.quality.issues import Issue
-
 
 # ============================================================================
 # helpers

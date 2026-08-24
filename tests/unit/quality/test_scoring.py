@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from packages.core.quality.issues import Issue
 from packages.core.quality.scoring import (
     score_character,
     score_continuity,
@@ -13,7 +14,6 @@ from packages.core.quality.scoring import (
     score_plot,
     score_style,
 )
-from packages.core.quality.issues import Issue
 
 
 def _delta(new_events=None, character_changes=None, new_hooks=None, resolved_hooks=None):

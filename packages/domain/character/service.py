@@ -33,20 +33,22 @@ from pathlib import Path
 
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
+from packages.core.story_state.write_helpers import (
+    decode_who_knows as _load_who_knows,
+)
 
 # V2.0 Wave B：双写面共享写入助手（与 write_through 同源）
 from packages.core.story_state.write_helpers import (
     dump_json as _dump_json,
+)
+from packages.core.story_state.write_helpers import (
     dump_json_or_null as _dump_json_or_null,
-    decode_who_knows as _load_who_knows,
-    now_iso_for_db,
 )
 
 from .models import (
     CharacterCreate,
     CharacterUpdate,
 )
-
 
 # V2.0 Wave B 任务二：触发键助手（aliases 解析 + inject_mode 三态 fallback）。
 # 与 packages/core/context_engine/builders._load_aliases / _load_inject_mode 同源语义，

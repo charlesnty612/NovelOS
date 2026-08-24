@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from packages.core.quality import QualityEngine, QualityContext
+from packages.core.quality import QualityContext, QualityEngine
 
 
 def _full_delta(chapter_id: str = "ch_001", extra: dict = None) -> dict:
@@ -42,7 +42,19 @@ def _full_delta(chapter_id: str = "ch_001", extra: dict = None) -> dict:
                 "risk_level": "LOW",
             }
         ],
-        "resolved_hooks": [{"change_id": "rh1", "op": "update", "target_id": "h1", "hook_id": "h1", "to_status": "RESOLVED", "payoff_summary": "钩子已结算", "confidence": 1.0, "evidence": {"chapter_id": chapter_id, "excerpt": "结算"}, "risk_level": "LOW"}],
+        "resolved_hooks": [
+            {
+                "change_id": "rh1",
+                "op": "update",
+                "target_id": "h1",
+                "hook_id": "h1",
+                "to_status": "RESOLVED",
+                "payoff_summary": "钩子已结算",
+                "confidence": 1.0,
+                "evidence": {"chapter_id": chapter_id, "excerpt": "结算"},
+                "risk_level": "LOW",
+            }
+        ],
         "new_hooks": [],
         "debt_changes": [],
     }

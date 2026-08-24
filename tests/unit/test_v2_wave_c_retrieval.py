@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from packages.core.context_engine.builders import (
     _cache_reset,
     build_director_input,
@@ -299,7 +297,7 @@ def test_rebuild_index_full(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     for n in range(3):
-        cid = _insert_chapter(db_path, pid, n + 1, content=f"古镜在章节{n+1}")
+        _ = _insert_chapter(db_path, pid, n + 1, content=f"古镜在章节{n+1}")
     n = rebuild_index(db_path)
     assert n == 3
     hits = search(db_path, pid, "古镜", limit=3)
@@ -310,8 +308,8 @@ def test_rebuild_index_project_scoped(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid_a = _insert_project(db_path, "A")
     pid_b = _insert_project(db_path, "B")
-    cid_a = _insert_chapter(db_path, pid_a, 1, content="古镜")
-    cid_b = _insert_chapter(db_path, pid_b, 1, content="古剑")
+    _ = _insert_chapter(db_path, pid_a, 1, content="古镜")  # 仅需副作用：建章待索引
+    _ = _insert_chapter(db_path, pid_b, 1, content="古剑")  # 仅需副作用：在 pid_b 建章
     n = rebuild_index(db_path, project_id=pid_a)
     assert n == 1
     # 项目 A 命中
@@ -405,7 +403,7 @@ def test_preview_shows_recalled_passages(tmp_path: Path):
         plan_json='{"chapter_goal": "古镜再次觉醒"}',
     )
     preview = preview_context(db_path, pid, cid_target)
-    l1 = next(l for l in preview["layers"] if l["id"] == "L1")
+    l1 = next(layer for layer in preview["layers"] if layer["id"] == "L1")
     recall_items = [it for it in l1["items"] if it["kind"] == "recalled_passage"]
     assert len(recall_items) >= 1
     for it in recall_items:
@@ -445,7 +443,15 @@ def test_assembly_cache_invalidate_when_state_version_changes(tmp_path: Path, mo
 
     def fake_get_current_state(self, project_id, *, branch_id=None):
         version_box["v"] += 1  # 每次调用都 +1，模拟 state_version 推进
-        return {"state_version": version_box["v"], "characters": [], "world": {}, "events": [], "hooks": [], "debt": [], "knowledge": {}}
+        return {
+            "state_version": version_box["v"],
+            "characters": [],
+            "world": {},
+            "events": [],
+            "hooks": [],
+            "debt": [],
+            "knowledge": {},
+        }
 
     monkeypatch.setattr(
         svc_mod.StoryStateService, "get_current_state", fake_get_current_state,
@@ -469,7 +475,15 @@ def test_writer_cache_invalidated_on_state_version_change(tmp_path: Path, monkey
 
     def fake_get_current_state(self, project_id, *, branch_id=None):
         version_box["v"] += 1
-        return {"state_version": version_box["v"], "characters": [], "world": {}, "events": [], "hooks": [], "debt": [], "knowledge": {}}
+        return {
+            "state_version": version_box["v"],
+            "characters": [],
+            "world": {},
+            "events": [],
+            "hooks": [],
+            "debt": [],
+            "knowledge": {},
+        }
 
     monkeypatch.setattr(
         svc_mod.StoryStateService, "get_current_state", fake_get_current_state,
@@ -493,11 +507,18 @@ def test_assembly_cache_thread_safe_basic(tmp_path: Path, monkeypatch):
     cid = _insert_chapter(db_path, pid, 1, content="", plan_json="{}")
     _cache_reset()
 
-    from packages.core.context_engine.builders import _cache_get
     from packages.core.story_state import service as svc_mod
 
     def fake_get_current_state(self, project_id, *, branch_id=None):
-        return {"state_version": 1, "characters": [], "world": {}, "events": [], "hooks": [], "debt": [], "knowledge": {}}
+        return {
+            "state_version": 1,
+            "characters": [],
+            "world": {},
+            "events": [],
+            "hooks": [],
+            "debt": [],
+            "knowledge": {},
+        }
 
     monkeypatch.setattr(
         svc_mod.StoryStateService, "get_current_state", fake_get_current_state,
@@ -657,7 +678,7 @@ def test_chapter_commit_invalidate_clears_cache(tmp_path: Path, monkeypatch):
         },
     )
 
-    p1 = build_director_input(db_path, pid, cid, author_intent="v1")
+    _ = build_director_input(db_path, pid, cid, author_intent="v1")  # 仅需副作用：写缓存
     assert any(k[0] == pid for k in cb._assembly_cache), "应有缓存键"
 
     # 显式调失效（模拟 _commit_node 末尾的兜底调用）
@@ -672,8 +693,9 @@ def test_chapter_commit_node_source_calls_invalidate(tmp_path: Path):
     不依赖完整 workflow 跑通（commit_delta 涉及多处 FK + 7 数组完整性，
     不在缓存测试聚焦范围）。改为源码静态检查 + 模块级 spy 验证调用链。
     """
-    from packages.workflows.chapter_commit import pipeline as cp
     import inspect
+
+    from packages.workflows.chapter_commit import pipeline as cp
 
     src = inspect.getsource(cp._commit_node)
     assert "_invalidate_cache_for_chapter" in src, (
@@ -695,8 +717,8 @@ def test_chapter_commit_node_invalidates_cache_at_runtime(tmp_path: Path, monkey
     _commit_node 并断言 spy 被调一次 + 缓存被清空。
     """
     from packages.core.context_engine import builders as cb
-    from packages.workflows.chapter_commit import pipeline as cp
     from packages.core.ids import new_id, now_iso
+    from packages.workflows.chapter_commit import pipeline as cp
 
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)

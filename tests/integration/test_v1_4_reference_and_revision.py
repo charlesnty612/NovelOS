@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 from pathlib import Path
 
 import httpx
@@ -31,7 +30,6 @@ import httpx
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations
-
 
 # -------- 复用 tests/api/test_quality.py 的 fixture / script 模式（独立副本，避免耦合）
 

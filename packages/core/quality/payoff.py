@@ -18,8 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .guardrails import CONFLICT_MARKERS, HOOK_MARKERS, REALM_KEYWORDS, _paragraphs, _world_rules_by_name
-from .issues import Issue, Severity, make_issue
-
+from .issues import Issue, make_issue
 
 # ============================================================================
 # 上下文（轻量；不强制使用 pydantic）

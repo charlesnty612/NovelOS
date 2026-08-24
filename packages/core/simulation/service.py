@@ -38,12 +38,10 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
 
 from packages.core.db import get_connection
-from packages.core.ids import new_id, now_iso
+from packages.core.ids import now_iso
 from packages.core.logging_config import get_logger
-
 from packages.core.story_state.exceptions import (
     ApprovalRequiredError,
     OptimisticLockError,

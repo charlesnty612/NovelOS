@@ -22,7 +22,6 @@ from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
-
 # ---------------------------------------------------------------------------
 # Fixtures（与 test_chapter_pipelines.py 对齐）
 # ---------------------------------------------------------------------------

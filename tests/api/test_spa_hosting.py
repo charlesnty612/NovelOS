@@ -14,12 +14,11 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 
 import httpx
 
-from packages.core.api.main import create_app
+from packages.core.api.main import __version__, create_app
 from packages.core.config import Settings
 
 
@@ -133,7 +132,7 @@ def test_spa_does_not_intercept_api(tmp_path: Path, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "ok"
-    assert body["version"] == "0.1.0"
+    assert body["version"] == __version__
 
 
 def test_spa_disabled_when_dist_missing(tmp_path: Path, monkeypatch):

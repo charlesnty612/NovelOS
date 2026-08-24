@@ -15,21 +15,16 @@
 
 from __future__ import annotations
 
-import re
-import statistics
-from typing import Iterable
-
 from .guardrails import (
+    AI_MARKERS,
     HOOK_MARKERS,
     _dialogue_chars,
     _marker_count,
     _norm,
     _paragraphs,
     _sentence_lengths,
-    AI_MARKERS,
 )
-from .issues import Issue, Severity, make_issue
-
+from .issues import Issue, make_issue
 
 # ============================================================================
 # 常量（建议值待校准）

@@ -19,15 +19,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 import statistics
 from typing import Iterable
 
 from packages.core.story_state.validator import validate_delta
 
-from .issues import Category, Issue, Severity, make_issue
-
+from .issues import Issue, Severity, make_issue
 
 # ============================================================================
 # 常量区（集中维护；阈值均为建议值待校准）

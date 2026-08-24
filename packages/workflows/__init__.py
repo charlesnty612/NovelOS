@@ -17,18 +17,22 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from packages.core.workflow_registry import (
+    all_workflows as _all_workflows,
+)
+from packages.core.workflow_registry import (
+    get_workflow as _get_workflow,
+)
+from packages.core.workflow_registry import (
+    register_workflow as _register_workflow,
+)
+
 # 触发各子包 __init__：每个子包在本步骤内调 core 注册表写入 builder。
 from packages.workflows.chapter_commit import pipeline as _commit  # noqa: E402, F401
 from packages.workflows.chapter_plan import pipeline as _plan  # noqa: E402, F401
 from packages.workflows.chapter_review import pipeline as _review  # noqa: E402, F401
 from packages.workflows.chapter_write import pipeline as _write  # noqa: E402, F401
 from packages.workflows.deconstruct_book import pipeline as _deconstruct_book  # noqa: E402, F401
-
-from packages.core.workflow_registry import (
-    all_workflows as _all_workflows,
-    get_workflow as _get_workflow,
-    register_workflow as _register_workflow,
-)
 
 
 def register_workflow(workflow_or_name: Any, builder: Callable[[], dict[str, Any]] | None = None) -> None:

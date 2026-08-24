@@ -27,10 +27,9 @@ overall = round((plot + character + continuity + style + pacing + foreshadowing 
 from __future__ import annotations
 
 import hashlib
-from typing import Iterable, Optional
+from typing import Optional
 
 from .issues import Issue, make_issue
-
 
 # ============================================================================
 # 权重（七子分固定；不得在调用方覆盖）

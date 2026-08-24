@@ -32,6 +32,7 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response
 
+from packages.core.db import get_connection
 from packages.core.logging_config import get_logger
 from packages.core.quality.engine import QualityEngine
 from packages.core.quality.service import (
@@ -40,7 +41,6 @@ from packages.core.quality.service import (
     capture_reference_consumption,
     compute_char_stats,
 )
-from packages.core.db import get_connection
 from packages.core.story_state.service import StoryStateService
 from packages.domain.chapter.service import ChapterService
 
@@ -109,7 +109,6 @@ def evaluate_chapter_quality(chapter_id: str, request: Request) -> dict:
     - 复用 :func:`build_quality_context` + :class:`QualityEngine`；
     - 落库后返回 report dict（与 GET 端点同 schema）。
     """
-    settings = request.app.state.settings
     db_path = _db_path(request)
 
     chapter = ChapterService(db_path).get(chapter_id)

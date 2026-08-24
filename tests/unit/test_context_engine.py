@@ -23,7 +23,6 @@ from packages.core.context_engine.builders import build_director_input
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
@@ -319,16 +318,12 @@ def test_chapter_plan_pipeline_writes_consumed_audit_to_checkpoint(tmp_path: Pat
     import asyncio
     import json
 
-    from packages.core.api.main import create_app
-    from packages.core.config import Settings
     from packages.core.workflow_runtime.engine import WorkflowEngine
 
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
     _insert_canon(db_path, pid, canon_json=_full_canon(spine_n=3, payoff_n=3), title="闭环测试")
-
-    settings = Settings(data_dir=str(tmp_path), db_path=str(db_path), log_level="WARNING")
 
     async def run() -> str:
         from packages.workflows import get_workflow

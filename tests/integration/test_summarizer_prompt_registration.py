@@ -33,7 +33,6 @@ from packages.core.agent_runtime import PromptRegistry
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPTS_DIR = REPO_ROOT / "docs" / "agents" / "prompts"
 SUMMARIZER_MD = PROMPTS_DIR / "summarizer-v1.md"

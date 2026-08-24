@@ -27,7 +27,6 @@ from packages.core.model_router import (
 )
 from packages.core.model_router.exceptions import ProviderError
 
-
 # ---------------------------------------------------------------------------
 # helper：MockTransport 捕获
 # ---------------------------------------------------------------------------

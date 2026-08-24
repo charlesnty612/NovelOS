@@ -107,7 +107,7 @@ MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通�
 1. ~~**review reject 即终局**~~（S4 审查 P1-1）✅ **已关闭**：PRD §59/§87 的「人工修改后重审」闭环已实现——review 的 Human 节点 resume 支持三态：`{approved:true}`（REVIEWED）、`{approved:false}`（FAILED，保持 DRAFTED）、`{approved:false, revise:true, note?}`（run FAILED + error=`rejected-for-revision`，chapter 保持 DRAFTED，note 落 `plan_json.revision_note` 供下次 write 参考；随后可人工改稿或重跑 write 后再 review）。实现口径：引擎 `workflow_runs.status` CHECK 与 `_finalize_run` 虽已支持 `CANCELLED`，但 `engine._run_nodes` 无产生 CANCELLED 的触发路径（节点成功必 COMPLETED、异常必 FAILED），且不修改 engine/DDL，故沿用 FAILED 终态以 error 字段区分（详见 `packages/workflows/chapter_review/README.md`）。
 2. **Context Engine MVP 全量装配**（S4）：L0-L9 裁剪/token 预算未实现，`plot_graph_excerpt.unresolved_branches` 恒空、`world_state_excerpts` 缺 sensory_anchors。记录于 `packages/core/context_engine/README.md`。
 3. **eval 内容正确性断言缺口**（S4 审查 P2-3）：golden runner 目前做流程+结构断言，observer 内容语义（before/after 与正文一致性、HIGH 误标对抗用例）归入 S6 范围。
-4. **model-configs 列表返回 params_json 明文**（S5 审查记录）：本地单用户 MVP 可接受；发布前（S8 或 S12）加脱敏。
+4. ~~**model-configs 列表返回 params_json 明文**（S5 审查记录）~~：~~本地单用户 MVP 可接受；发布前（S8 或 S12）加脱敏。~~ ✅ **已关闭**：V1.x 已落地 router 层 `_mask_response` 出口脱敏 + `has_api_key` + 清除 key 按钮（V1.5），见 `packages/core/api/routers/model_configs.py`。
 5. **连续两次 Human pause 的 human_input 覆盖语义**（S4 审查 P2-4）：`dict.update` 语义已写入 README，连续 pause 场景缺专项测试，后续补。
 6. **promote 按序重放而非单合并 commit**（S7 审查 P0 修复）：state-delta-v0 §6.3 字面为「单一合并 commit」，因 applier 固定应用顺序会破坏分支内 add→resolve 时序，改为逐 commit 重放（main state_version 单次跳 N）。记录于 `packages/core/story_state/README.md` §6.5。
 7. **quality_gate 默认 report 模式**（S6）：commit 门禁默认只落库不阻断；`NOVELOS_QUALITY_GATE=enforce` 或请求体 `quality_gate_mode:"enforce"` 才硬阻断。接入真实模型生产使用前建议切 enforce 并先跑一轮校准。

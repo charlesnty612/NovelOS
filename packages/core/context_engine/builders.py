@@ -49,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading as _threading
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -1039,8 +1040,6 @@ def _recall_passages(
 #
 # 不缓存任何含 sqlite 连接 / 副作用对象（仅纯 dict）。
 
-import threading as _threading
-
 _CACHE_MAX_SIZE = 256
 # V2.0 Wave C P1-1：装配缓存键加入内容指纹维度。
 # - director 键第 5 元 = sha256(plan_json 原文)[:16]（plan_json None → 'none'）；
@@ -1146,7 +1145,9 @@ _REFERENCE_CANON_SPINE_CAP = 20
 _REFERENCE_CANON_PAYOFF_CAP = 30
 
 
-def _reference_canon_excerpt(conn: sqlite3.Connection, project_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+def _reference_canon_excerpt(
+    conn: sqlite3.Connection, project_id: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """查该项目最新 active reference_canon（按 created_at DESC）。
 
     返回 (director_inject, audit_payload) 元组：
@@ -1428,7 +1429,10 @@ def _build_writer_input_uncached(
             scene_text_parts.extend([str(x) for x in chars if isinstance(x, (str, int, float))])
     trigger_corpus = _build_trigger_corpus(chap_row, previous_tail_text=recent_prose_tail)
     if scene_text_parts:
-        trigger_corpus = (trigger_corpus + "\n" + "\n".join(scene_text_parts)) if trigger_corpus else "\n".join(scene_text_parts)
+        if trigger_corpus:
+            trigger_corpus = trigger_corpus + "\n" + "\n".join(scene_text_parts)
+        else:
+            trigger_corpus = "\n".join(scene_text_parts)
 
     # 触发检测下放到 character/world excerpt（应用 aliases/inject_mode 策略）。
     conn2 = get_connection(db_path)

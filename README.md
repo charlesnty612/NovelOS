@@ -82,7 +82,7 @@ python -m packages.core.api.main
   与 `python scripts/serve.py` 都通过该字段读取。
 - 优先级：`NOVELOS_PORT` > `NOVELOS_API_PORT` > 默认 18081（兼容旧变量）。
 - 前端 dev 代理从 `NOVELOS_PORT` / `NOVELOS_API_PORT` 读后端端口（见
-  `apps/web/vite.config.ts` / `apps/desktop/vite.config.ts`）；改端口后需重启
+  `apps/web/vite.config.ts`；`apps/desktop/vite.config.ts` 为停维护骨架，仅供参考）；改端口后需重启
   vite dev 才生效。
 
 健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=34`，业务表数）。

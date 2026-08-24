@@ -303,7 +303,7 @@ def test_list_filter_by_node(tmp_path: Path):
             node_a = _insert_workflow_node_run(db, run_id=run_id, node_id="nodeA")
             node_b = _insert_workflow_node_run(db, run_id=run_id, node_id="nodeB")
             cid_a = _insert_ai_log(db, run_id=run_id, node_run_id=node_a)
-            cid_b = _insert_ai_log(db, run_id=run_id, node_run_id=node_b)
+            _ = _insert_ai_log(db, run_id=run_id, node_run_id=node_b)  # side-effect: insert second log
 
             r = await _request(app, "GET", f"/api/ai-call-logs?node={node_a}")
             assert r.status_code == 200

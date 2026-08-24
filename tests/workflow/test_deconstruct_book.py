@@ -21,7 +21,6 @@ from packages.core.workflow_runtime.engine import WorkflowEngine
 from packages.workflows.deconstruct_book import WORKFLOW, _validate_canon_schema
 from packages.workflows.deconstruct_book.pipeline import _g_sim_node  # noqa: F401
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -132,7 +131,6 @@ def _build_aggregate_canon(
       （用于 G-sim 阻断测试）。
     - ``drop_top_field``：从合规 canon 删一个顶层必填字段（用于 schema 不合规测试）。
     """
-    n = len(chapter_extracts)
     canon: dict = {
         "logline": "草根主角获逆袭金手指 → 家族比试首胜 → 反派出高手",
         "spine": [
@@ -525,8 +523,14 @@ def _book_text_for_offset_check() -> tuple[str, list[tuple[int, int, str]]]:
     )
     expected = [
         (0, len("第一章 少年被欺\n甲乙丙丁戊己庚辛壬癸十二字占位。\n\n"), "第一章 少年被欺"),
-        (len(text[: len("第一章 少年被欺\n甲乙丙丁戊己庚辛壬癸十二字占位。\n\n")]),
-         len(text[: len("第一章 少年被欺\n甲乙丙丁戊己庚辛壬癸十二字占位。\n\n第二章 暗修传承\n子丑寅卯辰巳午未申酉戌亥十二字续。\n\n")]),
+        (
+            len(text[: len("第一章 少年被欺\n甲乙丙丁戊己庚辛壬癸十二字占位。\n\n")]),
+            len(
+                text[: len(
+                    "第一章 少年被欺\n甲乙丙丁戊己庚辛壬癸十二字占位。\n\n"
+                    "第二章 暗修传承\n子丑寅卯辰巳午未申酉戌亥十二字续。\n\n"
+                )]
+            ),
          "第二章 暗修传承"),
     ]
     return text, expected
@@ -866,8 +870,8 @@ def test_t3_schema_retry_then_success(db_path: Path, engine: WorkflowEngine):
     不发起完整 workflow；单元测试 T3 retry 行为本身，断言它**第二次会再调 run_agent**
     且 第二次拿到的脚本与第一次不同（验证 retry 路径生效）。
     """
-    pid = _make_project(db_path)
-    chapter_mock = _chapter_extract_callable_mock()
+    _ = _make_project(db_path)  # 仅需副作用：建工程
+    _ = _chapter_extract_callable_mock()  # 仅需副作用：注册 callable mock
 
     canon_valid = _build_aggregate_canon(
         [
@@ -886,10 +890,9 @@ def test_t3_schema_retry_then_success(db_path: Path, engine: WorkflowEngine):
     # 该测试断言「payload 第 1 次无 _retry_hint，第 2 次含 _retry_hint」即 retry 逻辑生效。
     captured_payloads: list[dict[str, Any]] = []
 
-    from packages.workflows.deconstruct_book import pipeline as _pipeline_mod
     from unittest.mock import patch
 
-    real_run_agent = _pipeline_mod.run_agent
+    from packages.workflows.deconstruct_book import pipeline as _pipeline_mod
 
     def _fake_run_agent(*args, **kwargs):
         # args: (db_path, agent_name, payload, run_id) ；payload 是位置参数 2

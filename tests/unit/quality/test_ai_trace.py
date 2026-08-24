@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from packages.core.quality import QualityContext, QualityEngine
 from packages.core.quality.ai_trace import (
     AI_CLICHES,
     compute_ai_trace,
@@ -18,9 +19,6 @@ from packages.core.quality.ai_trace import (
     formula_text,
     intra_chapter_repetition,
 )
-from packages.core.quality.guardrails import compute_shingles
-from packages.core.quality import QualityEngine, QualityContext
-
 
 # ============================================================================
 # 子信号级别

@@ -18,9 +18,8 @@ import json
 import sqlite3
 from pathlib import Path
 
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import apply_migrations
 from packages.core.ids import new_id, now_iso
-from packages.core.story_state.service import StoryStateService
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
@@ -91,8 +90,8 @@ def test_write_through_and_domain_share_who_knows_encoding(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _make_project(db_path)
     from packages.core.story_state.write_through import encode_who_knows as canon_encode
+    from packages.domain.character.models import CharacterCreate
     from packages.domain.character.service import CharacterService
-    from packages.domain.character.models import CharacterCreate, CharacterUpdate
 
     # 三态对照值（canon 写入与 domain 写入应使用完全相同的 encode 结果）
     cases = [
@@ -157,10 +156,10 @@ def test_domain_crud_three_state_who_knows_null_guard(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _make_project(db_path)
 
-    from packages.domain.character.service import CharacterService
     from packages.domain.character.models import CharacterCreate, CharacterUpdate
-    from packages.domain.ledger.service import LedgerService
+    from packages.domain.character.service import CharacterService
     from packages.domain.ledger.models import HookCreate
+    from packages.domain.ledger.service import LedgerService
 
     char_svc = CharacterService(db_path)
     ledger_svc = LedgerService(db_path)

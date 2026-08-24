@@ -25,6 +25,7 @@ from packages.core.db import get_connection
 
 from .branches import branch_current_state
 from .exceptions import BranchNotFound, StateConflictError, StateNotFoundError
+from .snapshot import build_initial_state
 from .snapshots import (
     _parse_json,
     _parse_required_json,
@@ -32,7 +33,6 @@ from .snapshots import (
     latest_snapshot_version,
     strip_state_version,
 )
-from .snapshot import build_initial_state
 
 
 def get_current_state(service_self, project_id: str, *, branch_id: str | None = None) -> dict:

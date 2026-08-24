@@ -39,7 +39,6 @@ import httpx
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 
-
 # ----------------------------------------------------------------- helpers
 
 
@@ -483,7 +482,6 @@ def test_large_branch_incremental_replay_uses_snapshot(tmp_path: Path):
             # 走读路径：从物化点（base+3）开始应只增量重放 commit 4、5
             r = await _request(app, "GET", f"/api/projects/{pid}/state?branch_id={bid}")
             assert r.status_code == 200, r.text
-            via_incremental = r.json()
 
             # V2.0 Wave C P2-3：monkeypatch apply_delta 计数，断言增量路径只调用 2 次
             # （commit 4、5 对应的 2 个 delta）；若走全量重放会是 5 次。

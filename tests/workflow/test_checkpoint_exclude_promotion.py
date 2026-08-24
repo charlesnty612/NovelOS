@@ -122,8 +122,11 @@ def _writer_script():
 
 
 def _critic_ok_script():
-    """mock critic 输出合规：strengths + 2 issues（quote 必溯源到 prose）。"""
-    prose = "测试正文。本章不涉及任何剧情。灯芯闪了一下。"
+    """mock critic 输出合规：strengths + 2 issues（quote 必溯源到 prose）。
+
+    ``prose`` 模板：``"测试正文。本章不涉及任何剧情。灯芯闪了一下。"``，
+    下方 issues[*].quote 字段从中截取字面子串。
+    """
     return [
         json.dumps(
             {

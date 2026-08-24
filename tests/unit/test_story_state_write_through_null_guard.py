@@ -35,7 +35,6 @@ import httpx
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 
-
 # ----------------------------------------------------------------- helpers
 
 

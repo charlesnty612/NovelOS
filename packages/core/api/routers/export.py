@@ -36,7 +36,7 @@ def _project(request: Request) -> dict:
     settings = request.app.state.settings
     proj = ProjectService(settings.db_path).get(_project_id(request))
     if proj is None:
-        raise HTTPException(status_code=404, detail=f"project not found")
+        raise HTTPException(status_code=404, detail="project not found")
     return proj
 
 

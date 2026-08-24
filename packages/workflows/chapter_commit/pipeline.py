@@ -30,7 +30,8 @@ from packages.core.context_engine import build_observer_input
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.quality.engine import QualityEngine
-from packages.core.quality.models import Issue, QualityReport as _QualityReport
+from packages.core.quality.models import Issue
+from packages.core.quality.models import QualityReport as _QualityReport
 from packages.core.quality.service import (
     QualityService,
     build_quality_context,
@@ -39,7 +40,6 @@ from packages.core.quality.service import (
 from packages.core.story_state.service import StoryStateService
 from packages.core.story_state.validator import validate_delta
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
-
 
 # Observer delta 校验失败重试提示模板（注入 payload._retry_hint 引导 LLM 修正）。
 # 真实 LLM（如 MiniMax-M3）曾出现 ``character_changes[0].op='update' 但 before 为 None``
@@ -71,20 +71,20 @@ _RULE_REVISION_HINTS: dict[str, str] = {
     "H-4": "本章世界规则变更未铺垫——先埋 rule change 的前因后果，再正式推进到本章。",
     "H-5": "本章与前章状态衔接断裂——补一段承接句或回忆钩，确保读者认知连续。",
     # Guardrail rule_id 兜底（与 packages/core/quality/guardrails.py 对齐）
-    "RULE_CHAR_DEAD_ACTIVE": "不要让已死亡角色在本章发生 action/location/goal 等活跃状态变更；先在故事层处理复活情节，或换其它角色承担该情节。",
-    "RULE_CHAR_BEFORE_MISMATCH": "character_changes[*].before 必须与 snapshot 当前 canonical state 一致；不要在没有先写状态变更的情况下直接 update。",
-    "RULE_WORLD_BEFORE_MISMATCH": "world_changes[*].before 必须与 snapshot 当前 world 状态一致；先核对当前 location/faction/rule 再 update。",
-    "RULE_TIMELINE_REGRESSION": "本章 effective_at 不能早于上一个已 commit state 的 effective_at；调整时序或在更早章节埋点。",
-    "RULE_KNOWLEDGE_LEAK": "actor.knowledge 不能引用 visibility<HIDDEN 的知识；改用 actor 自身可见的线索。",
-    "RULE_SCHEMA_VALIDATION_FAILED": "Observer delta payload 不通过业务校验；按 payload._retry_hint / 阻断信息修正字段后再提交。",
-    "scoring_missing_subscore": "至少 1 个子分未算出（plan / snapshot / delta 不完整）；补全 chapters.plan_json 或 StoryStateService.submit_delta 后重跑。",
+    "RULE_CHAR_DEAD_ACTIVE": "不要让已死亡角色在本章发生 action/location/goal 等活跃状态变更；先在故事层处理复活情节，或换其它角色承担该情节。",  # noqa: E501
+    "RULE_CHAR_BEFORE_MISMATCH": "character_changes[*].before 必须与 snapshot 当前 canonical state 一致；不要在没有先写状态变更的情况下直接 update。",  # noqa: E501
+    "RULE_WORLD_BEFORE_MISMATCH": "world_changes[*].before 必须与 snapshot 当前 world 状态一致；先核对当前 location/faction/rule 再 update。",  # noqa: E501
+    "RULE_TIMELINE_REGRESSION": "本章 effective_at 不能早于上一个已 commit state 的 effective_at；调整时序或在更早章节埋点。",  # noqa: E501
+    "RULE_KNOWLEDGE_LEAK": "actor.knowledge 不能引用 visibility<HIDDEN 的知识；改用 actor 自身可见的线索。",  # noqa: E501
+    "RULE_SCHEMA_VALIDATION_FAILED": "Observer delta payload 不通过业务校验；按 payload._retry_hint / 阻断信息修正字段后再提交。",  # noqa: E501
+    "scoring_missing_subscore": "至少 1 个子分未算出（plan / snapshot / delta 不完整）；补全 chapters.plan_json 或 StoryStateService.submit_delta 后重跑。",  # noqa: E501
 }
 # guardrail category → 可执行改稿建议（覆盖 RULE_* 没在 _RULE_REVISION_HINTS 命中的情形）
 _CATEGORY_REVISION_HINTS: dict[str, str] = {
-    "character_contradiction": "character_changes 与 canonical character state 冲突；先核对角色当前 status/location/goal 再下发 update。",
-    "world_rule_contradiction": "world_changes 与 world canonical state 冲突；先核对当前 world rule / faction / location 再下发 update。",
+    "character_contradiction": "character_changes 与 canonical character state 冲突；先核对角色当前 status/location/goal 再下发 update。",  # noqa: E501
+    "world_rule_contradiction": "world_changes 与 world canonical state 冲突；先核对当前 world rule / faction / location 再下发 update。",  # noqa: E501
     "timeline_consistency": "本章 effective_at 或事件顺序与已 commit state 矛盾；调整时序或在更早章节先埋。",
-    "knowledge_leakage": "actor 引用的 knowledge 超出其 visibility；改用 actor 自身可见的线索，或先提升 actor.visibility。",
+    "knowledge_leakage": "actor 引用的 knowledge 超出其 visibility；改用 actor 自身可见的线索，或先提升 actor.visibility。",  # noqa: E501
     "schema_validity": "Observer delta payload 字段不合法；按错误信息逐条修复后重跑。",
     "payoff": "本章 payoff 计数偏低（<H-1 阈值）；对照 plan.debt_handling / hook_handling 检查是否漏兑现。",
     "consistency": "本章与前章状态衔接断裂；补一段承接句或回忆钩，确保读者认知连续。",

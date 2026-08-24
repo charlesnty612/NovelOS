@@ -370,7 +370,7 @@ def test_nonexistent_branch_returns_404(tmp_path: Path):
     async def run():
         async with app.router.lifespan_context(app):
             pid = await _make_project(app)
-            cid = await _make_character(app, pid)
+            _ = await _make_character(app, pid)  # 仅需副作用：建角色
             chap = await _make_chapter(app, pid)
             r = await _request(app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap})
             assert r.status_code == 201
@@ -385,17 +385,6 @@ def test_nonexistent_branch_returns_404(tmp_path: Path):
             r = await _request(app, "GET", f"/api/projects/{pid}/state?branch_id={fake_bid}")
             assert r.status_code == 404, r.text
 
-            delta = {
-                **_make_meta("dlt_nf", chap, 1),
-                "character_changes": [{
-                    "change_id": "cc_nf", "op": "update", "target_id": cid,
-                    "character_id": cid, "facet": "state", "field": "state.location",
-                    "before": "X", "after": "Y", "confidence": 0.9,
-                    "evidence": _evidence(chap), "risk_level": "LOW",
-                }],
-                "world_changes": [], "relationship_changes": [], "new_events": [],
-                "resolved_hooks": [], "new_hooks": [], "debt_changes": [],
-            }
             r = await _request(app, "POST", f"/api/projects/{pid}/commits",
                                json={"delta_id": "dlt_nf",
                                      "author_approval": {"approver": "u"},

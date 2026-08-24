@@ -45,6 +45,8 @@ Sprint 6 的 Quality 子模块，按 ``docs/evaluation/quality-scoring-v0.md`` �
 
 from __future__ import annotations
 
+# 暴露常用 guardrails / scorings 便于测试 / 集成
+from . import guardrails, scoring
 from .aggregate import (
     SUBSCORE_NAMES,
     WEIGHTS,
@@ -52,17 +54,12 @@ from .aggregate import (
     formula_hash,
     formula_text,
 )
-from .ai_trace import compute_ai_trace
 from .engine import QualityEngine
-from .issues import MVP_SEVERITY_MATRIX, Issue, Severity, Category, make_issue, loc, mvp_max_severity
-from .models import Issue as IssueModel, QualityContext, QualityReport
-from .payoff import PayoffContext, evaluate as payoff_evaluate
-
-# 暴露常用 guardrails / scorings 便于测试 / 集成
-from . import ai_trace, guardrails, scoring
-
-# 兼容两种别名
-Issue = IssueModel
+from .issues import MVP_SEVERITY_MATRIX, Category, Issue, Severity, loc, make_issue, mvp_max_severity
+from .models import Issue as IssueModel
+from .models import QualityContext, QualityReport
+from .payoff import PayoffContext
+from .payoff import evaluate as payoff_evaluate
 
 __all__ = [
     # 类与工厂

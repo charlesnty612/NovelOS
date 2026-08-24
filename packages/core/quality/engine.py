@@ -38,7 +38,8 @@ from .guardrails import (
 )
 from .issues import Issue
 from .models import QualityContext, QualityReport
-from .payoff import evaluate as payoff_evaluate, PayoffContext
+from .payoff import PayoffContext
+from .payoff import evaluate as payoff_evaluate
 from .scoring import (
     score_character,
     score_continuity,

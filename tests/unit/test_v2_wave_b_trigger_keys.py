@@ -25,10 +25,8 @@ import pytest
 from packages.core.context_engine.builders import (
     _apply_injection_policy,
     _build_trigger_corpus,
-    _character_state_excerpts,
     _is_triggered,
     _summarize_entity,
-    _world_state_excerpts,
     build_director_input,
     build_writer_input,
 )
@@ -37,7 +35,6 @@ from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
 from packages.domain.character.service import CharacterService
 from packages.domain.world.service import WorldService
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
@@ -512,7 +509,7 @@ def test_director_input_world_location_auto_summary(tmp_path: Path):
     out = build_director_input(db_path, pid, cid, "意图")
 
     locs = out["world_state_excerpts"]["locations"]
-    loc = next(l for l in locs if l["location_id"] == loc_id)
+    loc = next(item for item in locs if item["location_id"] == loc_id)
     assert loc["_injection"] == "summary"
     assert "王城" in loc["summary_line"]
 
@@ -530,7 +527,7 @@ def test_director_input_world_never_suppresses_location(tmp_path: Path):
     out = build_director_input(db_path, pid, cid, "意图")
 
     locs = out["world_state_excerpts"]["locations"]
-    assert all(l.get("location_id") != loc_id for l in locs)
+    assert all(item.get("location_id") != loc_id for item in locs)
     supp = out["world_state_excerpts"].get("_suppressed_locations", [])
     assert any(s.get("location_id") == loc_id for s in supp)
 
@@ -746,7 +743,7 @@ def test_preview_marks_full_summary_suppressed(tmp_path: Path):
 
     out = preview_context(str(db_path), pid, cid)
 
-    l1 = next(l for l in out["layers"] if l["id"] == "L1")
+    l1 = next(layer for layer in out["layers"] if layer["id"] == "L1")
     by_id = {(it["kind"], it["id"]): it for it in l1["items"]}
 
     assert by_id[("character", full_char)]["injection"] == "full"
@@ -766,7 +763,7 @@ def test_preview_summary_line_contains_role(tmp_path: Path):
 
     out = preview_context(str(db_path), pid, cid)
 
-    l1 = next(l for l in out["layers"] if l["id"] == "L1")
+    l1 = next(layer for layer in out["layers"] if layer["id"] == "L1")
     char_item = next(
         it for it in l1["items"]
         if it["kind"] == "character" and it["id"] == char_id
@@ -789,7 +786,7 @@ def test_preview_world_location_summary_and_suppressed(tmp_path: Path):
 
     out = preview_context(str(db_path), pid, cid)
 
-    l1 = next(l for l in out["layers"] if l["id"] == "L1")
+    l1 = next(layer for layer in out["layers"] if layer["id"] == "L1")
     loc_item = next(it for it in l1["items"] if it["kind"] == "location" and it["id"] == loc_id)
     assert loc_item["injection"] == "summary"
     fac_supp = next(it for it in l1["items"] if it["kind"] == "suppressed_faction" and it["id"] == fac_id)

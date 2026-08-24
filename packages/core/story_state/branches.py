@@ -47,8 +47,8 @@ from packages.core.ids import new_id, now_iso
 
 from .applier import apply_delta
 from .exceptions import BranchClosed, BranchNotFound, StateConflictError, StateNotFoundError
-from .snapshots import _parse_required_json, latest_snapshot_version
 from .snapshot import build_initial_state
+from .snapshots import _parse_required_json, latest_snapshot_version
 
 
 def _dump(value: Any) -> str:
@@ -444,7 +444,6 @@ def promote_branch(
     ``branch_id``（main.branch_id）/ ``replayed_delta_ids``（本次重放
     在 main 上产生的新 delta_id 列表，便于测试断言）。
     """
-    from datetime import datetime, timezone
 
     from packages.core.db import get_connection
     from packages.core.ids import new_id, now_iso
@@ -486,7 +485,6 @@ def promote_branch(
 
         if not commit_rows:
             # 空分支：直接 MERGED，返回最小结果
-            now = now_iso()
             conn.execute(
                 "UPDATE branches SET status = 'MERGED' WHERE branch_id = ?",
                 (branch_id,),

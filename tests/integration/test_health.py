@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from packages.core.api.main import create_app
+from packages.core.api.main import __version__, create_app
 from packages.core.config import Settings
 
 
@@ -34,7 +34,7 @@ def test_health_endpoint_returns_ok(tmp_path: Path):
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "ok"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == __version__
     # Sprint 14：0007_chapter_summaries.sql 已落地 → 32 业务表（31 + chapter_summaries）
     # Sprint 15 / V1.3：0008_author_style_samples_and_overdue.sql 加 author_style_samples → 33 业务表
     # V2.0 Wave B 任务一：0009_branch_snapshots.sql 加 branch_snapshots → 34 业务表

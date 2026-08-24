@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -532,7 +531,10 @@ def run_smoke() -> int:
             try:
                 r = client.get(f"/api/chapters/{chapter_id}")
                 _assert(r.status_code == 200, f"GET chapter status={r.status_code}")
-                _assert(r.json().get("status") == "COMMITTED", f"chapter.status={r.json().get('status')!r} != COMMITTED")
+                _assert(
+                    r.json().get("status") == "COMMITTED",
+                    f"chapter.status={r.json().get('status')!r} != COMMITTED",
+                )
                 print("[smoke] OK chapter.status=COMMITTED")
             except AssertionError as e:
                 failures.append(f"chapter final status: {e}")
@@ -566,7 +568,8 @@ def run_smoke() -> int:
                     f"world_rule {world_rule_name!r} not in state.world.world_rules names={names!r}",
                 )
                 print(
-                    f"[smoke] OK /projects/{project_id}/state.world.world_rules contains {world_rule_name!r}  (n={len(world_rules)})"
+                    f"[smoke] OK /projects/{project_id}/state.world.world_rules "
+                    f"contains {world_rule_name!r}  (n={len(world_rules)})"
                 )
             except AssertionError as e:
                 failures.append(f"state snapshot world_rules: {e}")

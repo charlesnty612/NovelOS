@@ -69,7 +69,6 @@ def loc(chapter_id: Optional[str], scene_id: Optional[str] = None) -> str:
 # 与 pydantic 模型互通，避免循环构造。
 from .models import Issue as Issue  # noqa: E402,F401
 
-
 # ----------------------------------------------------------------------------- factory
 
 

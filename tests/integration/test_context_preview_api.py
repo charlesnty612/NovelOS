@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import httpx
@@ -123,7 +122,7 @@ def test_context_preview_happy_path(tmp_path: Path):
             assert body["project_id"] == pid
             assert sorted(body["agents"]) == ["director", "observer", "writer"]
             assert len(body["layers"]) == 3
-            layer_ids = [l["id"] for l in body["layers"]]
+            layer_ids = [layer["id"] for layer in body["layers"]]
             assert layer_ids == ["L0", "L1", "L2"]
             assert body["token_budget"] == 8000
             assert body["within_budget"] == (body["total_tokens"] <= 8000)
@@ -134,7 +133,7 @@ def test_context_preview_happy_path(tmp_path: Path):
                 assert isinstance(layer["truncated"], bool)
 
             # L1 items 必须含 4 类
-            l1 = next(l for l in body["layers"] if l["id"] == "L1")
+            l1 = next(layer for layer in body["layers"] if layer["id"] == "L1")
             kinds = {it["kind"] for it in l1["items"]}
             assert {"character", "location", "hook", "debt"} <= kinds
             by_kind_id = {(it["kind"], it["id"]): it for it in l1["items"]}
@@ -232,7 +231,7 @@ def test_context_preview_token_budget_invariant(tmp_path: Path):
             r = await _request(app, "GET", f"/api/chapters/{cid}/context-preview")
             assert r.status_code == 200
             body = r.json()
-            expected = sum(l["token_estimate"] for l in body["layers"])
+            expected = sum(layer["token_estimate"] for layer in body["layers"])
             assert body["total_tokens"] == expected
             assert body["within_budget"] == (body["total_tokens"] <= body["token_budget"])
             return True

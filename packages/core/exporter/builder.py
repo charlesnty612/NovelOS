@@ -27,7 +27,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -36,7 +35,6 @@ from packages.core.db import get_connection
 from packages.domain.chapter.service import ChapterService
 
 from .docx import build_minimal_docx
-
 
 # ---------------------------------------------------------------------------
 # Scope

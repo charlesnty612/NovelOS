@@ -201,7 +201,7 @@ def test_build_txt_empty_project_only_header(tmp_path: Path):
 def test_build_txt_chapter_without_draft_shows_placeholder(tmp_path: Path):
     s = _setup(tmp_path)
     pid = _create_project(s.db_path, "占位")
-    cid = _create_chapter(s.db_path, pid, 1, "C1")  # 无 draft
+    _ = _create_chapter(s.db_path, pid, 1, "C1")  # 无 draft（仅需副作用：建章）
     data = build_txt(str(s.db_path), pid, ExportScope(kind="book"))
     text = data.decode("utf-8-sig")
     assert "本章尚无正文" in text

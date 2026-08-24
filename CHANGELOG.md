@@ -5,6 +5,17 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [2.0.1] - 2026-08-24
+
+### Fixed（全维度检修包）
+
+- **lint 清零**：修复 260 处 ruff 错误（unused-import / 行超长 / import 排序等，涉及 packages / tests / scripts 共 23 个文件），`ruff check packages tests scripts` 恢复 All checks passed，CI 后端 job 恢复可过；story_state/service.py 的 facade re-export 统一加 `# noqa: F401` 防止自动修复误删。
+- **CI 补前端 job**：`.github/workflows/ci.yml` 新增 web job（Node 20，npm ci → build → vitest），此前 195 个前端测试不在 CI 内。
+- **版本号元数据对齐 2.0.0**：pyproject.toml / apps/web/package.json / packages/core/api/main.py `__version__` 三处由 0.1.0 同步为 2.0.0；test_health 与 test_spa_hosting 的版本断言改为引用 `__version__` 常量，后续升版只改一处。
+- **文档一致性**：docs/data-model/data-model-v0.md 加现状注记（v0 的 28 张表 → 当前 34 张业务表 + chapter_fts，附增量迁移清单）；IMPLEMENTATION-PLAN §4.2 deviation #4（model-configs 明文返回）标记已关闭（router 层 `_mask_response` 已落地）；补 packages/core/workflow_registry/README.md；README 移除对停维护 apps/desktop/vite.config.ts 的消费性表述。
+- **新增 ADR-0002**：「model provider API Key 在本地 SQLite 明文存储（MVP 决策）」，记录既有防线（出口掩码 / ai_call_logs 敏感字段黑名单 / 备份排除 model_configs）与未来升级路径。
+- **工作区卫生**：清理 data/ 下 smoke_e2e_* / real_llm_e2e_* 等测试残留文件（主库 novelos.db 不受影响）。
+
 ## [2.0.0] - 2026-08-24
 
 结构性升级（路线图：`docs/roadmap/v1.3-v2.x-plan.md`）。含内部架构破坏性调整，对外 API 契约保持兼容。

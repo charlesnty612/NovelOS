@@ -281,7 +281,7 @@ def test_preview_items_extract_all_kinds(tmp_path: Path):
     out = preview_context(str(db_path), pid, cid)
 
     # L1 应包含全部 7 类条目
-    l1 = next(l for l in out["layers"] if l["id"] == "L1")
+    l1 = next(layer for layer in out["layers"] if layer["id"] == "L1")
     kinds = {item["kind"] for item in l1["items"]}
     assert {"character", "location", "faction", "world_rule", "hook", "debt", "reference_canon"} <= kinds
 
@@ -307,7 +307,7 @@ def test_preview_with_canon_only_appears_in_l1(tmp_path: Path):
     for layer in out["layers"]:
         for item in layer["items"]:
             assert item["kind"] != "reference_canon" or layer["id"] == "L1"
-    l1 = next(l for l in out["layers"] if l["id"] == "L1")
+    l1 = next(layer for layer in out["layers"] if layer["id"] == "L1")
     assert any(it["kind"] == "reference_canon" for it in l1["items"])
 
 

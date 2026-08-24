@@ -13,9 +13,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import branches, commits, queries
-from .applier import apply_delta
-from .exceptions import (
+from . import branches, commits, queries  # noqa: F401
+from .applier import apply_delta  # noqa: F401
+from .branches import (  # noqa: F401
+    ensure_branch as _ensure_branch,
+)
+from .commits import project_id_for_chapter as _project_id_for_chapter  # noqa: F401
+from .deltas import (  # noqa: F401
+    payload_json_from_delta as _payload_json_from_delta,
+)
+from .exceptions import (  # noqa: F401
     ApprovalRequiredError,
     BranchClosed,
     BranchNotFound,
@@ -23,9 +30,9 @@ from .exceptions import (
     StateConflictError,
     StateNotFoundError,
 )
-from .snapshot import build_initial_state, materialize_snapshot
-from .snapshots import diff_snapshots, strip_state_version
-from .validator import validate_delta
+from .snapshot import build_initial_state, materialize_snapshot  # noqa: F401
+from .snapshots import diff_snapshots, strip_state_version  # noqa: F401
+from .validator import validate_delta  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # 私有符号兼容重导出（拆分后保持外部深路径 import 0 改动）
@@ -35,24 +42,6 @@ from .validator import validate_delta
 # ---------------------------------------------------------------------------
 from .write_through import (  # noqa: F401
     encode_who_knows as _encode_who_knows,
-    read_who_knows as _read_who_knows,
-    read_visibility as _read_visibility,
-    write_through as _write_through,
-    apply_inverse_cleanup_to_state as _apply_inverse_cleanup_to_state,
-)
-from .commits import project_id_for_chapter as _project_id_for_chapter  # noqa: F401
-from .branches import (  # noqa: F401
-    ensure_branch as _ensure_branch,
-    resolve_branch as _resolve_branch,
-    branch_current_state as _branch_current_state,
-    load_branch_commit_payload as _load_branch_commit_payload,
-)
-from .deltas import (  # noqa: F401
-    payload_json_from_delta as _payload_json_from_delta,
-    restore_delta_from_row as _restore_delta_from_row,
-    restore_delta_from_row_payload as _restore_delta_from_row_payload,
-    high_risk_change_ids as _high_risk_change_ids,
-    build_inverse_delta as _build_inverse_delta,
 )
 
 
