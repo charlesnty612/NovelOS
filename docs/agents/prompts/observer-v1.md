@@ -150,6 +150,7 @@
    - `add`：新出现的事实（如新事件、新伏笔、新债务）。
    - `update`：已有事实被改写（如 belief 改变、relationship 数值变化）；Schema 要求 `before`/`after` 同时存在。
    - `remove`：事实被废止（如幻象被揭穿、某资源被耗尽）；Schema 要求 `reason`。
+   - **update 前必须核对 snapshot**：选 `update` 前，先在输入的 `previous_state` / snapshot 中确认该实体（character / world / location / faction / rule）确实已存在且你能给出真实前值；若实体是本章首次出现、或 snapshot 中查不到对应前值，必须改用 `add`（新事实）或放弃该条 change，**严禁凭印象编造 before**。validator 会逐条核对 before 与 snapshot 一致性。
 7. **target_id 规则**：
    - character_change → `character_id`。
    - world_change → 顶层 `target_id` 与 `world_id` 一致。

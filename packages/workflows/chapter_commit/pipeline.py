@@ -48,6 +48,8 @@ _OBSERVER_RETRY_HINT_TEMPLATE = (
     "\n\n[Validation note] 上一次输出的 delta 未通过业务校验：{errors}。"
     "请按反馈修正后重新完整输出 7 个 change 数组的合法 JSON（保持 schema_version="
     "state-delta-v0 外的其它元信息字段由后续节点注入，无需在本次输出中包含）。"
+    "特别注意：凡 snapshot 中不存在前值的实体（本章首次出现的人物/地点/设定），"
+    "必须用 add 而非 update；update 必须给出与 snapshot 一致的 before。"
 )
 
 # -----------------------------------------------------------------------
