@@ -2,10 +2,11 @@
 
 - 项目 ID：`prj_262251b433a9`
 - 起始时间：`2026-08-24T16:51:25.295734+00:00`
-- 最近更新：`2026-08-25T10:41:11.720060+00:00`
+- 最近更新：`2026-08-25T12:25:46.038719+00:00`
 - 数据目录：`D:\zcodeproject\NovelOS\data\m1_run`
-- 已加载章节文件：53 个；跳过：0 个
+- 已加载章节文件：56 个；跳过：0 个
 - DB：`D:\zcodeproject\NovelOS\data\m1_run\novelos.db`
+  - agent 计量：5 个环节，已过滤 0 条空 agent_id 行
 
 ---
 
@@ -13,13 +14,13 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| 已完成章数 / 目标 | 53 / 53 |
-| 总耗时 (s) | 25,748.3 |
-| Token 总量 | 6,894,918 |
-| Token 中 prompt | 3,234,027 |
-| Token 中 completion | 3,660,891 |
-| 平均单章 token | 130,093 |
-| 平均单章耗时 (s) | 485.8 |
+| 已完成章数 / 目标 | 56 / 53 |
+| 总耗时 (s) | 27,215.2 |
+| Token 总量 | 7,201,838 |
+| Token 中 prompt | 3,388,796 |
+| Token 中 completion | 3,813,042 |
+| 平均单章 token | 128,604 |
+| 平均单章耗时 (s) | 486.0 |
 
 ## 2. 逐章明细
 
@@ -78,6 +79,9 @@
 | 51 | 1,930 | 166,672 (86,051/80,621) | 5 | 1 | 0 | 100 | 100 | 100 | 75 | 65 | 85 | 92 | 53 | 127,396 |
 | 52 | 1,738 | 208,126 (88,098/120,028) | 5 | 0 | 84 | 100 | 100 | 100 | 75 | 65 | 50 | 100 | 54 | 139,665 |
 | 53 | 1,717 | 167,437 (88,908/78,529) | 5 | 1 | 88 | 100 | 100 | 100 | 75 | 65 | 85 | 92 | 55 | 135,543 |
+| 54 | 1,610 | 106,522 (56,999/49,523) | 2 | 1 | 76 | 90 | 100 | 100 | 75 | 65 | 0 | 100 | 56 | 150,621 |
+| 55 | 2,476 | 200,398 (97,770/102,628) | 5 | 1 | 77 | 100 | 100 | 100 | 75 | 65 | 0 | 100 | 57 | 151,347 |
+| 56 | 0 | 0 (0/0) | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 
 （sv = state_version；p/c = prompt/completion）
 
@@ -90,28 +94,28 @@
 | 21-30 | 10 | 765 | 135,903 | 31.9 | 99.4 | 75.0 | 65.0 | 97.2 | 64,405 |
 | 31-40 | 10 | 769 | 149,716 | 41.1 | 99.4 | 75.0 | 65.0 | 93.0 | 91,697 |
 | 41-50 | 10 | 924 | 123,260 | 35.4 | 99.7 | 75.0 | 65.0 | 98.6 | 110,158 |
-| 51-60 | 3 | 1,795 | 180,745 | 57.3 | 100.0 | 75.0 | 65.0 | 94.7 | 134,201 |
+| 51-60 | 6 | 1,578 | 141,526 | 54.2 | 83.3 | 62.5 | 54.2 | 80.7 | 117,429 |
 
 提示：用于肉眼判断连续性、风格、节奏、AI 痕迹、快照体积是否随章号衰减。
 
 ## 4. 质量 issue 频次演化
 
-采样：317 条 issue（来自 quality_reports.issues_json）。
+采样：343 条 issue（来自 quality_reports.issues_json）。
 
 ### 4.1 总览 Top10（按 rule_id 出现次数）
 
 | rule_id | 出现次数 |
 | --- | ---: |
-| Q6_NO_REFERENCES | 54 |
-| RULE_Q8_NO_DATA | 54 |
-| RULE_H1_NO_END_HOOK | 51 |
-| RULE_STYLE_REPETITION_TRIGRAM | 48 |
-| RULE_H2_NO_CLIMAX_3CH | 28 |
-| RULE_H3_FILLER_3CH | 28 |
+| Q6_NO_REFERENCES | 60 |
+| RULE_Q8_NO_DATA | 60 |
+| RULE_H1_NO_END_HOOK | 54 |
+| RULE_STYLE_REPETITION_TRIGRAM | 54 |
+| RULE_H2_NO_CLIMAX_3CH | 29 |
+| RULE_H3_FILLER_3CH | 29 |
 | RULE_FORESHADOW_NO_HOOKS | 23 |
+| RULE_Q7_FLAT_SENTENCE | 12 |
 | RULE_CHAR_BEFORE_MISMATCH | 10 |
-| RULE_Q7_FLAT_SENTENCE | 10 |
-| RULE_H3_FILLER_2CH | 5 |
+| RULE_H3_FILLER_2CH | 6 |
 
 ### 4.2 分段 Top10（每 10 章一段）
 
@@ -165,18 +169,19 @@
 | 41-50 | RULE_FORESHADOW_NO_HOOKS | 6 |
 | 41-50 | RULE_CHAR_BEFORE_MISMATCH | 2 |
 | 41-50 | RULE_H3_FILLER_2CH | 1 |
-| 51-60 | Q6_NO_REFERENCES | 4 |
-| 51-60 | RULE_Q8_NO_DATA | 4 |
-| 51-60 | RULE_H1_NO_END_HOOK | 4 |
-| 51-60 | RULE_STYLE_REPETITION_TRIGRAM | 4 |
-| 51-60 | RULE_Q7_FLAT_SENTENCE | 3 |
-| 51-60 | RULE_H2_NO_CLIMAX_3CH | 2 |
-| 51-60 | RULE_H3_FILLER_3CH | 2 |
+| 51-60 | Q6_NO_REFERENCES | 10 |
+| 51-60 | RULE_Q8_NO_DATA | 10 |
+| 51-60 | RULE_STYLE_REPETITION_TRIGRAM | 10 |
+| 51-60 | RULE_H1_NO_END_HOOK | 7 |
+| 51-60 | RULE_Q7_FLAT_SENTENCE | 5 |
+| 51-60 | RULE_H2_NO_CLIMAX_3CH | 3 |
+| 51-60 | RULE_H3_FILLER_3CH | 3 |
 | 51-60 | RULE_FORESHADOW_NO_HOOKS | 2 |
+| 51-60 | RULE_H3_FILLER_2CH | 1 |
 
 ## 5. 异常清单
 
-异常章节数：51 / 53。
+异常章节数：53 / 56。
 
 | 章号 | overall | max_attempt | 字数 | 原因 |
 | --- | ---: | ---: | ---: | --- |
@@ -231,14 +236,30 @@
 | 50 | 0 | 1 | 1,133 | overall=0 |
 | 51 | 0 | 2 | 1,930 | overall=0; max_attempt=2 |
 | 53 | 88 | 2 | 1,717 | max_attempt=2 |
+| 54 | 76 | 2 | 1,610 | max_attempt=2 |
+| 56 | 0 | 4 | 0 | overall=0; max_attempt=4; prose_chars<1000 (0) |
 
 ## 6. 成本外推
 
-基线：已完成 53 章的均值（avg_total_tokens=130,093，avg_prompt=61,019，avg_completion=69,073，avg_wall_s=485.8）。
+基线：已完成 56 章的均值（avg_total_tokens=128,604，avg_prompt=60,514，avg_completion=68,090，avg_wall_s=486.0）。
 
 线性外推：当前均值乘以目标章数。**仅作量级参考，未考虑上下文窗口膨胀、缓存命中、并发优化等非线性因素**。
 
 | 规模 | total_tokens | prompt | completion | 预计总耗时 (s) | 预计总耗时 (h) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 50 章 | 6,504,640 | 3,050,969 | 3,453,671 | 24,290.9 | 6.75 |
-| 500 章 | 65,046,396 | 30,509,689 | 34,536,708 | 242,908.9 | 67.47 |
+| 50 章 | 6,430,212 | 3,025,711 | 3,404,502 | 24,299.3 | 6.75 |
+| 500 章 | 64,302,125 | 30,257,107 | 34,045,018 | 242,992.8 | 67.50 |
+
+## 7. 按环节 token 计量
+
+数据源：``ai_call_logs`` × ``agents``，按 ``agents.name`` 聚合；agent_id 为 NULL / 空的日志已过滤（条数见底部）。
+
+| agent | calls | prompt | completion | total | total 占比 | avg_latency_ms | retry_sum |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| observer | 83 | 2,294,610 | 2,180,284 | 4,474,894 | 51.4% | 447858 | 11 |
+| writer | 66 | 542,335 | 1,200,602 | 1,742,937 | 20.0% | 227313 | 3 |
+| director | 67 | 827,722 | 556,211 | 1,383,933 | 15.9% | 72078 | 0 |
+| critic | 59 | 325,913 | 368,881 | 694,794 | 8.0% | 54826 | 1 |
+| summarizer | 56 | 206,049 | 211,186 | 417,235 | 4.8% | 26592 | 1 |
+
+**结论**：占总 token 最高的环节是 `observer`，占整体 51.4%（4,474,894 / 8,713,793 token）。

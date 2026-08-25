@@ -237,9 +237,17 @@ def _build_revision_guidance(report: _QualityReport, issues: list[Issue]) -> lis
 
 
 def _build_observer_ctx_node(ctx: dict[str, Any]) -> dict[str, Any]:
+    """装配 observer 输入。
+
+    改用 ``snapshot_mode="trimmed"``（M1/M2 实证：全量快照 >110KB 导致 LLM 超时；
+    trimmed 仅保留最近 ``keep_recent_commits`` 个 commit 中 touch 过的实体全量字段 +
+    open/active/escalated/acknowledged 状态 hook/debt 全量 + 其余仅摘要），让
+    observer 在大快照场景下也能稳定完成。trim 口径与 stats 写入由
+    :func:`build_observer_input` 负责；本节点仅做模式选择。
+    """
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
-    payload = build_observer_input(db_path, chapter_id)
+    payload = build_observer_input(db_path, chapter_id, snapshot_mode="trimmed")
     return {"observer_input": payload}
 
 
@@ -343,7 +351,13 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
         run_id=run_id,
         previous_state_version=previous_state_version,
     )
-    errors = validate_delta(delta)
+    # M3 引擎包：把 observer_input 中的 previous_state（trimmed 快照）传入 validate_delta，
+    # 启用「引用实体存在性」业务校验——把 DB FK 失败前置为可自愈的业务错误（详见
+    # ``validator._reference_existence_errors``）。observer_input.previous_state 是 trimmed
+    # 快照，仅含 touch 实体全集 + 其余摘要，足够作为引用白名单（add 实体在本 delta 内
+    # 自愈，不依赖 snapshot 全集）。
+    snapshot_for_validate = (ctx.get("observer_input") or {}).get("previous_state")
+    errors = validate_delta(delta, snapshot=snapshot_for_validate)
     if errors:
         # 构造重试 payload（在 observer_input 副本上注入 _retry_hint）
         retry_payload = dict(ctx.get("observer_input") or {})
@@ -377,7 +391,9 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
             run_id=run_id,
             previous_state_version=previous_state_version,
         )
-        errors = validate_delta(delta)
+        # retry_payload 是 observer_input 的浅拷贝，previous_state 字段仍在；继续复用
+        # 同一 snapshot 做引用存在性校验。
+        errors = validate_delta(delta, snapshot=snapshot_for_validate)
         if errors:
             raise ValueError(
                 f"observer delta rejected by validator: errors={errors}"

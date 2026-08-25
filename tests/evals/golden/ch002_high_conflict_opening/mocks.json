@@ -218,27 +218,7 @@
           "who_knows": ["char_周元_1", "char_林轩_0"]
         }
       ],
-      "resolved_hooks": [
-        {
-          "change_id": "rh_002",
-          "op": "update",
-          "target_id": "hook_cave_anomaly",
-          "hook_id": "hook_cave_anomaly",
-          "to_status": "RESOLVED",
-          "payoff_summary": "禁地异象外溢为截杀事件与宗门追查",
-          "confidence": 0.85,
-          "evidence": {
-            "chapter_id": "ch_截杀之夜",
-            "scene_id": "scene_004",
-            "excerpt": "周长老望着满地尸首与周身青光未散的林轩",
-            "span": {"start": 310, "end": 340}
-          },
-          "risk_level": "MEDIUM",
-          "notes": "伏笔从悬而未决推进到宗门追查阶段",
-          "visibility": "PUBLIC",
-          "who_knows": ["char_周元_1"]
-        }
-      ],
+      "resolved_hooks": [],
       "new_hooks": [
         {
           "change_id": "nh_004",

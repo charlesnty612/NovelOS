@@ -418,3 +418,40 @@ def test_chapter_commit_observer_retry_fails_after_two_invalid_attempts(tmp_path
                 conn.close()
 
     asyncio.run(run())
+
+
+def test_build_observer_ctx_node_uses_trimmed_snapshot(tmp_path: Path):
+    """端到端断言（任务书 DoD #3）：_build_observer_ctx_node 调用后 observer_input
+    必须带 trimmed 标记——``previous_state.snapshot_mode == 'trimmed'`` +
+    ``snapshot_trim_stats`` 顶层存在。验证 chapter_commit pipeline 已真正接入 M3 引擎包。
+
+    直接调节点函数、避开 HTTP 链路以最小化依赖；底层仍走真 DB + 真
+    build_observer_input（trimmed 模式）。
+    """
+    from packages.workflows.chapter_commit.pipeline import _build_observer_ctx_node
+
+    app = _create_app(tmp_path)
+
+    async def setup():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            await _make_character(app, pid, "林夕")
+            cid = await _make_chapter(app, pid, 1, "第一章")
+            return pid, cid
+
+    pid, cid = asyncio.run(setup())
+    db_path = app.state.settings.db_path
+
+    out = _build_observer_ctx_node({"db_path": db_path, "chapter_id": cid})
+
+    assert "observer_input" in out
+    payload = out["observer_input"]
+    # trimmed 模式必须注入 snapshot_trim_stats
+    assert "snapshot_trim_stats" in payload, (
+        f"trimmed 模式应在顶层带 snapshot_trim_stats；当前顶层键={list(payload.keys())}"
+    )
+    # trimmed 模式必须把 previous_state.snapshot_mode 标记为 trimmed
+    prev_state = payload.get("previous_state") or {}
+    assert prev_state.get("snapshot_mode") == "trimmed", (
+        f"previous_state.snapshot_mode 应为 'trimmed'，实际 {prev_state.get('snapshot_mode')!r}"
+    )

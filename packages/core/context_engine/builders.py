@@ -1608,14 +1608,495 @@ def _peek_project_id_from_chapter(db_path: str | Path, chapter_id: str) -> str |
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Observer 输入快照分代裁剪（M3 引擎包：解决 ch056 110KB+ 全量快照阻塞 LLM）
+# ---------------------------------------------------------------------------
+# 设计要点：
+# - ``snapshot_mode='full'``（默认）保持现有行为零变化；调用方零感知。
+# - ``snapshot_mode='trimmed'`` 在 payload["previous_state"] 中只保留「最近 N 个
+#   commit 的 delta 中被 touch 过的实体全量字段」+「其余实体仅保留摘要」；
+#   hooks/debts 仅保留 open/active/escalated/acknowledged 全量，resolved/paid
+#   类只留最近 5 条（按 hook_id/debt_id 字典序模拟「最近」）。
+# - 顶层元信息（state_version 等）不动。
+# - 裁剪 stats 附在 config 同级 payload["snapshot_trim_stats"]，便于观测；
+#   并在 previous_state 同级注入 ``snapshot_mode="trimmed"`` 提示 observer
+#   当前上下文是裁剪版（不能依赖旧的全量结构假设）。
+# ---------------------------------------------------------------------------
+
+
+def _collect_touched_entity_ids(
+    conn: sqlite3.Connection, project_id: str, *, keep_recent_commits: int
+) -> dict[str, set[str]]:
+    """从最近 ``keep_recent_commits`` 个 commit 的 delta payload 中收集被 touch 的实体 ID。
+
+    返回结构：
+        {
+            "characters": set[character_id],
+            "locations": set[location_id],
+            "factions": set[faction_id],
+            "world_rules": set[world_rule_id],
+            "hooks": set[hook_id],
+            "debts": set[debt_id],
+            "events": set[event_id],
+            "relationships": set[relationship_id],
+            "relationship_keys": set[str],   # "from::to::type"
+        }
+
+    实现要点：
+    - 仅读 ``commits`` + ``state_deltas`` 表（不读 story_states 全文，避免与全量快照
+      重复 IO）；无 commits 时返回全空集合。
+    - ``state_deltas.payload_json`` 由 commits.py 落库；解析时按 7 个 change 数组遍历。
+    - ``world_id`` 按 ``world_kind`` 路由到 locations / factions / world_rules。
+    - relationship 用合成 key（``from_character_id::to_character_id::relation_type``）
+      ——snapshot 中每个 relationship 条目都有 ``relationship_id``，但 schema 中
+      relationship_change 无该字段。两者并行收集。
+    """
+    out: dict[str, set[str]] = {
+        "characters": set(),
+        "locations": set(),
+        "factions": set(),
+        "world_rules": set(),
+        "hooks": set(),
+        "debts": set(),
+        "events": set(),
+        "relationships": set(),
+        "relationship_keys": set(),
+    }
+    if keep_recent_commits <= 0:
+        return out
+    rows = conn.execute(
+        """
+        SELECT c.commit_id, c.chapter_id, c.resulting_state_version,
+               c.timestamp, d.payload_json
+        FROM commits c
+        LEFT JOIN state_deltas d ON d.delta_id = c.delta_id
+        WHERE c.project_id = ?
+        ORDER BY c.resulting_state_version DESC
+        LIMIT ?
+        """,
+        (project_id, keep_recent_commits),
+    ).fetchall()
+
+    for r in rows:
+        raw = r["payload_json"]
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        for ch in payload.get("character_changes") or []:
+            if not isinstance(ch, dict):
+                continue
+            cid = ch.get("character_id") or ch.get("target_id")
+            if isinstance(cid, str) and cid:
+                out["characters"].add(cid)
+
+        for ch in payload.get("world_changes") or []:
+            if not isinstance(ch, dict):
+                continue
+            wid = ch.get("world_id") or ch.get("target_id")
+            if not (isinstance(wid, str) and wid):
+                continue
+            kind = ch.get("world_kind")
+            if kind == "location":
+                out["locations"].add(wid)
+            elif kind == "faction":
+                out["factions"].add(wid)
+            elif kind == "rule":
+                out["world_rules"].add(wid)
+
+        for ch in payload.get("relationship_changes") or []:
+            if not isinstance(ch, dict):
+                continue
+            f = ch.get("from_character_id")
+            t = ch.get("to_character_id")
+            rt = ch.get("relation_type")
+            if not (isinstance(f, str) and isinstance(t, str) and isinstance(rt, str)):
+                continue
+            key = f"{f}::{t}::{rt}"
+            out["relationship_keys"].add(key)
+            rid = ch.get("relationship_id")
+            if isinstance(rid, str) and rid:
+                out["relationships"].add(rid)
+
+        for ch in payload.get("new_events") or []:
+            if not isinstance(ch, dict):
+                continue
+            eid = ch.get("event_id") or ch.get("target_id")
+            if isinstance(eid, str) and eid:
+                out["events"].add(eid)
+
+        for ch in payload.get("resolved_hooks") or []:
+            if not isinstance(ch, dict):
+                continue
+            hid = ch.get("hook_id") or ch.get("target_id")
+            if isinstance(hid, str) and hid:
+                out["hooks"].add(hid)
+        for ch in payload.get("new_hooks") or []:
+            if not isinstance(ch, dict):
+                continue
+            hid = ch.get("hook_id") or ch.get("target_id")
+            if isinstance(hid, str) and hid:
+                out["hooks"].add(hid)
+
+        for ch in payload.get("debt_changes") or []:
+            if not isinstance(ch, dict):
+                continue
+            did = ch.get("debt_id") or ch.get("target_id")
+            if isinstance(did, str) and did:
+                out["debts"].add(did)
+
+    return out
+
+
+# hook / debt 状态常量：与 snapshot.py _load_hooks/_load_debts 口径一致；
+# hooks.status 五态枚举：OPEN/ACTIVE/ESCALATED/RESOLVED/ABANDONED
+# narrative_debts.status 四态枚举：open/acknowledged/paid/forgiven
+_HOOK_OPEN_STATUSES = frozenset({"OPEN", "ACTIVE", "ESCALATED"})
+_DEBT_OPEN_STATUSES = frozenset({"open", "acknowledged"})
+
+
+def _summarize_character(char: dict) -> dict:
+    return {
+        "character_id": char.get("character_id"),
+        "name": char.get("name"),
+        "facet": char.get("facet"),
+    }
+
+
+def _summarize_relationship(rel: dict) -> dict:
+    return {
+        "relationship_id": rel.get("relationship_id"),
+        "from_character_id": rel.get("from_character_id"),
+        "to_character_id": rel.get("to_character_id"),
+        "relation_type": rel.get("relation_type"),
+    }
+
+
+def _summarize_location(loc_val: dict) -> dict:
+    return {"name": loc_val.get("name") if isinstance(loc_val, dict) else None}
+
+
+def _summarize_faction(fac_val: dict) -> dict:
+    return {"name": fac_val.get("name") if isinstance(fac_val, dict) else None}
+
+
+def _summarize_world_rule(rule: dict) -> dict:
+    return {
+        "world_rule_id": rule.get("world_rule_id"),
+        "name": rule.get("name"),
+    }
+
+
+def _summarize_hook(h: dict) -> dict:
+    return {
+        "hook_id": h.get("hook_id"),
+        "name": h.get("name"),
+        "status": h.get("status"),
+    }
+
+
+def _summarize_debt(d: dict) -> dict:
+    return {
+        "debt_id": d.get("debt_id"),
+        "description": d.get("description"),
+        "status": d.get("status"),
+    }
+
+
+def _trim_snapshot_for_observer(
+    snap: dict[str, Any],
+    *,
+    keep_recent_commits: int = 3,
+    resolved_history_keep: int = 5,
+    touched: dict[str, set[str]] | None = None,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """对 observer 输入快照做「分代裁剪」。
+
+    参数：
+        snap：全量 Canonical State 快照。
+        keep_recent_commits：扫描 commits 表的最近 N 个 delta。仅当 ``touched is None``
+            时使用；若调用方已自行计算 ``touched``，可直接传入以避免重复 IO。
+        resolved_history_keep：resolved/abandoned hooks 与 paid/forgiven debts
+            的「保留最近多少条」上限（按 hook_id/debt_id 字典序取末尾 N 条）。
+        touched：可选预计算的「被 touch 的实体 ID 集合」（结构同
+            ``_collect_touched_entity_ids`` 返回值）。
+
+    返回：
+        (trimmed_snapshot, stats_dict)
+
+    口径（与任务书一致，字段以 snapshot 实际结构为准）：
+    - characters：touched 全量；其他仅 {character_id, name, facet}。
+    - characters[].relationships：touched 全量；其他仅摘要。
+    - world.locations / .factions（dict）：touched value 全量；其他仅 {name}。
+    - world.world_rules（list）：touched 全量；其他仅 {world_rule_id, name}。
+    - hooks：open/active/escalated 全量；resolved/abandoned 仅保留最近 N 条摘要；
+      touched 的 resolved hook 强制保留（即便超出 N 条上限）。
+    - debts：open/acknowledged 全量；paid/forgiven 仅保留最近 N 条摘要；touched 强制保留。
+    - state_version / recent_events / events / world.current_time_in_story /
+      world.active_resources：原样保留。
+    """
+    stats: dict[str, int] = {
+        "characters_full": 0,
+        "characters_summary": 0,
+        "relationships_full": 0,
+        "relationships_summary": 0,
+        "locations_full": 0,
+        "locations_summary": 0,
+        "factions_full": 0,
+        "factions_summary": 0,
+        "world_rules_full": 0,
+        "world_rules_summary": 0,
+        "hooks_open": 0,
+        "hooks_resolved_kept": 0,
+        "hooks_resolved_trimmed": 0,
+        "debts_open": 0,
+        "debts_resolved_kept": 0,
+        "debts_resolved_trimmed": 0,
+    }
+
+    if not isinstance(snap, dict):
+        return {"snapshot_mode": "trimmed"}, stats
+
+    touched = touched or {
+        "characters": set(),
+        "locations": set(),
+        "factions": set(),
+        "world_rules": set(),
+        "hooks": set(),
+        "debts": set(),
+        "events": set(),
+        "relationships": set(),
+        "relationship_keys": set(),
+    }
+
+    touched_chars = touched.get("characters", set())
+    touched_locs = touched.get("locations", set())
+    touched_facs = touched.get("factions", set())
+    touched_rules = touched.get("world_rules", set())
+    touched_hooks = touched.get("hooks", set())
+    touched_debts = touched.get("debts", set())
+    touched_rel_ids = touched.get("relationships", set())
+    touched_rel_keys = touched.get("relationship_keys", set())
+
+    trimmed: dict[str, Any] = {"snapshot_mode": "trimmed"}
+    for k in ("state_version", "recent_events", "events"):
+        if k in snap:
+            trimmed[k] = snap[k]
+
+    # ---- characters ----
+    chars_in = snap.get("characters") or []
+    chars_out: list[dict] = []
+    if isinstance(chars_in, list):
+        for c in chars_in:
+            if not isinstance(c, dict):
+                continue
+            cid = c.get("character_id")
+            is_full = isinstance(cid, str) and cid in touched_chars
+            if is_full:
+                rels_in = c.get("relationships") or []
+                rels_out: list[dict] = []
+                if isinstance(rels_in, list):
+                    for rel in rels_in:
+                        if not isinstance(rel, dict):
+                            continue
+                        rid = rel.get("relationship_id")
+                        rkey = None
+                        f = rel.get("from_character_id")
+                        t = rel.get("to_character_id")
+                        rt = rel.get("relation_type")
+                        if isinstance(f, str) and isinstance(t, str) and isinstance(rt, str):
+                            rkey = f"{f}::{t}::{rt}"
+                        rel_touched = (
+                            (isinstance(rid, str) and rid in touched_rel_ids)
+                            or (rkey is not None and rkey in touched_rel_keys)
+                        )
+                        if rel_touched:
+                            rels_out.append(rel)
+                            stats["relationships_full"] += 1
+                        else:
+                            rels_out.append(_summarize_relationship(rel))
+                            stats["relationships_summary"] += 1
+                new_c = dict(c)
+                new_c["relationships"] = rels_out
+                chars_out.append(new_c)
+                stats["characters_full"] += 1
+            else:
+                chars_out.append(_summarize_character(c))
+                stats["characters_summary"] += 1
+    trimmed["characters"] = chars_out
+
+    # ---- world ----
+    world_in = snap.get("world") or {}
+    world_out: dict[str, Any] = {}
+    if isinstance(world_in, dict):
+        for k in ("current_time_in_story", "active_resources"):
+            if k in world_in:
+                world_out[k] = world_in[k]
+
+        locs_in = world_in.get("locations") or {}
+        locs_out: dict[str, dict] = {}
+        if isinstance(locs_in, dict):
+            for lid, lval in locs_in.items():
+                if lid in touched_locs:
+                    locs_out[lid] = lval
+                    stats["locations_full"] += 1
+                else:
+                    locs_out[lid] = _summarize_location(lval)
+                    stats["locations_summary"] += 1
+        world_out["locations"] = locs_out
+
+        facs_in = world_in.get("factions") or {}
+        facs_out: dict[str, dict] = {}
+        if isinstance(facs_in, dict):
+            for fid, fval in facs_in.items():
+                if fid in touched_facs:
+                    facs_out[fid] = fval
+                    stats["factions_full"] += 1
+                else:
+                    facs_out[fid] = _summarize_faction(fval)
+                    stats["factions_summary"] += 1
+        world_out["factions"] = facs_out
+
+        rules_in = world_in.get("world_rules") or []
+        rules_out: list[dict] = []
+        if isinstance(rules_in, list):
+            for r in rules_in:
+                if not isinstance(r, dict):
+                    continue
+                rid = r.get("world_rule_id")
+                if isinstance(rid, str) and rid in touched_rules:
+                    rules_out.append(r)
+                    stats["world_rules_full"] += 1
+                else:
+                    rules_out.append(_summarize_world_rule(r))
+                    stats["world_rules_summary"] += 1
+        world_out["world_rules"] = rules_out
+
+    trimmed["world"] = world_out
+
+    # ---- hooks ----
+    hooks_in = snap.get("hooks") or []
+    hooks_open_out: list[dict] = []
+    hooks_resolved_out: list[dict] = []
+    if isinstance(hooks_in, list):
+        for h in hooks_in:
+            if not isinstance(h, dict):
+                continue
+            status = h.get("status")
+            if isinstance(status, str) and status in _HOOK_OPEN_STATUSES:
+                hooks_open_out.append(h)
+            elif isinstance(status, str) and status in ("RESOLVED", "ABANDONED"):
+                hooks_resolved_out.append(_summarize_hook(h))
+    if hooks_resolved_out:
+        hooks_resolved_out.sort(key=lambda x: x.get("hook_id") or "")
+        if len(hooks_resolved_out) > resolved_history_keep:
+            kept = hooks_resolved_out[-resolved_history_keep:]
+            trimmed_count = len(hooks_resolved_out) - resolved_history_keep
+        else:
+            kept = hooks_resolved_out
+            trimmed_count = 0
+        for h in hooks_in:
+            if not isinstance(h, dict):
+                continue
+            status = h.get("status")
+            if not (isinstance(status, str) and status in ("RESOLVED", "ABANDONED")):
+                continue
+            hid = h.get("hook_id")
+            if not (isinstance(hid, str) and hid in touched_hooks):
+                continue
+            if not any(k.get("hook_id") == hid for k in kept):
+                kept.append(h)
+        kept.sort(key=lambda x: x.get("hook_id") or "")
+        hooks_resolved_out = kept
+        stats["hooks_resolved_kept"] = len(hooks_resolved_out)
+        stats["hooks_resolved_trimmed"] = trimmed_count
+    else:
+        stats["hooks_resolved_kept"] = 0
+        stats["hooks_resolved_trimmed"] = 0
+    stats["hooks_open"] = len(hooks_open_out)
+    trimmed["hooks"] = hooks_open_out + hooks_resolved_out
+
+    # ---- debts ----
+    debts_in = snap.get("debts") or []
+    debts_open_out: list[dict] = []
+    debts_resolved_out: list[dict] = []
+    if isinstance(debts_in, list):
+        for d in debts_in:
+            if not isinstance(d, dict):
+                continue
+            status = d.get("status")
+            if isinstance(status, str) and status in _DEBT_OPEN_STATUSES:
+                debts_open_out.append(d)
+            elif isinstance(status, str) and status in ("paid", "forgiven"):
+                debts_resolved_out.append(_summarize_debt(d))
+    if debts_resolved_out:
+        debts_resolved_out.sort(key=lambda x: x.get("debt_id") or "")
+        if len(debts_resolved_out) > resolved_history_keep:
+            kept = debts_resolved_out[-resolved_history_keep:]
+            trimmed_count = len(debts_resolved_out) - resolved_history_keep
+        else:
+            kept = debts_resolved_out
+            trimmed_count = 0
+        for d in debts_in:
+            if not isinstance(d, dict):
+                continue
+            status = d.get("status")
+            if not (isinstance(status, str) and status in ("paid", "forgiven")):
+                continue
+            did = d.get("debt_id")
+            if not (isinstance(did, str) and did in touched_debts):
+                continue
+            if not any(k.get("debt_id") == did for k in kept):
+                kept.append(d)
+        kept.sort(key=lambda x: x.get("debt_id") or "")
+        debts_resolved_out = kept
+        stats["debts_resolved_kept"] = len(debts_resolved_out)
+        stats["debts_resolved_trimmed"] = trimmed_count
+    else:
+        stats["debts_resolved_kept"] = 0
+        stats["debts_resolved_trimmed"] = 0
+    stats["debts_open"] = len(debts_open_out)
+    trimmed["debts"] = debts_open_out + debts_resolved_out
+
+    return trimmed, stats
+
+
 def build_observer_input(
     db_path: str | Path,
     chapter_id: str,
     *,
     min_excerpt_chars_low_confidence: int = 80,
     max_changes_per_array: int = 50,
+    snapshot_mode: str = "full",
+    keep_recent_commits: int = 3,
+    resolved_history_keep: int = 5,
 ) -> dict[str, Any]:
-    """组装 Observer 输入（agent-contracts §5.1）。"""
+    """组装 Observer 输入（agent-contracts §5.1 + M3 快照分代裁剪）。
+
+    参数新增（M3）：
+        snapshot_mode："full"（默认，与旧行为字节级一致）或 "trimmed"。
+            - "full"：payload["previous_state"] 是全量快照，stats 不写入。
+            - "trimmed"：payload["previous_state"] 经过 ``_trim_snapshot_for_observer``
+              裁剪；同时 payload["snapshot_trim_stats"] 记录各集合裁剪前后数量。
+        keep_recent_commits：trimmed 模式下识别「被 touch 过实体」时扫描的最近
+            commit 数（默认 3）。≥1 才生效；≤0 等价未 touch（全部走摘要）。
+        resolved_history_keep：trimmed 模式下 resolved/abandoned hooks 与
+            paid/forgiven debts 的保留上限（默认 5）。
+
+    向后兼容：
+        既有调用方（chapter_commit/pipeline.py:242、preview.py:443）零改动；
+        ``snapshot_mode`` 默认值 "full" 保证行为完全等价。
+    """
+    if snapshot_mode not in ("full", "trimmed"):
+        raise ValueError(
+            f"snapshot_mode must be 'full' or 'trimmed', got {snapshot_mode!r}"
+        )
+
     conn = get_connection(db_path)
     try:
         chap_row = conn.execute("SELECT * FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()
@@ -1633,7 +2114,8 @@ def build_observer_input(
     state_version = int(snap.get("state_version") or 0)
 
     plan_json = chapter.get("plan_json") or {}
-    return {
+
+    payload: dict[str, Any] = {
         "agent": "observer",
         "prompt_version": "observer:v1",
         "chapter": {
@@ -1654,6 +2136,40 @@ def build_observer_input(
             "max_changes_per_array": max_changes_per_array,
         },
     }
+
+    if snapshot_mode == "trimmed":
+        # 收集最近 N 个 commit 中被 touch 的实体 ID；DB IO 失败时回退到空 touched
+        # 集合（退化等价于「未 touch 过」→ 全实体走摘要），保证裁剪路径不阻断装配。
+        conn2 = get_connection(db_path)
+        try:
+            touched = _collect_touched_entity_ids(
+                conn2, project_id, keep_recent_commits=keep_recent_commits,
+            )
+        except sqlite3.Error:
+            touched = None
+        finally:
+            conn2.close()
+
+        trimmed_snap, stats = _trim_snapshot_for_observer(
+            snap,
+            keep_recent_commits=keep_recent_commits,
+            resolved_history_keep=resolved_history_keep,
+            touched=touched,
+        )
+        # 体积量化（before/after JSON 字节数）
+        try:
+            stats["total_size_bytes_before"] = len(json.dumps(snap, ensure_ascii=False))
+            stats["total_size_bytes_after"] = len(
+                json.dumps(trimmed_snap, ensure_ascii=False)
+            )
+        except (TypeError, ValueError):
+            stats["total_size_bytes_before"] = 0
+            stats["total_size_bytes_after"] = 0
+
+        payload["previous_state"] = trimmed_snap
+        payload["snapshot_trim_stats"] = stats
+
+    return payload
 
 
 __all__ = [

@@ -174,6 +174,93 @@ def load_story_state_growth(db_path: Path | None) -> tuple[list[tuple[int, int]]
     return rows, None
 
 
+# --- 7 节：按 agent 聚合 token / 调用 / 延迟 / 重试 ---
+AgentTokenRow = dict[str, Any]
+
+
+def load_agent_token_stats(
+    db_path: Path | None,
+) -> tuple[list[AgentTokenRow], int, str | None]:
+    """JOIN ``ai_call_logs`` 与 ``agents``，按 ``agent.name`` 分组聚合 token。
+
+    返回 ``(rows, null_skipped, err)``：
+    - rows：按 ``total`` 降序的列表，每行字段见 :data:`AgentTokenRow`。
+      agent_id 为 NULL / 空的行**不进**聚合，其条数记入 ``null_skipped``。
+    - err：DB 不可用 / 表缺失时的告警。
+    """
+    empty: list[AgentTokenRow] = []
+    if db_path is None:
+        return empty, 0, "未指定 --db，跳过按 agent 计量"
+    if not db_path.exists():
+        return empty, 0, f"DB 不存在: {db_path}"
+
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            tbls = {
+                row[0]
+                for row in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "ai_call_logs" not in tbls:
+                return empty, 0, "ai_call_logs 表不存在，跳过按 agent 计量"
+            if "agents" not in tbls:
+                return empty, 0, "agents 表不存在，跳过按 agent 计量"
+            log_cols = {
+                r[1]
+                for r in con.execute("PRAGMA table_info(ai_call_logs)").fetchall()
+            }
+            for col in ("agent_id", "token_usage_json", "latency_ms", "retry_count"):
+                if col not in log_cols:
+                    return empty, 0, f"ai_call_logs 缺列 {col}"
+
+            # 1) 统计被过滤行数（NULL / 空）
+            null_skipped = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM ai_call_logs "
+                    "WHERE agent_id IS NULL OR TRIM(agent_id) = ''"
+                ).fetchone()[0]
+            )
+
+            # 2) JOIN 聚合（NULL name 退化为 "<无 agent 行>"）
+            sql = (
+                "SELECT "
+                "  COALESCE(a.name, '<无 agent 行>') AS agent_name, "
+                "  COUNT(*) AS calls, "
+                "  SUM(CAST(json_extract(l.token_usage_json, '$.prompt')     AS INTEGER)), "
+                "  SUM(CAST(json_extract(l.token_usage_json, '$.completion') AS INTEGER)), "
+                "  SUM(CAST(json_extract(l.token_usage_json, '$.total')      AS INTEGER)), "
+                "  CAST(AVG(CAST(l.latency_ms AS REAL)) AS INTEGER), "
+                "  SUM(CAST(COALESCE(l.retry_count, 0) AS INTEGER)) "
+                "FROM ai_call_logs l "
+                "LEFT JOIN agents a ON a.agent_id = l.agent_id "
+                "WHERE l.agent_id IS NOT NULL AND TRIM(l.agent_id) != '' "
+                "GROUP BY agent_name "
+                "ORDER BY 4 DESC, 2 DESC"
+            )
+            rows: list[AgentTokenRow] = []
+            for r in con.execute(sql).fetchall():
+                name = r[0] if isinstance(r[0], str) and r[0] else "<无 agent 行>"
+                rows.append(
+                    {
+                        "agent_name": name,
+                        "calls": int(r[1] or 0),
+                        "prompt": int(r[2] or 0),
+                        "completion": int(r[3] or 0),
+                        "total": int(r[4] or 0),
+                        "avg_latency_ms": int(r[5] or 0),
+                        "retry_sum": int(r[6] or 0),
+                    }
+                )
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        return empty, 0, f"DB 读取失败: {e}"
+
+    return rows, null_skipped, None
+
+
 # ---------------------------------------------------------------------------
 # 章节行规整（从 chapters dict 提取每章一行）
 # ---------------------------------------------------------------------------
@@ -517,6 +604,69 @@ def section_cost(rows: list[dict[str, Any]]) -> str:
     return "\n".join(out)
 
 
+def section_agent_tokens(
+    agent_rows: list[AgentTokenRow],
+    null_skipped: int,
+    err: str | None,
+) -> str:
+    """第 7 节：按环节（agent.name）聚合 token / 调用 / 延迟 / 重试。
+
+    表按 total 降序。底部给出一行结论："占总 token 最高的环节是 X，
+    占整体 Y%"，便于一眼定位烧钱环节。
+    """
+    head = "## 7. 按环节 token 计量"
+    if err:
+        return f"{head}\n\n> 跳过：{err}\n\n"
+    if not agent_rows:
+        note = (
+            f"（另有 {null_skipped} 条 agent_id 为空/NULL 的日志被过滤）"
+            if null_skipped else ""
+        )
+        return f"{head}\n\n无 agent 聚合数据。{note}\n\n"
+
+    grand_total = sum(int(r["total"] or 0) for r in agent_rows)
+    out: list[str] = [
+        head,
+        "",
+        "数据源：``ai_call_logs`` × ``agents``，按 ``agents.name`` 聚合；"
+        "agent_id 为 NULL / 空的日志已过滤（条数见底部）。",
+        "",
+        "| agent | calls | prompt | completion | total | total 占比 | avg_latency_ms | retry_sum |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for r in agent_rows:
+        total = int(r["total"] or 0)
+        pct = (total / grand_total * 100.0) if grand_total > 0 else 0.0
+        out.append(
+            "| {name} | {calls} | {p} | {c} | {tt} | {pct:.1f}% | {lat} | {rs} |".format(
+                name=r["agent_name"],
+                calls=r["calls"],
+                p=_fmt_int(r["prompt"]),
+                c=_fmt_int(r["completion"]),
+                tt=_fmt_int(total),
+                pct=pct,
+                lat=int(r["avg_latency_ms"] or 0),
+                rs=int(r["retry_sum"] or 0),
+            )
+        )
+
+    # 结论行
+    top = agent_rows[0]
+    top_total = int(top["total"] or 0)
+    top_pct = (top_total / grand_total * 100.0) if grand_total > 0 else 0.0
+    out += [
+        "",
+        f"**结论**：占总 token 最高的环节是 `{top['agent_name']}`，"
+        f"占整体 {top_pct:.1f}%（{_fmt_int(top_total)} / {_fmt_int(grand_total)} token）。",
+    ]
+    if null_skipped:
+        out.append(
+            f"另有 {null_skipped} 条 agent_id 为空 / NULL 的 ai_call_logs 行被过滤，未计入聚合。"
+        )
+    out.append("")
+    return "\n".join(out)
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -532,6 +682,7 @@ def build_report(
 
     issue_rows, issue_err = load_quality_reports(db_path)
     _state_rows, state_err = load_story_state_growth(db_path)
+    agent_rows, agent_null_skipped, agent_err = load_agent_token_stats(db_path)
 
     project_id = progress.get("project_id", "<unknown>")
     started = progress.get("started_at", "<unknown>")
@@ -544,14 +695,23 @@ def build_report(
     parts.append(f"- 起始时间：`{started}`")
     parts.append(f"- 最近更新：`{updated}`")
     parts.append(f"- 数据目录：`{data_dir}`")
-    parts.append(f"- 已加载章节文件：{len(chapters)} 个；跳过：{len(skipped)} 个"
-                 + (f"（{', '.join(skipped)}）" if skipped else ""))
+    parts.append(
+        f"- 已加载章节文件：{len(chapters)} 个；跳过：{len(skipped)} 个"
+        + (f"（{', '.join(skipped)}）" if skipped else "")
+    )
     if db_path is not None:
         parts.append(f"- DB：`{db_path}`")
         if issue_err:
             parts.append(f"  - issue 统计：{issue_err}")
         if state_err:
             parts.append(f"  - 快照体积：{state_err}")
+        if agent_err:
+            parts.append(f"  - agent 计量：{agent_err}")
+        else:
+            parts.append(
+                f"  - agent 计量：{len(agent_rows)} 个环节，已过滤"
+                f" {agent_null_skipped} 条空 agent_id 行"
+            )
     parts.append("")
     parts.append("---")
     parts.append("")
@@ -562,6 +722,7 @@ def build_report(
     parts.append(section_issues(issue_rows, issue_err))
     parts.append(section_anomalies(rows))
     parts.append(section_cost(rows))
+    parts.append(section_agent_tokens(agent_rows, agent_null_skipped, agent_err))
 
     diag: dict[str, Any] = {
         "project_id": project_id,
@@ -570,6 +731,9 @@ def build_report(
         "db_path": str(db_path) if db_path else None,
         "issue_err": issue_err,
         "state_err": state_err,
+        "agent_token_err": agent_err,
+        "agent_token_rows": len(agent_rows),
+        "agent_token_null_skipped": agent_null_skipped,
     }
     return "\n".join(parts), diag
 

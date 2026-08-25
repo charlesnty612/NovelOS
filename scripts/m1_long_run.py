@@ -76,6 +76,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sqlite3
 import sys
 import time
@@ -94,6 +95,8 @@ WORKFLOW_TIMEOUT_S = 900.0  # 单工作流超时（含 mock 长任务）
 RESUME_RETRY = 20  # review / commit PAUSED 后 resume 轮询最大次数
 HTTP_FAIL_THRESHOLD = 5  # 连续 HTTP 失败上限
 TARGET_WORD_COUNT = 1800  # chapter-write 的目标字数（番茄单章最佳区间 1500-2200 的中位）
+LOCK_FILE_NAME = ".run.lock"  # <data-dir>/.run.lock：run 子命令的单实例锁
+RUN_LOCK_HELD_EXIT = 5  # 检测到另一实例仍在运行时的退出码
 
 
 # ============================================================================
@@ -103,6 +106,100 @@ TARGET_WORD_COUNT = 1800  # chapter-write 的目标字数（番茄单章最佳�
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ============================================================================
+# 单实例文件锁
+# ============================================================================
+#
+# 背景：M1 曾出现两个 uvicorn 进程并存 + 驱动脚本残留，导致 build_observer_ctx
+# 节点被 SQLite 锁挂死 8h（py-spy 定位）。下方 ``_acquire_lock`` /
+# ``_release_lock`` 在 ``cmd_run`` 入口/出口处对 ``<data-dir>/.run.lock`` 做
+# 单实例防护：检测到 PID 仍存活则拒绝并退出码 5；--force-lock 强制接管用于
+# 清理残留锁。
+
+
+def _lock_path(data_dir: Path) -> Path:
+    """返回 ``<data-dir>/.run.lock`` 路径；data_dir 不会被自动创建。"""
+    return data_dir / LOCK_FILE_NAME
+
+
+def _pid_alive(pid: int) -> bool:
+    """跨平台判断 PID 是否仍在运行（``os.kill(pid, 0)``，不真杀进程）。
+
+    - ``ProcessLookupError``（不存在）→ False。
+    - ``PermissionError``（存在但权限不够）→ True（保守认定为活）。
+    - 其他 ``OSError``（如 PID<=0）→ False，避免误锁。
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_lock_meta(path: Path) -> dict[str, Any] | None:
+    """读取锁文件 JSON；缺文件 / 解析失败 / 字段缺失 PID → 返回 None。"""
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    pid = data.get("pid")
+    if not isinstance(pid, int):
+        return None
+    return data
+
+
+def _acquire_lock(data_dir: Path, force: bool) -> tuple[bool, dict[str, Any] | None]:
+    """尝试获取 ``<data-dir>/.run.lock`` 单实例锁。
+
+    返回 ``(acquired, conflicting_meta)``：
+    - ``(True, None)`` 拿到锁（写入自己 PID）；或 force/接管了现存锁。
+    - ``(False, meta)`` 当前已有活实例占用，``meta`` 是占锁方写入的 JSON。
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = _lock_path(data_dir)
+    my_meta: dict[str, Any] = {
+        "pid": os.getpid(),
+        "started_at": _now_iso(),
+        "host": socket.gethostname(),
+    }
+
+    existing = _read_lock_meta(lock_path)
+    if existing is not None:
+        existing_pid = existing.get("pid")
+        alive = _pid_alive(existing_pid) if isinstance(existing_pid, int) else False
+        if alive and not force:
+            return False, existing
+        # 已死 / 强制接管
+        my_meta["force_took_over"] = bool(force) or not alive
+        if existing.get("pid"):
+            my_meta["previous_pid"] = existing["pid"]
+
+    tmp = lock_path.with_suffix(lock_path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(my_meta, f, ensure_ascii=False, indent=2)
+    tmp.replace(lock_path)
+    return True, None
+
+
+def _release_lock(data_dir: Path) -> None:
+    """删除锁文件；不存在时静默。"""
+    try:
+        _lock_path(data_dir).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # ============================================================================
@@ -782,8 +879,48 @@ def cmd_run(args: argparse.Namespace) -> int:
     max_failures: int = args.max_failures
     from_n: int = args.from_chapter
     to_n: int = args.to_chapter
+    force_lock: bool = args.force_lock
 
     data_dir.mkdir(parents=True, exist_ok=True)
+
+    # 单实例锁：先于一切 IO，避免并发写同一 SQLite（M1 事故根因）。
+    acquired, conflict = _acquire_lock(data_dir, force=force_lock)
+    if not acquired and conflict is not None:
+        cp = conflict.get("pid")
+        cs = conflict.get("started_at")
+        ch = conflict.get("host")
+        print(
+            f"[m1] FAIL：检测到另一实例仍在运行（pid={cp}, started_at={cs}, host={ch}）。"
+            f" 如确认旧进程已死或残留锁：重跑时加 --force-lock 强制接管。",
+            flush=True,
+        )
+        print(f"[m1] 锁文件：{_lock_path(data_dir)}", flush=True)
+        return RUN_LOCK_HELD_EXIT
+    if acquired:
+        lock_note = "（force 接管）" if force_lock else ""
+        print(f"[m1] 单实例锁已获取 pid={os.getpid()} {lock_note}", flush=True)
+
+    # 锁一旦拿到，不论 run 中途抛什么异常，finally 都释放（即使 client 没创建）
+    try:
+        return _cmd_run_locked(args, host, port, db_path, data_dir, dry_run, budget, max_failures, from_n, to_n)
+    finally:
+        _release_lock(data_dir)
+
+
+def _cmd_run_locked(
+    args: argparse.Namespace,
+    host: str,
+    port: int,
+    db_path: str | None,
+    data_dir: Path,
+    dry_run: bool,
+    budget: int | None,
+    max_failures: int,
+    from_n: int,
+    to_n: int,
+) -> int:
+    """cmd_run 拿到锁后的实际执行体；抽出函数便于嵌套 try/finally 不嵌套缩进。"""
+    _ = args  # 当前 unused（保留接口以备将来加参数透传）
     prog = _load_progress(data_dir)
     if not prog or not prog.get("project_id"):
         print(f"[m1] FAIL：未发现 progress.json，请先 init（{_progress_path(data_dir)}）", flush=True)
@@ -1171,6 +1308,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--to", dest="to_chapter", type=int, required=True, help="结束章号（含）")
     p_run.add_argument("--budget-total-tokens", type=int, default=None, help="累计 total_tokens 预算")
     p_run.add_argument("--max-failures", type=int, default=3, help="单章最大重试次数")
+    p_run.add_argument(
+        "--force-lock",
+        action="store_true",
+        help=(
+            "强制接管 <data-dir>/.run.lock（跳过 PID 存活探测）。"
+            "用于清理残留锁或确认旧进程已死后接管；正常情况不要用。"
+        ),
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_status = sub.add_parser("status", help="打印进度摘要")

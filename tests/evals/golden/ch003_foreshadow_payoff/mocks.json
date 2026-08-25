@@ -218,46 +218,7 @@
           "who_knows": ["char_林轩_0"]
         }
       ],
-      "resolved_hooks": [
-        {
-          "change_id": "rh_003",
-          "op": "update",
-          "target_id": "hook_ancient_mirror",
-          "hook_id": "hook_ancient_mirror",
-          "to_status": "RESOLVED",
-          "payoff_summary": "议事堂上金手指由暗转明，第一重杀伐之意冲霄",
-          "confidence": 0.95,
-          "evidence": {
-            "chapter_id": "ch_议事堂风波",
-            "scene_id": "scene_001",
-            "excerpt": "林轩眉宇微挑，缓缓抬手，自眉心唤出一枚古镜虚影",
-            "span": {"start": 120, "end": 150}
-          },
-          "risk_level": "MEDIUM",
-          "notes": "金手指伏笔结算",
-          "visibility": "PUBLIC",
-          "who_knows": ["char_林轩_0"]
-        },
-        {
-          "change_id": "rh_004",
-          "op": "update",
-          "target_id": "hook_sect_inquiry",
-          "hook_id": "hook_sect_inquiry",
-          "to_status": "RESOLVED",
-          "payoff_summary": "议事堂质询以林轩破格升入内门候选收束",
-          "confidence": 0.95,
-          "evidence": {
-            "chapter_id": "ch_议事堂风波",
-            "scene_id": "scene_001",
-            "excerpt": "掌门自后堂步出，目露精光，沉声道：「此子既得上古杀伐真传，破格录为我青云宗内门候选」",
-            "span": {"start": 260, "end": 295}
-          },
-          "risk_level": "MEDIUM",
-          "notes": "议事彻查伏笔结算",
-          "visibility": "PUBLIC",
-          "who_knows": ["char_林轩_0"]
-        }
-      ],
+      "resolved_hooks": [],
       "new_hooks": [
         {
           "change_id": "nh_005",
