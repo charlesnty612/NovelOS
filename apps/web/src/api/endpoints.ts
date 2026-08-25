@@ -22,6 +22,10 @@ import type {
   CharacterUpdatePayload,
   Commit,
   ContextPreviewResponse,
+  ContinueAdoptPayload,
+  ContinueAdoptResponse,
+  ContinueRequestPayload,
+  ContinueResponse,
   Debt,
   DebtCreatePayload,
   DebtUpdatePayload,
@@ -532,4 +536,22 @@ export const branchesApi = {
     `/projects/${pid}/branches/${branchId}/promote`,
     payload,
   ),
+};
+
+// -------------------------------------------------------------- continuation
+// 对应后端续写助手端点：
+//   POST /projects/{pid}/chapters/{cid}/continue        —— 生成 N 个续写候选
+//   POST /projects/{pid}/chapters/{cid}/continue/adopt  —— 采纳其一追加为新草稿
+// 错误码统一走 ApiError：404 / 409 / 422 / 502；UI 在面板层用 ErrorBanner 呈现。
+export const continuationApi = {
+  generate: (pid: string, cid: string, payload: ContinueRequestPayload = {}) =>
+    api.post<ContinueResponse>(
+      `/projects/${pid}/chapters/${cid}/continue`,
+      payload,
+    ),
+  adopt: (pid: string, cid: string, payload: ContinueAdoptPayload) =>
+    api.post<ContinueAdoptResponse>(
+      `/projects/${pid}/chapters/${cid}/continue/adopt`,
+      payload,
+    ),
 };

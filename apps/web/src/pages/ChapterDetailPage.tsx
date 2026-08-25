@@ -11,6 +11,7 @@ import type {
 } from '../api/types';
 import { QualityPanel } from '../components/QualityPanel';
 import { ContextPreviewPanel } from '../components/ContextPreviewPanel';
+import { ContinuePanel } from '../components/ContinuePanel';
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
 import {
@@ -250,31 +251,36 @@ export function ChapterDetailPage() {
         <div className="muted">加载章节中…</div>
       ) : null}
 
-      {/* Workflow 面板（含 runs 列表 / 时间线 / 审批卡片） */}
+      {/* Workflow 面板（含 runs 列表 / 时间线 / 审批卡片）+ 续写助手 */}
       {chapter ? (
-        <div className="panel-grid" style={{ marginTop: 16 }}>
-          <WorkflowPanel
-            runs={chapterRuns}
-            selectedRunId={selectedRunId}
-            onSelect={(id) => setSelectedRunId(id)}
-            detailRun={detailRun}
-            detailLoading={detail.loading}
-            detailError={detail.error}
-            pollError={poll.error}
-            pausePayload={pausePayload}
-            submitting={submitting}
-            onApprove={handleResume}
-          />
-          <DraftsPanel
-            chapterId={chapterId}
-            chapterStatus={chapter.status}
-            drafts={draftsCall.data ?? []}
-            draftsLoading={draftsCall.loading}
-            draftsError={draftsCall.error}
-            onCreated={async () => {
-              await draftsCall.reload();
-            }}
-          />
+        <div style={{ marginTop: 16 }}>
+          <div className="panel-grid">
+            <WorkflowPanel
+              runs={chapterRuns}
+              selectedRunId={selectedRunId}
+              onSelect={(id) => setSelectedRunId(id)}
+              detailRun={detailRun}
+              detailLoading={detail.loading}
+              detailError={detail.error}
+              pollError={poll.error}
+              pausePayload={pausePayload}
+              submitting={submitting}
+              onApprove={handleResume}
+            />
+            <DraftsPanel
+              chapterId={chapterId}
+              chapterStatus={chapter.status}
+              drafts={draftsCall.data ?? []}
+              draftsLoading={draftsCall.loading}
+              draftsError={draftsCall.error}
+              onCreated={async () => {
+                await draftsCall.reload();
+              }}
+            />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <ContinuePanel projectId={projectId} chapterId={chapterId} />
+          </div>
         </div>
       ) : null}
 

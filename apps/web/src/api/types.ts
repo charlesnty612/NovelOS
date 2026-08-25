@@ -914,3 +914,40 @@ export interface BranchPromoteResult {
   branch_id: string;
   replayed_delta_ids: string[];
 }
+
+// ---------------------------------------------------------------------------
+// 续写助手（continuation）
+//   对齐后端契约：
+//   POST /projects/{pid}/chapters/{cid}/continue        —— 生成 N 个续写候选
+//   POST /projects/{pid}/chapters/{cid}/continue/adopt  —— 采纳其一追加为新草稿
+//   错误码：404 项目/章节不存在；409 章节状态不可续写（detail 说明）；
+//          422 参数非法；502 全部候选生成失败。统一走 ApiError 由 UI 展示。
+// ---------------------------------------------------------------------------
+
+export interface ContinueVariant {
+  index: number;
+  text: string;
+  tokens: number | null;
+  elapsed_ms: number;
+}
+
+export interface ContinueRequestPayload {
+  num_variants?: number;
+  instruction?: string;
+}
+
+export interface ContinueResponse {
+  variants: ContinueVariant[];
+  model: string;
+  total_elapsed_ms: number;
+}
+
+export interface ContinueAdoptPayload {
+  content: string;
+}
+
+export interface ContinueAdoptResponse {
+  version: number;
+  status: string;
+  appended_chars: number;
+}

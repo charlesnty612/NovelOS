@@ -5,6 +5,23 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [2.2.0] - 2026-08-25
+
+### Added（M1~M4 里程碑：真实长跑验证与上限能力）
+- **M1 真实模型长跑**：MiniMax-M3 连续生成 50+6 章，产出《一致性衰减观测报告》（docs/evaluation/m1-long-run-report.md）。核心结论：状态机零衰减实证（continuity 全程 99.4-99.7）；文风碎片化退化被定位并以 prompt 规则修复；payoff 闭环缺失被定位到 director 层。新增驱动脚本 scripts/m1_long_run.py（断点续跑/熔断/指标采集/单实例锁）与报告工具 scripts/m1_report.py。
+- **M2 上限能力干预**：director 增 [payoff] 前置/字数纪律/叙事推进纪律/停滞强制升级/交互密度下限规则；writer 增反碎片化/字数下限/对话占比/payoff 可感知兑现规则。验证（docs/evaluation/m2-verification.md）：LLM judge 四维均分 34→69，对话维度 5→72，单章字数 849→1738-1930。新增 judge 探针 scripts/m2_judge.py（爽感/文风/逻辑/对话四维结构化评审）。
+- **M3 量产管线硬化**：observer 输入快照分代裁剪（trimmed 模式，解 >110KB 快照超时）；validator 引用存在性校验（FK 失败前置为可自愈校验错误）；commit 管线接线两项能力——阻塞章 ch056 实战验收从 90 分钟不可解变为 253 秒一次通过。新增单实例文件锁（防双进程 SQLite 挂死）与按环节成本计量（observer 占 token 51.4%）。
+- **M4 写作现场·续写助手**：`POST /api/projects/{pid}/chapters/{cid}/continue` 一键生成最多 3 个续写候选（temperature 差异化），`/continue/adopt` 采纳追加为新草稿版本（REVIEWED 自动降级 DRAFTED 待重审）；前端 ContinuePanel 三候选并排对比面板挂载章节详情页。
+- quality 引擎新增 style 连续衰减监测（report-only，公式哈希不变）；golden 回归 eval 扩充至 3 case。
+
+### Changed
+- 模型配置 timeout_s 建议 480s（实测 1800s 硬超时无恢复案例，快速失败重试更优）；驱动客户端超时 900s。
+- provider 请求体清理：params_json 中 base_url/api_key/api_key_env 不再泄漏进上游请求体。
+
+### Known Issues / 路线登记（新增）
+- LLM judge 目前是旁路探针，尚未正式接入 quality 评分语义（style 子分与 judge 口径不一致，见 m2-verification.md 遗留2）。
+- 叙事主线惯性（量桩微循环）需故事弧光级管理工具，prompt 层只能缓解——归入 M4 后续写作现场迭代。
+
 ## [2.1.0] - 2026-08-24
 
 ### Added（番茄签约体检包）

@@ -32,6 +32,8 @@ NovelOS 面向长篇小说作者：在本地运行完整的小说生产闭环。
 - **番茄签约体检（V2.1）**：纯规则体检（无 LLM / 无新依赖 / 无 schema 变更），覆盖黄金三章（开篇 300 字冲突 / 主角 500 字出场 / 金手指前两章前 1000 字亮相 / 第三章小高潮）、逐章章末钩子、单章字数区间、高频副词堆叠、签约窗口 2万/5万/8万共 3 次机会提示；REST 端点 `GET /api/projects/{project_id}/signing-check`，番茄投稿包导出末尾自动追加摘要段。见 `packages/core/signing_check/`。
 - **项目备份 / 恢复（V1.4 Sprint 16 / MVP）**：整项目导出为单 JSON 包（22 张业务表 + metadata 自证字段，不含 API key），支持导入为新项目（不覆盖源项目），单事务整体回环。
   见 `packages/core/backup/` 与 `packages/core/api/routers/backup.py`。
+- **续写助手（V2.2）**：章节详情页一键生成多候选续写并排对比、采纳即追加草稿新版本。见 packages/core/api/routers/continuation.py。
+- **真实长跑验证（V2.2）**：50+ 章 MiniMax-M3 连续生成验证状态机零衰减；观测报告与 judge 探针见 docs/evaluation/。
 
 ## 仓库结构
 
@@ -91,7 +93,7 @@ python -m packages.core.api.main
 ## 测试
 
 ```bash
-# 后端全量（当前基线 621 passed）
+# 后端全量（当前基线 753 passed）
 python -m pytest tests/ -q
 
 # Golden 回归 eval（当前 1/1）
@@ -103,7 +105,7 @@ python scripts/smoke_e2e.py
 # 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
 python scripts/real_llm_e2e.py
 
-# 前端单测（vitest；当前 195）
+# 前端单测（vitest；当前 202）
 cd apps/web && npm run test
 ```
 
