@@ -5,6 +5,23 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [3.0.0] - 2026-08-26
+
+### Added（V3.0「提速与减负」）
+- **critic 采样模式**：`NOVELOS_CRITIC_MODE=off/sample/always`（默认 sample 每 5 章 1 次），请求 body `critic_mode` 可覆盖；跳过时工作流状态机不受影响。
+- **light capability 分级路由**：critic/summarizer 映射到可配轻量模型，缺失自动回退 reasoning 链（零破坏，回退有日志）。
+- **快照一致性巡检**：`scripts/check_state_sync.py` 只读对比 DB 实体表 vs snapshot JSON 七类实体集合，退出码 0/1/2 可接 CI；实测最新快照与 DB 对齐（早期版本漂移已随重写消除）。
+
+### Changed（性能检修实测，单章 804s → 609s，-24%）
+- **输出量瘦身**：observer `max_changes_per_array` 50→24+宁缺毋滥纪律；critic 限长 800 字；writer self_report 限 150 字；模型配置默认 thinking disabled。分环节实测：write 236-363s→32-136s、review 56-139s→29-37s。
+- **超时策略**：模型配置 timeout 建议 1800s→480s（长等无恢复案例），驱动客户端 900s 快速失败重试。
+
+### Fixed
+- write_through 将 observer 自由文本 location 直塞 `plot_events.location_id` 外键导致 `FOREIGN KEY constraint failed`：加存在性守卫（无效置 NULL 不阻断）+ observer prompt 约束；含回归测试。
+
+### Known Issues
+- 单章耗时距 ≤300s 目标尚差（当前 609s）：commit 环节 observer 仍占 338-494s，结构性解法（quality 异步旁路/上下文分页/输出硬上限）排 V3.1 P1-3 与 V3.2 P2-1——见 docs/roadmap/v3-plan.md 实测表。
+
 ## [2.2.0] - 2026-08-25
 
 ### Added（M1~M4 里程碑：真实长跑验证与上限能力）
@@ -13,20 +30,13 @@
 - **M3 量产管线硬化**：observer 输入快照分代裁剪（trimmed 模式，解 >110KB 快照超时）；validator 引用存在性校验（FK 失败前置为可自愈校验错误）；commit 管线接线两项能力——阻塞章 ch056 实战验收从 90 分钟不可解变为 253 秒一次通过。新增单实例文件锁（防双进程 SQLite 挂死）与按环节成本计量（observer 占 token 51.4%）。
 - **M4 写作现场·续写助手**：`POST /api/projects/{pid}/chapters/{cid}/continue` 一键生成最多 3 个续写候选（temperature 差异化），`/continue/adopt` 采纳追加为新草稿版本（REVIEWED 自动降级 DRAFTED 待重审）；前端 ContinuePanel 三候选并排对比面板挂载章节详情页。
 - quality 引擎新增 style 连续衰减监测（report-only，公式哈希不变）；golden 回归 eval 扩充至 3 case。
-- **V3 P0 首批**：critic 采样模式 `NOVELOS_CRITIC_MODE=off/sample/always`（默认 `sample`，每 5 章一次）；light capability 分级路由（critic/summarizer 可配轻量模型，缺失自动回退 reasoning）——见 `docs/roadmap/v3-plan.md`。
 
 ### Changed
-- 模型配置 timeout_s 建议 480s（实测 1800s 硬超时无恢复案例，快速失败重试更优）；驱动客户端超时 900s。
 - provider 请求体清理：params_json 中 base_url/api_key/api_key_env 不再泄漏进上游请求体。
-- LLM 输出量瘦身：observer `max_changes_per_array` 50→24+宁缺毋滥纪律；critic 评审输出限长 800 字；writer `self_report` 限 150 字；模型配置默认 `thinking disabled`。实测 critic 输出 10k→3k tokens。
-
-### Fixed
-- write_through 将 observer 自由文本 location 直塞 `plot_events.location_id` 外键导致 `FOREIGN KEY constraint failed`：加存在性守卫（无效置 NULL 不阻断），observer prompt 同步约束；实证复现方式与修复见 `tests/unit/test_story_state_write_through_null_guard.py`。
 
 ### Known Issues / 路线登记（新增）
 - LLM judge 目前是旁路探针，尚未正式接入 quality 评分语义（style 子分与 judge 口径不一致，见 m2-verification.md 遗留2）。
 - 叙事主线惯性（量桩微循环）需故事弧光级管理工具，prompt 层只能缓解——归入 M4 后续写作现场迭代。
-- 快照 JSON 与 DB 表存在实体漂移（如 `loc_yonghe_wharf` 在 `locations` 表但不在 `snapshot.locations`），一致性巡检治理排在 V3 P0-3。
 
 ## [2.1.0] - 2026-08-24
 
