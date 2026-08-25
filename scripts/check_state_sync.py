@@ -93,7 +93,7 @@ COLLECTIONS: list[dict] = [
         "db_id_column": "world_rule_id",
         "snapshot_kind": "list_field",
         "snapshot_path": ("world", "world_rules"),
-        "id_field": "rule_id",
+        "id_field": "world_rule_id",  # 与 snapshot.py 写入口径一致（曾误配 rule_id 导致假 DRIFT）
     },
     {
         "name": "plot_events",

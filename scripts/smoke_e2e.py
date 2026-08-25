@@ -19,6 +19,8 @@ project → character → model_config → chapter → 四工作流
    - GET /projects/{pid}/state 快照含 world_rules（创建的世界规则进入快照）
    - GET /chapters/{cid}/drafts 至少 1 条 AI 草稿
    - GET /chapters/{cid}/quality 200 + report（report 模式）
+10. 状态同步巡检：在临时 db 上跑 `python -m scripts.check_state_sync --db <tmp_db> --json`，
+    漂移（exit=1）或校验异常（exit=2）→ smoke 整体失败；OK → 打印 `[state-sync] SYNC OK`。
 
 执行：``python scripts/smoke_e2e.py``
 - 默认端口 18081；若被占，自动回退 18099（NOVELOS_PORT 透传子进程）。
@@ -597,6 +599,41 @@ def run_smoke() -> int:
             except AssertionError as e:
                 failures.append(f"quality: {e}")
 
+        # ---- (10) 状态同步巡检（DB 实体表 vs 快照 JSON 漂移）
+        # 时机点：全部章节 commit 完成、9 组断言已跑、服务仍运行、临时 db 尚未删除。
+        # check_state_sync 走只读 URI 模式打开 SQLite，与服务的 WAL 写连接不冲突。
+        try:
+            sync_proc = subprocess.run(
+                [sys.executable, "-m", "scripts.check_state_sync", "--db", str(tmp_db), "--json"],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if sync_proc.returncode == 0:
+                print("[state-sync] SYNC OK")
+            elif sync_proc.returncode == 1:
+                print("[state-sync] DRIFT detected on tmp_db", tmp_db)
+                print(sync_proc.stdout.rstrip() or sync_proc.stderr.rstrip())
+                failures.append(
+                    "[state-sync] DRIFT detected (see check_state_sync output above)"
+                )
+            else:
+                # exit=2：参数错误 / DB 文件不存在 / 脚本内部异常
+                print(f"[state-sync] ERROR (check_state_sync exit={sync_proc.returncode})")
+                if sync_proc.stdout:
+                    print(sync_proc.stdout.rstrip())
+                if sync_proc.stderr:
+                    print(sync_proc.stderr.rstrip(), file=sys.stderr)
+                failures.append(
+                    f"[state-sync] ERROR (check_state_sync exit={sync_proc.returncode})"
+                )
+        except subprocess.TimeoutExpired:
+            failures.append("[state-sync] ERROR (check_state_sync timeout >60s)")
+        except Exception as exc:  # noqa: BLE001
+            # 校验本身异常不掩盖原有结果，但要报错（退出码非 0）。
+            failures.append(f"[state-sync] ERROR (invocation failed: {exc})")
+
         client.close()
 
         if failures:
@@ -604,7 +641,7 @@ def run_smoke() -> int:
             for f in failures:
                 print(f"  - {f}")
             return 1
-        print("\n[smoke] PASS  (PRD §110 全链路 9 组断言全绿)")
+        print("\n[smoke] PASS  (PRD §110 全链路 9 组断言全绿 + 状态同步巡检 SYNC OK)")
         return 0
 
     finally:
