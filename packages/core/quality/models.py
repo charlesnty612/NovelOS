@@ -81,6 +81,10 @@ class QualityContext(BaseModel):
     # ai_trace 跨章子信号：同项目最近 N 章正文（章节号降序）。
     # service / pipeline 现场拉取后传入；engine 不直接读 DB。
     previous_drafts: list[str] = Field(default_factory=list)
+    # M2-C 趋势监测：最近若干章 style 子分序列（章节号升序）。
+    # 默认 None：不传则跳过 style 趋势监测（``engine`` 走兼容路径），
+    # 旧调用方零影响。仅当长度 >= :data:`style_trend.WINDOW` 时启用监测。
+    recent_style_scores: Optional[list[int]] = None
     commit_id: Optional[str] = None
     run_id: Optional[str] = None
 

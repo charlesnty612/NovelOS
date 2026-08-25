@@ -146,6 +146,11 @@ class OpenAICompatibleProvider:
         request_timeout = request_params.pop("timeout_s", self.timeout)
         if not isinstance(request_timeout, (int, float)) or request_timeout <= 0:
             raise ValueError("params_json.timeout_s must be a positive number of seconds")
+        # 剔除本地保留键，避免被透传到上游请求体（脏参数）。
+        # 这些是 NovelOS 自身解析用的字段（如 base_url 用于构造 URL、api_key 已走 Authorization 头），
+        # 上游 OpenAI 兼容 API 看到会直接报 400。
+        for k in ("base_url", "timeout_s", "api_key", "api_key_env"):
+            request_params.pop(k, None)
         if request_params:
             body.update(request_params)
         url = f"{self.base_url}/chat/completions"

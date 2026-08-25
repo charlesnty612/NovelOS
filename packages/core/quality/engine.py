@@ -48,6 +48,7 @@ from .scoring import (
     score_plot,
     score_style,
 )
+from .style_trend import check_style_trend
 
 
 class QualityEngine:
@@ -122,6 +123,12 @@ class QualityEngine:
             ctx.draft or "",
             list(ctx.previous_drafts or []),
         )
+
+        # ---- M2-C style 跨章趋势监测（报告型；不参与 subscores / overall / formula_hash）----
+        # ctx.recent_style_scores 默认 None：不传则完全短路，零影响。
+        trend_issue = check_style_trend(ctx.recent_style_scores, chapter_id=ctx.chapter_id)
+        if trend_issue is not None:
+            issues.append(trend_issue)
 
         # ---- 聚合（compute_overall 会原地补 missing + error 阻断）----
         subscores = {

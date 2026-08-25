@@ -60,6 +60,7 @@ from .models import Issue as IssueModel
 from .models import QualityContext, QualityReport
 from .payoff import PayoffContext
 from .payoff import evaluate as payoff_evaluate
+from .style_trend import DECAY_THRESHOLD, RULE_ID, WINDOW, check_style_trend
 
 __all__ = [
     # 类与工厂
@@ -78,6 +79,11 @@ __all__ = [
     "SUBSCORE_NAMES",
     "formula_hash",
     "formula_text",
+    # style 趋势监测（M2-C）
+    "check_style_trend",
+    "WINDOW",
+    "DECAY_THRESHOLD",
+    "RULE_ID",
     # payoff
     "payoff_evaluate",
     # 模块

@@ -1,0 +1,141 @@
+{
+  "meta": {
+    "db_path": "D:\\zcodeproject\\NovelOS\\data\\m1_run\\novelos.db",
+    "base_url": "https://api.minimaxi.com/v1",
+    "model": "MiniMax-M3",
+    "dry_run": false,
+    "total_elapsed_ms": 24343,
+    "total_tokens": 6455,
+    "started_at": 1787658729.21289,
+    "updated_at": 1787658753.577321,
+    "completed": 5,
+    "errored": 0
+  },
+  "results": [
+    {
+      "number": 51,
+      "title": "第 51 章",
+      "chapter_id": "ch_0ae8925ab89f",
+      "pacing": 15,
+      "style": 28,
+      "logic": 65,
+      "dialogue": 5,
+      "verdict": "全章机械重复同一观测流程，唯一发现被极度拖延，节奏近乎停滞。",
+      "top_issues": [
+        "通篇重复同一操作流程，节奏严重拖沓无爽点",
+        "零对话零互动，极简电报体句式堆砌，阅读枯燥",
+        "缺乏背景信息，读者无从知晓为何关注此实验"
+      ],
+      "score_avg": 28.25,
+      "usage": {
+        "prompt": 2003,
+        "completion": 968,
+        "total": 2971
+      },
+      "elapsed_ms": 13202,
+      "dry_run": false,
+      "attempts": 1,
+      "error": null
+    },
+    {
+      "number": 52,
+      "title": "第 52 章",
+      "chapter_id": "ch_0f18a8be9421",
+      "pacing": 22,
+      "style": 30,
+      "logic": 55,
+      "dialogue": 5,
+      "verdict": "实验碎片文体贯穿全篇，缺对话、缺情感，节奏近乎停滞。",
+      "top_issues": [
+        "全章零对话，角色心理空白，情感共鸣缺失",
+        "近两千字仅完成一次重复观测，爽感密度极低",
+        "碎片短句通篇堆砌，无句式变化，阅读极易疲劳"
+      ],
+      "score_avg": 28.0,
+      "usage": {
+        "prompt": 1881,
+        "completion": 839,
+        "total": 2720
+      },
+      "elapsed_ms": 14328,
+      "dry_run": false,
+      "attempts": 1,
+      "error": null
+    },
+    {
+      "number": 53,
+      "title": "第 53 章",
+      "chapter_id": "ch_d68f088f81d8",
+      "pacing": 25,
+      "style": 42,
+      "logic": 65,
+      "dialogue": 5,
+      "verdict": "极简实验风格极致，但节奏重复拖沓，全章零对话。",
+      "top_issues": [
+        "全章零对话，缺失人物交互与叙事张力",
+        "辰时与申时流程高度雷同，节奏拖沓",
+        "缺乏悬念与情感锚点，读者难以投入"
+      ],
+      "score_avg": 34.25,
+      "usage": {
+        "prompt": 1836,
+        "completion": 978,
+        "total": 2814
+      },
+      "elapsed_ms": 9812,
+      "dry_run": false,
+      "attempts": 1,
+      "error": null
+    },
+    {
+      "number": 54,
+      "title": "第 54 章",
+      "chapter_id": "ch_559afeb772da",
+      "pacing": 35,
+      "style": 60,
+      "logic": 76,
+      "dialogue": 30,
+      "verdict": "笔记体风格独到但节奏极慢，爽点仅末处一处，人物与情感刻画近乎空白",
+      "top_issues": [
+        "通篇短句罗列如流水账，节奏过缓爽点仅末处",
+        "句式高度雷同缺乏变化，画面感与可读性不足",
+        "对话几乎为零，人物塑造与情感维度严重缺失"
+      ],
+      "score_avg": 50.25,
+      "usage": {
+        "prompt": 1752,
+        "completion": 1232,
+        "total": 2984
+      },
+      "elapsed_ms": 12687,
+      "dry_run": false,
+      "attempts": 1,
+      "error": null
+    },
+    {
+      "number": 55,
+      "title": "第 55 章",
+      "chapter_id": "ch_a0f0dfa3852a",
+      "pacing": 55,
+      "style": 68,
+      "logic": 82,
+      "dialogue": 72,
+      "verdict": "工艺同源发现是真亮点，但笔记格式高度重复拖慢节奏。",
+      "top_issues": [
+        "指腹过桩、蘸墨摊纸等格式重复，阅读易疲",
+        "夜间维护系统概念前文未交代，本章突兀",
+        "全章节奏过于均匀平铺，缺乏起伏"
+      ],
+      "score_avg": 69.25,
+      "usage": {
+        "prompt": 2416,
+        "completion": 1055,
+        "total": 3471
+      },
+      "elapsed_ms": 11656,
+      "dry_run": false,
+      "attempts": 1,
+      "error": null
+    }
+  ]
+}

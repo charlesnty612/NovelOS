@@ -405,6 +405,48 @@ def _openai_with_transport(transport):
     )
 
 
+def test_openai_provider_strips_local_reserved_keys_from_request_body():
+    """params_json 里的本地保留键（base_url/timeout_s/api_key/api_key_env）不应透传到上游 body。
+
+    这些键是 NovelOS 自身用于构造 URL / 鉴权 / 超时的字段；如果被 body.update() 透传，
+    上游 OpenAI 兼容 API 会直接 400。"""
+    payload = {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    captured, handler = _capture_handler(payload)
+    transport = httpx.MockTransport(handler)
+    from packages.core.model_router import OpenAICompatibleProvider
+
+    p = OpenAICompatibleProvider(
+        base_url="https://api.example.com/v1",
+        api_key="sk-test",
+        model="m-1",
+        client=httpx.Client(transport=transport),
+    )
+    # 把本地保留键与正常 sampling 参数混在 params 里：仅合法采样参数应进入 body
+    p.complete(
+        [{"role": "user", "content": "hi"}],
+        params={
+            "base_url": "https://api.minimaxi.com/v1",
+            "timeout_s": 480,
+            "api_key": "sk-injected",
+            "api_key_env": "NOVELOS_API_KEY_OPENAI_COMPATIBLE",
+            "temperature": 0.7,
+            "top_p": 0.9,
+        },
+    )
+    body = captured["body"]
+    assert body["model"] == "m-1"
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+    # 合法采样参数仍然透传
+    assert body["temperature"] == 0.7
+    assert body["top_p"] == 0.9
+    # 本地保留键不应进入 body
+    for k in ("base_url", "timeout_s", "api_key", "api_key_env"):
+        assert k not in body, f"{k} 不应透传到上游请求体，实际 body={body}"
+
+
 def test_mock_health_check_always_ok():
     from packages.core.model_router import MockProvider
 

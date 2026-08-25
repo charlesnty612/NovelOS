@@ -1,0 +1,268 @@
+{
+  "director": [
+    {
+      "schema_version": "director-plan.v1",
+      "prompt_version": "director:v1",
+      "chapter_id": "ch_截杀之夜",
+      "chapter_goal": "林轩归宗途中遭赵四率山贼截杀，周元幕后指使；林轩以识海古镜残篇激发的杀伐意志反杀突围，揭开宗门内部的派系暗流",
+      "core_conflict": "林轩的求存意志 vs 周元的暗中倾轧",
+      "turning_point": "林轩在生死一线主动唤醒第一重残篇，杀伐之气暴涨，反杀赵四",
+      "expected_role": "rising_action",
+      "key_beats": [
+        {
+          "beat_id": "beat_005",
+          "purpose": "林轩夜归，察觉山道异常，落入赵四伏击圈",
+          "involved_characters": ["char_林轩_0", "char_赵四_2"],
+          "involved_locations": [],
+          "involved_hooks": ["hook_cave_anomaly"],
+          "involved_debts": [],
+          "risk_level": "HIGH",
+          "narrative_question_served": "兑现禁地异象余波：危机外溢"
+        },
+        {
+          "beat_id": "beat_006",
+          "purpose": "赵四围杀，林轩负伤，血染识海古镜，残篇短暂回响",
+          "involved_characters": ["char_林轩_0", "char_赵四_2"],
+          "involved_locations": [],
+          "involved_hooks": ["hook_ancient_mirror"],
+          "involved_debts": [],
+          "risk_level": "HIGH",
+          "narrative_question_served": "金手指第一战"
+        },
+        {
+          "beat_id": "beat_007",
+          "purpose": "林轩主动唤醒残篇，杀伐之意冲霄，赵四心神失守被反杀",
+          "involved_characters": ["char_林轩_0", "char_赵四_2"],
+          "involved_locations": [],
+          "involved_hooks": ["hook_ancient_mirror"],
+          "involved_debts": [],
+          "risk_level": "HIGH",
+          "narrative_question_served": "小爽点：逆境反杀"
+        },
+        {
+          "beat_id": "beat_008",
+          "purpose": "宗门巡夜长老目睹战场，疑心林轩传承来历，下令彻查",
+          "involved_characters": ["char_林轩_0", "char_周元_1"],
+          "involved_locations": [],
+          "involved_hooks": ["hook_zhou_yuan_suspicion", "hook_cave_anomaly"],
+          "involved_debts": [],
+          "risk_level": "MEDIUM",
+          "narrative_question_served": "章末钩子：宗门追查"
+        }
+      ],
+      "character_changes_planned": [
+        {
+          "character_id": "char_林轩_0",
+          "field": "state",
+          "from": "筑基初期，未历实战",
+          "to": "筑基初期，识海古镜第一重残篇已实战印证",
+          "rationale": "首战印证金手指",
+          "risk_level": "MEDIUM"
+        }
+      ],
+      "information_releases": [
+        {
+          "audience": "reader",
+          "target_id": "reader",
+          "content_summary": "周元幕后指使赵四截杀林轩的暗示",
+          "source_visibility": "AUTHOR",
+          "knowledge_permission_compliant": true
+        }
+      ],
+      "hook_handling": [
+        {
+          "hook_id": "hook_ancient_mirror",
+          "action": "advance",
+          "rationale": "本章金手指首次实战印证"
+        },
+        {
+          "hook_id": "hook_zhou_yuan_suspicion",
+          "action": "advance",
+          "rationale": "周元暗中调遣山贼，伏笔铺垫加深"
+        },
+        {
+          "hook_id": "hook_cave_anomaly",
+          "action": "advance",
+          "rationale": "禁地异象外溢：截杀事件引宗门高层注意"
+        }
+      ],
+      "debt_handling": [],
+      "proposed_new_entities": [],
+      "deviations": [],
+      "knowledge_leakage_check": {
+        "uses_hidden_knowledge": false,
+        "leakage_details": null
+      },
+      "open_questions": [],
+      "notes_for_planner": "首章末尾的禁地异象本章必须兑现外溢；周元以『不在场』姿态推动剧情；末段停在宗门长老追查令。"
+    }
+  ],
+  "writer": [
+    {
+      "schema_version": "writer-output.v1",
+      "prompt_version": "writer:v1",
+      "chapter_id": "ch_截杀之夜",
+      "prose": "夜风割过山道，林轩步伐放缓半拍。月光下，松林深处，三道黑影自乱石后缓缓合围。\n\n为首之人面带刀疤，正是赵四。他抬手掷出一枚暗青镖，破空而至。林轩侧身堪堪避开，左肩仍被擦出一道血痕。识海之内，那枚古镜骤然一颤，第一重残篇中那缕杀伐之意似被鲜血激醒。\n\n「上！」赵四沉声一喝，三柄长刀同时劈下。林轩咬牙不退，反向最近一人撞去，以血肉之躯硬接刀锋。一道青芒自他眉心透出，刀疤男子瞳孔骤缩。\n\n「杀伐证道。」林轩低喝一声，右手反扣那人腕骨，借势将长刀送入其胸膛。余下两人被这一瞬的杀意所慑，转身欲逃。林轩踏前一步，残篇之威再涌，识海古镜外层的青光在他周身一闪。刀疤男子喉间一甜，仰面栽倒。\n\n山道尽头，一道苍老身影自林间步出，正是青云宗巡夜长老周长老。他望着满地尸首与周身青光未散的林轩，眉头紧锁，沉声道：「明日宗门议事，传林轩来见。」",
+      "self_report": {
+        "slots_filled": ["slot_005", "slot_006", "slot_007", "slot_008"],
+        "word_count": 348,
+        "scene_count": 3,
+        "deviations": [],
+        "forbidden_word_hits": [],
+        "self_check_notes": "开篇 100 字内进入冲突；首战兑现并以新危机收尾。"
+      }
+    }
+  ],
+  "observer": [
+    {
+      "character_changes": [
+        {
+          "change_id": "cc_002",
+          "op": "add",
+          "target_id": "char_林轩_0",
+          "character_id": "char_林轩_0",
+          "facet": "state",
+          "field": "combat_experience",
+          "before": null,
+          "after": "首战印证识海古镜第一重残篇",
+          "confidence": 0.85,
+          "evidence": {
+            "chapter_id": "ch_截杀之夜",
+            "scene_id": "scene_003",
+            "excerpt": "识海之内，那枚古镜骤然一颤，第一重残篇中那缕杀伐之意似被鲜血激醒",
+            "span": {"start": 90, "end": 130}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "金手指首战印证",
+          "visibility": "VISIBLE",
+          "who_knows": ["char_林轩_0"],
+          "reason": null
+        }
+      ],
+      "world_changes": [],
+      "relationship_changes": [],
+      "new_events": [
+        {
+          "change_id": "ev_003",
+          "op": "add",
+          "target_id": "evt_zhao_si_ambush",
+          "event_id": "evt_zhao_si_ambush",
+          "type": "encounter",
+          "cause": ["evt_cave_anomaly"],
+          "effects": ["evt_ancient_mirror_combat"],
+          "participants": ["char_林轩_0", "char_赵四_2"],
+          "location": null,
+          "time": {"timeline_day": 2, "in_story_date": "沧历三百一十二年 三月初八"},
+          "status": "recorded",
+          "description": "赵四率山贼于山道截杀林轩，被林轩反杀",
+          "confidence": 0.9,
+          "evidence": {
+            "chapter_id": "ch_截杀之夜",
+            "scene_id": "scene_002",
+            "excerpt": "为首之人面带刀疤，正是赵四。他抬手掷出一枚暗青镖，破空而至",
+            "span": {"start": 30, "end": 70}
+          },
+          "risk_level": "HIGH",
+          "notes": "本章第一波冲突",
+          "visibility": "VISIBLE",
+          "who_knows": ["char_林轩_0"]
+        },
+        {
+          "change_id": "ev_004",
+          "op": "add",
+          "target_id": "evt_ancient_mirror_combat",
+          "event_id": "evt_ancient_mirror_combat",
+          "type": "revelation",
+          "cause": ["evt_zhao_si_ambush"],
+          "effects": ["evt_sect_inquiry"],
+          "participants": ["char_林轩_0"],
+          "location": null,
+          "time": {"timeline_day": 2, "in_story_date": "沧历三百一十二年 三月初八"},
+          "status": "recorded",
+          "description": "林轩在生死一线主动唤醒识海古镜第一重残篇，杀伐之意冲霄，反杀赵四",
+          "confidence": 0.9,
+          "evidence": {
+            "chapter_id": "ch_截杀之夜",
+            "scene_id": "scene_003",
+            "excerpt": "「杀伐证道。」林轩低喝一声，右手反扣那人腕骨，借势将长刀送入其胸膛",
+            "span": {"start": 220, "end": 260}
+          },
+          "risk_level": "HIGH",
+          "notes": "金手指首战印证",
+          "visibility": "RESTRICTED",
+          "who_knows": ["char_林轩_0"]
+        },
+        {
+          "change_id": "ev_005",
+          "op": "add",
+          "target_id": "evt_sect_inquiry",
+          "event_id": "evt_sect_inquiry",
+          "type": "transition",
+          "cause": ["evt_ancient_mirror_combat"],
+          "effects": [],
+          "participants": ["char_林轩_0", "char_周元_1"],
+          "location": null,
+          "time": {"timeline_day": 2, "in_story_date": "沧历三百一十二年 三月初八"},
+          "status": "recorded",
+          "description": "巡夜长老目睹战场，疑心林轩传承来历，下令明日宗门议事彻查",
+          "confidence": 0.85,
+          "evidence": {
+            "chapter_id": "ch_截杀之夜",
+            "scene_id": "scene_004",
+            "excerpt": "周长老望着满地尸首与周身青光未散的林轩，眉头紧锁，沉声道：「明日宗门议事，传林轩来见」",
+            "span": {"start": 300, "end": 340}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "章末钩子：宗门追查",
+          "visibility": "PUBLIC",
+          "who_knows": ["char_周元_1", "char_林轩_0"]
+        }
+      ],
+      "resolved_hooks": [
+        {
+          "change_id": "rh_002",
+          "op": "update",
+          "target_id": "hook_cave_anomaly",
+          "hook_id": "hook_cave_anomaly",
+          "to_status": "RESOLVED",
+          "payoff_summary": "禁地异象外溢为截杀事件与宗门追查",
+          "confidence": 0.85,
+          "evidence": {
+            "chapter_id": "ch_截杀之夜",
+            "scene_id": "scene_004",
+            "excerpt": "周长老望着满地尸首与周身青光未散的林轩",
+            "span": {"start": 310, "end": 340}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "伏笔从悬而未决推进到宗门追查阶段",
+          "visibility": "PUBLIC",
+          "who_knows": ["char_周元_1"]
+        }
+      ],
+      "new_hooks": [
+        {
+          "change_id": "nh_004",
+          "op": "add",
+          "target_id": "hook_sect_inquiry",
+          "hook_id": "hook_sect_inquiry",
+          "name": "宗门议事彻查传承",
+          "importance": 0.85,
+          "expected_payoff_chapter_id": "ch_截杀之夜",
+          "description": "周长老下令宗门议事彻查林轩传承来历，林轩需在下章给出应对",
+          "confidence": 0.85,
+          "evidence": {
+            "chapter_id": "ch_截杀之夜",
+            "scene_id": "scene_004",
+            "excerpt": "周长老眉头紧锁，沉声道：「明日宗门议事，传林轩来见」",
+            "span": {"start": 320, "end": 345}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "本章新钩子，连贯下一章",
+          "visibility": "PUBLIC",
+          "who_knows": ["char_林轩_0"]
+        }
+      ],
+      "debt_changes": []
+    }
+  ]
+}

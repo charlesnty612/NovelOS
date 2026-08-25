@@ -1,0 +1,9 @@
+{
+  "final_chapter_status": "COMMITTED",
+  "state_version_min": 2,
+  "delta_arrays_nonempty": ["new_hooks", "new_events"],
+  "snapshot_contains": {
+    "hooks_named": ["周元的怨毒"]
+  },
+  "no_guardrail_block": true
+}

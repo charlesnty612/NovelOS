@@ -1,0 +1,287 @@
+{
+  "director": [
+    {
+      "schema_version": "director-plan.v1",
+      "prompt_version": "director:v1",
+      "chapter_id": "ch_议事堂风波",
+      "chapter_goal": "议事堂质询兑现三重伏笔：林轩主动亮出识海古镜残篇，第一重杀伐之法觉醒；周元暗中操控证据被当场揭穿，伏笔与反派动机首次交汇；林轩破格升入内门候选",
+      "core_conflict": "林轩的隐忍自证 vs 周元的暗中倾轧",
+      "turning_point": "林轩主动祭出识海古镜残篇，议事堂共鸣，第一重杀伐之意冲霄震退质疑",
+      "expected_role": "climax",
+      "key_beats": [
+        {
+          "beat_id": "beat_009",
+          "purpose": "议事堂开审，周长老质问传承来历，林轩被迫自证",
+          "involved_characters": ["char_林轩_0"],
+          "involved_locations": [],
+          "involved_hooks": ["hook_sect_inquiry"],
+          "involved_debts": [],
+          "risk_level": "HIGH",
+          "narrative_question_served": "兑现 ch002 议事彻查伏笔"
+        },
+        {
+          "beat_id": "beat_010",
+          "purpose": "周元暗中递交伪造证据，诬林轩私藏邪物，林轩识破",
+          "involved_characters": ["char_林轩_0", "char_周元_1"],
+          "involved_locations": [],
+          "involved_hooks": ["hook_zhou_yuan_suspicion"],
+          "involved_debts": [],
+          "risk_level": "HIGH",
+          "narrative_question_served": "兑现 ch001 周元窥伺伏笔"
+        },
+        {
+          "beat_id": "beat_011",
+          "purpose": "林轩主动祭出识海古镜残篇，第一重杀伐之意冲霄，议事堂众人失语",
+          "involved_characters": ["char_林轩_0"],
+          "involved_locations": [],
+          "involved_hooks": ["hook_ancient_mirror"],
+          "involved_debts": [],
+          "risk_level": "HIGH",
+          "narrative_question_served": "兑现 ch001 金手指伏笔 + 小爽点"
+        },
+        {
+          "beat_id": "beat_012",
+          "purpose": "掌门破例收录林轩为内门候选，章末格局升级",
+          "involved_characters": ["char_林轩_0"],
+          "involved_locations": [],
+          "involved_hooks": [],
+          "involved_debts": [],
+          "risk_level": "MEDIUM",
+          "narrative_question_served": "章末钩子：内门格局"
+        }
+      ],
+      "character_changes_planned": [
+        {
+          "character_id": "char_林轩_0",
+          "field": "identity",
+          "from": "青云宗外门弟子",
+          "to": "青云宗内门候选",
+          "rationale": "议事堂质询后破格升迁",
+          "risk_level": "MEDIUM"
+        }
+      ],
+      "information_releases": [
+        {
+          "audience": "reader",
+          "target_id": "reader",
+          "content_summary": "周元递交伪造证据的阴谋被识破",
+          "source_visibility": "AUTHOR",
+          "knowledge_permission_compliant": true
+        }
+      ],
+      "hook_handling": [
+        {
+          "hook_id": "hook_ancient_mirror",
+          "action": "payoff",
+          "rationale": "本章兑现金手指伏笔，第一重残篇彻底觉醒"
+        },
+        {
+          "hook_id": "hook_zhou_yuan_suspicion",
+          "action": "advance",
+          "rationale": "周元阴谋首次被识破，伏笔推进但未完结"
+        },
+        {
+          "hook_id": "hook_sect_inquiry",
+          "action": "payoff",
+          "rationale": "本章兑现议事彻查伏笔"
+        }
+      ],
+      "debt_handling": [],
+      "proposed_new_entities": [],
+      "deviations": [],
+      "knowledge_leakage_check": {
+        "uses_hidden_knowledge": false,
+        "leakage_details": null
+      },
+      "open_questions": [],
+      "notes_for_planner": "伏笔集中兑现章，节奏要快；金手指登场场面需以青光共鸣 + 众人失语压住场子。"
+    }
+  ],
+  "writer": [
+    {
+      "schema_version": "writer-output.v1",
+      "prompt_version": "writer:v1",
+      "chapter_id": "ch_议事堂风波",
+      "prose": "议事堂内，烛火摇曳。林轩踏入堂中，数十道审视目光齐齐压来。周长老坐于主位，沉声道：「林轩，昨夜山道之事，你作何解释？」\n\n林轩尚未答话，一旁的周元已自袖中取出一枚暗青玉简，朗声指控林轩私藏邪物、勾结散修。堂中顿时一片低议。林轩眉宇微挑，缓缓抬手，自眉心唤出一枚古镜虚影。第一重残篇骤然自识海中浮现，蝇头小字化作一缕青光，直冲堂顶。\n\n议事堂众人齐齐失语。周长老瞳孔骤缩，那缕青光中蕴含的杀伐之意，正是上古杀伐真传的气息。周元手中的玉简当场碎裂，他踉跄后退两步，面色煞白。\n\n掌门自后堂步出，目露精光，沉声道：「此子既得上古杀伐真传，破格录为我青云宗内门候选。」林轩颔首，抱拳行礼。周元垂首，眼底掠过一抹不易察觉的怨毒。",
+      "self_report": {
+        "slots_filled": ["slot_009", "slot_010", "slot_011", "slot_012"],
+        "word_count": 312,
+        "scene_count": 1,
+        "deviations": [],
+        "forbidden_word_hits": [],
+        "self_check_notes": "三重伏笔集中兑现，金手指登场场面压住场子，章末格局升级。"
+      }
+    }
+  ],
+  "observer": [
+    {
+      "character_changes": [
+        {
+          "change_id": "cc_003",
+          "op": "add",
+          "target_id": "char_林轩_0",
+          "character_id": "char_林轩_0",
+          "facet": "state",
+          "field": "status",
+          "before": "外门弟子",
+          "after": "内门候选",
+          "confidence": 0.95,
+          "evidence": {
+            "chapter_id": "ch_议事堂风波",
+            "scene_id": "scene_001",
+            "excerpt": "掌门自后堂步出，目露精光，沉声道：「此子既得上古杀伐真传，破格录为我青云宗内门候选」",
+            "span": {"start": 260, "end": 295}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "本章身份跃迁",
+          "visibility": "PUBLIC",
+          "who_knows": ["char_林轩_0"],
+          "reason": null
+        }
+      ],
+      "world_changes": [],
+      "relationship_changes": [],
+      "new_events": [
+        {
+          "change_id": "ev_006",
+          "op": "add",
+          "target_id": "evt_council_inquiry",
+          "event_id": "evt_council_inquiry",
+          "type": "transition",
+          "cause": ["evt_sect_inquiry"],
+          "effects": ["evt_ancient_mirror_reveal"],
+          "participants": ["char_林轩_0", "char_周元_1"],
+          "location": null,
+          "time": {"timeline_day": 3, "in_story_date": "沧历三百一十二年 三月初九"},
+          "status": "recorded",
+          "description": "议事堂公开质询林轩传承来历，周元递交暗青玉简诬陷",
+          "confidence": 0.9,
+          "evidence": {
+            "chapter_id": "ch_议事堂风波",
+            "scene_id": "scene_001",
+            "excerpt": "周元已自袖中取出一枚暗青玉简，朗声指控林轩私藏邪物",
+            "span": {"start": 80, "end": 115}
+          },
+          "risk_level": "HIGH",
+          "notes": "伏笔兑现事件",
+          "visibility": "PUBLIC",
+          "who_knows": ["char_林轩_0", "char_周元_1"]
+        },
+        {
+          "change_id": "ev_007",
+          "op": "add",
+          "target_id": "evt_ancient_mirror_reveal",
+          "event_id": "evt_ancient_mirror_reveal",
+          "type": "revelation",
+          "cause": ["evt_council_inquiry"],
+          "effects": ["evt_inner_sect_promotion"],
+          "participants": ["char_林轩_0"],
+          "location": null,
+          "time": {"timeline_day": 3, "in_story_date": "沧历三百一十二年 三月初九"},
+          "status": "recorded",
+          "description": "林轩在议事堂祭出识海古镜，第一重杀伐之意冲霄，堂中失语",
+          "confidence": 0.95,
+          "evidence": {
+            "chapter_id": "ch_议事堂风波",
+            "scene_id": "scene_001",
+            "excerpt": "林轩眉宇微挑，缓缓抬手，自眉心唤出一枚古镜虚影。第一重残篇骤然自识海中浮现，蝇头小字化作一缕青光，直冲堂顶",
+            "span": {"start": 120, "end": 170}
+          },
+          "risk_level": "HIGH",
+          "notes": "金手指伏笔兑现",
+          "visibility": "PUBLIC",
+          "who_knows": ["char_林轩_0"]
+        },
+        {
+          "change_id": "ev_008",
+          "op": "add",
+          "target_id": "evt_inner_sect_promotion",
+          "event_id": "evt_inner_sect_promotion",
+          "type": "transition",
+          "cause": ["evt_ancient_mirror_reveal"],
+          "effects": [],
+          "participants": ["char_林轩_0"],
+          "location": null,
+          "time": {"timeline_day": 3, "in_story_date": "沧历三百一十二年 三月初九"},
+          "status": "recorded",
+          "description": "掌门破格收录林轩为青云宗内门候选",
+          "confidence": 0.95,
+          "evidence": {
+            "chapter_id": "ch_议事堂风波",
+            "scene_id": "scene_001",
+            "excerpt": "掌门自后堂步出，目露精光，沉声道：「此子既得上古杀伐真传，破格录为我青云宗内门候选」",
+            "span": {"start": 260, "end": 295}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "章末格局升级",
+          "visibility": "PUBLIC",
+          "who_knows": ["char_林轩_0"]
+        }
+      ],
+      "resolved_hooks": [
+        {
+          "change_id": "rh_003",
+          "op": "update",
+          "target_id": "hook_ancient_mirror",
+          "hook_id": "hook_ancient_mirror",
+          "to_status": "RESOLVED",
+          "payoff_summary": "议事堂上金手指由暗转明，第一重杀伐之意冲霄",
+          "confidence": 0.95,
+          "evidence": {
+            "chapter_id": "ch_议事堂风波",
+            "scene_id": "scene_001",
+            "excerpt": "林轩眉宇微挑，缓缓抬手，自眉心唤出一枚古镜虚影",
+            "span": {"start": 120, "end": 150}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "金手指伏笔结算",
+          "visibility": "PUBLIC",
+          "who_knows": ["char_林轩_0"]
+        },
+        {
+          "change_id": "rh_004",
+          "op": "update",
+          "target_id": "hook_sect_inquiry",
+          "hook_id": "hook_sect_inquiry",
+          "to_status": "RESOLVED",
+          "payoff_summary": "议事堂质询以林轩破格升入内门候选收束",
+          "confidence": 0.95,
+          "evidence": {
+            "chapter_id": "ch_议事堂风波",
+            "scene_id": "scene_001",
+            "excerpt": "掌门自后堂步出，目露精光，沉声道：「此子既得上古杀伐真传，破格录为我青云宗内门候选」",
+            "span": {"start": 260, "end": 295}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "议事彻查伏笔结算",
+          "visibility": "PUBLIC",
+          "who_knows": ["char_林轩_0"]
+        }
+      ],
+      "new_hooks": [
+        {
+          "change_id": "nh_005",
+          "op": "add",
+          "target_id": "hook_zhou_yuan_grudge",
+          "hook_id": "hook_zhou_yuan_grudge",
+          "name": "周元的怨毒",
+          "importance": 0.85,
+          "expected_payoff_chapter_id": "ch_议事堂风波",
+          "description": "周元议事堂阴谋被识破，对林轩怀恨在心，必将谋划新一轮倾轧",
+          "confidence": 0.9,
+          "evidence": {
+            "chapter_id": "ch_议事堂风波",
+            "scene_id": "scene_001",
+            "excerpt": "周元垂首，眼底掠过一抹不易察觉的怨毒",
+            "span": {"start": 295, "end": 320}
+          },
+          "risk_level": "MEDIUM",
+          "notes": "反派伏笔推进入新阶段",
+          "visibility": "RESTRICTED",
+          "who_knows": ["char_周元_1"]
+        }
+      ],
+      "debt_changes": []
+    }
+  ]
+}

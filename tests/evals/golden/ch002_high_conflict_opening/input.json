@@ -1,0 +1,48 @@
+{
+  "project": {
+    "name": "九幽仙途",
+    "premise": "修仙少年意外获上古传承，以杀伐证道",
+    "genre": "玄幻",
+    "target_words": 2200
+  },
+  "characters": [
+    {
+      "name": "林轩",
+      "role": "protagonist",
+      "core": {
+        "personality": "坚毅果决，重情义，逆境中求生",
+        "background": "青云宗外门弟子，筑基初期，父母早亡",
+        "goal": "查明父母死因，复仇雪恨，证道飞升",
+        "speech_pattern": "句短少修饰，常以反问收尾",
+        "appearance": "清瘦少年，眉宇带煞"
+      }
+    },
+    {
+      "name": "周元",
+      "role": "supporting",
+      "core": {
+        "personality": "圆滑市侩，表面热络实则趋利避害",
+        "background": "林轩同门师兄，筑基中期",
+        "goal": "在宗门内步步高升，攀附权贵",
+        "speech_pattern": "用词圆熟，喜用敬语暗藏机锋",
+        "appearance": "面如冠玉，眼带笑意"
+      }
+    },
+    {
+      "name": "赵四",
+      "role": "antagonist",
+      "core": {
+        "personality": "凶残嗜杀，寡言",
+        "background": "青云宗外围散修，筑基初期，常年替人做刀",
+        "goal": "受雇截杀林轩，攫取其新得古镜",
+        "speech_pattern": "短促有力",
+        "appearance": "络腮胡，右颊刀疤"
+      }
+    }
+  ],
+  "chapter": {
+    "number": 2,
+    "title": "截杀之夜"
+  },
+  "author_intent": "本章要让主角林轩在归宗途中遭遇周元暗中调遣的山贼赵四截杀，开篇 200 字内出现第一波冲突，并以林轩逆境搏杀、古镜觉醒加护反杀收尾；兑现「禁地异象惊宗门」伏笔的余波——周元已上报宗门高层将至。需保留番茄男频爽感节奏：每 500 字一个转折，章末以新危机收束。"
+}

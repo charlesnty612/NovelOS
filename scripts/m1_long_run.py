@@ -93,7 +93,7 @@ POLL_INTERVAL_S = 3.0
 WORKFLOW_TIMEOUT_S = 900.0  # 单工作流超时（含 mock 长任务）
 RESUME_RETRY = 20  # review / commit PAUSED 后 resume 轮询最大次数
 HTTP_FAIL_THRESHOLD = 5  # 连续 HTTP 失败上限
-TARGET_WORD_COUNT = 700  # chapter-write 的目标字数
+TARGET_WORD_COUNT = 1800  # chapter-write 的目标字数（番茄单章最佳区间 1500-2200 的中位）
 
 
 # ============================================================================
@@ -747,8 +747,9 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def _http_with_fail_counter(base_url: str) -> tuple[httpx.Client, list[int]]:
     """构建一个普通 client；连续失败计数由调用方维护（http_fail_count 列表）。"""
-    # 必须大于服务端模型配置的最长 LLM 超时（timeout_s），否则同步 POST 会被客户端先掐断
-    client = httpx.Client(base_url=base_url, timeout=2700.0)
+    # 必须大于服务端模型配置的最长 LLM 超时（timeout_s=480），否则同步 POST 会被客户端先掐断；
+    # 留轮询余量（workflow deadline=timeout_s + polling 间隙）。
+    client = httpx.Client(base_url=base_url, timeout=900.0)
     return client, [0]
 
 
