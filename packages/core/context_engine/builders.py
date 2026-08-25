@@ -2071,7 +2071,7 @@ def build_observer_input(
     chapter_id: str,
     *,
     min_excerpt_chars_low_confidence: int = 80,
-    max_changes_per_array: int = 50,
+    max_changes_per_array: int = 24,
     snapshot_mode: str = "full",
     keep_recent_commits: int = 3,
     resolved_history_keep: int = 5,
@@ -2087,10 +2087,18 @@ def build_observer_input(
             commit 数（默认 3）。≥1 才生效；≤0 等价未 touch（全部走摘要）。
         resolved_history_keep：trimmed 模式下 resolved/abandoned hooks 与
             paid/forgiven debts 的保留上限（默认 5）。
+        max_changes_per_array：注入 payload["config"]["max_changes_per_array"]
+            的上限值（默认 **24**）。**实测依据**：原默认值 50 会在 observer 提示
+            下诱发模型在 character_changes / world_changes 等数组上「穷举微变化」，
+            单章 observer 输出 completion tokens 实测 2.9 万-5.8 万（正常 delta
+            仅 2-3 千）。收紧到 24 既覆盖典型章节的原子变化条数（≤20 条），又能
+            显著抑制模型「宁滥勿缺」的扩展倾向，将单章 observer 输出压缩至
+            可接受范围。
 
     向后兼容：
         既有调用方（chapter_commit/pipeline.py:242、preview.py:443）零改动；
-        ``snapshot_mode`` 默认值 "full" 保证行为完全等价。
+        ``snapshot_mode`` 默认值 "full" 保证行为完全等价。``max_changes_per_array``
+        仅影响注入 prompt 的 config 字段值；调用方显式传参时按调用方为准。
     """
     if snapshot_mode not in ("full", "trimmed"):
         raise ValueError(

@@ -738,7 +738,7 @@ def test_observer_input_full_byte_equivalent_to_old_implementation(tmp_path: Pat
     assert payload["chapter"]["chapter_id"] == cid
     assert payload["knowledge_permissions"]["your_visibility"] == ["AUTHOR", "DIRECTOR"]
     assert payload["config"]["min_excerpt_chars_low_confidence"] == 80
-    assert payload["config"]["max_changes_per_array"] == 50
+    assert payload["config"]["max_changes_per_array"] == 24
     # 无 trimmed-only 字段
     assert "snapshot_trim_stats" not in payload
     assert "snapshot_mode" not in payload["previous_state"]

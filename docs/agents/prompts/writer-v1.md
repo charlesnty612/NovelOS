@@ -212,6 +212,8 @@
 
 `required` 字段：`schema_version`、`prompt_version`、`chapter_id`、`prose`、`self_report`、`self_report.slots_filled`、`self_report.word_count`、`self_report.scene_count`、`self_report.deviations`。
 
+**self_report 长度纪律**：`self_report` 下所有字段（`slots_filled` 列表元素、`word_count` 数字文本、`scene_count`、`deviations[]` 各条目的 `kind` / `slot_id` / `scene_id` / `from` / `to` / `reason` 等、`forbidden_word_hits[]` 元素、`self_check_notes`）**合计不超过 150 字（中文字符数）**。这是硬上限，超出会被下游软截断 + warn，并显著拉高单章输出 token（实测每多 50 字 self_report ≈ 多 60-80 completion tokens）。超出时优先压缩 `deviations[].reason` 与 `self_check_notes`——把 `from` / `to` 留作事实记录即可，不需要长解释。
+
 ---
 
 ## 8. Examples

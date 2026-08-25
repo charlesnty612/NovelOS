@@ -403,6 +403,20 @@ def write_through(
         for ev in delta.get("new_events") or []:
             ev_who = encode_who_knows(read_who_knows(ev))
             ev_vis = read_visibility(ev) or "RESTRICTED"
+            # location FK 守卫：observer 输出 location 是自由文本（可能描述性文字或编造
+            # id），plot_events.location_id 是外键（→ locations.location_id），直接 INSERT
+            # 在 PRAGMA foreign_keys=ON 下会触发 FOREIGN KEY constraint failed。
+            # 兜底：locations 表里查不到该值时置 NULL，不阻断提交（与既有的
+            # write-through NULL guards 先例一致——见 test_story_state_write_through_null_guard
+            # 中 world add 分支的 None 兜底）。原文已通过 effects/notes 可见处保留。
+            ev_location = ev.get("location")
+            if ev_location:
+                loc_row = conn.execute(
+                    "SELECT 1 FROM locations WHERE location_id = ?",
+                    (ev_location,),
+                ).fetchone()
+                if loc_row is None:
+                    ev_location = None
             conn.execute(
                 """
                 INSERT INTO plot_events
@@ -417,7 +431,7 @@ def write_through(
                     _dump(ev.get("cause") or []),
                     _dump(ev.get("effects") or []),
                     _dump(ev.get("participants") or []),
-                    ev.get("location"),
+                    ev_location,
                     _dump(ev.get("time") or {"timeline_day": 1}),
                     chapter_id,
                     ev_vis,

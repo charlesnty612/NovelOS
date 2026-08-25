@@ -123,7 +123,7 @@
   },
   "config": {
     "min_excerpt_chars_low_confidence": "integer, confidence < 0.5 时 excerpt 最少字符数（默认 80）",
-    "max_changes_per_array": "integer, 单数组上限（默认 50）"
+    "max_changes_per_array": "integer, 单数组上限（默认 24）"
   }
 }
 ```
@@ -170,6 +170,11 @@
 19. **保守原则**：拿不准的，宁可不写，也不在 Delta 中引入 false positive。
 20. **不要总结剧情**：change 描述要原子化、可执行。
 21. **不要输出 Schema 之外的字段**：`additionalProperties: false` 严格生效——任何 Schema 未声明的字段（包括 §3 中的 `deviations` 辅助字段）都不能出现在你的最终 JSON 输出中。
+22. **宁缺毋滥（数量纪律）**：`config.max_changes_per_array` 的默认值是 **24**（原 50 已实测下调：50 上限时模型倾向在 character_changes / world_changes 上穷举微变化，导致单章 observer 输出 3-5 万 completion tokens）。请按以下原则使用该上限：
+    - **只提取对后续叙事有影响的状态变化**（belief / goal / knowledge / relationship 实质位移、世界规则触发、伏笔推进、新事件）。
+    - **微小瞬态不要成条提取**：例如「位置小幅移动且无剧情意义」「情绪短时波动（持续 < 1 段）」「资源数值微调（< 10%）」「动作修饰性的外观描写变化」——这些都不进任何 change 数组。
+    - **正常一章 7 个数组合计 ≤ 24 条**；超出即视为「过度报告」，宁可丢弃低 confidence 项。
+    - **当 draft_text 整体变化很少时（如仅 1-2 段对话推进）**：宁可输出大部分数组为空，也要把每条 change 写到 evidence / confidence 都站得住。
 
 ---
 
@@ -257,7 +262,7 @@
       "cause": ["event_id, ..."] ,
       "effects": ["event_id, ..."] ,
       "participants": ["character_id, ..., 至少 1 个"],
-      "location": "string | null, location_id",
+      "location": "string | null, location_id",  // 仅可填写 previous_state/world_changes 中已存在的 location_id；若事件发生地未登记为地点实体，请省略该字段（输出时整条 key 不出现），不要填写描述性文字（free-form text）或编造的 id——下游 plot_events.location_id 为外键，无效值在 commit 阶段会被守卫置 NULL 并丢失事件地点信息。
       "time": {
         "timeline_day": "integer, ≥1",
         "in_story_date": "string | null"
@@ -405,7 +410,7 @@
     "debt_handling": [{ "debt_id": "debt_001", "action": "advance" }]
   },
   "knowledge_permissions": { "your_visibility": ["AUTHOR", "DIRECTOR"], "forbidden_kinds": ["HIDDEN"] },
-  "config": { "min_excerpt_chars_low_confidence": 80, "max_changes_per_array": 50 }
+  "config": { "min_excerpt_chars_low_confidence": 80, "max_changes_per_array": 24 }
 }
 ```
 
