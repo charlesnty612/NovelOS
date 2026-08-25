@@ -753,7 +753,10 @@ def run_case(case_dir: Path | str) -> RunResult:
                 engine, db_path, "chapter-write", chapter_id, project_id, mock_providers
             )
             _run_workflow_with_resume(
-                engine, db_path, "chapter-review", chapter_id, project_id, mock_providers
+                engine, db_path, "chapter-review", chapter_id, project_id, mock_providers,
+                # V3 P0-1：eval golden case 强制 critic_mode=always，保持既有语义。
+                # 避免 ch003 (number=3) 在默认 sample 模式下意外触发 critic 调用导致结构签名漂移。
+                initial_ctx_extra={"critic_mode": "always"},
             )
             _run_workflow_with_resume(
                 engine, db_path, "chapter-commit", chapter_id, project_id, mock_providers

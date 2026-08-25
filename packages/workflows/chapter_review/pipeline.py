@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
@@ -36,6 +37,59 @@ _CRITIC_PROMPT_VERSION = "critic:v1"
 _DEFAULT_TARGET_WORD_COUNT = 2200  # PRD §124 番茄单章 2000-2500
 
 _log = logging.getLogger(__name__)
+
+# V3 P0-1：critic LLM 评审员采样模式开关
+# - ``off``：完全跳过 critic LLM 调用，节点直接返回 ``critic_status='skipped'``。
+# - ``sample``：仅当 ``chapter.number % 5 == 0`` 时调用 LLM；其余章节跳过。
+# - ``always``：现状行为（每章都评）。
+# 优先级：``ctx["critic_mode"]``（来自 start review 请求 body） > ``NOVELOS_CRITIC_MODE`` 环境变量 > 默认 ``sample``。
+_VALID_CRITIC_MODES = ("off", "sample", "always")
+
+
+def _resolve_critic_mode(ctx: dict[str, Any]) -> str:
+    """按优先级解析 critic 模式：ctx > env > 默认 ``sample``。非法值回退到 ``sample``。"""
+    raw = ctx.get("critic_mode")
+    if isinstance(raw, str) and raw in _VALID_CRITIC_MODES:
+        return raw
+    env = os.environ.get("NOVELOS_CRITIC_MODE", "sample").strip().lower()
+    return env if env in _VALID_CRITIC_MODES else "sample"
+
+
+def _should_invoke_critic(mode: str, chapter_number: int | None) -> bool:
+    """判定当前章节是否触发 critic LLM 调用。``chapter_number`` 为 None（查不到）→ 保守调。"""
+    if mode == "off":
+        return False
+    if mode == "always":
+        return True
+    # sample：仅 chapter_number % 5 == 0 时调用；number 缺失时保守调
+    if chapter_number is None:
+        return True
+    return chapter_number % 5 == 0
+
+
+def _fetch_chapter_number(db_path: str, chapter_id: str) -> int | None:
+    """从 chapters 表取 number 字段；章节不存在或异常 → None（视同 always）。"""
+    try:
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT number FROM chapters WHERE chapter_id = ?",
+                (chapter_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 —— 任何读库异常均降级为 None
+        _log.warning(
+            "chapter_review.critic number lookup failed: chapter_id=%s err=%s",
+            chapter_id, exc,
+        )
+        return None
+    if row is None:
+        return None
+    try:
+        return int(row["number"])
+    except (TypeError, ValueError):
+        return None
 
 
 def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -170,11 +224,32 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
        ``critic_status='failed'`` + ``critic_report=None``，**不**抛错。
     4. ``critic_status='ok'`` 时 ``critic_report`` 写入 ctx，供 author_review 合并进 pause_payload。
 
-    返回 ``{"critic_status": "ok|failed", "critic_report": dict|None, "critic_error": str|None}``。
+    V3 P0-1：critic 采样模式开关（off / sample / always）。跳过时返回 ``critic_status='skipped'``
+    + ``critic_skipped=True`` + ``critic_mode=<mode>``，工作流状态机不受影响（author_review
+    Human 节点仍按 PauseRequested 走，pause_payload 中 ``critic_status='skipped'`` 不合并 critic_report）。
+
+    返回 ``{"critic_status": "ok|failed|skipped", "critic_report": dict|None,
+    "critic_error": str|None, "critic_skipped": bool, "critic_mode": str}``。
     """
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
     mock_script = (ctx.get("mock_providers") or {}).get("critic")
+
+    # V3 P0-1：解析 critic_mode 并按 chapter_number 判定是否跳过
+    mode = _resolve_critic_mode(ctx)
+    chapter_number = _fetch_chapter_number(db_path, chapter_id)
+    if not _should_invoke_critic(mode, chapter_number):
+        _log.info(
+            "chapter_review.critic skipped: chapter_id=%s mode=%s chapter_number=%s",
+            chapter_id, mode, chapter_number,
+        )
+        return {
+            "critic_status": "skipped",
+            "critic_report": None,
+            "critic_error": None,
+            "critic_skipped": True,
+            "critic_mode": mode,
+        }
 
     try:
         draft_text, project_id, plan_summary = _collect_critic_inputs(db_path, chapter_id)
@@ -188,6 +263,8 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
             "critic_status": "failed",
             "critic_report": None,
             "critic_error": f"inputs: {exc}",
+            "critic_skipped": False,
+            "critic_mode": mode,
         }
 
     payload = {
@@ -246,6 +323,8 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
             "critic_status": "ok",
             "critic_report": out,
             "critic_error": None,
+            "critic_skipped": False,
+            "critic_mode": mode,
         }
     except Exception as exc:  # noqa: BLE001 —— 任何 LLM / 契约 / parse 失败均降级
         _log.warning(
@@ -256,6 +335,8 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
             "critic_status": "failed",
             "critic_report": None,
             "critic_error": str(exc),
+            "critic_skipped": False,
+            "critic_mode": mode,
         }
 
 
@@ -268,12 +349,15 @@ def _author_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
     report = ctx.get("review_report") or {}
     critic_report = ctx.get("critic_report") if ctx.get("critic_status") == "ok" else None
     critic_status = ctx.get("critic_status") or "skipped"
+    # V3 P0-1：把 critic_mode/skipped 透传到 pause_payload，便于前端观测
     payload = {
         "stage": "chapter-review",
         "message": "请审查章节草稿并批准或驳回",
         "review_report": report,
         "critic_status": critic_status,
         "critic_report": critic_report,
+        "critic_mode": ctx.get("critic_mode"),
+        "critic_skipped": bool(ctx.get("critic_skipped")),
     }
     # 先把 human_input 已批准的标志 merge 进 ctx（提供给 mark_reviewed 用）
     hi = ctx.get("human_input") or {}
@@ -385,6 +469,7 @@ WORKFLOW = {
         "critic_report",
         "critic_status",
         "critic_error",
+        "critic_skipped",
     ],
 }
 

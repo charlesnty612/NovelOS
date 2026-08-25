@@ -6,7 +6,7 @@
 1. 用 ``tempfile.TemporaryDirectory()`` 建一个全新隔离 SQLite 数据库（不动项目库）。
 2. 执行 ``apply_migrations``（创建 agents / prompts 等全部业务表）。
 3. 对 ``docs/agents/prompts/`` 目录调 ``PromptRegistry.sync_from_docs`` 做一次完整 sync。
-4. 校验 ``agents`` 表含 summarizer 行（capability=reasoning）；``prompts`` 表含
+4. 校验 ``agents`` 表含 summarizer 行（capability=light，V3 P0-2）；``prompts`` 表含
    (summarizer, v1) ACTIVE 行；``get_active_prompt('summarizer')`` 返回的 content 是
    summarizer-v1.md 的全文（以约定头部开头）。
 5. 校验：再 sync 一次为幂等（``updated == []``）。
@@ -70,7 +70,7 @@ def test_summarizer_prompt_registered_after_sync():
         assert ("summarizer", 1) in registered, f"summarizer not registered: {registered}"
         assert "summarizer" in agents, f"summarizer not in agents: {agents}"
 
-        # 2. agents 表含 summarizer（capability=reasoning）
+        # 2. agents 表含 summarizer（capability=light，V3 P0-2）
         conn = get_connection(db_path)
         try:
             agent_row = conn.execute(
@@ -79,7 +79,7 @@ def test_summarizer_prompt_registered_after_sync():
             ).fetchone()
             assert agent_row is not None, "summarizer row not found in agents table"
             cfg = json.loads(agent_row["config_json"])
-            assert cfg.get("capability") == "reasoning", (
+            assert cfg.get("capability") == "light", (
                 f"summarizer capability mismatch: {cfg}"
             )
             agent_id = agent_row["agent_id"]

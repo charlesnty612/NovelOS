@@ -144,7 +144,7 @@ def _register_summarizer_agent(db_path: Path) -> None:
     try:
         conn.execute(
             "INSERT INTO agents (agent_id, name, role, config_json, created_at, updated_at) "
-            "VALUES (?, 'summarizer', 'reasoning', '{}', ?, ?)",
+            "VALUES (?, 'summarizer', 'light', '{}', ?, ?)",
             (agent_id, now, now),
         )
         conn.execute(

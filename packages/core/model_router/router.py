@@ -55,13 +55,20 @@ AGENT_CAPABILITY: dict[str, str] = {
     "arbiter": "reasoning",
     "deconstructor_chapter": "reasoning",
     "deconstructor_aggregate": "reasoning",
-    "summarizer": "reasoning",  # Sprint 14-A 章节摘要链
-    "critic": "reasoning",      # V1.3 LLM 评审员
+    "summarizer": "light",      # V3 P0-2：结构化提取走轻量模型
+    "critic": "light",          # V3 P0-2：LLM 评审员走轻量模型
 }
 """Agent 名 → capability 名（对齐 agent-contracts §7）。
 
 不在此映射的 agent（critic / planner / integrator 等）
 默认走 ``reasoning``——Sprint 3 MVP 仅在 README 中声明，不强约束。
+
+V3 P0-2 新增 ``light`` capability：用于结构化提取 / 评审类任务（critic / summarizer），
+可配更便宜更快的模型（DeepSeek-chat / GLM-flash 级）。observer 保持 ``reasoning``
+——observer 输出准确性直接影响 story_state，downgrade 风险高；writer 保持
+``creative_writing`` 不变（长文本生成任务）。``light`` capability 在未配置任何
+enabled 行时自动回退到 ``reasoning`` 链（见 :meth:`ModelRouter.call_with_fallback`），
+保证零破坏。
 """
 
 
@@ -209,9 +216,27 @@ class ModelRouter:
         全部失败抛 :class:`AggregateProviderError`，携带各次错误的 ``(config_id, error_repr)``。
         无任何候选 → 抛 :class:`ModelNotConfiguredError`（与 ``resolve`` 行为一致）。
 
+        V3 P0-2：``light`` capability 零配置时自动回退到 ``reasoning`` 候选链。
+        回退成功时，返回 ``used_config_row['capability']`` 改写为 ``'reasoning'``，
+        便于下游日志/审计识别实际命中配置。
+
         注：单配置时与 :meth:`resolve` + :meth:`get_provider` 的旧路径行为等价。
         """
         candidates = self.list_enabled(capability)
+        used_capability = capability
+        if not candidates and capability == "light":
+            # 零破坏：light 未配置时回退 reasoning
+            candidates = self.list_enabled("reasoning")
+            used_capability = "reasoning"
+            if candidates:
+                log.info(
+                    "model_router.light_fallback",
+                    extra={
+                        "requested": "light",
+                        "fallback_to": "reasoning",
+                        "candidates": len(candidates),
+                    },
+                )
         if not candidates:
             raise ModelNotConfiguredError(capability)
 
@@ -231,6 +256,10 @@ class ModelRouter:
                 continue
             try:
                 completion = provider.complete(messages, params=params)
+                # V3 P0-2：回退发生时把实际命中的 capability 暴露给下游
+                if used_capability != capability:
+                    row = dict(row)
+                    row["capability"] = used_capability
                 return completion, row
             except ProviderError as exc:
                 msg = f"{exc} (status_code={exc.status_code})"

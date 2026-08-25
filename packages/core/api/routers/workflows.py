@@ -60,6 +60,9 @@ class StartWorkflowRequest(BaseModel):
     # （"enforce" 阻断 / "report" 不阻断）；任务书拍板默认 report；
     # 显式注入便于测试覆盖两种模式。
     quality_gate_mode: str | None = None
+    # V3 P0-1：chapter-review critic 采样模式（off / sample / always）。
+    # 仅 chapter-review 节点读取；其他 workflow 忽略。优先级高于 NOVELOS_CRITIC_MODE 环境变量。
+    critic_mode: str | None = Field(default=None, pattern="^(off|sample|always)$")
 
 
 class ResumeRequest(BaseModel):
@@ -139,6 +142,9 @@ def _start_workflow(
         initial_ctx["mock_providers"] = body.mock_providers
     if body.quality_gate_mode is not None:
         initial_ctx["quality_gate_mode"] = body.quality_gate_mode
+    # V3 P0-1：仅 chapter-review 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。
+    if body.critic_mode is not None:
+        initial_ctx["critic_mode"] = body.critic_mode
 
     engine = _engine(request)
     try:

@@ -211,7 +211,12 @@ def test_capability_for_known_agents():
     assert capability_for("director") == "reasoning"
     assert capability_for("observer") == "reasoning"
     assert capability_for("writer") == "creative_writing"
+    # V3 P0-2：critic / summarizer 映射为 light capability
+    assert capability_for("critic") == "light"
+    assert capability_for("summarizer") == "light"
     assert AGENT_CAPABILITY["director"] == "reasoning"
+    assert AGENT_CAPABILITY["critic"] == "light"
+    assert AGENT_CAPABILITY["summarizer"] == "light"
 
 
 def test_capability_for_unknown_defaults_reasoning():
@@ -239,7 +244,8 @@ def test_capability_for_known_agents_via_prompts_module():
     )
 
     for name in ("director", "observer", "writer", "arbiter",
-                 "deconstructor_chapter", "deconstructor_aggregate"):
+                 "deconstructor_chapter", "deconstructor_aggregate",
+                 "critic", "summarizer"):
         assert capability_for(name) == prompts_capability_for(name), (
             f"capability_for({name!r}) mismatch: "
             f"router={capability_for(name)!r}, prompts={prompts_capability_for(name)!r}"
@@ -344,3 +350,74 @@ def test_router_get_provider_handles_dict_params_json(tmp_path: Path):
     }
     provider = ModelRouter(db_path).get_provider(row)
     assert provider.base_url == "https://x.com/v1"
+
+
+# ---------------------------------------------------------------------------
+# V3 P0-2：light capability 路由 + 回退
+# ---------------------------------------------------------------------------
+
+
+def test_light_capability_resolves_light_when_configured(tmp_path: Path):
+    """light capability 有 enabled 配置时，list_enabled("light") 返回 light 行（不走回退）。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    cid_light = _insert_config(db_path, "light", "openai", "gpt-4o-mini", enabled=1)
+    _insert_config(db_path, "reasoning", "openai", "gpt-4o", enabled=1)
+    rows = ModelRouter(db_path).list_enabled("light")
+    assert len(rows) == 1
+    assert rows[0]["config_id"] == cid_light
+    assert rows[0]["model"] == "gpt-4o-mini"
+
+
+def test_call_with_fallback_light_missing_falls_back_to_reasoning(tmp_path: Path):
+    """DB 只配 reasoning、light 无配置时，call_with_fallback("light", ...)
+    不抛错且走 reasoning 候选链；返回的 config_row['capability'] 改写为 'reasoning'。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    cid_reasoning = _insert_config(db_path, "reasoning", "mock", "mock-1", enabled=1)
+
+    router = ModelRouter(db_path)
+    completion, row = router.call_with_fallback(
+        "light", [{"role": "user", "content": "hi"}]
+    )
+    # mock provider 返回 {"text": "..."}；不必断言具体内容，关键是成功路径与回退标记
+    assert isinstance(completion, dict)
+    assert row["config_id"] == cid_reasoning
+    assert row["capability"] == "reasoning"  # V3 P0-2：fallback 标记
+
+
+def test_call_with_fallback_light_and_reasoning_both_missing_raises(tmp_path: Path):
+    """light 和 reasoning 都无配置时，call_with_fallback("light") 抛 ModelNotConfiguredError（capability='light'）。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    with pytest.raises(ModelNotConfiguredError) as exc:
+        ModelRouter(db_path).call_with_fallback(
+            "light", [{"role": "user", "content": "hi"}]
+        )
+    assert exc.value.capability == "light"
+
+
+def test_call_with_fallback_light_prefers_light_over_reasoning(tmp_path: Path):
+    """light 与 reasoning 都配时，call_with_fallback("light") 走 light（不触发回退）。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    cid_light = _insert_config(db_path, "light", "mock", "mock-light", enabled=1)
+    cid_reasoning = _insert_config(db_path, "reasoning", "mock", "mock-reasoning", enabled=1)
+
+    _, row = ModelRouter(db_path).call_with_fallback(
+        "light", [{"role": "user", "content": "hi"}]
+    )
+    assert row["config_id"] == cid_light
+    assert row["capability"] == "light"  # 没回退，capability 保持 light
+    assert row["config_id"] != cid_reasoning
+
+
+def test_call_with_fallback_non_light_missing_still_raises(tmp_path: Path):
+    """非 light capability（如 creative_writing）缺失时仍抛 ModelNotConfiguredError，不触发回退。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    with pytest.raises(ModelNotConfiguredError) as exc:
+        ModelRouter(db_path).call_with_fallback(
+            "creative_writing", [{"role": "user", "content": "hi"}]
+        )
+    assert exc.value.capability == "creative_writing"

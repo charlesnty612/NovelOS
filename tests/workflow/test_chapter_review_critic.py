@@ -225,7 +225,8 @@ def test_critic_ok_report_in_pause_payload(tmp_path: Path):
 
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
-                json={"mock_providers": {"critic": _critic_ok_script()}},
+                # V3 P0-1：显式固定 critic_mode=always，规避默认 sample 跳过（chapter.number=1 不命中 5）。
+                json={"mock_providers": {"critic": _critic_ok_script()}, "critic_mode": "always"},
             )
             assert r.status_code == 201, r.text
             paused = r.json()
@@ -290,7 +291,8 @@ def test_critic_non_json_degrades_and_keeps_pause(tmp_path: Path):
             bad_script = ["not json at all", "still not json"]
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
-                json={"mock_providers": {"critic": bad_script}},
+                # V3 P0-1：显式固定 always 验证 critic 降级路径（不被默认 sample 跳过拦截）
+                json={"mock_providers": {"critic": bad_script}, "critic_mode": "always"},
             )
             assert r.status_code == 201, r.text
             paused = r.json()
@@ -335,7 +337,8 @@ def test_critic_failed_reject_revise_still_works(tmp_path: Path):
             bad_script = ["not json", "still not json"]
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
-                json={"mock_providers": {"critic": bad_script}},
+                # V3 P0-1：显式固定 always 验证 critic 降级 → revise 闭环
+                json={"mock_providers": {"critic": bad_script}, "critic_mode": "always"},
             )
             paused = r.json()
             assert paused["pause_payload"]["critic_status"] == "failed"
@@ -378,7 +381,8 @@ def test_critic_no_mock_degrades_safely(tmp_path: Path):
             # 不配 critic mock：workflow ctx["mock_providers"]["critic"] 不存在
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
-                json={"mock_providers": {}},
+                # V3 P0-1：显式固定 always 验证 ModelNotConfiguredError → failed 降级
+                json={"mock_providers": {}, "critic_mode": "always"},
             )
             assert r.status_code == 201, r.text
             paused = r.json()
@@ -387,5 +391,231 @@ def test_critic_no_mock_degrades_safely(tmp_path: Path):
             payload = paused["pause_payload"]
             assert payload["critic_status"] == "failed"
             assert payload["critic_report"] is None
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# V3 P0-1：critic_mode 三模式（off / sample / always）+ env fallback
+# ---------------------------------------------------------------------------
+
+
+async def _set_chapter_number(app, cid: str, number: int) -> None:
+    """直接 SQL 把 chapters.number 改成目标值，便于构造 sample 命中/不命中。"""
+    conn = get_connection(app.state.settings.db_path)
+    try:
+        conn.execute(
+            "UPDATE chapters SET number = ?, updated_at = ? WHERE chapter_id = ?",
+            (number, "2026-08-24T00:00:00Z", cid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def _count_critic_logs(app, prompt_version: str = "critic:v1") -> int:
+    conn = get_connection(app.state.settings.db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ai_call_logs WHERE prompt_version = ?",
+            (prompt_version,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row["n"])
+
+
+def test_critic_mode_off_skips_llm(tmp_path: Path):
+    """critic_mode='off'：跳过 critic LLM 调用，pause_payload.critic_status='skipped'，
+    ai_call_logs 中无 critic:v1 行。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+            await _plan_and_write(app, pid, cid, _critic_ok_script())
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={
+                    "mock_providers": {"critic": _critic_ok_script()},
+                    "critic_mode": "off",
+                },
+            )
+            assert r.status_code == 201, r.text
+            paused = r.json()
+            assert paused["status"] == "PAUSED"
+            payload = paused["pause_payload"]
+            assert payload["critic_status"] == "skipped"
+            assert payload["critic_report"] is None
+            assert payload["critic_mode"] == "off"
+            assert payload["critic_skipped"] is True
+            # 无 critic LLM 调用
+            assert await _count_critic_logs(app) == 0
+
+    asyncio.run(run())
+
+
+def test_critic_mode_sample_only_runs_every_5(tmp_path: Path):
+    """critic_mode='sample'：chapter.number=5 命中（调 LLM）；chapter.number=3 跳过。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+
+            # chapter A：number=5 → 应调 critic
+            cid_a = await _make_chapter(app, pid, 5, "第五章")
+            await _make_character(app, pid)
+            await _plan_and_write(app, pid, cid_a, _critic_ok_script())
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid_a}/review",
+                json={
+                    "mock_providers": {"critic": _critic_ok_script()},
+                    "critic_mode": "sample",
+                },
+            )
+            assert r.status_code == 201, r.text
+            payload_a = r.json()["pause_payload"]
+            assert payload_a["critic_status"] == "ok"
+            assert payload_a["critic_mode"] == "sample"
+            assert payload_a["critic_skipped"] is False
+            assert isinstance(payload_a["critic_report"], dict)
+            assert await _count_critic_logs(app) == 1
+
+            # chapter B：number=3 → 应跳过
+            cid_b = await _make_chapter(app, pid, 3, "第三章")
+            await _plan_and_write(app, pid, cid_b, _critic_ok_script())
+
+            r2 = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid_b}/review",
+                json={
+                    "mock_providers": {"critic": _critic_ok_script()},
+                    "critic_mode": "sample",
+                },
+            )
+            assert r2.status_code == 201, r2.text
+            payload_b = r2.json()["pause_payload"]
+            assert payload_b["critic_status"] == "skipped"
+            assert payload_b["critic_report"] is None
+            assert payload_b["critic_skipped"] is True
+            # chapter A 已调过一次，B 跳过后总数仍为 1
+            assert await _count_critic_logs(app) == 1
+
+    asyncio.run(run())
+
+
+def test_critic_mode_always_runs_regardless_of_number(tmp_path: Path):
+    """critic_mode='always'：chapter.number=2（不命中 sample）也应调 critic。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 2, "第二章")
+            await _plan_and_write(app, pid, cid, _critic_ok_script())
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={
+                    "mock_providers": {"critic": _critic_ok_script()},
+                    "critic_mode": "always",
+                },
+            )
+            assert r.status_code == 201, r.text
+            payload = r.json()["pause_payload"]
+            assert payload["critic_status"] == "ok"
+            assert payload["critic_mode"] == "always"
+            assert payload["critic_skipped"] is False
+            assert await _count_critic_logs(app) == 1
+
+    asyncio.run(run())
+
+
+def test_critic_mode_env_fallback_when_body_missing(tmp_path, monkeypatch):
+    """body 不传 critic_mode 但 NOVELOS_CRITIC_MODE=off → 跳过；ctx > env 优先级验证。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            monkeypatch.setenv("NOVELOS_CRITIC_MODE", "off")
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 5, "第五章")
+            await _plan_and_write(app, pid, cid, _critic_ok_script())
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": {"critic": _critic_ok_script()}},
+            )
+            assert r.status_code == 201, r.text
+            payload = r.json()["pause_payload"]
+            assert payload["critic_status"] == "skipped"
+            assert payload["critic_mode"] == "off"
+            assert await _count_critic_logs(app) == 0
+
+    asyncio.run(run())
+
+
+def test_critic_mode_body_overrides_env(tmp_path, monkeypatch):
+    """body=always 但 env=off：ctx 优先级 > env，应调 critic。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            monkeypatch.setenv("NOVELOS_CRITIC_MODE", "off")
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+            await _plan_and_write(app, pid, cid, _critic_ok_script())
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={
+                    "mock_providers": {"critic": _critic_ok_script()},
+                    "critic_mode": "always",
+                },
+            )
+            assert r.status_code == 201, r.text
+            payload = r.json()["pause_payload"]
+            assert payload["critic_status"] == "ok"
+            assert payload["critic_mode"] == "always"
+            assert await _count_critic_logs(app) == 1
+
+    asyncio.run(run())
+
+
+def test_critic_mode_invalid_env_falls_back_to_sample(tmp_path, monkeypatch):
+    """env 是非法值 → 默认 sample；chapter.number=3 跳过（验证非法值不破流程）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            monkeypatch.setenv("NOVELOS_CRITIC_MODE", "garbage")
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 3, "第三章")
+            await _plan_and_write(app, pid, cid, _critic_ok_script())
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": {"critic": _critic_ok_script()}},
+            )
+            assert r.status_code == 201, r.text
+            payload = r.json()["pause_payload"]
+            # 非法 env 值回退到默认 sample；number=3 不命中 → 跳过
+            assert payload["critic_status"] == "skipped"
+            assert payload["critic_mode"] == "sample"
+            assert await _count_critic_logs(app) == 0
 
     asyncio.run(run())

@@ -36,6 +36,8 @@ from .exceptions import PromptNotFoundError
 _FILE_RE = re.compile(r"^(?P<agent>[a-zA-Z][a-zA-Z_-]*)-v(?P<n>\d+)\.md$")
 
 # Agent → Capability 映射（与 model_router.AGENT_CAPABILITY 保持一致；这里独立维护避免循环依赖）
+# V3 P0-2：critic / summarizer 改为 "light"（结构化提取 / 评审类任务）；
+# observer 保持 reasoning（输出准确性直接影响 story_state）。
 _AGENT_TO_CAPABILITY: dict[str, str] = {
     "director": "reasoning",
     "observer": "reasoning",
@@ -43,8 +45,8 @@ _AGENT_TO_CAPABILITY: dict[str, str] = {
     "arbiter": "reasoning",
     "deconstructor_chapter": "reasoning",
     "deconstructor_aggregate": "reasoning",
-    "summarizer": "reasoning",  # Sprint 14-A 章节摘要链
-    "critic": "reasoning",       # V1.3 LLM 评审员
+    "summarizer": "light",      # V3 P0-2
+    "critic": "light",          # V3 P0-2
     # 其它 agent 默认 reasoning（Sprint 3 MVP 不细化）
 }
 
