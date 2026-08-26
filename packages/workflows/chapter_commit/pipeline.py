@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -51,6 +52,145 @@ _OBSERVER_RETRY_HINT_TEMPLATE = (
     "特别注意：凡 snapshot 中不存在前值的实体（本章首次出现的人物/地点/设定），"
     "必须用 add 而非 update；update 必须给出与 snapshot 一致的 before。"
 )
+
+
+# ============================================================================
+# V3.1.1 O-2：observer 双腿拆分（entities / narrative）—— 拆分依据与开关
+# ============================================================================
+# 根因：单次 observer 大请求（输入 ~31k 字符 + 输出 1.6-5.8万 token）在 provider 拥堵
+# 窗口下反复 480s 超时（ch060/ch063 多轮实证）。两条轻量腿各自只覆盖对应 scope，输出
+# token 量减半并可走 light capability（V3.0 P0-2 已有；缺失自动回退 reasoning）。
+#
+# 两腿划分（与 docs/agents/prompts/observer-v1.md §11 extraction_scope 对齐）：
+# - leg_a (entities)：character_changes + relationship_changes + world_changes
+# - leg_b (narrative)：new_events + new_hooks + resolved_hooks + debt_changes
+#
+# 合并：leg_a 优先（同 key 冲突时 entity leg 覆盖，避免 narrative leg 误覆盖
+# canonical 状态字段）。同 key 由 change_id 判定；change_id 缺失时按数组内
+# 出现顺序（保留 leg_a 的全部条目，再追加 leg_b 中不冲突的条目）。
+#
+# 重试语义：解析 validator errors 中出现的数组名，把仅与某一腿关联的 errors
+# 路由到对应腿（其它腿保持首次响应）。无法归类（如 errors 涉及跨腿的字段）
+# 时回退到「双腿都重试」——既有 retry 预算（最多 1 次）保持不变。
+#
+# Mock 兼容：golden regression 的 mock_script 是完整 7 数组 mock。两腿消费同一
+# mock_script 时（MockProvider list 模式按调用顺序取元素），会让 leg B 拿到 leg A
+# 已消耗的元素。两腿需各自拿到全量 mock 输出，再在 merge 阶段按 scope 过滤——
+# 由 ``_filter_mock_for_leg`` 在 pipeline 入口处预处理 mock_script。
+_OBSERVER_LEG_A_ARRAYS = ("character_changes", "relationship_changes", "world_changes")
+_OBSERVER_LEG_B_ARRAYS = ("new_events", "new_hooks", "resolved_hooks", "debt_changes")
+_OBSERVER_ALL_ARRAYS = _OBSERVER_LEG_A_ARRAYS + _OBSERVER_LEG_B_ARRAYS
+_OBSERVER_LEG_A_SET = frozenset(_OBSERVER_LEG_A_ARRAYS)
+_OBSERVER_LEG_B_SET = frozenset(_OBSERVER_LEG_B_ARRAYS)
+
+
+def _observer_split_enabled() -> bool:
+    """环境开关 ``NOVELOS_OBSERVER_SPLIT``；默认 on；off 走旧单次路径。
+
+    优先级：``ctx['observer_split']``（测试 / 调用方显式覆盖） > 环境变量。
+    """
+    from_env = os.environ.get("NOVELOS_OBSERVER_SPLIT", "on").strip().lower()
+    return from_env not in ("0", "false", "off", "no")
+
+
+def _filter_mock_for_leg(mock_script: Any, leg: str) -> Any:
+    """按 leg 过滤 mock_script：让两条腿各自拿到「只含本 leg 范围」mock。
+
+    golden regression 的 mock 是完整 7 数组 mock；不做过滤的话两条腿会按 list
+    顺序消费不同元素，leg B 会拿到 leg A 已用过的响应。本函数把每条 mock JSON
+    解析后只保留本 leg 的数组（其它数组置为空列表），两条腿各自消费同一份
+    全量 mock 但只看到本 leg 的内容——merge 后等价于单次大调用。
+    """
+    if mock_script is None:
+        return None
+    if callable(mock_script):
+        # callable 模式：调用方按 i 取响应；过滤留给调用方。
+        return mock_script
+    if isinstance(mock_script, str):
+        items = [mock_script]
+    elif isinstance(mock_script, list):
+        items = mock_script
+    else:
+        return mock_script
+
+    keep = _OBSERVER_LEG_A_SET if leg == "entities" else _OBSERVER_LEG_B_SET
+    out: list[str] = []
+    for item in items:
+        try:
+            data = json.loads(item)
+        except (TypeError, ValueError):
+            # 非 JSON 透传：保留原样（runner 内部 extract_json 会再尝试一次）。
+            out.append(item)
+            continue
+        if not isinstance(data, dict):
+            out.append(item)
+            continue
+        filtered: dict[str, Any] = {}
+        for arr_name in _OBSERVER_ALL_ARRAYS:
+            if arr_name in keep:
+                # 保留本 leg 的数组：原样拿；若不存在则置空列表，保证 7 数组齐全
+                filtered[arr_name] = data.get(arr_name) or []
+            else:
+                filtered[arr_name] = []
+        out.append(json.dumps(filtered, ensure_ascii=False))
+    return out if not isinstance(mock_script, str) else out[0]
+
+
+def _merge_observer_legs(leg_a: dict[str, Any], leg_b: dict[str, Any]) -> dict[str, Any]:
+    """合并两条腿的 7 数组输出。
+
+    规则：
+    1. 7 数组齐全；任一腿缺某数组 → 视为空列表。
+    2. 同数组内：leg_a 优先；leg_b 中与 leg_a change_id 冲突的条目丢弃。
+    3. change_id 缺失或非字符串 → 按数组内出现顺序追加（保留双方全部）。
+    """
+    merged: dict[str, Any] = {}
+    for arr_name in _OBSERVER_ALL_ARRAYS:
+        a_list = leg_a.get(arr_name) if isinstance(leg_a, dict) else None
+        b_list = leg_b.get(arr_name) if isinstance(leg_b, dict) else None
+        if not isinstance(a_list, list):
+            a_list = []
+        if not isinstance(b_list, list):
+            b_list = []
+        if arr_name in _OBSERVER_LEG_A_SET:
+            # leg_a 负责：直接取 a_list，b_list 丢弃（按 scope 不会出现冲突）
+            merged[arr_name] = list(a_list)
+        else:
+            # leg_b 负责：a_list 应为空；防御性兜底时仍按 leg_b 优先
+            merged[arr_name] = list(b_list) if not a_list else (list(b_list) + list(a_list))
+    return merged
+
+
+def _classify_validator_errors_to_legs(errors: list[str]) -> tuple[bool, bool]:
+    """把 validator errors 解析为「需要重跑的腿」。
+
+    返回 ``(need_leg_a, need_leg_b)``：
+    - errors 涉及 ``character_changes`` / ``relationship_changes`` / ``world_changes`` → need_leg_a = True
+    - errors 涉及 ``new_events`` / ``new_hooks`` / ``resolved_hooks`` / ``debt_changes`` → need_leg_b = True
+    - 无法归类（errors 不含数组名）→ 双腿都重试（兜底）
+    """
+    import re as _re
+
+    array_pat = _re.compile(r"\b(" + "|".join(_OBSERVER_ALL_ARRAYS) + r")\b")
+    a_hit = False
+    b_hit = False
+    any_array_hit = False
+    for err in errors or []:
+        if not isinstance(err, str):
+            continue
+        m = array_pat.search(err)
+        if not m:
+            continue
+        any_array_hit = True
+        name = m.group(1)
+        if name in _OBSERVER_LEG_A_SET:
+            a_hit = True
+        elif name in _OBSERVER_LEG_B_SET:
+            b_hit = True
+    if not any_array_hit:
+        # 兜底：errors 不可归类 → 双腿都重试
+        return True, True
+    return a_hit, b_hit
 
 # -----------------------------------------------------------------------
 # Sprint V1.4：enforce 改稿引导（revision_guidance）
@@ -252,21 +392,163 @@ def _build_observer_ctx_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Observer 节点（V3.1.1 O-2：双 leg 拆分）。
+
+    V3.1.1 O-2 之前：本节点单次调 ``run_agent("observer", payload)`` 输出 7 数组。
+    V3.1.1 O-2 之后：
+    - 默认（``NOVELOS_OBSERVER_SPLIT=on``）：分两条轻量 leg 调 observer：
+      - leg_a (entities)：character_changes + relationship_changes + world_changes
+      - leg_b (narrative)：new_events + new_hooks + resolved_hooks + debt_changes
+      两腿各自走 ``light`` capability（V3 P0-2；缺失自动回退 reasoning）；payload
+      注入 ``extraction_scope`` 字段让 observer 只输出对应 scope 的数组（见
+      ``docs/agents/prompts/observer-v1.md`` §11）。两腿响应合并后走既有
+      ``_inject_validate_node`` 校验链不变。
+    - off（``NOVELOS_OBSERVER_SPLIT=off``）：走旧单次大调用路径——保留原代码
+      路径分支，保证可一键回退。
+
+    输出：
+    - ``observer_payload``：合并后的 7 数组（dict）。
+    - ``observer_split_meta``：可观测性元数据——
+      ``{"enabled": bool, "leg_a": {...}, "leg_b": {...}, "merged_at": iso}``；
+      每条 leg 含 ``{"tokens": int, "latency_ms": int, "retry_count": int}``，
+      数值从 ai_call_logs 聚合（chapter-commit run + node_run_id + agent='observer'）。
+    """
     db_path = ctx["db_path"]
     run_id = ctx["run_id"]
-    payload = ctx["observer_input"]
+    node_run_id = ctx.get("_current_node_run_id")
+    base_payload = ctx["observer_input"]
     mock_script = (ctx.get("mock_providers") or {}).get("observer")
-    out = run_agent(
+
+    # env 开关 + ctx 显式覆盖
+    if ctx.get("observer_split") is False or not _observer_split_enabled():
+        # 旧单次路径（V3.1.1 O-2 之前；保证回退兼容）
+        out = run_agent(
+            db_path,
+            "observer",
+            base_payload,
+            run_id,
+            node_run_id=node_run_id,
+            expected="observer",
+            mock_script=mock_script,
+        )
+        return {
+            "observer_payload": out,
+            "observer_split_meta": {
+                "enabled": False,
+                "leg_a": None,
+                "leg_b": None,
+                "merged_at": now_iso(),
+            },
+        }
+
+    # 新拆分路径：两腿分别调 observer agent，按 scope 注入 payload 指令
+    leg_a_payload = dict(base_payload)
+    leg_a_payload["extraction_scope"] = "entities"
+    leg_b_payload = dict(base_payload)
+    leg_b_payload["extraction_scope"] = "narrative"
+
+    # Mock 兼容：golden regression 的 mock_script 是完整 7 数组；按 leg 过滤，
+    # 让两腿各自看到「只含本 leg 范围」mock——merge 后等价于单次大调用。
+    leg_a_mock = _filter_mock_for_leg(mock_script, "entities")
+    leg_b_mock = _filter_mock_for_leg(mock_script, "narrative")
+
+    leg_a_out = run_agent(
         db_path,
         "observer",
-        payload,
+        leg_a_payload,
         run_id,
-        node_run_id=ctx.get("_current_node_run_id"),
+        node_run_id=node_run_id,
         expected="observer",
-        mock_script=mock_script,
+        mock_script=leg_a_mock,
+        capability_override="light",
     )
-    # out 含 7 个 change 数组（无元信息）
-    return {"observer_payload": out}
+    leg_b_out = run_agent(
+        db_path,
+        "observer",
+        leg_b_payload,
+        run_id,
+        node_run_id=node_run_id,
+        expected="observer",
+        mock_script=leg_b_mock,
+        capability_override="light",
+    )
+
+    merged = _merge_observer_legs(leg_a_out, leg_b_out)
+    meta = _aggregate_observer_split_meta(
+        db_path,
+        run_id=run_id,
+        node_run_id=node_run_id,
+        # 两腿各 1 次成功调用（首次即通过；如失败将由 _inject_validate_node 重试，
+        # 该节点会消费同一 ai_call_logs 行做聚合，本节点只关心成功首调）。
+        expected_calls=2,
+        merged_at=now_iso(),
+    )
+    return {"observer_payload": merged, "observer_split_meta": meta}
+
+
+def _aggregate_observer_split_meta(
+    db_path: Any,
+    *,
+    run_id: str,
+    node_run_id: str | None,
+    expected_calls: int,
+    merged_at: str,
+) -> dict[str, Any]:
+    """聚合 observer 双 leg 的 tokens / latency_ms / retry_count。
+
+    路径：``ai_call_logs`` WHERE ``run_id=? AND node_run_id=? AND agent='observer'``
+    取最近 ``expected_calls`` 条（按 created_at DESC 倒序后回正为 leg_a 先 leg_b 后）；
+    单次大调用时（off 路径）不会调用本函数，故此处的「按 created_at 排序 +
+    假定 leg_a 先 leg_b 后」足以区分两腿。极端情况下两腿几乎同时落库（毫秒级
+    差异），仍可按 ``rowid`` 倒序稳定回放顺序。
+    """
+    try:
+        conn = get_connection(db_path)
+    except Exception:  # noqa: BLE001 —— 观测失败不阻断 observer 节点
+        return {
+            "enabled": True,
+            "leg_a": None,
+            "leg_b": None,
+            "merged_at": merged_at,
+        }
+    try:
+        # 取本节点 observer 全部调用（按 rowid ASC；同一 run_id+node_run_id 下
+        # 两腿调用按代码顺序落库，rowid 顺序 = 调用顺序）
+        rows = conn.execute(
+            """
+            SELECT a.call_id, a.token_usage_json, a.latency_ms, a.retry_count, a.created_at
+            FROM ai_call_logs a
+            JOIN agents ag ON ag.agent_id = a.agent_id
+            WHERE a.run_id = ? AND ag.name = 'observer'
+              AND (? IS NULL OR a.node_run_id = ?)
+            ORDER BY a.rowid ASC
+            """,
+            (run_id, node_run_id, node_run_id),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    legs: list[dict[str, Any]] = []
+    for r in rows[-2:] if len(rows) >= 2 else rows:
+        try:
+            usage = json.loads(r["token_usage_json"]) if r["token_usage_json"] else {}
+        except (TypeError, ValueError):
+            usage = {}
+        legs.append({
+            "tokens": int(usage.get("total") or 0),
+            "latency_ms": int(r["latency_ms"] or 0),
+            "retry_count": int(r["retry_count"] or 0),
+            "call_id": r["call_id"],
+        })
+
+    leg_a = legs[0] if len(legs) >= 1 else None
+    leg_b = legs[1] if len(legs) >= 2 else None
+    return {
+        "enabled": True,
+        "leg_a": leg_a,
+        "leg_b": leg_b,
+        "merged_at": merged_at,
+    }
 
 
 def _has_high_risk_change(observer_payload: dict[str, Any]) -> bool:
@@ -319,20 +601,27 @@ def _build_delta(
 
 
 def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
-    """注入元信息 → validate_delta（纯函数，无落库副作用）→ 失败带错误重试 observer 一次。
+    """注入元信息 → validate_delta（纯函数，无落库副作用）→ 失败按 leg 重试。
 
-    重试范围（与 deconstruct_book 的 T2/T3 retry 范式对齐）：
-    - 校验失败后构造新 payload = ``dict(ctx["observer_input"])`` + ``_retry_hint``；
-    - mock_script 取 ``ctx["mock_providers"]["observer"]``：list 且长度 >1 时取 ``mock_script[1]``，
-      否则保持原样（让生产 / 单条 mock 走同一响应，retry 仅靠 _retry_hint 修正）；
-    - 两次都失败 ⇒ ``raise ValueError("observer delta rejected by validator: errors=...")``。
+    重试范围（V3.1.1 O-2 拆分后）：
+    - 校验失败后解析 errors 中出现的数组名，把仅与某 leg 关联的 errors 路由到对应腿：
+      - character_changes / relationship_changes / world_changes → leg_a 重试
+      - new_events / new_hooks / resolved_hooks / debt_changes → leg_b 重试
+    - errors 不可归类（不含数组名）→ 双腿都重试（兜底，保持向后兼容）。
+    - 重试 payload：``dict(ctx["observer_input"])`` + ``_retry_hint`` + ``extraction_scope``。
+    - mock_script：首次按 leg 过滤；重试时取 ``mock_script[idx+1]`` 对应 leg 的元素。
+    - 重试预算：每个 leg 最多 1 次（与单次路径的 1 次重试预算对齐——双腿都重试场景下
+      总调用次数上限 = 2 首次 + 2 重试 = 4 次 ai_call_logs 行）。
+    - 重试后再次 merge → validate；仍失败 ⇒ ``raise ValueError(...)``。
     - submit_delta 仅在最终通过的 delta 上调一次（service.py:662-680 失败会落 rejected 行，
       重试循环内禁止反复调）。
     """
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
     run_id = ctx["run_id"]
-    observer_payload = ctx.get("observer_payload") or {}
+    node_run_id = ctx.get("_current_node_run_id")
+    split_meta = ctx.get("observer_split_meta") or {}
+    split_enabled = bool(split_meta.get("enabled"))
 
     # 取当前 state_version 作 previous_state_version（不依赖 observer_payload，原口径）
     svc = StoryStateService(db_path)
@@ -344,55 +633,98 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
     current_state = svc.get_current_state(project_id)
     previous_state_version = int(current_state.get("state_version") or 1)
 
-    # 第一次：基于 _observer_node 注入的 observer_payload 构造 delta → validate
+    # 快照：observer_input.previous_state（trimmed 模式）+ 引用存在性校验
+    snapshot_for_validate = (ctx.get("observer_input") or {}).get("previous_state")
+
+    # 当前累积的 observer_payload（首次 = _observer_node 输出；后续 = merge 结果）
+    observer_payload = ctx.get("observer_payload") or {}
+    # leg 维度的输出缓存（按 leg 存最近一次响应，便于只重跑出错 leg）
+    leg_outputs: dict[str, dict[str, Any]] = {}
+    if split_enabled:
+        leg_outputs["entities"] = _extract_leg_payload(observer_payload, "entities")
+        leg_outputs["narrative"] = _extract_leg_payload(observer_payload, "narrative")
+    else:
+        # off 路径：把 observer_payload 视为「完整 7 数组」（与单次大调用一致）；
+        # 重试时整次重跑。
+        leg_outputs["all"] = dict(observer_payload) if isinstance(observer_payload, dict) else {}
+
+    # 首次校验
     delta = _build_delta(
         observer_payload,
         chapter_id=chapter_id,
         run_id=run_id,
         previous_state_version=previous_state_version,
     )
-    # M3 引擎包：把 observer_input 中的 previous_state（trimmed 快照）传入 validate_delta，
-    # 启用「引用实体存在性」业务校验——把 DB FK 失败前置为可自愈的业务错误（详见
-    # ``validator._reference_existence_errors``）。observer_input.previous_state 是 trimmed
-    # 快照，仅含 touch 实体全集 + 其余摘要，足够作为引用白名单（add 实体在本 delta 内
-    # 自愈，不依赖 snapshot 全集）。
-    snapshot_for_validate = (ctx.get("observer_input") or {}).get("previous_state")
     errors = validate_delta(delta, snapshot=snapshot_for_validate)
-    if errors:
-        # 构造重试 payload（在 observer_input 副本上注入 _retry_hint）
-        retry_payload = dict(ctx.get("observer_input") or {})
-        retry_payload["_retry_hint"] = _OBSERVER_RETRY_HINT_TEMPLATE.format(
-            errors="; ".join(errors)
-        )
-        # mock_script list 模式：第二次取下一条以让 MockProvider 返回不同响应。
-        # 注意 MockProvider(scripted=str) 会把 str 当 iterable 取字符（runner 测试通用行为），
-        # 因此弹出的 str 必须用 list[str]（单元素）包一层，与 deconstruct_book T2 retry
-        # 处理一致。
-        original_mock_script = (ctx.get("mock_providers") or {}).get("observer")
-        if isinstance(original_mock_script, list) and len(original_mock_script) > 1:
-            picked = original_mock_script[1]
-            retry_mock_script = [picked] if isinstance(picked, str) else picked
-        else:
-            retry_mock_script = original_mock_script
 
-        observer_payload = run_agent(
-            db_path,
-            "observer",
-            retry_payload,
-            run_id,
-            node_run_id=ctx.get("_current_node_run_id"),
-            expected="observer",
-            mock_script=retry_mock_script,
-        )
-        # 第二次：基于 retry 后 observer_payload 重建 delta → 再次 validate
+    # 重试预算：每腿 1 次
+    if errors:
+        # mock_script 原始形态（list / str / callable / None）
+        original_mock_script = (ctx.get("mock_providers") or {}).get("observer")
+        if split_enabled:
+            need_a, need_b = _classify_validator_errors_to_legs(errors)
+            legs_to_retry: list[str] = []
+            if need_a:
+                legs_to_retry.append("entities")
+            if need_b:
+                legs_to_retry.append("narrative")
+            for leg in legs_to_retry:
+                retry_payload = dict(ctx.get("observer_input") or {})
+                retry_payload["_retry_hint"] = _OBSERVER_RETRY_HINT_TEMPLATE.format(
+                    errors="; ".join(errors)
+                )
+                retry_payload["extraction_scope"] = (
+                    "entities" if leg == "entities" else "narrative"
+                )
+                # mock_script：取下一条响应（list 模式弹 idx+1），单条/字符串保持原样
+                retry_mock = _pick_retry_mock(original_mock_script, leg)
+                retry_out = run_agent(
+                    db_path,
+                    "observer",
+                    retry_payload,
+                    run_id,
+                    node_run_id=node_run_id,
+                    expected="observer",
+                    mock_script=retry_mock,
+                    capability_override="light",
+                )
+                leg_outputs[leg] = retry_out if isinstance(retry_out, dict) else {}
+            # 重新合并双腿
+            observer_payload = _merge_observer_legs(
+                leg_outputs.get("entities", {}),
+                leg_outputs.get("narrative", {}),
+            )
+        else:
+            # off 路径：整次重跑（与单次大调用一致）
+            retry_payload = dict(ctx.get("observer_input") or {})
+            retry_payload["_retry_hint"] = _OBSERVER_RETRY_HINT_TEMPLATE.format(
+                errors="; ".join(errors)
+            )
+            if isinstance(original_mock_script, list) and len(original_mock_script) > 1:
+                picked = original_mock_script[1]
+                retry_mock_script = [picked] if isinstance(picked, str) else picked
+            else:
+                retry_mock_script = original_mock_script
+            observer_payload = run_agent(
+                db_path,
+                "observer",
+                retry_payload,
+                run_id,
+                node_run_id=node_run_id,
+                expected="observer",
+                mock_script=retry_mock_script,
+            )
+            leg_outputs["all"] = (
+                dict(observer_payload) if isinstance(observer_payload, dict) else {}
+            )
+
+        # 二次校验（重试后）
         delta = _build_delta(
             observer_payload,
             chapter_id=chapter_id,
             run_id=run_id,
             previous_state_version=previous_state_version,
         )
-        # retry_payload 是 observer_input 的浅拷贝，previous_state 字段仍在；继续复用
-        # 同一 snapshot 做引用存在性校验。
         errors = validate_delta(delta, snapshot=snapshot_for_validate)
         if errors:
             raise ValueError(
@@ -417,6 +749,36 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "needs_high_risk_approval": needs_high_risk_approval,
         "submit_result": submit_result,
     }
+
+
+def _extract_leg_payload(observer_payload: dict[str, Any], leg: str) -> dict[str, Any]:
+    """从合并后的 observer_payload 中按 leg 抽取对应数组（用于 per-leg 重试缓存）。"""
+    keep = _OBSERVER_LEG_A_SET if leg == "entities" else _OBSERVER_LEG_B_SET
+    out: dict[str, Any] = {}
+    if not isinstance(observer_payload, dict):
+        return out
+    for arr_name in _OBSERVER_ALL_ARRAYS:
+        if arr_name in keep:
+            arr = observer_payload.get(arr_name)
+            out[arr_name] = list(arr) if isinstance(arr, list) else []
+    return out
+
+
+def _pick_retry_mock(mock_script: Any, leg: str) -> Any:
+    """按 leg 选取「下一条」mock 响应；非 list 模式保持原样。
+
+    与 _observer_node 首次调用的口径对齐：list[str] 模式按 leg 过滤（取下一条
+    元素再按 scope 过滤），让 mock 测试可以分别控制双腿的首次 / 重试响应。
+    """
+    if mock_script is None or callable(mock_script) or isinstance(mock_script, str):
+        # 字符串 / callable / None：透传（重试仅靠 _retry_hint 修正）
+        return mock_script
+    if not isinstance(mock_script, list) or len(mock_script) <= 1:
+        return mock_script
+    # list 模式 + 多条：弹下一条以让 MockProvider 返回不同响应
+    picked = mock_script[1]
+    retry_list = [picked] if isinstance(picked, str) else picked
+    return _filter_mock_for_leg(retry_list, leg)
 
 
 # ============================================================================

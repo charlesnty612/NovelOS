@@ -245,8 +245,12 @@ async def _push_chapter_to_reviewed(
 # ---------------------------------------------------------------------------
 
 
-def test_chapter_commit_observer_retry_succeeds_on_second_attempt(tmp_path: Path):
+def test_chapter_commit_observer_retry_succeeds_on_second_attempt(tmp_path: Path, monkeypatch):
     """observer 第 1 次非法（before=None）→ 第 2 次合法 → commit COMPLETED。
+
+    V3.1.1 O-2：默认 split on（双 leg）。本测试把 observer_split 强制 off，模拟旧
+    单次大调用路径，保证既有 retry 语义回归。split on 路径下的 retry 行为见
+    ``test_chapter_commit_observer_split_retry``。
 
     断言：
     - run.status == COMPLETED
@@ -254,6 +258,7 @@ def test_chapter_commit_observer_retry_succeeds_on_second_attempt(tmp_path: Path
     - ai_call_logs 中 observer 被调 2 次（call_count 列）
     - state_deltas 中无本章 rejected 行（重试循环内未调 submit_delta）
     """
+    monkeypatch.setenv("NOVELOS_OBSERVER_SPLIT", "off")
     app = _create_app(tmp_path)
 
     async def run():
@@ -331,8 +336,11 @@ def test_chapter_commit_observer_retry_succeeds_on_second_attempt(tmp_path: Path
     asyncio.run(run())
 
 
-def test_chapter_commit_observer_retry_fails_after_two_invalid_attempts(tmp_path: Path):
+def test_chapter_commit_observer_retry_fails_after_two_invalid_attempts(tmp_path: Path, monkeypatch):
     """observer 第 1 次、第 2 次都非法 → run FAILED 且 error 含 "observer delta rejected by validator"。
+
+    V3.1.1 O-2：本测试把 observer_split 强制 off，模拟旧单次路径；split on 路径下的
+    失败语义由 ``test_chapter_commit_observer_split_fails_after_retry`` 覆盖。
 
     断言：
     - run.status == FAILED
@@ -340,6 +348,7 @@ def test_chapter_commit_observer_retry_fails_after_two_invalid_attempts(tmp_path
     - chapters.status 保持 REVIEWED（commit 未推进）
     - state_deltas 中无 rejected 行（重试循环内未调 submit_delta）
     """
+    monkeypatch.setenv("NOVELOS_OBSERVER_SPLIT", "off")
     app = _create_app(tmp_path)
 
     async def run():

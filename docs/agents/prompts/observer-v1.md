@@ -129,6 +129,22 @@
 ```
 
 > **输入契约补充**：`previous_state_version`（正整数）从 `previous_state.state_version` 同步；下游 Workflow 在注入 Delta 时会把它复制到顶层 `previous_state_version` 字段（对齐 Schema required 列表）。
+>
+> **V3.1.1 O-1 trimmed 模式上下文说明**：当 Workflow 在 `snapshot_mode="trimmed"` 路径下装配 observer 输入时，`previous_state` 是**分代裁剪版**快照（携带 `"snapshot_mode": "trimmed"` 标记；完整裁剪统计见顶层 `snapshot_trim_stats`）。裁剪规则：
+> - `events`：滚动窗口——仅保留 `introduced_chapter_no` ∈ `[current - N, current]`（默认 N=6）的窗口内事件 + 被最近 N 个 commit 引入（`touched_events`）的事件，**其余事件整体不在 payload 中**（DB `plot_events` 表可检索，但 observer 不应假设出窗事件为「未发生」，也不必为其生成变更——更早的事实以 DB 为准）；
+> - `hooks`：open/active/escalated 走压缩字段（`{hook_id, name, status, visibility, created_chapter}`，无 description/importance/expected_payoff_chapter_id），resolved/abandoned 仅保留最近 5 条摘要；
+> - `debts`：open/acknowledged 走压缩字段（`{debt_id, description, status, visibility, created_chapter}`），paid/forgiven 仅保留最近 5 条摘要；
+> - 其它领域（characters / world）的裁剪语义与 M3 一致：touched 全量 + 其余仅摘要。
+>
+> **当 Observer 看到 `previous_state.snapshot_mode == "trimmed"` 时**：不要把「events 列表中没有某事件」解读为「该事件不存在」——它在 DB 中存在但被窗口排除；同样不要为「看到的 hooks/debts 字段不完整」而报错。trimmed 模式只为节省 token，**不影响事件/伏笔/债务的真实状态**。
+
+> **V3.1.1 O-2 双腿拆分输入说明（extraction_scope）**：当 Workflow 在 `NOVELOS_OBSERVER_SPLIT=on`（默认）路径下装配 observer 输入时，会在 payload 顶层注入 `extraction_scope` 字段，取值 `entities` 或 `narrative`：
+> - `entities`：本次调用**只输出** `character_changes` / `relationship_changes` / `world_changes` 三个数组；其它四个数组（`new_events` / `new_hooks` / `resolved_hooks` / `debt_changes`）必须输出**空数组**（保证 7 数组齐全，便于下游 merge 与契约校验）。聚焦提示：把注意力放在人物 / 世界 / 关系的状态变化，避免被事件 / 伏笔 / 债务细节分心。
+> - `narrative`：本次调用**只输出** `new_events` / `new_hooks` / `resolved_hooks` / `debt_changes` 四个数组；其它三个数组必须输出**空数组**。聚焦提示：把注意力放在情节推进、伏笔埋设/兑现、债务状态变化——这些是叙事对象，输出 token 量集中在 narrative leg。
+>
+> **拆分动机**：单次 observer 大请求（输入 ~31k 字符 + 输出 1.6-5.8万 token）在 provider 拥堵窗口下反复 480s 超时（ch060/ch063 多轮实证）。两条轻量腿各自只覆盖对应 scope，输出 token 量减半并可走 `light` capability（V3 P0-2；缺失自动回退 `reasoning`）。两条腿并行（顺序）调用后由 Workflow Runtime 合并（leg_a 优先），再走既有 `_inject_validate_node` 校验链。
+>
+> **拆分模式下：当你看到 `payload.extraction_scope == "entities"` 或 `"narrative"` 时**，严格按上面的「只输出 / 空数组」规则，不要输出 scope 之外的 change 条目——否则下游 merge 会因 scope 字段名错配而误丢弃；但也**不要**为了节省输出而省略非 scope 数组（必须输出 `[]` 占位）。
 
 ---
 

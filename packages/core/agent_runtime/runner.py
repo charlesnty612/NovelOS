@@ -207,6 +207,7 @@ def run_agent(
     node_run_id: str | None = None,
     expected: str | None = None,
     mock_script: Any = None,
+    capability_override: str | None = None,
 ) -> dict[str, Any]:
     """执行一次 agent 调用。
 
@@ -218,6 +219,11 @@ def run_agent(
     - :class:`AgentOutputError` ——解析 / 契约重试 1 次仍失败。
 
     注：所有异常出口都会把 ``workflow_runs`` 收尾为 ``FAILED``（孤儿 RUNNING 行兜底）。
+
+    V3.1.1 O-2：``capability_override`` 用于「同一 agent 不同 leg 走不同 capability」
+    的场景（如 observer 双 leg：leg A 走 reasoning，leg B 走 light）。``None`` 时
+    走原 :func:`capability_for(agent_name)` 逻辑，向后兼容全部已有调用方与测试。
+    仅在 mock_script 为 None 的真实链路下生效（mock 路径不消费 capability）。
     """
     db_path = str(db_path)
     # 兜底：任何异常路径都把 workflow_runs 收尾为 FAILED
@@ -230,9 +236,11 @@ def run_agent(
         if mock_script is not None:
             provider = MockProvider(scripted=mock_script)
             config_row: dict | None = None
-            capability = capability_for(agent_name)
+            # mock 路径不消费 capability，但若调用方显式 override，仍记录到 ai_call_logs
+            capability = capability_override or capability_for(agent_name)
         else:
-            capability = capability_for(agent_name)
+            # V3.1.1 O-2：capability_override 优先于 capability_for(agent_name)
+            capability = capability_override or capability_for(agent_name)
             # Sprint 8：走失败转移链（单配置时与旧 resolve+get_provider 等价）。
             # provider 与 config_row 在主调循环内首次获取；后续重试沿用同一 provider。
             provider = None

@@ -418,7 +418,16 @@ def _run_workflow_with_resume(
 
 
 def _collect_observer_payload(db_path: Path, chapter_id: str) -> dict[str, Any] | None:
-    """从 chapter-commit 的 ai_call_logs 抽 observer 7 数组（业务载荷）。"""
+    """从 chapter-commit 的 ai_call_logs 抽 observer 7 数组（业务载荷）。
+
+    V3.1.1 O-2 兼容：chapter-commit observer 默认走双 leg 拆分（``entities``
+    + ``narrative``），ai_call_logs 会落两条 observer 行，每条只含本 leg 的
+    数组。本函数把所有 observer 行的 7 数组按 leg 范围合并（leg_a 优先：
+    character_changes / relationship_changes / world_changes；leg_b 优先：
+    new_events / new_hooks / resolved_hooks / debt_changes），与 pipeline 层
+    的 ``_merge_observer_legs`` 行为一致。单次大调用路径（off 开关）下
+    observer 只调一次，返回那条即可。
+    """
     conn = get_connection(db_path)
     try:
         rows = conn.execute(
@@ -430,17 +439,42 @@ def _collect_observer_payload(db_path: Path, chapter_id: str) -> dict[str, Any] 
                   WHERE workflow_id = (SELECT workflow_id FROM workflows WHERE name = 'chapter-commit')
                     AND chapter_id = ?
               )
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, rowid ASC
             """,
             (chapter_id,),
         ).fetchall()
     finally:
         conn.close()
+
+    leg_a_arrays = ("character_changes", "relationship_changes", "world_changes")
+    leg_b_arrays = ("new_events", "new_hooks", "resolved_hooks", "debt_changes")
+    all_arrays = leg_a_arrays + leg_b_arrays
+
+    merged: dict[str, Any] = {}
+    seen_arrays: set[str] = set()
     for r in rows:
         payload = _parse_json(r["output_json"])
-        if isinstance(payload, dict):
-            return payload
-    return None
+        if not isinstance(payload, dict):
+            continue
+        # 先到的行：leg_a 优先（character/world/relationship），后到的行：leg_b 优先
+        # 但为兼容单次大调用，把所有 7 数组累加——非空数组优先保留第一个非空值
+        for arr_name in all_arrays:
+            if arr_name in seen_arrays:
+                continue
+            arr = payload.get(arr_name)
+            if isinstance(arr, list) and len(arr) > 0:
+                merged[arr_name] = arr
+                seen_arrays.add(arr_name)
+        # 全 7 数组齐全可早退
+        if len(seen_arrays) == 7:
+            break
+
+    if not merged:
+        return None
+    # 保证 7 数组齐全（缺失补空数组）
+    for arr_name in all_arrays:
+        merged.setdefault(arr_name, [])
+    return merged
 
 
 def _check_final_chapter_status(
