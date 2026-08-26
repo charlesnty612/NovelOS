@@ -5,6 +5,17 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [3.3.0] - 2026-08-26
+
+### Added（V3.3「知识权限补全」）
+- **reveal_policies 数据模型**：迁移 0014——relationships/timeline_events/scenes 三表补 visibility+who_knows（I6 收口）；reveal_policies 表（target_kind 枚举/reveal_by_chapter/audience/status 机）+ CRUD API（GET/POST/PATCH/DELETE /api/projects/{pid}/reveal-policies）。
+- **writer paged 装配可见性过滤**：HIDDEN 且存在 planned reader-audience 策略的实体从 writer 上下文整条移除（stats 记 hidden_filtered）；无策略时零行为变化；observer 保持作者全知视角（设计决策）。
+- **arc 视图扩展**：reveal_policies 小节（planned/revealed/overdue 清单）。
+- **模块轻量开关**：`NOVELOS_DISABLED_MODULES=simulation,arc` 按模块名过滤路由注册（默认空=零变化；仅过滤 HTTP 面，workflow 注册隔离为已知边界）。
+
+### Changed
+- 两条内置模型配置启用 `service_tier=priority`（MiniMax 官方优先准入，对策拥堵窗口大请求饿死；成本 1.5x）。
+
 ## [3.2.3] - 2026-08-26
 
 ### Fixed（V3.1.1 O-3）

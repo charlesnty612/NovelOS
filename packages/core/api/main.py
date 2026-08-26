@@ -26,7 +26,7 @@ from packages.core.config import Settings, get_settings
 from packages.core.db import apply_migrations
 from packages.core.logging_config import configure_logging, get_logger
 
-__version__ = "3.2.3"
+__version__ = "3.3.0"
 log = get_logger("novelos.api")
 
 
@@ -132,7 +132,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Sprint 1：自动发现并挂载业务路由到 /api 前缀。
     # discover_routers() 扫描 packages.core.api.routers 包内所有模块，
     # 收集名为 `router` 的 APIRouter 对象；此处统一挂到 /api 前缀下。
-    for r in discover_routers():
+    # V3.3：按 settings.disabled_modules 过滤被禁模块（轻量方案：仅 HTTP 路由面）。
+    _disabled = set(settings.disabled_modules)
+    for r in discover_routers(disabled=_disabled):
         app.include_router(r, prefix="/api")
 
     # Sprint 5：SPA 托管（apps/web/dist）。

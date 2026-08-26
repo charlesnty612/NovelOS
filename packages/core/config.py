@@ -29,6 +29,7 @@ class Settings:
     log_level: str
     api_host: str
     api_port: int
+    disabled_modules: list[str]
 
     def __init__(
         self,
@@ -37,6 +38,7 @@ class Settings:
         log_level: str = "INFO",
         api_host: str = "127.0.0.1",
         api_port: int = 18081,
+        disabled_modules: list[str] | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         if db_path is None:
@@ -45,6 +47,7 @@ class Settings:
         self.log_level = log_level
         self.api_host = api_host
         self.api_port = api_port
+        self.disabled_modules = list(disabled_modules) if disabled_modules is not None else []
 
     @classmethod
     def load(cls) -> "Settings":
@@ -63,12 +66,17 @@ class Settings:
         # 端口优先级：NOVELOS_PORT > NOVELOS_API_PORT > 18081
         port_env = _env("NOVELOS_PORT", "") or _env("NOVELOS_API_PORT", "")
         api_port = int(port_env) if port_env else 18081
+        # 模块开关（V3.3 轻量方案）：逗号分隔，strip 空白，丢空串
+        # 例如 "simulation,reference" → ["simulation", "reference"]
+        raw_disabled = _env("NOVELOS_DISABLED_MODULES", "")
+        disabled_modules = [s.strip() for s in raw_disabled.split(",") if s.strip()]
         return cls(
             data_dir=data_dir,
             db_path=db_path or None,
             log_level=log_level,
             api_host=api_host,
             api_port=api_port,
+            disabled_modules=disabled_modules,
         )
 
     def ensure_data_dir(self) -> None:
@@ -82,6 +90,7 @@ class Settings:
             "log_level": self.log_level,
             "api_host": self.api_host,
             "api_port": self.api_port,
+            "disabled_modules": list(self.disabled_modules),
         }
 
 

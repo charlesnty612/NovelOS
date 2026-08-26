@@ -337,6 +337,88 @@ def _summarize_debts(conn: sqlite3.Connection, project_id: str) -> dict[str, int
     return {"open": open_count, "paid": paid_count}
 
 
+def _summarize_reveal_policies(
+    conn: sqlite3.Connection,
+    project_id: str,
+    current_max_chapter_no: int | None,
+) -> dict[str, Any]:
+    """V3.3 P0-2 知识权限补全：reveal_policies 摘要 + overdue 清单。
+
+    返回结构::
+
+        {
+            "planned": int,
+            "revealed": int,
+            "cancelled": int,
+            "overdue": [
+                {
+                    "policy_id": str,
+                    "target_kind": str,
+                    "target_id": str,
+                    "reveal_by_chapter": int,
+                    "audience": str,
+                },
+                ...
+            ],
+        }
+
+    overdue 规则：
+    - ``status='planned'`` 且 ``reveal_by_chapter`` 非 NULL 且
+      ``current_max_chapter_no`` 非 NULL 且 ``reveal_by_chapter <= current_max_chapter_no``
+      即视为「到期未揭示」；
+    - 无章节 / 无 reveal_by_chapter → 不进 overdue 列表；
+    - ``cancelled`` 与 ``revealed`` 不进 overdue 列表。
+
+    SQL 异常（0014 未跑等 OperationalError）→ 返回全零 + 空 overdue，不阻断 arc 装配。
+    """
+    out: dict[str, Any] = {
+        "planned": 0,
+        "revealed": 0,
+        "cancelled": 0,
+        "overdue": [],
+    }
+    try:
+        rows = conn.execute(
+            """
+            SELECT policy_id, target_kind, target_id, status,
+                   reveal_by_chapter, audience
+            FROM reveal_policies
+            WHERE project_id = ?
+            ORDER BY policy_id ASC
+            """,
+            (project_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return out
+
+    overdue: list[dict[str, Any]] = []
+    for r in rows:
+        status = r["status"]
+        if status == "planned":
+            out["planned"] += 1
+            rbc = r["reveal_by_chapter"]
+            if (
+                current_max_chapter_no is not None
+                and rbc is not None
+                and int(rbc) <= int(current_max_chapter_no)
+            ):
+                overdue.append(
+                    {
+                        "policy_id": r["policy_id"],
+                        "target_kind": r["target_kind"],
+                        "target_id": r["target_id"],
+                        "reveal_by_chapter": int(rbc),
+                        "audience": r["audience"],
+                    }
+                )
+        elif status == "revealed":
+            out["revealed"] += 1
+        elif status == "cancelled":
+            out["cancelled"] += 1
+    out["overdue"] = overdue
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 纯函数：alerts 计算
 # ---------------------------------------------------------------------------
@@ -446,6 +528,16 @@ def build_arc_view(db_path: str | Path, project_id: str) -> dict[str, Any]:
             },
             "hooks": {"open": int, "resolved": int, "overdue": int},
             "debts": {"open": int, "paid": int},
+            "reveal_policies": {            # V3.3 P0-2 知识权限补全
+                "planned": int,
+                "revealed": int,
+                "cancelled": int,
+                "overdue": [
+                    {"policy_id": str, "target_kind": str, "target_id": str,
+                     "reveal_by_chapter": int, "audience": str},
+                    ...
+                ],
+            },
             "alerts": [ {"level": "warn"|"fail", "code": str, "message": str}, ... ],
         }``
 
@@ -519,6 +611,10 @@ def build_arc_view(db_path: str | Path, project_id: str) -> dict[str, Any]:
             conn, project_id, overdue_threshold, chapter_no_by_id, current_max_chapter_no
         )
         debts_summary = _summarize_debts(conn, project_id)
+        # V3.3 P0-2：reveal_policies 摘要 + overdue 清单
+        reveal_policies_summary = _summarize_reveal_policies(
+            conn, project_id, current_max_chapter_no,
+        )
     finally:
         conn.close()
 
@@ -537,6 +633,8 @@ def build_arc_view(db_path: str | Path, project_id: str) -> dict[str, Any]:
         },
         "hooks": hooks_summary,
         "debts": debts_summary,
+        # V3.3 P0-2：reveal_policies 摘要与到期未揭示清单
+        "reveal_policies": reveal_policies_summary,
         "alerts": alerts,
     }
 

@@ -35,6 +35,9 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     #   不增表 → 业务表 34，总表 35。
     # V3.1 P1-1.1：0013_plot_events_description 仅 ALTER TABLE plot_events 加 description
     #   列，不增表 → 业务表 34，总表 35。
+    # V3.3 P0-2（知识权限补全）：0014_knowledge_reveal 给 relationships/timeline_events/scenes
+    #   三表加 visibility+who_knows 列；DROP 旧 reveal_policies（0001 v1.1）后按 v3.3 schema
+    #   重建——表数不变，业务表 34，总表 35。
     assert result["tables"] == 35, f"expected 35 (34+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
@@ -62,12 +65,15 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     assert "0012_judge_scores.sql" in result["applied"]
     # V3.1 P1-1.1：0013_plot_events_description.sql（仅 ALTER TABLE 加 description 列，不增表）
     assert "0013_plot_events_description.sql" in result["applied"]
+    # V3.3 P0-2（知识权限补全）：0014_knowledge_reveal.sql（三表加列 + reveal_policies 重建，
+    #   表数不变；总表仍 35）。
+    assert "0014_knowledge_reveal.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     first = apply_migrations(db_path, MIGRATIONS_DIR)
-    # V3.1 P1-1.1：迁移目录下十三条脚本都应被首次应用
+    # V3.3 P0-2（知识权限补全）：迁移目录下十四条脚本都应被首次应用
     assert first["applied"] == [
         "0001_init.sql",
         "0002_drafts_unique.sql",
@@ -82,6 +88,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0011_fts_index.sql",
         "0012_judge_scores.sql",
         "0013_plot_events_description.sql",
+        "0014_knowledge_reveal.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -99,6 +106,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0011_fts_index.sql" in second["skipped"]
     assert "0012_judge_scores.sql" in second["skipped"]
     assert "0013_plot_events_description.sql" in second["skipped"]
+    # V3.3 P0-2（知识权限补全）：0014 也应被幂等跳过
+    assert "0014_knowledge_reveal.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -110,7 +119,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         rows = conn.execute("SELECT filename, applied_at FROM _migrations").fetchall()
     finally:
         conn.close()
-    # V3.1 P1-1.1：十三条迁移都应记录
+    # V3.3 P0-2（知识权限补全）：十四条迁移都应记录
     filenames = {r["filename"] for r in rows}
     assert filenames == {
         "0001_init.sql",
@@ -126,6 +135,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0011_fts_index.sql",
         "0012_judge_scores.sql",
         "0013_plot_events_description.sql",
+        "0014_knowledge_reveal.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -317,6 +327,164 @@ def test_0010_trigger_keys_columns_exist_with_defaults(tmp_path: Path):
         conn.close()
     assert dict(row)["aliases"] == "[]"
     assert dict(row)["inject_mode"] == "auto"
+
+
+def test_0014_relationships_timeline_events_scenes_have_visibility_columns(tmp_path: Path):
+    """V3.3 P0-2（知识权限补全）：0014 给 relationships / timeline_events / scenes
+    三表补齐 visibility + who_knows 字段（与既有 9 张实体表对齐）。
+
+    - visibility NOT NULL DEFAULT 'PUBLIC'；
+    - who_knows 可空（与 9 张表口径一致；NULL=沿用默认）；
+    - 三表旧行迁移后默认值生效。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        for table in ("relationships", "timeline_events", "scenes"):
+            cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            col_names = {c["name"] for c in cols}
+            assert "visibility" in col_names, (
+                f"{table} 缺 visibility 列（0014 应补）; got={col_names}"
+            )
+            assert "who_knows" in col_names, (
+                f"{table} 缺 who_knows 列（0014 应补）; got={col_names}"
+            )
+            vis_col = next(c for c in cols if c["name"] == "visibility")
+            assert vis_col["type"] == "TEXT", vis_col
+            assert vis_col["notnull"] == 1, vis_col
+            assert vis_col["dflt_value"] == "'PUBLIC'", vis_col
+            wk_col = next(c for c in cols if c["name"] == "who_knows")
+            assert wk_col["type"] == "TEXT", wk_col
+            # who_knows 可空（旧行 NULL=沿用默认）
+            assert wk_col["notnull"] == 0, wk_col
+            assert wk_col["dflt_value"] is None, wk_col
+    finally:
+        conn.close()
+
+
+def test_0014_reveal_policies_table_v3_3_schema(tmp_path: Path):
+    """V3.3 P0-2（知识权限补全）：0014 重建 reveal_policies 表（按 v3.3 schema 替换 0001 v1.1）。
+
+    - 必含列：policy_id / project_id / target_kind / target_id /
+      reveal_by_chapter / audience / status / revealed_chapter / notes /
+      created_at / updated_at；
+    - target_kind CHECK 枚举 8 种（character/location/faction/world_rule/event/hook/debt/relationship）；
+    - status CHECK planned/revealed/cancelled；
+    - audience 默认 'reader'；
+    - status 默认 'planned'；
+    - 索引 idx_rp_target(project_id, target_kind, target_id) 存在；
+    - 旧索引 idx_reveal_policies_project_id/target 已删。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        cols = conn.execute("PRAGMA table_info(reveal_policies)").fetchall()
+    finally:
+        conn.close()
+    col_names = {c["name"] for c in cols}
+    expected_cols = {
+        "policy_id", "project_id", "target_kind", "target_id",
+        "reveal_by_chapter", "audience", "status", "revealed_chapter",
+        "notes", "created_at", "updated_at",
+    }
+    assert expected_cols <= col_names, (
+        f"reveal_policies 缺列; got={col_names}, expected⊆={expected_cols}"
+    )
+    # 必无 v1.1 老字段
+    for old_col in ("target_type", "from_chapter_id", "until_chapter_id", "policy", "note"):
+        assert old_col not in col_names, (
+            f"reveal_policies 不应再有 v1.1 列 {old_col!r}; got={col_names}"
+        )
+
+    # status / audience 默认值
+    status_col = next(c for c in cols if c["name"] == "status")
+    assert status_col["dflt_value"] == "'planned'", status_col
+    audience_col = next(c for c in cols if c["name"] == "audience")
+    assert audience_col["dflt_value"] == "'reader'", audience_col
+
+    # 索引校验
+    conn = get_connection(db_path)
+    try:
+        idx_names = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='reveal_policies'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert "idx_rp_target" in idx_names, (
+        f"reveal_policies 缺 idx_rp_target 索引; got={idx_names}"
+    )
+    # 旧索引已 DROP
+    for old_idx in ("idx_reveal_policies_project_id", "idx_reveal_policies_target"):
+        assert old_idx not in idx_names, (
+            f"reveal_policies 不应再有旧索引 {old_idx!r}; got={idx_names}"
+        )
+
+
+def test_0014_reveal_policies_target_kind_check_constraint(tmp_path: Path):
+    """V3.3 P0-2（知识权限补全）：0014 给 reveal_policies.target_kind 加 CHECK 约束，
+    非法值 → IntegrityError。"""
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    from packages.core.ids import new_id, now_iso
+
+    pid = new_id("prj")
+    now = now_iso()
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO projects (project_id, name, premise, genre, target_words, "
+            "status, created_at, updated_at) VALUES (?, ?, NULL, NULL, NULL, "
+            "'ACTIVE', ?, ?)",
+            (pid, "p", now, now),
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO reveal_policies "
+                "(policy_id, project_id, target_kind, target_id, "
+                "reveal_by_chapter, audience, status, "
+                "revealed_chapter, notes, created_at, updated_at) "
+                "VALUES (?, ?, 'bogus_kind', 'x', NULL, 'reader', 'planned', "
+                "NULL, NULL, ?, ?)",
+                (new_id("rp"), pid, now, now),
+            )
+    finally:
+        conn.close()
+
+
+def test_0014_reveal_policies_status_check_constraint(tmp_path: Path):
+    """V3.3 P0-2（知识权限补全）：0014 给 reveal_policies.status 加 CHECK 约束。"""
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    from packages.core.ids import new_id, now_iso
+
+    pid = new_id("prj")
+    now = now_iso()
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO projects (project_id, name, premise, genre, target_words, "
+            "status, created_at, updated_at) VALUES (?, ?, NULL, NULL, NULL, "
+            "'ACTIVE', ?, ?)",
+            (pid, "p", now, now),
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO reveal_policies "
+                "(policy_id, project_id, target_kind, target_id, "
+                "reveal_by_chapter, audience, status, "
+                "revealed_chapter, notes, created_at, updated_at) "
+                "VALUES (?, ?, 'character', 'char_x', NULL, 'reader', "
+                "'bogus_status', NULL, NULL, ?, ?)",
+                (new_id("rp"), pid, now, now),
+            )
+    finally:
+        conn.close()
 
 
 def test_0010_inject_mode_check_constraint_enforced(tmp_path: Path):

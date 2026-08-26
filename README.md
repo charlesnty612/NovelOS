@@ -93,7 +93,7 @@ python -m packages.core.api.main
 ## 测试
 
 ```bash
-# 后端全量（当前基线 915 passed, 2 skipped）
+# 后端全量（当前基线 约 1000 passed）
 python -m pytest tests/ -q
 
 # Golden 回归 eval（当前 3/3）
@@ -122,6 +122,7 @@ cd apps/web && npm run test
 | `NOVELOS_WEB_DIST` | `apps/web/dist` | SPA 构建产物目录（存在 `index.html` 才启用托管） |
 | `NOVELOS_QUALITY_GATE` | `report` | quality gate 模式：`report`（不阻断）/ `enforce`（error 级阻断） |
 | `NOVELOS_API_KEY_<PROVIDER>` | — | provider API Key（`<PROVIDER>` 大写，如 `NOVELOS_API_KEY_OPENAI`）；也可在 model_configs 的 `params_json.api_key` 配置 |
+| `NOVELOS_DISABLED_MODULES` | — | 禁用模块列表（V3.3 轻量方案），逗号分隔；模块名 = `packages/core/api/routers/` 下的文件名去 `.py`（如 `simulation,reference,arc`）。被禁模块的 HTTP 路由**不挂载**，对应端点返回 404；不影响 workflow 注册（边界见 `docs/roadmap/v3.3-v3.5-candidates-design.md` §四） |
 
 ## 版本与更新日志
 

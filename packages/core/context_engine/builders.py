@@ -1686,6 +1686,185 @@ def _summarize_hook_for_writer(h: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _audience_blocks_writer(audience: str) -> bool:
+    """V3.3 P0-2：判断 reveal_policy.audience 是否对 writer 视角构成「不可见」。
+
+    设计决策（任务书口径）：
+    - 任务书定义：对 ``visibility='HIDDEN'`` + ``status='planned'`` + ``audience``
+      含 ``'reader'`` 的 reveal_policy → 实体从 writer 裁剪后集合移除（连摘要
+      也不留，避免 prompt 注入时泄露）。
+    - writer 视角 = 通用读者（无角色绑定），按 audience 中是否含 ``reader`` 判定
+      「这条 policy 的受众是否覆盖 writer」：
+        * audience 含 ``reader`` → writer 属于受众 → 触发过滤（HIDDEN 实体不
+          应在 writer payload 中泄露）；
+        * audience 仅含 ``character:<id>``（无 reader）→ writer 不属于该受众
+          → 不触发过滤（writer 不需为此策略担忧；但若实体 visibility=HIDDEN
+          且无任何 reader-audience policy，则仍按既有逻辑处理）；
+        * 空 / 未知 → 保守按"不触发"处理。
+
+    返回 True 表示该 policy 对 writer 构成可见性阻断。
+    """
+    if not isinstance(audience, str) or not audience.strip():
+        return False
+    parts = [p.strip() for p in audience.split(",") if p.strip()]
+    if not parts:
+        return False
+    has_reader = any(p == "reader" for p in parts)
+    return has_reader
+
+
+def _filter_hidden_by_reveal_policies(
+    db_path: str | Path,
+    project_id: str | None,
+    payload: dict[str, Any],
+) -> int:
+    """V3.3 P0-2 知识权限补全：HIDDEN 实体按 reveal_policies 二次过滤（writer 上下文）。
+
+    规则：
+    - ``reveal_policies`` 中存在 ``status='planned'`` 且 ``audience`` 含 ``'reader'``
+      的策略，策略对应实体 ``visibility='HIDDEN'`` 时，该实体从裁剪后集合中**移除**（连
+      摘要也不留——摘要仍会泄露名字/id，可能触发 writer 误用）。
+    - 适用范围：writer paged 装配下的 ``character_state_excerpts`` 与
+      ``world_state_excerpts.locations / .active_factions``（L0 world_rules 与 L2
+      信号不动）。
+    - **observer 路径不动**：observer 是作者视角，需要看到 HIDDEN 实体；详见
+      ``build_observer_input`` docstring「设计决策」节。
+    - **零破坏**：无任何 planned reader-policy 时，函数快速返回 0，payload 不变。
+
+    返回：被移除的实体数（用于 stats.hidden_filtered）。
+    """
+    if not project_id:
+        return 0
+    try:
+        conn = get_connection(db_path)
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        rows = conn.execute(
+            """
+            SELECT target_kind, target_id, audience FROM reveal_policies
+            WHERE project_id = ? AND status = 'planned'
+            """,
+            (project_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # 极老库（0014 未跑）→ 表不存在 → 不阻断装配
+        return 0
+    finally:
+        conn.close()
+
+    # 收集「planned reader-audience policy」对应的实体 ID；按 kind 分桶
+    # audience 字段语义（0014 DDL DEFAULT 'reader'）：
+    #   - 'reader' / 包含 'reader' 子串 → 全 reader 视角可见 → writer 不应注入
+    #   - 'character:<id>' / 包含 'character:<id>' 子串 → 仅该角色视角可见
+    #     → writer（无角色绑定）同样不应注入（视为对 writer 不可见，与 reader
+    #     等价的"非 writer"读者视角；保守策略：含 reader 或 character:* 任一即过滤）
+    #   - 复杂混合由 comma-split 后逐项判断
+    planned_chars: set[str] = set()
+    planned_locs: set[str] = set()
+    planned_facs: set[str] = set()
+    for r in rows:
+        kind = r["target_kind"]
+        tid = r["target_id"]
+        aud = r["audience"] or ""
+        if not isinstance(kind, str) or not isinstance(tid, str):
+            continue
+        if not _audience_blocks_writer(aud):
+            continue
+        if kind == "character":
+            planned_chars.add(tid)
+        elif kind == "location":
+            planned_locs.add(tid)
+        elif kind == "faction":
+            planned_facs.add(tid)
+        # world_rule/event/hook/debt/relationship 在 writer 装配无 excerpt 输出，不参与
+
+    if not (planned_chars or planned_locs or planned_facs):
+        return 0
+
+    # 校验实体本身 visibility='HIDDEN'（planned policy 不一定作用于 HIDDEN 实体——
+    # 这里只过滤「既被 policy 约束 planned+reader 又是 HIDDEN」的子集，避免误删）
+    try:
+        conn2 = get_connection(db_path)
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        hidden_chars: set[str] = set()
+        if planned_chars:
+            placeholders = ",".join("?" for _ in planned_chars)
+            for r in conn2.execute(
+                f"SELECT character_id FROM characters "
+                f"WHERE visibility='HIDDEN' AND character_id IN ({placeholders})",
+                list(planned_chars),
+            ).fetchall():
+                hidden_chars.add(r["character_id"])
+        hidden_locs: set[str] = set()
+        if planned_locs:
+            placeholders = ",".join("?" for _ in planned_locs)
+            for r in conn2.execute(
+                f"SELECT location_id FROM locations "
+                f"WHERE visibility='HIDDEN' AND location_id IN ({placeholders})",
+                list(planned_locs),
+            ).fetchall():
+                hidden_locs.add(r["location_id"])
+        hidden_facs: set[str] = set()
+        if planned_facs:
+            placeholders = ",".join("?" for _ in planned_facs)
+            for r in conn2.execute(
+                f"SELECT faction_id FROM factions "
+                f"WHERE visibility='HIDDEN' AND faction_id IN ({placeholders})",
+                list(planned_facs),
+            ).fetchall():
+                hidden_facs.add(r["faction_id"])
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        conn2.close()
+
+    if not (hidden_chars or hidden_locs or hidden_facs):
+        return 0
+
+    removed = 0
+
+    # character_state_excerpts：移除 hidden chars（含 touched/summary 两种形态）
+    chars_in = payload.get("character_state_excerpts")
+    if isinstance(chars_in, list) and hidden_chars:
+        kept = []
+        for c in chars_in:
+            if isinstance(c, dict) and c.get("character_id") in hidden_chars:
+                removed += 1
+                continue
+            kept.append(c)
+        payload["character_state_excerpts"] = kept
+
+    # world_state_excerpts.locations
+    world_in = payload.get("world_state_excerpts")
+    if isinstance(world_in, dict) and hidden_locs:
+        locs_in = world_in.get("locations")
+        if isinstance(locs_in, list):
+            kept = []
+            for loc in locs_in:
+                if isinstance(loc, dict) and loc.get("location_id") in hidden_locs:
+                    removed += 1
+                    continue
+                kept.append(loc)
+            world_in["locations"] = kept
+
+    # world_state_excerpts.active_factions
+    if isinstance(world_in, dict) and hidden_facs:
+        facs_in = world_in.get("active_factions")
+        if isinstance(facs_in, list):
+            kept = []
+            for f in facs_in:
+                if isinstance(f, dict) and f.get("faction_id") in hidden_facs:
+                    removed += 1
+                    continue
+                kept.append(f)
+            world_in["active_factions"] = kept
+
+    return removed
+
+
 def _build_writer_input_paged(
     db_path: str | Path,
     chapter_id: str,
@@ -1755,6 +1934,10 @@ def _build_writer_input_paged(
         "hooks_resolved_trimmed": 0,
         "total_size_bytes_before": 0,
         "total_size_bytes_after": 0,
+        # V3.3 P0-2：被 reveal_policies planned+reader-audience 规则移除的
+        # HIDDEN 实体数（character / location / faction）。无任何匹配 policy 时
+        # 保持 0，行为与既有实现完全一致（零破坏）。
+        "hidden_filtered": 0,
     }
 
     # 2. character_state_excerpts：touched 全量 + 其余摘要
@@ -1813,6 +1996,16 @@ def _build_writer_input_paged(
         if isinstance(rules_in, list):
             stats["world_rules_full"] = len(rules_in)
         full_payload["world_state_excerpts"] = world_in
+
+    # V3.3 P0-2 知识权限补全：HIDDEN 实体按 reveal_policies 二次过滤。
+    # 仅当存在「status='planned' 且 audience 含 'reader'」的 policy 时，从
+    # character_state_excerpts / world_state_excerpts.locations / .active_factions
+    # 中**移除**该实体（连摘要也不留——摘要仍会泄露名字/id 触发 prompt 注入）。
+    # 无任何 planned reader-policy 时行为与原实现完全一致（零破坏）。
+    hidden_filtered = _filter_hidden_by_reveal_policies(
+        db_path, project_id, full_payload,
+    )
+    stats["hidden_filtered"] = hidden_filtered
 
     # 4. hook_ledger_excerpt：writer 装配当前仅含 OPEN/ACTIVE/ESCALATED
     # 状态（``_hook_ledger_excerpt`` 函数本就只查 planted 状态），等价于
@@ -2612,6 +2805,13 @@ def build_observer_input(
     recent_event_ids_limit: int = _DEFAULT_RECENT_EVENT_IDS_LIMIT,
 ) -> dict[str, Any]:
     """组装 Observer 输入（agent-contracts §5.1 + M3 快照分代裁剪 + V3.1.1 O-1 + O-3）。
+
+    设计决策（V3.3 P0-2 知识权限补全）：
+    - observer 是作者视角（PRD §4 角色矩阵：observer 对应 AUTHOR/DIRECTOR 全可见档位），
+      必须能看到所有 HIDDEN 实体与未到期 reveal_policy，才能给出符合策略的 delta；
+    - 因此 observer 路径**不应用** ``_filter_hidden_by_reveal_policies``（与 writer
+      路径相反）；writer 视角按 reveal_policy + visibility 双重过滤；
+    - reveal_policies 统计只在 ``build_arc_view`` 与 ``arc.alerts`` 暴露给作者。
 
     参数新增（M3）：
         snapshot_mode："full"（默认，与旧行为字节级一致）或 "trimmed"。
