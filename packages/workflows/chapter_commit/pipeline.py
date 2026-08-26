@@ -27,7 +27,7 @@ import json
 import os
 from typing import Any
 
-from packages.core.agent_runtime.runner import run_agent
+from packages.core.agent_runtime.runner import _update_workflow_run, run_agent
 from packages.core.context_engine import build_observer_input
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
@@ -134,6 +134,33 @@ def _observer_parallel_enabled(ctx: dict[str, Any] | None = None) -> bool:
             return override.strip().lower() not in ("0", "false", "off", "no")
         return bool(override)
     from_env = os.environ.get("NOVELOS_OBSERVER_PARALLEL", "on").strip().lower()
+    return from_env not in ("0", "false", "off", "no")
+
+
+def _summary_parallel_enabled(ctx: dict[str, Any] | None = None) -> bool:
+    """V3.7：summarizer 与 observer 双腿同池并发开关。
+
+    环境变量 ``NOVELOS_SUMMARY_PARALLEL`` 默认 on；off 时 observer 节点不提前调
+    summarizer，下游 ``summarize`` 节点走原 prepare+run_agent 路径。
+
+    优先级：
+    - ``ctx['summary_parallel']=False/True``（测试 / 调用方显式覆盖，最高优先级）；
+    - 否则读环境变量 ``NOVELOS_SUMMARY_PARALLEL``，缺省视为 on；
+    - off 取值：``0 / false / off / no``。
+
+    设计动机（V3.7 提速调研结论）：summarizer 单次调用实测 25-80s，与 observer 双腿
+    并发跑可省墙钟。失败语义保持不变：summary 异常仅丢 ``summary_early``，observer
+    节点自身不抛错，summarize 节点能自愈（重走 ``_prepare_summarizer_call`` +
+    ``run_agent``）完成。
+    """
+    if ctx is not None and "summary_parallel" in ctx:
+        override = ctx.get("summary_parallel")
+        if isinstance(override, bool):
+            return override
+        if isinstance(override, str):
+            return override.strip().lower() not in ("0", "false", "off", "no")
+        return bool(override)
+    from_env = os.environ.get("NOVELOS_SUMMARY_PARALLEL", "on").strip().lower()
     return from_env not in ("0", "false", "off", "no")
 
 
@@ -509,13 +536,30 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         leg_b_chars = 0
 
     parallel_enabled = _observer_parallel_enabled(ctx)
+    summary_parallel = _summary_parallel_enabled(ctx)
     # wall_time：仅并发路径记录（便于测试断言「真并发」）；off 回退串行时不统计。
     parallel_wall_ms: int | None = None
-    if parallel_enabled:
-        # V3.5 P0：双腿并发（ThreadPoolExecutor）。两腿互不依赖、可同 provider
-        # 服务但走不同连接（runner 内部 get_connection 各自创建新连接，无共享
-        # 可变状态）。失败语义：单腿异常向 future 传异常，由 as_completed 收集
-        # 阶段重抛——重试归类仍由 _inject_validate_node 完成。
+    summary_early: dict[str, Any] | None = None
+    if parallel_enabled and summary_parallel:
+        # V3.7 P0：observer 双腿 + summarizer 三路同池并发（ThreadPoolExecutor,
+        # max_workers=3）。summary 与双腿互不依赖（不读 observer_payload），可同跑。
+        # summary_early 走 observer 返回 dict 顶层 key，引擎在 _run_nodes 里
+        # ``ctx.update(output)`` 自动合入下游 ctx，summarize 节点直接 ``ctx.get('summary_early')``
+        # 短路消费（参考 packages/core/workflow_runtime/engine.py 行 336-337）。
+        leg_a_out, leg_b_out, parallel_wall_ms, summary_early = (
+            _run_observer_with_summary_in_parallel(
+                db_path=db_path,
+                run_id=run_id,
+                node_run_id=node_run_id,
+                leg_a_payload=leg_a_payload,
+                leg_b_payload=leg_b_payload,
+                leg_a_mock=leg_a_mock,
+                leg_b_mock=leg_b_mock,
+                ctx=ctx,
+            )
+        )
+    elif parallel_enabled:
+        # V3.5：只开 observer_parallel，未开 summary_parallel → 保持现双腿并发形态。
         leg_a_out, leg_b_out, parallel_wall_ms = _run_observer_legs_in_parallel(
             db_path=db_path,
             run_id=run_id,
@@ -568,8 +612,13 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         meta["leg_b_trim_stats"] = leg_b_trim_stats
         # V3.5：并发模式标记 + wall_time（仅并发路径有值；off 路径为 None）。
         meta["parallel"] = bool(parallel_enabled)
+        # V3.7：summarizer 并入并发池标记（与 observer_parallel 双开关独立）。
+        meta["summary_parallel"] = bool(summary_parallel)
         if parallel_wall_ms is not None:
             meta["parallel_wall_ms"] = int(parallel_wall_ms)
+            # V3.7：summary 早产成功时复用同 wall，便于观测同池收益；早产失败/未触发时省略字段。
+            if summary_early is not None and not summary_early.get("skipped"):
+                meta["summary_parallel_wall_ms"] = int(parallel_wall_ms)
             # SQLite rowid 在并发 commit 下不保证 leg_a 先 leg_b 后——记录此点
             # 让观测者明确 leg_a / leg_b 字段可能交换（不影响业务正确性）。
             meta["ordering_note"] = (
@@ -583,7 +632,15 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
             reid = base_config.get("recent_event_ids")
             if isinstance(reid, list):
                 meta["recent_event_ids_count"] = len(reid)
-    return {"observer_payload": merged, "observer_split_meta": meta}
+    result: dict[str, Any] = {
+        "observer_payload": merged,
+        "observer_split_meta": meta,
+    }
+    # V3.7：summary 早产结果以顶层 key 暴露；引擎 ``ctx.update(output)`` 自动合入下游 ctx。
+    # 仅当 third-leg 跑过（即使是 skipped）才返回该 key，让下游明确语义。
+    if summary_early is not None:
+        result["summary_early"] = summary_early
+    return result
 
 
 def _run_observer_legs_in_parallel(
@@ -653,6 +710,150 @@ def _run_observer_legs_in_parallel(
         leg_b_out = future_b.result()
     wall_ms = int((_time.monotonic() - start) * 1000)
     return leg_a_out, leg_b_out, wall_ms
+
+
+def _run_observer_with_summary_in_parallel(
+    *,
+    db_path: Any,
+    run_id: str,
+    node_run_id: str | None,
+    leg_a_payload: dict[str, Any],
+    leg_b_payload: dict[str, Any],
+    leg_a_mock: Any,
+    leg_b_mock: Any,
+    ctx: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], int, dict[str, Any] | None]:
+    """V3.7 P0：observer 双腿 + summarizer 三路同池并发（ThreadPoolExecutor, max_workers=3）。
+
+    与 :func:`_run_observer_legs_in_parallel` 的关系：
+    - 本函数保留原双腿函数不动；调用方按需选择（summary_parallel 开关）。
+    - 第三 future ``_run_summary`` 内部 try/except 捕获一切异常，绝不让 summary
+      失败炸掉 observer 节点；失败时返回 ``{"skipped": True}`` 让下游走兜底。
+
+    返回 ``(leg_a_out, leg_b_out, wall_ms, summary_early)``：
+    - summary_early 形态：
+      - ``{"skipped": True}`` ——prepare 阶段判定为可跳过（章节/draft 缺失）。
+      - ``{"skipped": False, "output": out, "project_id": ..., "chapter_no": ..., "tail_text": ...}``
+        —— LLM 调成功，供下游 summarize 节点短路消费。
+      - ``None`` ——summary 异常被吞掉，让下游 summarize 节点自愈重跑。
+    """
+    import logging as _logging
+    import time as _time
+
+    def _run_leg_a() -> dict[str, Any]:
+        return run_agent(
+            db_path,
+            "observer",
+            leg_a_payload,
+            run_id,
+            node_run_id=node_run_id,
+            expected="observer",
+            mock_script=leg_a_mock,
+            capability_override="light",
+        )
+
+    def _run_leg_b() -> dict[str, Any]:
+        return run_agent(
+            db_path,
+            "observer",
+            leg_b_payload,
+            run_id,
+            node_run_id=node_run_id,
+            expected="observer",
+            mock_script=leg_b_mock,
+            capability_override="light",
+        )
+
+    def _recover_run_status() -> None:
+        """早产失败→恢复 run 状态防污染。
+
+        runner 内部（packages/core/agent_runtime/runner.py:303-323 / 388）
+        会在异常路径里 ``_update_workflow_run(..., status='FAILED')`` 标记 run
+        行。本函数把这一步强制改回 ``COMPLETED``（error=None），避免 observer
+        三路并发吞掉 summary 异常后，workflow_runs 行被错误地标 FAILED。
+        最终终态（PAUSED/COMPLETED/FAILED）由 ``engine._run_nodes`` 在所有节点
+        完成后经 ``_finalize_run`` 覆盖——这里只是中间兜底。
+        """
+        try:
+            _update_workflow_run(db_path, run_id, status="COMPLETED", error=None)
+        except Exception as exc:  # noqa: BLE001 —— 恢复本身失败仅记日志
+            _logging.getLogger(__name__).warning(
+                "chapter_commit.observer summary early failure: workflow_run "
+                "status recovery failed: run_id=%s err=%s", run_id, exc,
+            )
+
+    def _run_summary() -> dict[str, Any] | None:
+        """第三路：summarizer LLM 早产。
+
+        任一异常（prepare 缺失 / run_agent 失败 / 其它）→ log warning +
+        ``_recover_run_status()`` 防 runner 内部 FAILED 污染 +
+        返回 None，让下游 summarize 节点按原 prepare+run_agent 路径自愈完成。
+        """
+        try:
+            prepared = _prepare_summarizer_call(ctx)
+        except Exception as exc:  # noqa: BLE001 —— prepare 阶段容错
+            _logging.getLogger(__name__).warning(
+                "chapter_commit.observer early summarize prepare failed: "
+                "chapter_id=%s err=%s", ctx.get("chapter_id"), exc,
+            )
+            # 注意：prepare 阶段不调 run_agent，不会有 runner 兜底的 FAILED 状态。
+            # 仍调一次恢复函数做幂等的 noop，保证两条路径走向完全对称。
+            _recover_run_status()
+            return None
+        if prepared is None:
+            return {"skipped": True}
+        try:
+            out = run_agent(
+                db_path,
+                "summarizer",
+                prepared["payload"],
+                run_id,
+                node_run_id=node_run_id,
+                expected="summarizer",
+                mock_script=prepared["mock"],
+            )
+        except Exception as exc:  # noqa: BLE001 —— LLM 失败兜底，不炸 observer
+            _logging.getLogger(__name__).warning(
+                "chapter_commit.observer early summarize run_agent failed: "
+                "chapter_id=%s err=%s", ctx.get("chapter_id"), exc,
+            )
+            # runner 内部异常路径已 _update_workflow_run(FAILED)（runner.py:321/364/396）。
+            # 在本吞异常分支里强制恢复为 COMPLETED，避免 run 状态被污染。
+            _recover_run_status()
+            return None
+        return {
+            "skipped": False,
+            "output": out,
+            "project_id": prepared["project_id"],
+            "chapter_no": prepared["chapter_no"],
+            "tail_text": prepared["tail_text"],
+        }
+
+    # max_workers=3：恰好容纳两腿 + summary；不再扩张，避免 provider 侧并发请求过多。
+    start = _time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=3, thread_name_prefix="observer-leg+sum",
+    ) as pool:
+        future_a = pool.submit(_run_leg_a)
+        future_b = pool.submit(_run_leg_b)
+        future_s = pool.submit(_run_summary)
+        leg_a_out = future_a.result()
+        leg_b_out = future_b.result()
+        # summary future 的异常已由 _run_summary 内部吞掉；此处再兜一层确保异常
+        # 不会以 future.result() 形式冒泡炸掉 observer 节点。
+        try:
+            summary_early: dict[str, Any] | None = future_s.result()
+        except Exception as exc:  # noqa: BLE001
+            _logging.getLogger(__name__).warning(
+                "chapter_commit.observer summary future unexpected exception: "
+                "chapter_id=%s err=%s", ctx.get("chapter_id"), exc,
+            )
+            # future.result() 自身冒泡的异常：通常是 _run_summary 之外的代码 bug。
+            # 同样恢复 run 状态防污染（幂等）。
+            _recover_run_status()
+            summary_early = None
+    wall_ms = int((_time.monotonic() - start) * 1000)
+    return leg_a_out, leg_b_out, wall_ms, summary_early
 
 
 def _aggregate_observer_split_meta(
@@ -1514,19 +1715,16 @@ _SUMMARY_MAX_CHARS = 200
 _TAIL_TEXT_CHARS = 300
 
 
-def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
-    """summarize 节点（Sprint 14）—— commit 成功后追加。
+def _prepare_summarizer_call(ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """抽取 summarizer LLM 调用所需的全部准备产物（V3.7）。
 
-    行为：
-    1. 取最新 draft content（已 commit 的草稿正文）；若为空 → summary_status='skipped'。
-    2. tail_text = content[-300:]（不调 LLM）。
-    3. 调 ``run_agent(..., agent_name='summarizer', mock_script=...)`` 输出 JSON ``{"summary": "..."}``。
-    4. 写 ``chapter_summaries`` 行（summary_id / project_id / chapter_id / chapter_no /
-       summary ≤ 200 字 / tail_text / created_at）；摘要超长则截断并标记 degraded。
-    5. 任何异常（LLM 失败 / JSON 解析失败 / DB 写入失败）→ 降级：warning 日志 +
-       summary_status='failed' + 不抛错（保证 chapter 提交不因摘要失败而 FAILED）。
+    把 ``_summarize_node`` 中「调 LLM 之前」的步骤下沉：取章节 + 草稿 + 计划 goal +
+    组装 ``summary_payload`` + 取 mock_script。供 observer 节点提前并发调用，
+    命中后下游 ``_summarize_node`` 短路消费 ``ctx['summary_early']``。
 
-    返回 ``{"summary_status": "ok|failed|skipped", "summary_id": str|None, "degraded": bool}``。
+    返回 ``None`` 表示必需输入缺失（章节不存在 / 草稿为空），调用方应跳过本次早产调用
+    而非抛错。键序与原 ``_summarize_node`` 内联构造时保持一致——尤其是 ``chapter`` 子
+    dict 的 ``chapter_goal / chapter_no / chapter_id`` 顺序（缓存重排对齐）。
     """
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
@@ -1540,7 +1738,7 @@ def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
             (chapter_id,),
         ).fetchone()
         if chap_row is None:
-            return {"summary_status": "skipped", "summary_id": None, "degraded": False}
+            return None
         project_id = chap_row["project_id"]
         chapter_no = int(chap_row["number"] or 0)
         draft_row = conn.execute(
@@ -1553,15 +1751,14 @@ def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
         ).fetchone()
     finally:
         conn.close()
-    # sqlite3.Row 不支持 .get；用 dict(draft_row) 兜底（draft_row 为 None 时返回空 dict）
     content = (dict(draft_row) if draft_row else {}).get("content") or ""
     if not content.strip():
-        return {"summary_status": "skipped", "summary_id": None, "degraded": False}
+        return None
 
     # 2) tail_text（不调 LLM）
     tail_text = content[-_TAIL_TEXT_CHARS:] if len(content) > _TAIL_TEXT_CHARS else content
 
-    # 3) 构造输入 payload + 调 summarizer
+    # 3) plan_goal（读取失败不阻塞）
     plan_goal = ""
     try:
         conn = get_connection(db_path)
@@ -1572,31 +1769,180 @@ def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
         finally:
             conn.close()
         if pj:
-            import json as _json
             raw = pj["plan_json"] or "{}"
             try:
-                pj_d = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                pj_d = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except (TypeError, ValueError):
                 pj_d = {}
             plan_goal = (pj_d or {}).get("chapter_goal") or ""
     except Exception:  # noqa: BLE001 —— 计划读取失败不阻塞 summarize
         plan_goal = ""
 
-    summary_payload = {
+    # 键序固定：agent → prompt_version → chapter{chapter_goal, chapter_no, chapter_id}
+    # → prose_excerpt → tail_text（缓存重排对齐）。
+    summary_payload: dict[str, Any] = {
         "agent": "summarizer",
         "prompt_version": "summarizer:v1",
         "chapter": {
-            "chapter_id": chapter_id,
-            "chapter_no": chapter_no,
             "chapter_goal": plan_goal,
+            "chapter_no": chapter_no,
+            "chapter_id": chapter_id,
         },
         "prose_excerpt": content[:4000],  # 取前 4000 字足够上下文（避免超长 prompt）
         "tail_text": tail_text,
     }
+    return {
+        "payload": summary_payload,
+        "mock": mock_script,
+        "project_id": project_id,
+        "chapter_no": chapter_no,
+        "content": content,
+        "tail_text": tail_text,
+    }
+
+
+def _resolve_summary_out(
+    out: Any,
+    *,
+    summary_max_chars: int,
+) -> tuple[str, bool]:
+    """把 summarizer LLM 输出 dict 解析为 ``(summary_text, degraded)``。
+
+    解析失败抛 ``ValueError``，由调用方按已有 degraded 分支处理。
+    """
+    if not isinstance(out, dict):
+        raise ValueError(f"summarizer output not dict: {type(out).__name__}")
+    candidate = out.get("summary")
+    if not isinstance(candidate, str):
+        raise ValueError("summarizer output missing 'summary' string")
+    summary_text = candidate.strip()
+    if not summary_text:
+        raise ValueError("summarizer output 'summary' empty")
+    degraded = False
+    if len(summary_text) > summary_max_chars:
+        summary_text = summary_text[:summary_max_chars]
+        degraded = True
+    return summary_text, degraded
+
+
+def _insert_chapter_summary_row(
+    db_path: Any,
+    *,
+    project_id: str,
+    chapter_id: str,
+    chapter_no: int,
+    summary_text: str,
+    tail_text: str,
+) -> str:
+    """落库 ``chapter_summaries`` 行，返回新生成的 ``summary_id``。"""
+    summary_id = new_id("sum")
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO chapter_summaries
+                (summary_id, project_id, chapter_id, chapter_no,
+                 summary, tail_text, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                summary_id,
+                project_id,
+                chapter_id,
+                chapter_no,
+                summary_text,
+                tail_text,
+                now_iso(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return summary_id
+
+
+def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
+    """summarize 节点（Sprint 14；V3.7：可选短路消费 ``summary_early``）—— commit 成功后追加。
+
+    行为：
+    1. 若 ``ctx['summary_early']`` 存在且 ``not early.get('skipped')``：跳过 ``run_agent``，
+       直接复用「解析 out → 截断 → 落库」段。
+    2. 否则走原路径：先 :func:`_prepare_summarizer_call` 取准备产物（缺失则 skipped）→
+       ``run_agent('summarizer', ...)`` → 解析 ``{"summary"}`` → 写 ``chapter_summaries`` 表
+       → 返回 ``{"summary_status","summary_id","degraded"}``。内部已有 PromptNotFoundError
+       等降级路径（degraded=True 不抛错）。
+    3. 任何异常（LLM 失败 / JSON 解析失败 / DB 写入失败）→ 降级：warning 日志 +
+       summary_status='failed' + 不抛错（保证 chapter 提交不因摘要失败而 FAILED）。
+
+    返回 ``{"summary_status": "ok|failed|skipped", "summary_id": str|None, "degraded": bool}``。
+    """
+    db_path = ctx["db_path"]
+    chapter_id = ctx["chapter_id"]
+
+    # V3.7：短路消费 observer 提前并发产出的 summary_early。
+    early = ctx.get("summary_early")
+    if isinstance(early, dict) and not early.get("skipped"):
+        out = early.get("output")
+        try:
+            summary_text, degraded = _resolve_summary_out(
+                out, summary_max_chars=_SUMMARY_MAX_CHARS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # V3.7 修复 A1：短路路径解析失败 → fallthrough 自愈（重新 prepare +
+            # run_agent），与「缺字段分支」一致；自然走到原路径的 degraded 兜底
+            # （run_agent 异常 → summary_status='failed'）。
+            import logging
+            logging.getLogger(__name__).warning(
+                "chapter_commit.summarize early output malformed, fallback to "
+                "self-heal: chapter_id=%s err=%s", chapter_id, exc,
+            )
+            early = None  # fallthrough 到下方原路径 self-heal
+        else:
+            # 解析成功 → 落库所需字段从 early 附带（observer 节点透传 prepared 上下文）。
+            project_id = early.get("project_id")
+            chapter_no = int(early.get("chapter_no") or 0)
+            tail_text = early.get("tail_text") or ""
+            if not project_id or not tail_text:
+                # 早产数据缺关键字段 → 走自愈路径（重新自己 prepare）
+                early = None  # fallthrough 到下方原路径 self-heal
+            else:
+                try:
+                    summary_id = _insert_chapter_summary_row(
+                        db_path,
+                        project_id=project_id,
+                        chapter_id=chapter_id,
+                        chapter_no=chapter_no,
+                        summary_text=summary_text,
+                        tail_text=tail_text,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "chapter_commit.summarize early DB insert failed: "
+                        "chapter_id=%s err=%s", chapter_id, exc,
+                    )
+                    return {
+                        "summary_status": "failed",
+                        "summary_id": None,
+                        "degraded": False,
+                        "summary_error": str(exc),
+                    }
+                return {
+                    "summary_status": "ok",
+                    "summary_id": summary_id,
+                    "degraded": degraded,
+                }
+
+    # 原路径：自己 prepare + run_agent + 写库。
+    prepared = _prepare_summarizer_call(ctx)
+    if prepared is None:
+        return {"summary_status": "skipped", "summary_id": None, "degraded": False}
+
+    mock_script = prepared["mock"]
+    summary_payload = prepared["payload"]
 
     degraded = False
     summary_text = ""
-    summary_status = "failed"
     try:
         # summarizer 无 ACTIVE prompt 时 runner 会抛 PromptNotFoundError → 降级。
         out = run_agent(
@@ -1608,18 +1954,9 @@ def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
             expected="summarizer",
             mock_script=mock_script,
         )
-        if not isinstance(out, dict):
-            raise ValueError(f"summarizer output not dict: {type(out).__name__}")
-        candidate = out.get("summary")
-        if not isinstance(candidate, str):
-            raise ValueError("summarizer output missing 'summary' string")
-        summary_text = candidate.strip()
-        if not summary_text:
-            raise ValueError("summarizer output 'summary' empty")
-        if len(summary_text) > _SUMMARY_MAX_CHARS:
-            summary_text = summary_text[:_SUMMARY_MAX_CHARS]
-            degraded = True
-        summary_status = "ok"
+        summary_text, degraded = _resolve_summary_out(
+            out, summary_max_chars=_SUMMARY_MAX_CHARS,
+        )
     except Exception as exc:  # noqa: BLE001 —— 降级：任何失败不抛
         import logging
         logging.getLogger(__name__).warning(
@@ -1634,35 +1971,20 @@ def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
     # 4) 落库 chapter_summaries
-    summary_id = new_id("sum")
     try:
-        conn = get_connection(db_path)
-        try:
-            conn.execute(
-                """
-                INSERT INTO chapter_summaries
-                    (summary_id, project_id, chapter_id, chapter_no,
-                     summary, tail_text, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    summary_id,
-                    project_id,
-                    chapter_id,
-                    chapter_no,
-                    summary_text,
-                    tail_text,
-                    now_iso(),
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        summary_id = _insert_chapter_summary_row(
+            db_path,
+            project_id=prepared["project_id"],
+            chapter_id=chapter_id,
+            chapter_no=int(prepared["chapter_no"]),
+            summary_text=summary_text,
+            tail_text=prepared["tail_text"],
+        )
     except Exception as exc:  # noqa: BLE001
         import logging
         logging.getLogger(__name__).warning(
-            "chapter_commit.summarize DB insert failed: summary_id=%s err=%s",
-            summary_id, exc,
+            "chapter_commit.summarize DB insert failed: chapter_id=%s err=%s",
+            chapter_id, exc,
         )
         return {
             "summary_status": "failed",
@@ -1672,7 +1994,7 @@ def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
     return {
-        "summary_status": summary_status,
+        "summary_status": "ok",
         "summary_id": summary_id,
         "degraded": degraded,
     }
@@ -1712,6 +2034,21 @@ WORKFLOW = {
         "delta",
         "submit_result",
         "snapshot_pre",
+        # V3.7：observer 节点提前并发生成的 summarizer 早产结果。
+        # 排除理由：
+        # 1. PAUSED→resume 场景下，commit 节点之后才轮到 summarize；engine
+        #    ``resume``（packages/core/workflow_runtime/engine.py:264-279）从
+        #    high_risk_approval 节点的 PENDING 状态续跑，**不会重放** observer 节点
+        #    → summary_early 无源头生成，必须靠 summarize 节点走自愈（重新 prepare
+        #    + run_agent）才能完成，与 V3.7 前语义完全一致、幂等。
+        # 2. checkpoint 体积：summary_early 含 LLM 输出（典型 <1KB），虽然小但属于
+        #    可由 _summarize_node 重新产生的派生数据，没必要进 checkpoint 增加回放、
+        #    audit export 复杂度。
+        # 3. 不影响「completed 路径上的端到端确定性」：非 PAUSED 场景下 observer 与
+        #    summarize 在同一 run 里串行执行，observer 写完 ctx 后 engine 立即到
+        #    summarize 节点读到 summary_early，checkpoint 落盘已晚 → exclude 是
+        #    「未引用到的派生数据」性质的清理，不破坏任何运行时行为。
+        "summary_early",
     ],
 }
 

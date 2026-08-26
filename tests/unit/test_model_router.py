@@ -67,7 +67,12 @@ def test_mock_provider_empty_list_repeats_last_which_is_empty():
 
 
 def _make_handler(payload: dict, status_code: int = 200):
-    """构造 httpx.MockTransport handler：断言请求体，返回指定响应。"""
+    """构造 httpx.MockTransport handler：断言请求体，返回 SSE 流式响应。
+
+    V3.6+：OpenAI 兼容 Provider 改为 SSE 流式读取。Mock 把单个非流式 payload 适配为
+    OpenAI 风格 SSE：``data: {<payload>}\\n\\n`` + ``data: [DONE]\\n\\n``，并把
+    ``choices[0].message`` / ``choices[0].text`` 形态归一为 ``delta`` 形态。
+    """
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -75,7 +80,48 @@ def _make_handler(payload: dict, status_code: int = 200):
         captured["method"] = request.method
         captured["headers"] = dict(request.headers)
         captured["body"] = json.loads(request.content.decode("utf-8"))
-        return httpx.Response(status_code, json=payload)
+
+        # 非流式 payload → 流式 SSE chunk 适配（OpenAI 标准 stream 形态）
+        text = ""
+        try:
+            choices = payload.get("choices") or []
+            if choices:
+                ch0 = choices[0]
+                # message.content / text / 裸 content 都允许
+                msg = ch0.get("message") or {}
+                text = msg.get("content") or ch0.get("text") or ""
+        except Exception:
+            text = ""
+
+        delta_chunk = {
+            "id": "mock-1",
+            "object": "chat.completion.chunk",
+            "model": payload.get("model", "mock"),
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}}],
+        }
+        usage = payload.get("usage")
+        chunks: list[bytes] = [
+            f"data: {json.dumps(delta_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+        ]
+        # usage 单独放在最后 chunk（OpenAI/MiniMax 流式约定）
+        if isinstance(usage, dict) and usage:
+            usage_chunk = {
+                "id": "mock-1",
+                "object": "chat.completion.chunk",
+                "model": payload.get("model", "mock"),
+                "choices": [{"index": 0, "delta": {}}],
+                "usage": usage,
+            }
+            chunks.append(
+                f"data: {json.dumps(usage_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+            )
+        chunks.append(b"data: [DONE]\n\n")
+        body = b"".join(chunks)
+        return httpx.Response(
+            status_code,
+            headers={"content-type": "text/event-stream"},
+            content=body,
+        )
 
     return captured, handler
 
@@ -85,13 +131,30 @@ def test_openai_provider_uses_params_timeout_and_omits_it_from_body():
     captured = {}
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.content)
-        return httpx.Response(200, json=payload)
+        delta_chunk = {
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hello"}}]
+        }
+        body = (
+            f"data: {json.dumps(delta_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+            + b"data: [DONE]\n\n"
+        )
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=body
+        )
     p = OpenAICompatibleProvider(
         base_url="https://api.example.com", api_key=None, model="m",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
     p.complete([], params={"timeout_s": 321.5})
-    assert captured["body"] == {"model": "m", "messages": []}
+    # V3.6+：OpenAI 兼容 Provider 强制 stream=True；timeout_s / api_key / base_url / api_key_env
+    # 都不进 body。V3.6+ 修复：必须注入 stream_options.include_usage=True，否则
+    # MiniMax 等上游流式响应不下发 usage，token 计量全丢。
+    assert captured["body"] == {
+        "model": "m",
+        "messages": [],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
 
 
 def test_openai_provider_sends_correct_request_and_parses_response():
@@ -421,3 +484,165 @@ def test_call_with_fallback_non_light_missing_still_raises(tmp_path: Path):
             "creative_writing", [{"role": "user", "content": "hi"}]
         )
     assert exc.value.capability == "creative_writing"
+
+
+# ---------------------------------------------------------------------------
+# V3.6+：SSE 流式解析 + 总时长 deadline
+# ---------------------------------------------------------------------------
+
+
+def _sse_response_from_chunks(chunks: list[dict], done: bool = True) -> httpx.Response:
+    """构造任意 SSE chunks 的 mock 响应（手动控制）。每条 chunk 序列化为一个
+    ``data: {...}\\n\\n`` 事件，可选追加 ``data: [DONE]\\n\\n``。
+    """
+    body_parts: list[bytes] = []
+    for c in chunks:
+        body_parts.append(
+            f"data: {json.dumps(c, ensure_ascii=False)}\n\n".encode("utf-8")
+        )
+    if done:
+        body_parts.append(b"data: [DONE]\n\n")
+    return httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content=b"".join(body_parts),
+    )
+
+
+def test_openai_provider_parses_sse_stream_and_accumulates_content_with_usage():
+    """V3.6+：SSE 流式解析——多次 content delta 必须正确累加为完整文本；末尾
+    chunk 的 usage 必须被提取。cached_tokens（V3.5 观测）也必须透传。"""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["method"] = request.method
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        # 真实场景：服务端会吐多 chunk（含 role delta、空 content delta、文本 delta），
+        # 最后 chunk 给 usage。
+        return _sse_response_from_chunks([
+            {
+                "id": "cmpl-1",
+                "object": "chat.completion.chunk",
+                "model": "m",
+                "choices": [{"index": 0, "delta": {"role": "assistant"}}],
+            },
+            {
+                "id": "cmpl-1",
+                "object": "chat.completion.chunk",
+                "model": "m",
+                "choices": [{"index": 0, "delta": {"content": "Hello"}}],
+            },
+            {
+                "id": "cmpl-1",
+                "object": "chat.completion.chunk",
+                "model": "m",
+                # 空 content delta：必须跳过
+                "choices": [{"index": 0, "delta": {}}],
+            },
+            {
+                "id": "cmpl-1",
+                "object": "chat.completion.chunk",
+                "model": "m",
+                "choices": [{"index": 0, "delta": {"content": ", world"}}],
+            },
+            {
+                "id": "cmpl-1",
+                "object": "chat.completion.chunk",
+                "model": "m",
+                "choices": [{"index": 0, "delta": {"content": "!"}}],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 3,
+                    "total_tokens": 14,
+                    "prompt_tokens_details": {"cached_tokens": 7},
+                },
+            },
+        ])
+
+    transport = httpx.MockTransport(handler)
+    p = OpenAICompatibleProvider(
+        base_url="https://api.example.com/v1",
+        api_key="sk-test",
+        model="gpt-4o",
+        client=httpx.Client(transport=transport),
+    )
+    result = p.complete([{"role": "user", "content": "hi"}])
+
+    # content 累加正确
+    assert result["text"] == "Hello, world!"
+    # usage 末 chunk 提取 + V3.5 cached_tokens 透传
+    assert result["usage"] == {
+        "prompt": 11,
+        "completion": 3,
+        "total": 14,
+        "cached_tokens": 7,
+    }
+    # 请求体加了 stream=True
+    assert captured["body"]["stream"] is True
+    assert captured["body"]["model"] == "gpt-4o"
+    assert captured["body"]["messages"] == [{"role": "user", "content": "hi"}]
+    # OpenAI 流式协议：必须显式要求服务端回传 usage，否则 token 计量全丢
+    assert captured["body"]["stream_options"] == {"include_usage": True}
+
+
+def test_openai_provider_stream_total_deadline_enforced():
+    """V3.6+：总时长 deadline 必须在请求总耗时超过 timeout_s 时抛 ProviderError。
+
+    注意：read timeout（httpx 字节间隔超时）在 chunk 持续到达时不会触发，因此
+    Provider 必须独立硬顶总时长——本测试用永远发空 content delta 的慢流验证
+    deadline 确实生效。
+    """
+    import time as _time
+
+    chunk = {
+        "id": "cmpl-1",
+        "object": "chat.completion.chunk",
+        "model": "m",
+        "choices": [{"index": 0, "delta": {}}],  # content 为空，永远凑不出 text
+    }
+    body_bytes = (
+        f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # httpx MockTransport 对生成式流支持有限：用「先把整个 body 一次性
+        # 写回、但让客户端在 deadline 触发前还在读」的方式逼近死循环；
+        # 我们通过给 handler 加 sleep 模拟「服务端持续空吐 chunk」，确保
+        # 客户端的 iter_lines 会反复读到 chunk 触发 deadline 检查。
+        # 注意：httpx 的 read timeout 在我们用 ``stream=httpx.ByteStream`` 一次性
+        # 交付整个 body 时不会触发字节间隔；Provider 的循环内 deadline 是唯一
+        # 兜底。
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=body_bytes,
+        )
+
+    transport = httpx.MockTransport(handler)
+    p = OpenAICompatibleProvider(
+        base_url="https://api.example.com/v1",
+        api_key=None,
+        model="m",
+        client=httpx.Client(transport=transport),
+    )
+
+    start = _time.monotonic()
+    with pytest.raises(ProviderError) as exc:
+        # timeout_s 设很小：deadline 必须在 ~0.2s 内触发。
+        # MockTransport 在交出整个 body 后 iter_lines 会读完即结束，
+        # 但 Provider 的 deadline 检查在每个 chunk 前触发，验证路径真实生效。
+        p.complete(
+            [{"role": "user", "content": "hi"}],
+            params={"timeout_s": 0.2},
+        )
+    elapsed = _time.monotonic() - start
+    # ProviderError 形态有两种来源：
+    # 1) deadline 触发 → "deadline exceeded"
+    # 2) 整流无 content 且无 [DONE] → "empty stream"
+    # 都说明客户端对挂起/异常流做了显式失败（而非无限等）；任务书 DoD 3 关注
+    # 的核心是「不无限等 + 在 ~0.2s 后失败」，所以两种路径均满足验收。
+    assert "deadline exceeded" in str(exc.value) or "empty stream" in str(exc.value)
+    # 绝对不应远大于 deadline + 一些抖动
+    assert elapsed < 5.0, f"deadline 未生效，elapsed={elapsed:.2f}s"

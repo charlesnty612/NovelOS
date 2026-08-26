@@ -1294,17 +1294,26 @@ def _build_director_input_uncached(
     payload: dict[str, Any] = {
         "agent": "director",
         "prompt_version": "director:v1",
-        "chapter": {
-            "chapter_id": chapter_id,
-            "title": chapter.get("title"),
-            "target_word_count": target_word_count,
-            "expected_role": "setup",
-        },
         "project": {
             "project_id": project["project_id"],
             "name": project["name"],
             "genre": project.get("genre"),
             "premise": project.get("premise"),
+        },
+        "knowledge_permissions": {
+            "your_visibility": ["AUTHOR", "DIRECTOR"],
+            "forbidden_kinds": ["HIDDEN"],
+        },
+        "constraints": {
+            "forbidden_topics": [],
+            "must_include": [],
+            "style_constraints_id": None,
+        },
+        "chapter": {
+            "title": chapter.get("title"),
+            "target_word_count": target_word_count,
+            "expected_role": "setup",
+            "chapter_id": chapter_id,
         },
         "author_intent": {
             "raw": author_intent,
@@ -1328,15 +1337,6 @@ def _build_director_input_uncached(
         "plot_graph_excerpt": plot_excerpt,
         "hook_ledger_excerpt": hook_excerpt,
         "narrative_debt_excerpt": debt_excerpt,
-        "knowledge_permissions": {
-            "your_visibility": ["AUTHOR", "DIRECTOR"],
-            "forbidden_kinds": ["HIDDEN"],
-        },
-        "constraints": {
-            "forbidden_topics": [],
-            "must_include": [],
-            "style_constraints_id": None,
-        },
     }
 
     if reference_canon_inject is not None:
@@ -1455,11 +1455,16 @@ def _build_writer_input_uncached(
     return {
         "agent": "writer",
         "prompt_version": "writer:v1",
+        "knowledge_permissions": {
+            "your_visibility": ["WRITER", "PUBLIC", "VISIBLE"],
+            "forbidden_kinds": ["HIDDEN"],
+        },
+        "style_constraints": dict(_DEFAULT_STYLE_CONSTRAINTS),
         "chapter": {
-            "chapter_id": chapter_id,
             "title": chapter.get("title"),
             "target_word_count": target_word_count,
             "expected_role": director_plan.get("expected_role") or "setup",
+            "chapter_id": chapter_id,
         },
         "director_plan": {
             "chapter_goal": director_plan.get("chapter_goal"),
@@ -1484,11 +1489,6 @@ def _build_writer_input_uncached(
         # V2.0 Wave C 任务一：FTS 召回片段。无索引 / 无命中时为空 list。
         "recalled_passages": recalled_passages,
         "retrieved_memory": [],
-        "knowledge_permissions": {
-            "your_visibility": ["WRITER", "PUBLIC", "VISIBLE"],
-            "forbidden_kinds": ["HIDDEN"],
-        },
-        "style_constraints": dict(_DEFAULT_STYLE_CONSTRAINTS),
     }
 
 
@@ -2882,15 +2882,6 @@ def build_observer_input(
     payload: dict[str, Any] = {
         "agent": "observer",
         "prompt_version": "observer:v1",
-        "chapter": {
-            "chapter_id": chapter_id,
-            "title": chapter.get("title"),
-            "draft_text": (draft_row or {}).get("content") or "",
-            "scene_ids": [],
-        },
-        "previous_state_version": state_version,
-        "previous_state": snap,
-        "director_plan_summary": _director_plan_summary(plan_json),
         "knowledge_permissions": {
             "your_visibility": ["AUTHOR", "DIRECTOR"],
             "forbidden_kinds": ["HIDDEN"],
@@ -2908,6 +2899,15 @@ def build_observer_input(
                 db_path, project_id, limit=recent_event_ids_limit,
             ),
         },
+        "chapter": {
+            "title": chapter.get("title"),
+            "scene_ids": [],
+            "draft_text": (draft_row or {}).get("content") or "",
+            "chapter_id": chapter_id,
+        },
+        "previous_state_version": state_version,
+        "previous_state": snap,
+        "director_plan_summary": _director_plan_summary(plan_json),
     }
 
     if snapshot_mode == "trimmed":

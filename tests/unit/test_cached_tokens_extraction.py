@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
+
 from packages.core.agent_runtime.runner import create_adhoc_run, run_agent
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
@@ -60,6 +62,16 @@ def test_mock_provider_usage_is_none_treated_as_default():
 # ---------------------------------------------------------------------------
 
 
+def _sse_response(*chunks: str) -> httpx.Response:
+    """把若干 ``data:`` 行拼成 SSE 响应体（含末尾 ``data: [DONE]``）。"""
+    body = "\n\n".join(f"data: {c}" for c in chunks) + "\n\ndata: [DONE]\n\n"
+    return httpx.Response(
+        200,
+        text=body,
+        headers={"Content-Type": "text/event-stream"},
+    )
+
+
 def test_openai_compatible_provider_extracts_cached_tokens():
     """OpenAI 标准响应 ``usage.prompt_tokens_details.cached_tokens`` → 透传到 usage dict。"""
     # 构造一个 httpx MockTransport，拦截 POST /chat/completions
@@ -69,17 +81,19 @@ def test_openai_compatible_provider_extracts_cached_tokens():
 
     def _handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.content.decode("utf-8"))
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "hello"}}],
-                "usage": {
-                    "prompt_tokens": 200,
-                    "completion_tokens": 50,
-                    "total_tokens": 250,
-                    "prompt_tokens_details": {"cached_tokens": 173},
-                },
-            },
+        return _sse_response(
+            json.dumps({"choices": [{"delta": {"content": "hello"}}]}),
+            json.dumps(
+                {
+                    "choices": [{"delta": {}}],
+                    "usage": {
+                        "prompt_tokens": 200,
+                        "completion_tokens": 50,
+                        "total_tokens": 250,
+                        "prompt_tokens_details": {"cached_tokens": 173},
+                    },
+                }
+            ),
         )
 
     transport = httpx.MockTransport(_handler)
@@ -102,16 +116,18 @@ def test_openai_compatible_provider_no_prompt_details():
     import httpx
 
     def _handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "hi"}}],
-                "usage": {
-                    "prompt_tokens": 100,
-                    "completion_tokens": 30,
-                    "total_tokens": 130,
-                },
-            },
+        return _sse_response(
+            json.dumps({"choices": [{"delta": {"content": "hi"}}]}),
+            json.dumps(
+                {
+                    "choices": [{"delta": {}}],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 30,
+                        "total_tokens": 130,
+                    },
+                }
+            ),
         )
 
     transport = httpx.MockTransport(_handler)
@@ -130,17 +146,19 @@ def test_openai_compatible_provider_cached_tokens_zero_omitted():
     import httpx
 
     def _handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "hi"}}],
-                "usage": {
-                    "prompt_tokens": 50,
-                    "completion_tokens": 10,
-                    "total_tokens": 60,
-                    "prompt_tokens_details": {"cached_tokens": 0},
-                },
-            },
+        return _sse_response(
+            json.dumps({"choices": [{"delta": {"content": "hi"}}]}),
+            json.dumps(
+                {
+                    "choices": [{"delta": {}}],
+                    "usage": {
+                        "prompt_tokens": 50,
+                        "completion_tokens": 10,
+                        "total_tokens": 60,
+                        "prompt_tokens_details": {"cached_tokens": 0},
+                    },
+                }
+            ),
         )
 
     transport = httpx.MockTransport(_handler)
@@ -157,17 +175,19 @@ def test_openai_compatible_provider_cached_tokens_invalid_omitted():
     import httpx
 
     def _handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "hi"}}],
-                "usage": {
-                    "prompt_tokens": 50,
-                    "completion_tokens": 10,
-                    "total_tokens": 60,
-                    "prompt_tokens_details": {"cached_tokens": "abc"},
-                },
-            },
+        return _sse_response(
+            json.dumps({"choices": [{"delta": {"content": "hi"}}]}),
+            json.dumps(
+                {
+                    "choices": [{"delta": {}}],
+                    "usage": {
+                        "prompt_tokens": 50,
+                        "completion_tokens": 10,
+                        "total_tokens": 60,
+                        "prompt_tokens_details": {"cached_tokens": "abc"},
+                    },
+                }
+            ),
         )
 
     transport = httpx.MockTransport(_handler)

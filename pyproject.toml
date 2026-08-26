@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "novelos"
-version = "3.5.0"
+version = "3.6.0"
 description = "NovelOS - local-first novel writing operating system"
 requires-python = ">=3.11"
 dependencies = [

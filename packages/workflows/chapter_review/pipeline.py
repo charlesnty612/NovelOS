@@ -271,10 +271,10 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "agent": "critic",
         "prompt_version": _CRITIC_PROMPT_VERSION,
         "chapter": {
-            "chapter_id": chapter_id,
             "title": None,
             "target_word_count": int(ctx.get("target_word_count") or _DEFAULT_TARGET_WORD_COUNT),
             "expected_role": ctx.get("expected_role"),
+            "chapter_id": chapter_id,
         },
         "draft_text": draft_text,
         "plan_summary": plan_summary,

@@ -11,9 +11,12 @@
 - ``Provider.complete`` 接受 ``messages: list[dict]`` 与 ``params: dict``，返回
   ``{"text": str, "usage": {"prompt": int, "completion": int, "total": int}}``。
   与 ``docs/impl/IMPLEMENTATION-PLAN-v0.md`` D-I4 的 Completion 契约保持一致。
-- OpenAI 兼容 / Anthropic / Ollama Provider 使用 ``httpx.post`` 同步客户端（``timeout=60s``），
-  失败抛 :class:`ProviderError`；status_code 透传便于上层映射。
-- 不做流式、不做重试：重试与降级由 :class:`packages.core.model_router.ModelRouter`
+- OpenAI 兼容 Provider 走 SSE 流式（``httpx.client.stream`` + ``iter_lines`` + 解析
+  ``data: {...}`` / ``data: [DONE]``），配合 ``time.monotonic()`` 总时长 deadline
+  防止长生成在大量 keep-alive chunk 间无限挂起；失败抛 :class:`ProviderError`，
+  status_code 透传便于上层映射。``health_check`` 仍走非流式 GET ``/models``。
+- Anthropic / Ollama Provider 使用 ``httpx.post`` 同步客户端（``timeout=60s``）。
+- 不做重试：重试与降级由 :class:`packages.core.model_router.ModelRouter`
   的 ``call_with_fallback`` 负责（agent-contracts §6 重试原则）。
 - :meth:`Provider.health_check` 返回 ``{"ok": bool, "status_code": int|None,
   "detail": str, "latency_ms": int}``，用于 ``/model-configs/{id}/test`` 健康检查端点。
@@ -21,6 +24,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Callable, Sequence
@@ -163,7 +167,23 @@ class OpenAICompatibleProvider:
         return h
 
     def complete(self, messages: Messages, params: dict | None = None) -> CompletionResult:
-        body: dict[str, Any] = {"model": self.model, "messages": list(messages)}
+        """OpenAI 兼容 Chat Completions 流式调用（SSE）+ 总时长 deadline。
+
+        关键设计（Sprint V3.6+）：
+        - 用 ``client.stream("POST", ...)`` 逐行读 SSE chunk，避免非流式下整连接挂起
+          而 httpx read timeout（字节间隔语义）不生效导致客户端无限等待。
+        - ``stream=True`` 写入请求体，让服务端持续吐 SSE chunk；任何「整条挂起」都会立即
+          触发读超时暴露。
+        - ``start = time.monotonic()`` + 循环内手动检查总时长作为「硬顶 deadline」，
+          独立于 httpx 的 read timeout（因为 read timeout 在大量 chunk 持续到达时不会
+          触发；典型场景：服务端开始吐 chunk 后每 30s 发一个 keep-alive 字节，
+          永远不超过 read timeout）。
+        - httpx 的 read timeout 仍设为 ``request_timeout``，作为字节间隔兜底。
+        """
+        body: dict[str, Any] = {"model": self.model, "messages": list(messages), "stream": True}
+        # OpenAI 流式协议：不带 include_usage 时流式响应不下发 usage（实测 MiniMax 如此），
+        # token 计量会全丢；显式要求服务端在末 chunk 回传 usage。
+        body.setdefault("stream_options", {"include_usage": True})
         request_params = dict(params or {})
         request_timeout = request_params.pop("timeout_s", self.timeout)
         if not isinstance(request_timeout, (int, float)) or request_timeout <= 0:
@@ -173,40 +193,112 @@ class OpenAICompatibleProvider:
         # 上游 OpenAI 兼容 API 看到会直接报 400。
         for k in ("base_url", "timeout_s", "api_key", "api_key_env"):
             request_params.pop(k, None)
+        # 调用方可能传了 stream=False（少数情况下游不支持流式）；强制打开。
+        # 同理 stream_options 也可能由调用方误传，统一由本 Provider 注入并剔除。
+        request_params.pop("stream", None)
+        request_params.pop("stream_options", None)
         if request_params:
             body.update(request_params)
         url = f"{self.base_url}/chat/completions"
         client = self._ensure_client()
+        # httpx 字节间隔超时（兜底；总时长硬顶由下面 monotonic 循环控制）
+        stream_timeout = httpx.Timeout(request_timeout)
+
+        start = time.monotonic()
+        deadline_exceeded = False
         try:
-            resp = client.post(url, json=body, headers=self._headers(), timeout=request_timeout)
+            with client.stream(
+                "POST", url, json=body, headers=self._headers(), timeout=stream_timeout
+            ) as resp:
+                # HTTP 错误要在流式里也早暴露：读出错误体再抛
+                if resp.status_code >= 400:
+                    # 流式下错误体通常较短；读整个 body（最多 ~200 字符截断）
+                    try:
+                        err_body = resp.read()
+                        snippet = (err_body.decode("utf-8", errors="replace"))[:200]
+                    except Exception:
+                        snippet = ""
+                    # 抛错时 with 块退出会正常关闭流
+                    raise ProviderError(
+                        self.name,
+                        f"HTTP {resp.status_code}: {snippet}",
+                        status_code=resp.status_code,
+                    )
+
+                text_parts: list[str] = []
+                usage_raw: dict[str, Any] = {}
+                saw_done = False
+                # 逐行 SSE：data: {...}\n\n  /  data: [DONE]\n\n
+                for line in resp.iter_lines():
+                    # 总时长 deadline 检查：流式下服务端持续吐 chunk 也可能拉得过长
+                    # （MiniMax 长生成实测可超 1800s）；read timeout 在 chunk 间隔短时不
+                    # 触发，因此必须独立硬顶。
+                    if time.monotonic() - start > request_timeout:
+                        deadline_exceeded = True
+                        raise ProviderError(
+                            self.name,
+                            f"deadline exceeded: total elapsed {time.monotonic() - start:.2f}s "
+                            f"> timeout_s={request_timeout}",
+                        )
+                    if not line:
+                        continue
+                    # SSE 行通常以 "data: " 开头；strip 后只剩 payload
+                    if line.startswith(":"):
+                        # SSE 注释行；忽略
+                        continue
+                    if not line.startswith("data:"):
+                        # event: / id: 等其他 SSE 字段；本 Provider 暂不关注
+                        continue
+                    payload = line[len("data:"):].strip()
+                    if payload == "[DONE]":
+                        saw_done = True
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except Exception:
+                        # 单个 chunk 解析失败：跳过该 chunk 继续读（SSE 容错）；
+                        # 但 [DONE] 前若整个流没拿到任何 content 会在循环后判 empty。
+                        continue
+                    # usage：OpenAI / MiniMax 流式在最后一个 chunk 给 usage
+                    chunk_usage = chunk.get("usage")
+                    if isinstance(chunk_usage, dict) and chunk_usage:
+                        usage_raw = chunk_usage
+                    # content 累加
+                    try:
+                        delta = chunk["choices"][0]["delta"]
+                    except (KeyError, IndexError, TypeError):
+                        continue
+                    if isinstance(delta, dict):
+                        piece = delta.get("content")
+                        if isinstance(piece, str) and piece:
+                            text_parts.append(piece)
+        except ProviderError:
+            raise
         except httpx.HTTPError as exc:
             raise ProviderError(self.name, f"network error: {exc}") from exc
 
-        if resp.status_code >= 400:
-            # 截断 body 避免日志爆炸
-            snippet = (resp.text or "")[:200]
+        # deadline 超时：ProviderError 已抛；这里只是保险（避免 pylint 等告警）
+        if deadline_exceeded:
             raise ProviderError(
                 self.name,
-                f"HTTP {resp.status_code}: {snippet}",
-                status_code=resp.status_code,
+                f"deadline exceeded: total elapsed {time.monotonic() - start:.2f}s "
+                f"> timeout_s={request_timeout}",
             )
 
-        try:
-            data = resp.json()
-        except Exception as exc:  # noqa: BLE001
-            raise ProviderError(self.name, f"invalid JSON response: {exc}") from exc
+        # 零 content chunk → 空流（无论是否见到 [DONE]），抛错；
+        # 防止下游把空串当合法产出。
+        if not text_parts:
+            raise ProviderError(self.name, "empty stream: no content chunks received")
 
-        try:
-            text = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderError(self.name, f"malformed response: {exc}") from exc
+        text = "".join(text_parts)
 
-        # usage 可选；存在则取，否则默认 0
-        usage_raw = data.get("usage") or {}
+        # usage 提取（与原非流式语义一致；流式末 chunk 给 usage，缺省则 0）
         try:
-            prompt_tokens = int(usage_raw.get("prompt_tokens") or 0)
-            completion_tokens = int(usage_raw.get("completion_tokens") or 0)
-            total_tokens = int(usage_raw.get("total_tokens") or (prompt_tokens + completion_tokens))
+            prompt_tokens = int(usage_raw.get("prompt_tokens") or 0) if usage_raw else 0
+            completion_tokens = int(usage_raw.get("completion_tokens") or 0) if usage_raw else 0
+            total_tokens = int(
+                usage_raw.get("total_tokens") or (prompt_tokens + completion_tokens)
+            ) if usage_raw else (prompt_tokens + completion_tokens)
         except (TypeError, ValueError):
             prompt_tokens = completion_tokens = total_tokens = 0
 
@@ -220,18 +312,19 @@ class OpenAICompatibleProvider:
             "completion": completion_tokens,
             "total": total_tokens,
         }
-        prompt_details = usage_raw.get("prompt_tokens_details") or {}
-        if isinstance(prompt_details, dict):
-            cached_tokens_raw = prompt_details.get("cached_tokens")
-            try:
-                cached_tokens_int = int(cached_tokens_raw) if cached_tokens_raw is not None else None
-            except (TypeError, ValueError):
-                cached_tokens_int = None
-            if cached_tokens_int is not None and cached_tokens_int > 0:
-                usage_out["cached_tokens"] = cached_tokens_int
+        if usage_raw:
+            prompt_details = usage_raw.get("prompt_tokens_details") or {}
+            if isinstance(prompt_details, dict):
+                cached_tokens_raw = prompt_details.get("cached_tokens")
+                try:
+                    cached_tokens_int = int(cached_tokens_raw) if cached_tokens_raw is not None else None
+                except (TypeError, ValueError):
+                    cached_tokens_int = None
+                if cached_tokens_int is not None and cached_tokens_int > 0:
+                    usage_out["cached_tokens"] = cached_tokens_int
 
         return {
-            "text": text or "",
+            "text": text,
             "usage": usage_out,
         }
 

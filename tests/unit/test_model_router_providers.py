@@ -33,7 +33,73 @@ from packages.core.model_router.exceptions import ProviderError
 
 
 def _capture_handler(payload: dict, status_code: int = 200):
-    """构造 httpx.MockTransport handler：断言请求体，返回指定响应。"""
+    """构造 httpx.MockTransport handler：断言请求体，返回 SSE 流式响应。
+
+    V3.6+：OpenAI 兼容 Provider 改流式。Mock 把单个非流式 payload 适配为 SSE：
+    - choices[0].message.content → chunk.delta.content
+    - usage → 末尾独立 chunk
+    - 末尾加 ``data: [DONE]\\n\\n``
+
+    注：仅用于 OpenAICompatibleProvider；Anthropic / Ollama Provider 仍是非流式，
+    请用 ``_capture_handler_json``。
+    """
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["method"] = request.method
+        captured["headers"] = dict(request.headers)
+        try:
+            captured["body"] = json.loads(request.content.decode("utf-8"))
+        except Exception:
+            captured["body"] = None
+
+        text = ""
+        try:
+            choices = payload.get("choices") or []
+            if choices:
+                ch0 = choices[0]
+                msg = ch0.get("message") or {}
+                text = msg.get("content") or ch0.get("text") or ""
+        except Exception:
+            text = ""
+
+        delta_chunk = {
+            "id": "mock-1",
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}}],
+        }
+        chunks: list[bytes] = [
+            f"data: {json.dumps(delta_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+        ]
+        usage = payload.get("usage")
+        if isinstance(usage, dict) and usage:
+            usage_chunk = {
+                "id": "mock-1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}}],
+                "usage": usage,
+            }
+            chunks.append(
+                f"data: {json.dumps(usage_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+            )
+        chunks.append(b"data: [DONE]\n\n")
+        body = b"".join(chunks)
+        return httpx.Response(
+            status_code,
+            headers={"content-type": "text/event-stream"},
+            content=body,
+        )
+
+    return captured, handler
+
+
+def _capture_handler_json(payload: dict, status_code: int = 200):
+    """非流式 helper：返回 ``httpx.Response(json=...)`` 单次 JSON 响应。
+
+    用于 Anthropic / Ollama Provider（仍是非流式调用）；不要用于 OpenAI 兼容
+    Provider（V3.6+ 改为 SSE 流式解析，单次 JSON 会被判为空流）。
+    """
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -83,7 +149,7 @@ def test_anthropic_provider_sends_correct_request_and_parses_response():
         "content": [{"type": "text", "text": "hi from claude"}],
         "usage": {"input_tokens": 9, "output_tokens": 4},
     }
-    captured, handler = _capture_handler(payload)
+    captured, handler = _capture_handler_json(payload)
     transport = httpx.MockTransport(handler)
     p = AnthropicProvider(
         base_url="https://api.example.com",
@@ -114,7 +180,7 @@ def test_anthropic_provider_sends_correct_request_and_parses_response():
 
 
 def test_anthropic_provider_default_base_url():
-    captured, handler = _capture_handler({"content": [{"text": "ok"}], "usage": {}})
+    captured, handler = _capture_handler_json({"content": [{"text": "ok"}], "usage": {}})
     p = AnthropicProvider(
         api_key="sk-ant",
         model="claude-3-5-sonnet-20241022",
@@ -125,7 +191,7 @@ def test_anthropic_provider_default_base_url():
 
 
 def test_anthropic_provider_default_max_tokens_when_no_params():
-    captured, handler = _capture_handler({"content": [{"text": "ok"}], "usage": {}})
+    captured, handler = _capture_handler_json({"content": [{"text": "ok"}], "usage": {}})
     p = AnthropicProvider(
         api_key="sk-ant",
         model="claude-3-5-sonnet-20241022",
@@ -136,7 +202,7 @@ def test_anthropic_provider_default_max_tokens_when_no_params():
 
 
 def test_anthropic_provider_no_system_message():
-    captured, handler = _capture_handler({"content": [{"text": "ok"}], "usage": {}})
+    captured, handler = _capture_handler_json({"content": [{"text": "ok"}], "usage": {}})
     p = AnthropicProvider(
         api_key="sk",
         model="claude-3-5-sonnet-20241022",
@@ -188,7 +254,7 @@ def test_anthropic_provider_requires_model():
 
 
 def test_anthropic_health_check_ok_on_200():
-    captured, handler = _capture_handler(
+    captured, handler = _capture_handler_json(
         {"content": [{"text": "ok"}], "usage": {}}, status_code=200
     )
     p = AnthropicProvider(
@@ -252,7 +318,7 @@ def test_ollama_provider_sends_correct_request_and_parses_response():
         "eval_count": 5,
         "done": True,
     }
-    captured, handler = _capture_handler(payload)
+    captured, handler = _capture_handler_json(payload)
     transport = httpx.MockTransport(handler)
     p = OllamaProvider(
         base_url="http://127.0.0.1:11434",
@@ -283,7 +349,7 @@ def test_ollama_provider_sends_correct_request_and_parses_response():
 
 
 def test_ollama_provider_default_base_url():
-    captured, handler = _capture_handler(
+    captured, handler = _capture_handler_json(
         {"message": {"content": "ok"}, "prompt_eval_count": 0, "eval_count": 0}
     )
     p = OllamaProvider(
@@ -322,7 +388,7 @@ def test_ollama_provider_requires_model():
 
 
 def test_ollama_health_check_ok_on_200():
-    captured, handler = _capture_handler({"models": []}, status_code=200)
+    captured, handler = _capture_handler_json({"models": []}, status_code=200)
     p = OllamaProvider(
         base_url="http://127.0.0.1:11434", model="llama3",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
@@ -520,18 +586,47 @@ def test_router_list_enabled_returns_all_enabled_ordered(tmp_path: Path):
     assert ModelRouter(db_path).list_enabled("nonexistent") == []
 
 
+def _sse_response(text: str, usage: dict | None = None) -> httpx.Response:
+    """构造一个 OpenAI 风格 SSE 响应（content 一次性 + 可选 usage + [DONE]）。"""
+    delta_chunk = {
+        "id": "mock-1",
+        "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}}],
+    }
+    chunks: list[bytes] = [
+        f"data: {json.dumps(delta_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+    ]
+    if usage:
+        usage_chunk = {
+            "id": "mock-1",
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": {}}],
+            "usage": usage,
+        }
+        chunks.append(
+            f"data: {json.dumps(usage_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+        )
+    chunks.append(b"data: [DONE]\n\n")
+    return httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content=b"".join(chunks),
+    )
+
+
 def test_router_call_with_fallback_first_succeeds(tmp_path: Path):
     """单配置时与 resolve+get_provider 等价：直接成功，返回 used_config_row。"""
     apply_migrations(tmp_path / "test.db")
     db_path = str(tmp_path / "test.db")
     _insert_config(db_path, "reasoning", "openai", "gpt-4o")
 
-    transport = httpx.MockTransport(
-        lambda req: httpx.Response(200, json={
-            "choices": [{"message": {"role": "assistant", "content": "hi"}}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        })
-    )
+    def _ok_handler(req: httpx.Request) -> httpx.Response:
+        return _sse_response(
+            "hi",
+            usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+
+    transport = httpx.MockTransport(_ok_handler)
     # 注入 client 让 transport 生效：ModelRouter 不直接接受 client，这里走 Provider 内部注入
     from packages.core.model_router.providers import OpenAICompatibleProvider
 
@@ -569,10 +664,17 @@ def test_router_call_with_fallback_skips_failed_first_uses_second(tmp_path: Path
             # 每次都返 500
             transport = httpx.MockTransport(lambda req: httpx.Response(500, text="boom"))
         else:
-            transport = httpx.MockTransport(lambda req: httpx.Response(200, json={
-                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            }))
+            def _ok(req: httpx.Request) -> httpx.Response:
+                return _sse_response(
+                    "ok",
+                    usage={
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                )
+
+            transport = httpx.MockTransport(_ok)
         return OpenAICompatibleProvider(
             base_url="https://x", api_key=None, model=row["model"],
             client=httpx.Client(transport=transport),

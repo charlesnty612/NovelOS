@@ -5,6 +5,25 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [3.6.0] - 2026-08-27
+
+### Added（V3.6「流式根治挂起 + 前缀缓存重排 + commit 三路并发」）
+- **OpenAI 兼容 Provider 流式化**：`complete()` 改 `client.stream` + SSE 逐行解析（`data: {...}` / `[DONE]`），并加 `time.monotonic()` 总时长硬顶 deadline——根治非流式下整连接挂起而 read timeout（字节间隔语义）不生效的问题。`health_check` 保持非流式。
+- **commit 三路并发**：summarizer 的 LLM 调用提前并入 observer 双腿并发池（`NOVELOS_SUMMARY_PARALLEL` 默认 on，ctx/env 可关），下游 summarize 节点短路消费 `summary_early`，缺字段/失败自愈重调；`summary_early` 列入 checkpoint_exclude 保证 PAUSED→resume 幂等；早产失败恢复 run 状态防污染。
+- **竞品对标与单章提速决策文档**：docs/roadmap/v3.6-单章提速与竞品对标.md（oh-story / determinFlow / bishu-novel 管线对比、思考 token 数据真相、V3.8 方向）。
+
+### Fixed
+- 流式响应 usage 全丢：请求强制注入 `stream_options: {"include_usage": true}`（OpenAI 流式协议默认不下发 usage；实测 MiniMax 如此）。
+- prompt 前缀缓存几乎零命中：5 个 agent 的 user payload 键序重排——稳定块（project/knowledge_permissions/constraints 等）前置、每章动态块（chapter 及其 chapter_id）后置。ch067 实测 plan 二次装配 cached_tokens=16896/17981=94%、summarizer=100%。
+- serve.py 把通用 `MINIMAX_API_KEY` 映射到 provider 期望的 `NOVELOS_API_KEY_OPENAI_COMPATIBLE`（此前缺映射导致 401 秒失败）。
+
+### Changed
+- tests：SSE mock 全面适配（test_model_router / test_model_router_providers / test_cached_tokens_extraction）；空流语义统一为"零 content chunk 即抛错"；新增三路并发 13 个测试。全量 707 passed, 2 skipped。
+
+### Known Issues
+- writer 单次 completion 达 42~49k tokens，其中 ~95% 为 MiniMax-M2 内部思考 token（正文仅 ~2KB）；未启用 max_tokens 硬顶（截断风险破坏 JSON 契约）。V3.8 方向：字数带硬约束 + writer 分段写作（见 docs/roadmap/v3.6 文档 §四）。
+- 实测本章剩余耗时由 MiniMax 服务端解码主导（plan+write ≈ 550~580s/章）；本地环节 <15s。
+
 ## [3.5.0] - 2026-08-26
 
 ### Added（V3.5「并发化与缓存观测」）
