@@ -148,7 +148,12 @@ class OpenAICompatibleProvider:
 
     def _ensure_client(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=self.timeout)
+            # 连接池上限：限制 keep-alive 堆积（实测长进程 114 条死连接，新请求被路由到
+            # 挂起连接上无限等待——read timeout 是字节间隔语义，对整连接挂起不生效）
+            self._client = httpx.Client(
+                timeout=self.timeout,
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
         return self._client
 
     def _headers(self) -> dict[str, str]:
@@ -305,7 +310,12 @@ class AnthropicProvider:
 
     def _ensure_client(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=self.timeout)
+            # 连接池上限：限制 keep-alive 堆积（实测长进程 114 条死连接，新请求被路由到
+            # 挂起连接上无限等待——read timeout 是字节间隔语义，对整连接挂起不生效）
+            self._client = httpx.Client(
+                timeout=self.timeout,
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
         return self._client
 
     def _headers(self) -> dict[str, str]:
@@ -464,7 +474,12 @@ class OllamaProvider:
 
     def _ensure_client(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=self.timeout)
+            # 连接池上限：限制 keep-alive 堆积（实测长进程 114 条死连接，新请求被路由到
+            # 挂起连接上无限等待——read timeout 是字节间隔语义，对整连接挂起不生效）
+            self._client = httpx.Client(
+                timeout=self.timeout,
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
         return self._client
 
     def _headers(self) -> dict[str, str]:
