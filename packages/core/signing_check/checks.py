@@ -16,6 +16,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Final
 
+from packages.core.quality.wordcount import visible_chars
+
 # ---------------------------------------------------------------------------
 # 词典（模块级常量，tuple 不可变；各 25-40 词贴合网文语境）
 # ---------------------------------------------------------------------------
@@ -129,11 +131,11 @@ def _hits(text: str, words: tuple[str, ...]) -> list[str]:
 def _count_chars(text: str) -> int:
     """统计正文字符数（剔除空白，贴近番茄字数口径）。
 
-    番茄字数口径按字符计（含标点），空行不计；此处去除所有空白（空格/换行/制表）
-    后取长度，作为「正文密度」近似值。
+    V3.7 起委托给 :func:`packages.core.quality.wordcount.visible_chars`，
+    与全仓正文字数口径保持统一。函数名保留以维持既有调用链稳定。
     """
 
-    return len("".join(text.split()))
+    return visible_chars(text)
 
 
 def _chapter_by_number(chapters: list[dict]) -> dict[int, str]:

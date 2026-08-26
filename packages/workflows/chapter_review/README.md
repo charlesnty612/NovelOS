@@ -7,7 +7,7 @@
 
 | node_id | kind | 说明 |
 |---|---|---|
-| `basic_checks` | Transform | 校验草稿存在性；字数偏离 target ±15% 记 warning；扫描 forbidden_words（默认 `["仿佛", "如同", "本章目标"]`）。输出 `review_report` 进 ctx |
+| `basic_checks` | Transform | 校验草稿存在性；字数偏离 target ±15% 记 warning（V3.7 起带 `[W-LEN-DEVIATION]` rule_id），超 ±30% 追加到 `review_report.errors`（新建字段）；扫描 forbidden_words（默认 `["仿佛", "如同", "本章目标"]`）。输出 `review_report` 进 ctx |
 | `critic_review` | AI | V1.3 LLM 评审员。调 `critic` agent 对草稿生成**建议性**结构化报告；写入 `critic_report`，合并进 author_review 的 pause_payload。**仅建议、不拦截**：任何失败（prompt 缺失 / provider 异常 / 输出不合规）→ `critic_status='failed'` + `critic_report=null`，**不**阻断人工审批 / run 终态 |
 | `author_review` | Human | 抛 `PauseRequested(payload=review_report, critic_status, critic_report)` 等 author 决议；human_input 三态（见下） |
 | `mark_reviewed` | State | chapters.status DRAFTED→REVIEWED（仅当 author_review 通过）；revise 分支写 revision_note 并收尾 |
@@ -80,7 +80,14 @@ Content-Type: application/json
 ## 维护注意点
 
 - `review_report.warnings` 是信息性提示，不阻断 run（FATAL 仅在无 draft / author 拒绝 / status 不合法时）。
-- 字数检查基于字符数 `len(prose)`；中文按字符计算，不做分词。
+- V3.7 新增：`review_report.errors`（list[dict]）承载字数严重级条目（`±30%` 外缘外的
+  `W-LEN-DEVIATION`）。结构：`{rule_id, severity="error", message, word_band, visible_chars,
+  target, deviation_pct}`。errors 仍**不**阻断 run（FATAL 语义未改），但前端 reviewer
+  UI 已渲染（ApprovalCard `ReviewReportSummary` errors 区块，红色样式 + data-testid
+  `review-report-errors`）——供作者可见。errors 字段缺省时为 `[]`，向后兼容既有
+  review_report 消费者。
+- 字数检查口径：V3.7 起统一为 `packages.core.quality.wordcount.visible_chars`（去空白
+  后字符数）；`word_band` 来自 `wordcount.word_band`（floor=1200）。
 - **critic 报告**是**advisory**信息：UI 必须容忍 `critic_report=null` / `critic_status='failed'` 状态；不得因 critic 缺失而禁用批准/驳回按钮。
 - critic 输入构造：当前节点直接查 `chapters.plan_json` + `drafts.content` + `hooks` 表（status ∈ OPEN/ACTIVE/ESCALATED，按 importance 降序截断 10 条）；不接 context_engine 完整产物。
 - Quality 评分管线属 Sprint 6；V1.3 critic 仅做建议性报告，**不**参与 quality_reports 评分。

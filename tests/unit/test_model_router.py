@@ -487,6 +487,203 @@ def test_call_with_fallback_non_light_missing_still_raises(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# Bug 修复：model_configs.params_json 非构造键透传到上游请求体
+# ---------------------------------------------------------------------------
+
+
+def _patch_openai_client_with_capture(monkeypatch, captured: dict):
+    """把 ``packages.core.model_router.providers.httpx.Client`` 替换为构造带 MockTransport 的
+    Client；所有 httpx.Client(timeout=..., limits=...) 调用都被劫持到我们的 handler。
+
+    注意：Provider 在 ``_ensure_client`` 中 lazy new client。Patch 必须在 Client 构造之前生效。
+    """
+    import packages.core.model_router.providers as _providers_mod
+
+    # 拿到原始未 patch 的 httpx.Client 引用，避免递归调用 patched factory
+    _real_httpx_client = httpx.Client
+
+    def _factory(*args, **kwargs):
+        handler = captured.pop("_handler")
+        return _real_httpx_client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(_providers_mod.httpx, "Client", _factory)
+
+
+def _stub_sse_response(text: str = "ok", usage: dict | None = None) -> httpx.Response:
+    """最小合法 SSE 响应：一个 content delta + usage chunk + DONE。"""
+    chunks: list[dict] = [
+        {
+            "id": "mock-1",
+            "object": "chat.completion.chunk",
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}}],
+        },
+    ]
+    if usage:
+        chunks.append(
+            {
+                "id": "mock-1",
+                "object": "chat.completion.chunk",
+                "model": "m",
+                "choices": [{"index": 0, "delta": {}}],
+                "usage": usage,
+            }
+        )
+    return _sse_response_from_chunks(chunks, done=True)
+
+
+def test_call_with_fallback_passes_config_row_extras_into_request_body(
+    tmp_path: Path, monkeypatch
+):
+    """Bug 修复：DB model_configs.params_json 的非构造键（thinking / service_tier / temperature）
+    必须透传到上游请求体；构造键（base_url / timeout_s / api_key）必须被剥离以免污染 body。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+
+    # params_json 同时含构造键 + 透传键；只有透传键应进入上游 body
+    params = {
+        "base_url": "http://cap.example",
+        "timeout_s": 480,
+        "api_key": "sk-should-not-leak",
+        "service_tier": "priority",
+        "thinking": {"type": "disabled"},
+        "temperature": 0.7,
+    }
+    _insert_config(
+        db_path,
+        "creative_writing",
+        "openai",
+        "writer-model",
+        params_json=json.dumps(params),
+        enabled=1,
+    )
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return _stub_sse_response(
+            text="hi",
+            usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+        )
+
+    captured["_handler"] = handler
+    _patch_openai_client_with_capture(monkeypatch, captured)
+
+    completion, used_row = ModelRouter(db_path).call_with_fallback(
+        "creative_writing", [{"role": "user", "content": "hello"}]
+    )
+
+    body = captured["body"]
+    # 透传键进入 body
+    assert body["thinking"] == {"type": "disabled"}
+    assert body["service_tier"] == "priority"
+    assert body["temperature"] == 0.7
+    # 构造键被剥离
+    assert "base_url" not in body
+    assert "timeout_s" not in body
+    assert "api_key" not in body
+    # OpenAI 兼容 Provider 强制 stream + stream_options 仍注入（防回归）
+    assert body["stream"] is True
+    assert body["stream_options"] == {"include_usage": True}
+    # 提示：URL 用的是 base_url（构造键消费后的值），不是 raw 字符串
+    assert captured["url"].startswith("http://cap.example/")
+    # 命中行不变
+    assert used_row["model"] == "writer-model"
+    assert completion["text"] == "hi"
+
+
+def test_call_with_fallback_caller_params_override_config_row(
+    tmp_path: Path, monkeypatch
+):
+    """Bug 修复：调用方显式 ``params`` 覆盖配置行同名键（temperature=0.2 覆盖 0.7）。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    _insert_config(
+        db_path,
+        "creative_writing",
+        "openai",
+        "writer-model",
+        params_json=json.dumps({
+            "base_url": "http://cap.example",
+            "timeout_s": 480,
+            "temperature": 0.7,
+            "top_p": 0.9,
+        }),
+        enabled=1,
+    )
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return _stub_sse_response(text="hi")
+
+    captured["_handler"] = handler
+    _patch_openai_client_with_capture(monkeypatch, captured)
+
+    ModelRouter(db_path).call_with_fallback(
+        "creative_writing",
+        [{"role": "user", "content": "hello"}],
+        params={"temperature": 0.2},
+    )
+
+    body = captured["body"]
+    # 调用方覆盖
+    assert body["temperature"] == 0.2
+    # 配置行非覆盖键仍透传
+    assert body["top_p"] == 0.9
+
+
+def test_call_with_fallback_light_fallback_transmits_reasoning_extras(
+    tmp_path: Path, monkeypatch
+):
+    """Bug 修复 + V3 P0-2 回归：light 零配置时回退到 reasoning 链，实际命中行的 extras
+    （reasoning 行的 thinking / temperature）必须透传到请求体——不能丢、也不能错误地把
+    light 行（不存在）的 extras 当成回退行的 extras。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    # 只配 reasoning 行（带 thinking / temperature）；light 不配
+    _insert_config(
+        db_path,
+        "reasoning",
+        "openai",
+        "reasoning-model",
+        params_json=json.dumps({
+            "base_url": "http://reason.example",
+            "timeout_s": 600,
+            "thinking": {"type": "enabled"},
+            "temperature": 0.3,
+        }),
+        enabled=1,
+    )
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return _stub_sse_response(text="hi")
+
+    captured["_handler"] = handler
+    _patch_openai_client_with_capture(monkeypatch, captured)
+
+    completion, used_row = ModelRouter(db_path).call_with_fallback(
+        "light", [{"role": "user", "content": "hello"}]
+    )
+
+    body = captured["body"]
+    # 回退命中 reasoning 行的 extras 透传
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["temperature"] == 0.3
+    assert "base_url" not in body
+    assert "timeout_s" not in body
+    # V3 P0-2 行为：capability 标记改写为 reasoning
+    assert used_row["capability"] == "reasoning"
+    assert used_row["model"] == "reasoning-model"
+
+
+# ---------------------------------------------------------------------------
 # V3.6+：SSE 流式解析 + 总时长 deadline
 # ---------------------------------------------------------------------------
 

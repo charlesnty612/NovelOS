@@ -86,6 +86,15 @@ from typing import Any
 
 import httpx
 
+# V3.7：复用 packages.core.quality.wordcount 的字数口径，避免脚本侧漂移
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+from packages.core.quality.wordcount import (  # noqa: E402
+    classify_prose_length,
+    visible_chars,
+)
+
 # 路径约定：脚本与项目根平级
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HOST = "127.0.0.1"
@@ -517,9 +526,29 @@ def _latest_prose_chars(db_path: str, chapter_id: str) -> int:
         conn.close()
     if row is None:
         return 0
-    content = row["content"] or ""
-    # 去空白字符数（中文字数 / 总字符数口径，与 real_llm_e2e 一致：仅 len）
-    return len(content.replace(" ", "").replace("\n", "").replace("\t", "").replace("\r", ""))
+    # V3.7：复用 packages.core.quality.wordcount.visible_chars，与全仓正文字数口径统一
+    return visible_chars(row["content"] or "")
+
+
+def _latest_prose_word_stats(
+    db_path: str, chapter_id: str, target_word_count: int
+) -> dict[str, Any]:
+    """V3.7：取该章最新 draft 的字数分类（visible_chars / target / band / status / deviation_pct）。
+
+    无 draft 或 db_path 为空时返回零值字典。``target_word_count<=0`` 时仍走 wordcount
+    classify，band_low 会被 floor 保护。
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT content FROM drafts WHERE chapter_id = ? ORDER BY created_at DESC LIMIT 1",
+            (chapter_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    prose = (row["content"] or "") if row is not None else ""
+    return classify_prose_length(prose, target_word_count)
 
 
 # ============================================================================
@@ -1066,11 +1095,19 @@ def _cmd_run_locked(
                     quality = _latest_quality(db_path, ch_id) if db_path else {}
                     state = _story_state(db_path, project_id) if db_path else {"state_version": 0, "snapshot_bytes": 0}
                     prose_chars = _latest_prose_chars(db_path, ch_id) if db_path else 0
+                    # V3.7：补充 word_status / deviation_pct 观测字段；
+                    # target 与脚本常量 TARGET_WORD_COUNT 对齐（与 chapter-write 传入一致）。
+                    if db_path:
+                        word_stats = _latest_prose_word_stats(db_path, ch_id, TARGET_WORD_COUNT)
+                    else:
+                        word_stats = classify_prose_length("", TARGET_WORD_COUNT)
 
                     detail["metrics"] = metrics
                     detail["quality"] = quality
                     detail["state"] = state
                     detail["prose_chars"] = prose_chars
+                    detail["word_status"] = word_stats["status"]
+                    detail["deviation_pct"] = word_stats["deviation_pct"]
                     detail["wall_total_s"] = round(wall_total, 2)
                     detail["completed_at"] = _now_iso()
                     detail["status"] = "COMPLETED"

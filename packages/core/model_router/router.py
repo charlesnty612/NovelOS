@@ -220,7 +220,13 @@ class ModelRouter:
         回退成功时，返回 ``used_config_row['capability']`` 改写为 ``'reasoning'``，
         便于下游日志/审计识别实际命中配置。
 
-        注：单配置时与 :meth:`resolve` + :meth:`get_provider` 的旧路径行为等价。
+        配置行 ``params_json`` 的非构造键（除 ``base_url`` / ``timeout_s`` /
+        ``api_key`` / ``api_key_env`` 由 :meth:`get_provider` 消费外）会被合并进
+        ``provider.complete(..., params=...)``——从而透传到上游请求体。调用方显式
+        ``params`` 同名键覆盖配置行同名键。
+
+        注：单配置时与 :meth:`resolve` + :meth:`get_provider` 的旧路径行为等价；
+        ``resolve`` 仅返回行字典、不构造 Provider，因此不在本透传路径上。
         """
         candidates = self.list_enabled(capability)
         used_capability = capability
@@ -254,8 +260,24 @@ class ModelRouter:
                 attempts.append((cid, msg))
                 last_exc = exc
                 continue
+            # 解析该行 params_json：构造键（base_url/timeout_s/api_key/api_key_env）
+            # 已被 get_provider 消费，不进请求体；其余键作为 extras 透传。
+            # 解析失败 → {}（与 get_provider 同风格）。
+            _raw = row.get("params_json") or "{}"
+            if isinstance(_raw, dict):
+                _parsed = _raw
+            else:
+                try:
+                    _parsed = json.loads(_raw)
+                except (TypeError, ValueError):
+                    _parsed = {}
+            _extras = {
+                k: v for k, v in _parsed.items()
+                if k not in ("base_url", "timeout_s", "api_key", "api_key_env")
+            }
+            merged: dict[str, Any] | None = {**_extras, **(params or {})}
             try:
-                completion = provider.complete(messages, params=params)
+                completion = provider.complete(messages, params=merged or None)
                 # V3 P0-2：回退发生时把实际命中的 capability 暴露给下游
                 if used_capability != capability:
                     row = dict(row)

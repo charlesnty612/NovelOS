@@ -303,6 +303,9 @@ def _ch_rows(
             {
                 "chapter_no": ch_no,
                 "prose_chars": int(ch.get("prose_chars") or 0),
+                # V3.7：新增字数观测列（与 m1_long_run 采集结构对齐）
+                "word_status": ch.get("word_status") or "unknown",
+                "deviation_pct": float(ch.get("deviation_pct") or 0.0),
                 "prompt_tokens": int(metrics.get("prompt_tokens") or 0),
                 "completion_tokens": int(metrics.get("completion_tokens") or 0),
                 "total_tokens": int(metrics.get("total_tokens") or prog_entry.get("total_tokens") or 0),
@@ -383,6 +386,9 @@ def section_per_chapter(rows: list[dict[str, Any]]) -> str:
     cols = [
         ("章号", "{no}"),
         ("字数", "{pc}"),
+        # V3.7：新增字数状态/偏离度列
+        ("status", "{ws}"),
+        ("dev%", "{dv}"),
         ("total_tokens (p/c)", "{tt} ({p}/{c})"),
         ("调用数", "{cc}"),
         ("重试", "{rs}"),
@@ -397,7 +403,7 @@ def section_per_chapter(rows: list[dict[str, Any]]) -> str:
         ("sv", "{sv}"),
         ("快照字节", "{sb}"),
     ]
-    align = [":---", "---:", ":---"] + ["---:"] * 12
+    align = [":---", "---:", ":---", ":---"] + [":---"] + ["---:"] * 12
     head_cells = [c[0] for c in cols]
     sep_cells = align
     header_line = "| " + " | ".join(head_cells) + " |"
@@ -409,6 +415,8 @@ def section_per_chapter(rows: list[dict[str, Any]]) -> str:
                 c[1].format(
                     no=r["chapter_no"],
                     pc=_fmt_int(r["prose_chars"]),
+                    ws=r.get("word_status") or "-",
+                    dv=f"{float(r.get('deviation_pct') or 0.0):+.1f}",
                     tt=_fmt_int(r["total_tokens"]),
                     p=_fmt_int(r["prompt_tokens"]),
                     c=_fmt_int(r["completion_tokens"]),
@@ -437,7 +445,7 @@ def section_per_chapter(rows: list[dict[str, Any]]) -> str:
     ]
     for r in rows:
         out.append(fmt_row(r))
-    out += ["", "（sv = state_version；p/c = prompt/completion）", ""]
+    out += ["", "（sv = state_version；p/c = prompt/completion；dev% = 偏离 target 百分比；status = under/in_band/over）", ""]
     return "\n".join(out)
 
 

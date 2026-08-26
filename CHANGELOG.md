@@ -5,7 +5,45 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
-## [3.6.0] - 2026-08-27
+## [3.8.0] - 2026-08-27
+
+### Fixed（V3.8「配置参数透传修复 + 思考模式灰度定稿」）
+- **ModelRouter.call_with_fallback 配置参数丢失 bug（潜伏缺陷）**：`model_configs.params_json` 中除 `base_url/timeout_s/api_key` 外的所有键（`thinking`/`service_tier`/`temperature` 等）此前从未透传到上游请求体——配置写了 `thinking:disabled` 与 `service_tier:priority` 实际从未生效。现按行解析非构造键并入请求体，调用方显式 params 同名覆盖。`resolve()` 判定无需修（无生产调用方）。
+
+### Added
+- 思考模式灰度定稿（证据驱动，三章实测）：`reasoning`(director/critic) 与 `light`(observer 双腿+summarizer) 配置 `{"thinking":{"type":"disabled"}}`；`creative_writing`(writer) 保持思考开启。
+- provider 原始响应采样开关（V3.7 引入）用于本版取证：completion 字符的 **78%~94% 为 `<think>` 思考串**。
+
+### 实测对比（m1 ch069/ch070/ch071）
+
+| 阶段 | 思考开 | 禁思考 |
+|---|---|---|
+| observer 双腿(合计 wall) | ~185s | **13~39s**（腿间缓存命中达 98%） |
+| summarizer | 15~24s | **3~4s** |
+| director plan | 104~224s | **22s** |
+| writer | 125~135s（字数带内 +8.8%） | 10s 但字数 -40% 跌破 band |
+
+单章全链：V3.6 基线 658~866s → 仅 light 禁思考 320s → 全禁 63s（writer 破带）→ **定稿组合 198s 且 prose 在带内、quality=82**。
+
+### Known Issues
+- 全禁思考下 writer 产出偏短（实测 -40% 跌破 band 下限）；若未来要全速模式需配套 revision 重写闭环。
+- ch069 首次 commit 三连秒失败为本次配置误操作（light 行 base_url 被整串替换）所致现场，已从备份恢复；相关 error 记录留 DB 作审计。
+
+## [3.7.0] - 2026-08-27
+
+### Added（V3.7「字数带硬约束与口径统一」）
+- **权威字数模块** `packages/core/quality/wordcount.py`：`visible_chars`（去空白口径）/ `word_band`（[0.7,1.3] 带 + 1200 下限保护）/ `classify_prose_length`。
+- writer payload `chapter.word_band` 注入（置于 chapter_id 之后零破坏缓存键序，paged 模式原样继承）；review `_basic_checks_node` 升格产出 `W-LEN-DEVIATION`：>±15% warning、>±30% 进 errors（报告型：随 pause payload 展示），前端 ApprovalCard 红色渲染 errors 区块；m1 metrics 新增 `word_status`/`deviation_pct`。
+- provider 原始响应采样开关 `NOVELOS_DEBUG_PROVIDER_DUMP_DIR`（默认关；保留最新 10 个文件、单文件 2MB 截断、异常不阻主流程）。
+- `scripts/db_maintenance.py`：stale RUNNING 清理工具（list / fix --older-than-minutes N [--apply]，dry-run 默认，幂等）。（提前交付自迭代计划 V3.9 C1）
+- 迭代计划文档 docs/roadmap/v3.7-v3.9-迭代计划.md（含分段写作实验否决记录与候选项闭环映射表）。
+
+### Changed
+- 全仓 prose 字数口径统一：signing_check/_count_chars、arc/service、m1_long_run._latest_prose_chars、chapter_review 四处收敛引用 wordcount.visible_chars。
+
+### Fixed
+- word_band 低目标 floor 抬升导致 low>high 倒挂：high 钳制 `max(high, low)` 并锚定边界测试（恰 ±15%/±30% 判定方向用例固定）。
+
 
 ### Added（V3.6「流式根治挂起 + 前缀缓存重排 + commit 三路并发」）
 - **OpenAI 兼容 Provider 流式化**：`complete()` 改 `client.stream` + SSE 逐行解析（`data: {...}` / `[DONE]`），并加 `time.monotonic()` 总时长硬顶 deadline——根治非流式下整连接挂起而 read timeout（字节间隔语义）不生效的问题。`health_check` 保持非流式。

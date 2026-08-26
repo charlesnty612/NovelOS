@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from packages.core.db import get_connection
 from packages.core.ids import now_iso
+from packages.core.quality.wordcount import visible_chars
 from packages.domain.chapter.service import ChapterService
 from packages.domain.project.service import ProjectService
 
@@ -136,8 +137,8 @@ def run_signing_check(db_path: str | "Path", project_id: str) -> dict[str, Any]:
         cid = ch.get("chapter_id")
         text = _fetch_latest_draft_content(db_path, cid) if cid else ""
         chapters_payload.append({"number": ch.get("number"), "text": text})
-        # 总字数按非空白字符计，与 checks._count_chars 对齐
-        total_chars += len("".join(text.split()))
+        # 总字数按非空白字符计，与 checks._count_chars 对齐（V3.7：复用 wordcount.visible_chars）
+        total_chars += visible_chars(text)
 
     protagonist_names = _fetch_protagonist_names(db_path, project_id)
 

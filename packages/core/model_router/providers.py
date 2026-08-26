@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from collections.abc import Callable, Sequence
@@ -33,6 +34,89 @@ from typing import Any
 import httpx
 
 from .exceptions import ProviderError
+
+_LOG = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# V3.7 诊断特性：OpenAI 兼容 Provider 原始响应采样落盘（env 门控，默认关）
+# ---------------------------------------------------------------------------
+# 生产排障专用：当 ``NOVELOS_DEBUG_PROVIDER_DUMP_DIR`` 被设置时，每次成功的 OpenAI
+# 兼容 Provider 调用都会把 ``text`` 全文 + usage JSON 写到该目录下一个独立文件，
+# 文件名带时间戳与 completion_tokens。默认关闭（env 不设 → 零行为变化）。
+# 仅在 ``OpenAICompatibleProvider.complete()`` 成功 return 前调用；失败路径不采样。
+
+_DEBUG_DUMP_ENV = "NOVELOS_DEBUG_PROVIDER_DUMP_DIR"
+"""环境变量名：设置后开启原始响应采样落盘；未设置或为空字符串 → 完全 no-op。"""
+
+_DEBUG_DUMP_KEEP = 10
+"""同一目录下，仅保留最新 N 个 dump 文件；超出按 mtime ASC 排序删除旧文件。"""
+
+_DEBUG_DUMP_MAX_BYTES = 2 * 1024 * 1024
+"""单文件最大字节数；超过则只写入前 N 字节并在尾部追加 ``\\n\\n[TRUNCATED]``。"""
+
+
+def _dump_debug_response(model: str, usage: dict, text: str) -> None:
+    """OpenAI 兼容 Provider 原始响应落盘（诊断特性，仅 env 开启时执行）。
+
+    参数：
+    - ``model``：本次调用的模型名（用于文件名）。
+    - ``usage``：解析后的 usage dict（OpenAI 标准 usage 字段）。
+    - ``text``：累积的助手回复全文。
+
+    文件命名：``{YYYYmmdd_HHMMSS}_{model}_comp{completion_tokens}.txt``。
+    文件内容：``text`` 全文 + ``\\n\\n===== USAGE =====\\n`` + ``json.dumps(usage)``。
+
+    异常一律吞掉（不影响主流程），并通过 :mod:`logging` 记录 warning 便于排查。
+    """
+    dump_dir = os.environ.get(_DEBUG_DUMP_ENV)
+    if not dump_dir:
+        # 默认路径：零开销，第一时间 return
+        return
+    try:
+        os.makedirs(dump_dir, exist_ok=True)
+        completion_tokens = 0
+        try:
+            completion_tokens = int((usage or {}).get("completion") or 0)
+        except (TypeError, ValueError):
+            completion_tokens = 0
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        safe_model = (model or "unknown").replace(os.sep, "_").replace("/", "_")
+        filename = f"{ts}_{safe_model}_comp{completion_tokens}.txt"
+        target = os.path.join(dump_dir, filename)
+        # 单文件体积截断：超过 _DEBUG_DUMP_MAX_BYTES 只写前 N 字节并加尾部标注
+        if isinstance(text, str) and len(text.encode("utf-8")) > _DEBUG_DUMP_MAX_BYTES:
+            truncated = text.encode("utf-8")[:_DEBUG_DUMP_MAX_BYTES].decode(
+                "utf-8", errors="ignore"
+            )
+            payload = truncated + "\n\n[TRUNCATED]"
+        else:
+            payload = text if isinstance(text, str) else (text or "")
+        usage_json = json.dumps(usage or {}, ensure_ascii=False)
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.write("\n\n===== USAGE =====\n")
+            fh.write(usage_json)
+        # 轮转：仅保留最新 _DEBUG_DUMP_KEEP 个文件（按 mtime ASC 删旧）
+        try:
+            entries = [
+                (os.path.join(dump_dir, name), os.path.getmtime(os.path.join(dump_dir, name)))
+                for name in os.listdir(dump_dir)
+                if os.path.isfile(os.path.join(dump_dir, name))
+            ]
+            if len(entries) > _DEBUG_DUMP_KEEP:
+                entries.sort(key=lambda item: item[1])  # 旧 → 新
+                for old_path, _ in entries[: len(entries) - _DEBUG_DUMP_KEEP]:
+                    try:
+                        os.remove(old_path)
+                    except OSError:
+                        # 单文件删除失败不影响其他清理
+                        pass
+        except OSError:
+            # listdir / getmtime 失败不致命，跳过轮转
+            pass
+    except Exception as exc:  # noqa: BLE001
+        # 任何异常（权限/磁盘/编码）都吞掉；不影响主流程
+        _LOG.warning("debug dump failed (env=%s): %s", _DEBUG_DUMP_ENV, exc)
 
 # ---------------------------------------------------------------------------
 # 类型别名
@@ -322,6 +406,9 @@ class OpenAICompatibleProvider:
                     cached_tokens_int = None
                 if cached_tokens_int is not None and cached_tokens_int > 0:
                     usage_out["cached_tokens"] = cached_tokens_int
+
+        # V3.7 诊断：env 开启时把原始 text + usage 落盘（仅成功路径；失败路径不采样）
+        _dump_debug_response(self.model, usage_out, text)
 
         return {
             "text": text,

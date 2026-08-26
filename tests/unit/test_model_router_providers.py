@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -521,6 +522,106 @@ def test_mock_health_check_always_ok():
     assert r["ok"] is True
     assert r["status_code"] == 200
     assert r["latency_ms"] == 0
+
+
+# ===========================================================================
+# 3.5 V3.7 诊断特性：OpenAI 兼容 Provider 原始响应采样落盘（env 门控）
+# ===========================================================================
+
+
+def _openai_provider_with_sse_text(text: str, usage: dict | None = None):
+    """构造一个带 SSE 响应 mock 的 OpenAICompatibleProvider 实例。
+
+    仅用于 V3.7 debug dump 测试；沿用 ``_sse_response`` 的构造风格。
+    """
+    from packages.core.model_router.providers import OpenAICompatibleProvider
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        return _sse_response(text, usage=usage)
+
+    transport = httpx.MockTransport(_handler)
+    return OpenAICompatibleProvider(
+        base_url="https://api.example.com/v1",
+        api_key="sk",
+        model="gpt-4o-mini",
+        client=httpx.Client(transport=transport),
+    )
+
+
+def test_openai_debug_dump_writes_when_env_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """env 设置时：complete() 成功后目录出现 1 个 txt，内容含正文与 USAGE 段。"""
+    monkeypatch.setenv("NOVELOS_DEBUG_PROVIDER_DUMP_DIR", str(tmp_path))
+    provider = _openai_provider_with_sse_text(
+        "hello world from minmax",
+        usage={"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    )
+    result = provider.complete([{"role": "user", "content": "hi"}])
+    assert result["text"] == "hello world from minmax"
+
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1, f"expected exactly 1 dump file, got {files}"
+    dump = files[0]
+    # 文件名带时间戳 + model + completion_tokens
+    assert "_gpt-4o-mini_comp7.txt" in dump.name
+    content = dump.read_text(encoding="utf-8")
+    assert "hello world from minmax" in content
+    assert "===== USAGE =====" in content
+    assert '"completion": 7' in content
+    assert '"prompt": 11' in content
+
+
+def test_openai_debug_dump_noop_when_env_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """env 未设置：complete() 成功后不创建目录/文件（默认路径零行为变化）。"""
+    monkeypatch.delenv("NOVELOS_DEBUG_PROVIDER_DUMP_DIR", raising=False)
+    # 用一个不存在路径的 tmp 子目录，确保「未创建」这一断言有意义
+    target = tmp_path / "should_not_exist"
+    assert not target.exists()
+
+    monkeypatch.setenv("NOVELOS_DEBUG_PROVIDER_DUMP_DIR", "")  # 空字符串也视作关闭
+    provider = _openai_provider_with_sse_text("anything")
+    provider.complete([{"role": "user", "content": "hi"}])
+
+    # env 为空串 → 也不落盘
+    assert not target.exists()
+    # 完全 no-op 时 tmp_path 下也不应有任何 dump 文件
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_openai_debug_dump_keeps_only_latest_10(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """轮转：预放 10 个假旧文件再调用 complete，断言目录总数仍是 10（旧的被裁掉）。"""
+    monkeypatch.setenv("NOVELOS_DEBUG_PROVIDER_DUMP_DIR", str(tmp_path))
+    # 预放 10 个 mtime 较旧的假 dump 文件（mtime 设为递增以模拟「历史文件」）
+    import time as _time
+
+    base_ts = _time.time() - 1000
+    for i in range(10):
+        fake = tmp_path / f"20200101_0000{i:02d}_gpt-4o-mini_comp{i}.txt"
+        fake.write_text(f"old dump {i}", encoding="utf-8")
+        # 显式设 mtime 让排序稳定（旧 → 新）
+        os.utime(fake, (base_ts + i, base_ts + i))
+    assert len(list(tmp_path.iterdir())) == 10
+
+    provider = _openai_provider_with_sse_text(
+        "fresh response",
+        usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+    )
+    provider.complete([{"role": "user", "content": "hi"}])
+
+    # 新文件写入后，轮转触发：旧文件按 mtime 删到只剩 10 个
+    files = sorted(tmp_path.iterdir(), key=lambda p: p.stat().st_mtime)
+    assert len(files) == 10, (
+        f"expected 10 files after rotation, got {len(files)}: {[f.name for f in files]}"
+    )
+    # 最旧的一个假文件应已被裁掉；最新的应是本次 fresh dump
+    newest = files[-1]
+    assert "fresh response" in newest.read_text(encoding="utf-8")
+    assert "===== USAGE =====" in newest.read_text(encoding="utf-8")
 
 
 # ===========================================================================

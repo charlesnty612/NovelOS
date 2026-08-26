@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 
 from packages.core.db import get_connection
 from packages.core.ids import now_iso
+from packages.core.quality.wordcount import visible_chars
 from packages.domain.project.service import ProjectService
 
 if TYPE_CHECKING:
@@ -266,9 +267,9 @@ def _load_latest_draft_chars_per_chapter(
         row = conn.execute(_LATEST_DRAFT_SQL, (cid,)).fetchone()
         if row is None:
             continue
-        text = row["content"] or ""
-        # 与 signing_check._count_chars 对齐：去空白后取长度。
-        out[cid] = len("".join(text.split()))
+        # V3.7：委托到 packages.core.quality.wordcount.visible_chars，
+        # 与 signing_check._count_chars 保持同一口径（去空白后字符数）。
+        out[cid] = visible_chars(row["content"] or "")
     return out
 
 

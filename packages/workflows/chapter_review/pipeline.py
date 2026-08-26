@@ -26,6 +26,7 @@ from typing import Any
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection
 from packages.core.ids import now_iso
+from packages.core.quality.wordcount import classify_prose_length
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
 
 DEFAULT_FORBIDDEN_WORDS = ["仿佛", "如同", "本章目标"]
@@ -114,16 +115,41 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"chapter {chapter_id!r} has no draft; run chapter-write first")
 
     prose = draft_row["content"] or ""
-    word_count = len(prose)
-    deviation = (word_count - target) / target if target > 0 else 0
-    within_range = abs(deviation) <= 0.15
+    # V3.7：字数带硬约束 —— ±15% 升 warning（带 rule_id），超 ±30% 追加到 errors。
+    # classify 既出 visible_chars（word_count）又出 band / status / deviation_pct，避免重复调用。
+    classify = classify_prose_length(prose, target)
+    word_count = classify["visible_chars"]
+    deviation_pct = classify["deviation_pct"]
+    abs_dev_pct = abs(deviation_pct)
+    band_low, band_high = classify["band_low"], classify["band_high"]
+    within_range = abs_dev_pct <= 15.0
+    over_band = abs_dev_pct > 30.0
 
     forbidden_hits = [w for w in DEFAULT_FORBIDDEN_WORDS if w in prose]
     warnings: list[str] = []
+    errors: list[dict[str, Any]] = []
     if not within_range:
         warnings.append(
-            f"字数 {word_count} 偏离 target {target} 达 {deviation:.1%}（阈值 ±15%）"
+            f"[W-LEN-DEVIATION] visible={word_count} target={target} "
+            f"deviation={deviation_pct:+.1f}% (band {band_low}~{band_high})"
         )
+    if over_band:
+        # 超 ±30%：error 级条目，供 author_review / 前端 reviewer UI 消费
+        # （与 signing_check/quality_gate 的阻断语义对齐——errors 不阻断 run，但
+        # 在 review UI 上以「严重」色渲染，作者可见）。
+        errors.append({
+            "rule_id": "W-LEN-DEVIATION",
+            "severity": "error",
+            "message": (
+                f"[W-LEN-DEVIATION] visible={word_count} target={target} "
+                f"deviation={deviation_pct:+.1f}% exceeds band {band_low}~{band_high} "
+                f"(±30% 阈值)"
+            ),
+            "word_band": {"low": band_low, "high": band_high},
+            "visible_chars": word_count,
+            "target": target,
+            "deviation_pct": deviation_pct,
+        })
     if forbidden_hits:
         warnings.append(f"禁用词命中：{','.join(forbidden_hits)}")
 
@@ -132,9 +158,12 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "word_count": word_count,
         "target_word_count": target,
         "within_range": within_range,
-        "deviation": round(deviation, 4),
+        "deviation": round(deviation_pct / 100, 4),
+        "deviation_pct": deviation_pct,
+        "word_band": {"low": band_low, "high": band_high},
         "forbidden_word_hits": forbidden_hits,
         "warnings": warnings,
+        "errors": errors,
     }
     return {"review_report": report}
 

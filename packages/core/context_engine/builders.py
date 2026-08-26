@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from packages.core.db import get_connection
+from packages.core.quality.wordcount import word_band
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -1452,6 +1453,8 @@ def _build_writer_input_uncached(
         db_path, project_id, chapter_id, director_plan,
     )
 
+    # V3.7：writer payload 注入字数带（不含 floor，prompt Rule 15 已静态声明 1200 下限）
+    _wb_low, _wb_high = word_band(target_word_count)
     return {
         "agent": "writer",
         "prompt_version": "writer:v1",
@@ -1465,6 +1468,10 @@ def _build_writer_input_uncached(
             "target_word_count": target_word_count,
             "expected_role": director_plan.get("expected_role") or "setup",
             "chapter_id": chapter_id,
+            "word_band": {
+                "low": _wb_low,
+                "high": _wb_high,
+            },
         },
         "director_plan": {
             "chapter_goal": director_plan.get("chapter_goal"),

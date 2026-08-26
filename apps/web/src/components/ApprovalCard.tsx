@@ -43,13 +43,23 @@ export interface ApprovalCardProps {
   onApprove: (approved: boolean, opts?: ApproveOptions) => Promise<void> | void;
 }
 
+interface ReviewReportErrorItem {
+  rule_id?: string;
+  severity?: string;
+  message?: string;
+}
+
 interface ReviewReportShape {
   word_count?: number;
   target_word_count?: number;
   within_range?: boolean;
   deviation?: number;
+  deviation_pct?: number;
+  word_band?: { low?: number; high?: number };
   forbidden_word_hits?: string[];
   warnings?: string[];
+  /** V3.7：字数严重级条目（>±30% 外缘），报告型展示给作者，不阻断 run。 */
+  errors?: ReviewReportErrorItem[];
 }
 
 const CRITIC_CATEGORY_LABEL: Record<CriticIssueCategory, string> = {
@@ -249,6 +259,39 @@ function ReviewReportSummary({
           <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
             {(report['warnings'] as string[]).map((w, i) => (
               <li key={i}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {Array.isArray(report['errors']) &&
+      (report['errors'] as ReviewReportErrorItem[]).length > 0 ? (
+        <div
+          style={{
+            marginTop: 6,
+            padding: '6px 8px',
+            borderLeft: '3px solid var(--color-danger, #c62828)',
+            background: '#fff5f5',
+            borderRadius: 4,
+          }}
+          data-testid="review-report-errors"
+        >
+          <div
+            className="small"
+            style={{ color: 'var(--color-danger, #c62828)', fontWeight: 600 }}
+          >
+            严重（{(report['errors'] as ReviewReportErrorItem[]).length}）
+          </div>
+          <ul
+            style={{
+              margin: '4px 0 0 18px',
+              padding: 0,
+              color: 'var(--color-danger, #c62828)',
+            }}
+          >
+            {(report['errors'] as ReviewReportErrorItem[]).map((e, i) => (
+              <li key={`err-${i}`} data-rule-id={e.rule_id ?? ''}>
+                {e.message ?? String(e)}
+              </li>
             ))}
           </ul>
         </div>

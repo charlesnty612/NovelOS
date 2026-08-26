@@ -609,3 +609,64 @@ def test_full_and_paged_use_separate_cache_entries(tmp_path: Path):
     assert "context_mode" not in full_again
     paged_again = build_writer_input(db_path, cid, _SCENE_PLAN, context_mode="paged")
     assert paged_again["context_mode"] == "paged"
+
+
+# ---------------------------------------------------------------------------
+# V3.7 字数带硬约束：writer payload chapter 子对象注入 word_band
+# ---------------------------------------------------------------------------
+
+
+def test_chapter_word_band_default_target(tmp_path: Path):
+    """默认 target=2200 时，chapter.word_band.low/high=1870/2530，键序 word_band 在末尾。"""
+    _cache_reset()
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    _insert_character_with_state(db_path, pid, "char_alice", "Alice")
+    _insert_commit_with_payload(
+        db_path, pid, cid, {"character_changes": []}, version=1,
+    )
+    payload = build_writer_input(db_path, cid, _SCENE_PLAN, context_mode="full")
+    ch = payload["chapter"]
+    assert "word_band" in ch
+    assert ch["word_band"] == {"low": 1870, "high": 2530}
+    # 键序：word_band 必须位于 chapter 子对象末尾（chapter_id 之后）
+    keys = list(ch.keys())
+    assert keys[-1] == "word_band"
+    assert keys.index("chapter_id") < keys.index("word_band")
+
+
+def test_chapter_word_band_explicit_target(tmp_path: Path):
+    """显式 target_word_count=1000 时，低带被 floor=1200 保护到 1200；
+    V3.7：floor 单调性保护，high=raw_high=1150 < low=1200 → 同步抬到 1200。
+    """
+    _cache_reset()
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    _insert_character_with_state(db_path, pid, "char_alice", "Alice")
+    _insert_commit_with_payload(
+        db_path, pid, cid, {"character_changes": []}, version=1,
+    )
+    payload = build_writer_input(
+        db_path, cid, _SCENE_PLAN, target_word_count=1000, context_mode="full",
+    )
+    ch = payload["chapter"]
+    assert ch["target_word_count"] == 1000
+    assert ch["word_band"] == {"low": 1200, "high": 1200}
+
+
+def test_chapter_word_band_paged_inherits(tmp_path: Path):
+    """paged 模式：chapter 子对象（含 word_band）原样继承，未被裁剪。"""
+    _cache_reset()
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    _insert_character_with_state(db_path, pid, "char_alice", "Alice")
+    _insert_commit_with_payload(
+        db_path, pid, cid, {"character_changes": []}, version=1,
+    )
+    payload = build_writer_input(db_path, cid, _SCENE_PLAN, context_mode="paged")
+    ch = payload["chapter"]
+    assert "word_band" in ch
+    assert ch["word_band"] == {"low": 1870, "high": 2530}

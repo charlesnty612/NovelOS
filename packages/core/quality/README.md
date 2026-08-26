@@ -384,3 +384,49 @@ NovelOS 是**本地单机写作工具**，既不是「向公众提供生成式�
 用 ``re.fullmatch(r"[A-Za-z0-9_\-]+", project_id)`` 校验：不匹配（含 ``..``/``/`` 等）
 直接返回空列表，**不抛错**——保持「无参照目录」既有容错语义同时关闭路径穿越面
 （安全审计 P2-2；当前调用链不可达但属公共函数防御缺口）。
+
+---
+
+## 13. 字数度量与字数带（V3.7）
+
+新增模块 :mod:`packages.core.quality.wordcount` 提供正文字数权威口径与字数带计算，
+供 writer payload 注入 / review 校验 / signing_check / arc metrics 等全仓共用，
+避免口径漂移。
+
+### 13.1 公开 API
+
+- :func:`visible_chars(text) -> int` —— 去除所有空白字符后的字符数；
+  ``text=None`` / 空串 → 0。与 :func:`packages.core.signing_check.checks._count_chars`
+  同式（``len("".join(text.split()))``），全仓统一引用此处。
+- :func:`word_band(target, *, low_ratio=0.85, high_ratio=1.15, floor=1200) -> (low, high)`
+  —— 返回字数带（int, int）。低带受 :data:`_MIN_BAND_FLOOR` 保护（writer 纪律 Rule 15：
+  计划低于 1200 字时以 1200 为下限）。``target<=0`` 返回 ``(floor, floor)``。
+- :func:`classify_prose_length(prose, target, **kw) -> dict` —— 一字数三态分类；
+  返回字段：``visible_chars`` / ``target`` / ``band_low`` / ``band_high`` /
+  ``deviation_pct``（保留 1 位小数）/ ``status``（``under`` | ``in_band`` | ``over``）。
+
+### 13.2 阈值常量
+
+| 常量 | 值 | 说明 |
+|---|---|---|
+| `_MIN_BAND_FLOOR` | 1200 | band 低带保护下限（writer 纪律 Rule 15） |
+| `_WARNING_RATIO` | 0.15 | 偏离 target 比例超过此值 ⇒ review 升 warning |
+| `_ERROR_RATIO` | 0.30 | 偏离 target 比例超过此值 ⇒ review 升 error |
+
+阈值走 default 参数注入；如需项目级覆盖，传 ``low_ratio`` / ``high_ratio`` / ``floor`` 即可。
+
+### 13.3 集成位置
+
+- writer payload：``packages.core.context_engine.builders.build_writer_input`` 在
+  ``chapter`` 子对象末尾注入 ``word_band: {low, high}``；prompt Rule 15 已静态声明
+  1200 下限，故 payload 不再带 floor。
+- review 校验：``packages.workflows.chapter_review.pipeline._basic_checks_node`` 改用
+  :func:`classify_prose_length`，warning 升级带 ``rule_id`` (``W-LEN-DEVIATION``)，
+  超 ±30% 追加到 review_report 的 ``errors`` 字段（新建字段，供下游 _author_review
+  / mark_reviewed 消费）。
+- signing_check：``packages.core.signing_check.checks._count_chars`` 单行委托到
+  :func:`visible_chars`，函数名保留。
+- arc metrics：``packages.core.arc.service._load_latest_draft_chars_per_chapter``
+  内部计数改为调用 :func:`visible_chars`。
+- m1 观测：``scripts/m1_long_run.py`` 采集结构新增 ``word_status`` / ``deviation_pct``，
+  展示同步加列。
