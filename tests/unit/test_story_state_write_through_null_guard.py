@@ -20,6 +20,8 @@
 3. ``new_events[].location`` 不是已登记的 ``location_id`` 时，write_through 守卫置 NULL、
    不抛错（plot_events.location_id 外键不破坏）；
 4. ``new_events[].location`` 为合法 ``location_id`` 时正常写入（不被守卫误伤）。
+5. V3.1 P1-1.1：``new_events[].description`` 经 write_through 落库到 ``plot_events.description``；
+   缺失 description 字段时落库为 NULL（迁移 0013 配套用例）。
 
 测试位置：``tests/unit/test_story_state_write_through_null_guard.py``。
 - 该路径原先无任何专属测试文件，按任务书要求新建于此；
@@ -566,6 +568,108 @@ def test_write_through_new_event_valid_location_writes_normally(tmp_path: Path):
                 assert row is not None, "evt_goodloc 应落行"
                 assert row["location_id"] == "loc_cave", (
                     f"合法 location_id 应被写入，实际 {row['location_id']!r}"
+                )
+            finally:
+                conn.close()
+
+    asyncio.run(run())
+
+
+# ----------------------------------------------------------------- 5. new_events.description 写穿
+
+
+def test_write_through_new_event_description_persists(tmp_path: Path):
+    """V3.1 P1-1.1：observer 在 ``new_events[].description`` 给出的描述经
+    write_through 落库到 ``plot_events.description``（迁移 0013）。
+
+    同时验证缺失 description 字段时落库为 NULL（与 Schema ``description:
+    string|null`` 对齐；旧行迁移后保持 NULL）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            chap = await _make_chapter(app, pid)
+
+            # init genesis（v1）
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap}
+            )
+            assert r.status_code == 201, r.text
+
+            delta_id = "dlt_ne_desc_persist"
+            delta = {
+                **_make_meta(delta_id, chap, 1),
+                "character_changes": [],
+                "world_changes": [],
+                "relationship_changes": [],
+                "new_events": [
+                    {
+                        "change_id": "ev:01HDESC01",
+                        "op": "add",
+                        "target_id": "evt_with_desc",
+                        "event_id": "evt_with_desc",
+                        "type": "encounter",
+                        "cause": [],
+                        "effects": [],
+                        "participants": ["char_alice"],
+                        "time": {"timeline_day": 1, "in_story_date": None},
+                        # observer 给出的描述
+                        "description": "玉惜轩夜访，林渊未答关键一问。",
+                        "confidence": 0.9,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    },
+                    {
+                        "change_id": "ev:01HDESC02",
+                        "op": "add",
+                        "target_id": "evt_without_desc",
+                        "event_id": "evt_without_desc",
+                        "type": "transition",
+                        "cause": [],
+                        "effects": [],
+                        "participants": ["char_alice"],
+                        "time": {"timeline_day": 1, "in_story_date": None},
+                        # 无 description 字段
+                        "confidence": 0.7,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    },
+                ],
+                "resolved_hooks": [],
+                "new_hooks": [],
+                "debt_changes": [],
+            }
+
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json=delta)
+            assert r.status_code == 201, r.text
+            assert r.json()["status"] == "validated"
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/commits",
+                json={
+                    "delta_id": delta_id,
+                    "author_approval": {"approver": "user:local:test", "approved": False},
+                    "workflow_run_id": f"wfr_{delta_id}",
+                },
+            )
+            assert r.status_code == 201, r.text
+
+            # 断言：两条都落行，description 列分别保留观察者描述 / NULL
+            conn = sqlite3.connect(str(tmp_path / "novelos.db"))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT event_id, description FROM plot_events ORDER BY event_id"
+                ).fetchall()
+                assert len(rows) == 2, f"应有 2 条 plot_events，实际 {len(rows)}"
+                by_id = {r["event_id"]: r["description"] for r in rows}
+                assert by_id["evt_with_desc"] == "玉惜轩夜访，林渊未答关键一问。", (
+                    f"description 应随事件持久化, 实际 {by_id['evt_with_desc']!r}"
+                )
+                assert by_id["evt_without_desc"] is None, (
+                    f"缺失 description 应落库为 NULL, 实际 {by_id['evt_without_desc']!r}"
                 )
             finally:
                 conn.close()

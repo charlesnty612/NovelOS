@@ -33,6 +33,8 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     #   count_tables 口径排除 ``chapter_fts%`` 前缀 → 业务表仍 34，总表仍 35。
     # V3.1 P1-2：0012_judge_scores 仅 ALTER TABLE quality_reports 加 judge_json 列，
     #   不增表 → 业务表 34，总表 35。
+    # V3.1 P1-1.1：0013_plot_events_description 仅 ALTER TABLE plot_events 加 description
+    #   列，不增表 → 业务表 34，总表 35。
     assert result["tables"] == 35, f"expected 35 (34+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
@@ -58,12 +60,14 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     assert "0011_fts_index.sql" in result["applied"]
     # V3.1 P1-2：0012_judge_scores.sql（仅 ALTER TABLE 加 judge_json 列，不增表）
     assert "0012_judge_scores.sql" in result["applied"]
+    # V3.1 P1-1.1：0013_plot_events_description.sql（仅 ALTER TABLE 加 description 列，不增表）
+    assert "0013_plot_events_description.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     first = apply_migrations(db_path, MIGRATIONS_DIR)
-    # V3.1 P1-2：迁移目录下十二条脚本都应被首次应用
+    # V3.1 P1-1.1：迁移目录下十三条脚本都应被首次应用
     assert first["applied"] == [
         "0001_init.sql",
         "0002_drafts_unique.sql",
@@ -77,6 +81,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0010_trigger_keys.sql",
         "0011_fts_index.sql",
         "0012_judge_scores.sql",
+        "0013_plot_events_description.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -93,6 +98,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0010_trigger_keys.sql" in second["skipped"]
     assert "0011_fts_index.sql" in second["skipped"]
     assert "0012_judge_scores.sql" in second["skipped"]
+    assert "0013_plot_events_description.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -104,7 +110,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         rows = conn.execute("SELECT filename, applied_at FROM _migrations").fetchall()
     finally:
         conn.close()
-    # V3.1 P1-2：十二条迁移都应记录
+    # V3.1 P1-1.1：十三条迁移都应记录
     filenames = {r["filename"] for r in rows}
     assert filenames == {
         "0001_init.sql",
@@ -119,6 +125,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0010_trigger_keys.sql",
         "0011_fts_index.sql",
         "0012_judge_scores.sql",
+        "0013_plot_events_description.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -198,6 +205,30 @@ def test_0012_quality_reports_has_judge_json_column(tmp_path: Path):
     assert judge_col["type"] == "TEXT", judge_col
     assert judge_col["notnull"] == 0, judge_col
     assert judge_col["dflt_value"] is None, judge_col
+
+
+def test_0013_plot_events_has_description_column(tmp_path: Path):
+    """V3.1 P1-1.1：0013 给 plot_events 加 description TEXT（默认 NULL）。
+
+    observer 在 ``new_events[]`` 给出的 description 字段经 write_through 落库；
+    旧行迁移后保持 NULL（与 Schema ``description: string|null`` 对齐）。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        cols = conn.execute("PRAGMA table_info(plot_events)").fetchall()
+    finally:
+        conn.close()
+    col_names = {c["name"] for c in cols}
+    assert "description" in col_names, (
+        f"plot_events missing description after 0013; got={col_names}"
+    )
+    desc_col = next(c for c in cols if c["name"] == "description")
+    assert desc_col["type"] == "TEXT", desc_col
+    # 可空：observer 给出 None / 缺失时落库即为 NULL；旧行迁移后保持 NULL。
+    assert desc_col["notnull"] == 0, desc_col
+    assert desc_col["dflt_value"] is None, desc_col
 
 
 def test_projects_has_foreshadow_overdue_chapters_default(tmp_path: Path):

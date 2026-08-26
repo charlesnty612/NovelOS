@@ -133,10 +133,12 @@ def rebuild_snapshot_collections_from_db(
     - **plot_events 单独实现**:DB 侧 ``plot_events`` 表的列与 snapshot 侧
       ``events`` dict 的 value 形状不对齐——snapshot 的 value 是
       ``{type, participants, time, description}``(见 ``applier._apply_new_events``),
-      DB 列有 ``type / participants_json / time_json / cause_json / effects_json`` 等。
-      ``description`` 在 write_through 时未入库,因此重建后 description 必然为 None
-      ——这是 DB 权威语义下的正确表现(早期快照里残留的 description 视为一次性数据,
-      重建后即收敛到 DB-only 字段子集)。
+      DB 列有 ``type / participants_json / time_json / cause_json / effects_json /
+      description(V3.1 P1-1.1 迁移 0013 落地)`` 等。
+      ``description`` 自 V3.1 P1-1.1 起在 write_through 阶段下沉到 plot_events.description,
+      本函数 SELECT 时一并取回——重建后 ``events[eid].description`` 携带 observer 当时
+      给出的描述(旧行 description=NULL → None,与 Schema ``description: string|null``
+      对齐)。
     - 未知集合名静默跳过(防御:允许调用方传入 COLLECTIONS 子集做按需重建)。
     - 深拷贝 ``snapshot`` 起手,避免 mutate 调用方传入的原 dict。
 
@@ -199,22 +201,21 @@ def _load_plot_events_dict(conn: sqlite3.Connection, project_id: str) -> dict[st
             "type": ev.get("type"),
             "participants": ev.get("participants") or [],
             "time": ev.get("time") or {},
-            "description": ev.get("description"),  # write_through 不入库
+            "description": ev.get("description"),
         }
 
     本函数从 plot_events 行反推:
     - ``type`` → plot_events.type
     - ``participants`` → json.loads(participants_json)(空或解析失败 → [])
     - ``time`` → json.loads(time_json)(空或解析失败 → {})
-    - ``description`` → None(write_through 阶段丢弃,DB 权威下视为无信息;早期快照里的
-      description 在首次重建后即收敛)
+    - ``description`` → plot_events.description(V3.1 P1-1.1 迁移 0013 落地;旧行 NULL → None)
 
     返回字典的 key 集合即 plot_events.event_id 全集(去重,与 check_state_sync.COLLECTIONS
     对照口径一致)。
     """
     rows = conn.execute(
         """
-        SELECT event_id, type, participants_json, time_json
+        SELECT event_id, type, participants_json, time_json, description
         FROM plot_events
         WHERE project_id = ?
         ORDER BY event_id ASC
@@ -250,7 +251,12 @@ def _load_plot_events_dict(conn: sqlite3.Connection, project_id: str) -> dict[st
             "type": r["type"],
             "participants": participants,
             "time": time_obj,
-            "description": None,
+            # V3.1 P1-1.1：迁移 0013 给 plot_events 加了 description 列,此处
+            # 直接读取并落到 events[eid].description,重建后事件描述不再丢失。
+            # 旧行 description=NULL → events[eid].description=None(与 Schema
+            # ``description: string|null`` 一致);observer 本次 delta 给出描述
+            # 时,write_through 写穿,此处取回即"自愈"语义。
+            "description": r["description"],
         }
     return out
 

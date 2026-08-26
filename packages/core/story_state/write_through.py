@@ -421,8 +421,9 @@ def write_through(
                 """
                 INSERT INTO plot_events
                     (event_id, project_id, type, cause_json, effects_json, participants_json,
-                     location_id, time_json, status, introduced_chapter_id, visibility, who_knows)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recorded', ?, ?, ?)
+                     location_id, time_json, status, introduced_chapter_id, visibility,
+                     who_knows, description)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recorded', ?, ?, ?, ?)
                 """,
                 (
                     ev["event_id"],
@@ -436,6 +437,10 @@ def write_through(
                     chapter_id,
                     ev_vis,
                     ev_who,
+                    # V3.1 P1-1.1：observer 输出的 ``new_events[].description`` 下沉
+                    # 落库（迁移 0013 加 description TEXT 列）；可空——缺失/为 None
+                    # 视为「该事件未给出描述」，与 Schema ``description: string|null`` 对齐。
+                    ev.get("description"),
                 ),
             )
 

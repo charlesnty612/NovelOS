@@ -232,6 +232,11 @@ def test_drift_self_heal_plot_event(tmp_path: Path):
     模拟历史漂移场景(早期版本实测 loc_yonghe_wharf 在 DB 不在快照)——直接
     INSERT 一行 plot_events 制造漂移,然后跑 commit_delta。断言新快照 v2 自愈:
     ``ev_drift_test`` 必须出现在 snapshot.events 中,且 type 一致。
+
+    V3.1 P1-1.1：迁移 0013 给 plot_events 加了 description 列，本测试同时验证
+    description 经 DB 权威重建后保留——直接 SQL 写入时一并把 description 填好，
+    重建后 ``events[ev_drift_test].description`` 应为该值（替代早期"必为 None"断言，
+    该断言语义已被 V3.1 P1-1.1 推翻）。
     """
     app = _create_app(tmp_path)
 
@@ -249,6 +254,8 @@ def test_drift_self_heal_plot_event(tmp_path: Path):
 
             # 制造漂移:直接 SQL 写一行 plot_events,绕过 write_through。
             # 这是模拟"DB 已落行但 snapshot.events 没追上"的早期版本 bug。
+            # V3.1 P1-1.1：同时写入 description 字段,验证重建后该字段保留。
+            drift_desc = "苏婉清在玉惜轩夜访时第一次对林渊产生疑虑。"
             conn = _open_db(db_path)
             try:
                 conn.execute(
@@ -256,11 +263,11 @@ def test_drift_self_heal_plot_event(tmp_path: Path):
                     INSERT INTO plot_events
                         (event_id, project_id, type, cause_json, effects_json,
                          participants_json, location_id, time_json, status,
-                         introduced_chapter_id, visibility, who_knows)
+                         introduced_chapter_id, visibility, who_knows, description)
                     VALUES (?, ?, ?, '[]', '[]', '[]', NULL,
-                            '{"timeline_day":1}', 'recorded', ?, 'RESTRICTED', NULL)
+                            '{"timeline_day":1}', 'recorded', ?, 'RESTRICTED', NULL, ?)
                     """,
-                    ("ev_drift_test", pid, "encounter", chap),
+                    ("ev_drift_test", pid, "encounter", chap, drift_desc),
                 )
                 conn.commit()
             finally:
@@ -326,8 +333,11 @@ def test_drift_self_heal_plot_event(tmp_path: Path):
             )
             assert isinstance(ev_entry["participants"], list)
             assert isinstance(ev_entry["time"], dict)
-            # description 在 DB 权威下为 None(write_through 阶段丢失)
-            assert ev_entry["description"] is None
+            # V3.1 P1-1.1：description 经 DB 权威重建后保留（早期"必为 None"断言已被推翻）
+            assert ev_entry["description"] == drift_desc, (
+                f"V3.1 P1-1.1 漂移自愈 description 保留失败:"
+                f" 期望 {drift_desc!r}, 实际 {ev_entry['description']!r}"
+            )
 
             # 同时断言 hk_rebuild_marker 也被新流程正确写入
             assert any(h.get("hook_id") == "hk_rebuild_marker" for h in snap_v2["hooks"])
@@ -392,6 +402,9 @@ def test_snapshot_consistent_after_commit(tmp_path: Path):
                         "participants": ["char_cons_actor"],
                         "location": "loc_cons",
                         "time": {"timeline_day": 1, "in_story_date": None},
+                        # V3.1 P1-1.1：observer 给出的 description 应通过
+                        # write_through 落库,重建后保留。
+                        "description": "女主在一致测试点与 NPC 偶遇。",
                         "confidence": 0.8,
                         "evidence": _evidence(chap),
                         "risk_level": "LOW",
@@ -454,6 +467,8 @@ def test_snapshot_consistent_after_commit(tmp_path: Path):
             assert "dbt_cons" in {d["debt_id"] for d in snap["debts"]}
             assert "evt_cons" in snap["events"]
             assert snap["events"]["evt_cons"]["type"] == "encounter"
+            # V3.1 P1-1.1：observer 给出的 description 落库并经重建保留
+            assert snap["events"]["evt_cons"]["description"] == "女主在一致测试点与 NPC 偶遇。"
 
     asyncio.run(run())
 

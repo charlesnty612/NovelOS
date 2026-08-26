@@ -5,6 +5,14 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [3.2.1] - 2026-08-26
+
+### Fixed
+- **事件描述下沉 plot_events**（V3.1 P1-1.1 遗留）：新增迁移 0013 为 plot_events 加 description 列；write_through 写入 observer 的 `new_events[].description`；快照 DB 权威重建后事件描述不再丢失（漂移自愈测试同步更新语义）。
+
+### Known Issues
+- writer paged 模式的 LLM 输出质量 A/B 对比因 provider 长请求拥堵窗口暂缓，待稳定窗口补测（结构断言与体积量化已在 [3.2.0] 覆盖）。
+
 ## [3.2.0] - 2026-08-26
 
 ### Added（V3.2「写作现场完善与上下文分页」）

@@ -93,10 +93,10 @@ python -m packages.core.api.main
 ## 测试
 
 ```bash
-# 后端全量（当前基线 865 passed）
+# 后端全量（当前基线 851 passed, 1 skipped）
 python -m pytest tests/ -q
 
-# Golden 回归 eval（当前 1/1）
+# Golden 回归 eval（当前 3/3）
 python scripts/eval_regression.py
 
 # 端到端 HTTP smoke（真实起服务，临时库，跑完自清理）
