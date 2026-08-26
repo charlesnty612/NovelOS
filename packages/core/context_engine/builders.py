@@ -1567,30 +1567,300 @@ def build_writer_input(
     scene_plan: dict[str, Any],
     *,
     target_word_count: int = _DEFAULT_TARGET_WORD_COUNT,
+    context_mode: str = "full",
 ) -> dict[str, Any]:
     """组装 Writer 输入（agent-contracts §4.1 + Sprint 15/V1.3 author_style_samples
-    + V2.0 Wave B 任务二 条件触发动态注入 + V2.0 Wave C 任务一 召回 + 任务二 缓存）。
+    + V2.0 Wave B 任务二 条件触发动态注入 + V2.0 Wave C 任务一 召回 + 任务二 缓存
+    + V3.2 P2-1 分页模式 L0/L1/L2 裁剪）。
+
+    参数新增（V3.2 P2-1）：
+        context_mode：
+            - ``"full"``（默认行为零变化）：返回与历史版本逐字段一致的完整 payload。
+            - ``"paged"``：按 L0/L1/L2 分层裁剪——
+                * L0 常驻：``world_rules`` 全量（硬设定）；
+                * L1 近窗：``characters / locations / factions`` 按「最近
+                  ``keep_recent_commits``（默认 3）个 commit 触达的全量 + 其余仅
+                  id/name/status 摘要」裁剪；``hooks`` open 全量、resolved 仅留
+                  最近 5 条摘要（与 observer trimmed 同口径）；``plot_events`` 保持
+                  现有摘要链机制不变。
+                * payload 顶层追加 ``context_mode="paged"`` 与 ``context_paging_stats``
+                  裁剪统计。
 
     V2.0 Wave C P1-1 修复：缓存键追加 ``scene_fp``（scene_plan 序列化指纹）；
     不同 scene_plan 不再共享同一缓存条目——避免传不同 scene 时命中陈旧 writer 输入。
     不可序列化时 ``scene_fp == 'uncached'`` → 跳过缓存（直接走 uncached）。
+
+    V3.2 P2-1：缓存键追加第 6 元 ``mode``（``"full"`` / ``"paged"``）——
+    防止 paged/full 模式共享同一缓存条目而命中陈旧结构。
     """
+    if context_mode not in ("full", "paged"):
+        raise ValueError(
+            f"context_mode must be 'full' or 'paged', got {context_mode!r}"
+        )
     project_id = _peek_project_id_from_chapter(db_path, chapter_id)
     chapter_no, state_version = _peek_chapter_no_state_version(
         db_path, project_id, chapter_id,
     )
     scene_fp = _fingerprint_scene_plan(scene_plan)
-    cache_key = (project_id or "", state_version, chapter_no, "writer", scene_fp)
+    cache_key = (project_id or "", state_version, chapter_no, "writer", scene_fp, context_mode)
     if scene_fp != _FINGERPRINT_UNCACHED:
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
-    payload = _build_writer_input_uncached(
-        db_path, chapter_id, scene_plan, target_word_count,
-    )
+    if context_mode == "paged":
+        payload = _build_writer_input_paged(
+            db_path, chapter_id, scene_plan, target_word_count,
+        )
+    else:
+        payload = _build_writer_input_uncached(
+            db_path, chapter_id, scene_plan, target_word_count,
+        )
     if scene_fp != _FINGERPRINT_UNCACHED:
         _cache_put(cache_key, payload)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# V3.2 P2-1：writer 分页模式（L0 world_rules 常驻 + L1 实体近窗 + L2 章节专属）
+# ---------------------------------------------------------------------------
+# 设计要点：
+# - L0：world_rules 全量（PRD 视世界规则为硬设定；observer 亦保留全量）。
+# - L1：characters/locations/factions 按「最近 keep_recent_commits 个 commit 触达
+#   的全量 + 其余仅 {id, name, status/role} 摘要」裁剪；hooks open/active/escalated
+#   全量、resolved/abandoned 仅留最近 5 条摘要（与 observer 同口径）。
+# - L2：director_plan / scene_plan / recent_prose / author_style_samples /
+#   recalled_passages / retrieved_memory / knowledge_permissions / style_constraints
+#   保持不变（已是章节专属信号）。
+# - plot_events：保持现有摘要链机制不重复处理（V2.0 Wave C 任务二已注入；
+#   writer 当前不读 plot_graph_excerpt，留作未来扩展；不强行塞入）。
+# - 顶层追加 ``context_mode="paged"`` + ``context_paging_stats`` 体积量化与裁剪计数，
+#   与 observer 的 ``snapshot_trim_stats`` 命名对齐。
+# - 摘要构造器独立实现（不复用 observer 摘要构造器——observer 处理的是 snapshot
+#   Canonical State 结构，writer 处理的是 excerpt dict 集合；语义层差异显著，
+#   强行复用会让两组函数耦合到同一份输入契约，违背「摘要构造器按口径独立」原则）。
+# ---------------------------------------------------------------------------
+
+
+# writer 分页模式常量
+_WRITER_KEEP_RECENT_COMMITS = 3  # 默认扫描 commit 数；与 observer 对齐
+_WRITER_RESOLVED_HOOKS_KEEP = 5  # resolved hooks 保留上限；与 observer 对齐
+# writer 分页触达实体「未命中 touched」的极简摘要口径（与 observer 区分——observer
+# 处理 snapshot 内嵌结构，writer 处理 excerpt dict 列表）。
+_SUMMARY_KEYS_CHARACTER = ("character_id", "name", "role")
+_SUMMARY_KEYS_LOCATION = ("location_id", "name")
+_SUMMARY_KEYS_FACTION = ("faction_id", "name")
+_SUMMARY_KEYS_HOOK = ("hook_id", "name", "status")
+
+
+def _summarize_character_for_writer(char: dict[str, Any]) -> dict[str, Any]:
+    """writer 分页模式：未触达 character 的极简摘要（仅 id/name/role）。"""
+    return {
+        "character_id": char.get("character_id"),
+        "name": char.get("name"),
+        "role": char.get("role"),
+        "summary_marker": True,  # 标记摘要项，便于测试与未来 i18n
+    }
+
+
+def _summarize_location_for_writer(loc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "location_id": loc.get("location_id"),
+        "name": loc.get("name"),
+        "summary_marker": True,
+    }
+
+
+def _summarize_faction_for_writer(fac: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "faction_id": fac.get("faction_id"),
+        "name": fac.get("name"),
+        "summary_marker": True,
+    }
+
+
+def _summarize_hook_for_writer(h: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "hook_id": h.get("hook_id"),
+        "name": h.get("name"),
+        "status": h.get("status"),
+    }
+
+
+def _build_writer_input_paged(
+    db_path: str | Path,
+    chapter_id: str,
+    scene_plan: dict[str, Any],
+    target_word_count: int,
+    *,
+    keep_recent_commits: int = _WRITER_KEEP_RECENT_COMMITS,
+    resolved_history_keep: int = _WRITER_RESOLVED_HOOKS_KEEP,
+) -> dict[str, Any]:
+    """writer 分页模式装配（L0/L1/L2 裁剪）。
+
+    复用 :func:`_build_writer_input_uncached` 取得 full payload 后，按 touched 集合
+    与 hook 状态机裁剪 character/world_state_excerpts 与 hook_ledger_excerpt，
+    再注入 ``context_mode`` 与 ``context_paging_stats``。
+    """
+    full_payload = _build_writer_input_uncached(
+        db_path, chapter_id, scene_plan, target_word_count,
+    )
+    # 裁剪前快照：仅保留被裁剪的 3 个键，便于 stats 体积量化
+    # （深拷贝防止后续 in-place 修改干扰）。
+    _snapshot_pre_trim: dict[str, Any] = {
+        "character_state_excerpts": _safe_copy(full_payload.get("character_state_excerpts")),
+        "world_state_excerpts": _safe_copy(full_payload.get("world_state_excerpts")),
+        "hook_ledger_excerpt": _safe_copy(full_payload.get("hook_ledger_excerpt")),
+    }
+
+    # 1. 收集 touched 实体（DB IO 失败 → 空集合 → 全部走摘要路径，保安全）
+    project_id = _peek_project_id_from_chapter(db_path, chapter_id)
+    touched: dict[str, set[str]] | None = None
+    if project_id:
+        conn = get_connection(db_path)
+        try:
+            touched = _collect_touched_entity_ids(
+                conn, project_id, keep_recent_commits=keep_recent_commits,
+            )
+        except sqlite3.Error:
+            touched = None
+        finally:
+            conn.close()
+    touched = touched or {
+        "characters": set(),
+        "locations": set(),
+        "factions": set(),
+        "world_rules": set(),
+        "hooks": set(),
+        "debts": set(),
+        "events": set(),
+        "relationships": set(),
+        "relationship_keys": set(),
+    }
+    touched_chars = touched.get("characters", set())
+
+    stats: dict[str, Any] = {
+        "context_mode": "paged",
+        "keep_recent_commits": keep_recent_commits,
+        "resolved_history_keep": resolved_history_keep,
+        "characters_full": 0,
+        "characters_summary": 0,
+        "locations_full": 0,
+        "locations_summary": 0,
+        "factions_full": 0,
+        "factions_summary": 0,
+        "world_rules_full": 0,
+        "world_rules_summary": 0,
+        "hooks_open": 0,
+        "hooks_resolved_kept": 0,
+        "hooks_resolved_trimmed": 0,
+        "total_size_bytes_before": 0,
+        "total_size_bytes_after": 0,
+    }
+
+    # 2. character_state_excerpts：touched 全量 + 其余摘要
+    chars_in = full_payload.get("character_state_excerpts") or []
+    chars_out: list[dict[str, Any]] = []
+    if isinstance(chars_in, list):
+        for c in chars_in:
+            if not isinstance(c, dict):
+                continue
+            cid = c.get("character_id")
+            if isinstance(cid, str) and cid in touched_chars:
+                chars_out.append(c)
+                stats["characters_full"] += 1
+            else:
+                chars_out.append(_summarize_character_for_writer(c))
+                stats["characters_summary"] += 1
+    full_payload["character_state_excerpts"] = chars_out
+
+    # 3. world_state_excerpts.locations / .active_factions / .world_rules_relevant
+    world_in = full_payload.get("world_state_excerpts") or {}
+    if isinstance(world_in, dict):
+        touched_locs = touched.get("locations", set())
+        locs_in = world_in.get("locations") or []
+        locs_out: list[dict[str, Any]] = []
+        if isinstance(locs_in, list):
+            for loc_item in locs_in:
+                if not isinstance(loc_item, dict):
+                    continue
+                lid = loc_item.get("location_id")
+                if isinstance(lid, str) and lid in touched_locs:
+                    locs_out.append(loc_item)
+                    stats["locations_full"] += 1
+                else:
+                    locs_out.append(_summarize_location_for_writer(loc_item))
+                    stats["locations_summary"] += 1
+        world_in["locations"] = locs_out
+
+        touched_facs = touched.get("factions", set())
+        facs_in = world_in.get("active_factions") or []
+        facs_out: list[dict[str, Any]] = []
+        if isinstance(facs_in, list):
+            for f in facs_in:
+                if not isinstance(f, dict):
+                    continue
+                fid = f.get("faction_id")
+                if isinstance(fid, str) and fid in touched_facs:
+                    facs_out.append(f)
+                    stats["factions_full"] += 1
+                else:
+                    facs_out.append(_summarize_faction_for_writer(f))
+                    stats["factions_summary"] += 1
+        world_in["active_factions"] = facs_out
+
+        # world_rules_relevant 全量保留（L0 硬设定；统计 full=总数 summary=0）
+        rules_in = world_in.get("world_rules_relevant") or []
+        if isinstance(rules_in, list):
+            stats["world_rules_full"] = len(rules_in)
+        full_payload["world_state_excerpts"] = world_in
+
+    # 4. hook_ledger_excerpt：writer 装配当前仅含 OPEN/ACTIVE/ESCALATED
+    # 状态（``_hook_ledger_excerpt`` 函数本就只查 planted 状态），等价于
+    # 任务书「open 全量」。resolved hooks 在 writer 不直接注入（伏笔管理归
+    # director，writer 透过 director_plan.hook_handling 间接获取）——故本
+    # 函数对 hook_ledger_excerpt 不做 resolved 截断（与 observer 的
+    # ``previous_state.hooks`` 口径不同：observer 处理全量 Canonical State，
+    # writer 处理 director 提炼后的摘要）。仅统计 open hooks 数量。
+    hooks_in_raw = full_payload.get("hook_ledger_excerpt") or []
+    if isinstance(hooks_in_raw, list):
+        stats["hooks_open"] = sum(
+            1 for h in hooks_in_raw
+            if isinstance(h, dict) and isinstance(h.get("status"), str)
+            and h.get("status") in _HOOK_OPEN_STATUSES
+        )
+    else:
+        stats["hooks_open"] = 0
+    stats["hooks_resolved_kept"] = 0
+    stats["hooks_resolved_trimmed"] = 0
+
+    # 5. 注入 context_mode + stats；体积量化（before/after）
+    # 体积仅统计被裁剪的 3 个键（character_state_excerpts +
+    # world_state_excerpts + hook_ledger_excerpt），与 observer 「previous_state」
+    # 口径一致；其他键（director_plan / scene_plan / recent_prose /
+    # author_style_samples / recalled_passages / style_constraints 等）属 L2
+    # 章节专属信号，不在裁剪范围。
+    try:
+        before_bytes = sum(
+            len(json.dumps(c, ensure_ascii=False))
+            for c in (
+                _snapshot_pre_trim.get("character_state_excerpts"),
+                _snapshot_pre_trim.get("world_state_excerpts"),
+                _snapshot_pre_trim.get("hook_ledger_excerpt"),
+            )
+        )
+        after_bytes = sum(
+            len(json.dumps(full_payload.get(k), ensure_ascii=False))
+            for k in ("character_state_excerpts", "world_state_excerpts", "hook_ledger_excerpt")
+        )
+    except (TypeError, ValueError):
+        before_bytes = 0
+        after_bytes = 0
+    stats["total_size_bytes_before"] = before_bytes
+    stats["total_size_bytes_after"] = after_bytes
+
+    full_payload["context_mode"] = "paged"
+    full_payload["context_paging_stats"] = stats
+    return full_payload
 
 
 def _peek_project_id_from_chapter(db_path: str | Path, chapter_id: str) -> str | None:
@@ -1790,6 +2060,27 @@ def _summarize_world_rule(rule: dict) -> dict:
         "world_rule_id": rule.get("world_rule_id"),
         "name": rule.get("name"),
     }
+
+
+def _safe_copy(value: Any) -> Any:
+    """对 writer payload 的 list 字段做浅拷贝（dict 元素逐个 dict() 拷贝）。
+
+    payload 中的字符字段（如 ``chapter`` / ``project``）不会被裁剪，不需要深拷贝；
+    这里只需在裁剪前快照出被裁剪的 3 个键，防止后续 in-place 修改后无法量化
+    before 体积。``copy.deepcopy`` 在 SQLite Row 等不可序列化对象上会失败，故
+    采用「list 包浅拷贝 + dict 元素逐个 dict()」的折中：list 顶层新建避免共享
+    引用；dict 元素新建避免子项共享。
+    """
+    import copy as _copy
+
+    try:
+        return _copy.copy(value)
+    except Exception:  # noqa: BLE001
+        if isinstance(value, list):
+            return [dict(x) if isinstance(x, dict) else x for x in value]
+        if isinstance(value, dict):
+            return dict(value)
+        return value
 
 
 def _summarize_hook(h: dict) -> dict:

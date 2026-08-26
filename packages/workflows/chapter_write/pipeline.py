@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
@@ -106,16 +107,45 @@ def _scene_planner_stub(ctx: dict[str, Any]) -> dict[str, Any]:
     return {"scene_plan": {"scenes": scenes}}
 
 
+def _resolve_writer_context_mode(ctx: dict[str, Any]) -> str:
+    """解析 writer context_mode（V3.2 P2-1）。
+
+    优先级：
+    1. workflow 上下文 ``writer_context_mode`` 字段（显式传参 > 一切）；
+    2. 环境变量 ``NOVELOS_WRITER_CONTEXT_MODE``（全局开关，便于回归测试一键切换）；
+    3. 默认 ``"paged"``（V3.2 行为变更：writer 默认按 L0/L1/L2 分页注入）。
+
+    返回值仅做白名单校验，非合法值回退默认 ``"paged"`` 并发出警告（不抛错——
+    装配阶段抛错会让运行中的 writer workflow 失败，违反「上下文裁剪是性能
+    优化、不应是阻断级」的初衷）。
+    """
+    raw = ctx.get("writer_context_mode")
+    if raw is None:
+        raw = os.environ.get("NOVELOS_WRITER_CONTEXT_MODE")
+    if raw is None:
+        return "paged"
+    if raw in ("full", "paged"):
+        return raw
+    # 非法值：兜底 paged + 不抛错（仅开发期日志可见）
+    import logging
+    logging.getLogger(__name__).warning(
+        "writer_context_mode=%r is invalid; falling back to 'paged'", raw,
+    )
+    return "paged"
+
+
 def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     run_id = ctx["run_id"]
     chapter_id = ctx["chapter_id"]
     scene_plan = ctx["scene_plan"]
+    context_mode = _resolve_writer_context_mode(ctx)
     payload = build_writer_input(
         db_path,
         chapter_id,
         scene_plan,
         target_word_count=ctx.get("target_word_count", 2200),
+        context_mode=context_mode,
     )
     mock_script = (ctx.get("mock_providers") or {}).get("writer")
     out = run_agent(
@@ -127,7 +157,7 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         expected="writer",
         mock_script=mock_script,
     )
-    return {"writer_output": out}
+    return {"writer_output": out, "_writer_context_mode": context_mode}
 
 
 def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:

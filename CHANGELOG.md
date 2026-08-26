@@ -5,6 +5,19 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [3.2.0] - 2026-08-26
+
+### Added（V3.2「写作现场完善与上下文分页」）
+- **writer 上下文分页**：chapter-write 支持 `writer_context_mode=full|paged`（默认 paged，env `NOVELOS_WRITER_CONTEXT_MODE` 可全局回退 full）；paged 模式下实体集合按「最近触达全量 + 其余摘要」裁剪并注入裁剪统计。实测当前数据集缩减 5.4%（大项目收益更大，20 角色合成场景单键 -37%）。
+- **叙事弧光视图**：`GET /api/projects/{pid}/arc` 聚合逐章 payoff/charge 标注、质量分、伏笔与债务台账，输出蓄力连击、兑现密度、逾期告警等弧线健康信号（含 51 条测试）。
+- **CI 增强**：新增 pip-audit 依赖 CVE 扫描 job 与 e2e smoke job（真实起服务跑 scripts/smoke_e2e.py 全链路 + 状态同步巡检）。
+
+### Changed
+- chapter-write 默认上下文模式变更为 paged（原 full）；`writer_context_mode="full"` 或环境变量可回退旧行为。
+
+### Known Issues
+- paged 模式对 writer 输出质量的 LLM 实评未做（需对比 eval），当前仅结构断言与体积量化。
+
 ## [3.1.0] - 2026-08-26
 
 ### Added（V3.1「一致性治理与质量语义升级」）
