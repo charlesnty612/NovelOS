@@ -5,6 +5,18 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [3.5.0] - 2026-08-26
+
+### Added（V3.5「并发化与缓存观测」）
+- **observer 双腿并发**：split 路径下腿 A/腿 B 经 ThreadPoolExecutor 并行提交（`NOVELOS_OBSERVER_PARALLEL` 开关默认 on，ctx/env 可关），单腿异常仍走原 per-leg 重试归类；实测两腿几乎同时启动。
+- **cached_tokens 观测**：OpenAI 兼容 provider 提取 `usage.prompt_tokens_details.cached_tokens` 写入 ai_call_logs.token_usage_json（缺省不写字段），为 MiniMax 自动前缀缓存命中率提供数据基础。
+
+### Fixed
+- smoke_e2e / test_health / README 的业务表数断言链统一修正为 35（volumes 为唯一新增表；0014 系重建既有 reveal_policies 不增数）。
+
+### Known Issues
+- prompt 前缀缓存命中率待真实链路采样（cached_tokens 已可观测）；若命中率低需将 user 消息内动态字段后置。
+
 ## [3.4.0] - 2026-08-26
 
 ### Added（V3.4「多卷与规模」组织层）

@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 from typing import Any
@@ -105,9 +106,34 @@ _OBSERVER_LEG_B_SET = frozenset(_OBSERVER_LEG_B_ARRAYS)
 def _observer_split_enabled() -> bool:
     """环境开关 ``NOVELOS_OBSERVER_SPLIT``；默认 on；off 走旧单次路径。
 
-    优先级：``ctx['observer_split']``（测试 / 调用方显式覆盖） > 环境变量。
+    优先级：``ctx['observer_split']``（测试 / 调用方显式覆盖）> 环境变量。
     """
     from_env = os.environ.get("NOVELOS_OBSERVER_SPLIT", "on").strip().lower()
+    return from_env not in ("0", "false", "off", "no")
+
+
+def _observer_parallel_enabled(ctx: dict[str, Any] | None = None) -> bool:
+    """V3.5：observer 双腿并发开关。
+
+    环境变量 ``NOVELOS_OBSERVER_PARALLEL`` 默认 on；off 回退串行提交。
+
+    优先级：
+    - ``ctx['observer_parallel']=False/True``（测试 / 调用方显式覆盖，最高优先级）；
+    - 否则读环境变量 ``NOVELOS_OBSERVER_PARALLEL``，缺省视为 on；
+    - off 取值：``0 / false / off / no``。
+
+    设计动机（V3.5 提速调研结论）：见 ``docs/roadmap/v3-plan.md`` 已知问题节——
+    service_tier=priority 已启用，但 provider 拥堵窗口仍可能饿死双腿；
+    并发提交能让 wall_time 接近 max(leg_a, leg_b) 而非 sum（每腿实测 60-180s）。
+    """
+    if ctx is not None and "observer_parallel" in ctx:
+        override = ctx.get("observer_parallel")
+        if isinstance(override, bool):
+            return override
+        if isinstance(override, str):
+            return override.strip().lower() not in ("0", "false", "off", "no")
+        return bool(override)
+    from_env = os.environ.get("NOVELOS_OBSERVER_PARALLEL", "on").strip().lower()
     return from_env not in ("0", "false", "off", "no")
 
 
@@ -482,26 +508,45 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         leg_b_chars = 0
 
-    leg_a_out = run_agent(
-        db_path,
-        "observer",
-        leg_a_payload,
-        run_id,
-        node_run_id=node_run_id,
-        expected="observer",
-        mock_script=leg_a_mock,
-        capability_override="light",
-    )
-    leg_b_out = run_agent(
-        db_path,
-        "observer",
-        leg_b_payload,
-        run_id,
-        node_run_id=node_run_id,
-        expected="observer",
-        mock_script=leg_b_mock,
-        capability_override="light",
-    )
+    parallel_enabled = _observer_parallel_enabled(ctx)
+    # wall_time：仅并发路径记录（便于测试断言「真并发」）；off 回退串行时不统计。
+    parallel_wall_ms: int | None = None
+    if parallel_enabled:
+        # V3.5 P0：双腿并发（ThreadPoolExecutor）。两腿互不依赖、可同 provider
+        # 服务但走不同连接（runner 内部 get_connection 各自创建新连接，无共享
+        # 可变状态）。失败语义：单腿异常向 future 传异常，由 as_completed 收集
+        # 阶段重抛——重试归类仍由 _inject_validate_node 完成。
+        leg_a_out, leg_b_out, parallel_wall_ms = _run_observer_legs_in_parallel(
+            db_path=db_path,
+            run_id=run_id,
+            node_run_id=node_run_id,
+            leg_a_payload=leg_a_payload,
+            leg_b_payload=leg_b_payload,
+            leg_a_mock=leg_a_mock,
+            leg_b_mock=leg_b_mock,
+        )
+    else:
+        # off / 兼容回退：原串行提交，保持既有行为
+        leg_a_out = run_agent(
+            db_path,
+            "observer",
+            leg_a_payload,
+            run_id,
+            node_run_id=node_run_id,
+            expected="observer",
+            mock_script=leg_a_mock,
+            capability_override="light",
+        )
+        leg_b_out = run_agent(
+            db_path,
+            "observer",
+            leg_b_payload,
+            run_id,
+            node_run_id=node_run_id,
+            expected="observer",
+            mock_script=leg_b_mock,
+            capability_override="light",
+        )
 
     merged = _merge_observer_legs(leg_a_out, leg_b_out)
     meta = _aggregate_observer_split_meta(
@@ -521,6 +566,17 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         meta["leg_a_total_chars"] = leg_a_chars + leg_b_chars
         meta["leg_a_trim_stats"] = leg_a_trim_stats
         meta["leg_b_trim_stats"] = leg_b_trim_stats
+        # V3.5：并发模式标记 + wall_time（仅并发路径有值；off 路径为 None）。
+        meta["parallel"] = bool(parallel_enabled)
+        if parallel_wall_ms is not None:
+            meta["parallel_wall_ms"] = int(parallel_wall_ms)
+            # SQLite rowid 在并发 commit 下不保证 leg_a 先 leg_b 后——记录此点
+            # 让观测者明确 leg_a / leg_b 字段可能交换（不影响业务正确性）。
+            meta["ordering_note"] = (
+                "concurrent_legs_rowid_order_unstable"
+                if parallel_enabled
+                else "serial"
+            )
         # recent_event_ids 注入条数（base_payload.config 已在 build_observer_input 完成）
         base_config = base_payload.get("config") or {}
         if isinstance(base_config, dict):
@@ -528,6 +584,75 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
             if isinstance(reid, list):
                 meta["recent_event_ids_count"] = len(reid)
     return {"observer_payload": merged, "observer_split_meta": meta}
+
+
+def _run_observer_legs_in_parallel(
+    *,
+    db_path: Any,
+    run_id: str,
+    node_run_id: str | None,
+    leg_a_payload: dict[str, Any],
+    leg_b_payload: dict[str, Any],
+    leg_a_mock: Any,
+    leg_b_mock: Any,
+) -> tuple[dict[str, Any], dict[str, Any], int]:
+    """V3.5：双腿并发提交到 run_agent（ThreadPoolExecutor，max_workers=2）。
+
+    并发语义：
+    - 两条腿同时入队；任一腿抛异常会让该 future 携带异常被 ``future.result()`` 重抛——
+      ``_observer_node`` 调用方未捕获，将直接冒泡（与原串行路径异常语义一致）。
+    - 两腿各自 ``run_agent`` 内部独立 get_connection / insert ai_call_logs；
+      SQLite WAL + busy_timeout 5s 保证并发 INSERT 不锁死（先到先 commit，rowid 顺序
+      不可预测但业务正确性不依赖 leg_a/leg_b 提交顺序，merge 按 key 区分）。
+    - 收集后返回 ``(leg_a_out, leg_b_out, wall_ms)``。wall_ms 用 ``time.monotonic()``
+      度量，仅供测试 / 观测断言「真并发」。
+
+    设计动机（V3.5 提速调研结论）：见 ``docs/roadmap/v3-plan.md`` 已知问题——双腿
+    并发让 wall_time ≈ max(t_leg_a, t_leg_b)，单次路径 ≈ sum(t_leg_a, t_leg_b)。
+    实测 m1_run（service_tier=priority 启用）：单腿 60-180s ⇒ 并发收益 30-50%。
+    """
+    import time as _time
+
+    def _run_leg_a() -> dict[str, Any]:
+        return run_agent(
+            db_path,
+            "observer",
+            leg_a_payload,
+            run_id,
+            node_run_id=node_run_id,
+            expected="observer",
+            mock_script=leg_a_mock,
+            capability_override="light",
+        )
+
+    def _run_leg_b() -> dict[str, Any]:
+        return run_agent(
+            db_path,
+            "observer",
+            leg_b_payload,
+            run_id,
+            node_run_id=node_run_id,
+            expected="observer",
+            mock_script=leg_b_mock,
+            capability_override="light",
+        )
+
+    # max_workers=2：恰好容纳两条腿；不再扩张，避免 provider 侧被并发请求压垮。
+    # ThreadPoolExecutor 默认 shutdown 语义是 with-block 退出时 wait 全部完成——
+    # 即使 future.result() 抛异常，两腿都会被 join 后才退出。
+    start = _time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="observer-leg",
+    ) as pool:
+        future_a = pool.submit(_run_leg_a)
+        future_b = pool.submit(_run_leg_b)
+        # as_completed：任一腿完成就返回，但需为每条腿 .result() 检查异常——这里直接
+        # 按「submit 顺序」取结果：leg_a / leg_b 的归属由调用方按变量绑定恢复，不依赖
+        # 完成时间。
+        leg_a_out = future_a.result()
+        leg_b_out = future_b.result()
+    wall_ms = int((_time.monotonic() - start) * 1000)
+    return leg_a_out, leg_b_out, wall_ms
 
 
 def _aggregate_observer_split_meta(

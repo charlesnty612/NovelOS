@@ -56,12 +56,23 @@ class MockProvider:
     - ``MockProvider(scripted=["hello"])``：第一次返回 ``"hello"``，后续永远返回 ``"hello"``。
     - ``MockProvider(scripted=lambda i: f"reply {i}")``：第 i 次调用返回对应响应。
     - ``MockProvider()``：无脚本，回显空 JSON（``"{}"``），便于断言「未提供脚本时不影响 runner」。
+    - ``MockProvider(scripted=..., usage={"prompt_tokens_details": {"cached_tokens": 123}})``：
+      V3.5 cached_tokens 观测——让单测断言 usage 字段透传到 ai_call_logs.token_usage_json。
+      ``usage`` 为 ``None`` 或缺省则保持 ``{prompt:0, completion:0, total:0}``。
     """
 
     name = "mock"
 
-    def __init__(self, scripted: Scripted | None = None) -> None:
+    def __init__(
+        self,
+        scripted: Scripted | None = None,
+        *,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
         self._scripted = scripted
+        # V3.5：cached_tokens 注入槽——仅当显式传入时覆盖默认 usage；None/缺省保
+        # 留 ``{prompt:0, completion:0, total:0}``，与既有测试零兼容影响。
+        self._forced_usage = usage
 
     def complete(self, messages: Messages, params: dict | None = None) -> CompletionResult:
         """返回脚本响应。``messages`` / ``params`` 仅用于可观测性，不做解析。"""
@@ -82,9 +93,15 @@ class MockProvider:
             else:
                 text = self._scripted[-1]
             self._call_count = idx + 1
+        if self._forced_usage is not None:
+            # V3.5：透传注入的 usage（典型场景：cached_tokens 命中观测）；
+            # copy() 防止调用方对同一个 dict 的修改被下一次 complete 看到。
+            usage_out = dict(self._forced_usage)
+        else:
+            usage_out = {"prompt": 0, "completion": 0, "total": 0}
         return {
             "text": text,
-            "usage": {"prompt": 0, "completion": 0, "total": 0},
+            "usage": usage_out,
         }
 
     def health_check(self, *, timeout: float | None = None) -> dict[str, Any]:
@@ -188,13 +205,29 @@ class OpenAICompatibleProvider:
         except (TypeError, ValueError):
             prompt_tokens = completion_tokens = total_tokens = 0
 
+        # V3.5 cached_tokens 观测：从 OpenAI 标准 usage.prompt_tokens_details.cached_tokens
+        # 抽取命中前缀缓存的 token 数。这是 MiniMax / OpenAI 自动前缀缓存开启后的
+        # 命中率指标——观测目标，不影响计费（OpenAI 不对缓存命中 token 二次收费）。
+        # 缺省时不下发该 key，避免后续读端误判 0 为「未观测」。runner 写 ai_call_logs
+        # 时整段 usage 透传，token_usage_json 自动得到该字段。零 schema 变更。
+        usage_out: dict[str, Any] = {
+            "prompt": prompt_tokens,
+            "completion": completion_tokens,
+            "total": total_tokens,
+        }
+        prompt_details = usage_raw.get("prompt_tokens_details") or {}
+        if isinstance(prompt_details, dict):
+            cached_tokens_raw = prompt_details.get("cached_tokens")
+            try:
+                cached_tokens_int = int(cached_tokens_raw) if cached_tokens_raw is not None else None
+            except (TypeError, ValueError):
+                cached_tokens_int = None
+            if cached_tokens_int is not None and cached_tokens_int > 0:
+                usage_out["cached_tokens"] = cached_tokens_int
+
         return {
             "text": text or "",
-            "usage": {
-                "prompt": prompt_tokens,
-                "completion": completion_tokens,
-                "total": total_tokens,
-            },
+            "usage": usage_out,
         }
 
     def health_check(self, *, timeout: float | None = None) -> dict[str, Any]:

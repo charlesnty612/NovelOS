@@ -64,10 +64,12 @@ SERVER_START_TIMEOUT_S = 30
 ENDPOINT_READY_TIMEOUT_S = 30
 HTTP_TIMEOUT_S = 60.0
 
-# health.tables = 业务表数（34 业务表；含 _migrations 总表 35，health 返回减 1 后的业务表数）
-EXPECTED_BUSINESS_TABLES = 34
+# health.tables = 业务表数（35 业务表；含 _migrations 总表 36，health 返回减 1 后的业务表数）
+EXPECTED_BUSINESS_TABLES = 35
 # V2.0 Wave B 任务一：0009_branch_snapshots.sql 加 branch_snapshots → 34 业务表
 # V2.0 Wave B 任务二：0010_trigger_keys.sql 仅 ALTER TABLE 加列，不增表 → 仍 34 业务表
+# V3.3：0014_knowledge_reveal.sql 重建 reveal_policies（表早已存在于基线，不增数）→ 仍 34 业务表
+# V3.4：0015_volumes.sql 加 volumes → 35 业务表
 
 
 # ---------------------------------------------------------------------------
