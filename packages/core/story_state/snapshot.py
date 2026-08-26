@@ -95,6 +95,166 @@ def _sha256_hex(value: str) -> str:
 # ----------------------------------------------------------------------------- initial
 
 
+ALL_REBUILD_COLLECTIONS: tuple[str, ...] = (
+    "characters",
+    "locations",
+    "factions",
+    "world_rules",
+    "plot_events",
+    "hooks",
+    "narrative_debts",
+)
+
+
+def rebuild_snapshot_collections_from_db(
+    conn: sqlite3.Connection,
+    project_id: str,
+    snapshot: dict,
+    collections: list[str],
+) -> dict:
+    """以 DB 为权威重建 snapshot 中指定集合的实体数据,返回新 snapshot。
+
+    V3.1 P1-1:消除 ``story_states.snapshot_json`` 与 DB 实体表的双源漂移。
+    在 ``commit_delta`` 事务内,write_through 落库后、新快照持久化前调用——
+    对 ``characters / locations / factions / world_rules / plot_events / hooks /
+    narrative_debts`` 7 个集合,按 DB 当前实表重建 snapshot 中对应字段(整体替换),
+    后续 ``materialize_snapshot`` 写入 story_states 的即为 DB 权威版本。
+
+    设计要点:
+    - **DB 为权威**:只重建传入的 ``collections``,未列出的字段(state_version /
+      recent_events / active_resources / current_time_in_story 等)保持原值不动;
+      调用方后续可能再 mutate(如 rollback 路径的 ``apply_inverse_cleanup_to_state``),
+      重建在前保证 inverse 清理仍能正确剔除已被逆路径清理的 event_id。
+    - **复用既有口径**:characters / locations / factions / world_rules / hooks /
+      narrative_debts 直接调用本模块 ``_load_characters`` / ``_load_world`` /
+      ``_load_hooks`` / ``_load_debts``,保证字段名(character_id / world_rule_id /
+      hook_id / debt_id 等)与 ``check_state_sync.COLLECTIONS`` 完全一致,两套代码
+      不会各写各的字段口径。
+    - **plot_events 单独实现**:DB 侧 ``plot_events`` 表的列与 snapshot 侧
+      ``events`` dict 的 value 形状不对齐——snapshot 的 value 是
+      ``{type, participants, time, description}``(见 ``applier._apply_new_events``),
+      DB 列有 ``type / participants_json / time_json / cause_json / effects_json`` 等。
+      ``description`` 在 write_through 时未入库,因此重建后 description 必然为 None
+      ——这是 DB 权威语义下的正确表现(早期快照里残留的 description 视为一次性数据,
+      重建后即收敛到 DB-only 字段子集)。
+    - 未知集合名静默跳过(防御:允许调用方传入 COLLECTIONS 子集做按需重建)。
+    - 深拷贝 ``snapshot`` 起手,避免 mutate 调用方传入的原 dict。
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        与 ``commit_delta`` 同一事务的连接。
+    project_id : str
+        项目 id(用于过滤该 project 实体)。
+    snapshot : dict
+        当前待重建的 snapshot(由 ``apply_delta`` 产生,或由 ``build_initial_state`` 初始化)。
+    collections : list[str]
+        需要重建的集合名(取 ``ALL_REBUILD_COLLECTIONS`` 子集)。
+
+    Returns
+    -------
+    dict
+        重建后的 snapshot(深拷贝结果,不再与输入共享引用)。
+    """
+    new_snapshot = copy.deepcopy(snapshot)
+    # 复用 _load_world 整体 dict,从中拆出 locations/factions/world_rules 三个子集
+    # —— 单一来源保证字段口径一致(load_world 已是 build_initial_state 的复用路径)。
+    needs_world_load = any(c in ("locations", "factions", "world_rules") for c in collections)
+    world: dict | None = None
+    if needs_world_load:
+        world = _load_world(conn, project_id)
+
+    for coll in collections:
+        if coll == "characters":
+            new_snapshot["characters"] = _load_characters(conn, project_id)
+        elif coll == "locations":
+            if "world" not in new_snapshot or not isinstance(new_snapshot["world"], dict):
+                new_snapshot["world"] = {}
+            new_snapshot["world"]["locations"] = (world or _load_world(conn, project_id))["locations"]
+        elif coll == "factions":
+            if "world" not in new_snapshot or not isinstance(new_snapshot["world"], dict):
+                new_snapshot["world"] = {}
+            new_snapshot["world"]["factions"] = (world or _load_world(conn, project_id))["factions"]
+        elif coll == "world_rules":
+            if "world" not in new_snapshot or not isinstance(new_snapshot["world"], dict):
+                new_snapshot["world"] = {}
+            new_snapshot["world"]["world_rules"] = (world or _load_world(conn, project_id))["world_rules"]
+        elif coll == "plot_events":
+            new_snapshot["events"] = _load_plot_events_dict(conn, project_id)
+        elif coll == "hooks":
+            new_snapshot["hooks"] = _load_hooks(conn, project_id)
+        elif coll == "narrative_debts":
+            new_snapshot["debts"] = _load_debts(conn, project_id)
+        # 未知集合名静默跳过
+    return new_snapshot
+
+
+def _load_plot_events_dict(conn: sqlite3.Connection, project_id: str) -> dict[str, dict]:
+    """重建 snapshot.events:以 DB plot_events 表为权威,返回 ``{event_id: {type, participants, time, description}}``。
+
+    与 ``applier._apply_new_events``(Sprint 2)写入 snapshot 的 value 形状对齐:
+    ``applier`` 写入::
+
+        events[eid] = {
+            "type": ev.get("type"),
+            "participants": ev.get("participants") or [],
+            "time": ev.get("time") or {},
+            "description": ev.get("description"),  # write_through 不入库
+        }
+
+    本函数从 plot_events 行反推:
+    - ``type`` → plot_events.type
+    - ``participants`` → json.loads(participants_json)(空或解析失败 → [])
+    - ``time`` → json.loads(time_json)(空或解析失败 → {})
+    - ``description`` → None(write_through 阶段丢弃,DB 权威下视为无信息;早期快照里的
+      description 在首次重建后即收敛)
+
+    返回字典的 key 集合即 plot_events.event_id 全集(去重,与 check_state_sync.COLLECTIONS
+    对照口径一致)。
+    """
+    rows = conn.execute(
+        """
+        SELECT event_id, type, participants_json, time_json
+        FROM plot_events
+        WHERE project_id = ?
+        ORDER BY event_id ASC
+        """,
+        (project_id,),
+    ).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        eid = r["event_id"]
+        if not eid:
+            continue
+        # participants_json 解析(可能为 '[]' / JSON 数组 / 缺失)
+        participants_raw = r["participants_json"]
+        participants: list = []
+        if participants_raw:
+            try:
+                parsed = json.loads(participants_raw)
+                if isinstance(parsed, list):
+                    participants = parsed
+            except (TypeError, json.JSONDecodeError):
+                participants = []
+        # time_json 解析
+        time_raw = r["time_json"]
+        time_obj: dict = {}
+        if time_raw:
+            try:
+                parsed_t = json.loads(time_raw)
+                if isinstance(parsed_t, dict):
+                    time_obj = parsed_t
+            except (TypeError, json.JSONDecodeError):
+                time_obj = {}
+        out[eid] = {
+            "type": r["type"],
+            "participants": participants,
+            "time": time_obj,
+            "description": None,
+        }
+    return out
+
+
 def build_initial_state(conn: sqlite3.Connection, project_id: str) -> dict:
     """从领域表组装初始 Canonical State JSON。
 
@@ -359,4 +519,9 @@ def materialize_snapshot(
     return snapshot_ref, digest
 
 
-__all__ = ["build_initial_state", "materialize_snapshot"]
+__all__ = [
+    "ALL_REBUILD_COLLECTIONS",
+    "build_initial_state",
+    "materialize_snapshot",
+    "rebuild_snapshot_collections_from_db",
+]

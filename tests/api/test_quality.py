@@ -134,6 +134,172 @@ def test_latest_returns_404_when_no_report(tmp_path: Path):
     asyncio.run(run())
 
 
+# =============================================================================
+# V3.1 P1-2: LLM judge 双轨并排
+# =============================================================================
+
+
+def test_get_chapter_quality_attaches_null_judge_when_empty(tmp_path: Path):
+    """未经 judge 评审时，GET quality 响应顶层 judge 字段为 None（契约兼容）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid)
+
+            # 跑一次 evaluate 让 schema/双轨字段稳定
+            r = await _request(app, "POST", f"/api/chapters/{cid}/quality/evaluate")
+            assert r.status_code == 201, r.text
+            body = r.json()
+            assert body.get("judge") is None, body
+
+            # GET 也带 judge 字段
+            r2 = await _request(app, "GET", f"/api/chapters/{cid}/quality")
+            assert r2.status_code == 200, r2.text
+            again = r2.json()
+            assert "judge" in again, again
+            assert again["judge"] is None
+
+    asyncio.run(run())
+
+
+def test_post_judge_endpoint_persists_and_returns(tmp_path: Path):
+    """POST /api/chapters/{cid}/quality/judge 落库 + GET 返回 judge dict。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid)
+
+            # 先 evaluate
+            r = await _request(app, "POST", f"/api/chapters/{cid}/quality/evaluate")
+            assert r.status_code == 201, r.text
+
+            payload = {
+                "pacing": 72, "style": 78, "logic": 70, "dialogue": 65,
+                "verdict": "节奏平稳，开场铺设完整。",
+                "top_issues": ["冲突未明确给出", "对话偏少", "悬念可加强"],
+                "score_avg": 71.25,
+                "dry_run": True,
+            }
+            r = await _request(app, "POST", f"/api/chapters/{cid}/quality/judge", json=payload)
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["chapter_id"] == cid
+            assert body["report_id"].startswith("qr_")
+            assert isinstance(body["judge"], dict)
+            assert body["judge"]["pacing"] == 72
+            assert body["judge"]["verdict"] == "节奏平稳，开场铺设完整。"
+
+            # GET 路径透出
+            r2 = await _request(app, "GET", f"/api/chapters/{cid}/quality")
+            assert r2.status_code == 200, r2.text
+            again = r2.json()
+            assert isinstance(again["judge"], dict)
+            assert again["judge"]["dialogue"] == 65
+            # 七子分 / overall / formula_hash 完全不变
+            assert "scores_json" in again
+            assert "plot" in again["scores_json"]
+            assert "overall" in again
+            # 再次落库覆盖（幂等覆盖）
+            payload2 = dict(payload)
+            payload2["pacing"] = 90
+            r3 = await _request(
+                app, "POST", f"/api/chapters/{cid}/quality/judge", json=payload2
+            )
+            assert r3.status_code == 200
+            assert r3.json()["judge"]["pacing"] == 90
+
+    asyncio.run(run())
+
+
+def test_post_judge_422_missing_score_keys(tmp_path: Path):
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid)
+            r = await _request(app, "POST", f"/api/chapters/{cid}/quality/evaluate")
+            assert r.status_code == 201
+
+            bad = {"pacing": 70, "style": 70, "logic": 60}  # 缺 dialogue
+            r = await _request(app, "POST", f"/api/chapters/{cid}/quality/judge", json=bad)
+            assert r.status_code == 422, r.text
+            assert "missing required score keys" in r.json()["detail"]
+
+    asyncio.run(run())
+
+
+def test_post_judge_404_for_unknown_chapter(tmp_path: Path):
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            payload = {"pacing": 70, "style": 70, "logic": 60, "dialogue": 50}
+            r = await _request(
+                app, "POST", "/api/chapters/ch_nope/quality/judge", json=payload
+            )
+            assert r.status_code == 404
+
+    asyncio.run(run())
+
+
+def test_post_judge_422_when_chapter_has_no_report(tmp_path: Path):
+    """chapter 存在但还没 evaluate → judge 落库拒绝（先跑 evaluate）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid)  # PLANNED -> REVIEWED 但无 evaluate
+            payload = {"pacing": 70, "style": 70, "logic": 60, "dialogue": 50}
+            r = await _request(app, "POST", f"/api/chapters/{cid}/quality/judge", json=payload)
+            assert r.status_code == 422, r.text
+            assert "no quality report" in r.json()["detail"]
+
+    asyncio.run(run())
+
+
+def test_list_project_quality_attaches_judge_per_row(tmp_path: Path):
+    """GET /api/projects/{pid}/quality 列表每行都带 judge 字段（无则 None）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid)
+            r = await _request(app, "POST", f"/api/chapters/{cid}/quality/evaluate")
+            assert r.status_code == 201
+
+            # 不写 judge
+            r2 = await _request(app, "GET", f"/api/projects/{pid}/quality")
+            assert r2.status_code == 200
+            rows = r2.json()
+            assert len(rows) == 1
+            assert rows[0]["judge"] is None
+
+            # 写 judge 后再 list
+            payload = {"pacing": 80, "style": 75, "logic": 60, "dialogue": 50}
+            r3 = await _request(app, "POST", f"/api/chapters/{cid}/quality/judge", json=payload)
+            assert r3.status_code == 200
+            r4 = await _request(app, "GET", f"/api/projects/{pid}/quality")
+            assert r4.status_code == 200
+            rows = r4.json()
+            assert len(rows) == 1
+            assert isinstance(rows[0]["judge"], dict)
+            assert rows[0]["judge"]["pacing"] == 80
+
+    asyncio.run(run())
+
+
 def test_latest_returns_404_for_unknown_chapter(tmp_path: Path):
     """chapter 不存在 → 404（与 chapters router 风格一致）。"""
     app = _create_app(tmp_path)

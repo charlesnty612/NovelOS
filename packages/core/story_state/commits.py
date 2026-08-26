@@ -42,7 +42,12 @@ from .exceptions import (
     StateConflictError,
     StateNotFoundError,
 )
-from .snapshot import build_initial_state, materialize_snapshot
+from .snapshot import (
+    ALL_REBUILD_COLLECTIONS,
+    build_initial_state,
+    materialize_snapshot,
+    rebuild_snapshot_collections_from_db,
+)
 from .snapshots import _dump, latest_snapshot_version
 from .validator import validate_delta
 from .write_through import apply_inverse_cleanup_to_state, write_through
@@ -341,6 +346,7 @@ def commit_delta(
        → ``ApprovalRequiredError``。
     5. ``apply_delta(current_state, delta)`` → 新 state，state_version+1。
     6. **写透领域表**。
+    6.5. V3.1 P1-1:以 DB 为权威重建 snapshot 中 7 个被波及实体集合（main 分支路径）。
     7. 落 commits 行（validation_json + author_approval_json + 可选 rollback_of）。
     8. main 路径：落 story_states 新快照；branch 路径：不写 story_states。
     9. UPDATE state_deltas.status='applied'。
@@ -459,6 +465,19 @@ def commit_delta(
             conn, project_id, delta, new_version,
             skip_all=(not is_main_branch_for_write),
         )
+
+        # 5.5) V3.1 P1-1:以 DB 为权威重建 snapshot 中 7 个被波及集合。
+        # 仅 main 分支路径重建(非 main 分支不写 story_states,无需此步)。
+        # 必须在逆路径清理之前:rollback 的 inverse_cleanup 要 mutate new_state
+        # (剔除 recent_events / events / hooks),重建在前保证后续 inverse 清理
+        # 能正确剔除已被领域表 DELETE 的 event_id / hook_id。
+        if is_main_branch_for_write:
+            new_state = rebuild_snapshot_collections_from_db(
+                conn,
+                project_id,
+                new_state,
+                list(ALL_REBUILD_COLLECTIONS),
+            )
 
         # 6) commits
         commit_id = new_id("cmt")

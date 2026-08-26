@@ -5,6 +5,22 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [3.1.0] - 2026-08-26
+
+### Added（V3.1「一致性治理与质量语义升级」）
+- **快照漂移自愈**：commit 事务内 write_through 之后、逆路径清理之前，以 DB 为权威重建快照的 7 类实体集合（characters/locations/factions/world_rules/plot_events/hooks/narrative_debts）——历史漂移在下次 commit 自动收敛；分支路径不受影响。含漂移自愈回归测试。
+- **LLM judge 双轨落库**：迁移 0012 为 quality_reports 新增 judge_json 列；`POST /api/chapters/{cid}/quality/judge` 持久化四维评审（pacing/style/logic/dialogue），GET quality 响应透出 judge 字段；m2_judge.py 支持 `--persist-api` 直连落库。judge 为旁路数据，不参与 overall 计算（七子分公式哈希不变）。
+- **快照一致性巡检工具**：scripts/check_state_sync.py 只读对比 DB 实体表与 snapshot JSON 的 7 集合双向差集，退出码 0/1/2 可接 CI；已接入 smoke_e2e 第 10 步（每次冒烟自动验证零漂移）。
+
+### Changed
+- 快照 world_rules 等集合字段口径统一为 DB 权威语义（snapshot.events[].description 在首次重建后收敛为 NULL，属预期行为）。
+
+### Known Issues
+- new_events[].description 信息源未下沉 plot_events 表（DB 权威重建后该字段丢失），V3.1 P1-1.1 候选。
+
+### Fixed
+- 巡检脚本 world_rules id_field 错配（rule_id→world_rule_id）导致的假 DRIFT。
+
 ## [3.0.0] - 2026-08-26
 
 ### Added（V3.0「提速与减负」）

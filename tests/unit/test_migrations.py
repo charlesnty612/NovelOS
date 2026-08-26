@@ -31,6 +31,8 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     #   业务表 → 业务表 34（33+1），总数 35。
     # V2.0 Wave C 任务一：0011_fts_index 加 FTS5 虚表（chapter_fts + 4 内部表），但
     #   count_tables 口径排除 ``chapter_fts%`` 前缀 → 业务表仍 34，总表仍 35。
+    # V3.1 P1-2：0012_judge_scores 仅 ALTER TABLE quality_reports 加 judge_json 列，
+    #   不增表 → 业务表 34，总表 35。
     assert result["tables"] == 35, f"expected 35 (34+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
@@ -54,12 +56,14 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     assert "0010_trigger_keys.sql" in result["applied"]
     # V2.0 Wave C 任务一：0011_fts_index.sql（建 FTS5 虚表 chapter_fts，不进业务表计数）
     assert "0011_fts_index.sql" in result["applied"]
+    # V3.1 P1-2：0012_judge_scores.sql（仅 ALTER TABLE 加 judge_json 列，不增表）
+    assert "0012_judge_scores.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     first = apply_migrations(db_path, MIGRATIONS_DIR)
-    # V2.0 Wave C 任务一：迁移目录下十一条脚本都应被首次应用
+    # V3.1 P1-2：迁移目录下十二条脚本都应被首次应用
     assert first["applied"] == [
         "0001_init.sql",
         "0002_drafts_unique.sql",
@@ -72,6 +76,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0009_branch_snapshots.sql",
         "0010_trigger_keys.sql",
         "0011_fts_index.sql",
+        "0012_judge_scores.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -87,6 +92,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0009_branch_snapshots.sql" in second["skipped"]
     assert "0010_trigger_keys.sql" in second["skipped"]
     assert "0011_fts_index.sql" in second["skipped"]
+    assert "0012_judge_scores.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -98,7 +104,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         rows = conn.execute("SELECT filename, applied_at FROM _migrations").fetchall()
     finally:
         conn.close()
-    # V2.0 Wave C 任务一：十一条迁移都应记录
+    # V3.1 P1-2：十二条迁移都应记录
     filenames = {r["filename"] for r in rows}
     assert filenames == {
         "0001_init.sql",
@@ -112,6 +118,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0009_branch_snapshots.sql",
         "0010_trigger_keys.sql",
         "0011_fts_index.sql",
+        "0012_judge_scores.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -171,6 +178,26 @@ def test_0011_chapter_fts_virtual_table_exists(tmp_path: Path):
         conn.close()
     assert row is not None, "chapter_fts virtual table should exist after 0011"
     assert row["type"] == "table", f"chapter_fts should be registered as table, got {row['type']}"
+
+
+def test_0012_quality_reports_has_judge_json_column(tmp_path: Path):
+    """V3.1 P1-2：0012 给 quality_reports 加 judge_json TEXT（默认 NULL）。"""
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        cols = conn.execute("PRAGMA table_info(quality_reports)").fetchall()
+    finally:
+        conn.close()
+    col_names = {c["name"] for c in cols}
+    assert "judge_json" in col_names, (
+        f"quality_reports missing judge_json after 0012; got={col_names}"
+    )
+    # 验证该列可空（用于「该章节暂未评审」语义；旧行迁移后保持 NULL）
+    judge_col = next(c for c in cols if c["name"] == "judge_json")
+    assert judge_col["type"] == "TEXT", judge_col
+    assert judge_col["notnull"] == 0, judge_col
+    assert judge_col["dflt_value"] is None, judge_col
 
 
 def test_projects_has_foreshadow_overdue_chapters_default(tmp_path: Path):

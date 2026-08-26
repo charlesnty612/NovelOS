@@ -15,6 +15,12 @@
 - 输出：``<out-dir>/judge_results.json``（逐章明细 + 元数据）与
   ``<out-dir>/judge_summary.md``（汇总表 + 分段趋势 + top_issues 词频）。
 
+V3.1 P1-2 新增：``--persist-api URL`` 可选参数。评审成功（无 ``error`` 字段）的章
+会通过 ``POST {URL}/api/chapters/<chapter_id>/quality/judge`` 落库到
+``quality_reports.judge_json`` 列；与七子分公式双轨并存。失败/缺四维分/网络错误仅
+log warning，不阻断主流程（评审结果仍写到 ``judge_results.json``）。**默认不传
+``--persist-api`` 时与原 V3.0 行为完全一致**。
+
 用法：
     # 默认 dry-run：评审 50 章真实语料，验证脚本本身
     python scripts/m2_judge.py --dry-run
@@ -29,6 +35,9 @@
 
     # 强制重跑（覆盖断点）
     python scripts/m2_judge.py --chapters 1-3 --out-dir /tmp/m2 --force
+
+    # 评审后落库（双轨）：先启动后端 ``uvicorn packages.core.api.main:app --port 18091``，
+    # 再 ``python scripts/m2_judge.py --dry-run --persist-api http://127.0.0.1:18091``
 """
 
 from __future__ import annotations
@@ -67,6 +76,7 @@ from packages.core.agent_runtime.structured_output import (  # noqa: E402
 DEFAULT_BASE_URL = "https://api.minimaxi.com/v1"
 DEFAULT_MODEL = "MiniMax-M3"
 DEFAULT_TIMEOUT_S = 600.0
+DEFAULT_PERSIST_TIMEOUT_S = 10.0  # POST /quality/judge 落库请求超时
 DEFAULT_MAX_CONTENT_CHARS = 60_000  # 单章正文超过则截断到该上限，避免 prompt 爆炸
 DEFAULT_DB = "data/m1_run/novelos.db"
 DEFAULT_OUT_DIR = "docs/evaluation/m2-judge"
@@ -501,6 +511,41 @@ def save_results(out_dir: Path, results: list[dict[str, Any]], meta: dict[str, A
     tmp.replace(final)
 
 
+def persist_judge_to_api(
+    api_base_url: str,
+    chapter_id: str,
+    judge_payload: dict[str, Any],
+    *,
+    timeout: float = DEFAULT_PERSIST_TIMEOUT_S,
+) -> tuple[bool, str]:
+    """V3.1 P1-2：把单章 LLM judge 结果 POST 到 ``/api/chapters/{cid}/quality/judge``。
+
+    入参 ``judge_payload`` 已是 ``judge_one_chapter`` 返回的 dict（含 pacing/style/
+    logic/dialogue/verdict/top_issues/score_avg/usage/dry_run/error 等）；直接
+    转发；后端 service 会做四维校验。
+
+    返回 ``(ok, detail)``：``ok=True`` 表示落库成功；``ok=False`` 时 ``detail``
+    是错误原因（HTTP 状态码 + 摘要）。任何错误均不抛（让脚本继续评审下一章），
+    由调用方决定是否记 warning。
+
+    设计要点：
+    - 默认超时 10s（落库是轻量请求），可被 timeout 参数覆盖（仅测试需要）；
+    - 不写 API key / 评测元数据到日志（payload 已经无敏感信息；
+      verdict / top_issues 含中文，正常打印属预期行为）；
+    - 4xx/5xx/网络错误一律返回 ``(False, detail)``，不抛异常。
+    """
+    url = f"{api_base_url.rstrip('/')}/api/chapters/{chapter_id}/quality/judge"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(url, json=judge_payload)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"network: {type(exc).__name__}: {exc}"
+    if 200 <= resp.status_code < 300:
+        return True, ""
+    snippet = (resp.text or "")[:200]
+    return False, f"HTTP {resp.status_code}: {snippet}"
+
+
 # ---------------------------------------------------------------------------
 # 报告生成
 # ---------------------------------------------------------------------------
@@ -665,6 +710,21 @@ def main() -> int:
         default=DEFAULT_MAX_CONTENT_CHARS,
         help=f"单章正文超过该字符数则截断（默认 {DEFAULT_MAX_CONTENT_CHARS}）",
     )
+    parser.add_argument(
+        "--persist-api",
+        default=None,
+        help=(
+            "V3.1 P1-2 可选：评审后逐章 POST 到 "
+            "{base_url}/api/chapters/<cid>/quality/judge 落库到 "
+            "quality_reports.judge_json；与七子分公式双轨并存。默认不传=原行为。"
+        ),
+    )
+    parser.add_argument(
+        "--persist-timeout",
+        type=float,
+        default=DEFAULT_PERSIST_TIMEOUT_S,
+        help=f"落库请求超时（秒，默认 {DEFAULT_PERSIST_TIMEOUT_S}）",
+    )
     args = parser.parse_args()
 
     db_path = Path(args.db).resolve()
@@ -768,6 +828,21 @@ def main() -> int:
             "errored": sum(1 for r in results if r.get("error")),
         }
         save_results(out_dir, results, meta)
+        # V3.1 P1-2：--persist-api 可选落库；与 save_results 解耦，失败仅 warning
+        # 不阻断主流程（评审结果已经在 judge_results.json 内，persistence 是双轨可选项）。
+        if args.persist_api and not result.get("error"):
+            ok, detail = persist_judge_to_api(
+                args.persist_api,
+                result["chapter_id"],
+                result,
+                timeout=args.persist_timeout,
+            )
+            mark = "PERSISTED" if ok else "PERSIST-WARN"
+            print(
+                f"[m2-judge]   └─ {mark} 第 {chapter['number']} 章 "
+                f"{'ok' if ok else detail}",
+                flush=True,
+            )
         status = "OK" if not result.get("error") else "ERR"
         print(
             f"[m2-judge] [{idx + 1}/{len(pending)}] 第 {chapter['number']} 章 "

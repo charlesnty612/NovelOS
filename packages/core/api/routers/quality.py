@@ -4,6 +4,7 @@
 - ``GET  /chapters/{chapter_id}/quality``       —— 最新一份 report；不存在 → 404
 - ``GET  /projects/{project_id}/quality``       —— 项目全部 report 列表（created_at DESC，limit 默认 50）
 - ``POST /chapters/{chapter_id}/quality/evaluate`` —— 现场组装 ctx + 评估 + 落库 + 返回；201
+- ``POST /chapters/{chapter_id}/quality/judge``  —— V3.1 P1-2：LLM judge 双轨评分落库
 - ``GET  /projects/{project_id}/quality/q8-export`` —— 全章节人工加工占比 CSV（PRD §125 合规自证）
 
 错误码映射：
@@ -12,11 +13,13 @@
 - 500 — DB 错误或意外异常。
 
 设计要点：
-- 复用 :class:`packages.core.quality.service.QualityService`（save_report / latest /
-  list）以及 :func:`packages.core.quality.service.build_quality_context`（与
-  ``packages/workflows/chapter_commit/pipeline.py`` 共用）；
+- 复用 :class:`packages.core.quality.service.QualityService`（save_report /
+  save_judge_score / latest / list）以及 :func:`packages.core.quality.service.build_quality_context`
+  （与 ``packages/workflows/chapter_commit/pipeline.py`` 共用）；
 - 评估不经过 chapter_commit pipeline；该端点对应「人工触发一次最新评估」的轻量入口，
   与门禁节点同语义但不对 chapter 状态 / commit 产生副作用（最多落一份新 report）。
+- V3.1 P1-2：``/quality/judge`` 端点与七子分完全解耦，``judge`` 字段单独附在
+  GET 响应顶层，无 judge 时为 ``null``。
 - ``discover_routers`` 自动发现：模块顶层 ``router`` 即被 ``main.py`` 挂载。
 - ``q8-export`` 端点：按章节实时调 :func:`packages.core.quality.service.compute_char_stats`
   计算 ai/human 字符数（与 :func:`guardrails.req_q8` 算法一致）；输出 csv（utf-8-sig）
@@ -28,6 +31,7 @@ from __future__ import annotations
 import csv
 import io
 import sqlite3
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response
@@ -66,9 +70,29 @@ def _ensure_chapter(request: Request, chapter_id: str) -> None:
         )
 
 
+def _attach_judge(row: dict[str, Any] | None) -> dict[str, Any]:
+    """V3.1 P1-2：从 ``row["judge_json"]`` 派生顶层 ``judge`` 字段（无则 ``None``）。
+
+    - ``judge_json`` 已是 dict / None（service 层 ``_row_to_dict`` 解析过）；
+    - 本函数不修改七子分与 overall；只是把 judge 的 JSON 内容挪到独立的 ``judge`` 键，
+      便于前端一查就能识别「LLM judge 旁路数据」存在与否。
+    """
+    if row is None:
+        return {}
+    judge = row.pop("judge_json", None)
+    # 兼容历史版本：旧库迁移前未跑 0012 时 ``judge_json`` 不在 row 中；一律视为 None
+    row["judge"] = judge if isinstance(judge, (dict, type(None))) else None
+    return row
+
+
 @router.get("/chapters/{chapter_id}/quality")
 def get_chapter_quality(chapter_id: str, request: Request) -> dict:
-    """该 chapter 的最新一份 QualityReport；不存在 → 404。"""
+    """该 chapter 的最新一份 QualityReport；不存在 → 404。
+
+    V3.1 P1-2：响应顶层附 ``judge`` 字段（来自 ``quality_reports.judge_json``，
+    双轨并存；未评审或评审失败时为 ``null``）。七子分 ``scores_json`` / overall
+    / issues_json / formula_hash 等字段不变；judge 不进入 overall 计算。
+    """
     _ensure_chapter(request, chapter_id)
     row = _service(request).latest_report(chapter_id)
     if row is None:
@@ -76,7 +100,36 @@ def get_chapter_quality(chapter_id: str, request: Request) -> dict:
             status_code=404,
             detail=f"chapter {chapter_id!r} has no quality report yet",
         )
-    return row
+    return _attach_judge(row)
+
+
+@router.post(
+    "/chapters/{chapter_id}/quality/judge",
+    status_code=status.HTTP_200_OK,
+)
+def save_chapter_judge(chapter_id: str, payload: dict, request: Request) -> dict:
+    """V3.1 P1-2：把 LLM judge 四维评分（pacing/style/logic/dialogue 0-100）+ 扩展
+    字段（verdict / top_issues / score_avg / usage / dry_run）落库到该 chapter
+    最新一份 report 的 ``judge_json``。
+
+    - chapter 不存在 → 404；
+    - payload 缺四维分键 → 422（``QualityService.save_judge_score`` 抛 ``ValueError``）；
+    - 该 chapter 没有 quality_report → 422（先跑 evaluate 再落 judge）。
+    - 返回 ``{"report_id", "chapter_id", "judge": {...}}``，与 POST evaluate 的
+      风格一致（chapter_id 回显、报告标识）。
+    """
+    _ensure_chapter(request, chapter_id)
+    try:
+        report_id = _service(request).save_judge_score(chapter_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    row = _service(request).latest_report(chapter_id) or {}
+    return {
+        "report_id": report_id,
+        "chapter_id": chapter_id,
+        "judge": row.get("judge_json"),
+    }
 
 
 @router.get("/projects/{project_id}/quality")
@@ -93,7 +146,8 @@ def list_project_quality(
         raise HTTPException(
             status_code=404, detail=f"project {project_id!r} not found"
         )
-    return _service(request).list_reports(project_id, limit=int(limit))
+    rows = _service(request).list_reports(project_id, limit=int(limit))
+    return [_attach_judge(r) for r in rows]
 
 
 @router.post(
@@ -157,7 +211,7 @@ def evaluate_chapter_quality(chapter_id: str, request: Request) -> dict:
             status_code=422, detail=f"integrity error: {exc}"
         ) from exc
 
-    return _service(request).latest_report(chapter_id) or {}
+    return _attach_judge(_service(request).latest_report(chapter_id) or {})
 
 
 @router.get("/projects/{project_id}/quality/q8-export")

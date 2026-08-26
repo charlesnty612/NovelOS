@@ -3,6 +3,9 @@
 职责：
 - :meth:`QualityService.save_report` —— 把 :class:`QualityReport` 落 ``quality_reports`` 表
   （含 ``scores_json`` = 六子分 + ``_meta``、``issues_json`` = ``Issue[]``）。
+- :meth:`QualityService.save_judge_score` —— V3.1 P1-2：把 LLM judge 四维评分（pacing /
+  style / logic / dialogue + verdict + top_issues + score_avg + usage + dry_run 等元数据）
+  写入对应 chapter 最新一份 report 的 ``judge_json`` 列，与七子分公式双轨并排。
 - :meth:`QualityService.latest_report` —— 取该 chapter 的最新一份 report。
 - :meth:`QualityService.list_reports` —— 按 ``project_id`` 列出全部 report（``created_at``
   降序，``limit`` 默认 50）。
@@ -47,6 +50,12 @@ __all__ = [
 ]
 
 
+# V3.1 P1-2：LLM judge 四维评分最小字段集合（pacing/style/logic/dialogue）。
+# 0-100 整数；类型/范围校验时按 SCORE_KEYS 走（与 ``scripts/m2_judge.py::SCORE_KEYS``
+# 对齐口径，但脚本侧还有 verdict/top_issues 等扩展字段，本服务仅校验最小集合）。
+JUDGE_REQUIRED_SCORE_KEYS: tuple[str, ...] = ("pacing", "style", "logic", "dialogue")
+
+
 class QualityService:
     """Quality 评估报告落库 + 检索。"""
 
@@ -74,6 +83,17 @@ class QualityService:
                 d["issues_json"] = json.loads(d["issues_json"])
             except json.JSONDecodeError:
                 d["issues_json"] = []
+        # V3.1 P1-2：judge_json 解析；缺四维分列迁移前旧库无此列 → 字段缺失则跳过
+        # （保留 None）。
+        if "judge_json" in d:
+            raw = d["judge_json"]
+            if raw is None or raw == "":
+                d["judge_json"] = None
+            else:
+                try:
+                    d["judge_json"] = json.loads(raw)
+                except json.JSONDecodeError:
+                    d["judge_json"] = None
         return d
 
     # ---------------------------------------------------------------- save
@@ -158,6 +178,90 @@ class QualityService:
         finally:
             conn.close()
         return self._row_to_dict(row)
+
+    # ---------------------------------------------------------- judge (V3.1 P1-2)
+    def save_judge_score(
+        self,
+        chapter_id: str,
+        judge_payload: dict[str, Any],
+    ) -> str:
+        """V3.1 P1-2：把 LLM judge 四维评分持久化到该 chapter 最新一份 report 的
+        ``judge_json`` 列。
+
+        双轨语义：不参与 ``scores_json`` 与 ``overall`` 计算，``scoring_formula_hash``
+        仅与七子分公式绑定（保持 V3.1 公式稳定）；judge 为旁路探针数据。
+
+        参数：
+        - ``chapter_id`` —— 章节主键（ch_<ulid>）；按 created_at 取最新一份 report。
+        - ``judge_payload`` —— 须包含 ``pacing/style/logic/dialogue`` 四维 0-100
+          整数；额外 ``verdict / top_issues / score_avg / usage / dry_run`` 等字段
+          一并存入 JSON（宽松校验）。
+
+        行为：
+        - 校验四维分类型与范围（int 0-100；非整数抛 ``ValueError``）。
+        - 找不到该 chapter 的任何 report → 抛 ``ValueError``（让 router 转 422）。
+        - 找到 → UPDATE 该 row 的 judge_json；返回该 report_id。
+
+        返回：``report_id``（被写入 judge_json 的 report）。
+        """
+        if not isinstance(judge_payload, dict):
+            raise ValueError("judge_payload must be dict")
+        missing = [
+            k for k in JUDGE_REQUIRED_SCORE_KEYS
+            if k not in judge_payload
+        ]
+        if missing:
+            raise ValueError(f"judge missing required score keys: {missing}")
+        # 类型/范围校验（与 m2_judge.py::validate_payload 口径一致：宽松）
+        cleaned: dict[str, Any] = {}
+        for k in JUDGE_REQUIRED_SCORE_KEYS:
+            v = judge_payload[k]
+            if isinstance(v, bool) or not isinstance(v, int):
+                # 浮点型整数允许（如 72.0）
+                if isinstance(v, float) and v.is_integer():
+                    v = int(v)
+                else:
+                    raise ValueError(
+                        f"judge score {k!r} must be int 0-100, got {type(v).__name__}={v!r}"
+                    )
+            v = max(0, min(100, int(v)))
+            cleaned[k] = v
+        # 其余字段（verdict/top_issues/score_avg/usage/dry_run 等）原样保留；
+        # JSON 序列化时 ensure_ascii=False 保留中文 verdict / top_issues。
+        merged: dict[str, Any] = {**judge_payload}
+        for k, v in cleaned.items():
+            merged[k] = v  # 用清洗后的 0-100 整数值覆盖原始输入
+        payload_json = self._dump_json(merged)
+
+        conn = get_connection(self.db_path)
+        try:
+            # 找最新一份 report；没有就抛 ValueError 由 router 转 422
+            row = conn.execute(
+                """
+                SELECT report_id FROM quality_reports
+                WHERE chapter_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (chapter_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"no quality report for chapter {chapter_id!r}; "
+                    "run evaluate first"
+                )
+            report_id = row["report_id"]
+            conn.execute(
+                """
+                UPDATE quality_reports
+                SET judge_json = :judge_json
+                WHERE report_id = :report_id
+                """,
+                {"judge_json": payload_json, "report_id": report_id},
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return report_id
 
     # ----------------------------------------------------------------- list
     def list_reports(
