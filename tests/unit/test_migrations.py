@@ -38,7 +38,8 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # V3.3 P0-2（知识权限补全）：0014_knowledge_reveal 给 relationships/timeline_events/scenes
     #   三表加 visibility+who_knows 列；DROP 旧 reveal_policies（0001 v1.1）后按 v3.3 schema
     #   重建——表数不变，业务表 34，总表 35。
-    assert result["tables"] == 35, f"expected 35 (34+_migrations), got {result['tables']}"
+    # V3.4 多卷与规模（组织层）：0015_volumes 加 volumes 业务表 → 业务表 35（34+1），总表 36。
+    assert result["tables"] == 36, f"expected 36 (35+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
     # Sprint 5 review F2：0002_drafts_unique.sql 也应被应用
@@ -68,12 +69,14 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # V3.3 P0-2（知识权限补全）：0014_knowledge_reveal.sql（三表加列 + reveal_policies 重建，
     #   表数不变；总表仍 35）。
     assert "0014_knowledge_reveal.sql" in result["applied"]
+    # V3.4 多卷与规模（组织层）：0015_volumes.sql（volumes 表 + chapters.volume_id；总表 36）。
+    assert "0015_volumes.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     first = apply_migrations(db_path, MIGRATIONS_DIR)
-    # V3.3 P0-2（知识权限补全）：迁移目录下十四条脚本都应被首次应用
+    # V3.4 多卷与规模（组织层）：迁移目录下十五条脚本都应被首次应用
     assert first["applied"] == [
         "0001_init.sql",
         "0002_drafts_unique.sql",
@@ -89,6 +92,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0012_judge_scores.sql",
         "0013_plot_events_description.sql",
         "0014_knowledge_reveal.sql",
+        "0015_volumes.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -108,6 +112,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0013_plot_events_description.sql" in second["skipped"]
     # V3.3 P0-2（知识权限补全）：0014 也应被幂等跳过
     assert "0014_knowledge_reveal.sql" in second["skipped"]
+    # V3.4 多卷与规模（组织层）：0015 也应被幂等跳过
+    assert "0015_volumes.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -119,7 +125,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         rows = conn.execute("SELECT filename, applied_at FROM _migrations").fetchall()
     finally:
         conn.close()
-    # V3.3 P0-2（知识权限补全）：十四条迁移都应记录
+    # V3.4 多卷与规模（组织层）：十五条迁移都应记录
     filenames = {r["filename"] for r in rows}
     assert filenames == {
         "0001_init.sql",
@@ -136,6 +142,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0012_judge_scores.sql",
         "0013_plot_events_description.sql",
         "0014_knowledge_reveal.sql",
+        "0015_volumes.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -170,7 +177,8 @@ def test_business_table_count_is_34(tmp_path: Path):
     # Sprint 15 / V1.3：业务表 32 + author_style_samples = 33
     # V2.0 Wave B 任务一：0009_branch_snapshots 加 branch_snapshots → 业务表 34
     # V2.0 Wave C 任务一：0011_fts_index 加 FTS5 虚表，但口径排除 → 业务表仍 34
-    assert len(names) == 34, f"expected 34 business tables, got {len(names)}"
+    # V3.4 多卷与规模（组织层）：0015_volumes 加 volumes 业务表 → 业务表 35
+    assert len(names) == 35, f"expected 35 business tables, got {len(names)}"
     # 抽检：PRD §67 关键表
     for expected in ("projects", "characters", "chapters", "commits", "state_deltas", "ai_call_logs"):
         assert expected in names, f"missing table {expected}"
@@ -180,6 +188,7 @@ def test_business_table_count_is_34(tmp_path: Path):
     assert "chapter_summaries" in names, "chapter_summaries table should exist (Sprint 14)"
     assert "author_style_samples" in names, "author_style_samples table should exist (Sprint 15 / V1.3)"
     assert "branch_snapshots" in names, "branch_snapshots table should exist (V2.0 Wave B 任务一)"
+    assert "volumes" in names, "volumes table should exist (V3.4 多卷与规模组织层)"
 
 
 def test_0011_chapter_fts_virtual_table_exists(tmp_path: Path):
@@ -511,6 +520,140 @@ def test_0010_inject_mode_check_constraint_enforced(tmp_path: Path):
                 "inject_mode) VALUES (?, ?, 'x', 'supporting', '{}', 'PUBLIC', "
                 "NULL, ?, ?, 'bogus')",
                 (cid, pid, now, now),
+            )
+    finally:
+        conn.close()
+
+
+def test_0015_volumes_table_and_chapters_volume_id_column(tmp_path: Path):
+    """V3.4 多卷与规模（组织层）：0015_volumes 落地 volumes 表 + chapters.volume_id。
+
+    - volumes 表存在且列齐（volume_id / project_id / number / title / status /
+      terminal_snapshot_json / created_at / updated_at）；
+    - status 默认 'active'；CHECK 枚举 active/sealed；
+    - UNIQUE(project_id, number) 约束生效；
+    - chapters.volume_id 列存在、可空、与 volumes.volume_id FK 关联。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        # 1) volumes 表存在
+        cols = conn.execute("PRAGMA table_info(volumes)").fetchall()
+    finally:
+        conn.close()
+    col_names = {c["name"] for c in cols}
+    expected = {
+        "volume_id", "project_id", "number", "title", "status",
+        "terminal_snapshot_json", "created_at", "updated_at",
+    }
+    assert expected <= col_names, (
+        f"volumes 缺列; got={col_names}, expected⊆={expected}"
+    )
+
+    # 2) status 默认值与 CHECK（合法值写入成功）
+    from packages.core.ids import new_id, now_iso
+    pid = new_id("prj")
+    now = now_iso()
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO projects (project_id, name, premise, genre, target_words, "
+            "status, created_at, updated_at) VALUES (?, ?, NULL, NULL, NULL, "
+            "'ACTIVE', ?, ?)",
+            (pid, "p", now, now),
+        )
+        vid = new_id("vol")
+        conn.execute(
+            """
+            INSERT INTO volumes
+                (volume_id, project_id, number, title, status,
+                 terminal_snapshot_json, created_at, updated_at)
+            VALUES (?, ?, 1, '第一卷', 'active', NULL, ?, ?)
+            """,
+            (vid, pid, now, now),
+        )
+        conn.commit()
+
+        # 3) CHECK 非法 status → IntegrityError
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO volumes
+                    (volume_id, project_id, number, title, status,
+                     terminal_snapshot_json, created_at, updated_at)
+                VALUES (?, ?, 2, 'x', 'bogus_status', NULL, ?, ?)
+                """,
+                (new_id("vol"), pid, now, now),
+            )
+
+        # 4) UNIQUE(project_id, number) 生效
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO volumes
+                    (volume_id, project_id, number, title, status,
+                     terminal_snapshot_json, created_at, updated_at)
+                VALUES (?, ?, 1, 'dup', 'active', NULL, ?, ?)
+                """,
+                (new_id("vol"), pid, now, now),
+            )
+    finally:
+        conn.close()
+
+    # 5) chapters.volume_id 列存在
+    conn = get_connection(db_path)
+    try:
+        ch_cols = conn.execute("PRAGMA table_info(chapters)").fetchall()
+    finally:
+        conn.close()
+    ch_col_names = {c["name"] for c in ch_cols}
+    assert "volume_id" in ch_col_names, (
+        f"chapters 缺 volume_id 列（0015 应补）; got={ch_col_names}"
+    )
+    vid_col = next(c for c in ch_cols if c["name"] == "volume_id")
+    assert vid_col["type"] == "TEXT"
+    # 可空（旧章节不强制回填）
+    assert vid_col["notnull"] == 0
+    assert vid_col["dflt_value"] is None
+
+    # 6) chapters.volume_id FK 存在（FOREIGN KEY(volume_id) REFERENCES volumes(volume_id)）
+    conn = get_connection(db_path)
+    try:
+        fks = conn.execute("PRAGMA foreign_key_list(chapters)").fetchall()
+    finally:
+        conn.close()
+    fk_targets = {(fk["from"], fk["table"], fk["to"]) for fk in fks}
+    assert ("volume_id", "volumes", "volume_id") in fk_targets, (
+        f"chapters.volume_id FK 到 volumes(volume_id) 缺失; got={fk_targets}"
+    )
+
+
+def test_0015_volumes_status_check_constraint_enforced(tmp_path: Path):
+    """V3.4 多卷与规模（组织层）：0015 给 volumes.status 加的 CHECK 约束生效。"""
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    from packages.core.ids import new_id, now_iso
+    pid = new_id("prj")
+    now = now_iso()
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO projects (project_id, name, premise, genre, target_words, "
+            "status, created_at, updated_at) VALUES (?, ?, NULL, NULL, NULL, "
+            "'ACTIVE', ?, ?)",
+            (pid, "p", now, now),
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO volumes
+                    (volume_id, project_id, number, title, status,
+                     terminal_snapshot_json, created_at, updated_at)
+                VALUES (?, ?, 1, 'x', 'archived', NULL, ?, ?)
+                """,
+                (new_id("vol"), pid, now, now),
             )
     finally:
         conn.close()

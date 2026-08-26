@@ -12,7 +12,15 @@
   - 逾期伏笔 > 0 → warn ``foreshadow_overdue``
   - 任一章 pacing < 50 → warn ``low_pacing_chapter``
 - :func:`_load_latest_quality_per_chapter` / :func:`_load_latest_draft_chars_per_chapter` /
-  :func:`_summarize_hooks` / :func:`_summarize_debts` —— DB 拉数辅助。
+  :func:`_summarize_hooks` / :func:`_summarize_debts` / :func:`_load_volumes` —— DB 拉数辅助。
+
+V3.4 多卷与规模（组织层）：
+- ``chapters`` 数组元素新增 ``volume_id`` / ``volume_number`` 字段
+  （LEFT JOIN volumes，无卷 → null / null）；
+- 顶层新增 ``volumes`` 小节：``[{volume_id, number, title, status, chapter_count}, ...]``，
+  按 ``number ASC`` 排序；
+- 容错：0015 未跑（volumes 表缺失）→ chapters 元素的 volume 字段全为 null，
+  顶层 ``volumes`` 小节为空列表；不阻断 arc 装配。
 
 DB 取数说明（任务书要求**纯函数 + 显式 SQL**，不依赖私有函数）：
 
@@ -337,6 +345,47 @@ def _summarize_debts(conn: sqlite3.Connection, project_id: str) -> dict[str, int
     return {"open": open_count, "paid": paid_count}
 
 
+def _load_volumes(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """V3.4 多卷与规模（组织层）：按 number ASC 列项目下所有卷 + chapter_count。
+
+    返回元素 ``{volume_id, number, title, status, chapter_count}``；``title`` 为
+    None 时透传 NULL。
+
+    容错：0015 未跑（volumes 表不存在）→ 返回 ``[]``，不阻断 arc 装配。
+    """
+    out: list[dict[str, Any]] = []
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                v.volume_id, v.number, v.title, v.status,
+                COALESCE(COUNT(c.chapter_id), 0) AS chapter_count
+            FROM volumes v
+            LEFT JOIN chapters c ON c.volume_id = v.volume_id
+            WHERE v.project_id = ?
+            GROUP BY v.volume_id
+            ORDER BY v.number ASC, v.volume_id ASC
+            """,
+            (project_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return out
+    for r in rows:
+        out.append(
+            {
+                "volume_id": r["volume_id"],
+                "number": int(r["number"]),
+                "title": r["title"],
+                "status": r["status"],
+                "chapter_count": int(r["chapter_count"]),
+            }
+        )
+    return out
+
+
 def _summarize_reveal_policies(
     conn: sqlite3.Connection,
     project_id: str,
@@ -520,6 +569,8 @@ def build_arc_view(db_path: str | Path, project_id: str) -> dict[str, Any]:
                 "number": int, "title": str,
                 "has_payoff_beat": bool, "charge_beat": bool,
                 "overall": int|null, "pacing": int|null, "prose_chars": int|null,
+                "volume_id": str|null,        # V3.4 多卷与规模
+                "volume_number": int|null,    # V3.4 多卷与规模
               } ...
             ],
             "payoff": {
@@ -538,6 +589,11 @@ def build_arc_view(db_path: str | Path, project_id: str) -> dict[str, Any]:
                     ...
                 ],
             },
+            "volumes": [                    # V3.4 多卷与规模
+                {"volume_id": str, "number": int, "title": str|null,
+                 "status": "active"|"sealed", "chapter_count": int},
+                ...
+            ],
             "alerts": [ {"level": "warn"|"fail", "code": str, "message": str}, ... ],
         }``
 
@@ -556,12 +612,33 @@ def build_arc_view(db_path: str | Path, project_id: str) -> dict[str, Any]:
 
     conn = get_connection(db_path)
     try:
-        # 2) chapters（按 number ASC）
-        chapter_rows = conn.execute(
-            "SELECT chapter_id, number, title, plan_json FROM chapters "
-            "WHERE project_id = ? ORDER BY number ASC",
-            (project_id,),
-        ).fetchall()
+        # 2) chapters（按 number ASC；LEFT JOIN volumes 拿卷信息）
+        # V3.4 多卷与规模：容错——0015 未跑（volumes 表缺失）→ 降级为 SELECT chapters
+        # 而不阻断 arc 装配；chapter.volume_id / volume_number 全为 null。
+        try:
+            chapter_rows = conn.execute(
+                """
+                SELECT c.chapter_id, c.number, c.title, c.plan_json,
+                       c.volume_id, v.number AS volume_number
+                FROM chapters c
+                LEFT JOIN volumes v ON v.volume_id = c.volume_id
+                WHERE c.project_id = ?
+                ORDER BY c.number ASC
+                """,
+                (project_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # volumes 表缺失 → 回退到无卷信息的纯 chapters 查询
+            chapter_rows = conn.execute(
+                """
+                SELECT chapter_id, number, title, plan_json,
+                       NULL AS volume_id, NULL AS volume_number
+                FROM chapters
+                WHERE project_id = ?
+                ORDER BY number ASC
+                """,
+                (project_id,),
+            ).fetchall()
 
         chapter_ids: list[str] = [r["chapter_id"] for r in chapter_rows]
         chapter_no_by_id: dict[str, int] = {r["chapter_id"]: int(r["number"]) for r in chapter_rows}
@@ -585,6 +662,11 @@ def build_arc_view(db_path: str | Path, project_id: str) -> dict[str, Any]:
                     "title": r["title"] or "",
                     "has_payoff_beat": has_payoff,
                     "charge_beat": has_charge,
+                    # V3.4 多卷与规模：chapter 归属（LEFT JOIN，无卷为 null）
+                    "volume_id": r["volume_id"],
+                    "volume_number": (
+                        int(r["volume_number"]) if r["volume_number"] is not None else None
+                    ),
                 }
             )
 
@@ -615,6 +697,8 @@ def build_arc_view(db_path: str | Path, project_id: str) -> dict[str, Any]:
         reveal_policies_summary = _summarize_reveal_policies(
             conn, project_id, current_max_chapter_no,
         )
+        # V3.4 多卷与规模：volumes 顶层小节（含 chapter_count 聚合）
+        volumes_summary = _load_volumes(conn, project_id)
     finally:
         conn.close()
 
@@ -635,6 +719,8 @@ def build_arc_view(db_path: str | Path, project_id: str) -> dict[str, Any]:
         "debts": debts_summary,
         # V3.3 P0-2：reveal_policies 摘要与到期未揭示清单
         "reveal_policies": reveal_policies_summary,
+        # V3.4 多卷与规模：volumes 顶层小节
+        "volumes": volumes_summary,
         "alerts": alerts,
     }
 

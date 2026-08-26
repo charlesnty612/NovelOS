@@ -5,6 +5,15 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [3.4.0] - 2026-08-26
+
+### Added（V3.4「多卷与规模」组织层）
+- **卷管理**：迁移 0015（volumes 表 + chapters.volume_id）；VolumeService 与 REST 六端点（CRUD/seal/assign）；封存时冻结终态快照入卷归档；单项目同时仅一个 active 卷；sealed 卷拒绝挂章。
+- **arc 按卷分组**：弧光视图章节元素携带 volume 归属，顶层新增 volumes 小节。
+
+### 设计决策
+- 未做按卷拆分快照存储——O-1 滚动窗口已实证上下文有界（63 章 trimmed 输入 31k 字符），存储级拆分的复杂度税不成立；150+ 章实测恶化时再按设计文档 §三升级快照分代。健康端点业务表数 35→36（volumes）。
+
 ## [3.3.0] - 2026-08-26
 
 ### Added（V3.3「知识权限补全」）

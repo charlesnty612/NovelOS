@@ -63,7 +63,7 @@ jsonschema / httpx；测试另需 pytest / ruff）。
 # 1) 安装依赖
 pip install -e ".[dev]"
 
-# 2) 执行数据库迁移（生成 data/novelos.db；34 张业务表 + _migrations）
+# 2) 执行数据库迁移（生成 data/novelos.db；36 张业务表 + _migrations）
 python scripts/migrate.py
 
 # 3) 前端构建（构建产物 apps/web/dist，后端会自动托管）
@@ -88,12 +88,12 @@ python -m packages.core.api.main
   `apps/web/vite.config.ts`；`apps/desktop/vite.config.ts` 为停维护骨架，仅供参考）；改端口后需重启
   vite dev 才生效。
 
-健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=34`，业务表数）。
+健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=36`，业务表数）。
 
 ## 测试
 
 ```bash
-# 后端全量（当前基线 约 1000 passed）
+# 后端全量（当前基线 约 1023 passed）
 python -m pytest tests/ -q
 
 # Golden 回归 eval（当前 3/3）
