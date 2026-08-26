@@ -360,14 +360,26 @@
 | `character_changes` | change_id, op, target_id, character_id, facet, field, before*, after*, confidence, evidence, risk_level | add/update/remove | facet ∈ {definition, state} |
 | `world_changes` | change_id, op, target_id, world_kind, world_id, field, before*, after*, confidence, evidence, risk_level | add/update/remove | world_kind ∈ {location, faction, rule, politics, economy, event, time} |
 | `relationship_changes` | change_id, op, target_id, from_character_id, to_character_id, relation_type, before*, after*, confidence, evidence, risk_level | add/update/remove | before/after 为 object |
-| `new_events` | change_id, op, target_id, event_id, type, participants, time, confidence, evidence, risk_level | const `add` | type ∈ {revelation, conflict, decision, encounter, transition, other}；time.timeline_day ≥ 1；participants ≥ 1 |
+| `new_events` | change_id, op, target_id, event_id, type, participants, time, confidence, evidence, risk_level | const `add` | type ∈ {revelation, conflict, decision, encounter, transition, other}；time.timeline_day ≥ 1；participants ≥ 1；**event_id 必须全新唯一——见下文 §7.4** |
 | `resolved_hooks` | change_id, op, target_id, hook_id, to_status, payoff_summary, confidence, evidence, risk_level | const `update` | to_status 五态之一 |
 | `new_hooks` | change_id, op, target_id, hook_id, name, importance, description, confidence, evidence, risk_level | const `add` | importance ∈ [0, 1] |
 | `debt_changes` | change_id, op, target_id, debt_id, status_after, confidence, evidence, risk_level | add/update/remove | status_after ∈ {open, acknowledged, paid, forgiven} |
 
 > `before*` / `after*` 的具体 required 状态依赖 `op`：update 时 before/after 均必填；add 时 after 必填；remove 时 before/after 可为 null（remove 时 `reason` 必填）。
 
-### 7.3 Schema 不允许的输出（示例）
+### 7.4 new_events[*].event_id 唯一性约束（V3.1.1 O-3）
+
+`new_events[*].event_id` 在 `plot_events` 表上是 **PRIMARY KEY**——任意两条重复 event_id 在 commit 阶段都会触发 `UNIQUE constraint failed`，导致 run FAILED（ch063 实证现场）。
+
+每次 observer 调用会收到 `payload.config.recent_event_ids`（最近 30 条已落库 event_id 白名单，按 rowid DESC 倒序）。**必须遵守**：
+
+1. **不得与 `config.recent_event_ids` 白名单中的任何 id 重复**。
+2. **强烈建议使用带本章章号前缀的命名**（如 `evt_ch63_xxx` / `event_ch63_xxx`），天然避免跨章冲突。
+3. 若 `recent_event_ids` 为空（项目首个事件 / 白名单关闭），仍需保证 id 全局唯一；可使用 `evt_ch{n}_{slug}` 或 `event_<ulid>` 形式。
+4. **绝不**复用白名单中既有 id 改字段值——commit 会因主键冲突直接落 rejected 行。
+5. validator 会在 `validate_delta` 阶段做一次额外的 event_id 冲突预检（详见 §11.5），即便 observer 输出合法，业务校验仍可能拦截。
+
+### 7.5 Schema 不允许的输出（示例）
 
 以下字段 **不要** 出现在你的最终 JSON 输出中：
 

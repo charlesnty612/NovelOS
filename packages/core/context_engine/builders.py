@@ -2550,6 +2550,54 @@ def _trim_snapshot_for_observer(
     return trimmed, stats
 
 
+# V3.1.1 O-3：observer recent_event_ids 白名单默认上限（条）。
+# 调用方可在 chapter_commit/pipeline.py 里显式覆盖；DB 读取按 rowid DESC 倒序
+# 取最近 N 条 event_id 注入 payload["config"]["recent_event_ids"]，让 observer
+# 在生成 new_events[*].event_id 时主动避开白名单中的既有 id，避免与 DB 已有
+# event 主键冲突（ch063 历史现场：UNIQUE constraint failed）。
+_DEFAULT_RECENT_EVENT_IDS_LIMIT = 30
+
+
+def _load_recent_event_ids(
+    db_path: str | Path, project_id: str, *, limit: int,
+) -> list[str]:
+    """从 plot_events 取最近 ``limit`` 条 event_id（按 rowid DESC；不依赖 created_at 列）。
+
+    返回 ``[event_id, ...]``（最新在前）；DB IO 异常或 limit≤0 → 空 list。
+    plot_events 表无 created_at 列（schema 见 0009），按 rowid 倒序等价「最新 N 条」。
+    """
+    if limit is None or not isinstance(limit, int) or limit <= 0:
+        return []
+    try:
+        conn = get_connection(db_path)
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT event_id FROM plot_events
+            WHERE project_id = ?
+            ORDER BY rowid DESC
+            LIMIT ?
+            """,
+            (project_id, int(limit)),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    out: list[str] = []
+    for r in rows:
+        if not isinstance(r, sqlite3.Row):
+            d = dict(r) if hasattr(r, "keys") else {"event_id": r[0]}
+        else:
+            d = dict(r)
+        eid = d.get("event_id")
+        if isinstance(eid, str) and eid:
+            out.append(eid)
+    return out
+
+
 def build_observer_input(
     db_path: str | Path,
     chapter_id: str,
@@ -2560,8 +2608,10 @@ def build_observer_input(
     keep_recent_commits: int = 3,
     resolved_history_keep: int = 5,
     events_window_chapters: int | None = _DEFAULT_EVENTS_WINDOW_CHAPTERS,
+    recent_event_ids: list[str] | None = None,
+    recent_event_ids_limit: int = _DEFAULT_RECENT_EVENT_IDS_LIMIT,
 ) -> dict[str, Any]:
-    """组装 Observer 输入（agent-contracts §5.1 + M3 快照分代裁剪 + V3.1.1 O-1）。
+    """组装 Observer 输入（agent-contracts §5.1 + M3 快照分代裁剪 + V3.1.1 O-1 + O-3）。
 
     参数新增（M3）：
         snapshot_mode："full"（默认，与旧行为字节级一致）或 "trimmed"。
@@ -2584,6 +2634,12 @@ def build_observer_input(
             仅 2-3 千）。收紧到 24 既覆盖典型章节的原子变化条数（≤20 条），又能
             显著抑制模型「宁滥勿缺」的扩展倾向，将单章 observer 输出压缩至
             可接受范围。
+        recent_event_ids（V3.1.1 O-3）：可选显式传入的「最近 event_id 白名单」；
+            注入到 payload["config"]["recent_event_ids"]，observer 在生成
+            ``new_events[*].event_id`` 时应主动避开白名单中 id，避免与 plot_events
+            主键 UNIQUE 约束冲突（ch063 历史现场）。
+        recent_event_ids_limit（V3.1.1 O-3）：当 ``recent_event_ids=None`` 时，
+            从 plot_events 按 rowid DESC 自动取最近 N 条注入白名单（默认 30）。
 
     向后兼容：
         既有调用方（chapter_commit/pipeline.py:242、preview.py:443）零改动；
@@ -2591,6 +2647,9 @@ def build_observer_input(
         仅影响注入 prompt 的 config 字段值；调用方显式传参时按调用方为准。
         ``events_window_chapters`` 默认 6，仅影响 trimmed 模式；传 None 即可
         关闭窗口回归旧行为。
+        ``recent_event_ids`` 默认 None → 按 ``recent_event_ids_limit`` 自动取数；
+        老调用方未传该参数时，config 键会自动出现（注入空 list 也行——不破坏 schema，
+        observer prompt 后续可识别并据白名单避让）。
     """
     if snapshot_mode not in ("full", "trimmed"):
         raise ValueError(
@@ -2639,6 +2698,15 @@ def build_observer_input(
         "config": {
             "min_excerpt_chars_low_confidence": min_excerpt_chars_low_confidence,
             "max_changes_per_array": max_changes_per_array,
+            # V3.1.1 O-3：recent_event_ids 白名单。调用方显式传则按调用方；
+            # 否则按 recent_event_ids_limit 从 plot_events 自动取最近 N 条。
+            # 注入 payload 让 observer 在生成 new_events[*].event_id 时主动避让，
+            # 避免与 plot_events.event_id 主键 UNIQUE 约束冲突。
+            "recent_event_ids": list(recent_event_ids)
+            if isinstance(recent_event_ids, list)
+            else _load_recent_event_ids(
+                db_path, project_id, limit=recent_event_ids_limit,
+            ),
         },
     }
 
@@ -2704,4 +2772,6 @@ __all__ = [
     "build_director_input",
     "build_writer_input",
     "build_observer_input",
+    "_load_recent_event_ids",
+    "_DEFAULT_RECENT_EVENT_IDS_LIMIT",
 ]

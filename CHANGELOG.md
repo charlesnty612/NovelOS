@@ -5,6 +5,21 @@
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。
 
+## [3.2.2] - 2026-08-26
+
+### Added（V3.1.1 observer 减负专项 O-1/O-2）
+- **事件摘要滚动窗口**：observer trimmed 输入的 events 摘要只保留最近 6 章触达 + 被 open hooks/debts 引用者，open hooks/debts 字段压缩；实测输入 92.6k→31.3k 字符（-66%）。
+- **observer 双腿拆分**：`NOVELOS_OBSERVER_SPLIT` 开关（默认 on）——腿 A 实体状态（characters/relationships/world_changes）、腿 B 叙事对象（events/hooks/debts）各自独立调用与重试（按校验错误归类到出错腿），light capability 可配；run_agent 支持 capability_override。ch063 实战：单腿拥堵超时不再导致整次死锁。
+
+## [3.2.3] - 2026-08-26
+
+### Fixed（V3.1.1 O-3）
+- **observer 按腿输入裁剪**：腿 A 移除 events/hooks/debts（previous_state -65.5%）、腿 B 实体降级为标识摘要——双腿合计 payload 47.9k 字符，总 token ~120k→89k（-26%）。
+- **近期 event_id 白名单**：payload.config 注入最近 30 个 event_id + prompt 强制避让，消除 observer 生成 id 与库中历史事件撞车导致的 UNIQUE constraint failed（ch063 实战首次尝试即 COMMITTED）。
+
+### Known Issues
+- provider 拥堵窗口下单腿仍可能 480s 超时（网络抖动同源），断点续跑可自愈；根治候选为流式调用或备用 provider 失败转移。
+
 ## [3.2.1] - 2026-08-26
 
 ### Fixed

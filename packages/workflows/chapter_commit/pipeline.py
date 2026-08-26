@@ -77,6 +77,24 @@ _OBSERVER_RETRY_HINT_TEMPLATE = (
 # mock_script 时（MockProvider list 模式按调用顺序取元素），会让 leg B 拿到 leg A
 # 已消耗的元素。两腿需各自拿到全量 mock 输出，再在 merge 阶段按 scope 过滤——
 # 由 ``_filter_mock_for_leg`` 在 pipeline 入口处预处理 mock_script。
+#
+# ============================================================================
+# V3.1.1 O-3：按腿裁剪 previous_state + recent_event_ids 白名单
+# ============================================================================
+# 根因（O-2 遗留）：
+# ①两条腿各自携带全量 trimmed previous_state（各 ~30k 字符），合计 ~60k；
+#   observer 阶段总输入翻倍（~120k tokens），重 leg 仍偏重。
+# ②observer 在 narrative 腿生成 new_events[*].event_id 时可能与 plot_events.event_id
+#   主键撞车，触发 UNIQUE constraint failed（ch063 现场）。
+# 设计：
+# - leg_a (entities)：只保留实体集合（characters / locations / factions /
+#   world_rules / relationships）+ 顶层元信息；移除 events / hooks / debts 集合。
+# - leg_b (narrative)：保留 events（trimmed 滚动窗口）+ hooks（压缩口径）+ debts；
+#   实体集合降级为标识性摘要（{id, name, status}），便于 new_events[*].participants
+#   引用；world_rules 保留 name/statement 摘要（事件可能触发规则变化引用）。
+# - 两腿各自注入 ``snapshot_trim_stats``（按腿统计）。
+# - recent_event_ids 白名单由 pipeline 从 DB 取最近 30 条注入 payload.config。
+# - per-leg 字符数计入 observer_split_meta.leg_a_chars/leg_b_chars，便于量化收益。
 _OBSERVER_LEG_A_ARRAYS = ("character_changes", "relationship_changes", "world_changes")
 _OBSERVER_LEG_B_ARRAYS = ("new_events", "new_hooks", "resolved_hooks", "debt_changes")
 _OBSERVER_ALL_ARRAYS = _OBSERVER_LEG_A_ARRAYS + _OBSERVER_LEG_B_ARRAYS
@@ -442,15 +460,27 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
     # 新拆分路径：两腿分别调 observer agent，按 scope 注入 payload 指令
-    leg_a_payload = dict(base_payload)
+    # V3.1.1 O-3：先按 leg 裁剪 previous_state，让两腿各自只看到本 leg 需要的集合；
+    # 同时 base_payload["config"]["recent_event_ids"] 已由 build_observer_input 自动注入。
+    leg_a_payload, leg_a_trim_stats = _trim_observer_input_for_leg(base_payload, "entities")
     leg_a_payload["extraction_scope"] = "entities"
-    leg_b_payload = dict(base_payload)
+    leg_b_payload, leg_b_trim_stats = _trim_observer_input_for_leg(base_payload, "narrative")
     leg_b_payload["extraction_scope"] = "narrative"
 
     # Mock 兼容：golden regression 的 mock_script 是完整 7 数组；按 leg 过滤，
     # 让两腿各自看到「只含本 leg 范围」mock——merge 后等价于单次大调用。
     leg_a_mock = _filter_mock_for_leg(mock_script, "entities")
     leg_b_mock = _filter_mock_for_leg(mock_script, "narrative")
+
+    # 量化 per-leg 字符数（便于 O-3 收益对比）；量的是 trim 后的 JSON 序列化字节数。
+    try:
+        leg_a_chars = len(json.dumps(leg_a_payload, ensure_ascii=False))
+    except (TypeError, ValueError):
+        leg_a_chars = 0
+    try:
+        leg_b_chars = len(json.dumps(leg_b_payload, ensure_ascii=False))
+    except (TypeError, ValueError):
+        leg_b_chars = 0
 
     leg_a_out = run_agent(
         db_path,
@@ -483,6 +513,20 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         expected_calls=2,
         merged_at=now_iso(),
     )
+    # V3.1.1 O-3：把 per-leg payload 字符数 + 按腿 trim stats 挂到 observer_split_meta，
+    # 便于量化 O-3 收益（与 O-2 时的 ~120k tokens / 全量 payload 对比）。
+    if isinstance(meta, dict):
+        meta["leg_a_chars"] = leg_a_chars
+        meta["leg_b_chars"] = leg_b_chars
+        meta["leg_a_total_chars"] = leg_a_chars + leg_b_chars
+        meta["leg_a_trim_stats"] = leg_a_trim_stats
+        meta["leg_b_trim_stats"] = leg_b_trim_stats
+        # recent_event_ids 注入条数（base_payload.config 已在 build_observer_input 完成）
+        base_config = base_payload.get("config") or {}
+        if isinstance(base_config, dict):
+            reid = base_config.get("recent_event_ids")
+            if isinstance(reid, list):
+                meta["recent_event_ids_count"] = len(reid)
     return {"observer_payload": merged, "observer_split_meta": meta}
 
 
@@ -608,7 +652,9 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
       - character_changes / relationship_changes / world_changes → leg_a 重试
       - new_events / new_hooks / resolved_hooks / debt_changes → leg_b 重试
     - errors 不可归类（不含数组名）→ 双腿都重试（兜底，保持向后兼容）。
-    - 重试 payload：``dict(ctx["observer_input"])`` + ``_retry_hint`` + ``extraction_scope``。
+    - 重试 payload（V3.1.1 O-3）：``_trim_observer_input_for_leg(base, leg)`` 后的
+      leg 专用 payload + ``_retry_hint`` + ``extraction_scope``——按腿裁剪 previous_state
+      与首次调用口径一致。
     - mock_script：首次按 leg 过滤；重试时取 ``mock_script[idx+1]`` 对应 leg 的元素。
     - 重试预算：每个 leg 最多 1 次（与单次路径的 1 次重试预算对齐——双腿都重试场景下
       总调用次数上限 = 2 首次 + 2 重试 = 4 次 ai_call_logs 行）。
@@ -669,7 +715,11 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
             if need_b:
                 legs_to_retry.append("narrative")
             for leg in legs_to_retry:
-                retry_payload = dict(ctx.get("observer_input") or {})
+                # V3.1.1 O-3：retry 也按 leg 裁剪 previous_state；与首次调用口径一致。
+                base_retry_payload = dict(ctx.get("observer_input") or {})
+                retry_payload, _ = _trim_observer_input_for_leg(
+                    base_retry_payload, leg,
+                )
                 retry_payload["_retry_hint"] = _OBSERVER_RETRY_HINT_TEMPLATE.format(
                     errors="; ".join(errors)
                 )
@@ -762,6 +812,318 @@ def _extract_leg_payload(observer_payload: dict[str, Any], leg: str) -> dict[str
             arr = observer_payload.get(arr_name)
             out[arr_name] = list(arr) if isinstance(arr, list) else []
     return out
+
+
+# ============================================================================
+# V3.1.1 O-3：按 leg 裁剪 observer_input.previous_state
+# ============================================================================
+#
+# 入口供 ``_observer_node`` 与 per-leg retry 共用：拿到完整 ``base_payload``（已含
+# ``snapshot_mode='trimmed'`` 的 previous_state + snapshot_trim_stats + config +
+# chapter + director_plan_summary + knowledge_permissions 等）后，按 leg 范围裁剪
+# ``previous_state`` 各集合，并按腿独立重算 ``snapshot_trim_stats``。
+#
+# 公共部分（不动）：``chapter`` / ``director_plan_summary`` / ``config``
+# / ``knowledge_permissions`` / ``previous_state_version`` / ``previous_state`` 顶层
+# ``state_version`` / ``recent_events`` / ``world.current_time_in_story`` /
+# ``world.active_resources``。
+#
+# leg_a (entities) previous_state：保留实体集合全量（已是 O-1 trimmed 口径）；
+#   移除 ``events`` / ``hooks`` / ``debts`` 集合。
+# leg_b (narrative) previous_state：保留 events（trimmed 口径）+ hooks（压缩口径）+
+#   debts；实体集合降级为 ``{id, name, status/role}`` 标识性摘要；world_rules 保留
+#   ``{world_rule_id, name, statement}`` 摘要（事件可能触发规则变化引用）。
+#
+# 返回 ``(trimmed_payload, per_leg_trim_stats)``：trimmed_payload 是可直接喂给
+# ``run_agent("observer", ...)`` 的完整 payload；stats 写到顶层 ``snapshot_trim_stats``
+# 供观测 / 测试断言。
+# ============================================================================
+
+
+def _summarize_character_for_leg_b(char: dict[str, Any]) -> dict[str, Any]:
+    """leg_b narrative 用：实体性 character 降级为标识性摘要（仅 id/name/role/status）。"""
+    if not isinstance(char, dict):
+        return {}
+    state = char.get("current_state")
+    status = None
+    if isinstance(state, dict):
+        status = state.get("status")
+    return {
+        "character_id": char.get("character_id"),
+        "name": char.get("name"),
+        "role": char.get("role"),
+        "status": status,
+        "summary_marker": "leg_b_narrative",
+    }
+
+
+def _summarize_location_for_leg_b(loc: Any, lid: str | None = None) -> dict[str, Any]:
+    """leg_b narrative 用：location 降级为 ``{location_id, name}``。"""
+    if isinstance(loc, dict):
+        return {
+            "location_id": loc.get("location_id") or lid,
+            "name": loc.get("name"),
+            "summary_marker": "leg_b_narrative",
+        }
+    return {"location_id": lid, "name": None, "summary_marker": "leg_b_narrative"}
+
+
+def _summarize_faction_for_leg_b(fac: Any, fid: str | None = None) -> dict[str, Any]:
+    if isinstance(fac, dict):
+        return {
+            "faction_id": fac.get("faction_id") or fid,
+            "name": fac.get("name"),
+            "summary_marker": "leg_b_narrative",
+        }
+    return {"faction_id": fid, "name": None, "summary_marker": "leg_b_narrative"}
+
+
+def _summarize_world_rule_for_leg_b(rule: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(rule, dict):
+        return {}
+    return {
+        "world_rule_id": rule.get("world_rule_id"),
+        "name": rule.get("name"),
+        "statement": rule.get("statement"),
+        "summary_marker": "leg_b_narrative",
+    }
+
+
+def _trim_observer_input_for_leg(
+    base_payload: dict[str, Any], leg: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """V3.1.1 O-3：按 leg 裁剪 observer_input.previous_state。
+
+    输入 ``base_payload`` 是 :func:`build_observer_input` 输出的完整 payload（已含
+    ``snapshot_mode='trimmed'`` 的 previous_state）；输出 ``(trimmed_payload, stats)``。
+
+    公共部分（两腿都保留）：``chapter`` / ``director_plan_summary`` / ``config``
+    （含 recent_event_ids 白名单）/ ``knowledge_permissions`` / ``previous_state_version`` /
+    ``previous_state.snapshot_mode`` / ``previous_state.state_version`` /
+    ``previous_state.recent_events`` / ``previous_state.world.current_time_in_story`` /
+    ``previous_state.world.active_resources``。
+
+    leg_a (entities) previous_state 保留：
+    - ``characters``（已是 O-1 trimmed：touched 全量 / 其他仅 {character_id, name, facet}）
+    - ``characters[].relationships``（touched 全量 / 其他仅摘要）
+    - ``world.locations`` / ``world.factions``（touched value 全量 / 其他仅 {name}）
+    - ``world.world_rules``（touched 全量 / 其他仅 {world_rule_id, name}）
+    leg_a 移除：``events`` / ``hooks`` / ``debts``（leg_a 不读）。
+
+    leg_b (narrative) previous_state 保留：
+    - ``events``（O-1 窗口口径，原样）
+    - ``hooks``（open 压缩口径，resolved 仅摘要，与 O-1 对齐）
+    - ``debts``（open 压缩口径，resolved 仅摘要，与 O-1 对齐）
+    leg_b 实体集合降级：
+    - ``characters`` → ``{character_id, name, role, status}`` 摘要
+    - ``world.locations`` → ``{location_id, name}`` 摘要
+    - ``world.active_factions`` 或 ``world.factions`` → ``{faction_id, name}`` 摘要
+    - ``world.world_rules`` → ``{world_rule_id, name, statement}`` 摘要（事件可能引用规则变化）
+
+    stats 记录裁剪前后体积（按 leg 统计）：
+    - ``leg`` / ``previous_state_bytes_before`` / ``previous_state_bytes_after``
+    - ``characters_kept`` / ``locations_kept`` / ``factions_kept`` / ``world_rules_kept``
+    - ``events_kept`` / ``hooks_kept`` / ``debts_kept``
+    """
+    if leg not in ("entities", "narrative"):
+        raise ValueError(f"leg must be 'entities' or 'narrative', got {leg!r}")
+
+    prev_state = base_payload.get("previous_state") or {}
+    if not isinstance(prev_state, dict):
+        prev_state = {}
+
+    try:
+        bytes_before = len(json.dumps(prev_state, ensure_ascii=False))
+    except (TypeError, ValueError):
+        bytes_before = 0
+
+    stats: dict[str, Any] = {
+        "leg": leg,
+        "previous_state_bytes_before": bytes_before,
+        "characters_kept": 0,
+        "locations_kept": 0,
+        "factions_kept": 0,
+        "world_rules_kept": 0,
+        "events_kept": 0,
+        "hooks_kept": 0,
+        "debts_kept": 0,
+    }
+
+    # 顶层元信息（两腿都保留）
+    new_state: dict[str, Any] = {}
+    for k in ("snapshot_mode", "state_version", "recent_events"):
+        if k in prev_state:
+            new_state[k] = prev_state[k]
+    # 如果原 snapshot 没有 snapshot_mode 但 snapshot_mode='trimmed'，补一个标识
+    if "snapshot_mode" not in new_state:
+        new_state["snapshot_mode"] = (
+            prev_state.get("snapshot_mode") or "trimmed"
+        )
+
+    if leg == "entities":
+        # ---- characters（保留 O-1 裁剪后的形态）----
+        chars_in = prev_state.get("characters") or []
+        chars_out: list[dict[str, Any]] = []
+        if isinstance(chars_in, list):
+            for c in chars_in:
+                if isinstance(c, dict):
+                    chars_out.append(c)
+        stats["characters_kept"] = len(chars_out)
+        new_state["characters"] = chars_out
+
+        # ---- world（保留 locations / factions / world_rules；current_time 等不动）----
+        world_in = prev_state.get("world") or {}
+        world_out: dict[str, Any] = {}
+        if isinstance(world_in, dict):
+            for k in ("current_time_in_story", "active_resources"):
+                if k in world_in:
+                    world_out[k] = world_in[k]
+
+            locs_in = world_in.get("locations") or {}
+            if isinstance(locs_in, dict):
+                world_out["locations"] = dict(locs_in)
+                stats["locations_kept"] = len(locs_in)
+            elif isinstance(locs_in, list):
+                # list 形态：每条带 location_id 的项原样保留（与 O-1 兼容）
+                world_out["locations"] = [
+                    x for x in locs_in if isinstance(x, dict)
+                ]
+                stats["locations_kept"] = len(world_out["locations"])
+
+            facs_in = world_in.get("factions") or {}
+            if isinstance(facs_in, dict):
+                world_out["factions"] = dict(facs_in)
+                stats["factions_kept"] = len(facs_in)
+            elif isinstance(facs_in, list):
+                world_out["factions"] = [
+                    x for x in facs_in if isinstance(x, dict)
+                ]
+                stats["factions_kept"] = len(world_out["factions"])
+            # 兼容：有的 snapshot 把 factions 放在 active_factions
+            active_facs_in = world_in.get("active_factions")
+            if active_facs_in is not None and "factions" not in world_out:
+                if isinstance(active_facs_in, list):
+                    world_out["factions"] = [
+                        x for x in active_facs_in if isinstance(x, dict)
+                    ]
+                    stats["factions_kept"] = len(world_out["factions"])
+
+            rules_in = world_in.get("world_rules") or []
+            if isinstance(rules_in, list):
+                world_out["world_rules"] = list(rules_in)
+                stats["world_rules_kept"] = len(rules_in)
+
+        new_state["world"] = world_out
+        # 明确移除 leg_a 不读的集合（即便原 snapshot_mode=trimmed 也移除——保证 payload 字节级一致）
+        # events / hooks / debts 全部置空 list，避免 observer 误读
+        new_state["events"] = {}
+        new_state["hooks"] = []
+        new_state["debts"] = []
+
+    else:  # leg == "narrative"
+        # ---- 实体集合降级为标识性摘要 ----
+        chars_in = prev_state.get("characters") or []
+        chars_out: list[dict[str, Any]] = []
+        if isinstance(chars_in, list):
+            for c in chars_in:
+                chars_out.append(_summarize_character_for_leg_b(c))
+        stats["characters_kept"] = len(chars_out)
+        new_state["characters"] = chars_out
+
+        world_in = prev_state.get("world") or {}
+        world_out: dict[str, Any] = {}
+        if isinstance(world_in, dict):
+            for k in ("current_time_in_story", "active_resources"):
+                if k in world_in:
+                    world_out[k] = world_in[k]
+
+            locs_in = world_in.get("locations") or {}
+            if isinstance(locs_in, dict):
+                world_out["locations"] = {
+                    lid: _summarize_location_for_leg_b(lval, lid)
+                    for lid, lval in locs_in.items()
+                }
+                stats["locations_kept"] = len(locs_in)
+            elif isinstance(locs_in, list):
+                world_out["locations"] = [
+                    _summarize_location_for_leg_b(
+                        x, x.get("location_id") if isinstance(x, dict) else None
+                    )
+                    for x in locs_in if isinstance(x, dict)
+                ]
+                stats["locations_kept"] = len(world_out["locations"])
+
+            facs_in = world_in.get("factions") or {}
+            if isinstance(facs_in, dict):
+                world_out["factions"] = {
+                    fid: _summarize_faction_for_leg_b(fval, fid)
+                    for fid, fval in facs_in.items()
+                }
+                stats["factions_kept"] = len(facs_in)
+            elif isinstance(facs_in, list):
+                world_out["factions"] = [
+                    _summarize_faction_for_leg_b(
+                        x, x.get("faction_id") if isinstance(x, dict) else None
+                    )
+                    for x in facs_in if isinstance(x, dict)
+                ]
+                stats["factions_kept"] = len(world_out["factions"])
+            active_facs_in = world_in.get("active_factions")
+            if active_facs_in is not None and "factions" not in world_out:
+                if isinstance(active_facs_in, list):
+                    world_out["factions"] = [
+                        _summarize_faction_for_leg_b(
+                            x, x.get("faction_id") if isinstance(x, dict) else None
+                        )
+                        for x in active_facs_in if isinstance(x, dict)
+                    ]
+                    stats["factions_kept"] = len(world_out["factions"])
+
+            rules_in = world_in.get("world_rules") or []
+            if isinstance(rules_in, list):
+                world_out["world_rules"] = [
+                    _summarize_world_rule_for_leg_b(r)
+                    for r in rules_in if isinstance(r, dict)
+                ]
+                stats["world_rules_kept"] = len(world_out["world_rules"])
+
+        new_state["world"] = world_out
+
+        # ---- events / hooks / debts 原样保留（O-1 口径）----
+        events_in = prev_state.get("events")
+        if isinstance(events_in, dict):
+            new_state["events"] = events_in
+            stats["events_kept"] = len(events_in)
+        else:
+            new_state["events"] = {}
+
+        hooks_in = prev_state.get("hooks") or []
+        if isinstance(hooks_in, list):
+            new_state["hooks"] = list(hooks_in)
+            stats["hooks_kept"] = len(hooks_in)
+        else:
+            new_state["hooks"] = []
+
+        debts_in = prev_state.get("debts") or []
+        if isinstance(debts_in, list):
+            new_state["debts"] = list(debts_in)
+            stats["debts_kept"] = len(debts_in)
+        else:
+            new_state["debts"] = []
+
+    try:
+        bytes_after = len(json.dumps(new_state, ensure_ascii=False))
+    except (TypeError, ValueError):
+        bytes_after = 0
+    stats["previous_state_bytes_after"] = bytes_after
+    stats["previous_state_bytes_delta"] = bytes_before - bytes_after
+
+    trimmed = dict(base_payload)
+    trimmed["previous_state"] = new_state
+    # 按腿的 stats 写到 payload 顶层，命名 leg_<x>_snapshot_trim_stats
+    # 让两腿各自读各自的 stats，便于后续观测与测试断言。
+    trimmed[f"snapshot_trim_stats_leg_{'a' if leg == 'entities' else 'b'}"] = stats
+    return trimmed, stats
 
 
 def _pick_retry_mock(mock_script: Any, leg: str) -> Any:

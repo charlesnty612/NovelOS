@@ -93,7 +93,7 @@ python -m packages.core.api.main
 ## 测试
 
 ```bash
-# 后端全量（当前基线 851 passed, 1 skipped）
+# 后端全量（当前基线 915 passed, 2 skipped）
 python -m pytest tests/ -q
 
 # Golden 回归 eval（当前 3/3）
