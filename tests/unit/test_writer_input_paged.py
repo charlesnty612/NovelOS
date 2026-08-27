@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -30,6 +31,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# P2 Context Engine：本文件专门测试 paged 模式裁剪，默认 relevance_trim 会同时
+# 压缩 full 模式，导致「paged 比 full 小」的体积断言失效。模块级关闭 relevance_trim
+# 以保持原有测试对 paged 行为的隔离观测；relevance_trim 本身在新增测试文件
+# test_context_engine_p2.py 中覆盖。
+os.environ["NOVELOS_CONTEXT_RELEVANCE"] = "off"
 
 # ruff: noqa: E402  —— import 在 sys.path 注入后必须放在条件块之后
 from packages.core.context_engine.builders import (  # noqa: E402

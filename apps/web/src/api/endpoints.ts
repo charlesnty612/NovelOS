@@ -11,6 +11,7 @@ import type {
   Branch,
   BranchCreatePayload,
   BranchPromoteResult,
+  CapabilityBinding,
   CanonDetail,
   CanonSummary,
   Chapter,
@@ -41,10 +42,17 @@ import type {
   ModelConfigCreatePayload,
   ModelConfigTestResult,
   ModelConfigUpdatePayload,
+  ModelProfile,
+  ModelProfileCreatePayload,
+  ModelProfileTestResult,
+  ModelProfileUpdatePayload,
   PlotEvent,
   PlotEventCreatePayload,
   Project,
   ProjectCreatePayload,
+  ProjectInitPayload,
+  ProjectInitResponse,
+  ProjectInitResumeRequestPayload,
   ProjectUpdatePayload,
   PromptVersion,
   QualityReport,
@@ -69,6 +77,11 @@ export const projectsApi = {
   update: (id: string, payload: ProjectUpdatePayload) =>
     api.patch<Project>(`/projects/${id}`, payload),
   delete: (id: string) => api.delete<void>(`/projects/${id}`),
+  // P1 project-init：触发 AI 初始化设定工作流（项目总览页挂载入口）。
+  // 对齐 packages/core/api/routers/workflows.py POST /projects/init。
+  // brief 字段在调用端已做 trim；project_id 在 payload 内携带（UI 入口仅在已有项目页打开）。
+  init: (payload: ProjectInitPayload) =>
+    api.post<ProjectInitResponse>('/projects/init', payload),
 };
 
 // ------------------------------------------------------------- style samples
@@ -289,6 +302,10 @@ export const workflowsApi = {
     ),
   resume: (runId: string, payload: ResumeRequestPayload) =>
     api.post<WorkflowStartResponse>(`/runs/${runId}/resume`, payload),
+  // P1 project-init：分步审阅放行（POST /runs/{id}/resume，body 为 revisions）。
+  // 与 chapter-review 走同一条路由，但 payload 形态不同——类型层面单独封装以避免误用。
+  resumeInit: (runId: string, payload: ProjectInitResumeRequestPayload) =>
+    api.post<ProjectInitResponse>(`/runs/${runId}/resume`, payload),
 };
 
 // -------------------------------------------------------------- model configs
@@ -320,6 +337,49 @@ export const modelConfigsApi = {
   delete: (id: string) => api.delete<void>(`/model-configs/${id}`),
   test: (id: string) =>
     api.post<ModelConfigTestResult>(`/model-configs/${id}/test`, {}),
+};
+
+// -------------------------------------------------------------- model profiles
+// model_profiles 行字段：profile_id / name / provider / model / params / enabled /
+// has_api_key。params 由后端存为 JSON 字符串（与 model_configs 一致），前端拿到后
+// coerceJson 解析为对象便于表单读写。读路径下 params.api_key 已被脱敏为 "***"。
+function normalizeProfile(row: ModelProfile): ModelProfile {
+  return {
+    ...row,
+    params: (coerceJson(row.params) as Record<string, unknown>) ?? {},
+    has_api_key: row.has_api_key ?? false,
+  };
+}
+
+export const modelProfilesApi = {
+  list: () =>
+    api
+      .get<ModelProfile[]>('/model-profiles')
+      .then((rows) => rows.map(normalizeProfile)),
+  create: (payload: ModelProfileCreatePayload) =>
+    api
+      .post<ModelProfile>('/model-profiles', payload)
+      .then(normalizeProfile),
+  update: (id: string, payload: ModelProfileUpdatePayload) =>
+    api
+      .patch<ModelProfile>(`/model-profiles/${id}`, payload)
+      .then(normalizeProfile),
+  remove: (id: string) => api.delete<void>(`/model-profiles/${id}`),
+  test: (id: string) =>
+    api.post<ModelProfileTestResult>(`/model-profiles/${id}/test`, {}),
+};
+
+// -------------------------------------------------------------- capability bindings
+// GET 全量 7 项 capability → profile 映射；PUT 单项绑定、DELETE 单项解绑。
+// 错误码：422 至少 1 个、档案存在 + enabled 才能保存（由后端校验）。
+export const capabilityBindingsApi = {
+  list: () => api.get<CapabilityBinding[]>('/capability-bindings'),
+  bind: (capability: string, profileIds: string[]) =>
+    api.put<CapabilityBinding>(`/capability-bindings/${capability}`, {
+      profile_ids: profileIds,
+    }),
+  unbind: (capability: string) =>
+    api.delete<void>(`/capability-bindings/${capability}`),
 };
 
 // -------------------------------------------------------------- agents

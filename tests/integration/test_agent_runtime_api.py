@@ -61,9 +61,9 @@ def _valid_observer_output() -> dict:
 
 
 def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
-    """sync 后 GET /agents 应含 8 个 agent（director / writer / observer / arbiter /
-    deconstructor_chapter / deconstructor_aggregate / summarizer / critic）。P2-2 拆分后下划线名注册；
-    V1.2.0 新增 summarizer（章节摘要链生产路径）；V1.3 新增 critic（LLM 评审员，advisory only）。"""
+    """sync 后 GET /agents 应含全部已注册 agent。P2-2 拆分后下划线名注册；
+    V1.2.0 新增 summarizer；V1.3 新增 critic；P0 新增 scene_planner；
+    project-init 新增 premise_designer / world_builder / character_designer / volume_outliner。"""
     app = _create_app(tmp_path)
 
     async def run():
@@ -79,7 +79,8 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
             expected = {
                 "director", "writer", "observer", "arbiter",
                 "deconstructor_chapter", "deconstructor_aggregate",
-                "summarizer", "critic",
+                "summarizer", "critic", "scene_planner",
+                "premise_designer", "world_builder", "character_designer", "volume_outliner",
             }
             assert expected == set(payload["agents"]), (
                 f"agents mismatch: got {payload['agents']}"
@@ -94,6 +95,7 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
             assert "deconstructor_aggregate" in names
             assert "summarizer" in names
             assert "critic" in names
+            assert "scene_planner" in names
 
             # GET /agents/observer/prompts → 至少 1 个 ACTIVE
             r = await _request(app, "GET", "/api/agents/observer/prompts")

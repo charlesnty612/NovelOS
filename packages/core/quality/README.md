@@ -299,11 +299,11 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
 - 跑 :class:`QualityEngine.evaluate`；
 - 落库到 ``quality_reports``（独立事务，与 :meth:`StoryStateService.commit_delta`
   的事务互不污染）；
-- ``NOVELOS_QUALITY_GATE`` = ``"enforce"`` 时任一 ``severity=='error'`` ⇒ 抛
+- ``NOVELOS_QUALITY_GATE`` = ``"enforce"``（**默认**）时任一 ``severity=='error'`` ⇒ 抛
   ``ValueError('quality gate blocked: [...]')`` 让 run FAILED、chapter 保持 REVIEWED。
-- ``"report"`` 模式（**默认**）：error 仅落库不阻断，方便评审 / REQ-Q8 等 MVP 阻断观察。
+- ``"report"`` 模式：error 仅落库不阻断，方便评审 / REQ-Q8 等 MVP 阻断观察。
 - 模式优先级：``ctx["quality_gate_mode"]``（``/api/.../commit`` 请求体字段）→
-  ``NOVELOS_QUALITY_GATE`` 环境变量 → 默认 ``"report"``。
+  ``NOVELOS_QUALITY_GATE`` 环境变量 → 默认 ``"enforce"``。
 
 ### 11.4 报告查询 API：``packages.core.api.routers.quality``
 

@@ -212,6 +212,60 @@ V1.5 起把 `model_configs` 表的 SQL 从 router 下沉到独立 service（`pac
 - `OllamaProvider`（本地服务 + 健康检查）—— 已完成，详见上文。
 - 失败转移（`call_with_fallback`，按 `rowid` 顺序逐个尝试，全失败聚合）—— 已完成，详见上文。
 
+## V3.7 模型档案 + 环节绑定（两层架构）
+
+把"模型档案"与"环节绑定"解耦：同一条模型可被多个环节复用，不必复制多份。
+
+```
+profile (model_profiles)            binding (capability_bindings)        resolver (ModelRouter._candidates)
+┌─────────────────────────┐         ┌─────────────────────────┐         ┌──────────────────────────────┐
+│ profile_id (mprof_xxx)  │◀────┐   │ capability (PK)         │         │ 1. bindings 命中             │
+│ name / provider / model │     │   │ profile_ids (JSON 数组, │────┐    │    → profile_ids 顺序即       │
+│ params_json / enabled   │     │   │   顺序即 fallback 序)   │    │    │      fallback 链            │
+└─────────────────────────┘     │   └─────────────────────────┘    │    │ 2. 无 binding → 回落          │
+                                │                                  │    │      model_configs（旧）      │
+                                └──────────────────────────────────┘    └──────────────────────────────┘
+```
+
+### `_candidates(capability)` 优先级
+1. `capability_bindings` 有该 capability → 取 `profile_ids` JSON 数组，逐个解析 `model_profiles.enabled=1` 行；缺失或 disabled 跳过。返回行键名与 `model_configs` **完全一致**（`config_id ← profile_id`、`capability ← 本 capability`），保证 `get_provider` 与 runner 把 `config_id` 写 `ai_call_logs` 不需要 schema 改动。
+2. 无 binding → 直接查 `model_configs` 中 `capability` 匹配 `enabled=1` 的全部行（按 rowid ASC，V3.6 旧行为）。
+
+### CAPABILITY_LABELS（七环节）
+有序 dict，前端 / GET bindings 用，每项含 `label` 与 `agents`（从 `AGENT_CAPABILITY` 反推）：
+
+| capability | label | agents |
+|---|---|---|
+| `premise_design` | 题材定位 | `premise_designer` |
+| `world_building` | 世界观 | `world_builder` |
+| `character_design` | 角色设计 | `character_designer` |
+| `volume_outline` | 卷纲 | `volume_outliner` |
+| `creative_writing` | 正文写作 | `writer` |
+| `reasoning` | 推理规划 | `director` / `observer` / `arbiter` / `deconstructor_chapter` / `deconstructor_aggregate` / `scene_planner` |
+| `light` | 轻量评审 | `summarizer` / `critic` |
+
+### 绑定 / fallback 语义
+- `light` capability：V3 P0-2 的回退到 `reasoning` 行为在 `call_with_fallback` 中保留。
+  - 有显式 binding（即使只有 disabled / missing profile）→ 不回退；
+  - 无 binding + `model_configs` 也无 light 行 → 走 reasoning 候选链，并把 `used_config_row['capability']` 改写为 `'reasoning'` 便于下游审计。
+- 其它 capability：无 binding → 直接查 `model_configs`，无命中抛 `ModelNotConfiguredError`。
+- 全部候选失败：`ModelNotConfiguredError`（resolve）/ `AggregateProviderError`（call_with_fallback）。
+
+### 新增 API
+- `GET /model-profiles[?include_enabled_only=true]` / `POST /model-profiles` / `GET|PATCH|DELETE /model-profiles/{id}` / `POST /model-profiles/{id}/test`
+- `GET /capability-bindings`（返回全 7 项，含 label/agents/profile_ids/profiles/legacy_available/updated_at）
+- `PUT /capability-bindings/{capability}`（body `{profile_ids: [...]}`，至少 1 个、须都存在且 enabled=1；未知 capability → 404）
+- `DELETE /capability-bindings/{capability}`（解除 binding → 回落旧行为）
+- 旧 `/model-configs` 端点保留不动（**只读兼容期**，仅 model_configs 写入仍走 `/model-configs`；新代码优先用两层 API；详见 README「弃用说明」）。
+
+### 共享脱敏
+`packages/core/model_router/security.py` 集中 `_MASK` / `_mask_response` / `_prepare_post_params` / `_prepare_patch_params` 等参数掩码工具，`/model-configs` / `/model-profiles` 路由共同 import 使用，避免重复粘贴。
+
+### 弃用说明（V3.7 起）
+- `/model-configs` 端点进入只读兼容期：仍可读、可改；不建议再向该端点写入新行（新建档案请改走 `/model-profiles`）。
+- `ModelConfigService` 保留供 `ModelRouter._candidates` 的「无 binding 回落」路径使用；新代码不应再直接调用它。
+- 下一里程碑将下线 `/model-configs` 写入语义；仅 `/model-profiles` + `/capability-bindings` 是受支持入口。
+
 ## 权威文档
 - `docs/agents/agent-contracts-v0.md` §7（Agent 十问中的 capability）。
 - `docs/impl/IMPLEMENTATION-PLAN-v0.md` §1 D-I4、§2 Sprint 3/8。

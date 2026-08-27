@@ -640,6 +640,93 @@ def test_quality_gate_report_mode_does_not_block(tmp_path: Path):
     asyncio.run(run())
 
 
+def test_quality_gate_default_mode_is_enforce(tmp_path: Path):
+    """P0：不传入 quality_gate_mode 时默认 enforce，error 级 issue 阻断 commit。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/characters",
+                json={"name": "死角色默认", "role": "supporting"},
+            )
+            assert r.status_code == 201, r.text
+            dead_char_id = r.json()["character_id"]
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                conn.execute(
+                    "UPDATE character_states SET state_json = ? WHERE character_id = ?",
+                    ('{"status":"dead"}', dead_char_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters",
+                json={"number": 1, "title": "qa default enforce"},
+            )
+            assert r.status_code == 201, r.text
+            cid = r.json()["chapter_id"]
+
+            # 完整 pipeline，commit 请求体**不**传 quality_gate_mode
+            # plan
+            mock_providers = {
+                "director": _director_script(cid),
+                "writer": _writer_script(cid),
+                "observer": _observer_dead_character_script(cid, dead_char_id),
+            }
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "test", "mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            assert r.json()["status"] == "COMPLETED", r.json()
+
+            # write
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            assert r.json()["status"] == "COMPLETED", r.json()
+
+            # review + approve
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            review_run = r.json()
+            assert review_run["status"] == "PAUSED", review_run
+            r = await _request(
+                app, "POST", f"/api/runs/{review_run['run_id']}/resume",
+                json={"human_input": {"approved": True}, "auto_revise_max": 0},
+            )
+            assert r.status_code == 200 and r.json()["status"] == "COMPLETED", r.text
+
+            # commit：默认 enforce → 应 FAILED
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/commit",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            body = r.json()
+            assert body["status"] == "FAILED", body
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.json()["status"] == "REVIEWED", r.json()
+
+            # quality_reports 仍有落库
+            r = await _request(app, "GET", f"/api/chapters/{cid}/quality")
+            assert r.status_code == 200
+            assert any(
+                i["severity"] == "error" for i in r.json()["issues_json"]
+            )
+
+    asyncio.run(run())
+
+
 # =============================================================================
 # Sprint 11 合规补丁：Q8 CSV 导出 + references 路径防护
 # =============================================================================

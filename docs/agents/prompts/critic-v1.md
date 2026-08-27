@@ -90,7 +90,13 @@
   },
   "open_hooks": [
     { "hook_id": "string", "name": "string", "importance": "number 0-1", "summary": "string" }
-  ]
+  ],
+  "deterministic_hints": {
+    "ai_pattern_hit_count": 0,
+    "ai_pattern_summary": [
+      { "rule_id": "AI-FORBIDDEN-WORD", "message": "AI 高频套话/禁用词命中：仿佛,宛如", "count": 3 }
+    ]
+  }
 }
 ```
 
@@ -98,6 +104,7 @@
 > - 你**不**接收完整 Story State、Character State、World Rules；只接收 `plan_summary`（本章意图）+ `open_hooks`（伏笔台账的可推进位）。
 > - `draft_text` 可能为空（极端情况）；若为空，输出 `overall_comment="本章正文为空"` 且 `issues=[]`。
 > - `plan_summary` 可能缺字段（部分项目未启用 chapter-plan）；缺字段视为 null，**不要**据此指责正文。
+> - `deterministic_hints` 是工作流前置确定性规则（去 AI 味 / AI 腔检测）的摘要，**仅供参考**；你可引用其中命中项辅助判断 `ai_flavor` 类别，但每条 `issue` 仍必须有 `draft_text` 中的真实引用，不能仅因摘要命中就列问题。
 
 ---
 

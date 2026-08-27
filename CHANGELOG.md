@@ -1,6 +1,52 @@
 # 更新日志（CHANGELOG）
 
 > **留痕规矩（自 V1.0 起强制）**：此后所有迭代——功能、修复、迁移、行为变更——合并前必须在本文件追加条目。
+
+## [Unreleased]
+
+### Added
+- **V3.7 模型档案 + 环节绑定（两层架构）**：解耦「模型是什么」与「环节用谁」，同一条模型可被多个环节复用，不必复制多份。迁移 0016（`database/migrations/0016_model_profiles.sql`）新增 `model_profiles`（档案库：`profile_id / name / provider / model / params_json / enabled`）与 `capability_bindings`（环节分配：`capability → profile_ids JSON 数组`，顺序即 fallback 序）两张表，并把现有 `model_configs` 行一次性搬运成档案（`name` 取 `model` 字段）。`ModelRouter` 新增 `_candidates(capability)` 统一收口：优先读 `capability_bindings + model_profiles`，无 binding 回落 `model_configs`；返回行键名与 `model_configs` 完全一致（`config_id ← profile_id`、`capability ← 本 capability`），保证 `runner` 把 `config_id` 写 `ai_call_logs` 与 `get_provider` 零 schema 改动。`AGENT_CAPABILITY` 在 `model_router.router` 与 `agent_runtime.prompts` 双侧同步扩展四个 project-init agent 映射：`premise_designer → premise_design` / `world_builder → world_building` / `character_designer → character_design` / `volume_outliner → volume_outline`，避免 `capability_for` 默认回退 `reasoning`。新增 `CAPABILITY_LABELS`（七环节有序 dict：premise_design / world_building / character_design / volume_outline / creative_writing / reasoning / light，每项含 `label` + `agents`）供前端与 `GET /capability-bindings` 使用。新增 service `ProfileService` / `BindingService`（`packages/core/model_router/profiles.py` / `bindings.py`），新增路由 `model_profiles.py` / `capability_bindings.py`（自动发现，无需改 `main.py`），新增共享掩码工具 `packages/core/model_router/security.py`（`/model-configs` / `/model-profiles` 共用）。`light` capability 回退 `reasoning` 的 V3 P0-2 语义在 `_candidates` 收口后保留：仅「无 binding + `model_configs` 也无 light 行」时回退，有显式 binding 即便 binding 全 disabled 也不回退。`DELETE /model-profiles/{id}` 在被任何 binding 引用时返回 409（detail 含 `referenced_by` capability 清单，便于前端一键解绑）。旧 `/model-configs` 端点保留不动进入只读兼容期；新代码优先走两层 API，下一里程碑下线其写入语义。前端项目总览页的「AI 初始化设定」面板同步升级到按环节分配档案的引导式向导（前端联动由前端代理负责实现）。
+- **项目总览页「AI 初始化设定」入口**：新增 `apps/web/src/components/ProjectInitPanel.tsx` 挂载在简介卡片之后、`StyleSamplesPanel` 之前。用户填写 brief（title/genre/logline/platform/target_words/author_notes/chapter_seed_count），提交触发 `POST /projects/init`（`projectsApi.init`，引擎同步阻塞到终态）。面板展开时探测 `charactersApi.listByProject` 角色数；>0 时显示「可能造成重复」warning 并要求勾选确认才可提交。成功展示 `run_id` 并回调父组件 `useApiCall.reload` 重载项目数据；失败以 `ApiError(status, detail)`（detail >200 字截断）走 ErrorBanner。`api/types.ts` 新增 `ProjectInitBrief`/`ProjectInitPayload`/`ProjectInitResponse`；`api/endpoints.ts` 的 `projectsApi.init` 仅做薄封装，未引入新依赖。`chapter_seed_count` 走 payload 顶层字段以命中后端 `Field(ge=1, le=100)` 校验（不进 brief），前端同步做 1-100 范围校验。新增 `ProjectInitPanel.test.tsx` 覆盖 5 个用例：logline 空禁用 / 正确参数调用 + projectId + seed_count 在顶层 / 有既有角色需勾选 / 成功展示 run_id 且 onDone 被调用 / seed_count 越界(150)禁用。
+- **project-init 分段审阅暂停（step_mode）**：`packages/workflows/project_init/pipeline.py` 新增 `STAGE_SPECS` / `_gate_should_pause` / `_resolve_stage_input`，4 个 AI 节点在 `step_mode=True` 时成功产出后抛 `PauseRequested({"stage", "stage_index" 0..3, "stages_total":4, "degraded", "draft"})`，下游 `_world_payload` / `_character_payload` / `_outline_payload` / `_persist_all_node` 全部改走 `_resolve_stage_input` 三层 fallback（`human_input.revisions[output_key]` → `ctx[output_key]` → `ctx[node_id].__pause_payload__.draft`），确保人工修订穿透到下游 AI 输入与 `persist_all` 落库。`packages/core/api/routers/workflows.py` 的 `ProjectInitRequest` 新增 `step_mode: bool | None`（默认 None = 一次性跑完，与既有行为一致），`_start_project_init` 返回体在 PAUSED 时附 `pause_payload`，复用通用 `POST /runs/{run_id}/resume` 端点回灌 `human_input={"revisions": {"<output_key>": <修订后完整 dict>}}`，引擎不变。`packages/workflows/project_init/README.md` 同步更新节点图、4 关卡表、pause_payload 与 human_input 契约、修订生效路径。`tests/workflow/test_project_init.py` 新增 4 用例（第一关即停 / 修订推进到第二关 / 四关走完落库生效 projects.name 来自修订 / 默认不分段回归）。前端侧：项目总览页面板升级为分步审阅向导（题材定位 → 世界观 → 核心角色 → 卷纲与章节种子），mock 自测全绿。
+- **Story State Delta 确定性自动修复层（arbiter-lite）**：新增 `packages/core/story_state/delta_repair.py`，`repair_delta(delta, snapshot, db_path)` 在 `validate_delta` 前做确定性自动修复：world/character/relationship `op='update'` 且 `before=None` 时从 snapshot/DB 补当前值；`op='add'` 且目标 id 已存在时降级为 `update`（内容与现有行一致则丢弃）；同步覆盖 debt_changes `status_before`/`severity_before`、resolved_hooks `from_status`、new_events/new_hooks 重复 id 丢弃。`packages/workflows/chapter_commit/pipeline.py` 的 `_inject_validate_node` 在首次校验与重试后均先 repair 再 validate，修复记录写入 `ctx['delta_repairs']` 并 logging.info 留痕；修不了的仍走原校验/按腿重试路径。新增单元测试 `tests/unit/test_delta_repair.py` 与 workflow 层一次性修复回归测试。
+- **去 AI 味确定性检测**：新增 `packages/core/quality/ai_patterns.py` 纯函数模块，`scan_ai_patterns(prose)` 基于正则/统计检测 AI 腔（高频套话、连续同词开头、「他/她」排比、章尾总结体、破折号/省略号滥用、解释腔），命中数超阈值可升 error；规则表 `AI_PATTERN_RULES` / `AI_PATTERN_FORBIDDEN_WORDS` 模块级可扩展。
+- **chapter_review 接入 AI 腔检测**：`_basic_checks_node` 调用 `scan_ai_patterns`，`review_report` 新增 `ai_pattern_hits` 字段并合并进 `warnings`/`errors`；原 `forbidden_word_hits` 向后兼容保留。
+- **critic payload 注入确定性摘要**：`_critic_review_node` 向 critic LLM 传入 `deterministic_hints`（命中数 + 规则摘要），`docs/agents/prompts/critic-v1.md` 同步说明该字段仅供 LLM 参考；critic 输出契约无需放宽（仅新增输入字段）。
+- **ScenePlanner 真实化**：`packages/workflows/chapter_write/pipeline.py` 新增 AI 节点 `scene_planner`（P0），调用 `scene_planner` agent 将 Director Plan 翻译为结构化 Scene Plan（含 slots / conflict / turn / information_boundary / ending_hook）。新增 `docs/agents/prompts/scene_planner-v1.md`、agent capability 注册、`expected="scene_planner"` 契约校验。支持 `mock_providers['scene_planner']`；agent 失败时降级到原 stub 逻辑，不阻断 writer。
+- **自动改稿回路**：`packages/core/api/routers/workflows.py` resume 端点新增 `auto_revise_max` 与 `mock_providers` 字段。chapter-review 以 `rejected-for-revision` 失败且 `auto_revise_max > 0` 时，自动依次重跑 chapter-write → chapter-review，直到 approved 或达到上限。上限默认 `NOVELOS_AUTO_REVISE_MAX=2`，`0` 表示禁用（保持现有 FAILED 终态语义不变）。
+- **服务启动自动 prompt 同步**：`packages/core/api/main.py` lifespan 在迁移后自动执行 `PromptRegistry.sync_from_docs`（幂等），新 agent 不再依赖手工 `POST /agents/sync`（ch072 scene_planner 未注册静默降级的教训）。`NOVELOS_PROMPT_SYNC=off` 可关闭；sync 失败只告警不阻断启动。
+- **m1_long_run `--quality-gate-mode` 开关**：此前驱动脚本硬编码 `quality_gate_mode="report"`，enforce 默认值在生产长跑链路无法被验证。现可通过 `--quality-gate-mode enforce` 覆盖（默认仍 report，保持长跑不阻断语义）。
+
+### Changed
+- **critic 默认全量**：`packages/workflows/chapter_review/pipeline.py` 默认 critic 模式从 `sample` 改为 `always`，`NOVELOS_CRITIC_MODE` / `ctx['critic_mode']` 覆盖逻辑保留。
+- **quality_gate 默认 enforce**：`packages/workflows/chapter_commit/pipeline.py` 默认 quality_gate 模式从 `report` 改为 `enforce`，与文件顶部 docstring 对齐。eval / golden runner / 相关测试已显式设为 `report` 模式以避免 MVP 阻断规则误伤。
+
+### Migration
+- 使用自动化脚本或外部 runner 调用 commit 且依赖「默认不阻断」行为的调用方，需显式传入 `quality_gate_mode="report"` 或设置 `NOVELOS_QUALITY_GATE=report`。
+- 原有 revise 后依赖手动重跑 write+review 的测试/脚本，若需保持旧行为，resume 时应传 `auto_revise_max: 0`。
+
+### Fixed
+- **Provider HTTP 连接池上限修复（单章耗时根因）**：`packages/core/model_router/providers.py` 三个 provider 的 `_ensure_client` 统一加 `httpx.Limits(max_connections=10, max_keepalive_connections=5)`。此前 client 从不关闭、keep-alive 无限堆积（实测长进程 114 条到 MiniMax 的 ESTABLISHED 死连接），新请求被路由到被对端静默挂起的连接上无限等待（httpx read timeout 为字节间隔语义，对整连接挂起不生效），是单章 600-900s 的主因。详见《单章耗时诊断报告.md》根因 1。
+- **`MINIMAX_API_KEY` 映射下沉到 api.main**：此前 `MINIMAX_API_KEY → NOVELOS_API_KEY_OPENAI_COMPATIBLE` 映射只在 `scripts/serve.py`，`python -m packages.core.api.main` 直启（m1_long_run docstring 的推荐姿势）不带映射导致 401 秒失败（ch072 实测复现）。现映射在 `packages/core/api/main.py` 模块导入时执行，覆盖所有入口。
+- **extract_json 兼容裸控制字符**：`packages/core/agent_runtime/structured_output.py` 的 `extract_json` 在严格解析失败后用 `json.loads(strict=False)` 兜底一次——LLM 偶发在字符串内输出未转义控制字符（ch074 observer 输出实测，首次 commit 因此失败），strict=False 允许字符串内控制字符通过。其余解析失败行为不变。
+- **delta_repair 补 update-to-add-field 规则（ch073 实测缺口）**：observer 对实体的 data_json/state **新子键**用 `op='update'` 且 `before=None` 时，旧值本就为空属诚实表达，但校验器拒绝 update+before=None，导致 commit 反复重试（ch072 连挂 3 次、ch073 挂 1 次）。现 `_repair_world_changes` / `_repair_character_changes` 在「实体存在但字段无现值」时把 update 转为字段级 `add`（validator 接受 add+after；write_through 对已存在 id 的 add 走 UPDATE，安全）。`after` 也为 None 的语义空洞条目仍不修，留给校验器报错。
+
+### Added（P2 Context Engine 补全）
+- `build_director_input.plot_graph_excerpt.unresolved_branches` 不再恒空：从 `branches` 表查询 `status='ACTIVE'` 的未解决分支并注入 `{branch_id, name, parent_branch_id, base_state_version, status}`。
+- `build_writer_input.world_state_excerpts.sensory_anchors` 感官锚点：在零 DDL 约束下，从 `locations.data_json.sensory_anchors` 或常见感官字段（`sensory_details / atmosphere / smell / sound / light / texture / temperature`）解析，最后回退到 `statement`；无数据时返回空 list。
+- Writer 章节级相关性裁剪 `relevance_trim`：默认开启，按 `plan_json` / `scene_plan` 的 `involved_characters` / `involved_locations` 过滤角色与世界观条目；主角（`role='protagonist'`）与 `inject_mode='always'` 实体始终完整保留，未涉及实体降级为 `{id, name, relevance_summary: True}`。
+- `relevance_trim` 开关：显式参数 > 环境变量 `NOVELOS_CONTEXT_RELEVANCE=off` > 默认开启；Writer 缓存键追加第 7 元 `relevance` 避免脏命中。
+- `preview_context` L1 新增 `unresolved_branch` 与 `sensory_anchor` 条目展示。
+- 新增测试 `tests/unit/test_context_engine_p2.py`（13 用例）覆盖三项缺口；`tests/unit/test_writer_input_paged.py` 模块级关闭 `NOVELOS_CONTEXT_RELEVANCE` 以保持 paged 体积断言独立。
+
+### Added（P1 project-init workflow）
+- 新增 `project-init` 工作流：`load_brief → premise_designer → world_builder → character_designer → volume_outliner → persist_all`，实现从题材 brief 到可开写 Story Bible 的全自动建书。
+- 新增 4 个 AI agent 与 prompt：`premise_designer`（题材定位/卖点/主角雏形）、`world_builder`（世界观/规则/地点/势力）、`character_designer`（3-5 核心角色）、`volume_outliner`（第一卷卷纲 + 前 N 章种子，默认 10 章）。
+- 新增 `POST /api/projects/init` 端点：支持不带 `project_id` 新建项目，或传入已有 `project_id` 挂载更新。
+- AI 节点失败按 critic 模式降级（返回 `_degraded` 结构、不阻断流程）；`persist_all` 失败直接抛错。
+- 复用现有 domain service 落库：`ProjectService`、`CharacterService`、`WorldService`、`VolumeService`、`ChapterService`、`PlotService`。
+- 新增测试 `tests/workflow/test_project_init.py`：覆盖新建项目、挂载已有项目、AI 降级、persist 失败。
+
 > 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/)：版本号 + 日期 + 分类小节
 > （Added 新增 / Changed 变更 / Fixed 修复 / Removed 移除 / Migration 迁移 / Known Issues 已知问题）。
 > 版本号语义化：破坏性变更升 major，新功能升 minor，修复升 patch。

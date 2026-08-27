@@ -329,3 +329,87 @@ never 模式另起独立条目 `kind=suppressed_character` / `suppressed_locatio
   （同 chapter 不同 scene_plan 返回不同对象）、
   `test_chapter_commit_invalidate_clears_cache` /
   `test_chapter_commit_node_invalidates_cache_in_pipeline`（commit 后显式失效）。
+
+## P2 Context Engine 补全（Context Engine 缺口关闭）
+
+对齐 `docs/impl/IMPLEMENTATION-PLAN-v0.md` §4.2 登记的 Context Engine MVP 缺口：
+
+### 1. `plot_graph_excerpt.unresolved_branches` 不再恒空
+
+`build_director_input` 现在从 `branches` 表查询 `status = 'ACTIVE'` 的分支作为未解决分支。
+
+- ACTIVE = 尚未 MERGED / DISCARDED / ARCHIVED 的活跃分支；
+- 注入字段：`{branch_id, name, parent_branch_id, base_state_version, status}`；
+- `preview_context` L1 新增 `kind="unresolved_branch"` 展示。
+
+### 2. `world_state_excerpts.sensory_anchors` 感官锚点
+
+Writer 契约要求 `world_state_excerpts` 必须含 `sensory_anchors[]`。当前 schema
+（`0001_init.sql`）`locations` 表无专用感官列，因此采用**零 DDL 兼容方案**：
+
+- 优先读取 `locations.data_json.sensory_anchors`（标准扩展点，未来可在此字段维护
+  结构化感官数据，无需改 schema）；
+- 其次从 `data_json` 常见感官字段
+  (`sensory_details / atmosphere / smell / sound / light / texture / temperature`)
+  组合成 `anchor_text`；
+- 最后回退到 `statement` 一句话陈述；
+- 无数据 → 空 list，不抛错。
+
+注入格式：
+
+```json
+[
+  {"location_id": "loc_xxx", "location_name": "古庙", "anchor_text": "腐朽的檀香"},
+  {"location_id": "loc_xxx", "location_name": "古庙", "sense": "smell", "anchor_text": "腐朽的檀香"}
+]
+```
+
+`preview_context` L1 新增 `kind="sensory_anchor"` 展示。
+
+### 3. 章节级相关性裁剪（Relevance Trim）
+
+`build_writer_input` 新增 `relevance_trim` 参数：
+
+```python
+build_writer_input(
+    db_path, chapter_id, scene_plan,
+    relevance_trim=True,   # None 时读环境变量；默认开启
+)
+```
+
+开关方式（优先级从高到低）：
+
+1. 显式传参 `relevance_trim=True/False`；
+2. 环境变量 `NOVELOS_CONTEXT_RELEVANCE=off` 关闭，其他值开启；
+3. 默认开启。
+
+裁剪逻辑（纯函数 `_apply_relevance_trim`）：
+
+- 扫描面 = 当前章 `plan_json.key_beats[].involved_characters / involved_locations` +
+  `plan_json.character_changes_planned[].name|character_id` +
+  `scene_plan.characters / location / beats[].involved_*`；
+- **始终完整保留**：主角（`role='protagonist'`）与 `inject_mode='always'` 的实体；
+- **未涉及实体**（id 或 name 未命中 involved 集合且非核心）降级为
+  `{id, name, relevance_summary: True}`，不直接剔除，保留可识别信息；
+- 仅作用于 `build_writer_input`（Director 需全局视角规划，不裁剪）；
+- 分页模式（`context_mode='paged'`）同样受 relevance_trim 影响：先 relevance_trim
+  再分页裁剪，两者可叠加；
+- 缓存键追加第 7 元 `relevance`（`"on"` / `"off"`），防止开关/环境变量变化导致脏命中。
+
+观测字段：
+
+- `_relevance_trim_enabled: bool`
+- `_relevance_trim_stats: {characters_full, characters_summary, locations_full,
+  locations_summary, factions_full, factions_summary, involved_characters[],
+  involved_locations[]}`
+
+### 测试
+
+新增 `tests/unit/test_context_engine_p2.py`（13 用例）覆盖：
+
+- `unresolved_branches` 查询与 preview 展示；
+- `sensory_anchors` 解析、零 DDL 回退、preview 展示；
+- `relevance_trim` 环境变量/显式参数开关、主角/always 保留、involved 命中保留、
+  未涉及实体降级、纯函数行为；
+- `test_writer_input_paged.py` 模块级设置 `NOVELOS_CONTEXT_RELEVANCE=off`，
+  以保持对 paged 模式裁剪的独立观测。

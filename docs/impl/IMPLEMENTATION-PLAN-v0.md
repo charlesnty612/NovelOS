@@ -105,12 +105,16 @@ MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通�
 ### 4.2 已知 deviation 登记（随版本关闭）
 
 1. ~~**review reject 即终局**~~（S4 审查 P1-1）✅ **已关闭**：PRD §59/§87 的「人工修改后重审」闭环已实现——review 的 Human 节点 resume 支持三态：`{approved:true}`（REVIEWED）、`{approved:false}`（FAILED，保持 DRAFTED）、`{approved:false, revise:true, note?}`（run FAILED + error=`rejected-for-revision`，chapter 保持 DRAFTED，note 落 `plan_json.revision_note` 供下次 write 参考；随后可人工改稿或重跑 write 后再 review）。实现口径：引擎 `workflow_runs.status` CHECK 与 `_finalize_run` 虽已支持 `CANCELLED`，但 `engine._run_nodes` 无产生 CANCELLED 的触发路径（节点成功必 COMPLETED、异常必 FAILED），且不修改 engine/DDL，故沿用 FAILED 终态以 error 字段区分（详见 `packages/workflows/chapter_review/README.md`）。
-2. **Context Engine MVP 全量装配**（S4）：L0-L9 裁剪/token 预算未实现，`plot_graph_excerpt.unresolved_branches` 恒空、`world_state_excerpts` 缺 sensory_anchors。记录于 `packages/core/context_engine/README.md`。
+2. ~~**Context Engine MVP 全量装配**~~（S4）✅ **已关闭（P2 Context Engine）**：
+   - `plot_graph_excerpt.unresolved_branches` 已按 `branches.status='ACTIVE'` 实际查询注入；
+   - `world_state_excerpts.sensory_anchors` 已实现零 DDL 方案（从 `locations.data_json` 解析）；
+   - Writer 新增章节级相关性裁剪（`relevance_trim`），按 `plan_json` / `scene_plan` 的 `involved_characters` / `involved_locations` 降级未涉及实体；
+   - 详情与限制见 `packages/core/context_engine/README.md` §"P2 Context Engine 补全"。
 3. **eval 内容正确性断言缺口**（S4 审查 P2-3）：golden runner 目前做流程+结构断言，observer 内容语义（before/after 与正文一致性、HIGH 误标对抗用例）归入 S6 范围。
 4. ~~**model-configs 列表返回 params_json 明文**（S5 审查记录）~~：~~本地单用户 MVP 可接受；发布前（S8 或 S12）加脱敏。~~ ✅ **已关闭**：V1.x 已落地 router 层 `_mask_response` 出口脱敏 + `has_api_key` + 清除 key 按钮（V1.5），见 `packages/core/api/routers/model_configs.py`。
 5. **连续两次 Human pause 的 human_input 覆盖语义**（S4 审查 P2-4）：`dict.update` 语义已写入 README，连续 pause 场景缺专项测试，后续补。
 6. **promote 按序重放而非单合并 commit**（S7 审查 P0 修复）：state-delta-v0 §6.3 字面为「单一合并 commit」，因 applier 固定应用顺序会破坏分支内 add→resolve 时序，改为逐 commit 重放（main state_version 单次跳 N）。记录于 `packages/core/story_state/README.md` §6.5。
-7. **quality_gate 默认 report 模式**（S6）：commit 门禁默认只落库不阻断；`NOVELOS_QUALITY_GATE=enforce` 或请求体 `quality_gate_mode:"enforce"` 才硬阻断。接入真实模型生产使用前建议切 enforce 并先跑一轮校准。
+7. ~~**quality_gate 默认 report 模式**~~（S6）✅ **已关闭（P0）**：commit 门禁默认改为 `enforce`，与 `chapter_commit/pipeline.py` 顶部 docstring 一致；`NOVELOS_QUALITY_GATE=report` 或请求体 `quality_gate_mode:"report"` 可回退到只落库不阻断。eval / 测试需显式传 report 避免 MVP 阻断规则误伤。
 8. **deconstruct-book MVP defer 清单**（S11）：epub 不支持、T1 失败无 Human 补切分、多参照系加权（OV-2）、embedding 轨道、同步长任务无超时/异步队列。记录于 `packages/workflows/deconstruct_book/README.md`。
 9. **checkpoint_exclude 与 resume 的交互**（S11 修复遗留）：被剔除键（如拆书原文 text）在 resume 时不恢复；deconstruct 无 Human 节点暂不显现，未来加 Human 节点需注入机制。
 10. **Simulation 限制**（S10）：纯状态推演（无 LLM 叙事推演）；`_skip_approval` 仅 simulation 路径可用且有审计字段；chapter_id 必填。记录于 `packages/core/simulation/README.md`。

@@ -20,7 +20,7 @@ export class ApiError extends Error {
 }
 
 export interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined | null>;
   signal?: AbortSignal;
@@ -119,6 +119,9 @@ export const api = {
   },
   post<T>(path: string, body?: unknown): Promise<T> {
     return request<T>(path, { method: 'POST', body });
+  },
+  put<T>(path: string, body?: unknown): Promise<T> {
+    return request<T>(path, { method: 'PUT', body });
   },
   patch<T>(path: string, body?: unknown): Promise<T> {
     return request<T>(path, { method: 'PATCH', body });

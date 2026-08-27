@@ -349,3 +349,64 @@ def test_boundary_in_band_center_visible_1700(tmp_path: Path):
     assert rep["within_range"] is True
     assert rep["warnings"] == []
     assert rep["errors"] == []
+
+# ---------------------------------------------------------------------------
+# V3.8：去 AI 味确定性检测集成
+# ---------------------------------------------------------------------------
+
+
+def test_ai_pattern_hits_field_always_present(tmp_path: Path):
+    """即便无 AI 腔，review_report 也含 ai_pattern_hits 字段（可能为空列表）。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    _insert_draft(db_path, cid, "中" * 2000)
+    ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
+    rep = _basic_checks_node(ctx)["review_report"]
+    assert "ai_pattern_hits" in rep
+    assert rep["ai_pattern_hits"] == []
+
+
+def test_ai_pattern_forbidden_word_merged_into_report(tmp_path: Path):
+    """禁用词命中既保留 forbidden_word_hits，也进入 ai_pattern_hits 与 warnings。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    # 在 band 内，避免字数 warning 干扰
+    filler = "正文" * 950  # 1900 字符
+    _insert_draft(db_path, cid, ("仿佛" * 3) + filler)
+    ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
+    rep = _basic_checks_node(ctx)["review_report"]
+
+    # 向后兼容字段
+    assert rep["forbidden_word_hits"] == ["仿佛"]
+    assert any("禁用词命中" in w for w in rep["warnings"])
+
+    # 新增 ai_pattern_hits
+    assert "ai_pattern_hits" in rep
+    fw_hits = [h for h in rep["ai_pattern_hits"] if h["rule_id"] == "AI-FORBIDDEN-WORD"]
+    assert len(fw_hits) == 1
+    assert "仿佛" in fw_hits[0]["words"]
+    assert any("[AI-FORBIDDEN-WORD]" in w for w in rep["warnings"])
+    assert rep["errors"] == []
+
+
+def test_ai_pattern_ending_summary_and_punct_abuse(tmp_path: Path):
+    """章尾总结体 + 破折号滥用均进入 ai_pattern_hits；破折号滥用 severity=error。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    # 约 200 字正文 + 10 处破折号/省略号，每千字约 50 处
+    base = "风吹过山岗，他站起身，望向远方。" * 5
+    prose = base + "\n\n这一刻，命运画上了句号。——……"
+    _insert_draft(db_path, cid, prose)
+    ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 5000}
+    rep = _basic_checks_node(ctx)["review_report"]
+
+    rule_ids = {h["rule_id"] for h in rep["ai_pattern_hits"]}
+    assert "AI-ENDING-SUMMARY" in rule_ids
+    assert "AI-PUNCT-ABUSE" in rule_ids
+
+    pa_hit = next(h for h in rep["ai_pattern_hits"] if h["rule_id"] == "AI-PUNCT-ABUSE")
+    assert pa_hit["severity"] == "error"
+    assert pa_hit["rule_id"] in {e["rule_id"] for e in rep["errors"]}

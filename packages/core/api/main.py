@@ -30,6 +30,26 @@ __version__ = "3.5.0"
 log = get_logger("novelos.api")
 
 
+def _ensure_provider_key() -> None:
+    """把通用 ``MINIMAX_API_KEY`` 映射到 provider 期望的 ``NOVELOS_API_KEY_OPENAI_COMPATIBLE``。
+
+    与 ``scripts/serve.py`` 同名逻辑保持一致：provider 只认
+    ``NOVELOS_API_KEY_<PROVIDER大写>``（providers.resolve_api_key），而部署/脚本侧惯用
+    ``MINIMAX_API_KEY``。此前该映射只在 serve.py 做，``python -m packages.core.api.main``
+    直启会 401（m1 ch072 实测复现）。仅当目标变量未设置时注入，不覆盖显式配置；
+    密钥只走进程环境，不落盘。
+    """
+    target = "NOVELOS_API_KEY_OPENAI_COMPATIBLE"
+    if not os.environ.get(target):
+        minimax = os.environ.get("MINIMAX_API_KEY")
+        if minimax:
+            os.environ[target] = minimax
+
+
+# 模块导入即执行：覆盖 ``python -m`` / ``uvicorn ...:app`` / TestClient 全入口。
+_ensure_provider_key()
+
+
 # ---------------------------------------------------------------------------
 # Sprint 5：SPA dist 路径解析。
 # ---------------------------------------------------------------------------
@@ -74,6 +94,26 @@ async def lifespan(app: FastAPI):
         settings.db_path,
     )
     app.state.migration_result = result
+
+    # 启动时自动同步 prompt（docs/agents/prompts → agents/prompts 表，幂等）。
+    # 此前需手工 POST /agents/sync，新 agent 未 sync 时会静默降级（ch072 scene_planner 实测）。
+    # 失败不阻断启动（prompt 缺失时 agent 调用侧本就有降级/报错路径）；
+    # ``NOVELOS_PROMPT_SYNC=off`` 可关闭（测试/调试场景）。
+    if os.environ.get("NOVELOS_PROMPT_SYNC", "on").strip().lower() != "off":
+        try:
+            from packages.core.agent_runtime.prompts import PromptRegistry
+
+            sync_res = PromptRegistry(settings.db_path).sync_from_docs(
+                _REPO_ROOT / "docs" / "agents" / "prompts"
+            )
+            log.info(
+                "prompt sync: scanned=%d registered=%d updated=%d",
+                len(sync_res.get("scanned") or []),
+                len(sync_res.get("registered") or []),
+                len(sync_res.get("updated") or []),
+            )
+        except Exception as exc:  # noqa: BLE001 —— sync 失败不应拖垮服务启动
+            log.warning("prompt sync failed (non-fatal): %s", exc)
     yield
 
 

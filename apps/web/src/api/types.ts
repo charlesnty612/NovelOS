@@ -951,3 +951,153 @@ export interface ContinueAdoptResponse {
   status: string;
   appended_chars: number;
 }
+
+// ---------------------------------------------------------------------------
+// P1 project-init workflow：项目总览页「AI 初始化设定」入口契约。
+//   对齐 packages/core/api/routers/workflows.py ProjectInitRequest / _start_project_init：
+//   - POST /projects/init               body: {brief, project_id?, chapter_seed_count?}
+//   - 响应: {run_id, status, current_node, project_id}
+//   - 引擎同步阻塞到终态（COMPLETED / FAILED）；AI 节点失败按 chapter_review
+//     critic 模式降级不阻断，仅 persist_all 失败才直接抛错。
+// ---------------------------------------------------------------------------
+
+export interface ProjectInitBrief {
+  title?: string | null;
+  genre?: string | null;
+  logline: string;
+  platform?: string | null;
+  target_words?: number | null;
+  author_notes?: string | null;
+  chapter_seed_count?: number | null;
+}
+
+export interface ProjectInitPayload {
+  brief: ProjectInitBrief;
+  project_id?: string | null;
+  chapter_seed_count?: number | null;
+  /**
+   * P1 project-init 增量：分步审阅生成。
+   * - true：后端在 4 个关卡（premise / world / character / outline）每个完成时返回
+   *   status=PAUSED + pause_payload，前端走审阅向导。
+   * - 缺省 / false：维持旧的一次性生成模式，直接返回 COMPLETED。
+   */
+  step_mode?: boolean | null;
+}
+
+// ---- P1 project-init：分步审阅 pause_payload 契约 --------------------------
+// 后端 4 关卡逐个 PAUSED 时携带；前端据 stage 决定渲染哪种表单。
+// - stage:           premise | world | character | outline
+// - stage_index:     0-based 当前步骤下标（与 stages_total 配合显示「第 N / 4 步」）
+// - stages_total:    固定 4
+// - degraded:        true 表示该关卡 AI 生成降级（_degraded / error 已置入 draft）
+// - draft:           该关卡的草稿字典；缺字段容错为空结构（前端按 stage 分别渲染）
+export interface ProjectInitPausePayload {
+  stage: 'premise' | 'world' | 'character' | 'outline' | string;
+  stage_index: number;
+  stages_total: number;
+  degraded: boolean;
+  draft: Record<string, unknown>;
+}
+
+export interface ProjectInitResponse {
+  run_id: string;
+  status: WorkflowRunStatus;
+  current_node: string | null;
+  project_id?: string | null;
+  /** status=PAUSED 时携带；其余状态可缺省。 */
+  pause_payload?: ProjectInitPausePayload | null;
+}
+
+// ---- P1 project-init：放行（resume）请求契约 --------------------------------
+// POST /runs/{run_id}/resume —— 仅在 project-init 分步审阅模式下被调用。
+// human_input.revisions 字典键为 output_key：premise_output / world_output /
+// character_output / outline_output；值是该关卡修订后的完整 dict（前端整段替换）。
+// 注：原 ResumeRequestPayload（chapter-review Human 节点）的 approved/revise 形态
+// 不变；这里新增独立的 ProjectInitResumeRequestPayload 以避免两套语义在同一类型
+// 上叠加可选字段导致的歧义。
+export interface ProjectInitResumeRequestPayload {
+  human_input: {
+    revisions: Record<string, Record<string, unknown>>;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 模型档案（model_profiles）+ 环节绑定（capability_bindings）。
+// 对齐后端路由（开发中）：
+//   GET    /model-profiles
+//   POST   /model-profiles
+//   PATCH  /model-profiles/{id}
+//   DELETE /model-profiles/{id}    —— 409 + detail 列出 capability
+//   POST   /model-profiles/{id}/test
+//   GET    /capability-bindings    —— 7 项固定清单
+//   PUT    /capability-bindings/{capability}
+//   DELETE /capability-bindings/{capability}
+// 档案与 capability 解耦：档案只描述「一组模型参数」，能力→档案的指派走
+// capability_bindings。
+// ---------------------------------------------------------------------------
+
+export type CapabilityKey =
+  | 'premise_design'
+  | 'world_building'
+  | 'character_design'
+  | 'volume_outline'
+  | 'creative_writing'
+  | 'reasoning'
+  | 'light';
+
+export interface ModelProfile {
+  profile_id: string;
+  name: string;
+  provider: string;
+  model: string;
+  /** 列表读路径下由后端脱敏：api_key 字段被替换为 "***"；不要回填到输入框。 */
+  params: Record<string, unknown>;
+  enabled: 0 | 1 | boolean;
+  has_api_key?: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ModelProfileCreatePayload {
+  name: string;
+  provider: string;
+  model: string;
+  params: Record<string, unknown> | string | null;
+  enabled?: 0 | 1 | boolean;
+}
+
+export interface ModelProfileUpdatePayload {
+  name?: string;
+  provider?: string;
+  model?: string;
+  params?: Record<string, unknown> | string | null;
+  enabled?: 0 | 1 | boolean;
+}
+
+export interface ModelProfileTestResult {
+  profile_id: string;
+  ok: boolean;
+  latency_ms: number;
+  detail?: string | null;
+  status_code?: number | null;
+}
+
+export interface CapabilityBindingProfile {
+  profile_id: string;
+  name: string;
+  model: string;
+}
+
+export interface CapabilityBinding {
+  capability: CapabilityKey | string;
+  label: string;
+  agents: string[];
+  profile_ids: string[];
+  profiles: CapabilityBindingProfile[];
+  /** 后端提示：旧版 model_configs 链是否仍可兜底（解绑时附小字提示）。 */
+  legacy_available: boolean;
+}
+
+export interface CapabilityBindPayload {
+  profile_ids: string[];
+}

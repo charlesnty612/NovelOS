@@ -1034,6 +1034,7 @@ def _cmd_run_locked(
                         db_path=db_path,
                         ch_id=ch_id,
                         character_id=protagonist_id,
+                        quality_gate_mode=getattr(args, "quality_gate_mode", "report"),
                     )
                     run_ids: list[str] = []
                     wall_total = 0.0
@@ -1219,11 +1220,12 @@ def _build_payloads(  # noqa: PLR0913 — 长跑脚本统一构造入口
     db_path: str | None,
     ch_id: str,
     character_id: str | None,
+    quality_gate_mode: str = "report",
 ) -> dict[str, dict[str, Any]]:
     """构造四工作流的 body。dry-run 注入 mock_providers；真实模式走正常 payload。"""
     base_body = {
         "target_word_count": TARGET_WORD_COUNT,
-        "quality_gate_mode": "report",
+        "quality_gate_mode": quality_gate_mode,
     }
     if character_id:
         # 用 character_id 作为 author_intent 触发点，便于 reviewer 找到人物上下文
@@ -1345,6 +1347,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--to", dest="to_chapter", type=int, required=True, help="结束章号（含）")
     p_run.add_argument("--budget-total-tokens", type=int, default=None, help="累计 total_tokens 预算")
     p_run.add_argument("--max-failures", type=int, default=3, help="单章最大重试次数")
+    p_run.add_argument(
+        "--quality-gate-mode",
+        choices=("report", "enforce"),
+        default="report",
+        help="commit 质量门禁模式（默认 report 保持长跑不阻断；enforce 用于验证门禁拦截）",
+    )
     p_run.add_argument(
         "--force-lock",
         action="store_true",

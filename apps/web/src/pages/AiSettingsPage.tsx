@@ -2,20 +2,23 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   agentsApi,
-  modelConfigsApi,
+  capabilityBindingsApi,
+  modelProfilesApi,
 } from '../api/endpoints';
 import type {
   Agent,
-  ModelConfig,
-  ModelConfigCreatePayload,
-  ModelConfigUpdatePayload,
+  CapabilityBinding,
+  ModelProfile,
+  ModelProfileCreatePayload,
+  ModelProfileTestResult,
+  ModelProfileUpdatePayload,
   PromptVersion,
   SyncPromptsResult,
 } from '../api/types';
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
 import { useApiCall } from '../hooks/useApiCall';
-import { formatDateTime, formatJson, tryParseJsonObject } from '../utils/format';
+import { formatDateTime } from '../utils/format';
 import { ApiError } from '../api/client';
 
 const PROVIDER_OPTIONS = [
@@ -25,18 +28,14 @@ const PROVIDER_OPTIONS = [
   { value: 'mock', label: 'Mock（本地兜底）' },
 ];
 
-const CAPABILITY_OPTIONS = [
-  { value: 'reasoning', label: 'reasoning（director / observer / arbiter）' },
-  { value: 'creative_writing', label: 'creative_writing（writer）' },
-];
-
 export function AiSettingsPage() {
   return (
     <div>
       <h1 className="section-title">AI 设置</h1>
       <p className="section-subtitle">
-        模型路由（按 capability 选 provider）与 Agent prompt 版本管理。本期页面挂在项目
-        路由下，仅展示该 scope 内可配置项；模型配置是项目无关的全局表，这里仍展示完整列表。
+        模型档案（model_profiles）与环节绑定（capability_bindings）统一管理本页；
+        Agent prompt 版本管理与本页同步。本期页面挂在项目路由下，仅展示该 scope 内可配置项；
+        模型配置是项目无关的全局表，这里仍展示完整列表。
       </p>
 
       <InfoBanner>
@@ -47,7 +46,8 @@ export function AiSettingsPage() {
       </InfoBanner>
 
       <div className="panel-grid">
-        <ModelConfigsPanel />
+        <ModelProfilesPanel />
+        <CapabilityBindingsPanel />
         <AgentsPanel />
       </div>
     </div>
@@ -55,37 +55,31 @@ export function AiSettingsPage() {
 }
 
 // =============================================================================
-// ModelConfigsPanel
+// ModelProfilesPanel —— 档案列表
 // =============================================================================
 
-function ModelConfigsPanel() {
+function ModelProfilesPanel() {
   const { pid } = useParams();
   void pid;
-  const list = useApiCall<ModelConfig[]>(
-    () => modelConfigsApi.list(),
+  const list = useApiCall<ModelProfile[]>(
+    () => modelProfilesApi.list(),
     [],
   );
-  const [editing, setEditing] = useState<ModelConfig | null>(null);
+  const [editing, setEditing] = useState<ModelProfile | null>(null);
   const [creating, setCreating] = useState(false);
-  const [testResult, setTestResult] = useState<{
-    config_id: string;
-    ok: boolean;
-    latency_ms: number;
-    detail: string;
-    status_code: number | null;
-  } | null>(null);
+  const [testResult, setTestResult] = useState<ModelProfileTestResult | null>(null);
 
   return (
-    <div className="panel" data-testid="model-configs-panel">
+    <div className="panel" data-testid="model-profiles-panel">
       <div className="panel__title">
-        模型配置（model_configs）
+        模型档案（model_profiles）
         <div style={{ flex: 1 }} />
         <button
           className="btn btn--sm btn--primary"
           onClick={() => setCreating(true)}
-          data-testid="new-model-config"
+          data-testid="new-model-profile"
         >
-          + 新建
+          + 新建档案
         </button>
       </div>
 
@@ -95,42 +89,44 @@ function ModelConfigsPanel() {
         <div className="muted">加载中…</div>
       ) : !list.data || list.data.length === 0 ? (
         <EmptyState
-          title="还没有模型配置"
-          hint="点击右上角「新建」创建第一条。"
+          title="还没有模型档案"
+          hint="点击右上角「新建档案」创建第一条。"
         />
       ) : (
         <div className="kv-list">
           {list.data.map((m) => (
             <div
-              key={m.config_id}
+              key={m.profile_id}
               className="kv-list__row"
-              data-testid={`model-config-row-${m.config_id}`}
+              data-testid={`model-profile-row-${m.profile_id}`}
             >
               <span className="kv-list__title">
-                {m.capability} / {m.provider} / {m.model}
+                {m.name} · {m.provider} · {m.model}
               </span>
               <span
-                className={`badge ${m.enabled === 1 ? 'badge--chapter-committed' : 'badge--archived'}`}
+                className={`badge ${
+                  Number(m.enabled) === 1 ? 'badge--chapter-committed' : 'badge--archived'
+                }`}
               >
-                {m.enabled === 1 ? 'enabled' : 'disabled'}
+                {Number(m.enabled) === 1 ? 'enabled' : 'disabled'}
               </span>
-              <span className="kv-list__meta">{m.config_id}</span>
+              <span className="kv-list__meta">{m.profile_id}</span>
               <span style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
                 <button
                   className="btn btn--sm"
                   onClick={async () => {
-                    // Sprint 5 review F5：编辑时先 GET 详情拿最新 params_json，
-                    // 避免编辑后误以为有值而漏填。
-                    // P1-1：读路径 api_key 已被后端脱敏（"***"），前端只用
+                    // 读路径 params.api_key 已被后端脱敏（"***"），前端只用
                     // has_api_key 字段判断「已配置」状态，不回填明文到输入框。
                     try {
-                      const detail = await modelConfigsApi.get(m.config_id);
-                      setEditing(detail);
+                      const detail = await modelProfilesApi
+                        .list()
+                        .then((rows) => rows.find((r) => r.profile_id === m.profile_id));
+                      setEditing(detail ?? null);
                     } catch (e: unknown) {
                       const msg =
                         e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
                       setTestResult({
-                        config_id: m.config_id,
+                        profile_id: m.profile_id,
                         ok: false,
                         latency_ms: 0,
                         detail: `加载详情失败 · ${msg}`,
@@ -138,7 +134,7 @@ function ModelConfigsPanel() {
                       });
                     }
                   }}
-                  data-testid={`model-config-edit-${m.config_id}`}
+                  data-testid={`model-profile-edit-${m.profile_id}`}
                 >
                   编辑
                 </button>
@@ -147,20 +143,13 @@ function ModelConfigsPanel() {
                   onClick={async () => {
                     setTestResult(null);
                     try {
-                      const r = await modelConfigsApi.test(m.config_id);
-                      setTestResult({
-                        config_id: m.config_id,
-                        ok: r.ok,
-                        latency_ms: r.latency_ms,
-                        detail: r.detail ?? '',
-                        status_code: r.status_code ?? null,
-                      });
+                      const r = await modelProfilesApi.test(m.profile_id);
+                      setTestResult(r);
                     } catch (e: unknown) {
-                      // 后端 /test 失败时抛 HTTPException：502 等。
                       const msg =
                         e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
                       setTestResult({
-                        config_id: m.config_id,
+                        profile_id: m.profile_id,
                         ok: false,
                         latency_ms: 0,
                         detail: `FAIL · ${msg}`,
@@ -169,17 +158,42 @@ function ModelConfigsPanel() {
                     }
                     void list.reload();
                   }}
-                  data-testid={`model-config-test-${m.config_id}`}
+                  data-testid={`model-profile-test-${m.profile_id}`}
                 >
                   测试连接
                 </button>
                 <button
                   className="btn btn--sm btn--danger"
                   onClick={async () => {
-                    if (!window.confirm(`确认删除模型配置 ${m.config_id}？`)) return;
-                    await modelConfigsApi.delete(m.config_id);
-                    void list.reload();
+                    if (!window.confirm(`确认删除模型档案 ${m.profile_id}？`)) return;
+                    try {
+                      await modelProfilesApi.remove(m.profile_id);
+                      void list.reload();
+                    } catch (e: unknown) {
+                      // 后端删除遇 409 时按 wire 契约 detail 列出 capability；
+                      // 若 detail 已给出明确指引，直接透传；否则附前端兜底文案。
+                      if (e instanceof ApiError && e.status === 409) {
+                        setTestResult({
+                          profile_id: m.profile_id,
+                          ok: false,
+                          latency_ms: 0,
+                          detail: `${e.detail}（请先在「环节分配」中解除绑定）`,
+                          status_code: e.status,
+                        });
+                      } else {
+                        const msg =
+                          e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
+                        setTestResult({
+                          profile_id: m.profile_id,
+                          ok: false,
+                          latency_ms: 0,
+                          detail: `删除失败 · ${msg}`,
+                          status_code: null,
+                        });
+                      }
+                    }
                   }}
+                  data-testid={`model-profile-delete-${m.profile_id}`}
                 >
                   删除
                 </button>
@@ -191,8 +205,8 @@ function ModelConfigsPanel() {
 
       {testResult ? (
         <InfoBanner>
-          <code data-testid="model-config-test-result">
-            {testResult.config_id}：
+          <code data-testid="model-profile-test-result">
+            {testResult.profile_id}：
             <span
               className={
                 testResult.ok ? 'badge badge--chapter-committed' : 'badge badge--chapter-failed'
@@ -209,11 +223,11 @@ function ModelConfigsPanel() {
       ) : null}
 
       {creating ? (
-        <ModelConfigFormModal
-          title="新建模型配置"
+        <ModelProfileFormModal
+          title="新建模型档案"
           onCancel={() => setCreating(false)}
-          onSubmit={async (payload: ModelConfigCreatePayload) => {
-            await modelConfigsApi.create(payload);
+          onSubmit={async (payload: ModelProfileCreatePayload) => {
+            await modelProfilesApi.create(payload);
             setCreating(false);
             list.reload();
           }}
@@ -221,12 +235,12 @@ function ModelConfigsPanel() {
       ) : null}
 
       {editing ? (
-        <ModelConfigFormModal
-          title={`编辑：${editing.config_id}`}
+        <ModelProfileFormModal
+          title={`编辑：${editing.name || editing.profile_id}`}
           initial={editing}
           onCancel={() => setEditing(null)}
-          onSubmit={async (payload: ModelConfigUpdatePayload) => {
-            await modelConfigsApi.update(editing.config_id, payload);
+          onSubmit={async (payload: ModelProfileUpdatePayload) => {
+            await modelProfilesApi.update(editing.profile_id, payload);
             setEditing(null);
             list.reload();
           }}
@@ -237,7 +251,213 @@ function ModelConfigsPanel() {
 }
 
 // =============================================================================
-// AgentsPanel
+// CapabilityBindingsPanel —— 7 项固定清单，PUT 即绑 / DELETE 即解绑
+// =============================================================================
+
+const BINDING_LABELS_FALLBACK: Record<string, string> = {
+  premise_design: '题材定位',
+  world_building: '世界观',
+  character_design: '角色设计',
+  volume_outline: '卷纲',
+  creative_writing: '正文写作',
+  reasoning: '推理规划',
+  light: '轻量评审',
+};
+
+type SaveState =
+  | { kind: 'idle' }
+  | { kind: 'saving' }
+  | { kind: 'saved' }
+  | { kind: 'error'; message: string };
+
+function CapabilityBindingsPanel() {
+  const list = useApiCall<CapabilityBinding[]>(
+    () => capabilityBindingsApi.list(),
+    [],
+  );
+  // profiles 用于下拉选项：enabled=1 的档案集合
+  const profiles = useApiCall<ModelProfile[]>(
+    () => modelProfilesApi.list(),
+    [],
+  );
+
+  // 本地缓存 profile_ids → 提交成功后立即回写，失败时回滚到 GET 状态。
+  const [selectedMap, setSelectedMap] = useState<
+    Record<string, string>
+  >({});
+  const [saveMap, setSaveMap] = useState<Record<string, SaveState>>({});
+
+  // GET bindings 拉到数据时，把每项的 profile_ids 用 , 拼成单值（多档选一个，按下拉语义）。
+  useEffect(() => {
+    if (!list.data) return;
+    const rows = list.data;
+    setSelectedMap((prev) => {
+      const next: Record<string, string> = {};
+      for (const b of rows) {
+        // 若本地已编辑过且不等于原值，保留本地值；否则用后端值（取第一项；后端允许数组）
+        next[b.capability] = prev[b.capability] ?? b.profile_ids[0] ?? '';
+      }
+      return next;
+    });
+  }, [list.data]);
+
+  const enabledProfiles = useMemo(
+    () => (profiles.data ?? []).filter((p) => Number(p.enabled) === 1),
+    [profiles.data],
+  );
+
+  const handleChange = async (
+    capability: string,
+    profileId: string,
+  ): Promise<void> => {
+    const prev = selectedMap[capability] ?? '';
+    setSelectedMap((m) => ({ ...m, [capability]: profileId }));
+    setSaveMap((m) => ({ ...m, [capability]: { kind: 'saving' } }));
+    try {
+      if (profileId === '') {
+        await capabilityBindingsApi.unbind(capability);
+      } else {
+        await capabilityBindingsApi.bind(capability, [profileId]);
+      }
+      setSaveMap((m) => ({ ...m, [capability]: { kind: 'saved' } }));
+      void list.reload();
+    } catch (e: unknown) {
+      // 失败回滚
+      setSelectedMap((m) => ({ ...m, [capability]: prev }));
+      const msg = e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
+      setSaveMap((m) => ({ ...m, [capability]: { kind: 'error', message: msg } }));
+    }
+  };
+
+  return (
+    <div className="panel" data-testid="capability-bindings-panel">
+      <div className="panel__title">环节分配（capability_bindings）</div>
+      <div className="muted small" style={{ marginBottom: 6 }}>
+        把模型档案指派到 7 个生产环节；解绑即该环节回落后端历史默认链（适用旧版 model_configs 仍存在时）。
+      </div>
+
+      <ErrorBanner>{list.error}</ErrorBanner>
+      <ErrorBanner>{profiles.error}</ErrorBanner>
+
+      {list.loading ? (
+        <div className="muted">加载中…</div>
+      ) : !list.data || list.data.length === 0 ? (
+        <EmptyState
+          title="尚未获取到环节清单"
+          hint="后端 /capability-bindings 返回空或失败。"
+        />
+      ) : (
+        <div className="kv-list" data-testid="capability-bindings-list">
+          {list.data.map((b) => (
+            <CapabilityBindingRow
+              key={b.capability}
+              binding={b}
+              profiles={enabledProfiles}
+              selected={selectedMap[b.capability] ?? b.profile_ids[0] ?? ''}
+              state={saveMap[b.capability] ?? { kind: 'idle' }}
+              onChange={(id) => void handleChange(b.capability, id)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CapabilityBindingRow({
+  binding,
+  profiles,
+  selected,
+  state,
+  onChange,
+}: {
+  binding: CapabilityBinding;
+  profiles: ModelProfile[];
+  selected: string;
+  state: SaveState;
+  onChange: (profileId: string) => void;
+}) {
+  const isUnbound = selected === '';
+  const showLegacyHint = isUnbound && binding.legacy_available;
+  return (
+    <div
+      className="kv-list__row"
+      data-testid={`cap-binding-${binding.capability}`}
+    >
+      <span className="kv-list__title">
+        {binding.label ||
+          BINDING_LABELS_FALLBACK[binding.capability] ||
+          binding.capability}
+      </span>
+      <span className="muted small">
+        {binding.agents && binding.agents.length > 0
+          ? `agents: ${binding.agents.join(', ')}`
+          : ''}
+      </span>
+      <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <select
+          value={selected}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={state.kind === 'saving'}
+          data-testid={`cap-binding-select-${binding.capability}`}
+        >
+          <option value="">未绑定 · 使用默认配置</option>
+          {profiles.map((p: ModelProfile) => (
+            <option key={p.profile_id} value={p.profile_id}>
+              {p.name}（{p.model}）
+            </option>
+          ))}
+        </select>
+        <SaveIndicator state={state} />
+      </span>
+      {showLegacyHint ? (
+        <span
+          className="muted small"
+          style={{ display: 'block', width: '100%' }}
+          data-testid={`cap-binding-legacy-hint-${binding.capability}`}
+        >
+          检测到旧版配置仍可用
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function SaveIndicator({ state }: { state: SaveState }) {
+  if (state.kind === 'saving')
+    return (
+      <span
+        className="muted small"
+        data-testid="cap-binding-saving"
+      >
+        保存中…
+      </span>
+    );
+  if (state.kind === 'saved')
+    return (
+      <span
+        className="muted small"
+        data-testid="cap-binding-saved"
+        style={{ color: 'seagreen' }}
+      >
+        已保存 ✓
+      </span>
+    );
+  if (state.kind === 'error')
+    return (
+      <span
+        className="small"
+        style={{ color: 'crimson' }}
+        data-testid="cap-binding-error"
+      >
+        失败：{state.message}
+      </span>
+    );
+  return null;
+}
+
+// =============================================================================
+// AgentsPanel —— 与上一轮不变
 // =============================================================================
 
 function AgentsPanel() {
@@ -380,17 +600,17 @@ function AgentsPanel() {
 }
 
 // =============================================================================
-// ModelConfigFormModal
+// ModelProfileFormModal —— 档案表单：去 capability 下拉、加 name 必填
 // =============================================================================
 
-interface ModelConfigFormModalProps {
+interface ModelProfileFormModalProps {
   title: string;
-  initial?: ModelConfig;
+  initial?: ModelProfile;
   onCancel: () => void;
-  /** 编辑/新建由父组件传不同的 submit（create 必填 capability，update 部分更新） */
+  /** 编辑/新建由父组件传不同的 submit（create 必填 name，update 部分更新） */
   onSubmit:
-    | ((payload: ModelConfigCreatePayload) => Promise<void>)
-    | ((payload: ModelConfigUpdatePayload) => Promise<void>);
+    | ((payload: ModelProfileCreatePayload) => Promise<void>)
+    | ((payload: ModelProfileUpdatePayload) => Promise<void>);
 }
 
 interface ParamsState {
@@ -398,22 +618,19 @@ interface ParamsState {
   apiKey: string;
 }
 
-function ModelConfigFormModal({
+function ModelProfileFormModal({
   title,
   initial,
   onCancel,
   onSubmit,
-}: ModelConfigFormModalProps) {
-  const initialParams = (initial?.params_json as Record<string, unknown>) ?? {};
-  const [capability, setCapability] = useState<string>(
-    initial?.capability ?? CAPABILITY_OPTIONS[0].value,
-  );
+}: ModelProfileFormModalProps) {
+  const initialParams = (initial?.params as Record<string, unknown>) ?? {};
+  const [name, setName] = useState<string>(initial?.name ?? '');
   const [provider, setProvider] = useState<string>(
     initial?.provider ?? PROVIDER_OPTIONS[0].value,
   );
   const [model, setModel] = useState<string>(initial?.model ?? '');
-  // P1-1：编辑模式下不再回填 api_key 明文到输入框（后端读路径已脱敏）。
-  // 始终以空串进入；placeholder 与提示文案由 has_api_key 决定。
+  // 读路径 params.api_key 已被脱敏（"***"），不回填明文到输入框。
   const [params, setParams] = useState<ParamsState>({
     baseUrl:
       typeof initialParams['base_url'] === 'string'
@@ -421,19 +638,17 @@ function ModelConfigFormModal({
         : '',
     apiKey: '',
   });
-  const [enabled, setEnabled] = useState<boolean>(initial ? initial.enabled === 1 : true);
+  const [enabled, setEnabled] = useState<boolean>(
+    initial ? Number(initial.enabled) === 1 : true,
+  );
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  // V1.1 修补（V1.0 Known Issues）：编辑模式下显式「清除已存密钥」入口。
-  // 点击后 handleSubmit 会显式传 api_key="" 给后端（PATCH 语义：空串=清空）；
-  // 输入框留空本身不会触发清除（保留 DB 原值），因此需要独立标志位。
+  // 编辑模式下「清除已存密钥」独立标志位：仅显式请求时才传 api_key=""。
   const [clearKeyRequested, setClearKeyRequested] = useState(false);
 
   const isMock = provider === 'mock';
   const isAnthropic = provider === 'anthropic';
   const isOllama = provider === 'ollama';
-  // base_url 必填：仅 mock / anthropic / ollama 可省（Provider 自带默认值），
-  // 其余 provider（openai_compatible 等）仍走 Sprint 3 强制必填口径。
   const requireBaseUrl = !isMock && !isAnthropic && !isOllama;
   const baseUrlPlaceholder = isAnthropic
     ? '留空 = 官方 api.anthropic.com'
@@ -441,10 +656,7 @@ function ModelConfigFormModal({
       ? '留空 = 本地 http://127.0.0.1:11434'
       : 'https://api.openai.com/v1';
 
-  // P1-1：编辑且后端标记 has_api_key=true 时显示「已配置」，否则按 provider 性质区分。
   const hasApiKey = !!initial?.has_api_key;
-  // 「清除已存密钥」按钮：仅在编辑模式 + has_api_key=true + 需要 key 的 provider 时可用。
-  // mock / ollama 本就没有 key 概念，故隐藏。
   const canShowClearKeyButton = !!initial && hasApiKey && !isMock && !isOllama;
   const apiKeyPlaceholder = isAnthropic
     ? hasApiKey
@@ -461,6 +673,10 @@ function ModelConfigFormModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
+    if (!name.trim()) {
+      setErr('name 不能为空');
+      return;
+    }
     if (!model.trim()) {
       setErr('model 不能为空');
       return;
@@ -469,32 +685,25 @@ function ModelConfigFormModal({
       setErr('该 provider 需要 base_url');
       return;
     }
-    const params_json: Record<string, unknown> = {};
+    const paramsOut: Record<string, unknown> = {};
     if (!isMock) {
       const trimmedUrl = params.baseUrl.trim();
-      if (trimmedUrl) {
-        params_json['base_url'] = trimmedUrl;
-      }
-      // Ollama 本地不需要 api_key：即便用户填了也丢弃，不写入 params_json。
-      // P1-1：编辑 + has_api_key=true 时，若用户留空 → 不传 api_key 字段
-      // （后端 _prepare_patch_params 会保留 DB 原值）；若用户填了新值 → 传明文。
-      // 新建场景下用户留空同样不传 key。
-      // V1.1 修补：若用户点击了「清除已存密钥」→ 显式传 api_key="" 触发后端清除分支。
+      if (trimmedUrl) paramsOut['base_url'] = trimmedUrl;
       if (!isOllama) {
         if (clearKeyRequested) {
-          params_json['api_key'] = '';
+          paramsOut['api_key'] = '';
         } else if (params.apiKey.trim() !== '') {
-          params_json['api_key'] = params.apiKey.trim();
+          paramsOut['api_key'] = params.apiKey.trim();
         }
       }
     }
     setSubmitting(true);
     try {
       await onSubmit({
-        capability,
+        name: name.trim(),
         provider,
         model: model.trim(),
-        params_json,
+        params: paramsOut,
         enabled: enabled ? 1 : 0,
       });
     } catch (e: unknown) {
@@ -503,11 +712,6 @@ function ModelConfigFormModal({
       setSubmitting(false);
     }
   };
-
-  // tryParseJsonObject 用于诊断：UI 当前把 base_url / api_key 用结构化输入；不直接走 JSON textarea。
-  // 保留引用以避免 lint 报 unused import（也方便将来扩展）。
-  void tryParseJsonObject;
-  void formatJson;
 
   return (
     <div
@@ -525,35 +729,29 @@ function ModelConfigFormModal({
         <div className="section-title">{title}</div>
         <ErrorBanner>{err}</ErrorBanner>
 
-        <div className="form-grid">
-          <div className="form-row">
-            <label>capability *</label>
-            <select
-              value={capability}
-              onChange={(e) => setCapability(e.target.value)}
-              data-testid="cfg-capability"
-            >
-              {CAPABILITY_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="form-row">
-            <label>provider *</label>
-            <select
-              value={provider}
-              onChange={(e) => setProvider(e.target.value)}
-              data-testid="cfg-provider"
-            >
-              {PROVIDER_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="form-row">
+          <label>name *</label>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="如 default-creative / fast-creative"
+            data-testid="profile-name"
+          />
+        </div>
+
+        <div className="form-row">
+          <label>provider *</label>
+          <select
+            value={provider}
+            onChange={(e) => setProvider(e.target.value)}
+            data-testid="profile-provider"
+          >
+            {PROVIDER_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="form-row">
@@ -562,7 +760,7 @@ function ModelConfigFormModal({
             value={model}
             onChange={(e) => setModel(e.target.value)}
             placeholder="如 gpt-4o-mini / mock-echo / deepseek-chat"
-            data-testid="cfg-model"
+            data-testid="profile-model"
           />
         </div>
 
@@ -576,7 +774,7 @@ function ModelConfigFormModal({
                   setParams((p) => ({ ...p, baseUrl: e.target.value }))
                 }
                 placeholder={baseUrlPlaceholder}
-                data-testid="cfg-base-url"
+                data-testid="profile-base-url"
               />
             </div>
             {isOllama ? (
@@ -589,12 +787,11 @@ function ModelConfigFormModal({
                     type="password"
                     value={params.apiKey}
                     onChange={(e) => {
-                      // 用户重新输入则自动取消「清除」请求（让填写的新值生效）。
                       setClearKeyRequested(false);
                       setParams((p) => ({ ...p, apiKey: e.target.value }));
                     }}
                     placeholder={apiKeyPlaceholder}
-                    data-testid="cfg-api-key"
+                    data-testid="profile-api-key"
                     style={{ flex: 1 }}
                   />
                   {canShowClearKeyButton ? (
@@ -606,7 +803,7 @@ function ModelConfigFormModal({
                         setParams((p) => ({ ...p, apiKey: '' }));
                       }}
                       disabled={clearKeyRequested}
-                      data-testid="cfg-clear-api-key"
+                      data-testid="profile-clear-api-key"
                       title="点击后保存将清空已存的 api_key"
                     >
                       {clearKeyRequested ? '已请求清除' : '清除已存密钥'}
@@ -614,7 +811,7 @@ function ModelConfigFormModal({
                   ) : null}
                 </div>
                 {initial ? (
-                  <div className="muted small" data-testid="cfg-api-key-hint">
+                  <div className="muted small" data-testid="profile-api-key-hint">
                     {hasApiKey
                       ? clearKeyRequested
                         ? '清除已请求：点击保存将清空已存的 api_key；如想保留请改填新值。'
@@ -636,7 +833,7 @@ function ModelConfigFormModal({
               checked={enabled}
               onChange={(e) => setEnabled(e.target.checked)}
             />{' '}
-            启用（enabled=1 时可被路由命中）
+            启用（enabled=1 时可被环节分配命中）
           </label>
         </div>
 
@@ -648,7 +845,7 @@ function ModelConfigFormModal({
             type="submit"
             className="btn btn--primary"
             disabled={submitting}
-            data-testid="cfg-save"
+            data-testid="profile-save"
           >
             {submitting ? '保存中…' : '保存'}
           </button>

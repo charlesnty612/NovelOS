@@ -793,7 +793,9 @@ def run_case(case_dir: Path | str) -> RunResult:
                 initial_ctx_extra={"critic_mode": "always"},
             )
             _run_workflow_with_resume(
-                engine, db_path, "chapter-commit", chapter_id, project_id, mock_providers
+                engine, db_path, "chapter-commit", chapter_id, project_id, mock_providers,
+                # P0：quality_gate 默认已改为 enforce；golden eval 保持 report 避免 MVP 阻断规则误伤。
+                initial_ctx_extra={"quality_gate_mode": "report"},
             )
 
             # 5) 断言

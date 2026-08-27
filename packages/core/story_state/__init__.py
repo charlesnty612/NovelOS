@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 from .applier import apply_delta
+from .delta_repair import repair_delta
 from .exceptions import (
     ApprovalRequiredError,
     OptimisticLockError,
@@ -36,6 +37,7 @@ __all__ = [
     "StoryStateService",
     "apply_delta",
     "validate_delta",
+    "repair_delta",
     "build_initial_state",
     "materialize_snapshot",
     "StoryStateError",

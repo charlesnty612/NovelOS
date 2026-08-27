@@ -39,7 +39,8 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     #   三表加 visibility+who_knows 列；DROP 旧 reveal_policies（0001 v1.1）后按 v3.3 schema
     #   重建——表数不变，业务表 34，总表 35。
     # V3.4 多卷与规模（组织层）：0015_volumes 加 volumes 业务表 → 业务表 35（34+1），总表 36。
-    assert result["tables"] == 36, f"expected 36 (35+_migrations), got {result['tables']}"
+    # V3.7 模型档案 + 环节绑定：0016 加 model_profiles + capability_bindings → 业务表 37（35+2），总表 38。
+    assert result["tables"] == 38, f"expected 38 (37+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
     # Sprint 5 review F2：0002_drafts_unique.sql 也应被应用
@@ -71,12 +72,14 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     assert "0014_knowledge_reveal.sql" in result["applied"]
     # V3.4 多卷与规模（组织层）：0015_volumes.sql（volumes 表 + chapters.volume_id；总表 36）。
     assert "0015_volumes.sql" in result["applied"]
+    # V3.7 模型档案 + 环节绑定：0016_model_profiles.sql（model_profiles + capability_bindings；总表 38）。
+    assert "0016_model_profiles.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     first = apply_migrations(db_path, MIGRATIONS_DIR)
-    # V3.4 多卷与规模（组织层）：迁移目录下十五条脚本都应被首次应用
+    # V3.7 模型档案 + 环节绑定：0016 加入；迁移目录下十六条脚本都应被首次应用
     assert first["applied"] == [
         "0001_init.sql",
         "0002_drafts_unique.sql",
@@ -93,6 +96,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0013_plot_events_description.sql",
         "0014_knowledge_reveal.sql",
         "0015_volumes.sql",
+        "0016_model_profiles.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -114,6 +118,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0014_knowledge_reveal.sql" in second["skipped"]
     # V3.4 多卷与规模（组织层）：0015 也应被幂等跳过
     assert "0015_volumes.sql" in second["skipped"]
+    # V3.7 模型档案 + 环节绑定：0016 也应被幂等跳过
+    assert "0016_model_profiles.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -125,7 +131,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         rows = conn.execute("SELECT filename, applied_at FROM _migrations").fetchall()
     finally:
         conn.close()
-    # V3.4 多卷与规模（组织层）：十五条迁移都应记录
+    # V3.7 模型档案 + 环节绑定：十六条迁移都应记录
     filenames = {r["filename"] for r in rows}
     assert filenames == {
         "0001_init.sql",
@@ -143,6 +149,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0013_plot_events_description.sql",
         "0014_knowledge_reveal.sql",
         "0015_volumes.sql",
+        "0016_model_profiles.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -178,7 +185,8 @@ def test_business_table_count_is_34(tmp_path: Path):
     # V2.0 Wave B 任务一：0009_branch_snapshots 加 branch_snapshots → 业务表 34
     # V2.0 Wave C 任务一：0011_fts_index 加 FTS5 虚表，但口径排除 → 业务表仍 34
     # V3.4 多卷与规模（组织层）：0015_volumes 加 volumes 业务表 → 业务表 35
-    assert len(names) == 35, f"expected 35 business tables, got {len(names)}"
+    # V3.7 模型档案 + 环节绑定：0016 加 model_profiles + capability_bindings → 业务表 37
+    assert len(names) == 37, f"expected 37 business tables, got {len(names)}"
     # 抽检：PRD §67 关键表
     for expected in ("projects", "characters", "chapters", "commits", "state_deltas", "ai_call_logs"):
         assert expected in names, f"missing table {expected}"
@@ -189,6 +197,8 @@ def test_business_table_count_is_34(tmp_path: Path):
     assert "author_style_samples" in names, "author_style_samples table should exist (Sprint 15 / V1.3)"
     assert "branch_snapshots" in names, "branch_snapshots table should exist (V2.0 Wave B 任务一)"
     assert "volumes" in names, "volumes table should exist (V3.4 多卷与规模组织层)"
+    assert "model_profiles" in names, "model_profiles table should exist (V3.7 模型档案 + 环节绑定)"
+    assert "capability_bindings" in names, "capability_bindings table should exist (V3.7 模型档案 + 环节绑定)"
 
 
 def test_0011_chapter_fts_virtual_table_exists(tmp_path: Path):

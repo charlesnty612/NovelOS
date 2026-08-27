@@ -57,6 +57,14 @@ AGENT_CAPABILITY: dict[str, str] = {
     "deconstructor_aggregate": "reasoning",
     "summarizer": "light",      # V3 P0-2：结构化提取走轻量模型
     "critic": "light",          # V3 P0-2：LLM 评审员走轻量模型
+    "scene_planner": "reasoning",  # P0：Director plan → Scene plan 结构翻译
+    # V3.7 project-init 四个 agent 显式映射：避免 ``capability_for`` 默认回退
+    # reasoning——把「题材定位 / 世界观 / 角色设计 / 卷纲」与正文写作分离，
+    # 前端可独立分配更便宜的小模型。
+    "premise_designer": "premise_design",
+    "world_builder": "world_building",
+    "character_designer": "character_design",
+    "volume_outliner": "volume_outline",
 }
 """Agent 名 → capability 名（对齐 agent-contracts §7）。
 
@@ -69,12 +77,42 @@ V3 P0-2 新增 ``light`` capability：用于结构化提取 / 评审类任务（
 ``creative_writing`` 不变（长文本生成任务）。``light`` capability 在未配置任何
 enabled 行时自动回退到 ``reasoning`` 链（见 :meth:`ModelRouter.call_with_fallback`），
 保证零破坏。
+
+V3.7 project-init 四 agent（premise_designer / world_builder / character_designer /
+volume_outliner）映射到独立 capability（premise_design / world_building /
+character_design / volume_outline），与正文创作（creative_writing）/ 推理规划
+（reasoning）/ 轻量评审（light）解耦。
 """
 
 
 def capability_for(agent_name: str) -> str:
     """按 agent 名取 capability；未知 agent 默认 ``reasoning``。"""
     return AGENT_CAPABILITY.get(agent_name, "reasoning")
+
+
+# ---------------------------------------------------------------------------
+# V3.7：Capability 标签 + agents 归属（前端 / GET bindings 展示）
+# ---------------------------------------------------------------------------
+
+CAPABILITY_LABELS: dict[str, dict[str, object]] = {
+    # 顺序即前端「环节」展示顺序；先 project-init（项目初始化四步），
+    # 再正文写作，再推理规划与轻量评审。
+    "premise_design":   {"label": "题材定位",   "agents": ["premise_designer"]},
+    "world_building":   {"label": "世界观",     "agents": ["world_builder"]},
+    "character_design": {"label": "角色设计",   "agents": ["character_designer"]},
+    "volume_outline":   {"label": "卷纲",       "agents": ["volume_outliner"]},
+    "creative_writing": {"label": "正文写作",   "agents": ["writer"]},
+    "reasoning":        {"label": "推理规划",   "agents": [
+        "director", "observer", "arbiter",
+        "deconstructor_chapter", "deconstructor_aggregate", "scene_planner",
+    ]},
+    "light":            {"label": "轻量评审",   "agents": ["summarizer", "critic"]},
+}
+"""环节元信息（有序 dict，前端 / GET bindings 用）。
+
+- ``label``：人类可读中文名（前端展示）；
+- ``agents``：归属该 capability 的 agent 名列表（从 :data:`AGENT_CAPABILITY` 反推）。
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -88,42 +126,70 @@ class ModelRouter:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = str(db_path)
 
-    # -------------------------------------------------------------- resolve
-    def resolve(self, capability: str) -> dict[str, Any]:
-        """返回 ``model_configs`` 中 capability 匹配且 enabled=1 的第一行（按 rowid 升序）。
+    # -------------------------------------------------------------- _candidates
+    def _candidates(self, capability: str) -> list[dict[str, Any]]:
+        """统一候选来源（V3.7）：优先 ``capability_bindings + model_profiles``，无 binding 回落 ``model_configs``。
 
-        无命中 → 抛 :class:`ModelNotConfiguredError`。
-        返回 dict 与数据库行字段一致：``config_id / capability / provider / model /
-        params_json / enabled``（params_json 字段以**字符串原样**返回，调用方按需 json.loads）。
+        返回字典键名与 model_configs 行完全一致（``config_id / capability / provider /
+        model / params_json / enabled``），其中 ``config_id`` 取 ``profile_id``、
+        ``capability`` 取入参 ``capability``，其它字段从 model_profiles 行映射。
+        保证 :meth:`get_provider` / ``runner`` 写 ai_call_logs 不需要 schema 改动。
+
+        优先级：
+        1. ``capability_bindings`` 有该 capability → 取 ``profile_ids`` JSON 数组，
+           顺序即 fallback 序；逐个解析 profile_id，在 ``model_profiles`` 里取
+           ``enabled=1`` 的行；缺失或 ``enabled=0`` 跳过。
+        2. 无 binding → 直接查 ``model_configs`` 中 ``capability`` 匹配 ``enabled=1``
+           的全部行（按 rowid ASC），与 V3.6 旧行为等价。
         """
         if not capability:
-            raise ModelNotConfiguredError(capability or "")
+            return []
+
         conn = get_connection(self.db_path)
         try:
-            row = conn.execute(
-                """
-                SELECT config_id, capability, provider, model, params_json, enabled
-                FROM model_configs
-                WHERE capability = ? AND enabled = 1
-                ORDER BY rowid ASC
-                LIMIT 1
-                """,
+            binding_row = conn.execute(
+                "SELECT profile_ids FROM capability_bindings WHERE capability = ?",
                 (capability,),
             ).fetchone()
         finally:
             conn.close()
-        if row is None:
-            raise ModelNotConfiguredError(capability)
-        return dict(row)
 
-    # -------------------------------------------------------------- list_enabled
-    def list_enabled(self, capability: str) -> list[dict[str, Any]]:
-        """返回 ``model_configs`` 中 capability 匹配且 enabled=1 的全部行（按 rowid 升序）。
+        if binding_row is not None:
+            try:
+                raw = json.loads(binding_row["profile_ids"] or "[]")
+            except (TypeError, ValueError):
+                raw = []
+            profile_ids = [str(x) for x in raw if x]
+            if not profile_ids:
+                return []
+            # 保留 binding 顺序：逐个查；missing/enabled=0 跳过
+            conn = get_connection(self.db_path)
+            try:
+                out: list[dict[str, Any]] = []
+                for pid in profile_ids:
+                    row = conn.execute(
+                        """
+                        SELECT profile_id, provider, model, params_json, enabled
+                        FROM model_profiles
+                        WHERE profile_id = ? AND enabled = 1
+                        """,
+                        (pid,),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    out.append({
+                        "config_id": row["profile_id"],
+                        "capability": capability,
+                        "provider": row["provider"],
+                        "model": row["model"],
+                        "params_json": row["params_json"],
+                        "enabled": row["enabled"],
+                    })
+            finally:
+                conn.close()
+            return out
 
-        无命中 → 返回空列表（不抛）。用于 ``call_with_fallback`` 的候选链。
-        """
-        if not capability:
-            return []
+        # 无 binding → 回落 model_configs（旧行为）
         conn = get_connection(self.db_path)
         try:
             rows = conn.execute(
@@ -138,6 +204,56 @@ class ModelRouter:
         finally:
             conn.close()
         return [dict(r) for r in rows]
+
+    # -------------------------------------------------------------- resolve
+    def resolve(self, capability: str) -> dict[str, Any]:
+        """返回该 capability 候选链的第一个（bindings 命中走 bindings，否则走 model_configs）。
+
+        无命中 → 抛 :class:`ModelNotConfiguredError`（capability 字段保持原始字符串；
+        消息体补充「环节 X 未绑定档案且无历史配置」便于运维定位）。
+        返回 dict 字段对齐 :meth:`_candidates` 的契约。
+        """
+        if not capability:
+            raise ModelNotConfiguredError(capability or "")
+        rows = self._candidates(capability)
+        if not rows:
+            err = ModelNotConfiguredError(capability)
+            # 覆盖 message：保留 capability 字段契约（test_model_router 强校验 exc.value.capability），
+            # 但在 message 里补全「未绑定档案且无历史配置」的诊断信息，便于运维定位。
+            err.args = (f"环节 {capability!r} 未绑定档案且无历史配置",)
+            raise err
+        return rows[0]
+
+    # -------------------------------------------------------------- list_enabled
+    def list_enabled(self, capability: str) -> list[dict[str, Any]]:
+        """返回该 capability 的全部启用候选（按 binding 顺序或 rowid ASC）。
+
+        无命中 → 返回空列表（不抛）。用于 :meth:`call_with_fallback` 的候选链。
+        """
+        if not capability:
+            return []
+        return self._candidates(capability)
+
+    # -------------------------------------------------------------- _has_binding
+    def _has_binding(self, capability: str) -> bool:
+        """仅判断 ``capability_bindings`` 表里是否存在该 capability 行。
+
+        用于 B1 修复：``call_with_fallback`` 在 light 零候选时，需要区分
+        「该 capability 没 binding」（旧行为：回退 reasoning）与「有 binding
+        但 _candidates 全 disabled / 缺失」（新行为：不回退，直接抛异常）。
+        本方法只查 binding 主键存在性，不读 profile_ids 内容，单次 query 极轻。
+        """
+        if not capability:
+            return False
+        conn = get_connection(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM capability_bindings WHERE capability = ? LIMIT 1",
+                (capability,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
 
     # -------------------------------------------------------------- get_provider
     def get_provider(
@@ -231,18 +347,22 @@ class ModelRouter:
         candidates = self.list_enabled(capability)
         used_capability = capability
         if not candidates and capability == "light":
-            # 零破坏：light 未配置时回退 reasoning
-            candidates = self.list_enabled("reasoning")
-            used_capability = "reasoning"
-            if candidates:
-                log.info(
-                    "model_router.light_fallback",
-                    extra={
-                        "requested": "light",
-                        "fallback_to": "reasoning",
-                        "candidates": len(candidates),
-                    },
-                )
+            # V3.7 修复（B1）：显式 binding 为准不回退。仅当 capability_bindings
+            # 里压根没有 light 这一行时（旧行为）才回退 reasoning；显式 binding
+            # 但 _candidates 全 disabled / 缺失则抛 ModelNotConfiguredError，
+            # 不再静默落到 reasoning 链（避免绑定语义被绕过）。
+            if not self._has_binding("light"):
+                candidates = self.list_enabled("reasoning")
+                used_capability = "reasoning"
+                if candidates:
+                    log.info(
+                        "model_router.light_fallback",
+                        extra={
+                            "requested": "light",
+                            "fallback_to": "reasoning",
+                            "candidates": len(candidates),
+                        },
+                    )
         if not candidates:
             raise ModelNotConfiguredError(capability)
 
@@ -304,4 +424,4 @@ class ModelRouter:
         raise AggregateProviderError(capability, attempts) from last_exc
 
 
-__all__ = ["ModelRouter", "AGENT_CAPABILITY", "capability_for"]
+__all__ = ["ModelRouter", "AGENT_CAPABILITY", "CAPABILITY_LABELS", "capability_for"]

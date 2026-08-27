@@ -1,5 +1,5 @@
 """chapter_review 工作流（Sprint 4-A；revise 语义 Sprint 5 补全，闭环 PRD §59/§87；
-V1.3 新增 critic 节点）。
+V1.3 新增 critic 节点；P0 默认 always）。
 
 节点列表：
 - ``basic_checks`` (Transform) —— 草稿存在性、字数偏离 target ±15% 记 warning 进
@@ -9,6 +9,7 @@ V1.3 新增 critic 节点）。
   （键名 ``critic_report``），供人工审批界面渲染。
   **仅建议、不拦截**：任何失败（prompt 缺失 / provider 异常 / 输出不合规）→ 降级
   ``critic_status='failed'`` 且 ``critic_report=None``，**不**阻断人工审批 / run 终态。
+  P0 默认模式改为 ``always``（每章都评），``NOVELOS_CRITIC_MODE`` / ``ctx['critic_mode']`` 仍覆盖。
 - ``author_review`` (Human) —— payload=review_report + critic_report；human_input 三态决议：
   ``{"approved": true}`` 通过；``{"approved": false}`` 拒绝（run FAILED）；
   ``{"approved": false, "revise": true, "note": str?}`` 驳回并改稿（run FAILED、
@@ -26,6 +27,7 @@ from typing import Any
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection
 from packages.core.ids import now_iso
+from packages.core.quality.ai_patterns import scan_ai_patterns
 from packages.core.quality.wordcount import classify_prose_length
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
 
@@ -42,18 +44,18 @@ _log = logging.getLogger(__name__)
 # V3 P0-1：critic LLM 评审员采样模式开关
 # - ``off``：完全跳过 critic LLM 调用，节点直接返回 ``critic_status='skipped'``。
 # - ``sample``：仅当 ``chapter.number % 5 == 0`` 时调用 LLM；其余章节跳过。
-# - ``always``：现状行为（每章都评）。
-# 优先级：``ctx["critic_mode"]``（来自 start review 请求 body） > ``NOVELOS_CRITIC_MODE`` 环境变量 > 默认 ``sample``。
+# - ``always``：每章都评（P0 默认）。
+# 优先级：``ctx["critic_mode"]``（来自 start review 请求 body） > ``NOVELOS_CRITIC_MODE`` 环境变量 > 默认 ``always``。
 _VALID_CRITIC_MODES = ("off", "sample", "always")
 
 
 def _resolve_critic_mode(ctx: dict[str, Any]) -> str:
-    """按优先级解析 critic 模式：ctx > env > 默认 ``sample``。非法值回退到 ``sample``。"""
+    """按优先级解析 critic 模式：ctx > env > 默认 ``always``。非法值回退到 ``always``。"""
     raw = ctx.get("critic_mode")
     if isinstance(raw, str) and raw in _VALID_CRITIC_MODES:
         return raw
-    env = os.environ.get("NOVELOS_CRITIC_MODE", "sample").strip().lower()
-    return env if env in _VALID_CRITIC_MODES else "sample"
+    env = os.environ.get("NOVELOS_CRITIC_MODE", "always").strip().lower()
+    return env if env in _VALID_CRITIC_MODES else "always"
 
 
 def _should_invoke_critic(mode: str, chapter_number: int | None) -> bool:
@@ -125,7 +127,15 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
     within_range = abs_dev_pct <= 15.0
     over_band = abs_dev_pct > 30.0
 
-    forbidden_hits = [w for w in DEFAULT_FORBIDDEN_WORDS if w in prose]
+    # V3.8：去 AI 味确定性检测（纯规则、不调用 LLM）
+    ai_hits = scan_ai_patterns(prose)
+    # 向后兼容：保留 forbidden_word_hits 字段（由原 DEFAULT_FORBIDDEN_WORDS 扩展而来）
+    forbidden_hits: list[str] = []
+    for hit in ai_hits:
+        if hit.get("rule_id") == "AI-FORBIDDEN-WORD":
+            forbidden_hits.extend(hit.get("words", []))
+    forbidden_hits = sorted(set(forbidden_hits))
+
     warnings: list[str] = []
     errors: list[dict[str, Any]] = []
     if not within_range:
@@ -152,6 +162,11 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
         })
     if forbidden_hits:
         warnings.append(f"禁用词命中：{','.join(forbidden_hits)}")
+    for hit in ai_hits:
+        if hit.get("severity") == "error":
+            errors.append(hit)
+        else:
+            warnings.append(f"[{hit['rule_id']}] {hit['message']}")
 
     report = {
         "chapter_id": chapter_id,
@@ -162,6 +177,7 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "deviation_pct": deviation_pct,
         "word_band": {"low": band_low, "high": band_high},
         "forbidden_word_hits": forbidden_hits,
+        "ai_pattern_hits": ai_hits,
         "warnings": warnings,
         "errors": errors,
     }
@@ -296,6 +312,20 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
             "critic_mode": mode,
         }
 
+    # V3.8：把确定性检测结果摘要注入 critic payload，供 LLM 参考。
+    # 优先从 basic_checks 已产出的 review_report 读取；若未经历该节点（单测/异常），
+    # 退化为对 draft_text 直接扫描，保证节点自洽。
+    ai_hits = (ctx.get("review_report") or {}).get("ai_pattern_hits")
+    if ai_hits is None:
+        ai_hits = scan_ai_patterns(draft_text)
+    deterministic_hints = {
+        "ai_pattern_hit_count": len(ai_hits),
+        "ai_pattern_summary": [
+            {"rule_id": h.get("rule_id"), "message": h.get("message"), "count": h.get("count")}
+            for h in ai_hits
+        ],
+    }
+
     payload = {
         "agent": "critic",
         "prompt_version": _CRITIC_PROMPT_VERSION,
@@ -308,6 +338,7 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "draft_text": draft_text,
         "plan_summary": plan_summary,
         "open_hooks": open_hooks,
+        "deterministic_hints": deterministic_hints,
     }
 
     try:
@@ -482,7 +513,7 @@ WORKFLOW = {
     "name": "chapter-review",
     "version": "v1",
     "description": (
-        "basic_checks → critic_review(AI, advisory) → author_review(Human) → mark_reviewed "
+        "basic_checks → critic_review(AI, advisory, default always) → author_review(Human) → mark_reviewed "
         "(DRAFTED→REVIEWED)；revise 驳回改稿闭环；critic 仅做建议、不拦截"
     ),
     "nodes": _build_nodes(),

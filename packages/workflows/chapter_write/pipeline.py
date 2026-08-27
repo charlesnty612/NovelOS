@@ -1,9 +1,11 @@
-"""chapter_write 工作流（Sprint 4-A）。
+"""chapter_write 工作流（Sprint 4-A + P0 ScenePlanner 真实化）。
 
 节点列表：
 - ``load_plan`` (Transform) —— 读 chapters.plan_json 准备 director_plan 输入。
-- ``scene_planner_stub`` (Transform) —— MVP 占位：把 director.key_beats 逐个映射为 scene,
-  每 scene slots=[{slot_id, type}] 机械生成。**V1 由 Planner Agent 替代**。
+- ``scene_planner`` (AI) —— P0 新增：调 scene_planner agent 把 director_plan 翻译为
+  结构化 Scene Plan（含 slots / 冲突 / 信息边界 / 结尾钩子）。
+  任何失败（prompt 缺失 / provider 异常 / 输出不合规）→ 降级到原 stub 机械映射逻辑，
+  **不**阻断 writer run。
 - ``writer`` (AI) —— 调 writer agent 生成本章 prose。
 - ``save_draft`` (State) —— 写 drafts 表 + chapters.status PLANNED→DRAFTED。
 """
@@ -11,7 +13,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sqlite3
 from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
@@ -20,6 +24,8 @@ from packages.core.context_engine import build_writer_input
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.workflow_runtime.engine import WorkflowNode
+
+_log = logging.getLogger(__name__)
 
 
 def _load_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -43,10 +49,23 @@ def _load_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
     return {"loaded_plan": plan_json}
 
 
-def _scene_planner_stub(ctx: dict[str, Any]) -> dict[str, Any]:
-    """MVP 占位：把 director.key_beats 逐个映射为 scene；每 scene slots=[1 个 action]。
+_SCENE_PLANNER_PROMPT_VERSION = "scene_planner:v1"
 
-    **V1 由 Planner Agent 替代**（参见 ``docs/agents/agent-contracts-v0.md`` Open Question §1）。
+# Scene Planner 失败降级：与原 stub 输出字段完全一致，保证 build_writer_input 零改动。
+_SCENE_PLANNER_DEFAULT_STYLE = {
+    "language": "zh-Hans",
+    "pov": "third_person_limited",
+    "dialogue_ratio": 0.4,
+    "forbidden_words": ["仿佛", "如同", "本章目标"],
+}
+
+
+def _scene_planner_fallback(ctx: dict[str, Any]) -> dict[str, Any]:
+    """降级路径：把 director.key_beats 逐个映射为 scene；每 scene slots=[1 个 action]。
+
+    字段与 AI scene_planner 输出保持一致（scene_id / purpose / characters / location /
+    conflict / turn / time_in_story / pov / pov_character_id / slots），下游
+    build_writer_input 无需改动。
     """
     plan = ctx.get("loaded_plan") or {}
     beats = plan.get("key_beats") or []
@@ -67,6 +86,8 @@ def _scene_planner_stub(ctx: dict[str, Any]) -> dict[str, Any]:
                 "time_in_story": "",
                 "pov": "third_person_limited",
                 "pov_character_id": None,
+                "information_boundary": [],
+                "ending_hook": None,
                 "slots": [
                     {
                         "slot_id": slot_id,
@@ -84,14 +105,16 @@ def _scene_planner_stub(ctx: dict[str, Any]) -> dict[str, Any]:
         scenes = [
             {
                 "scene_id": "scene_001",
-                "purpose": "本章内容（V1 由 Planner Agent 替代）",
+                "purpose": "本章内容（Director plan 未提供 beats，兜底规划）",
                 "characters": [],
                 "location": None,
                 "conflict": "",
-                "turn": "",
+                "turn": None,
                 "time_in_story": "",
                 "pov": "third_person_limited",
                 "pov_character_id": None,
+                "information_boundary": [],
+                "ending_hook": None,
                 "slots": [
                     {
                         "slot_id": "slot_001",
@@ -105,6 +128,177 @@ def _scene_planner_stub(ctx: dict[str, Any]) -> dict[str, Any]:
             }
         ]
     return {"scene_plan": {"scenes": scenes}}
+
+
+def _collect_scene_planner_inputs(
+    db_path: str, chapter_id: str, plan: dict[str, Any]
+) -> dict[str, Any]:
+    """组装 scene_planner agent 输入（最小可运行口径）。
+
+    - chapter 元信息、director_plan 来自 load_plan。
+    - available_characters / available_locations 从 DB 取 id/name。
+    - style_constraints 取项目配置或本地默认。
+    - recent_prose 当前留空（Scene Planner 不依赖前章尾段亦可工作；非空为后续优化）。
+    """
+    conn = get_connection(db_path)
+    try:
+        chap_row = conn.execute(
+            "SELECT project_id, number, title FROM chapters WHERE chapter_id = ?",
+            (chapter_id,),
+        ).fetchone()
+        char_rows = conn.execute(
+            """
+            SELECT character_id, name FROM characters
+            WHERE project_id = (SELECT project_id FROM chapters WHERE chapter_id = ?)
+            ORDER BY name
+            """,
+            (chapter_id,),
+        ).fetchall()
+        loc_rows = conn.execute(
+            """
+            SELECT location_id, name FROM locations
+            WHERE project_id = (SELECT project_id FROM chapters WHERE chapter_id = ?)
+            ORDER BY name
+            """,
+            (chapter_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    project_id = chap_row["project_id"] if chap_row else None
+
+    # style_constraints：优先读项目级；暂无则本地默认。
+    style_constraints: dict[str, Any]
+    if project_id:
+        style_constraints = _load_project_style_constraints(db_path, project_id)
+    else:
+        style_constraints = dict(_SCENE_PLANNER_DEFAULT_STYLE)
+
+    return {
+        "agent": "scene_planner",
+        "prompt_version": _SCENE_PLANNER_PROMPT_VERSION,
+        "chapter": {
+            "chapter_id": chapter_id,
+            "title": chap_row["title"] if chap_row else None,
+            "number": int(chap_row["number"]) if chap_row and chap_row["number"] is not None else 1,
+            "target_word_count": int(plan.get("target_word_count") or 2200),
+            "expected_role": plan.get("expected_role"),
+        },
+        "director_plan": {
+            "chapter_goal": plan.get("chapter_goal"),
+            "core_conflict": plan.get("core_conflict"),
+            "turning_point": plan.get("turning_point"),
+            "key_beats": plan.get("key_beats") or [],
+            "notes_for_planner": plan.get("notes_for_planner"),
+            "revision_note": plan.get("revision_note"),
+        },
+        "available_characters": [
+            {"character_id": r["character_id"], "name": r["name"]} for r in char_rows
+        ],
+        "available_locations": [
+            {"location_id": r["location_id"], "name": r["name"]} for r in loc_rows
+        ],
+        "style_constraints": style_constraints,
+        "recent_prose": {"last_chapter_excerpt": "", "last_scene_excerpt": ""},
+    }
+
+
+def _load_project_style_constraints(
+    db_path: str, project_id: str
+) -> dict[str, Any]:
+    """读 projects.style_constraints_id → style_constraints 配置；缺失则返回默认。
+
+    对老库（无 style_constraints 表 / 无列）做防御性捕获，避免 DDL 差异阻断 write。
+    """
+    try:
+        conn = get_connection(db_path)
+    except Exception:  # noqa: BLE001
+        return dict(_SCENE_PLANNER_DEFAULT_STYLE)
+    try:
+        row = conn.execute(
+            "SELECT style_constraints_id FROM projects WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        conn.close()
+        return dict(_SCENE_PLANNER_DEFAULT_STYLE)
+    style_id = row["style_constraints_id"] if row else None
+    if style_id:
+        try:
+            sc_row = conn.execute(
+                "SELECT config_json FROM style_constraints WHERE style_constraints_id = ?",
+                (style_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            conn.close()
+            return dict(_SCENE_PLANNER_DEFAULT_STYLE)
+        if sc_row and sc_row["config_json"]:
+            try:
+                cfg = json.loads(sc_row["config_json"])
+                if isinstance(cfg, dict):
+                    conn.close()
+                    return cfg
+            except (TypeError, ValueError):
+                pass
+    conn.close()
+    return dict(_SCENE_PLANNER_DEFAULT_STYLE)
+
+
+def _scene_planner_node(ctx: dict[str, Any]) -> dict[str, Any]:
+    """P0 Scene Planner AI 节点。
+
+    行为：
+    1. 取 loaded_plan + chapter 元信息 + 项目角色/地点，组装 scene_planner payload。
+    2. 调 ``run_agent(..., agent_name='scene_planner', expected='scene_planner',
+       mock_script=...)``；runner 内部走 parse_json → validate_contract("scene_planner")
+       → 写 ai_call_logs。
+    3. 任何异常（prompt 缺失 / provider 异常 / 契约校验失败 / 输出字段缺失）→ 降级
+       到 ``_scene_planner_fallback``，**不**抛错、**不**阻断 writer。
+    4. 输出顶层保留 ``scene_plan`` key（与 stub 兼容），同时把原始 AI 输出放入
+       ``scene_planner_output`` 供观测。
+
+    支持 mock：``ctx["mock_providers"]["scene_planner"]`` 与 writer/critic 同机制。
+    """
+    db_path = ctx["db_path"]
+    run_id = ctx["run_id"]
+    chapter_id = ctx["chapter_id"]
+    plan = ctx.get("loaded_plan") or {}
+    mock_script = (ctx.get("mock_providers") or {}).get("scene_planner")
+
+    payload = _collect_scene_planner_inputs(db_path, chapter_id, plan)
+    try:
+        out = run_agent(
+            db_path,
+            "scene_planner",
+            payload,
+            run_id,
+            node_run_id=ctx.get("_current_node_run_id"),
+            expected="scene_planner",
+            mock_script=mock_script,
+        )
+        if not isinstance(out, dict):
+            raise ValueError(f"scene_planner output not dict: {type(out).__name__}")
+        scenes = out.get("scenes")
+        if not isinstance(scenes, list) or not scenes:
+            raise ValueError("scene_planner output missing non-empty 'scenes'")
+        # 只把 scene_planner 的核心 scenes 包装成 scene_plan；保留完整输出供观测。
+        return {
+            "scene_plan": {"scenes": scenes},
+            "scene_planner_output": out,
+            "scene_planner_status": "ok",
+        }
+    except Exception as exc:  # noqa: BLE001 —— 任何失败均降级，不阻断 writer
+        _log.warning(
+            "chapter_write.scene_planner degraded: chapter_id=%s err=%s",
+            chapter_id, exc,
+        )
+        fallback = _scene_planner_fallback(ctx)
+        return {
+            **fallback,
+            "scene_planner_output": None,
+            "scene_planner_status": "failed",
+            "scene_planner_error": str(exc),
+        }
 
 
 def _resolve_writer_context_mode(ctx: dict[str, Any]) -> str:
@@ -127,8 +321,7 @@ def _resolve_writer_context_mode(ctx: dict[str, Any]) -> str:
     if raw in ("full", "paged"):
         return raw
     # 非法值：兜底 paged + 不抛错（仅开发期日志可见）
-    import logging
-    logging.getLogger(__name__).warning(
+    _log.warning(
         "writer_context_mode=%r is invalid; falling back to 'paged'", raw,
     )
     return "paged"
@@ -220,7 +413,9 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
 def _build_nodes() -> list[WorkflowNode]:
     return [
         WorkflowNode("load_plan", "Transform", _load_plan_node),
-        WorkflowNode("scene_planner_stub", "Transform", _scene_planner_stub),
+        WorkflowNode(
+            "scene_planner", "AI", _scene_planner_node, agent_name="scene_planner"
+        ),
         WorkflowNode("writer", "AI", _writer_node, agent_name="writer"),
         WorkflowNode("save_draft", "State", _save_draft_node),
     ]
@@ -229,7 +424,10 @@ def _build_nodes() -> list[WorkflowNode]:
 WORKFLOW = {
     "name": "chapter-write",
     "version": "v1",
-    "description": "Director Plan + Scene Planner stub → Writer prose → drafts table; chapter status PLANNED→DRAFTED",
+    "description": (
+        "Director Plan → Scene Planner(AI) → Writer prose → drafts table; "
+        "chapter status PLANNED→DRAFTED; scene_planner 失败降级到 stub 不阻断 writer"
+    ),
     "nodes": _build_nodes(),
 }
 

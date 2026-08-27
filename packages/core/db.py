@@ -112,9 +112,9 @@ def apply_migrations(
 
 
 def count_tables(db_path: Path | str) -> int:
-    """查询总表数量（不含 sqlite_*，含 _migrations）。
+    """查询总表数量（不含 sqlite_* 与 chapter_fts% 影子表，含 _migrations）。
 
-    业务表固定 28 张；含 _migrations 时总数为 29，调用方按需减一。
+    业务表随迁移增长（0015 后为 35 张）；含 _migrations 时总数为 36，调用方按需减一。
     """
     conn = get_connection(db_path)
     try:

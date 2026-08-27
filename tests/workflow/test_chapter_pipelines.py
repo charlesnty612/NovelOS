@@ -144,6 +144,33 @@ def _writer_script() -> list[str]:
     ]
 
 
+def _writer_revised_script() -> list[str]:
+    """改稿后的 writer-output.v1 输出（用于 auto-revise 回路第二轮 write）。"""
+    prose = (
+        "戌时的更鼓从街尾传过来。苏婉清坐在窗下，手里那只茶盏已温了许久，她却没喝。\n\n"
+        "林渊闻言沉默良久，终是轻轻点头：\"令尊遗物，确有一件我尚未说清。\""
+    )
+    return [
+        json.dumps(
+            {
+                "schema_version": "writer-output.v1",
+                "prompt_version": "writer:v1",
+                "chapter_id": "ch_xxx",
+                "prose": prose,
+                "self_report": {
+                    "slots_filled": ["slot_001"],
+                    "word_count": len(prose),
+                    "scene_count": 1,
+                    "deviations": [],
+                    "forbidden_word_hits": [],
+                    "self_check_notes": "",
+                },
+            },
+            ensure_ascii=False,
+        )
+    ]
+
+
 def _observer_noop_script() -> list[str]:
     """Observer 输出 7 个空数组（无 change）；通过 schema 校验（无 risk_level=HIGH）。"""
     return [
@@ -372,9 +399,13 @@ def test_chapter_review_revise_loop_end_to_end(tmp_path: Path):
             assert paused["status"] == "PAUSED"
 
             # 3) resume revise:true + note → run FAILED(rejected-for-revision)
+            # P0：auto_revise 默认开启，为验证原手动改稿闭环显式关闭。
             r = await _request(
                 app, "POST", f"/api/runs/{paused['run_id']}/resume",
-                json={"human_input": {"approved": False, "revise": True, "note": "禁用词命中，请改写后重审"}},
+                json={
+                    "human_input": {"approved": False, "revise": True, "note": "禁用词命中，请改写后重审"},
+                    "auto_revise_max": 0,
+                },
             )
             assert r.status_code == 200, r.text
             final = r.json()
@@ -472,7 +503,10 @@ def test_chapter_review_revise_without_note_clears_revision_note(tmp_path: Path)
             paused = r.json()
             r = await _request(
                 app, "POST", f"/api/runs/{paused['run_id']}/resume",
-                json={"human_input": {"approved": False, "revise": True}},
+                json={
+                    "human_input": {"approved": False, "revise": True},
+                    "auto_revise_max": 0,
+                },
             )
             assert r.status_code == 200
             assert r.json()["status"] == "FAILED"
@@ -610,5 +644,151 @@ def test_list_runs_endpoint(tmp_path: Path):
             runs = r.json()
             assert len(runs) >= 1
             assert all(r["chapter_id"] == cid or r["chapter_id"] is None for r in runs)
+
+    asyncio.run(run())
+
+
+def test_chapter_review_auto_revise_loop_once_then_approve(tmp_path: Path):
+    """P0 自动改稿回路：revise 一次后 approve。
+
+    review PAUSED → resume {revise:true, auto_revise_max:2} → 自动重跑 write→review
+    → 新 review PAUSED → resume {approved:true} → COMPLETED + REVIEWED。
+    验证 drafts 产生 v2（自动 write 追加新版本）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            first_mock = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+            }
+
+            # 1) plan + write v1
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "意图", "mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+
+            # 2) review → PAUSED
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": first_mock},
+            )
+            assert r.status_code == 201
+            paused = r.json()
+            assert paused["status"] == "PAUSED"
+            first_review_run_id = paused["run_id"]
+
+            # 3) resume with revise + auto_revise_max=2：触发自动回路
+            revise_mock = {
+                "director": _director_script(),
+                "writer": _writer_revised_script(),  # 改稿后 prose
+            }
+            r = await _request(
+                app, "POST", f"/api/runs/{first_review_run_id}/resume",
+                json={
+                    "human_input": {"approved": False, "revise": True, "note": "节奏太散，重写"},
+                    "auto_revise_max": 2,
+                    "mock_providers": revise_mock,
+                },
+            )
+            assert r.status_code == 200, r.text
+            loop_result = r.json()
+            # 自动回路应返回新 review 的 PAUSED 状态
+            assert loop_result["status"] == "PAUSED", loop_result
+            assert loop_result["run_id"] != first_review_run_id
+            second_review_run_id = loop_result["run_id"]
+
+            # 4) 校验 chapter 仍为 DRAFTED，但 drafts 已有 v2
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.status_code == 200
+            ch = r.json()
+            assert ch["status"] == "DRAFTED"
+            assert ch["plan_json"]["revision_note"] == "节奏太散，重写"
+
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                drafts = conn.execute(
+                    "SELECT version, content FROM drafts WHERE chapter_id = ? ORDER BY version",
+                    (cid,),
+                ).fetchall()
+            finally:
+                conn.close()
+            assert len(drafts) == 2, drafts
+            assert "终是轻轻点头" in (drafts[1]["content"] or "")
+
+            # 5) 批准新 review → COMPLETED + REVIEWED
+            r = await _request(
+                app, "POST", f"/api/runs/{second_review_run_id}/resume",
+                json={"human_input": {"approved": True}},
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "COMPLETED"
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.json()["status"] == "REVIEWED"
+
+    asyncio.run(run())
+
+
+def test_chapter_review_auto_revise_disabled_keeps_failed(tmp_path: Path):
+    """auto_revise_max=0（或默认 env=0）时，revise 后保持 FAILED，不自动重跑。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            mock_providers = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+            }
+            for path in ("plan", "write"):
+                r = await _request(
+                    app, "POST", f"/api/projects/{pid}/chapters/{cid}/{path}",
+                    json={"mock_providers": mock_providers},
+                )
+                assert r.status_code == 201, r.text
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock_providers},
+            )
+            paused = r.json()
+
+            r = await _request(
+                app, "POST", f"/api/runs/{paused['run_id']}/resume",
+                json={
+                    "human_input": {"approved": False, "revise": True, "note": "不改"},
+                    "auto_revise_max": 0,
+                },
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "FAILED"
+            assert r.json()["run_id"] == paused["run_id"]
+
+            # drafts 只有 v1
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                n = conn.execute(
+                    "SELECT COUNT(*) AS n FROM drafts WHERE chapter_id = ?", (cid,)
+                ).fetchone()["n"]
+            finally:
+                conn.close()
+            assert n == 1
 
     asyncio.run(run())

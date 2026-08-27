@@ -12,8 +12,7 @@
   - ``"enforce"``（默认）—— 任一 ``severity == 'error'`` ⇒ 抛
     ``ValueError("quality gate blocked: ...")`；run 收尾 FAILED，chapter 保持 REVIEWED。
   - ``"report"`` —— error 只落库不阻断；run 收尾 COMPLETED（评审展示用，便于 ``evals/runner`` 通过）。
-  与 high_risk_approval / commit 是顺序节点；eval golden / 测试默认走
-  ``report`` 避免 REQ-Q8 / H-3 等 MVP 阻断规则误伤（任务书拍板）。
+  eval golden / 测试需显式传入 ``quality_gate_mode="report"`` 避免 REQ-Q8 / H-3 等 MVP 阻断规则误伤。
 - ``high_risk_approval`` (Human) —— **仅当 payload 含 HIGH/definition/rule change 时暂停**，
   payload=change 清单；human_input={"approved": true}。
 - ``commit`` (State) —— 调 :meth:`StoryStateService.commit_delta`；
@@ -24,6 +23,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import logging
 import os
 from typing import Any
 
@@ -39,6 +39,7 @@ from packages.core.quality.service import (
     build_quality_context,
     capture_reference_consumption,
 )
+from packages.core.story_state.delta_repair import repair_delta
 from packages.core.story_state.service import StoryStateService
 from packages.core.story_state.validator import validate_delta
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
@@ -1020,13 +1021,17 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
         # 重试时整次重跑。
         leg_outputs["all"] = dict(observer_payload) if isinstance(observer_payload, dict) else {}
 
-    # 首次校验
+    # 首次校验（先确定性自动修复，再 validate；修不了的留给重试）
     delta = _build_delta(
         observer_payload,
         chapter_id=chapter_id,
         run_id=run_id,
         previous_state_version=previous_state_version,
     )
+    delta, repairs = repair_delta(delta, snapshot=snapshot_for_validate, db_path=db_path)
+    if repairs:
+        ctx["delta_repairs"] = repairs
+        logging.info("observer delta repaired before first validation: %s", repairs)
     errors = validate_delta(delta, snapshot=snapshot_for_validate)
 
     # 重试预算：每腿 1 次
@@ -1094,13 +1099,17 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 dict(observer_payload) if isinstance(observer_payload, dict) else {}
             )
 
-        # 二次校验（重试后）
+        # 二次校验（重试后）：同样先 repair 再 validate
         delta = _build_delta(
             observer_payload,
             chapter_id=chapter_id,
             run_id=run_id,
             previous_state_version=previous_state_version,
         )
+        delta, repairs = repair_delta(delta, snapshot=snapshot_for_validate, db_path=db_path)
+        if repairs:
+            ctx["delta_repairs"] = repairs
+            logging.info("observer delta repaired after retry: %s", repairs)
         errors = validate_delta(delta, snapshot=snapshot_for_validate)
         if errors:
             raise ValueError(
@@ -1479,11 +1488,11 @@ def _quality_gate_mode(ctx: dict[str, Any]) -> str:
 
     优先级（与现有 NOVELOS_* 环境变量口径对齐）：
     - ``ctx["quality_gate_mode"]``（调用方 / 测试用例可显式注入）。
-    - ``NOVELOS_QUALITY_GATE`` 环境变量（``"enforce"`` / ``"report"``，默认 ``"report"``）。
+    - ``NOVELOS_QUALITY_GATE`` 环境变量（``"enforce"`` / ``"report"``，默认 ``"enforce"``）。
     """
-    mode = ctx.get("quality_gate_mode") or os.environ.get("NOVELOS_QUALITY_GATE", "report")
+    mode = ctx.get("quality_gate_mode") or os.environ.get("NOVELOS_QUALITY_GATE", "enforce")
     mode = str(mode).strip().lower()
-    return mode if mode in {"enforce", "report"} else "report"
+    return mode if mode in {"enforce", "report"} else "enforce"
 
 
 def _quality_gate_node(ctx: dict[str, Any]) -> dict[str, Any]:

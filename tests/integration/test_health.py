@@ -40,7 +40,8 @@ def test_health_endpoint_returns_ok(tmp_path: Path):
     # V2.0 Wave B 任务一：0009_branch_snapshots.sql 加 branch_snapshots → 34 业务表
     # V2.0 Wave B 任务二：0010_trigger_keys.sql 仅 ALTER TABLE 加列，不增表 → 仍 34 业务表
     # V3.4 多卷与规模（组织层）：0015_volumes.sql 加 volumes 业务表 → 35 业务表
-    assert data["tables"] == 35
+    # V3.7 模型档案 + 环节绑定：0016_model_profiles.sql 加 model_profiles + capability_bindings → 37 业务表
+    assert data["tables"] == 37
 
 
 def test_root_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

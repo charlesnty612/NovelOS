@@ -120,7 +120,7 @@ cd apps/web && npm run test
 | `NOVELOS_API_PORT` | `8000` | 后端监听端口（`scripts/serve.py` 使用） |
 | `NOVELOS_PORT` | `18081` | 便捷端口变量（`python -m packages.core.api.main` 使用；优先级高于 `NOVELOS_API_PORT`） |
 | `NOVELOS_WEB_DIST` | `apps/web/dist` | SPA 构建产物目录（存在 `index.html` 才启用托管） |
-| `NOVELOS_QUALITY_GATE` | `report` | quality gate 模式：`report`（不阻断）/ `enforce`（error 级阻断） |
+| `NOVELOS_QUALITY_GATE` | `enforce` | quality gate 模式：`enforce`（error 级阻断）/ `report`（不阻断） |
 | `NOVELOS_API_KEY_<PROVIDER>` | — | provider API Key（`<PROVIDER>` 大写，如 `NOVELOS_API_KEY_OPENAI`）；也可在 model_configs 的 `params_json.api_key` 配置 |
 | `NOVELOS_DISABLED_MODULES` | — | 禁用模块列表（V3.3 轻量方案），逗号分隔；模块名 = `packages/core/api/routers/` 下的文件名去 `.py`（如 `simulation,reference,arc`）。被禁模块的 HTTP 路由**不挂载**，对应端点返回 404；不影响 workflow 注册（边界见 `docs/roadmap/v3.3-v3.5-candidates-design.md` §四） |
 

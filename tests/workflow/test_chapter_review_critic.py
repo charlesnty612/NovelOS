@@ -594,8 +594,34 @@ def test_critic_mode_body_overrides_env(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_critic_mode_invalid_env_falls_back_to_sample(tmp_path, monkeypatch):
-    """env 是非法值 → 默认 sample；chapter.number=3 跳过（验证非法值不破流程）。"""
+def test_critic_default_mode_is_always_without_env_or_body(tmp_path: Path):
+    """P0：不 env 不 body 时 critic 默认 always，chapter.number=3 也应调 critic。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 3, "第三章")
+            await _plan_and_write(app, pid, cid, _critic_ok_script())
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": {"critic": _critic_ok_script()}},
+            )
+            assert r.status_code == 201, r.text
+            payload = r.json()["pause_payload"]
+            assert payload["critic_status"] == "ok"
+            assert payload["critic_mode"] == "always"
+            assert payload["critic_skipped"] is False
+            assert await _count_critic_logs(app) == 1
+
+    asyncio.run(run())
+
+
+def test_critic_mode_invalid_env_falls_back_to_always(tmp_path, monkeypatch):
+    """env 是非法值 → 默认 always；chapter.number=3 也应调 critic。"""
     app = _create_app(tmp_path)
 
     async def run():
@@ -613,9 +639,76 @@ def test_critic_mode_invalid_env_falls_back_to_sample(tmp_path, monkeypatch):
             )
             assert r.status_code == 201, r.text
             payload = r.json()["pause_payload"]
-            # 非法 env 值回退到默认 sample；number=3 不命中 → 跳过
-            assert payload["critic_status"] == "skipped"
-            assert payload["critic_mode"] == "sample"
-            assert await _count_critic_logs(app) == 0
+            # 非法 env 值回退到默认 always；number=3 也调 critic
+            assert payload["critic_status"] == "ok"
+            assert payload["critic_mode"] == "always"
+            assert await _count_critic_logs(app) == 1
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# V3.8：review_report 集成验证（含 ai_pattern_hits）
+# ---------------------------------------------------------------------------
+
+
+def test_review_report_includes_ai_pattern_hits(tmp_path: Path):
+    """完整 workflow 调用后，pause_payload.review_report 含 ai_pattern_hits 字段。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+            # 在 draft 中故意加入 AI 腔词
+            prose_with_ai_flavor = PROSE_FOR_CRITIC + "\n\n仿佛命运的齿轮已悄然转动。"
+            script = [
+                json.dumps(
+                    {
+                        "schema_version": "writer-output.v1",
+                        "prompt_version": "writer:v1",
+                        "chapter_id": "ch_xxx",
+                        "prose": prose_with_ai_flavor,
+                        "self_report": {
+                            "slots_filled": ["slot_001"],
+                            "word_count": len(prose_with_ai_flavor),
+                            "scene_count": 1,
+                            "deviations": [],
+                            "forbidden_word_hits": [],
+                            "self_check_notes": "",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+            mock_providers = {
+                "director": _director_script(),
+                "writer": script,
+                "critic": _critic_ok_script(),
+            }
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "让女主第一次怀疑男主", "mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock_providers, "critic_mode": "always"},
+            )
+            assert r.status_code == 201, r.text
+            payload = r.json()["pause_payload"]
+            review_report = payload["review_report"]
+            assert "ai_pattern_hits" in review_report
+            rule_ids = {h["rule_id"] for h in review_report["ai_pattern_hits"]}
+            assert "AI-FORBIDDEN-WORD" in rule_ids
+            assert "仿佛" in review_report["forbidden_word_hits"]
 
     asyncio.run(run())

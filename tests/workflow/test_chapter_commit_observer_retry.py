@@ -58,6 +58,19 @@ async def _make_character(app, pid: str, name: str = "林夕") -> str:
     return r.json()["character_id"]
 
 
+async def _make_location(app, pid: str, name: str = "青石巷") -> str:
+    r = await _request(
+        app, "POST", f"/api/projects/{pid}/locations",
+        json={
+            "name": name,
+            "statement": "一条青石铺就的小巷",
+            "data": {"atmosphere": "阴暗"},
+        },
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
 async def _make_chapter(app, pid: str, number: int = 1, title: str = "第一章") -> str:
     r = await _request(
         app, "POST", f"/api/projects/{pid}/chapters",
@@ -125,6 +138,45 @@ def _observer_valid_noop_script() -> list[str]:
             {
                 "character_changes": [],
                 "world_changes": [],
+                "relationship_changes": [],
+                "new_events": [],
+                "resolved_hooks": [],
+                "new_hooks": [],
+                "debt_changes": [],
+            },
+            ensure_ascii=False,
+        )
+    ]
+
+
+def _observer_world_update_before_null_script(chapter_id: str, location_id: str) -> list[str]:
+    """observer 输出可修错误：world_changes[0].op='update' 但 before=None。
+
+    对应实体在 snapshot / DB 中存在，repair_delta 会把 before 填为当前值，
+    从而一次性通过校验、无需触发 observer 重试。
+    """
+    return [
+        json.dumps(
+            {
+                "character_changes": [],
+                "world_changes": [
+                    {
+                        "change_id": "wc_repair_001",
+                        "op": "update",
+                        "target_id": location_id,
+                        "world_kind": "location",
+                        "world_id": location_id,
+                        "field": "data_json.atmosphere",
+                        "before": None,
+                        "after": "明亮",
+                        "confidence": 0.9,
+                        "evidence": {
+                            "chapter_id": chapter_id,
+                            "excerpt": "天光大亮，青石巷不再是昨夜模样",
+                        },
+                        "risk_level": "LOW",
+                    }
+                ],
                 "relationship_changes": [],
                 "new_events": [],
                 "resolved_hooks": [],
@@ -464,3 +516,77 @@ def test_build_observer_ctx_node_uses_trimmed_snapshot(tmp_path: Path):
     assert prev_state.get("snapshot_mode") == "trimmed", (
         f"previous_state.snapshot_mode 应为 'trimmed'，实际 {prev_state.get('snapshot_mode')!r}"
     )
+
+
+def test_chapter_commit_observer_delta_repair_succeeds_first_attempt(tmp_path: Path, monkeypatch):
+    """observer 输出可修错误（world_changes update before=None）时，repair_delta 一次性修复，
+    commit 直接 COMPLETED，不触发 observer 重试。
+
+    断言：
+    - run.status == COMPLETED
+    - chapters.status == COMMITTED
+    - observer 仅被调 1 次（无重试）
+    - state_deltas 中无 rejected 行
+    """
+    monkeypatch.setenv("NOVELOS_OBSERVER_SPLIT", "off")
+    monkeypatch.setenv("NOVELOS_QUALITY_GATE", "report")
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid, "林夕")
+            lid = await _make_location(app, pid, "青石巷")
+            cid = await _make_chapter(app, pid, 1, "夜叩青石")
+
+            base_mocks = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+            }
+            await _push_chapter_to_reviewed(app, pid, cid, base_mocks)
+
+            observer_script = _observer_world_update_before_null_script(cid, lid)
+            mock_providers = dict(base_mocks)
+            mock_providers["observer"] = observer_script
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/commit",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            commit_resp = r.json()
+            assert commit_resp["status"] == "COMPLETED", commit_resp
+
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.status_code == 200
+            assert r.json()["status"] == "COMMITTED"
+
+            db_path = app.state.settings.db_path
+            conn = get_connection(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT COUNT(*) AS n FROM ai_call_logs WHERE agent_id IN "
+                    "(SELECT agent_id FROM agents WHERE name='observer')",
+                ).fetchone()
+                assert rows["n"] == 1, (
+                    f"可修错误应一次性通过，observer 仅调 1 次，实际 {rows['n']}"
+                )
+
+                rejected = conn.execute(
+                    "SELECT COUNT(*) AS n FROM state_deltas "
+                    "WHERE chapter_id = ? AND status = 'rejected'",
+                    (cid,),
+                ).fetchone()
+                assert rejected["n"] == 0, rejected["n"]
+
+                observer_delta_rows = conn.execute(
+                    "SELECT COUNT(*) AS n FROM state_deltas "
+                    "WHERE chapter_id = ? AND created_by = 'observer:v1'",
+                    (cid,),
+                ).fetchone()
+                assert observer_delta_rows["n"] == 1, observer_delta_rows["n"]
+            finally:
+                conn.close()
+
+    asyncio.run(run())

@@ -1,13 +1,18 @@
-"""Model Router 包（Sprint 3 + Sprint 8 + V1.5 架构整理）。
+"""Model Router 包（Sprint 3 + Sprint 8 + V1.5 架构整理 + V3.7 模型档案两层架构）。
 
 公共 API：
-- :class:`ModelRouter` ——按 ``capability`` 解析 ``model_configs`` + 构造 Provider + 失败转移。
+- :class:`ModelRouter` ——按 ``capability`` 解析 model_configs + 构造 Provider + 失败转移。
+  V3.7 起内部统一收口到 :meth:`ModelRouter._candidates`：优先
+  ``capability_bindings + model_profiles``，无 binding 回落 ``model_configs``。
 - :class:`MockProvider` / :class:`OpenAICompatibleProvider` / :class:`AnthropicProvider` /
   :class:`OllamaProvider` ——Provider 实现（Sprint 8 新增后两个）。
 - :func:`resolve_api_key` ——从 params_json 或环境变量取 key。
-- :data:`AGENT_CAPABILITY` / :func:`capability_for` ——Agent → capability 映射。
+- :data:`AGENT_CAPABILITY` / :data:`CAPABILITY_LABELS` / :func:`capability_for`
+  ——Agent → capability 映射与环节标签。
 - :class:`ModelConfigService` ——V1.5 起的 ``model_configs`` 表 CRUD（被 router 调用），
   替代路由层直接 SQL。
+- :class:`ProfileService` ——V3.7 起的 ``model_profiles`` 表 CRUD（档案库）。
+- :class:`BindingService` ——V3.7 起的 ``capability_bindings`` 表 CRUD（环节分配）。
 - 异常：:class:`ModelRouterError` / :class:`ModelNotConfiguredError` / :class:`ProviderError` /
   :class:`AggregateProviderError`。
 
@@ -20,6 +25,7 @@
 
 from __future__ import annotations
 
+from .bindings import BindingService
 from .configs import ModelConfigService
 from .exceptions import (
     AggregateProviderError,
@@ -27,6 +33,7 @@ from .exceptions import (
     ModelRouterError,
     ProviderError,
 )
+from .profiles import ProfileService
 from .providers import (
     AnthropicProvider,
     MockProvider,
@@ -34,17 +41,20 @@ from .providers import (
     OpenAICompatibleProvider,
     resolve_api_key,
 )
-from .router import AGENT_CAPABILITY, ModelRouter, capability_for
+from .router import AGENT_CAPABILITY, CAPABILITY_LABELS, ModelRouter, capability_for
 
 __all__ = [
     "ModelRouter",
     "ModelConfigService",
+    "ProfileService",
+    "BindingService",
     "MockProvider",
     "OpenAICompatibleProvider",
     "AnthropicProvider",
     "OllamaProvider",
     "resolve_api_key",
     "AGENT_CAPABILITY",
+    "CAPABILITY_LABELS",
     "capability_for",
     "ModelRouterError",
     "ModelNotConfiguredError",

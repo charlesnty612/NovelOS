@@ -222,12 +222,30 @@ def _extract_l1(
             name=str(rule.get("name") or rule.get("world_rule_id")),
             injection="full",
         )
+    # P2 Context Engine：sensory_anchors 在 preview L1 展示。
+    for anchor in world.get("sensory_anchors") or []:
+        _push_item(
+            items,
+            kind="sensory_anchor",
+            id_=str(anchor.get("location_id") or "_anchor"),
+            name=str(anchor.get("location_name") or anchor.get("location_id") or "感官锚点"),
+            anchor_text=str(anchor.get("anchor_text") or "")[:80],
+        )
 
     plot = director.get("plot_graph_excerpt") or {}
     for ev in plot.get("upcoming_planned_events") or []:
         _push_item(
             items, kind="plot_event", id_=str(ev.get("event_id")),
             name=str(ev.get("event_id")), type=ev.get("type"),
+        )
+    # P2 Context Engine：未解决分支在 preview L1 展示。
+    for br in plot.get("unresolved_branches") or []:
+        _push_item(
+            items,
+            kind="unresolved_branch",
+            id_=str(br.get("branch_id")),
+            name=str(br.get("name") or br.get("branch_id")),
+            status=br.get("status"),
         )
 
     for h in director.get("hook_ledger_excerpt") or []:

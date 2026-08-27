@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading as _threading
 from pathlib import Path
@@ -296,6 +297,228 @@ def _apply_injection_policy(
     return "summary", summary
 
 
+# ---------------------------------------------------------------------------
+# P2 Context Engine：章节级相关性裁剪（Relevance Trim）
+# ---------------------------------------------------------------------------
+# 对标 bishu-novel trimmer：按本章 plan / scene_plan 明确涉及的字符 / 地点
+# 过滤角色与世界观条目，降低无关 token 与噪音。默认开启，可通过环境变量
+# ``NOVELOS_CONTEXT_RELEVANCE=off`` 全局关闭，或通过 ``relevance_trim=False`` 单次关闭。
+# ---------------------------------------------------------------------------
+
+
+def _resolve_relevance_trim(relevance_trim: bool | None) -> bool:
+    """解析 ``relevance_trim`` 参数：显式传值优先，否则读环境变量。
+
+    - ``NOVELOS_CONTEXT_RELEVANCE=off``（大小写不敏感）→ 关闭；
+    - 未设置 / 其他值 → 默认开启。
+    """
+    if relevance_trim is not None:
+        return bool(relevance_trim)
+    env = (os.environ.get("NOVELOS_CONTEXT_RELEVANCE") or "").strip().lower()
+    return env != "off"
+
+
+def _extract_involved_entities(
+    plan_json: dict[str, Any],
+    scene_plan: dict[str, Any],
+) -> tuple[set[str], set[str]]:
+    """从章节 plan + scene_plan 中提取涉及的角色 / 地点标识集合。
+
+    扫描面（与 chapter_write.pipeline 中 scene_plan 构造口径对齐）：
+    - ``plan_json.key_beats[*].involved_characters / involved_locations``
+    - ``plan_json.character_changes_planned[*].name / character_id``
+    - ``scene_plan.characters / location``
+    - ``scene_plan.beats[*].involved_characters / involved_locations``
+
+    返回 ``(involved_characters, involved_locations)``，元素为 id 或 name（字符串）。
+    """
+    chars: set[str] = set()
+    locs: set[str] = set()
+
+    if isinstance(plan_json, dict):
+        for beat in plan_json.get("key_beats") or []:
+            if isinstance(beat, dict):
+                for c in beat.get("involved_characters") or []:
+                    if isinstance(c, str):
+                        chars.add(c.strip())
+                for l in beat.get("involved_locations") or []:
+                    if isinstance(l, str):
+                        locs.add(l.strip())
+        for change in plan_json.get("character_changes_planned") or []:
+            if isinstance(change, dict):
+                name = change.get("name")
+                if isinstance(name, str) and name.strip():
+                    chars.add(name.strip())
+                cid = change.get("character_id")
+                if isinstance(cid, str) and cid.strip():
+                    chars.add(cid.strip())
+            elif isinstance(change, str) and change.strip():
+                chars.add(change.strip())
+
+    if isinstance(scene_plan, dict):
+        for c in scene_plan.get("characters") or []:
+            if isinstance(c, str):
+                chars.add(c.strip())
+        loc = scene_plan.get("location")
+        if isinstance(loc, str) and loc.strip():
+            locs.add(loc.strip())
+        for beat in scene_plan.get("beats") or []:
+            if isinstance(beat, dict):
+                for c in beat.get("involved_characters") or []:
+                    if isinstance(c, str):
+                        chars.add(c.strip())
+                for l in beat.get("involved_locations") or []:
+                    if isinstance(l, str):
+                        locs.add(l.strip())
+
+    return chars, locs
+
+
+def _is_character_relevant(char: dict[str, Any], involved: set[str]) -> bool:
+    """角色是否属于本章核心相关：主角 / always 模式 / id 或 name 命中 involved。"""
+    if not isinstance(char, dict):
+        return False
+    if char.get("role") == "protagonist":
+        return True
+    if char.get("inject_mode") == "always":
+        return True
+    cid = char.get("character_id")
+    name = char.get("name")
+    if isinstance(cid, str) and cid in involved:
+        return True
+    if isinstance(name, str) and name in involved:
+        return True
+    return False
+
+
+def _is_location_relevant(loc: dict[str, Any], involved: set[str]) -> bool:
+    """地点是否属于本章核心相关：always 模式 / id 或 name 命中 involved。"""
+    if not isinstance(loc, dict):
+        return False
+    if loc.get("inject_mode") == "always":
+        return True
+    lid = loc.get("location_id")
+    name = loc.get("name")
+    if isinstance(lid, str) and lid in involved:
+        return True
+    if isinstance(name, str) and name in involved:
+        return True
+    return False
+
+
+def _is_faction_relevant(fac: dict[str, Any], involved: set[str]) -> bool:
+    """势力是否属于本章核心相关：always 模式 / id 或 name 命中 involved。"""
+    if not isinstance(fac, dict):
+        return False
+    if fac.get("inject_mode") == "always":
+        return True
+    fid = fac.get("faction_id")
+    name = fac.get("name")
+    if isinstance(fid, str) and fid in involved:
+        return True
+    if isinstance(name, str) and name in involved:
+        return True
+    return False
+
+
+def _summarize_entity_for_relevance(entity: dict[str, Any], *, id_field: str) -> dict[str, Any]:
+    """未涉及实体的极简降级：仅保留 id + name + 标记位。"""
+    return {
+        id_field: entity.get(id_field),
+        "name": entity.get("name"),
+        "relevance_summary": True,
+    }
+
+
+def _apply_relevance_trim(
+    payload: dict[str, Any],
+    *,
+    relevance_trim: bool,
+    plan_json: dict[str, Any],
+    scene_plan: dict[str, Any],
+) -> dict[str, Any]:
+    """按本章 plan/scene 对 writer payload 做相关性裁剪（纯函数）。
+
+    - 主角（role=protagonist）与 ``inject_mode='always'`` 的实体始终完整保留；
+    - 其余实体若 id 或 name 命中 ``involved_characters / involved_locations`` 则保留完整；
+    - 未命中实体降级为 ``{id, name, relevance_summary: True}``，不直接剔除，便于调用方
+      / preview 仍识别到存在；
+    - 注入 ``_relevance_trim_enabled`` 与 ``_relevance_trim_stats`` 用于观测。
+
+    注意：本函数会原地修改 ``payload`` 并返回它。
+    """
+    payload["_relevance_trim_enabled"] = relevance_trim
+    if not relevance_trim:
+        return payload
+
+    involved_chars, involved_locs = _extract_involved_entities(plan_json, scene_plan)
+
+    chars_in = payload.get("character_state_excerpts") or []
+    chars_out: list[dict[str, Any]] = []
+    stats: dict[str, Any] = {
+        "characters_full": 0,
+        "characters_summary": 0,
+        "locations_full": 0,
+        "locations_summary": 0,
+        "factions_full": 0,
+        "factions_summary": 0,
+        "involved_characters": sorted(involved_chars),
+        "involved_locations": sorted(involved_locs),
+    }
+
+    for c in chars_in:
+        if not isinstance(c, dict):
+            continue
+        if _is_character_relevant(c, involved_chars):
+            chars_out.append(c)
+            stats["characters_full"] += 1
+        else:
+            chars_out.append(
+                _summarize_entity_for_relevance(c, id_field="character_id")
+            )
+            stats["characters_summary"] += 1
+
+    world_in = payload.get("world_state_excerpts") or {}
+    if isinstance(world_in, dict):
+        locs_in = world_in.get("locations") or []
+        locs_out: list[dict[str, Any]] = []
+        for loc in locs_in:
+            if not isinstance(loc, dict):
+                continue
+            if _is_location_relevant(loc, involved_locs):
+                locs_out.append(loc)
+                stats["locations_full"] += 1
+            else:
+                locs_out.append(
+                    _summarize_entity_for_relevance(loc, id_field="location_id")
+                )
+                stats["locations_summary"] += 1
+        world_in["locations"] = locs_out
+
+        facs_in = world_in.get("active_factions") or []
+        facs_out: list[dict[str, Any]] = []
+        for fac in facs_in:
+            if not isinstance(fac, dict):
+                continue
+            if _is_faction_relevant(fac, involved_locs):
+                facs_out.append(fac)
+                stats["factions_full"] += 1
+            else:
+                facs_out.append(
+                    _summarize_entity_for_relevance(fac, id_field="faction_id")
+                )
+                stats["factions_summary"] += 1
+        world_in["active_factions"] = facs_out
+
+        # 感官锚点已经只在完整注入的 location 上生成；relevance_trim 后若某 location
+        # 被降级，它的 data_json 为空，不会贡献锚点。这里不需要重新提取。
+        payload["world_state_excerpts"] = world_in
+
+    payload["character_state_excerpts"] = chars_out
+    payload["_relevance_trim_stats"] = stats
+    return payload
+
+
 def _row_to_project(row: sqlite3.Row) -> dict[str, Any]:
     return dict(row)
 
@@ -400,6 +623,67 @@ def _character_state_excerpts(
     return out
 
 
+def _extract_sensory_anchors(locs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """从 locations 已解析的 data_json 中提取感官锚点（不加 DDL 的兜底方案）。
+
+    优先级：
+    1. ``data_json.sensory_anchors`` 为 list 时直接透传（标准扩展点，未来可在
+       locations.data_json 中维护专用感官字段而不改 schema）。
+    2. 否则从 ``data_json`` 中常见感官字段（sensory_details / atmosphere / smell /
+       sound / light / texture / temperature）组合成一段 anchor_text。
+    3. 仍无则回退到 ``statement`` 一句话陈述。
+
+    当前 schema（0001_init.sql）locations 表无专用感官列，因此本函数是
+    「零 DDL」约束下的兼容实现：有则取、无则空 list，不抛错。
+    """
+    anchors: list[dict[str, Any]] = []
+    for loc in locs:
+        if not isinstance(loc, dict):
+            continue
+        lid = loc.get("location_id")
+        name = loc.get("name")
+        data = loc.get("data_json") or {}
+        if not isinstance(data, dict):
+            data = {}
+        raw_anchors = data.get("sensory_anchors")
+        if isinstance(raw_anchors, list):
+            for item in raw_anchors:
+                entry: dict[str, Any] = {"location_id": lid, "location_name": name}
+                if isinstance(item, dict):
+                    entry.update(item)
+                elif isinstance(item, str):
+                    entry["anchor_text"] = item
+                else:
+                    continue
+                anchors.append(entry)
+            continue
+        parts: list[str] = []
+        for key in (
+            "sensory_details",
+            "atmosphere",
+            "smell",
+            "sound",
+            "light",
+            "texture",
+            "temperature",
+        ):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                parts.append(f"{key}: {val.strip()}")
+        statement = loc.get("statement")
+        if not parts and isinstance(statement, str) and statement.strip():
+            parts.append(f"statement: {statement.strip()}")
+        if parts:
+            anchors.append(
+                {
+                    "location_id": lid,
+                    "location_name": name,
+                    "anchor_text": "；".join(parts),
+                }
+            )
+    return anchors
+
+
 def _world_state_excerpts(
     conn: sqlite3.Connection,
     project_id: str,
@@ -413,6 +697,9 @@ def _world_state_excerpts(
     - world_rules 保持常驻不变（PRD 视世界规则为硬设定）；
     - 不传 ``trigger_corpus`` → 全部 full 注入（向后兼容）。
     - 每条目带 ``_injection`` 字段；suppressed 项统一汇集到顶层 ``_suppressed_{kind}`` 列表。
+
+    P2 Context Engine：
+    - ``sensory_anchors`` 从 locations.data_json 解析（零 DDL 方案）。
     """
     locs = conn.execute(
         "SELECT location_id, name, statement, data_json, aliases, inject_mode "
@@ -512,6 +799,9 @@ def _world_state_excerpts(
             }
             for r in rules
         ],
+        # P2 Context Engine：感官锚点零 DDL 方案——从已注入 locations 的 data_json 解析。
+        # 未命中/降级为 summary 的 location 因 data_json 为空而不贡献锚点。
+        "sensory_anchors": _extract_sensory_anchors(loc_out),
     }
     if apply_policy:
         if loc_supp:
@@ -530,12 +820,32 @@ def _plot_graph_excerpt(conn: sqlite3.Connection, project_id: str) -> dict[str, 
         """,
         (project_id,),
     ).fetchall()
+    # P2 Context Engine：未解决分支 = 仍处于 ACTIVE（尚未 MERGED/DISCARDED/ARCHIVED）的分支。
+    # branches.status 枚举见 0001_init.sql + 0005_branches_archived_status.sql。
+    branch_rows = conn.execute(
+        """
+        SELECT branch_id, name, parent_branch_id, base_state_version, status
+        FROM branches
+        WHERE project_id = ? AND status = 'ACTIVE'
+        ORDER BY branch_id ASC
+        """,
+        (project_id,),
+    ).fetchall()
     return {
         "upcoming_planned_events": [
             {"event_id": r["event_id"], "type": r["type"], "status": r["status"]}
             for r in rows
         ],
-        "unresolved_branches": [],
+        "unresolved_branches": [
+            {
+                "branch_id": r["branch_id"],
+                "name": r["name"],
+                "parent_branch_id": r["parent_branch_id"],
+                "base_state_version": r["base_state_version"],
+                "status": r["status"],
+            }
+            for r in branch_rows
+        ],
     }
 
 
@@ -1400,6 +1710,8 @@ def _build_writer_input_uncached(
     chapter_id: str,
     scene_plan: dict[str, Any],
     target_word_count: int,
+    *,
+    relevance_trim: bool = True,
 ) -> dict[str, Any]:
     """无缓存版 writer 装配。"""
     conn = get_connection(db_path)
@@ -1455,7 +1767,7 @@ def _build_writer_input_uncached(
 
     # V3.7：writer payload 注入字数带（不含 floor，prompt Rule 15 已静态声明 1200 下限）
     _wb_low, _wb_high = word_band(target_word_count)
-    return {
+    payload: dict[str, Any] = {
         "agent": "writer",
         "prompt_version": "writer:v1",
         "knowledge_permissions": {
@@ -1497,6 +1809,15 @@ def _build_writer_input_uncached(
         "recalled_passages": recalled_passages,
         "retrieved_memory": [],
     }
+
+    # P2 Context Engine：章节级相关性裁剪。默认开启，可在调用层 / 环境变量关闭。
+    _apply_relevance_trim(
+        payload,
+        relevance_trim=relevance_trim,
+        plan_json=director_plan,
+        scene_plan=scene_plan,
+    )
+    return payload
 
 
 def _peek_chapter_no_state_version(
@@ -1575,10 +1896,11 @@ def build_writer_input(
     *,
     target_word_count: int = _DEFAULT_TARGET_WORD_COUNT,
     context_mode: str = "full",
+    relevance_trim: bool | None = None,
 ) -> dict[str, Any]:
     """组装 Writer 输入（agent-contracts §4.1 + Sprint 15/V1.3 author_style_samples
     + V2.0 Wave B 任务二 条件触发动态注入 + V2.0 Wave C 任务一 召回 + 任务二 缓存
-    + V3.2 P2-1 分页模式 L0/L1/L2 裁剪）。
+    + V3.2 P2-1 分页模式 L0/L1/L2 裁剪 + P2 Context Engine 相关性裁剪）。
 
     参数新增（V3.2 P2-1）：
         context_mode：
@@ -1593,23 +1915,41 @@ def build_writer_input(
                 * payload 顶层追加 ``context_mode="paged"`` 与 ``context_paging_stats``
                   裁剪统计。
 
+    参数新增（P2 Context Engine）：
+        relevance_trim：
+            - ``True`` / ``False`` 显式开关本章相关性裁剪；
+            - ``None``（默认）时读环境变量 ``NOVELOS_CONTEXT_RELEVANCE``：
+              值为 ``off`` 时关闭，其他值开启。
+            - 按本章 plan_json / scene_plan 中的 ``involved_characters`` /
+              ``involved_locations`` 过滤角色与世界观条目；主角（protagonist）与
+              ``inject_mode='always'`` 的实体始终完整保留；未命中实体降级为
+              ``{id, name, relevance_summary: True}``。
+
     V2.0 Wave C P1-1 修复：缓存键追加 ``scene_fp``（scene_plan 序列化指纹）；
     不同 scene_plan 不再共享同一缓存条目——避免传不同 scene 时命中陈旧 writer 输入。
     不可序列化时 ``scene_fp == 'uncached'`` → 跳过缓存（直接走 uncached）。
 
     V3.2 P2-1：缓存键追加第 6 元 ``mode``（``"full"`` / ``"paged"``）——
     防止 paged/full 模式共享同一缓存条目而命中陈旧结构。
+
+    P2 Context Engine：缓存键追加第 7 元 ``relevance``（``"on"`` / ``"off"``）——
+    防止 relevance_trim 开关/环境变量变化导致脏命中。
     """
     if context_mode not in ("full", "paged"):
         raise ValueError(
             f"context_mode must be 'full' or 'paged', got {context_mode!r}"
         )
+    relevance_trim_final = _resolve_relevance_trim(relevance_trim)
     project_id = _peek_project_id_from_chapter(db_path, chapter_id)
     chapter_no, state_version = _peek_chapter_no_state_version(
         db_path, project_id, chapter_id,
     )
     scene_fp = _fingerprint_scene_plan(scene_plan)
-    cache_key = (project_id or "", state_version, chapter_no, "writer", scene_fp, context_mode)
+    relevance_flag = "on" if relevance_trim_final else "off"
+    cache_key = (
+        project_id or "", state_version, chapter_no, "writer",
+        scene_fp, context_mode, relevance_flag,
+    )
     if scene_fp != _FINGERPRINT_UNCACHED:
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -1617,10 +1957,12 @@ def build_writer_input(
     if context_mode == "paged":
         payload = _build_writer_input_paged(
             db_path, chapter_id, scene_plan, target_word_count,
+            relevance_trim=relevance_trim_final,
         )
     else:
         payload = _build_writer_input_uncached(
             db_path, chapter_id, scene_plan, target_word_count,
+            relevance_trim=relevance_trim_final,
         )
     if scene_fp != _FINGERPRINT_UNCACHED:
         _cache_put(cache_key, payload)
@@ -1880,15 +2222,21 @@ def _build_writer_input_paged(
     *,
     keep_recent_commits: int = _WRITER_KEEP_RECENT_COMMITS,
     resolved_history_keep: int = _WRITER_RESOLVED_HOOKS_KEEP,
+    relevance_trim: bool = True,
 ) -> dict[str, Any]:
     """writer 分页模式装配（L0/L1/L2 裁剪）。
 
     复用 :func:`_build_writer_input_uncached` 取得 full payload 后，按 touched 集合
     与 hook 状态机裁剪 character/world_state_excerpts 与 hook_ledger_excerpt，
     再注入 ``context_mode`` 与 ``context_paging_stats``。
+
+    P2 Context Engine：通过 ``relevance_trim`` 参数让分页模式同样经过/跳过
+    章节级相关性裁剪；裁剪顺序在分页裁剪之前（``_build_writer_input_uncached``
+    内部已完成），因此分页 stats 统计的是 relevance_trim 之后的二次裁剪。
     """
     full_payload = _build_writer_input_uncached(
         db_path, chapter_id, scene_plan, target_word_count,
+        relevance_trim=relevance_trim,
     )
     # 裁剪前快照：仅保留被裁剪的 3 个键，便于 stats 体积量化
     # （深拷贝防止后续 in-place 修改干扰）。

@@ -38,124 +38,18 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from packages.core.logging_config import get_logger
 from packages.core.model_router import ModelConfigService, ModelRouter, ProviderError
+from packages.core.model_router.security import (
+    _MASK,
+    _dump_params_json,
+    _mask_response,
+    _normalize_params,
+    _prepare_patch_params,
+    _prepare_post_params,
+)
 
 log = get_logger("novelos.routers.model_configs")
 
 router = APIRouter(tags=["model_configs"])
-
-
-# 读路径脱敏常量：占位符。客户端用来表示「保留 / 未改动」；服务端用来遮蔽真实密钥。
-_MASK = "***"
-
-
-def _parse_params_json(params_json: str) -> dict:
-    """把 DB 中的 params_json JSON 字符串解析为 dict；解析失败 → 空 dict。"""
-    if not params_json:
-        return {}
-    try:
-        v = json.loads(params_json)
-        return v if isinstance(v, dict) else {}
-    except (TypeError, ValueError):
-        return {}
-
-
-def _dump_params_json(params: dict) -> str:
-    return json.dumps(params, ensure_ascii=False)
-
-
-def _mask_params(params: dict) -> tuple[dict, bool]:
-    """浅拷贝 ``params``：若存在非空 ``api_key`` → 替换为 ``_MASK``。
-
-    返回 ``(masked_params, has_api_key)``，供响应组装。
-    """
-    out = dict(params)
-    key = out.get("api_key")
-    has_key = isinstance(key, str) and key != ""
-    if has_key:
-        out["api_key"] = _MASK
-    return out, has_key
-
-
-def _mask_response(row: dict) -> dict:
-    """读路径出口统一过此函数：把 ``row`` 转成对外响应（mask api_key + 附 has_api_key）。
-
-    ``params_json`` 在 DB 是 JSON 字符串；此处解析后脱敏再以 dict 形态返回，便于前端直接渲染。
-    """
-    params = _parse_params_json(row.get("params_json"))
-    masked, has_key = _mask_params(params)
-    out = dict(row)
-    out["params_json"] = masked
-    out["has_api_key"] = has_key
-    return out
-
-
-def _normalize_params(params_json) -> dict:
-    """统一 ``params_json`` 入参为 dict（接受 dict 或 str）。
-
-    返回 dict 而不是 JSON 字符串，便于在写路径上做 ``api_key`` 的特殊值处理。
-    """
-    if params_json is None:
-        return {}
-    if isinstance(params_json, str):
-        try:
-            v = json.loads(params_json)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=422, detail=f"params_json must be valid JSON: {exc}")
-        if not isinstance(v, dict):
-            raise HTTPException(status_code=422, detail="params_json must decode to an object")
-        return v
-    if isinstance(params_json, dict):
-        return params_json
-    raise HTTPException(status_code=422, detail="params_json must be a string or object")
-
-
-def _is_mask_or_empty(v: Any) -> bool:
-    return v is None or (isinstance(v, str) and (v == "" or v == _MASK))
-
-
-def _prepare_post_params(params: dict) -> dict:
-    """POST 写路径：剥离 mask/空 api_key（视为未设置），其余保留明文。"""
-    out = dict(params)
-    if "api_key" in out and _is_mask_or_empty(out["api_key"]):
-        out.pop("api_key")
-    return out
-
-
-def _prepare_patch_params(payload_params: dict, existing_params_json: str) -> dict:
-    """PATCH 写路径：合并入参与 DB 原值。
-
-    - 入参 ``api_key`` 是 ``_MASK``（"***"）→ 沿用 DB 原值；
-    - 入参 ``api_key`` 是空字符串 → 清空（从结果中删除键）；
-    - 入参 ``api_key`` 是其他字符串 → 用入参值覆盖；
-    - 入参无 ``api_key`` 字段 → DB 原值保留；
-    - 其它字段以入参为准（PATCH 部分更新语义）。
-    """
-    existing = _parse_params_json(existing_params_json)
-    if "api_key" in payload_params:
-        v = payload_params["api_key"]
-        if isinstance(v, str) and v == _MASK:
-            # mask → 入参 api_key 用 existing 原值替换
-            payload_without = dict(payload_params)
-            if "api_key" in existing:
-                payload_without["api_key"] = existing["api_key"]
-            else:
-                payload_without.pop("api_key", None)
-            out = dict(existing)
-            out.update(payload_without)
-            return out
-        if v is None or (isinstance(v, str) and v == ""):
-            # 空字符串 / null → 清空：先 out 复制 existing，再从 out 删 api_key，最后合并其它入参
-            out = dict(existing)
-            out.pop("api_key", None)
-            for k, val in payload_params.items():
-                if k == "api_key":
-                    continue
-                out[k] = val
-            return out
-    # 其它（含非空 api_key 覆盖、无 api_key 字段）：入参整体覆盖在 existing 之上。
-    out = dict(existing)
-    out.update(payload_params)
-    return out
 
 
 @router.post("/model-configs", status_code=status.HTTP_201_CREATED)
@@ -175,7 +69,12 @@ def create_model_config(payload: dict, request: Request) -> dict:
         raise HTTPException(status_code=422, detail="provider required")
     if not (isinstance(model, str) and model):
         raise HTTPException(status_code=422, detail="model required")
-    raw_params = _normalize_params(payload.get("params_json"))
+    try:
+        raw_params = _normalize_params(payload.get("params_json"))
+    except ValueError as exc:
+        # security._normalize_params 在非法 JSON / 非对象时抛 ValueError；
+        # 转 422 与 model_profiles.py 对齐（详见 E3 review 修复）。
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     params_dict = _prepare_post_params(raw_params)
     enabled = payload.get("enabled", 1)
     if enabled not in (0, 1, True, False):
@@ -258,7 +157,12 @@ def patch_model_config(config_id: str, payload: dict, request: Request) -> dict:
         existing = svc.get(config_id)
         if existing is None:
             raise HTTPException(status_code=404, detail=f"model_config {config_id!r} not found")
-        raw_params = _normalize_params(payload["params_json"])
+        try:
+            raw_params = _normalize_params(payload["params_json"])
+        except ValueError as exc:
+            # security._normalize_params 在非法 JSON / 非对象时抛 ValueError；
+            # 转 422 与 model_profiles.py 对齐（详见 E3 review 修复）。
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         merged = _prepare_patch_params(raw_params, existing.get("params_json") or "{}")
         fields["params_json"] = _dump_params_json(merged)
     if "enabled" in payload:

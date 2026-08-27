@@ -103,7 +103,12 @@ def extract_json(text: str) -> dict[str, Any]:
     try:
         parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
-        raise AgentOutputError(f"invalid JSON: {exc}; raw={candidate[:200]!r}") from exc
+        # LLM 偶发在字符串内输出未转义控制字符（生产实测 observer 输出含裸控制符，
+        # ch074 commit 首次失败即此因）：strict=False 放宽字符串内控制字符，兜底重试一次。
+        try:
+            parsed = json.loads(candidate, strict=False)
+        except json.JSONDecodeError:
+            raise AgentOutputError(f"invalid JSON: {exc}; raw={candidate[:200]!r}") from exc
     if not isinstance(parsed, dict):
         raise AgentOutputError(f"JSON top-level is not an object: {type(parsed).__name__}")
     return parsed
@@ -181,6 +186,70 @@ _VALIDATOR_ALLOWED_CATEGORIES = frozenset(
     {"pacing", "character", "logic", "foreshadowing", "ai_flavor", "other"}
 )
 _VALIDATOR_ALLOWED_SEVERITIES = frozenset({"high", "medium", "low"})
+_VALID_SCENE_SLOT_TYPES = frozenset(
+    {"dialogue", "action", "description", "emotion", "suspense", "humor", "romance"}
+)
+_VALID_SCENE_POVS = frozenset(
+    {"first_person", "third_person_limited", "third_person_omniscient"}
+)
+
+
+def _validate_scene_planner(payload: dict[str, Any]) -> None:
+    """Scene Planner（P0）契约：结构合规 + 枚举合法。
+
+    Schema 与 `docs/agents/prompts/scene_planner-v1.md` §7 对齐：
+    - required: schema_version, prompt_version, chapter_id, scenes
+    - scenes 必须为非空 list
+    - scenes[*].scene_id / purpose / characters / conflict / slots 必填
+    - scenes[*].pov 在枚举内；slot.type 在枚举内
+    - scenes[*].slots 为非空 list（兜底 scene 至少 1 个 slot）
+
+    字段兼容性：输出字段与 chapter_write._scene_planner_stub 输出完全一致
+    （scene_id / purpose / characters / location / conflict / turn / time_in_story /
+    pov / pov_character_id / slots），保证下游 build_writer_input 无需改动。
+    """
+    for key in ("schema_version", "prompt_version", "chapter_id", "scenes"):
+        if key not in payload:
+            raise AgentOutputError(f"scene_planner output missing required field: {key!r}")
+    if payload.get("schema_version") != "scene-plan.v1":
+        raise AgentOutputError(
+            f"scene_planner schema_version must be 'scene-plan.v1', got {payload.get('schema_version')!r}"
+        )
+    scenes = payload.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        raise AgentOutputError("scene_planner output 'scenes' must be a non-empty list")
+    for sidx, scene in enumerate(scenes):
+        if not isinstance(scene, dict):
+            raise AgentOutputError(f"scene_planner scene[{sidx}] must be an object")
+        for key in ("scene_id", "purpose", "characters", "conflict", "slots"):
+            if key not in scene:
+                raise AgentOutputError(
+                    f"scene_planner scene[{sidx}] missing required field: {key!r}"
+                )
+        if scene.get("pov") not in _VALID_SCENE_POVS:
+            raise AgentOutputError(
+                f"scene_planner scene[{sidx}].pov {scene.get('pov')!r} not in {sorted(_VALID_SCENE_POVS)}"
+            )
+        slots = scene.get("slots")
+        if not isinstance(slots, list) or not slots:
+            raise AgentOutputError(
+                f"scene_planner scene[{sidx}].slots must be a non-empty list"
+            )
+        for lidx, slot in enumerate(slots):
+            if not isinstance(slot, dict):
+                raise AgentOutputError(
+                    f"scene_planner scene[{sidx}].slots[{lidx}] must be an object"
+                )
+            for key in ("slot_id", "type", "purpose", "characters", "constraints"):
+                if key not in slot:
+                    raise AgentOutputError(
+                        f"scene_planner scene[{sidx}].slots[{lidx}] missing required field: {key!r}"
+                    )
+            if slot.get("type") not in _VALID_SCENE_SLOT_TYPES:
+                raise AgentOutputError(
+                    f"scene_planner scene[{sidx}].slots[{lidx}].type {slot.get('type')!r} "
+                    f"not in {sorted(_VALID_SCENE_SLOT_TYPES)}"
+                )
 
 
 def _validate_critic(payload: dict[str, Any]) -> None:
@@ -228,11 +297,54 @@ def _validate_critic(payload: dict[str, Any]) -> None:
             )
 
 
+def _validate_premise_designer(payload: dict[str, Any]) -> None:
+    """project-init premise_designer 契约：schema_version + 关键字段。"""
+    if payload.get("schema_version") != "premise-design.v1":
+        raise AgentOutputError(
+            f"premise_designer schema_version must be 'premise-design.v1', got {payload.get('schema_version')!r}"
+        )
+
+
+def _validate_world_builder(payload: dict[str, Any]) -> None:
+    """project-init world_builder 契约：schema_version + 关键字段。"""
+    if payload.get("schema_version") != "world-build.v1":
+        raise AgentOutputError(
+            f"world_builder schema_version must be 'world-build.v1', got {payload.get('schema_version')!r}"
+        )
+
+
+def _validate_character_designer(payload: dict[str, Any]) -> None:
+    """project-init character_designer 契约：schema_version + characters 数组。"""
+    if payload.get("schema_version") != "character-design.v1":
+        raise AgentOutputError(
+            f"character_designer schema_version must be 'character-design.v1', got {payload.get('schema_version')!r}"
+        )
+    if not isinstance(payload.get("characters"), list):
+        raise AgentOutputError("character_designer output missing required array 'characters'")
+
+
+def _validate_volume_outliner(payload: dict[str, Any]) -> None:
+    """project-init volume_outliner 契约：schema_version + volume + chapter_seeds。"""
+    if payload.get("schema_version") != "volume-outline.v1":
+        raise AgentOutputError(
+            f"volume_outliner schema_version must be 'volume-outline.v1', got {payload.get('schema_version')!r}"
+        )
+    if not isinstance(payload.get("volume"), dict):
+        raise AgentOutputError("volume_outliner output missing required object 'volume'")
+    if not isinstance(payload.get("chapter_seeds"), list):
+        raise AgentOutputError("volume_outliner output missing required array 'chapter_seeds'")
+
+
 _VALIDATORS = {
     "observer": _validate_observer,
     "director": _validate_director,
     "writer": _validate_writer,
     "critic": _validate_critic,
+    "scene_planner": _validate_scene_planner,
+    "premise_designer": _validate_premise_designer,
+    "world_builder": _validate_world_builder,
+    "character_designer": _validate_character_designer,
+    "volume_outliner": _validate_volume_outliner,
 }
 
 

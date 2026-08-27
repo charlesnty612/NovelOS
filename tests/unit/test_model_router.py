@@ -843,3 +843,204 @@ def test_openai_provider_stream_total_deadline_enforced():
     assert "deadline exceeded" in str(exc.value) or "empty stream" in str(exc.value)
     # 绝对不应远大于 deadline + 一些抖动
     assert elapsed < 5.0, f"deadline 未生效，elapsed={elapsed:.2f}s"
+
+
+# ---------------------------------------------------------------------------
+# V3.7：模型档案 + 环节绑定（capability_bindings + model_profiles）
+# ---------------------------------------------------------------------------
+
+
+def _insert_profile(
+    db_path: str,
+    *,
+    profile_id: str | None = None,
+    name: str = "p",
+    provider: str = "mock",
+    model: str = "m",
+    params_json: str = "{}",
+    enabled: int = 1,
+) -> str:
+    from packages.core.ids import new_id
+
+    pid = profile_id or new_id("mprof")
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO model_profiles "
+            "(profile_id, name, provider, model, params_json, enabled, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+            (pid, name, provider, model, params_json, enabled),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return pid
+
+
+def _upsert_binding(db_path: str, capability: str, profile_ids: list[str]) -> None:
+    import json as _json
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO capability_bindings (capability, profile_ids, updated_at) "
+            "VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(capability) DO UPDATE SET "
+            "profile_ids = excluded.profile_ids, updated_at = excluded.updated_at",
+            (capability, _json.dumps(list(profile_ids))),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_capability_labels_covers_all_agents(tmp_path: Path):
+    """CAPABILITY_LABELS 必须覆盖 AGENT_CAPABILITY 所有 values；每项 agents 非空。"""
+    apply_migrations(tmp_path / "test.db")
+    from packages.core.model_router.router import CAPABILITY_LABELS
+
+    cap_values = set(AGENT_CAPABILITY.values())
+    assert cap_values <= set(CAPABILITY_LABELS.keys()), (
+        f"AGENT_CAPABILITY values 未在 CAPABILITY_LABELS 里: "
+        f"{cap_values - set(CAPABILITY_LABELS.keys())}"
+    )
+    for cap, meta in CAPABILITY_LABELS.items():
+        assert meta.get("label"), f"{cap} label missing"
+        assert meta.get("agents"), f"{cap} agents missing"
+
+
+def test_candidates_binding_hit_returns_profile_shaped_row(tmp_path: Path):
+    """binding 命中时，list_enabled 返回与 model_configs 行同键名的 dict
+    （config_id←profile_id，capability←本 capability）。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    pid1 = _insert_profile(db_path, profile_id="mprof_a", name="alpha",
+                           provider="openai", model="m1",
+                           params_json='{"base_url": "http://x"}')
+    pid2 = _insert_profile(db_path, profile_id="mprof_b", name="beta",
+                           provider="deepseek", model="m2")
+    _upsert_binding(db_path, "reasoning", [pid1, pid2])
+
+    rows = ModelRouter(db_path).list_enabled("reasoning")
+    assert len(rows) == 2
+    assert rows[0]["config_id"] == pid1
+    assert rows[0]["capability"] == "reasoning"
+    assert rows[0]["provider"] == "openai"
+    assert rows[0]["model"] == "m1"
+    assert rows[1]["config_id"] == pid2
+    assert rows[1]["provider"] == "deepseek"
+    # params_json 保持字符串原样
+    assert rows[0]["params_json"] == '{"base_url": "http://x"}'
+
+
+def test_candidates_resolve_returns_first_enabled_profile(tmp_path: Path):
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    pid = _insert_profile(db_path, profile_id="mprof_x", provider="mock", model="p1")
+    _upsert_binding(db_path, "premise_design", [pid])
+    row = ModelRouter(db_path).resolve("premise_design")
+    assert row["config_id"] == pid
+    assert row["capability"] == "premise_design"
+
+
+def test_candidates_skips_disabled_profile_in_binding(tmp_path: Path):
+    """主档 enabled=0 → 跳到备选 enabled=1。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    pid1 = _insert_profile(db_path, profile_id="mprof_off", enabled=0)
+    pid2 = _insert_profile(db_path, profile_id="mprof_on", enabled=1)
+    _upsert_binding(db_path, "world_building", [pid1, pid2])
+    rows = ModelRouter(db_path).list_enabled("world_building")
+    assert [r["config_id"] for r in rows] == [pid2]
+
+
+def test_candidates_skips_missing_profile_in_binding(tmp_path: Path):
+    """binding 引用的 profile_id 在 model_profiles 不存在 → 跳过。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    pid = _insert_profile(db_path, profile_id="mprof_real", enabled=1)
+    _upsert_binding(db_path, "character_design", ["mprof_missing", pid])
+    rows = ModelRouter(db_path).list_enabled("character_design")
+    assert [r["config_id"] for r in rows] == [pid]
+
+
+def test_candidates_all_disabled_raises(tmp_path: Path):
+    """binding 命中但全 disabled → list_enabled 空，resolve 抛 ModelNotConfiguredError。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    pid = _insert_profile(db_path, profile_id="mprof_off", enabled=0)
+    _upsert_binding(db_path, "volume_outline", [pid])
+    assert ModelRouter(db_path).list_enabled("volume_outline") == []
+    with pytest.raises(ModelNotConfiguredError) as exc:
+        ModelRouter(db_path).resolve("volume_outline")
+    assert exc.value.capability == "volume_outline"
+
+
+def test_candidates_no_binding_falls_back_to_model_configs(tmp_path: Path):
+    """无 binding 时回落 model_configs（旧行为保持）。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    cid = _insert_config(db_path, "reasoning", "openai", "gpt-4o", enabled=1)
+    rows = ModelRouter(db_path).list_enabled("reasoning")
+    assert len(rows) == 1
+    assert rows[0]["config_id"] == cid
+    assert ModelRouter(db_path).resolve("reasoning")["config_id"] == cid
+
+
+def test_light_with_binding_does_not_fall_back_to_reasoning(tmp_path: Path):
+    """light 有显式 binding 时，call_with_fallback 不再回退 reasoning。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    pid_light = _insert_profile(db_path, profile_id="mprof_light",
+                                provider="mock", model="m-light")
+    _upsert_binding(db_path, "light", [pid_light])
+    # reasoning 也配（mock）——若 light 回退，used_config_row 会改 capability
+    cid_reasoning = _insert_config(db_path, "reasoning", "mock", "m-r")
+    _, row = ModelRouter(db_path).call_with_fallback(
+        "light", [{"role": "user", "content": "hi"}]
+    )
+    assert row["config_id"] == pid_light
+    assert row["capability"] == "light"
+    assert row["config_id"] != cid_reasoning
+
+
+def test_light_no_binding_no_rows_still_falls_back_to_reasoning(tmp_path: Path):
+    """light 无 binding 且 model_configs 也无 light 行 → 仍回退 reasoning（保护既有语义）。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    cid_reasoning = _insert_config(db_path, "reasoning", "mock", "m-r")
+    _, row = ModelRouter(db_path).call_with_fallback(
+        "light", [{"role": "user", "content": "hi"}]
+    )
+    assert row["config_id"] == cid_reasoning
+    assert row["capability"] == "reasoning"  # V3 P0-2 标记
+
+
+def test_light_no_binding_no_reasoning_raises(tmp_path: Path):
+    """light 无 binding + reasoning 也无 → ModelNotConfiguredError('light')。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    with pytest.raises(ModelNotConfiguredError) as exc:
+        ModelRouter(db_path).call_with_fallback(
+            "light", [{"role": "user", "content": "hi"}]
+        )
+    assert exc.value.capability == "light"
+
+
+def test_light_binding_all_disabled_no_fallback(tmp_path: Path):
+    """B1 修复：light 有显式 binding 但候选链全 disabled / 缺失 → 抛 ModelNotConfiguredError
+    绝不静默回退 reasoning 链（即便 reasoning 有可用行）。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    # binding 指向一个 disabled 的 profile；同时配 reasoning 可用行作为「诱饵」
+    pid_off = _insert_profile(db_path, profile_id="mprof_light_off", enabled=0)
+    cid_reasoning = _insert_config(db_path, "reasoning", "mock", "m-r", enabled=1)
+    _upsert_binding(db_path, "light", [pid_off])
+
+    with pytest.raises(ModelNotConfiguredError) as exc:
+        ModelRouter(db_path).call_with_fallback(
+            "light", [{"role": "user", "content": "hi"}]
+        )
+    assert exc.value.capability == "light"
+    # 关键：resolve('reasoning') 必须仍命中诱饵（说明 call_with_fallback 没把
+    # reasoning 行静默用掉）—— 防止实现退化为「light 失败就尝试 reasoning」。
+    assert ModelRouter(db_path).resolve("reasoning")["config_id"] == cid_reasoning

@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { ExportPanel } from '../components/ExportPanel';
+import { ProjectInitPanel } from '../components/ProjectInitPanel';
 import { StatusBadge } from '../components/StatusBadge';
 import { StyleSamplesPanel } from '../components/StyleSamplesPanel';
 import { BranchesPanel } from '../components/BranchesPanel';
@@ -32,7 +33,7 @@ export function ProjectOverviewPage() {
   const [backupErr, setBackupErr] = useState<string | null>(null);
   const [backingUp, setBackingUp] = useState(false);
 
-  const { data: project, error: projectErr } = useApiCall<Project>(
+  const { data: project, error: projectErr, reload: reloadProject } = useApiCall<Project>(
     () => projectsApi.get(projectId),
     [projectId],
   );
@@ -127,6 +128,15 @@ export function ProjectOverviewPage() {
             </>
           ) : null}
         </div>
+      ) : null}
+
+      {/* P1 project-init：项目总览页「AI 初始化设定」入口 */}
+      {project ? (
+        <ProjectInitPanel
+          projectId={projectId}
+          project={project}
+          onDone={() => reloadProject()}
+        />
       ) : null}
 
       {/* Sprint 15 / V1.3：项目级文风样例管理 */}

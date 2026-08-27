@@ -38,6 +38,7 @@ _FILE_RE = re.compile(r"^(?P<agent>[a-zA-Z][a-zA-Z_-]*)-v(?P<n>\d+)\.md$")
 # Agent → Capability 映射（与 model_router.AGENT_CAPABILITY 保持一致；这里独立维护避免循环依赖）
 # V3 P0-2：critic / summarizer 改为 "light"（结构化提取 / 评审类任务）；
 # observer 保持 reasoning（输出准确性直接影响 story_state）。
+# V3.7 project-init 四 agent 显式映射独立 capability。
 _AGENT_TO_CAPABILITY: dict[str, str] = {
     "director": "reasoning",
     "observer": "reasoning",
@@ -47,6 +48,11 @@ _AGENT_TO_CAPABILITY: dict[str, str] = {
     "deconstructor_aggregate": "reasoning",
     "summarizer": "light",      # V3 P0-2
     "critic": "light",          # V3 P0-2
+    "scene_planner": "reasoning",  # P0：Director plan → Scene plan 结构翻译
+    "premise_designer": "premise_design",       # V3.7 project-init
+    "world_builder": "world_building",          # V3.7 project-init
+    "character_designer": "character_design",   # V3.7 project-init
+    "volume_outliner": "volume_outline",        # V3.7 project-init
     # 其它 agent 默认 reasoning（Sprint 3 MVP 不细化）
 }
 
