@@ -101,16 +101,70 @@ PAUSED 时 `POST /api/projects/init` 与 `POST /api/runs/{run_id}/resume` 响应
 - 复用 `POST /api/runs/{run_id}/resume` 通用端点，未改 engine.py / ResumeRequest。
 - `mock_providers` 在 checkpoint 中持久化，跨 resume 仍可用（列表模式耗尽后重复末条）。
 
+## 环节完成状态查询（V3.x init-status）
+
+`GET /api/projects/{project_id}/init-status` 返回四环节各自完成状态（数据推导，不建新表）：
+
+```json
+{
+  "stages": [
+    {"stage": "premise",   "label": "题材定位",       "done": true,  "detail": "已有 premise 文本"},
+    {"stage": "world",     "label": "世界观",          "done": true,  "detail": "已有 1 个位置、1 个势力、1 条规则"},
+    {"stage": "character", "label": "核心角色",        "done": true,  "detail": "已有 3 个角色"},
+    {"stage": "outline",   "label": "卷纲与章节种子", "done": true,  "detail": "已有 1 卷 / 10 章"}
+  ],
+  "has_any_data": true
+}
+```
+
+判定口径：
+
+| stage      | done 条件                                                                          |
+|------------|------------------------------------------------------------------------------------|
+| premise    | `projects.premise` 非空                                                              |
+| world      | `locations` / `factions` / `world_rules` 任一表该 project 有行                       |
+| character  | `characters` 表该 project 有行                                                      |
+| outline    | `volumes` 表有行 且 `chapters` 有行                                                  |
+
+`project_id` 不存在 → 404。
+
+## 环节可选复用（V3.x selected_stages）
+
+`POST /api/projects/init` 请求体新增字段 `selected_stages: list[str] | None`：
+
+- 省略 / `null`：等价于 `["premise", "world", "character", "outline"]`，全选（与既有行为一致）。
+- 传入非空列表：仅跑白名单内的 AI 节点；**未选环节不调 AI、不抛 `PauseRequested`**，
+  从落库数据**重建为下游 AI 节点的输入**（同构结构，含 `_degraded` 字段）。
+- 非法值（含不在白名单的元素）→ 422；空列表 → 422。
+
+重建口径（与 AI 产出同构）：
+
+| stage      | 重建来源                                                                                  |
+|------------|-------------------------------------------------------------------------------------------|
+| premise    | `projects.name / genre / premise / target_words`                                            |
+| world      | `locations` / `factions` / `world_rules`（按 `created_at` 顺序）                            |
+| character  | `characters`（按 `created_at` 顺序，核心字段为 `name / role / core_json`）                  |
+| outline    | `volumes`（取 `number` 最小的）+ `chapters`（按 `number` 升序；`plan_json.chapter_goal → one_sentence`、`plan_json.expected_role → role`、`plan_json.key_beats → key_beats`） |
+
+适用场景：
+
+- 第一轮初始化完成四环节但因故放弃（生成内容已落库）→ 重发起 `selected_stages=["outline"]`
+  仅重跑 outline，其余三关从落库重建为下游 AI 的输入；
+- 与 `step_mode` 不冲突：被选的环节在 `step_mode=true` 时仍按规则暂停。
+
 ## 依赖
 - 上游：`packages/domain/*`、`packages/core/agent_runtime/`、`packages/core/workflow_runtime/`。
 - 节点 fn 抛 `packages.core.workflow_runtime.engine.PauseRequested`。
 
 ## 使用 / 入口
 - `POST /api/projects/init`（`packages/core/api/routers/workflows.py` `_start_project_init`）。
+- `GET /api/projects/{project_id}/init-status`。
 
 ## 维护注意点
 - 项目 ID 格式 `prj_<ulid>`，由 `ProjectService` 生成。
 - AI 节点失败降级不阻断；`persist_all` 失败直接抛 5xx，不降级。
 - step_mode 关卡次序与节点次序一致；`stage_index` 0..3。
 - 修订必须为完整 dict（不是补丁）；下游不深合并，只替换。
+- selected_stages 跳过分支直接 `return`（不进 run_agent 也不抛 PauseRequested），
+  因此 `workflow_run_nodes.output_json` 在重建节点处缺空（端到端用例的副产物）。
 - 权威文档：PRD §67（projects 表）；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 1。

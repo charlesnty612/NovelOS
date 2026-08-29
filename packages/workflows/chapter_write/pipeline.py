@@ -23,6 +23,7 @@ from packages.core.agent_runtime.structured_output import strip_think_blocks
 from packages.core.context_engine import build_writer_input
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
+from packages.core.model_router.router import capability_for
 from packages.core.workflow_runtime.engine import WorkflowNode
 
 _log = logging.getLogger(__name__)
@@ -181,7 +182,12 @@ def _collect_scene_planner_inputs(
             "chapter_id": chapter_id,
             "title": chap_row["title"] if chap_row else None,
             "number": int(chap_row["number"]) if chap_row and chap_row["number"] is not None else 1,
-            "target_word_count": int(plan.get("target_word_count") or 2200),
+            # plan_json 存的是 expected_word_count（3000）；target_word_count 为兼容旧字段
+            "target_word_count": int(
+                plan.get("expected_word_count")
+                or plan.get("target_word_count")
+                or 3000
+            ),
             "expected_role": plan.get("expected_role"),
         },
         "director_plan": {
@@ -275,6 +281,9 @@ def _scene_planner_node(ctx: dict[str, Any]) -> dict[str, Any]:
             node_run_id=ctx.get("_current_node_run_id"),
             expected="scene_planner",
             mock_script=mock_script,
+            profile_id=(ctx.get("model_overrides") or {}).get(
+                capability_for("scene_planner")
+            ),
         )
         if not isinstance(out, dict):
             raise ValueError(f"scene_planner output not dict: {type(out).__name__}")
@@ -327,6 +336,28 @@ def _resolve_writer_context_mode(ctx: dict[str, Any]) -> str:
     return "paged"
 
 
+def _latest_draft_text(db_path: str, chapter_id: str) -> str:
+    """读该章最新 draft content（drafts 表，按 version DESC LIMIT 1）。
+
+    无 draft 行或 content 为空 → 返回空串。DB 异常（缺失表/列）→ 返回空串，
+    与既有"上下文缺失不阻断 writer run"口径一致。
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT content FROM drafts WHERE chapter_id = ? "
+            "ORDER BY version DESC LIMIT 1",
+            (chapter_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return ""
+    finally:
+        conn.close()
+    if row is None:
+        return ""
+    return row["content"] or ""
+
+
 def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     run_id = ctx["run_id"]
@@ -337,9 +368,30 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         db_path,
         chapter_id,
         scene_plan,
-        target_word_count=ctx.get("target_word_count", 2200),
+        # 目标字数优先取 plan 的 expected_word_count（3000）；ctx 覆盖其次；默认 3000
+        target_word_count=ctx.get("target_word_count")
+        or int((ctx.get("loaded_plan") or {}).get("expected_word_count") or 0)
+        or 3000,
         context_mode=context_mode,
     )
+
+    # 修订模式（基于现有 draft 局部修改）注入：读最新 draft content +
+    # plan_json.revision_note，二者皆非空 → mode='revise'。
+    if ctx.get("fresh_write"):
+        # 全新重写：忽略旧稿与改稿意见（用于跨模型文风对比）
+        draft_text = ""
+        revision_note = ""
+    else:
+        draft_text = _latest_draft_text(db_path, chapter_id)
+        revision_note = (ctx.get("loaded_plan") or {}).get("revision_note") or ""
+    mode = "revise" if (revision_note and draft_text) else "write"
+    payload["mode"] = mode
+    payload["draft_text"] = draft_text
+    if revision_note:
+        # revision_note 在 build_writer_input 内部已落入 director_plan.revision_note；
+        # 顶层再冗余一份，便于 writer prompt / 测试断言不走嵌套结构。
+        payload["revision_note"] = revision_note
+
     mock_script = (ctx.get("mock_providers") or {}).get("writer")
     out = run_agent(
         db_path,
@@ -349,8 +401,34 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         node_run_id=ctx.get("_current_node_run_id"),
         expected="writer",
         mock_script=mock_script,
+        profile_id=(ctx.get("model_overrides") or {}).get(
+            capability_for("writer")
+        ),
     )
-    return {"writer_output": out, "_writer_context_mode": context_mode}
+    # V3.1.1 V-P0：writer 本节点真实落库模型 id（mock 路径无 ai_call_logs 行 → None）。
+    # 用于 drafts.model_id 记录真实 provider/model，避免列表页无法区分模型。
+    writer_model_id: str | None = None
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT model_id FROM ai_call_logs "
+            "WHERE run_id = ? AND node_run_id = ? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (run_id, ctx.get("_current_node_run_id")),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        conn.close()
+    if row is not None:
+        writer_model_id = row["model_id"]
+    # writer_input 透出到 ctx（→ checkpoint_json）供测试断言；生产仅作为可观测钩子。
+    return {
+        "writer_output": out,
+        "_writer_context_mode": context_mode,
+        "writer_input": payload,
+        "writer_model_id": writer_model_id,
+    }
 
 
 def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -377,9 +455,17 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
             """
             INSERT INTO drafts (draft_id, chapter_id, version, content, created_by,
                                 prompt_version, model_id, created_at)
-            VALUES (?, ?, ?, ?, 'writer:v1', ?, 'mock/mock', ?)
+            VALUES (?, ?, ?, ?, 'writer:v1', ?, ?, ?)
             """,
-            (draft_id, chapter_id, next_v, prose, prompt_version, now),
+            (
+                draft_id,
+                chapter_id,
+                next_v,
+                prose,
+                prompt_version,
+                ctx.get("writer_model_id") or "mock/mock",
+                now,
+            ),
         )
         # chapters.status PLANNED→DRAFTED（走白名单）
         cur = conn.execute("SELECT status FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()

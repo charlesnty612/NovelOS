@@ -325,6 +325,7 @@ class ModelRouter:
         *,
         params: dict[str, Any] | None = None,
         scripted: Any | None = None,
+        profile_id: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """失败转移：按 rowid 顺序逐个尝试该 capability 的 enabled configs。
 
@@ -341,28 +342,70 @@ class ModelRouter:
         ``provider.complete(..., params=...)``——从而透传到上游请求体。调用方显式
         ``params`` 同名键覆盖配置行同名键。
 
+        单次 run 级覆盖：``profile_id`` 非 None 时，候选列表收缩为
+        ``model_profiles.profile_id == profile_id AND enabled=1`` 的唯一一行；
+        行为与 :meth:`_candidates` 的 binding 分支一致——行形状（``config_id`` /
+        ``capability`` / ``provider`` / ``model`` / ``params_json`` / ``enabled``）
+        保持 ``config_id ← profile_id``、``capability ← 本 capability``，保证
+        ``get_provider`` / ``ai_call_logs`` 无 schema 改动。``profile_id`` 缺失 /
+        disabled → 抛 :class:`ModelNotConfiguredError`（detail 含 profile_id 便于排查），
+        跳过 ``light → reasoning`` 回退逻辑（覆盖语义优先）。
+
         注：单配置时与 :meth:`resolve` + :meth:`get_provider` 的旧路径行为等价；
         ``resolve`` 仅返回行字典、不构造 Provider，因此不在本透传路径上。
         """
-        candidates = self.list_enabled(capability)
-        used_capability = capability
-        if not candidates and capability == "light":
-            # V3.7 修复（B1）：显式 binding 为准不回退。仅当 capability_bindings
-            # 里压根没有 light 这一行时（旧行为）才回退 reasoning；显式 binding
-            # 但 _candidates 全 disabled / 缺失则抛 ModelNotConfiguredError，
-            # 不再静默落到 reasoning 链（避免绑定语义被绕过）。
-            if not self._has_binding("light"):
-                candidates = self.list_enabled("reasoning")
-                used_capability = "reasoning"
-                if candidates:
-                    log.info(
-                        "model_router.light_fallback",
-                        extra={
-                            "requested": "light",
-                            "fallback_to": "reasoning",
-                            "candidates": len(candidates),
-                        },
-                    )
+        if profile_id is not None:
+            # 单次 run 级覆盖：直接按 profile_id 锁定唯一候选，跳过 binding 与回退。
+            conn = get_connection(self.db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT profile_id, provider, model, params_json, enabled
+                    FROM model_profiles
+                    WHERE profile_id = ? AND enabled = 1
+                    """,
+                    (profile_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is None:
+                err = ModelNotConfiguredError(capability)
+                err.args = (
+                    f"profile_id={profile_id!r} 未在 model_profiles 命中或已 disabled "
+                    f"(capability={capability!r})",
+                )
+                raise err
+            # 行形状对齐 _candidates binding 分支：config_id←profile_id、
+            # capability←本 capability，其它键从 model_profiles 直接映射。
+            candidates: list[dict[str, Any]] = [{
+                "config_id": row["profile_id"],
+                "capability": capability,
+                "provider": row["provider"],
+                "model": row["model"],
+                "params_json": row["params_json"],
+                "enabled": row["enabled"],
+            }]
+            used_capability = capability
+        else:
+            candidates = self.list_enabled(capability)
+            used_capability = capability
+            if not candidates and capability == "light":
+                # V3.7 修复（B1）：显式 binding 为准不回退。仅当 capability_bindings
+                # 里压根没有 light 这一行时（旧行为）才回退 reasoning；显式 binding
+                # 但 _candidates 全 disabled / 缺失则抛 ModelNotConfiguredError，
+                # 不再静默落到 reasoning 链（避免绑定语义被绕过）。
+                if not self._has_binding("light"):
+                    candidates = self.list_enabled("reasoning")
+                    used_capability = "reasoning"
+                    if candidates:
+                        log.info(
+                            "model_router.light_fallback",
+                            extra={
+                                "requested": "light",
+                                "fallback_to": "reasoning",
+                                "candidates": len(candidates),
+                            },
+                        )
         if not candidates:
             raise ModelNotConfiguredError(capability)
 

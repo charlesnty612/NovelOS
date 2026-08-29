@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { chaptersApi, qualityApi, workflowsApi } from '../api/endpoints';
+import { chaptersApi, modelProfilesApi, qualityApi, workflowsApi } from '../api/endpoints';
 import type {
   Chapter,
   Draft,
+  ModelProfile,
   QualityGateCheckpoint,
   QualityReport,
   WorkflowRun,
+  WorkflowStartPayload,
   WorkflowStartResponse,
 } from '../api/types';
 import { QualityPanel } from '../components/QualityPanel';
@@ -123,11 +125,15 @@ export function ChapterDetailPage() {
       return latest.status !== 'RUNNING' && latest.status !== 'PENDING';
     },
     stopOnError: true,
-    onResult: () => {
+    onResult: (latest) => {
       // 轮询到结果后同步刷新 chapter / drafts / runs
       void chapterCall.reload();
       void draftsCall.reload();
       void runsCall.reload();
+      // 异步化后：run 停到 PAUSED 时，detail（checkpoint 详情，含 pause_payload）
+      // 是在 RUNNING 阶段拉的、不含暂停载荷——必须重拉，审批卡才渲染得出来。
+      // （detail 声明在本 hook 之后，闭包调用时机在渲染完成后，安全。）
+      if (latest.status === 'PAUSED') void detail.reload();
     },
   });
 
@@ -163,19 +169,84 @@ export function ChapterDetailPage() {
   // ---- 顶部工作流按钮 ----
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [reviseLooping, setReviseLooping] = useState(false);
   const handleStartWorkflow = useCallback(
     async (
       action: 'plan' | 'write' | 'review' | 'commit',
-      payload?: { author_intent?: string; target_word_count?: number },
+      payload?: {
+        author_intent?: string;
+        target_word_count?: number;
+        /** 已选档案 id（profile_id）；非空时并入 model_overrides[capability] */
+        model_profile_id?: string | null;
+        /** 写作模式（仅 write 生效）：true ⇒ 全新重写。临时字段，在此处剥离后
+         *  按 action==='write' 决定是否写入请求 payload 的 fresh_write 键。 */
+        fresh_write?: boolean;
+      },
     ) => {
+      // 防呆：章节已有 plan_json 时，「生成计划」需二次确认（覆盖会丢字数规划）
+      if (action === 'plan' && chapter) {
+        const plan = chapter.plan_json;
+        const hasPlan =
+          plan != null &&
+          typeof plan === 'object' &&
+          !Array.isArray(plan) &&
+          Object.keys(plan).length > 0;
+        if (hasPlan) {
+          const ok = window.confirm(
+            '章节已有计划，重新生成将覆盖当前计划（含字数规划），确定继续？',
+          );
+          if (!ok) return;
+        }
+      }
       setActionErr(null);
       setSubmitting(true);
       try {
+        // 按次模型档案选择：plan/write/review → 对应 capability；commit 由 Observer 兜底
+        // 不消耗 LLM，不透传 model_overrides（保留旧语义）。
+        const capabilityByAction: Record<
+          'plan' | 'write' | 'review' | 'commit',
+          string | null
+        > = {
+          plan: 'reasoning',
+          write: 'creative_writing',
+          review: 'light',
+          commit: null,
+        };
+        const capability = capabilityByAction[action];
+        const profileId = (payload?.model_profile_id ?? '').trim();
+        // 从入参 payload 中剥离临时字段 model_profile_id / fresh_write，避免下发给后端；
+        // author_intent / target_word_count 等业务字段透传给后端。fresh_write 在下方按
+        // action==='write' 决定是否并入请求 payload（业务字段）。
+        const {
+          model_profile_id: _omit,
+          fresh_write: rawFreshWrite,
+          ...basePayload
+        } = payload ?? {};
+        void _omit;
+        const hasOverride = !!capability && !!profileId;
+        // 写作模式：仅 write 动作支持；其他动作剥离后丢弃。
+        const wantsFreshWrite =
+          action === 'write' && rawFreshWrite === true;
+        const hasBusinessFields =
+          Object.keys(basePayload).length > 0 || wantsFreshWrite;
+        // 无业务字段且无 override 时透传 undefined，保持向后兼容（与旧契约一致）。
+        const requestPayload: WorkflowStartPayload | undefined =
+          !hasOverride && !hasBusinessFields
+            ? undefined
+            : hasOverride
+            ? {
+                ...basePayload,
+                model_overrides: { [capability as string]: profileId },
+                ...(wantsFreshWrite ? { fresh_write: true } : {}),
+              }
+            : wantsFreshWrite
+            ? ({ ...basePayload, fresh_write: true } as WorkflowStartPayload)
+            : (basePayload as WorkflowStartPayload);
         let resp: WorkflowStartResponse;
-        if (action === 'plan') resp = await workflowsApi.startPlan(projectId, chapterId, payload);
-        else if (action === 'write') resp = await workflowsApi.startWrite(projectId, chapterId, payload);
-        else if (action === 'review') resp = await workflowsApi.startReview(projectId, chapterId, payload);
-        else resp = await workflowsApi.startCommit(projectId, chapterId, payload);
+        if (action === 'plan') resp = await workflowsApi.startPlan(projectId, chapterId, requestPayload);
+        else if (action === 'write') resp = await workflowsApi.startWrite(projectId, chapterId, requestPayload);
+        else if (action === 'review') resp = await workflowsApi.startReview(projectId, chapterId, requestPayload);
+        else resp = await workflowsApi.startCommit(projectId, chapterId, requestPayload);
         // 启动后立刻刷新 + 选中该 run
         setSelectedRunId(resp.run_id);
         await Promise.all([chapterCall.reload(), runsCall.reload(), draftsCall.reload()]);
@@ -185,7 +256,7 @@ export function ChapterDetailPage() {
         setSubmitting(false);
       }
     },
-    [projectId, chapterId, chapterCall, runsCall, draftsCall],
+    [projectId, chapterId, chapter, chapterCall, runsCall, draftsCall],
   );
 
   const handleResume = useCallback(
@@ -195,6 +266,7 @@ export function ChapterDetailPage() {
     ) => {
       if (!selectedRunSummary) return;
       setActionErr(null);
+      if (!approved || opts?.revise) setReviseLooping(true);
       setSubmitting(true);
       try {
         // 三态：approve / reject / revise（revise 时 run 以 FAILED(rejected-for-revision) 收尾，
@@ -213,10 +285,22 @@ export function ChapterDetailPage() {
         throw e;
       } finally {
         setSubmitting(false);
+        setReviseLooping(false);
       }
     },
     [selectedRunSummary, chapterCall, runsCall, draftsCall, detail],
   );
+
+  // V1.5 / 横幅：构造「正在运行」实时详情。优先用 poll 拉到的最新详情（含 nodes /
+  // current_node / workflow_name / started_at），否则退化为 activeRun 的 list 行
+  // （list 不返回 nodes，组件内做退化文案）。submitting=true 时允许显示（按钮已点
+  // 下但 list 还没刷出 RUNNING 行的过渡窗口）。
+  const runningDetail: WorkflowRun | null = poll.data ?? activeRun ?? null;
+  const isRunningBannerVisible =
+    !!activeRun ||
+    (submitting && !poll.data) ||
+    (poll.data != null &&
+      (poll.data.status === 'RUNNING' || poll.data.status === 'PENDING'));
 
   // 渲染
   return (
@@ -249,6 +333,26 @@ export function ChapterDetailPage() {
         />
       ) : chapterCall.loading ? (
         <div className="muted">加载章节中…</div>
+      ) : null}
+
+      {/* V1.5：运行中横幅。RUNNING/PENDING 时显示节点进度 + 已运行时长；
+          终态自动消失（FAILED 由 ErrorBanner 承载）。submitting 过渡期也显示，避免「按下无反馈」。 */}
+      {reviseLooping ? (
+        <div
+          className="alert alert--info"
+          data-testid="revise-loop-banner"
+          role="status"
+          style={{ marginTop: 12 }}
+        >
+          <div style={{ fontWeight: 600 }}>⏳ 自动改稿回路进行中</div>
+          <div className="muted small" style={{ marginTop: 4 }}>
+            已驳回并自动重写正文 → 重新审校（通常需 1-3 分钟，请勿关闭页面）
+          </div>
+        </div>
+      ) : chapter && isRunningBannerVisible ? (
+        <div style={{ marginTop: 12 }}>
+          <WorkflowRunningBanner detail={runningDetail} />
+        </div>
       ) : null}
 
       {/* Workflow 面板（含 runs 列表 / 时间线 / 审批卡片）+ 续写助手 */}
@@ -347,13 +451,43 @@ function ChapterHeader({
   submitting: boolean;
   onStart: (
     action: 'plan' | 'write' | 'review' | 'commit',
-    payload?: { author_intent?: string; target_word_count?: number },
+    payload?: {
+      author_intent?: string;
+      target_word_count?: number;
+      model_profile_id?: string | null;
+      fresh_write?: boolean;
+    },
   ) => Promise<void>;
 }) {
   const activeRunInfo =
     activeRunStatus === 'RUNNING' || activeRunStatus === 'PENDING'
       ? { status: activeRunStatus as 'RUNNING' | 'PENDING' }
       : null;
+
+  // 拉取已启用模型档案列表；失败静默降级为不显示下拉（不阻塞按钮）。
+  const profilesCall = useApiCall<ModelProfile[]>(
+    () => modelProfilesApi.list(),
+    [],
+  );
+  const enabledProfiles = useMemo(
+    () =>
+      (profilesCall.data ?? []).filter((p) => {
+        const v = p.enabled;
+        return v === 1 || v === true;
+      }),
+    [profilesCall.data],
+  );
+
+  // 每个按钮独立保存选中的 profile_id（key=action）；空串=走环节绑定默认。
+  const [selectedProfile, setSelectedProfile] = useState<
+    Record<'plan' | 'write' | 'review' | 'commit', string>
+  >({ plan: '', write: '', review: '', commit: '' });
+  const setProfile = (action: 'plan' | 'write' | 'review' | 'commit', value: string) =>
+    setSelectedProfile((prev) => ({ ...prev, [action]: value }));
+
+  // 「写正文」动作专属：写作模式选择。''=按意见改稿（默认），'fresh'=全新重写。
+  // 仅 write 卡片渲染该下拉；点击时读取最新值，避免 setState 异步竞态。
+  const [writeMode, setWriteMode] = useState<'' | 'fresh'>('');
 
   const buttons: Array<{
     action: 'plan' | 'write' | 'review' | 'commit';
@@ -385,20 +519,71 @@ function ChapterHeader({
               chapterStatus: chapter.status,
               activeRun: activeRunInfo,
             });
+            const supportsModelPick = b.action !== 'commit';
+            const showSelect =
+              supportsModelPick && !profilesCall.error && enabledProfiles.length > 0;
             return (
-              <button
+              <div
                 key={b.action}
-                className="btn"
-                disabled={!avail.enabled || submitting}
-                title={avail.reason ?? undefined}
-                data-testid={`wf-btn-${b.action}`}
-                onClick={() => void onStart(b.action)}
+                className="workflow-actions__card"
+                style={{ display: 'flex', flexDirection: 'column', gap: 4 }}
               >
-                <span className="btn__title">{b.title}</span>
-                <span className="btn__hint">
-                  需要状态：{EXPECTED_STATUS[b.action].join(' / ')}
-                </span>
-              </button>
+                <button
+                  className="btn"
+                  disabled={!avail.enabled || submitting}
+                  title={avail.reason ?? undefined}
+                  data-testid={`wf-btn-${b.action}`}
+                  onClick={() =>
+                    void onStart(b.action, {
+                      model_profile_id: supportsModelPick
+                        ? selectedProfile[b.action] || null
+                        : null,
+                      fresh_write:
+                        b.action === 'write' ? writeMode === 'fresh' : undefined,
+                    })
+                  }
+                >
+                  <span className="btn__title">{b.title}</span>
+                  <span className="btn__hint">
+                    需要状态：{EXPECTED_STATUS[b.action].join(' / ')}
+                  </span>
+                </button>
+                {supportsModelPick && showSelect ? (
+                  <select
+                    className="workflow-actions__model-select"
+                    data-testid={`wf-model-select-${b.action}`}
+                    value={selectedProfile[b.action]}
+                    onChange={(e) => setProfile(b.action, e.target.value)}
+                    title="选择本次运行使用的模型档案；默认走环节绑定"
+                    disabled={submitting}
+                  >
+                    <option value="">环节绑定（默认）</option>
+                    {enabledProfiles.map((p) => (
+                      <option key={p.profile_id} value={p.profile_id}>
+                        {p.name}（{p.provider}/{p.model}）
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
+                {/* 「写正文」专属：写作模式（按意见改稿 / 全新重写）。小号 select
+                    放在模型下拉下方；仅 write 卡片渲染；其他动作不显示。 */}
+                {b.action === 'write' ? (
+                  <select
+                    className="workflow-actions__model-select"
+                    data-testid="wf-write-mode"
+                    value={writeMode}
+                    onChange={(e) =>
+                      setWriteMode(e.target.value === 'fresh' ? 'fresh' : '')
+                    }
+                    title="全新重写忽略旧稿与改稿意见，用于不同模型文风对比"
+                    disabled={submitting}
+                    style={{ fontSize: 12 }}
+                  >
+                    <option value="">按意见改稿（默认）</option>
+                    <option value="fresh">全新重写</option>
+                  </select>
+                ) : null}
+              </div>
             );
           })}
         </div>
@@ -567,7 +752,15 @@ function WorkflowPanel({
                       前端以短 ID 形式展示，鼠标悬浮看完整 run_id / workflow_id。 */}
                   run · {r.run_id.slice(0, 12)}…
                 </span>
-                <WorkflowRunStatusBadge status={r.status} />
+                <span
+                  title={
+                    (r.error ?? '').includes('rejected-for-revision')
+                      ? '该轮审校被「按建议修改/驳回并改稿」主动驳回，系统已自动重跑写正文→审校；非失败。'
+                      : undefined
+                  }
+                >
+                  <WorkflowRunStatusBadge status={r.status} error={r.error} />
+                </span>
                 <span className="kv-list__meta">
                   {formatDateTime(r.started_at)}
                   {r.ended_at ? ` → ${formatDateTime(r.ended_at)}` : ''}
@@ -626,7 +819,7 @@ function RunTimeline({ run }: { run: WorkflowRun }) {
         <li key={n.node_run_id} style={{ marginBottom: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <strong>{n.node_id}</strong>
-            <NodeStatusBadge status={n.status} />
+            <NodeStatusBadge status={n.status} error={n.error} />
             <span className="muted small">
               {formatDateTime(n.started_at)}
               {n.ended_at ? ` → ${formatDateTime(n.ended_at)}` : ''}
@@ -634,7 +827,16 @@ function RunTimeline({ run }: { run: WorkflowRun }) {
             </span>
           </div>
           {n.error ? (
-            <ErrorBanner>{n.error}</ErrorBanner>
+            (n.error ?? '').includes('rejected-for-revision') ? (
+              // 「按建议修改/驳回并改稿」主动驳回：改稿回路会自动重跑 write→review，
+              // 非真失败，用中性 InfoBanner 而非红色 ErrorBanner。
+              <InfoBanner>
+                已按审校建议驳回本轮（rejected-for-revision）：系统正在自动改稿重跑
+                写正文 → 审校，非失败。
+              </InfoBanner>
+            ) : (
+              <ErrorBanner>{n.error}</ErrorBanner>
+            )
           ) : null}
           {n.output_json && typeof n.output_json === 'object' ? (
             <details style={{ marginTop: 4 }}>
@@ -650,22 +852,142 @@ function RunTimeline({ run }: { run: WorkflowRun }) {
   );
 }
 
+// ---- WorkflowRunningBanner ----
+// V1.5：仅当存在 RUNNING/PENDING run（或 submitting 过渡期）时渲染。
+// 数据源：poll.data（GET /runs/{id}，含 nodes/current_node/workflow_name/started_at），
+// 退化为 activeRun（list 行，不含 nodes）。
+//
+// 文案三段：
+//  1. 标题  ：⏳ 正在执行：{动作中文名}（{workflow_name}）
+//  2. 节点  ：节点名（第 X/Y 步）· 已运行 N 秒
+//  3. 提示  ：正在生成…（约需 1-3 分钟，请勿关闭）
+//
+// 终态（COMPLETED/FAILED/CANCELLED/PAUSED）由调用方控制不再传入 detail；FAILED 由 ErrorBanner 承载。
+const WORKFLOW_ACTION_LABEL: Record<string, string> = {
+  'chapter-plan': '生成计划',
+  'chapter-write': '写正文',
+  'chapter-review': '审校',
+  'chapter-commit': '提交',
+};
+
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s === 0 ? `${m} 分` : `${m} 分 ${s} 秒`;
+}
+
+function WorkflowRunningBanner({ detail }: { detail: WorkflowRun | null }) {
+  // 本地每秒 +1，让「已运行 X 秒」看起来在跳；started_at 没拿到时退化为 0。
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!detail) {
+    // 提交中、详情尚未到达：用兜底文案
+    return (
+      <div
+        className="alert alert--info"
+        data-testid="workflow-running-banner"
+        role="status"
+      >
+        <div style={{ fontWeight: 600 }}>⏳ 正在执行：工作流启动中…</div>
+        <div className="muted small" style={{ marginTop: 4 }}>
+          正在生成（请勿关闭页面）。
+        </div>
+      </div>
+    );
+  }
+
+  const actionLabel =
+    WORKFLOW_ACTION_LABEL[detail.workflow_id] ??
+    WORKFLOW_ACTION_LABEL[detail.workflow_name ?? ''] ??
+    detail.workflow_name ??
+    detail.workflow_id;
+  const workflowName = detail.workflow_name ?? detail.workflow_id;
+
+  const nodes = Array.isArray(detail.nodes) ? detail.nodes : [];
+  const currentIdx = detail.current_node
+    ? nodes.findIndex((n) => n.node_id === detail.current_node)
+    : -1;
+  const hasNodeProgress = currentIdx >= 0 && nodes.length > 0;
+  const currentNodeName = hasNodeProgress ? nodes[currentIdx].node_id : null;
+
+  // 计算已运行时长（秒）
+  let elapsedSec = 0;
+  if (detail.started_at) {
+    const start = Date.parse(detail.started_at);
+    if (!Number.isNaN(start)) {
+      elapsedSec = Math.max(0, Math.floor((Date.now() - start) / 1000));
+    }
+  }
+  // tick 引用进来避免 lint 警告，也保证下次 render 时 elapsedSec 会重新算
+  void tick;
+
+  const hintText = (() => {
+    if (detail.status === 'PENDING') return '正在排队启动（约需 1-3 分钟，请勿关闭）';
+    if (detail.workflow_id === 'chapter-write')
+      return '正在生成正文草稿（约需 1-3 分钟，请勿关闭）';
+    if (detail.workflow_id === 'chapter-plan')
+      return '正在生成章节计划（约需 1-3 分钟，请勿关闭）';
+    if (detail.workflow_id === 'chapter-review')
+      return '正在执行审校（约需 1-3 分钟，请勿关闭）';
+    if (detail.workflow_id === 'chapter-commit')
+      return '正在提交章节（约需 1-3 分钟，请勿关闭）';
+    return '正在执行（约需 1-3 分钟，请勿关闭）';
+  })();
+
+  return (
+    <div
+      className="alert alert--info"
+      data-testid="workflow-running-banner"
+      role="status"
+      data-workflow-id={detail.workflow_id}
+      data-current-node={detail.current_node ?? ''}
+      data-run-id={detail.run_id}
+    >
+      <div style={{ fontWeight: 600 }}>
+        ⏳ 正在执行：{actionLabel}（{workflowName}）
+      </div>
+      <div className="muted small" style={{ marginTop: 4 }}>
+        {hasNodeProgress && currentNodeName
+          ? `节点：${currentNodeName}（第 ${currentIdx + 1}/${nodes.length} 步）· 已运行 ${formatElapsed(elapsedSec)}`
+          : `执行中 · 已运行 ${formatElapsed(elapsedSec)}`}
+      </div>
+      <div className="muted small" style={{ marginTop: 2 }}>
+        {hintText}
+      </div>
+    </div>
+  );
+}
+
 function NodeStatusBadge({
   status,
+  error,
 }: {
   status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
+  /** 节点 error：FAILED 且为 rejected-for-revision 时渲染中性「已驳回·改稿」，
+   *  避免与真失败的红色 FAILED 混淆（改稿回路的正常语义）。 */
+  error?: string | null;
 }) {
-  const cls =
-    status === 'COMPLETED'
-      ? 'badge badge--chapter-committed'
-      : status === 'RUNNING'
-      ? 'badge badge--chapter-running'
-      : status === 'FAILED'
-      ? 'badge badge--chapter-failed'
-      : status === 'SKIPPED'
-      ? 'badge badge--archived'
-      : 'badge badge--chapter-planned';
-  return <span className={cls}>{status}</span>;
+  const rejectedForRevision =
+    status === 'FAILED' && (error ?? '').includes('rejected-for-revision');
+  const cls = rejectedForRevision
+    ? 'badge badge--chapter-rejected'
+    : status === 'COMPLETED'
+    ? 'badge badge--chapter-committed'
+    : status === 'RUNNING'
+    ? 'badge badge--chapter-running'
+    : status === 'FAILED'
+    ? 'badge badge--chapter-failed'
+    : status === 'SKIPPED'
+    ? 'badge badge--archived'
+    : 'badge badge--chapter-planned';
+  return (
+    <span className={cls}>{rejectedForRevision ? '已驳回·改稿' : status}</span>
+  );
 }
 
 // ---- DraftsPanel ----
@@ -738,7 +1060,11 @@ function DraftsPanel({
   };
 
   return (
-    <div className="panel" data-testid="drafts-panel">
+    <div
+      className="panel"
+      data-testid="drafts-panel"
+      style={{ display: 'flex', flexDirection: 'column' }}
+    >
       <div className="panel__title">
         草稿（drafts）
         <div style={{ flex: 1 }} />
@@ -818,7 +1144,10 @@ function DraftsPanel({
             </div>
           </div>
 
-          <div className="panel__section">
+          <div
+            className="panel__section"
+            style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+          >
             <div className="panel__section-title">
               {editingId ? '编辑内容（保存后会创建新版本）' : '当前版本内容'}
             </div>
@@ -841,6 +1170,14 @@ function DraftsPanel({
               <pre
                 className="prose-block"
                 data-testid="draft-content"
+                data-layout-ver="8"
+                style={{
+                  // 与左侧审批卡（approval-card）视觉齐高：审批卡由审校报告内容撑高，
+                  // 此处给一个匹配的固定高度，避免 flex 撑满整个 panel 导致过高
+                  height: 1722,
+                  maxHeight: 'none',
+                  overflowY: 'auto',
+                }}
               >
                 {selected.content}
               </pre>

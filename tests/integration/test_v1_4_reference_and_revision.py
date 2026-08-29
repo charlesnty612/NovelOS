@@ -31,6 +31,40 @@ from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations
 
+
+
+# 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
+async def _get_run_via_http(app, run_id: str) -> dict | None:
+    import httpx
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        r = await client.get(f"/api/runs/{run_id}")
+    finally:
+        await client.aclose()
+    if r.status_code == 404:
+        return None
+    return r.json()
+
+
+async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 60.0) -> dict:
+    """轮询直到 run.status ∈ expected；返回最终 run dict。
+
+    SQLite 跨连接视角 + 后台线程落库时延：单节点 mock 流程通常 < 1s 跑完，
+    但 polling 必须等到节点行 FAILED/COMPLETED 也写入——轮询间隔 0.2s 足以。
+    """
+    import asyncio, time
+    deadline = time.monotonic() + timeout
+    last_run = None
+    while time.monotonic() < deadline:
+        run = await _get_run_via_http(app, run_id)
+        last_run = run
+        if run is None:
+            raise AssertionError(f"run {run_id} disappeared")
+        if run["status"] in expected:
+            return run
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
 # -------- 复用 tests/api/test_quality.py 的 fixture / script 模式（独立副本，避免耦合）
 
 
@@ -156,27 +190,39 @@ async def _drive_plan_write_review(app, pid: str, cid: str, mock_providers: dict
         json={"author_intent": "v1.4 test", "mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["status"] == "COMPLETED", r.json()
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
     r = await _request(
         app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
         json={"mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["status"] == "COMPLETED", r.json()
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
     r = await _request(
         app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
         json={"mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
     review_run = r.json()
-    assert review_run["status"] == "PAUSED", review_run
+    review_run = await _wait_run_terminal(app, review_run["run_id"], expected=("PAUSED",))
     r = await _request(
         app, "POST", f"/api/runs/{review_run['run_id']}/resume",
         json={"human_input": {"approved": True}},
     )
-    assert r.status_code == 200 and r.json()["status"] == "COMPLETED", r.text
+    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
 
 # -------- 测试用例
@@ -242,13 +288,13 @@ def test_v1_4_reference_consumption_persists_to_checkpoint_and_meta(tmp_path: Pa
             )
             assert r.status_code == 201, r.text
             commit_body = r.json()
-            assert commit_body["status"] == "COMPLETED", commit_body
+            commit_body = await _wait_run_terminal(app, commit_body["run_id"], expected=("COMPLETED",))
 
             # 拿 commit run 的 run_id
             commit_run_id = commit_body["run_id"]
+            run_obj = await _wait_run_terminal(app, commit_run_id, expected=("COMPLETED", "FAILED"))
             r = await _request(app, "GET", f"/api/runs/{commit_run_id}")
             assert r.status_code == 200, r.text
-            run_obj = r.json()
             ckpt = run_obj.get("checkpoint_json") or {}
             qg = ckpt.get("quality_gate") if isinstance(ckpt, dict) else None
             assert qg is not None, f"quality_gate missing in checkpoint_json: {ckpt}"
@@ -310,7 +356,7 @@ def test_v1_4_reference_consumption_empty_when_no_refs_dir(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             run_id = r.json()["run_id"]
-            run_obj = (await _request(app, "GET", f"/api/runs/{run_id}")).json()
+            run_obj = await _wait_run_terminal(app, run_id, expected=("COMPLETED", "FAILED"))
             ckpt = run_obj.get("checkpoint_json") or {}
             qg = ckpt.get("quality_gate") if isinstance(ckpt, dict) else None
             assert qg is not None
@@ -368,11 +414,10 @@ def test_v1_4_enforce_revision_guidance_in_error_and_checkpoint(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             commit_body = r.json()
-            assert commit_body["status"] == "FAILED", commit_body
+            commit_body = await _wait_run_terminal(app, commit_body["run_id"], expected=("FAILED",))
 
             run_id = commit_body["run_id"]
-            run_obj = (await _request(app, "GET", f"/api/runs/{run_id}")).json()
-            assert run_obj["status"] == "FAILED"
+            run_obj = await _wait_run_terminal(app, run_id, expected=("FAILED",))
 
             # 1) runs.error 含 "| guidance=<json>"
             err = run_obj.get("error") or ""

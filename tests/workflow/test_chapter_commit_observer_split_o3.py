@@ -25,6 +25,40 @@ from packages.workflows.chapter_commit.pipeline import (
     _trim_observer_input_for_leg,
 )
 
+
+
+# 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
+async def _get_run_via_http(app, run_id: str) -> dict | None:
+    import httpx
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        r = await client.get(f"/api/runs/{run_id}")
+    finally:
+        await client.aclose()
+    if r.status_code == 404:
+        return None
+    return r.json()
+
+
+async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 60.0) -> dict:
+    """轮询直到 run.status ∈ expected；返回最终 run dict。
+
+    SQLite 跨连接视角 + 后台线程落库时延：单节点 mock 流程通常 < 1s 跑完，
+    但 polling 必须等到节点行 FAILED/COMPLETED 也写入——轮询间隔 0.2s 足以。
+    """
+    import asyncio, time
+    deadline = time.monotonic() + timeout
+    last_run = None
+    while time.monotonic() < deadline:
+        run = await _get_run_via_http(app, run_id)
+        last_run = run
+        if run is None:
+            raise AssertionError(f"run {run_id} disappeared")
+        if run["status"] in expected:
+            return run
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
 # ---------------------------------------------------------------------------
 # 摘要函数单测
 # ---------------------------------------------------------------------------
@@ -506,24 +540,34 @@ async def _push_chapter_to_reviewed(app, pid: str, cid: str, mock_providers: dic
         json={"author_intent": "意图", "mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
     r = await _request(
         app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
         json={"mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
     r = await _request(
         app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
         json={"mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
     paused = r.json()
-    assert paused["status"] == "PAUSED", paused
+    paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
     r = await _request(
         app, "POST", f"/api/runs/{paused['run_id']}/resume",
         json={"human_input": {"approved": True}},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["status"] == "COMPLETED", r.json()
+    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
 
 def test_chapter_commit_observer_split_o3_meta_has_per_leg_chars(
@@ -557,6 +601,9 @@ def test_chapter_commit_observer_split_o3_meta_has_per_leg_chars(
                 json={"mock_providers": base_mocks},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             run_id = r.json()["run_id"]
 
             from packages.core.db import get_connection
@@ -616,6 +663,9 @@ def test_chapter_commit_observer_split_off_legacy_path_unaffected(
                 json={"mock_providers": base_mocks},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             run_id = r.json()["run_id"]
 
             from packages.core.db import get_connection

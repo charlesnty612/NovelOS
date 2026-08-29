@@ -18,6 +18,7 @@ from typing import Any
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.context_engine import build_director_input
 from packages.core.db import get_connection
+from packages.core.model_router.router import capability_for
 from packages.core.workflow_runtime.engine import WorkflowNode
 
 
@@ -32,7 +33,7 @@ def _build_ctx_node(ctx: dict[str, Any]) -> dict[str, Any]:
         project_id,
         chapter_id,
         intent,
-        target_word_count=ctx.get("target_word_count", 2200),
+        target_word_count=ctx.get("target_word_count", 3000),
     )
     payload["chapter"]["expected_role"] = ctx.get("expected_role", "setup")
     return {"director_input": payload}
@@ -52,20 +53,55 @@ def _director_node(ctx: dict[str, Any]) -> dict[str, Any]:
         node_run_id=ctx.get("_current_node_run_id"),
         expected="director",
         mock_script=mock_script,
+        profile_id=(ctx.get("model_overrides") or {}).get(
+            capability_for("director")
+        ),
     )
     return {"director_output": out}
 
 
 def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
-    """State：把 director 输出写入 chapters.plan_json（status 不动）。"""
+    """State：把 director 输出写入 chapters.plan_json（status 不动）。
+
+    保字数契约：若章节当前 plan_json 已含 ``expected_word_count``（>0），
+    重生成时继承该值，避免误点「生成计划」覆盖掉已规划的单章字数。
+    默认 3000（对齐 NovelOS 单章字数标准，与 project-init 的 DEFAULT_CHAPTER_WORD_COUNT 一致）。
+    """
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
     director_output = ctx.get("director_output") or {}
+
+    # 读取原 plan_json.expected_word_count（如有）——保字数用
+    inherit_expected: int | None = None
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT plan_json FROM chapters WHERE chapter_id = ?",
+            (chapter_id,),
+        ).fetchone()
+        if row is not None:
+            existing_plan = _safe_load_json(row["plan_json"])
+            if isinstance(existing_plan, dict):
+                raw = existing_plan.get("expected_word_count")
+                if isinstance(raw, (int, float)) and raw > 0:
+                    inherit_expected = int(raw)
+    finally:
+        conn.close()
+
+    director_word_count = director_output.get("expected_word_count")
+    if isinstance(director_word_count, (int, float)) and director_word_count > 0:
+        expected_word_count: int = int(director_word_count)
+    elif inherit_expected is not None:
+        expected_word_count = inherit_expected
+    else:
+        expected_word_count = 2200
+
     plan_payload: dict[str, Any] = {
         "chapter_goal": director_output.get("chapter_goal"),
         "core_conflict": director_output.get("core_conflict"),
         "turning_point": director_output.get("turning_point"),
         "expected_role": director_output.get("expected_role"),
+        "expected_word_count": expected_word_count,
         "key_beats": director_output.get("key_beats", []),
         "character_changes_planned": director_output.get("character_changes_planned", []),
         "information_releases": director_output.get("information_releases", []),
@@ -96,6 +132,25 @@ def _now() -> str:
     from packages.core.ids import now_iso
 
     return now_iso()
+
+
+def _safe_load_json(raw: Any) -> Any:
+    """chapters.plan_json 列存的是 JSON 字符串；读时安全反序列化（失败返回 None）。"""
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="replace")
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        try:
+            return json.loads(s)
+        except (ValueError, TypeError):
+            return None
+    return None
 
 
 def _build_nodes() -> list[WorkflowNode]:

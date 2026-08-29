@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -204,6 +205,79 @@ class WorkflowEngine:
             ctx["mock_providers"] = mock_providers
         self._checkpoint_exclude = list(checkpoint_exclude or [])
 
+        run_id = self._insert_run_row(
+            workflow_name=workflow_name,
+            chapter_id=chapter_id,
+        )
+
+        self._run_nodes(
+            run_id=run_id,
+            nodes=nodes,
+            ctx=ctx,
+            start_index=0,
+        )
+        return run_id
+
+    # -------------------------------------------------------------- start_with_nodes_async
+    def start_with_nodes_async(
+        self,
+        workflow_name: str,
+        nodes: list[WorkflowNode],
+        *,
+        chapter_id: str | None = None,
+        initial_ctx: dict[str, Any] | None = None,
+        mock_providers: dict[str, list[str]] | None = None,
+        checkpoint_exclude: list[str] | None = None,
+    ) -> str:
+        """异步版 :meth:`start_with_nodes`：插入 RUNNING 行后立刻返回 run_id，执行在后台线程推进。
+
+        设计要点：
+        - 调用线程不做任何节点执行，只负责插行 + 启动 daemon thread 后立即返回。
+        - 后台线程复用 :meth:`_run_nodes`（同一份异常/PAUSE/FAIL 收尾逻辑），不再包 try。
+        - SQLite 跨线程安全由 ``packages.core.db.get_connection``（每次新建 + WAL +
+          busy_timeout）保证；observer 双腿并行已在生产验证同模式。
+        - ``_run_nodes`` 抛出的任何异常都会被引擎层（_finalize_run 等）兜底写 FAILED，
+          若仍有外溢异常则在线程内 logging.exception 留痕，不二次写库。
+        """
+        if not nodes:
+            raise ValueError("nodes must be a non-empty list")
+
+        ctx: dict[str, Any] = dict(initial_ctx or {})
+        if mock_providers is not None:
+            ctx["mock_providers"] = mock_providers
+        self._checkpoint_exclude = list(checkpoint_exclude or [])
+
+        run_id = self._insert_run_row(
+            workflow_name=workflow_name,
+            chapter_id=chapter_id,
+        )
+
+        thread = threading.Thread(
+            target=self._run_nodes_safe,
+            kwargs={
+                "run_id": run_id,
+                "nodes": nodes,
+                "ctx": ctx,
+                "start_index": 0,
+            },
+            name=f"workflow-{run_id}",
+            daemon=True,
+        )
+        thread.start()
+        return run_id
+
+    # -------------------------------------------------------------- internal: _insert_run_row
+    def _insert_run_row(
+        self,
+        *,
+        workflow_name: str,
+        chapter_id: str | None,
+    ) -> str:
+        """确保 workflows 行 + 插入 workflow_runs 行（status=RUNNING）；返回 run_id。
+
+        供 :meth:`start_with_nodes`（同步）与 :meth:`start_with_nodes_async`（异步）
+        共用，保持两者落库口径一致。
+        """
         conn = get_connection(self.db_path)
         try:
             wf_id = _ensure_workflow(conn, workflow_name)
@@ -221,14 +295,30 @@ class WorkflowEngine:
             conn.commit()
         finally:
             conn.close()
-
-        self._run_nodes(
-            run_id=run_id,
-            nodes=nodes,
-            ctx=ctx,
-            start_index=0,
-        )
         return run_id
+
+    def _run_nodes_safe(
+        self,
+        *,
+        run_id: str,
+        nodes: list[WorkflowNode],
+        ctx: dict[str, Any],
+        start_index: int,
+    ) -> None:
+        """异步线程入口：包一层 try/except，捕获 _run_nodes 之外可能外溢的异常。
+
+        _run_nodes 内部已经把 PauseRequested / BaseException 收尾为 PAUSED/FAILED，
+        行状态由引擎内部维护，线程内不再二次写库——异常外溢仅作 logging 留痕。
+        """
+        try:
+            self._run_nodes(
+                run_id=run_id,
+                nodes=nodes,
+                ctx=ctx,
+                start_index=start_index,
+            )
+        except BaseException:  # noqa: BLE001
+            log.exception("workflow run %s background thread crashed", run_id)
 
     # -------------------------------------------------------------- resume
     def resume(
@@ -237,8 +327,13 @@ class WorkflowEngine:
         nodes: list[WorkflowNode],
         *,
         human_input: dict[str, Any] | None = None,
+        regenerate: bool = False,
     ) -> str:
         """从最近一次 PAUSED 状态恢复执行；human_input 并入 ctx["human_input"]。
+
+        ``regenerate=True`` 时从挂起节点本身重跑（而非其下一节点），用于「带意见
+        重新生成当前关」。此时不会把上一轮的 PENDING 行收尾为 SKIPPED，让审计链
+        保留两次执行（首次+重生成）。
 
         返回 run_id（同入参）。如无 PAUSED run 或 run 已结束 → 抛 ValueError。
         """
@@ -250,6 +345,92 @@ class WorkflowEngine:
                 f"workflow run {run_id!r} status={run['status']!r}, must be PAUSED to resume"
             )
 
+        ctx, start_index = self._prepare_resume_ctx(
+            run=run,
+            nodes=nodes,
+            human_input=human_input,
+            regenerate=regenerate,
+        )
+
+        # 与 resume_async 同口径：恢复执行期 run 行为 RUNNING（见 _mark_run_running 注释）
+        self._mark_run_running(run_id)
+
+        self._run_nodes(
+            run_id=run_id,
+            nodes=nodes,
+            ctx=ctx,
+            start_index=start_index,
+        )
+        return run_id
+
+    # -------------------------------------------------------------- resume_async
+    def resume_async(
+        self,
+        run_id: str,
+        nodes: list[WorkflowNode],
+        *,
+        human_input: dict[str, Any] | None = None,
+        regenerate: bool = False,
+    ) -> str:
+        """异步版 :meth:`resume`：参数校验在调用线程同步做，剩余执行在后台线程推进。
+
+        设计要点：
+        - 调用线程做必要的 PAUSED 校验（便于调用方 raise HTTPException）；校验失败抛
+          ValueError，**不启动后台线程**。
+        - 校验通过后启动 daemon thread 跑 ``_run_nodes_safe``，立即返回 run_id。
+        - ``_skip_pending_node_rows`` 等收尾副作用放到后台线程里跑——它本身就是
+          :meth:`_run_nodes` 之前必须做的 DB 写，不会影响 API 响应即时性。
+        """
+        run = _get_run(self.db_path, run_id)
+        if run is None:
+            raise ValueError(f"workflow run {run_id!r} not found")
+        if run["status"] != "PAUSED":
+            raise ValueError(
+                f"workflow run {run_id!r} status={run['status']!r}, must be PAUSED to resume"
+            )
+
+        ctx, start_index = self._prepare_resume_ctx(
+            run=run,
+            nodes=nodes,
+            human_input=human_input,
+            regenerate=regenerate,
+        )
+
+        # 恢复执行前把 run 行置回 RUNNING：resume 执行期间 run 不再是「已暂停」，
+        # 轮询方（前端 2s 轮询 / auto_revise 等待环）据此继续跟踪直到终态。
+        # 同步时代无此翻转——执行期行一直标 PAUSED，端点阻塞到终态无人察觉；
+        # 异步化后 PAUSED 会让轮询方误停，必须在调用线程同步翻转。
+        self._mark_run_running(run_id)
+
+        thread = threading.Thread(
+            target=self._run_nodes_safe,
+            kwargs={
+                "run_id": run_id,
+                "nodes": nodes,
+                "ctx": ctx,
+                "start_index": start_index,
+            },
+            name=f"workflow-resume-{run_id}",
+            daemon=True,
+        )
+        thread.start()
+        return run_id
+
+    # -------------------------------------------------------------- internal: _prepare_resume_ctx
+    def _prepare_resume_ctx(
+        self,
+        *,
+        run: dict[str, Any],
+        nodes: list[WorkflowNode],
+        human_input: dict[str, Any] | None,
+        regenerate: bool,
+    ) -> tuple[dict[str, Any], int]:
+        """构造 resume 用的 ctx + start_index。
+
+        抽离自 :meth:`resume`，供 :meth:`resume_async` 复用，保证两条路径（同步/异步）
+        的 ctx 拼装、``human_input`` 合并、``regenerate_stage`` 标记写入、
+        ``_skip_pending_node_rows`` 副作用口径完全一致。
+        """
         ctx: dict[str, Any] = dict(run.get("checkpoint_json") or {})
         ctx.setdefault("human_input", {})
         if human_input is not None:
@@ -260,24 +441,28 @@ class WorkflowEngine:
                 existing = human_input
             ctx["human_input"] = existing
 
-        # 定位 current_node 在 nodes 列表中的 index；从 index+1 开始执行
+        # 定位 current_node 在 nodes 列表中的 index。
+        # 默认从 index+1 开始（正常推进）；regenerate=True 时从 index 本身重跑当前挂起节点。
         current = run.get("current_node")
         start_index = 0
+        matched_index = -1
         for i, node in enumerate(nodes):
             if node.node_id == current:
+                matched_index = i
                 start_index = i + 1
                 break
 
-        # 收尾旧的 PENDING 节点行（标记 SKIPPED），便于审计
-        self._skip_pending_node_rows(run_id, current)
+        if regenerate and matched_index >= 0:
+            start_index = matched_index
+            # 在 ctx 写入标记：让 pipeline 的 _resolve_stage_input 知道
+            # 当前正在重跑哪个关，以便跳过自身 revisions 优先层
+            ctx["regenerate_stage"] = current
+            # regenerate 不收尾旧 PENDING 行——保留审计链（首次+重生成两条节点行）
+        else:
+            # 收尾旧的 PENDING 节点行（标记 SKIPPED），便于审计
+            self._skip_pending_node_rows(run["run_id"], current)
 
-        self._run_nodes(
-            run_id=run_id,
-            nodes=nodes,
-            ctx=ctx,
-            start_index=start_index,
-        )
-        return run_id
+        return ctx, start_index
 
     # -------------------------------------------------------------- internal: _run_nodes
     def _run_nodes(
@@ -431,6 +616,22 @@ class WorkflowEngine:
                 WHERE run_id = ?
                 """,
                 (_dump_json(scrubbed), current_node, run_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _mark_run_running(self, run_id: str) -> None:
+        """resume 接受后把 run 行置回 RUNNING（清 ended_at；error 留待终态覆盖）。
+
+        同步时代 resume 执行期间行一直标 PAUSED（端点阻塞无人察觉）；异步化后
+        轮询方依赖 status 区分「已暂停待审批」与「恢复执行中」，必须翻转。
+        """
+        conn = get_connection(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE workflow_runs SET status = 'RUNNING', ended_at = NULL WHERE run_id = ?",
+                (run_id,),
             )
             conn.commit()
         finally:

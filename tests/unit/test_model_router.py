@@ -1044,3 +1044,117 @@ def test_light_binding_all_disabled_no_fallback(tmp_path: Path):
     # 关键：resolve('reasoning') 必须仍命中诱饵（说明 call_with_fallback 没把
     # reasoning 行静默用掉）—— 防止实现退化为「light 失败就尝试 reasoning」。
     assert ModelRouter(db_path).resolve("reasoning")["config_id"] == cid_reasoning
+
+
+# ---------------------------------------------------------------------------
+# 单次 run 级覆盖：call_with_fallback(profile_id=...)
+# ---------------------------------------------------------------------------
+
+
+def test_call_with_fallback_profile_id_hit_returns_profile_row(tmp_path: Path):
+    """profile_id 命中 enabled 行时，候选列表只含该行；行形状对齐 _candidates（config_id=profile_id,
+    capability=本 capability，provider/model/params_json 原样透传）。
+    """
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    pid = _insert_profile(
+        db_path,
+        profile_id="mprof_override",
+        provider="mock",
+        model="override-model",
+        params_json='{"base_url": "http://override.example"}',
+    )
+    # 即使该 capability 还配了其它 profile / binding，也不应被命中
+    pid_other = _insert_profile(
+        db_path, profile_id="mprof_other", provider="mock", model="other"
+    )
+    _upsert_binding(db_path, "creative_writing", [pid_other])
+
+    _, row = ModelRouter(db_path).call_with_fallback(
+        "creative_writing",
+        [{"role": "user", "content": "hi"}],
+        profile_id=pid,
+    )
+    # 行形状必须与 _candidates binding 分支完全一致
+    assert row["config_id"] == pid
+    assert row["capability"] == "creative_writing"
+    assert row["provider"] == "mock"
+    assert row["model"] == "override-model"
+    assert row["params_json"] == '{"base_url": "http://override.example"}'
+    assert row["enabled"] == 1
+
+
+def test_call_with_fallback_profile_id_missing_raises(tmp_path: Path):
+    """profile_id 不存在 → ModelNotConfiguredError，detail 含 profile_id。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    # 即使 capability 有可用 binding/profile，也不影响覆盖语义
+    pid_real = _insert_profile(
+        db_path, profile_id="mprof_real", provider="mock", model="m"
+    )
+    _upsert_binding(db_path, "creative_writing", [pid_real])
+
+    with pytest.raises(ModelNotConfiguredError) as exc:
+        ModelRouter(db_path).call_with_fallback(
+            "creative_writing",
+            [{"role": "user", "content": "hi"}],
+            profile_id="mprof_does_not_exist",
+        )
+    assert exc.value.capability == "creative_writing"
+    assert "mprof_does_not_exist" in str(exc.value)
+
+
+def test_call_with_fallback_profile_id_disabled_raises(tmp_path: Path):
+    """profile_id 存在但 enabled=0 → ModelNotConfiguredError。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    pid = _insert_profile(
+        db_path, profile_id="mprof_off", provider="mock", model="m", enabled=0
+    )
+
+    with pytest.raises(ModelNotConfiguredError) as exc:
+        ModelRouter(db_path).call_with_fallback(
+            "reasoning",
+            [{"role": "user", "content": "hi"}],
+            profile_id=pid,
+        )
+    assert exc.value.capability == "reasoning"
+    assert pid in str(exc.value)
+
+
+def test_call_with_fallback_profile_id_skips_light_to_reasoning_fallback(tmp_path: Path):
+    """profile_id 覆盖路径跳过 light→reasoning 回退：light 缺配置时即使配了 reasoning 行，
+    profile_id 也不允许它「静默回退」到 reasoning 链。
+    """
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    # reasoning 可用行作为诱饵（应当不被命中）
+    cid_reasoning = _insert_config(
+        db_path, "reasoning", "mock", "reasoning-model", enabled=1
+    )
+    # 一个不存在的 profile_id 应抛错，而非回退到 reasoning 行
+    with pytest.raises(ModelNotConfiguredError) as exc:
+        ModelRouter(db_path).call_with_fallback(
+            "light",
+            [{"role": "user", "content": "hi"}],
+            profile_id="mprof_missing",
+        )
+    assert exc.value.capability == "light"
+    assert "mprof_missing" in str(exc.value)
+    # resolve('reasoning') 仍命中诱饵（防止覆盖路径退化为「自动回退」）
+    assert ModelRouter(db_path).resolve("reasoning")["config_id"] == cid_reasoning
+
+
+def test_call_with_fallback_profile_id_none_preserves_existing_behavior(tmp_path: Path):
+    """profile_id=None 时行为与之前完全一致（既不打破 binding 也不打破 light→reasoning 回退）。"""
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    # light 零配置 + reasoning 有行 → 触发 light→reasoning 回退
+    cid_reasoning = _insert_config(
+        db_path, "reasoning", "mock", "reasoning-model", enabled=1
+    )
+    _, row = ModelRouter(db_path).call_with_fallback(
+        "light", [{"role": "user", "content": "hi"}]
+    )
+    assert row["config_id"] == cid_reasoning
+    assert row["capability"] == "reasoning"  # V3 P0-2 标记

@@ -238,18 +238,18 @@ def test_visible_chars_folds_whitespace(tmp_path: Path):
 
 
 def test_default_target_fallback(tmp_path: Path):
-    """ctx 不带 target_word_count 时回退到 _DEFAULT_TARGET_WORD_COUNT=2200。"""
+    """ctx 不带 target_word_count 时回退到 _DEFAULT_TARGET_WORD_COUNT=3000（用户拍板单章口径）。"""
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 2200)
+    _insert_draft(db_path, cid, "中" * 3000)
     ctx = {"db_path": db_path, "chapter_id": cid}
     rep = _basic_checks_node(ctx)["review_report"]
-    assert rep["target_word_count"] == 2200
-    assert rep["word_count"] == 2200
+    assert rep["target_word_count"] == 3000
+    assert rep["word_count"] == 3000
     assert rep["within_range"] is True
-    # 2200 默认 band：1870~2530
-    assert rep["word_band"] == {"low": 1870, "high": 2530}
+    # 3000 默认 band：2550~3449
+    assert rep["word_band"] == {"low": 2550, "high": 3449}
 
 
 # ---------------------------------------------------------------------------

@@ -60,7 +60,11 @@ def create_model_profile(payload: dict, request: Request) -> dict:
     if not (isinstance(model, str) and model):
         raise HTTPException(status_code=422, detail="model required")
     try:
-        raw_params = _normalize_params(payload.get("params_json"))
+        # 契约兼容：params_json（旧）优先；缺失则读 params（新契约，前端按约定发）。
+        # 两者都无 → None → _normalize_params 返回空 dict（保留原行为）。
+        raw_params = _normalize_params(
+            payload.get("params_json", payload.get("params"))
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     params_dict = _prepare_post_params(raw_params)
@@ -138,12 +142,16 @@ def patch_model_profile(profile_id: str, payload: dict, request: Request) -> dic
         if not (isinstance(v, str) and v):
             raise HTTPException(status_code=422, detail="model must be non-empty string")
         fields["model"] = v
-    if "params_json" in payload:
+    if "params_json" in payload or "params" in payload:
         existing = svc.get(profile_id)
         if existing is None:
             raise HTTPException(status_code=404, detail=f"model_profile {profile_id!r} not found")
         try:
-            raw_params = _normalize_params(payload["params_json"])
+            # 契约兼容：params_json 优先；缺失则读 params（新契约）。
+            # 与 POST 对齐：两个键都视作「更新 params」的入口。
+            raw_params = _normalize_params(
+                payload.get("params_json", payload.get("params"))
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         merged = _prepare_patch_params(raw_params, existing.get("params_json") or "{}")

@@ -2,9 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { formatDateTime, formatJson, parseReportMarkdown, tryParseJsonObject } from './format';
 
 describe('formatDateTime', () => {
-  it('ISO 时间截到分钟', () => {
-    expect(formatDateTime('2026-08-23T10:30:45Z')).toBe('2026-08-23 10:30');
-    expect(formatDateTime('2026-08-23 10:30:45')).toBe('2026-08-23 10:30');
+  it('ISO 时间转本地时区（UTC 带 Z 正确转换）', () => {
+    // 带 Z 的 UTC 时间：按本地时区显示（不写死具体值，因 CI/本地时区不同）
+    const local = formatDateTime('2026-08-23T10:30:45Z');
+    expect(local).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    // 与 Date 解析结果一致（证明走了时区转换而非字符串截取）
+    const d = new Date('2026-08-23T10:30:45Z');
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const expected = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    expect(local).toBe(expected);
+  });
+  it('无时区 ISO 按原样解析（不崩）', () => {
+    // 不带时区后缀：Date 按本地解析，格式一致即可
+    expect(formatDateTime('2026-08-23 10:30:45')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   });
   it('空值返回占位', () => {
     expect(formatDateTime(null)).toBe('—');

@@ -4,15 +4,17 @@
 //                        + V1.3 critic_report（LLM 评审员建议；advisory only）
 //   - chapter-commit.high_risk_approval → 显示 changes 待审批条数
 //
-// chapter-review 分支有三态决议（对齐 PRD §59/§87 的「人工修改后重审」闭环）：
+// chapter-review 分支有四态决议：
 //   - 批准        → onApprove(true)
 //   - 驳回        → onApprove(false)              （run FAILED，章节保持 DRAFTED）
 //   - 驳回并改稿  → onApprove(false, {revise:true, note})（run FAILED(rejected-for-revision)，
 //                    章节保持 DRAFTED，note 落 plan_json.revision_note，可改稿后重跑 write/review）
+//   - 按建议修改  → onApprove(false, {revise:true, note: <勾选的 critic suggestion / warnings / errors>})
+//                    复用改稿回路，但 note 由审校报告自动收集（默认全选、用户可取消勾选）。
 //
 // 通过 props 注入决定 / 拒绝动作，由父组件负责调 resume API。
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ErrorBanner, InfoBanner } from './ErrorBanner';
 import type {
   CriticIssue,
@@ -77,6 +79,86 @@ const CRITIC_SEVERITY_LABEL: Record<CriticIssueSeverity, string> = {
   low: '低',
 };
 
+/** 一条「建议」的可视化条目 + 用于 note 拼接的纯文本。
+ *  来源优先级：critic_report.issues[].suggestion（结构化 LLM 建议，最像"建议"）
+ *  → review_report.warnings[]（字符串警告）
+ *  → review_report.errors[].message（严重规则项提示） */
+interface SuggestionEntry {
+  /** 唯一 key，供 React 列表 + 勾选状态 */
+  key: string;
+  /** 显示用类别标签，例如「AI 审稿」「warnings」「严重」 */
+  source: string;
+  /** 选填：分类标签（仅 critic issue 有） */
+  category?: CriticIssueCategory;
+  /** 选填：严重度（仅 critic issue 有） */
+  severity?: CriticIssueSeverity;
+  /** 选填：问题引文（critic issue 有；warnings/errors 也可附加） */
+  quote?: string;
+  /** 真正写入 revision_note 的建议文本 */
+  text: string;
+}
+
+/** 从 pausePayload 中抽取建议条目。
+ *  字段命名以 types.ts ChapterReviewPausePayload + ApprovalCard ReviewReportShape 为准：
+ *  - review_report.warnings: string[]
+ *  - review_report.errors: {rule_id, severity, message}[]
+ *  - critic_report.issues: {category, severity, quote, suggestion}[]   ← 主要建议源
+ */
+export function extractSuggestions(
+  pausePayload: Record<string, unknown>,
+): SuggestionEntry[] {
+  const out: SuggestionEntry[] = [];
+  const reviewReport = pausePayload['review_report'] as
+    | ReviewReportShape
+    | undefined;
+  const criticReport = pausePayload['critic_report'] as
+    | CriticReport
+    | null
+    | undefined;
+
+  if (criticReport && Array.isArray(criticReport.issues)) {
+    criticReport.issues.forEach((it: CriticIssue, i: number) => {
+      const text = (it.suggestion ?? '').trim();
+      if (!text) return;
+      out.push({
+        key: `critic-${i}`,
+        source: 'AI 审稿',
+        category: it.category,
+        severity: it.severity,
+        quote: it.quote,
+        text,
+      });
+    });
+  }
+
+  if (reviewReport && Array.isArray(reviewReport.warnings)) {
+    reviewReport.warnings.forEach((w, i) => {
+      const text = String(w ?? '').trim();
+      if (!text) return;
+      out.push({
+        key: `warn-${i}`,
+        source: 'warnings',
+        text,
+      });
+    });
+  }
+
+  if (reviewReport && Array.isArray(reviewReport.errors)) {
+    reviewReport.errors.forEach((e, i) => {
+      const text = String(e.message ?? '').trim();
+      if (!text) return;
+      out.push({
+        key: `err-${i}`,
+        source: '严重',
+        severity: (e.severity as CriticIssueSeverity | undefined) ?? undefined,
+        text,
+      });
+    });
+  }
+
+  return out;
+}
+
 export function ApprovalCard(props: ApprovalCardProps) {
   const {
     stage,
@@ -89,6 +171,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
   } = props;
   const [pendingApprove, setPendingApprove] = useState<boolean | null>(null);
   const [pendingRevise, setPendingRevise] = useState(false);
+  const [pendingSuggestionKey, setPendingSuggestionKey] = useState<string | null>(null);
   const [reviseNote, setReviseNote] = useState('');
 
   const reviewReport = pausePayload['review_report'] as
@@ -98,6 +181,36 @@ export function ApprovalCard(props: ApprovalCardProps) {
   // UI 仅显示弱提示，不影响审批按钮可用性。
   const criticStatus = (pausePayload['critic_status'] as string | undefined) ?? 'skipped';
   const criticReport = pausePayload['critic_report'] as CriticReport | null | undefined;
+
+  // chapter-review 分支：根据审校报告收集建议条目，默认全选。
+  const suggestions = useMemo<SuggestionEntry[]>(
+    () => (stage === 'chapter-review' ? extractSuggestions(pausePayload) : []),
+    [stage, pausePayload],
+  );
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(
+    () => new Set(suggestions.map((s) => s.key)),
+  );
+  // 当建议列表变化（如 pausePayload 切换 run）时，重置勾选集合为全选。
+  // 用 useMemo 派生集合的稳定 hash 来检测变化，避免漏更新。
+  const suggestionsKey = suggestions.map((s) => s.key).join('|');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useMemo(() => {
+    setSelectedKeys(new Set(suggestions.map((s) => s.key)));
+  }, [suggestionsKey]);
+
+  const selectedNote = useMemo(() => {
+    const picked = suggestions.filter((s) => selectedKeys.has(s.key));
+    return picked.map((s) => s.text).join('\n');
+  }, [suggestions, selectedKeys]);
+
+  function toggleSuggestion(key: string) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   return (
     <div
@@ -193,6 +306,26 @@ export function ApprovalCard(props: ApprovalCardProps) {
             {submitting && pendingRevise ? '提交中…' : '驳回并改稿'}
           </button>
         ) : null}
+        {stage === 'chapter-review' && suggestions.length > 0 ? (
+          <button
+            className="btn"
+            disabled={submitting || selectedKeys.size === 0}
+            data-testid="approval-apply-suggestions"
+            onClick={async () => {
+              setPendingRevise(true);
+              try {
+                await onApprove(false, {
+                  revise: true,
+                  note: selectedNote || undefined,
+                });
+              } finally {
+                setPendingRevise(false);
+              }
+            }}
+          >
+            {submitting && pendingRevise ? '提交中…' : '按建议修改'}
+          </button>
+        ) : null}
       </div>
 
       {stage === 'chapter-review' ? (
@@ -220,6 +353,114 @@ export function ApprovalCard(props: ApprovalCardProps) {
               fontSize: 12,
             }}
           />
+        </div>
+      ) : null}
+
+      {stage === 'chapter-review' && suggestions.length > 0 ? (
+        <div
+          style={{ marginTop: 8 }}
+          data-testid="approval-suggestions"
+          data-selected-count={selectedKeys.size}
+        >
+          <div className="muted small">
+            审校建议（{suggestions.length}，已选 {selectedKeys.size}）— 勾选后点击「按建议修改」
+          </div>
+          <ul
+            style={{
+              listStyle: 'none',
+              padding: 0,
+              margin: '4px 0 0 0',
+            }}
+          >
+            {suggestions.map((s) => {
+              const checked = selectedKeys.has(s.key);
+              return (
+                <li
+                  key={s.key}
+                  data-testid="approval-suggestion-row"
+                  data-suggestion-key={s.key}
+                  style={{
+                    display: 'flex',
+                    gap: 6,
+                    alignItems: 'flex-start',
+                    borderLeft: '3px solid var(--color-border-strong)',
+                    paddingLeft: 8,
+                    marginTop: 4,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    data-testid="approval-suggestion-checkbox"
+                    data-suggestion-key={s.key}
+                    checked={checked}
+                    disabled={submitting}
+                    onChange={() => toggleSuggestion(s.key)}
+                    style={{ marginTop: 3 }}
+                  />
+                  <div style={{ flex: 1 }}>
+                    {/* 行内直接展示建议正文（+问题引文/分类/严重度），
+                        让「应用此条」能一眼对上要改哪条；
+                        note 拼接始终以程序数据 s.text 为准。 */}
+                    <div
+                      className="small muted"
+                      style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}
+                    >
+                      <span className="badge">{s.source}</span>
+                      {s.category ? (
+                        <span className="badge">
+                          {CRITIC_CATEGORY_LABEL[s.category] ?? s.category}
+                        </span>
+                      ) : null}
+                      {s.severity ? (
+                        <span className="badge">
+                          {CRITIC_SEVERITY_LABEL[s.severity] ?? s.severity}
+                        </span>
+                      ) : null}
+                      <div style={{ flex: 1 }} />
+                      <button
+                        type="button"
+                        className="btn btn--sm"
+                        disabled={submitting}
+                        data-testid="approval-apply-suggestion"
+                        data-suggestion-key={s.key}
+                        onClick={async () => {
+                          setPendingSuggestionKey(s.key);
+                          try {
+                            await onApprove(false, {
+                              revise: true,
+                              note: s.text || undefined,
+                            });
+                          } finally {
+                            setPendingSuggestionKey(null);
+                          }
+                        }}
+                      >
+                        {submitting && pendingSuggestionKey === s.key
+                          ? '应用修改中…'
+                          : '应用此条'}
+                      </button>
+                    </div>
+                    {s.quote ? (
+                      <div
+                        className="muted small"
+                        data-testid="approval-suggestion-quote"
+                        style={{ marginTop: 2 }}
+                      >
+                        位置：{s.quote}
+                      </div>
+                    ) : null}
+                    <div
+                      className="small"
+                      data-testid="approval-suggestion-text"
+                      style={{ marginTop: 2, whiteSpace: 'pre-wrap' }}
+                    >
+                      {s.text}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         </div>
       ) : null}
     </div>

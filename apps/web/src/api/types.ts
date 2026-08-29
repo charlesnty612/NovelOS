@@ -133,7 +133,8 @@ export type EventType =
   | 'other';
 
 export interface PlotEvent {
-  event_id: string;
+  /** 后端 plot_events 列表/详情接口返回字段为 id（非 event_id） */
+  id: string;
   project_id: string;
   type: EventType;
   cause: Record<string, unknown> | null;
@@ -301,6 +302,9 @@ export interface WorkflowRun {
   // workflow_name 由 router 端通过 join 写入；后端 list_runs/get_run 暂未提供该字段，
   // 前端 UI 退化为显示 workflow_id；详见 workflow_runtime.runs.list_runs / get_run。
   workflow_name?: string;
+  // P1.1 恢复挂起的初始化：单 run GET 在 PAUSED 时携带的 pause_payload；
+  // 非 PAUSED / list 行可能缺省。前端 ProjectInitPanel 用其直接恢复 review 视图。
+  pause_payload?: ProjectInitPausePayload | null;
 }
 
 // ---- workflow start payload / responses -----------------------------------
@@ -310,6 +314,18 @@ export interface WorkflowStartPayload {
   expected_role?: string | null;
   target_word_count?: number | null;
   mock_providers?: Record<string, string[]> | null;
+  /**
+   * 按次选择模型档案：key 为 capability（reasoning / creative_writing / light 等），
+   * value 为 model_profiles.profile_id。未指定 capability 时后端走 capability_bindings 默认绑定。
+   * 仅 plan/write/review 三个动作支持（commit 由 Observer 节点不消耗 LLM，不透传）。
+   */
+  model_overrides?: Record<string, string> | null;
+  /**
+   * 写作模式（仅 chapter-write 生效）：true ⇒ 全新重写，忽略旧稿与改稿意见，
+   * 用于不同模型文风对比。缺省 / false ⇒ 按意见改稿（默认行为）。
+   * 后端启动请求体可选布尔字段 fresh_write，缺省 false。
+   */
+  fresh_write?: boolean | null;
 }
 
 export interface WorkflowStartResponse {
@@ -969,6 +985,8 @@ export interface ProjectInitBrief {
   target_words?: number | null;
   author_notes?: string | null;
   chapter_seed_count?: number | null;
+  /** 单章字数（字/章）；后端据此推导章节数 = round(target_words / chapter_word_count)。 */
+  chapter_word_count?: number | null;
 }
 
 export interface ProjectInitPayload {
@@ -982,6 +1000,13 @@ export interface ProjectInitPayload {
    * - 缺省 / false：维持旧的一次性生成模式，直接返回 COMPLETED。
    */
   step_mode?: boolean | null;
+  /**
+   * P1 project-init 增量：本次要生成的环节白名单。
+   * - 缺省 / null / undefined：后端按"全选"处理（生成全部 4 关卡）。
+   * - 指定数组：仅生成其中的环节；未列入的环节不生成、不暂停，复用项目已有设定。
+   *   合法取值：'premise' | 'world' | 'character' | 'outline'（与 init-status 的 stage 对齐）。
+   */
+  selected_stages?: string[] | null;
 }
 
 // ---- P1 project-init：分步审阅 pause_payload 契约 --------------------------
@@ -1008,6 +1033,24 @@ export interface ProjectInitResponse {
   pause_payload?: ProjectInitPausePayload | null;
 }
 
+// ---- P1 project-init：项目已有设定覆盖度探测 ------------------------------
+// 对齐后端 GET /projects/{id}/init-status：表单预勾选用，让用户对已生成的环节选择"跳过/重新生成"。
+// - stage：premise | world | character | outline（与 ProjectInitPausePayload.stage 同空间）。
+// - label：中文环节名（后端给死，前端展示用）。
+// - done：该环节是否已有设定（true ⇒ 用户可取消勾选 / false ⇒ 强制勾选）。
+// - detail：可选，给 UI 展示的附加信息（如"3 角色 / 5 章种子"）。
+export interface InitStageStatus {
+  stage: 'premise' | 'world' | 'character' | 'outline' | string;
+  label: string;
+  done: boolean;
+  detail?: string | null;
+}
+
+export interface InitStatusResponse {
+  stages: InitStageStatus[];
+  has_any_data: boolean;
+}
+
 // ---- P1 project-init：放行（resume）请求契约 --------------------------------
 // POST /runs/{run_id}/resume —— 仅在 project-init 分步审阅模式下被调用。
 // human_input.revisions 字典键为 output_key：premise_output / world_output /
@@ -1016,9 +1059,18 @@ export interface ProjectInitResponse {
 // 不变；这里新增独立的 ProjectInitResumeRequestPayload 以避免两套语义在同一类型
 // 上叠加可选字段导致的歧义。
 export interface ProjectInitResumeRequestPayload {
+  /**
+   * 后端 POST /runs/{run_id}/resume 在 project-init 分步审阅模式下接受的扩展字段：
+   * - human_input.revisions：放行（保留当前编辑走下一关）；regenerate=true 时可省
+   * - human_input.regenerate_note：「带意见重新生成」时携带的 AI 引导意见；可空（纯重试）
+   * - regenerate：true 时后端重跑当前挂起节点而非放行
+   * 两者二选一：放行走 revisions；重生成走 regenerate_note + regenerate=true。
+   */
   human_input: {
-    revisions: Record<string, Record<string, unknown>>;
+    revisions?: Record<string, Record<string, unknown>>;
+    regenerate_note?: string;
   };
+  regenerate?: boolean;
 }
 
 // ---------------------------------------------------------------------------

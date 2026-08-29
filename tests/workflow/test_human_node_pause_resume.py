@@ -18,6 +18,40 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations
 
 
+
+
+# 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
+async def _get_run_via_http(app, run_id: str) -> dict | None:
+    import httpx
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        r = await client.get(f"/api/runs/{run_id}")
+    finally:
+        await client.aclose()
+    if r.status_code == 404:
+        return None
+    return r.json()
+
+
+async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 60.0) -> dict:
+    """轮询直到 run.status ∈ expected；返回最终 run dict。
+
+    SQLite 跨连接视角 + 后台线程落库时延：单节点 mock 流程通常 < 1s 跑完，
+    但 polling 必须等到节点行 FAILED/COMPLETED 也写入——轮询间隔 0.2s 足以。
+    """
+    import asyncio, time
+    deadline = time.monotonic() + timeout
+    last_run = None
+    while time.monotonic() < deadline:
+        run = await _get_run_via_http(app, run_id)
+        last_run = run
+        if run is None:
+            raise AssertionError(f"run {run_id} disappeared")
+        if run["status"] in expected:
+            return run
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
 def _make_client(app) -> httpx.AsyncClient:
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
@@ -176,25 +210,35 @@ async def _setup_drafted_chapter(app, pid: str, cid: str) -> None:
         app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
         json={"author_intent": "intent", "mock_providers": mock_providers},
     )
-    assert r.status_code == 201
+    assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
     r = await _request(
         app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
         json={"mock_providers": mock_providers},
     )
-    assert r.status_code == 201
+    assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
     r = await _request(
         app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
         json={"mock_providers": mock_providers},
     )
-    assert r.status_code == 201
+    assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
     paused = r.json()
-    assert paused["status"] == "PAUSED"
+    paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
     r = await _request(
         app, "POST", f"/api/runs/{paused['run_id']}/resume",
         json={"human_input": {"approved": True}},
     )
     assert r.status_code == 200
-    assert r.json()["status"] == "COMPLETED"
+    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
 
 def test_commit_high_risk_pause_then_approve(tmp_path: Path):
@@ -216,8 +260,11 @@ def test_commit_high_risk_pause_then_approve(tmp_path: Path):
                 json={"mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             paused = r.json()
-            assert paused["status"] == "PAUSED", paused
+            paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
             assert "pause_payload" in paused
 
             # 校验 pause_payload 含 delta_id
@@ -230,7 +277,8 @@ def test_commit_high_risk_pause_then_approve(tmp_path: Path):
                 json={"human_input": {"approved": True}},
             )
             assert r.status_code == 200, r.text
-            assert r.json()["status"] == "COMPLETED"
+            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
             # chapter 应为 COMMITTED
             r = await _request(app, "GET", f"/api/chapters/{cid}")
@@ -257,16 +305,20 @@ def test_commit_high_risk_pause_then_reject(tmp_path: Path):
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/commit",
                 json={"mock_providers": mock_providers},
             )
-            assert r.status_code == 201
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             paused = r.json()
-            assert paused["status"] == "PAUSED"
+            paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
 
             r = await _request(
                 app, "POST", f"/api/runs/{paused['run_id']}/resume",
                 json={"human_input": {"approved": False}},
             )
             assert r.status_code == 200
-            assert r.json()["status"] == "FAILED"
+            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
+            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("FAILED",))
 
             # chapter 应保持 REVIEWED
             r = await _request(app, "GET", f"/api/chapters/{cid}")

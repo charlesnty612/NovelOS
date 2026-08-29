@@ -21,6 +21,40 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
 
+
+
+# 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
+async def _get_run_via_http(app, run_id: str) -> dict | None:
+    import httpx
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        r = await client.get(f"/api/runs/{run_id}")
+    finally:
+        await client.aclose()
+    if r.status_code == 404:
+        return None
+    return r.json()
+
+
+async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 60.0) -> dict:
+    """轮询直到 run.status ∈ expected；返回最终 run dict。
+
+    SQLite 跨连接视角 + 后台线程落库时延：单节点 mock 流程通常 < 1s 跑完，
+    但 polling 必须等到节点行 FAILED/COMPLETED 也写入——轮询间隔 0.2s 足以。
+    """
+    import asyncio, time
+    deadline = time.monotonic() + timeout
+    last_run = None
+    while time.monotonic() < deadline:
+        run = await _get_run_via_http(app, run_id)
+        last_run = run
+        if run is None:
+            raise AssertionError(f"run {run_id} disappeared")
+        if run["status"] in expected:
+            return run
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
 def _make_client(app) -> httpx.AsyncClient:
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
@@ -197,13 +231,21 @@ async def _plan_and_write(app, pid: str, cid: str, with_critic_script: list[str]
         json={"author_intent": "让女主第一次怀疑男主", "mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["status"] == "COMPLETED"
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
     r = await _request(
         app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
         json={"mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["status"] == "COMPLETED"
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +272,7 @@ def test_critic_ok_report_in_pause_payload(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             paused = r.json()
-            assert paused["status"] == "PAUSED"
+            paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
             payload = paused["pause_payload"]
             assert payload is not None
             assert payload["stage"] == "chapter-review"
@@ -296,7 +338,7 @@ def test_critic_non_json_degrades_and_keeps_pause(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             paused = r.json()
-            assert paused["status"] == "PAUSED"
+            paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
             payload = paused["pause_payload"]
             assert payload is not None
             assert payload["critic_status"] == "failed"
@@ -310,7 +352,8 @@ def test_critic_non_json_degrades_and_keeps_pause(tmp_path: Path):
                 json={"human_input": {"approved": True}},
             )
             assert r.status_code == 200, r.text
-            assert r.json()["status"] == "COMPLETED"
+            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.json()["status"] == "REVIEWED"
 
@@ -340,8 +383,9 @@ def test_critic_failed_reject_revise_still_works(tmp_path: Path):
                 # V3 P0-1：显式固定 always 验证 critic 降级 → revise 闭环
                 json={"mock_providers": {"critic": bad_script}, "critic_mode": "always"},
             )
-            paused = r.json()
-            assert paused["pause_payload"]["critic_status"] == "failed"
+            paused_run = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+            assert paused_run["pause_payload"]["critic_status"] == "failed"
+            paused = paused_run  # 后续 resume 引用 paused["run_id"]
 
             # revise:true 闭环
             r = await _request(
@@ -350,7 +394,8 @@ def test_critic_failed_reject_revise_still_works(tmp_path: Path):
             )
             assert r.status_code == 200, r.text
             r = await _request(app, "GET", f"/api/runs/{paused['run_id']}")
-            assert r.json()["status"] == "FAILED"
+            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
+            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("FAILED",))
             assert r.json()["error"] == "rejected-for-revision"
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.json()["status"] == "DRAFTED"
@@ -386,7 +431,7 @@ def test_critic_no_mock_degrades_safely(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             paused = r.json()
-            assert paused["status"] == "PAUSED"
+            paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
             # 无 model_config + 无 mock → ModelNotConfiguredError → 降级
             payload = paused["pause_payload"]
             assert payload["critic_status"] == "failed"
@@ -447,7 +492,7 @@ def test_critic_mode_off_skips_llm(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             paused = r.json()
-            assert paused["status"] == "PAUSED"
+            paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
             payload = paused["pause_payload"]
             assert payload["critic_status"] == "skipped"
             assert payload["critic_report"] is None
@@ -481,7 +526,7 @@ def test_critic_mode_sample_only_runs_every_5(tmp_path: Path):
                 },
             )
             assert r.status_code == 201, r.text
-            payload_a = r.json()["pause_payload"]
+            payload_a = (await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",)))["pause_payload"]
             assert payload_a["critic_status"] == "ok"
             assert payload_a["critic_mode"] == "sample"
             assert payload_a["critic_skipped"] is False
@@ -500,7 +545,8 @@ def test_critic_mode_sample_only_runs_every_5(tmp_path: Path):
                 },
             )
             assert r2.status_code == 201, r2.text
-            payload_b = r2.json()["pause_payload"]
+            r2_data = await _wait_run_terminal(app, r2.json()["run_id"], expected=("PAUSED",))
+            payload_b = r2_data["pause_payload"]
             assert payload_b["critic_status"] == "skipped"
             assert payload_b["critic_report"] is None
             assert payload_b["critic_skipped"] is True
@@ -530,7 +576,7 @@ def test_critic_mode_always_runs_regardless_of_number(tmp_path: Path):
                 },
             )
             assert r.status_code == 201, r.text
-            payload = r.json()["pause_payload"]
+            payload = (await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",)))["pause_payload"]
             assert payload["critic_status"] == "ok"
             assert payload["critic_mode"] == "always"
             assert payload["critic_skipped"] is False
@@ -557,7 +603,7 @@ def test_critic_mode_env_fallback_when_body_missing(tmp_path, monkeypatch):
                 json={"mock_providers": {"critic": _critic_ok_script()}},
             )
             assert r.status_code == 201, r.text
-            payload = r.json()["pause_payload"]
+            payload = (await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",)))["pause_payload"]
             assert payload["critic_status"] == "skipped"
             assert payload["critic_mode"] == "off"
             assert await _count_critic_logs(app) == 0
@@ -586,7 +632,7 @@ def test_critic_mode_body_overrides_env(tmp_path, monkeypatch):
                 },
             )
             assert r.status_code == 201, r.text
-            payload = r.json()["pause_payload"]
+            payload = (await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",)))["pause_payload"]
             assert payload["critic_status"] == "ok"
             assert payload["critic_mode"] == "always"
             assert await _count_critic_logs(app) == 1
@@ -611,7 +657,8 @@ def test_critic_default_mode_is_always_without_env_or_body(tmp_path: Path):
                 json={"mock_providers": {"critic": _critic_ok_script()}},
             )
             assert r.status_code == 201, r.text
-            payload = r.json()["pause_payload"]
+            run_data = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+            payload = run_data["pause_payload"]
             assert payload["critic_status"] == "ok"
             assert payload["critic_mode"] == "always"
             assert payload["critic_skipped"] is False
@@ -638,7 +685,7 @@ def test_critic_mode_invalid_env_falls_back_to_always(tmp_path, monkeypatch):
                 json={"mock_providers": {"critic": _critic_ok_script()}},
             )
             assert r.status_code == 201, r.text
-            payload = r.json()["pause_payload"]
+            payload = (await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",)))["pause_payload"]
             # 非法 env 值回退到默认 always；number=3 也调 critic
             assert payload["critic_status"] == "ok"
             assert payload["critic_mode"] == "always"
@@ -693,18 +740,27 @@ def test_review_report_includes_ai_pattern_hits(tmp_path: Path):
                 json={"author_intent": "让女主第一次怀疑男主", "mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
                 json={"mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
 
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
                 json={"mock_providers": mock_providers, "critic_mode": "always"},
             )
             assert r.status_code == 201, r.text
-            payload = r.json()["pause_payload"]
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            payload = (await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",)))["pause_payload"]
             review_report = payload["review_report"]
             assert "ai_pattern_hits" in review_report
             rule_ids = {h["rule_id"] for h in review_report["ai_pattern_hits"]}

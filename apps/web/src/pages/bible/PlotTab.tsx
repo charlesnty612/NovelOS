@@ -100,7 +100,7 @@ export function PlotTab({ projectId }: PlotTabProps) {
               </thead>
               <tbody>
                 {events.map((e) => (
-                  <tr key={e.event_id}>
+                  <tr key={e.id}>
                     <td>{e.type}</td>
                     <td>{e.status}</td>
                     <td className="muted small">
@@ -111,7 +111,7 @@ export function PlotTab({ projectId }: PlotTabProps) {
                     <td className="right">
                       <button
                         className="btn btn--sm btn--danger"
-                        onClick={() => void handleDelete(e.event_id)}
+                        onClick={() => void handleDelete(e.id)}
                       >
                         删除
                       </button>

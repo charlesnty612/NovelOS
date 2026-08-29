@@ -20,6 +20,7 @@ import logging
 from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
+from packages.core.db import get_connection
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
 from packages.domain.chapter.models import ChapterCreate
 from packages.domain.chapter.service import ChapterService
@@ -29,13 +30,49 @@ from packages.domain.plot.models import PLOT_EVENT_TYPES
 from packages.domain.plot.service import PlotService
 from packages.domain.project.models import ProjectCreate, ProjectUpdate
 from packages.domain.project.service import ProjectService
-from packages.domain.volume.models import VolumeCreate
+from packages.domain.volume.models import VolumeCreate, VolumeUpdate
 from packages.domain.volume.service import VolumeService
 from packages.domain.world.service import WorldService
 
 _log = logging.getLogger(__name__)
 
 DEFAULT_CHAPTER_SEED_COUNT = 10
+DEFAULT_CHAPTER_WORD_COUNT = 3000
+MIN_CHAPTER_SEED_COUNT = 10
+MAX_CHAPTER_SEED_COUNT = 500
+MIN_CHAPTER_WORD_COUNT = 500
+MAX_CHAPTER_WORD_COUNT = 20000
+
+
+def _clamp(value: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, value))
+
+
+def _coerce_chapter_word_count(raw: Any) -> int:
+    """把 brief/ctx 的 chapter_word_count 规范为合法 int；非法回退 DEFAULT。"""
+    if raw is None:
+        return DEFAULT_CHAPTER_WORD_COUNT
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_CHAPTER_WORD_COUNT
+    if v < MIN_CHAPTER_WORD_COUNT or v > MAX_CHAPTER_WORD_COUNT:
+        return DEFAULT_CHAPTER_WORD_COUNT
+    return v
+
+
+def _derive_chapter_seed_count(
+    target_words: Any, chapter_word_count: int
+) -> int:
+    """目标字数 / 单章字数 → 章节种子数；clamp 到 [MIN, MAX]；target_words 缺失或非正则回退 MIN。"""
+    try:
+        tw = int(target_words) if target_words is not None else 0
+    except (TypeError, ValueError):
+        tw = 0
+    if tw <= 0:
+        return MIN_CHAPTER_SEED_COUNT
+    derived = round(tw / chapter_word_count)
+    return _clamp(derived, MIN_CHAPTER_SEED_COUNT, MAX_CHAPTER_SEED_COUNT)
 
 
 # ---------------------------------------------------------------------------
@@ -70,18 +107,27 @@ def _resolve_stage_input(ctx: dict[str, Any], stage: str) -> dict[str, Any]:
     3. ``ctx[node_id].__pause_payload__.draft``（checkpoint 中的挂起草稿）。
 
     都拿不到时回退空 dict。
+
+    regenerate 场景：当 ``ctx.regenerate_stage == node_id``（当前关正在被重跑），
+    跳过第 1 层 revisions——重生成时不应沿用自身旧修订，否则意见无效。
+    注：``ctx.regenerate_stage`` 由引擎写入的是 node_id（如 ``world_builder``），
+    故此处必须与 ``node_id`` 比较，而非 ``stage``（如 ``world``）。
     """
     spec = STAGE_SPECS.get(stage) or {}
     output_key = spec.get("output_key") or ""
     node_id = spec.get("node_id") or ""
 
-    human_input = ctx.get("human_input") or {}
-    if isinstance(human_input, dict):
-        revisions = human_input.get("revisions") or {}
-        if isinstance(revisions, dict):
-            rev = revisions.get(output_key)
-            if isinstance(rev, dict):
-                return rev
+    # regenerate 模式下，重跑当前关时跳过自身 revisions 优先层
+    skip_revisions_layer = ctx.get("regenerate_stage") == node_id
+
+    if not skip_revisions_layer:
+        human_input = ctx.get("human_input") or {}
+        if isinstance(human_input, dict):
+            revisions = human_input.get("revisions") or {}
+            if isinstance(revisions, dict):
+                rev = revisions.get(output_key)
+                if isinstance(rev, dict):
+                    return rev
 
     direct = ctx.get(output_key)
     if isinstance(direct, dict):
@@ -98,6 +144,254 @@ def _resolve_stage_input(ctx: dict[str, Any], stage: str) -> dict[str, Any]:
     return {}
 
 
+def _stage_selected(ctx: dict[str, Any], stage: str) -> bool:
+    """判定当前关卡是否需要真正跑 AI 节点。
+
+    ``ctx["selected_stages"]`` 不存在时默认全选（保持与既有行为一致）；
+    存在时仅当 ``stage`` 在白名单内才返回 True。
+    """
+    selected = ctx.get("selected_stages")
+    if selected is None:
+        return True
+    if not isinstance(selected, (list, tuple)):
+        return True
+    return stage in set(selected)
+
+
+def _rebuild_premise_from_db(db_path: str, project_id: str | None) -> dict[str, Any]:
+    """从 projects 表重建 premise_output。project_id 缺失或无行时返回降级空结构。"""
+    base: dict[str, Any] = {
+        "title": "",
+        "genre": "",
+        "logline": "",
+        "positioning": "",
+        "selling_points": [],
+        "protagonist": {},
+        "_degraded": True,
+    }
+    if not project_id:
+        return base
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT name, genre, premise, target_words FROM projects WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return base
+    return {
+        "title": row["name"] or "",
+        "genre": row["genre"] or "",
+        "logline": "",
+        "positioning": row["premise"] or "",
+        "selling_points": [],
+        "protagonist": {},
+        "target_words": row["target_words"],
+        "_degraded": False,
+    }
+
+
+def _rebuild_world_from_db(db_path: str, project_id: str | None) -> dict[str, Any]:
+    """从 locations/factions/world_rules 三表重建 world_output。"""
+    empty: dict[str, Any] = {
+        "core_premise": "",
+        "rules": [],
+        "locations": [],
+        "factions": [],
+        "_degraded": True,
+    }
+    if not project_id:
+        return empty
+    conn = get_connection(db_path)
+    try:
+        loc_rows = conn.execute(
+            "SELECT name, statement, data_json FROM locations WHERE project_id = ? ORDER BY created_at",
+            (project_id,),
+        ).fetchall()
+        fac_rows = conn.execute(
+            "SELECT name, statement, data_json FROM factions WHERE project_id = ? ORDER BY created_at",
+            (project_id,),
+        ).fetchall()
+        rule_rows = conn.execute(
+            "SELECT name, statement, data_json FROM world_rules WHERE project_id = ? ORDER BY created_at",
+            (project_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    def _row_to_item(row: Any) -> dict[str, Any]:
+        data_raw = row["data_json"]
+        data: Any = {}
+        if data_raw:
+            try:
+                data = json.loads(data_raw)
+            except (TypeError, ValueError):
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        return {
+            "name": row["name"] or "",
+            "statement": row["statement"] or "",
+            "data": data,
+        }
+
+    locations = [_row_to_item(r) for r in loc_rows]
+    factions = [_row_to_item(r) for r in fac_rows]
+    rules = [_row_to_item(r) for r in rule_rows]
+    has_any = bool(locations or factions or rules)
+    return {
+        "core_premise": "",
+        "rules": rules,
+        "locations": locations,
+        "factions": factions,
+        "_degraded": not has_any,
+    }
+
+
+def _rebuild_character_from_db(db_path: str, project_id: str | None) -> dict[str, Any]:
+    """从 characters 表重建 character_output。"""
+    empty: dict[str, Any] = {"characters": [], "_degraded": True}
+    if not project_id:
+        return empty
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT name, role, core_json FROM characters WHERE project_id = ? ORDER BY created_at",
+            (project_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    chars: list[dict[str, Any]] = []
+    for row in rows:
+        core_raw = row["core_json"]
+        core: Any = {}
+        if core_raw:
+            try:
+                core = json.loads(core_raw)
+            except (TypeError, ValueError):
+                core = {}
+        if not isinstance(core, dict):
+            core = {}
+        chars.append({
+            "name": row["name"] or "",
+            "role": row["role"] or "supporting",
+            "core_json": core,
+        })
+    return {
+        "characters": chars,
+        "_degraded": not chars,
+    }
+
+
+def _rebuild_outline_from_db(
+    db_path: str,
+    project_id: str | None,
+    fallback_seed_count: int,
+    chapter_word_count: int = DEFAULT_CHAPTER_WORD_COUNT,
+) -> dict[str, Any]:
+    """从 volumes + chapters 表重建 outline_output。"""
+    empty: dict[str, Any] = {
+        "volume": {"number": 1, "title": "", "arc_summary": ""},
+        "chapter_seeds": [],
+        "_degraded": True,
+    }
+    if not project_id:
+        return empty
+    conn = get_connection(db_path)
+    try:
+        vol_row = conn.execute(
+            "SELECT volume_id, number, title FROM volumes WHERE project_id = ? ORDER BY number ASC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        chap_rows = conn.execute(
+            "SELECT number, title, plan_json FROM chapters WHERE project_id = ? ORDER BY number ASC",
+            (project_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if vol_row is None and not chap_rows:
+        return empty
+
+    volume: dict[str, Any] = {
+        "number": int(vol_row["number"]) if vol_row is not None else 1,
+        "title": vol_row["title"] if vol_row is not None and vol_row["title"] else "",
+        "arc_summary": "",
+    }
+
+    seeds: list[dict[str, Any]] = []
+    for row in chap_rows:
+        plan: Any = {}
+        if row["plan_json"]:
+            try:
+                plan = json.loads(row["plan_json"])
+            except (TypeError, ValueError):
+                plan = {}
+        if not isinstance(plan, dict):
+            plan = {}
+        seeds.append({
+            "number": int(row["number"]),
+            "title": row["title"] or "",
+            "role": str(plan.get("expected_role") or "setup"),
+            "one_sentence": str(plan.get("chapter_goal") or ""),
+            "expected_word_count": int(
+                plan.get("expected_word_count") or chapter_word_count
+            ),
+            "key_beats": plan.get("key_beats") or [],
+        })
+
+    if not seeds:
+        seeds = _fallback_chapter_seeds(fallback_seed_count, chapter_word_count)
+
+    return {
+        "volume": volume,
+        "chapter_seeds": seeds,
+        "_degraded": False,
+    }
+
+
+def _rebuild_stage_from_db(
+    ctx: dict[str, Any], stage: str
+) -> dict[str, Any]:
+    """从落库数据重建某环节输出，结构与 AI 节点产出同构（含 `_degraded` 字段）。"""
+    db_path = ctx.get("db_path") or ""
+    project_id = ctx.get("project_id")
+    if not db_path:
+        return {"_degraded": True}
+    if stage == "premise":
+        return _rebuild_premise_from_db(db_path, project_id)
+    if stage == "world":
+        return _rebuild_world_from_db(db_path, project_id)
+    if stage == "character":
+        return _rebuild_character_from_db(db_path, project_id)
+    if stage == "outline":
+        return _rebuild_outline_from_db(
+            db_path,
+            project_id,
+            int(ctx.get("chapter_seed_count") or DEFAULT_CHAPTER_SEED_COUNT),
+            chapter_word_count=int(
+                ctx.get("chapter_word_count") or DEFAULT_CHAPTER_WORD_COUNT
+            ),
+        )
+    return {"_degraded": True}
+
+
+def _regenerate_note(ctx: dict[str, Any]) -> str:
+    """读取重生成意见（trim 后的字符串）。无意见返回 ``""``。
+
+    供各 AI 节点的 payload 函数透传到 prompt/agent。
+    """
+    human_input = ctx.get("human_input") or {}
+    if not isinstance(human_input, dict):
+        return ""
+    raw = human_input.get("regenerate_note")
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip()
+
+
 # ---------------------------------------------------------------------------
 # Transform: load_brief
 # ---------------------------------------------------------------------------
@@ -107,7 +401,10 @@ def _load_brief_node(ctx: dict[str, Any]) -> dict[str, Any]:
     """Transform：规范化 brief，补默认值。
 
     期望 ctx["brief"] 为 dict，可含 genre / logline / platform / target_words /
-    title / author_notes。``chapter_seed_count`` 可从 brief 或 ctx 顶层取，默认 10。
+    title / author_notes。``chapter_seed_count`` 可从 brief 或 ctx 顶层取，
+    默认 10；用户未显式提供时按 target_words / chapter_word_count 推导并
+    clamp 到 [10, 500]。``chapter_word_count`` 默认 3000，可被 brief / ctx
+    覆盖；仅在 [500, 20000] 区间内才采纳。
     """
     brief = ctx.get("brief") or {}
     if not isinstance(brief, dict):
@@ -129,18 +426,39 @@ def _load_brief_node(ctx: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         normalized["target_words"] = None
 
-    seed_count = brief.get("chapter_seed_count")
-    if seed_count is None:
-        seed_count = ctx.get("chapter_seed_count")
-    try:
-        seed_count = int(seed_count) if seed_count is not None else DEFAULT_CHAPTER_SEED_COUNT
-    except (TypeError, ValueError):
-        seed_count = DEFAULT_CHAPTER_SEED_COUNT
-    if seed_count < 1:
-        seed_count = DEFAULT_CHAPTER_SEED_COUNT
+    # chapter_word_count：brief 优先，回退到 ctx 顶层；非法或越界回退 DEFAULT。
+    raw_cwc = brief.get("chapter_word_count")
+    if raw_cwc is None:
+        raw_cwc = ctx.get("chapter_word_count")
+    chapter_word_count = _coerce_chapter_word_count(raw_cwc)
 
+    # chapter_seed_count：用户显式传了（brief 或 ctx 都有视为显式），尊重用户值；
+    # 否则按 target_words / chapter_word_count 推导并 clamp 到 [10, 500]。
+    raw_seed = brief.get("chapter_seed_count")
+    user_explicit_seed = raw_seed is not None
+    if raw_seed is None:
+        raw_seed = ctx.get("chapter_seed_count")
+        if raw_seed is not None:
+            user_explicit_seed = True
+    if user_explicit_seed:
+        try:
+            seed_count = int(raw_seed)
+        except (TypeError, ValueError):
+            seed_count = DEFAULT_CHAPTER_SEED_COUNT
+        if seed_count < 1:
+            seed_count = DEFAULT_CHAPTER_SEED_COUNT
+    else:
+        seed_count = _derive_chapter_seed_count(
+            normalized["target_words"], chapter_word_count
+        )
+
+    normalized["chapter_word_count"] = chapter_word_count
     normalized["chapter_seed_count"] = seed_count
-    return {"brief": normalized, "chapter_seed_count": seed_count}
+    return {
+        "brief": normalized,
+        "chapter_seed_count": seed_count,
+        "chapter_word_count": chapter_word_count,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +468,7 @@ def _load_brief_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
 def _premise_payload(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = ctx.get("brief") or {}
-    return {
+    payload: dict[str, Any] = {
         "agent": "premise_designer",
         "prompt_version": "premise_designer:v1",
         "brief": {
@@ -162,10 +480,17 @@ def _premise_payload(ctx: dict[str, Any]) -> dict[str, Any]:
             "author_notes": brief.get("author_notes"),
         },
     }
+    note = _regenerate_note(ctx)
+    if note:
+        payload["regenerate_note"] = note
+    return payload
 
 
 def _run_premise_designer(ctx: dict[str, Any]) -> dict[str, Any]:
     """AI：题材定位 + 核心卖点 + 主角雏形。"""
+    if not _stage_selected(ctx, "premise"):
+        # 未选环节：跳过 AI 调用，从落库重建为下游 AI 的输入；不抛 PauseRequested。
+        return {"premise_output": _rebuild_stage_from_db(ctx, "premise")}
     db_path = ctx["db_path"]
     mock_script = (ctx.get("mock_providers") or {}).get("premise_designer")
     try:
@@ -225,7 +550,7 @@ def _world_payload(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = ctx.get("brief") or {}
     premise = _resolve_stage_input(ctx, "premise")
     protagonist = premise.get("protagonist") or {}
-    return {
+    payload: dict[str, Any] = {
         "agent": "world_builder",
         "prompt_version": "world_builder:v1",
         "brief": {
@@ -240,10 +565,16 @@ def _world_payload(ctx: dict[str, Any]) -> dict[str, Any]:
             "protagonist": protagonist,
         },
     }
+    note = _regenerate_note(ctx)
+    if note:
+        payload["regenerate_note"] = note
+    return payload
 
 
 def _run_world_builder(ctx: dict[str, Any]) -> dict[str, Any]:
     """AI：世界观生成（核心设定、规则、地理/势力骨架）。"""
+    if not _stage_selected(ctx, "world"):
+        return {"world_output": _rebuild_stage_from_db(ctx, "world")}
     db_path = ctx["db_path"]
     mock_script = (ctx.get("mock_providers") or {}).get("world_builder")
     try:
@@ -297,7 +628,7 @@ def _character_payload(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = ctx.get("brief") or {}
     premise = _resolve_stage_input(ctx, "premise")
     world = _resolve_stage_input(ctx, "world")
-    return {
+    payload: dict[str, Any] = {
         "agent": "character_designer",
         "prompt_version": "character_designer:v1",
         "brief": {
@@ -315,10 +646,16 @@ def _character_payload(ctx: dict[str, Any]) -> dict[str, Any]:
             "factions": [fac.get("name", "") for fac in world.get("factions") or []],
         },
     }
+    note = _regenerate_note(ctx)
+    if note:
+        payload["regenerate_note"] = note
+    return payload
 
 
 def _run_character_designer(ctx: dict[str, Any]) -> dict[str, Any]:
     """AI：核心角色 3-5 个（含动机、关系）。"""
+    if not _stage_selected(ctx, "character"):
+        return {"character_output": _rebuild_stage_from_db(ctx, "character")}
     db_path = ctx["db_path"]
     mock_script = (ctx.get("mock_providers") or {}).get("character_designer")
     try:
@@ -367,7 +704,7 @@ def _outline_payload(ctx: dict[str, Any]) -> dict[str, Any]:
     premise = _resolve_stage_input(ctx, "premise")
     world = _resolve_stage_input(ctx, "world")
     character = _resolve_stage_input(ctx, "character")
-    return {
+    payload: dict[str, Any] = {
         "agent": "volume_outliner",
         "prompt_version": "volume_outliner:v1",
         "brief": {
@@ -375,6 +712,10 @@ def _outline_payload(ctx: dict[str, Any]) -> dict[str, Any]:
             "logline": brief.get("logline"),
             "target_words": brief.get("target_words"),
             "chapter_seed_count": brief.get("chapter_seed_count", DEFAULT_CHAPTER_SEED_COUNT),
+            "chapter_word_count": brief.get(
+                "chapter_word_count", DEFAULT_CHAPTER_WORD_COUNT
+            ),
+            "author_notes": brief.get("author_notes"),
         },
         "premise": {
             "title": premise.get("title"),
@@ -389,10 +730,16 @@ def _outline_payload(ctx: dict[str, Any]) -> dict[str, Any]:
         },
         "characters": character.get("characters") or [],
     }
+    note = _regenerate_note(ctx)
+    if note:
+        payload["regenerate_note"] = note
+    return payload
 
 
 def _run_volume_outliner(ctx: dict[str, Any]) -> dict[str, Any]:
     """AI：第一卷卷纲 + 前 N 章章节种子。"""
+    if not _stage_selected(ctx, "outline"):
+        return {"outline_output": _rebuild_stage_from_db(ctx, "outline")}
     db_path = ctx["db_path"]
     mock_script = (ctx.get("mock_providers") or {}).get("volume_outliner")
     seed_count = ctx.get("chapter_seed_count", DEFAULT_CHAPTER_SEED_COUNT)
@@ -428,20 +775,28 @@ def _run_volume_outliner(ctx: dict[str, Any]) -> dict[str, Any]:
             "outline_output": {
                 "_degraded": True,
                 "volume": {"number": 1, "title": "", "arc_summary": ""},
-                "chapter_seeds": _fallback_chapter_seeds(seed_count),
+                "chapter_seeds": _fallback_chapter_seeds(
+                    seed_count,
+                    int(
+                        ctx.get("chapter_word_count")
+                        or DEFAULT_CHAPTER_WORD_COUNT
+                    ),
+                ),
                 "error": str(exc),
             }
         }
 
 
-def _fallback_chapter_seeds(count: int) -> list[dict[str, Any]]:
+def _fallback_chapter_seeds(
+    count: int, chapter_word_count: int = DEFAULT_CHAPTER_WORD_COUNT
+) -> list[dict[str, Any]]:
     return [
         {
             "number": i + 1,
             "title": f"第{i + 1}章",
             "role": "setup",
             "one_sentence": "",
-            "expected_word_count": 2200,
+            "expected_word_count": chapter_word_count,
             "key_beats": [],
         }
         for i in range(count)
@@ -451,6 +806,73 @@ def _fallback_chapter_seeds(count: int) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # State: persist_all
 # ---------------------------------------------------------------------------
+
+
+def _upsert_volume(db_path: Any, project_id: str, payload: VolumeCreate) -> dict:
+    """按 (project_id, number) upsert 卷。
+
+    - 已存在 → 更新 title（保持 volume_id 不变，避免下游引用断裂）。
+    - 不存在 → 走 VolumeService.create 路径。
+
+    修复「只重跑卷纲」时新生成的 outline 撞 UNIQUE(project_id, number) 唯一约束。
+    """
+    svc = VolumeService(db_path)
+    conn = get_connection(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT volume_id, title, status FROM volumes WHERE project_id = ? AND number = ?",
+            (project_id, payload.number),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        created = svc.create(project_id, payload)
+        return created
+    volume_id = row["volume_id"]
+    # title 变化才更新，避免无谓写盘
+    if row["title"] != payload.title:
+        svc.update(volume_id, VolumeUpdate(title=payload.title))
+    return svc.get(volume_id) or {
+        "volume_id": volume_id,
+        "project_id": project_id,
+        "number": payload.number,
+        "title": payload.title,
+        "status": row["status"],
+    }
+
+
+def _delete_chapters_for_volume(db_path: Any, volume_id: str) -> int:
+    """删除指定 volume 下已挂的所有 chapters（精确到 volume，不误删其他卷）。
+
+    - ChapterService 没有 list_by_volume / delete_by_volume；走直接 SQL。
+    - 删除顺序：先删关联 drafts（FK 在 0001_init.sql 中是 ON DELETE CASCADE，
+      这里仍然显式写是为了兼容可能的旧库迁移顺序）；再删 chapters。
+    - 返回删除的章节数。
+    """
+    conn = get_connection(str(db_path))
+    try:
+        # 收集待删 chapter_id，避免 DELETE...IN 误读 SQL 兼容性问题
+        rows = conn.execute(
+            "SELECT chapter_id FROM chapters WHERE volume_id = ?",
+            (volume_id,),
+        ).fetchall()
+        chapter_ids = [r["chapter_id"] for r in rows]
+        if not chapter_ids:
+            return 0
+        # drafts 表对 chapter_id 有 FK；先清掉子记录再删 chapter 行
+        placeholders = ",".join("?" for _ in chapter_ids)
+        conn.execute(
+            f"DELETE FROM drafts WHERE chapter_id IN ({placeholders})",
+            chapter_ids,
+        )
+        cur = conn.execute(
+            f"DELETE FROM chapters WHERE chapter_id IN ({placeholders})",
+            chapter_ids,
+        )
+        conn.commit()
+        return int(cur.rowcount)
+    finally:
+        conn.close()
 
 
 def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -509,58 +931,91 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
         )
         project_id = project["project_id"]
 
-    # 2) characters
+    # 2) characters —— 按 (project_id, name) 存在即跳过，避免「只重跑卷纲」时
+    #    旧角色被无条件重复 create 导致行数翻倍。
+    character_svc = CharacterService(db_path)
+    existing_char_names = {c["name"] for c in character_svc.list_by_project(project_id)}
     character_ids: list[str] = []
     for char in _normalize_characters(character.get("characters") or []):
-        created = CharacterService(db_path).create(
+        name = char["name"]
+        if name in existing_char_names:
+            # 沿用旧角色（首次落库或重跑 outline 时角色已存在）
+            existing = next(c for c in character_svc.list_by_project(project_id) if c["name"] == name)
+            character_ids.append(existing["character_id"])
+            continue
+        created = character_svc.create(
             project_id,
             CharacterCreate(
-                name=char["name"],
+                name=name,
                 role=char.get("role") or "supporting",
                 core_json=char.get("core_json") or {},
                 visibility="PUBLIC",
             ),
         )
+        existing_char_names.add(name)
         character_ids.append(created["character_id"])
 
-    # 3) world entities
+    # 3) world entities —— 同样按 (project_id, name) 存在即跳过。
     world_svc = WorldService(db_path)
+    existing_loc_names = {e.name for e in world_svc.list_locations(project_id)}
     location_ids: list[str] = []
     for loc in _normalize_locations(world.get("locations") or []):
+        name = loc["name"]
+        if name in existing_loc_names:
+            existing = next(e for e in world_svc.list_locations(project_id) if e.name == name)
+            location_ids.append(existing.id)
+            continue
         ent = world_svc.create_location(
             project_id=project_id,
-            name=loc["name"],
+            name=name,
             statement=loc.get("statement", ""),
             data=loc.get("data") or {},
             visibility="PUBLIC",
         )
+        existing_loc_names.add(name)
         location_ids.append(ent.id)
 
+    existing_fac_names = {e.name for e in world_svc.list_factions(project_id)}
     faction_ids: list[str] = []
     for fac in _normalize_factions(world.get("factions") or []):
+        name = fac["name"]
+        if name in existing_fac_names:
+            existing = next(e for e in world_svc.list_factions(project_id) if e.name == name)
+            faction_ids.append(existing.id)
+            continue
         ent = world_svc.create_faction(
             project_id=project_id,
-            name=fac["name"],
+            name=name,
             statement=fac.get("statement", ""),
             data=fac.get("data") or {},
             visibility="VISIBLE",
         )
+        existing_fac_names.add(name)
         faction_ids.append(ent.id)
 
+    existing_rule_names = {e.name for e in world_svc.list_world_rules(project_id)}
     rule_ids: list[str] = []
     for rule in _normalize_rules(world.get("rules") or []):
+        name = rule["name"]
+        if name in existing_rule_names:
+            existing = next(e for e in world_svc.list_world_rules(project_id) if e.name == name)
+            rule_ids.append(existing.id)
+            continue
         ent = world_svc.create_world_rule(
             project_id=project_id,
-            name=rule["name"],
+            name=name,
             statement=rule.get("statement", ""),
             data=rule.get("data") or {},
             visibility="PUBLIC",
         )
+        existing_rule_names.add(name)
         rule_ids.append(ent.id)
 
-    # 4) volume
+    # 4) volume —— upsert：同 (project, number) 已存在则更新 title，否则新建。
+    #    解决「只重跑卷纲」时旧空壳卷造成 UNIQUE 冲突的问题。
     volume_raw = outline.get("volume") or {"number": 1, "title": None, "arc_summary": ""}
-    volume = VolumeService(db_path).create(
+    volume = _upsert_volume(
+        db_path,
         project_id,
         VolumeCreate(
             number=int(volume_raw.get("number") or 1),
@@ -569,14 +1024,27 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
     )
     volume_id = volume["volume_id"]
 
-    # 5) chapters
+    # 5) chapters —— 先清后建（精确到当前 volume，旧章被替换，新章按新 seeds 创建）。
+    #    解决「只重跑卷纲」时旧空章与新章并存的问题。
+    _delete_chapters_for_volume(db_path, volume_id)
     chapter_svc = ChapterService(db_path)
     chapter_ids: list[str] = []
-    for seed in _normalize_chapter_seeds(outline.get("chapter_seeds") or [], ctx.get("chapter_seed_count", DEFAULT_CHAPTER_SEED_COUNT)):
+    for seed in _normalize_chapter_seeds(
+        outline.get("chapter_seeds") or [],
+        ctx.get("chapter_seed_count", DEFAULT_CHAPTER_SEED_COUNT),
+        chapter_word_count=int(
+            ctx.get("chapter_word_count") or DEFAULT_CHAPTER_WORD_COUNT
+        ),
+    ):
         plan_payload = {
             "chapter_goal": seed.get("one_sentence", ""),
             "expected_role": seed.get("role", "setup"),
             "key_beats": seed.get("key_beats") or [],
+            "expected_word_count": int(
+                seed.get("expected_word_count")
+                or ctx.get("chapter_word_count")
+                or DEFAULT_CHAPTER_WORD_COUNT
+            ),
             "core_conflict": "",
             "turning_point": "",
             "character_changes_planned": [],
@@ -723,7 +1191,11 @@ def _normalize_rules(rules: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _normalize_chapter_seeds(seeds: list[Any], fallback_count: int) -> list[dict[str, Any]]:
+def _normalize_chapter_seeds(
+    seeds: list[Any],
+    fallback_count: int,
+    chapter_word_count: int = DEFAULT_CHAPTER_WORD_COUNT,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for idx, item in enumerate(seeds):
         if not isinstance(item, dict):
@@ -739,9 +1211,9 @@ def _normalize_chapter_seeds(seeds: list[Any], fallback_count: int) -> list[dict
             role = "setup"
         word_count = item.get("expected_word_count")
         try:
-            word_count = int(word_count) if word_count is not None else 2200
+            word_count = int(word_count) if word_count is not None else chapter_word_count
         except (TypeError, ValueError):
-            word_count = 2200
+            word_count = chapter_word_count
         out.append({
             "number": number,
             "title": title,
@@ -751,7 +1223,7 @@ def _normalize_chapter_seeds(seeds: list[Any], fallback_count: int) -> list[dict
             "key_beats": item.get("key_beats") or [],
         })
     if not out:
-        out = _fallback_chapter_seeds(fallback_count)
+        out = _fallback_chapter_seeds(fallback_count, chapter_word_count)
     return out
 
 

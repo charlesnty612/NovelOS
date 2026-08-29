@@ -766,22 +766,17 @@ def _run_observer_with_summary_in_parallel(
         )
 
     def _recover_run_status() -> None:
-        """早产失败→恢复 run 状态防污染。
+        """早产失败→恢复 run 状态防污染（已退化为 no-op）。
 
-        runner 内部（packages/core/agent_runtime/runner.py:303-323 / 388）
-        会在异常路径里 ``_update_workflow_run(..., status='FAILED')`` 标记 run
-        行。本函数把这一步强制改回 ``COMPLETED``（error=None），避免 observer
-        三路并发吞掉 summary 异常后，workflow_runs 行被错误地标 FAILED。
-        最终终态（PAUSED/COMPLETED/FAILED）由 ``engine._run_nodes`` 在所有节点
-        完成后经 ``_finalize_run`` 覆盖——这里只是中间兜底。
+        历史行为：runner 异常路径会把 run 行盖成 FAILED，本函数改回 COMPLETED
+        兜底。2026-08 异步化改造后（1）runner 对引擎托管调用（node_run_id 非空）
+        一律不再盖戳（见 runner._finalize_agent_run_status）；（2）本函数自己盖
+        的 COMPLETED 反而成为污染源——异步轮询方（前端 2s 轮询 / 集成测试等待环）
+        会在 observer 节点仍在执行时读到假 COMPLETED 终态。run 终态完全由
+        ``engine._run_nodes`` 的 ``_finalize_run`` 收口，这里保留 no-op 维持
+        三条失败路径调用对称。
         """
-        try:
-            _update_workflow_run(db_path, run_id, status="COMPLETED", error=None)
-        except Exception as exc:  # noqa: BLE001 —— 恢复本身失败仅记日志
-            _logging.getLogger(__name__).warning(
-                "chapter_commit.observer summary early failure: workflow_run "
-                "status recovery failed: run_id=%s err=%s", run_id, exc,
-            )
+        return None
 
     def _run_summary() -> dict[str, Any] | None:
         """第三路：summarizer LLM 早产。

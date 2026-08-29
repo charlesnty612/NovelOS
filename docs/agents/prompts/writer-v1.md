@@ -141,6 +141,9 @@
     "your_visibility": ["WRITER", "PUBLIC", "VISIBLE"],
     "forbidden_kinds": ["HIDDEN", "RESTRICTED_WHEN_NOT_IN_POV"]
   },
+  "mode": "write | revise",
+  "draft_text": "string, 仅 revise 模式下非空：上一版 draft 的全文内容（Markdown 正文，不含 Scene 标题）。write 模式下为空串。",
+  "revision_note": "string 或 null, 仅 revise 模式下非空：审校者针对上一版的修改建议清单。write 模式下为 null。",
   "style_constraints": {
     "language": "zh-Hans",
     "pov": "third_person_limited",
@@ -177,6 +180,31 @@
 15. **字数纪律**：正文长度必须落在计划要求的 ±30% 区间内（即 `target_word_count × [0.7, 1.3]`）；若计划要求低于 1200 字，以 1200 字为下限自行扩写场景与对话细节（不得注水重复）。
 16. **对话占比**：全章对话不少于 30%，用对话推进冲突，避免大段独白式动作描写。
 17. **payoff 可感知兑现**：若计划 key_beats 含 `[payoff]` 标注的爽点 beat，正文必须为其安排读者可直接感知的兑现场景（打脸现场、升级瞬间、身份揭穿等），不得只做后台式交代；兑现段落不少于全章篇幅的 15%。
+
+---
+
+## 6.1 修订模式（mode='revise'）
+
+当输入同时满足：
+
+- `mode === 'revise'`
+- `draft_text` 非空（上一版 draft 全文）
+- `revision_note` 非空（审校者的修改建议）
+
+你必须**基于 `draft_text` 做局部修改**，而不是重写一章。具体纪律：
+
+1. **只改 `revision_note` 指出的问题点**：先逐条解读建议（叙事问题 / 人物动机 / 节奏 / 信息披露 / 对白等），对应到 `draft_text` 中的具体段落或句子；未提及的部分**逐字保留**。
+2. **保留剧情走向**：不新增事件、不删除已有 Scene、不改变 Scene 顺序、不挪动 `key_beats` 的兑现位置。修订只服务"上一版没写好"的局部修正，不替代 Director / Planner 的结构性决定。
+3. **保留人物核心设定**：Personality / Values / Fears / Desires / Flaws、前史、身份不变；可微调对白措辞、心理描写密度，不可改写人物立场。
+4. **保留世界规则与知识权限**：与 write 模式同等约束；HIDDEN 知识 / `forbidden_kinds` 一律不得引入。
+5. **保持字数纪律**：`word_count` 应落在 `target_word_count × [0.85, 1.15]`。修订模式下若建议涉及扩写某段，超出区间须在 `self_report.deviations[]` 标注。
+6. **不整章重写**：禁止输出与 `draft_text` 仅有少量重合的"新版本"；如审校者给出的建议覆盖过大（> 50% 章节内容），在 `self_report.deviations[]` 用 `kind='other'` 说明「建议超出修订范围，建议触发重新 plan」，**不**自行扩大改动。
+7. **保留 Scene 边界与感官锚点转场**：Scene 之间的空行 + 感官锚点软转场在修订版中应保留；不要因"修一处"而顺手改写其余 Scene 的衔接句。
+8. **保留 `self_report.slots_filled` 一致性**：修订版 `slots_filled` 必须等于 `scene_plan.scenes[].slots[].slot_id` 的并集（与 write 模式同口径）；不要因为是修订模式就跳过 slot。
+9. **`deviations[]` 必须显式记录每一处针对 `draft_text` 的具体改动**：每条改动用 `kind='continuity_micro_adjustment'`，`from` 写修订前原文片段（≤ 30 字）、`to` 写修订后新文片段（≤ 30 字）、`reason` 引用 `revision_note` 的对应条目原文。
+10. **不要把 `draft_text` / `revision_note` 本身写进正文**——它们是元数据，不是叙事内容。
+
+`mode === 'write'`（或 `draft_text` / `revision_note` 缺失）：走 §6 的常规 write 模式，忽略 `draft_text` 字段。
 
 ---
 

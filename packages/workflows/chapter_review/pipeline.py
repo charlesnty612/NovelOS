@@ -27,17 +27,18 @@ from typing import Any
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection
 from packages.core.ids import now_iso
+from packages.core.model_router.router import capability_for
 from packages.core.quality.ai_patterns import scan_ai_patterns
 from packages.core.quality.wordcount import classify_prose_length
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
 
 DEFAULT_FORBIDDEN_WORDS = ["仿佛", "如同", "本章目标"]
 _CRITIC_PROMPT_VERSION = "critic:v1"
-# 单章目标字数默认。必须与 ``packages.core.context_engine.builders._DEFAULT_TARGET_WORD_COUNT``
-# 保持同值（对齐 PRD §124 番茄单章 2000-2500）；不直接 import 是因为该常量在
-# context_engine 模块内为 private（_ 前缀），跨包引用 _ 开头常量不规范且易随模块
-# 内部重构漂移。本文件复制定义仅作为 chapter_review 内 fallback，与 builders 同步维护。
-_DEFAULT_TARGET_WORD_COUNT = 2200  # PRD §124 番茄单章 2000-2500
+# 单章目标字数默认。与 chapter_plan / project-init 的 DEFAULT_CHAPTER_WORD_COUNT(3000)
+# 同一口径（用户拍板单章约 3000 字）；builders._DEFAULT_TARGET_WORD_COUNT(2200) 是
+# context_engine 侧的另一 fallback 口径，两处允许不同：本值仅在请求体与 plan_json
+# 均未给出 expected_word_count 时兜底。
+_DEFAULT_TARGET_WORD_COUNT = 3000
 
 _log = logging.getLogger(__name__)
 
@@ -98,7 +99,24 @@ def _fetch_chapter_number(db_path: str, chapter_id: str) -> int | None:
 def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
-    target = int(ctx.get("target_word_count") or _DEFAULT_TARGET_WORD_COUNT)
+    # 目标字数：请求体显式传入 > plan_json.expected_word_count > 默认 3000
+    target = int(ctx.get("target_word_count") or 0)
+    if not target:
+        try:
+            conn = get_connection(db_path)
+            try:
+                prow = conn.execute(
+                    "SELECT plan_json FROM chapters WHERE chapter_id = ?", (chapter_id,)
+                ).fetchone()
+            finally:
+                conn.close()
+            if prow and prow["plan_json"]:
+                plan = json.loads(prow["plan_json"])
+                target = int(plan.get("expected_word_count") or 0)
+        except Exception:
+            target = 0
+    if not target:
+        target = _DEFAULT_TARGET_WORD_COUNT
 
     conn = get_connection(db_path)
     try:
@@ -350,6 +368,9 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
             node_run_id=ctx.get("_current_node_run_id"),
             expected="critic",
             mock_script=mock_script,
+            profile_id=(ctx.get("model_overrides") or {}).get(
+                capability_for("critic")
+            ),
         )
         if not isinstance(out, dict):
             raise ValueError(f"critic output not dict: {type(out).__name__}")

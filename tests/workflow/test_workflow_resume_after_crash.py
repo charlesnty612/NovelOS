@@ -21,6 +21,40 @@ from packages.core.workflow_runtime.runs import get_run
 from packages.workflows import get_workflow
 
 
+
+
+# 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
+async def _get_run_via_http(app, run_id: str) -> dict | None:
+    import httpx
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        r = await client.get(f"/api/runs/{run_id}")
+    finally:
+        await client.aclose()
+    if r.status_code == 404:
+        return None
+    return r.json()
+
+
+async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 60.0) -> dict:
+    """轮询直到 run.status ∈ expected；返回最终 run dict。
+
+    SQLite 跨连接视角 + 后台线程落库时延：单节点 mock 流程通常 < 1s 跑完，
+    但 polling 必须等到节点行 FAILED/COMPLETED 也写入——轮询间隔 0.2s 足以。
+    """
+    import asyncio, time
+    deadline = time.monotonic() + timeout
+    last_run = None
+    while time.monotonic() < deadline:
+        run = await _get_run_via_http(app, run_id)
+        last_run = run
+        if run is None:
+            raise AssertionError(f"run {run_id} disappeared")
+        if run["status"] in expected:
+            return run
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
 def _make_client(app) -> httpx.AsyncClient:
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
@@ -124,21 +158,30 @@ def test_resume_via_new_engine_instance(tmp_path: Path):
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
                 json={"author_intent": "intent", "mock_providers": mock_providers},
             )
-            assert r.status_code == 201
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
                 json={"mock_providers": mock_providers},
             )
-            assert r.status_code == 201
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
 
             # 启动 review → PAUSED（author_review 节点）
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
                 json={"mock_providers": mock_providers},
             )
-            assert r.status_code == 201
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             paused = r.json()
-            assert paused["status"] == "PAUSED"
+            paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
             run_id = paused["run_id"]
 
             # 校验：workflow_run_nodes 含 3 行（V1.3：basic_checks + critic_review + author_review PENDING）
@@ -169,7 +212,7 @@ def test_resume_via_new_engine_instance(tmp_path: Path):
 
             # 校验：run COMPLETED，chapter.status=REVIEWED
             run_after = get_run(db_path, run_id)
-            assert run_after["status"] == "COMPLETED"
+            run_after = await _wait_run_terminal(app, run_after["run_id"], expected=("COMPLETED",))
             assert run_after["current_node"] is None
 
             r = await _request(app, "GET", f"/api/chapters/{cid}")

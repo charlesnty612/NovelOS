@@ -166,9 +166,10 @@ describe('ApprovalCard', () => {
         }}
       />,
     );
+    // 该 warning 文本同时出现在 warnings 区块与审校建议列表行内
     expect(
-      screen.getByText(/字数 1500 偏离 target 2200 达 -31\.8%/),
-    ).toBeInTheDocument();
+      screen.getAllByText(/字数 1500 偏离 target 2200 达 -31\.8%/).length,
+    ).toBeGreaterThanOrEqual(1);
     // 禁用词命中：仿佛、如同 — 用前缀匹配避免 strict mode 文本分割
     expect(screen.getByText(/禁用词命中：/)).toHaveTextContent(
       '禁用词命中：仿佛、如同',
@@ -215,17 +216,20 @@ describe('ApprovalCard', () => {
     expect(screen.getByText(/女主情绪位移有锚点/)).toBeInTheDocument();
     // issue 数量徽标
     expect(screen.getByText(/问题（2）/)).toBeInTheDocument();
-    // issue 行 + 引用 + 建议
+    // issue 行 + 引用 + 建议（引用/建议正文同时出现在 critic 卡片与
+    // 审校建议列表行内，故用 getAllByText 允许多处匹配）
     expect(screen.getAllByTestId('critic-issue')).toHaveLength(2);
-    expect(screen.getByText(/「好」的时候，答得太轻/)).toBeInTheDocument();
     expect(
-      screen.getByText(/让男主主动提一句父亲遗物中的玉佩/),
-    ).toBeInTheDocument();
+      screen.getAllByText(/「好」的时候，答得太轻/).length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getAllByText(/让男主主动提一句父亲遗物中的玉佩/).length,
+    ).toBeGreaterThanOrEqual(1);
     // severity / category 徽标渲染了「高」「伏笔」「低」「AI 腔」
-    expect(screen.getByText('高')).toBeInTheDocument();
-    expect(screen.getByText('伏笔')).toBeInTheDocument();
-    expect(screen.getByText('低')).toBeInTheDocument();
-    expect(screen.getByText('AI 腔')).toBeInTheDocument();
+    expect(screen.getAllByText('高').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('伏笔').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('低').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('AI 腔').length).toBeGreaterThanOrEqual(1);
   });
 
   it('critic_status=failed 时显示「AI 审稿不可用」弱提示，不影响审批按钮', () => {
@@ -289,5 +293,158 @@ describe('ApprovalCard', () => {
     );
     expect(screen.queryByTestId('critic-report')).not.toBeInTheDocument();
     expect(screen.queryByTestId('critic-report-degraded')).not.toBeInTheDocument();
+  });
+
+  // -------- 「按建议修改」按钮 --------
+  // 来源主控任务：以实际 review_report / critic_report 数据结构为准。
+  // 建议来源优先级：critic_report.issues[].suggestion → review_report.warnings[] → review_report.errors[].message
+
+  /** 构造带 critic + warnings 的 pausePayload，触发按钮渲染 */
+  function withSuggestions(extra?: Partial<{ warnings: string[]; errors: { rule_id: string; severity: string; message: string }[] }>) {
+    return {
+      ...baseProps.pausePayload,
+      critic_status: 'ok',
+      critic_report: {
+        overall_comment: '总体可接受',
+        strengths: [],
+        issues: [
+          {
+            category: 'foreshadowing',
+            severity: 'high',
+            quote: '「好」的时候，答得太轻',
+            suggestion: '让男主主动提一句父亲遗物中的玉佩。',
+          },
+          {
+            category: 'ai_flavor',
+            severity: 'low',
+            quote: '竹影斜斜地落在青石地砖上',
+            suggestion: '删除或换成具体动作描写。',
+          },
+        ],
+      },
+      review_report: {
+        ...(baseProps.pausePayload['review_report'] as Record<string, unknown>),
+        warnings: extra?.warnings ?? [],
+        errors: extra?.errors ?? [],
+      },
+    };
+  }
+
+  it('chapter-review 含 critic_report.issues 时渲染「按建议修改」按钮与建议列表', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        pausePayload={withSuggestions() as Record<string, unknown>}
+      />,
+    );
+    expect(screen.getByTestId('approval-apply-suggestions')).toBeInTheDocument();
+    expect(screen.getByText('按建议修改')).toBeInTheDocument();
+    // 两条 critic suggestion 都作为 checkbox 行渲染
+    expect(screen.getAllByTestId('approval-suggestion-row')).toHaveLength(2);
+    // 默认全选 → data-selected-count=2
+    expect(screen.getByTestId('approval-suggestions')).toHaveAttribute(
+      'data-selected-count',
+      '2',
+    );
+  });
+
+  it('点击「按建议修改」以 revise:true + note（含所有建议文本）调用 onApprove', async () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ApprovalCard
+        {...baseProps}
+        onApprove={onApprove}
+        pausePayload={withSuggestions() as Record<string, unknown>}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('approval-apply-suggestions'));
+    await waitFor(() =>
+      expect(onApprove).toHaveBeenCalledWith(false, {
+        revise: true,
+        note: '让男主主动提一句父亲遗物中的玉佩。\n删除或换成具体动作描写。',
+      }),
+    );
+  });
+
+  it('取消勾选部分建议后，「按建议修改」只应用勾选的建议', async () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ApprovalCard
+        {...baseProps}
+        onApprove={onApprove}
+        pausePayload={withSuggestions() as Record<string, unknown>}
+      />,
+    );
+    const checkboxes = screen.getAllByTestId('approval-suggestion-checkbox');
+    expect(checkboxes).toHaveLength(2);
+    // 取消第二条
+    fireEvent.click(checkboxes[1]!);
+    // 选中计数 = 1
+    expect(screen.getByTestId('approval-suggestions')).toHaveAttribute(
+      'data-selected-count',
+      '1',
+    );
+    fireEvent.click(screen.getByTestId('approval-apply-suggestions'));
+    await waitFor(() =>
+      expect(onApprove).toHaveBeenCalledWith(false, {
+        revise: true,
+        note: '让男主主动提一句父亲遗物中的玉佩。',
+      }),
+    );
+  });
+
+  it('submitting=true 时「按建议修改」按钮被禁用', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        submitting={true}
+        pausePayload={withSuggestions() as Record<string, unknown>}
+      />,
+    );
+    expect(screen.getByTestId('approval-apply-suggestions')).toBeDisabled();
+  });
+
+  // -------- 「应用此条」（逐条按建议修改） --------
+
+  it('每条建议行有「应用此条」按钮', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        pausePayload={withSuggestions() as Record<string, unknown>}
+      />,
+    );
+    expect(screen.getAllByTestId('approval-apply-suggestion')).toHaveLength(2);
+  });
+
+  it('点击某条「应用此条」→ 仅以该条建议文本调用 onApprove(revise:true)', async () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ApprovalCard
+        {...baseProps}
+        onApprove={onApprove}
+        pausePayload={withSuggestions() as Record<string, unknown>}
+      />,
+    );
+    const applyBtns = screen.getAllByTestId('approval-apply-suggestion');
+    // 点第一条
+    fireEvent.click(applyBtns[0]!);
+    await waitFor(() =>
+      expect(onApprove).toHaveBeenCalledWith(false, {
+        revise: true,
+        note: '让男主主动提一句父亲遗物中的玉佩。',
+      }),
+    );
+  });
+
+  it('submitting=true 时「应用此条」按钮被禁用', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        submitting={true}
+        pausePayload={withSuggestions() as Record<string, unknown>}
+      />,
+    );
+    const applyBtns = screen.getAllByTestId('approval-apply-suggestion');
+    applyBtns.forEach((b) => expect(b).toBeDisabled());
   });
 });

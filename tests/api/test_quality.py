@@ -34,6 +34,40 @@ from packages.core.ids import new_id, now_iso
 from packages.core.quality.service import load_reference_texts
 
 
+
+
+# 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
+async def _get_run_via_http(app, run_id: str) -> dict | None:
+    import httpx
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        r = await client.get(f"/api/runs/{run_id}")
+    finally:
+        await client.aclose()
+    if r.status_code == 404:
+        return None
+    return r.json()
+
+
+async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 60.0) -> dict:
+    """轮询直到 run.status ∈ expected；返回最终 run dict。
+
+    SQLite 跨连接视角 + 后台线程落库时延：单节点 mock 流程通常 < 1s 跑完，
+    但 polling 必须等到节点行 FAILED/COMPLETED 也写入——轮询间隔 0.2s 足以。
+    """
+    import asyncio, time
+    deadline = time.monotonic() + timeout
+    last_run = None
+    while time.monotonic() < deadline:
+        run = await _get_run_via_http(app, run_id)
+        last_run = run
+        if run is None:
+            raise AssertionError(f"run {run_id} disappeared")
+        if run["status"] in expected:
+            return run
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
 def _make_client(app) -> httpx.AsyncClient:
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
@@ -490,7 +524,11 @@ async def _drive_full_pipeline_to_committed_or_failed(
         json={"author_intent": "test", "mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["status"] == "COMPLETED", r.json()
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
     # write
     r = await _request(
@@ -498,7 +536,11 @@ async def _drive_full_pipeline_to_committed_or_failed(
         json={"mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["status"] == "COMPLETED", r.json()
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
     # review (PAUSED, then resume approved)
     r = await _request(
@@ -506,13 +548,17 @@ async def _drive_full_pipeline_to_committed_or_failed(
         json={"mock_providers": mock_providers},
     )
     assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
     review_run = r.json()
-    assert review_run["status"] == "PAUSED", review_run
+    review_run = await _wait_run_terminal(app, review_run["run_id"], expected=("PAUSED",))
     r = await _request(
         app, "POST", f"/api/runs/{review_run['run_id']}/resume",
         json={"human_input": {"approved": True}},
     )
-    assert r.status_code == 200 and r.json()["status"] == "COMPLETED", r.text
+    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
     # commit
     r = await _request(
@@ -572,7 +618,7 @@ def test_quality_gate_enforce_blocks_dead_character_delta(tmp_path: Path):
             )
             assert commit_resp.status_code == 201, commit_resp.text
             body = commit_resp.json()
-            assert body["status"] == "FAILED", body
+            body = await _wait_run_terminal(app, body["run_id"], expected=("FAILED",))
             # chapter 保持 REVIEWED（blocked 后 commit node 不再执行）
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.json()["status"] == "REVIEWED", r.json()
@@ -627,7 +673,8 @@ def test_quality_gate_report_mode_does_not_block(tmp_path: Path):
                 quality_gate_mode="report",
             )
             assert commit_resp.status_code == 201, commit_resp.text
-            assert commit_resp.json()["status"] == "COMPLETED", commit_resp.json()
+            commit_data = await _wait_run_terminal(app, commit_resp.json()["run_id"], expected=("COMPLETED",))
+            assert commit_data["status"] == "COMPLETED", commit_data
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.json()["status"] == "COMMITTED", r.json()
             # report 已落库
@@ -682,7 +729,11 @@ def test_quality_gate_default_mode_is_enforce(tmp_path: Path):
                 json={"author_intent": "test", "mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
-            assert r.json()["status"] == "COMPLETED", r.json()
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
             # write
             r = await _request(
@@ -690,7 +741,11 @@ def test_quality_gate_default_mode_is_enforce(tmp_path: Path):
                 json={"mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
-            assert r.json()["status"] == "COMPLETED", r.json()
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
             # review + approve
             r = await _request(
@@ -698,13 +753,17 @@ def test_quality_gate_default_mode_is_enforce(tmp_path: Path):
                 json={"mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             review_run = r.json()
-            assert review_run["status"] == "PAUSED", review_run
+            review_run = await _wait_run_terminal(app, review_run["run_id"], expected=("PAUSED",))
             r = await _request(
                 app, "POST", f"/api/runs/{review_run['run_id']}/resume",
                 json={"human_input": {"approved": True}, "auto_revise_max": 0},
             )
-            assert r.status_code == 200 and r.json()["status"] == "COMPLETED", r.text
+            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
             # commit：默认 enforce → 应 FAILED
             r = await _request(
@@ -712,8 +771,11 @@ def test_quality_gate_default_mode_is_enforce(tmp_path: Path):
                 json={"mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             body = r.json()
-            assert body["status"] == "FAILED", body
+            body = await _wait_run_terminal(app, body["run_id"], expected=("FAILED",))
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.json()["status"] == "REVIEWED", r.json()
 

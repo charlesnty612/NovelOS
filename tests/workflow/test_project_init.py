@@ -19,6 +19,40 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
 
+
+
+# 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
+async def _get_run_via_http(app, run_id: str) -> dict | None:
+    import httpx
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        r = await client.get(f"/api/runs/{run_id}")
+    finally:
+        await client.aclose()
+    if r.status_code == 404:
+        return None
+    return r.json()
+
+
+async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 60.0) -> dict:
+    """轮询直到 run.status ∈ expected；返回最终 run dict。
+
+    SQLite 跨连接视角 + 后台线程落库时延：单节点 mock 流程通常 < 1s 跑完，
+    但 polling 必须等到节点行 FAILED/COMPLETED 也写入——轮询间隔 0.2s 足以。
+    """
+    import asyncio, time
+    deadline = time.monotonic() + timeout
+    last_run = None
+    while time.monotonic() < deadline:
+        run = await _get_run_via_http(app, run_id)
+        last_run = run
+        if run is None:
+            raise AssertionError(f"run {run_id} disappeared")
+        if run["status"] in expected:
+            return run
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
 def _make_client(app) -> httpx.AsyncClient:
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
@@ -219,9 +253,9 @@ def test_project_init_creates_new_project(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             payload = r.json()
-            assert payload["status"] == "COMPLETED", payload
-            assert payload["current_node"] is None
-            project_id = payload["project_id"]
+            run_data = await _wait_run_terminal(app, payload["run_id"], expected=("COMPLETED",))
+            assert run_data["current_node"] is None
+            project_id = (run_data.get("checkpoint_json") or {}).get("project_id")
             assert project_id and project_id.startswith("prj_")
 
             # 校验项目字段
@@ -326,8 +360,8 @@ def test_project_init_attaches_to_existing_project(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             payload = r.json()
-            assert payload["status"] == "COMPLETED"
-            assert payload["project_id"] == pid
+            run_data = await _wait_run_terminal(app, payload["run_id"], expected=("COMPLETED",))
+            assert (run_data.get("checkpoint_json") or {}).get("project_id") == pid
 
             r = await _request(app, "GET", f"/api/projects/{pid}")
             assert r.status_code == 200
@@ -375,9 +409,9 @@ def test_project_init_degrades_on_agent_failure(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             payload = r.json()
-            assert payload["status"] == "COMPLETED"
-
             run_id = payload["run_id"]
+            await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+
             conn = get_connection(app.state.settings.db_path)
             try:
                 # 校验 world_builder 节点是 COMPLETED（节点级降级不抛错）
@@ -387,12 +421,15 @@ def test_project_init_degrades_on_agent_failure(tmp_path: Path):
                 ).fetchone()
             finally:
                 conn.close()
-            assert row["status"] == "COMPLETED"
+            # 之前 await _wait_run_terminal(app, row["run_id"]...) 是 patcher 错误插的——row 是 SQL 结果不含 run_id
+            run_data = await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
             output = json.loads(row["output_json"])
             assert output["world_output"]["_degraded"] is True
 
             # 项目仍应落库成功
-            pid = payload["project_id"]
+            run_data = await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            pid = (run_data.get("checkpoint_json") or {}).get("project_id")
+            assert pid
             r = await _request(app, "GET", f"/api/projects/{pid}/characters")
             assert r.status_code == 200
             assert len(r.json()) == 3
@@ -470,7 +507,7 @@ def test_project_init_step_mode_pauses_at_first_stage(tmp_path: Path):
             assert r.status_code == 201, r.text
             payload = r.json()
 
-            assert payload["status"] == "PAUSED", payload
+            payload = await _wait_run_terminal(app, payload["run_id"], expected=("PAUSED",))
             assert payload["current_node"] == "premise_designer"
             assert "pause_payload" in payload
             pp = payload["pause_payload"]
@@ -483,8 +520,8 @@ def test_project_init_step_mode_pauses_at_first_stage(tmp_path: Path):
             assert draft["genre"] == "玄幻"
             assert "selling_points" in draft and draft["selling_points"]
 
-            # 尚未落库
-            assert payload["project_id"] is None
+            # 尚未落库：run dict 无 project_id 字段
+            assert "project_id" not in payload or payload["project_id"] is None
 
     asyncio.run(run())
 
@@ -510,7 +547,7 @@ def test_project_init_step_mode_revision_advances_to_next_stage(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             start = r.json()
-            assert start["status"] == "PAUSED"
+            start = await _wait_run_terminal(app, start["run_id"], expected=("PAUSED",))
             run_id = start["run_id"]
 
             # 人工修订 premise_output，回灌推进
@@ -530,7 +567,16 @@ def test_project_init_step_mode_revision_advances_to_next_stage(tmp_path: Path):
             )
             assert r.status_code == 200, r.text
             after = r.json()
-            assert after["status"] == "PAUSED", after
+            # 异步化后：resume_async 立刻返回 RUNNING，_run_nodes 在后台推进。
+            # 等到 PAUSED 时 current_node 已经被 _finalize_run(PAUSED, current_node=node_id) 写入。
+            # 但后台线程可能与 GET 之间有微小延迟，循环重试以稳定。
+            import asyncio
+            run_id = after["run_id"]
+            for _ in range(50):
+                after = await _wait_run_terminal(app, run_id, expected=("PAUSED",))
+                if after["current_node"] == "world_builder":
+                    break
+                await asyncio.sleep(0.1)
             assert after["current_node"] == "world_builder"
             pp = after["pause_payload"]
             assert pp["stage"] == "world"
@@ -562,7 +608,8 @@ def test_project_init_step_mode_completes_with_persistence(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             run_id = r.json()["run_id"]
-            assert r.json()["status"] == "PAUSED"
+            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("PAUSED",))
 
             # 第 1 关：premise 修订（关键校验——回灌后落库的 name 应来自此处）
             r = await _request(
@@ -585,11 +632,19 @@ def test_project_init_step_mode_completes_with_persistence(tmp_path: Path):
                 },
             )
             assert r.status_code == 200, r.text
-            assert r.json()["status"] == "PAUSED"
-            assert r.json()["current_node"] == "world_builder"
+            import asyncio
+            r2 = None
+            for _ in range(50):
+                r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+                if r2["current_node"] == "world_builder":
+                    break
+                await asyncio.sleep(0.1)
+            assert r2["current_node"] == "world_builder"
 
             # 第 2~4 关：不带 revisions 直接推进（依赖 _resolve_stage_input
             # 第二层 ctx[output_key] 兜底）
+            last_r_run = None
+            import asyncio as _aio
             for _ in range(3):
                 r = await _request(
                     app,
@@ -598,15 +653,18 @@ def test_project_init_step_mode_completes_with_persistence(tmp_path: Path):
                     json={"human_input": {}},
                 )
                 assert r.status_code == 200, r.text
-                st = r.json()["status"]
-                if st == "COMPLETED":
+                r_run = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED", "COMPLETED"))
+                last_r_run = r_run
+                if r_run["status"] == "COMPLETED":
                     break
-                assert st == "PAUSED", r.json()
-            assert r.json()["status"] == "COMPLETED", r.json()
+                # 异步化后：等前一个后台线程 _finalize_run 事务提交（SQLite WAL 写入可见）
+                await _aio.sleep(0.2)
+            assert last_r_run is not None
+            r2 = await _wait_run_terminal(app, last_r_run["run_id"], expected=("COMPLETED",))
             # 最后一关 resume 返回即应含 project_id（与落库项目一致）
-            completed_resp = r.json()
-            assert "project_id" in completed_resp, completed_resp
-            project_id = completed_resp["project_id"]
+            # 异步化后：resume_async 立即返回 RUNNING，project_id 需从 checkpoint_json 读
+            run_data = await _wait_run_terminal(app, last_r_run["run_id"], expected=("COMPLETED",))
+            project_id = (run_data.get("checkpoint_json") or {}).get("project_id")
             assert project_id and project_id.startswith("prj_")
 
             # 校验修订后的 premise 穿透到 projects.name
@@ -666,7 +724,7 @@ def test_project_init_default_no_step_mode_regression(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             payload = r.json()
-            assert payload["status"] == "COMPLETED", payload
+            payload = await _wait_run_terminal(app, payload["run_id"], expected=("COMPLETED",))
             assert payload["current_node"] is None
             assert "pause_payload" not in payload
 
@@ -684,7 +742,7 @@ def test_project_init_default_no_step_mode_regression(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             payload = r.json()
-            assert payload["status"] == "COMPLETED"
+            payload = await _wait_run_terminal(app, payload["run_id"], expected=("COMPLETED",))
             assert "pause_payload" not in payload
 
     asyncio.run(run())

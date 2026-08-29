@@ -38,6 +38,7 @@ import type {
   Hook,
   HookCreatePayload,
   HookUpdatePayload,
+  InitStatusResponse,
   ModelConfig,
   ModelConfigCreatePayload,
   ModelConfigTestResult,
@@ -82,6 +83,10 @@ export const projectsApi = {
   // brief 字段在调用端已做 trim；project_id 在 payload 内携带（UI 入口仅在已有项目页打开）。
   init: (payload: ProjectInitPayload) =>
     api.post<ProjectInitResponse>('/projects/init', payload),
+  // P1 project-init 增量：探测项目已有设定覆盖度，用于表单预勾选。
+  // 对齐 packages/core/api/routers/projects.py GET /projects/{id}/init-status。
+  initStatus: (projectId: string) =>
+    api.get<InitStatusResponse>(`/projects/${projectId}/init-status`),
 };
 
 // ------------------------------------------------------------- style samples

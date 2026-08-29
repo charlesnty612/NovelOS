@@ -13,6 +13,8 @@
 1. **第一卷信息**（volume）：number=1、title、arc_summary。
 2. **章节种子**（chapter_seeds）：前 N 章（N 由 brief.chapter_seed_count 指定，默认 10），每章含 number、title、role、one_sentence、expected_word_count、key_beats。
 
+> **作者备注（brief.author_notes）**：若提供，它是作者对本书的**最高优先级创作约束**，必须严格遵循并落实到卷纲与章节种子中（如主角身份、核心关系、基调、禁忌等），不得与其冲突。
+
 ## 3. Output Schema
 
 只输出一个合法 JSON 对象，不要 Markdown 围栏、不要解释。

@@ -165,6 +165,20 @@ def _record_call(
         conn.close()
 
 
+def _finalize_agent_run_status(
+    db_path: Path | str,
+    run_id: str,
+    node_run_id: str | None,
+    *,
+    status: str,
+    error: str | None = None,
+) -> None:
+    """按调用归属决定是否收尾 run 行：引擎托管（node_run_id 非空）不盖戳。"""
+    if node_run_id is not None:
+        return
+    _update_workflow_run(db_path, run_id, status=status, error=error)
+
+
 def _update_workflow_run(
     db_path: Path | str,
     run_id: str,
@@ -172,7 +186,15 @@ def _update_workflow_run(
     status: str = "COMPLETED",
     error: str | None = None,
 ) -> None:
-    """把 ``workflow_runs`` 行收尾（COMPLETED / FAILED）。"""
+    """把 ``workflow_runs`` 行收尾（COMPLETED / FAILED）。
+
+    仅限**独立 run_agent 调用**（node_run_id=None，run 行由本次调用自己负责收尾）。
+    引擎托管的调用（node_run_id 非空）禁止盖戳：run 的终态（COMPLETED/PAUSED/FAILED）
+    由 ``engine._run_nodes`` 在全部节点结束后经 ``_finalize_run`` 统一写入——
+    agent 调用是 run 中途的一步，提前盖 COMPLETED/FAILED 会让异步轮询方
+    （前端 2s 轮询 / auto_revise 等待环）把中间态误读为终态（2026-08 观察者
+    并行测试与实时进度横幅双双踩雷的根因）。
+    """
     conn = get_connection(db_path)
     try:
         conn.execute(
@@ -208,6 +230,7 @@ def run_agent(
     expected: str | None = None,
     mock_script: Any = None,
     capability_override: str | None = None,
+    profile_id: str | None = None,
 ) -> dict[str, Any]:
     """执行一次 agent 调用。
 
@@ -224,6 +247,11 @@ def run_agent(
     的场景（如 observer 双 leg：leg A 走 reasoning，leg B 走 light）。``None`` 时
     走原 :func:`capability_for(agent_name)` 逻辑，向后兼容全部已有调用方与测试。
     仅在 mock_script 为 None 的真实链路下生效（mock 路径不消费 capability）。
+
+    单次 run 级模型档案覆盖：``profile_id`` 非 None 时透传给
+    :meth:`ModelRouter.call_with_fallback` 作为强制唯一候选；mock_script 非空
+    路径不消费 ``profile_id``（mock 自带脚本，与 provider 选择正交）。``None``
+    时维持既有 capability_bindings / model_configs 链路，零行为变更。
     """
     db_path = str(db_path)
     # 兜底：任何异常路径都把 workflow_runs 收尾为 FAILED
@@ -297,7 +325,7 @@ def run_agent(
                     completion = provider.complete(messages)
                 else:
                     completion, config_row = ModelRouter(db_path).call_with_fallback(
-                        capability, messages
+                        capability, messages, profile_id=profile_id
                     )
                     model_id = f"{config_row['provider']}/{config_row['model']}"
             except Exception as exc:  # noqa: BLE001
@@ -318,7 +346,7 @@ def run_agent(
                     error=f"provider error: {exc}",
                     retry_count=0,
                 )
-                _update_workflow_run(db_path, run_id, status="FAILED", error=str(exc))
+                _finalize_agent_run_status(db_path, run_id, node_run_id, status="FAILED", error=str(exc))
                 finalised = True
                 raise
 
@@ -361,7 +389,7 @@ def run_agent(
                 error=f"output invalid after retry: {last_error}",
                 retry_count=retry_count,
             )
-            _update_workflow_run(db_path, run_id, status="FAILED", error=last_error)
+            _finalize_agent_run_status(db_path, run_id, node_run_id, status="FAILED", error=last_error)
             finalised = True
             raise AgentOutputError(
                 f"agent {agent_name!r} output invalid after 1 retry: {last_error}",
@@ -385,7 +413,7 @@ def run_agent(
             error=observer_warn,  # observer 越权剥离 → 写 ai_call_logs.error 为 warn 前缀
             retry_count=retry_count,
         )
-        _update_workflow_run(db_path, run_id, status="COMPLETED")
+        _finalize_agent_run_status(db_path, run_id, node_run_id, status="COMPLETED")
         finalised = True
         return output_log  # type: ignore[return-value]
     except BaseException:
@@ -393,7 +421,7 @@ def run_agent(
             # 兜底：任何未走 finalize 的异常（如 PromptNotFoundError /
             # ModelNotConfiguredError / Provider 构造异常）一律收尾为 FAILED
             try:
-                _update_workflow_run(db_path, run_id, status="FAILED", error="unhandled exception")
+                _finalize_agent_run_status(db_path, run_id, node_run_id, status="FAILED", error="unhandled exception")
             except Exception:  # noqa: BLE001
                 # finalize 本身失败也不能吞掉原异常
                 pass

@@ -33,6 +33,7 @@ export function ChapterStatusBadge({ status }: { status: ChapterStatus }) {
 
 export function WorkflowRunStatusBadge({
   status,
+  error,
 }: {
   status:
     | 'PENDING'
@@ -41,17 +42,23 @@ export function WorkflowRunStatusBadge({
     | 'COMPLETED'
     | 'FAILED'
     | 'CANCELLED';
+  /** run 的 error 字段：FAILED 时用于区分「按建议驳回改稿」（rejected-for-revision）
+   *  与真失败——前者是审校改稿回路的正常语义，渲染成中性徽标避免误导为红色失败。 */
+  error?: string | null;
 }) {
-  const cls =
-    status === 'RUNNING'
-      ? 'badge badge--chapter-running'
-      : status === 'PAUSED'
-      ? 'badge badge--chapter-paused'
-      : status === 'COMPLETED'
-      ? 'badge badge--chapter-committed'
-      : status === 'FAILED' || status === 'CANCELLED'
-      ? 'badge badge--chapter-failed'
-      : 'badge badge--chapter-planned';
+  const rejectedForRevision =
+    status === 'FAILED' && (error ?? '').includes('rejected-for-revision');
+  const cls = rejectedForRevision
+    ? 'badge badge--chapter-rejected'
+    : status === 'RUNNING'
+    ? 'badge badge--chapter-running'
+    : status === 'PAUSED'
+    ? 'badge badge--chapter-paused'
+    : status === 'COMPLETED'
+    ? 'badge badge--chapter-committed'
+    : status === 'FAILED' || status === 'CANCELLED'
+    ? 'badge badge--chapter-failed'
+    : 'badge badge--chapter-planned';
   const label: Record<typeof status, string> = {
     PENDING: '等待',
     RUNNING: '运行中',
@@ -60,5 +67,9 @@ export function WorkflowRunStatusBadge({
     FAILED: '失败',
     CANCELLED: '已取消',
   };
-  return <span className={cls}>{label[status]}</span>;
+  return (
+    <span className={cls}>
+      {rejectedForRevision ? '已驳回·改稿' : label[status]}
+    </span>
+  );
 }

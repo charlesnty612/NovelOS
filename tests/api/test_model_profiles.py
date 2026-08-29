@@ -334,3 +334,137 @@ def test_create_missing_required_returns_422(tmp_path: Path):
             assert r.status_code == 422, r.text
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 5. 契约兼容：params（新契约，前端约定） vs params_json（旧语义）
+# ---------------------------------------------------------------------------
+
+
+def test_create_accepts_params_key_with_api_key_and_base_url(tmp_path: Path):
+    """POST 用 `params` 键（含 base_url + api_key）→ 201 且 GET 回读 params 内含
+    base_url、api_key 被 has_api_key=true 标记；DB 中 api_key 落库（明文 → 测试直读 DB）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(
+                app, "POST", "/api/model-profiles",
+                json={
+                    "name": "alpha",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "params": {
+                        "base_url": "https://api.openai.com/v1",
+                        "api_key": _SECRET,
+                    },
+                },
+            )
+            assert r.status_code == 201, r.text
+            body = r.json()
+            assert body["params_json"]["base_url"] == "https://api.openai.com/v1"
+            assert body["params_json"]["api_key"] == "***"
+            assert body["has_api_key"] is True
+            pid = body["profile_id"]
+
+            # GET 回读
+            r = await _request(app, "GET", f"/api/model-profiles/{pid}")
+            assert r.status_code == 200
+            detail = r.json()
+            assert detail["params_json"]["base_url"] == "https://api.openai.com/v1"
+            assert detail["has_api_key"] is True
+
+            # DB 直查：api_key 必须落库（POST 路径下明文 api_key 写库）
+            settings = app.state.settings
+            conn = get_connection(settings.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT params_json FROM model_profiles WHERE profile_id = ?",
+                    (pid,),
+                ).fetchone()
+            finally:
+                conn.close()
+            stored = json.loads(row["params_json"])
+            assert stored["api_key"] == _SECRET
+            assert stored["base_url"] == "https://api.openai.com/v1"
+
+    asyncio.run(run())
+
+
+def test_patch_accepts_params_key_partial_update(tmp_path: Path):
+    """PATCH 用 `params` 键部分更新 base_url → 生效；其它键（已有 api_key）保留。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            # 建档案，初始含 api_key + base_url
+            r = await _request(
+                app, "POST", "/api/model-profiles",
+                json={
+                    "name": "alpha",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "params": {
+                        "base_url": "https://api.openai.com/v1",
+                        "api_key": _SECRET,
+                    },
+                },
+            )
+            pid = r.json()["profile_id"]
+
+            # PATCH：仅传 `params` 改 base_url；api_key 仍为 _MASK → 保留原值
+            r = await _request(
+                app, "PATCH", f"/api/model-profiles/{pid}",
+                json={
+                    "params": {
+                        "base_url": "https://api.openai.com/v2",
+                        "api_key": "***",
+                    },
+                },
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["params_json"]["base_url"] == "https://api.openai.com/v2"
+            assert r.json()["has_api_key"] is True
+
+            # DB 直查：api_key 原值未丢，base_url 已切到 v2
+            settings = app.state.settings
+            conn = get_connection(settings.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT params_json FROM model_profiles WHERE profile_id = ?",
+                    (pid,),
+                ).fetchone()
+            finally:
+                conn.close()
+            stored = json.loads(row["params_json"])
+            assert stored["api_key"] == _SECRET
+            assert stored["base_url"] == "https://api.openai.com/v2"
+
+    asyncio.run(run())
+
+
+def test_create_accepts_params_json_key_legacy(tmp_path: Path):
+    """旧语义 `params_json` 键仍工作（防回归）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(
+                app, "POST", "/api/model-profiles",
+                json={
+                    "name": "alpha",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "params_json": {
+                        "base_url": "https://api.openai.com/v1",
+                        "api_key": _SECRET,
+                    },
+                },
+            )
+            assert r.status_code == 201, r.text
+            body = r.json()
+            assert body["params_json"]["base_url"] == "https://api.openai.com/v1"
+            assert body["params_json"]["api_key"] == "***"
+            assert body["has_api_key"] is True
+
+    asyncio.run(run())

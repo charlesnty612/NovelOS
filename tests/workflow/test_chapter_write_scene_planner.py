@@ -19,6 +19,40 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
 
+
+
+# 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
+async def _get_run_via_http(app, run_id: str) -> dict | None:
+    import httpx
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        r = await client.get(f"/api/runs/{run_id}")
+    finally:
+        await client.aclose()
+    if r.status_code == 404:
+        return None
+    return r.json()
+
+
+async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 60.0) -> dict:
+    """轮询直到 run.status ∈ expected；返回最终 run dict。
+
+    SQLite 跨连接视角 + 后台线程落库时延：单节点 mock 流程通常 < 1s 跑完，
+    但 polling 必须等到节点行 FAILED/COMPLETED 也写入——轮询间隔 0.2s 足以。
+    """
+    import asyncio, time
+    deadline = time.monotonic() + timeout
+    last_run = None
+    while time.monotonic() < deadline:
+        run = await _get_run_via_http(app, run_id)
+        last_run = run
+        if run is None:
+            raise AssertionError(f"run {run_id} disappeared")
+        if run["status"] in expected:
+            return run
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
 def _make_client(app) -> httpx.AsyncClient:
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
@@ -211,7 +245,11 @@ def test_scene_planner_ok_produces_structured_scene_plan(tmp_path: Path):
                 json={"author_intent": "让女主第一次怀疑男主", "mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
-            assert r.json()["status"] == "COMPLETED"
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
             # write
             r = await _request(
@@ -219,8 +257,11 @@ def test_scene_planner_ok_produces_structured_scene_plan(tmp_path: Path):
                 json={"mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             body = r.json()
-            assert body["status"] == "COMPLETED", body
+            body = await _wait_run_terminal(app, body["run_id"], expected=("COMPLETED",))
 
             # 校验 ai_call_logs 有 scene_planner:v1 调用
             conn = get_connection(app.state.settings.db_path)
@@ -264,14 +305,20 @@ def test_scene_planner_bad_output_falls_back_to_stub(tmp_path: Path):
                 json={"author_intent": "意图", "mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
 
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
                 json={"mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             body = r.json()
-            assert body["status"] == "COMPLETED", body
+            body = await _wait_run_terminal(app, body["run_id"], expected=("COMPLETED",))
 
             # 校验 drafts 已写
             conn = get_connection(app.state.settings.db_path)
@@ -308,13 +355,20 @@ def test_scene_planner_missing_mock_degrades_to_stub(tmp_path: Path):
                 json={"author_intent": "意图", "mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
 
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
                 json={"mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
-            assert r.json()["status"] == "COMPLETED"
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
 
             # model config 缺失时 runner 仍会写一条 ai_call_logs（error 字段非空）
             conn = get_connection(app.state.settings.db_path)

@@ -2,10 +2,16 @@
 
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
-  // 后端 ISO 形如 "2026-08-23T10:30:00" 或 "...Z"；只截到分钟足够 UI 展示。
-  const m = iso.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/);
-  if (m) return `${m[1]} ${m[2]}`;
-  return iso;
+  // 后端 ISO 可能带时区（UTC: "...Z" / "+00:00"）或不带；用 Date 解析以正确转换到本地时区。
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    // 非标准 ISO：退化为原样截取
+    const m = iso.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/);
+    if (m) return `${m[1]} ${m[2]}`;
+    return iso;
+  }
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 export function formatJson(value: unknown): string {
