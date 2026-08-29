@@ -443,6 +443,49 @@ def test_patch_accepts_params_key_partial_update(tmp_path: Path):
     asyncio.run(run())
 
 
+def test_patch_with_both_params_and_params_json_returns_422(tmp_path: Path):
+    """PATCH 同时带 `params` 与 `params_json` 两键 → 422（互斥校验）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            # 先建一条档案，保证行存在；双键冲突校验应先于 404 触发。
+            r = await _request(
+                app, "POST", "/api/model-profiles",
+                json={
+                    "name": "alpha",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "params": {"base_url": "https://api.openai.com/v1", "api_key": _SECRET},
+                },
+            )
+            assert r.status_code == 201, r.text
+            pid = r.json()["profile_id"]
+
+            # 双键同传 → 422
+            r = await _request(
+                app, "PATCH", f"/api/model-profiles/{pid}",
+                json={
+                    "params": {"base_url": "https://a"},
+                    "params_json": {"base_url": "https://b"},
+                },
+            )
+            assert r.status_code == 422, r.text
+            assert "params" in r.text and "params_json" in r.text
+
+            # 双键同传 + 行不存在 → 仍应 422（互斥校验先于 404），不返回 404。
+            r = await _request(
+                app, "PATCH", "/api/model-profiles/no-such-id",
+                json={
+                    "params": {"base_url": "https://a"},
+                    "params_json": {"base_url": "https://b"},
+                },
+            )
+            assert r.status_code == 422, r.text
+
+    asyncio.run(run())
+
+
 def test_create_accepts_params_json_key_legacy(tmp_path: Path):
     """旧语义 `params_json` 键仍工作（防回归）。"""
     app = _create_app(tmp_path)

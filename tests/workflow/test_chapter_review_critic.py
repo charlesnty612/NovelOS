@@ -390,13 +390,18 @@ def test_critic_failed_reject_revise_still_works(tmp_path: Path):
             # revise:true 闭环
             r = await _request(
                 app, "POST", f"/api/runs/{paused['run_id']}/resume",
-                json={"human_input": {"approved": False, "revise": True, "note": "AI 评审失败仍可人工驳回"}},
+                json={
+                    "human_input": {"approved": False, "revise": True, "note": "AI 评审失败仍可人工驳回"},
+                    # P0：auto_revise 默认开启，本测试只验 rejected-for-revision 闭环，显式关闭
+                    # 防止 daemon 链路在后台跑新 write/review run 干扰后续断言。
+                    "auto_revise_max": 0,
+                },
             )
             assert r.status_code == 200, r.text
             r = await _request(app, "GET", f"/api/runs/{paused['run_id']}")
             r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
             r2 = await _wait_run_terminal(app, r2["run_id"], expected=("FAILED",))
-            assert r.json()["error"] == "rejected-for-revision"
+            assert r2["error"] == "rejected-for-revision"
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.json()["status"] == "DRAFTED"
             assert r.json()["plan_json"]["revision_note"] == "AI 评审失败仍可人工驳回"

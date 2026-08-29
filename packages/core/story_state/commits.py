@@ -553,6 +553,133 @@ def commit_delta(
                 conn.execute("DELETE FROM plot_events WHERE event_id = ?", (eid,))
             for hid in _inverse_cleanup.get("remove_hook_ids") or []:
                 conn.execute("DELETE FROM hooks WHERE hook_id = ?", (hid,))
+            # 关系：按 (from,to,type) DELETE（write_through 对 op=remove 走 else 分支不删）
+            for key in _inverse_cleanup.get("remove_relationship_keys") or []:
+                if isinstance(key, (list, tuple)) and len(key) == 3:
+                    conn.execute(
+                        """
+                        DELETE FROM relationships
+                        WHERE from_character_id = ? AND to_character_id = ? AND relation_type = ?
+                        """,
+                        (key[0], key[1], key[2]),
+                    )
+            # 关系：逆 update → 恢复 before state_json
+            for entry in _inverse_cleanup.get("restore_relationship_states") or []:
+                if not isinstance(entry, dict):
+                    continue
+                before = entry.get("before")
+                if not isinstance(before, dict):
+                    continue
+                conn.execute(
+                    """
+                    UPDATE relationships
+                    SET state_json = ?
+                    WHERE from_character_id = ? AND to_character_id = ? AND relation_type = ?
+                    """,
+                    (_dump(before), entry.get("from_character_id"),
+                     entry.get("to_character_id"), entry.get("relation_type")),
+                )
+            # 世界实体：location / faction / world_rule 逆 add → DELETE
+            for wid in _inverse_cleanup.get("remove_location_ids") or []:
+                conn.execute("DELETE FROM locations WHERE location_id = ?", (wid,))
+            for wid in _inverse_cleanup.get("remove_faction_ids") or []:
+                conn.execute("DELETE FROM factions WHERE faction_id = ?", (wid,))
+            for wid in _inverse_cleanup.get("remove_world_rule_ids") or []:
+                conn.execute("DELETE FROM world_rules WHERE world_rule_id = ?", (wid,))
+            # 世界实体：逆 update → 恢复 before data_json
+            for entry in _inverse_cleanup.get("restore_location_states") or []:
+                if not isinstance(entry, dict):
+                    continue
+                before = entry.get("before")
+                wid = entry.get("world_id")
+                if not wid or not isinstance(before, dict):
+                    continue
+                # 写回完整 before 形态（name/statement/data_json/visibility/who_knows）
+                conn.execute(
+                    """
+                    UPDATE locations
+                    SET name = COALESCE(?, name),
+                        statement = COALESCE(?, statement),
+                        data_json = ?,
+                        updated_at = ?
+                    WHERE location_id = ?
+                    """,
+                    (
+                        (before or {}).get("name") if isinstance(before, dict) else None,
+                        (before or {}).get("statement") if isinstance(before, dict) else None,
+                        _dump((before or {}).get("data_json") or {}),
+                        now_iso(),
+                        wid,
+                    ),
+                )
+            for entry in _inverse_cleanup.get("restore_faction_states") or []:
+                if not isinstance(entry, dict):
+                    continue
+                before = entry.get("before")
+                wid = entry.get("world_id")
+                if not wid or not isinstance(before, dict):
+                    continue
+                conn.execute(
+                    """
+                    UPDATE factions
+                    SET name = COALESCE(?, name),
+                        statement = COALESCE(?, statement),
+                        data_json = ?,
+                        updated_at = ?
+                    WHERE faction_id = ?
+                    """,
+                    (
+                        (before or {}).get("name") if isinstance(before, dict) else None,
+                        (before or {}).get("statement") if isinstance(before, dict) else None,
+                        _dump((before or {}).get("data_json") or {}),
+                        now_iso(),
+                        wid,
+                    ),
+                )
+            for entry in _inverse_cleanup.get("restore_world_rule_states") or []:
+                if not isinstance(entry, dict):
+                    continue
+                before = entry.get("before")
+                wid = entry.get("world_id")
+                if not wid or not isinstance(before, dict):
+                    continue
+                conn.execute(
+                    """
+                    UPDATE world_rules
+                    SET name = COALESCE(?, name),
+                        statement = COALESCE(?, statement),
+                        data_json = ?,
+                        updated_at = ?
+                    WHERE world_rule_id = ?
+                    """,
+                    (
+                        (before or {}).get("name") if isinstance(before, dict) else None,
+                        (before or {}).get("statement") if isinstance(before, dict) else None,
+                        _dump((before or {}).get("data_json") or {}),
+                        now_iso(),
+                        wid,
+                    ),
+                )
+            # narrative_debts：逆 add → DELETE；逆 update → 恢复 status/severity
+            for did in _inverse_cleanup.get("remove_debt_ids") or []:
+                conn.execute("DELETE FROM narrative_debts WHERE debt_id = ?", (did,))
+            for entry in _inverse_cleanup.get("restore_debt_states") or []:
+                if not isinstance(entry, dict):
+                    continue
+                before = entry.get("before") or {}
+                did = entry.get("debt_id")
+                if not did:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE narrative_debts
+                    SET status = COALESCE(?, status),
+                        severity = COALESCE(?, severity),
+                        updated_at = ?
+                    WHERE debt_id = ?
+                    """,
+                    (before.get("status"), before.get("severity"), now_iso(), did),
+                )
 
         # 8) story_states 新快照：仅 main 路径写（分支不写）
         snapshot_ref: str | None = None
@@ -661,10 +788,15 @@ def rollback_commit(
         current_version=current_version,
     )
 
-    # 从逆 delta 收集「需在领域表删除」的事件 / hook ID；
+    # 从逆 delta 收集「需在领域表删除/恢复」的事件 / hook / 关系 / 世界 / 债务 hints；
     # 逆 Delta 的 new_events / new_hooks 数组保持空（schema 禁止 remove op），
     # 这里从原始 delta 收集要被清除的 ID（因为回滚是「撤销原 commit」语义）。
-    cleanup: dict[str, list[str]] = {
+    # 关系 / 世界 / 债务：write_through 对 op=remove 不会 DELETE（已存在的行需要显式 hint），
+    # 对 op=update 不会回滚 before 值（需显式 hint 在 cleanup 阶段执行）；
+    # 因此逆 add（→op=remove）需要收集 world_id / debt_id / (from,to,type) 用于 DELETE；
+    # 逆 update（→op=update）需要收集 before 值用于 UPDATE 恢复。
+    inv = inverse["delta"]
+    cleanup: dict = {
         "remove_event_ids": [
             ev.get("event_id")
             for ev in (original_delta.get("new_events") or [])
@@ -675,10 +807,100 @@ def rollback_commit(
             for nh in (original_delta.get("new_hooks") or [])
             if nh.get("hook_id")
         ],
+        "remove_location_ids": [],
+        "restore_location_states": [],
+        "remove_faction_ids": [],
+        "restore_faction_states": [],
+        "remove_world_rule_ids": [],
+        "restore_world_rule_states": [],
+        "remove_relationship_keys": [],
+        "restore_relationship_states": [],
+        "remove_debt_ids": [],
+        "restore_debt_states": [],
     }
     # 过滤空值
     cleanup["remove_event_ids"] = [x for x in cleanup["remove_event_ids"] if x]
     cleanup["remove_hook_ids"] = [x for x in cleanup["remove_hook_ids"] if x]
+
+    # world_changes：按 kind 分桶收集（逆 add → DELETE；逆 update → 恢复 before）
+    for w in inv.get("world_changes") or []:
+        kind = w.get("world_kind")
+        wid = w.get("world_id")
+        op = w.get("op")
+        if not wid or not kind:
+            continue
+        if kind == "location":
+            if op == "remove":
+                cleanup["remove_location_ids"].append(wid)
+            elif op == "update":
+                cleanup["restore_location_states"].append(
+                    {"world_id": wid, "before": w.get("before")}
+                )
+        elif kind == "faction":
+            if op == "remove":
+                cleanup["remove_faction_ids"].append(wid)
+            elif op == "update":
+                cleanup["restore_faction_states"].append(
+                    {"world_id": wid, "before": w.get("before")}
+                )
+        elif kind == "rule":
+            if op == "remove":
+                cleanup["remove_world_rule_ids"].append(wid)
+            elif op == "update":
+                cleanup["restore_world_rule_states"].append(
+                    {"world_id": wid, "before": w.get("before")}
+                )
+        # politics/economy/event/time 等无对应领域表，跳过
+
+    # relationship_changes：按 (from,to,type) 收集
+    for r in inv.get("relationship_changes") or []:
+        key = (
+            r.get("from_character_id"),
+            r.get("to_character_id"),
+            r.get("relation_type"),
+        )
+        if not all(key):
+            continue
+        op = r.get("op")
+        if op == "remove":
+            cleanup["remove_relationship_keys"].append(list(key))
+        elif op == "update":
+            cleanup["restore_relationship_states"].append({
+                "from_character_id": key[0],
+                "to_character_id": key[1],
+                "relation_type": key[2],
+                "before": r.get("before"),
+            })
+
+    # debt_changes：
+    # - 逆 add → op=remove：DELETE narrative_debts 行（hints.remove_debt_ids）。
+    # - 逆 update → op=update：write_through 已在 commit_delta 步骤 5 把
+    #   narrative_debts.status/severity 用逆 delta 的 status_after/severity_after
+    #   （即原 status_before/severity_before，「应恢复到的 before 值」）恢复回去。
+    #   hints 阶段收集的 restore_debt_states 是为「逆 delta 没覆盖字段时的兜底」，
+    #   必须取**原 delta 的 before 值**（status_before/severity_before），而不能
+    #   取逆 delta 的 status_before——后者在 build_inverse_delta 中已与原 after
+    #   互换，等价于「当前 DB 的错误值」，会把刚恢复好的正确值再次覆盖回原 after。
+    #   此前 bug：restore_debt_states 从 inv 读 status_before/status_severity，
+    #   而 inv 的 status_before 来自原 status_after=acknowledged，导致 hints 把
+    #   narrative_debts.status 又盖回 acknowledged，破坏恢复语义。
+    for d in original_delta.get("debt_changes") or []:
+        did = d.get("debt_id")
+        if not did:
+            continue
+        op = d.get("op")
+        if op == "remove":
+            # 逆 add（→remove）走 remove_debt_ids；这里也对账：原 op=remove
+            # 在逆 Delta 中变 add，对应的 hints 是空（write_through 会 INSERT）。
+            cleanup["remove_debt_ids"].append(did)
+        elif op == "update":
+            cleanup["restore_debt_states"].append({
+                "debt_id": did,
+                "before": {
+                    "status": d.get("status_before"),
+                    "severity": d.get("severity_before"),
+                },
+            })
 
     # 走 submit + commit 全流程（author_approval.approved=True 由调用方/UI 强制）
     ap = dict(author_approval or {})

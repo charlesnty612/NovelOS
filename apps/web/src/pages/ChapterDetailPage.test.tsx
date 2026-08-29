@@ -580,9 +580,9 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
     } as unknown as WorkflowRun);
   }
 
-  it('e) 驳回（approved=false）触发自动回路 → 提交期间显示 revise-loop-banner，完成后消失', async () => {
+  it('e) 驳回（approved=false）→ 不触发自动回路,不显示 revise-loop-banner', async () => {
     mockReviewRunPending();
-    // resume 是异步挂起的（模拟自动回路同步阻塞中），resolve 后清除横幅
+    // resume 是异步挂起的（模拟后端处理中）
     let resolveResume!: (v: WorkflowStartResponse) => void;
     vi.mocked(workflowsApi.resume).mockImplementation(
       () => new Promise((res) => { resolveResume = res as (v: WorkflowStartResponse) => void; }),
@@ -592,20 +592,18 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
 
     // 审批卡片出现（PAUSED review run）
     const approveBtn = await waitFor(() => screen.getByTestId('approval-reject'));
-    // 点击「驳回」→ handleResume(approved=false) → reviseLooping=true
+    // 点击「驳回」→ handleResume(approved=false) → 不再启动 reviseLooping（纯驳回由后端 FAILED(rejected) 收尾）
     fireEvent.click(approveBtn);
 
-    // 过渡横幅出现
+    // 等候一轮 microtask 让 setState 落定
     await waitFor(() => {
-      expect(screen.getByTestId('revise-loop-banner')).toBeInTheDocument();
+      expect(vi.mocked(workflowsApi.resume)).toHaveBeenCalled();
     });
-    expect(screen.getByTestId('revise-loop-banner').textContent).toMatch(/自动改稿回路进行中/);
+    // 纯驳回不显示回路横幅
+    expect(screen.queryByTestId('revise-loop-banner')).toBeNull();
 
-    // resume resolve（回路完成）→ 横幅消失
+    // resolve 兜底清理,避免未完成的 promise 影响后续用例
     resolveResume!({ run_id: 'wfr_review_001', status: 'COMPLETED', current_node: null, pause_payload: null } as WorkflowStartResponse);
-    await waitFor(() => {
-      expect(screen.queryByTestId('revise-loop-banner')).toBeNull();
-    });
   });
 
   it('f) 批准（approved=true）→ 不显示 revise-loop-banner', async () => {
@@ -623,7 +621,7 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
     });
   });
 
-  it('g) 驳回并改稿（revise=true）→ 也显示 revise-loop-banner', async () => {
+  it('g) 驳回并改稿（revise=true）→ 显示 revise-loop-banner', async () => {
     mockReviewRunPending();
     let resolveResume!: (v: WorkflowStartResponse) => void;
     vi.mocked(workflowsApi.resume).mockImplementation(
@@ -632,14 +630,15 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
 
     renderPage();
 
-    // 「驳回并改稿」按钮（如有）；若无独立按钮，用驳回 + 改稿 note 触发
-    const reviseBtn = await waitFor(() => screen.getByTestId('approval-reject'));
-    // ApprovalCard 驳回带 revise 时通过 note 输入触发；这里直接点驳回（approved=false 即触发回路）
+    // 点击 ApprovalCard 上的「驳回并改稿」按钮(独立 testid,带 revise=true),
+    // → handleResume(false, { revise: true }) → 触发自动改稿回路。
+    const reviseBtn = await waitFor(() => screen.getByTestId('approval-revise'));
     fireEvent.click(reviseBtn);
 
     await waitFor(() => {
       expect(screen.getByTestId('revise-loop-banner')).toBeInTheDocument();
     });
+    expect(screen.getByTestId('revise-loop-banner').textContent).toMatch(/自动改稿回路进行中/);
     resolveResume!({ run_id: 'wfr_review_001', status: 'COMPLETED', current_node: null, pause_payload: null } as WorkflowStartResponse);
     await waitFor(() => {
       expect(screen.queryByTestId('revise-loop-banner')).toBeNull();
@@ -851,5 +850,118 @@ describe('ChapterDetailPage - 按次模型档案选择', () => {
     const call = vi.mocked(workflowsApi.startWrite).mock.calls[0];
     // 未选模式 + 无档案 → payload 应为 undefined（保持向后兼容），fresh_write 不出现
     expect(call[2]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 审校目标草稿版本：选中草稿后点审校 → payload 含 draft_version=<version>。
+// ---------------------------------------------------------------------------
+
+describe('ChapterDetailPage - 审校指定草稿版本', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(chaptersApi.delete).mockReset();
+    vi.mocked(chaptersApi.update).mockReset();
+    vi.mocked(chaptersApi.createDraft).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(workflowsApi.startPlan).mockReset();
+    vi.mocked(workflowsApi.startWrite).mockReset();
+    vi.mocked(workflowsApi.startReview).mockReset();
+    vi.mocked(workflowsApi.startCommit).mockReset();
+    vi.mocked(workflowsApi.resume).mockReset();
+    vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(modelProfilesApi.create).mockReset();
+    vi.mocked(modelProfilesApi.update).mockReset();
+    vi.mocked(modelProfilesApi.remove).mockReset();
+    vi.mocked(modelProfilesApi.test).mockReset();
+
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([]);
+    // detail = useApiCall(() => workflowsApi.get(selectedRunId ?? '')) —— mount 即触发
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun);
+    vi.mocked(workflowsApi.startReview).mockResolvedValue({
+      run_id: 'wfr_review_v1',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+  });
+
+  it('点选 v1 草稿后点「审校」→ startReview 收到 payload 含 draft_version=1', async () => {
+    // DRAFTED 状态让 review 按钮可用
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    // 列表返回两版:v2(最新)+v1;drafts 列表按 version DESC 排序
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([
+      {
+        draft_id: 'drf_v2',
+        chapter_id: 'ch_001',
+        version: 2,
+        content: 'v2 内容',
+        created_by: 'writer',
+        prompt_version: null,
+        model_id: null,
+        created_at: '2026-08-24T11:00:00+00:00',
+      },
+      {
+        draft_id: 'drf_v1',
+        chapter_id: 'ch_001',
+        version: 1,
+        content: 'v1 内容',
+        created_by: 'writer',
+        prompt_version: null,
+        model_id: null,
+        created_at: '2026-08-24T10:00:00+00:00',
+      },
+    ] as Draft[]);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('drafts-panel')).toBeInTheDocument();
+    });
+    // 等列表渲染完(v2 默认被自动选中,active row = drf_v2)
+    await waitFor(() => {
+      expect(screen.getByTestId('draft-row-drf_v1')).toBeInTheDocument();
+    });
+
+    // 1) 默认选中 v2 时,审校提示应显示「将审校：草稿 v2」
+    expect(screen.getByTestId('wf-review-target-hint').textContent).toMatch(
+      /将审校：.*v2/,
+    );
+
+    // 2) 点选 v1 行 → 受控选中态上抛,审校提示跟着切到 v1
+    fireEvent.click(screen.getByTestId('draft-row-drf_v1'));
+    expect(screen.getByTestId('wf-review-target-hint').textContent).toMatch(
+      /将审校：.*v1/,
+    );
+
+    // 3) 点「审校」按钮 → payload 含 draft_version: 1
+    const reviewBtn = await waitFor(() => screen.getByTestId('wf-btn-review'));
+    expect(reviewBtn).not.toBeDisabled();
+    fireEvent.click(reviewBtn);
+
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.startReview)).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(workflowsApi.startReview).mock.calls[0];
+    expect(call[0]).toBe('prj_001');
+    expect(call[1]).toBe('ch_001');
+    expect(call[2]).toEqual({ draft_version: 1 });
   });
 });

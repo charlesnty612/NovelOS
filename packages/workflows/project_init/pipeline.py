@@ -21,10 +21,11 @@ from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection
+from packages.core.ids import new_id, now_iso
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
 from packages.domain.chapter.models import ChapterCreate
 from packages.domain.chapter.service import ChapterService
-from packages.domain.character.models import CharacterCreate
+from packages.domain.character.models import CharacterCreate, CharacterUpdate
 from packages.domain.character.service import CharacterService
 from packages.domain.plot.models import PLOT_EVENT_TYPES
 from packages.domain.plot.service import PlotService
@@ -126,7 +127,11 @@ def _resolve_stage_input(ctx: dict[str, Any], stage: str) -> dict[str, Any]:
             revisions = human_input.get("revisions") or {}
             if isinstance(revisions, dict):
                 rev = revisions.get(output_key)
-                if isinstance(rev, dict):
+                # 仅在用户真正提供了"非空 dict"时才采纳第 1 层修订；
+                # 空 dict 视为"未提供"，回退到 ctx/draft 兜底，避免
+                # 静默用空数据落库并触发占位章（参见
+                # docs/testing/audit-project-init-frontend-20260829.md §一.3）。
+                if isinstance(rev, dict) and rev:
                     return rev
 
     direct = ctx.get(output_key)
@@ -931,84 +936,116 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
         )
         project_id = project["project_id"]
 
-    # 2) characters —— 按 (project_id, name) 存在即跳过，避免「只重跑卷纲」时
-    #    旧角色被无条件重复 create 导致行数翻倍。
+    # 2) characters —— 按 (project_id, name) 已存在则更新 AI 可管内容字段
+    #    （name/role/core_json），保留 id 与 created_at 不变；不存在则新建。
+    #    修复前：存在即跳过 → 分段审阅中修订过的 AI 内容重新生成时被
+    #    静默丢弃（与头注释"更新该项目并挂载生成内容"语义不符）。
     character_svc = CharacterService(db_path)
-    existing_char_names = {c["name"] for c in character_svc.list_by_project(project_id)}
+    existing_chars_by_name = {
+        c["name"]: c for c in character_svc.list_by_project(project_id)
+    }
     character_ids: list[str] = []
     for char in _normalize_characters(character.get("characters") or []):
         name = char["name"]
-        if name in existing_char_names:
-            # 沿用旧角色（首次落库或重跑 outline 时角色已存在）
-            existing = next(c for c in character_svc.list_by_project(project_id) if c["name"] == name)
-            character_ids.append(existing["character_id"])
+        role = char.get("role") or "supporting"
+        core_json = char.get("core_json") or {}
+        existing = existing_chars_by_name.get(name)
+        if existing is not None:
+            updated = character_svc.update(
+                existing["character_id"],
+                CharacterUpdate(name=name, role=role, core_json=core_json),
+            )
+            assert updated is not None
+            character_ids.append(updated["character_id"])
             continue
         created = character_svc.create(
             project_id,
             CharacterCreate(
                 name=name,
-                role=char.get("role") or "supporting",
-                core_json=char.get("core_json") or {},
+                role=role,
+                core_json=core_json,
                 visibility="PUBLIC",
             ),
         )
-        existing_char_names.add(name)
+        existing_chars_by_name[name] = created
         character_ids.append(created["character_id"])
 
-    # 3) world entities —— 同样按 (project_id, name) 存在即跳过。
+    # 3) world entities —— 同 characters：存在则更新 statement / data / name，
+    #    不重建行（保留 id / created_at）。
     world_svc = WorldService(db_path)
-    existing_loc_names = {e.name for e in world_svc.list_locations(project_id)}
+    existing_locs_by_name = {
+        e.name: e for e in world_svc.list_locations(project_id)
+    }
     location_ids: list[str] = []
     for loc in _normalize_locations(world.get("locations") or []):
         name = loc["name"]
-        if name in existing_loc_names:
-            existing = next(e for e in world_svc.list_locations(project_id) if e.name == name)
-            location_ids.append(existing.id)
+        statement = loc.get("statement", "")
+        data = loc.get("data") or {}
+        existing = existing_locs_by_name.get(name)
+        if existing is not None:
+            updated = world_svc.update_location(
+                existing.id, name=name, statement=statement, data=data,
+            )
+            location_ids.append(updated.id)
             continue
         ent = world_svc.create_location(
             project_id=project_id,
             name=name,
-            statement=loc.get("statement", ""),
-            data=loc.get("data") or {},
+            statement=statement,
+            data=data,
             visibility="PUBLIC",
         )
-        existing_loc_names.add(name)
+        existing_locs_by_name[name] = ent
         location_ids.append(ent.id)
 
-    existing_fac_names = {e.name for e in world_svc.list_factions(project_id)}
+    existing_facs_by_name = {
+        e.name: e for e in world_svc.list_factions(project_id)
+    }
     faction_ids: list[str] = []
     for fac in _normalize_factions(world.get("factions") or []):
         name = fac["name"]
-        if name in existing_fac_names:
-            existing = next(e for e in world_svc.list_factions(project_id) if e.name == name)
-            faction_ids.append(existing.id)
+        statement = fac.get("statement", "")
+        data = fac.get("data") or {}
+        existing = existing_facs_by_name.get(name)
+        if existing is not None:
+            updated = world_svc.update_faction(
+                existing.id, name=name, statement=statement, data=data,
+            )
+            faction_ids.append(updated.id)
             continue
         ent = world_svc.create_faction(
             project_id=project_id,
             name=name,
-            statement=fac.get("statement", ""),
-            data=fac.get("data") or {},
+            statement=statement,
+            data=data,
             visibility="VISIBLE",
         )
-        existing_fac_names.add(name)
+        existing_facs_by_name[name] = ent
         faction_ids.append(ent.id)
 
-    existing_rule_names = {e.name for e in world_svc.list_world_rules(project_id)}
+    existing_rules_by_name = {
+        e.name: e for e in world_svc.list_world_rules(project_id)
+    }
     rule_ids: list[str] = []
     for rule in _normalize_rules(world.get("rules") or []):
         name = rule["name"]
-        if name in existing_rule_names:
-            existing = next(e for e in world_svc.list_world_rules(project_id) if e.name == name)
-            rule_ids.append(existing.id)
+        statement = rule.get("statement", "")
+        data = rule.get("data") or {}
+        existing = existing_rules_by_name.get(name)
+        if existing is not None:
+            updated = world_svc.update_world_rule(
+                existing.id, name=name, statement=statement, data=data,
+            )
+            rule_ids.append(updated.id)
             continue
         ent = world_svc.create_world_rule(
             project_id=project_id,
             name=name,
-            statement=rule.get("statement", ""),
-            data=rule.get("data") or {},
+            statement=statement,
+            data=data,
             visibility="PUBLIC",
         )
-        existing_rule_names.add(name)
+        existing_rules_by_name[name] = ent
         rule_ids.append(ent.id)
 
     # 4) volume —— upsert：同 (project, number) 已存在则更新 title，否则新建。
@@ -1024,52 +1061,101 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
     )
     volume_id = volume["volume_id"]
 
-    # 5) chapters —— 先清后建（精确到当前 volume，旧章被替换，新章按新 seeds 创建）。
-    #    解决「只重跑卷纲」时旧空章与新章并存的问题。
-    _delete_chapters_for_volume(db_path, volume_id)
-    chapter_svc = ChapterService(db_path)
-    chapter_ids: list[str] = []
-    for seed in _normalize_chapter_seeds(
+    # 5) chapters —— 重建序列必须包进单事务。
+    #    修复前：先 DELETE + commit，再多次 chapter create + commit，再
+    #    assign_chapter + commit——中途失败时旧章已被删、新章半写入，
+    #    数据丢失。修复后：单连接 BEGIN→DELETE 旧 drafts/chapters→INSERT
+    #    新 chapters（直接挂 volume_id）→COMMIT；任何环节异常触发
+    #    ROLLBACK，旧章与 drafts 完整保留，新章一行不入库。
+    normalized_chapter_seeds = _normalize_chapter_seeds(
         outline.get("chapter_seeds") or [],
         ctx.get("chapter_seed_count", DEFAULT_CHAPTER_SEED_COUNT),
         chapter_word_count=int(
             ctx.get("chapter_word_count") or DEFAULT_CHAPTER_WORD_COUNT
         ),
-    ):
-        plan_payload = {
-            "chapter_goal": seed.get("one_sentence", ""),
-            "expected_role": seed.get("role", "setup"),
-            "key_beats": seed.get("key_beats") or [],
-            "expected_word_count": int(
-                seed.get("expected_word_count")
-                or ctx.get("chapter_word_count")
-                or DEFAULT_CHAPTER_WORD_COUNT
-            ),
-            "core_conflict": "",
-            "turning_point": "",
-            "character_changes_planned": [],
-            "information_releases": [],
-            "hook_handling": [],
-            "debt_handling": [],
-            "proposed_new_entities": [],
-            "deviations": [],
-            "knowledge_leakage_check": {"uses_hidden_knowledge": False, "leakage_details": None},
-            "open_questions": [],
-            "notes_for_planner": "",
-            "schema_version": "director-plan.v1",
-            "prompt_version": "volume_outliner:v1",
-        }
-        created = chapter_svc.create(
-            project_id,
-            ChapterCreate(
-                number=int(seed["number"]),
-                title=seed.get("title"),
-                plan_json=plan_payload,
-            ),
-        )
-        # 把章节挂到 volume
-        VolumeService(db_path).assign_chapter(volume_id, created["chapter_id"])
-        chapter_ids.append(created["chapter_id"])
+    )
+    chapter_ids: list[str] = []
+    conn = get_connection(str(db_path))
+    try:
+        # 收集待删 chapter_id（精确到本 volume）
+        old_rows = conn.execute(
+            "SELECT chapter_id FROM chapters WHERE volume_id = ?",
+            (volume_id,),
+        ).fetchall()
+        old_chapter_ids = [r["chapter_id"] for r in old_rows]
+
+        if old_chapter_ids:
+            placeholders = ",".join("?" for _ in old_chapter_ids)
+            # drafts 子记录先清（FK ON DELETE CASCADE 也兜底，显式写兼容迁移顺序）
+            conn.execute(
+                f"DELETE FROM drafts WHERE chapter_id IN ({placeholders})",
+                old_chapter_ids,
+            )
+            conn.execute(
+                f"DELETE FROM chapters WHERE chapter_id IN ({placeholders})",
+                old_chapter_ids,
+            )
+
+        # 逐章 INSERT（同连接 → 同一事务；异常会冒泡到下方 except 触发 rollback）
+        for seed in normalized_chapter_seeds:
+            plan_payload = {
+                "chapter_goal": seed.get("one_sentence", ""),
+                "expected_role": seed.get("role", "setup"),
+                "key_beats": seed.get("key_beats") or [],
+                "expected_word_count": int(
+                    seed.get("expected_word_count")
+                    or ctx.get("chapter_word_count")
+                    or DEFAULT_CHAPTER_WORD_COUNT
+                ),
+                "core_conflict": "",
+                "turning_point": "",
+                "character_changes_planned": [],
+                "information_releases": [],
+                "hook_handling": [],
+                "debt_handling": [],
+                "proposed_new_entities": [],
+                "deviations": [],
+                "knowledge_leakage_check": {"uses_hidden_knowledge": False, "leakage_details": None},
+                "open_questions": [],
+                "notes_for_planner": "",
+                "schema_version": "director-plan.v1",
+                "prompt_version": "volume_outliner:v1",
+            }
+            chapter_id = new_id("ch")
+            now = now_iso()
+            conn.execute(
+                """
+                INSERT INTO chapters
+                    (chapter_id, project_id, number, title, plan_json,
+                     status, visibility, who_knows,
+                     created_at, updated_at, volume_id)
+                VALUES
+                    (:chapter_id, :project_id, :number, :title, :plan_json,
+                     :status, :visibility, :who_knows,
+                     :created_at, :updated_at, :volume_id)
+                """,
+                {
+                    "chapter_id": chapter_id,
+                    "project_id": project_id,
+                    "number": int(seed["number"]),
+                    "title": seed.get("title"),
+                    "plan_json": json.dumps(plan_payload, ensure_ascii=False),
+                    "status": "PLANNED",
+                    "visibility": "VISIBLE",
+                    "who_knows": None,
+                    "created_at": now,
+                    "updated_at": now,
+                    "volume_id": volume_id,
+                },
+            )
+            chapter_ids.append(chapter_id)
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
     # 6) 把卷纲摘要记录为 plot_event（类型 other），便于 timeline / 大纲视图
     arc_summary = (volume_raw.get("arc_summary") or "").strip()

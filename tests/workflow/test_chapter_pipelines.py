@@ -407,6 +407,12 @@ def test_chapter_review_rejected_results_in_failed(tmp_path: Path):
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.json()["status"] == "DRAFTED"
 
+            # 纯驳回（无 revise）：run FAILED + error='rejected'（与 revise 分支的
+            # 'rejected-for-revision' 区分），且不会触发 auto_revise 回路。
+            r = await _request(app, "GET", f"/api/runs/{paused['run_id']}")
+            assert r.status_code == 200
+            assert r.json()["error"] == "rejected", r.json().get("error")
+
     asyncio.run(run())
 
 
@@ -729,6 +735,9 @@ def test_list_runs_endpoint(tmp_path: Path):
             runs = r.json()
             assert len(runs) >= 1
             assert all(r["chapter_id"] == cid or r["chapter_id"] is None for r in runs)
+            # 每行必须带 label（人类可读中文名）；chapter-plan run 的 label 应为 "生成计划"
+            assert all("label" in r for r in runs)
+            assert any(r["workflow_name"] == "chapter-plan" and r["label"] == "生成计划" for r in runs)
 
     asyncio.run(run())
 
@@ -739,6 +748,10 @@ def test_chapter_review_auto_revise_loop_once_then_approve(tmp_path: Path):
     review PAUSED → resume {revise:true, auto_revise_max:2} → 自动重跑 write→review
     → 新 review PAUSED → resume {approved:true} → COMPLETED + REVIEWED。
     验证 drafts 产生 v2（自动 write 追加新版本）。
+
+    异步化后适配：resume 端点立即返回 RUNNING，run_id 仍是原 review run；
+    auto_revise 在 daemon 线程里跑 → 实际写入的「第二次 review run」需要通过
+    GET /projects/{pid}/runs list 端点按时间序找到（status=PAUSED 且 != first_review_run_id）。
     """
     app = _create_app(tmp_path)
 
@@ -785,7 +798,7 @@ def test_chapter_review_auto_revise_loop_once_then_approve(tmp_path: Path):
             paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
             first_review_run_id = paused["run_id"]
 
-            # 3) resume with revise + auto_revise_max=2：触发自动回路
+            # 3) resume with revise + auto_revise_max=2：触发自动回路（daemon 线程执行）
             revise_mock = {
                 "director": _director_script(),
                 "writer": _writer_revised_script(),  # 改稿后 prose
@@ -799,11 +812,35 @@ def test_chapter_review_auto_revise_loop_once_then_approve(tmp_path: Path):
                 },
             )
             assert r.status_code == 200, r.text
-            loop_result = r.json()
-            # 自动回路应返回新 review 的 PAUSED 状态
-            loop_result = await _wait_run_terminal(app, loop_result["run_id"], expected=("PAUSED",))
-            assert loop_result["run_id"] != first_review_run_id
-            second_review_run_id = loop_result["run_id"]
+            # 异步化：响应仍指向原 review run；等它进 FAILED 即 daemon 链路启动完成。
+            assert r.json()["run_id"] == first_review_run_id
+            assert r.json()["status"] == "RUNNING"
+            await _wait_run_terminal(app, first_review_run_id, expected=("FAILED",))
+
+            # 找 daemon 回路产生的「第二次 review run」：list 端点过滤 chapter_review + PAUSED
+            # 且 run_id != first_review_run_id 的最新一行。
+            second_review_run_id: str | None = None
+            import time as _list_t
+            _list_deadline = _list_t.monotonic() + 120.0
+            while _list_t.monotonic() < _list_deadline:
+                rr = await _request(app, "GET", f"/api/projects/{pid}/runs")
+                assert rr.status_code == 200, rr.text
+                candidates = [
+                    row for row in rr.json()
+                    if row.get("workflow_name") == "chapter-review"
+                    and row["status"] == "PAUSED"
+                    and row["run_id"] != first_review_run_id
+                ]
+                if candidates:
+                    # 取 started_at 最大的（最新一轮）
+                    candidates.sort(key=lambda r0: r0.get("started_at") or "", reverse=True)
+                    second_review_run_id = candidates[0]["run_id"]
+                    break
+                await asyncio.sleep(0.3)
+            assert second_review_run_id is not None, (
+                "daemon 回路未在 120s 内产出第二个 PAUSED review run"
+            )
+            assert second_review_run_id != first_review_run_id
 
             # 4) 校验 chapter 仍为 DRAFTED，但 drafts 已有 v2
             r = await _request(app, "GET", f"/api/chapters/{cid}")
@@ -889,5 +926,260 @@ def test_chapter_review_auto_revise_disabled_keeps_failed(tmp_path: Path):
             finally:
                 conn.close()
             assert n == 1
+
+    asyncio.run(run())
+
+
+def test_chapter_review_resume_with_auto_revise_returns_within_2s(tmp_path: Path):
+    """resume + auto_revise 触发时：POST ≤2s 即返回；轮询最终见到 daemon 回路新 write/review run。
+
+    验证点：
+    - POST /runs/{id}/resume 在 ≤2s 内拿到 200 响应（不再像旧实现那样阻塞到回路结束，
+      auto_revise_max=2 最长可跑两轮 write+review，几分钟量级）。
+    - 响应 status="RUNNING"，run_id 等于被 resume 的原 review run。
+    - daemon 线程最终在 list 端点可观察到 chapter-review 的新 PAUSED run 与
+      chapter-write 新 run（数量 ≥2 的 chapter-review run、≥1 的 chapter-write run
+      是在 daemon 链路里新建的）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            first_mock = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+            }
+
+            # 1) plan + write v1
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "意图", "mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+
+            # 2) review → PAUSED
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+            first_review_run_id = paused["run_id"]
+
+            # 3) resume revise + auto_revise_max=2：必须 ≤2s 返回
+            revise_mock = {
+                "director": _director_script(),
+                "writer": _writer_revised_script(),
+            }
+            import time as _wall_t
+            _t0 = _wall_t.monotonic()
+            r = await _request(
+                app, "POST", f"/api/runs/{first_review_run_id}/resume",
+                json={
+                    "human_input": {"approved": False, "revise": True, "note": "改稿触发"},
+                    "auto_revise_max": 2,
+                    "mock_providers": revise_mock,
+                },
+            )
+            _t1 = _wall_t.monotonic()
+            assert r.status_code == 200, r.text
+            assert (_t1 - _t0) <= 2.0, (
+                f"resume + auto_revise 响应耗时 {_t1 - _t0:.2f}s 超 2s 上限"
+            )
+            assert r.json()["status"] == "RUNNING"
+            assert r.json()["run_id"] == first_review_run_id
+
+            # 4) 轮询 list 端点，直到见到 daemon 回路产生的新 write + 新 review run
+            import time as _list_t
+            _list_deadline = _list_t.monotonic() + 120.0
+            new_write_run_id: str | None = None
+            new_review_run_id: str | None = None
+            while _list_t.monotonic() < _list_deadline:
+                rr = await _request(app, "GET", f"/api/projects/{pid}/runs")
+                assert rr.status_code == 200, rr.text
+                rows = rr.json()
+                review_rows = [
+                    row for row in rows
+                    if row.get("workflow_name") == "chapter-review"
+                    and row["run_id"] != first_review_run_id
+                ]
+                write_rows = [row for row in rows if row.get("workflow_name") == "chapter-write"]
+                # 至少一个新 review PAUSED（回路最终态）+ 至少一个新 write（回路跑过）
+                paused_new = [row for row in review_rows if row["status"] == "PAUSED"]
+                if paused_new and write_rows:
+                    new_review_run_id = max(
+                        paused_new,
+                        key=lambda r0: r0.get("started_at") or "",
+                    )["run_id"]
+                    new_write_run_id = max(
+                        write_rows,
+                        key=lambda r0: r0.get("started_at") or "",
+                    )["run_id"]
+                    break
+                await asyncio.sleep(0.3)
+
+            assert new_write_run_id is not None, "daemon 未在 120s 内产出新 chapter-write run"
+            assert new_review_run_id is not None, "daemon 未在 120s 内产出新 PAUSED chapter-review run"
+            assert new_write_run_id != new_review_run_id
+
+            # 5) drafts 已含 v2（daemon 跑过 write）
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                drafts = conn.execute(
+                    "SELECT version FROM drafts WHERE chapter_id = ? ORDER BY version",
+                    (cid,),
+                ).fetchall()
+            finally:
+                conn.close()
+            assert [d["version"] for d in drafts] == [1, 2], drafts
+
+    asyncio.run(run())
+
+
+def test_chapter_review_with_draft_version_selects_specific_version(tmp_path: Path):
+    """指定 draft_version=1 审 v1；不指定时审最新稿（v2）。
+
+    场景：plan → write(v1) → 人工 POST drafts(v2) → review 带 draft_version=1
+    → review_report.draft_version==1 且 label 为「审校（审 v1）」。
+    再单独验证不带 draft_version → 审最新版（v2）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            mock_providers = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+            }
+            for path in ("plan", "write"):
+                r = await _request(
+                    app, "POST", f"/api/projects/{pid}/chapters/{cid}/{path}",
+                    json={"mock_providers": mock_providers},
+                )
+                assert r.status_code == 201, r.text
+                await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+
+            # 人工 POST drafts 产出 v2（特征 marker 便于断言）
+            v2_marker = "【人工修订稿】苏婉清怒掷茶盏。"
+            r = await _request(
+                app, "POST", f"/api/chapters/{cid}/drafts",
+                json={"content": v2_marker + "林渊默然。"},
+            )
+            assert r.status_code == 201, r.text
+
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                drafts = conn.execute(
+                    "SELECT version, content FROM drafts WHERE chapter_id = ? ORDER BY version",
+                    (cid,),
+                ).fetchall()
+            finally:
+                conn.close()
+            assert [d["version"] for d in drafts] == [1, 2], drafts
+
+            # 1) review 带 draft_version=1 → 审 v1（review_report.draft_version==1, 不含 v2 marker）
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock_providers, "draft_version": 1},
+            )
+            assert r.status_code == 201, r.text
+            paused1 = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+            run1_resp = await _request(app, "GET", f"/api/runs/{paused1['run_id']}")
+            assert run1_resp.status_code == 200
+            run1 = run1_resp.json()
+            # review_report 落进 pause_payload（author_review payload）
+            pp1 = run1.get("pause_payload") or {}
+            rr1 = pp1.get("review_report") or {}
+            assert rr1.get("draft_version") == 1, rr1
+            # list 端点 label 应为「审校（审 v1）」
+            list_resp = await _request(app, "GET", f"/api/projects/{pid}/runs")
+            runs = list_resp.json()
+            label1 = next(r["label"] for r in runs if r["run_id"] == paused1["run_id"])
+            assert label1 == "审校（审 v1）", label1
+
+            # 清理 reviewer（驳回 + 关 auto_revise），让能再次起 review
+            r = await _request(
+                app, "POST", f"/api/runs/{paused1['run_id']}/resume",
+                json={"human_input": {"approved": False}, "auto_revise_max": 0},
+            )
+            assert r.status_code == 200, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
+
+            # 2) review 不带 draft_version → 审最新版 v2
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            paused2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+            run2_resp = await _request(app, "GET", f"/api/runs/{paused2['run_id']}")
+            run2 = run2_resp.json()
+            pp2 = run2.get("pause_payload") or {}
+            rr2 = pp2.get("review_report") or {}
+            assert rr2.get("draft_version") == 2, rr2
+            list_resp = await _request(app, "GET", f"/api/projects/{pid}/runs")
+            runs = list_resp.json()
+            label2 = next(r["label"] for r in runs if r["run_id"] == paused2["run_id"])
+            assert label2 == "审校（审 v2）", label2
+
+    asyncio.run(run())
+
+
+def test_chapter_review_with_nonexistent_draft_version_fails(tmp_path: Path):
+    """指定 draft_version 不存在 → basic_checks 抛错 → run FAILED。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            mock_providers = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+            }
+            for path in ("plan", "write"):
+                r = await _request(
+                    app, "POST", f"/api/projects/{pid}/chapters/{cid}/{path}",
+                    json={"mock_providers": mock_providers},
+                )
+                assert r.status_code == 201, r.text
+                await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock_providers, "draft_version": 99},
+            )
+            assert r.status_code == 201, r.text
+            failed = await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
+            await _wait_run_terminal(app, failed["run_id"], expected=("FAILED",))
+            assert "no draft version 99" in (failed.get("error") or ""), failed.get("error")
 
     asyncio.run(run())

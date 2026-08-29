@@ -211,7 +211,10 @@ def test_smoke_full_chain(tmp_path: Path):
                 app, "POST", f"/api/runs/{r.json()['run_id']}/resume",
                 json={"human_input": {"approved": True}},
             )
-            statuses["review_after_resume"] = r.json()["status"]
+            assert r.status_code == 200, r.text
+            # 异步化：resume 立即返回 RUNNING，提交下一环节前必须等当前 run 终态（否则 409）
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "FAILED"))
+            statuses["review_after_resume"] = (await _request(app, "GET", f"/api/runs/{r.json()['run_id']}")).json()["status"]
 
             # 4. commit
             r = await _request(

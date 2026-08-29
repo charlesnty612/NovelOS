@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .guardrails import CONFLICT_MARKERS, HOOK_MARKERS, REALM_KEYWORDS, _paragraphs, _world_rules_by_name
-from .issues import Issue, make_issue
+from .issues import Issue, make_issue, mvp_max_severity
 
 # ============================================================================
 # 上下文（轻量；不强制使用 pydantic）
@@ -64,6 +64,11 @@ def _head(text: str, n: int) -> str:
 
 def _contains_any(text: str, markers) -> bool:
     return any(m in (text or "") for m in markers)
+
+
+def _payoff_severity() -> str:
+    """payoff 类目的 severity 上限，统一从 MVP_SEVERITY_MATRIX 读取（避免硬编码）。"""
+    return mvp_max_severity("payoff")
 
 
 def _delta_paid_debt_count(delta: dict) -> int:
@@ -154,7 +159,7 @@ def _h3_filler(ctx: PayoffContext) -> list[Issue]:
     if streak >= 3:
         issues.append(
             make_issue(
-                severity="error",
+                severity=_payoff_severity(),
                 category="payoff",
                 rule_id="RULE_H3_FILLER_3CH",
                 message=f"连续 {streak}+ 章 payoff 为 0",

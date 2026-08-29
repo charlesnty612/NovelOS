@@ -172,7 +172,8 @@ function EventFormModal({ onCancel, onSubmit }: EventFormModalProps) {
   const [type, setType] = useState<EventType>('revelation');
   const [description, setDescription] = useState('');
   const [participantsJson, setParticipantsJson] = useState('[]');
-  const [timeJson, setTimeJson] = useState('{}');
+  // 默认含 timeline_day=1；后端 _validate_time 强制要求该字段，避免空 {} → 422。
+  const [timeJson, setTimeJson] = useState('{"timeline_day": 1}');
   const [status, setStatus] = useState('planned');
   const [jsonErr, setJsonErr] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -200,9 +201,12 @@ function EventFormModal({ onCancel, onSubmit }: EventFormModalProps) {
     time = tp.value;
     setSubmitting(true);
     try {
+      // 后端 contract：cause 是 event_id 字符串数组（或 null）；
+      // 描述/起因文本统一落进 description 字段，cause 不从 description 生成。
+      // 当用户未在前置事件里挑 cause 时，传 null 让后端走默认（不影响必填校验）。
       await onSubmit({
         type,
-        cause: description.trim() ? { summary: description.trim() } : {},
+        cause: null,
         participants,
         time,
         status,
@@ -288,7 +292,7 @@ function EventFormModal({ onCancel, onSubmit }: EventFormModalProps) {
 
         <div className="form-row">
           <label>
-            time_json <span className="muted small">JSON 对象，如 {'{ "day_index": 1, "at": "..." }'}</span>
+            time_json <span className="muted small">JSON 对象，必须含 timeline_day（如 {'{ "timeline_day": 1 }'}）</span>
           </label>
           <textarea
             rows={3}
@@ -298,7 +302,7 @@ function EventFormModal({ onCancel, onSubmit }: EventFormModalProps) {
               setJsonErr(null);
             }}
             style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
-            placeholder='{ "day_index": 1 }'
+            placeholder='{ "timeline_day": 1 }'
           />
         </div>
 

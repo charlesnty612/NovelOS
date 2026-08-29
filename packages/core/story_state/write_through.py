@@ -27,9 +27,14 @@
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 from typing import Any
 
 from packages.core.ids import new_id, now_iso
+
+
+_logger = logging.getLogger(__name__)
 
 from .snapshots import _parse_required_json
 from .write_helpers import (
@@ -88,11 +93,22 @@ def apply_inverse_cleanup_to_state(state: dict, cleanup: dict) -> None:
     """Rollback 路径下 mutate ``state``（in place）：
     - 剔除 ``recent_events`` 中出现在 ``remove_event_ids`` 的 event_id；
     - 剔除 ``events`` 中相同 key；
-    - 剔除 ``hooks`` 中 ``hook_id`` 在 ``remove_hook_ids`` 里的元素。
+    - 剔除 ``hooks`` 中 ``hook_id`` 在 ``remove_hook_ids`` 里的元素；
+    - 剔除 ``world.locations`` / ``world.factions`` / ``world.world_rules`` 中
+      对应 id 的条目（按 ``remove_location_ids`` / ``remove_faction_ids`` /
+      ``remove_world_rule_ids``）；
+    - 剔除 ``characters[*].relationships`` 中 ``(from,to,type)`` 匹配
+      ``remove_relationship_keys`` 的条目；
+    - 剔除 ``debts`` 中 ``debt_id`` 在 ``remove_debt_ids`` 的条目；
+    - 恢复 ``restore_*`` hints 中 world/character/relationship/debt 的 before 值
+      （update 逆 update 路径）。
 
     必须在 ``commit_delta`` 同一事务内调用（在 materialize_snapshot 之前），这样落盘
     的 story_states 即「回滚后」语义；rollback 后 GET state 直接拿到该快照，无需 post-facto
     修改。
+
+    注：character facet=state 不在逆清理覆盖范围（character_states 表是 append-only
+    版本化设计，rollback 不撤销历史 state 版本——见 ``build_inverse_delta`` 注释）。
     """
     remove_event_ids = set(cleanup.get("remove_event_ids") or [])
     remove_hook_ids = set(cleanup.get("remove_hook_ids") or [])
@@ -110,6 +126,134 @@ def apply_inverse_cleanup_to_state(state: dict, cleanup: dict) -> None:
         hooks = state.get("hooks") or []
         if isinstance(hooks, list):
             state["hooks"] = [h for h in hooks if not (isinstance(h, dict) and h.get("hook_id") in remove_hook_ids)]
+
+    # world.locations / factions（dict 形态，按 world_id 删 key）
+    world = state.get("world") or {}
+    if isinstance(world, dict):
+        for k, snapshot_key in (
+            ("remove_location_ids", "locations"),
+            ("remove_faction_ids", "factions"),
+        ):
+            rm = set(cleanup.get(k) or [])
+            if rm and isinstance(world.get(snapshot_key), dict):
+                bucket = world[snapshot_key]
+                for wid in list(bucket.keys()):
+                    if wid in rm:
+                        del bucket[wid]
+        # world.world_rules（list 形态，按 world_rule_id 过滤）
+        rm_rules = set(cleanup.get("remove_world_rule_ids") or [])
+        if rm_rules and isinstance(world.get("world_rules"), list):
+            world["world_rules"] = [
+                r for r in world["world_rules"]
+                if not (isinstance(r, dict) and r.get("world_rule_id") in rm_rules)
+            ]
+        # 逆 update → 恢复 before 状态（locations/factions）
+        for hint_key, snapshot_key in (
+            ("restore_location_states", "locations"),
+            ("restore_faction_states", "factions"),
+        ):
+            restores = cleanup.get(hint_key) or []
+            if restores and isinstance(world.get(snapshot_key), dict):
+                bucket = world[snapshot_key]
+                for entry in restores:
+                    if not isinstance(entry, dict):
+                        continue
+                    wid = entry.get("world_id")
+                    if isinstance(wid, str) and wid in bucket:
+                        bucket[wid] = entry.get("before")
+        # 逆 update → 恢复 world_rules（list 形态）
+        restore_rules = cleanup.get("restore_world_rule_states") or []
+        if restore_rules and isinstance(world.get("world_rules"), list):
+            rule_index = {
+                r.get("world_rule_id"): i
+                for i, r in enumerate(world["world_rules"])
+                if isinstance(r, dict)
+            }
+            for entry in restore_rules:
+                if not isinstance(entry, dict):
+                    continue
+                rid = entry.get("world_id")
+                idx = rule_index.get(rid)
+                if idx is not None:
+                    world["world_rules"][idx] = entry.get("before")
+
+    # characters[*].relationships：按 (from,to,type) 删；逆 update 恢复 before
+    rm_rel_keys = set(
+        tuple(k) for k in (cleanup.get("remove_relationship_keys") or []) if isinstance(k, (list, tuple))
+    )
+    if rm_rel_keys or cleanup.get("restore_relationship_states"):
+        characters = state.get("characters") or []
+        if isinstance(characters, list):
+            for char in characters:
+                if not isinstance(char, dict):
+                    continue
+                rels = char.get("relationships")
+                if not isinstance(rels, list):
+                    continue
+                if rm_rel_keys:
+                    char["relationships"] = [
+                        r for r in rels
+                        if not (
+                            isinstance(r, dict)
+                            and (
+                                r.get("from_character_id"),
+                                r.get("to_character_id"),
+                                r.get("relation_type"),
+                            ) in rm_rel_keys
+                        )
+                    ]
+                # 逆 update：单角色侧 relationship 整段替换为 before
+                restore_rels = cleanup.get("restore_relationship_states") or []
+                for entry in restore_rels:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("from_character_id") != char.get("character_id"):
+                        continue
+                    key = (
+                        entry.get("from_character_id"),
+                        entry.get("to_character_id"),
+                        entry.get("relation_type"),
+                    )
+                    if key in rm_rel_keys:
+                        # 该 (from,to,type) 整段已在 rm_rel_keys 删过；不再覆盖
+                        continue
+                    # 查找同 (from,to,type) 条目，整段替换为 before
+                    for r in char["relationships"]:
+                        if isinstance(r, dict) and (
+                            r.get("from_character_id"),
+                            r.get("to_character_id"),
+                            r.get("relation_type"),
+                        ) == key:
+                            r["state_json"] = entry.get("before")
+                            break
+
+    # debts（list 形态）：按 debt_id 删
+    rm_debts = set(cleanup.get("remove_debt_ids") or [])
+    if rm_debts and isinstance(state.get("debts"), list):
+        state["debts"] = [
+            d for d in state["debts"]
+            if not (isinstance(d, dict) and d.get("debt_id") in rm_debts)
+        ]
+    # 逆 update：恢复 before（severity/status）
+    restore_debts = cleanup.get("restore_debt_states") or []
+    if restore_debts and isinstance(state.get("debts"), list):
+        by_id = {
+            d.get("debt_id"): d
+            for d in state["debts"]
+            if isinstance(d, dict)
+        }
+        for entry in restore_debts:
+            if not isinstance(entry, dict):
+                continue
+            did = entry.get("debt_id")
+            target = by_id.get(did)
+            if target is None:
+                continue
+            before = entry.get("before") or {}
+            if "status" in before:
+                target["status"] = before["status"]
+            if "severity" in before:
+                target["severity"] = before["severity"]
 
 
 def write_through(
@@ -377,15 +521,38 @@ def write_through(
         if op in ("add", "update"):
             if existing is None:
                 rid = rel.get("target_id") or new_id("rel")
-                conn.execute(
-                    """
-                    INSERT INTO relationships
-                        (relationship_id, project_id, from_character_id, to_character_id,
-                         relation_type, state_json, last_state_version)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (rid, project_id, from_id, to_id, rel_type, _dump(after or {}), new_version),
-                )
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO relationships
+                            (relationship_id, project_id, from_character_id, to_character_id,
+                             relation_type, state_json, last_state_version)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (rid, project_id, from_id, to_id, rel_type, _dump(after or {}), new_version),
+                    )
+                except sqlite3.IntegrityError:
+                    # 0017 唯一索引 ``idx_relationships_unique`` 兜底：并发 add 在
+                    # SELECT-then-INSERT 窗口内产生冲突 → 转 UPDATE 分支幂等。
+                    # 重查现有行（对方事务可能刚提交，existing 行还没在本连接可见）
+                    existing = conn.execute(
+                        """
+                        SELECT relationship_id FROM relationships
+                        WHERE project_id = ? AND from_character_id = ?
+                          AND to_character_id = ? AND relation_type = ?
+                        """,
+                        (project_id, from_id, to_id, rel_type),
+                    ).fetchone()
+                    if existing is None:
+                        # 不应发生：唯一索引报错却查不到行 → 让调用方感知
+                        raise
+                    conn.execute(
+                        """
+                        UPDATE relationships SET state_json = ?, last_state_version = ?
+                        WHERE relationship_id = ?
+                        """,
+                        (_dump(after or {}), new_version, existing["relationship_id"]),
+                    )
             else:
                 conn.execute(
                     """
@@ -447,9 +614,31 @@ def write_through(
     # resolved_hooks
     # 哨兵：notes 含 ``__CLEAR_PAYOFF_CHAPTER__`` → 显式把 hooks.payoff_chapter_id 置 NULL
     # （用于逆 Delta；schema 不允许新字段，只能用 notes 字符串携带标记）。
+    # 守卫：ABANDONED 是 hook 终态（HOOK_ALLOWED_NEXT['ABANDONED']={ABANDONED}），
+    # 任何 resolved_hooks 回写（包括清空 payoff_chapter_id）都不应触发「复活」或
+    # 改变终态——审计 §A1：story_state 数据污染风险。
     for rh in delta.get("resolved_hooks") or []:
         notes = rh.get("notes") or ""
         clear_payoff = "__CLEAR_PAYOFF_CHAPTER__" in notes
+        hook_id = rh.get("hook_id")
+        existing_row = (
+            conn.execute(
+                "SELECT status FROM hooks WHERE hook_id = ?",
+                (hook_id,),
+            ).fetchone()
+            if isinstance(hook_id, str) and hook_id
+            else None
+        )
+        current_hook_status = existing_row["status"] if existing_row else None
+        if current_hook_status == "ABANDONED":
+            _logger.warning(
+                "write_through.resolved_hooks: skip ABANDONED hook %s "
+                "(to_status=%s, clear_payoff=%s): 终态不可回退",
+                hook_id,
+                rh.get("to_status"),
+                clear_payoff,
+            )
+            continue
         if clear_payoff:
             conn.execute(
                 """

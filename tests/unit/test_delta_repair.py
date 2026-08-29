@@ -362,6 +362,50 @@ def test_repair_resolved_hook_fill_from_status():
     assert validate_delta(repaired) == []
 
 
+def test_repair_resolved_hook_skips_fill_when_hook_abandoned():
+    """审计 §A1 守卫：ABANDONED 钩子的 resolved_hooks 不填 from_status。
+
+    修复前：repair 把 from_status 填为 ABANDONED，再叠 validator 接受
+    ABANDONED→ABANDONED 的合法迁移——但业务语义上"对一个已放弃的钩子
+    又来一次 resolved delta"本身是异常；更糟的是若 to_status=RESOLVED，
+    后续 write_through 旧逻辑会把 payoff_chapter_id 写入并触发状态机
+    "复活"风险。修复后：ABANDONED 时 repair 保持 from_status=None，
+    无 fill-before 记录，把"异常是否拒绝"的判断完整交给下游业务层
+    （validator 对 from_status=None 跳过迁移检查是跨分支/回滚语义）。
+    """
+    delta = _minimal_delta(
+        resolved_hooks=[
+            {
+                "change_id": "rh_abandoned",
+                "op": "update",
+                "target_id": "hook_aban",
+                "hook_id": "hook_aban",
+                "from_status": None,
+                "to_status": "RESOLVED",
+                "payoff_summary": "误判复活",
+                "confidence": 0.9,
+                "evidence": _evidence(),
+                "risk_level": "LOW",
+            }
+        ],
+    )
+    snapshot = {"hooks": [{"hook_id": "hook_aban", "status": "ABANDONED"}]}
+    repaired, repairs = repair_delta(delta, snapshot=snapshot)
+    # 关键断言：ABANDONED 时不产生 fill-before 记录、from_status 保持 None
+    assert repairs == []
+    assert repaired["resolved_hooks"][0]["from_status"] is None
+    # 回归：ACTIVE 时仍正常 fill-before（已有用例覆盖，这里再快速 smoke）
+    delta_active = _minimal_delta(
+        resolved_hooks=[{**repaired["resolved_hooks"][0], "hook_id": "hook_act",
+                         "target_id": "hook_act", "from_status": None}],
+    )
+    snap_active = {"hooks": [{"hook_id": "hook_act", "status": "ACTIVE"}]}
+    rep2, rep2_repairs = repair_delta(delta_active, snapshot=snap_active)
+    assert len(rep2_repairs) == 1
+    assert rep2_repairs[0]["rule"] == "fill-before"
+    assert rep2["resolved_hooks"][0]["from_status"] == "ACTIVE"
+
+
 def test_repair_new_event_drop_duplicate():
     delta = _minimal_delta(
         new_events=[

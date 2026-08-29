@@ -585,3 +585,566 @@ def test_commit_delta_unchanged_behavior(tmp_path: Path):
                 conn.close()
 
     asyncio.run(run())
+
+
+# ----------------------------------------------------------------- 4. recent_events 顺序稳定性(rebuild 路径)
+
+
+def test_recent_events_order_preserved_across_rebuild(tmp_path: Path):
+    """``rebuild_snapshot_collections_from_db`` 重建 7 个集合后,``recent_events``
+    仍必须按 ``_apply_new_events`` 契约定向累积——即每次 commit 新增的 event_id
+    按 delta.new_events 输入顺序追加在历史末尾;历史顺序不得被打乱、第一条 event
+    不得丢失。
+
+    复现 ``docs/testing/audit-story-state-20260829.md`` 第 2 条:
+    ``commit_delta`` 写透后 ``rebuild_snapshot_collections_from_db`` 以 DB 全量
+    重载 characters(每角色逐条 ``_load_relationships_for``),依赖字符序+行序;
+    增量路径 ``_apply_new_events`` 的"先追加后截断保留最新 N 条"语义必须在重载
+    路径下保持一致(``recent_events`` 顺序不被破坏、首条 event 不丢失)。
+
+    测试设计:
+    - 准备 6 个 event_id,其中故意混入排序后位置变化的情况——如果重建路径错误地
+      按 event_id 字典序回填 recent_events,会把 ``evt_first``(提交顺序第 1 条)
+      推到末尾或丢失。
+    - v1 init → v2 commit 携带 3 个 event → v3 commit 携带另外 3 个 event;
+      每次 commit 都会跑 write_through→rebuild→materialize_snapshot 全链。
+    - 直接读 DB 的 ``story_states.snapshot_json``,断言 v3 的 ``recent_events``
+      等于按提交顺序累积的 6 条 event_id(不受字典序重排影响)。
+    """
+    app = _create_app(tmp_path)
+
+    # 故意设计的 6 个 event_id:字典序顺序(evt_a, evt_b, evt_c, evt_d, evt_e, evt_first)
+    # 与提交顺序不同——任何把 recent_events 重写成字典序的"修复"都会立刻失败。
+    event_ids_in_commit_order = [
+        "evt_d",   # 字典序第 4
+        "evt_b",   # 字典序第 2
+        "evt_first",  # 字典序第 6(最后),提交顺序第 1(最易在重排路径下丢失)
+        "evt_a",   # 字典序第 1
+        "evt_e",   # 字典序第 5
+        "evt_c",   # 字典序第 3
+    ]
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app, name="recent_events_order")
+            chap = await _make_chapter(app, pid)
+            db_path = tmp_path / "novelos.db"
+
+            # v1 init
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap}
+            )
+            assert r.status_code == 201, r.text
+            assert r.json()["state_version"] == 1
+
+            # v2 commit:写入前 3 个 event
+            v2_delta_id = "dlt_re_events_v2"
+            v2_delta = {
+                **_make_meta(v2_delta_id, chap, 1),
+                "character_changes": [],
+                "world_changes": [],
+                "relationship_changes": [],
+                "new_events": [
+                    {
+                        "change_id": f"ce_{eid}",
+                        "op": "add",
+                        "target_id": eid,
+                        "event_id": eid,
+                        "type": "encounter",
+                        "cause": [],
+                        "effects": [],
+                        "participants": ["char_actor"],
+                        "location": None,
+                        "time": {"timeline_day": i + 1, "in_story_date": None},
+                        "description": f"v2 event {eid}",
+                        "confidence": 0.8,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    }
+                    for i, eid in enumerate(event_ids_in_commit_order[:3])
+                ],
+                "resolved_hooks": [],
+                "new_hooks": [],
+                "debt_changes": [],
+            }
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json=v2_delta)
+            assert r.status_code == 201, r.text
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/commits",
+                json={"delta_id": v2_delta_id, "author_approval": {"approver": "u", "approved": False}, "workflow_run_id": f"wfr_{v2_delta_id}"},
+            )
+            assert r.status_code == 201, r.text
+
+            v2_snap = _fetch_latest_snapshot_json(db_path, pid)
+            # v2 断言:前 3 条按提交顺序追加
+            assert v2_snap["recent_events"] == event_ids_in_commit_order[:3], (
+                f"v2 recent_events 顺序被破坏: 期望 {event_ids_in_commit_order[:3]}, "
+                f"实际 {v2_snap['recent_events']}"
+            )
+
+            # v3 commit:写入后 3 个 event;关键观察点——v3 重建后 recent_events
+            # 必须是 [v2 前 3 条按提交顺序] + [v3 后 3 条按提交顺序]。
+            v3_delta_id = "dlt_re_events_v3"
+            v3_delta = {
+                **_make_meta(v3_delta_id, chap, 2),
+                "character_changes": [],
+                "world_changes": [],
+                "relationship_changes": [],
+                "new_events": [
+                    {
+                        "change_id": f"ce_{eid}",
+                        "op": "add",
+                        "target_id": eid,
+                        "event_id": eid,
+                        "type": "encounter",
+                        "cause": [],
+                        "effects": [],
+                        "participants": ["char_actor"],
+                        "location": None,
+                        "time": {"timeline_day": i + 4, "in_story_date": None},
+                        "description": f"v3 event {eid}",
+                        "confidence": 0.8,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    }
+                    for i, eid in enumerate(event_ids_in_commit_order[3:])
+                ],
+                "resolved_hooks": [],
+                "new_hooks": [],
+                "debt_changes": [],
+            }
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json=v3_delta)
+            assert r.status_code == 201, r.text
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/commits",
+                json={"delta_id": v3_delta_id, "author_approval": {"approver": "u", "approved": False}, "workflow_run_id": f"wfr_{v3_delta_id}"},
+            )
+            assert r.status_code == 201, r.text
+
+            v3_snap = _fetch_latest_snapshot_json(db_path, pid)
+            # v3 关键断言:rebuild 路径下 recent_events 仍按"v2 提交顺序 + v3 提交顺序"
+            # 累积——不丢 evt_first、不被字典序重排。
+            assert v3_snap["recent_events"] == event_ids_in_commit_order, (
+                f"rebuild 后 recent_events 顺序被破坏: "
+                f"期望 {event_ids_in_commit_order}, 实际 {v3_snap['recent_events']} "
+                f"(审计 §第2条:rebuild 路径下 recent_events 顺序/首条事件丢失)"
+            )
+            # 首条不丢失:提交顺序第一条 evt_d 必须出现在 v3 recent_events[0]
+            assert v3_snap["recent_events"][0] == "evt_d", (
+                f"v3 recent_events[0] 应为提交顺序首条 evt_d, 实际 {v3_snap['recent_events'][0]!r}"
+            )
+            # 末尾是 v3 最后一条
+            assert v3_snap["recent_events"][-1] == event_ids_in_commit_order[-1]
+
+    asyncio.run(run())
+
+
+def test_recent_events_order_preserved_with_rollback_inverse_cleanup(tmp_path: Path):
+    """``apply_inverse_cleanup_to_state`` 过滤 ``recent_events`` 时必须保持顺序。
+
+    rollback 路径下,``commit_delta`` 走 inverse_cleanup 删 event_id;若清理实现
+    误用 ``[i for i in recent if i != eid]``(按值删而非按 id 删)或类似错误,会
+    导致后续 event_id 错位 / 首条丢失。重建路径下(inverse_cleanup 在 rebuild
+    之后)recent_events 必须按累积提交顺序保留。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app, name="recent_events_rollback")
+            chap = await _make_chapter(app, pid)
+            db_path = tmp_path / "novelos.db"
+
+            # v1 init
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap}
+            )
+            assert r.status_code == 201, r.text
+
+            # v2 commit:写入 3 个 event
+            v2_delta_id = "dlt_rollback_v2"
+            eids = ["evt_aaa", "evt_bbb", "evt_ccc"]
+            v2_delta = {
+                **_make_meta(v2_delta_id, chap, 1),
+                "character_changes": [],
+                "world_changes": [],
+                "relationship_changes": [],
+                "new_events": [
+                    {
+                        "change_id": f"ce_{eid}",
+                        "op": "add",
+                        "target_id": eid,
+                        "event_id": eid,
+                        "type": "encounter",
+                        "cause": [],
+                        "effects": [],
+                        "participants": ["char_actor"],
+                        "location": None,
+                        "time": {"timeline_day": i + 1, "in_story_date": None},
+                        "description": f"rollback test event {eid}",
+                        "confidence": 0.8,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    }
+                    for i, eid in enumerate(eids)
+                ],
+                "resolved_hooks": [],
+                "new_hooks": [],
+                "debt_changes": [],
+            }
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json=v2_delta)
+            assert r.status_code == 201, r.text
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/commits",
+                json={"delta_id": v2_delta_id, "author_approval": {"approver": "u", "approved": False}, "workflow_run_id": f"wfr_{v2_delta_id}"},
+            )
+            assert r.status_code == 201, r.text
+            v2_commit_id = r.json()["commit_id"]
+
+            # v3 commit:再加 2 个 event
+            v3_delta_id = "dlt_rollback_v3"
+            v3_extra = ["evt_ddd", "evt_eee"]
+            v3_delta = {
+                **_make_meta(v3_delta_id, chap, 2),
+                "character_changes": [],
+                "world_changes": [],
+                "relationship_changes": [],
+                "new_events": [
+                    {
+                        "change_id": f"ce_{eid}",
+                        "op": "add",
+                        "target_id": eid,
+                        "event_id": eid,
+                        "type": "encounter",
+                        "cause": [],
+                        "effects": [],
+                        "participants": ["char_actor"],
+                        "location": None,
+                        "time": {"timeline_day": i + 4, "in_story_date": None},
+                        "description": f"v3 event {eid}",
+                        "confidence": 0.8,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    }
+                    for i, eid in enumerate(v3_extra)
+                ],
+                "resolved_hooks": [],
+                "new_hooks": [],
+                "debt_changes": [],
+            }
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json=v3_delta)
+            assert r.status_code == 201, r.text
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/commits",
+                json={"delta_id": v3_delta_id, "author_approval": {"approver": "u", "approved": False}, "workflow_run_id": f"wfr_{v3_delta_id}"},
+            )
+            assert r.status_code == 201, r.text
+
+            v3_snap = _fetch_latest_snapshot_json(db_path, pid)
+            assert v3_snap["recent_events"] == eids + v3_extra, (
+                f"v3 recent_events 应为累积提交顺序: 期望 {eids + v3_extra}, 实际 {v3_snap['recent_events']}"
+            )
+
+            # 回滚 v2 commit(inverse_cleanup 仅删 v2 的 3 个 event),断言:
+            # - v2 的 event 被剔除
+            # - v3 的 event 保留,顺序保持
+            # - 首条不丢失
+            r = await _request(
+                app, "POST", f"/api/commits/{v2_commit_id}/rollback",
+                json={"author_approval": {"approver": "u", "approved": True}},
+            )
+            assert r.status_code in (200, 201), r.text
+
+            final_snap = _fetch_latest_snapshot_json(db_path, pid)
+            # rollback 后 recent_events 应只剩 v3 提交的 2 条(按提交顺序)
+            assert final_snap["recent_events"] == v3_extra, (
+                f"rollback v2 后 recent_events 应只剩 v3 累积顺序: 期望 {v3_extra}, "
+                f"实际 {final_snap['recent_events']}"
+            )
+            # 首条不丢失:v3 提交顺序首条 evt_ddd 必须保留
+            assert final_snap["recent_events"][0] == "evt_ddd", (
+                f"rollback 后 recent_events[0] 应为 v3 提交首条 evt_ddd, "
+                f"实际 {final_snap['recent_events'][0]!r}"
+            )
+
+    asyncio.run(run())
+
+
+# ----------------------------------------------------------------- 5. rollback 逆清理全集合覆盖(审计 §第3条)
+
+
+def test_rollback_inverse_cleanup_covers_all_collections(tmp_path: Path):
+    """rollback 路径必须清理全 6 个领域集合,而非仅 events/hooks。
+
+    复现 ``docs/testing/audit-story-state-20260829.md`` 第 3 条:
+    原 ``_inverse_cleanup`` 只收集 ``remove_event_ids`` / ``remove_hook_ids``,
+    ``commit_delta`` 阶段仅 DELETE ``plot_events`` / ``hooks`` / ``timeline_events``;
+    ``relationships`` / ``narrative_debts`` / ``locations`` / ``factions`` /
+    ``world_rules`` / ``characters`` / ``character_states`` 在 rollback 后残留
+    → 半回滚态。
+
+    测试设计:
+    - v1 init。
+    - v2 commit 同时写入:
+        * location(loc_rbck) / faction(fac_rbck) / world_rule(rule_rbck)
+        * character_state 增量(char_actor 的 state field)
+        * relationship (char_actor→char_target, type=ally)
+        * debt(dbt_rbck)  + new_event(evt_rbck) + new_hook(hk_rbck)
+    - 校验 v2 提交后 6 集合 DB 行均存在。
+    - 调 ``/api/commits/{v2_commit_id}/rollback``。
+    - 修复后断言:
+        * relationships / narrative_debts / locations / factions / world_rules
+          全部无对应残留行(逆 add → DELETE / 逆 update → 恢复 before);
+        * 事件 evt_rbck / 钩 hk_rbck 已被 DELETE(原有回滚回归);
+        * snapshot 同步剔除对应条目。
+    - 修复前(红):关系/债务/世界实体表均残留。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app, name="rollback_full_cleanup")
+            chap = await _make_chapter(app, pid)
+            db_path = tmp_path / "novelos.db"
+
+            # 准备 2 个角色(relationship 需要 from→to 两侧角色存在)
+            from packages.core.db import get_connection
+            _conn = get_connection(str(db_path))
+            try:
+                _conn.execute(
+                    """INSERT INTO characters
+                       (character_id, project_id, name, core_json, visibility,
+                        who_knows, created_at, updated_at)
+                       VALUES (?, ?, ?, '{}', 'VISIBLE', NULL, ?, ?)
+                    """,
+                    ("char_actor", pid, "行动者", _now_iso(), _now_iso()),
+                )
+                _conn.execute(
+                    """INSERT INTO characters
+                       (character_id, project_id, name, core_json, visibility,
+                        who_knows, created_at, updated_at)
+                       VALUES (?, ?, ?, '{}', 'VISIBLE', NULL, ?, ?)
+                    """,
+                    ("char_target", pid, "目标者", _now_iso(), _now_iso()),
+                )
+                _conn.commit()
+            finally:
+                _conn.close()
+
+            # v1 init
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap}
+            )
+            assert r.status_code == 201, r.text
+
+            # v2 commit:写入全 6 集合
+            v2_delta_id = "dlt_full_collections"
+            v2_delta = {
+                **_make_meta(v2_delta_id, chap, 1),
+                "character_changes": [
+                    {
+                        "change_id": "cc_rbck_1",
+                        "op": "add",
+                        "target_id": "char_actor",
+                        "character_id": "char_actor",
+                        "facet": "state",
+                        "field": "mood",
+                        "after": "警惕",
+                        "confidence": 0.8,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    },
+                ],
+                "world_changes": [
+                    {
+                        "change_id": "wc_loc_rbck",
+                        "op": "add",
+                        "target_id": "loc_rbck",
+                        "world_id": "loc_rbck",
+                        "world_kind": "location",
+                        "field": "name",
+                        "after": {"name": "回滚测试点", "statement": "用于回滚全集合的地点", "data_json": {}},
+                        "confidence": 0.9,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    },
+                    {
+                        "change_id": "wc_fac_rbck",
+                        "op": "add",
+                        "target_id": "fac_rbck",
+                        "world_id": "fac_rbck",
+                        "world_kind": "faction",
+                        "field": "name",
+                        "after": {"name": "回滚测试派系", "statement": "用于回滚全集合的派系", "data_json": {}},
+                        "confidence": 0.9,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    },
+                    {
+                        "change_id": "wc_rule_rbck",
+                        "op": "add",
+                        "target_id": "rule_rbck",
+                        "world_id": "rule_rbck",
+                        "world_kind": "rule",
+                        "field": "name",
+                        "after": {"name": "回滚测试规则", "statement": "用于回滚全集合的规则", "data_json": {}},
+                        "confidence": 0.9,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    },
+                ],
+                "relationship_changes": [
+                    {
+                        "change_id": "rc_rbck_1",
+                        "op": "add",
+                        "target_id": "rel_rbck_1",
+                        "from_character_id": "char_actor",
+                        "to_character_id": "char_target",
+                        "relation_type": "ally",
+                        "after": {"intensity": 0.7, "note": "初始盟友关系"},
+                        "confidence": 0.8,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    },
+                ],
+                "new_events": [
+                    {
+                        "change_id": "ce_rbck_1",
+                        "op": "add",
+                        "target_id": "evt_rbck",
+                        "event_id": "evt_rbck",
+                        "type": "encounter",
+                        "cause": [],
+                        "effects": [],
+                        "participants": ["char_actor", "char_target"],
+                        "location": "loc_rbck",
+                        "time": {"timeline_day": 1, "in_story_date": None},
+                        "description": "回滚测试事件",
+                        "confidence": 0.8,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    },
+                ],
+                "resolved_hooks": [],
+                "new_hooks": [
+                    {
+                        "change_id": "nh_rbck_1",
+                        "op": "add",
+                        "target_id": "hk_rbck",
+                        "hook_id": "hk_rbck",
+                        "name": "回滚测试钩",
+                        "importance": 0.5,
+                        "description": "回滚全集合测试用钩",
+                        "expected_payoff_chapter_id": None,
+                        "confidence": 0.8,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    },
+                ],
+                "debt_changes": [
+                    {
+                        "change_id": "dc_rbck_1",
+                        "op": "add",
+                        "target_id": "dbt_rbck",
+                        "debt_id": "dbt_rbck",
+                        "description": "回滚测试伏债",
+                        "status_after": "open",
+                        "confidence": 0.8,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    },
+                ],
+            }
+
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json=v2_delta)
+            assert r.status_code == 201, r.text
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/commits",
+                json={
+                    "delta_id": v2_delta_id,
+                    "author_approval": {"approver": "u", "approved": True},
+                    "workflow_run_id": f"wfr_{v2_delta_id}",
+                },
+            )
+            assert r.status_code == 201, r.text
+            v2_commit_id = r.json()["commit_id"]
+
+            # 提交后断言:6 集合 DB 行均存在(预条件)
+            conn = _open_db(db_path)
+            try:
+                assert conn.execute("SELECT 1 FROM locations WHERE location_id=?", ("loc_rbck",)).fetchone()
+                assert conn.execute("SELECT 1 FROM factions WHERE faction_id=?", ("fac_rbck",)).fetchone()
+                assert conn.execute("SELECT 1 FROM world_rules WHERE world_rule_id=?", ("rule_rbck",)).fetchone()
+                assert conn.execute(
+                    "SELECT 1 FROM relationships WHERE from_character_id=? AND to_character_id=? AND relation_type=?",
+                    ("char_actor", "char_target", "ally"),
+                ).fetchone()
+                assert conn.execute("SELECT 1 FROM narrative_debts WHERE debt_id=?", ("dbt_rbck",)).fetchone()
+                assert conn.execute("SELECT 1 FROM plot_events WHERE event_id=?", ("evt_rbck",)).fetchone()
+                assert conn.execute("SELECT 1 FROM hooks WHERE hook_id=?", ("hk_rbck",)).fetchone()
+            finally:
+                conn.close()
+
+            # 回滚 v2
+            r = await _request(
+                app, "POST", f"/api/commits/{v2_commit_id}/rollback",
+                json={"author_approval": {"approver": "u", "approved": True}},
+            )
+            assert r.status_code in (200, 201), r.text
+
+            # 关键断言(修复后绿 / 修复前红):
+            # 1) 原 6 集合 DB 表全部清理干净(逆 add → DELETE)
+            conn = _open_db(db_path)
+            try:
+                leftovers = {
+                    "locations": conn.execute("SELECT 1 FROM locations WHERE location_id=?", ("loc_rbck",)).fetchone(),
+                    "factions": conn.execute("SELECT 1 FROM factions WHERE faction_id=?", ("fac_rbck",)).fetchone(),
+                    "world_rules": conn.execute("SELECT 1 FROM world_rules WHERE world_rule_id=?", ("rule_rbck",)).fetchone(),
+                    "relationships": conn.execute(
+                        "SELECT 1 FROM relationships WHERE from_character_id=? AND to_character_id=? AND relation_type=?",
+                        ("char_actor", "char_target", "ally"),
+                    ).fetchone(),
+                    "narrative_debts": conn.execute("SELECT 1 FROM narrative_debts WHERE debt_id=?", ("dbt_rbck",)).fetchone(),
+                    "plot_events": conn.execute("SELECT 1 FROM plot_events WHERE event_id=?", ("evt_rbck",)).fetchone(),
+                    "hooks": conn.execute("SELECT 1 FROM hooks WHERE hook_id=?", ("hk_rbck",)).fetchone(),
+                }
+            finally:
+                conn.close()
+            for tbl, row in leftovers.items():
+                assert row is None, (
+                    f"rollback 逆清理失败:{tbl} 表残留已回滚 commit 的行 {row}"
+                )
+
+            # 2) 快照同步:对应 id 不在 6 集合中(events/hooks 原逻辑已覆盖,这里抽样所有 6 类)
+            final_snap = _fetch_latest_snapshot_json(db_path, pid)
+            assert "loc_rbck" not in (final_snap.get("world", {}).get("locations") or {}), (
+                f"rollback 后 snapshot.world.locations 残留 loc_rbck: {final_snap.get('world', {}).get('locations')}"
+            )
+            assert "fac_rbck" not in (final_snap.get("world", {}).get("factions") or {}), (
+                f"rollback 后 snapshot.world.factions 残留 fac_rbck: {final_snap.get('world', {}).get('factions')}"
+            )
+            assert "rule_rbck" not in (final_snap.get("world", {}).get("world_rules") or []), (
+                f"rollback 后 snapshot.world.world_rules 残留 rule_rbck"
+            )
+            # 关系/债务:snapshot.characters[*].relationships 与 snapshot.debts
+            actor = next(
+                (c for c in final_snap.get("characters", []) if c.get("character_id") == "char_actor"),
+                None,
+            )
+            assert actor is not None, "rollback 后 char_actor 不应被删除(角色定义本身不在 6 集合写透范围)"
+            # 关系的逆是 op=remove,从角色侧 relationships 列表中应消失
+            actor_rels = actor.get("relationships") or []
+            assert not any(
+                r.get("target_id") == "char_target" and r.get("relation_type") == "ally"
+                for r in actor_rels
+            ), f"rollback 后 char_actor.relationships 残留 ally 关系: {actor_rels}"
+            assert not any(d.get("debt_id") == "dbt_rbck" for d in final_snap.get("debts", [])), (
+                f"rollback 后 snapshot.debts 残留 dbt_rbck"
+            )
+
+    asyncio.run(run())
+
+
+def _now_iso() -> str:
+    from packages.core.ids import now_iso as _ni
+    return _ni()

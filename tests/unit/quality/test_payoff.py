@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from packages.core.quality.issues import MVP_SEVERITY_MATRIX, mvp_max_severity
 from packages.core.quality.payoff import PayoffContext
 from packages.core.quality.payoff import evaluate as payoff_evaluate
 
@@ -87,7 +88,12 @@ def test_h3_filler_2ch_warning():
     assert any(i.rule_id == "RULE_H3_FILLER_2CH" for i in iss)
 
 
-def test_h3_filler_3ch_error():
+def test_h3_filler_3ch_warning_matches_matrix():
+    """H-3 连续 ≥3 章 命中时 severity 必须读 MVP_SEVERITY_MATRIX（payoff→warning）。
+
+    回归：原实现硬编码 severity="error"，违反矩阵与 MVP 设计意图（阻断章节提交）。
+    """
+    assert MVP_SEVERITY_MATRIX["payoff"]["mvp_max"] == "warning"
     iss = payoff_evaluate(
         _ctx(
             draft="末段竟然有钩子？",
@@ -95,7 +101,16 @@ def test_h3_filler_3ch_error():
             delta={"resolved_hooks": []},
         )
     )
-    assert any(i.severity == "error" and i.rule_id == "RULE_H3_FILLER_3CH" for i in iss)
+    rule3 = [i for i in iss if i.rule_id == "RULE_H3_FILLER_3CH"]
+    assert rule3, "H-3 3ch 应触发"
+    assert rule3[0].severity == "warning"
+
+
+def test_mvp_max_severity_fallback_for_unknown_category():
+    """矩阵缺失键时回退到 warning（契约保护，避免新增 category 时误升 error）。"""
+    assert mvp_max_severity("nonexistent_category") == "warning"
+    # 矩阵中存在 payoff，验证启用后真的被 payoff 路径读取
+    assert mvp_max_severity("payoff") == "warning"
 
 
 def test_h3_pass_with_chapter_payoff():

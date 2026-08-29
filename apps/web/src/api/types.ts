@@ -295,6 +295,12 @@ export interface WorkflowRun {
   started_at: string;
   ended_at: string | null;
   /**
+   * 后端 list_runs 提供的可读标签（如「写正文 → 草稿 v6」「审校（审 v5）」
+   * 「生成计划」）；前端 runs 列表行优先展示 label。无 label 时退化为 run_id 短形式。
+   * 后端字段命名可能为 label / title / display_name；契约方为 label。
+   */
+  label?: string | null;
+  /**
    * 节点明细数组：单 run GET（`/runs/{id}`）返回；list（`/projects/{pid}/runs`）不返回。
    * UI 用 useApiCall 单独拉详情时填充。
    */
@@ -326,6 +332,11 @@ export interface WorkflowStartPayload {
    * 后端启动请求体可选布尔字段 fresh_write，缺省 false。
    */
   fresh_write?: boolean | null;
+  /**
+   * 审校目标草稿版本（仅 chapter-review 生效）：缺省 ⇒ 审最新版；
+   * 指定版本号 ⇒ 审该版。后端对不存在的版本会报错,前端不做校验。
+   */
+  draft_version?: number | null;
 }
 
 export interface WorkflowStartResponse {

@@ -48,6 +48,13 @@
 3. **category / severity 必填且用枚举**：见 §7；超出枚举即不合规。
 4. **不做自动改正 / 自动驳回**：你**只**输出报告；Workflow 不会因为 `severity=high` 而拒绝、驳回或重跑本 run。
 5. **不引用 HIDDEN 知识**：若计划 / 摘要中包含本视角不可见的设定，不要据此指责正文「漏写」。
+6. **设定一致性（OOC）审查（V3.9 新增）**：当输入中包含 `settings_digest` 且非空时，**对照**该摘要检查正文——
+   - 人物行为 / 称谓 / 外貌是否符合 `kind=character` 条目的 `one_line`；
+   - 事件是否违反 `kind=world_rule` 条目的 `one_line`（时间线 / 势力关系 / 硬设定等）。
+   若正文与 `settings_digest` 冲突，必须在 `issues` 中**显式报告**：
+   - `category` 使用 `logic`（逻辑 / 时间线 / 势力关系违反）或 `other`（人物档案 OOC）；
+   - `severity` **至少** `medium`（设定级错误易影响全书一致性，不可降为 low 规避）。
+   当 `settings_digest` 为空数组时，**不**做 OOC 维度审查，**不**据此指责正文「漏写设定」。
 
 ---
 
@@ -91,6 +98,10 @@
   "open_hooks": [
     { "hook_id": "string", "name": "string", "importance": "number 0-1", "summary": "string" }
   ],
+  "settings_digest": [
+    { "kind": "world_rule", "name": "string", "one_line": "string" },
+    { "kind": "character",  "name": "string", "one_line": "string" }
+  ],
   "deterministic_hints": {
     "ai_pattern_hit_count": 0,
     "ai_pattern_summary": [
@@ -101,9 +112,10 @@
 ```
 
 > **输入边界**：
-> - 你**不**接收完整 Story State、Character State、World Rules；只接收 `plan_summary`（本章意图）+ `open_hooks`（伏笔台账的可推进位）。
+> - 你**不**接收完整 Story State、Character State、World Rules；只接收 `plan_summary`（本章意图）+ `open_hooks`（伏笔台账的可推进位）+ `settings_digest`（设定摘要切片）。
 > - `draft_text` 可能为空（极端情况）；若为空，输出 `overall_comment="本章正文为空"` 且 `issues=[]`。
 > - `plan_summary` 可能缺字段（部分项目未启用 chapter-plan）；缺字段视为 null，**不要**据此指责正文。
+> - `settings_digest` 是项目级设定（world_rules 全量规则 + 主要角色档案）的轻量摘要切片，专供**设定一致性（OOC）**审查使用；项目尚无角色/规则时该数组为空，**不**代表「设定无要求」——空时跳过 OOC 维度即可，**不**据此指责正文。
 > - `deterministic_hints` 是工作流前置确定性规则（去 AI 味 / AI 腔检测）的摘要，**仅供参考**；你可引用其中命中项辅助判断 `ai_flavor` 类别，但每条 `issue` 仍必须有 `draft_text` 中的真实引用，不能仅因摘要命中就列问题。
 
 ---
@@ -124,6 +136,7 @@
     - **每个 category（pacing / character / logic / foreshadowing / ai_flavor / other）维度最多指出 2 个最主要问题**——同维度第 3 条起视为「次要」并丢弃，让作者聚焦真问题。
     - **禁止复述原文超过 20 字**：`issue.quote` 字段上限保持 §7 的 60 字机检，但你在思考 / suggestion 里**不要**长段复述正文；只引最短能定位原文的片段（≤20 字）。
     - **不输出修改示范全文**：suggestion 写「建议如何改」即可，不要替作者写出改写后的整段示例（示范 ≤ 1 句、≤ 30 字）。
+11. **设定一致性（OOC）证据要求**（V3.9 新增）：OOC 类 issue 的 `quote` 仍必须是 `draft_text` 中的真实子串；`suggestion` 必须**显式引用**违反的 `settings_digest` 条目（标注 kind + name，例如「违反 world_rule『青云宗不收外徒』」），便于作者定位设定来源。
 
 ---
 
@@ -151,6 +164,8 @@
 
 `required` 字段：`schema_version`, `prompt_version`, `chapter_id`, `overall_comment`, `strengths[]`, `issues[]`。
 `strengths` 与 `issues` 必须是数组（即便为空也输出 `[]`，不省略）。
+
+> **关于 OOC 维度的输出**：本版本**不**新增 category 枚举；OOC 类问题按其性质映射到现有枚举——人物档案行为/称谓违反 → `character`；事件逻辑/时间线/势力关系违反 → `logic`；其它设定不一致 → `other`。`severity` 遵守 §3.6 的「至少 medium」硬性下限。
 
 ---
 

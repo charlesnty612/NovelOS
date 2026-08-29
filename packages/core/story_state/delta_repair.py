@@ -624,7 +624,10 @@ def _repair_resolved_hooks(
 
         if item.get("from_status") is None and entity is not None:
             current_status = entity.get("status")
-            if current_status is not None:
+            # 守卫：ABANDONED 是 hook 终态，fill-before 不补，避免把
+            # ABANDONED 钩子的 to_status=RESOLVED 抹平为合法迁移——
+            # 显式让 validator 在 ABANDONED→非ABANDONED 上抛错，保留语义。
+            if current_status is not None and current_status != "ABANDONED":
                 item = {**item, "from_status": current_status}
                 repairs.append(
                     {

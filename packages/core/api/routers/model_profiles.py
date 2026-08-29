@@ -143,6 +143,11 @@ def patch_model_profile(profile_id: str, payload: dict, request: Request) -> dic
             raise HTTPException(status_code=422, detail="model must be non-empty string")
         fields["model"] = v
     if "params_json" in payload or "params" in payload:
+        if "params_json" in payload and "params" in payload:
+            raise HTTPException(
+                status_code=422,
+                detail="params 与 params_json 只能传其一",
+            )
         existing = svc.get(profile_id)
         if existing is None:
             raise HTTPException(status_code=404, detail=f"model_profile {profile_id!r} not found")

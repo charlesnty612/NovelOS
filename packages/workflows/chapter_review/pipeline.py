@@ -120,21 +120,32 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     conn = get_connection(db_path)
     try:
-        draft_row = conn.execute(
-            """
-            SELECT content FROM drafts WHERE chapter_id = ?
-            ORDER BY created_at DESC LIMIT 1
-            """,
-            (chapter_id,),
-        ).fetchone()
+        # 用户指定 draft_version（ctx["draft_version"]）时按版本精确读取；
+        # 否则保持原"取最新"语义，便于跨模型文风对比时复审指定稿。
+        version = ctx.get("draft_version")
+        if version:
+            draft_row = conn.execute(
+                "SELECT content, version FROM drafts WHERE chapter_id = ? AND version = ?",
+                (chapter_id, int(version)),
+            ).fetchone()
+        else:
+            draft_row = conn.execute(
+                """
+                SELECT content, version FROM drafts WHERE chapter_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (chapter_id,),
+            ).fetchone()
     finally:
         conn.close()
 
     if draft_row is None:
-        # 直接抛错：basic_checks 失败会让 run FAILED
+        if version:
+            raise ValueError(f"chapter {chapter_id!r} has no draft version {version}")
         raise ValueError(f"chapter {chapter_id!r} has no draft; run chapter-write first")
 
     prose = draft_row["content"] or ""
+    reviewed_version = int(draft_row["version"])
     # V3.7：字数带硬约束 —— ±15% 升 warning（带 rule_id），超 ±30% 追加到 errors。
     # classify 既出 visible_chars（word_count）又出 band / status / deviation_pct，避免重复调用。
     classify = classify_prose_length(prose, target)
@@ -188,6 +199,7 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     report = {
         "chapter_id": chapter_id,
+        "draft_version": reviewed_version,
         "word_count": word_count,
         "target_word_count": target,
         "within_range": within_range,
@@ -203,12 +215,14 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def _collect_critic_inputs(
-    db_path: str, chapter_id: str
+    db_path: str, chapter_id: str, draft_version: int | None = None
 ) -> tuple[str, str, dict[str, Any]]:
     """收集 critic 节点所需输入：draft_text、project_id、plan_summary。
 
     返回 ``(draft_text, project_id, plan_summary_dict)``。任一环节失败抛 ValueError，
     让 critic 节点降级。
+
+    ``draft_version``：用户显式指定时按版本取；None 时维持"取最新"语义。
     """
     conn = get_connection(db_path)
     try:
@@ -221,16 +235,24 @@ def _collect_critic_inputs(
         ).fetchone()
         if chap_row is None:
             raise ValueError(f"chapter {chapter_id!r} not found")
-        draft_row = conn.execute(
-            """
-            SELECT content FROM drafts WHERE chapter_id = ?
-            ORDER BY created_at DESC LIMIT 1
-            """,
-            (chapter_id,),
-        ).fetchone()
+        if draft_version:
+            draft_row = conn.execute(
+                "SELECT content FROM drafts WHERE chapter_id = ? AND version = ?",
+                (chapter_id, int(draft_version)),
+            ).fetchone()
+        else:
+            draft_row = conn.execute(
+                """
+                SELECT content FROM drafts WHERE chapter_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (chapter_id,),
+            ).fetchone()
     finally:
         conn.close()
     if draft_row is None:
+        if draft_version:
+            raise ValueError(f"chapter {chapter_id!r} has no draft version {draft_version}")
         raise ValueError(f"chapter {chapter_id!r} has no draft")
     project_id = chap_row["project_id"]
     raw = chap_row["plan_json"] or "{}"
@@ -245,6 +267,105 @@ def _collect_critic_inputs(
         "key_beats": plan.get("key_beats") or [],
     }
     return (draft_row["content"] or ""), project_id, plan_summary
+
+
+def _collect_settings_digest(db_path: str, project_id: str) -> list[dict[str, Any]]:
+    """V3.9：组装 critic 的设定上下文摘要。
+
+    - world_rules 全部规则的 name + statement（顺序：world_rule_id ASC）。
+    - 主要角色档案：name + core_json 中的 one_line 字段（缺则用 statement 兜底）。
+    - 上限 8 个角色（按 character_id ASC 截断）。
+    - core_json 是非法 JSON 字符串 → **跳过该角色**（其余角色保留），不抛错。
+    - 全部失败 / 表为空 → 返回 []，**不**阻断 critic 调用；critic 拿空 settings_digest
+      仍能基于 plan_summary + open_hooks 正常出报告（OOC 维度无新发现）。
+    """
+    if not project_id:
+        return []
+    try:
+        conn = get_connection(db_path)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "chapter_review.settings_digest db open failed: project_id=%s err=%s",
+            project_id, exc,
+        )
+        return []
+    try:
+        try:
+            rule_rows = conn.execute(
+                "SELECT name, statement FROM world_rules "
+                "WHERE project_id = ? ORDER BY world_rule_id ASC",
+                (project_id,),
+            ).fetchall()
+            char_rows = conn.execute(
+                "SELECT name, core_json FROM characters "
+                "WHERE project_id = ? ORDER BY character_id ASC LIMIT 8",
+                (project_id,),
+            ).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "chapter_review.settings_digest query failed: project_id=%s err=%s",
+                project_id, exc,
+            )
+            return []
+    finally:
+        conn.close()
+
+    digest: list[dict[str, Any]] = []
+    for r in rule_rows:
+        if not isinstance(r["name"], str):
+            continue
+        digest.append({
+            "kind": "world_rule",
+            "name": r["name"],
+            "one_line": r["statement"] if isinstance(r["statement"], str) else "",
+        })
+    for r in char_rows:
+        if not isinstance(r["name"], str):
+            continue
+        raw_core = r["core_json"]
+        # 解析 core_json：字符串 → json.loads；已是 dict → 直接用；
+        # 解析失败（非法 JSON / 异常类型）→ 跳过该角色。
+        if isinstance(raw_core, str):
+            if not raw_core:
+                core: dict[str, Any] | None = {}
+            else:
+                try:
+                    parsed = json.loads(raw_core)
+                except (TypeError, ValueError):
+                    _log.warning(
+                        "chapter_review.settings_digest skip character with bad core_json: "
+                        "project_id=%s name=%s",
+                        project_id, r["name"],
+                    )
+                    continue
+                core = parsed if isinstance(parsed, dict) else None
+        elif isinstance(raw_core, dict):
+            core = raw_core
+        else:
+            # None / 其他类型：core_json 不可用，跳过该角色（与损坏 JSON 同样保守处理）
+            _log.warning(
+                "chapter_review.settings_digest skip character with unusable core_json: "
+                "project_id=%s name=%s type=%s",
+                project_id, r["name"], type(raw_core).__name__,
+            )
+            continue
+
+        one_line = ""
+        if isinstance(core, dict):
+            val = core.get("one_line")
+            if isinstance(val, str):
+                one_line = val
+            else:
+                # 兜底：用 statement（结构不固定时的最小有用描述）
+                stmt = core.get("statement")
+                if isinstance(stmt, str):
+                    one_line = stmt
+        digest.append({
+            "kind": "character",
+            "name": r["name"],
+            "one_line": one_line,
+        })
+    return digest
 
 
 def _collect_open_hooks(db_path: str, project_id: str, limit: int = 10) -> list[dict[str, Any]]:
@@ -315,8 +436,13 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        draft_text, project_id, plan_summary = _collect_critic_inputs(db_path, chapter_id)
+        draft_text, project_id, plan_summary = _collect_critic_inputs(
+            db_path, chapter_id, draft_version=ctx.get("draft_version")
+        )
         open_hooks = _collect_open_hooks(db_path, project_id)
+        # V3.9：设定上下文摘要（world_rules + 角色档案 one_line），供 critic 做 OOC 审查。
+        # 失败 / 空 → settings_digest=[]，不阻断 critic（与 §5 契约一致）。
+        settings_digest = _collect_settings_digest(db_path, project_id)
     except Exception as exc:  # noqa: BLE001 —— 输入收集失败即降级
         _log.warning(
             "chapter_review.critic inputs collection failed: chapter_id=%s err=%s",
@@ -356,6 +482,7 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "draft_text": draft_text,
         "plan_summary": plan_summary,
         "open_hooks": open_hooks,
+        "settings_digest": settings_digest,
         "deterministic_hints": deterministic_hints,
     }
 
@@ -464,6 +591,14 @@ class _RejectForRevision(Exception):
         super().__init__("rejected-for-revision")
 
 
+class _Rejected(Exception):
+    """纯驳回（approved=false，无 revise）的终态标记：run FAILED + error='rejected'，
+    章节保持 DRAFTED。与 _RejectForRevision 同机制（error 字段区分，不碰 engine/DDL）。"""
+
+    def __init__(self) -> None:
+        super().__init__("rejected")
+
+
 def _mark_reviewed_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
@@ -498,7 +633,7 @@ def _mark_reviewed_node(ctx: dict[str, Any]) -> dict[str, Any]:
             finally:
                 conn.close()
             raise _RejectForRevision()
-        raise ValueError("author_review 未通过，无法标记 REVIEWED")
+        raise _Rejected()
 
     conn = get_connection(db_path)
     try:

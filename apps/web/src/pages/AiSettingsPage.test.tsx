@@ -339,4 +339,105 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     // 不应发 bind
     expect(capabilityBindingsApi.bind).not.toHaveBeenCalled();
   });
+
+  // -------------------- 档案卡「设为默认」-----------------------------
+
+  it('档案卡展示其作为首选的环节徽标', async () => {
+    // premise_design/world_building/character_design/volume_outline/reasoning 都把 mpf_001 放首位
+    renderPage();
+    const wrap = await screen.findByTestId('model-profile-default-caps-mpf_001');
+    for (const b of bindingsFixture) {
+      if (b.profile_ids[0] === 'mpf_001') {
+        expect(
+          screen.getByTestId(`model-profile-default-cap-badge-mpf_001-${b.capability}`),
+        ).toHaveTextContent(b.label);
+      } else {
+        // profile_ids[0] 不是本档案的环节不出现在该徽标区
+        expect(
+          screen.queryByTestId(`model-profile-default-cap-badge-mpf_001-${b.capability}`),
+        ).toBeNull();
+      }
+    }
+    expect(wrap).toBeInTheDocument();
+  });
+
+  it('档案卡点击「设为默认」展开 7 环节 chip；再次点击收起', async () => {
+    renderPage();
+
+    const btn = await screen.findByTestId('profile-set-default-mpf_001');
+    // 初始不展示 chip 行
+    expect(screen.queryByTestId('profile-default-chip-row-mpf_001')).toBeNull();
+    fireEvent.click(btn);
+    const row = await screen.findByTestId('profile-default-chip-row-mpf_001');
+    // 7 个 chip 都在
+    for (const b of bindingsFixture) {
+      expect(
+        screen.getByTestId(`profile-default-cap-mpf_001-${b.capability}`),
+      ).toBeInTheDocument();
+    }
+    expect(
+      row.querySelectorAll('[data-testid^="profile-default-cap-mpf_001-"]').length,
+    ).toBe(7);
+
+    // 再次点击收起
+    fireEvent.click(btn);
+    await waitFor(() => {
+      expect(screen.queryByTestId('profile-default-chip-row-mpf_001')).toBeNull();
+    });
+  });
+
+  it('点击某环节 chip → bind(capability, [本档案, ...其余]) 首位 = 本档案 id', async () => {
+    // creative_writing 当前 profile_ids=[]，绑本档案 → 期望 [mpf_001]
+    // volume_outline 当前 profile_ids=['mpf_001']；绑一个不存在的 mpf_999（不参与 list）
+    //   反而更稳：测「首位是新档案、其余保留」→ 选 mpf_001 作为新档案绑到 world_building（当前也是 mpf_001 首位）
+    //   为了断言首位变化，选用 mpf_002（profileNoKey）作为新档案绑到 premise_design。
+    // 但 mock 只列了 mpf_001；改用「仍能验证顺序正确」方式：
+    //   - 把第一个档案再绑到 creative_writing（profile_ids=[]），结果应为 [mpf_001]。
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([baseProfile, profileNoKey]);
+    vi.mocked(capabilityBindingsApi.bind).mockResolvedValue({
+      capability: 'creative_writing',
+      label: '正文写作',
+      agents: ['writer'],
+      profile_ids: ['mpf_002'],
+      profiles: [
+        { profile_id: 'mpf_002', name: 'plain', model: 'gpt-4o-mini' },
+      ],
+      legacy_available: false,
+    });
+
+    renderPage();
+    const btn = await screen.findByTestId('profile-set-default-mpf_002');
+    fireEvent.click(btn);
+    const chip = await screen.findByTestId(
+      'profile-default-cap-mpf_002-creative_writing',
+    );
+    fireEvent.click(chip);
+
+    await waitFor(() => {
+      expect(capabilityBindingsApi.bind).toHaveBeenCalledTimes(1);
+    });
+    const [capability, profileIds] = vi.mocked(capabilityBindingsApi.bind).mock.calls[0]!;
+    expect(capability).toBe('creative_writing');
+    // 首位必须是新档案
+    expect(profileIds[0]).toBe('mpf_002');
+    // 其余项不含本档案（无重复）
+    expect(profileIds.filter((p) => p === 'mpf_002')).toHaveLength(1);
+    // 整体数组等价于「本档案 + 现有列表中去掉本档案」
+    expect(profileIds).toEqual(['mpf_002']);
+  });
+
+  it('已经是首选时点击 chip 幂等（不发起 bind）', async () => {
+    // premise_design 首位已是 mpf_001；点 chip → 不该 bind
+    renderPage();
+    const btn = await screen.findByTestId('profile-set-default-mpf_001');
+    fireEvent.click(btn);
+    const chip = await screen.findByTestId(
+      'profile-default-cap-mpf_001-premise_design',
+    );
+    fireEvent.click(chip);
+
+    // 给一点时间确认没有副作用被触发
+    await new Promise((r) => setTimeout(r, 10));
+    expect(capabilityBindingsApi.bind).not.toHaveBeenCalled();
+  });
 });

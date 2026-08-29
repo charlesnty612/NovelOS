@@ -75,17 +75,16 @@ def _scrub_ctx_for_checkpoint(
     return scrubbed
 
 
-def _parse_json(raw: Any) -> Any:
-    if raw is None:
-        return None
-    if isinstance(raw, (dict, list)):
-        return raw
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return None
+class WorkflowRunConflict(Exception):
+    """同 chapter 下已存在 RUNNING/PENDING run，启动被拒（409 语义）。
+
+    设计要点：
+    - 抛 ``sqlite3.IntegrityError`` 在 SQL 层由 0017 部分唯一索引
+      ``idx_workflow_runs_active`` 兜底触发（覆盖 TOCTOU 窗口）。
+    - engine 层捕获后转为业务异常，API 路由（``routers/workflows.py``）
+      映射为 HTTP 409，与既有 ``_check_active_run_for_chapter`` 的 409
+      同语义（避免 500/422 误导客户端）。
+    """
 
 
 def _ensure_workflow(conn: sqlite3.Connection, name: str, version: str = "v1") -> str:
@@ -283,16 +282,27 @@ class WorkflowEngine:
             wf_id = _ensure_workflow(conn, workflow_name)
             run_id = new_id("wfr")
             now = now_iso()
-            conn.execute(
-                """
-                INSERT INTO workflow_runs
-                    (run_id, workflow_id, chapter_id, status, current_node,
-                     checkpoint_json, error, retry_count, started_at, ended_at)
-                VALUES (?, ?, ?, 'RUNNING', NULL, '{}', NULL, 0, ?, NULL)
-                """,
-                (run_id, wf_id, chapter_id, now),
-            )
-            conn.commit()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_runs
+                        (run_id, workflow_id, chapter_id, status, current_node,
+                         checkpoint_json, error, retry_count, started_at, ended_at)
+                    VALUES (?, ?, ?, 'RUNNING', NULL, '{}', NULL, 0, ?, NULL)
+                    """,
+                    (run_id, wf_id, chapter_id, now),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                # 0017 部分唯一索引 ``idx_workflow_runs_active`` 兜底 TOCTOU：
+                # 双 start 窄窗口内第二个 INSERT 会被拒。转为业务异常供 API 层
+                # 映射为 409（与 ``_check_active_run_for_chapter`` 同语义）。
+                msg = str(exc)
+                if "idx_workflow_runs_active" in msg or "UNIQUE" in msg.upper():
+                    raise WorkflowRunConflict(
+                        f"chapter {chapter_id!r} already has an active workflow run"
+                    ) from exc
+                raise
         finally:
             conn.close()
         return run_id

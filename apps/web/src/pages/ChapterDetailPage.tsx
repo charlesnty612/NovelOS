@@ -166,6 +166,22 @@ export function ChapterDetailPage() {
     };
   }, [detailRun?.checkpoint_json]);
 
+  // ---- 草稿选中版本（受控，提升至父组件，供审校按钮读取 payload）----
+  // drafts 是 version DESC 排序（drafts[0] 即最新一版）；选中版本变化时同步刷新
+  // ——见下方 selectedDraftVersion 的 sync effect。默认 null = drafts 加载完成后
+  // 自动落到 drafts[0]（最新版），保持原视觉与行为。
+  const [selectedDraftVersion, setSelectedDraftVersion] = useState<number | null>(null);
+  const drafts = draftsCall.data ?? [];
+  useEffect(() => {
+    if (drafts.length === 0) {
+      setSelectedDraftVersion(null);
+      return;
+    }
+    if (selectedDraftVersion == null || !drafts.some((d) => d.version === selectedDraftVersion)) {
+      setSelectedDraftVersion(drafts[0].version);
+    }
+  }, [drafts, selectedDraftVersion]);
+
   // ---- 顶部工作流按钮 ----
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -245,7 +261,15 @@ export function ChapterDetailPage() {
         let resp: WorkflowStartResponse;
         if (action === 'plan') resp = await workflowsApi.startPlan(projectId, chapterId, requestPayload);
         else if (action === 'write') resp = await workflowsApi.startWrite(projectId, chapterId, requestPayload);
-        else if (action === 'review') resp = await workflowsApi.startReview(projectId, chapterId, requestPayload);
+        else if (action === 'review') {
+          // 审校目标版本：始终带 draft_version（默认 = 最新版,由 selectedDraftVersion
+          // 父级状态保证;后端对不存在版本会报错,前端不校验）。
+          const reviewPayload: WorkflowStartPayload = {
+            ...(requestPayload ?? {}),
+            draft_version: selectedDraftVersion,
+          };
+          resp = await workflowsApi.startReview(projectId, chapterId, reviewPayload);
+        }
         else resp = await workflowsApi.startCommit(projectId, chapterId, requestPayload);
         // 启动后立刻刷新 + 选中该 run
         setSelectedRunId(resp.run_id);
@@ -256,7 +280,7 @@ export function ChapterDetailPage() {
         setSubmitting(false);
       }
     },
-    [projectId, chapterId, chapter, chapterCall, runsCall, draftsCall],
+    [projectId, chapterId, chapter, chapterCall, runsCall, draftsCall, selectedDraftVersion],
   );
 
   const handleResume = useCallback(
@@ -266,11 +290,14 @@ export function ChapterDetailPage() {
     ) => {
       if (!selectedRunSummary) return;
       setActionErr(null);
-      if (!approved || opts?.revise) setReviseLooping(true);
+      // 仅当 opts?.revise（按建议修改/驳回并改稿）触发自动改稿回路并显示回路横幅。
+      // 纯驳回（approved=false）由后端以 FAILED(error='rejected') 收尾,不再启动回路。
+      if (opts?.revise) setReviseLooping(true);
       setSubmitting(true);
       try {
-        // 三态：approve / reject / revise（revise 时 run 以 FAILED(rejected-for-revision) 收尾，
-        // chapter 保持 DRAFTED，note 落 plan_json.revision_note，改稿后可重跑 write/review）
+        // 三态：approve / reject / revise（revise 时 run 以 FAILED(rejected-for-revision) 收尾,
+        // 纯驳回时 run 以 FAILED(error='rejected') 收尾,chapter 保持 DRAFTED。
+        // note 落 plan_json.revision_note，改稿后可重跑 write/review）
         const human_input: { approved: boolean; revise?: boolean; note?: string } = {
           approved,
         };
@@ -329,6 +356,7 @@ export function ChapterDetailPage() {
           chapter={chapter}
           activeRunStatus={activeRun?.status ?? null}
           submitting={submitting}
+          selectedDraftVersion={selectedDraftVersion}
           onStart={handleStartWorkflow}
         />
       ) : chapterCall.loading ? (
@@ -377,6 +405,8 @@ export function ChapterDetailPage() {
               drafts={draftsCall.data ?? []}
               draftsLoading={draftsCall.loading}
               draftsError={draftsCall.error}
+              selectedDraftVersion={selectedDraftVersion}
+              onSelectDraftVersion={setSelectedDraftVersion}
               onCreated={async () => {
                 await draftsCall.reload();
               }}
@@ -444,11 +474,14 @@ function ChapterHeader({
   chapter,
   activeRunStatus,
   submitting,
+  selectedDraftVersion,
   onStart,
 }: {
   chapter: Chapter;
   activeRunStatus: 'PENDING' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | null;
   submitting: boolean;
+  /** 当前选中的 draft 版本号;用于「将审校:草稿 vN」动态提示。null = 尚无草稿。 */
+  selectedDraftVersion: number | null;
   onStart: (
     action: 'plan' | 'write' | 'review' | 'commit',
     payload?: {
@@ -582,6 +615,19 @@ function ChapterHeader({
                     <option value="">按意见改稿（默认）</option>
                     <option value="fresh">全新重写</option>
                   </select>
+                ) : null}
+                {/* 「审校」专属：动态提示将审哪版,让用户在点之前就知道。
+                    草稿尚未加载时(selectedDraftVersion=null)显示「暂未选择」。 */}
+                {b.action === 'review' ? (
+                  <div
+                    className="muted small"
+                    data-testid="wf-review-target-hint"
+                  >
+                    将审校：
+                    {selectedDraftVersion != null
+                      ? `草稿 v${selectedDraftVersion}`
+                      : '暂未选择'}
+                  </div>
                 ) : null}
               </div>
             );
@@ -748,14 +794,21 @@ function WorkflowPanel({
                   className="kv-list__title"
                   title={`run_id=${r.run_id} · workflow_id=${r.workflow_id}`}
                 >
-                  {/* 后端 list_runs 不返回 workflow_name（仅 GET /runs/{id} 含 nodes 但也无 workflow_name）；
-                      前端以短 ID 形式展示，鼠标悬浮看完整 run_id / workflow_id。 */}
-                  run · {r.run_id.slice(0, 12)}…
+                  {/* 优先展示后端给的 label（如「写正文 → 草稿 v6」），缺省退化为 run_id 短形式；
+                      完整 run_id 保留在行内 muted 小字，便于溯源。 */}
+                  {r.label ? r.label : `run · ${r.run_id.slice(0, 12)}…`}
+                  {r.label ? (
+                    <span className="muted small" style={{ marginLeft: 6 }}>
+                      {r.run_id.slice(0, 8)}
+                    </span>
+                  ) : null}
                 </span>
                 <span
                   title={
                     (r.error ?? '').includes('rejected-for-revision')
                       ? '该轮审校被「按建议修改/驳回并改稿」主动驳回，系统已自动重跑写正文→审校；非失败。'
+                      : (r.error ?? '').includes('rejected')
+                      ? '作者已驳回本轮审校，章节保持 DRAFTED；非失败。'
                       : undefined
                   }
                 >
@@ -833,6 +886,12 @@ function RunTimeline({ run }: { run: WorkflowRun }) {
               <InfoBanner>
                 已按审校建议驳回本轮（rejected-for-revision）：系统正在自动改稿重跑
                 写正文 → 审校，非失败。
+              </InfoBanner>
+            ) : (n.error ?? '').includes('rejected') ? (
+              // 纯驳回：作者主动驳回本轮审校，后端以 FAILED(error='rejected') 收尾。
+              // 章节保持 DRAFTED,可改稿后重新发起写正文/审校;非失败,用中性 InfoBanner。
+              <InfoBanner>
+                作者已驳回本轮审校，章节保持 DRAFTED，可改稿后重新发起写正文/审校；非失败。
               </InfoBanner>
             ) : (
               <ErrorBanner>{n.error}</ErrorBanner>
@@ -968,13 +1027,18 @@ function NodeStatusBadge({
   error,
 }: {
   status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
-  /** 节点 error：FAILED 且为 rejected-for-revision 时渲染中性「已驳回·改稿」，
-   *  避免与真失败的红色 FAILED 混淆（改稿回路的正常语义）。 */
+  /** 节点 error：FAILED 时区分两态——
+   *   rejected-for-revision = 按建议修改/驳回并改稿（中性徽标「已驳回·改稿」）
+   *   rejected              = 纯驳回（中性徽标「已驳回」）
+   * 两者都避免与真失败的红色 FAILED 混淆。判断顺序：rejected-for-revision 含子串 rejected,先判。 */
   error?: string | null;
 }) {
+  const err = error ?? '';
   const rejectedForRevision =
-    status === 'FAILED' && (error ?? '').includes('rejected-for-revision');
-  const cls = rejectedForRevision
+    status === 'FAILED' && err.includes('rejected-for-revision');
+  const rejectedOnly =
+    !rejectedForRevision && status === 'FAILED' && err.includes('rejected');
+  const cls = rejectedForRevision || rejectedOnly
     ? 'badge badge--chapter-rejected'
     : status === 'COMPLETED'
     ? 'badge badge--chapter-committed'
@@ -985,9 +1049,12 @@ function NodeStatusBadge({
     : status === 'SKIPPED'
     ? 'badge badge--archived'
     : 'badge badge--chapter-planned';
-  return (
-    <span className={cls}>{rejectedForRevision ? '已驳回·改稿' : status}</span>
-  );
+  const label = rejectedForRevision
+    ? '已驳回·改稿'
+    : rejectedOnly
+    ? '已驳回'
+    : status;
+  return <span className={cls}>{label}</span>;
 }
 
 // ---- DraftsPanel ----
@@ -997,6 +1064,8 @@ function DraftsPanel({
   drafts,
   draftsLoading,
   draftsError,
+  selectedDraftVersion,
+  onSelectDraftVersion,
   onCreated,
 }: {
   chapterId: string;
@@ -1004,27 +1073,19 @@ function DraftsPanel({
   drafts: Draft[];
   draftsLoading: boolean;
   draftsError: string | null;
+  /** 父组件持有的当前选中版本号（受控）。null = drafts 为空或尚未回落。 */
+  selectedDraftVersion: number | null;
+  /** 版本被点选时通知父组件；保存新版本后父组件会刷新此值,本组件无须本地同步。 */
+  onSelectDraftVersion: (version: number) => void;
   onCreated: () => Promise<void> | void;
 }) {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editorText, setEditorText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // 默认选中最新一条
-  useEffect(() => {
-    if (drafts.length === 0) {
-      setSelectedId(null);
-      setEditingId(null);
-      return;
-    }
-    if (!selectedId || !drafts.find((d) => d.draft_id === selectedId)) {
-      setSelectedId(drafts[0].draft_id);
-    }
-  }, [drafts, selectedId]);
-
-  const selected = drafts.find((d) => d.draft_id === selectedId) ?? null;
+  // 受控：选中态由父组件持有。本组件只读 drafts 派生当前 draft 对象。
+  const selected = drafts.find((d) => d.version === selectedDraftVersion) ?? null;
 
   const canCreateDraft =
     chapterStatus === 'DRAFTED' || chapterStatus === 'REVIEWED';
@@ -1127,14 +1188,25 @@ function DraftsPanel({
               {drafts.map((d) => (
                 <div
                   key={d.draft_id}
-                  className={`kv-list__row ${d.draft_id === selectedId ? 'kv-list__row--active' : ''}`}
+                  className={`kv-list__row ${d.version === selectedDraftVersion ? 'kv-list__row--active' : ''}`}
                   onClick={() => {
-                    setSelectedId(d.draft_id);
+                    onSelectDraftVersion(d.version);
                     setEditingId(null);
                   }}
                   data-testid={`draft-row-${d.draft_id}`}
                 >
                   <span className="kv-list__title">v{d.version}</span>
+                  {/* 模型徽标：model_id 存在且非 'mock/mock' 时展示（mock 默认无意义）。
+                      完整 model_id 保留在 title，便于调试；徽标本身只显示短形式。 */}
+                  {d.model_id && d.model_id !== 'mock/mock' ? (
+                    <span
+                      className="badge"
+                      title={d.model_id}
+                      data-testid={`draft-model-${d.draft_id}`}
+                    >
+                      {d.model_id}
+                    </span>
+                  ) : null}
                   <span className="muted small">{d.created_by}</span>
                   <span className="kv-list__meta">
                     {formatDateTime(d.created_at)}

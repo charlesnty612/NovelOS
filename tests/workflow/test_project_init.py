@@ -746,3 +746,668 @@ def test_project_init_default_no_step_mode_regression(tmp_path: Path):
             assert "pause_payload" not in payload
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 回归：_resolve_stage_input 第 1 层 revisions 空 dict 应视为"未提供"，
+# 回退到 ctx[output_key] / checkpoint draft 兜底。
+#
+# 语义决策：project_init 工作流把"空修订 dict"解释为"调用方没真正提供修订"，
+# 因为：
+#   1. 前端审阅框清空提交是常见误操作，不应短路掉 checkpoint 中的合法 AI 草稿；
+#   2. 真要清空某字段应通过 explicit reset 语义或删行级实体，不该靠"传空对象"。
+# 因此第 1 层只接受"非空 dict"，空 dict 走 ctx/draft 兜底。
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_stage_input_empty_revisions_falls_back_to_draft():
+    """单测：_resolve_stage_input 第 1 层 revisions 空 dict 应回退到 draft。
+
+    修复前：空 dict 命中第 1 层即短路，不走 draft 兜底。
+    修复后：空 dict 跳过第 1 层，回退到 ctx[node_id].__pause_payload__.draft。
+    """
+    from packages.workflows.project_init.pipeline import _resolve_stage_input
+
+    draft_data = {
+        "title": "九天星辰诀",
+        "genre": "玄幻",
+        "selling_points": ["金手指独特"],
+        "protagonist": {"name": "叶尘"},
+    }
+    ctx = {
+        "human_input": {"revisions": {"premise_output": {}}},
+        # pause_payload 模拟：premise_designer 节点挂起时的 AI 草稿
+        "premise_designer": {"__pause_payload__": {"draft": draft_data}},
+        # premise_output 不在 ctx（Pause 分支不写 ctx[output_key]，与引擎实现一致）
+    }
+
+    resolved = _resolve_stage_input(ctx, "premise")
+    # 修复后应回退到 draft；修复前会返回 {}
+    assert resolved == draft_data, (
+        f"空 revisions 应回退到 checkpoint draft，"
+        f"修复前会返回 {{}}。实得 resolved={resolved!r}"
+    )
+    assert resolved.get("title") == "九天星辰诀"
+
+
+def test_resolve_stage_input_nonempty_revisions_take_precedence():
+    """单测回归：非空 revisions 仍优先于 draft。"""
+    from packages.workflows.project_init.pipeline import _resolve_stage_input
+
+    revised = {
+        "title": "改后书名",
+        "genre": "玄幻",
+        "selling_points": ["s1"],
+        "protagonist": {"name": "叶尘"},
+    }
+    draft_data = {
+        "title": "九天星辰诀",
+        "genre": "玄幻",
+        "selling_points": ["金手指独特"],
+        "protagonist": {"name": "叶尘"},
+    }
+    ctx = {
+        "human_input": {"revisions": {"premise_output": revised}},
+        "premise_designer": {"__pause_payload__": {"draft": draft_data}},
+    }
+
+    resolved = _resolve_stage_input(ctx, "premise")
+    assert resolved == revised, f"非空 revisions 应优先，实得 {resolved!r}"
+    assert resolved.get("title") == "改后书名"
+
+
+def test_resolve_stage_input_revisions_key_absent_falls_back_to_draft():
+    """单测：revisions dict 缺少对应 output_key 时也回退到 draft（既有用法不变）。"""
+    from packages.workflows.project_init.pipeline import _resolve_stage_input
+
+    draft_data = {"title": "九天星辰诀", "genre": "玄幻"}
+    ctx = {
+        "human_input": {"revisions": {"other_output": {"foo": "bar"}}},
+        "premise_designer": {"__pause_payload__": {"draft": draft_data}},
+    }
+    resolved = _resolve_stage_input(ctx, "premise")
+    assert resolved == draft_data
+
+
+def test_resolve_stage_input_falls_back_to_ctx_output_key():
+    """单测：revisions 无值时回退到 ctx[output_key]（节点已 COMPLETED 的场景）。"""
+    from packages.workflows.project_init.pipeline import _resolve_stage_input
+
+    persisted = {"title": "已落库", "genre": "玄幻"}
+    ctx = {
+        "human_input": {"revisions": {}},
+        "premise_output": persisted,
+    }
+    resolved = _resolve_stage_input(ctx, "premise")
+    assert resolved == persisted
+
+
+def test_project_init_step_mode_empty_revisions_persists_real_data(tmp_path: Path):
+    """端到端：step_mode 全程传空 revisions，落库数据应来自 AI 草稿而非占位。
+
+    修复前：world/character/outline 任一关传空 revisions 都会让
+    _resolve_stage_input 第 1 层短路回空 dict，persist_all 用空数据
+    落库并通过 _fallback_chapter_seeds 静默造 10 个占位章。
+    修复后：空 revisions 视为未提供 → 回退到 draft → 落库与一次性跑通一致。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 3,
+                    "step_mode": True,
+                    "mock_providers": _step_mode_full_scripts(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id = r.json()["run_id"]
+            await _wait_run_terminal(app, run_id, expected=("PAUSED",))
+
+            # 每关都传空 revisions dict 复现 bug：
+            # 第 1 关：premise_output: {}
+            # 第 2~4 关：world/character/outline_output: {}
+            revisions_payloads = [
+                {"premise_output": {}},
+                {"world_output": {}, "character_output": {}, "outline_output": {}},
+                {"world_output": {}, "character_output": {}, "outline_output": {}},
+                {"world_output": {}, "character_output": {}, "outline_output": {}},
+            ]
+            for rev_payload in revisions_payloads:
+                r = await _request(
+                    app,
+                    "POST",
+                    f"/api/runs/{run_id}/resume",
+                    json={"human_input": {"revisions": rev_payload}},
+                )
+                assert r.status_code == 200, r.text
+                cur = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED", "COMPLETED"))
+                if cur["status"] == "COMPLETED":
+                    break
+                await asyncio.sleep(0.2)
+
+            run_data = await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            project_id = (run_data.get("checkpoint_json") or {}).get("project_id")
+            assert project_id and project_id.startswith("prj_")
+
+            # 角色应来自 _character_script（3 个），不是空 / 占位
+            r = await _request(app, "GET", f"/api/projects/{project_id}/characters")
+            assert r.status_code == 200
+            chars = r.json()
+            assert len(chars) == 3, (
+                f"空 revisions 不应让 character 落空/占位，实得 {len(chars)} 个角色: "
+                f"{[c['name'] for c in chars]!r}"
+            )
+            names = {c["name"] for c in chars}
+            assert names == {"叶尘", "苏婉清", "林渊"}
+
+            # 章节种子数应来自请求（3），不是 fallback 占位 10
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM chapters WHERE project_id = ?",
+                    (project_id,),
+                ).fetchone()["c"]
+            finally:
+                conn.close()
+            assert count == 3, (
+                f"应为 3 章（空 revisions 不应触发 fallback 10 章占位），实得 {count}"
+            )
+
+    asyncio.run(run())
+
+
+def test_project_init_step_mode_nonempty_revisions_still_take_effect(tmp_path: Path):
+    """回归：非空 revisions 正常生效（修订穿透到 projects.name）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 3,
+                    "step_mode": True,
+                    "mock_providers": _step_mode_full_scripts(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id = r.json()["run_id"]
+            await _wait_run_terminal(app, run_id, expected=("PAUSED",))
+
+            # 传非空修订 → 应穿透
+            revised = {
+                "title": "改后书名",
+                "genre": "玄幻",
+                "logline": "修订后的一句话",
+                "positioning": "传统玄幻升级流",
+                "selling_points": ["s1", "s2"],
+                "protagonist": {"name": "叶尘"},
+            }
+            r = await _request(
+                app,
+                "POST",
+                f"/api/runs/{run_id}/resume",
+                json={"human_input": {"revisions": {"premise_output": revised}}},
+            )
+            assert r.status_code == 200, r.text
+
+            import asyncio as _aio
+            for _ in range(50):
+                cur = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+                if cur["current_node"] == "world_builder":
+                    break
+                await _aio.sleep(0.1)
+            assert cur["current_node"] == "world_builder"
+
+            # 后续 resume 用空 human_input（不动 revisions），保证第 1 关的修订
+            # 不会被后续空 revisions 覆盖——这是 project_init 的标准用法。
+            for _ in range(3):
+                r = await _request(
+                    app,
+                    "POST",
+                    f"/api/runs/{run_id}/resume",
+                    json={"human_input": {}},
+                )
+                cur = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED", "COMPLETED"))
+                if cur["status"] == "COMPLETED":
+                    break
+                await _aio.sleep(0.2)
+
+            run_data = await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            project_id = (run_data.get("checkpoint_json") or {}).get("project_id")
+            assert project_id
+
+            r = await _request(app, "GET", f"/api/projects/{project_id}")
+            assert r.status_code == 200
+            proj = r.json()
+            assert proj["name"] == "改后书名", f"非空 revisions 应穿透，实得 {proj['name']!r}"
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# #10：persist_all 已存在实体应更新内容字段（修复前会被静默跳过）。
+# ---------------------------------------------------------------------------
+
+
+def _character_script_v2() -> list[str]:
+    """第二次 init：把核心角色 core_json 内容全部改掉，name 保持兼容。"""
+    return [
+        json.dumps(
+            {
+                "schema_version": "character-design.v1",
+                "prompt_version": "character_designer:v1",
+                "characters": [
+                    {
+                        "name": "叶尘",
+                        "role": "protagonist",
+                        "core_json": {
+                            "motivation": "改后动机：守护苍生",
+                            "goal": "改后目标：踏入星辰境巅峰",
+                            "conflict": "改后冲突：体内暗藏古神残念",
+                            "distinctive_trait": "改后特征：沉稳果断",
+                            "relationships": [
+                                {"to_name": "苏婉清", "relation_type": "ally", "one_line": "改后关系描述"}
+                            ],
+                        },
+                    },
+                    {
+                        "name": "苏婉清",
+                        "role": "love_interest",
+                        "core_json": {
+                            "motivation": "改后：陪伴叶尘",
+                            "goal": "改后：双修星辰诀",
+                            "conflict": "改后：家族覆灭",
+                            "distinctive_trait": "改后：坚毅果决",
+                            "relationships": [],
+                        },
+                    },
+                    {
+                        "name": "林渊",
+                        "role": "antagonist",
+                        "core_json": {
+                            "motivation": "改后：成神",
+                            "goal": "改后：灭世",
+                            "conflict": "改后：被宿命束缚",
+                            "distinctive_trait": "改后：阴狠冷厉",
+                            "relationships": [],
+                        },
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+    ]
+
+
+def _world_script_v2() -> list[str]:
+    """第二次 init：把 location/faction/rule 的 statement 与 data 都改掉。"""
+    return [
+        json.dumps(
+            {
+                "schema_version": "world-build.v1",
+                "prompt_version": "world_builder:v1",
+                "core_premise": "改后核心设定",
+                "rules": [
+                    {
+                        "name": "星辰共鸣",
+                        "statement": "改后陈述：需以心血祭祀星辰方可共鸣",
+                        "data": {"severity": "soft", "改后": True},
+                    }
+                ],
+                "locations": [
+                    {
+                        "name": "青石城",
+                        "statement": "改后陈述：已成废墟",
+                        "data": {"layer": "地下", "importance": "起点-改后"},
+                    }
+                ],
+                "factions": [
+                    {
+                        "name": "天星宗",
+                        "statement": "改后陈述：内部已分裂",
+                        "data": {"alignment": "混乱", "relation_to_protagonist": "敌对-改后"},
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+    ]
+
+
+def _outline_script_v2(seed_count: int = 6) -> list[str]:
+    """第二次 init：6 章。"""
+    seeds = [
+        {
+            "number": i + 1,
+            "title": f"改后第{i + 1}章",
+            "role": "setup" if i < 2 else ("escalation" if i < 5 else "climax"),
+            "one_sentence": f"改后本章事件{i + 1}",
+            "expected_word_count": 2400,
+            "key_beats": [f"改后_beat_{i + 1}_a"],
+        }
+        for i in range(seed_count)
+    ]
+    return [
+        json.dumps(
+            {
+                "schema_version": "volume-outline.v1",
+                "prompt_version": "volume_outliner:v1",
+                "volume": {
+                    "number": 1,
+                    "title": "改后卷名",
+                    "arc_summary": "改后卷摘要",
+                },
+                "chapter_seeds": seeds,
+            },
+            ensure_ascii=False,
+        )
+    ]
+
+
+def _mock_providers_v2(seed_count: int = 6) -> dict[str, list[str]]:
+    return {
+        "premise_designer": _premise_script(),
+        "world_builder": _world_script_v2(),
+        "character_designer": _character_script_v2(),
+        "volume_outliner": _outline_script_v2(seed_count),
+    }
+
+
+def test_project_init_reinit_updates_existing_entities(tmp_path: Path, monkeypatch):
+    """#10 修复：同一 project 二次 init，已存在 character/location/faction/rule
+    应被更新内容字段，id/created_at 不变；章节数被新 seeds 替换。
+
+    修复前：persist_all 按 name 命中即跳过，已存在实体的 core_json / data 等
+    内容字段不会被覆盖，分段审阅中修订过的 AI 内容重新生成时被静默丢弃。
+    修复后：存在 → UPDATE 内容字段（保留 id 与 created_at），章节走单事务重建。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            # 1) 第一次 init：3 角色 / 1 location / 1 faction / 1 rule / 5 章
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 5,
+                    "mock_providers": _mock_providers(5),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id_1 = r.json()["run_id"]
+            await _wait_run_terminal(app, run_id_1, expected=("COMPLETED",))
+            run_data = await _wait_run_terminal(app, run_id_1, expected=("COMPLETED",))
+            project_id = (run_data.get("checkpoint_json") or {}).get("project_id")
+            assert project_id and project_id.startswith("prj_")
+
+            # 抓住第一次落库的 character_id 与 created_at（红测基线）
+            r = await _request(app, "GET", f"/api/projects/{project_id}/characters")
+            assert r.status_code == 200
+            chars_before = {c["name"]: c for c in r.json()}
+            assert set(chars_before) == {"叶尘", "苏婉清", "林渊"}
+            old_char_id_yc = chars_before["叶尘"]["character_id"]
+            old_created_at_yc = chars_before["叶尘"]["created_at"]
+            old_core_json_yc = chars_before["叶尘"]["core_json"]
+            assert old_core_json_yc["motivation"] == "登临九天查明真相"
+
+            r = await _request(app, "GET", f"/api/projects/{project_id}/locations")
+            assert r.status_code == 200
+            loc_before = r.json()[0]
+            old_loc_id = loc_before["id"]
+            old_loc_created_at = loc_before["created_at"]
+
+            r = await _request(app, "GET", f"/api/projects/{project_id}/factions")
+            assert r.status_code == 200
+            fac_before = r.json()[0]
+            old_fac_id = fac_before["id"]
+
+            r = await _request(app, "GET", f"/api/projects/{project_id}/world-rules")
+            assert r.status_code == 200
+            rule_before = r.json()[0]
+            old_rule_id = rule_before["id"]
+
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                chap_before = conn.execute(
+                    "SELECT chapter_id, number, title FROM chapters "
+                    "WHERE project_id = ? ORDER BY number",
+                    (project_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+            assert len(chap_before) == 5
+            old_chap_ids = {r["chapter_id"] for r in chap_before}
+
+            # 2) 第二次 init：相同 project_id，mock 内容全改；章节数改 6
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "project_id": project_id,
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 6,
+                    "mock_providers": _mock_providers_v2(6),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id_2 = r.json()["run_id"]
+            await _wait_run_terminal(app, run_id_2, expected=("COMPLETED",))
+
+            # 3) 校验：角色 id/created_at 不变，core_json 被更新
+            r = await _request(app, "GET", f"/api/projects/{project_id}/characters")
+            assert r.status_code == 200
+            chars_after = {c["name"]: c for c in r.json()}
+            yc_after = chars_after["叶尘"]
+            assert yc_after["character_id"] == old_char_id_yc, (
+                f"character_id 应不变；修复前会保持不变（但内容不更新），"
+                f"修复后 id 不变但 content 应更新。旧={old_char_id_yc} 新={yc_after['character_id']}"
+            )
+            assert yc_after["created_at"] == old_created_at_yc, (
+                f"created_at 应不变（旧={old_created_at_yc} 新={yc_after['created_at']}）"
+            )
+            assert yc_after["core_json"]["motivation"] == "改后动机：守护苍生", (
+                f"core_json 应被更新为第二次 init 的内容；"
+                f"修复前会保持旧值 {old_core_json_yc['motivation']!r} 不变（静默跳过），"
+                f"实得 {yc_after['core_json']['motivation']!r}"
+            )
+            # role 也应被更新（也是 AI 可管字段）
+            # 原 role=protagonist 不变；只验 core_json 内容更新 + id 不变
+
+            # location / faction / rule id 不变，data/statement 更新
+            r = await _request(app, "GET", f"/api/projects/{project_id}/locations")
+            assert r.status_code == 200
+            loc_after = r.json()[0]
+            assert loc_after["id"] == old_loc_id, "location id 应保留"
+            assert loc_after["created_at"] == old_loc_created_at, "location created_at 应保留"
+            assert loc_after["statement"] == "改后陈述：已成废墟", (
+                f"location statement 应被更新；修复前会保留旧值，实得 {loc_after['statement']!r}"
+            )
+            assert loc_after["data"]["importance"] == "起点-改后"
+
+            r = await _request(app, "GET", f"/api/projects/{project_id}/factions")
+            assert r.status_code == 200
+            fac_after = r.json()[0]
+            assert fac_after["id"] == old_fac_id
+            assert fac_after["statement"] == "改后陈述：内部已分裂"
+
+            r = await _request(app, "GET", f"/api/projects/{project_id}/world-rules")
+            assert r.status_code == 200
+            rule_after = r.json()[0]
+            assert rule_after["id"] == old_rule_id
+            assert rule_after["statement"] == "改后陈述：需以心血祭祀星辰方可共鸣"
+
+            # 4) 章节被重建：旧 chapter_id 应全部消失，新 6 章
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                chap_after = conn.execute(
+                    "SELECT chapter_id, number, title FROM chapters "
+                    "WHERE project_id = ? ORDER BY number",
+                    (project_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+            new_chap_ids = {r["chapter_id"] for r in chap_after}
+            assert len(chap_after) == 6, [r["number"] for r in chap_after]
+            assert new_chap_ids.isdisjoint(old_chap_ids), (
+                "旧 chapter_id 应被全部清除，新章走全新 ID"
+            )
+            # 新章标题来自 _outline_script_v2
+            assert chap_after[0]["title"] == "改后第1章"
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# #11：章节「先清后建」重建序列必须包进单事务；中途失败旧章应保留。
+# ---------------------------------------------------------------------------
+
+
+def test_project_init_chapter_rebuild_atomic_on_failure(tmp_path: Path, monkeypatch):
+    """#11 修复：章节重建（DELETE 旧章 + INSERT 新章）必须包进单事务；中途异常
+    触发 rollback，旧章应保留。
+
+    修复前：先 DELETE + commit，再多次 chapter create + commit——中途失败时
+    旧章已被删除、新章半写入，数据丢失。
+    修复后：单连接 BEGIN→DELETE→INSERT→COMMIT；异常触发 ROLLBACK，旧章
+    完整保留，新章一行不入库。
+
+    注入策略：monkeypatch ``pipeline.new_id``，让第二次 init 的章节重建序列
+    在第 2 个新 chapter INSERT 前抛错（new_id("ch") 是每个新 chapter 的
+    第一次调用；第 2 次调用即抛错 → 第 1 个新 chapter 已 INSERT、第 2 个未
+    INSERT，事务回滚把第 1 个新 chapter 也撤销）。
+    """
+    from packages.workflows.project_init import pipeline as pipeline_mod
+
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            # 1) 第一次 init：3 章
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 3,
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id_1 = r.json()["run_id"]
+            await _wait_run_terminal(app, run_id_1, expected=("COMPLETED",))
+            run_data = await _wait_run_terminal(app, run_id_1, expected=("COMPLETED",))
+            project_id = (run_data.get("checkpoint_json") or {}).get("project_id")
+            assert project_id and project_id.startswith("prj_")
+
+            # 旧章基线
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                chap_before = conn.execute(
+                    "SELECT chapter_id, number, title FROM chapters "
+                    "WHERE project_id = ? ORDER BY number",
+                    (project_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+            assert len(chap_before) == 3
+            old_chap_ids = [r["chapter_id"] for r in chap_before]
+            old_titles = [r["title"] for r in chap_before]
+            assert old_titles == ["第1章", "第2章", "第3章"]
+
+            # 2) 注入：第二次 init 时，让 pipeline.new_id 在第 2 次被调用时抛错。
+            #    第二次 init 走 persist_all 章节重建序列：每个新 chapter 调 1 次
+            #    new_id("ch")；第 2 次抛错 → 第 1 个新 chapter 已 INSERT、第 2
+            #    个未 INSERT，事务异常 → ROLLBACK 应把第 1 个新 chapter 也撤销。
+            original_new_id = pipeline_mod.new_id
+            call_state = {"n": 0, "boom_at": 2}
+
+            def maybe_boom_new_id(prefix: str) -> str:
+                if prefix == "ch":
+                    call_state["n"] += 1
+                    if call_state["n"] == call_state["boom_at"]:
+                        raise RuntimeError(
+                            "injected: chapter rebuild mid-sequence failure"
+                        )
+                return original_new_id(prefix)
+
+            monkeypatch.setattr(pipeline_mod, "new_id", maybe_boom_new_id)
+
+            # 3) 第二次 init：3 章
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "project_id": project_id,
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 3,
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id_2 = r.json()["run_id"]
+            final = await _wait_run_terminal(
+                app, run_id_2, expected=("COMPLETED", "FAILED"), timeout=60.0,
+            )
+            # 注入异常应让 run 落入 FAILED（持久化失败冒泡到工作流层）
+            assert final["status"] == "FAILED", (
+                f"注入异常后 run 应为 FAILED；实得 status={final['status']!r}"
+            )
+
+            # 4) 核心断言：旧章必须仍存在，ID 与注入前完全一致；
+            #    不应有任何「新章残留」（事务回滚把 INSERT 全部撤销）。
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                chap_after = conn.execute(
+                    "SELECT chapter_id, number, title FROM chapters "
+                    "WHERE project_id = ? ORDER BY number",
+                    (project_id,),
+                ).fetchall()
+                drafts_rows = conn.execute(
+                    "SELECT chapter_id FROM drafts WHERE chapter_id IN (?, ?, ?)",
+                    tuple(old_chap_ids),
+                ).fetchall()
+            finally:
+                conn.close()
+
+            # 旧 3 章必须完整保留（顺序、ID、title 全部一致）
+            assert [r["chapter_id"] for r in chap_after] == old_chap_ids, (
+                f"修复前：旧章会被 DELETE 清空，新章半写入；"
+                f"修复后：单事务回滚，旧章应保留。"
+                f"实得 chapter_ids={[r['chapter_id'] for r in chap_after]} "
+                f"期望={old_chap_ids}"
+            )
+            assert [r["title"] for r in chap_after] == old_titles
+            # 不应有第 4/5/6... 章（新章 INSERT 全部回滚）
+            assert len(chap_after) == 3, (
+                f"事务回滚后旧章应仍为 3 条；实得 {len(chap_after)} 条"
+            )
+            # drafts 不应被孤立
+            assert len(drafts_rows) == 0, (
+                f"旧章未删 → 旧章的 drafts 也应保持 0；实得 {len(drafts_rows)} 条"
+            )
+
+    asyncio.run(run())

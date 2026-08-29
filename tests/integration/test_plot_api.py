@@ -373,3 +373,29 @@ def test_relationships_read_only(tmp_path: Path):
                 assert rels[0]["state"]["intensity"] == 0.8
 
     _run(main())
+
+
+def test_event_create_missing_timeline_day_422_with_readable_detail(tmp_path: Path):
+    """time 缺 timeline_day → 422，detail 含可读中文提示。
+
+    白盒审计发现 PlotTab 旧表单默认提交 ``time={}``，必然 422；
+    仅当后端错误信息足够可读，前端才容易把问题定位到「缺少 timeline_day」。
+    """
+    app, pid, _, _ = _build_app(tmp_path)
+
+    async def main():
+        async with app.router.lifespan_context(app):
+            async with _make_client(app) as c:
+                r = await c.post(
+                    f"/api/projects/{pid}/events",
+                    json={"type": "revelation", "time": {}},
+                )
+                assert r.status_code == 422, r.text
+                detail = r.json()["detail"]
+                # 必须指出 timeline_day 字段缺失，且有中文提示便于前端/用户看懂
+                assert "timeline_day" in detail, detail
+                assert "时间" in detail, detail
+
+    _run(main())
+
+    _run(main())

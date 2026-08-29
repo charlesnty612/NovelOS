@@ -74,12 +74,14 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     assert "0015_volumes.sql" in result["applied"]
     # V3.7 模型档案 + 环节绑定：0016_model_profiles.sql（model_profiles + capability_bindings；总表 38）。
     assert "0016_model_profiles.sql" in result["applied"]
+    # 0017 关键表 UNIQUE 兜底（relationships / workflow_runs 部分索引）
+    assert "0017_unique_constraints.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     first = apply_migrations(db_path, MIGRATIONS_DIR)
-    # V3.7 模型档案 + 环节绑定：0016 加入；迁移目录下十六条脚本都应被首次应用
+    # V3.7 模型档案 + 环节绑定：0016 加入；迁移目录下十七条脚本都应被首次应用
     assert first["applied"] == [
         "0001_init.sql",
         "0002_drafts_unique.sql",
@@ -97,6 +99,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0014_knowledge_reveal.sql",
         "0015_volumes.sql",
         "0016_model_profiles.sql",
+        "0017_unique_constraints.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -120,6 +123,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0015_volumes.sql" in second["skipped"]
     # V3.7 模型档案 + 环节绑定：0016 也应被幂等跳过
     assert "0016_model_profiles.sql" in second["skipped"]
+    # 0017 关键表 UNIQUE 兜底：也应被幂等跳过
+    assert "0017_unique_constraints.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -132,6 +137,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
     finally:
         conn.close()
     # V3.7 模型档案 + 环节绑定：十六条迁移都应记录
+    # 0017 关键表 UNIQUE 兜底（relationships / workflow_runs）
     filenames = {r["filename"] for r in rows}
     assert filenames == {
         "0001_init.sql",
@@ -150,6 +156,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0014_knowledge_reveal.sql",
         "0015_volumes.sql",
         "0016_model_profiles.sql",
+        "0017_unique_constraints.sql",
     }
     for r in rows:
         assert r["applied_at"]

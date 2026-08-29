@@ -531,14 +531,14 @@ class PlotService:
     @staticmethod
     def _validate_time(time: Any) -> None:
         if not isinstance(time, dict):
-            raise ValidationError("time 必须是 JSON 对象")
+            raise ValidationError("时间字段 time 必须是 JSON 对象")
         if "timeline_day" not in time:
-            raise ValidationError("time 必须包含 timeline_day 字段")
+            raise ValidationError("时间字段 time 缺少必填项 timeline_day（事件发生的天序号）")
         td = time["timeline_day"]
         if td is not None and not isinstance(td, int):
-            raise ValidationError("time.timeline_day 必须是整数或 null")
+            raise ValidationError("时间字段 time.timeline_day 必须是整数或 null")
         if td is not None and td < 0:
-            raise ValidationError("time.timeline_day 不能为负")
+            raise ValidationError("时间字段 time.timeline_day 不能为负")
 
     def _require_project(self, project_id: str) -> None:
         if not project_id:

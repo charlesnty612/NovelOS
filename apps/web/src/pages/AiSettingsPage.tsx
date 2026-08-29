@@ -65,9 +65,25 @@ function ModelProfilesPanel() {
     () => modelProfilesApi.list(),
     [],
   );
+  // 档案卡「设为默认」按钮需要读到当前 capability_bindings（哪个环节首选了哪个档案）。
+  // 这里独立拉一份，与 CapabilityBindingsPanel 互不共享——后者维护 selectedMap 编辑态，
+  // 由它上调会增加耦合；本面板只要最新 GET 结果即可。
+  const bindings = useApiCall<CapabilityBinding[]>(
+    () => capabilityBindingsApi.list(),
+    [],
+  );
   const [editing, setEditing] = useState<ModelProfile | null>(null);
   const [creating, setCreating] = useState(false);
   const [testResult, setTestResult] = useState<ModelProfileTestResult | null>(null);
+  // 该档案卡片正在展开「设为默认」下拉时持有的打开态。
+  // 同时只能展开一张档案，避免多行同时弹出 7 个 chip 行干扰视线。
+  const [openSetDefaultFor, setOpenSetDefaultFor] = useState<string | null>(null);
+  // 该档案对应的「设为默认」操作进行中的 capability 列表；用于 chip 行内单独禁用。
+  const [setDefaultBusyFor, setSetDefaultBusyFor] = useState<
+    Record<string, string | null>
+  >({});
+  // 该档案在「设为默认」分支中上一次失败的错误信息；展示在档案卡底部 ErrorBanner。
+  const [setDefaultError, setSetDefaultError] = useState<string | null>(null);
 
   return (
     <div className="panel" data-testid="model-profiles-panel">
@@ -94,114 +110,245 @@ function ModelProfilesPanel() {
         />
       ) : (
         <div className="kv-list">
-          {list.data.map((m) => (
-            <div
-              key={m.profile_id}
-              className="kv-list__row"
-              data-testid={`model-profile-row-${m.profile_id}`}
-            >
-              <span className="kv-list__title">
-                {m.name} · {m.provider} · {m.model}
-              </span>
-              <span
-                className={`badge ${
-                  Number(m.enabled) === 1 ? 'badge--chapter-committed' : 'badge--archived'
-                }`}
+          {list.data.map((m) => {
+            // 当前档案在每个 capability 的 profile_ids 中是否排第一 → 默认环节徽标。
+            // profile_ids 可能为 [] / ['mpf_xxx'] / ['mpf_xxx', 'mpf_yyy', ...]，
+            // 仅当第 0 项等于本档案 id 时算「该环节首选 = 本档案」，用于徽标展示。
+            const defaultCapabilities = (bindings.data ?? []).filter(
+              (b) => b.profile_ids[0] === m.profile_id,
+            );
+            const open = openSetDefaultFor === m.profile_id;
+            const busyCap = setDefaultBusyFor[m.profile_id] ?? null;
+            return (
+              <div
+                key={m.profile_id}
+                className="kv-list__row"
+                data-testid={`model-profile-row-${m.profile_id}`}
+                style={{ flexDirection: 'column', alignItems: 'stretch' }}
               >
-                {Number(m.enabled) === 1 ? 'enabled' : 'disabled'}
-              </span>
-              <span className="kv-list__meta">{m.profile_id}</span>
-              <span style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
-                <button
-                  className="btn btn--sm"
-                  onClick={async () => {
-                    // 读路径 params.api_key 已被后端脱敏（"***"），前端只用
-                    // has_api_key 字段判断「已配置」状态，不回填明文到输入框。
-                    try {
-                      const detail = await modelProfilesApi
-                        .list()
-                        .then((rows) => rows.find((r) => r.profile_id === m.profile_id));
-                      setEditing(detail ?? null);
-                    } catch (e: unknown) {
-                      const msg =
-                        e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
-                      setTestResult({
-                        profile_id: m.profile_id,
-                        ok: false,
-                        latency_ms: 0,
-                        detail: `加载详情失败 · ${msg}`,
-                        status_code: null,
-                      });
-                    }
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    flexWrap: 'wrap',
                   }}
-                  data-testid={`model-profile-edit-${m.profile_id}`}
                 >
-                  编辑
-                </button>
-                <button
-                  className="btn btn--sm"
-                  onClick={async () => {
-                    setTestResult(null);
-                    try {
-                      const r = await modelProfilesApi.test(m.profile_id);
-                      setTestResult(r);
-                    } catch (e: unknown) {
-                      const msg =
-                        e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
-                      setTestResult({
-                        profile_id: m.profile_id,
-                        ok: false,
-                        latency_ms: 0,
-                        detail: `FAIL · ${msg}`,
-                        status_code: null,
-                      });
-                    }
-                    void list.reload();
-                  }}
-                  data-testid={`model-profile-test-${m.profile_id}`}
-                >
-                  测试连接
-                </button>
-                <button
-                  className="btn btn--sm btn--danger"
-                  onClick={async () => {
-                    if (!window.confirm(`确认删除模型档案 ${m.profile_id}？`)) return;
-                    try {
-                      await modelProfilesApi.remove(m.profile_id);
-                      void list.reload();
-                    } catch (e: unknown) {
-                      // 后端删除遇 409 时按 wire 契约 detail 列出 capability；
-                      // 若 detail 已给出明确指引，直接透传；否则附前端兜底文案。
-                      if (e instanceof ApiError && e.status === 409) {
-                        setTestResult({
-                          profile_id: m.profile_id,
-                          ok: false,
-                          latency_ms: 0,
-                          detail: `${e.detail}（请先在「环节分配」中解除绑定）`,
-                          status_code: e.status,
-                        });
-                      } else {
-                        const msg =
-                          e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
-                        setTestResult({
-                          profile_id: m.profile_id,
-                          ok: false,
-                          latency_ms: 0,
-                          detail: `删除失败 · ${msg}`,
-                          status_code: null,
-                        });
-                      }
-                    }
-                  }}
-                  data-testid={`model-profile-delete-${m.profile_id}`}
-                >
-                  删除
-                </button>
-              </span>
-            </div>
-          ))}
+                  <span className="kv-list__title">
+                    {m.name} · {m.provider} · {m.model}
+                  </span>
+                  <span
+                    className={`badge ${
+                      Number(m.enabled) === 1 ? 'badge--chapter-committed' : 'badge--archived'
+                    }`}
+                  >
+                    {Number(m.enabled) === 1 ? 'enabled' : 'disabled'}
+                  </span>
+                  {defaultCapabilities.length > 0 ? (
+                    <span
+                      className="muted small"
+                      data-testid={`model-profile-default-caps-${m.profile_id}`}
+                    >
+                      默认：
+                      {defaultCapabilities.map((b) => (
+                        <span
+                          key={b.capability}
+                          className="badge badge--chapter-committed"
+                          style={{ marginLeft: 4 }}
+                          data-testid={`model-profile-default-cap-badge-${m.profile_id}-${b.capability}`}
+                        >
+                          {b.label || BINDING_LABELS_FALLBACK[b.capability] || b.capability}
+                        </span>
+                      ))}
+                    </span>
+                  ) : null}
+                  <span className="kv-list__meta">{m.profile_id}</span>
+                  <span style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
+                    <button
+                      className="btn btn--sm"
+                      onClick={() => {
+                        // 切换展开：再次点击收起；切到别的档案时直接换对象。
+                        setSetDefaultError(null);
+                        setOpenSetDefaultFor((cur) =>
+                          cur === m.profile_id ? null : m.profile_id,
+                        );
+                      }}
+                      data-testid={`profile-set-default-${m.profile_id}`}
+                      aria-expanded={open}
+                    >
+                      设为默认 ▾
+                    </button>
+                    <button
+                      className="btn btn--sm"
+                      onClick={async () => {
+                        // 读路径 params.api_key 已被后端脱敏（"***"），前端只用
+                        // has_api_key 字段判断「已配置」状态，不回填明文到输入框。
+                        try {
+                          const detail = await modelProfilesApi
+                            .list()
+                            .then((rows) => rows.find((r) => r.profile_id === m.profile_id));
+                          setEditing(detail ?? null);
+                        } catch (e: unknown) {
+                          const msg =
+                            e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
+                          setTestResult({
+                            profile_id: m.profile_id,
+                            ok: false,
+                            latency_ms: 0,
+                            detail: `加载详情失败 · ${msg}`,
+                            status_code: null,
+                          });
+                        }
+                      }}
+                      data-testid={`model-profile-edit-${m.profile_id}`}
+                    >
+                      编辑
+                    </button>
+                    <button
+                      className="btn btn--sm"
+                      onClick={async () => {
+                        setTestResult(null);
+                        try {
+                          const r = await modelProfilesApi.test(m.profile_id);
+                          setTestResult(r);
+                        } catch (e: unknown) {
+                          const msg =
+                            e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
+                          setTestResult({
+                            profile_id: m.profile_id,
+                            ok: false,
+                            latency_ms: 0,
+                            detail: `FAIL · ${msg}`,
+                            status_code: null,
+                          });
+                        }
+                        void list.reload();
+                      }}
+                      data-testid={`model-profile-test-${m.profile_id}`}
+                    >
+                      测试连接
+                    </button>
+                    <button
+                      className="btn btn--sm btn--danger"
+                      onClick={async () => {
+                        if (!window.confirm(`确认删除模型档案 ${m.profile_id}？`)) return;
+                        try {
+                          await modelProfilesApi.remove(m.profile_id);
+                          void list.reload();
+                        } catch (e: unknown) {
+                          // 后端删除遇 409 时按 wire 契约 detail 列出 capability；
+                          // 若 detail 已给出明确指引，直接透传；否则附前端兜底文案。
+                          if (e instanceof ApiError && e.status === 409) {
+                            setTestResult({
+                              profile_id: m.profile_id,
+                              ok: false,
+                              latency_ms: 0,
+                              detail: `${e.detail}（请先在「环节分配」中解除绑定）`,
+                              status_code: e.status,
+                            });
+                          } else {
+                            const msg =
+                              e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
+                            setTestResult({
+                              profile_id: m.profile_id,
+                              ok: false,
+                              latency_ms: 0,
+                              detail: `删除失败 · ${msg}`,
+                              status_code: null,
+                            });
+                          }
+                        }
+                      }}
+                      data-testid={`model-profile-delete-${m.profile_id}`}
+                    >
+                      删除
+                    </button>
+                  </span>
+                </div>
+                {/* 展开行：7 个 capability chip；点 chip 把该档案置为该 capability 的首选。 */}
+                {open ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: 6,
+                      marginTop: 8,
+                      marginLeft: 4,
+                    }}
+                    data-testid={`profile-default-chip-row-${m.profile_id}`}
+                  >
+                    {(bindings.data ?? []).map((b) => {
+                      const isCurrentDefault = b.profile_ids[0] === m.profile_id;
+                      const isBusy = busyCap === b.capability;
+                      return (
+                        <button
+                          key={b.capability}
+                          type="button"
+                          className={`badge ${
+                            isCurrentDefault
+                              ? 'badge--chapter-committed'
+                              : 'badge--archived'
+                          }`}
+                          disabled={isBusy || Number(m.enabled) !== 1}
+                          title={
+                            Number(m.enabled) !== 1
+                              ? '档案需启用（enabled=1）才能绑定'
+                              : isCurrentDefault
+                                ? '已是该环节首选'
+                                : `把 ${m.name} 设为「${b.label}」首选`
+                          }
+                          data-testid={`profile-default-cap-${m.profile_id}-${b.capability}`}
+                          onClick={async () => {
+                            // 幂等：若本档案已经是该 capability 的首选，则不发起请求。
+                            if (isCurrentDefault) return;
+                            const rest = b.profile_ids.filter(
+                              (pid) => pid !== m.profile_id,
+                            );
+                            const next = [m.profile_id, ...rest];
+                            setSetDefaultError(null);
+                            setSetDefaultBusyFor((s) => ({ ...s, [m.profile_id]: b.capability }));
+                            try {
+                              await capabilityBindingsApi.bind(b.capability, next);
+                              await bindings.reload();
+                            } catch (e: unknown) {
+                              const msg =
+                                e instanceof ApiError
+                                  ? `${e.status} ${e.detail}`
+                                  : String(e);
+                              setSetDefaultError(
+                                `「${b.label}」绑定失败：${msg}`,
+                              );
+                            } finally {
+                              setSetDefaultBusyFor((s) => ({
+                                ...s,
+                                [m.profile_id]: null,
+                              }));
+                            }
+                          }}
+                          style={{ cursor: 'pointer', border: 'none' }}
+                        >
+                          {isBusy
+                            ? '保存中…'
+                            : `${b.label || BINDING_LABELS_FALLBACK[b.capability] || b.capability}${
+                                isCurrentDefault ? ' · 首选' : ''
+                              }`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                {open && setDefaultError && setDefaultError.startsWith(`「`) && openSetDefaultFor === m.profile_id ? (
+                  <ErrorBanner>{setDefaultError}</ErrorBanner>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       )}
+
+      {!openSetDefaultFor && setDefaultError ? (
+        <ErrorBanner>{setDefaultError}</ErrorBanner>
+      ) : null}
 
       {testResult ? (
         <InfoBanner>
@@ -401,7 +548,7 @@ function CapabilityBindingRow({
           disabled={state.kind === 'saving'}
           data-testid={`cap-binding-select-${binding.capability}`}
         >
-          <option value="">未绑定 · 使用默认配置</option>
+          <option value="">未绑定（回落旧版 model_configs 链）</option>
           {profiles.map((p: ModelProfile) => (
             <option key={p.profile_id} value={p.profile_id}>
               {p.name}（{p.model}）

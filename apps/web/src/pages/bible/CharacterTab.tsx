@@ -177,6 +177,10 @@ export function CharacterTab({ projectId }: CharacterTabProps) {
         <CharacterFormModal
           title={`编辑角色：${editing.name}`}
           initial={editing}
+          // 编辑时快照原始 core_json：保存时与表单字段合并，
+          // 保留后端 / project_init 写入的非表单键（motivation/goal/conflict/relationship 等），
+          // 避免提交体全量覆盖。
+          baseCoreJson={editing.core_json ?? {}}
           onCancel={() => setEditing(null)}
           onSubmit={async (p) => {
             await charactersApi.update(
@@ -242,6 +246,12 @@ function Field({ label, value }: { label: string; value: string }) {
 interface CharacterFormModalProps {
   title: string;
   initial?: Character;
+  /**
+   * 编辑模式下作为基础 core_json；保存时与表单字段合并，
+   * 保留后端/project_init 写入的非表单键，避免被全量覆盖而丢失。
+   * 新建场景无需传入。
+   */
+  baseCoreJson?: Record<string, unknown>;
   onCancel: () => void;
   onSubmit: (
     payload: CharacterCreatePayload | CharacterUpdatePayload,
@@ -263,6 +273,7 @@ const CORE_FIELDS: Array<{
 function CharacterFormModal({
   title,
   initial,
+  baseCoreJson,
   onCancel,
   onSubmit,
 }: CharacterFormModalProps) {
@@ -291,19 +302,25 @@ function CharacterFormModal({
       setErr('角色名不能为空');
       return;
     }
-    const core_json: Record<string, unknown> = {};
+    const formCore: Record<string, unknown> = {};
     for (const f of CORE_FIELDS) {
       const v = core[f.key].trim();
       if (v === '') continue;
-      core_json[f.key] = v;
+      formCore[f.key] = v;
     }
+    // 编辑场景：以 baseCoreJson（=打开编辑器时的全量 core_json）为基底，
+    // 用本次表单字段覆盖对应键；非表单键（motivation/goal/conflict/relationship 等）保留原值。
+    // 新建场景无 baseCoreJson，提交体仅为表单字段（保持原行为，避免凭空填入非表单键）。
+    const core_json: Record<string, unknown> = baseCoreJson
+      ? { ...baseCoreJson, ...formCore }
+      : formCore;
     setSubmitting(true);
     try {
       await onSubmit({
         name: name.trim(),
         role,
-        core_json: Object.keys(core_json).length > 0 ? core_json : {},
-      });
+        core_json: Object.keys(core_json).length > 0 ? core_json : undefined,
+      } as CharacterCreatePayload | CharacterUpdatePayload);
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : '保存失败');
     } finally {

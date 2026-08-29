@@ -27,12 +27,17 @@ P0 自动改稿回路：
   则自动依次重跑 chapter-write → chapter-review，直到 approved（COMPLETED）或达到上限。
 - 上限由请求体 ``auto_revise_max`` 或环境变量 ``NOVELOS_AUTO_REVISE_MAX`` 决定，默认 ``2``，
   ``0`` 表示禁用（保持现状）。
+- **异步化（P0 续）**：resume 启动 ``resume_async`` 后立即返回 RUNNING；
+  auto_revise 改稿回路在 daemon 线程（``auto-revise-{run_id}``）内执行，HTTP 不再阻塞
+  等回路结束（最长可能几十分钟）。前端通过 ``GET /runs/{id}`` 或 list 端点轮询拿
+  回路产生的子 run 状态。
 """
 
 from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
@@ -41,7 +46,7 @@ from pydantic import BaseModel, Field
 from packages.core.logging_config import get_logger
 from packages.core.workflow_registry import get_workflow
 from packages.core.db import get_connection
-from packages.core.workflow_runtime.engine import WorkflowEngine
+from packages.core.workflow_runtime.engine import WorkflowEngine, WorkflowRunConflict
 from packages.core.workflow_runtime.runs import (
     get_run,
     get_workflow_name_for_run,
@@ -54,6 +59,11 @@ from packages.domain.volume.service import VolumeService
 log = get_logger("novelos.routers.workflows")
 
 router = APIRouter(tags=["workflows"])
+
+
+# 缺陷 1（P0 高）：_run_workflow_return_payload 等待 run 终态的 deadline。
+# 提为模块级常量便于测试注入（短超时复现），生产仍是 600s 覆盖真实 write 几分钟量级。
+_RUN_WAIT_DEADLINE_SECONDS: float = 600.0
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +90,9 @@ class StartWorkflowRequest(BaseModel):
     # chapter-write 全章重写：True 时忽略 plan_json.revision_note 与最新 draft，
     # 强制走 write 模式（用于跨模型文风对比）。None/False → 维持既有 revise 判定。
     fresh_write: bool | None = None
+    # chapter-review 指定审校稿版本：用户对比多模型多版本草稿时，可指定审 v7/v8 等
+    # 特定版本（不再强制只审最新稿）。None → 维持既有"取最新 draft"语义。
+    draft_version: int | None = Field(default=None, ge=1)
 
 
 class ProjectInitRequest(BaseModel):
@@ -278,8 +291,16 @@ def _run_workflow_return_payload(
     chapter_id: str,
     mock_providers: dict[str, list[str]] | None,
     initial_ctx_extra: dict[str, Any] | None = None,
+    *,
+    wait_deadline_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """启动指定 workflow 并返回标准响应 payload（run_id / status / current_node / pause_payload）。"""
+    """启动指定 workflow 并返回标准响应 payload（run_id / status / current_node / pause_payload）。
+
+    缺陷 1（P0 高）修复：等待 deadline（默认 ``_RUN_WAIT_DEADLINE_SECONDS`` = 600s）到了之后，
+    若 run 仍未到终态（仍 RUNNING/PENDING），payload 显式标记 ``timeout=True`` 并附加人类可读
+    ``detail``，明确告知调用方后台 run 仍在执行；不杀后台线程（它会自行到终态）。
+    ``wait_deadline_seconds`` 仅用于测试注入，生产调用方不传。
+    """
     workflow = get_workflow(workflow_name)
     if workflow is None:
         raise HTTPException(status_code=500, detail=f"workflow {workflow_name!r} not registered")
@@ -306,11 +327,16 @@ def _run_workflow_return_payload(
 
     # 异步启动后本函数仅被 auto_revise 回路内部使用：调用方依赖返回的
     # status 判断本轮 write/review 是否 COMPLETED/PAUSED/FAILED，因此必须
-    # 同步等到终态（引擎已在后台线程推进，这里只轮询 run 行）。上限 600s
-    # 覆盖真实 write（几分钟量级）；超时按 FAILED 语义返回，由调用方兜底。
+    # 同步等到终态（引擎已在后台线程推进，这里只轮询 run 行）。上限默认 600s
+    # 覆盖真实 write（几分钟量级）；测试可通过 wait_deadline_seconds 注入短超时。
     import time as _wait_t
 
-    deadline = _wait_t.monotonic() + 600.0
+    deadline_seconds = (
+        wait_deadline_seconds
+        if wait_deadline_seconds is not None
+        else _RUN_WAIT_DEADLINE_SECONDS
+    )
+    deadline = _wait_t.monotonic() + deadline_seconds
     run: dict[str, Any] | None = None
     while _wait_t.monotonic() < deadline:
         run = get_run(db_path, run_id)
@@ -326,6 +352,18 @@ def _run_workflow_return_payload(
     }
     if run["status"] == "PAUSED":
         payload["pause_payload"] = _extract_pause_payload(run)
+    # 缺陷 1（P0 高）：超时分支显式标记。RUNNING 保留供调用方识别当前实际状态；
+    # timeout=True + detail 是「后台仍在跑」的明确信号；不杀后台线程。
+    if run["status"] not in ("COMPLETED", "PAUSED", "FAILED", "CANCELLED"):
+        payload["timeout"] = True
+        payload["detail"] = (
+            f"等待 run 终态超时（{int(deadline_seconds)}s），"
+            f"run 仍在后台执行；请稍后在 run 列表查看结果"
+        )
+        log.warning(
+            "_run_workflow_return_payload 超时: run_id=%s workflow=%s deadline=%ss",
+            run_id, workflow_name, int(deadline_seconds),
+        )
     return payload
 
 
@@ -342,6 +380,9 @@ def _auto_revise_loop(
     返回最终 run 的标准 payload。write 失败或 review 非 revise 失败时直接返回。
     review 达到 PAUSED（待人工审批）时直接返回 PAUSED。
     review 继续 revise 失败时进入下一轮，最多 ``max_iter`` 轮。
+
+    缺陷 1（P0 高）修复：当 write 或 review 子 run 等待超时（payload 含 ``timeout=True``，
+    即 run 仍 RUNNING）时，不继续下一轮——后台线程会自行到终态，前端通过 GET /runs 轮询。
     """
     final_payload: dict[str, Any] | None = None
     for iteration in range(1, max_iter + 1):
@@ -353,6 +394,14 @@ def _auto_revise_loop(
         write_payload = _run_workflow_return_payload(
             engine, db_path, "chapter-write", project_id, chapter_id, mock_providers
         )
+        # 缺陷 1（P0 高）：子 run 超时（仍在后台执行），不触发下一轮 review，
+        # 直接返回该 payload；后台 run 列表可见，前端轮询。
+        if write_payload.get("timeout") or write_payload["status"] == "RUNNING":
+            log.warning(
+                "auto_revise_loop 短路: write 超时（run_id=%s），不再触发 review",
+                write_payload.get("run_id"),
+            )
+            return write_payload
         if write_payload["status"] != "COMPLETED":
             return write_payload
 
@@ -360,6 +409,13 @@ def _auto_revise_loop(
         review_payload = _run_workflow_return_payload(
             engine, db_path, "chapter-review", project_id, chapter_id, mock_providers
         )
+        # 缺陷 1（P0 高）：同上，review 超时短路
+        if review_payload.get("timeout") or review_payload["status"] == "RUNNING":
+            log.warning(
+                "auto_revise_loop 短路: review 超时（run_id=%s），不再触发下一轮 write",
+                review_payload.get("run_id"),
+            )
+            return review_payload
         if review_payload["status"] == "COMPLETED":
             return review_payload
         if review_payload["status"] == "PAUSED":
@@ -440,6 +496,9 @@ def _start_workflow(
     # chapter-write 全新重写：仅 chapter-write 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。
     if body.fresh_write:
         initial_ctx["fresh_write"] = True
+    # chapter-review 指定草稿版本：仅 chapter-review 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。
+    if body.draft_version is not None:
+        initial_ctx["draft_version"] = body.draft_version
 
     engine = _engine(request)
     try:
@@ -451,6 +510,9 @@ def _start_workflow(
             mock_providers=body.mock_providers,
             checkpoint_exclude=workflow.get("checkpoint_exclude"),
         )
+    except WorkflowRunConflict as exc:
+        # 0017 部分唯一索引兜底 TOCTOU：双 start 窄窗口第二个被 SQL 拒绝 → 409。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
     except ValueError as exc:
@@ -786,7 +848,17 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
             regenerate=bool(body.regenerate),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 缺陷 2（P0 低）修复：resume_async 抛 ValueError 时按语义分桶映射状态码。
+        # - 「not found」：run 在前置校验后被删除（或并发删除）→ 404
+        # - 「must be PAUSED」：run 在前置校验后状态被改（并发竞态）→ 409
+        # - 其他：兜底 400
+        msg = str(exc)
+        log.debug("resume_async ValueError: %s", msg)
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=msg) from exc
+        if "must be PAUSED" in msg:
+            raise HTTPException(status_code=409, detail=msg) from exc
+        raise HTTPException(status_code=400, detail=msg) from exc
 
     # 异步化后：resume_async 立即返回，run 行已是 RUNNING（_prepare_resume_ctx 已
     # 在调用线程完成；_run_nodes 在后台线程推进）。HTTP 响应固定为 RUNNING；
@@ -797,52 +869,168 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
         "current_node": None,
     }
 
-    # P0 自动改稿回路：仅 chapter-review + rejected-for-revision + auto_revise_max>0 时触发。
-    # 异步化后 resume 不再阻塞到终态——本条件判断需要 sync 等到 resume 终态才能执行。
-    # 方案取舍：保留 auto_revise 行为（test 期望），改为同步阻塞调用 _auto_revise_loop。
-    # 副作用：resume 端点可能阻塞几秒到几分钟（auto_revise 同步）；不符合「立即返回」目标。
-    # 但保留它比破坏既有契约更安全；前端集成测试已统一加 polling 兜底。
+    # P0 自动改稿回路：仅 chapter-review + auto_revise_max>0 时可能触发。
+    # 异步化后 resume 不再阻塞到终态——auto_revise 条件判断需要等当前 resume run 走到
+    # 终态（FAILED-rejected-for-revision）。把「轮询等终态 → 判 rejected → _auto_revise_loop」
+    # 整段搬进 daemon 线程（name=f"auto-revise-{run_id}"）执行；HTTP 立即返回 RUNNING，
+    # 前端通过 GET /runs 轮询回路产生的子 run（write / review）。
     auto_revise_max = _resolve_auto_revise_max(body.auto_revise_max)
     log.warning("[DEBUG] auto_revise entry: workflow=%s auto_revise_max=%s", workflow_name, auto_revise_max)
     if (
         workflow_name == "chapter-review"
         and auto_revise_max > 0
     ):
-        # 同步等当前 resume run 走到终态（FAILED/PAUSED/COMPLETED），再判断是否触发 auto_revise
-        import time as _t
-        deadline = _t.monotonic() + 180.0
-        while _t.monotonic() < deadline:
-            cur = get_run(db_path, run_id)
-            if cur and cur["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
-                break
-            _t.sleep(0.2)
-        cur = get_run(db_path, run_id)
-        log.warning("[DEBUG] resume final: status=%s err=%s", cur["status"] if cur else None, cur.get("error") if cur else None)
-        if (
-            cur
-            and cur["status"] == "FAILED"
-            and "rejected-for-revision" in str(cur.get("error") or "")
-        ):
-            chapter_id_for_loop = run.get("chapter_id")
-            if chapter_id_for_loop:
-                project_id_for_loop = ChapterService(db_path).get_project_id(chapter_id_for_loop)
-                if project_id_for_loop is not None:
-                    mp = body.mock_providers
-                    if mp is None:
-                        ckpt = run.get("checkpoint_json") or {}
-                        legacy_mp = ckpt.get("mock_providers")
-                        if isinstance(legacy_mp, dict):
-                            mp = legacy_mp
-                    return _auto_revise_loop(
-                        engine,
-                        db_path,
-                        project_id_for_loop,
-                        chapter_id_for_loop,
-                        mp,
-                        auto_revise_max,
-                    )
+        chapter_id_for_loop = run.get("chapter_id")
+        if chapter_id_for_loop:
+            project_id_for_loop = ChapterService(db_path).get_project_id(chapter_id_for_loop)
+            if project_id_for_loop is not None:
+                mp = body.mock_providers
+                if mp is None:
+                    ckpt = run.get("checkpoint_json") or {}
+                    legacy_mp = ckpt.get("mock_providers")
+                    if isinstance(legacy_mp, dict):
+                        mp = legacy_mp
+
+                # 防御快照：daemon 线程不能持有 Request / Body 引用，避免 GC 后访问异常；
+                # db_path / workflow 元数据 / mock_providers 都重新解出原始值再传入线程。
+                _thread_db_path = str(db_path)
+                _thread_engine = engine
+                _thread_run_id = run_id
+                _thread_project_id = project_id_for_loop
+                _thread_chapter_id = chapter_id_for_loop
+                _thread_mp = mp
+                _thread_auto_revise_max = auto_revise_max
+
+                def _auto_revise_runner() -> None:
+                    """daemon 线程体：等当前 resume run 终态 → 判 rejected → 调 _auto_revise_loop。
+
+                    轮询 deadline 保留 180s（与原同步实现一致）；失败/异常仅记日志，
+                    不向外抛出（HTTP 已返回，调用方拿不到）。子 run 状态由前端轮询
+                    GET /runs/{id} / list 端点查看。
+                    """
+                    import time as _t
+                    try:
+                        deadline = _t.monotonic() + 180.0
+                        cur: dict[str, Any] | None = None
+                        while _t.monotonic() < deadline:
+                            cur = get_run(_thread_db_path, _thread_run_id)
+                            if cur and cur["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
+                                break
+                            _t.sleep(0.2)
+                        log.warning(
+                            "[DEBUG] resume final (async): run_id=%s status=%s err=%s",
+                            _thread_run_id,
+                            cur["status"] if cur else None,
+                            cur.get("error") if cur else None,
+                        )
+                        if (
+                            cur
+                            and cur["status"] == "FAILED"
+                            and "rejected-for-revision" in str(cur.get("error") or "")
+                        ):
+                            _auto_revise_loop(
+                                _thread_engine,
+                                _thread_db_path,
+                                _thread_project_id,
+                                _thread_chapter_id,
+                                _thread_mp,
+                                _thread_auto_revise_max,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception(
+                            "auto_revise daemon thread crashed: run_id=%s err=%s",
+                            _thread_run_id, exc,
+                        )
+
+                t = threading.Thread(
+                    target=_auto_revise_runner,
+                    name=f"auto-revise-{run_id}",
+                    daemon=True,
+                )
+                t.start()
+                log.info(
+                    "auto_revise daemon thread started: run_id=%s thread=%s",
+                    run_id, t.name,
+                )
 
     return out
+
+
+# workflow_name → 人类可读中文名（list 端点用；与 UI 列表文案对齐）
+_WORKFLOW_ZH_LABELS: dict[str, str] = {
+    "chapter-plan": "生成计划",
+    "chapter-write": "写正文",
+    "chapter-review": "审校",
+    "chapter-commit": "提交",
+    "project-init": "AI 初始化",
+}
+
+
+def _compute_run_label(
+    db_path: str,
+    workflow_name: str | None,
+    run: dict[str, Any],
+) -> str | None:
+    """为单 run 推导人类可读 label。
+
+    - chapter-write：查 run 期间（[started_at, ended_at|∞)）产出的草稿最大版本
+      → 有则 label="写正文 → 草稿 v{v}"，无则 "写正文"。
+    - chapter-review：查启动时（<=started_at）最新草稿版本
+      → 有则 label="审校（审 v{v}）"，无则 "审校"。
+    - 其他（生成计划 / 提交 / AI 初始化）：直接用中文名。
+    - 推导异常：兜底为中文名，不抛错。
+    """
+    zh = _WORKFLOW_ZH_LABELS.get(workflow_name or "")
+    if zh is None:
+        return None
+    chapter_id = run.get("chapter_id")
+    started_at = run.get("started_at")
+    if not chapter_id or not started_at:
+        return zh
+    if workflow_name == "chapter-write":
+        try:
+            conn = get_connection(db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT MAX(version) AS v FROM drafts
+                    WHERE chapter_id = ?
+                      AND created_at >= ?
+                      AND created_at <= COALESCE(?, '9999-12-31T23:59:59Z')
+                    """,
+                    (chapter_id, started_at, run.get("ended_at")),
+                ).fetchone()
+            finally:
+                conn.close()
+            v = row["v"] if row else None
+            return f"{zh} → 草稿 v{v}" if v is not None else zh
+        except Exception:
+            return zh
+    if workflow_name == "chapter-review":
+        # 优先从 checkpoint_json（已解析为 ctx dict，顶层即变量键）取用户显式指定的
+        # draft_version；与 basic_checks 实际审的版本一致，确保 label 准确。
+        ckpt = run.get("checkpoint_json") or {}
+        specified = ckpt.get("draft_version") if isinstance(ckpt, dict) else None
+        if isinstance(specified, int):
+            return f"{zh}（审 v{specified}）"
+        try:
+            conn = get_connection(db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT MAX(version) AS v FROM drafts
+                    WHERE chapter_id = ?
+                      AND created_at <= ?
+                    """,
+                    (chapter_id, started_at),
+                ).fetchone()
+            finally:
+                conn.close()
+            v = row["v"] if row else None
+            return f"{zh}（审 v{v}）" if v is not None else zh
+        except Exception:
+            return zh
+    return zh
 
 
 @router.get("/projects/{project_id}/runs")
@@ -852,8 +1040,11 @@ def list_runs_endpoint(project_id: str, request: Request) -> list[dict[str, Any]
     runs = list_runs(db_path, project_id)
     # 恢复挂起的初始化：每行附加 workflow_name（get_workflow_name_for_run 反查）；
     # 一行一次查询可接受，list 端点不在热路径上。其余字段保持不变。
+    # 同时附加人类可读 label（推导版，不改 DB）。
     for run in runs:
-        run["workflow_name"] = get_workflow_name_for_run(db_path, run["run_id"])
+        wf = get_workflow_name_for_run(db_path, run["run_id"])
+        run["workflow_name"] = wf
+        run["label"] = _compute_run_label(db_path, wf, run)
     return runs
 
 
