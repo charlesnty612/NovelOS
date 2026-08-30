@@ -1101,7 +1101,7 @@ export interface ProjectInitResumeRequestPayload {
 //   PATCH  /model-profiles/{id}
 //   DELETE /model-profiles/{id}    —— 409 + detail 列出 capability
 //   POST   /model-profiles/{id}/test
-//   GET    /capability-bindings    —— 7 项固定清单
+//   GET    /capability-bindings    —— 8 项固定清单（V3.9.3 起含 observer 状态提取）
 //   PUT    /capability-bindings/{capability}
 //   DELETE /capability-bindings/{capability}
 // 档案与 capability 解耦：档案只描述「一组模型参数」，能力→档案的指派走

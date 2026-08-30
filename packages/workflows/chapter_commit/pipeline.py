@@ -17,6 +17,15 @@
   payload=change 清单；human_input={"approved": true}。
 - ``commit`` (State) —— 调 :meth:`StoryStateService.commit_delta`；
   chapters.status REVIEWED→COMMITTED；若当前 DRAFTED（未过 review）则 run FAILED 提示先跑 review。
+
+V3.9.4 单次 run 级 model_overrides（与 chapter-write 范式一致）：
+- ``ctx['model_overrides']`` 携带 ``{"observer": <profile_id>}`` 时，observer 所有
+  ``run_agent`` 调用（单次 / 双 leg / 拆分并发 / summary-early / 两条 retry 路径）都
+  会把 ``profile_id=`` 透传给 :class:`ModelRouter`，锁定唯一候选（缺/disabled 抛错不回落）。
+- ``summarizer`` 节点（独立 summarize 节点 + observer summary-early 早产）的覆盖走
+  ``ctx['model_overrides']['light']``（与 ``capability_for('summarizer')`` 对齐）；
+  用户覆盖 observer 不会串到 summarizer。
+- mock 路径不消费 profile_id（mock 自带脚本），与既有契约一致。
 """
 
 from __future__ import annotations
@@ -31,6 +40,7 @@ from packages.core.agent_runtime.runner import _update_workflow_run, run_agent
 from packages.core.context_engine import build_observer_input
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
+from packages.core.model_router.router import capability_for
 from packages.core.quality.engine import QualityEngine
 from packages.core.quality.models import Issue
 from packages.core.quality.models import QualityReport as _QualityReport
@@ -61,7 +71,11 @@ _OBSERVER_RETRY_HINT_TEMPLATE = (
 # ============================================================================
 # 根因：单次 observer 大请求（输入 ~31k 字符 + 输出 1.6-5.8万 token）在 provider 拥堵
 # 窗口下反复 480s 超时（ch060/ch063 多轮实证）。两条轻量腿各自只覆盖对应 scope，输出
-# token 量减半并可走 light capability（V3.0 P0-2 已有；缺失自动回退 reasoning）。
+# token 量减半。V3.9.3 之前双腿硬编码 ``capability_override="light"`` 走 light capability；
+# V3.9.3 起 observer 拆为独立环节（见 packages/core/model_router/router.py 的
+# ``AGENT_CAPABILITY["observer"] = "observer"``），双腿显式指定 ``capability_override=
+# "observer"``，前端 AI 设置页能单独给 observer 分配模型。迁移 0018 负责把 reasoning
+# 的当前绑定同步给 observer 行（已有行不动，幂等），线上行为保持不变。
 #
 # 两腿划分（与 docs/agents/prompts/observer-v1.md §11 extraction_scope 对齐）：
 # - leg_a (entities)：character_changes + relationship_changes + world_changes
@@ -471,8 +485,8 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     - 默认（``NOVELOS_OBSERVER_SPLIT=on``）：分两条轻量 leg 调 observer：
       - leg_a (entities)：character_changes + relationship_changes + world_changes
       - leg_b (narrative)：new_events + new_hooks + resolved_hooks + debt_changes
-      两腿各自走 ``light`` capability（V3 P0-2；缺失自动回退 reasoning）；payload
-      注入 ``extraction_scope`` 字段让 observer 只输出对应 scope 的数组（见
+      两腿各自走 ``observer`` capability（V3.9.3 拆出独立环节，迁移 0018 同步绑定）；
+      payload 注入 ``extraction_scope`` 字段让 observer 只输出对应 scope 的数组（见
       ``docs/agents/prompts/observer-v1.md`` §11）。两腿响应合并后走既有
       ``_inject_validate_node`` 校验链不变。
     - off（``NOVELOS_OBSERVER_SPLIT=off``）：走旧单次大调用路径——保留原代码
@@ -502,6 +516,9 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
             node_run_id=node_run_id,
             expected="observer",
             mock_script=mock_script,
+            # V3.9.4：observer 单次 run 级 model_overrides 透传（off 路径未显式
+            # capability_override，沿用既有 capability_for('observer') 解析行为）。
+            profile_id=(ctx.get("model_overrides") or {}).get("observer"),
         )
         return {
             "observer_payload": out,
@@ -569,9 +586,13 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
             leg_b_payload=leg_b_payload,
             leg_a_mock=leg_a_mock,
             leg_b_mock=leg_b_mock,
+            # V3.9.4：observer 单次 run 级 model_overrides 透传
+            profile_id=(ctx.get("model_overrides") or {}).get("observer"),
         )
     else:
         # off / 兼容回退：原串行提交，保持既有行为
+        # 单次 run 级 model_overrides：observer 键 → profile_id 透传
+        _observer_profile_id = (ctx.get("model_overrides") or {}).get("observer")
         leg_a_out = run_agent(
             db_path,
             "observer",
@@ -580,7 +601,8 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
             node_run_id=node_run_id,
             expected="observer",
             mock_script=leg_a_mock,
-            capability_override="light",
+            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
+            profile_id=_observer_profile_id,
         )
         leg_b_out = run_agent(
             db_path,
@@ -590,7 +612,8 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
             node_run_id=node_run_id,
             expected="observer",
             mock_script=leg_b_mock,
-            capability_override="light",
+            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
+            profile_id=_observer_profile_id,
         )
 
     merged = _merge_observer_legs(leg_a_out, leg_b_out)
@@ -653,6 +676,7 @@ def _run_observer_legs_in_parallel(
     leg_b_payload: dict[str, Any],
     leg_a_mock: Any,
     leg_b_mock: Any,
+    profile_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], int]:
     """V3.5：双腿并发提交到 run_agent（ThreadPoolExecutor，max_workers=2）。
 
@@ -668,6 +692,10 @@ def _run_observer_legs_in_parallel(
     设计动机（V3.5 提速调研结论）：见 ``docs/roadmap/v3-plan.md`` 已知问题——双腿
     并发让 wall_time ≈ max(t_leg_a, t_leg_b)，单次路径 ≈ sum(t_leg_a, t_leg_b)。
     实测 m1_run（service_tier=priority 启用）：单腿 60-180s ⇒ 并发收益 30-50%。
+
+    V3.9.4：新增 ``profile_id`` 参数透传 observer 单次 run 级 model_overrides 覆盖
+    （由 :func:`_observer_node` 从 ctx['model_overrides']['observer'] 解析后传入）。
+    mock 路径不消费 profile_id，与既有契约一致。
     """
     import time as _time
 
@@ -680,7 +708,8 @@ def _run_observer_legs_in_parallel(
             node_run_id=node_run_id,
             expected="observer",
             mock_script=leg_a_mock,
-            capability_override="light",
+            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
+            profile_id=profile_id,  # V3.9.4：observer 覆盖透传
         )
 
     def _run_leg_b() -> dict[str, Any]:
@@ -692,7 +721,8 @@ def _run_observer_legs_in_parallel(
             node_run_id=node_run_id,
             expected="observer",
             mock_script=leg_b_mock,
-            capability_override="light",
+            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
+            profile_id=profile_id,  # V3.9.4：observer 覆盖透传
         )
 
     # max_workers=2：恰好容纳两条腿；不再扩张，避免 provider 侧被并发请求压垮。
@@ -741,6 +771,12 @@ def _run_observer_with_summary_in_parallel(
     import logging as _logging
     import time as _time
 
+    # V3.9.4：observer 单次 run 级 model_overrides 透传（summary 走 light 键，互不串）。
+    _observer_profile_id = (ctx.get("model_overrides") or {}).get("observer")
+    _summarizer_profile_id = (ctx.get("model_overrides") or {}).get(
+        capability_for("summarizer")
+    )
+
     def _run_leg_a() -> dict[str, Any]:
         return run_agent(
             db_path,
@@ -750,7 +786,8 @@ def _run_observer_with_summary_in_parallel(
             node_run_id=node_run_id,
             expected="observer",
             mock_script=leg_a_mock,
-            capability_override="light",
+            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
+            profile_id=_observer_profile_id,
         )
 
     def _run_leg_b() -> dict[str, Any]:
@@ -762,7 +799,8 @@ def _run_observer_with_summary_in_parallel(
             node_run_id=node_run_id,
             expected="observer",
             mock_script=leg_b_mock,
-            capability_override="light",
+            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
+            profile_id=_observer_profile_id,
         )
 
     def _recover_run_status() -> None:
@@ -807,6 +845,8 @@ def _run_observer_with_summary_in_parallel(
                 node_run_id=node_run_id,
                 expected="summarizer",
                 mock_script=prepared["mock"],
+                # V3.9.4：summarizer 单次 run 级覆盖走 light 键透传
+                profile_id=_summarizer_profile_id,
             )
         except Exception as exc:  # noqa: BLE001 —— LLM 失败兜底，不炸 observer
             _logging.getLogger(__name__).warning(
@@ -1062,7 +1102,9 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
                     node_run_id=node_run_id,
                     expected="observer",
                     mock_script=retry_mock,
-                    capability_override="light",
+                    capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
+                    # V3.9.4：observer 单次 run 级覆盖透传（与首次调用口径一致）
+                    profile_id=(ctx.get("model_overrides") or {}).get("observer"),
                 )
                 leg_outputs[leg] = retry_out if isinstance(retry_out, dict) else {}
             # 重新合并双腿
@@ -1089,6 +1131,9 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 node_run_id=node_run_id,
                 expected="observer",
                 mock_script=retry_mock_script,
+                # V3.9.4：observer 单次 run 级覆盖透传（off 路径未显式 capability_override，
+                # 沿用既有 capability_for('observer') 解析行为，不改变业务逻辑）。
+                profile_id=(ctx.get("model_overrides") or {}).get("observer"),
             )
             leg_outputs["all"] = (
                 dict(observer_payload) if isinstance(observer_payload, dict) else {}
@@ -1957,6 +2002,10 @@ def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
             node_run_id=ctx.get("_current_node_run_id"),
             expected="summarizer",
             mock_script=mock_script,
+            # V3.9.4：summarizer 单次 run 级覆盖走 light 键透传
+            profile_id=(ctx.get("model_overrides") or {}).get(
+                capability_for("summarizer")
+            ),
         )
         summary_text, degraded = _resolve_summary_out(
             out, summary_max_chars=_SUMMARY_MAX_CHARS,

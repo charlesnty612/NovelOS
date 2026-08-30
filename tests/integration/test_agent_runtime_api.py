@@ -283,10 +283,10 @@ def test_run_observer_with_mock_script_happy_path(tmp_path: Path):
             docs_dir = Path.cwd().resolve() / "docs" / "agents" / "prompts"
             await _request(app, "POST", f"/api/agents/sync?docs_dir={docs_dir.as_posix()}")
 
-            # 配 mock provider（runner 内部走 ModelRouter.resolve("reasoning")）
+            # 配 mock provider（V3.9.3：observer 拆为独立 capability；走 observer 绑定）
             r = await _request(
                 app, "POST", "/api/model-configs",
-                json={"capability": "reasoning", "provider": "mock", "model": "mock-1"},
+                json={"capability": "observer", "provider": "mock", "model": "mock-1"},
             )
             assert r.status_code == 201
 
@@ -345,7 +345,7 @@ def test_run_observer_with_bad_then_good_script_retries(tmp_path: Path):
 
             await _request(
                 app, "POST", "/api/model-configs",
-                json={"capability": "reasoning", "provider": "mock", "model": "mock-1"},
+                json={"capability": "observer", "provider": "mock", "model": "mock-1"},
             )
 
             r = await _request(
@@ -394,7 +394,7 @@ def test_run_observer_strips_forbidden_keys_and_succeeds(tmp_path: Path):
 
             await _request(
                 app, "POST", "/api/model-configs",
-                json={"capability": "reasoning", "provider": "mock", "model": "mock-1"},
+                json={"capability": "observer", "provider": "mock", "model": "mock-1"},
             )
 
             # 含越权字段（10 元信息 + 3 辅助，sample）
@@ -475,7 +475,7 @@ def test_run_observer_strips_when_missing_arrays_auto_filled(tmp_path: Path):
 
             await _request(
                 app, "POST", "/api/model-configs",
-                json={"capability": "reasoning", "provider": "mock", "model": "mock-1"},
+                json={"capability": "observer", "provider": "mock", "model": "mock-1"},
             )
 
             # 只给部分数组 + 1 个越权字段
@@ -516,7 +516,11 @@ def test_run_observer_strips_when_missing_arrays_auto_filled(tmp_path: Path):
 
 
 def test_run_missing_model_config_returns_422(tmp_path: Path):
-    """sync 了 prompt 但未配置 model_config → 422（ModelNotConfiguredError）。"""
+    """sync 了 prompt 但未配置 model_config → 422（ModelNotConfiguredError）。
+
+    V3.9.3 起 observer 拆为独立 capability（不再 fallback reasoning）；
+    错误信息现在精确到 "observer" capability。
+    """
     app = _create_app(tmp_path)
 
     async def run():
@@ -533,7 +537,8 @@ def test_run_missing_model_config_returns_422(tmp_path: Path):
                 },
             )
             assert r.status_code == 422, r.text
-            assert "reasoning" in r.json()["detail"]
+            # V3.9.3：observer 拆为独立 capability；detail 应含 'observer' capability 名
+            assert "observer" in r.json()["detail"]
 
     asyncio.run(run())
 
@@ -562,9 +567,10 @@ def test_run_validation_input_payload_must_be_dict(tmp_path: Path):
             # sync + mock config（避免先撞 model 错误）
             docs_dir = Path.cwd().resolve() / "docs" / "agents" / "prompts"
             await _request(app, "POST", f"/api/agents/sync?docs_dir={docs_dir.as_posix()}")
+            # V3.9.3：observer 拆为独立 capability；mock config 走 observer 绑定。
             await _request(
                 app, "POST", "/api/model-configs",
-                json={"capability": "reasoning", "provider": "mock", "model": "mock-1"},
+                json={"capability": "observer", "provider": "mock", "model": "mock-1"},
             )
             r = await _request(
                 app, "POST", "/api/agents/observer/run",
@@ -587,9 +593,10 @@ def test_run_creates_workflow_runs_and_agents_row(tmp_path: Path):
         async with app.router.lifespan_context(app):
             docs_dir = Path.cwd().resolve() / "docs" / "agents" / "prompts"
             await _request(app, "POST", f"/api/agents/sync?docs_dir={docs_dir.as_posix()}")
+            # V3.9.3：observer 拆为独立 capability；mock config 走 observer 绑定。
             await _request(
                 app, "POST", "/api/model-configs",
-                json={"capability": "reasoning", "provider": "mock", "model": "mock-1"},
+                json={"capability": "observer", "provider": "mock", "model": "mock-1"},
             )
             r = await _request(
                 app, "POST", "/api/agents/observer/run",

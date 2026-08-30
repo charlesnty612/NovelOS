@@ -24,7 +24,7 @@ describe('useApiCall', () => {
 
   it('已有数据后调用 reload：loading 保持 false，data 最终被刷新', async () => {
     // 关键：用「可控 promise」让我们能在 reload 触发后、resolve 之前断言中间态。
-    let resolveSecond: ((v: { id: number; name: string }) => void) | null = null;
+    let resolveSecond: (() => void) | null = null;
     let n = 0;
     const fn = vi.fn().mockImplementation(async () => {
       n += 1;

@@ -36,12 +36,12 @@ from .exceptions import PromptNotFoundError
 _FILE_RE = re.compile(r"^(?P<agent>[a-zA-Z][a-zA-Z_-]*)-v(?P<n>\d+)\.md$")
 
 # Agent → Capability 映射（与 model_router.AGENT_CAPABILITY 保持一致；这里独立维护避免循环依赖）
-# V3 P0-2：critic / summarizer 改为 "light"（结构化提取 / 评审类任务）；
-# observer 保持 reasoning（输出准确性直接影响 story_state）。
+# V3 P0-2：critic / summarizer 改为 "light"（结构化提取 / 评审类任务）。
 # V3.7 project-init 四 agent 显式映射独立 capability。
+# V3.9.3：observer 从 reasoning 拆为独立 "observer" capability；迁移 0018 同步绑定。
 _AGENT_TO_CAPABILITY: dict[str, str] = {
     "director": "reasoning",
-    "observer": "reasoning",
+    "observer": "observer",  # V3.9.3：从 reasoning 拆出
     "writer": "creative_writing",
     "polisher": "creative_writing",  # P1：润色走 creative_writing，与 writer 同 capability
     "arbiter": "reasoning",
@@ -198,13 +198,34 @@ class PromptRegistry:
         return row["agent_id"] if row else None
 
     def _upsert_agent(self, conn: sqlite3.Connection, agent_name: str) -> str:
-        """确保 agent 行存在；返回 agent_id。"""
+        """确保 agent 行存在；返回 agent_id。
+
+        V3.9.4：已存在行同步刷新 ``role``（来自当前 capability 映射）。
+        修复 observer 拆为独立 capability 后（迁移 0018）生产库旧行 ``role='reasoning'``
+        仍残留的观测性失真：启动时 prompt sync 会对全部 agent 跑一遍本函数，因此
+        下次启动即可自动对齐 ``role`` 与 ``config_json['capability']``。``created_at``
+        维持原值不动（避免审计漂移），仅 ``updated_at`` 刷新。
+        """
         existing = self._get_agent_id(conn, agent_name)
+        cap = _capability_for(agent_name)
         if existing is not None:
+            # 已存在：刷新 role + config_json + updated_at；created_at 保持原值。
+            conn.execute(
+                """
+                UPDATE agents
+                SET role = ?, config_json = ?, updated_at = ?
+                WHERE agent_id = ?
+                """,
+                (
+                    cap,
+                    json.dumps({"capability": cap}, ensure_ascii=False),
+                    now_iso(),
+                    existing,
+                ),
+            )
             return existing
         agent_id = new_id("ag")
         now = now_iso()
-        cap = _capability_for(agent_name)
         conn.execute(
             """
             INSERT INTO agents (agent_id, name, role, config_json, created_at, updated_at)

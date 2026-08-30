@@ -58,8 +58,11 @@ async def _create_profile(app, **fields) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_get_returns_all_seven_capabilities_with_label_and_agents(tmp_path: Path):
-    """GET 必须返回全部七项 capability（CAPABILITY_LABELS 口径），每项含 label/agents。"""
+def test_get_returns_all_eight_capabilities_with_label_and_agents(tmp_path: Path):
+    """GET 必须返回全部八项 capability（CAPABILITY_LABELS 口径），每项含 label/agents。
+
+    V3.9.3 起 observer 拆为独立 capability；之前七项 → 现在八项。
+    """
     app = _create_app(tmp_path)
 
     async def run():
@@ -71,7 +74,7 @@ def test_get_returns_all_seven_capabilities_with_label_and_agents(tmp_path: Path
             caps = {item["capability"] for item in data}
             assert caps == {
                 "premise_design", "world_building", "character_design",
-                "volume_outline", "creative_writing", "reasoning", "light",
+                "volume_outline", "creative_writing", "reasoning", "observer", "light",
             }
             for item in data:
                 assert item["label"], f"{item['capability']} label missing"

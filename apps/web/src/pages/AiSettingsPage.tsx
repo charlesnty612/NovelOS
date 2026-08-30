@@ -274,7 +274,7 @@ function ModelProfilesPanel() {
                     </button>
                   </span>
                 </div>
-                {/* 展开行：7 个 capability chip；点 chip 把该档案置为该 capability 的首选。 */}
+                {/* 展开行：8 个 capability chip；点 chip 把该档案置为该 capability 的首选。 */}
                 {open ? (
                   <div
                     style={{
@@ -407,7 +407,7 @@ function ModelProfilesPanel() {
 }
 
 // =============================================================================
-// CapabilityBindingsPanel —— 7 项固定清单，PUT 即绑 / DELETE 即解绑
+// CapabilityBindingsPanel —— 8 项固定清单，PUT 即绑 / DELETE 即解绑
 // =============================================================================
 
 const BINDING_LABELS_FALLBACK: Record<string, string> = {
@@ -417,6 +417,8 @@ const BINDING_LABELS_FALLBACK: Record<string, string> = {
   volume_outline: '卷纲',
   creative_writing: '正文写作',
   reasoning: '推理规划',
+  // V3.9.3：observer 拆为独立 capability；前端 AI 设置页能单独给 observer 分配模型。
+  observer: '状态提取',
   light: '轻量评审',
 };
 
@@ -489,7 +491,7 @@ function CapabilityBindingsPanel() {
     <div className="panel" data-testid="capability-bindings-panel">
       <div className="panel__title">环节分配（capability_bindings）</div>
       <div className="muted small" style={{ marginBottom: 6 }}>
-        把模型档案指派到 7 个生产环节；解绑即该环节回落后端历史默认链（适用旧版 model_configs 仍存在时）。
+        把模型档案指派到 8 个生产环节；解绑即该环节回落后端历史默认链（适用旧版 model_configs 仍存在时）。
       </div>
 
       <ErrorBanner>{list.error}</ErrorBanner>

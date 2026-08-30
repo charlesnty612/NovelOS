@@ -395,8 +395,8 @@ export const modelProfilesApi = {
 };
 
 // -------------------------------------------------------------- capability bindings
-// GET 全量 7 项 capability → profile 映射；PUT 单项绑定、DELETE 单项解绑。
-// 错误码：422 至少 1 个、档案存在 + enabled 才能保存（由后端校验）。
+// GET 全量 8 项 capability → profile 映射（V3.9.3 起 observer 拆为独立环节）；
+// PUT 单项绑定、DELETE 单项解绑。错误码：422 至少 1 个、档案存在 + enabled 才能保存（由后端校验）。
 export const capabilityBindingsApi = {
   list: () => api.get<CapabilityBinding[]>('/capability-bindings'),
   bind: (capability: string, profileIds: string[]) =>

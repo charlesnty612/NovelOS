@@ -109,7 +109,16 @@ const bindingsFixture: CapabilityBinding[] = [
   {
     capability: 'reasoning',
     label: '推理规划',
-    agents: ['director', 'observer', 'arbiter'],
+    agents: ['director', 'arbiter'],
+    profile_ids: ['mpf_001'],
+    profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
+    legacy_available: false,
+  },
+  {
+    // V3.9.3：observer 拆为独立 capability，AI 设置页能单独分配模型。
+    capability: 'observer',
+    label: '状态提取',
+    agents: ['observer'],
     profile_ids: ['mpf_001'],
     profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
     legacy_available: false,
@@ -251,7 +260,7 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
 
   // -------------------- 环节分配 ----------------------------------------------
 
-  it('环节分配渲染 7 行（含中文 label + agents 小字）', async () => {
+  it('环节分配渲染 8 行（含中文 label + agents 小字）', async () => {
     renderPage();
 
     // 等列表到位
@@ -266,7 +275,7 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
         expect(row).toHaveTextContent(b.agents[0]!);
       }
     }
-    // 7 行
+    // 8 行
     const rows = document.querySelectorAll(
       '[data-testid^="cap-binding-"]:not([data-testid*="-select"]):not([data-testid*="-legacy"]):not([data-testid*="-saving"]):not([data-testid*="-saved"]):not([data-testid*="-error"]):not([data-testid*="-status"])',
     );
@@ -274,9 +283,9 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     const fixed = bindingsFixture.filter((b) =>
       document.querySelector(`[data-testid="cap-binding-${b.capability}"]`),
     );
-    expect(fixed).toHaveLength(7);
-    // sanity: 至少查到 7 个匹配
-    expect(rows.length).toBeGreaterThanOrEqual(7);
+    expect(fixed).toHaveLength(8);
+    // sanity: 至少查到 8 个匹配
+    expect(rows.length).toBeGreaterThanOrEqual(8);
   });
 
   it('切换下拉发出 PUT 正确载荷（profile_ids 数组包裹单值）', async () => {
@@ -362,7 +371,7 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     expect(wrap).toBeInTheDocument();
   });
 
-  it('档案卡点击「设为默认」展开 7 环节 chip；再次点击收起', async () => {
+  it('档案卡点击「设为默认」展开 8 环节 chip；再次点击收起', async () => {
     renderPage();
 
     const btn = await screen.findByTestId('profile-set-default-mpf_001');
@@ -370,7 +379,7 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     expect(screen.queryByTestId('profile-default-chip-row-mpf_001')).toBeNull();
     fireEvent.click(btn);
     const row = await screen.findByTestId('profile-default-chip-row-mpf_001');
-    // 7 个 chip 都在
+    // 8 个 chip 都在
     for (const b of bindingsFixture) {
       expect(
         screen.getByTestId(`profile-default-cap-mpf_001-${b.capability}`),
@@ -378,7 +387,7 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     }
     expect(
       row.querySelectorAll('[data-testid^="profile-default-cap-mpf_001-"]').length,
-    ).toBe(7);
+    ).toBe(8);
 
     // 再次点击收起
     fireEvent.click(btn);

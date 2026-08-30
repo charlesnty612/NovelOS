@@ -21,7 +21,7 @@
 | Agent | capability |
 |---|---|
 | director | `reasoning` |
-| observer | `reasoning` |
+| observer | `observer`（V3.9.3 起独立环节） |
 | writer | `creative_writing` |
 | arbiter | `reasoning` |
 | deconstructor_chapter | `reasoning` |
@@ -152,6 +152,24 @@ completion, used_config_row = router.call_with_fallback(
 5. 无任何候选 → 抛 `ModelNotConfiguredError(capability)`（与 `resolve` 行为一致，不进入循环）。
 6. 单配置场景：与 `resolve` + `get_provider` 旧路径等价（直走第一个即返回）。
 
+## V3.9.4：单次 run 级 `model_overrides` 覆盖
+
+调用方在请求体传 `model_overrides: {<capability>: <profile_id>}` 时，pipeline 从 ctx
+取该映射后，**对每个 `run_agent` 调用点按其对应的 capability 取出 profile_id 透传**
+`ModelRouter.call_with_fallback(profile_id=...)`，**锁定唯一候选**（`profile_id` 缺
+或 `enabled=0` 即抛错，不回落）。mock 路径不消费 profile_id（mock 自带脚本）。
+
+支持工作流与覆盖键：
+
+| 工作流 | 覆盖键（capability） | 说明 |
+|---|---|---|
+| `chapter-plan`   | `reasoning`         | director / arbiter / deconstructor_chapter 等 |
+| `chapter-write`  | `creative_writing`、`reasoning`（scene_planner）、`light`（polisher） | 见 `packages/workflows/chapter_write/pipeline.py` 行 328/453/538 |
+| `chapter-review` | `light`             | review 动作覆盖键维持 light 不变 |
+| `chapter-commit` | `observer`（observer 全部 run_agent 腿 + 两条 retry 路径）、`light`（summarizer） | 见 `packages/workflows/chapter_commit/pipeline.py` 头部 V3.9.4 说明 |
+
+设计动机：单次 run 不污染全局 binding；用户临时换档做对比；前端提交卡可直接选档案。
+
 ## 依赖
 - 外部：`httpx>=0.26`（项目已有）。
 - 上游：`packages/core/db.py`、`packages/core/ids.py`。
@@ -231,8 +249,11 @@ profile (model_profiles)            binding (capability_bindings)        resolve
 1. `capability_bindings` 有该 capability → 取 `profile_ids` JSON 数组，逐个解析 `model_profiles.enabled=1` 行；缺失或 disabled 跳过。返回行键名与 `model_configs` **完全一致**（`config_id ← profile_id`、`capability ← 本 capability`），保证 `get_provider` 与 runner 把 `config_id` 写 `ai_call_logs` 不需要 schema 改动。
 2. 无 binding → 直接查 `model_configs` 中 `capability` 匹配 `enabled=1` 的全部行（按 rowid ASC，V3.6 旧行为）。
 
-### CAPABILITY_LABELS（七环节）
-有序 dict，前端 / GET bindings 用，每项含 `label` 与 `agents`（从 `AGENT_CAPABILITY` 反推）：
+### CAPABILITY_LABELS（八环节，V3.9.3 起）
+有序 dict，前端 / GET bindings 用，每项含 `label` 与 `agents`（从 `AGENT_CAPABILITY` 反推）。
+
+V3.9.3 把 observer 从 reasoning 拆为独立 capability（迁移 0018 同步 binding；之前 observer
+硬编码 `capability_override="light"` 走 light 链，与 reasoning 展示失真）。
 
 | capability | label | agents |
 |---|---|---|
@@ -241,7 +262,8 @@ profile (model_profiles)            binding (capability_bindings)        resolve
 | `character_design` | 角色设计 | `character_designer` |
 | `volume_outline` | 卷纲 | `volume_outliner` |
 | `creative_writing` | 正文写作 | `writer` / `polisher` / `scene_planner` |
-| `reasoning` | 推理规划 | `director` / `observer` / `arbiter` / `deconstructor_chapter` / `deconstructor_aggregate` |
+| `reasoning` | 推理规划 | `director` / `arbiter` / `deconstructor_chapter` / `deconstructor_aggregate` |
+| `observer` | 状态提取 | `observer` |
 | `light` | 轻量评审 | `summarizer` / `critic` / `writer(revise·改稿，V3.9.2 起 revise 模式局部修改走 light)` |
 
 ### 绑定 / fallback 语义
@@ -253,7 +275,7 @@ profile (model_profiles)            binding (capability_bindings)        resolve
 
 ### 新增 API
 - `GET /model-profiles[?include_enabled_only=true]` / `POST /model-profiles` / `GET|PATCH|DELETE /model-profiles/{id}` / `POST /model-profiles/{id}/test`
-- `GET /capability-bindings`（返回全 7 项，含 label/agents/profile_ids/profiles/legacy_available/updated_at）
+- `GET /capability-bindings`（返回全 8 项，含 label/agents/profile_ids/profiles/legacy_available/updated_at）
 - `PUT /capability-bindings/{capability}`（body `{profile_ids: [...]}`，至少 1 个、须都存在且 enabled=1；未知 capability → 404）
 - `DELETE /capability-bindings/{capability}`（解除 binding → 回落旧行为）
 - 旧 `/model-configs` 端点保留不动（**只读兼容期**，仅 model_configs 写入仍走 `/model-configs`；新代码优先用两层 API；详见 README「弃用说明」）。

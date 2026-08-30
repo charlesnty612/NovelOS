@@ -25,6 +25,8 @@ import json
 import re
 from typing import Any
 
+import json_repair
+
 from .exceptions import AgentOutputError
 
 # Observer 顶层白名单（7 数组）；其余视为越权
@@ -86,13 +88,19 @@ def extract_json(
     text: str,
     *,
     finish_reason: str | None = None,
-) -> dict[str, Any]:
+    return_meta: bool = False,
+) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
     """从 LLM 输出中提取首个 JSON 对象并解析。
 
-    步骤：
-    1. 去围栏。
+    步骤（三级解析链）：
+    1. 去围栏 / 去除 ``<think>`` 块。
     2. 取首个 ``{`` 与末个 ``}`` 之间的子串。
-    3. ``json.loads``；失败抛 :class:`AgentOutputError`。
+    3. 一级：``json.loads``（严格模式，零开销覆盖正常输出）。
+    4. 二级：失败则 ``json.loads(strict=False)``，放宽字符串内控制字符（生产实测
+       observer 输出含裸控制符 ch074 commit 首次失败即此因）。
+    5. 三级：再失败则用 ``json_repair.loads`` 做语法修复——处理缺逗号、未转义引号、
+       截断 JSON 等常见 LLM 语法错误（生产事故：observer 在 char 562 缺逗号，
+       ``Expecting ',' delimiter``，strict=False 救不回，重试也失败，导致提交失败）。
 
     ``finish_reason``（可选）：上游 provider 透传的 ``choices[0].finish_reason``
     （OpenAI 兼容语义；典型值 ``stop`` / ``length``）。仅当**剥围栏/think 后内容为空**时
@@ -100,6 +108,13 @@ def extract_json(
     （自适应思考 / 长 reasoning），需提示调大 ``params.max_tokens``，而不是怀疑解析器。
     其它取值（含 ``None``）不改变既有错误文案，只在末尾追加 ``(finish_reason=xxx)``
     便于排障。
+
+    ``return_meta``（默认 ``False``）：为兼容既有调用方（runner / 测试套件），
+    默认仍直接返回 ``dict``；开启后返回 ``(payload, meta)``，其中 ``meta`` 是
+    ``dict``，至少包含 ``repaired: bool``（三级兜底是否触发）。runner 层据此
+    写入 ``warn: JSON auto-repaired`` 落库，使「修复」事件可观测——修复产物仍需
+    过 :func:`validate_contract` 结构校验，**内容级静默损坏风险由 warn 落库对冲**，
+    不静默吞错。
     """
     if not isinstance(text, str):
         raise AgentOutputError(f"output is not a string: {type(text).__name__}")
@@ -125,18 +140,51 @@ def extract_json(
     if first == -1 or last == -1 or last <= first:
         raise AgentOutputError(f"no JSON object braces found in output: {cleaned[:80]!r}")
     candidate = cleaned[first : last + 1]
+    repaired = False
     try:
         parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
-        # LLM 偶发在字符串内输出未转义控制字符（生产实测 observer 输出含裸控制符，
-        # ch074 commit 首次失败即此因）：strict=False 放宽字符串内控制字符，兜底重试一次。
+        # 二级兜底：strict=False 放宽字符串内控制字符
         try:
             parsed = json.loads(candidate, strict=False)
         except json.JSONDecodeError:
-            raise AgentOutputError(f"invalid JSON: {exc}; raw={candidate[:200]!r}") from exc
+            # 三级兜底：json_repair 处理常见 LLM 语法错误（缺逗号 / 未转义引号 / 截断）。
+            # 仅当 repair 后顶层是 dict 才接受（库对完全乱码可能返回空字符串等非 dict），
+            # 否则视为修复失败走抛错路径。
+            try:
+                repaired_obj = json_repair.loads(candidate)
+            except Exception as repair_exc:  # noqa: BLE001
+                raise AgentOutputError(
+                    _format_json_error(exc, candidate)
+                ) from repair_exc
+            if not isinstance(repaired_obj, dict):
+                raise AgentOutputError(
+                    _format_json_error(exc, candidate)
+                ) from exc
+            parsed = repaired_obj
+            repaired = True
     if not isinstance(parsed, dict):
         raise AgentOutputError(f"JSON top-level is not an object: {type(parsed).__name__}")
+    if return_meta:
+        return parsed, {"repaired": repaired}
     return parsed
+
+
+def _format_json_error(exc: json.JSONDecodeError, candidate: str) -> str:
+    """构造 JSON 解析失败的报错文案：错误位置前后各 100 字符上下文 + 头部 200 字符，
+    总长控制在 500 字符内，便于排障时定位具体位置而不暴露全量 LLM 输出。
+    """
+    pos = getattr(exc, "pos", None)
+    if isinstance(pos, int) and 0 <= pos <= len(candidate):
+        ctx_start = max(0, pos - 100)
+        ctx_end = min(len(candidate), pos + 100)
+        ctx_snippet = candidate[ctx_start:ctx_end]
+        return (
+            f"invalid JSON: {exc}; "
+            f"pos={pos} ctx={ctx_snippet!r}; "
+            f"raw={candidate[:200]!r}"
+        )[:500]
+    return f"invalid JSON: {exc}; raw={candidate[:200]!r}"
 
 
 def _validate_observer(payload: dict[str, Any]) -> None:

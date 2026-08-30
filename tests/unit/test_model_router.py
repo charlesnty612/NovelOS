@@ -272,12 +272,14 @@ def _insert_config(
 
 def test_capability_for_known_agents():
     assert capability_for("director") == "reasoning"
-    assert capability_for("observer") == "reasoning"
+    # V3.9.3：observer 拆为独立 capability，不再归属 reasoning。
+    assert capability_for("observer") == "observer"
     assert capability_for("writer") == "creative_writing"
     # V3 P0-2：critic / summarizer 映射为 light capability
     assert capability_for("critic") == "light"
     assert capability_for("summarizer") == "light"
     assert AGENT_CAPABILITY["director"] == "reasoning"
+    assert AGENT_CAPABILITY["observer"] == "observer"
     assert AGENT_CAPABILITY["critic"] == "light"
     assert AGENT_CAPABILITY["summarizer"] == "light"
 

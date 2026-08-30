@@ -300,3 +300,73 @@ def test_validate_contract_none_passes_anything():
 def test_validate_contract_unknown_passes_through():
     # 未知 expected → 当 None 处理
     validate_contract("foo", {"anything": True})
+
+
+# ---------------------------------------------------------------------------
+# 第三级兜底：json_repair（Sprint 4 生产事故：observer char 562 缺逗号，
+# strict=False 救不回，重试也失败 → 加 json_repair 自动修复）
+# ---------------------------------------------------------------------------
+
+
+def test_extract_json_repairs_missing_comma_between_array_elements():
+    """LLM 在数组元素之间漏掉逗号（生产事故典型形态）→ 三级兜底修复成功。"""
+    payload, meta = extract_json('{"a":["x" "y"]}', return_meta=True)
+    assert payload == {"a": ["x", "y"]}
+    assert meta == {"repaired": True}
+
+
+def test_extract_json_repairs_missing_comma_between_object_keys():
+    """LLM 在两个顶层键之间漏掉逗号 → 修复成功。"""
+    payload, meta = extract_json('{"a":1 "b":2}', return_meta=True)
+    assert payload == {"a": 1, "b": 2}
+    assert meta["repaired"] is True
+
+
+def test_extract_json_repairs_chinese_long_string_with_unescaped_quotes():
+    """中文长字符串内含未转义双引号 → 修复成功（json_repair 对中文内容实测 OK）。"""
+    raw = '{"text":"他说：\"你好\"，继续往下写"}'
+    payload, meta = extract_json(raw, return_meta=True)
+    assert meta["repaired"] is True
+    assert payload["text"].startswith("他说")
+    assert "你好" in payload["text"]
+
+
+def test_extract_json_clean_json_no_repair_meta_false():
+    """干净 JSON → repaired=False，不触发第三级（零开销覆盖）。"""
+    payload, meta = extract_json('{"a": 1, "b": [2, 3]}', return_meta=True)
+    assert payload == {"a": 1, "b": [2, 3]}
+    assert meta == {"repaired": False}
+
+
+def test_extract_json_return_meta_default_false_keeps_legacy_dict_contract():
+    """return_meta 不传（默认 False）→ 行为与旧版完全一致：返回 dict 而非 tuple。
+    该断言保护既有调用方（runner / 测试套件）的零侵入契约。
+    """
+    result = extract_json('{"a":1 "b":2}')
+    assert isinstance(result, dict)
+    assert result == {"a": 1, "b": 2}
+
+
+def test_extract_json_unrepairable_garbage_raises_with_pos_context():
+    """花括号内是 LLM 偶发输出但顶层不是 dict 的形态（json_repair 修复后是 list）→
+    仍抛 AgentOutputError，错误消息含 pos 上下文。
+    这种样本模拟「LLM 输出本身不含字典结构」，前两级 strict 也救不回。
+    """
+    # {[1,2,3]}：有 {} 让 braces 分支通过，前两级 json.loads 失败，
+    # json_repair 修复为 list（顶层非 dict），被「非 dict 视为修复失败」分支拦截抛错
+    garbage = "{[1,2,3]}"
+    with pytest.raises(AgentOutputError) as exc:
+        extract_json(garbage)
+    msg = str(exc.value)
+    # 错误消息需带 pos= 上下文（排障关键证据）
+    assert "pos=" in msg
+    assert "invalid JSON" in msg
+
+
+def test_extract_json_truncated_json_repaired():
+    """截断 JSON（首尾花括号闭合但内部未闭合）→ json_repair 自动补齐成功。"""
+    # 闭合花括号已加，但内部字符串未闭合——json_repair 实测能补全
+    payload, meta = extract_json('{"a":1, "b":[1,2,3}', return_meta=True)
+    assert payload["a"] == 1
+    assert payload["b"] == [1, 2, 3]
+    assert meta["repaired"] is True

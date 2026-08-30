@@ -76,12 +76,15 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     assert "0016_model_profiles.sql" in result["applied"]
     # 0017 关键表 UNIQUE 兜底（relationships / workflow_runs 部分索引）
     assert "0017_unique_constraints.sql" in result["applied"]
+    # V3.9.3 observer 独立 capability 绑定：0018_observer_capability_binding.sql
+    assert "0018_observer_capability_binding.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     first = apply_migrations(db_path, MIGRATIONS_DIR)
-    # V3.7 模型档案 + 环节绑定：0016 加入；迁移目录下十七条脚本都应被首次应用
+    # V3.7 模型档案 + 环节绑定：0016 加入；V3.9.3 observer 独立 capability 绑定
+    # 0018 也要首次应用。迁移目录下一共 18 个脚本都应被首次应用。
     assert first["applied"] == [
         "0001_init.sql",
         "0002_drafts_unique.sql",
@@ -100,6 +103,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0015_volumes.sql",
         "0016_model_profiles.sql",
         "0017_unique_constraints.sql",
+        "0018_observer_capability_binding.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -125,6 +129,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0016_model_profiles.sql" in second["skipped"]
     # 0017 关键表 UNIQUE 兜底：也应被幂等跳过
     assert "0017_unique_constraints.sql" in second["skipped"]
+    # V3.9.3 observer 拆为独立 capability 绑定：0018 也应被幂等跳过
+    assert "0018_observer_capability_binding.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -138,6 +144,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         conn.close()
     # V3.7 模型档案 + 环节绑定：十六条迁移都应记录
     # 0017 关键表 UNIQUE 兜底（relationships / workflow_runs）
+    # 0018 V3.9.3 observer 独立 capability 绑定（profile_ids 继承 reasoning）
     filenames = {r["filename"] for r in rows}
     assert filenames == {
         "0001_init.sql",
@@ -157,6 +164,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0015_volumes.sql",
         "0016_model_profiles.sql",
         "0017_unique_constraints.sql",
+        "0018_observer_capability_binding.sql",
     }
     for r in rows:
         assert r["applied_at"]

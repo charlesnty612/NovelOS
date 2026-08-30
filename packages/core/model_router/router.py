@@ -10,7 +10,7 @@
 设计要点：
 - 单一入口 :class:`ModelRouter`；构造接收 ``db_path``，每个方法内部开连接、try/finally 关闭。
 - 能力映射（capability）与 agent 名口径固定，对齐 ``docs/agents/agent-contracts-v0.md`` §7 十问：
-  - director / observer → ``reasoning``
+  - director → ``reasoning``，observer → ``observer``（V3.9.3 起独立环节）
   - writer → ``creative_writing``
 - ``resolve(capability)`` 无命中 → :class:`ModelNotConfiguredError`，detail 注明 capability。
 - ``get_provider(config_row)`` 按 provider 字段工厂化；mock 不传脚本（每次回显空 JSON），
@@ -50,7 +50,7 @@ log = get_logger("novelos.model_router")
 
 AGENT_CAPABILITY: dict[str, str] = {
     "director": "reasoning",
-    "observer": "reasoning",
+    "observer": "observer",  # V3.9.3：observer 独立环节（从 reasoning 拆出）
     "writer": "creative_writing",
     "polisher": "creative_writing",  # P1：润色走 creative_writing，与 writer 同 capability，可单次覆盖
     "arbiter": "reasoning",
@@ -73,8 +73,7 @@ AGENT_CAPABILITY: dict[str, str] = {
 默认走 ``reasoning``——Sprint 3 MVP 仅在 README 中声明，不强约束。
 
 V3 P0-2 新增 ``light`` capability：用于结构化提取 / 评审类任务（critic / summarizer），
-可配更便宜更快的模型（DeepSeek-chat / GLM-flash 级）。observer 保持 ``reasoning``
-——observer 输出准确性直接影响 story_state，downgrade 风险高；writer 保持
+可配更便宜更快的模型（DeepSeek-chat / GLM-flash 级）。writer 保持
 ``creative_writing`` 不变（长文本生成任务）。``light`` capability 在未配置任何
 enabled 行时自动回退到 ``reasoning`` 链（见 :meth:`ModelRouter.call_with_fallback`），
 保证零破坏。
@@ -83,6 +82,13 @@ V3.7 project-init 四 agent（premise_designer / world_builder / character_desig
 volume_outliner）映射到独立 capability（premise_design / world_building /
 character_design / volume_outline），与正文创作（creative_writing）/ 推理规划
 （reasoning）/ 轻量评审（light）解耦。
+
+V3.9.3 把 observer 从 reasoning 拆成独立 ``observer`` 环节：chapter_commit 的
+observer 双腿此前以 ``capability_override="light"`` 硬编码跑 light 绑定的模型，
+但页面把 observer 展示在 reasoning 组——展示与实际失真。独立环节后，observer
+按 ``AGENT_CAPABILITY`` 默认走 ``observer`` capability，前端 AI 设置页能单独
+分配模型；不依赖 capability_override 硬编码。迁移 0018 负责把 reasoning 的当前
+绑定同步给 observer 行（已有行不动，幂等）。
 """
 
 
@@ -97,16 +103,22 @@ def capability_for(agent_name: str) -> str:
 
 CAPABILITY_LABELS: dict[str, dict[str, object]] = {
     # 顺序即前端「环节」展示顺序；先 project-init（项目初始化四步），
-    # 再正文写作，再推理规划与轻量评审。
+    # 再正文写作，再推理规划、状态提取与轻量评审。
     "premise_design":   {"label": "题材定位",   "agents": ["premise_designer"]},
     "world_building":   {"label": "世界观",     "agents": ["world_builder"]},
     "character_design": {"label": "角色设计",   "agents": ["character_designer"]},
     "volume_outline":   {"label": "卷纲",       "agents": ["volume_outliner"]},
     "creative_writing": {"label": "正文写作",   "agents": ["writer", "polisher", "scene_planner"]},
     "reasoning":        {"label": "推理规划",   "agents": [
-        "director", "observer", "arbiter",
+        "director", "arbiter",
         "deconstructor_chapter", "deconstructor_aggregate",
     ]},
+    # V3.9.3：observer 拆为独立环节；不再列在 reasoning 组。原因：chapter_commit
+    # observer 双腿此前硬编码 capability_override="light"，让 observer 实际跑
+    # light 模型——前端却把它展示在 reasoning 组，分配与展示失真。独立环节后
+    # observer 默认走 observer capability（见 AGENT_CAPABILITY），不依赖
+    # capability_override；前端能单独分配模型。
+    "observer":         {"label": "状态提取",   "agents": ["observer"]},
     # writer 在 revise 模式（按建议修改/驳回并改稿的局部修改）也走 light——
     # 标注为 writer(revise·改稿) 以便环节分配页如实展示；write/fresh_write 走 creative_writing。
     "light":            {"label": "轻量评审",   "agents": [

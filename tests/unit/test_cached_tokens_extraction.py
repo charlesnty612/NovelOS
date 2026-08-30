@@ -876,3 +876,96 @@ def test_runner_concat_retry_warn_and_observer_strip_warn(
     assert err.startswith("warn: first attempt invalid:")
     assert " | warn: stripped keys=" in err
     assert "delta_id" in err
+
+
+# ---------------------------------------------------------------------------
+# 三级解析兜底（json_repair）→ runner warn 落库（Sprint 4）
+# ---------------------------------------------------------------------------
+
+
+def test_runner_warns_json_auto_repaired_on_first_attempt_success(
+    tmp_path: Path, monkeypatch,
+):
+    """首次输出含可修复语法错误（缺逗号）→ json_repair 三级兜底修复成功 →
+    ai_call_logs.error 写 ``warn: JSON auto-repaired``，retry_count=0（未重试）。
+
+    这是生产事故 observer char 562 缺逗号场景的目标行为：strict=False 救不回、
+    重试也失败的兜底链，由 json_repair 在不重试的前提下救回。
+    """
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    _register_observer_agent(db_path, "agn_observer_warn_repair")
+
+    # 故意制造一个 observer 7 数组全在但顶层键之间缺逗号的 JSON
+    # → json_repair 能修复为合法 dict，过 validate_contract
+    broken = '{"character_changes":[] "world_changes":[] "relationship_changes":[] "new_events":[] "resolved_hooks":[] "new_hooks":[] "debt_changes":[]}'
+
+    def _patched_complete(self, messages, params=None):
+        return {"text": broken, "usage": {"prompt": 1, "completion": 2, "total": 3}}
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    out = run_agent(
+        db_path,
+        "observer",
+        {"chapter_id": "ch_warn_repair"},
+        run_id,
+        expected="observer",
+        mock_script=lambda i: _VALID_OBSERVER_TEXT,
+    )
+    # 修复产物结构合法 → 7 数组均存在
+    assert out["character_changes"] == []
+    assert out["world_changes"] == []
+
+    log = _fetch_call_log(db_path, run_id)
+    assert log["retry_count"] == 0  # 首次修复成功，未触发重试
+    assert log["error"] == "warn: JSON auto-repaired"
+
+
+def test_runner_concat_retry_warn_repair_warn_and_observer_strip_warn(
+    tmp_path: Path, monkeypatch,
+):
+    """三段 warn 同时存在时的拼接顺序：retry warn → repair warn → observer warn
+    （根因 → 修复痕迹 → 剥离痕迹），用 ' | ' 拼接。
+    """
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    _register_observer_agent(db_path, "agn_observer_warn_combo_repair")
+
+    call_count = {"n": 0}
+
+    def _patched_complete(self, messages, params=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # 首次：非 JSON → extract_json 失败
+            return {"text": "this is not json at all, no braces here", "usage": {"prompt": 1, "completion": 2, "total": 3}}
+        # 重试：可修复的缺逗号 JSON + 越权字段 delta_id（剥离路径）
+        broken = '{"character_changes":[] "world_changes":[] "relationship_changes":[] "new_events":[] "resolved_hooks":[] "new_hooks":[] "debt_changes":[] "delta_id":"strip_me"}'
+        return {"text": broken, "usage": {"prompt": 1, "completion": 2, "total": 3}}
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    out = run_agent(
+        db_path,
+        "observer",
+        {"chapter_id": "ch_warn_combo_repair"},
+        run_id,
+        expected="observer",
+        mock_script=lambda i: _VALID_OBSERVER_TEXT,
+    )
+    assert "delta_id" not in out
+
+    log = _fetch_call_log(db_path, run_id)
+    assert log["retry_count"] == 1
+    err = log["error"]
+    assert err is not None
+    # 三段拼接顺序：retry → repair → observer
+    assert err.startswith("warn: first attempt invalid:")
+    assert " | warn: JSON auto-repaired | warn: stripped keys=" in err
+    assert "delta_id" in err

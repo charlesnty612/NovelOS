@@ -252,7 +252,7 @@ def run_agent(
     注：所有异常出口都会把 ``workflow_runs`` 收尾为 ``FAILED``（孤儿 RUNNING 行兜底）。
 
     V3.1.1 O-2：``capability_override`` 用于「同一 agent 不同 leg 走不同 capability」
-    的场景（如 observer 双 leg：leg A 走 reasoning，leg B 走 light）。``None`` 时
+    的场景（如 observer 双 leg 统一走 observer 环节；V3.9.3 前曾拆走 reasoning/light）。``None`` 时
     走原 :func:`capability_for(agent_name)` 逻辑，向后兼容全部已有调用方与测试。
     仅在 mock_script 为 None 的真实链路下生效（mock 路径不消费 capability）。
 
@@ -321,6 +321,9 @@ def run_agent(
         output_log: dict[str, Any] | None = None
         # observer 剥离累积（仅在 expected=="observer" 路径下生效；非 observer 一律 None）
         observer_warn: str | None = None
+        # 三级解析兜底（json_repair）触发累积：True 时在成功落库 error 列追加
+        # ``warn: JSON auto-repaired``。修复未重试一次成功时 retry_count=0 也照常写 warn。
+        repair_warn: str | None = None
 
         for attempt in range(2):  # 0 = 首次，1 = 1 次重试
             if attempt > 0:
@@ -368,7 +371,15 @@ def run_agent(
                 token_usage = dict(token_usage)
                 token_usage["finish_reason"] = finish_reason_raw
             try:
-                parsed = extract_json(raw_text, finish_reason=finish_reason_raw if isinstance(finish_reason_raw, str) else None)
+                parsed, parse_meta = extract_json(
+                    raw_text,
+                    finish_reason=finish_reason_raw if isinstance(finish_reason_raw, str) else None,
+                    return_meta=True,
+                )
+                if parse_meta.get("repaired"):
+                    # 三级兜底（json_repair）触发 → 标记 warn 落库，便于事后追溯
+                    # 内容级静默损坏风险由该 warn + validate_contract 结构校验对冲
+                    repair_warn = "warn: JSON auto-repaired"
             except AgentOutputError as exc:
                 last_error = str(exc)
                 continue  # 进入重试
@@ -416,11 +427,13 @@ def run_agent(
         # 可观测性：重试成功时把首次失败原因以 warn 前缀写入 ai_call_logs.error。
         # 与 observer_warn 可同时存在（剥离 + 重试成功独立事件），用 " | " 拼接；
         # 都没有时保持现状 error=None，不污染正常成功路径。
+        # 新增 repair_warn（json_repair 三级兜底触发），拼接顺序：
+        # retry warn → repair warn → observer warn（根因 → 修复痕迹 → 剥离痕迹）。
         retry_warn: str | None = None
         if retry_count == 1 and last_error:
             truncated = last_error[:_WARN_MAX_LEN]
             retry_warn = f"{_RETRY_WARN_PREFIX} {truncated}"
-        warn_parts = [w for w in (retry_warn, observer_warn) if w]
+        warn_parts = [w for w in (retry_warn, repair_warn, observer_warn) if w]
         error_text = " | ".join(warn_parts) if warn_parts else None
         _record_call(
             db_path,

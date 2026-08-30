@@ -217,8 +217,9 @@ export function ChapterDetailPage() {
       setActionErr(null);
       setSubmitting(true);
       try {
-        // 按次模型档案选择：plan/write/review → 对应 capability；commit 由 Observer 兜底
-        // 不消耗 LLM，不透传 model_overrides（保留旧语义）。
+        // 按次模型档案选择：plan/write/review → 对应 capability；commit 走 observer
+        // 覆盖键（observer agent 是 LLM 调用，V3.9.3 拆为独立 capability；summarizer
+        // 走 light 绑定，不受 commit 覆盖键影响）。
         const capabilityByAction: Record<
           'plan' | 'write' | 'review' | 'commit',
           string | null
@@ -226,7 +227,7 @@ export function ChapterDetailPage() {
           plan: 'reasoning',
           write: 'creative_writing',
           review: 'light',
-          commit: null,
+          commit: 'observer',
         };
         const capability = capabilityByAction[action];
         const profileId = (payload?.model_profile_id ?? '').trim();
@@ -553,7 +554,7 @@ function ChapterHeader({
               chapterStatus: chapter.status,
               activeRun: activeRunInfo,
             });
-            const supportsModelPick = b.action !== 'commit';
+            const supportsModelPick = true; // V3.9.4：四 action 全支持模型下拉（commit 走 observer 覆盖键）
             const showSelect =
               supportsModelPick && !profilesCall.error && enabledProfiles.length > 0;
             return (

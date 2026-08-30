@@ -790,8 +790,8 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 按次选择模型档案：plan/write/review 三个按钮从下拉选择 profile_id，
-// 启动后请求 payload 带 model_overrides；commit 不显示下拉。
+// 按次选择模型档案：plan/write/review/commit 四个按钮从下拉选择 profile_id，
+// 启动后请求 payload 带 model_overrides（commit 走 observer 覆盖键，V3.9.4 起）。
 // ---------------------------------------------------------------------------
 
 function buildProfile(
@@ -994,6 +994,81 @@ describe('ChapterDetailPage - 按次模型档案选择', () => {
     const call = vi.mocked(workflowsApi.startWrite).mock.calls[0];
     // 默认 fresh 重写：payload 含 fresh_write=true（且无其他键泄漏）
     expect(call[2]).toEqual({ fresh_write: true });
+  });
+
+  it('e) 提交卡 V3.9.4：渲染模型下拉 + 选中后请求带 model_overrides.observer', async () => {
+    // V3.9.4：observer 拆为独立 capability 后，commit 提交卡也应支持模型下拉；
+    // 覆盖键 = observer（与 commit pipeline profile_id 透传口径一致）。
+    const observerId = 'mp_observer_99';
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'REVIEWED' }));
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([
+      buildProfile({ profile_id: observerId, name: '观察-甲', provider: 'openai', model: 'gpt-x' }),
+      buildProfile({ profile_id: 'mp_other', name: '其他' }),
+    ]);
+    vi.mocked(workflowsApi.startCommit).mockResolvedValue({
+      run_id: 'wfr_commit_override',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-header')).toBeInTheDocument();
+    });
+    // 提交卡应渲染模型下拉（data-testid 与其它 action 同形）
+    const commitSelect = await waitFor(() =>
+      screen.getByTestId('wf-model-select-commit'),
+    );
+    fireEvent.change(commitSelect, { target: { value: observerId } });
+
+    const commitBtn = screen.getByTestId('wf-btn-commit');
+    expect(commitBtn).not.toBeDisabled();
+    fireEvent.click(commitBtn);
+
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.startCommit)).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(workflowsApi.startCommit).mock.calls[0];
+    expect(call[0]).toBe('prj_001');
+    expect(call[1]).toBe('ch_001');
+    // 关键断言：commit 覆盖键是 observer（与 pipeline 一致），不是 reasoning
+    expect(call[2]).toEqual({ model_overrides: { observer: observerId } });
+    // 临时字段 model_profile_id 不得泄漏
+    expect((call[2] as Record<string, unknown>)['model_profile_id']).toBeUndefined();
+  });
+
+  it('f) 提交卡不选择档案时：payload 不含 model_overrides 键', async () => {
+    // 缺省零行为变更：未选档案时，commit 请求不应带 model_overrides 键。
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'REVIEWED' }));
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([
+      buildProfile({ profile_id: 'mp_a', name: 'A' }),
+    ]);
+    vi.mocked(workflowsApi.startCommit).mockResolvedValue({
+      run_id: 'wfr_commit_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-header')).toBeInTheDocument();
+    });
+    // 下拉存在但默认 = ''
+    await waitFor(() => {
+      expect(screen.getByTestId('wf-model-select-commit')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId('wf-btn-commit'));
+
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.startCommit)).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(workflowsApi.startCommit).mock.calls[0];
+    // 未选档案 → 不带 model_overrides；payload 为 undefined（保持向后兼容）
+    expect(call[2]).toBeUndefined();
   });
 });
 
