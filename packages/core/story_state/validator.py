@@ -239,6 +239,28 @@ def _reference_existence_errors(
             return True  # 字段缺失/空串视为不校验（容错优先）
         return value in snap_ids.get(bucket, set()) or value in created_ids.get(bucket, set())
 
+    def _exists_endpoint(value: Any) -> bool:
+        """关系端点 / 事件参与者存在性：允许 character_id 或 faction_id。
+
+        修复 wfr_6619a7bfa6fa：组织间关系（faction↔faction）以前被 validator 误杀——
+        ``relationship_changes.from_character_id`` / ``to_character_id`` 和
+        ``new_events.participants[]`` 不再仅查 characters，而是查 characters ∪
+        factions；端点身份对调用方透明（DB 字段名沿用 ``from_character_id`` /
+        ``to_character_id`` / ``participants`` 是 schema 历史命名，端点既可以是
+        个人也可以是组织）。
+        """
+        if not isinstance(value, str) or not value:
+            return True
+        if value in snap_ids.get("characters", set()):
+            return True
+        if value in snap_ids.get("factions", set()):
+            return True
+        if value in created_ids.get("characters", set()):
+            return True
+        if value in created_ids.get("factions", set()):
+            return True
+        return False
+
     errs: list[str] = []
 
     for idx, ch in enumerate(delta.get("character_changes") or []):
@@ -280,15 +302,15 @@ def _reference_existence_errors(
             continue
         f = ch.get("from_character_id")
         t = ch.get("to_character_id")
-        if not _exists("characters", f):
+        if not _exists_endpoint(f):
             errs.append(
                 f"[business] relationship_changes[{idx}].from_character_id "
-                f"{f!r} 不在 snapshot 且未被本 delta add 创建"
+                f"{f!r} 不在 snapshot 且未被本 delta add 创建（端点必须是 character_id 或 faction_id）"
             )
-        if not _exists("characters", t):
+        if not _exists_endpoint(t):
             errs.append(
                 f"[business] relationship_changes[{idx}].to_character_id "
-                f"{t!r} 不在 snapshot 且未被本 delta add 创建"
+                f"{t!r} 不在 snapshot 且未被本 delta add 创建（端点必须是 character_id 或 faction_id）"
             )
         if ch.get("op") != "add":
             rid = ch.get("relationship_id")
@@ -310,10 +332,10 @@ def _reference_existence_errors(
         parts = ch.get("participants") or []
         if isinstance(parts, list):
             for j, p in enumerate(parts):
-                if not _exists("characters", p):
+                if not _exists_endpoint(p):
                     errs.append(
                         f"[business] new_events[{idx}].participants[{j}] "
-                        f"{p!r} 不在 snapshot 且未被本 delta add 创建"
+                        f"{p!r} 不在 snapshot 且未被本 delta add 创建（参与者必须是 character_id 或 faction_id）"
                     )
 
     for idx, ch in enumerate(delta.get("resolved_hooks") or []):

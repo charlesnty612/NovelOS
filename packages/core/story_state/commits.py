@@ -519,31 +519,57 @@ def commit_delta(
         if isinstance(author_approval, dict) and author_approval.get("promoted_from"):
             promoted_from = author_approval["promoted_from"]
             validation_json["promoted_from"] = promoted_from
-        conn.execute(
-            """
-            INSERT INTO commits
-                (commit_id, project_id, branch_id, chapter_id,
-                 previous_state_version, resulting_state_version,
-                 delta_id, validation_json, author_approval_json,
-                 timestamp, workflow_run_id, rollback_of)
-            VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                commit_id,
-                project_id,
-                branch_id,
-                delta_row["chapter_id"],
-                current_version,
-                new_version,
-                delta_id,
-                _dump(validation_json),
-                _dump(author_approval_norm),
-                now,
-                workflow_run_id,
-                _rollback_of,
-            ),
-        )
+        try:
+            conn.execute(
+                """
+                INSERT INTO commits
+                    (commit_id, project_id, branch_id, chapter_id,
+                     previous_state_version, resulting_state_version,
+                     delta_id, validation_json, author_approval_json,
+                     timestamp, workflow_run_id, rollback_of)
+                VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    commit_id,
+                    project_id,
+                    branch_id,
+                    delta_row["chapter_id"],
+                    current_version,
+                    new_version,
+                    delta_id,
+                    _dump(validation_json),
+                    _dump(author_approval_norm),
+                    now,
+                    workflow_run_id,
+                    _rollback_of,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            # 0022 兜底：commits.rollback_of 部分唯一索引（idx_commits_rollback_of）
+            # 在双重回滚场景下会撞——同一 commit 被 rollback 两次，第二条 rollback
+            # commit 的 rollback_of 字段与第一条重复，DB 层直接拦截。
+            # 与 write_through.py 的 0017 idx_relationships_unique 兜底同款先例
+            # （relationships 并发 add 转 UPDATE 分支幂等）——本场景并发语义不同
+            # （rollback 是顺序操作），无需 UPDATE 分支，直接抛 StateConflictError
+            # 让 router 层映射为 409 Conflict（语义：rollback_of 已存在）。
+            conn.rollback()
+            raise StateConflictError(
+                f"commits INSERT 撞唯一约束（疑似双重回滚 rollback_of={_rollback_of!r}）",
+                delta_id=delta_id,
+            ) from exc
+
+        # 6.5) 章节状态联动（仅 rollback 触发）：COMMITTED → DRAFTED。
+        # 生产实锤：rollback 成功后 chapter.status 不联动回退，导致
+        # COMMITTED 章回滚后仍处于 COMMITTED，save_draft 拦截后续改稿。
+        # 仅处理 COMMITTED → DRAFTED，其它状态（PLANNED/DRAFTED/REVIEWED/RELEASED）不动。
+        # 与 commits 行 INSERT 同一事务：若 rollback 后续任意步骤失败，全部回滚。
+        if _rollback_of is not None and delta_row["chapter_id"]:
+            conn.execute(
+                "UPDATE chapters SET status = 'DRAFTED', updated_at = ? "
+                "WHERE chapter_id = ? AND status = 'COMMITTED'",
+                (now, delta_row["chapter_id"]),
+            )
 
         # 7) 逆路径清理（仅 rollback 触发）：与 write_through 同一事务。
         if _inverse_cleanup:
@@ -749,6 +775,23 @@ def rollback_commit(
             conn.rollback()
             conn.close()
             raise StateNotFoundError(f"commit {commit_id!r} not found", resource="commit", resource_id=commit_id)
+        # 幂等守卫：同一 commit 不允许被回滚两次。
+        # 生产实锤：cmt_6c9faba70b8c 已被回滚过一次（产生 cmt_480699e94622），
+        # 再回滚会产生第二条逆 commit，导致 update 类变更被反转两次=回到原值，状态污染。
+        # commits.rollback_of 列记录「本 commit 是哪条 commit 的回滚」，用其存在性
+        # 作为「已被回滚」的判定（防御并发：同一事务内可见）。
+        existing_rollback = conn.execute(
+            "SELECT commit_id FROM commits WHERE rollback_of = ? LIMIT 1",
+            (commit_id,),
+        ).fetchone()
+        if existing_rollback is not None:
+            conn.rollback()
+            conn.close()
+            raise StateConflictError(
+                f"commit {commit_id!r} has already been rolled back by "
+                f"commit {existing_rollback['commit_id']!r}; rollback is idempotent-only",
+                delta_id=commit_id,
+            )
         delta_row = conn.execute(
             "SELECT * FROM state_deltas WHERE delta_id = ?", (row["delta_id"],)
         ).fetchone()

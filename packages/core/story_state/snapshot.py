@@ -331,7 +331,7 @@ def _load_characters(conn: sqlite3.Connection, project_id: str) -> list[dict]:
         beliefs = state_json.get("beliefs", [])
         if not isinstance(beliefs, list):
             beliefs = []
-        relationships = _load_relationships_for(conn, cid)
+        relationships = _load_relationships_for(conn, "character", cid)
         out.append(
             {
                 "character_id": cid,
@@ -346,7 +346,20 @@ def _load_characters(conn: sqlite3.Connection, project_id: str) -> list[dict]:
     return out
 
 
-def _load_relationships_for(conn: sqlite3.Connection, character_id: str) -> list[dict]:
+def _load_relationships_for(
+    conn: sqlite3.Connection, endpoint_kind: str, endpoint_id: str
+) -> list[dict]:
+    """按 (endpoint_kind, endpoint_id) 从 relationships 表聚合。
+
+    修复 wfr_6619a7bfa6fa：关系端点既可以是 character_id 也可以是 faction_id，
+    0022 移除 FK 后允许两端写入任意 id 字符串。本函数按 endpoint_kind 区分：
+    - ``"character"`` → 仅取 ``from_character_id == endpoint_id`` 的行；
+    - ``"faction"`` → 仅取 ``from_character_id == endpoint_id`` 且端点类型为
+      faction 的行（实现：通过查 factions.faction_id 探测端点是否真为 faction；
+      避免 character 端点 id 撞到 faction 桶产生污染）。
+
+    返回 list[dict]，按 relationship_id ASC 排序保证确定性。
+    """
     rows = conn.execute(
         """
         SELECT relationship_id, from_character_id, to_character_id, relation_type,
@@ -355,8 +368,16 @@ def _load_relationships_for(conn: sqlite3.Connection, character_id: str) -> list
         WHERE from_character_id = ?
         ORDER BY relationship_id ASC
         """,
-        (character_id,),
+        (endpoint_id,),
     ).fetchall()
+    if endpoint_kind == "faction":
+        # 二次过滤：端点必须是真实 faction（防止 character id 撞到 faction 桶
+        # 或历史脏数据混入）。取 1 行即可探测。
+        kind_probe = conn.execute(
+            "SELECT 1 FROM factions WHERE faction_id = ?", (endpoint_id,)
+        ).fetchone()
+        if kind_probe is None:
+            return []
     out: list[dict] = []
     for r in rows:
         out.append(
@@ -366,8 +387,6 @@ def _load_relationships_for(conn: sqlite3.Connection, character_id: str) -> list
                 "to_character_id": r["to_character_id"],
                 "relation_type": r["relation_type"],
                 "state_json": _parse_json_column(r["state_json"]),
-                # 携带伴随列（visibility / who_knows）让 knowledge_leakage 与
-                # 后续 consumer 读到一致字段；缺失/null 解码为 None（沿用语义）。
                 "visibility": r["visibility"],
                 "who_knows": _parse_who_knows(r["who_knows"]),
             }
@@ -410,6 +429,12 @@ def _load_world(conn: sqlite3.Connection, project_id: str) -> dict:
             "statement": r["statement"],
             "data_json": _parse_json_column(r["data_json"]),
             "visibility": r["visibility"],
+            # wfr_6619a7bfa6fa：factions[fid] 桶补 relationships 列表——
+            # 关系端点为 faction 时（faction↔faction / person↔org）由 applier
+            # 写入此处；rebuild_snapshot_collections_from_db 重建快照时也会
+            # 从 relationships 表聚合写入（与 characters[cid].relationships
+            # 同源数据，DB 为权威）。
+            "relationships": _load_relationships_for(conn, "faction", r["faction_id"]),
         }
         for r in fac_rows
     }

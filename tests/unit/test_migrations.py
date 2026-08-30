@@ -83,6 +83,15 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # V3.10 init 空壳 plot_event 修复：0020_backfill_init_plot_event_description.sql
     # （仅 ALTER TABLE 加列 + UPDATE 回填，不增表；总表 38 不变）
     assert "0020_backfill_init_plot_event_description.sql" in result["applied"]
+    # 2026-08-31 双重回滚事故修复：0021_repair_ch2_status_after_double_rollback.sql
+    # （一次性数据校正，带 chapter_id+status 双守卫，重跑 0 行影响）
+    assert "0021_repair_ch2_status_after_double_rollback.sql" in result["applied"]
+    # 修复 wfr_6619a7bfa6fa：0022_faction_relationship_endpoints.sql
+    # - 重建 relationships 表去掉 from/to 两个 FK 子句（保留 project_id FK），让
+    #   faction 端点（fac_ 前缀）合法写入；其余列/索引逐字保留；
+    # - 同步给 commits.rollback_of 加部分唯一索引（idx_commits_rollback_of），
+    #   双重回滚在 SQLite 层被拦截。
+    assert "0022_faction_relationship_endpoints.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
@@ -112,6 +121,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0018_observer_capability_binding.sql",
         "0019_backfill_timeline_events.sql",
         "0020_backfill_init_plot_event_description.sql",
+        "0021_repair_ch2_status_after_double_rollback.sql",
+        "0022_faction_relationship_endpoints.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -143,6 +154,10 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0019_backfill_timeline_events.sql" in second["skipped"]
     # V3.10 init 空壳 plot_event 修复：0020 也应被幂等跳过
     assert "0020_backfill_init_plot_event_description.sql" in second["skipped"]
+    # 双重回滚事故修复：0021 也应被幂等跳过
+    assert "0021_repair_ch2_status_after_double_rollback.sql" in second["skipped"]
+    # faction 端点修复 + commits.rollback_of 部分唯一索引：0022 也应被幂等跳过
+    assert "0022_faction_relationship_endpoints.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -180,6 +195,8 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0018_observer_capability_binding.sql",
         "0019_backfill_timeline_events.sql",
         "0020_backfill_init_plot_event_description.sql",
+        "0021_repair_ch2_status_after_double_rollback.sql",
+        "0022_faction_relationship_endpoints.sql",
     }
     for r in rows:
         assert r["applied_at"]

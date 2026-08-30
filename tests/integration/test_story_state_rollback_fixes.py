@@ -736,3 +736,337 @@ def test_persistence_v3_after_real_restart(tmp_path: Path):
             assert char["current_state"].get("location") == "Unknown"
 
     asyncio.run(phase2())
+
+
+# ----------------------------------------------------------------- 8. rollback idempotency guard (P0 production bug)
+
+
+def test_rollback_is_idempotent_second_rollback_rejected(tmp_path: Path):
+    """新测 8（P0 生产 bug）：rollback 幂等守卫——同一 commit 第二次 rollback
+    必须被拒（409 StateConflictError），commits 表只产生一条逆 commit。
+
+    生产实锤：cmt_6c9faba70b8c 被回滚两次，产生 cmt_480699e94622 + cmt_6a3a028d522d
+    两条逆 commit，update 类变更被反转两次=回到原值，状态污染。
+    """
+    setup = asyncio.run(_setup_project(tmp_path))
+    pid = setup["pid"]
+    chap = setup["chap"]
+    cid = setup["cid"]
+    app = setup["app"]
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            # commit 一条 character update（v2）
+            d = {
+                **_make_meta("dlt_idem_target", chap, 1),
+                "character_changes": [
+                    {
+                        "change_id": "cc_idem",
+                        "op": "update",
+                        "target_id": cid,
+                        "character_id": cid,
+                        "facet": "state",
+                        "field": "state.location",
+                        "before": "Forest",
+                        "after": "Cave",
+                        "confidence": 0.9,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    }
+                ],
+                "world_changes": [],
+                "relationship_changes": [],
+                "new_events": [],
+                "resolved_hooks": [],
+                "new_hooks": [],
+                "debt_changes": [],
+            }
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json=d)
+            assert r.status_code == 201, r.text
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/commits",
+                json={
+                    "delta_id": "dlt_idem_target",
+                    "author_approval": {"approver": "user:local:test"},
+                    "workflow_run_id": "wfr_idem_target",
+                },
+            )
+            assert r.status_code == 201, r.text
+            target_commit = r.json()["commit_id"]
+
+            # 第一次 rollback → 201
+            r1 = await _request(
+                app, "POST", f"/api/commits/{target_commit}/rollback",
+                json={"author_approval": {"approver": "user:local:test", "approved": True}},
+            )
+            assert r1.status_code == 201, r1.text
+            first_rollback_commit = r1.json()["commit_id"]
+
+            # 第二次 rollback 同 commit → 409（幂等守卫）
+            r2 = await _request(
+                app, "POST", f"/api/commits/{target_commit}/rollback",
+                json={"author_approval": {"approver": "user:local:test", "approved": True}},
+            )
+            assert r2.status_code == 409, r2.text
+            detail = r2.json()["detail"]
+            assert "already been rolled back" in str(detail)
+
+            # commits 表只有一条逆 commit（rollback_of = target_commit）
+            conn = sqlite3.connect(str(tmp_path / "novelos.db"))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT commit_id FROM commits WHERE rollback_of = ?",
+                    (target_commit,),
+                ).fetchall()
+                assert len(rows) == 1, f"expected 1 rollback, got {len(rows)}"
+                assert rows[0]["commit_id"] == first_rollback_commit
+            finally:
+                conn.close()
+
+    asyncio.run(run())
+
+
+# ----------------------------------------------------------------- 9. rollback demotes COMMITTED chapter to DRAFTED (P1 production bug)
+
+
+def test_rollback_demotes_committed_chapter_to_drafted(tmp_path: Path):
+    """新测 9（P1 生产 bug）：rollback 成功后，若原 commit 的 chapter 当前
+    status='COMMITTED'，必须联动回退为 'DRAFTED'。
+
+    生产实锤：COMMITTED 章 rollback 后仍 COMMITTED，save_draft 拦截后续改稿。
+    """
+    setup = asyncio.run(_setup_project(tmp_path))
+    pid = setup["pid"]
+    chap = setup["chap"]
+    cid = setup["cid"]
+    app = setup["app"]
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            # 先把 chapter 推到 COMMITTED（PLANNED→DRAFTED→REVIEWED→COMMITTED）
+            for next_status in ("DRAFTED", "REVIEWED", "COMMITTED"):
+                r = await _request(
+                    app, "PATCH", f"/api/chapters/{chap}",
+                    json={"status": next_status},
+                )
+                assert r.status_code == 200, r.text
+                assert r.json()["status"] == next_status
+
+            # commit 一条 character update（v2）
+            d = {
+                **_make_meta("dlt_committed_target", chap, 1),
+                "character_changes": [
+                    {
+                        "change_id": "cc_committed",
+                        "op": "update",
+                        "target_id": cid,
+                        "character_id": cid,
+                        "facet": "state",
+                        "field": "state.location",
+                        "before": "Forest",
+                        "after": "Cave",
+                        "confidence": 0.9,
+                        "evidence": _evidence(chap),
+                        "risk_level": "LOW",
+                    }
+                ],
+                "world_changes": [],
+                "relationship_changes": [],
+                "new_events": [],
+                "resolved_hooks": [],
+                "new_hooks": [],
+                "debt_changes": [],
+            }
+            r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json=d)
+            assert r.status_code == 201, r.text
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/commits",
+                json={
+                    "delta_id": "dlt_committed_target",
+                    "author_approval": {"approver": "user:local:test"},
+                    "workflow_run_id": "wfr_committed_target",
+                },
+            )
+            assert r.status_code == 201, r.text
+            target_commit = r.json()["commit_id"]
+
+            # rollback → 201
+            r = await _request(
+                app, "POST", f"/api/commits/{target_commit}/rollback",
+                json={"author_approval": {"approver": "user:local:test", "approved": True}},
+            )
+            assert r.status_code == 201, r.text
+
+            # 验证：chapter.status 已联动回退为 DRAFTED
+            conn = sqlite3.connect(str(tmp_path / "novelos.db"))
+            conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(
+                    "SELECT status, updated_at FROM chapters WHERE chapter_id = ?",
+                    (chap,),
+                ).fetchone()
+                assert row["status"] == "DRAFTED", f"expected DRAFTED, got {row['status']}"
+                assert row["updated_at"] is not None
+            finally:
+                conn.close()
+
+            # 验证：GET /api/chapters/{id} 也返回 DRAFTED（API 层一致）
+            r = await _request(app, "GET", f"/api/chapters/{chap}")
+            assert r.status_code == 200
+            assert r.json()["status"] == "DRAFTED"
+
+            # 验证：save_draft 不再被拦截（status=DRAFTED 允许）
+            r = await _request(
+                app, "POST", f"/api/chapters/{chap}/drafts",
+                json={"content": "rollback 后改稿测试"},
+            )
+            assert r.status_code == 201, r.text
+
+    asyncio.run(run())
+
+
+# ----------------------------------------------------------------- 10. rollback does NOT touch non-COMMITTED chapter status
+
+
+def _setup_then_drive_and_rollback_status(
+    tmp_root: Path, initial_status: str,
+) -> str:
+    """helper for test 10：每个用例独立 tmp_path/setup，跑完后返回 rollback
+    之后 chapters.status 的最终值。
+
+    设计要点：使用 sync httpx（非 ASGITransport + 内部 asyncio.run），
+    避免嵌套 event loop。
+    """
+    from packages.core.api.main import create_app as _create
+    from packages.core.config import Settings as _Settings
+
+    sub = tmp_root / initial_status.lower()
+    sub.mkdir()
+    s = _Settings(data_dir=sub, log_level="WARNING")
+    app = _create(s)
+
+    async def _go():
+        async with app.router.lifespan_context(app):
+            # 1) 建项目 + 角色 + 章 + init state
+            async with _make_client(app) as client:
+                r = await client.post("/api/projects", json={"name": f"proj_{initial_status}"})
+                assert r.status_code == 201, r.text
+                pid = r.json()["project_id"]
+                r = await client.post(
+                    f"/api/projects/{pid}/characters",
+                    json={"name": "林夕", "role": "protagonist"},
+                )
+                assert r.status_code == 201, r.text
+                cid = r.json()["character_id"]
+                r = await client.post(
+                    f"/api/projects/{pid}/chapters",
+                    json={"number": 1, "title": "第一章"},
+                )
+                assert r.status_code == 201, r.text
+                chap = r.json()["chapter_id"]
+                r = await client.post(
+                    f"/api/projects/{pid}/state/init", json={"chapter_id": chap}
+                )
+                assert r.status_code == 201, r.text
+
+                # 2) 推到 initial_status（仅 PLANNED/DRAFTED/REVIEWED 可达；RELEASED 略）
+                chain = {
+                    "PLANNED": [],
+                    "DRAFTED": ["DRAFTED"],
+                    "REVIEWED": ["DRAFTED", "REVIEWED"],
+                }[initial_status]
+                for s_ in chain:
+                    r = await client.patch(f"/api/chapters/{chap}", json={"status": s_})
+                    assert r.status_code == 200, r.text
+
+                # 3) commit character update（v2）
+                did = f"dlt_{initial_status.lower()}"
+                d = {
+                    **_make_meta(did, chap, 1),
+                    "character_changes": [
+                        {
+                            "change_id": f"cc_{initial_status.lower()}",
+                            "op": "update",
+                            "target_id": cid,
+                            "character_id": cid,
+                            "facet": "state",
+                            "field": "state.location",
+                            "before": "Forest",
+                            "after": "Cave",
+                            "confidence": 0.9,
+                            "evidence": _evidence(chap),
+                            "risk_level": "LOW",
+                        }
+                    ],
+                    "world_changes": [],
+                    "relationship_changes": [],
+                    "new_events": [],
+                    "resolved_hooks": [],
+                    "new_hooks": [],
+                    "debt_changes": [],
+                }
+                r = await client.post(f"/api/projects/{pid}/deltas", json=d)
+                assert r.status_code == 201, r.text
+                r = await client.post(
+                    f"/api/projects/{pid}/commits",
+                    json={
+                        "delta_id": did,
+                        "author_approval": {"approver": "user:local:test"},
+                        "workflow_run_id": f"wfr_{initial_status.lower()}",
+                    },
+                )
+                assert r.status_code == 201, r.text
+                target_commit = r.json()["commit_id"]
+
+                # 4) rollback
+                r = await client.post(
+                    f"/api/commits/{target_commit}/rollback",
+                    json={
+                        "author_approval": {
+                            "approver": "user:local:test",
+                            "approved": True,
+                        }
+                    },
+                )
+                assert r.status_code == 201, r.text
+
+            # 5) 直接读 DB
+            conn = sqlite3.connect(str(sub / "novelos.db"))
+            conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(
+                    "SELECT status FROM chapters WHERE chapter_id = ?",
+                    (chap,),
+                ).fetchone()
+                return row["status"]
+            finally:
+                conn.close()
+
+    return asyncio.run(_go())
+
+
+def test_rollback_does_not_touch_non_committed_chapter_status(tmp_path: Path):
+    """新测 10：rollback 触发时，chapter 状态为非 COMMITTED（PLANNED/DRAFTED/
+    REVIEWED）一律不动——只有 COMMITTED→DRAFTED 是单一联动语义。
+
+    防 over-reach：避免误把 DRAFTED 改成 PLANNED、或把 REVIEWED 改成 DRAFTED。
+    RELEASED 状态由状态机不可达（COMMITTED→RELEASED 在此测试栈无 setter），跳过。
+    """
+    # DRAFTED：rollback 后仍 DRAFTED（不被错降级）
+    final_drafted = _setup_then_drive_and_rollback_status(tmp_path, "DRAFTED")
+    assert final_drafted == "DRAFTED", (
+        f"DRAFTED chapter should stay DRAFTED, got {final_drafted}"
+    )
+
+    # REVIEWED：rollback 后仍 REVIEWED（不被错降级）
+    final_reviewed = _setup_then_drive_and_rollback_status(tmp_path, "REVIEWED")
+    assert final_reviewed == "REVIEWED", (
+        f"REVIEWED chapter should stay REVIEWED, got {final_reviewed}"
+    )
+
+    # PLANNED：rollback 后仍 PLANNED（基线，状态不动）
+    final_planned = _setup_then_drive_and_rollback_status(tmp_path, "PLANNED")
+    assert final_planned == "PLANNED", (
+        f"PLANNED chapter should stay PLANNED, got {final_planned}"
+    )

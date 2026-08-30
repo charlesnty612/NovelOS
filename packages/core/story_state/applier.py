@@ -201,18 +201,84 @@ def _set_top_level(entry: dict, field: str, value: Any) -> None:
 
 
 def _apply_relationship_changes(state: dict, items: list[dict]) -> None:
+    """应用 relationship_changes 到 state。
+
+    修复 wfr_6619a7bfa6fa：关系端点 (``from_character_id`` / ``to_character_id``)
+    既可指向 character_id，也可指向 faction_id（组织间关系，例如两家典当行商战）。
+    端点宿主桶解析按 characters ∪ factions 顺序查找；若端点既不在 characters
+    也不在 factions 中（apply 阶段已被 validator 拒），静默忽略。
+
+    设计要点：
+    - 关系挂「from 端点所在宿主」上：character 关系挂在
+      ``state["characters"][from].relationships``；faction 关系挂在
+      ``state["world"]["factions"][from].relationships``（factions 是 dict，
+      每个 faction entry 含 ``relationships`` list，对齐 snapshot 聚合口径）。
+    - 字段名沿用 ``from_character_id`` / ``to_character_id``（schema/DB 历史
+      命名），端点身份对 entry 字段值透明；宿主流（character / faction）的
+      区分仅在「写到哪个桶的 relationships 列表」。
+    - remove 不区分宿主：按 (from,to,type) 元组遍历两个桶的宿主关系删除
+      （避免悬挂；与 rollback 路径 ``apply_inverse_cleanup_to_state`` 行为一致）。
+    """
     characters = state.setdefault("characters", [])
-    by_id = {c.get("character_id"): c for c in characters}
+    world = state.setdefault("world", {})
+    factions = world.setdefault("factions", {}) if isinstance(world, dict) else {}
+
     for change in items:
         from_id = change.get("from_character_id")
         to_id = change.get("to_character_id")
         rel_type = change.get("relation_type")
         op = change.get("op")
         after = change.get("after")
-        char = by_id.get(from_id)
-        if char is None:
+
+        if op == "remove":
+            # remove：按 (from,to,type) 同时清理两个桶的宿主关系，避免悬挂。
+            _rel_key = (from_id, to_id, rel_type)
+            for c in characters:
+                if not isinstance(c, dict):
+                    continue
+                rels = c.get("relationships")
+                if not isinstance(rels, list):
+                    continue
+                c["relationships"] = [
+                    r for r in rels
+                    if not (
+                        isinstance(r, dict)
+                        and r.get("from_character_id") == _rel_key[0]
+                        and r.get("to_character_id") == _rel_key[1]
+                        and r.get("relation_type") == _rel_key[2]
+                    )
+                ]
+            for fid, fac in factions.items():
+                if not isinstance(fac, dict):
+                    continue
+                rels = fac.get("relationships")
+                if not isinstance(rels, list):
+                    continue
+                fac["relationships"] = [
+                    r for r in rels
+                    if not (
+                        isinstance(r, dict)
+                        and r.get("from_character_id") == _rel_key[0]
+                        and r.get("to_character_id") == _rel_key[1]
+                        and r.get("relation_type") == _rel_key[2]
+                    )
+                ]
             continue
-        rels = char.setdefault("relationships", [])
+
+        # add / update：定位 from 端点所在宿主桶（characters 先于 factions）
+        rels: list | None = None
+        if isinstance(from_id, str) and from_id:
+            for c in characters:
+                if isinstance(c, dict) and c.get("character_id") == from_id:
+                    rels = c.setdefault("relationships", [])
+                    break
+            if rels is None and from_id in factions:
+                entry = factions.get(from_id)
+                if isinstance(entry, dict):
+                    rels = entry.setdefault("relationships", [])
+        if rels is None:
+            # 端点不在 characters / factions 中（validator 已拒，静默忽略）
+            continue
         match_idx = None
         for i, r in enumerate(rels):
             if (
@@ -234,9 +300,6 @@ def _apply_relationship_changes(state: dict, items: list[dict]) -> None:
                 rels.append(entry)
             else:
                 rels[match_idx] = entry
-        elif op == "remove":
-            if match_idx is not None:
-                rels.pop(match_idx)
 
 
 def _apply_new_events(state: dict, items: list[dict]) -> None:

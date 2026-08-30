@@ -24,8 +24,8 @@
 
 1. `character_changes` — 人物状态、认知、关系的变化。
 2. `world_changes` — 世界状态、时间、地点、势力、资源、规则的变化。
-3. `relationship_changes` — 人物之间关系（信任 / 敌对 / 亲近等）的变化。
-4. `new_events` — 本章新发生的事件。
+3. `relationship_changes` — 人物之间关系（信任 / 敌对 / 亲近等）的变化，**端点可以是 character 或 faction**（见 §6-22）。
+4. `new_events` — 本章新发生的事件，**participants 可以是 character 或 faction**（见 §6-22）。
 5. `resolved_hooks` — 本章被回收的伏笔。
 6. `new_hooks` — 本章新埋下的伏笔。
 7. `debt_changes` — 本章新增 / 推进 / 解决的 Narrative Debt。
@@ -186,7 +186,13 @@
 19. **保守原则**：拿不准的，宁可不写，也不在 Delta 中引入 false positive。
 20. **不要总结剧情**：change 描述要原子化、可执行。
 21. **不要输出 Schema 之外的字段**：`additionalProperties: false` 严格生效——任何 Schema 未声明的字段（包括 §3 中的 `deviations` 辅助字段）都不能出现在你的最终 JSON 输出中。
-22. **宁缺毋滥（数量纪律）**：`config.max_changes_per_array` 的默认值是 **24**（原 50 已实测下调：50 上限时模型倾向在 character_changes / world_changes 上穷举微变化，导致单章 observer 输出 3-5 万 completion tokens）。请按以下原则使用该上限：
+22. **关系端点与事件参与者身份**：`relationship_changes[*].from_character_id` / `to_character_id` 与 `new_events[*].participants[]` 中的元素**既可以是 `character_id`（`char_` 前缀），也可以是 `faction_id`（`fac_` 前缀）**——下游 Validator 接受 characters ∪ factions 集合内的任意 id（修复 wfr_6619a7bfa6fa：组织间关系——商战、结盟、敌对——以前被误杀）。语义取舍：
+    - **人物↔人物** 用 character_id；
+    - **组织↔组织**（家族、门派、商行、典当行等）用 faction_id；faction 关系只能发生在「上一章 / snapshot 已存在的 faction」之间，不可凭印象编造 fac_ 前缀 id；
+    - **人物↔组织**（个人加入某门派、个人与某商会结仇）两端可一端是 character、一端是 faction；
+    - 端点身份对 entry 字段值透明（Schema 字段名沿用 `from_character_id` / `to_character_id` / `participants`，是历史命名）。
+23. **不要输出 Schema 之外的字段**：`additionalProperties: false` 严格生效——任何 Schema 未声明的字段（包括 §3 中的 `deviations` 辅助字段）都不能出现在你的最终 JSON 输出中。
+24. **宁缺毋滥（数量纪律）**：`config.max_changes_per_array` 的默认值是 **24**（原 50 已实测下调：50 上限时模型倾向在 character_changes / world_changes 上穷举微变化，导致单章 observer 输出 3-5 万 completion tokens）。请按以下原则使用该上限：
     - **只提取对后续叙事有影响的状态变化**（belief / goal / knowledge / relationship 实质位移、世界规则触发、伏笔推进、新事件）。
     - **微小瞬态不要成条提取**：例如「位置小幅移动且无剧情意义」「情绪短时波动（持续 < 1 段）」「资源数值微调（< 10%）」「动作修饰性的外观描写变化」——这些都不进任何 change 数组。
     - **正常一章 7 个数组合计 ≤ 24 条**；超出即视为「过度报告」，宁可丢弃低 confidence 项。
@@ -254,8 +260,8 @@
       "change_id": "string",
       "op": "add | update | remove",
       "target_id": "string, 建议 from_character_id 或 'from:to'",
-      "from_character_id": "string",
-      "to_character_id": "string",
+      "from_character_id": "string, character_id（char_ 前缀）或 faction_id（fac_ 前缀，端点为组织时用）",
+      "to_character_id": "string, character_id 或 faction_id（同上语义）",
       "relation_type": "string, 如 ally / enemy / lover / family / trust",
       "before": { "intensity": "number, 0-1 或其他属性" } ,
       "after": { "intensity": "number, 0-1 或其他属性" } ,
@@ -277,7 +283,7 @@
       "type": "revelation | conflict | decision | encounter | transition | other",
       "cause": ["event_id, ..."] ,
       "effects": ["event_id, ..."] ,
-      "participants": ["character_id, ..., 至少 1 个"],
+      "participants": ["character_id 或 faction_id, ..., 至少 1 个；端点身份见 §6-22"],
       "location": "string | null, location_id",  // 仅可填写 previous_state/world_changes 中已存在的 location_id；若事件发生地未登记为地点实体，请省略该字段（输出时整条 key 不出现），不要填写描述性文字（free-form text）或编造的 id——下游 plot_events.location_id 为外键，无效值在 commit 阶段会被守卫置 NULL 并丢失事件地点信息。
       "time": {
         "timeline_day": "integer, ≥1",
@@ -359,8 +365,8 @@
 |---|---|---|---|
 | `character_changes` | change_id, op, target_id, character_id, facet, field, before*, after*, confidence, evidence, risk_level | add/update/remove | facet ∈ {definition, state} |
 | `world_changes` | change_id, op, target_id, world_kind, world_id, field, before*, after*, confidence, evidence, risk_level | add/update/remove | world_kind ∈ {location, faction, rule, politics, economy, event, time} |
-| `relationship_changes` | change_id, op, target_id, from_character_id, to_character_id, relation_type, before*, after*, confidence, evidence, risk_level | add/update/remove | before/after 为 object |
-| `new_events` | change_id, op, target_id, event_id, type, participants, time, confidence, evidence, risk_level | const `add` | type ∈ {revelation, conflict, decision, encounter, transition, other}；time.timeline_day ≥ 1；participants ≥ 1；**event_id 必须全新唯一——见下文 §7.4** |
+| `relationship_changes` | change_id, op, target_id, from_character_id, to_character_id, relation_type, before*, after*, confidence, evidence, risk_level | add/update/remove | before/after 为 object；from/to 端点可为 character_id 或 faction_id（见 §6-22） |
+| `new_events` | change_id, op, target_id, event_id, type, participants, time, confidence, evidence, risk_level | const `add` | type ∈ {revelation, conflict, decision, encounter, transition, other}；time.timeline_day ≥ 1；participants ≥ 1（可为 character_id 或 faction_id）；**event_id 必须全新唯一——见下文 §7.4** |
 | `resolved_hooks` | change_id, op, target_id, hook_id, to_status, payoff_summary, confidence, evidence, risk_level | const `update` | to_status 五态之一 |
 | `new_hooks` | change_id, op, target_id, hook_id, name, importance, description, confidence, evidence, risk_level | const `add` | importance ∈ [0, 1] |
 | `debt_changes` | change_id, op, target_id, debt_id, status_after, confidence, evidence, risk_level | add/update/remove | status_after ∈ {open, acknowledged, paid, forgiven} |

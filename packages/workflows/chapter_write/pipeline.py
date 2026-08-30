@@ -636,7 +636,13 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 now,
             ),
         )
-        # chapters.status PLANNED→DRAFTED（走白名单）
+        # chapters.status 推进/回退：
+        # - PLANNED→DRAFTED：首写；
+        # - DRAFTED：重跑追加新 draft 版本（人工改稿循环）；
+        # - REVIEWED→DRAFTED：批准后改稿（双层评审 SOP 的 smart 二审可能推翻
+        #   critic 批准）——新草稿使旧批准失效，回退 DRAFTED 强制重审；
+        # 与 domain chapter 服务 _DRAFT_ALLOWED_STATUS={DRAFTED, REVIEWED} 口径一致；
+        # COMMITTED/RELEASED 仍硬拒（须先 rollback commit）。
         cur = conn.execute("SELECT status FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()
         if cur is None:
             raise ValueError(f"chapter {chapter_id!r} not found")
@@ -646,11 +652,15 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 "UPDATE chapters SET status = 'DRAFTED', updated_at = ? WHERE chapter_id = ?",
                 (now, chapter_id),
             )
+        elif status == "REVIEWED":
+            conn.execute(
+                "UPDATE chapters SET status = 'DRAFTED', updated_at = ? WHERE chapter_id = ?",
+                (now, chapter_id),
+            )
         elif status != "DRAFTED":
-            # 与 chapter_commit 硬校验口径一致：仅 PLANNED / DRAFTED 允许 write；
-            # DRAFTED 重跑允许追加新 draft 版本（支撑人工改稿循环）。
             raise ValueError(
-                f"chapter {chapter_id} status={status} 不允许 write，仅 PLANNED/DRAFTED 可写"
+                f"chapter {chapter_id} status={status} 不允许 write，"
+                "仅 PLANNED/DRAFTED/REVIEWED 可写"
             )
         conn.commit()
     finally:

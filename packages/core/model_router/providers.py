@@ -406,7 +406,27 @@ class OpenAICompatibleProvider:
 
         # 零 content chunk → 空流（无论是否见到 [DONE]），抛错；
         # 防止下游把空串当合法产出。
+        #
+        # finish_reason 线索：典型生产事故是「档案缺 max_tokens」→ 推理 token 占满
+        # 预算 → 流式零 content + finish_reason='length'。原消息不含线索，运维难以
+        # 直观看出根因；此处按 finish_reason 三态区分文案：
+        #   - length：点名根因（输出预算被思考 token 耗尽）+ 修法（调大档案 params 的 max_tokens），
+        #             与 ``structured_output.py`` 既有可行动提示风格对齐；
+        #   - 其它非 None：附 ``(finish_reason=<值>)`` 便于诊断；
+        #   - None：保持原消息不变（不臆造线索，向后兼容已有断言 / 日志检索）。
         if not text_parts:
+            if finish_reason == "length":
+                raise ProviderError(
+                    self.name,
+                    "empty stream: no content chunks received "
+                    "(finish_reason=length —— 输出预算被思考 token 耗尽，"
+                    "请调大档案 params 的 max_tokens)",
+                )
+            if finish_reason is not None:
+                raise ProviderError(
+                    self.name,
+                    f"empty stream: no content chunks received (finish_reason={finish_reason})",
+                )
             raise ProviderError(self.name, "empty stream: no content chunks received")
 
         text = "".join(text_parts)

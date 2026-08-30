@@ -169,6 +169,10 @@ def build_inverse_delta(
     # 用于 audit 的占位：scheduler 当前不接受 timestamp；直接生成
     now_ts = datetime.now(timezone.utc).isoformat()
     delta_id = new_id("dlt")
+    # 三段循环（character/world/relationship）共用的回滚原因——必须在首个循环外
+    # 初始化：原实现在 character_changes 循环内赋值，character_changes 为空而
+    # relationship_changes 含 op=add 时 UnboundLocalError（生产复核确认）。
+    rollback_reason = f"rollback of {original.get('delta_id')}"
 
     # character_changes：add→remove；update→update(after↔before)；remove→add(after)
     inv_char: list[dict] = []
@@ -185,7 +189,6 @@ def build_inverse_delta(
             "risk_level": ch.get("risk_level"),
             "notes": f"inverse of {ch.get('change_id')}",
         }
-        rollback_reason = f"rollback of {original.get('delta_id')}"
         if op == "add":
             inv_char.append(
                 {**base, "op": "remove", "before": ch.get("after"), "after": None, "reason": rollback_reason}
