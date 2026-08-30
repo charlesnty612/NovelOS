@@ -215,7 +215,8 @@ def _load_plot_events_dict(conn: sqlite3.Connection, project_id: str) -> dict[st
     """
     rows = conn.execute(
         """
-        SELECT event_id, type, participants_json, time_json, description
+        SELECT event_id, type, participants_json, time_json, description,
+               visibility, who_knows
         FROM plot_events
         WHERE project_id = ?
         ORDER BY event_id ASC
@@ -257,6 +258,10 @@ def _load_plot_events_dict(conn: sqlite3.Connection, project_id: str) -> dict[st
             # ``description: string|null`` 一致);observer 本次 delta 给出描述
             # 时,write_through 写穿,此处取回即"自愈"语义。
             "description": r["description"],
+            # 携带伴随列让 knowledge_leakage guardrail 读到一致字段；
+            # 与 hooks/debts 同款口径：DB 缺省 NULL → None（沿用）。
+            "visibility": r["visibility"],
+            "who_knows": _parse_who_knows(r["who_knows"]),
         }
     return out
 
@@ -344,7 +349,8 @@ def _load_characters(conn: sqlite3.Connection, project_id: str) -> list[dict]:
 def _load_relationships_for(conn: sqlite3.Connection, character_id: str) -> list[dict]:
     rows = conn.execute(
         """
-        SELECT relationship_id, from_character_id, to_character_id, relation_type, state_json
+        SELECT relationship_id, from_character_id, to_character_id, relation_type,
+               state_json, visibility, who_knows
         FROM relationships
         WHERE from_character_id = ?
         ORDER BY relationship_id ASC
@@ -360,6 +366,10 @@ def _load_relationships_for(conn: sqlite3.Connection, character_id: str) -> list
                 "to_character_id": r["to_character_id"],
                 "relation_type": r["relation_type"],
                 "state_json": _parse_json_column(r["state_json"]),
+                # 携带伴随列（visibility / who_knows）让 knowledge_leakage 与
+                # 后续 consumer 读到一致字段；缺失/null 解码为 None（沿用语义）。
+                "visibility": r["visibility"],
+                "who_knows": _parse_who_knows(r["who_knows"]),
             }
         )
     return out
@@ -439,7 +449,7 @@ def _load_hooks(conn: sqlite3.Connection, project_id: str) -> list[dict]:
     rows = conn.execute(
         """
         SELECT hook_id, name, introduced_chapter_id, status, importance,
-               expected_payoff_chapter_id, payoff_chapter_id, visibility
+               expected_payoff_chapter_id, payoff_chapter_id, visibility, who_knows
         FROM hooks
         WHERE project_id = ?
         ORDER BY hook_id ASC
@@ -458,6 +468,10 @@ def _load_hooks(conn: sqlite3.Connection, project_id: str) -> list[dict]:
                 "expected_payoff_chapter_id": r["expected_payoff_chapter_id"],
                 "payoff_chapter_id": r["payoff_chapter_id"],
                 "visibility": r["visibility"],
+                # who_knows：knowledge_leakage guardrail 读取快照此字段做防泄漏校验，
+                # 缺失/null → None（与 applier 写时口径一致；guardrail 见
+                # guardrails.knowledge_leakage §4.5）。
+                "who_knows": _parse_who_knows(r["who_knows"]),
             }
         )
     return out
@@ -467,7 +481,7 @@ def _load_debts(conn: sqlite3.Connection, project_id: str) -> list[dict]:
     rows = conn.execute(
         """
         SELECT debt_id, description, created_chapter_id, severity,
-               deadline_chapter_id, status, visibility
+               deadline_chapter_id, status, visibility, who_knows
         FROM narrative_debts
         WHERE project_id = ?
         ORDER BY debt_id ASC
@@ -485,6 +499,7 @@ def _load_debts(conn: sqlite3.Connection, project_id: str) -> list[dict]:
                 "deadline_chapter_id": r["deadline_chapter_id"],
                 "status": r["status"],
                 "visibility": r["visibility"],
+                "who_knows": _parse_who_knows(r["who_knows"]),
             }
         )
     return out

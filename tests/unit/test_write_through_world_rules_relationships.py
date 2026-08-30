@@ -190,6 +190,8 @@ CREATE TABLE relationships (
     relation_type       TEXT NOT NULL,
     state_json          TEXT NOT NULL DEFAULT '{}',
     last_state_version  INTEGER NOT NULL,
+    visibility          TEXT NOT NULL DEFAULT 'PUBLIC',
+    who_knows           TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(project_id),
     FOREIGN KEY (from_character_id) REFERENCES characters(character_id),
     FOREIGN KEY (to_character_id) REFERENCES characters(character_id)
@@ -991,3 +993,172 @@ def test_delta_repair_then_write_through_relationships_roundtrip(
     assert rival is not None, "add 分支应 INSERT 新关系"
     assert json.loads(rival["state_json"]) == {"intensity": 1}
     assert rival["last_state_version"] == 6
+
+
+# ---------------------------------------------------------------------------
+# 4) relationships 伴随列 visibility / who_knows 三态语义（P0 bug 修复回归）
+# ---------------------------------------------------------------------------
+
+
+def test_relationship_add_inserts_visibility_and_who_knows(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """relationship add 显式声明 who_knows/visibility → DB 行携带二者。"""
+    _insert_char(db_conn, "char_a")
+    _insert_char(db_conn, "char_b")
+    delta = _base_delta(
+        relationship_changes=[
+            {
+                "change_id": "rc_p0_add",
+                "op": "add",
+                "from_character_id": "char_a",
+                "to_character_id": "char_b",
+                "relation_type": "ally",
+                "before": None,
+                "after": {"intensity": 5},
+                "who_knows": ["char_a"],
+                "visibility": "RESTRICTED",
+                "target_id": "rel_p0_add",
+                "confidence": 0.9,
+                "evidence": {"chapter_id": "ch_test", "excerpt": "x"},
+                "risk_level": "LOW",
+            }
+        ]
+    )
+    write_through(db_conn, "prj_test", delta, new_version=2)
+    row = db_conn.execute(
+        "SELECT visibility, who_knows FROM relationships WHERE relationship_id = ?",
+        ("rel_p0_add",),
+    ).fetchone()
+    assert row["visibility"] == "RESTRICTED"
+    assert json.loads(row["who_knows"]) == ["char_a"], (
+        "who_knows 应原样写入；原 bug：DB 行 who_knows=NULL"
+    )
+
+
+def test_relationship_update_keeps_missing_who_knows(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """relationship update 缺省声明 who_knows → 不覆盖原值（沿用）。"""
+    _insert_char(db_conn, "char_a")
+    _insert_char(db_conn, "char_b")
+    db_conn.execute(
+        """
+        INSERT INTO relationships
+            (relationship_id, project_id, from_character_id, to_character_id,
+             relation_type, state_json, last_state_version, visibility, who_knows)
+        VALUES (?, 'prj_test', 'char_a', 'char_b', 'ally', ?, 1, 'RESTRICTED', ?)
+        """,
+        ("rel_p0_seed", json.dumps({"intensity": 3}, ensure_ascii=False),
+         json.dumps(["char_a"], ensure_ascii=False)),
+    )
+    db_conn.commit()
+    delta = _base_delta(
+        relationship_changes=[
+            {
+                "change_id": "rc_p0_upd_missing",
+                "op": "update",
+                "from_character_id": "char_a",
+                "to_character_id": "char_b",
+                "relation_type": "ally",
+                "before": {"intensity": 3},
+                "after": {"intensity": 7},
+                "who_knows": None,
+                "visibility": None,
+                "target_id": "rel_p0_seed",
+                "confidence": 0.9,
+                "evidence": {"chapter_id": "ch_test", "excerpt": "x"},
+                "risk_level": "LOW",
+            }
+        ]
+    )
+    write_through(db_conn, "prj_test", delta, new_version=5)
+    row = db_conn.execute(
+        "SELECT state_json, visibility, who_knows FROM relationships WHERE relationship_id = ?",
+        ("rel_p0_seed",),
+    ).fetchone()
+    assert json.loads(row["state_json"]) == {"intensity": 7}
+    # 三态语义：who_knows 缺省=不更新该列，沿用 DB 原值 ['char_a']。
+    assert json.loads(row["who_knows"]) == ["char_a"], (
+        "缺省 who_knows 应保持原值；原 bug：UPDATE 不带伴随列但也不存在只更新 state_json 的接口"
+    )
+
+
+def test_relationship_update_explicit_who_knows_overwrites(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """relationship update 显式 who_knows → 覆盖原值。"""
+    _insert_char(db_conn, "char_a")
+    _insert_char(db_conn, "char_b")
+    db_conn.execute(
+        """
+        INSERT INTO relationships
+            (relationship_id, project_id, from_character_id, to_character_id,
+             relation_type, state_json, last_state_version, visibility, who_knows)
+        VALUES (?, 'prj_test', 'char_a', 'char_b', 'ally', ?, 1, 'PUBLIC', ?)
+        """,
+        ("rel_p0_overwrite", json.dumps({"intensity": 1}, ensure_ascii=False),
+         json.dumps(["char_a"], ensure_ascii=False)),
+    )
+    db_conn.commit()
+    delta = _base_delta(
+        relationship_changes=[
+            {
+                "change_id": "rc_p0_upd_set",
+                "op": "update",
+                "from_character_id": "char_a",
+                "to_character_id": "char_b",
+                "relation_type": "ally",
+                "before": {"intensity": 1},
+                "after": {"intensity": 9},
+                "who_knows": ["char_a", "char_b"],
+                "visibility": "RESTRICTED",
+                "target_id": "rel_p0_overwrite",
+                "confidence": 0.9,
+                "evidence": {"chapter_id": "ch_test", "excerpt": "x"},
+                "risk_level": "LOW",
+            }
+        ]
+    )
+    write_through(db_conn, "prj_test", delta, new_version=3)
+    row = db_conn.execute(
+        "SELECT state_json, visibility, who_knows FROM relationships WHERE relationship_id = ?",
+        ("rel_p0_overwrite",),
+    ).fetchone()
+    assert json.loads(row["state_json"]) == {"intensity": 9}
+    assert row["visibility"] == "RESTRICTED"
+    assert json.loads(row["who_knows"]) == ["char_a", "char_b"]
+
+
+def test_relationship_add_default_visibility_public(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """relationship add 缺省 visibility → 沿用 DDL 默认 PUBLIC（与迁移 0014 对齐）。"""
+    _insert_char(db_conn, "char_a")
+    _insert_char(db_conn, "char_b")
+    delta = _base_delta(
+        relationship_changes=[
+            {
+                "change_id": "rc_p0_default_vis",
+                "op": "add",
+                "from_character_id": "char_a",
+                "to_character_id": "char_b",
+                "relation_type": "rival",
+                "before": None,
+                "after": {"intensity": 1},
+                "who_knows": None,
+                "visibility": None,
+                "target_id": "rel_p0_default",
+                "confidence": 0.9,
+                "evidence": {"chapter_id": "ch_test", "excerpt": "x"},
+                "risk_level": "LOW",
+            }
+        ]
+    )
+    write_through(db_conn, "prj_test", delta, new_version=2)
+    row = db_conn.execute(
+        "SELECT visibility, who_knows FROM relationships WHERE relationship_id = ?",
+        ("rel_p0_default",),
+    ).fetchone()
+    assert row["visibility"] == "PUBLIC", "缺省 visibility 应写入 PUBLIC"
+    assert row["who_knows"] is None, "缺省 who_knows 应为 NULL"

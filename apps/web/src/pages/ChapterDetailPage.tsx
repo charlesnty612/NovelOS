@@ -24,9 +24,11 @@ import { ApprovalCard } from '../components/ApprovalCard';
 import { useApiCall } from '../hooks/useApiCall';
 import { usePoll } from '../hooks/usePoll';
 import {
-  EXPECTED_STATUS,
   countHighRiskChanges,
   getButtonAvailability,
+  getPipelineStepStates,
+  isRejectedForRevisionRun,
+  isRejectedRun,
   isRunForChapter,
   pickActiveRun,
   pickLatestRun,
@@ -529,11 +531,36 @@ function ChapterHeader({
     title: string;
     hint: string;
   }> = [
-    { action: 'plan', title: '生成计划', hint: 'Director 跑出 plan_json' },
-    { action: 'write', title: '写正文', hint: 'Writer 生成 draft' },
+    { action: 'plan', title: '生成计划', hint: 'Director 生成章节计划' },
+    { action: 'write', title: '写正文', hint: 'Writer 生成正文草稿' },
     { action: 'review', title: '审校', hint: 'basic_checks + 作者审批' },
-    { action: 'commit', title: '提交', hint: 'Observer delta → COMMIT' },
+    { action: 'commit', title: '提交', hint: 'Observer 提取状态并入库' },
   ];
+
+  // 四步流水线展示态：状态机 + plan_json 是否已落库共同决定每步是 done/current/todo。
+  const hasPlanForPipeline =
+    chapter != null &&
+    chapter.plan_json != null &&
+    typeof chapter.plan_json === 'object' &&
+    !Array.isArray(chapter.plan_json) &&
+    Object.keys(chapter.plan_json).length > 0;
+  const stepStates = getPipelineStepStates({
+    chapterStatus: chapter.status,
+    hasPlan: hasPlanForPipeline,
+  });
+
+  const stepStateLabel: Record<'done' | 'current' | 'todo', string> = {
+    done: '已完成',
+    current: '当前步骤',
+    todo: '未到达',
+  };
+  const stepOrder: Array<'plan' | 'write' | 'review' | 'commit'> = [
+    'plan',
+    'write',
+    'review',
+    'commit',
+  ];
+  const buttonByAction = new Map(buttons.map((b) => [b.action, b] as const));
 
   return (
     <div className="panel" data-testid="chapter-header">
@@ -548,8 +575,10 @@ function ChapterHeader({
 
       <div className="panel__section">
         <div className="panel__section-title">工作流操作</div>
-        <div className="workflow-actions">
-          {buttons.map((b) => {
+        <div className="wf-pipeline" data-testid="wf-pipeline">
+          {stepOrder.map((action, idx) => {
+            const b = buttonByAction.get(action)!;
+            const state = stepStates[action];
             const avail = getButtonAvailability(b.action, {
               chapterStatus: chapter.status,
               activeRun: activeRunInfo,
@@ -557,14 +586,36 @@ function ChapterHeader({
             const supportsModelPick = true; // V3.9.4：四 action 全支持模型下拉（commit 走 observer 覆盖键）
             const showSelect =
               supportsModelPick && !profilesCall.error && enabledProfiles.length > 0;
-            return (
+            const isCurrent = state === 'current';
+            const dotLabel =
+              state === 'done' ? '✓' : String(idx + 1);
+            const stepNode = (
               <div
                 key={b.action}
-                className="workflow-actions__card"
-                style={{ display: 'flex', flexDirection: 'column', gap: 4 }}
+                className="wf-step"
+                data-state={state}
+                data-testid={`wf-step-${b.action}`}
               >
+                <div className="wf-step__head">
+                  <span
+                    className="wf-step__dot"
+                    data-state={state}
+                    aria-hidden="true"
+                  >
+                    {dotLabel}
+                  </span>
+                  <span className="wf-step__name">{b.title}</span>
+                  <span
+                    className={
+                      'wf-step__state' +
+                      (isCurrent ? ' wf-step__state--current' : '')
+                    }
+                  >
+                    {stepStateLabel[state]}
+                  </span>
+                </div>
                 <button
-                  className="btn"
+                  className={'btn wf-step__btn' + (isCurrent ? ' btn--primary' : '')}
                   disabled={!avail.enabled || submitting}
                   title={avail.reason ?? undefined}
                   data-testid={`wf-btn-${b.action}`}
@@ -579,20 +630,18 @@ function ChapterHeader({
                   }
                 >
                   <span className="btn__title">{b.title}</span>
-                  <span className="btn__hint">
-                    需要状态：{EXPECTED_STATUS[b.action].join(' / ')}
-                  </span>
+                  <span className="btn__hint">{b.hint}</span>
                 </button>
                 {supportsModelPick && showSelect ? (
                   <select
-                    className="workflow-actions__model-select"
+                    className="wf-step__select"
                     data-testid={`wf-model-select-${b.action}`}
                     value={selectedProfile[b.action]}
                     onChange={(e) => setProfile(b.action, e.target.value)}
                     title="选择本次运行使用的模型档案；默认走环节绑定"
                     disabled={submitting}
                   >
-                    <option value="">环节绑定（默认）</option>
+                    <option value="">模型：环节绑定（默认）</option>
                     {enabledProfiles.map((p) => (
                       <option key={p.profile_id} value={p.profile_id}>
                         {p.name}（{p.provider}/{p.model}）
@@ -601,10 +650,10 @@ function ChapterHeader({
                   </select>
                 ) : null}
                 {/* 「写正文」专属：写作模式（按意见改稿 / 全新重写）。小号 select
-                    放在模型下拉下方；仅 write 卡片渲染；其他动作不显示。 */}
+                    放在模型下拉下方；仅 write 步骤渲染；其他动作不显示。 */}
                 {b.action === 'write' ? (
                   <select
-                    className="workflow-actions__model-select"
+                    className="wf-step__select"
                     data-testid="wf-write-mode"
                     value={writeMode}
                     onChange={(e) =>
@@ -612,31 +661,36 @@ function ChapterHeader({
                     }
                     title="全新重写忽略旧稿与改稿意见，用于不同模型文风对比"
                     disabled={submitting}
-                    style={{ fontSize: 12 }}
                   >
-                    <option value="fresh">全新重写（默认）</option>
-                    <option value="">按意见改稿</option>
+                    <option value="fresh">模式：全新重写（默认）</option>
+                    <option value="">模式：按意见改稿</option>
                   </select>
                 ) : null}
                 {/* 「审校」专属：动态提示将审哪版,让用户在点之前就知道。
                     草稿尚未加载时(selectedDraftVersion=null)显示「暂未选择」。 */}
                 {b.action === 'review' ? (
                   <div
-                    className="muted small"
+                    className="wf-step__extra muted small"
                     data-testid="wf-review-target-hint"
                   >
-                    将审校：
-                    {selectedDraftVersion != null
-                      ? `草稿 v${selectedDraftVersion}`
-                      : '暂未选择'}
+                    将审校：草稿 v{selectedDraftVersion ?? '暂未选择'}
                   </div>
                 ) : null}
               </div>
             );
+            if (idx === stepOrder.length - 1) return stepNode;
+            return [
+              stepNode,
+              <div
+                key={`conn-${action}`}
+                className="wf-step__connector"
+                aria-hidden="true"
+              />,
+            ];
           })}
         </div>
         <div className="muted small" style={{ marginTop: 6 }}>
-          状态机：仅当章节处于对应状态时可点击；同一时间只能有一个 RUNNING run。
+          步骤按顺序推进，同一时间只能运行一个工作流；灰色步骤需先完成前置步骤，已完成的步骤在状态允许时可重跑。
         </div>
       </div>
     </div>
@@ -807,9 +861,9 @@ function WorkflowPanel({
                 </span>
                 <span
                   title={
-                    (r.error ?? '').includes('rejected-for-revision')
+                    isRejectedForRevisionRun(r.error)
                       ? '该轮审校被「按建议修改/驳回并改稿」主动驳回，系统已自动重跑写正文→审校；非失败。'
-                      : (r.error ?? '').includes('rejected')
+                      : isRejectedRun(r.error)
                       ? '作者已驳回本轮审校，章节保持 DRAFTED；非失败。'
                       : undefined
                   }
@@ -882,14 +936,14 @@ function RunTimeline({ run }: { run: WorkflowRun }) {
             </span>
           </div>
           {n.error ? (
-            (n.error ?? '').includes('rejected-for-revision') ? (
+            isRejectedForRevisionRun(n.error) ? (
               // 「按建议修改/驳回并改稿」主动驳回：改稿回路会自动重跑 write→review，
               // 非真失败，用中性 InfoBanner 而非红色 ErrorBanner。
               <InfoBanner>
                 已按审校建议驳回本轮（rejected-for-revision）：系统正在自动改稿重跑
                 写正文 → 审校，非失败。
               </InfoBanner>
-            ) : (n.error ?? '').includes('rejected') ? (
+            ) : isRejectedRun(n.error) ? (
               // 纯驳回：作者主动驳回本轮审校，后端以 FAILED(error='rejected') 收尾。
               // 章节保持 DRAFTED,可改稿后重新发起写正文/审校;非失败,用中性 InfoBanner。
               <InfoBanner>
@@ -1045,9 +1099,9 @@ function NodeStatusBadge({
 }) {
   const err = error ?? '';
   const rejectedForRevision =
-    status === 'FAILED' && err.includes('rejected-for-revision');
+    status === 'FAILED' && isRejectedForRevisionRun(err);
   const rejectedOnly =
-    !rejectedForRevision && status === 'FAILED' && err.includes('rejected');
+    !rejectedForRevision && status === 'FAILED' && isRejectedRun(err);
   const cls = rejectedForRevision || rejectedOnly
     ? 'badge badge--chapter-rejected'
     : status === 'COMPLETED'

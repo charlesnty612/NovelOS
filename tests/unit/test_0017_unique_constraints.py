@@ -85,6 +85,8 @@ CREATE TABLE relationships (
     relation_type       TEXT NOT NULL,
     state_json          TEXT NOT NULL DEFAULT '{}',
     last_state_version  INTEGER NOT NULL,
+    visibility          TEXT NOT NULL DEFAULT 'PUBLIC',
+    who_knows           TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(project_id),
     FOREIGN KEY (from_character_id) REFERENCES characters(character_id),
     FOREIGN KEY (to_character_id) REFERENCES characters(character_id)

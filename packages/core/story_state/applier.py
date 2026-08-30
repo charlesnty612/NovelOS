@@ -252,6 +252,11 @@ def _apply_new_events(state: dict, items: list[dict]) -> None:
             "participants": ev.get("participants") or [],
             "time": ev.get("time") or {},
             "description": ev.get("description"),
+            # 携带伴随列（visibility / who_knows）与 write_through 落库口径一致，
+            # 让 snapshot 中 events[eid] 也具备 knowledge_leakage 校验所需的
+            # who_knows 字段（缺失→None，三态语义保持一致）。
+            "visibility": ev.get("visibility") or "RESTRICTED",
+            "who_knows": ev.get("who_knows"),
         }
     # 截断：保留最新 RECENT_EVENTS_CAP 条
     if len(recent) > RECENT_EVENTS_CAP:
@@ -295,6 +300,9 @@ def _apply_new_hooks(state: dict, items: list[dict]) -> None:
                 "payoff_chapter_id": None,
                 "visibility": change.get("visibility") or "RESTRICTED",
                 "description": change.get("description"),
+                # who_knows：与 write_through.hooks INSERT 同款三态语义
+                # （缺失→None）；knowledge_leakage guardrail 读取快照此字段。
+                "who_knows": change.get("who_knows"),
             }
         )
 
@@ -316,6 +324,8 @@ def _apply_debt_changes(state: dict, items: list[dict]) -> None:
                     "deadline_chapter_id": change.get("deadline_chapter_id"),
                     "status": change.get("status_after"),
                     "visibility": change.get("visibility") or "RESTRICTED",
+                    # who_knows：与 write_through.narrative_debts INSERT 同款三态语义。
+                    "who_knows": change.get("who_knows"),
                 }
             )
             by_id[did] = len(debts) - 1
@@ -331,6 +341,9 @@ def _apply_debt_changes(state: dict, items: list[dict]) -> None:
                 existing["deadline_chapter_id"] = change["deadline_chapter_id"]
             if change.get("description") is not None:
                 existing["description"] = change["description"]
+            # 三态语义：who_knows 缺失=不更新该列（沿用 DB 现值）。
+            if "who_knows" in change:
+                existing["who_knows"] = change["who_knows"]
         elif op == "remove":
             if idx is not None:
                 debts.pop(idx)

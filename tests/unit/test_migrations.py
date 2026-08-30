@@ -78,13 +78,19 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     assert "0017_unique_constraints.sql" in result["applied"]
     # V3.9.3 observer 独立 capability 绑定：0018_observer_capability_binding.sql
     assert "0018_observer_capability_binding.sql" in result["applied"]
+    # V3.1 P1-1.1 B3 修复：0019_backfill_timeline_events.sql（不回填新表，仅补数据）
+    assert "0019_backfill_timeline_events.sql" in result["applied"]
+    # V3.10 init 空壳 plot_event 修复：0020_backfill_init_plot_event_description.sql
+    # （仅 ALTER TABLE 加列 + UPDATE 回填，不增表；总表 38 不变）
+    assert "0020_backfill_init_plot_event_description.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     first = apply_migrations(db_path, MIGRATIONS_DIR)
     # V3.7 模型档案 + 环节绑定：0016 加入；V3.9.3 observer 独立 capability 绑定
-    # 0018 也要首次应用。迁移目录下一共 18 个脚本都应被首次应用。
+    # 0018 也要首次应用；V3.1 P1-1.1 B3 修复 0019 回填 timeline_events 也要首次应用。
+    # 迁移目录下一共 19 个脚本都应被首次应用。
     assert first["applied"] == [
         "0001_init.sql",
         "0002_drafts_unique.sql",
@@ -104,6 +110,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0016_model_profiles.sql",
         "0017_unique_constraints.sql",
         "0018_observer_capability_binding.sql",
+        "0019_backfill_timeline_events.sql",
+        "0020_backfill_init_plot_event_description.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -131,6 +139,10 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0017_unique_constraints.sql" in second["skipped"]
     # V3.9.3 observer 拆为独立 capability 绑定：0018 也应被幂等跳过
     assert "0018_observer_capability_binding.sql" in second["skipped"]
+    # V3.1 P1-1.1 B3 修复：0019 回填 timeline_events 也应被幂等跳过
+    assert "0019_backfill_timeline_events.sql" in second["skipped"]
+    # V3.10 init 空壳 plot_event 修复：0020 也应被幂等跳过
+    assert "0020_backfill_init_plot_event_description.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -145,6 +157,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
     # V3.7 模型档案 + 环节绑定：十六条迁移都应记录
     # 0017 关键表 UNIQUE 兜底（relationships / workflow_runs）
     # 0018 V3.9.3 observer 独立 capability 绑定（profile_ids 继承 reasoning）
+    # 0019 V3.1 P1-1.1 B3 回填 timeline_events 索引
     filenames = {r["filename"] for r in rows}
     assert filenames == {
         "0001_init.sql",
@@ -165,6 +178,8 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0016_model_profiles.sql",
         "0017_unique_constraints.sql",
         "0018_observer_capability_binding.sql",
+        "0019_backfill_timeline_events.sql",
+        "0020_backfill_init_plot_event_description.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -682,3 +697,459 @@ def test_0015_volumes_status_check_constraint_enforced(tmp_path: Path):
             )
     finally:
         conn.close()
+
+
+def test_0020_volumes_has_arc_summary_column(tmp_path: Path):
+    """V3.10 init 空壳修复：0020 给 volumes 加 arc_summary TEXT（可空）。"""
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        cols = conn.execute("PRAGMA table_info(volumes)").fetchall()
+    finally:
+        conn.close()
+    col_names = {c["name"] for c in cols}
+    assert "arc_summary" in col_names, (
+        f"volumes missing arc_summary after 0020; got={col_names}"
+    )
+    arc_col = next(c for c in cols if c["name"] == "arc_summary")
+    assert arc_col["type"] == "TEXT", arc_col
+    assert arc_col["notnull"] == 0, arc_col
+    assert arc_col["dflt_value"] is None, arc_col
+
+
+def test_0020_backfills_empty_shell_plot_event_description(tmp_path: Path):
+    """V3.10 init 空壳修复：0020 把 workflow_runs.checkpoint_json 里的
+    volume.arc_summary 反向写入 volumes.arc_summary，并用其回填 plot_events
+    与 timeline_events 空壳事件的 description。
+
+    - volumes.arc_summary 被回填（取 workflow_runs.checkpoint_json 中
+      $.volume.arc_summary，按 chapter_id → chapters.project_id 关联，
+      number 匹配）；
+    - plot_events 中 type='other' AND status='planned' AND description 空
+      AND introduced_chapter_id IS NULL 的空壳被回填；
+    - timeline_events 对应行（event_id 匹配且 description IS NULL）被回填；
+    - 已正常描述的事件 / 已 commit 的事件 / 非空壳事件均不被覆盖。
+    """
+    from packages.core.ids import new_id, now_iso
+    import json
+
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+
+    pid = new_id("prj")
+    vid = new_id("vol")
+    eid = new_id("event")
+    tid = new_id("tle")
+    cid = new_id("ch")
+    run_id = new_id("wfr")
+    now = now_iso()
+    arc = "叶尘从废脉少年踏上星辰之路"
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO projects (project_id, name, premise, genre, "
+            "target_words, status, created_at, updated_at) VALUES "
+            "(?, ?, NULL, NULL, NULL, 'ACTIVE', ?, ?)",
+            (pid, "p", now, now),
+        )
+        # volumes.arc_summary 留 NULL（让 0020 从 workflow_runs 回填）
+        conn.execute(
+            "INSERT INTO volumes (volume_id, project_id, number, title, "
+            "status, terminal_snapshot_json, created_at, updated_at) "
+            "VALUES (?, ?, 1, '星落青石', 'active', NULL, ?, ?)",
+            (vid, pid, now, now),
+        )
+        conn.execute(
+            "INSERT INTO chapters (chapter_id, project_id, number, title, "
+            "plan_json, status, visibility, who_knows, created_at, "
+            "updated_at, volume_id) VALUES (?, ?, 1, 'ch1', '{}', "
+            "'PLANNED', 'VISIBLE', NULL, ?, ?, ?)",
+            (cid, pid, now, now, vid),
+        )
+        # workflow_runs.workflow_id 需先在 workflows 落行（FK 约束）
+        wf_id = new_id("wf")
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, name, version, "
+            "definition_json, created_at, updated_at) VALUES (?, 'wf', "
+            "'v1', '{}', ?, ?)",
+            (wf_id, now, now),
+        )
+        # workflow_runs.checkpoint_json 含 volume.arc_summary
+        ck = json.dumps(
+            {"volume": {"number": 1, "title": "星落青石", "arc_summary": arc}},
+            ensure_ascii=False,
+        )
+        conn.execute(
+            "INSERT INTO workflow_runs (run_id, workflow_id, chapter_id, "
+            "status, current_node, checkpoint_json, error, retry_count, "
+            "started_at, ended_at) VALUES (?, ?, ?, 'COMPLETED', NULL, "
+            "?, NULL, 0, ?, ?)",
+            (run_id, wf_id, cid, ck, now, now),
+        )
+        # 空壳 plot_event（description=NULL, introduced_chapter_id=NULL）
+        conn.execute(
+            "INSERT INTO plot_events (event_id, project_id, type, "
+            "cause_json, effects_json, participants_json, location_id, "
+            "time_json, status, introduced_chapter_id, visibility, "
+            "who_knows, description) VALUES (?, ?, 'other', '[]', '[]', "
+            "'[]', NULL, '{\"timeline_day\": 1, \"in_story_date\": null}', "
+            "'planned', NULL, 'RESTRICTED', NULL, NULL)",
+            (eid, pid),
+        )
+        # timeline_events 对应索引行（description=NULL）
+        conn.execute(
+            "INSERT INTO timeline_events (timeline_event_id, project_id, "
+            "event_id, day_index, time_ref, description, visibility, "
+            "who_knows) VALUES (?, ?, ?, 1, NULL, NULL, 'PUBLIC', NULL)",
+            (tid, pid, eid),
+        )
+        # 正常事件（已有 description、已 commit、引入过 chapter）— 不应被覆盖
+        normal_eid = new_id("event")
+        normal_desc = "已写好的事件描述，不应被覆盖"
+        conn.execute(
+            "INSERT INTO plot_events (event_id, project_id, type, "
+            "cause_json, effects_json, participants_json, location_id, "
+            "time_json, status, introduced_chapter_id, visibility, "
+            "who_knows, description) VALUES (?, ?, 'revelation', '[]', "
+            "'[]', '[]', NULL, '{\"timeline_day\": 2}', 'recorded', "
+            "?, 'RESTRICTED', NULL, ?)",
+            (normal_eid, pid, cid, normal_desc),
+        )
+        # type='other' 但 status='recorded'（不应被当作空壳）
+        committed_other = new_id("event")
+        conn.execute(
+            "INSERT INTO plot_events (event_id, project_id, type, "
+            "cause_json, effects_json, participants_json, location_id, "
+            "time_json, status, introduced_chapter_id, visibility, "
+            "who_knows, description) VALUES (?, ?, 'other', '[]', '[]', "
+            "'[]', NULL, '{\"timeline_day\": 3}', 'recorded', ?, "
+            "'RESTRICTED', NULL, NULL)",
+            (committed_other, pid, cid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 此时 apply_migrations(db_path, MIGRATIONS_DIR) 已记录 0020 为已应用；
+    # _migrations 跳过 0020 → UPDATE 部分不会自动跑。
+    # 拆出 0020 的 UPDATE 语句手工执行（模拟「首次执行 0020」语义）：
+    # - volumes UPDATE：从 workflow_runs.checkpoint_json 反向写 volumes.arc_summary
+    # - plot_events UPDATE：空壳 description 回填
+    # - timeline_events UPDATE：对应索引行 description 回填
+    # 这些 UPDATE 都用 WHERE 守卫，重跑幂等。
+    update_sql = """
+    UPDATE volumes
+    SET arc_summary = (
+        SELECT json_extract(wr.checkpoint_json, '$.volume.arc_summary')
+        FROM workflow_runs AS wr
+        JOIN chapters AS ch ON ch.chapter_id = wr.chapter_id
+        WHERE ch.project_id = volumes.project_id
+          AND json_extract(wr.checkpoint_json, '$.volume.arc_summary') IS NOT NULL
+          AND trim(json_extract(wr.checkpoint_json, '$.volume.arc_summary')) != ''
+          AND json_extract(wr.checkpoint_json, '$.volume.number') = volumes.number
+        ORDER BY wr.started_at DESC
+        LIMIT 1
+    )
+    WHERE EXISTS (
+        SELECT 1
+        FROM workflow_runs AS wr
+        JOIN chapters AS ch ON ch.chapter_id = wr.chapter_id
+        WHERE ch.project_id = volumes.project_id
+          AND json_extract(wr.checkpoint_json, '$.volume.arc_summary') IS NOT NULL
+          AND trim(json_extract(wr.checkpoint_json, '$.volume.arc_summary')) != ''
+          AND json_extract(wr.checkpoint_json, '$.volume.number') = volumes.number
+    );
+
+    UPDATE plot_events
+    SET description = (
+        SELECT v.arc_summary
+        FROM volumes AS v
+        WHERE v.project_id = plot_events.project_id
+          AND v.arc_summary IS NOT NULL
+          AND trim(v.arc_summary) != ''
+        ORDER BY v.number ASC
+        LIMIT 1
+    )
+    WHERE type = 'other'
+      AND status = 'planned'
+      AND (description IS NULL OR trim(description) = '')
+      AND introduced_chapter_id IS NULL
+      AND EXISTS (
+          SELECT 1
+          FROM volumes AS v
+          WHERE v.project_id = plot_events.project_id
+            AND v.arc_summary IS NOT NULL
+            AND trim(v.arc_summary) != ''
+      );
+
+    UPDATE timeline_events
+    SET description = (
+        SELECT v.arc_summary
+        FROM plot_events AS pe
+        JOIN volumes AS v
+          ON v.project_id = pe.project_id
+         AND v.arc_summary IS NOT NULL
+         AND trim(v.arc_summary) != ''
+        WHERE pe.event_id = timeline_events.event_id
+        ORDER BY v.number ASC
+        LIMIT 1
+    )
+    WHERE description IS NULL
+      AND EXISTS (
+          SELECT 1
+          FROM plot_events AS pe
+          JOIN volumes AS v
+            ON v.project_id = pe.project_id
+           AND v.arc_summary IS NOT NULL
+           AND trim(v.arc_summary) != ''
+          WHERE pe.event_id = timeline_events.event_id
+      );
+    """
+    conn = get_connection(db_path)
+    try:
+        conn.executescript(update_sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = get_connection(db_path)
+    try:
+        v_row = conn.execute(
+            "SELECT arc_summary FROM volumes WHERE volume_id = ?", (vid,)
+        ).fetchone()
+        assert dict(v_row)["arc_summary"] == arc, (
+            f"volumes.arc_summary 应被回填；实得 {dict(v_row)['arc_summary']!r}"
+        )
+
+        pe_row = conn.execute(
+            "SELECT description FROM plot_events WHERE event_id = ?", (eid,)
+        ).fetchone()
+        assert dict(pe_row)["description"] == arc, (
+            f"空壳 plot_events.description 应被回填；实得 {dict(pe_row)['description']!r}"
+        )
+
+        te_row = conn.execute(
+            "SELECT description FROM timeline_events WHERE timeline_event_id = ?",
+            (tid,),
+        ).fetchone()
+        assert dict(te_row)["description"] == arc, (
+            f"对应 timeline_events.description 应被回填；实得 {dict(te_row)['description']!r}"
+        )
+
+        normal_row = conn.execute(
+            "SELECT description FROM plot_events WHERE event_id = ?",
+            (normal_eid,),
+        ).fetchone()
+        assert dict(normal_row)["description"] == normal_desc, (
+            "正常事件 description 不应被覆盖"
+        )
+
+        committed_row = conn.execute(
+            "SELECT description FROM plot_events WHERE event_id = ?",
+            (committed_other,),
+        ).fetchone()
+        assert dict(committed_row)["description"] is None, (
+            "type='other' 但 status='recorded' 的事件不视作空壳，"
+            "description 应保留 NULL"
+        )
+    finally:
+        conn.close()
+
+
+def test_0020_idempotent_rerun_no_changes(tmp_path: Path):
+    """V3.10 init 空壳修复：0020 重跑 SQL 不应改写已回填的行（幂等）。"""
+    from packages.core.ids import new_id, now_iso
+    import json
+
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+
+    pid = new_id("prj")
+    vid = new_id("vol")
+    eid = new_id("event")
+    tid = new_id("tle")
+    cid = new_id("ch")
+    run_id = new_id("wfr")
+    now = now_iso()
+    arc = "回填后的 arc_summary"
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO projects (project_id, name, premise, genre, "
+            "target_words, status, created_at, updated_at) VALUES "
+            "(?, ?, NULL, NULL, NULL, 'ACTIVE', ?, ?)",
+            (pid, "p", now, now),
+        )
+        conn.execute(
+            "INSERT INTO volumes (volume_id, project_id, number, title, "
+            "status, terminal_snapshot_json, created_at, updated_at) "
+            "VALUES (?, ?, 1, 'vol', 'active', NULL, ?, ?)",
+            (vid, pid, now, now),
+        )
+        conn.execute(
+            "INSERT INTO chapters (chapter_id, project_id, number, title, "
+            "plan_json, status, visibility, who_knows, created_at, "
+            "updated_at, volume_id) VALUES (?, ?, 1, 'ch1', '{}', "
+            "'PLANNED', 'VISIBLE', NULL, ?, ?, ?)",
+            (cid, pid, now, now, vid),
+        )
+        wf_id = new_id("wf")
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, name, version, "
+            "definition_json, created_at, updated_at) VALUES (?, 'wf', "
+            "'v1', '{}', ?, ?)",
+            (wf_id, now, now),
+        )
+        ck = json.dumps(
+            {"volume": {"number": 1, "title": "vol", "arc_summary": arc}},
+            ensure_ascii=False,
+        )
+        conn.execute(
+            "INSERT INTO workflow_runs (run_id, workflow_id, chapter_id, "
+            "status, current_node, checkpoint_json, error, retry_count, "
+            "started_at, ended_at) VALUES (?, ?, ?, 'COMPLETED', NULL, "
+            "?, NULL, 0, ?, ?)",
+            (run_id, wf_id, cid, ck, now, now),
+        )
+        conn.execute(
+            "INSERT INTO plot_events (event_id, project_id, type, "
+            "cause_json, effects_json, participants_json, location_id, "
+            "time_json, status, introduced_chapter_id, visibility, "
+            "who_knows, description) VALUES (?, ?, 'other', '[]', '[]', "
+            "'[]', NULL, '{\"timeline_day\": 1, \"in_story_date\": null}', "
+            "'planned', NULL, 'RESTRICTED', NULL, NULL)",
+            (eid, pid),
+        )
+        conn.execute(
+            "INSERT INTO timeline_events (timeline_event_id, project_id, "
+            "event_id, day_index, time_ref, description, visibility, "
+            "who_knows) VALUES (?, ?, ?, 1, NULL, NULL, 'PUBLIC', NULL)",
+            (tid, pid, eid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 0020 的 UPDATE 部分（不含 ALTER TABLE——apply_migrations 已记录 0020，
+    # _migrations 跳过 0020 → 重跑文件会先 ALTER 报 duplicate column）。
+    # 直接 exec UPDATE 部分验证幂等。
+    update_sql = """
+    UPDATE volumes
+    SET arc_summary = (
+        SELECT json_extract(wr.checkpoint_json, '$.volume.arc_summary')
+        FROM workflow_runs AS wr
+        JOIN chapters AS ch ON ch.chapter_id = wr.chapter_id
+        WHERE ch.project_id = volumes.project_id
+          AND json_extract(wr.checkpoint_json, '$.volume.arc_summary') IS NOT NULL
+          AND trim(json_extract(wr.checkpoint_json, '$.volume.arc_summary')) != ''
+          AND json_extract(wr.checkpoint_json, '$.volume.number') = volumes.number
+        ORDER BY wr.started_at DESC
+        LIMIT 1
+    )
+    WHERE EXISTS (
+        SELECT 1
+        FROM workflow_runs AS wr
+        JOIN chapters AS ch ON ch.chapter_id = wr.chapter_id
+        WHERE ch.project_id = volumes.project_id
+          AND json_extract(wr.checkpoint_json, '$.volume.arc_summary') IS NOT NULL
+          AND trim(json_extract(wr.checkpoint_json, '$.volume.arc_summary')) != ''
+          AND json_extract(wr.checkpoint_json, '$.volume.number') = volumes.number
+    );
+
+    UPDATE plot_events
+    SET description = (
+        SELECT v.arc_summary
+        FROM volumes AS v
+        WHERE v.project_id = plot_events.project_id
+          AND v.arc_summary IS NOT NULL
+          AND trim(v.arc_summary) != ''
+        ORDER BY v.number ASC
+        LIMIT 1
+    )
+    WHERE type = 'other'
+      AND status = 'planned'
+      AND (description IS NULL OR trim(description) = '')
+      AND introduced_chapter_id IS NULL
+      AND EXISTS (
+          SELECT 1
+          FROM volumes AS v
+          WHERE v.project_id = plot_events.project_id
+            AND v.arc_summary IS NOT NULL
+            AND trim(v.arc_summary) != ''
+      );
+
+    UPDATE timeline_events
+    SET description = (
+        SELECT v.arc_summary
+        FROM plot_events AS pe
+        JOIN volumes AS v
+          ON v.project_id = pe.project_id
+         AND v.arc_summary IS NOT NULL
+         AND trim(v.arc_summary) != ''
+        WHERE pe.event_id = timeline_events.event_id
+        ORDER BY v.number ASC
+        LIMIT 1
+    )
+    WHERE description IS NULL
+      AND EXISTS (
+          SELECT 1
+          FROM plot_events AS pe
+          JOIN volumes AS v
+            ON v.project_id = pe.project_id
+           AND v.arc_summary IS NOT NULL
+           AND trim(v.arc_summary) != ''
+          WHERE pe.event_id = timeline_events.event_id
+      );
+    """
+    # 第一次跑
+    conn = get_connection(db_path)
+    try:
+        conn.executescript(update_sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 第二次跑：应当影响 0 行（WHERE 条件已不再匹配）
+    conn = get_connection(db_path)
+    try:
+        before_v = conn.execute(
+            "SELECT arc_summary FROM volumes WHERE volume_id = ?", (vid,)
+        ).fetchone()["arc_summary"]
+        before_pe = conn.execute(
+            "SELECT description FROM plot_events WHERE event_id = ?", (eid,)
+        ).fetchone()["description"]
+        before_te = conn.execute(
+            "SELECT description FROM timeline_events WHERE timeline_event_id = ?",
+            (tid,),
+        ).fetchone()["description"]
+    finally:
+        conn.close()
+
+    conn = get_connection(db_path)
+    try:
+        conn.executescript(update_sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = get_connection(db_path)
+    try:
+        after_v = conn.execute(
+            "SELECT arc_summary FROM volumes WHERE volume_id = ?", (vid,)
+        ).fetchone()["arc_summary"]
+        after_pe = conn.execute(
+            "SELECT description FROM plot_events WHERE event_id = ?", (eid,)
+        ).fetchone()["description"]
+        after_te = conn.execute(
+            "SELECT description FROM timeline_events WHERE timeline_event_id = ?",
+            (tid,),
+        ).fetchone()["description"]
+    finally:
+        conn.close()
+
+    assert after_v == before_v == arc
+    assert after_pe == before_pe == arc
+    assert after_te == before_te == arc

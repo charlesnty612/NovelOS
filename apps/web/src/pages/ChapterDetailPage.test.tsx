@@ -1184,3 +1184,230 @@ describe('ChapterDetailPage - 审校指定草稿版本', () => {
     expect(call[2]).toEqual({ draft_version: 1 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// 四步流水线展示态（plan→write→review→commit）：
+// - done / current / todo 三态由 status + plan_json 共同推导；
+// - current 步骤的按钮带 btn--primary；
+// - 按钮副标题由「需要状态：…」改为「Director 生成章节计划」等人性化文案。
+// ---------------------------------------------------------------------------
+
+describe('ChapterDetailPage - 工作流四步流水线展示态', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(chaptersApi.delete).mockReset();
+    vi.mocked(chaptersApi.update).mockReset();
+    vi.mocked(chaptersApi.createDraft).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(workflowsApi.startPlan).mockReset();
+    vi.mocked(workflowsApi.startWrite).mockReset();
+    vi.mocked(workflowsApi.startReview).mockReset();
+    vi.mocked(workflowsApi.startCommit).mockReset();
+    vi.mocked(workflowsApi.resume).mockReset();
+    vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(modelProfilesApi.create).mockReset();
+    vi.mocked(modelProfilesApi.update).mockReset();
+    vi.mocked(modelProfilesApi.remove).mockReset();
+    vi.mocked(modelProfilesApi.test).mockReset();
+
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([]);
+    vi.mocked(workflowsApi.startPlan).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun);
+  });
+
+  it('DRAFTED + 有 plan_json：plan/write=done, review=current(primary), commit=todo', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(
+      baseChapter({
+        status: 'DRAFTED',
+        plan_json: { chapter_goal: '目标', expected_word_count: 3000 },
+      }),
+    );
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('wf-pipeline')).toBeInTheDocument();
+    });
+
+    const planStep = screen.getByTestId('wf-step-plan');
+    const writeStep = screen.getByTestId('wf-step-write');
+    const reviewStep = screen.getByTestId('wf-step-review');
+    const commitStep = screen.getByTestId('wf-step-commit');
+
+    expect(planStep.getAttribute('data-state')).toBe('done');
+    expect(writeStep.getAttribute('data-state')).toBe('done');
+    expect(reviewStep.getAttribute('data-state')).toBe('current');
+    expect(commitStep.getAttribute('data-state')).toBe('todo');
+
+    // current 步骤的按钮带 btn--primary；其它步骤不带。
+    const reviewBtn = screen.getByTestId('wf-btn-review');
+    expect(reviewBtn.className).toMatch(/btn--primary/);
+    expect(screen.getByTestId('wf-btn-plan').className).not.toMatch(/btn--primary/);
+    expect(screen.getByTestId('wf-btn-write').className).not.toMatch(/btn--primary/);
+    expect(screen.getByTestId('wf-btn-commit').className).not.toMatch(/btn--primary/);
+
+    // done 步骤展示 ✓ 序号占位（dot 内文案）。
+    expect(planStep.querySelector('.wf-step__dot')?.textContent).toBe('✓');
+    expect(writeStep.querySelector('.wf-step__dot')?.textContent).toBe('✓');
+    // current/todo 步骤展示 1-4 序号。
+    expect(reviewStep.querySelector('.wf-step__dot')?.textContent).toBe('3');
+    expect(commitStep.querySelector('.wf-step__dot')?.textContent).toBe('4');
+  });
+
+  it('PLANNED + 无 plan_json：plan=current(primary)，按钮副标题含「Director 生成章节计划」、不含「需要状态」', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(
+      baseChapter({ status: 'PLANNED', plan_json: {} }),
+    );
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('wf-pipeline')).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId('wf-step-plan').getAttribute('data-state')).toBe('current');
+    expect(screen.getByTestId('wf-step-write').getAttribute('data-state')).toBe('todo');
+    expect(screen.getByTestId('wf-step-review').getAttribute('data-state')).toBe('todo');
+    expect(screen.getByTestId('wf-step-commit').getAttribute('data-state')).toBe('todo');
+
+    const planBtn = screen.getByTestId('wf-btn-plan');
+    expect(planBtn.className).toMatch(/btn--primary/);
+    expect(planBtn.textContent).toMatch(/Director 生成章节计划/);
+    expect(planBtn.textContent).not.toMatch(/需要状态/);
+  });
+
+  it('DRAFTED：todo 步骤按钮禁用且 title 给出状态机原因（disabled/tooltip 契约回归）', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(
+      baseChapter({
+        status: 'DRAFTED',
+        plan_json: { chapter_goal: '目标', expected_word_count: 3000 },
+      }),
+    );
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('wf-pipeline')).toBeInTheDocument();
+    });
+
+    // todo 步骤（commit）按钮禁用，title 透传 getButtonAvailability 的原因文案。
+    const commitBtn = screen.getByTestId('wf-btn-commit');
+    expect(commitBtn).toBeDisabled();
+    expect(commitBtn.getAttribute('title')).toMatch(/REVIEWED/);
+
+    // current 步骤（review）可点击、无禁用原因；done 的 write 在 DRAFTED 下状态机允许重跑。
+    expect(screen.getByTestId('wf-btn-review')).toBeEnabled();
+    expect(screen.getByTestId('wf-btn-write')).toBeEnabled();
+    // done 的 plan 在 DRAFTED 下被状态机禁用（防覆盖已有计划）。
+    expect(screen.getByTestId('wf-btn-plan')).toBeDisabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FAILED run 错误渲染回归（commit 校验失败不应被误判为「已驳回」）
+// ---------------------------------------------------------------------------
+
+function buildFailedRun(error: string, runId = 'wfr_failed_001'): WorkflowRun {
+  return {
+    run_id: runId,
+    workflow_id: 'chapter-commit',
+    chapter_id: 'ch_001',
+    status: 'FAILED',
+    current_node: null,
+    checkpoint_json: {},
+    error,
+    retry_count: 0,
+    started_at: new Date().toISOString(),
+    ended_at: new Date().toISOString(),
+    nodes: [],
+    workflow_name: 'chapter-commit',
+    pause_payload: null,
+  } as unknown as WorkflowRun;
+}
+
+describe('ChapterDetailPage - FAILED run 错误文案不误判为「已驳回」', () => {
+  it("commit 校验失败 (error 含 'rejected' 子串) → 渲染「失败」，不出现「已驳回」", async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'COMMITTED' }));
+    const failedRun = buildFailedRun(
+      'observer delta rejected by validator: errors=[orphan ref to c1]',
+    );
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([failedRun]);
+
+    renderPage();
+
+    // 列表渲染后：徽标为「失败」，不应出现「已驳回」/「已驳回·改稿」
+    await waitFor(() => {
+      expect(screen.getByText('失败')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('已驳回')).toBeNull();
+    expect(screen.queryByText('已驳回·改稿')).toBeNull();
+  });
+
+  it("commit 校验失败 (无 'rejected' 子串) → 渲染「失败」", async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'COMMITTED' }));
+    const failedRun = buildFailedRun(
+      'observer delta failed validation: errors=[x]',
+      'wfr_failed_002',
+    );
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([failedRun]);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText('失败')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('已驳回')).toBeNull();
+  });
+
+  it("纯驳回 (error='rejected') → 渲染「已驳回」", async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const failedRun = buildFailedRun('rejected', 'wfr_rejected_001');
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([failedRun]);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText('已驳回')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('已驳回·改稿')).toBeNull();
+  });
+
+  it("驳回并改稿 (error='rejected-for-revision') → 渲染「已驳回·改稿」", async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const failedRun = buildFailedRun(
+      'rejected-for-revision',
+      'wfr_rejected_for_revision_001',
+    );
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([failedRun]);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText('已驳回·改稿')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('已驳回')).toBeNull();
+  });
+});

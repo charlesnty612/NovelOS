@@ -137,13 +137,16 @@ export interface PlotEvent {
   id: string;
   project_id: string;
   type: EventType;
-  cause: Record<string, unknown> | null;
-  effects: Record<string, unknown> | null;
+  /** 因果引用：后端 plot_events.cause 是 event_id 字符串数组（packages/domain/plot/models.py L40-41）。 */
+  cause: string[] | null;
+  effects: string[] | null;
   participants: unknown[];
   location_id: string | null;
   time: Record<string, unknown> | null;
   status: string;
   introduced_chapter_id: string | null;
+  /** 事件描述全文（后端 commit 写入；UI 主展示列）。老 init 空壳行可能为 null/空串。 */
+  description?: string | null;
   visibility: VisibilityLevel;
   who_knows: string[] | null;
   created_at: string;
@@ -152,11 +155,14 @@ export interface PlotEvent {
 
 export interface PlotEventCreatePayload {
   type: EventType;
-  cause?: Record<string, unknown> | null;
-  effects?: Record<string, unknown> | null;
+  /** 与 PlotEvent.cause 对齐：event_id 字符串数组或 null。旧 Record 形态与后端契约不符。 */
+  cause?: string[] | null;
+  effects?: string[] | null;
   participants?: unknown[] | null;
   time?: Record<string, unknown> | null;
   status?: string;
+  /** 事件描述全文（与 PlotEvent.description 对齐；后端 commit 必落字段）。 */
+  description?: string | null;
 }
 
 export interface TimelineEvent {

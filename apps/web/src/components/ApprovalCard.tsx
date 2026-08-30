@@ -2,7 +2,7 @@
 // 支持两种 stage：
 //   - chapter-review  → 显示 review_report（字数偏离 / 禁用词 / warnings）
 //                        + V1.3 critic_report（LLM 评审员建议；advisory only）
-//   - chapter-commit.high_risk_approval → 显示 changes 待审批条数
+//   - chapter-commit.high_risk_approval → 显示 changes 计数 + 全量明细
 //
 // chapter-review 分支有四态决议：
 //   - 批准        → onApprove(true)
@@ -249,7 +249,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
         {stage === 'chapter-review'
           ? '请作者审查后批准（继续推进到 REVIEWED）；驳回则该 run 结束（FAILED）、章节保持 DRAFTED，可改稿后重新发起写正文/审校；「驳回并改稿」会附上意见（落 plan_json.revision_note），同样保持 DRAFTED，改稿后重新发起写正文/审校即可。'
           : stage === 'chapter-commit.high_risk_approval'
-          ? 'Observer 检测到高风险 / definition / world_kind=rule 变更，请人工审批。'
+          ? 'Observer 检测到高风险 / definition / world_kind=rule 变更，请人工审批。下方列出全部变更明细（高风险置顶），请逐条过目后再批准。'
           : '请人工决议以恢复 workflow。'}
       </InfoBanner>
 
@@ -562,6 +562,26 @@ function HighRiskSummary({
   const changes = pausePayload['changes'] as
     | { character_changes?: unknown[]; world_changes?: unknown[] }
     | undefined;
+  // 仅当 changes 存在时合并两条数组；HIGH 排最前，其余保持原相对顺序。
+  const entries: ChangeEntry[] = useMemo(() => {
+    if (!changes) return [];
+    const merged: ChangeEntry[] = [];
+    if (Array.isArray(changes.character_changes)) {
+      changes.character_changes.forEach((raw, idx) => {
+        merged.push(toChangeEntry('character_changes', raw, idx));
+      });
+    }
+    if (Array.isArray(changes.world_changes)) {
+      changes.world_changes.forEach((raw, idx) => {
+        merged.push(toChangeEntry('world_changes', raw, idx));
+      });
+    }
+    return merged.sort((a, b) => {
+      const aHigh = a.risk_level === 'HIGH' ? 0 : 1;
+      const bHigh = b.risk_level === 'HIGH' ? 0 : 1;
+      return aHigh - bHigh;
+    });
+  }, [changes]);
   return (
     <div style={{ marginTop: 8 }}>
       <div className="form-grid">
@@ -578,10 +598,208 @@ function HighRiskSummary({
           value={String(changes?.world_changes?.length ?? 0)}
         />
       </div>
+      {entries.length > 0 ? (
+        <ul
+          data-testid="high-risk-change-list"
+          style={{
+            listStyle: 'none',
+            padding: 0,
+            margin: '8px 0 0 0',
+          }}
+        >
+          {entries.map((e) => (
+            <ChangeItemRow key={`${e.kind}-${e.change_id}-${e.idx}`} entry={e} />
+          ))}
+        </ul>
+      ) : null}
       <div className="muted small" style={{ marginTop: 4 }}>
         涉及 character_changes / world_changes。批准会继续 COMMIT 流程，驳回则 workflow 进入 FAILED。
       </div>
     </div>
+  );
+}
+
+// ---------- HighRiskSummary：变更明细渲染辅助 ----------
+
+interface ChangeEntry {
+  kind: 'character_changes' | 'world_changes';
+  idx: number;
+  change_id: string;
+  op: string;
+  target_id: string;
+  field: string;
+  before: unknown;
+  after: unknown;
+  confidence: unknown;
+  evidence: { chapter_id?: unknown; scene_id?: unknown; excerpt?: unknown; span?: unknown } | undefined;
+  notes: string | undefined;
+  risk_level: string;
+  visibility: unknown;
+  who_knows: unknown;
+  // 类别字段
+  character_id?: string;
+  facet?: string;
+  world_id?: string;
+  world_kind?: string;
+}
+
+function toChangeEntry(
+  kind: 'character_changes' | 'world_changes',
+  raw: unknown,
+  idx: number,
+): ChangeEntry {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const evidence = (o['evidence'] ?? undefined) as
+    | { chapter_id?: unknown; scene_id?: unknown; excerpt?: unknown; span?: unknown }
+    | undefined;
+  return {
+    kind,
+    idx,
+    change_id: strOrDash(o['change_id']),
+    op: strOrDash(o['op']),
+    target_id: strOrDash(o['target_id']),
+    field: strOrDash(o['field']),
+    before: o['before'],
+    after: o['after'],
+    confidence: o['confidence'],
+    evidence,
+    notes: typeof o['notes'] === 'string' ? (o['notes'] as string) : undefined,
+    risk_level: typeof o['risk_level'] === 'string' ? (o['risk_level'] as string) : 'LOW',
+    visibility: o['visibility'],
+    who_knows: o['who_knows'],
+    character_id: typeof o['character_id'] === 'string' ? (o['character_id'] as string) : undefined,
+    facet: typeof o['facet'] === 'string' ? (o['facet'] as string) : undefined,
+    world_id: typeof o['world_id'] === 'string' ? (o['world_id'] as string) : undefined,
+    world_kind: typeof o['world_kind'] === 'string' ? (o['world_kind'] as string) : undefined,
+  };
+}
+
+function strOrDash(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'string') return v;
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return '—';
+  }
+}
+
+/** 把 before/after 渲染成展示字符串。null/undefined/'' → "新增：{after}"，否则 "{before} → {after}"。 */
+function renderValueChange(before: unknown, after: unknown): { text: string; full: string } {
+  const formatVal = (v: unknown): string => {
+    if (v === null || v === undefined || v === '') return '—';
+    if (Array.isArray(v)) return v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join('；');
+    if (typeof v === 'string') return v;
+    if (typeof v === 'object') {
+      try {
+        return JSON.stringify(v);
+      } catch {
+        return String(v);
+      }
+    }
+    return String(v);
+  };
+  const isEmpty = (v: unknown) => v === null || v === undefined || v === '';
+  const full = isEmpty(before)
+    ? `新增：${formatVal(after)}`
+    : `${formatVal(before)} → ${formatVal(after)}`;
+  const truncated = full.length > 200 ? full.slice(0, 200) + '…' : full;
+  return { text: truncated, full };
+}
+
+function truncateWithTitle(s: string, max: number): { text: string; title: string } {
+  if (s.length <= max) return { text: s, title: s };
+  return { text: s.slice(0, max) + '…', title: s };
+}
+
+const RISK_BADGE_LABEL: Record<string, { label: string; color: string }> = {
+  HIGH: { label: '高风险', color: 'var(--color-danger, #c62828)' },
+  MEDIUM: { label: '中风险', color: 'var(--color-warn, #c97a16)' },
+  LOW: { label: '低风险', color: 'var(--color-text-muted, #6b7280)' },
+};
+
+const OP_LABEL: Record<string, string> = {
+  add: '新增',
+  update: '更新',
+  remove: '删除',
+};
+
+const WORLD_KIND_LABEL: Record<string, string> = {
+  location: '地点',
+  rule: '规则',
+  faction: '势力',
+  item: '物品',
+};
+
+function ChangeItemRow({ entry }: { entry: ChangeEntry }) {
+  const riskInfo = RISK_BADGE_LABEL[entry.risk_level] ?? RISK_BADGE_LABEL.LOW!;
+  const opLabel = OP_LABEL[entry.op] ?? entry.op;
+  const typeLabel =
+    entry.kind === 'character_changes'
+      ? '人物'
+      : WORLD_KIND_LABEL[entry.world_kind ?? ''] ?? entry.world_kind ?? '—';
+  const objId = entry.kind === 'character_changes' ? entry.character_id : entry.world_id;
+  const idTail = objId ? ` · ${objId}` : '';
+  const valueRender = renderValueChange(entry.before, entry.after);
+  const excerpt = entry.evidence?.excerpt;
+  const excerptStr = typeof excerpt === 'string' ? excerpt : '';
+  const excerptRender = excerptStr ? truncateWithTitle(excerptStr, 80) : null;
+  const hasNotes = !!entry.notes;
+  const hasExcerpt = !!excerptRender;
+  return (
+    <li
+      data-testid="high-risk-change-item"
+      data-risk={entry.risk_level}
+      style={{
+        borderLeft: '3px solid var(--color-border-strong)',
+        paddingLeft: 8,
+        marginTop: 6,
+      }}
+    >
+      <div
+        className="small"
+        style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}
+      >
+        <span
+          className="badge"
+          data-testid="high-risk-change-risk"
+          style={{ color: riskInfo.color, borderColor: riskInfo.color }}
+        >
+          {riskInfo.label}
+        </span>
+        <span className="badge" data-testid="high-risk-change-op">
+          {opLabel}
+        </span>
+        <span className="badge" data-testid="high-risk-change-type">
+          {typeLabel}
+        </span>
+        <span className="muted small" data-testid="high-risk-change-meta">
+          {entry.field}
+          {idTail}
+        </span>
+      </div>
+      <div
+        className="small"
+        data-testid="high-risk-change-value"
+        title={valueRender.full}
+        style={{ marginTop: 2, whiteSpace: 'pre-wrap' }}
+      >
+        {valueRender.text}
+      </div>
+      {hasNotes || hasExcerpt ? (
+        <div
+          className="muted small"
+          style={{ marginTop: 2 }}
+          data-testid="high-risk-change-notes"
+        >
+          {hasNotes ? <span>备注：{entry.notes}</span> : null}
+          {hasNotes && hasExcerpt ? <span>；</span> : null}
+          {hasExcerpt ? (
+            <span title={excerptRender!.title}>引文：{excerptRender!.text}</span>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
   );
 }
 

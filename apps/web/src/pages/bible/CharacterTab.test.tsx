@@ -28,18 +28,16 @@ const SAMPLE_CHARACTER = {
   project_id: 'p1',
   name: '林远',
   role: 'protagonist',
-  // 关键：core_json 里除了 5 个表单字段，还含 project_init 写入的非表单键
+  // 表单 5 键对齐后端契约（project_init pipeline L1274-1284）：
+  // motivation / goal / conflict / distinctive_trait / relationships。
+  // 此外混入 1 个自定义非表单键（_project_init_marker）以验证 merge 不丢键。
   core_json: {
-    personality: '冷静',
-    values: '正义',
-    fears: '失去',
-    desires: '真相',
-    flaws: '固执',
-    // —— 以下属于"非表单键"，保存时不应被覆盖清除 ——
     motivation: '为亡母复仇',
     goal: '揭开组织真相',
     conflict: '内外双重矛盾',
-    relationship: { ally: '苏挽', foe: '赵靖' },
+    distinctive_trait: '左眼旧疤',
+    relationships: { ally: '苏挽', foe: '赵靖' },
+    // —— 非表单键，保存时不应被覆盖清除 ——
     _project_init_marker: 'untouched',
   },
   visibility: 'PUBLIC',
@@ -79,21 +77,21 @@ describe('CharacterTab 编辑保存——core_json merge 语义', () => {
     const nameInput = screen.getByTestId('character-name');
     expect((nameInput as HTMLInputElement).value).toBe('林远');
 
-    // 改名 + 调整 personality（模拟用户在表单内修改）
+    // 改名 + 调整 motivation（模拟用户在表单内修改）
     await user.clear(nameInput);
     await user.type(nameInput, '林远（新名）');
-    // 通过 form 作用域定位 personality textarea，避免与详情面板里其他 textarea 混淆
+    // 通过 form 作用域定位 motivation textarea（表单第 1 行），避免与详情面板里其他 textarea 混淆
     const dialog = screen.getByRole('dialog');
-    const personalityTa = dialog.querySelectorAll('textarea')[0];
-    await user.clear(personalityTa);
-    await user.type(personalityTa, '冷静偏执');
+    const motivationTa = dialog.querySelectorAll('textarea')[0];
+    await user.clear(motivationTa);
+    await user.type(motivationTa, '为亡母复仇，偏执追寻真相');
 
     // 提交
     await user.click(screen.getByText('保存'));
 
     // 关键断言：update 被调用时，core_json 是"完整"对象
-    // —— 表单字段更新（name 与 personality）
-    // —— 非表单键（motivation / goal / conflict / relationship 等）原样保留
+    // —— 表单字段更新（name 与 motivation）
+    // —— 非表单键（_project_init_marker 等）原样保留
     await waitFor(() => {
       expect(charactersApi.update).toHaveBeenCalledTimes(1);
     });
@@ -107,17 +105,13 @@ describe('CharacterTab 编辑保存——core_json merge 语义', () => {
 
     const cj = calledPayload.core_json as Record<string, unknown>;
     // 表单字段已更新
-    expect(cj.personality).toBe('冷静偏执');
+    expect(cj.motivation).toBe('为亡母复仇，偏执追寻真相');
     // 其他表单字段保留
-    expect(cj.values).toBe('正义');
-    expect(cj.fears).toBe('失去');
-    expect(cj.desires).toBe('真相');
-    expect(cj.flaws).toBe('固执');
-    // 关键：非表单键必须原样保留
-    expect(cj.motivation).toBe('为亡母复仇');
     expect(cj.goal).toBe('揭开组织真相');
     expect(cj.conflict).toBe('内外双重矛盾');
-    expect(cj.relationship).toEqual({ ally: '苏挽', foe: '赵靖' });
+    expect(cj.distinctive_trait).toBe('左眼旧疤');
+    expect(cj.relationships).toEqual({ ally: '苏挽', foe: '赵靖' });
+    // 关键：非表单键必须原样保留（防止 merge 逻辑误清空历史数据）
     expect(cj._project_init_marker).toBe('untouched');
   });
 
@@ -151,6 +145,116 @@ describe('CharacterTab 编辑保存——core_json merge 语义', () => {
     const cj = (createPayload.core_json ?? {}) as Record<string, unknown>;
     expect(cj).not.toHaveProperty('motivation');
     expect(cj).not.toHaveProperty('goal');
+  });
+
+  it('编辑角色保存时，relationships 由 JSON 字符串往返回对象（不被字符串化破坏）', async () => {
+    const user = userEvent.setup();
+    render(<CharacterTab projectId="p1" />);
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: '编辑' }).length).toBeGreaterThan(0);
+    });
+    await user.click(screen.getAllByRole('button', { name: '编辑' })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText(/编辑角色：林远/)).toBeInTheDocument();
+    });
+
+    // 编辑器打开后，relationships textarea 应预填 JSON 美化文本
+    const dialog = screen.getByRole('dialog');
+    const tas = dialog.querySelectorAll('textarea');
+    // 表单顺序：motivation / goal / conflict / distinctive_trait / relationships
+    // ⇒ 第 5 个 textarea 是 relationships
+    const relTa = tas[4];
+    const initialText = (relTa as HTMLTextAreaElement).value;
+    expect(initialText).toContain('"ally"');
+    expect(initialText).toContain('苏挽');
+
+    // 修改：把对象改成数组，再保存
+    await user.clear(relTa);
+    // 用 paste 避开 userEvent.keyboard 对 [] 的描述符解析限制
+    await user.paste(
+      '[{"name":"苏挽","type":"ally"},{"name":"赵靖","type":"foe"}]',
+    );
+
+    await user.click(screen.getByText('保存'));
+
+    await waitFor(() => {
+      expect(charactersApi.update).toHaveBeenCalledTimes(1);
+    });
+    const [, calledPayload] = (
+      charactersApi.update as unknown as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
+    const cj = calledPayload.core_json as Record<string, unknown>;
+
+    // relationships 必须是数组对象，不是字符串化的 JSON 文本
+    expect(typeof cj.relationships).not.toBe('string');
+    expect(Array.isArray(cj.relationships)).toBe(true);
+    expect(cj.relationships).toEqual([
+      { name: '苏挽', type: 'ally' },
+      { name: '赵靖', type: 'foe' },
+    ]);
+  });
+
+  it('编辑角色保存时，relationships 无法解析为 JSON 时按字符串保存（兜底）', async () => {
+    const user = userEvent.setup();
+    render(<CharacterTab projectId="p1" />);
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: '编辑' }).length).toBeGreaterThan(0);
+    });
+    await user.click(screen.getAllByRole('button', { name: '编辑' })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText(/编辑角色：林远/)).toBeInTheDocument();
+    });
+
+    const dialog = screen.getByRole('dialog');
+    const tas = dialog.querySelectorAll('textarea');
+    const relTa = tas[4];
+    await user.clear(relTa);
+    await user.type(relTa, '与苏挽结盟，与赵靖为敌');
+
+    await user.click(screen.getByText('保存'));
+
+    await waitFor(() => {
+      expect(charactersApi.update).toHaveBeenCalledTimes(1);
+    });
+    const [, calledPayload] = (
+      charactersApi.update as unknown as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
+    const cj = calledPayload.core_json as Record<string, unknown>;
+    // 不是合法 JSON 的纯文本：按字符串存，避免被强行 stringify 破坏
+    expect(cj.relationships).toBe('与苏挽结盟，与赵靖为敌');
+  });
+
+  it('编辑角色打开表单时，core_json 中的 motivation/goal/conflict/distinctive_trait/relationships 全部回显', async () => {
+    const user = userEvent.setup();
+    render(<CharacterTab projectId="p1" />);
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: '编辑' }).length).toBeGreaterThan(0);
+    });
+    await user.click(screen.getAllByRole('button', { name: '编辑' })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText(/编辑角色：林远/)).toBeInTheDocument();
+    });
+
+    const dialog = screen.getByRole('dialog');
+    const tas = dialog.querySelectorAll('textarea');
+    expect(tas.length).toBeGreaterThanOrEqual(5);
+    const [motivation, goal, conflict, trait, relationships] = Array.from(
+      tas,
+    ).slice(0, 5) as HTMLTextAreaElement[];
+
+    expect(motivation.value).toBe('为亡母复仇');
+    expect(goal.value).toBe('揭开组织真相');
+    expect(conflict.value).toBe('内外双重矛盾');
+    expect(trait.value).toBe('左眼旧疤');
+    // relationships 是对象，textarea 内显示 JSON 美化文本
+    expect(relationships.value).toContain('ally');
+    expect(relationships.value).toContain('苏挽');
   });
 });
 

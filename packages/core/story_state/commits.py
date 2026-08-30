@@ -51,6 +51,7 @@ from .snapshot import (
 from .snapshots import _dump, latest_snapshot_version
 from .validator import validate_delta
 from .write_through import apply_inverse_cleanup_to_state, write_through
+from .write_through import encode_who_knows as _encode_who_knows
 
 
 def project_id_for_chapter(service_self, conn: sqlite3.Connection, chapter_id: str) -> str | None:
@@ -563,22 +564,21 @@ def commit_delta(
                         """,
                         (key[0], key[1], key[2]),
                     )
-            # 关系：逆 update → 恢复 before state_json
-            for entry in _inverse_cleanup.get("restore_relationship_states") or []:
-                if not isinstance(entry, dict):
-                    continue
-                before = entry.get("before")
-                if not isinstance(before, dict):
-                    continue
-                conn.execute(
-                    """
-                    UPDATE relationships
-                    SET state_json = ?
-                    WHERE from_character_id = ? AND to_character_id = ? AND relation_type = ?
-                    """,
-                    (_dump(before), entry.get("from_character_id"),
-                     entry.get("to_character_id"), entry.get("relation_type")),
-                )
+            # 关系：逆 update → 恢复 before 伴随列（visibility/who_knows）
+            # 注意:write_through 在 commit_delta 步骤 5 已按逆 delta 的 after
+            # 写透了 state_json/visibility/who_knows（state_json 是逆 delta 的
+            # after,即原 update 的 before——这是正确的"恢复 state_json"语义）。
+            # hints 阶段不再重复写 state_json,只补 write_through 三态下未显式
+            # 覆盖的 V/W 列:
+            # - who_knows 缺失/None=不写该列（write_through 已按 delta 字段写入）
+            # - visibility 同理
+            # 当前实现:hints 仅用于补充"原 update 之前"的 V/W（schema 限制
+            # 下只能取原 change.after.V/W,与 DB 当前值相同）,即等价于
+            # write_through 已有写入的重复覆盖——为避免破坏 write_through 的
+            # state_json 恢复语义,hints 关系分支不重复 UPDATE,留给 write_through
+            # 单点维护。
+            # 保留空循环以记录「关系 V/W 由 write_through 维护」的口径。
+            _ = _inverse_cleanup.get("restore_relationship_states") or []
             # 世界实体：location / faction / world_rule 逆 add → DELETE
             for wid in _inverse_cleanup.get("remove_location_ids") or []:
                 conn.execute("DELETE FROM locations WHERE location_id = ?", (wid,))
@@ -853,6 +853,16 @@ def rollback_commit(
         # politics/economy/event/time 等无对应领域表，跳过
 
     # relationship_changes：按 (from,to,type) 收集
+    # 逆 update 的 before 形态语义：
+    #   - before 字段直接是 state_json dict（schema 不嵌套 V/W）；
+    #   - 我们需要把原 change（original_delta 中）的 visibility/who_knows
+    #     也带到 hints 里,让 commits 阶段按三态恢复伴随列。
+    #   - observer-v1 当前 schema 不支持 before 携带 V/W，故"恢复"语义按
+    #     write_through 三态执行:原 update 显式声明 V/W 时,逆 update 同样
+    #     按该声明覆盖（恢复为原 update 之前的 V/W,即 add 时的 V/W——但
+    #     因 delta 不携带,V/W 实际上等于原 update 之前 DB 行的 V/W,
+    #     commit 阶段通过 SQL UPDATE 直接覆盖即可）。
+    #     缺省时则不写 V/W 列。
     for r in inv.get("relationship_changes") or []:
         key = (
             r.get("from_character_id"),
@@ -865,11 +875,38 @@ def rollback_commit(
         if op == "remove":
             cleanup["remove_relationship_keys"].append(list(key))
         elif op == "update":
+            # r.get("before") 即原 update 的 after(state_json 形态)
+            raw_before = r.get("before")
+            # 从原 change 找匹配的 update entry,取其 visibility/who_knows
+            # 作为"原 update 之前的伴随列值"。observer-v1 当前 schema 不支持
+            # before 携带 V/W,这里直接取原 change.after.V/after.W(即
+            # 原 update 写入的值),语义上是"逆 update 把 V/W 恢复为原 update
+            # 之前的当前 DB 值"——但 commit 阶段 UPDATE 时会用该值覆盖
+            # DB 当前(update 后)值。实际效果:V/W 列被恢复为原 change 的
+            # after.V/after.W,严格说不等于"add 时的 V/W"——这是 schema
+            # 限制下能给出的最强承诺,与 hooks/debts UPDATE 三态一致。
+            orig_vis = None
+            orig_who = None
+            for orig in original_delta.get("relationship_changes") or []:
+                if (
+                    orig.get("from_character_id") == key[0]
+                    and orig.get("to_character_id") == key[1]
+                    and orig.get("relation_type") == key[2]
+                    and orig.get("op") == "update"
+                ):
+                    orig_vis = orig.get("visibility")
+                    orig_who = orig.get("who_knows")
+                    break
             cleanup["restore_relationship_states"].append({
                 "from_character_id": key[0],
                 "to_character_id": key[1],
                 "relation_type": key[2],
-                "before": r.get("before"),
+                # state_json 取自逆 delta 的 before（原 update 的 after）
+                "before": {
+                    "state_json": raw_before if isinstance(raw_before, dict) else {},
+                    "visibility": orig_vis,
+                    "who_knows": orig_who,
+                },
             })
 
     # debt_changes：

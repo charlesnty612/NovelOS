@@ -1728,6 +1728,153 @@ def test_project_init_full_pipeline_unaffected_by_partial_skip(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# V3.10 init 空壳 plot_event 修复：persist_all 应把 volume.arc_summary 作为
+# description 写入 type='other' status='planned' 的 plot_event，重复 init
+# 不堆叠（命中即复用旧 id），timeline_events 对应索引行也带 description。
+# ---------------------------------------------------------------------------
+
+
+def test_project_init_persist_all_records_arc_summary_as_description(tmp_path: Path):
+    """#14 init plot_event 描述修复：persist_all 第 6 步把 arc_summary 写入
+    plot_event.description（修复前 create_event 不支持 description，arc_summary
+    被静默丢弃 → 空壳事件）。
+
+    - 全量 init 后 plot_events 中 type='other' AND status='planned' 的事件
+      description 应等于 arc_summary（来自 outline JSON）；
+    - timeline_events 对应索引行 description 也应等于 arc_summary；
+    - 同时 volumes.arc_summary 列已被写（持久化收口，迁移 0020 落列）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 3,
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id = r.json()["run_id"]
+            await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            run_data = await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            pid = (run_data.get("checkpoint_json") or {}).get("project_id")
+            assert pid and pid.startswith("prj_")
+
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                # plot_event 描述 = arc_summary
+                pe_row = conn.execute(
+                    "SELECT event_id, description FROM plot_events "
+                    "WHERE project_id = ? AND type = 'other' AND status = 'planned'",
+                    (pid,),
+                ).fetchone()
+                assert pe_row is not None, "init 应至少落一条 type='other' plot_event"
+                assert pe_row["description"] == "叶尘从废脉少年踏上星辰之路", (
+                    f"plot_event.description 应等于 arc_summary；"
+                    f"实得 {pe_row['description']!r}"
+                )
+                # timeline_events 对应索引行也带 description
+                te_row = conn.execute(
+                    "SELECT description FROM timeline_events "
+                    "WHERE event_id = ?",
+                    (pe_row["event_id"],),
+                ).fetchone()
+                assert te_row is not None
+                assert te_row["description"] == "叶尘从废脉少年踏上星辰之路", (
+                    f"timeline_events.description 应等于 arc_summary；"
+                    f"实得 {te_row['description']!r}"
+                )
+            finally:
+                conn.close()
+
+    asyncio.run(run())
+
+
+def test_project_init_reinit_does_not_duplicate_arc_summary_event(tmp_path: Path):
+    """#14 init plot_event 描述防重：同 project 重复跑 init，已有相同 arc_summary
+    的占位 plot_event 不应被堆叠——持久化层命中即复用其 id（同时复用 timeline
+    索引行），plot_events + timeline_events 各只 1 条。
+
+    修复前：每次 init 都调一次 create_event（无 description），产生 N 条
+    description=NULL 的空壳，污染 timeline。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 3,
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id_1 = r.json()["run_id"]
+            await _wait_run_terminal(app, run_id_1, expected=("COMPLETED",))
+            run_data = await _wait_run_terminal(app, run_id_1, expected=("COMPLETED",))
+            pid = (run_data.get("checkpoint_json") or {}).get("project_id")
+
+            # 第二次 init：mock 内容不变（arc_summary 相同），应复用 event_id
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "project_id": pid,
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 3,
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id_2 = r.json()["run_id"]
+            await _wait_run_terminal(app, run_id_2, expected=("COMPLETED",))
+
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                pe_rows = conn.execute(
+                    "SELECT event_id, description FROM plot_events "
+                    "WHERE project_id = ? AND type = 'other' AND status = 'planned'",
+                    (pid,),
+                ).fetchall()
+                te_rows = conn.execute(
+                    "SELECT event_id, description FROM timeline_events "
+                    "WHERE project_id = ?",
+                    (pid,),
+                ).fetchall()
+            finally:
+                conn.close()
+
+            assert len(pe_rows) == 1, (
+                f"重复 init 不应堆叠 plot_event；实得 {len(pe_rows)} 条 "
+                f"{[r['event_id'] for r in pe_rows]}"
+            )
+            assert pe_rows[0]["description"] == "叶尘从废脉少年踏上星辰之路"
+            # timeline_events 对应此 event_id 的索引行也只 1 条（创建事件时同步
+            # 落索引；防重分支复用 event_id，不再新插 timeline 行）
+            te_for_event = [r for r in te_rows if r["event_id"] == pe_rows[0]["event_id"]]
+            assert len(te_for_event) == 1, (
+                f"对应 event 的 timeline 索引行只 1 条；实得 {len(te_for_event)} 条"
+            )
+            assert te_for_event[0]["description"] == "叶尘从废脉少年踏上星辰之路"
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
 # P1.2 GET /runs/{id} PAUSED 携带 stage_models：按 agent 名聚合最近一次
 # 成功（error IS NULL）的 model_id；错误行不计入；多次调用取最新。
 # ---------------------------------------------------------------------------

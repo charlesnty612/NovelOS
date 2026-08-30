@@ -1219,17 +1219,33 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
         arc_summary = (volume_raw.get("arc_summary") or "").strip()
         if arc_summary:
             try:
-                ev = PlotService(db_path).create_event(
-                    project_id=project_id,
-                    type="other",
-                    cause=[],
-                    effects=[],
-                    participants=[],
-                    time={"timeline_day": 1, "in_story_date": None},
-                    status="planned",
-                    visibility="RESTRICTED",
-                )
-                event_id = ev.id
+                plot_svc = PlotService(db_path)
+                # 防重：同 project 下若已有 type='other' AND status='planned' AND
+                # description=arc_summary 的事件，复用其 id（避免重复 init 堆占位）。
+                # list_events 的内存比对足够（命中期望 0/1 条；用 PlotService
+                # 现有查询而不是再开 db 连接）。
+                existing_id: str | None = None
+                for _ev in plot_svc.list_events(
+                    project_id, type="other", status="planned"
+                ):
+                    if (_ev.description or "").strip() == arc_summary:
+                        existing_id = _ev.id
+                        break
+                if existing_id is not None:
+                    event_id = existing_id
+                else:
+                    ev = plot_svc.create_event(
+                        project_id=project_id,
+                        type="other",
+                        cause=[],
+                        effects=[],
+                        participants=[],
+                        time={"timeline_day": 1, "in_story_date": None},
+                        status="planned",
+                        visibility="RESTRICTED",
+                        description=arc_summary,
+                    )
+                    event_id = ev.id
             except Exception:  # noqa: BLE001 —— plot_event 失败不阻断主流程
                 _log.warning("project_init persist_all: plot_event creation failed", exc_info=True)
 

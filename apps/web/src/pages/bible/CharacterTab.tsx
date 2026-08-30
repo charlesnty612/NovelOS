@@ -6,7 +6,7 @@ import type {
   CharacterRole,
   CharacterUpdatePayload,
 } from '../../api/types';
-import { formatDateTime, formatJson } from '../../utils/format';
+import { formatDateTime } from '../../utils/format';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
 import { ReadableJson, RawJsonDetails } from '../../components/ReadableJson';
@@ -273,17 +273,81 @@ interface CharacterFormModalProps {
   ) => Promise<void>;
 }
 
+// core_json 表单键对齐后端写入契约：project_init pipeline L1274-1284 会把
+// motivation/goal/conflict/distinctive_trait/relationships 五个 key 注入角色
+// core_json；前端表单必须按这套键读写，否则真实角色编辑会五框全空白。
+// 历史上的 personality/values/fears/desires/flaws 是早期方案，DB 现存 0 条
+// （全库 9 角色已无旧键），本次直接切到新键。
+type CoreFieldKey =
+  | 'motivation'
+  | 'goal'
+  | 'conflict'
+  | 'distinctive_trait'
+  | 'relationships';
+
 const CORE_FIELDS: Array<{
-  key: 'personality' | 'values' | 'fears' | 'desires' | 'flaws';
+  key: CoreFieldKey;
   label: string;
   hint: string;
 }> = [
-  { key: 'personality', label: '性格 personality', hint: '一句话或关键词列表' },
-  { key: 'values', label: '价值观 values', hint: 'TA 坚守/践行的原则' },
-  { key: 'fears', label: '恐惧 fears', hint: 'TA 害怕/回避的东西' },
-  { key: 'desires', label: '欲望 desires', hint: 'TA 想要追求的东西' },
-  { key: 'flaws', label: '缺陷 flaws', hint: 'TA 的弱点/盲点' },
+  { key: 'motivation', label: '动机 motivation', hint: '驱动 TA 行动的核心动力' },
+  { key: 'goal', label: '目标 goal', hint: 'TA 想达成的具体目标' },
+  { key: 'conflict', label: '冲突 conflict', hint: 'TA 面对的关键矛盾' },
+  {
+    key: 'distinctive_trait',
+    label: '特质 distinctive_trait',
+    hint: '让 TA 区别于他人的辨识点',
+  },
+  {
+    key: 'relationships',
+    label: '关系 relationships',
+    hint: 'TA 与其他角色的关系（JSON 对象/数组，例如 {"ally":"苏挽"}）',
+  },
 ];
+
+/**
+ * 把 core_json 的原始值（字符串/对象/数组）渲染成 textarea 文本：
+ * - 字符串：原样显示
+ * - 对象/数组：JSON.stringify 美化
+ * - 空值：空串
+ *
+ * 表单内一律以"字符串"展示；保存时按字段语义回写（见 stringifyCoreField）。
+ */
+function readCoreFieldText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * relationships 等结构化字段保存时尝试 JSON.parse 回对象/数组；
+ * 解析失败则按字符串存（兜底，避免破坏历史纯文本数据）。
+ * motivation/goal/conflict/distinctive_trait 视为纯文本。
+ */
+function parseCoreField(
+  key: CoreFieldKey,
+  text: string,
+): unknown {
+  const trimmed = text.trim();
+  if (trimmed === '') return undefined; // 空串 = 不写该键
+  if (key !== 'relationships') return trimmed;
+  // relationships：尝试解析为 JSON
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed === null || typeof parsed !== 'object') {
+      // 基本类型（数字/字符串/布尔）— 当作字符串存
+      return trimmed;
+    }
+    return parsed;
+  } catch {
+    // 解析失败：按字符串存，保留原文
+    return trimmed;
+  }
+}
 
 function CharacterFormModal({
   title,
@@ -300,9 +364,10 @@ function CharacterFormModal({
     if (initial) {
       const cj = initial.core_json ?? {};
       for (const f of CORE_FIELDS) {
-        const v = cj[f.key];
-        if (typeof v === 'string') base[f.key] = v;
-        else if (v !== undefined && v !== null) base[f.key] = formatJson(v);
+        // 历史遗留字段（personality/values/fears/desires/flaws/relationship）即使在
+        // 某些环境里残留，也不再回填到新表单框——本次切换到后端契约五键，避免误导。
+        // 非表单键（包括 relationship 单数）由 baseCoreJson 在保存时一并保留。
+        base[f.key] = readCoreFieldText(cj[f.key]);
       }
     }
     return base;
@@ -319,12 +384,12 @@ function CharacterFormModal({
     }
     const formCore: Record<string, unknown> = {};
     for (const f of CORE_FIELDS) {
-      const v = core[f.key].trim();
-      if (v === '') continue;
+      const v = parseCoreField(f.key, core[f.key]);
+      if (v === undefined) continue;
       formCore[f.key] = v;
     }
     // 编辑场景：以 baseCoreJson（=打开编辑器时的全量 core_json）为基底，
-    // 用本次表单字段覆盖对应键；非表单键（motivation/goal/conflict/relationship 等）保留原值。
+    // 用本次表单字段覆盖对应键；非表单键（如历史的 relationship 单数 / 自定义键）保留原值。
     // 新建场景无 baseCoreJson，提交体仅为表单字段（保持原行为，避免凭空填入非表单键）。
     const core_json: Record<string, unknown> = baseCoreJson
       ? { ...baseCoreJson, ...formCore }

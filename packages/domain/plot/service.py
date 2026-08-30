@@ -29,6 +29,12 @@ from typing import Any
 from packages.core.db import get_connection
 from packages.core.ids import new_id
 
+# V3.1 P1-1.2：who_knows 三态编码与反序列化对齐 write_helpers（与 ledger / canon
+# 写透统一），timeline_events 行映射走 ``decode_who_knows`` 与 hooks/debts 一致。
+from packages.core.story_state.write_helpers import (
+    decode_who_knows as _decode_who_knows,
+)
+
 from .models import (
     PLOT_EVENT_STATUSES,
     PLOT_EVENT_TYPES,
@@ -103,6 +109,7 @@ class PlotService:
         introduced_chapter_id: str | None = None,
         visibility: str | None = None,
         who_knows: list[str] | None = None,
+        description: str | None = None,
     ) -> PlotEvent:
         # 前置校验（多数在开连接前完成，避免持有连接时校验失败）
         self._require_project(project_id)
@@ -113,6 +120,12 @@ class PlotService:
         cause = self._validate_id_list(cause, "cause")
         effects = self._validate_id_list(effects, "effects")
         participants = self._validate_id_list(participants, "participants")
+        # description：非 None 必须 str；strip 后空串归一为 None。
+        # 前端表单偶发提交全空白字符串，落库前归一化避免「看不见的空行」。
+        if description is not None:
+            if not isinstance(description, str):
+                raise ValidationError("description 必须是字符串")
+            description = description.strip() or None
 
         status = status or "planned"
         if status not in PLOT_EVENT_STATUSES:
@@ -169,18 +182,24 @@ class PlotService:
                     event_id, project_id, type,
                     cause_json, effects_json, participants_json,
                     location_id, time_json, status,
-                    introduced_chapter_id, visibility, who_knows
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    introduced_chapter_id, visibility, who_knows,
+                    description
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     eid, project_id, type,
                     cause_json, effects_json, participants_json,
                     location_id, time_json, status,
                     introduced_chapter_id, visibility, who_knows_json,
+                    description,
                 ),
             )
 
             # PRD §20：若 time.timeline_day 存在 → 自动同步插入 timeline_events
+            # V3.1 P1-1.2：timeline_events.visibility/who_knows 复用 plot_events 同源列，
+            # 避免 timeline 索引与事件表出现「公开度口径分叉」（迁移 0019 B3 已对齐）。
+            # 写入语义：who_knows 经 ``encode_who_knows`` 三态编码（None→NULL、[]→'[]'、
+            # list→JSON），与 canon 写透 / hooks/debts 共用 ``write_helpers`` 助手。
             timeline_day = self._extract_timeline_day(time)
             if timeline_day is not None:
                 self._insert_timeline_event(
@@ -189,7 +208,9 @@ class PlotService:
                     event_id=eid,
                     day_index=timeline_day,
                     time_ref=None,
-                    description=None,
+                    description=description,
+                    visibility=visibility,
+                    who_knows_json=who_knows_json,
                 )
 
             conn.commit()
@@ -212,6 +233,7 @@ class PlotService:
             introduced_chapter_id=introduced_chapter_id,
             visibility=visibility,
             who_knows=who_knows,
+            description=description,
         )
 
     def get_event(self, event_id: str) -> PlotEvent | None:
@@ -273,6 +295,7 @@ class PlotService:
         introduced_chapter_id: str | None = None,
         visibility: str | None = None,
         who_knows: list[str] | None = None,
+        description: str | None = None,
     ) -> PlotEvent:
         existing = self.get_event(event_id)
         if existing is None:
@@ -332,6 +355,12 @@ class PlotService:
             params.append(
                 json.dumps(self._validate_who_knows(who_knows), ensure_ascii=False)
             )
+        if description is not None:
+            if not isinstance(description, str):
+                raise ValidationError("description 必须是字符串")
+            normalized = description.strip() or None
+            sets.append("description = ?")
+            params.append(normalized)
 
         if sets:
             params.append(event_id)
@@ -416,6 +445,8 @@ class PlotService:
         *,
         time_ref: str | None = None,
         description: str | None = None,
+        visibility: str | None = None,
+        who_knows: list[str] | None = None,
     ) -> TimelineEvent:
         self._require_project(project_id)
         self._require_exists("plot_events", "event_id", event_id, "event")
@@ -424,6 +455,17 @@ class PlotService:
         if day_index < 0:
             raise ValidationError("day_index 不能为负")
 
+        # V3.1 P1-1.2：手工 timeline 创建端点接受可选 visibility/who_knows（缺省 None
+        # → DDL 默认 'PUBLIC' / NULL），向后兼容旧调用；写穿路径与迁移 0019 走「事件
+        # 表同源」路径不走这里。
+        resolved_visibility = (
+            visibility if visibility is not None else "PUBLIC"
+        )
+        who_knows_json = (
+            json.dumps(who_knows, ensure_ascii=False)
+            if who_knows is not None else None
+        )
+
         tid = new_id("tle")
         conn = get_connection(self.db_path)
         try:
@@ -431,10 +473,13 @@ class PlotService:
                 """
                 INSERT INTO timeline_events (
                     timeline_event_id, project_id, event_id, day_index,
-                    time_ref, description
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    time_ref, description, visibility, who_knows
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (tid, project_id, event_id, day_index, time_ref, description),
+                (
+                    tid, project_id, event_id, day_index, time_ref, description,
+                    resolved_visibility, who_knows_json,
+                ),
             )
             conn.commit()
         except sqlite3.IntegrityError as exc:
@@ -450,6 +495,8 @@ class PlotService:
             day_index=day_index,
             time_ref=time_ref,
             description=description,
+            visibility=resolved_visibility,
+            who_knows=who_knows,
         )
 
     def list_timeline_events(self, project_id: str) -> list[TimelineEvent]:
@@ -504,17 +551,28 @@ class PlotService:
         day_index: int,
         time_ref: str | None,
         description: str | None,
+        visibility: str | None = None,
+        who_knows_json: str | None = None,
     ) -> None:
-        """插入 timeline_events 行；不 commit，由调用方统一提交（同事务）。"""
+        """插入 timeline_events 行；不 commit，由调用方统一提交（同事务）。
+
+        V3.1 P1-1.2：补 ``visibility`` / ``who_knows`` 伴随列，默认沿用 DDL
+        'PUBLIC' / NULL（向后兼容未传参的旧调用方）。create_event 写透路径会
+        传入 plot_events 同源值，避免 timeline 索引与事件表公开度分叉。
+        """
+        resolved_visibility = visibility if visibility is not None else "PUBLIC"
         tid = new_id("tle")
         conn.execute(
             """
             INSERT INTO timeline_events (
                 timeline_event_id, project_id, event_id, day_index,
-                time_ref, description
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                time_ref, description, visibility, who_knows
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (tid, project_id, event_id, day_index, time_ref, description),
+            (
+                tid, project_id, event_id, day_index, time_ref, description,
+                resolved_visibility, who_knows_json,
+            ),
         )
 
     @staticmethod
@@ -639,10 +697,18 @@ class PlotService:
             introduced_chapter_id=row["introduced_chapter_id"],
             visibility=row["visibility"],
             who_knows=json.loads(row["who_knows"]) if row["who_knows"] else None,
+            # V3.1 P1-1.1 修复 B1：DB 有 description 列（迁移 0013），行映射先前丢弃该列
+            # → list/get/update 路径都拿不到 observer 写入的事件描述。sqlite3.Row
+            # 支持按列名取值；旧库若列不存在会抛 KeyError，但 0013 已在生产跑过，
+            # 不存在「缺列」场景（防御见 _migrations 顺序保证）。
+            description=row["description"],
         )
 
     @staticmethod
     def _row_to_timeline(row: sqlite3.Row) -> TimelineEvent:
+        # V3.1 P1-1.2：行映射补 visibility/who_knows；who_knows 用 ``decode_who_knows``
+        # 与 ledger service 对齐（失败兜底 None）；visibility 缺列兜底 'PUBLIC'
+        # 对齐 DDL DEFAULT（0014 迁移已在生产加列，缺列场景仅遗留防御）。
         return TimelineEvent(
             id=row["timeline_event_id"],
             project_id=row["project_id"],
@@ -650,6 +716,8 @@ class PlotService:
             day_index=row["day_index"],
             time_ref=row["time_ref"],
             description=row["description"],
+            visibility=row["visibility"] if "visibility" in row.keys() else "PUBLIC",
+            who_knows=_decode_who_knows(row["who_knows"]) if "who_knows" in row.keys() else None,
         )
 
     @staticmethod

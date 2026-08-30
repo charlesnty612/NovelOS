@@ -26,6 +26,55 @@ import type { ChapterStatus, WorkflowRunStatus } from '../api/types';
 
 export type WorkflowAction = 'plan' | 'write' | 'review' | 'commit';
 
+export type PipelineStepState = 'done' | 'current' | 'todo';
+
+const STATUS_RANK: Record<ChapterStatus, number> = {
+  PLANNED: 0,
+  DRAFTED: 1,
+  REVIEWED: 2,
+  COMMITTED: 3,
+  RELEASED: 4,
+};
+
+/**
+ * 推导四步流水线（plan→write→review→commit）每步的展示状态。
+ * done    = 步骤产物已存在（状态机已越过该步，或 plan_json 已落库）；
+ * current = 第一个非 done 的步骤（用户下一步该做的）；
+ * todo    = 尚未到达。全部 done 时不存在 current（全部返回 'done'）。
+ * 注意：本函数只管展示态，按钮可否点击仍由 getButtonAvailability 决定。
+ */
+export function getPipelineStepStates(input: {
+  chapterStatus: ChapterStatus;
+  hasPlan: boolean;
+}): Record<WorkflowAction, PipelineStepState> {
+  const rank = STATUS_RANK[input.chapterStatus];
+  const done: Record<WorkflowAction, boolean> = {
+    plan: input.hasPlan || rank >= 1,
+    write: rank >= 1,
+    review: rank >= 2,
+    commit: rank >= 3,
+  };
+  const order: WorkflowAction[] = ['plan', 'write', 'review', 'commit'];
+  const result: Record<WorkflowAction, PipelineStepState> = {
+    plan: 'todo',
+    write: 'todo',
+    review: 'todo',
+    commit: 'todo',
+  };
+  let currentMarked = false;
+  for (const step of order) {
+    if (done[step]) {
+      result[step] = 'done';
+    } else if (!currentMarked) {
+      result[step] = 'current';
+      currentMarked = true;
+    } else {
+      result[step] = 'todo';
+    }
+  }
+  return result;
+}
+
 export interface ActiveRunInfo {
   status: WorkflowRunStatus;
 }
@@ -153,6 +202,32 @@ export function pickLatestRun<
   const mine = runs.filter((r) => isRunForChapter(r, chapterId));
   mine.sort((a, b) => (a.started_at < b.started_at ? 1 : a.started_at > b.started_at ? -1 : 0));
   return mine[0] ?? null;
+}
+
+/**
+ * run 是否「人工纯驳回」：error 精确等于 'rejected'（review author_review 节点产生）。
+ *
+ * 后端两态口径（packages/workflows/chapter_review/pipeline.py:594-599）：
+ *   - author_review 纯驳回 → FAILED(error='rejected')
+ *   - 驳回并改稿         → FAILED(error='rejected-for-revision')
+ * 其它 FAILED 的 error（如 commit 校验失败 'observer delta failed validation...'）
+ * 都包含子串 'rejected' 但不是真驳回，必须用精确匹配排除。
+ */
+export function isRejectedRun(error: string | null | undefined): boolean {
+  if (error == null) return false;
+  return error.trim() === 'rejected';
+}
+
+/**
+ * run 是否「驳回并改稿」：error 以 'rejected-for-revision' 开头。
+ *
+ * 顺序陷阱：'rejected-for-revision' 包含子串 'rejected'，调用方必须
+ * 先判 isRejectedForRevisionRun，再判 isRejectedRun，否则会被裸
+ * 'rejected' 分支误吞。
+ */
+export function isRejectedForRevisionRun(error: string | null | undefined): boolean {
+  if (error == null) return false;
+  return error.trim().startsWith('rejected-for-revision');
 }
 
 /**

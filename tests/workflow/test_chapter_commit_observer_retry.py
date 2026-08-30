@@ -6,7 +6,7 @@
    失败带错误提示重试 observer 1 次；通过后再调 submit_delta。
 2. mock observer 第一次非法、第二次合法 → commit COMPLETED、observer 被调 2 次、
    state_deltas 无本章 rejected 行（重试循环内不调 submit_delta）。
-3. mock 两次都非法 → run FAILED 且 error 含 "observer delta rejected by validator"。
+3. mock 两次都非法 → run FAILED 且 error 含 "observer delta failed validation"。
 4. 单次合法回归：原有测试已覆盖，此处复用同一链路确认。
 """
 
@@ -436,14 +436,14 @@ def test_chapter_commit_observer_retry_succeeds_on_second_attempt(tmp_path: Path
 
 
 def test_chapter_commit_observer_retry_fails_after_two_invalid_attempts(tmp_path: Path, monkeypatch):
-    """observer 第 1 次、第 2 次都非法 → run FAILED 且 error 含 "observer delta rejected by validator"。
+    """observer 第 1 次、第 2 次都非法 → run FAILED 且 error 含 "observer delta failed validation"。
 
     V3.1.1 O-2：本测试把 observer_split 强制 off，模拟旧单次路径；split on 路径下的
     失败语义由 ``test_chapter_commit_observer_split_fails_after_retry`` 覆盖。
 
     断言：
     - run.status == FAILED
-    - GET /runs/{id}.error 含 "observer delta rejected by validator"
+    - GET /runs/{id}.error 含 "observer delta failed validation"
     - chapters.status 保持 REVIEWED（commit 未推进）
     - state_deltas 中无 rejected 行（重试循环内未调 submit_delta）
     """
@@ -487,8 +487,8 @@ def test_chapter_commit_observer_retry_fails_after_two_invalid_attempts(tmp_path
             r = await _request(app, "GET", f"/api/runs/{run_id}")
             assert r.status_code == 200, r.text
             err = r.json().get("error") or ""
-            assert "observer delta rejected by validator" in err, (
-                f"error 应包含 'observer delta rejected by validator'，实际：{err!r}"
+            assert "observer delta failed validation" in err, (
+                f"error 应包含 'observer delta failed validation'，实际：{err!r}"
             )
 
             # chapters.status 保持 REVIEWED

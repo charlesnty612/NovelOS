@@ -57,6 +57,25 @@ def _dump(value: Any) -> str:
     return _dump_json(value)
 
 
+def _extract_timeline_day(time: dict | None) -> int | None:
+    """从 ``new_events[].time`` 提取 ``timeline_day``，口径对齐 ``PlotService._extract_timeline_day``。
+
+    - time 缺失 / 非 dict / ``timeline_day`` 缺失 → None（不插 timeline 行）。
+    - 非 int / 负数 → None（同 PlotService 的静默失败语义：宁可少插也不报错，
+      与 commit 写透的「不应阻断 commit」目标一致）。
+    """
+    if not isinstance(time, dict):
+        return None
+    td = time.get("timeline_day")
+    if td is None:
+        return None
+    if not isinstance(td, int):
+        return None
+    if td < 0:
+        return None
+    return td
+
+
 def _dump_or_null(value: list | dict | None) -> str | None:
     """``None`` → ``NULL``；list/dict → JSON。
 
@@ -511,6 +530,11 @@ def write_through(
         rel_type = rel.get("relation_type")
         op = rel.get("op")
         after = rel.get("after")
+        # 三态语义：对齐 hooks/debts 既有分支——缺失/None=沿用（不写该列），
+        # 非 None=显式覆盖。visibility 缺失默认 'PUBLIC'（与迁移 0014 DDL 默认
+        # 值一致；后续 inverse/rollback 阶段 commit 前 latest 行即落入 default）。
+        rel_who = encode_who_knows(read_who_knows(rel))
+        rel_vis = read_visibility(rel) or "PUBLIC"
         existing = conn.execute(
             """
             SELECT relationship_id FROM relationships
@@ -526,10 +550,14 @@ def write_through(
                         """
                         INSERT INTO relationships
                             (relationship_id, project_id, from_character_id, to_character_id,
-                             relation_type, state_json, last_state_version)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                             relation_type, state_json, last_state_version,
+                             visibility, who_knows)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (rid, project_id, from_id, to_id, rel_type, _dump(after or {}), new_version),
+                        (
+                            rid, project_id, from_id, to_id, rel_type,
+                            _dump(after or {}), new_version, rel_vis, rel_who,
+                        ),
                     )
                 except sqlite3.IntegrityError:
                     # 0017 唯一索引 ``idx_relationships_unique`` 兜底：并发 add 在
@@ -546,21 +574,61 @@ def write_through(
                     if existing is None:
                         # 不应发生：唯一索引报错却查不到行 → 让调用方感知
                         raise
+                    # 兜底分支同样按三态语义：who_knows 缺失=不更新该列；
+                    # visibility 缺失=沿用实体现状。
+                    if rel_who is not None:
+                        conn.execute(
+                            """
+                            UPDATE relationships
+                            SET state_json = ?, last_state_version = ?,
+                                visibility = ?, who_knows = ?
+                            WHERE relationship_id = ?
+                            """,
+                            (
+                                _dump(after or {}), new_version, rel_vis, rel_who,
+                                existing["relationship_id"],
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE relationships
+                            SET state_json = ?, last_state_version = ?, visibility = ?
+                            WHERE relationship_id = ?
+                            """,
+                            (
+                                _dump(after or {}), new_version, rel_vis,
+                                existing["relationship_id"],
+                            ),
+                        )
+            else:
+                # 已存在关系按三态语义 UPDATE：who_knows 缺失=不写该列；
+                # visibility 缺失=沿用（与 hooks/debts 同款口径）。
+                if rel_who is not None:
                     conn.execute(
                         """
-                        UPDATE relationships SET state_json = ?, last_state_version = ?
+                        UPDATE relationships
+                        SET state_json = ?, last_state_version = ?,
+                            visibility = ?, who_knows = ?
                         WHERE relationship_id = ?
                         """,
-                        (_dump(after or {}), new_version, existing["relationship_id"]),
+                        (
+                            _dump(after or {}), new_version, rel_vis, rel_who,
+                            existing["relationship_id"],
+                        ),
                     )
-            else:
-                conn.execute(
-                    """
-                    UPDATE relationships SET state_json = ?, last_state_version = ?
-                    WHERE relationship_id = ?
-                    """,
-                    (_dump(after or {}), new_version, existing["relationship_id"]),
-                )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE relationships
+                        SET state_json = ?, last_state_version = ?, visibility = ?
+                        WHERE relationship_id = ?
+                        """,
+                        (
+                            _dump(after or {}), new_version, rel_vis,
+                            existing["relationship_id"],
+                        ),
+                    )
         elif op == "remove":
             if existing is not None:
                 conn.execute("DELETE FROM relationships WHERE relationship_id = ?", (existing["relationship_id"],))
@@ -610,6 +678,49 @@ def write_through(
                     ev.get("description"),
                 ),
             )
+
+            # V3.1 P1-1.1 修复 B2：commit 写透路径此前只插 plot_events，未同步
+            # timeline_events，导致右侧时间线断供（与 ``PlotService.create_event``
+            # 既有「time.timeline_day → 同事务插 timeline_events」先例脱节）。
+            # 口径对齐 PlotService：
+            #   - timeline_day 提取：复用 ``_extract_timeline_day`` 静默失败语义
+            #     （非 int / 负数 / None → 不插 timeline 行，与 create_event 同款）。
+            #   - id 生成：``tle_`` + 12 位 hex（与 ``_insert_timeline_event`` 同源
+            #     ``new_id("tle")`` 口径）。
+            #   - 幂等：commit 重放 / 同一 event_id 二次写透不重复插（先 SELECT
+            #     event_id 判存）；与迁移 0019 回填口径一致。
+            #   - 描述：复用 ``ev.get("description")``（即 plot_events.description 同源），
+            #     不重复 observer 字段以免口径漂移。
+            ev_time = ev.get("time") or {"timeline_day": 1}
+            timeline_day = _extract_timeline_day(ev_time)
+            if timeline_day is not None:
+                existing_tle = conn.execute(
+                    "SELECT 1 FROM timeline_events WHERE event_id = ? LIMIT 1",
+                    (ev["event_id"],),
+                ).fetchone()
+                if existing_tle is None:
+                    in_story_date = ev_time.get("in_story_date")
+                    time_ref = (
+                        str(in_story_date) if in_story_date is not None else None
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO timeline_events
+                            (timeline_event_id, project_id, event_id, day_index,
+                             time_ref, description, visibility, who_knows)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            new_id("tle"),
+                            project_id,
+                            ev["event_id"],
+                            timeline_day,
+                            time_ref,
+                            ev.get("description"),
+                            ev_vis,
+                            ev_who,
+                        ),
+                    )
 
     # resolved_hooks
     # 哨兵：notes 含 ``__CLEAR_PAYOFF_CHAPTER__`` → 显式把 hooks.payoff_chapter_id 置 NULL

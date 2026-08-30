@@ -29,7 +29,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
@@ -398,7 +397,9 @@ class LedgerService:
             v = payload.who_knows
             if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
                 raise ValidationError("who_knows must be list[str] or null")
-            fields["who_knows"] = json.dumps(v, ensure_ascii=False)
+            # V3.1 P1-1.2：与 hooks.update_hook 同源——共享 ``_dump_json_or_null``
+            # 写面助手，who_knows 三态（None/[]/list → None/'[]'/JSON）由助手统一管。
+            fields["who_knows"] = _dump_json_or_null(v)
 
         if not fields:
             return existing

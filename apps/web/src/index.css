@@ -591,26 +591,126 @@ a:hover {
   align-self: center;
 }
 
-.workflow-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+/* ============================================================================
+ * 工作流操作：四步流水线（plan → write → review → commit）
+ * --------------------------------------------------------------------------
+ * grid 列 = 1fr 24px 1fr 24px 1fr 24px 1fr，connector 占固定 24px 列。
+ * 窄屏 < 960px 折叠为单列，connector 旋转 90° 让箭头垂直。
+ * ========================================================================= */
+.wf-pipeline {
+  display: grid;
+  grid-template-columns: 1fr 24px 1fr 24px 1fr 24px 1fr;
+  align-items: stretch;
+  gap: 0;
 }
-.workflow-actions .btn {
+.wf-step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-elev);
+  min-width: 0;
+}
+.wf-step[data-state='current'] {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+}
+.wf-step[data-state='todo'] {
+  opacity: 0.55;
+}
+.wf-step__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.wf-step__dot {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+.wf-step__dot[data-state='done'] {
+  background: var(--color-success, #2a9d6a);
+  color: #fff;
+}
+.wf-step__dot[data-state='current'] {
+  background: var(--color-primary);
+  color: #fff;
+}
+.wf-step__dot[data-state='todo'] {
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text-muted);
+}
+.wf-step__name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.wf-step__state {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin-left: auto;
+}
+.wf-step__state--current {
+  color: var(--color-primary);
+}
+.wf-step__btn {
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  padding: var(--space-2) var(--space-3);
   text-align: left;
-  min-width: 120px;
+  padding: 6px var(--space-3);
 }
-.workflow-actions .btn__title {
+.wf-step__btn .btn__title {
   font-weight: 600;
 }
-.workflow-actions .btn__hint {
+.wf-step__btn .btn__hint {
   font-size: 11px;
   color: var(--color-text-muted);
   margin-top: 2px;
+}
+.wf-step__btn.btn--primary .btn__hint {
+  color: rgba(255, 255, 255, 0.85);
+}
+.wf-step__select {
+  width: 100%;
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  background: var(--color-bg-elev);
+}
+.wf-step__extra {
+  font-size: 11px;
+}
+.wf-step__connector {
+  align-self: center;
+  justify-self: center;
+  color: var(--color-border-strong);
+  font-size: 14px;
+  line-height: 1;
+  user-select: none;
+}
+.wf-step__connector::before {
+  content: '→';
+}
+@media (max-width: 960px) {
+  .wf-pipeline {
+    grid-template-columns: 1fr;
+  }
+  .wf-step__connector {
+    transform: rotate(90deg);
+  }
 }
 
 /* ============================================================================

@@ -4,7 +4,10 @@ import {
   EXPECTED_STATUS,
   countHighRiskChanges,
   getButtonAvailability,
+  getPipelineStepStates,
   isActiveRun,
+  isRejectedForRevisionRun,
+  isRejectedRun,
   isRunForChapter,
   pickActiveRun,
   pickLatestRun,
@@ -279,5 +282,135 @@ describe('countHighRiskChanges', () => {
   it('changes 字段非对象 → 0', () => {
     expect(countHighRiskChanges({ changes: 'oops' })).toBe(0);
     expect(countHighRiskChanges({ changes: ['x'] })).toBe(0);
+  });
+});
+
+describe('getPipelineStepStates', () => {
+  it('PLANNED 且无 plan → plan=current，其余 todo', () => {
+    expect(
+      getPipelineStepStates({ chapterStatus: 'PLANNED', hasPlan: false }),
+    ).toEqual({
+      plan: 'current',
+      write: 'todo',
+      review: 'todo',
+      commit: 'todo',
+    });
+  });
+
+  it('PLANNED 且有 plan（hasPlan=true）→ plan=done，write=current', () => {
+    expect(
+      getPipelineStepStates({ chapterStatus: 'PLANNED', hasPlan: true }),
+    ).toEqual({
+      plan: 'done',
+      write: 'current',
+      review: 'todo',
+      commit: 'todo',
+    });
+  });
+
+  it('DRAFTED（有 plan）→ plan/write=done，review=current', () => {
+    expect(
+      getPipelineStepStates({ chapterStatus: 'DRAFTED', hasPlan: true }),
+    ).toEqual({
+      plan: 'done',
+      write: 'done',
+      review: 'current',
+      commit: 'todo',
+    });
+  });
+
+  it('DRAFTED 但无 plan → plan 也按 hasPlan=true 抬升（rank>=1）', () => {
+    expect(
+      getPipelineStepStates({ chapterStatus: 'DRAFTED', hasPlan: false }),
+    ).toEqual({
+      plan: 'done',
+      write: 'done',
+      review: 'current',
+      commit: 'todo',
+    });
+  });
+
+  it('REVIEWED → 仅 commit=current，其余 done', () => {
+    expect(
+      getPipelineStepStates({ chapterStatus: 'REVIEWED', hasPlan: true }),
+    ).toEqual({
+      plan: 'done',
+      write: 'done',
+      review: 'done',
+      commit: 'current',
+    });
+  });
+
+  it('COMMITTED → 全 done（无 current）', () => {
+    expect(
+      getPipelineStepStates({ chapterStatus: 'COMMITTED', hasPlan: true }),
+    ).toEqual({
+      plan: 'done',
+      write: 'done',
+      review: 'done',
+      commit: 'done',
+    });
+  });
+
+  it('RELEASED → 全 done', () => {
+    expect(
+      getPipelineStepStates({ chapterStatus: 'RELEASED', hasPlan: true }),
+    ).toEqual({
+      plan: 'done',
+      write: 'done',
+      review: 'done',
+      commit: 'done',
+    });
+  });
+});
+
+describe('isRejectedRun / isRejectedForRevisionRun (后端两态严格匹配)', () => {
+  it("'rejected' → isRejectedRun true / isRejectedForRevisionRun false", () => {
+    expect(isRejectedRun('rejected')).toBe(true);
+    expect(isRejectedForRevisionRun('rejected')).toBe(false);
+  });
+
+  it("'rejected-for-revision' → 反之 isRejectedRun false / isRejectedForRevisionRun true", () => {
+    expect(isRejectedRun('rejected-for-revision')).toBe(false);
+    expect(isRejectedForRevisionRun('rejected-for-revision')).toBe(true);
+  });
+
+  it("commit 校验失败 'observer delta rejected by validator: errors=[...]' → 两 helper 皆 false（防误判）", () => {
+    const err = 'observer delta rejected by validator: errors=[orphan ref to c1]';
+    expect(isRejectedRun(err)).toBe(false);
+    expect(isRejectedForRevisionRun(err)).toBe(false);
+  });
+
+  it("'observer delta failed validation: errors=[...]' → 两 helper 皆 false", () => {
+    const err = 'observer delta failed validation: errors=[something]';
+    expect(isRejectedRun(err)).toBe(false);
+    expect(isRejectedForRevisionRun(err)).toBe(false);
+  });
+
+  it('null / undefined / 空串 → 两 helper 皆 false', () => {
+    expect(isRejectedRun(null)).toBe(false);
+    expect(isRejectedRun(undefined)).toBe(false);
+    expect(isRejectedRun('')).toBe(false);
+    expect(isRejectedForRevisionRun(null)).toBe(false);
+    expect(isRejectedForRevisionRun(undefined)).toBe(false);
+    expect(isRejectedForRevisionRun('')).toBe(false);
+  });
+
+  it('前后带空白的 " rejected " 仍视为纯驳回（trim 后相等）', () => {
+    expect(isRejectedRun('  rejected ')).toBe(true);
+    expect(isRejectedForRevisionRun('  rejected ')).toBe(false);
+    expect(isRejectedForRevisionRun('  rejected-for-revision ')).toBe(true);
+    expect(isRejectedRun('  rejected-for-revision ')).toBe(false);
+  });
+
+  it('顺序陷阱：rejected-for-revision 必须先判（裸 rejected 不会误吞）', () => {
+    // 模拟调用方"先 isRejectedForRevisionRun 再 isRejectedRun"的正确顺序
+    const err = 'rejected-for-revision';
+    const isRevFirst = isRejectedForRevisionRun(err) || isRejectedRun(err);
+    expect(isRevFirst).toBe(true); // 第一支命中，正确分支为「驳回并改稿」
+
+    // 反向顺序会得到错误结论（'rejected' 也是 false 的原因）—— 验证裸 rejected 严格匹配
+    expect(isRejectedRun('rejected')).toBe(true);
+    expect(isRejectedRun('rejected-for-revision')).toBe(false);
   });
 });

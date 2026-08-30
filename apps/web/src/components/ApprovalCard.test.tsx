@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ApprovalCard } from './ApprovalCard';
 
 describe('ApprovalCard', () => {
@@ -467,5 +467,134 @@ describe('ApprovalCard', () => {
     );
     const applyBtns = screen.getAllByTestId('approval-apply-suggestion');
     applyBtns.forEach((b) => expect(b).toBeDisabled());
+  });
+
+  // -------- chapter-commit.high_risk_approval：变更明细列表 --------
+
+  /** 构造 1 HIGH world rule + 1 MEDIUM character 的 pausePayload */
+  function highRiskPayload() {
+    return {
+      stage: 'chapter-commit.high_risk_approval',
+      message: '高风险变更待审批',
+      delta_id: 'd_high',
+      changes: {
+        character_changes: [
+          {
+            change_id: 'cc:01HCMED001',
+            op: 'update',
+            target_id: 'char_shen_zhiyao',
+            character_id: 'char_shen_zhiyao',
+            facet: 'state',
+            field: 'state.rule',
+            before: null,
+            after: '沈鹤龄向沈知遥明令两条当铺规矩：其一，不得擅入死当库最里头那间。',
+            confidence: 0.92,
+            evidence: {
+              chapter_id: 'ch_03',
+              scene_id: 's_03_02',
+              excerpt: '「从今往后，死当库最里头那间，你不许进。」',
+              span: [410, 438],
+            },
+            notes: '新增的家规需要当事人确认',
+            risk_level: 'MEDIUM',
+            visibility: 'private',
+            who_knows: ['沈鹤龄', '沈知遥'],
+          },
+        ],
+        world_changes: [
+          {
+            change_id: 'wc:01HRULE001',
+            op: 'add',
+            target_id: 'rule_dead_pawn_inner',
+            world_id: 'rule_dead_pawn_inner',
+            world_kind: 'rule',
+            field: 'definition',
+            before: null,
+            after: '死当库最里头那间为沈鹤龄明确禁止进入的区域。',
+            confidence: 0.95,
+            evidence: {
+              chapter_id: 'ch_03',
+              scene_id: 's_03_02',
+              excerpt: '「从今往后，死当库最里头那间，你不许进。」',
+              span: [410, 438],
+            },
+            notes: '',
+            risk_level: 'HIGH',
+            visibility: 'public',
+            who_knows: ['沈鹤龄', '沈知遥'],
+          },
+        ],
+      },
+    };
+  }
+
+  it('high_risk_approval：渲染明细列表，HIGH 排最前，徽标/值/引文正确', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        stage="chapter-commit.high_risk_approval"
+        message="高风险变更待审批"
+        pausePayload={highRiskPayload() as Record<string, unknown>}
+        highRiskChangeCount={2}
+      />,
+    );
+    // 顶部计数区仍在
+    expect(screen.getByText('2 项')).toBeInTheDocument();
+    // 表单网格内的两个计数项（"1" 与 "1"）
+    const formGrid = screen.getByText('待审批变更条数').parentElement as HTMLElement;
+    const grid = formGrid.parentElement as HTMLElement;
+    expect(within(grid).getAllByText('1')).toHaveLength(2);
+    // 明细列表 2 条
+    const list = screen.getByTestId('high-risk-change-list');
+    expect(list).toBeInTheDocument();
+    const items = screen.getAllByTestId('high-risk-change-item');
+    expect(items).toHaveLength(2);
+    // HIGH 排第一
+    expect(items[0]).toHaveAttribute('data-risk', 'HIGH');
+    expect(items[1]).toHaveAttribute('data-risk', 'MEDIUM');
+    // 第一条（world rule HIGH）：风险/操作/类型徽标文案
+    const firstItem = items[0]!;
+    expect(within(firstItem).getByTestId('high-risk-change-risk')).toHaveTextContent('高风险');
+    expect(within(firstItem).getByTestId('high-risk-change-op')).toHaveTextContent('新增');
+    expect(within(firstItem).getByTestId('high-risk-change-type')).toHaveTextContent('规则');
+    // after 文本「新增：死当库最里头那间为沈鹤龄明确禁止进入的区域。」出现
+    expect(
+      within(firstItem).getByTestId('high-risk-change-value').textContent,
+    ).toContain('新增：死当库最里头那间为沈鹤龄明确禁止进入的区域。');
+    // 引文出现且截断到 80 字（标题含全文）
+    const notesLine = within(firstItem).getByTestId('high-risk-change-notes');
+    expect(notesLine.textContent).toContain('引文：');
+    const valueEl = within(firstItem).getByTestId('high-risk-change-value');
+    expect(valueEl.getAttribute('title') ?? '').toContain('死当库最里头那间为沈鹤龄明确禁止进入的区域。');
+    // 第二条（character MEDIUM）：类型徽标「人物」、操作「更新」、风险「中风险」
+    const secondItem = items[1]!;
+    expect(within(secondItem).getByTestId('high-risk-change-risk')).toHaveTextContent('中风险');
+    expect(within(secondItem).getByTestId('high-risk-change-op')).toHaveTextContent('更新');
+    expect(within(secondItem).getByTestId('high-risk-change-type')).toHaveTextContent('人物');
+    // InfoBanner 文案末尾追加变更明细提示
+    expect(
+      screen.getByText(/下方列出全部变更明细（高风险置顶），请逐条过目后再批准/),
+    ).toBeInTheDocument();
+  });
+
+  it('high_risk_approval：pausePayload.changes 缺失时明细区不渲染，计数区仍在', () => {
+    render(
+      <ApprovalCard
+        {...baseProps}
+        stage="chapter-commit.high_risk_approval"
+        message="高风险变更待审批"
+        pausePayload={{
+          stage: 'chapter-commit.high_risk_approval',
+          message: '高风险变更待审批',
+          delta_id: 'd_empty',
+        }}
+        highRiskChangeCount={0}
+      />,
+    );
+    // 计数区三条 Field 仍在
+    expect(screen.getByText('0 项')).toBeInTheDocument();
+    // 明细区不存在
+    expect(screen.queryByTestId('high-risk-change-list')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('high-risk-change-item')).not.toBeInTheDocument();
   });
 });

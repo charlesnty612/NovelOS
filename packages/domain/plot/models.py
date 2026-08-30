@@ -49,6 +49,9 @@ class PlotEvent:
     introduced_chapter_id: str | None = None
     visibility: str = "RESTRICTED"
     who_knows: list[str] | None = None
+    # V3.1 P1-1.1：迁移 0013 在 DB 加 ``description TEXT`` 列，observer 写透路径
+    # 已落该列内容，但领域模型/API 响应此前未暴露 → 修复 B1：补齐字段透出。
+    description: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +67,7 @@ class PlotEvent:
             "introduced_chapter_id": self.introduced_chapter_id,
             "visibility": self.visibility,
             "who_knows": self.who_knows,
+            "description": self.description,
         }
 
 
@@ -77,6 +81,10 @@ class TimelineEvent:
     day_index: int
     time_ref: str | None = None
     description: str | None = None
+    # V3.1 P1-1.2：补 visibility/who_knows 伴随列；与 plot_events 同源（迁移 0019
+    # 已对齐 DDL + 回填）。默认与 DDL DEFAULT 一致：'PUBLIC' / None。
+    visibility: str = "PUBLIC"
+    who_knows: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -86,6 +94,8 @@ class TimelineEvent:
             "day_index": self.day_index,
             "time_ref": self.time_ref,
             "description": self.description,
+            "visibility": self.visibility,
+            "who_knows": self.who_knows,
         }
 
 

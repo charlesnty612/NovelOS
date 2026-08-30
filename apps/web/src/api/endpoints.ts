@@ -164,8 +164,10 @@ export const eventsApi = {
 function normalizeEvent(row: PlotEvent): PlotEvent {
   return {
     ...row,
-    cause: coerceJson(row.cause) as Record<string, unknown> | null,
-    effects: coerceJson(row.effects) as Record<string, unknown> | null,
+    // 后端契约：cause/effects 是 event_id 字符串数组（plot/models.py L40-41）；
+    // 若服务端把列表 JSON 序列化成字符串，统一经 coerceJson 还原成数组。
+    cause: coerceJson(row.cause) as string[] | null,
+    effects: coerceJson(row.effects) as string[] | null,
     time: coerceJson(row.time) as Record<string, unknown> | null,
   };
 }

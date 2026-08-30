@@ -10,6 +10,7 @@
 // Reuses 现有 .badge / .badge--* 类（见 src/index.css），新增 .badge--chapter-* 类。
 
 import type { ChapterStatus } from '../api/types';
+import { isRejectedForRevisionRun, isRejectedRun } from '../utils/chapterState';
 
 const LABEL: Record<ChapterStatus, string> = {
   PLANNED: '计划中',
@@ -46,16 +47,16 @@ export function WorkflowRunStatusBadge({
    *  与真失败——前者是审校改稿回路的正常语义，渲染成中性徽标避免误导为红色失败。 */
   error?: string | null;
 }) {
-  // 后端「驳回」两态：
+  // 后端「驳回」两态（严格匹配，避免把 commit 校验失败 'observer delta failed validation...'
+  // 等普通 FAILED 误判成「已驳回」）：
   //   rejected-for-revision = 按建议修改/驳回并改稿（会自动重跑 write→review）
   //   rejected              = 纯驳回（作者主动驳回，章节保持 DRAFTED）
   // 两者都用中性 badge--chapter-rejected 徽标，避免与真失败的红色 FAILED 混淆。
-  // 判断顺序：rejected-for-revision 包含子串 rejected，必须先判。
-  const err = error ?? '';
+  // 判断顺序：rejected-for-rerevision 先判（精确匹配由 helper 内部保证）。
   const rejectedForRevision =
-    status === 'FAILED' && err.includes('rejected-for-revision');
+    status === 'FAILED' && isRejectedForRevisionRun(error);
   const rejectedOnly =
-    !rejectedForRevision && status === 'FAILED' && err.includes('rejected');
+    !rejectedForRevision && status === 'FAILED' && isRejectedRun(error);
   const isRejected = rejectedForRevision || rejectedOnly;
   const cls = isRejected
     ? 'badge badge--chapter-rejected'

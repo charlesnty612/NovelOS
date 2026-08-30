@@ -117,6 +117,99 @@ _OBSERVER_ALL_ARRAYS = _OBSERVER_LEG_A_ARRAYS + _OBSERVER_LEG_B_ARRAYS
 _OBSERVER_LEG_A_SET = frozenset(_OBSERVER_LEG_A_ARRAYS)
 _OBSERVER_LEG_B_SET = frozenset(_OBSERVER_LEG_B_ARRAYS)
 
+# ============================================================================
+# V3.10 O-4：可核销白名单（hook / debt 仍可在本章被 resolve / update 的 id 集合）
+# ============================================================================
+# 根因：observer 反复在 ``resolved_hooks[*].hook_id`` / ``debt_changes[*].debt_id``
+# 中引用 snapshot 不存在、本 delta 也未 add 创建的 id，validator 在
+# ``packages/core/story_state/validator.py:319-327`` 的 FK 存在性规则处拦截；
+# 同时 ``debt_changes[*].status_before=None`` 违反 schema 枚举，导致 commit run
+# 在生产连跑三次失败（mini-cap-shape 现场）。
+# 设计：
+# - pipeline 在构造 observer payload 前，从 observer_input.previous_state（与
+#   observer 所见快照一致；**不**直查 DB，避免与 observer 看到的快照错位）收集
+#   hooks / debts 的「未结清」id 白名单，注入 payload.config 的
+#   ``resolvable_hook_ids`` / ``resolvable_debt_ids``，observer 仅允许引用其中 id
+#   做 resolved_hooks / debt_changes.update 类操作；add 类不受限。
+# - 白名单只注入 narrative 腿（_OBSERVER_LEG_B_ARRAYS 覆盖 resolved_hooks /
+#   debt_changes）；entities 腿不需要。
+# - 数据源必须 = observer 看到的 snapshot（ctx["observer_input"]["previous_state"]），
+#   与 validator 校验用的 ``snapshot_for_validate`` 同源，确保 observer 与
+#   validator 视角一致。
+# - snapshot 缺 hooks / debts 集合时返回空列表，绝不抛错（不影响单腿旧路径、
+#   空 snapshot 走默认空白名单）。
+_HOOK_OPEN_STATUSES = frozenset({"OPEN", "ACTIVE", "ESCALATED"})
+_DEBT_OPEN_STATUSES = frozenset({"open", "acknowledged"})
+
+
+def _collect_resolvable_ids(snapshot: dict[str, Any]) -> dict[str, list[str]]:
+    """从 snapshot 的 hooks / debts 集合收集「未结清」条目的 id 白名单。
+
+    返回 ``{"hooks": [<hook_id>, ...], "debts": [<debt_id>, ...]}``；集合缺 / 空
+    时返回空列表；snapshot 不是 dict 时返回两组空列表（兜底）。
+
+    字段名以 ``packages/core/story_state/snapshot.py:_load_hooks`` /
+    ``_load_debts`` 为准：
+    - hooks：``hook_id`` / ``status``（五态枚举：OPEN / ACTIVE / ESCALATED /
+      RESOLVED / ABANDONED，「未结清」取 OPEN / ACTIVE / ESCALATED）
+    - debts：``debt_id`` / ``status``（四态枚举：open / acknowledged / paid /
+      forgiven，「未结清」取 open / acknowledged）
+
+    本函数是纯函数：snapshot 必须是 immutable 视图（dict 引用即可，不就地修改）。
+    """
+    hooks_out: list[str] = []
+    debts_out: list[str] = []
+    if not isinstance(snapshot, dict):
+        return {"hooks": hooks_out, "debts": debts_out}
+
+    hooks = snapshot.get("hooks")
+    if isinstance(hooks, list):
+        for h in hooks:
+            if not isinstance(h, dict):
+                continue
+            hid = h.get("hook_id")
+            status = h.get("status")
+            if isinstance(hid, str) and hid and status in _HOOK_OPEN_STATUSES:
+                hooks_out.append(hid)
+
+    debts = snapshot.get("debts")
+    if isinstance(debts, list):
+        for d in debts:
+            if not isinstance(d, dict):
+                continue
+            did = d.get("debt_id")
+            status = d.get("status")
+            if isinstance(did, str) and did and status in _DEBT_OPEN_STATUSES:
+                debts_out.append(did)
+
+    return {"hooks": hooks_out, "debts": debts_out}
+
+
+def _inject_resolvable_ids_into_config(
+    payload: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """把 resolvable_hook_ids / resolvable_debt_ids 写入 payload['config']。
+
+    - payload 必须有 config 字段（缺则新建 dict）；
+    - 白名单数据源 = snapshot（与 validator 校验快照同源）；
+    - 已是正确类型（list）时直接覆盖；其它类型降级为新建空 list；
+    - 本函数不修改入参 payload，浅拷贝返回。
+    """
+    if not isinstance(payload, dict):
+        return payload
+    out = dict(payload)
+    cfg = out.get("config")
+    if not isinstance(cfg, dict):
+        cfg = {}
+    else:
+        cfg = dict(cfg)
+    ids = _collect_resolvable_ids(snapshot)
+    cfg["resolvable_hook_ids"] = list(ids.get("hooks") or [])
+    cfg["resolvable_debt_ids"] = list(ids.get("debts") or [])
+    out["config"] = cfg
+    return out
+
 
 def _observer_split_enabled() -> bool:
     """环境开关 ``NOVELOS_OBSERVER_SPLIT``；默认 on；off 走旧单次路径。
@@ -505,6 +598,15 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     base_payload = ctx["observer_input"]
     mock_script = (ctx.get("mock_providers") or {}).get("observer")
 
+    # V3.10 O-4：可核销白名单注入。数据源 = observer_input.previous_state，
+    # 与 validator 校验快照同源；narrative 腿与单腿旧路径都需要（entities 腿不需要）。
+    snapshot_for_resolvable = (
+        base_payload.get("previous_state") if isinstance(base_payload, dict) else None
+    )
+    base_payload = _inject_resolvable_ids_into_config(
+        base_payload, snapshot_for_resolvable or {},
+    )
+
     # env 开关 + ctx 显式覆盖
     if ctx.get("observer_split") is False or not _observer_split_enabled():
         # 旧单次路径（V3.1.1 O-2 之前；保证回退兼容）
@@ -537,6 +639,13 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     leg_a_payload["extraction_scope"] = "entities"
     leg_b_payload, leg_b_trim_stats = _trim_observer_input_for_leg(base_payload, "narrative")
     leg_b_payload["extraction_scope"] = "narrative"
+
+    # V3.10 O-4：narrative 腿再次注入可核销白名单（trim_observer_input_for_leg
+    # 不动 config 子树，重新注入确保 trimmed payload 也带白名单；entities 腿
+    # 不涉及 resolved_hooks / debt_changes，不需要白名单）。
+    leg_b_payload = _inject_resolvable_ids_into_config(
+        leg_b_payload, snapshot_for_resolvable or {},
+    )
 
     # Mock 兼容：golden regression 的 mock_script 是完整 7 数组；按 leg 过滤，
     # 让两腿各自看到「只含本 leg 范围」mock——merge 后等价于单次大调用。
@@ -1092,6 +1201,15 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 retry_payload["extraction_scope"] = (
                     "entities" if leg == "entities" else "narrative"
                 )
+                # V3.10 O-4：narrative 腿 retry payload 重新注入可核销白名单
+                # （_trim_observer_input_for_leg 不动 config 子树，retry 时需要补一次）。
+                if leg == "narrative":
+                    snapshot_for_resolvable = (
+                        (ctx.get("observer_input") or {}).get("previous_state")
+                    )
+                    retry_payload = _inject_resolvable_ids_into_config(
+                        retry_payload, snapshot_for_resolvable or {},
+                    )
                 # mock_script：取下一条响应（list 模式弹 idx+1），单条/字符串保持原样
                 retry_mock = _pick_retry_mock(original_mock_script, leg)
                 retry_out = run_agent(
@@ -1153,14 +1271,14 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
         errors = validate_delta(delta, snapshot=snapshot_for_validate)
         if errors:
             raise ValueError(
-                f"observer delta rejected by validator: errors={errors}"
+                f"observer delta failed validation: errors={errors}"
             )
 
     submit_result = svc.submit_delta(delta)
     if submit_result.get("status") != "validated":
         # 防御保留：理论上 validate_delta 通过后 service 也会通过；若仍失败按原口径报错
         raise ValueError(
-            f"observer delta rejected by validator: errors={submit_result.get('errors')}"
+            f"observer delta failed validation: errors={submit_result.get('errors')}"
         )
 
     # 标记是否需 high_risk 审批（基于最终采用的 observer_payload 计算）

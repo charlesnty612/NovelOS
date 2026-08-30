@@ -388,6 +388,26 @@
 - `field` 路径之外的旧字段名（如 `event_type` / `time_in_story` / `summary` / `quote_range` / `speaker_or_source` / `from` / `to` 已被统一替换为 `before` / `after`，debt 例外用 `status_before` / `status_after`）。
 - 任何 change 数组以外的顶层数组。
 
+### 7.6 可核销白名单（V3.10 O-4）——`resolved_hooks` / `debt_changes` 的硬约束
+
+下游 State Validator 会对 `resolved_hooks[*].hook_id` / `debt_changes[*].debt_id`（update / resolve 类操作）做 FK 存在性校验：`packages/core/story_state/validator.py:319-327` 要求 id 必须在 `previous_state` 已有，或在本 delta 的 `new_hooks` / `debt_changes.op='add'` 中被新建；不满足即拒绝。生产现场（mini-cap-shape）曾因此连跑三次失败。
+
+为消除这种幻觉引用，每次 observer 调用会收到两个 payload 注入字段（与 `recent_event_ids` 白名单同源，由 `packages/workflows/chapter_commit/pipeline.py` 在 observer 节点入口注入 narrative 腿）：
+
+- `payload.config.resolvable_hook_ids`：`previous_state` 中状态 ∈ {`OPEN`, `ACTIVE`, `ESCALATED`} 的 hook `hook_id` 列表（**未结清的伏笔**）。
+- `payload.config.resolvable_debt_ids`：`previous_state` 中状态 ∈ {`open`, `acknowledged`} 的 debt `debt_id` 列表（**未清欠条**）。
+
+**硬约束（违反 = run FAILED）**：
+
+1. **`resolved_hooks` 的 `hook_id` 必须 ∈ `payload.config.resolvable_hook_ids`**；不得引用白名单外的 id，不得从记忆中凑。
+2. **`resolvable_hook_ids` 为空（项目首个 observer 调用 / snapshot 无 open hook）时，`resolved_hooks` 必须输出空数组 `[]`**；不允许补任何条目。
+3. **本章新埋的钩子只走 `new_hooks`**；同一 hook_id **不得同时出现在 `resolved_hooks`**（同一 id 不能在本章既新埋又被回收——schema 与业务都禁止）。
+4. **`debt_changes` 的 `update` / `resolve` 类操作（`op ∈ {update, remove}` 的 debt_id）必须 ∈ `payload.config.resolvable_debt_ids`**。`op='add'` 不受限（新增债务没有 FK 约束）。
+5. **`debt_changes[*].status_before` 必须 ∈ `{open, acknowledged, paid, forgiven}` 枚举内值**；**不得为 `null`**（即使是 update 操作的反向引用也必须显式填枚举值）。`status_after` 同理必填枚举值。
+6. 白名单字段不可信：若调用方未注入（极旧链路 / 测试 mock），按「全量空白名单」处理 —— 视为项目首个 observer 调用，`resolved_hooks` 与所有非 add 类 `debt_changes` 全部输出空数组。
+
+本节与 §7.4 共同构成 observer 输出侧的硬约束，违反任一条都会在 validator 阶段被拦截（`[business]` 报错），commit run 直接 FAILED。
+
 ---
 
 ## 8. Examples

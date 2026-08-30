@@ -71,6 +71,7 @@ def create_event(
             introduced_chapter_id=payload.get("introduced_chapter_id"),
             visibility=payload.get("visibility"),
             who_knows=payload.get("who_knows"),
+            description=payload.get("description"),
         )
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle(exc) from exc
@@ -119,6 +120,7 @@ def update_event(
             introduced_chapter_id=payload.get("introduced_chapter_id"),
             visibility=payload.get("visibility"),
             who_knows=payload.get("who_knows"),
+            description=payload.get("description"),
         )
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle(exc) from exc
@@ -158,6 +160,10 @@ def create_timeline(
             day_index=payload.get("day_index", 0),
             time_ref=payload.get("time_ref"),
             description=payload.get("description"),
+            # V3.1 P1-1.2：透传 visibility/who_knows（缺省 → 'PUBLIC' / NULL，
+            # 向后兼容旧调用方）。
+            visibility=payload.get("visibility"),
+            who_knows=payload.get("who_knows"),
         )
     except (NotFoundError, ReferencedError, ValidationError) as exc:
         raise _handle(exc) from exc
