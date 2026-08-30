@@ -25,6 +25,11 @@
   - `start_with_nodes(workflow_name, nodes, chapter_id=None, initial_ctx=None, mock_providers=None) -> run_id`
   - `resume(run_id, nodes, human_input=None) -> run_id`
 - `PauseRequested(payload)` — Human 节点抛出用。
+- `recover_interrupted_runs(db_path) -> list[str]` — 启动自愈：把残留
+  `status='RUNNING'` 的 run 收尾为 FAILED（单进程部署，daemon 线程随进程死亡
+  → 启动瞬间 RUNNING 必为孤儿）；其下 RUNNING/PENDING 节点行同口径收尾。
+  PAUSED / 终态 run 不动。返回受影响 run_id 列表；任何异常 log warning 不抛。
+  FastAPI lifespan startup（`packages/core/api/main.py`）在迁移执行后调用。
 - `runs.list_runs(db_path, project_id) -> list[dict]`
 - `runs.get_run(db_path, run_id) -> dict | None`（含 nodes 数组）
 

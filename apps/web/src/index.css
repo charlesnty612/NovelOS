@@ -345,6 +345,12 @@ a:hover {
   background: #fdecec;
   color: var(--color-danger);
 }
+/* AI 调用日志「软告警」前缀（warn: ...）：中性黄/灰，区分真失败红。
+   重试后成功调用属于软告警，不应被误读为红色错误。 */
+.badge--chapter-warn {
+  background: #fff2e0;
+  color: var(--color-warn);
+}
 /* 「已驳回·改稿」：review run 被「按建议修改/驳回并改稿」主动结束的中性态，
    非真失败——灰底避免用户误读为红色错误（改稿回路会自动重跑 write→review）。 */
 .badge--chapter-rejected {

@@ -140,7 +140,7 @@ def test_put_upsert_returns_full_enriched_item(tmp_path: Path):
             data = r.json()
             assert data["capability"] == "creative_writing"
             assert data["label"] == "正文写作"
-            assert data["agents"] == ["writer", "polisher"]  # P1：polisher 加入 creative_writing capability
+            assert data["agents"] == ["writer", "polisher", "scene_planner"]  # V3.9.2+：scene_planner 按 chapter-write 管线阶段归入 creative_writing
             assert data["profile_ids"] == [pid1, pid2]
             assert len(data["profiles"]) == 2
             assert data["profiles"][0]["profile_id"] == pid1

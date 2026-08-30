@@ -384,10 +384,13 @@ export const modelProfilesApi = {
   // V3.8「拉取模型」：后端代理调 provider 的模型列表接口。
   // 对应 packages/core/api/routers/model_profiles.py POST /model-profiles/available-models。
   // 入参可为空字符串——交由后端按 provider 走默认；apikey 不发（后端走 resolve_api_key）。
+  // signal：15s 前端超时——后端进程若在响应中途死亡，fetch 可能永不落定（按钮永久
+  // 「拉取中」事故），任何情况下都要让 promise settle。
   fetchAvailableModels: (payload: FetchAvailableModelsPayload) =>
     api.post<FetchAvailableModelsResponse>(
       '/model-profiles/available-models',
       payload,
+      { signal: AbortSignal.timeout(15000) },
     ),
 };
 

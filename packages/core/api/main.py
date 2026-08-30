@@ -95,6 +95,19 @@ async def lifespan(app: FastAPI):
     )
     app.state.migration_result = result
 
+    # 启动自愈：进程重启把残留 RUNNING run 收尾为 FAILED（详见 engine.recover_interrupted_runs）。
+    # 单进程部署下，RUNNING 必然是孤儿；不收尾会触发 409 阻断同 chapter 新 run。
+    try:
+        from packages.core.workflow_runtime.engine import recover_interrupted_runs
+
+        recovered = recover_interrupted_runs(settings.db_path)
+        if recovered:
+            log.warning("startup recovered interrupted runs: %s", recovered)
+        else:
+            log.debug("startup recovered interrupted runs: none")
+    except Exception as exc:  # noqa: BLE001 —— 自愈失败不能阻断启动
+        log.warning("startup recovery hook failed (non-fatal): %s", exc)
+
     # 启动时自动同步 prompt（docs/agents/prompts → agents/prompts 表，幂等）。
     # 此前需手工 POST /agents/sync，新 agent 未 sync 时会静默降级（ch072 scene_planner 实测）。
     # 失败不阻断启动（prompt 缺失时 agent 调用侧本就有降级/报错路径）；

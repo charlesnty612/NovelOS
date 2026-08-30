@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
 from packages.core.agent_runtime.runner import create_adhoc_run, run_agent
 from packages.core.config import Settings
@@ -470,3 +471,408 @@ def test_runner_messages_order_system_then_user_with_static_prompt(
     # user 内容包含动态字段但属于「user 部分」——前缀缓存按 system 命中不受影响
     assert "alpha" in msgs_a[1]["content"]
     assert "beta" in msgs_b[1]["content"]
+
+
+# ---------------------------------------------------------------------------
+# V3.9 finish_reason 透传：排障体验修复（length 提示 + ai_call_logs 落库）
+# ---------------------------------------------------------------------------
+
+
+def test_runner_finish_reason_length_raises_actionable_agent_output_error(
+    tmp_path: Path, monkeypatch,
+):
+    """content='' + finish_reason='length' → 触发两次重试后抛 AgentOutputError，
+    错误文案必须含「max_tokens」与「16384」（不再误报「empty output after stripping fences」）。
+
+    模拟生产事故签名（MiniMax M3 自适应思考打满 8192 → 零 content）。
+    """
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    conn = get_connection(db_path)
+    try:
+        agent_id = "agn_observer_frlen"
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO agents (agent_id, name, role, config_json, created_at, updated_at)
+            VALUES (?, 'observer', 'reasoning', '{}', ?, ?)
+            """,
+            (agent_id, _now(), _now()),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO prompts (
+                prompt_id, agent_id, version, status, content, created_at, updated_at
+            ) VALUES (
+                'prm_obs_frlen_v1', ?, 'observer:v1', 'ACTIVE',
+                'You are observer.', ?, ?
+            )
+            """,
+            (agent_id, _now(), _now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    def _patched_complete(self, messages, params=None):
+        return {
+            "text": "",  # 零 content：模拟思考耗尽预算
+            "usage": {"prompt": 500, "completion": 8192, "total": 8692},
+            "finish_reason": "length",
+        }
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    from packages.core.agent_runtime.exceptions import AgentOutputError
+    with pytest.raises(AgentOutputError) as exc:
+        run_agent(
+            db_path,
+            "observer",
+            {"chapter_id": "ch_frlen"},
+            run_id,
+            expected="observer",
+            mock_script=lambda i: "",
+        )
+    msg = str(exc.value)
+    assert "max_tokens" in msg
+    assert "16384" in msg
+    assert "length" in msg
+
+
+def test_runner_writes_finish_reason_to_ai_call_logs_token_usage(
+    tmp_path: Path, monkeypatch,
+):
+    """OpenAI 兼容 Provider 下发的 finish_reason 通过 runner 透传到
+    ``ai_call_logs.token_usage_json.finish_reason``，便于事后诊断。
+    """
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    conn = get_connection(db_path)
+    try:
+        agent_id = "agn_observer_frlog"
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO agents (agent_id, name, role, config_json, created_at, updated_at)
+            VALUES (?, 'observer', 'reasoning', '{}', ?, ?)
+            """,
+            (agent_id, _now(), _now()),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO prompts (
+                prompt_id, agent_id, version, status, content, created_at, updated_at
+            ) VALUES (
+                'prm_obs_frlog_v1', ?, 'observer:v1', 'ACTIVE',
+                'You are observer.', ?, ?
+            )
+            """,
+            (agent_id, _now(), _now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    def _patched_complete(self, messages, params=None):
+        return {
+            "text": json.dumps(
+                {
+                    "character_changes": [],
+                    "world_changes": [],
+                    "relationship_changes": [],
+                    "new_events": [],
+                    "resolved_hooks": [],
+                    "new_hooks": [],
+                    "debt_changes": [],
+                },
+                ensure_ascii=False,
+            ),
+            "usage": {"prompt": 100, "completion": 50, "total": 150},
+            "finish_reason": "stop",
+        }
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    run_agent(
+        db_path,
+        "observer",
+        {"chapter_id": "ch_frlog"},
+        run_id,
+        expected="observer",
+        mock_script=lambda i: "{}",
+    )
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT token_usage_json FROM ai_call_logs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    usage = json.loads(row["token_usage_json"])
+    assert usage["finish_reason"] == "stop"
+    assert usage["prompt"] == 100
+
+
+def test_runner_no_finish_reason_field_when_provider_returns_none(tmp_path: Path, monkeypatch):
+    """provider 未下发 finish_reason（None 或缺省）→ ai_call_logs.token_usage_json 不含此 key。
+    与既有 cached_tokens 处理风格一致：缺省不写入，避免 0 vs 未观测混淆。
+    """
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    conn = get_connection(db_path)
+    try:
+        agent_id = "agn_observer_frnone"
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO agents (agent_id, name, role, config_json, created_at, updated_at)
+            VALUES (?, 'observer', 'reasoning', '{}', ?, ?)
+            """,
+            (agent_id, _now(), _now()),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO prompts (
+                prompt_id, agent_id, version, status, content, created_at, updated_at
+            ) VALUES (
+                'prm_obs_frnone_v1', ?, 'observer:v1', 'ACTIVE',
+                'You are observer.', ?, ?
+            )
+            """,
+            (agent_id, _now(), _now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    def _patched_complete(self, messages, params=None):
+        return {
+            "text": json.dumps(
+                {
+                    "character_changes": [],
+                    "world_changes": [],
+                    "relationship_changes": [],
+                    "new_events": [],
+                    "resolved_hooks": [],
+                    "new_hooks": [],
+                    "debt_changes": [],
+                },
+                ensure_ascii=False,
+            ),
+            "usage": {"prompt": 10, "completion": 5, "total": 15},
+            # finish_reason 缺省（None 不下发 key，与 MockProvider 默认行为一致）
+        }
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    run_agent(
+        db_path,
+        "observer",
+        {"chapter_id": "ch_frnone"},
+        run_id,
+        expected="observer",
+        mock_script=lambda i: "{}",
+    )
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT token_usage_json FROM ai_call_logs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    usage = json.loads(row["token_usage_json"])
+    assert "finish_reason" not in usage
+
+
+# ---------------------------------------------------------------------------
+# 可观测性：重试成功 → ai_call_logs.error 落 warn 前缀（首次失败原因）
+# ---------------------------------------------------------------------------
+
+_VALID_OBSERVER_TEXT = json.dumps(
+    {
+        "character_changes": [],
+        "world_changes": [],
+        "relationship_changes": [],
+        "new_events": [],
+        "resolved_hooks": [],
+        "new_hooks": [],
+        "debt_changes": [],
+    },
+    ensure_ascii=False,
+)
+
+
+def _register_observer_agent(db_path, agent_id: str = "agn_observer_warn") -> None:
+    """注册一个最小可用的 observer agent + ACTIVE prompt（runner mock 路径前置条件）。"""
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO agents (agent_id, name, role, config_json, created_at, updated_at)
+            VALUES (?, 'observer', 'reasoning', '{}', ?, ?)
+            """,
+            (agent_id, _now(), _now()),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO prompts (
+                prompt_id, agent_id, version, status, content, created_at, updated_at
+            ) VALUES (
+                'prm_obs_warn_v1', ?, 'observer:v1', 'ACTIVE',
+                'You are observer. Output JSON only.', ?, ?
+            )
+            """,
+            (agent_id, _now(), _now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _fetch_call_log(db_path, run_id: str) -> dict:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT retry_count, error FROM ai_call_logs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else {}
+
+
+def test_runner_warns_first_attempt_invalid_on_retry_success(
+    tmp_path: Path, monkeypatch,
+):
+    """首次输出非 JSON（extract_json 失败）→ 重试成功 → ai_call_logs.error 以
+    ``warn: first attempt invalid:`` 开头，含首次失败关键词，retry_count=1。"""
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    _register_observer_agent(db_path, "agn_observer_warn_retry")
+
+    call_count = {"n": 0}
+
+    def _patched_complete(self, messages, params=None):
+        call_count["n"] += 1
+        # 首次：返回非 JSON 文本（无任何 { }）→ extract_json 抛 AgentOutputError。
+        # 注意：observer 路径下 strip_observer_violations 会补全缺数组键，
+        # 因此用「非 JSON 文本」才能稳定触发首次失败。
+        if call_count["n"] == 1:
+            return {"text": "this is not json at all, no braces here", "usage": {"prompt": 1, "completion": 2, "total": 3}}
+        return {"text": _VALID_OBSERVER_TEXT, "usage": {"prompt": 4, "completion": 5, "total": 9}}
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    out = run_agent(
+        db_path,
+        "observer",
+        {"chapter_id": "ch_warn_retry"},
+        run_id,
+        expected="observer",
+        mock_script=lambda i: _VALID_OBSERVER_TEXT,
+    )
+    assert out["character_changes"] == []
+
+    log = _fetch_call_log(db_path, run_id)
+    assert log["retry_count"] == 1
+    assert log["error"] is not None
+    assert log["error"].startswith("warn: first attempt invalid:")
+    # extract_json 失败典型关键词必须出现，便于事后分类
+    err_lower = log["error"].lower()
+    assert "json" in err_lower or "braces" in err_lower
+
+
+def test_runner_no_warn_on_first_attempt_success(tmp_path: Path, monkeypatch):
+    """一次成功（retry_count=0）→ ai_call_logs.error 仍为 None，不污染正常路径。"""
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    _register_observer_agent(db_path, "agn_observer_warn_clean")
+
+    def _patched_complete(self, messages, params=None):
+        return {"text": _VALID_OBSERVER_TEXT, "usage": {"prompt": 1, "completion": 2, "total": 3}}
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    run_agent(
+        db_path,
+        "observer",
+        {"chapter_id": "ch_warn_clean"},
+        run_id,
+        expected="observer",
+        mock_script=lambda i: _VALID_OBSERVER_TEXT,
+    )
+
+    log = _fetch_call_log(db_path, run_id)
+    assert log["retry_count"] == 0
+    assert log["error"] is None
+
+
+def test_runner_concat_retry_warn_and_observer_strip_warn(
+    tmp_path: Path, monkeypatch,
+):
+    """首次 JSON 解析失败 + 重试成功且仍触发 observer 剥离 → 两段 warn 用 ' | ' 拼接，
+    retry_warn 在前（首次失败根因），observer_warn 在后。"""
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    _register_observer_agent(db_path, "agn_observer_warn_combo")
+
+    call_count = {"n": 0}
+
+    def _patched_complete(self, messages, params=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # 首次：返回非 JSON → extract_json 抛错
+            return {"text": "this is not json at all, no braces here", "usage": {"prompt": 1, "completion": 2, "total": 3}}
+        # 重试：合法但含越权字段 delta_id（observer 剥离路径）
+        stripped_source = {
+            "character_changes": [],
+            "world_changes": [],
+            "relationship_changes": [],
+            "new_events": [],
+            "resolved_hooks": [],
+            "new_hooks": [],
+            "debt_changes": [],
+            "delta_id": "should_be_stripped",
+        }
+        return {"text": json.dumps(stripped_source, ensure_ascii=False), "usage": {"prompt": 1, "completion": 2, "total": 3}}
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    out = run_agent(
+        db_path,
+        "observer",
+        {"chapter_id": "ch_warn_combo"},
+        run_id,
+        expected="observer",
+        mock_script=lambda i: _VALID_OBSERVER_TEXT,
+    )
+    # 越权字段已被剥离，cleaned 输出不含 delta_id
+    assert "delta_id" not in out
+
+    log = _fetch_call_log(db_path, run_id)
+    assert log["retry_count"] == 1
+    err = log["error"]
+    assert err is not None
+    # 两段拼接：第一段 retry_warn（前缀），第二段 observer_warn
+    assert err.startswith("warn: first attempt invalid:")
+    assert " | warn: stripped keys=" in err
+    assert "delta_id" in err

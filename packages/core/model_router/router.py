@@ -58,7 +58,7 @@ AGENT_CAPABILITY: dict[str, str] = {
     "deconstructor_aggregate": "reasoning",
     "summarizer": "light",      # V3 P0-2：结构化提取走轻量模型
     "critic": "light",          # V3 P0-2：LLM 评审员走轻量模型
-    "scene_planner": "reasoning",  # P0：Director plan → Scene plan 结构翻译
+    "scene_planner": "creative_writing",  # V3.9.2+：运行于 chapter-write 管线，按管线阶段归入正文写作（V3.9.2 前归 reasoning）
     # V3.7 project-init 四个 agent 显式映射：避免 ``capability_for`` 默认回退
     # reasoning——把「题材定位 / 世界观 / 角色设计 / 卷纲」与正文写作分离，
     # 前端可独立分配更便宜的小模型。
@@ -102,12 +102,16 @@ CAPABILITY_LABELS: dict[str, dict[str, object]] = {
     "world_building":   {"label": "世界观",     "agents": ["world_builder"]},
     "character_design": {"label": "角色设计",   "agents": ["character_designer"]},
     "volume_outline":   {"label": "卷纲",       "agents": ["volume_outliner"]},
-    "creative_writing": {"label": "正文写作",   "agents": ["writer", "polisher"]},
+    "creative_writing": {"label": "正文写作",   "agents": ["writer", "polisher", "scene_planner"]},
     "reasoning":        {"label": "推理规划",   "agents": [
         "director", "observer", "arbiter",
-        "deconstructor_chapter", "deconstructor_aggregate", "scene_planner",
+        "deconstructor_chapter", "deconstructor_aggregate",
     ]},
-    "light":            {"label": "轻量评审",   "agents": ["summarizer", "critic"]},
+    # writer 在 revise 模式（按建议修改/驳回并改稿的局部修改）也走 light——
+    # 标注为 writer(revise·改稿) 以便环节分配页如实展示；write/fresh_write 走 creative_writing。
+    "light":            {"label": "轻量评审",   "agents": [
+        "summarizer", "critic", "writer(revise·改稿)",
+    ]},
 }
 """环节元信息（有序 dict，前端 / GET bindings 用）。
 

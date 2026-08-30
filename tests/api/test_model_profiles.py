@@ -207,6 +207,134 @@ def test_patch_empty_string_clears_key(tmp_path: Path):
     asyncio.run(run())
 
 
+def test_patch_null_deletes_key_and_keeps_others(tmp_path: Path):
+    """PATCH payload 键显式 None → DB 结果删除该键；其它键保留（部分更新语义）。
+
+    锁死事故修复：思考档位回「默认」必须能真正清掉 reasoning_effort。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(
+                app, "POST", "/api/model-profiles",
+                json={
+                    "name": "kimi",
+                    "provider": "kimi",
+                    "model": "moonshot-v1-8k",
+                    "params_json": {
+                        "api_key": _SECRET,
+                        "base_url": "https://api.moonshot.cn/v1",
+                        "max_tokens": 4096,
+                        "thinking": {"type": "enabled"},
+                        "reasoning_effort": "high",
+                    },
+                },
+            )
+            pid = r.json()["profile_id"]
+
+            # 显式 null = 删除该键；其余键缺失 → DB 旧值保留
+            r = await _request(
+                app, "PATCH", f"/api/model-profiles/{pid}",
+                json={"params_json": {"reasoning_effort": None, "thinking": None}},
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert "reasoning_effort" not in body["params_json"]
+            assert "thinking" not in body["params_json"]
+            # 其它键（base_url / max_tokens / api_key 掩码）保留
+            assert body["params_json"]["base_url"] == "https://api.moonshot.cn/v1"
+            assert body["params_json"]["max_tokens"] == 4096
+            assert body["params_json"]["api_key"] == "***"
+            assert body["has_api_key"] is True
+
+            # DB 直查二次确认：删除真的落库
+            settings = Settings(data_dir=tmp_path, log_level="WARNING")
+            with get_connection(settings.db_path) as conn:
+                row = conn.execute(
+                    "SELECT params_json FROM model_profiles WHERE profile_id = ?",
+                    (pid,),
+                ).fetchone()
+            stored = json.loads(row["params_json"])
+            assert "reasoning_effort" not in stored
+            assert "thinking" not in stored
+
+    asyncio.run(run())
+
+
+def test_patch_missing_key_keeps_existing_partial_update(tmp_path: Path):
+    """PATCH payload 缺键 → DB 旧值保留（锁死部分更新语义不被新 null 规则破坏）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(
+                app, "POST", "/api/model-profiles",
+                json={
+                    "name": "kimi",
+                    "provider": "kimi",
+                    "model": "moonshot-v1-8k",
+                    "params_json": {
+                        "api_key": _SECRET,
+                        "base_url": "https://api.moonshot.cn/v1",
+                        "reasoning_effort": "high",
+                    },
+                },
+            )
+            pid = r.json()["profile_id"]
+
+            # payload 缺 reasoning_effort，只动 base_url → DB 原值保留
+            r = await _request(
+                app, "PATCH", f"/api/model-profiles/{pid}",
+                json={"params_json": {"base_url": "https://api.moonshot.cn/v2"}},
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["params_json"]["base_url"] == "https://api.moonshot.cn/v2"
+            assert body["params_json"]["reasoning_effort"] == "high"
+            assert body["params_json"]["api_key"] == "***"
+
+    asyncio.run(run())
+
+
+def test_patch_null_does_not_break_api_key_mask_merge(tmp_path: Path):
+    """PATCH payload 同时含 api_key='***'（保留哨兵）与 reasoning_effort=None（删除）：
+    两个分支都要按既有语义执行，互不干扰。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(
+                app, "POST", "/api/model-profiles",
+                json={
+                    "name": "kimi",
+                    "provider": "kimi",
+                    "model": "moonshot-v1-8k",
+                    "params_json": {
+                        "api_key": _SECRET,
+                        "base_url": "https://api.moonshot.cn/v1",
+                        "reasoning_effort": "high",
+                    },
+                },
+            )
+            pid = r.json()["profile_id"]
+
+            r = await _request(
+                app, "PATCH", f"/api/model-profiles/{pid}",
+                json={"params_json": {
+                    "api_key": "***",          # 保留原值
+                    "reasoning_effort": None,  # 显式删除
+                }},
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert "reasoning_effort" not in body["params_json"]
+            assert body["params_json"]["api_key"] == "***"
+            assert body["has_api_key"] is True
+
+    asyncio.run(run())
+
+
 # ---------------------------------------------------------------------------
 # 2. DELETE 被 binding 引用 → 409
 # ---------------------------------------------------------------------------

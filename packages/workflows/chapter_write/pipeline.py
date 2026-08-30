@@ -184,6 +184,40 @@ def _collect_scene_planner_inputs(
     else:
         style_constraints = dict(_SCENE_PLANNER_DEFAULT_STYLE)
 
+    # world_state_excerpts：复用既有字段结构（P2-补洞），让 Scene Planner 能看到
+    # world_rules_relevant（项目级硬设定，如原著要素锁），保证"沿传 Director 约束"
+    # 不会因本节点缺 world_rules 而退化为凭印象。L0 world_rules 全量常驻，与
+    # director/writer 装配口径保持一致。无项目 / 异常 → 返回最小结构，不阻断。
+    world_state_excerpts: dict[str, Any] = {
+        "current_time_in_story": None,
+        "current_location": None,
+        "locations": [],
+        "active_factions": [],
+        "world_rules_relevant": [],
+        "sensory_anchors": [],
+    }
+    if project_id:
+        conn2 = get_connection(db_path)
+        try:
+            rule_rows = conn2.execute(
+                "SELECT world_rule_id, name, statement FROM world_rules "
+                "WHERE project_id = ? ORDER BY world_rule_id ASC",
+                (project_id,),
+            ).fetchall()
+            world_state_excerpts["world_rules_relevant"] = [
+                {
+                    "world_rule_id": r["world_rule_id"],
+                    "name": r["name"],
+                    "statement": r["statement"],
+                }
+                for r in rule_rows
+            ]
+        except sqlite3.OperationalError:
+            # 老库 / 缺表 → 保留空列表，不阻断 Scene Planner 装配。
+            pass
+        finally:
+            conn2.close()
+
     return {
         "agent": "scene_planner",
         "prompt_version": _SCENE_PLANNER_PROMPT_VERSION,
@@ -213,6 +247,7 @@ def _collect_scene_planner_inputs(
         "available_locations": [
             {"location_id": r["location_id"], "name": r["name"]} for r in loc_rows
         ],
+        "world_state_excerpts": world_state_excerpts,
         "style_constraints": style_constraints,
         "recent_prose": {"last_chapter_excerpt": "", "last_scene_excerpt": ""},
     }

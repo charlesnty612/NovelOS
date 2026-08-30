@@ -368,6 +368,149 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
     expect(banner.textContent).toMatch(/已运行/);
   });
 
+  // V1.5 横幅节点选取修正：当 current_node 仍指向已完成节点，但下一个节点已 RUNNING 时，
+  //   横幅应显示真正在跑的节点（而不是 current_node 指向的已完成节点）。
+  it('a1) current_node 滞后：实际 RUNNING 节点优先于 detail.current_node', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const runningList: WorkflowRun[] = [
+      {
+        run_id: 'wfr_running_005',
+        workflow_id: 'chapter-write',
+        chapter_id: 'ch_001',
+        status: 'RUNNING',
+        current_node: 'scene_planner', // 后端尚未更新,仍指上一个已完成节点
+        checkpoint_json: {},
+        error: null,
+        retry_count: 0,
+        started_at: new Date(Date.now() - 600_000).toISOString(),
+        ended_at: null,
+        nodes: [],
+        workflow_name: 'chapter-write',
+      } as WorkflowRun,
+    ];
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue(runningList);
+    // detail 含三个节点：scene_planner 已完成、writer 正在 RUNNING、reviewer PENDING
+    // current_node 仍指 scene_planner（模拟后端只更新于节点完成）
+    vi.mocked(workflowsApi.get).mockResolvedValue(
+      buildRunningDetail({
+        run_id: 'wfr_running_005',
+        current_node: 'scene_planner',
+        started_at: new Date(Date.now() - 600_000).toISOString(),
+        nodes: [
+          buildNodeRun('load_plan', 'COMPLETED', new Date(Date.now() - 590_000).toISOString()),
+          buildNodeRun('scene_planner', 'COMPLETED', new Date(Date.now() - 540_000).toISOString()),
+          buildNodeRun('writer', 'RUNNING', new Date(Date.now() - 5).toISOString()),
+          buildNodeRun('reviewer', 'PENDING', '2026-08-24T10:00:00+00:00'),
+        ],
+      }),
+    );
+
+    renderPage();
+
+    const banner = await waitFor(() => screen.getByTestId('workflow-running-banner'));
+    // 横幅应展示实际 RUNNING 的 writer,而非 detail.current_node 指向的 scene_planner
+    expect(banner.textContent).toMatch(/writer/);
+    expect(banner.textContent).toMatch(/第\s*3\s*\/\s*4\s*步/);
+    expect(banner.textContent).not.toMatch(/scene_planner（第/);
+    // data-current-node 也应跟随真实展示节点,便于外部断言与监控
+    expect(banner.getAttribute('data-current-node')).toBe('writer');
+  });
+
+  // V1.5 回归：nodes 中无 RUNNING 时（如节点状态尚未刷新 / 全 PENDING），仍按 detail.current_node 兜底展示。
+  it('a2) nodes 中无 RUNNING 时回退到 detail.current_node', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([
+      {
+        run_id: 'wfr_running_006',
+        workflow_id: 'chapter-write',
+        chapter_id: 'ch_001',
+        status: 'RUNNING',
+        current_node: 'author_review', // 后端指向 author_review（但 nodes 都还没切到 RUNNING）
+        checkpoint_json: {},
+        error: null,
+        retry_count: 0,
+        started_at: new Date(Date.now() - 60_000).toISOString(),
+        ended_at: null,
+        nodes: [],
+        workflow_name: 'chapter-write',
+      } as WorkflowRun,
+    ]);
+    // 节点列表里没有 RUNNING 状态（全部 PENDING，模拟节点状态尚未刷新窗口）
+    vi.mocked(workflowsApi.get).mockResolvedValue(
+      buildRunningDetail({
+        run_id: 'wfr_running_006',
+        current_node: 'author_review',
+        nodes: [
+          buildNodeRun('planner', 'PENDING'),
+          buildNodeRun('writer', 'PENDING'),
+          buildNodeRun('author_review', 'PENDING'),
+          buildNodeRun('committer', 'PENDING'),
+        ],
+      }),
+    );
+
+    renderPage();
+
+    const banner = await waitFor(() => screen.getByTestId('workflow-running-banner'));
+    // 没有任何 RUNNING 时,按 detail.current_node 兜底展示 author_review
+    expect(banner.textContent).toMatch(/author_review/);
+    expect(banner.getAttribute('data-current-node')).toBe('author_review');
+  });
+
+  // V1.5 回归：已运行时长应从展示节点的 started_at 起算,而非 run.started_at。
+  //   本用例构造 run.started_at 早 5 分钟、节点 started_at 仅几秒前,
+  //   断言 banner 「已运行」更接近节点口径（数十秒以内,而不是 5 分钟量级）。
+  it('a3) 已运行时长按展示节点 started_at 起算（而非 run.started_at）', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([
+      {
+        run_id: 'wfr_running_007',
+        workflow_id: 'chapter-write',
+        chapter_id: 'ch_001',
+        status: 'RUNNING',
+        current_node: 'writer',
+        checkpoint_json: {},
+        error: null,
+        retry_count: 0,
+        started_at: new Date(Date.now() - 300_000).toISOString(), // run 启动 5 分钟前
+        ended_at: null,
+        nodes: [],
+        workflow_name: 'chapter-write',
+      } as WorkflowRun,
+    ]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(
+      buildRunningDetail({
+        run_id: 'wfr_running_007',
+        started_at: new Date(Date.now() - 300_000).toISOString(),
+        nodes: [
+          buildNodeRun('planner', 'COMPLETED', new Date(Date.now() - 290_000).toISOString()),
+          // writer 节点 started_at 距现在几秒;已运行应是个位数秒,绝不该是 5 分钟
+          buildNodeRun('writer', 'RUNNING', new Date(Date.now() - 5_000).toISOString()),
+          buildNodeRun('reviewer', 'PENDING'),
+          buildNodeRun('committer', 'PENDING'),
+        ],
+      }),
+    );
+
+    renderPage();
+
+    const banner = await waitFor(() => screen.getByTestId('workflow-running-banner'));
+    // 提取「已运行 X 秒」/「已运行 X 分」片段
+    const text = banner.textContent ?? '';
+    const m = text.match(/已运行\s*([0-9]+)\s*分(?:\s*([0-9]+)\s*秒)?/);
+    if (m) {
+      // 命中「X 分」格式：旧口径会跑到 5 分；新口径应为 0 分（节点才 5 秒）
+      const minutes = parseInt(m[1], 10);
+      expect(minutes).toBe(0);
+    } else {
+      // 命中「X 秒」格式：旧口径会是 ~300s；新口径应 ≤ 10s
+      const m2 = text.match(/已运行\s*([0-9]+)\s*秒/);
+      expect(m2).not.toBeNull();
+      const seconds = parseInt(m2![1], 10);
+      expect(seconds).toBeLessThan(30);
+    }
+  });
+
   it('b) run 终态（COMPLETED）时横幅消失', async () => {
     vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
     // 列表返回 RUNNING → poll 拿到 COMPLETED 后 activeRun 消失
@@ -748,6 +891,7 @@ describe('ChapterDetailPage - 按次模型档案选择', () => {
     expect(call[1]).toBe('ch_001');
     expect(call[2]).toEqual({
       model_overrides: { creative_writing: creativeId },
+      fresh_write: true, // 2026-08-30 起「全新重写」为默认写作模式
     });
     // 临时字段 model_profile_id 不得泄漏到下游 payload
     expect((call[2] as Record<string, unknown>)['model_profile_id']).toBeUndefined();
@@ -780,9 +924,8 @@ describe('ChapterDetailPage - 按次模型档案选择', () => {
       expect(vi.mocked(workflowsApi.startWrite)).toHaveBeenCalledTimes(1);
     });
     const call = vi.mocked(workflowsApi.startWrite).mock.calls[0];
-    // 未选档案 + 无业务字段 → payload 透传 undefined（保持向后兼容）；
-    // 关键是 model_overrides 不出现。
-    expect(call[2]).toBeUndefined();
+    // 未选档案 → model_overrides 不出现；默认写作模式「全新重写」带 fresh_write=true
+    expect(call[2]).toEqual({ fresh_write: true });
   });
 
   it('c) 选「全新重写」点「写正文」：payload 含 fresh_write: true', async () => {
@@ -806,7 +949,8 @@ describe('ChapterDetailPage - 按次模型档案选择', () => {
     const modeSelect = await waitFor(() =>
       screen.getByTestId('wf-write-mode'),
     );
-    fireEvent.change(modeSelect, { target: { value: 'fresh' } });
+    // 切到「按意见改稿」：payload 不含 fresh_write（向后兼容路径）
+    fireEvent.change(modeSelect, { target: { value: '' } });
 
     fireEvent.click(screen.getByTestId('wf-btn-write'));
 
@@ -816,12 +960,12 @@ describe('ChapterDetailPage - 按次模型档案选择', () => {
     const call = vi.mocked(workflowsApi.startWrite).mock.calls[0];
     expect(call[0]).toBe('prj_001');
     expect(call[1]).toBe('ch_001');
-    expect(call[2]).toEqual({ fresh_write: true });
-    // 临时字段 fresh_write 不得泄漏到 payload 顶层以外其他键
-    expect((call[2] as Record<string, unknown>)['model_overrides']).toBeUndefined();
+    // 未选 fresh + 无档案 → payload 为 undefined（保持向后兼容），fresh_write 不出现
+    expect(call[2]).toBeUndefined();
+    expect((call[2] as Record<string, unknown> | undefined)?.['fresh_write']).toBeUndefined();
   });
 
-  it('d) 默认「按意见改稿」点「写正文」：payload 不含 fresh_write 键', async () => {
+  it('d) 默认「全新重写」点「写正文」：payload 含 fresh_write=true', async () => {
     vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
     vi.mocked(modelProfilesApi.list).mockResolvedValue([
       buildProfile({ profile_id: 'mp_a', name: 'A' }),
@@ -838,7 +982,7 @@ describe('ChapterDetailPage - 按次模型档案选择', () => {
     await waitFor(() => {
       expect(screen.getByTestId('chapter-header')).toBeInTheDocument();
     });
-    // 默认即为「按意见改稿」；不切换下拉，直接点按钮
+    // 默认即为「全新重写」；不切换下拉，直接点按钮
     await waitFor(() => {
       expect(screen.getByTestId('wf-write-mode')).toBeInTheDocument();
     });
@@ -848,8 +992,8 @@ describe('ChapterDetailPage - 按次模型档案选择', () => {
       expect(vi.mocked(workflowsApi.startWrite)).toHaveBeenCalledTimes(1);
     });
     const call = vi.mocked(workflowsApi.startWrite).mock.calls[0];
-    // 未选模式 + 无档案 → payload 应为 undefined（保持向后兼容），fresh_write 不出现
-    expect(call[2]).toBeUndefined();
+    // 默认 fresh 重写：payload 含 fresh_write=true（且无其他键泄漏）
+    expect(call[2]).toEqual({ fresh_write: true });
   });
 });
 

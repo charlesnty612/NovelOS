@@ -12,6 +12,9 @@
 - AI 节点 fn 内部调 :func:`packages.core.agent_runtime.runner.run_agent`（run_id/node_run_id 传入），
   ``mock_providers`` 参数（``{agent_name: [scripted_responses...]}``）透传给 run_agent 的 mock_script。
 - 节点异常：节点行 FAILED + error，run FAILED，不重试（重试在 run_agent 内部）。
+- 启动自愈：:func:`recover_interrupted_runs` 在 lifespan startup 把残留
+  ``status='RUNNING'`` 的 run 收尾为 FAILED（工作线程随进程死亡，单进程
+  部署下启动瞬间不可能存在真正还在跑的 run）。PAUSED / 终态 run 不动。
 
 设计要点：
 - checkpoint_json 每节点完成后落盘；崩溃后 :meth:`resume` 从最近一个 COMPLETED 节点的
@@ -700,4 +703,114 @@ class WorkflowEngine:
             conn.close()
 
 
-__all__ = ["WorkflowEngine", "WorkflowNode", "PauseRequested"]
+# ---------------------------------------------------------------------------
+# Startup self-healing: 工作线程只活在进程内，进程重启后 DB 中残留的 RUNNING
+# run 必为孤儿（永不推进），且会触发 409 唯一索引阻断同 chapter 的新 run。
+# 单进程部署下，启动瞬间不可能存在真正还在跑的 RUNNING run → 一律按中断
+# 收尾为 FAILED；PAUSED 不动（合法持久状态，等待人工 resume）。
+# 此外，对历史已 FAILED/CANCELLED 但节点行仍 RUNNING/PENDING 的孤儿节点
+# （run 收尾时漏掉节点行的产物），启动时一并清扫为 FAILED，避免永远推进。
+# ---------------------------------------------------------------------------
+
+
+def recover_interrupted_runs(db_path: Path | str) -> list[str]:
+    """启动时把 ``workflow_runs`` 中所有 ``status='RUNNING'`` 的 run 收尾为 FAILED。
+
+    收尾口径：
+    - run 行：``status='FAILED'``, ``error='interrupted: service restart killed worker thread'``,
+      ``ended_at=<UTC now ISO>``。
+    - 该 run 下仍处于 ``RUNNING`` / ``PENDING`` 的节点行：``status='FAILED'``,
+      ``error='interrupted by restart'``, ``ended_at=<UTC now ISO>``（已
+      ``COMPLETED`` / ``FAILED`` / ``SKIPPED`` 的节点行保留原状，便于审计）。
+    - 孤儿节点清扫：run 已处于 ``FAILED`` / ``CANCELLED`` 终态、但其下节点行
+      仍为 ``RUNNING`` / ``PENDING`` 的僵尸节点，一并收尾为 FAILED（口径同上）。
+      这类残留通常源于历史 bug：run 收尾逻辑漏掉节点行（例如本次启动前已
+      收尾为 FAILED 的 run）；不处理会一直阻塞唯一索引、产生永远推进的孤儿。
+      ``PAUSED`` run 的 ``PENDING`` 节点行是合法的人工审阅等待状态，绝不动；
+      ``COMPLETED`` run 的 ``RUNNING`` 节点行视为矛盾数据，本次也不扫。
+    - PAUSED / COMPLETED run 本身不动。
+
+    返回受影响 run_id 列表（便于日志）；无受影响返回 ``[]``；任何异常
+    ``log.warning`` 不抛——启动不能被它阻断。
+    """
+    db_path = str(Path(db_path).resolve()) if not str(db_path).startswith(":memory:") else str(db_path)
+    conn = get_connection(db_path)
+    try:
+        # 1) 找出当前所有 RUNNING run_id（用于更新节点行 + 返回）
+        rows = conn.execute(
+            "SELECT run_id FROM workflow_runs WHERE status = 'RUNNING'"
+        ).fetchall()
+        run_ids: list[str] = [row["run_id"] for row in rows]
+        now = now_iso()
+
+        # 2) 收尾 RUNNING run 行（若有 RUNNING run）
+        if run_ids:
+            conn.execute(
+                """
+                UPDATE workflow_runs
+                SET status = 'FAILED',
+                    error = 'interrupted: service restart killed worker thread',
+                    ended_at = ?
+                WHERE status = 'RUNNING'
+                """,
+                (now,),
+            )
+            # 3) 收尾这些 run 下仍处于 RUNNING/PENDING 的节点行
+            placeholders = ",".join("?" for _ in run_ids)
+            conn.execute(
+                f"""
+                UPDATE workflow_run_nodes
+                SET status = 'FAILED',
+                    error = 'interrupted by restart',
+                    ended_at = ?
+                WHERE run_id IN ({placeholders})
+                  AND status IN ('RUNNING', 'PENDING')
+                """,
+                (now, *run_ids),
+            )
+
+        # 4) 孤儿节点清扫：run 已 FAILED/CANCELLED 终态、但节点行仍
+        # RUNNING/PENDING 的僵尸节点一并收尾。典型产物是历史已 FAILED 但
+        # 当时漏掉节点行的 run（生产库中那条 scene_planner 永远 RUNNING 的
+        # wfrn_fbc58dda2a70）。当前 RUNNING run 收尾后其下节点由步骤 3
+        # 处理，步骤 4 对那些行是幂等空操作；放在最末确保即使无 RUNNING
+        # run（启动时只有终态残留）也照样执行。PAUSED 不扫，COMPLETED 不扫。
+        cur = conn.execute(
+            """
+            UPDATE workflow_run_nodes
+            SET status = 'FAILED',
+                error = 'interrupted by restart',
+                ended_at = ?
+            WHERE status IN ('RUNNING', 'PENDING')
+              AND run_id IN (
+                SELECT run_id FROM workflow_runs
+                WHERE status IN ('FAILED', 'CANCELLED')
+              )
+            """,
+            (now,),
+        )
+        swept = cur.rowcount
+        if swept:
+            log.info(
+                "recover_interrupted_runs: 孤儿节点清扫收尾 %d 条残留 RUNNING/PENDING 节点行",
+                swept,
+            )
+        conn.commit()
+        return run_ids
+    except Exception as exc:  # noqa: BLE001 —— 启动不能被自愈阻断
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        log.warning("recover_interrupted_runs failed (non-fatal): %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+__all__ = [
+    "WorkflowEngine",
+    "WorkflowNode",
+    "PauseRequested",
+    "recover_interrupted_runs",
+]

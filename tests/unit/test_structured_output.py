@@ -57,6 +57,54 @@ def test_extract_json_empty_raises():
         extract_json("")
 
 
+# ---------------------------------------------------------------------------
+# finish_reason 透传与 length 分支文案（V3.9+ 排障体验修复）
+# ---------------------------------------------------------------------------
+
+
+def test_extract_json_empty_with_length_finish_reason_raises_actionable_message():
+    """content='' + finish_reason='length' → 报错文案明确提示 max_tokens 预算被思考耗尽，
+    给「调大 max_tokens（建议 16384）」可行动指引，不再误导「解析器问题」。
+    """
+    with pytest.raises(AgentOutputError) as exc:
+        extract_json("", finish_reason="length")
+    msg = str(exc.value)
+    assert "max_tokens" in msg
+    assert "16384" in msg
+    assert "length" in msg
+
+
+def test_extract_json_empty_with_stop_finish_reason_keeps_original_message_with_suffix():
+    """content='' + finish_reason='stop' → 保留原「empty output after stripping fences」文案，
+    末尾追加 ``(finish_reason=stop)`` 便于排障（与既有报错兼容 + 增量诊断）。
+    """
+    with pytest.raises(AgentOutputError) as exc:
+        extract_json("", finish_reason="stop")
+    msg = str(exc.value)
+    assert msg.startswith("empty output after stripping fences")
+    assert "(finish_reason=stop)" in msg
+
+
+def test_extract_json_empty_without_finish_reason_keeps_original_message():
+    """content='' + finish_reason=None → 既有行为零变化（与历史报错完全兼容）。"""
+    with pytest.raises(AgentOutputError) as exc:
+        extract_json("", finish_reason=None)
+    assert str(exc.value) == "empty output after stripping fences"
+
+
+def test_extract_json_empty_with_non_string_finish_reason_falls_back():
+    """上游偶发下发非字符串 finish_reason（如整型 / None / dict）→ 走「未知」分支，
+    不误判 length、不污染文案。仅当 ``isinstance(str) and non-empty`` 时才追加后缀。
+    """
+    with pytest.raises(AgentOutputError) as exc:
+        extract_json("", finish_reason=None)
+    assert "(finish_reason=" not in str(exc.value)
+    # 显式 None 与缺省参数等价
+    with pytest.raises(AgentOutputError) as exc2:
+        extract_json("")
+    assert "(finish_reason=" not in str(exc2.value)
+
+
 def test_extract_json_no_braces_raises():
     with pytest.raises(AgentOutputError):
         extract_json("nothing here")

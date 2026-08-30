@@ -127,6 +127,47 @@ describe('AiCallLogsPage', () => {
     expect(aiCallLogsApi.get).toHaveBeenCalledWith('aic_002');
   });
 
+  it('status badge tri-state: warn prefix shows 告警 with neutral badge class', async () => {
+    // 三态徽章：null → 成功 / 普通 error → 失败 / warn: 前缀 → 告警（中性黄/灰）
+    const warnLog: AiCallLogSummary = {
+      ...baseLog,
+      call_id: 'aic_warn',
+      created_at: '2026-08-24T12:00:00+00:00',
+      error: 'warn: first attempt invalid: no JSON object braces found',
+      retry_count: 1,
+      latency_ms: 950,
+    };
+    vi.mocked(aiCallLogsApi.list).mockResolvedValue([baseLog, baseLogError, warnLog]);
+    vi.mocked(aiCallLogsApi.get).mockResolvedValue(baseDetail);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('ai-log-row-aic_warn')).toBeInTheDocument();
+    });
+
+    const okBadge = screen.getByTestId('ai-log-status-aic_001');
+    const errBadge = screen.getByTestId('ai-log-status-aic_002');
+    const warnBadge = screen.getByTestId('ai-log-status-aic_warn');
+
+    // 文案三态
+    expect(okBadge).toHaveTextContent('成功');
+    expect(errBadge).toHaveTextContent('失败');
+    expect(warnBadge).toHaveTextContent('告警');
+
+    // 样式三态：成功 = committed；失败 = failed；warn = chapter-warn（中性）
+    expect(okBadge.className).toContain('badge--chapter-committed');
+    expect(okBadge.className).not.toContain('badge--chapter-failed');
+    expect(okBadge.className).not.toContain('badge--chapter-warn');
+
+    expect(errBadge.className).toContain('badge--chapter-failed');
+    expect(errBadge.className).not.toContain('badge--chapter-warn');
+
+    expect(warnBadge.className).toContain('badge--chapter-warn');
+    expect(warnBadge.className).not.toContain('badge--chapter-failed');
+    expect(warnBadge.className).not.toContain('badge--chapter-committed');
+  });
+
   it('reload button triggers list refresh', async () => {
     vi.mocked(aiCallLogsApi.list).mockResolvedValue([baseLog]);
     vi.mocked(aiCallLogsApi.get).mockResolvedValue(baseDetail);

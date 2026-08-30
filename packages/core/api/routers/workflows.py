@@ -296,7 +296,8 @@ def _collect_stage_models(db_path: str, run_id: str) -> dict[str, str]:
     """反查 run 期间各 AI 节点实际调用的模型。
 
     联查 ``ai_call_logs`` 与 ``agents``，按 ``agents.name``（即 node_id / agent 名）
-    分组取该 agent 最新一次成功调用的 ``model_id``（成功 = ``error IS NULL``）。
+    分组取该 agent 最新一次「成功」调用的 ``model_id``。判定口径：
+    ``error IS NULL`` 或 ``error LIKE 'warn:%'`` 前缀软告警（重试后成功场景）。
 
     返回 ``{agent_name: model_id}``；无任何成功调用时为空 dict（合法）。
     """
@@ -307,7 +308,7 @@ def _collect_stage_models(db_path: str, run_id: str) -> dict[str, str]:
             FROM ai_call_logs l
             JOIN agents a ON a.agent_id = l.agent_id
             WHERE l.run_id = ?
-              AND l.error IS NULL
+              AND (l.error IS NULL OR l.error LIKE 'warn:%')
               AND l.model_id IS NOT NULL
             ORDER BY l.created_at DESC
             """,

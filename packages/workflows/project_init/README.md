@@ -64,7 +64,7 @@ PAUSED 时 `POST /api/projects/init` 与 `POST /api/runs/{run_id}/resume` 响应
 }
 ```
 
-PAUSED 时 `GET /api/runs/{run_id}` 响应体同时附 `stage_models`：按 agent 名（`premise_designer` / `world_builder` / `character_designer` / `volume_outliner`）聚合 `ai_call_logs` 最新一次成功调用的 `model_id`（`error IS NULL`），用于审阅卡片区分「下拉显示的全局绑定」与「本次实际使用的模型」。非 PAUSED 不携带。
+PAUSED 时 `GET /api/runs/{run_id}` 响应体同时附 `stage_models`：按 agent 名（`premise_designer` / `world_builder` / `character_designer` / `volume_outliner`）聚合 `ai_call_logs` 最新一次成功调用的 `model_id`（`error IS NULL` 或 `warn:` 前缀软告警，如重试成功/observer 越权剥离），用于审阅卡片区分「下拉显示的全局绑定」与「本次实际使用的模型」。非 PAUSED 不携带。
 
 ### 人工修订回灌
 

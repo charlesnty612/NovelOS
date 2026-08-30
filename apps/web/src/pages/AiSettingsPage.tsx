@@ -837,8 +837,13 @@ function getThinkingOptions(
       ['default', 'off', 'low', 'medium', 'high'].includes(o.value),
     );
   }
-  // Kimi：default / off / low / high / max（不含 on/adaptive）
-  if (host.includes('kimi.com')) {
+  // Kimi：default / off / low / high / max（不含 on/adaptive）。
+  // host 需同时命中 kimi.com 与 Moonshot 官方域（api.moonshot.ai / api.moonshot.cn）。
+  if (
+    host.includes('kimi.com') ||
+    host.includes('moonshot.ai') ||
+    host.includes('moonshot.cn')
+  ) {
     return THINKING_OPTIONS.filter((o) =>
       ['default', 'off', 'low', 'high', 'max'].includes(o.value),
     );
@@ -863,7 +868,8 @@ function getThinkingOptions(
  * - reasoning_effort ∈ {low,medium,high} → 对应档位
  * - 都没有 → 'default'（不显式写入 params）
  */
-function inferThinkingMode(params: Record<string, unknown>): ThinkingMode {
+// 导出仅为测试：回归锁死 reasoning_effort=max 的回显（漏判会静默丢档）。
+export function inferThinkingMode(params: Record<string, unknown>): ThinkingMode {
   const thinking = params['thinking'];
   if (thinking && typeof thinking === 'object') {
     const t = thinking as Record<string, unknown>;
@@ -872,7 +878,12 @@ function inferThinkingMode(params: Record<string, unknown>): ThinkingMode {
     if (t['type'] === 'adaptive') return 'adaptive';
   }
   const effort = params['reasoning_effort'];
-  if (effort === 'low' || effort === 'medium' || effort === 'high') {
+  if (
+    effort === 'low' ||
+    effort === 'medium' ||
+    effort === 'high' ||
+    effort === 'max'
+  ) {
     return effort;
   }
   return 'default';
@@ -1050,6 +1061,8 @@ function ModelProfileFormModal({
       delete paramsOut['api_key'];
     }
     // 思考模式：表单是该字段的唯一管理面，按选项写/删 thinking / reasoning_effort。
+    // 与后端约定：payload 键值显式 null = 删除该键；缺键 = 保留 DB 原值（部分更新）。
+    // 因此「回默认」用 null 显式删除，避免与「未提供该字段」混淆。
     if (!isMock) {
       delete paramsOut['thinking'];
       delete paramsOut['reasoning_effort'];
@@ -1067,8 +1080,11 @@ function ModelProfileFormModal({
         thinkingMode === 'max'
       ) {
         paramsOut['reasoning_effort'] = thinkingMode;
+      } else if (thinkingMode === 'default') {
+        // 「默认（跟随端点）」= 显式删除 thinking / reasoning_effort，触发后端 null 语义
+        if ('thinking' in initialParams) paramsOut['thinking'] = null;
+        if ('reasoning_effort' in initialParams) paramsOut['reasoning_effort'] = null;
       }
-      // 'default' → 两键均不写入
     } else {
       // mock provider 没有「思考」概念，强制清除避免残留
       delete paramsOut['thinking'];
@@ -1138,7 +1154,6 @@ function ModelProfileFormModal({
               value={model}
               onChange={(e) => setModel(e.target.value)}
               placeholder="如 gpt-4o-mini / mock-echo / deepseek-chat"
-              list="profile-model-options"
               style={{ flex: 1 }}
               data-testid="profile-model"
             />
@@ -1157,16 +1172,29 @@ function ModelProfileFormModal({
                 {fetchingModels ? '拉取中…' : '拉取模型'}
               </button>
           </div>
-          {/* V3.8：拉取得到的候选列表（仅供浏览器自动补全 / datalist 提示候选，不限定手输）。
-              mock 端点直接给 mock-model 占位，避免用户空白无候选。 */}
-          <datalist id="profile-model-options">
-            {(isMock
-              ? ['mock-model']
-              : availableModels
-            ).map((id) => (
-              <option key={id} value={id} />
-            ))}
-          </datalist>
+          {/* V3.8：拉取成功后显式列出完整候选（原生 datalist 会按输入框当前值
+              过滤候选——当前值命中某一项时其余候选全部不可见，故弃用）。
+              仅作选取辅助，不限定手输。 */}
+          {availableModels.length > 0 ? (
+            <select
+              className="input"
+              style={{ marginTop: 6 }}
+              value=""
+              onChange={(e) => {
+                if (e.target.value) setModel(e.target.value);
+              }}
+              data-testid="profile-model-candidates"
+            >
+              <option value="" disabled>
+                从已拉取的 {availableModels.length} 个模型中选择…
+              </option>
+              {availableModels.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+          ) : null}
           {fetchHint ? (
             <div
               className="muted small"

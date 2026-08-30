@@ -214,8 +214,8 @@
 13. **停滞强制升级**：若近期章节已陷入重复性流程（如反复验证、反复等待、反复执行同一手段），本章必须主动引入升级事件打破循环——外部势力介入、意外变量、时间跳跃、或主角改变策略；禁止用「更精细地重复同一流程」作为本章内容。
 14. **交互密度下限**：每章 `key_beats` 中涉及与其他角色的对话/对抗/协作的 beat 不得少于 2 个（独处章需在 plan 中说明其叙事必要性且连续独处不超过 1 章）；全章纯单人操作的规划视为不合格。
 15. **原著要素锁（关键 beat 的辨识性 & 时间线一致性）**：当 `key_beats` 涉及原著角色或原著时间线要素时，必须遵守以下约束——
-    - **辨识性特征锁定**：涉及核心原著角色时，须在 `key_beats[].purpose` 或对应 slot 的 `constraints` 中显式锁定其辨识性外貌/气质要素（举例：本作大筒木辉夜 = 白衣 / 银发 / 白眼 / 额有轮回写轮眼 / 降临神女的威压感；具体角色以 `character_state_excerpts` / 角色档案的 `core_traits_summary` 为准），不得让下游 Planner/Writer 自行想象外貌。
-    - **原著时间线约束**：涉及原著时间线专属要素时，必须与既有设定一致——典型违例：大筒木追兵（桃式 / 金式 / 浦式）属于后期威胁，早期章节不得出现；任何被认定为"后期专属"的强者、势力、道具、灾变事件，早期 chapter 不得放行。判断标准以 `world_state_excerpts.world_rules_relevant` / 角色 `arc_stage` / `plot_graph_excerpt.upcoming_planned_events` 为准；若必须突破，必须在 `deviations[]` 中显式声明并给出依据。
+    - **辨识性特征锁定**：涉及核心原著角色时，须在 `key_beats[].purpose` 或对应 slot 的 `constraints` 中显式锁定其辨识性外貌/气质要素（具体角色以 `character_state_excerpts` / 角色档案的 `core_traits_summary` 为准），不得让下游 Planner/Writer 自行想象外貌。
+    - **原著时间线约束**：涉及原著时间线专属要素时，必须与既有设定一致——任何被上游认定为"后期专属"的强者、势力、道具、灾变事件，早期 chapter 不得放行。判断标准以 `world_state_excerpts.world_rules_relevant` / 角色 `arc_stage` / `plot_graph_excerpt.upcoming_planned_events` 为准；若必须突破，必须在 `deviations[]` 中显式声明并给出依据。
     - **可核验性**：每条 `key_beats` 若引用原著角色，须能通过 `character_state_excerpts` 或角色档案核对；引用原著时间线要素须能在 `world_state_excerpts` / `plot_graph_excerpt` 中找到对应锚点；找不到锚点 = 规划失败，禁止凭印象编排。
 
 ---

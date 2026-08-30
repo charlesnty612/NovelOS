@@ -3,7 +3,7 @@
 > 版本：`scene_planner:v1`（Sprint 16 P0：ScenePlanner 真实化）
 > 对齐：PRD §30（Planner Agent / Scene Planner）、§40（主 Workflow）、§45（Scene Plan）、§46（Narrative Slot）、§62（Prompt 九段结构）、§113（Agent 十问）
 > 状态：Canonical Prompt 文本。
-> 注册：`docs/agents/prompts/scene_planner-v1.md` → `PromptRegistry.sync_from_docs` → `agents` / `prompts` 表（capability=reasoning，agent_name=scene_planner，version=v1）。
+> 注册：`docs/agents/prompts/scene_planner-v1.md` → `PromptRegistry.sync_from_docs` → `agents` / `prompts` 表（V3.9.2+ capability=creative_writing，V3.9.2 前 capability=reasoning，agent_name=scene_planner，version=v1）。
 > 触发节点：`packages/workflows/chapter_write/pipeline.py` 的 `_scene_planner_node`（load_plan 之后、writer 之前；失败降级到原 stub 逻辑，不阻断 writer）。
 
 ---
@@ -143,8 +143,8 @@
 9. **revision_note 优先**：若 `revision_note` 与 Director plan 冲突，以 `revision_note` 的约束为准，并在 `deviations` 中记录。
 10. **失败透明**：若 Director plan 过空无法规划，输出 1 个兜底 scene（见 §7），并在 `notes_for_writer` 说明。
 11. **原著要素锁（沿传 Director 约束，禁止脱锁）**：当 `director_plan.key_beats[]` 涉及原著角色或原著时间线要素时，本 Agent 必须**沿传** Director 的「原著要素锁」（见 `director:v1` §6-Rule-15），不得在结构翻译过程中丢失、稀释或自行替换——
-    - **辨识性特征沿传**：若某 beat 的 `purpose` 显式锁定了原著角色的外貌/气质要素（典型：大筒木辉夜 = 白衣 / 银发 / 白眼 / 额有轮回写轮眼 / 降临神女的威压感；具体以 `character_state_excerpts` / 角色档案为准），对应 slot 的 `constraints[]` 必须**逐字保留**这些锁定要素，禁止改写或省略；不得让 Writer 在 slot 中自行决定角色外貌。
-    - **原著时间线沿传**：Director 已声明的"早期 chapter 不得出现的后期要素"（典型违例：大筒木追兵桃式 / 金式 / 浦式；其他被认定为后期专属的强者 / 势力 / 道具 / 灾变）必须**原样进入** `information_boundary[]`，作为本 chapter / 本 scene 的硬性禁用清单；Writer 误用即视为违反 §4 Forbidden-2（使用计划外实体）。
+    - **辨识性特征沿传**：若某 beat 的 `purpose` 显式锁定了原著角色的外貌/气质要素（具体以 `character_state_excerpts` / 角色档案为准），对应 slot 的 `constraints[]` 必须**逐字保留**这些锁定要素，禁止改写或省略；不得让 Writer 在 slot 中自行决定角色外貌。
+    - **原著时间线沿传**：Director 已声明的"早期 chapter 不得出现的后期要素"（其他被认定为后期专属的强者 / 势力 / 道具 / 灾变）必须**原样进入** `information_boundary[]`，作为本 chapter / 本 scene 的硬性禁用清单；Writer 误用即视为违反 §4 Forbidden-2（使用计划外实体）。
     - **可核验性**：scene 涉及原著角色 / 原著时间线要素时，对应 slot 的 `characters` / `location` 必须在 `available_characters` / `available_locations` 内可查；引用必须可追溯回 `director_plan.key_beats`，禁止 Scene Planner 自创原著要素引用。
 
 ---

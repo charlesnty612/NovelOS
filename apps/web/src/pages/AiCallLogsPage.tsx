@@ -135,12 +135,18 @@ export function AiCallLogsPage() {
                 <span
                   className={
                     r.error
-                      ? 'badge badge--chapter-failed'
+                      ? r.error.startsWith('warn:')
+                        ? 'badge badge--chapter-warn'
+                        : 'badge badge--chapter-failed'
                       : 'badge badge--chapter-committed'
                   }
                   data-testid={`ai-log-status-${r.call_id}`}
                 >
-                  {r.error ? '失败' : '成功'}
+                  {r.error
+                    ? r.error.startsWith('warn:')
+                      ? '告警'
+                      : '失败'
+                    : '成功'}
                 </span>
                 <span className="kv-list__meta">
                   {r.call_id.slice(0, 12)}…

@@ -117,8 +117,8 @@ export const api = {
   get<T>(path: string, query?: RequestOptions['query']): Promise<T> {
     return request<T>(path, { method: 'GET', query });
   },
-  post<T>(path: string, body?: unknown): Promise<T> {
-    return request<T>(path, { method: 'POST', body });
+  post<T>(path: string, body?: unknown, options?: Omit<RequestOptions, 'method' | 'body' | 'query'>): Promise<T> {
+    return request<T>(path, { method: 'POST', body, ...options });
   },
   put<T>(path: string, body?: unknown): Promise<T> {
     return request<T>(path, { method: 'PUT', body });

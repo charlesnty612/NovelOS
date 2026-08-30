@@ -334,7 +334,8 @@ def test_run_observer_with_mock_script_happy_path(tmp_path: Path):
 
 
 def test_run_observer_with_bad_then_good_script_retries(tmp_path: Path):
-    """mock_script 先坏 JSON 再给合法 → 201 + retry_count=1。"""
+    """mock_script 先坏 JSON 再给合法 → 201 + retry_count=1；最后一次成功调用
+    在 ai_call_logs.error 中写 ``warn: first attempt invalid: ...`` 软告警前缀。"""
     app = _create_app(tmp_path)
 
     async def run():
@@ -363,12 +364,20 @@ def test_run_observer_with_bad_then_good_script_retries(tmp_path: Path):
             conn = get_connection(settings.db_path)
             try:
                 row = conn.execute(
-                    "SELECT retry_count, error FROM ai_call_logs ORDER BY created_at DESC LIMIT 1"
+                    "SELECT retry_count, error FROM ai_call_logs "
+                    "WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (body["run_id"],),
                 ).fetchone()
             finally:
                 conn.close()
             assert row["retry_count"] == 1
-            assert row["error"] is None
+            # 重试成功后，最后一行写软告警前缀（warn: first attempt invalid: ...），
+            # 而非旧语义下的 error IS NULL。稳定子串用 no JSON object braces found
+            # 验证每次错误信息核心内容。
+            err = row["error"]
+            assert err is not None
+            assert err.startswith("warn: first attempt invalid:")
+            assert "no JSON object braces found" in err
 
     asyncio.run(run())
 
@@ -428,7 +437,9 @@ def test_run_observer_strips_forbidden_keys_and_succeeds(tmp_path: Path):
             conn = get_connection(settings.db_path)
             try:
                 row = conn.execute(
-                    "SELECT retry_count, error FROM ai_call_logs ORDER BY created_at DESC LIMIT 1"
+                    "SELECT retry_count, error FROM ai_call_logs "
+                    "WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (body["run_id"],),
                 ).fetchone()
             finally:
                 conn.close()
@@ -493,7 +504,9 @@ def test_run_observer_strips_when_missing_arrays_auto_filled(tmp_path: Path):
             conn = get_connection(settings.db_path)
             try:
                 row = conn.execute(
-                    "SELECT error FROM ai_call_logs ORDER BY created_at DESC LIMIT 1"
+                    "SELECT error FROM ai_call_logs "
+                    "WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (body["run_id"],),
                 ).fetchone()
             finally:
                 conn.close()

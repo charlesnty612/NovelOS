@@ -49,7 +49,7 @@ _AGENT_TO_CAPABILITY: dict[str, str] = {
     "deconstructor_aggregate": "reasoning",
     "summarizer": "light",      # V3 P0-2
     "critic": "light",          # V3 P0-2
-    "scene_planner": "reasoning",  # P0：Director plan → Scene plan 结构翻译
+    "scene_planner": "creative_writing",  # V3.9.2+：运行于 chapter-write 管线，按管线阶段归入正文写作（V3.9.2 前归 reasoning）
     "premise_designer": "premise_design",       # V3.7 project-init
     "world_builder": "world_building",          # V3.7 project-init
     "character_designer": "character_design",   # V3.7 project-init

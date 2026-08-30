@@ -16,7 +16,10 @@
 - Mock 测试通道：``mock_script`` 非空时跳过 :class:`ModelRouter`，直接构造 :class:`MockProvider`
   并注入脚本；用于测试「先坏后好」「两次都坏」等场景。
 - ``ai_call_logs`` 落库：调用次数写 ``retry_count``（0 / 1）；成功后写 ``output_json`` / ``token_usage`` /
-  ``latency_ms``；失败时 ``error`` 字段写最后一次错误。
+  ``latency_ms``；失败时 ``error`` 字段写最后一次错误。可观测性口径：成功路径若曾重试
+  （``retry_count == 1`` 且 ``last_error`` 非空），把首次失败原因以 ``warn: first attempt invalid: ...``
+  写入 ``error``；若同时存在 observer 越权剥离的 ``warn: stripped keys=[...]``，两段用 `` | `` 拼接；
+  都没有时 ``error=None``，不污染正常成功路径。
 - ``input_context_ids_json``：从 input_payload 里挑 ``*_id`` 键值，去重、截断到 100 条。
 
 契约校验三档（agent-contracts §3.2 / §4.2 / §5.2）：
@@ -47,6 +50,11 @@ from .structured_output import extract_json, strip_observer_violations, validate
 _ID_KEY_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*_id$")
 _RETRY_HINT = "\n\n[System note] 上次输出无法解析/不合规：{err}。请只输出合法 JSON，不要附加解释。"
 _MAX_CONTEXT_IDS = 100
+# 可观测性：成功落库时把「首次失败原因」以 warn 前缀写入 ai_call_logs.error，
+# 便于事后回溯首次失败类别（JSON 解析失败 / 缺字段 / schema_version 不符等）。
+# 文本截断上限防止超长堆栈进库。
+_RETRY_WARN_PREFIX = "warn: first attempt invalid:"
+_WARN_MAX_LEN = 300
 
 
 def _collect_context_ids(payload: dict[str, Any]) -> list[str]:
@@ -352,8 +360,15 @@ def run_agent(
 
             raw_text = completion.get("text") or ""
             token_usage = completion.get("usage") or {"prompt": 0, "completion": 0, "total": 0}
+            # finish_reason：从 provider 透传（OpenAI 兼容 SSE 解析；Anthropic/Ollama/Mock
+            # 默认 None）。仅当非 None 时挂到 token_usage 上一并写入 ai_call_logs.token_usage_json
+            # ——零 schema 变更、与 cached_tokens 风格一致；runner 报错路径按需消费。
+            finish_reason_raw = completion.get("finish_reason")
+            if isinstance(finish_reason_raw, str) and finish_reason_raw:
+                token_usage = dict(token_usage)
+                token_usage["finish_reason"] = finish_reason_raw
             try:
-                parsed = extract_json(raw_text)
+                parsed = extract_json(raw_text, finish_reason=finish_reason_raw if isinstance(finish_reason_raw, str) else None)
             except AgentOutputError as exc:
                 last_error = str(exc)
                 continue  # 进入重试
@@ -398,6 +413,15 @@ def run_agent(
 
         # 成功落库
         latency = int((time.monotonic() - start) * 1000)
+        # 可观测性：重试成功时把首次失败原因以 warn 前缀写入 ai_call_logs.error。
+        # 与 observer_warn 可同时存在（剥离 + 重试成功独立事件），用 " | " 拼接；
+        # 都没有时保持现状 error=None，不污染正常成功路径。
+        retry_warn: str | None = None
+        if retry_count == 1 and last_error:
+            truncated = last_error[:_WARN_MAX_LEN]
+            retry_warn = f"{_RETRY_WARN_PREFIX} {truncated}"
+        warn_parts = [w for w in (retry_warn, observer_warn) if w]
+        error_text = " | ".join(warn_parts) if warn_parts else None
         _record_call(
             db_path,
             call_id=new_id("aic"),
@@ -410,7 +434,7 @@ def run_agent(
             output=output_log,
             token_usage=token_usage,
             latency_ms=latency,
-            error=observer_warn,  # observer 越权剥离 → 写 ai_call_logs.error 为 warn 前缀
+            error=error_text,  # 成功路径可能为 warn 前缀（重试首次失败 / observer 剥离），否则 None
             retry_count=retry_count,
         )
         _finalize_agent_run_status(db_path, run_id, node_run_id, status="COMPLETED")

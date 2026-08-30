@@ -240,9 +240,9 @@ profile (model_profiles)            binding (capability_bindings)        resolve
 | `world_building` | 世界观 | `world_builder` |
 | `character_design` | 角色设计 | `character_designer` |
 | `volume_outline` | 卷纲 | `volume_outliner` |
-| `creative_writing` | 正文写作 | `writer` |
-| `reasoning` | 推理规划 | `director` / `observer` / `arbiter` / `deconstructor_chapter` / `deconstructor_aggregate` / `scene_planner` |
-| `light` | 轻量评审 | `summarizer` / `critic` |
+| `creative_writing` | 正文写作 | `writer` / `polisher` / `scene_planner` |
+| `reasoning` | 推理规划 | `director` / `observer` / `arbiter` / `deconstructor_chapter` / `deconstructor_aggregate` |
+| `light` | 轻量评审 | `summarizer` / `critic` / `writer(revise·改稿，V3.9.2 起 revise 模式局部修改走 light)` |
 
 ### 绑定 / fallback 语义
 - `light` capability：V3 P0-2 的回退到 `reasoning` 行为在 `call_with_fallback` 中保留。
@@ -260,6 +260,11 @@ profile (model_profiles)            binding (capability_bindings)        resolve
 
 ### 共享脱敏
 `packages/core/model_router/security.py` 集中 `_MASK` / `_mask_response` / `_prepare_post_params` / `_prepare_patch_params` 等参数掩码工具，`/model-configs` / `/model-profiles` 路由共同 import 使用，避免重复粘贴。
+
+### PATCH `params_json` 合并语义（V3.8+）
+- 缺键 → DB 原值保留（部分更新；`api_key="***"` 掩码合并依赖此语义）；
+- 键显式 `null` → 从结果中删除该键（思考档位「回默认」等场景；`api_key` 的 `null` 仍走清空分支）；
+- `api_key` 特殊值：`"***"` 保留原值、`""` 清空、其它字符串覆盖。
 
 ### 弃用说明（V3.7 起）
 - `/model-configs` 端点进入只读兼容期：仍可读、可改；不建议再向该端点写入新行（新建档案请改走 `/model-profiles`）。

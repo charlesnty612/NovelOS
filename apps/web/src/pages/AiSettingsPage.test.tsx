@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { AiSettingsPage } from './AiSettingsPage';
+import { AiSettingsPage, inferThinkingMode } from './AiSettingsPage';
 import { agentsApi, capabilityBindingsApi, modelProfilesApi } from '../api/endpoints';
 import type {
   Agent,
@@ -534,7 +534,7 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     expect(Object.prototype.hasOwnProperty.call(paramsOut, 'thinking')).toBe(false);
   });
 
-  it('编辑档案：切回「默认」保存 → params 同时无 thinking 与 reasoning_effort', async () => {
+  it('编辑档案：切回「默认」保存 → params 含 reasoning_effort=null（显式删除）', async () => {
     const profileWithEffort: ModelProfile = {
       ...baseProfile,
       profile_id: 'mpf_t3',
@@ -565,13 +565,48 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     });
     const [, payload] = vi.mocked(modelProfilesApi.update).mock.calls[0]!;
     const paramsOut = (payload as Record<string, unknown>).params as Record<string, unknown>;
+    // 与后端 null=删除语义对齐：原本存在 reasoning_effort → 发 null 显式删除
+    expect(paramsOut).toHaveProperty('reasoning_effort', null);
     expect(Object.prototype.hasOwnProperty.call(paramsOut, 'thinking')).toBe(false);
+  });
+
+  it('编辑档案：原本无 reasoning_effort 时切「默认」保存 → payload 不含该键', async () => {
+    // 初始 params 不含 reasoning_effort / thinking → 切「默认」保持缺键（非 null）
+    const profileNoEffort: ModelProfile = {
+      ...baseProfile,
+      profile_id: 'mpf_t4',
+      name: 'thinking-none',
+      params: {
+        base_url: 'https://api.openai.com/v1',
+        api_key: '***',
+      },
+    };
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([profileNoEffort]);
+    vi.mocked(modelProfilesApi.update).mockResolvedValue(profileNoEffort);
+
+    renderPage();
+    fireEvent.click(await screen.findByTestId('model-profile-edit-mpf_t4'));
+
+    const sel = (await screen.findByTestId(
+      'profile-thinking-select',
+    )) as HTMLSelectElement;
+    // initialParams 不含 reasoning_effort → 回显「默认」
+    expect(sel.value).toBe('default');
+
+    fireEvent.click(screen.getByTestId('profile-save'));
+
+    await waitFor(() => {
+      expect(modelProfilesApi.update).toHaveBeenCalledTimes(1);
+    });
+    const [, payload] = vi.mocked(modelProfilesApi.update).mock.calls[0]!;
+    const paramsOut = (payload as Record<string, unknown>).params as Record<string, unknown>;
     expect(Object.prototype.hasOwnProperty.call(paramsOut, 'reasoning_effort')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(paramsOut, 'thinking')).toBe(false);
   });
 
   // -------------------- V3.8 拉取模型 + 思考模式端点收窄 ----------------------------
 
-  it('mock provider：拉取按钮始终可点，datalist 出现 mock-model', async () => {
+  it('mock provider：拉取按钮始终可点，候选下拉出现 mock-model', async () => {
     // mock 不需要 base_url，按钮可点；内部直返 [mock-model]。
     vi.mocked(modelProfilesApi.fetchAvailableModels).mockResolvedValue({
       models: ['mock-model'],
@@ -597,12 +632,13 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
       expect(modelProfilesApi.fetchAvailableModels).toHaveBeenCalledTimes(1);
     });
 
-    // datalist 出现 mock-model 候选。
-    const dataList = document.getElementById(
-      'profile-model-options',
-    ) as HTMLDataListElement | null;
-    expect(dataList).toBeTruthy();
-    const opts = dataList ? Array.from(dataList.querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value) : [];
+    // 拉取成功后出现完整候选下拉（原生 datalist 会按输入值过滤候选，已弃用）。
+    const cand = (await screen.findByTestId(
+      'profile-model-candidates',
+    )) as HTMLSelectElement;
+    const opts = Array.from(cand.querySelectorAll('option')).map(
+      (o) => (o as HTMLOptionElement).value,
+    );
     expect(opts).toContain('mock-model');
   });
 
@@ -646,5 +682,21 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     expect(values).toContain('adaptive');
     expect(values).toContain('on');
     expect(values).toContain('low');
+  });
+});
+// -------------------- 回归：思考档位回显 --------------------
+
+describe('inferThinkingMode 回归（审查 2026-08-30）', () => {
+  it('reasoning_effort=max 回显为 max（漏判会在重开编辑后静默丢档）', () => {
+    expect(inferThinkingMode({ reasoning_effort: 'max' })).toBe('max');
+    expect(inferThinkingMode({ reasoning_effort: 'low' })).toBe('low');
+    expect(inferThinkingMode({ reasoning_effort: 'high' })).toBe('high');
+  });
+
+  it('thinking.type 各值回显正确', () => {
+    expect(inferThinkingMode({ thinking: { type: 'adaptive' } })).toBe('adaptive');
+    expect(inferThinkingMode({ thinking: { type: 'disabled' } })).toBe('off');
+    expect(inferThinkingMode({ thinking: { type: 'enabled' } })).toBe('on');
+    expect(inferThinkingMode({})).toBe('default');
   });
 });

@@ -1848,6 +1848,114 @@ def test_get_run_paused_attaches_stage_models(tmp_path: Path):
     asyncio.run(run())
 
 
+def test_get_run_paused_attaches_stage_models_with_warn_prefix(tmp_path: Path):
+    """附带 warn 前缀的「重试后成功」调用仍计入 stage_models（与 error 失败行区分）。
+
+    - premise_designer 真实调用 + 直插一条 error='warn: first attempt invalid: ...'
+      的「重试成功」行（晚于真实 mock）→ 应作为最新有效 model_id 被聚合。
+    - 直插一条 error='real-failure' 的失败行（晚于 warn 行）→ 应被排除。
+    - 期望：stage_models['premise_designer'] == warn 行 model_id。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {
+                        "genre": "玄幻",
+                        "logline": "少年叶尘偶得星辰古卷",
+                        "platform": "起点",
+                        "target_words": 300000,
+                        "title": "",
+                        "author_notes": "",
+                    },
+                    "chapter_seed_count": 5,
+                    "step_mode": True,
+                    "mock_providers": _step_mode_full_scripts(5),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id = r.json()["run_id"]
+            run_dict = await _wait_run_terminal(app, run_id, expected=("PAUSED",))
+            assert run_dict["current_node"] == "premise_designer"
+
+            db_path = app.state.settings.db_path
+            from packages.core.ids import new_id
+            from packages.core.db import get_connection
+            from packages.core.ids import now_iso
+
+            with get_connection(db_path) as conn:
+                p_id = conn.execute(
+                    "SELECT agent_id FROM agents WHERE name = ?",
+                    ("premise_designer",),
+                ).fetchone()["agent_id"]
+                base_ts = now_iso()
+
+                def _insert(
+                    agent_id: str,
+                    model_id: str,
+                    ts: str,
+                    error: str | None = None,
+                    call_id: str | None = None,
+                ) -> None:
+                    conn.execute(
+                        """
+                        INSERT INTO ai_call_logs (
+                            call_id, run_id, node_run_id, agent_id, model_id, prompt_version,
+                            input_context_ids_json, output_json, token_usage_json, latency_ms,
+                            cost, error, retry_count, created_at
+                        ) VALUES (?, ?, NULL, ?, ?, 'manual:v1', '[]', NULL, NULL, 0,
+                                  NULL, ?, 0, ?)
+                        """,
+                        (
+                            call_id or new_id("aic"),
+                            run_id,
+                            agent_id,
+                            model_id,
+                            error,
+                            ts,
+                        ),
+                    )
+
+                # warn 前缀的「重试成功」行：晚于真实 mock 落库时间，应胜出
+                _insert(
+                    p_id,
+                    "openai_compatible/k3-warn",
+                    base_ts + "z9",
+                    error="warn: first attempt invalid: no JSON object braces found",
+                )
+                # 真正的失败行：比 warn 行更晚，应被排除
+                _insert(
+                    p_id,
+                    "openai_compatible/should-not-win",
+                    base_ts + "za",
+                    error="real-failure",
+                )
+                conn.commit()
+
+            detail = await _get_run_via_http(app, run_id)
+            assert detail is not None
+            assert detail["status"] == "PAUSED"
+            assert "stage_models" in detail
+            stage_models = detail["stage_models"]
+            assert isinstance(stage_models, dict)
+            # warn 前缀软告警行被视为「成功」，应进入聚合；失败行被排除
+            assert stage_models.get("premise_designer") == "openai_compatible/k3-warn", (
+                f"premise_designer 应取最新「warn 软告警」行 model_id；实得 {stage_models!r}"
+            )
+            assert "openai_compatible/should-not-win" not in stage_models.values(), (
+                f"真实失败行应被 stage_models 排除；实得 {stage_models!r}"
+            )
+
+    asyncio.run(run())
+
+
 def test_get_run_non_paused_has_no_stage_models(tmp_path: Path):
     """非 PAUSED 状态的 run：响应不附加 stage_models（响应体最小化语义）。"""
     app = _create_app(tmp_path)

@@ -126,7 +126,17 @@ Messages = list[dict[str, Any]]
 """Chat messages 格式：每条 ``{"role": "system"|"user"|"assistant", "content": str}``。"""
 
 CompletionResult = dict[str, Any]
-"""Provider 输出：``{"text": str, "usage": {"prompt": int, "completion": int, "total": int}}``。"""
+"""Provider 输出：``{"text": str, "usage": {"prompt": int, "completion": int, "total": int},
+"finish_reason": str | None}``。
+
+``finish_reason`` 字段：
+- OpenAI 兼容 Provider：从 SSE ``choices[0].finish_reason`` 透传（典型值 ``stop``
+  / ``length``；其它上游自定义值原样透传）。
+- Anthropic Provider：当前固定为 ``None``（Anthropic 原生 stop_reason 与 OpenAI
+  finish_reason 语义不一一对应，避免误映射）。
+- Ollama Provider：从响应 ``done_reason`` 透传（字符串时；非字符串/缺失为 ``None``）。
+- Mock Provider：仅当构造时显式传入才下发；否则不下发该键（既有调用点 ``.get`` 行为零变化）。
+"""
 
 Scripted = Sequence[str] | Callable[[int], str]
 """MockProvider 脚本来源：固定列表（耗尽则重复末条）或按调用次数返回响应的 callable。"""
@@ -156,11 +166,16 @@ class MockProvider:
         scripted: Scripted | None = None,
         *,
         usage: dict[str, Any] | None = None,
+        finish_reason: str | None = None,
     ) -> None:
         self._scripted = scripted
         # V3.5：cached_tokens 注入槽——仅当显式传入时覆盖默认 usage；None/缺省保
         # 留 ``{prompt:0, completion:0, total:0}``，与既有测试零兼容影响。
         self._forced_usage = usage
+        # finish_reason 注入槽：测试可显式传入 ``"length"`` / ``"stop"``，模拟
+        # 上游 OpenAI 兼容 SSE 的末 chunk 字段；None 时不下发该键，保持与既有
+        # 调用点（dict.get 不存在的 key 行为）零行为变化。
+        self._forced_finish_reason = finish_reason
 
     def complete(self, messages: Messages, params: dict | None = None) -> CompletionResult:
         """返回脚本响应。``messages`` / ``params`` 仅用于可观测性，不做解析。"""
@@ -187,10 +202,15 @@ class MockProvider:
             usage_out = dict(self._forced_usage)
         else:
             usage_out = {"prompt": 0, "completion": 0, "total": 0}
-        return {
+        result: dict[str, Any] = {
             "text": text,
             "usage": usage_out,
         }
+        # finish_reason 缺省时不下发该键——保持既有调用点 dict.get 行为零变化；
+        # 仅当测试或调用方显式注入时才带 key。
+        if self._forced_finish_reason is not None:
+            result["finish_reason"] = self._forced_finish_reason
+        return result
 
     def health_check(self, *, timeout: float | None = None) -> dict[str, Any]:
         """Mock provider 永远 ``ok=True``（任务书口径：mock provider 保持现状语义）。"""
@@ -312,6 +332,13 @@ class OpenAICompatibleProvider:
                 text_parts: list[str] = []
                 usage_raw: dict[str, Any] = {}
                 saw_done = False
+                # finish_reason：OpenAI 流式在每个 content chunk 的 ``choices[0]``
+                # 给 ``finish_reason``（最后一条非空 content chunk 通常是 ``stop``，
+                # ``length`` 表示 max_tokens 截断）。记录**最后一次**非 None 值，避免
+                # 上游中间心跳帧清空语义。末 chunk 不一定有 content，但会下发
+                # ``finish_reason``；content-empty + finish_reason='length' 是自适应思考
+                # 耗尽预算的典型签名——runner 报错依赖此值。
+                finish_reason: str | None = None
                 # 逐行 SSE：data: {...}\n\n  /  data: [DONE]\n\n
                 for line in resp.iter_lines():
                     # 总时长 deadline 检查：流式下服务端持续吐 chunk 也可能拉得过长
@@ -347,6 +374,14 @@ class OpenAICompatibleProvider:
                     chunk_usage = chunk.get("usage")
                     if isinstance(chunk_usage, dict) and chunk_usage:
                         usage_raw = chunk_usage
+                    # finish_reason：取 ``choices[0].finish_reason``（可能为 None / 缺失 /
+                    # 非 str）；记录最后一次非 None 值。
+                    try:
+                        _fr_raw = chunk["choices"][0].get("finish_reason")
+                    except (KeyError, IndexError, TypeError):
+                        _fr_raw = None
+                    if _fr_raw is not None and (not isinstance(_fr_raw, str) or _fr_raw):
+                        finish_reason = _fr_raw
                     # content 累加
                     try:
                         delta = chunk["choices"][0]["delta"]
@@ -413,6 +448,9 @@ class OpenAICompatibleProvider:
         return {
             "text": text,
             "usage": usage_out,
+            # 透传 finish_reason 供下游诊断 ``empty output + finish_reason=length``
+            # 这类自适应思考耗尽预算的隐性失败；``None`` 表示上游未下发。
+            "finish_reason": finish_reason,
         }
 
     def health_check(self, *, timeout: float | None = None) -> dict[str, Any]:
@@ -581,6 +619,10 @@ class AnthropicProvider:
                 "completion": completion_tokens,
                 "total": total_tokens,
             },
+            # Anthropic 原生 stop_reason 暂不下穿（与 OpenAI finish_reason 语义不同：
+            # end_turn / max_tokens / stop_sequence 等）；runner 报错路径看到 None
+            # 走「未知」分支，不误报「max_tokens 耗尽」。后续如需诊断再加。
+            "finish_reason": None,
         }
 
     def health_check(self, *, timeout: float | None = None) -> dict[str, Any]:
@@ -710,6 +752,10 @@ class OllamaProvider:
         # Ollama usage：prompt_eval_count / eval_count
         prompt_tokens = int(data.get("prompt_eval_count") or 0)
         completion_tokens = int(data.get("eval_count") or 0)
+        # Ollama 协议 ``done_reason`` 与 OpenAI finish_reason 语义接近（"stop" /
+        # "length"），但下穿需类型校验；下游报错依赖此值。
+        done_reason_raw = data.get("done_reason")
+        finish_reason_out: str | None = done_reason_raw if isinstance(done_reason_raw, str) else None
         return {
             "text": text or "",
             "usage": {
@@ -717,6 +763,7 @@ class OllamaProvider:
                 "completion": completion_tokens,
                 "total": prompt_tokens + completion_tokens,
             },
+            "finish_reason": finish_reason_out,
         }
 
     def health_check(self, *, timeout: float | None = None) -> dict[str, Any]:

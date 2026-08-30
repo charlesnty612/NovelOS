@@ -82,19 +82,44 @@ def strip_think_blocks(text: str) -> str:
     return _THINK_RE.sub("", text).strip()
 
 
-def extract_json(text: str) -> dict[str, Any]:
+def extract_json(
+    text: str,
+    *,
+    finish_reason: str | None = None,
+) -> dict[str, Any]:
     """从 LLM 输出中提取首个 JSON 对象并解析。
 
     步骤：
     1. 去围栏。
     2. 取首个 ``{`` 与末个 ``}`` 之间的子串。
     3. ``json.loads``；失败抛 :class:`AgentOutputError`。
+
+    ``finish_reason``（可选）：上游 provider 透传的 ``choices[0].finish_reason``
+    （OpenAI 兼容语义；典型值 ``stop`` / ``length``）。仅当**剥围栏/think 后内容为空**时
+    用于在报错文案中区分根因—— ``"length"`` 几乎一定是 LLM max_tokens 预算被思考耗尽
+    （自适应思考 / 长 reasoning），需提示调大 ``params.max_tokens``，而不是怀疑解析器。
+    其它取值（含 ``None``）不改变既有错误文案，只在末尾追加 ``(finish_reason=xxx)``
+    便于排障。
     """
     if not isinstance(text, str):
         raise AgentOutputError(f"output is not a string: {type(text).__name__}")
     cleaned = strip_think_blocks(strip_code_fence(text))
     if not cleaned:
-        raise AgentOutputError("empty output after stripping fences")
+        # 空内容是排障第一坑：原报错 "empty output after stripping fences" 把
+        # 「自适应思考耗尽 max_tokens」「provider 真正返回空」「messages 构造错」
+        # 三种根因混为一谈。finish_reason='length' 时给出明确可行动提示。
+        if finish_reason == "length":
+            raise AgentOutputError(
+                "输出为空：max_tokens 预算被思考耗尽（finish_reason=length）"
+                "——请调大档案 params 的 max_tokens（建议 16384）"
+            )
+        # 其它情况（None / stop / 上游自定义值）：保留原 message + finish_reason 标注
+        suffix = (
+            f" (finish_reason={finish_reason})"
+            if isinstance(finish_reason, str) and finish_reason
+            else ""
+        )
+        raise AgentOutputError(f"empty output after stripping fences{suffix}")
     first = cleaned.find("{")
     last = cleaned.rfind("}")
     if first == -1 or last == -1 or last <= first:

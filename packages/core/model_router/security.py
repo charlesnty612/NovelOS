@@ -133,9 +133,22 @@ def _prepare_patch_params(payload_params: dict, existing_params_json: str) -> di
     - 入参 ``api_key`` 是空字符串 / ``None`` → 清空（从结果中删除键）；
     - 入参 ``api_key`` 是其他字符串 → 用入参值覆盖；
     - 入参无 ``api_key`` 字段 → DB 原值保留；
-    - 其它字段以入参为准（PATCH 部分更新语义）。
+    - 其它字段以入参为准（PATCH 部分更新语义）；
+    - 入参某键显式为 ``None``（除 ``api_key`` 外）→ 视为「删除该键」语义，
+      用于思考档位回默认等需要从 DB 删除字段的场景。缺键仍走「保留 DB 原值」
+      的部分更新语义。
     """
     existing = _parse_params_json(existing_params_json)
+
+    def _strip_nulls(merged: dict) -> dict:
+        # 显式 None = 删除该键（api_key 的 None 已在上面专门分支处理过）
+        for k, v in payload_params.items():
+            if k == "api_key":
+                continue
+            if v is None:
+                merged.pop(k, None)
+        return merged
+
     if "api_key" in payload_params:
         v = payload_params["api_key"]
         if isinstance(v, str) and v == _MASK:
@@ -146,18 +159,21 @@ def _prepare_patch_params(payload_params: dict, existing_params_json: str) -> di
                 payload_without.pop("api_key", None)
             out = dict(existing)
             out.update(payload_without)
-            return out
+            return _strip_nulls(out)
         if v is None or (isinstance(v, str) and v == ""):
             out = dict(existing)
             out.pop("api_key", None)
             for k, val in payload_params.items():
                 if k == "api_key":
                     continue
-                out[k] = val
+                if val is None:
+                    out.pop(k, None)
+                else:
+                    out[k] = val
             return out
     out = dict(existing)
     out.update(payload_params)
-    return out
+    return _strip_nulls(out)
 
 
 __all__ = [

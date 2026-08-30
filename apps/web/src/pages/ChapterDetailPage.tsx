@@ -518,9 +518,10 @@ function ChapterHeader({
   const setProfile = (action: 'plan' | 'write' | 'review' | 'commit', value: string) =>
     setSelectedProfile((prev) => ({ ...prev, [action]: value }));
 
-  // 「写正文」动作专属：写作模式选择。''=按意见改稿（默认），'fresh'=全新重写。
+  // 「写正文」动作专属：写作模式选择。'fresh'=全新重写（默认，2026-08-30 用户拍板：
+  // 改稿应由「按建议修改/驳回并改稿」链路触发，手动写正文默认整章重写），''=按意见改稿。
   // 仅 write 卡片渲染该下拉；点击时读取最新值，避免 setState 异步竞态。
-  const [writeMode, setWriteMode] = useState<'' | 'fresh'>('');
+  const [writeMode, setWriteMode] = useState<'' | 'fresh'>('fresh');
 
   const buttons: Array<{
     action: 'plan' | 'write' | 'review' | 'commit';
@@ -612,8 +613,8 @@ function ChapterHeader({
                     disabled={submitting}
                     style={{ fontSize: 12 }}
                   >
-                    <option value="">按意见改稿（默认）</option>
-                    <option value="fresh">全新重写</option>
+                    <option value="fresh">全新重写（默认）</option>
+                    <option value="">按意见改稿</option>
                   </select>
                 ) : null}
                 {/* 「审校」专属：动态提示将审哪版,让用户在点之前就知道。
@@ -968,16 +969,24 @@ function WorkflowRunningBanner({ detail }: { detail: WorkflowRun | null }) {
   const workflowName = detail.workflow_name ?? detail.workflow_id;
 
   const nodes = Array.isArray(detail.nodes) ? detail.nodes : [];
-  const currentIdx = detail.current_node
+
+  // V1.5 横幅节点选取修正：
+  //   后端仅在节点完成后才更新 current_node，导致 N+1 节点已 RUNNING 时横幅仍显示 N。
+  //   这里优先取 nodes 中首个 RUNNING 节点作为展示节点；无 RUNNING 时回退到 current_node。
+  const runningIdx = nodes.findIndex((n) => n.status === 'RUNNING');
+  const fallbackIdx = detail.current_node
     ? nodes.findIndex((n) => n.node_id === detail.current_node)
     : -1;
+  const currentIdx = runningIdx >= 0 ? runningIdx : fallbackIdx;
   const hasNodeProgress = currentIdx >= 0 && nodes.length > 0;
   const currentNodeName = hasNodeProgress ? nodes[currentIdx].node_id : null;
 
-  // 计算已运行时长（秒）
+  // 已运行时长：优先按展示节点 started_at 起算；无节点 / 节点无 started_at 时回退到 run.started_at
   let elapsedSec = 0;
-  if (detail.started_at) {
-    const start = Date.parse(detail.started_at);
+  const elapsedSource =
+    (hasNodeProgress && nodes[currentIdx].started_at) || detail.started_at;
+  if (elapsedSource) {
+    const start = Date.parse(elapsedSource);
     if (!Number.isNaN(start)) {
       elapsedSec = Math.max(0, Math.floor((Date.now() - start) / 1000));
     }
@@ -1004,7 +1013,7 @@ function WorkflowRunningBanner({ detail }: { detail: WorkflowRun | null }) {
       data-testid="workflow-running-banner"
       role="status"
       data-workflow-id={detail.workflow_id}
-      data-current-node={detail.current_node ?? ''}
+      data-current-node={currentNodeName ?? ''}
       data-run-id={detail.run_id}
     >
       <div style={{ fontWeight: 600 }}>
