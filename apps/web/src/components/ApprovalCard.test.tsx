@@ -366,6 +366,27 @@ describe('ApprovalCard', () => {
     );
   });
 
+  it('「按建议修改」合并意见框补充内容：note = 勾选建议 + 意见框文本', async () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ApprovalCard
+        {...baseProps}
+        onApprove={onApprove}
+        pausePayload={withSuggestions() as Record<string, unknown>}
+      />,
+    );
+    fireEvent.change(screen.getByTestId('approval-revise-note'), {
+      target: { value: '全书以人民币支付，银元仅作计价单位。' },
+    });
+    fireEvent.click(screen.getByTestId('approval-apply-suggestions'));
+    await waitFor(() =>
+      expect(onApprove).toHaveBeenCalledWith(false, {
+        revise: true,
+        note: '让男主主动提一句父亲遗物中的玉佩。\n删除或换成具体动作描写。\n\n全书以人民币支付，银元仅作计价单位。',
+      }),
+    );
+  });
+
   it('取消勾选部分建议后，「按建议修改」只应用勾选的建议', async () => {
     const onApprove = vi.fn().mockResolvedValue(undefined);
     render(

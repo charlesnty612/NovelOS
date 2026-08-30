@@ -756,23 +756,44 @@ class OllamaProvider:
 # ---------------------------------------------------------------------------
 
 
-def resolve_api_key(provider: str, params_json: dict | None) -> str | None:
-    """按任务书口径解析 API Key：
+def resolve_api_key(
+    provider: str,
+    params_json: dict | None,
+    *,
+    profile_id: str | None = None,
+    env_name: str | None = None,
+) -> str | None:
+    """按统一优先级解析 API Key（V3.8 扩展 secrets.json 来源）：
 
-    1. 优先 ``params_json["api_key"]``（明文存于 DB，仅 MVP 演示用，不推荐生产）。
-    2. 否则读环境变量 ``NOVELOS_API_KEY_<PROVIDER大写>``。
-    3. 都没有 → 返回 None（Mock Provider 不需要 key；OpenAI 兼容 Provider 若无 key
-       通常仍可访问本地 / Ollama 服务，由 Provider 自行处理是否 401）。
+    1. ``secrets.json`` 中 ``api_keys[<profile_id>]``（profile_id 非 None 时优先）；
+    2. ``secrets.json`` 中 ``api_keys[<provider>]``；
+    3. ``secrets.json`` 中 ``api_keys[<env_name>]``（兼容旧条目）；
+    4. ``params_json["api_key"]``（存量 DB 明文；迁移期兼容）；
+    5. 环境变量 ``NOVELOS_API_KEY_<PROVIDER大写>``（默认），或显式 ``env_name``。
+
+    都没有 → 返回 None（Mock Provider 不需要 key；OpenAI 兼容 Provider 若无 key
+    通常仍可访问本地 / Ollama 服务，由 Provider 自行处理是否 401）。
     """
+    # 延迟导入避免循环依赖（providers ← secrets_store ← logging_config，
+    # secrets_store 与 providers 同级，不存在循环；但仍保持 lazy 以减小启动开销）
+    from packages.core.secrets_store import resolve_profile_api_key
+
+    env_names: list[str] = []
+    if env_name:
+        env_names.append(env_name)
+    env_names.append(f"NOVELOS_API_KEY_{provider.upper()}")
+
+    params_api_key = None
     if params_json:
-        key = params_json.get("api_key")
-        if isinstance(key, str) and key:
-            return key
-    env_name = f"NOVELOS_API_KEY_{provider.upper()}"
-    val = os.environ.get(env_name)
-    if val:
-        return val
-    return None
+        v = params_json.get("api_key")
+        if isinstance(v, str):
+            params_api_key = v
+    return resolve_profile_api_key(
+        profile_id=profile_id,
+        provider=provider,
+        env_names=env_names,
+        params_api_key=params_api_key,
+    )
 
 
 __all__ = [

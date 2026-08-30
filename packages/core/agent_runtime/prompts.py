@@ -43,6 +43,7 @@ _AGENT_TO_CAPABILITY: dict[str, str] = {
     "director": "reasoning",
     "observer": "reasoning",
     "writer": "creative_writing",
+    "polisher": "creative_writing",  # P1：润色走 creative_writing，与 writer 同 capability
     "arbiter": "reasoning",
     "deconstructor_chapter": "reasoning",
     "deconstructor_aggregate": "reasoning",

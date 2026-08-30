@@ -316,7 +316,11 @@ export function ApprovalCard(props: ApprovalCardProps) {
               try {
                 await onApprove(false, {
                   revise: true,
-                  note: selectedNote || undefined,
+                  // 勾选的建议 + 意见框补充内容合并下发（意见框对任何改稿动作都生效）
+                  note:
+                    [selectedNote, reviseNote.trim()]
+                      .filter((s) => s)
+                      .join('\n\n') || undefined,
                 });
               } finally {
                 setPendingRevise(false);

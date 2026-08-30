@@ -8,6 +8,7 @@ import type { WorldEntity, WorldEntityPayload } from '../../api/types';
 import { formatDateTime, formatJson, tryParseJsonObject } from '../../utils/format';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
+import { ReadableJson, RawJsonDetails } from '../../components/ReadableJson';
 
 type Kind = 'locations' | 'factions' | 'world-rules';
 
@@ -158,7 +159,13 @@ export function WorldTab({ projectId }: WorldTabProps) {
           <div className="muted small" style={{ marginBottom: 6 }}>
             data_json 预览（第一条）
           </div>
-          <pre className="json-block">{formatJson(list[0].data)}</pre>
+          <div data-testid="world-data-preview">
+            <ReadableJson value={list[0].data ?? {}} />
+          </div>
+          <RawJsonDetails
+            value={list[0].data ?? {}}
+            testId="world-data-preview-raw"
+          />
         </div>
       ) : null}
 

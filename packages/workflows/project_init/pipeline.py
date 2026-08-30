@@ -11,6 +11,18 @@
 若 ctx 中已存在 project_id，则更新该项目并挂载生成内容；否则新建项目。
 AI 节点失败时按 chapter_review critic 模式降级（记录 warning、返回降级结构），
 不阻断后续节点；persist_all 失败直接抛错。
+
+部分生成（``ctx["selected_stages"]`` 仅含子集环节）：未选环节的输出由
+``_rebuild_stage_from_db`` 从落库数据重建为下游输入，不调 AI、不暂停；
+``_persist_all_node`` 检测到重建结果 ``_degraded=True`` 时**不写入占位卷 / 占位
+章节 / plot_event**，避免出现空骨架。premise 降级但项目已存在时也不覆盖
+projects 行（保留用户原始 premise），仅在新建项目场景按 brief 创建挂载点。
+
+单次 run 级模型档案覆盖：若 ctx 含 ``model_profile_id``（由
+``POST /projects/init`` 的 ``model_profile_id`` 字段注入），4 个 AI 节点
+``run_agent`` 调用会透传该 ``profile_id`` 给 ModelRouter，覆盖全局
+capability_bindings；不影响其他 run。缺省 / None 时维持既有 capability_bindings
+/ model_configs 链路，零行为变更。
 """
 
 from __future__ import annotations
@@ -164,7 +176,12 @@ def _stage_selected(ctx: dict[str, Any], stage: str) -> bool:
 
 
 def _rebuild_premise_from_db(db_path: str, project_id: str | None) -> dict[str, Any]:
-    """从 projects 表重建 premise_output。project_id 缺失或无行时返回降级空结构。"""
+    """从 projects 表重建 premise_output。project_id 缺失或无行时返回降级空结构。
+
+    兼容历史 `projects.premise` 已存为「定位：…卖点：…一句话：…」复合文本的情况：
+    从中尝试提取最后一段「一句话：」之后的内容作为 `logline`，供下游 AI 输入更干净。
+    `positioning` 字段保留复合文本原始形态（项目 update 主修已保证不会回写）。
+    """
     base: dict[str, Any] = {
         "title": "",
         "genre": "",
@@ -186,11 +203,19 @@ def _rebuild_premise_from_db(db_path: str, project_id: str | None) -> dict[str, 
         conn.close()
     if row is None:
         return base
+    premise_text = row["premise"] or ""
+    # 从复合文本提取最后一段「一句话：」之后的内容作为 logline。
+    # 无匹配时回退空字符串（与既有行为一致）。
+    logline = ""
+    marker = "一句话："
+    idx = premise_text.rfind(marker)
+    if idx != -1:
+        logline = premise_text[idx + len(marker):].strip()
     return {
         "title": row["name"] or "",
         "genre": row["genre"] or "",
-        "logline": "",
-        "positioning": row["premise"] or "",
+        "logline": logline,
+        "positioning": premise_text,
         "selling_points": [],
         "protagonist": {},
         "target_words": row["target_words"],
@@ -507,6 +532,7 @@ def _run_premise_designer(ctx: dict[str, Any]) -> dict[str, Any]:
             node_run_id=ctx.get("_current_node_run_id"),
             expected="premise_designer",
             mock_script=mock_script,
+            profile_id=ctx.get("model_profile_id") or None,
         )
         if not isinstance(out, dict):
             raise ValueError(f"premise_designer output not dict: {type(out).__name__}")
@@ -591,6 +617,7 @@ def _run_world_builder(ctx: dict[str, Any]) -> dict[str, Any]:
             node_run_id=ctx.get("_current_node_run_id"),
             expected="world_builder",
             mock_script=mock_script,
+            profile_id=ctx.get("model_profile_id") or None,
         )
         if not isinstance(out, dict):
             raise ValueError(f"world_builder output not dict: {type(out).__name__}")
@@ -672,6 +699,7 @@ def _run_character_designer(ctx: dict[str, Any]) -> dict[str, Any]:
             node_run_id=ctx.get("_current_node_run_id"),
             expected="character_designer",
             mock_script=mock_script,
+            profile_id=ctx.get("model_profile_id") or None,
         )
         if not isinstance(out, dict):
             raise ValueError(f"character_designer output not dict: {type(out).__name__}")
@@ -757,6 +785,7 @@ def _run_volume_outliner(ctx: dict[str, Any]) -> dict[str, Any]:
             node_run_id=ctx.get("_current_node_run_id"),
             expected="volume_outliner",
             mock_script=mock_script,
+            profile_id=ctx.get("model_profile_id") or None,
         )
         if not isinstance(out, dict):
             raise ValueError(f"volume_outliner output not dict: {type(out).__name__}")
@@ -891,6 +920,13 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
     - plot_events（可选）：把 volume 的 arc_summary 写成一条 type=other 的 plot_event。
 
     任何 service 异常直接上抛，不降级。
+
+    部分生成语义：当 ``outline._degraded=True``（未选 outline 环节、由
+    ``_rebuild_stage_from_db`` 从空库重建）时，跳过 volume / chapters /
+    plot_event 写入，相应 ID 返回 ``None`` / ``[]``，并在返回结构中标记
+    ``outline_skipped=True``，避免落占位空卷 / 占位章节。premise 降级但
+    project_id 已存在时同样跳过 project update（保留用户已写入的 premise），
+    仅在新建项目时按 brief 创建挂载点。
     """
     db_path = ctx["db_path"]
     brief = ctx.get("brief") or {}
@@ -901,6 +937,11 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     project_id = ctx.get("project_id")
     project_svc = ProjectService(db_path)
+
+    # 0) 部分生成降级标记：未选环节的输出由 _rebuild_stage_from_db 重建，
+    #    _degraded=True 表示数据库里也没有可重建内容，绝不能落占位数据。
+    premise_degraded = bool(premise.get("_degraded"))
+    outline_degraded = bool(outline.get("_degraded"))
 
     # 1) project
     title = (premise.get("title") or brief.get("title") or "未命名项目").strip()
@@ -916,15 +957,24 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
         existing = project_svc.get(project_id)
         if existing is None:
             raise ValueError(f"project {project_id!r} not found")
-        project = project_svc.update(
-            project_id,
-            ProjectUpdate(
-                name=title or None,
-                premise=premise_text or None,
-                genre=genre or None,
-                target_words=target_words,
-            ),
-        )
+        # premise 环节本次未被选中（selected_stages 不含 premise）：
+        # DB 重建出的 premise 是「定位：…卖点：…一句话：…」复合文本，
+        # 若再走 _build_premise_text 落库，每跑一次叠一层「定位：」+「一句话：」，
+        # 形成套娃污染。仅在 premise 环节本次真跑了（_stage_selected True）或
+        # premise 是合法 AI/重试产出（_degraded=False）时才允许回写。
+        # 退化（_degraded=True）也照跳，覆盖"AI 节点异常但 project 已存在"
+        # 的防御分支（保留用户原始 premise）。
+        premise_stage_selected = _stage_selected(ctx, "premise")
+        if premise_stage_selected and not premise_degraded:
+            project = project_svc.update(
+                project_id,
+                ProjectUpdate(
+                    name=title or None,
+                    premise=premise_text or None,
+                    genre=genre or None,
+                    target_words=target_words,
+                ),
+            )
     else:
         project = project_svc.create(
             ProjectCreate(
@@ -1050,131 +1100,138 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     # 4) volume —— upsert：同 (project, number) 已存在则更新 title，否则新建。
     #    解决「只重跑卷纲」时旧空壳卷造成 UNIQUE 冲突的问题。
-    volume_raw = outline.get("volume") or {"number": 1, "title": None, "arc_summary": ""}
-    volume = _upsert_volume(
-        db_path,
-        project_id,
-        VolumeCreate(
-            number=int(volume_raw.get("number") or 1),
-            title=volume_raw.get("title"),
-        ),
-    )
-    volume_id = volume["volume_id"]
-
-    # 5) chapters —— 重建序列必须包进单事务。
-    #    修复前：先 DELETE + commit，再多次 chapter create + commit，再
-    #    assign_chapter + commit——中途失败时旧章已被删、新章半写入，
-    #    数据丢失。修复后：单连接 BEGIN→DELETE 旧 drafts/chapters→INSERT
-    #    新 chapters（直接挂 volume_id）→COMMIT；任何环节异常触发
-    #    ROLLBACK，旧章与 drafts 完整保留，新章一行不入库。
-    normalized_chapter_seeds = _normalize_chapter_seeds(
-        outline.get("chapter_seeds") or [],
-        ctx.get("chapter_seed_count", DEFAULT_CHAPTER_SEED_COUNT),
-        chapter_word_count=int(
-            ctx.get("chapter_word_count") or DEFAULT_CHAPTER_WORD_COUNT
-        ),
-    )
+    #    outline 降级（未选该环节且 DB 无重建内容）时跳过整个卷 / 章 / plot_event
+    #    链路，绝不落占位空卷。
+    volume_id: str | None = None
     chapter_ids: list[str] = []
-    conn = get_connection(str(db_path))
-    try:
-        # 收集待删 chapter_id（精确到本 volume）
-        old_rows = conn.execute(
-            "SELECT chapter_id FROM chapters WHERE volume_id = ?",
-            (volume_id,),
-        ).fetchall()
-        old_chapter_ids = [r["chapter_id"] for r in old_rows]
-
-        if old_chapter_ids:
-            placeholders = ",".join("?" for _ in old_chapter_ids)
-            # drafts 子记录先清（FK ON DELETE CASCADE 也兜底，显式写兼容迁移顺序）
-            conn.execute(
-                f"DELETE FROM drafts WHERE chapter_id IN ({placeholders})",
-                old_chapter_ids,
-            )
-            conn.execute(
-                f"DELETE FROM chapters WHERE chapter_id IN ({placeholders})",
-                old_chapter_ids,
-            )
-
-        # 逐章 INSERT（同连接 → 同一事务；异常会冒泡到下方 except 触发 rollback）
-        for seed in normalized_chapter_seeds:
-            plan_payload = {
-                "chapter_goal": seed.get("one_sentence", ""),
-                "expected_role": seed.get("role", "setup"),
-                "key_beats": seed.get("key_beats") or [],
-                "expected_word_count": int(
-                    seed.get("expected_word_count")
-                    or ctx.get("chapter_word_count")
-                    or DEFAULT_CHAPTER_WORD_COUNT
-                ),
-                "core_conflict": "",
-                "turning_point": "",
-                "character_changes_planned": [],
-                "information_releases": [],
-                "hook_handling": [],
-                "debt_handling": [],
-                "proposed_new_entities": [],
-                "deviations": [],
-                "knowledge_leakage_check": {"uses_hidden_knowledge": False, "leakage_details": None},
-                "open_questions": [],
-                "notes_for_planner": "",
-                "schema_version": "director-plan.v1",
-                "prompt_version": "volume_outliner:v1",
-            }
-            chapter_id = new_id("ch")
-            now = now_iso()
-            conn.execute(
-                """
-                INSERT INTO chapters
-                    (chapter_id, project_id, number, title, plan_json,
-                     status, visibility, who_knows,
-                     created_at, updated_at, volume_id)
-                VALUES
-                    (:chapter_id, :project_id, :number, :title, :plan_json,
-                     :status, :visibility, :who_knows,
-                     :created_at, :updated_at, :volume_id)
-                """,
-                {
-                    "chapter_id": chapter_id,
-                    "project_id": project_id,
-                    "number": int(seed["number"]),
-                    "title": seed.get("title"),
-                    "plan_json": json.dumps(plan_payload, ensure_ascii=False),
-                    "status": "PLANNED",
-                    "visibility": "VISIBLE",
-                    "who_knows": None,
-                    "created_at": now,
-                    "updated_at": now,
-                    "volume_id": volume_id,
-                },
-            )
-            chapter_ids.append(chapter_id)
-
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-    # 6) 把卷纲摘要记录为 plot_event（类型 other），便于 timeline / 大纲视图
-    arc_summary = (volume_raw.get("arc_summary") or "").strip()
     event_id: str | None = None
-    if arc_summary:
+    outline_skipped = False
+    if outline_degraded:
+        outline_skipped = True
+    else:
+        volume_raw = outline.get("volume") or {"number": 1, "title": None, "arc_summary": ""}
+        volume = _upsert_volume(
+            db_path,
+            project_id,
+            VolumeCreate(
+                number=int(volume_raw.get("number") or 1),
+                title=volume_raw.get("title"),
+            ),
+        )
+        volume_id = volume["volume_id"]
+
+        # 5) chapters —— 重建序列必须包进单事务。
+        #    修复前：先 DELETE + commit，再多次 chapter create + commit，再
+        #    assign_chapter + commit——中途失败时旧章已被删、新章半写入，
+        #    数据丢失。修复后：单连接 BEGIN→DELETE 旧 drafts/chapters→INSERT
+        #    新 chapters（直接挂 volume_id）→COMMIT；任何环节异常触发
+        #    ROLLBACK，旧章与 drafts 完整保留，新章一行不入库。
+        normalized_chapter_seeds = _normalize_chapter_seeds(
+            outline.get("chapter_seeds") or [],
+            ctx.get("chapter_seed_count", DEFAULT_CHAPTER_SEED_COUNT),
+            chapter_word_count=int(
+                ctx.get("chapter_word_count") or DEFAULT_CHAPTER_WORD_COUNT
+            ),
+        )
+        conn = get_connection(str(db_path))
         try:
-            ev = PlotService(db_path).create_event(
-                project_id=project_id,
-                type="other",
-                cause=[],
-                effects=[],
-                participants=[],
-                time={"timeline_day": 1, "in_story_date": None},
-                status="planned",
-                visibility="RESTRICTED",
-            )
-            event_id = ev.id
-        except Exception:  # noqa: BLE001 —— plot_event 失败不阻断主流程
-            _log.warning("project_init persist_all: plot_event creation failed", exc_info=True)
+            # 收集待删 chapter_id（精确到本 volume）
+            old_rows = conn.execute(
+                "SELECT chapter_id FROM chapters WHERE volume_id = ?",
+                (volume_id,),
+            ).fetchall()
+            old_chapter_ids = [r["chapter_id"] for r in old_rows]
+
+            if old_chapter_ids:
+                placeholders = ",".join("?" for _ in old_chapter_ids)
+                # drafts 子记录先清（FK ON DELETE CASCADE 也兜底，显式写兼容迁移顺序）
+                conn.execute(
+                    f"DELETE FROM drafts WHERE chapter_id IN ({placeholders})",
+                    old_chapter_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM chapters WHERE chapter_id IN ({placeholders})",
+                    old_chapter_ids,
+                )
+
+            # 逐章 INSERT（同连接 → 同一事务；异常会冒泡到下方 except 触发 rollback）
+            for seed in normalized_chapter_seeds:
+                plan_payload = {
+                    "chapter_goal": seed.get("one_sentence", ""),
+                    "expected_role": seed.get("role", "setup"),
+                    "key_beats": seed.get("key_beats") or [],
+                    "expected_word_count": int(
+                        seed.get("expected_word_count")
+                        or ctx.get("chapter_word_count")
+                        or DEFAULT_CHAPTER_WORD_COUNT
+                    ),
+                    "core_conflict": "",
+                    "turning_point": "",
+                    "character_changes_planned": [],
+                    "information_releases": [],
+                    "hook_handling": [],
+                    "debt_handling": [],
+                    "proposed_new_entities": [],
+                    "deviations": [],
+                    "knowledge_leakage_check": {"uses_hidden_knowledge": False, "leakage_details": None},
+                    "open_questions": [],
+                    "notes_for_planner": "",
+                    "schema_version": "director-plan.v1",
+                    "prompt_version": "volume_outliner:v1",
+                }
+                chapter_id = new_id("ch")
+                now = now_iso()
+                conn.execute(
+                    """
+                    INSERT INTO chapters
+                        (chapter_id, project_id, number, title, plan_json,
+                         status, visibility, who_knows,
+                         created_at, updated_at, volume_id)
+                    VALUES
+                        (:chapter_id, :project_id, :number, :title, :plan_json,
+                         :status, :visibility, :who_knows,
+                         :created_at, :updated_at, :volume_id)
+                    """,
+                    {
+                        "chapter_id": chapter_id,
+                        "project_id": project_id,
+                        "number": int(seed["number"]),
+                        "title": seed.get("title"),
+                        "plan_json": json.dumps(plan_payload, ensure_ascii=False),
+                        "status": "PLANNED",
+                        "visibility": "VISIBLE",
+                        "who_knows": None,
+                        "created_at": now,
+                        "updated_at": now,
+                        "volume_id": volume_id,
+                    },
+                )
+                chapter_ids.append(chapter_id)
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        # 6) 把卷纲摘要记录为 plot_event（类型 other），便于 timeline / 大纲视图
+        arc_summary = (volume_raw.get("arc_summary") or "").strip()
+        if arc_summary:
+            try:
+                ev = PlotService(db_path).create_event(
+                    project_id=project_id,
+                    type="other",
+                    cause=[],
+                    effects=[],
+                    participants=[],
+                    time={"timeline_day": 1, "in_story_date": None},
+                    status="planned",
+                    visibility="RESTRICTED",
+                )
+                event_id = ev.id
+            except Exception:  # noqa: BLE001 —— plot_event 失败不阻断主流程
+                _log.warning("project_init persist_all: plot_event creation failed", exc_info=True)
 
     return {
         "project_id": project_id,
@@ -1185,14 +1242,20 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "rule_ids": rule_ids,
         "chapter_ids": chapter_ids,
         "event_id": event_id,
+        "outline_skipped": outline_skipped,
         "persisted": True,
     }
 
 
 def _build_premise_text(premise: dict[str, Any], brief: dict[str, Any]) -> str:
+    # 防御：positioning 若以「定位：」开头（任何残余路径把复合文本塞回来）
+    # 先剥一层前缀，避免「定位：定位：…」套娃；只剥一层。
+    raw_positioning = str(premise.get("positioning") or "")
+    if raw_positioning.startswith("定位："):
+        raw_positioning = raw_positioning.removeprefix("定位：").lstrip()
     parts: list[str] = []
-    if premise.get("positioning"):
-        parts.append(f"定位：{premise['positioning']}")
+    if raw_positioning:
+        parts.append(f"定位：{raw_positioning}")
     if premise.get("selling_points"):
         parts.append("卖点：" + " / ".join(str(x) for x in premise["selling_points"]))
     if brief.get("logline"):

@@ -1,4 +1,4 @@
-"""chapter_write 工作流（Sprint 4-A + P0 ScenePlanner 真实化）。
+"""chapter_write 工作流（Sprint 4-A + P0 ScenePlanner 真实化 + P1 Polisher）。
 
 节点列表：
 - ``load_plan`` (Transform) —— 读 chapters.plan_json 准备 director_plan 输入。
@@ -7,7 +7,14 @@
   任何失败（prompt 缺失 / provider 异常 / 输出不合规）→ 降级到原 stub 机械映射逻辑，
   **不**阻断 writer run。
 - ``writer`` (AI) —— 调 writer agent 生成本章 prose。
+- ``polisher`` (AI) —— P1 新增：以 writer 产出的 prose + scan_ai_patterns(prose)
+  确定性命中为输入，做去 AI 腔的文风级润色；不改情节 / 人物 / 事实。
+  任何失败（prompt 缺失 / provider 异常 / 输出不合规 / 长度守恒失败）→ 兜底回退
+  writer 原始 prose，**不**阻断 save_draft。
+  mock 直通：若 ``ctx["mock_providers"]`` 含 'writer' 但不含 'polisher'，跳过润色
+  原样透传（既有 mock 测试不受影响；真实链路始终润色）。
 - ``save_draft`` (State) —— 写 drafts 表 + chapters.status PLANNED→DRAFTED。
+  优先取 ``polished_prose``（无则回落 ``writer_output.prose``）。
 """
 
 from __future__ import annotations
@@ -24,6 +31,8 @@ from packages.core.context_engine import build_writer_input
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.model_router.router import capability_for
+from packages.core.quality.ai_patterns import scan_ai_patterns
+from packages.core.quality.wordcount import visible_chars
 from packages.core.workflow_runtime.engine import WorkflowNode
 
 _log = logging.getLogger(__name__)
@@ -393,6 +402,10 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         payload["revision_note"] = revision_note
 
     mock_script = (ctx.get("mock_providers") or {}).get("writer")
+    # 能力路由：revise=定向局部修改，走 light（与 critic/summarizer 同源，省创作额度）；
+    # write / fresh_write 走默认 creative_writing。mock 路径不走 capability，
+    # capability_override 仅在真实链路下被 ModelRouter 使用，不影响 mock 行为。
+    writer_capability_override: str | None = "light" if mode == "revise" else None
     out = run_agent(
         db_path,
         "writer",
@@ -401,6 +414,7 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         node_run_id=ctx.get("_current_node_run_id"),
         expected="writer",
         mock_script=mock_script,
+        capability_override=writer_capability_override,
         profile_id=(ctx.get("model_overrides") or {}).get(
             capability_for("writer")
         ),
@@ -431,12 +445,132 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _polish_node(ctx: dict[str, Any]) -> dict[str, Any]:
+    """P1 Polisher AI 节点（去 AI 腔文风润色）。
+
+    行为：
+    1. 取 ``writer_output.prose``，跑 ``scan_ai_patterns`` 拿确定性命中。
+    2. 组装 polisher payload（draft_text + ai_findings + style_constraints）。
+    3. mock 直通判定：若 ``ctx["mock_providers"]`` 含 'writer' 但不含 'polisher'，
+       跳过润色原样透传（既有用例零回归；真实链路始终润色）。
+    4. 调 ``run_agent(..., agent_name='polisher', expected='polisher', mock_script=...)``。
+    5. 长度守恒：``polished_text`` 与原文 ``visible_chars`` 差距 >10% → 兜底回退原文。
+    6. 任何异常（prompt 缺失 / provider 异常 / 契约校验失败）→ 兜底回退原文，
+       写 ``polisher_status='failed'``，**不**阻断 save_draft。
+    7. 输出 ``polished_prose`` 进 ctx，``save_draft_node`` 优先取。
+    """
+    db_path = ctx["db_path"]
+    run_id = ctx["run_id"]
+    chapter_id = ctx["chapter_id"]
+    writer_output = ctx.get("writer_output") or {}
+    raw_prose = strip_think_blocks(writer_output.get("prose") or "")
+    mock_providers = ctx.get("mock_providers") or {}
+
+    # mock 直通：既有 mock 流（仅含 writer、不含 polisher）原样透传，
+    # 保证 test_chapter_write_revise_mode / test_chapter_write_scene_planner 等
+    # 既有测试零回归；真实链路（mock_providers 为 None 或包含 polisher）始终润色。
+    if mock_providers and ("writer" in mock_providers) and ("polisher" not in mock_providers):
+        return {
+            "polished_prose": raw_prose,
+            "polish_changes_summary": "mock 直通：未配置 polisher mock，原样透传 writer prose",
+            "polisher_status": "passthrough",
+            "ai_findings": [],
+        }
+
+    ai_findings = scan_ai_patterns(raw_prose)
+    payload: dict[str, Any] = {
+        "agent": "polisher",
+        "prompt_version": "polisher:v1",
+        "draft_text": raw_prose,
+        "ai_findings": ai_findings,
+        "style_constraints": {
+            "language": "zh-Hans",
+            "pov": "third_person_limited",
+            "forbidden_words": ["仿佛", "如同", "宛如"],
+        },
+    }
+
+    mock_script = mock_providers.get("polisher")
+    try:
+        out = run_agent(
+            db_path,
+            "polisher",
+            payload,
+            run_id,
+            node_run_id=ctx.get("_current_node_run_id"),
+            expected="polisher",
+            mock_script=mock_script,
+            profile_id=(ctx.get("model_overrides") or {}).get(
+                capability_for("polisher")
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 —— 任何失败均兜底回退原文
+        _log.warning(
+            "chapter_write.polisher degraded: chapter_id=%s err=%s",
+            chapter_id, exc,
+        )
+        return {
+            "polished_prose": raw_prose,
+            "polish_changes_summary": f"润色失败已回退原文：{exc}",
+            "polisher_status": "failed",
+            "polisher_error": str(exc),
+            "ai_findings": ai_findings,
+        }
+
+    if not isinstance(out, dict):
+        return {
+            "polished_prose": raw_prose,
+            "polish_changes_summary": "润色输出非 dict，已回退原文",
+            "polisher_status": "failed",
+            "ai_findings": ai_findings,
+        }
+    polished = out.get("polished_text")
+    if not isinstance(polished, str):
+        return {
+            "polished_prose": raw_prose,
+            "polish_changes_summary": "润色输出 polished_text 非字符串，已回退原文",
+            "polisher_status": "failed",
+            "ai_findings": ai_findings,
+        }
+
+    # 长度守恒：polished 与原文 visible_chars 差距 >10% → 回退原文（兜底）
+    orig_len = visible_chars(raw_prose)
+    new_len = visible_chars(polished)
+    if orig_len > 0:
+        delta = abs(new_len - orig_len) / orig_len
+        if delta > 0.10:
+            _log.warning(
+                "chapter_write.polisher length drift: chapter_id=%s orig=%d new=%d delta=%.2f",
+                chapter_id, orig_len, new_len, delta,
+            )
+            return {
+                "polished_prose": raw_prose,
+                "polish_changes_summary": (
+                    f"润色超长度限制（Δ{delta:.0%}），已回退原文"
+                ),
+                "polisher_status": "length_drift",
+                "ai_findings": ai_findings,
+            }
+
+    changes_summary = out.get("changes_summary") or ""
+    return {
+        "polished_prose": polished,
+        "polish_changes_summary": changes_summary,
+        "polisher_status": "ok",
+        "ai_findings": ai_findings,
+        "polisher_output": out,
+    }
+
+
 def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
     run_id = ctx["run_id"]
     writer_output = ctx.get("writer_output") or {}
-    prose = strip_think_blocks(writer_output.get("prose") or "")
+    # P1：polished_prose 优先；缺失（passthrough / 失败兜底）则回落 writer 原始 prose。
+    prose = strip_think_blocks(
+        ctx.get("polished_prose") or writer_output.get("prose") or ""
+    )
     self_report = writer_output.get("self_report") or {}
     word_count = int(self_report.get("word_count") or len(prose))
     prompt_version = writer_output.get("prompt_version") or "writer:v1"
@@ -503,6 +637,7 @@ def _build_nodes() -> list[WorkflowNode]:
             "scene_planner", "AI", _scene_planner_node, agent_name="scene_planner"
         ),
         WorkflowNode("writer", "AI", _writer_node, agent_name="writer"),
+        WorkflowNode("polisher", "AI", _polish_node, agent_name="polisher"),
         WorkflowNode("save_draft", "State", _save_draft_node),
     ]
 
@@ -511,8 +646,9 @@ WORKFLOW = {
     "name": "chapter-write",
     "version": "v1",
     "description": (
-        "Director Plan → Scene Planner(AI) → Writer prose → drafts table; "
-        "chapter status PLANNED→DRAFTED; scene_planner 失败降级到 stub 不阻断 writer"
+        "Director Plan → Scene Planner(AI) → Writer prose → Polisher(AI) → "
+        "drafts table; chapter status PLANNED→DRAFTED; scene_planner / polisher "
+        "失败均降级不阻断 writer"
     ),
     "nodes": _build_nodes(),
 }

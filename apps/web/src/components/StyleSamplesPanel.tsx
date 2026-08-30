@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ApiError } from '../api/client';
 import { styleSamplesApi } from '../api/endpoints';
 import type { StyleSample } from '../api/types';
@@ -34,11 +34,18 @@ export function StyleSamplesPanel({ projectId, initialSamples }: Props) {
     setError(null);
     try {
       const rows = await styleSamplesApi.list(projectId);
-      setSamples(rows);
+      setSamples(Array.isArray(rows) ? rows : []);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : '加载文风样例失败');
     }
   }, [projectId]);
+
+  // 挂载时自取一次列表：initialSamples 只是父页并行取数的即时占位——
+  // 若面板先于父页 style-samples 响应挂载，useState 初值会是空数组且
+  // 之后父页数据到位也不再同步（此前"样例丢失"的竞态根因）。
+  useEffect(() => {
+    void reload();
+  }, [reload]);
 
   const handleAdd = useCallback(async () => {
     setError(null);

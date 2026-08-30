@@ -1411,3 +1411,653 @@ def test_project_init_chapter_rebuild_atomic_on_failure(tmp_path: Path, monkeypa
             )
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# model_profile_id 透传：ctx 注入 → 4 个 AI 节点 run_agent kwargs 校验
+# ---------------------------------------------------------------------------
+
+
+def _fake_outputs_by_agent() -> dict[str, dict]:
+    """按 agent 名返回合法假产出：覆盖 pipeline 各 _run_* 节点 out.setdefault 的
+    关键字段；最小化 mock 字段。"""
+    return {
+        "premise_designer": {
+            "title": "T",
+            "genre": "G",
+            "logline": "L",
+            "positioning": "P",
+            "selling_points": [],
+            "protagonist": {},
+        },
+        "world_builder": {
+            "core_premise": "",
+            "rules": [],
+            "locations": [],
+            "factions": [],
+        },
+        "character_designer": {
+            "characters": [],
+        },
+        "volume_outliner": {
+            "volume": {"number": 1, "title": "", "arc_summary": ""},
+            "chapter_seeds": [],
+        },
+    }
+
+
+def test_project_init_model_profile_id_propagates_to_all_ai_nodes(monkeypatch):
+    """ctx 含 model_profile_id='mprof_x' 时，4 个 AI 节点的 run_agent 调用
+    都应透传 profile_id='mprof_x'。"""
+    from packages.workflows.project_init import pipeline as pipeline_mod
+
+    fake_outs = _fake_outputs_by_agent()
+    captured: list[dict] = []
+
+    def fake_run_agent(*args, **kwargs):
+        captured.append({"args": args, "kwargs": dict(kwargs)})
+        # args: (db_path, agent_name, input_payload, run_id)
+        agent_name = args[1]
+        return dict(fake_outs[agent_name])
+
+    monkeypatch.setattr(pipeline_mod, "run_agent", fake_run_agent)
+
+    # 公共 ctx：4 个节点都需要的最小字段；db_path 留占位（不会真连库）。
+    base_ctx = {
+        "db_path": "/tmp/nonex.db",
+        "brief": {"genre": "玄幻", "logline": "x", "title": "T"},
+        "model_profile_id": "mprof_x",
+        "chapter_seed_count": 3,
+    }
+
+    pipeline_mod._run_premise_designer(base_ctx)
+    pipeline_mod._run_world_builder(base_ctx)
+    pipeline_mod._run_character_designer(base_ctx)
+    pipeline_mod._run_volume_outliner(base_ctx)
+
+    assert len(captured) == 4, f"应有 4 次 run_agent 调用，实得 {len(captured)}"
+    agents_called = [c["args"][1] for c in captured]
+    assert agents_called == [
+        "premise_designer",
+        "world_builder",
+        "character_designer",
+        "volume_outliner",
+    ], agents_called
+    for c in captured:
+        assert c["kwargs"].get("profile_id") == "mprof_x", (
+            f"agent={c['args'][1]!r} 应透传 profile_id='mprof_x'，"
+            f"实得 kwargs={c['kwargs']!r}"
+        )
+
+
+def test_project_init_model_profile_id_absent_yields_none(monkeypatch):
+    """ctx 不含 model_profile_id 时，4 个 AI 节点的 run_agent 调用应
+    profile_id=None（走全局 capability_bindings / model_configs）。"""
+    from packages.workflows.project_init import pipeline as pipeline_mod
+
+    fake_outs = _fake_outputs_by_agent()
+    captured: list[dict] = []
+
+    def fake_run_agent(*args, **kwargs):
+        captured.append({"args": args, "kwargs": dict(kwargs)})
+        agent_name = args[1]
+        return dict(fake_outs[agent_name])
+
+    monkeypatch.setattr(pipeline_mod, "run_agent", fake_run_agent)
+
+    base_ctx = {
+        "db_path": "/tmp/nonex.db",
+        "brief": {"genre": "玄幻", "logline": "x", "title": "T"},
+        # 故意不放 model_profile_id
+        "chapter_seed_count": 3,
+    }
+
+    pipeline_mod._run_premise_designer(base_ctx)
+    pipeline_mod._run_world_builder(base_ctx)
+    pipeline_mod._run_character_designer(base_ctx)
+    pipeline_mod._run_volume_outliner(base_ctx)
+
+    assert len(captured) == 4
+    for c in captured:
+        assert c["kwargs"].get("profile_id") is None, (
+            f"agent={c['args'][1]!r} 应 profile_id=None，"
+            f"实得 kwargs={c['kwargs']!r}"
+        )
+
+
+def test_project_init_route_rejects_unknown_model_profile_id(tmp_path: Path):
+    """POST /projects/init 带不存在的 model_profile_id 应返回 400，且
+    不写入 workflow_runs 行（启动前校验失败）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {"genre": "玄幻", "logline": "测试"},
+                    "chapter_seed_count": 3,
+                    "model_profile_id": "mprof_nonexistent",
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 400, r.text
+            assert "mprof_nonexistent" in r.json()["detail"]
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 部分生成（selected_stages 子集）：未选环节从 DB 重建，persist_all 不落占位
+# ---------------------------------------------------------------------------
+
+
+def test_project_init_partial_world_only_skips_volume_chapters(tmp_path: Path):
+    """#13 部分生成契约：selected_stages=['world'] 时仅跑 world_builder AI 节点，
+    premise/character/outline 从 DB 重建为下游输入。persist_all 检测到
+    outline._degraded=True（DB 中无卷/章可重建）时**不**写占位卷 / 占位章节 /
+    plot_event，返回 ``outline_skipped=True``、``volume_id=None``、
+    ``chapter_ids=[]``、``event_id=None``。
+
+    修复前：outline 重建走 ``_rebuild_outline_from_db`` 但 DB 无卷/章 →
+    ``empty`` 分支 + ``_degraded=True``；persist_all 仍调
+    ``_normalize_chapter_seeds([], ...)`` 触发 ``_fallback_chapter_seeds`` 兜底
+    创建 10 个占位章节 + `_upsert_volume` 建空卷；并写入 type=other 的 plot_event
+    占位事件，污染 DB。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app, "旧项目")
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "project_id": pid,
+                    "brief": {
+                        "genre": "玄幻",
+                        "logline": "少年叶尘偶得星辰古卷",
+                    },
+                    "chapter_seed_count": 3,
+                    "selected_stages": ["world"],
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            payload = r.json()
+            run_id = payload["run_id"]
+            await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            run_data = await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+
+            # 1) persist_all 返回值含 outline_skipped / volume_id=None / chapter_ids=[]
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                node_row = conn.execute(
+                    "SELECT output_json FROM workflow_run_nodes "
+                    "WHERE run_id = ? AND node_id = ?",
+                    (run_id, "persist_all"),
+                ).fetchone()
+            finally:
+                conn.close()
+            assert node_row is not None
+            persist_out = json.loads(node_row["output_json"])
+            assert persist_out["outline_skipped"] is True, (
+                f"outline 降级时 persist 应标记 outline_skipped=True；实得 {persist_out!r}"
+            )
+            assert persist_out["volume_id"] is None, (
+                f"outline 降级时不应落卷；实得 volume_id={persist_out['volume_id']!r}"
+            )
+            assert persist_out["chapter_ids"] == [], (
+                f"outline 降级时不应落占位章节；实得 {persist_out['chapter_ids']!r}"
+            )
+            assert persist_out["event_id"] is None, (
+                f"outline 降级时不应落 plot_event；实得 event_id={persist_out['event_id']!r}"
+            )
+            assert persist_out["persisted"] is True
+
+            # 2) DB 校验：volumes / chapters 该 project 行数必须为 0（无占位）
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                vol_count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM volumes WHERE project_id = ?", (pid,)
+                ).fetchone()["c"]
+                chap_count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM chapters WHERE project_id = ?", (pid,)
+                ).fetchone()["c"]
+                char_count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM characters WHERE project_id = ?", (pid,)
+                ).fetchone()["c"]
+                plot_event_count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM plot_events WHERE project_id = ?", (pid,)
+                ).fetchone()["c"]
+            finally:
+                conn.close()
+            assert vol_count == 0, f"部分生成不应落占位卷；实得 {vol_count} 条"
+            assert chap_count == 0, f"部分生成不应落占位章节；实得 {chap_count} 条"
+            assert char_count == 0, "character 环节未选，DB 不应有角色行"
+            assert plot_event_count == 0, (
+                f"部分生成不应落 plot_event；实得 {plot_event_count} 条"
+            )
+
+            # 3) world 实体确实落库（世界 1 rule / 1 location / 1 faction）
+            r = await _request(app, "GET", f"/api/projects/{pid}/locations")
+            assert r.status_code == 200
+            assert len(r.json()) == 1
+            r = await _request(app, "GET", f"/api/projects/{pid}/factions")
+            assert r.status_code == 200
+            assert len(r.json()) == 1
+            r = await _request(app, "GET", f"/api/projects/{pid}/world-rules")
+            assert r.status_code == 200
+            assert len(r.json()) == 1
+
+            # 4) checkpoint_json 含 project_id（仍指向同一条记录）
+            assert (run_data.get("checkpoint_json") or {}).get("project_id") == pid
+
+    asyncio.run(run())
+
+
+def test_project_init_full_pipeline_unaffected_by_partial_skip(tmp_path: Path):
+    """#13 全量回归：selected_stages 缺省时（None）走全流程；persist_all
+    outline._degraded=False（AI 产出合法 volume + chapter_seeds），**不**触发
+    outline_skipped 分支，volume / chapters / plot_event 正常落库。
+
+    修复前：若 outline_skipped 误判把全量生成也跳过，volumes / chapters 表行数
+    为 0 + outline_skipped=True，会让全量用例红。这是 test_project_init_creates_new_project
+    之外的独立断言，明确把 outline_skipped=False 锁进回归。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {
+                        "genre": "玄幻",
+                        "logline": "少年叶尘偶得星辰古卷",
+                    },
+                    "chapter_seed_count": 3,
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            payload = r.json()
+            run_id = payload["run_id"]
+            await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            run_data = await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            pid = (run_data.get("checkpoint_json") or {}).get("project_id")
+            assert pid and pid.startswith("prj_")
+
+            # persist_all 应标记 outline_skipped=False + 正常落卷/章/plot_event
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                node_row = conn.execute(
+                    "SELECT output_json FROM workflow_run_nodes "
+                    "WHERE run_id = ? AND node_id = ?",
+                    (run_id, "persist_all"),
+                ).fetchone()
+                vol_count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM volumes WHERE project_id = ?", (pid,)
+                ).fetchone()["c"]
+                chap_count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM chapters WHERE project_id = ?", (pid,)
+                ).fetchone()["c"]
+            finally:
+                conn.close()
+            assert node_row is not None
+            persist_out = json.loads(node_row["output_json"])
+            assert persist_out["outline_skipped"] is False, (
+                f"全量生成时 outline_skipped 应为 False；实得 {persist_out!r}"
+            )
+            assert isinstance(persist_out["volume_id"], str) and persist_out["volume_id"]
+            assert len(persist_out["chapter_ids"]) == 3
+            assert vol_count == 1
+            assert chap_count == 3
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# P1.2 GET /runs/{id} PAUSED 携带 stage_models：按 agent 名聚合最近一次
+# 成功（error IS NULL）的 model_id；错误行不计入；多次调用取最新。
+# ---------------------------------------------------------------------------
+
+
+def test_get_run_paused_attaches_stage_models(tmp_path: Path):
+    """GET /runs/{id} PAUSED 时 stage_models 携带本次 run 实际使用的模型。
+
+    - 真实 mock provider 调起 premise_designer → ai_call_logs 写入 model_id='mock/mock'
+    - 直插两条 premise_designer（不同 model_id、晚者应胜出）+ 一条失败行（应被排除）
+    - 直插另一 agent 错误行（应被排除）
+    - GET /runs/{id} 返回 stage_models 含两 agent 名 → model_id
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {
+                        "genre": "玄幻",
+                        "logline": "少年叶尘偶得星辰古卷",
+                        "platform": "起点",
+                        "target_words": 300000,
+                        "title": "",
+                        "author_notes": "",
+                    },
+                    "chapter_seed_count": 5,
+                    "step_mode": True,
+                    "mock_providers": _step_mode_full_scripts(5),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id = r.json()["run_id"]
+            run_dict = await _wait_run_terminal(app, run_id, expected=("PAUSED",))
+            assert run_dict["current_node"] == "premise_designer"
+
+            # 直插额外 ai_call_logs 验证聚合规则：
+            # 1) premise_designer 旧行（应被覆盖）：model_id=openai/gpt-4o
+            # 2) premise_designer 新行（应胜出）：model_id=openai_compatible/k3-256k
+            # 3) premise_designer 错误行（应被排除）：error='boom'
+            # 4) world_builder 错误行（应被排除）：error='world-fail'
+            db_path = app.state.settings.db_path
+            from packages.core.ids import new_id
+            from packages.core.db import get_connection
+            from packages.core.ids import now_iso
+
+            with get_connection(db_path) as conn:
+                # 取 premise_designer / world_builder 的 agent_id
+                p_id = conn.execute(
+                    "SELECT agent_id FROM agents WHERE name = ?",
+                    ("premise_designer",),
+                ).fetchone()["agent_id"]
+                w_id = conn.execute(
+                    "SELECT agent_id FROM agents WHERE name = ?",
+                    ("world_builder",),
+                ).fetchone()["agent_id"]
+                base_ts = now_iso()
+
+                def _insert(
+                    agent_id: str,
+                    model_id: str,
+                    ts: str,
+                    error: str | None = None,
+                    call_id: str | None = None,
+                ) -> None:
+                    conn.execute(
+                        """
+                        INSERT INTO ai_call_logs (
+                            call_id, run_id, node_run_id, agent_id, model_id, prompt_version,
+                            input_context_ids_json, output_json, token_usage_json, latency_ms,
+                            cost, error, retry_count, created_at
+                        ) VALUES (?, ?, NULL, ?, ?, 'manual:v1', '[]', NULL, NULL, 0,
+                                  NULL, ?, 0, ?)
+                        """,
+                        (
+                            call_id or new_id("aic"),
+                            run_id,
+                            agent_id,
+                            model_id,
+                            error,
+                            ts,
+                        ),
+                    )
+
+                # 让 premise_designer 的「最新成功」变成 openai_compatible/k3-256k
+                # （晚于真实 mock 落库时间——用更晚的 created_at 覆盖之）
+                _insert(p_id, "openai/gpt-4o", base_ts + "z0")
+                _insert(p_id, "openai_compatible/k3-256k", base_ts + "z9")
+                # 错误行：因 created_at 较新，验证 error 过滤是否仍生效
+                _insert(p_id, "openai_compatible/error-model", base_ts + "za", error="boom")
+                _insert(w_id, "anthropic/claude-3", base_ts + "z8", error="world-fail")
+                conn.commit()
+
+            detail = await _get_run_via_http(app, run_id)
+            assert detail is not None
+            assert detail["status"] == "PAUSED"
+            assert "stage_models" in detail, (
+                f"GET /runs/{id} PAUSED 应携带 stage_models；实得 keys={list(detail.keys())}"
+            )
+            stage_models = detail["stage_models"]
+            assert isinstance(stage_models, dict)
+
+            # premise_designer 应为最新成功调用（k3-256k），不是 gpt-4o，也不是 error-model
+            assert stage_models.get("premise_designer") == "openai_compatible/k3-256k", (
+                f"premise_designer 应取最新成功 model_id；实得 {stage_models!r}"
+            )
+            # world_builder 仅写过错误行 → 不应出现
+            assert "world_builder" not in stage_models, (
+                f"world_builder 仅错误行，应被排除；实得 {stage_models!r}"
+            )
+
+    asyncio.run(run())
+
+
+def test_get_run_non_paused_has_no_stage_models(tmp_path: Path):
+    """非 PAUSED 状态的 run：响应不附加 stage_models（响应体最小化语义）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {
+                        "genre": "玄幻",
+                        "logline": "少年叶尘偶得星辰古卷",
+                        "platform": "起点",
+                        "target_words": 300000,
+                        "title": "",
+                        "author_notes": "",
+                    },
+                    "chapter_seed_count": 5,
+                    # 不开 step_mode：一次性跑完，最终 COMPLETED
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id = r.json()["run_id"]
+            final = await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            assert final["status"] == "COMPLETED"
+            assert "pause_payload" not in final, (
+                f"非 PAUSED 不应携带 pause_payload；实得 keys={list(final.keys())}"
+            )
+            assert "stage_models" not in final, (
+                f"非 PAUSED 不应携带 stage_models；实得 keys={list(final.keys())}"
+            )
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# premise 套娃污染回归：partial 生成（selected_stages 不含 premise）时，
+# projects.premise 应保持库中现状不被复合文本「定位：…一句话：…」叠层。
+# ---------------------------------------------------------------------------
+
+
+def test_project_init_partial_world_preserves_existing_premise_text(tmp_path: Path):
+    """用例 A（污染回归）：预置 project 行 premise 为复合文本
+    「定位：旧定位\\n一句话：旧一句话」，selected_stages=['world'] 时跑完后
+    projects.premise 应与预置完全一致（未叠任何前缀、未拼接新 logline）。
+
+    修复前：_persist_all_node 拿重建后的 premise（含完整复合文本）走
+    _build_premise_text，再包一层「定位：」+「一句话：」落库，每跑一次叠一层。
+    修复后：premise 环节本次未选 → 跳过 project update 分支，库文本不动。
+    """
+    app = _create_app(tmp_path)
+    preserved_premise = "定位：旧定位\n一句话：旧一句话"
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app, "旧项目")
+
+            # 预置复合文本（模拟历史被污染/修复后的库现状）
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                conn.execute(
+                    "UPDATE projects SET premise = ?, genre = ? WHERE project_id = ?",
+                    (preserved_premise, "玄幻", pid),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "project_id": pid,
+                    "brief": {
+                        "genre": "玄幻",
+                        "logline": "新一句话——不应写入",
+                    },
+                    "chapter_seed_count": 3,
+                    "selected_stages": ["world"],
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id = r.json()["run_id"]
+            await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+
+            # 核心断言：projects.premise 必须与预置完全一致，未被叠加任何前缀。
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT name, premise, genre FROM projects WHERE project_id = ?",
+                    (pid,),
+                ).fetchone()
+            finally:
+                conn.close()
+            assert row["premise"] == preserved_premise, (
+                f"修复前：premise 环节未选时仍会被叠一层「定位：」+「一句话：」"
+                f"变成「{preserved_premise}\\n卖点：…\\n一句话：新的一句话」之类；"
+                f"修复后：项目简介应原样保留。"
+                f"实得 premise={row['premise']!r}（应保持 {preserved_premise!r}）"
+            )
+            # name 也不应在 premise 未选时被覆盖（避免误覆盖用户原有书名）
+            assert row["name"] == "旧项目", (
+                f"premise 环节未选时 name 不应被覆盖；实得 name={row['name']!r}"
+            )
+
+    asyncio.run(run())
+
+
+def test_project_init_premise_selected_updates_premise_text(tmp_path: Path):
+    """用例 B（正常路径回归）：selected_stages 含 premise（或 None 全选）时
+    project_svc.update 应照常发生——projects.premise 被新生成的定位/卖点/一句话
+    拼接文本覆盖。
+
+    既有用例 test_project_init_creates_new_project / test_project_init_attaches_to_existing_project
+    / test_project_init_reinit_updates_existing_entities 等均走全量生成且断言了
+    projects.premise 含新内容，本用例用 selected_stages=['premise'] 单独触发
+    该路径以锁定未来回归。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app, "旧项目")
+
+            # 预置旧 premise
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                conn.execute(
+                    "UPDATE projects SET premise = ? WHERE project_id = ?",
+                    ("旧文本", pid),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "project_id": pid,
+                    "brief": {
+                        "genre": "玄幻",
+                        "logline": "少年叶尘偶得星辰古卷",
+                    },
+                    "chapter_seed_count": 3,
+                    "selected_stages": ["premise"],
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id = r.json()["run_id"]
+            await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+
+            # premise 环节被选中 → 应被新生成的复合文本覆盖
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT name, premise FROM projects WHERE project_id = ?",
+                    (pid,),
+                ).fetchone()
+            finally:
+                conn.close()
+            assert row["name"] == "九天星辰诀", (
+                f"premise 被选中时 name 应被 AI 产出的 title 覆盖；"
+                f"实得 name={row['name']!r}"
+            )
+            assert row["premise"] != "旧文本", (
+                "premise 被选中时 premise 文本应被新内容覆盖，"
+                "未覆盖则 _persist_all_node 的 project update 分支未执行"
+            )
+            assert "星辰古卷" in row["premise"], (
+                f"新 premise 应含 logline「星辰古卷」；实得 {row['premise']!r}"
+            )
+            assert "定位：传统玄幻升级流" in row["premise"], (
+                f"新 premise 应含「定位：…」（来自 _premise_script）；"
+                f"实得 {row['premise']!r}"
+            )
+
+    asyncio.run(run())
+
+
+def test_build_premise_text_strips_redundant_positioning_prefix():
+    """用例 C（防御单元）：_build_premise_text 在 positioning 已带「定位：」
+    前缀时应剥掉该层后再拼接，杜绝「定位：定位：…」套娃。"""
+    from packages.workflows.project_init.pipeline import _build_premise_text
+
+    # 1) positioning 已带「定位：」前缀 → 不应叠第二层
+    premise = {"positioning": "定位：已污染的定位", "selling_points": []}
+    brief = {"logline": "一句话"}
+    out = _build_premise_text(premise, brief)
+    # 期望：「定位：已污染的定位\\n卖点：（无）\\n一句话：一句话」
+    assert out.count("定位：") == 1, (
+        f"positioning 已带「定位：」时不应再叠一层；实得 {out!r}"
+    )
+    assert "定位：已污染的定位" in out
+    assert "一句话：一句话" in out
+
+    # 2) 干净 positioning（不带前缀）→ 行为与既有契约一致
+    premise_clean = {"positioning": "传统玄幻升级流", "selling_points": ["s1", "s2"]}
+    brief_clean = {"logline": "少年叶尘偶得星辰古卷"}
+    out_clean = _build_premise_text(premise_clean, brief_clean)
+    assert out_clean == "定位：传统玄幻升级流\n卖点：s1 / s2\n一句话：少年叶尘偶得星辰古卷", (
+        f"干净输入应保持既有契约；实得 {out_clean!r}"
+    )

@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 from packages.core.logging_config import get_logger
 from packages.core.workflow_registry import get_workflow
 from packages.core.db import get_connection
+from packages.core.model_router.profiles import ProfileService
 from packages.core.workflow_runtime.engine import WorkflowEngine, WorkflowRunConflict
 from packages.core.workflow_runtime.runs import (
     get_run,
@@ -104,6 +105,10 @@ class ProjectInitRequest(BaseModel):
     - ``mock_providers`` 可选：测试用脚本化 LLM 输出。
     - ``selected_stages`` 可选：仅跑白名单内的环节；未选环节从落库数据重建为
       下游 AI 输入，不调 AI、不抛 PauseRequested。省略时全选（与既有行为一致）。
+    - ``model_profile_id`` 可选：本次初始化全部 4 个 AI 节点（premise_designer /
+      world_builder / character_designer / volume_outliner）统一使用该 model_profiles
+      档案调用 LLM；不影响全局 capability_bindings。None/缺省 → 走全局
+      capability_bindings / model_configs。
     """
 
     brief: dict[str, Any]
@@ -119,6 +124,10 @@ class ProjectInitRequest(BaseModel):
     # 省略或 null 时等价于 ["premise", "world", "character", "outline"]。
     # 非法值（不在白名单内）→ 422。
     selected_stages: list[str] | None = None
+    # 单次 run 级模型档案覆盖：本次初始化全部 AI 节点统一使用该档案；None → 走
+    # 全局 capability_bindings。后端会校验该 profile_id 存在（model_profiles 表），
+    # 不存在 → 400。
+    model_profile_id: str | None = None
 
 
 PROJECT_INIT_STAGES: tuple[str, ...] = ("premise", "world", "character", "outline")
@@ -281,6 +290,36 @@ def _extract_pause_payload(run: dict[str, Any]) -> dict[str, Any] | None:
         if isinstance(val, dict) and "__pause_payload__" in val:
             return val["__pause_payload__"]
     return None
+
+
+def _collect_stage_models(db_path: str, run_id: str) -> dict[str, str]:
+    """反查 run 期间各 AI 节点实际调用的模型。
+
+    联查 ``ai_call_logs`` 与 ``agents``，按 ``agents.name``（即 node_id / agent 名）
+    分组取该 agent 最新一次成功调用的 ``model_id``（成功 = ``error IS NULL``）。
+
+    返回 ``{agent_name: model_id}``；无任何成功调用时为空 dict（合法）。
+    """
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT a.name AS agent_name, l.model_id AS model_id, l.created_at AS created_at
+            FROM ai_call_logs l
+            JOIN agents a ON a.agent_id = l.agent_id
+            WHERE l.run_id = ?
+              AND l.error IS NULL
+              AND l.model_id IS NOT NULL
+            ORDER BY l.created_at DESC
+            """,
+            (run_id,),
+        ).fetchall()
+    seen: dict[str, str] = {}
+    for row in rows:
+        name = row["agent_name"]
+        if name in seen:
+            continue
+        seen[name] = row["model_id"]
+    return seen
 
 
 def _run_workflow_return_payload(
@@ -554,6 +593,20 @@ def _start_project_init(
                 status_code=404, detail=f"project {body.project_id!r} not found"
             )
 
+    # 单次 run 级模型档案覆盖：校验 model_profile_id 存在再塞 ctx；不存在 → 400。
+    # 校验走 ProfileService.get（与 model_profiles API 共用底层 SQL）；缺省
+    # （None）跳过校验 / 不塞 ctx，与「不静默回落」原则一致。
+    if body.model_profile_id is not None:
+        if ProfileService(db_path).get(body.model_profile_id) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"model_profile_id {body.model_profile_id!r} not found in "
+                    f"model_profiles; create it first or omit the field to use "
+                    f"global capability_bindings"
+                ),
+            )
+
     initial_ctx: dict[str, Any] = {
         "db_path": str(db_path),
         "brief": body.brief,
@@ -570,6 +623,9 @@ def _start_project_init(
     selected_stages = _validate_selected_stages(body.selected_stages)
     if selected_stages is not None:
         initial_ctx["selected_stages"] = selected_stages
+    # 单次 run 级模型档案覆盖：已校验存在 → 塞 ctx；4 个 AI 节点透传给 run_agent。
+    if body.model_profile_id is not None:
+        initial_ctx["model_profile_id"] = body.model_profile_id
 
     engine = _engine(request)
     try:
@@ -795,6 +851,9 @@ def get_run_endpoint(run_id: str, request: Request) -> dict[str, Any]:
     # 非 PAUSED 状态不附加 pause_payload，保持响应体最小。
     if run.get("status") == "PAUSED":
         run["pause_payload"] = _extract_pause_payload(run)
+        # 各 AI 节点本次实际调用的 model_id（按 agent 名聚合），供审阅卡片区分
+        # 「下拉显示的全局绑定」与「本次实际使用的模型」，避免误读。
+        run["stage_models"] = _collect_stage_models(db_path, run_id)
     run["workflow_name"] = get_workflow_name_for_run(db_path, run_id)
     return run
 

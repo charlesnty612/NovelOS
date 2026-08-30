@@ -16,3 +16,6 @@ data/
 *.log
 .env
 packages/novelos.egg-info/
+# 集中存储 API key 的密钥文件（V3.8）；可被环境变量 NOVELOS_SECRETS_FILE 覆盖
+secrets.json
+secrets.*.json

@@ -9,6 +9,7 @@ import type {
 import { formatDateTime, formatJson } from '../../utils/format';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
+import { ReadableJson, RawJsonDetails } from '../../components/ReadableJson';
 
 const ROLE_OPTIONS: { value: CharacterRole; label: string }[] = [
   { value: 'protagonist', label: '主角 protagonist' },
@@ -210,17 +211,31 @@ function CharacterDetail({ character }: { character: Character }) {
       </div>
 
       <div className="detail-pane__section">
-        <div className="detail-pane__section-title">core_json（性格/价值观/恐惧/欲望/缺陷…）</div>
-        <pre className="json-block" data-testid="character-core-json">
-          {formatJson(character.core_json)}
-        </pre>
+        <div className="detail-pane__section-title">核心设定</div>
+        <div data-testid="character-core-json">
+          <ReadableJson value={character.core_json ?? {}} />
+        </div>
+        <RawJsonDetails
+          value={character.core_json ?? {}}
+          testId="character-core-json-raw"
+        />
       </div>
 
       <div className="detail-pane__section">
         <div className="detail-pane__section-title">
           最新 state（v{character.latest_state_version}）
         </div>
-        <pre className="json-block">{formatJson(character.latest_state_json)}</pre>
+        <div data-testid="character-latest-state">
+          <ReadableJson
+            value={character.latest_state_json}
+            emptyText="暂无状态数据"
+          />
+        </div>
+        <RawJsonDetails
+          value={character.latest_state_json}
+          testId="character-latest-state-raw"
+          summary="查看原始 state JSON"
+        />
       </div>
 
       {character.who_knows && character.who_knows.length > 0 ? (

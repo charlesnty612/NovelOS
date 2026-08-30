@@ -52,6 +52,7 @@ AGENT_CAPABILITY: dict[str, str] = {
     "director": "reasoning",
     "observer": "reasoning",
     "writer": "creative_writing",
+    "polisher": "creative_writing",  # P1：润色走 creative_writing，与 writer 同 capability，可单次覆盖
     "arbiter": "reasoning",
     "deconstructor_chapter": "reasoning",
     "deconstructor_aggregate": "reasoning",
@@ -101,7 +102,7 @@ CAPABILITY_LABELS: dict[str, dict[str, object]] = {
     "world_building":   {"label": "世界观",     "agents": ["world_builder"]},
     "character_design": {"label": "角色设计",   "agents": ["character_designer"]},
     "volume_outline":   {"label": "卷纲",       "agents": ["volume_outliner"]},
-    "creative_writing": {"label": "正文写作",   "agents": ["writer"]},
+    "creative_writing": {"label": "正文写作",   "agents": ["writer", "polisher"]},
     "reasoning":        {"label": "推理规划",   "agents": [
         "director", "observer", "arbiter",
         "deconstructor_chapter", "deconstructor_aggregate", "scene_planner",
@@ -286,7 +287,11 @@ class ModelRouter:
                 params = {}
 
         if provider_name == "anthropic":
-            api_key = resolve_api_key(provider_name, params)
+            api_key = resolve_api_key(
+                provider_name,
+                params,
+                profile_id=config_row.get("config_id"),
+            )
             return AnthropicProvider(
                 base_url=params.get("base_url") or None,
                 api_key=api_key,
@@ -306,7 +311,11 @@ class ModelRouter:
                 f"provider {provider_name!r} requires params_json.base_url "
                 f"(config_id={config_row.get('config_id')})"
             )
-        api_key = resolve_api_key(provider_name, params)
+        api_key = resolve_api_key(
+            provider_name,
+            params,
+            profile_id=config_row.get("config_id"),
+        )
         timeout = params.get("timeout_s", 240.0)
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("params_json.timeout_s must be a positive number of seconds")

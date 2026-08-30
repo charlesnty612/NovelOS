@@ -42,6 +42,8 @@ def _mask_params(params: dict) -> tuple[dict, bool]:
     """浅拷贝 ``params``：若存在非空 ``api_key`` → 替换为 :data:`_MASK`。
 
     返回 ``(masked_params, has_api_key)``，供响应组装。
+    ``has_api_key`` 仅反映 ``params.api_key`` 是否非空；文件来源的 key
+    由 :func:`_mask_response` 在外层叠加（避免重复 JSON 解析与缓存失效）。
     """
     out = dict(params)
     key = out.get("api_key")
@@ -51,14 +53,41 @@ def _mask_params(params: dict) -> tuple[dict, bool]:
     return out, has_key
 
 
+def _file_has_key(row: dict) -> bool:
+    """``secrets.json`` 文件里是否有该档案 / provider 的 key。
+
+    通过 ``profile_id``（model_profiles 行）或 ``config_id``（model_configs 行）
+    查 ;provider 字段同时作为兜底。延迟导入以避免循环。
+    """
+    try:
+        from packages.core.secrets_store import load_api_keys
+    except Exception:  # pragma: no cover - 极端 import 失败
+        return False
+    secrets = load_api_keys()
+    if not secrets:
+        return False
+    profile_id = row.get("profile_id") or row.get("config_id")
+    if isinstance(profile_id, str) and secrets.get(profile_id):
+        return True
+    provider = row.get("provider")
+    if isinstance(provider, str) and provider:
+        if secrets.get(provider) or secrets.get(provider.lower()):
+            return True
+    return False
+
+
 def _mask_response(row: dict) -> dict:
     """读路径出口统一过此函数：把 ``row`` 转成对外响应（mask api_key + 附 has_api_key）。
 
     ``params_json`` 在 DB 是 JSON 字符串；此处解析后脱敏再以 dict 形态返回，
     便于前端直接渲染。``has_api_key`` 顶层字段供前端判断密钥是否已配置。
+    V3.8 扩展：``has_api_key`` 现在同时涵盖 ``secrets.json`` 文件来源（profile_id /
+    provider 命中），保证迁移到文件后前端仍能正确展示「已配置」。
     """
     params = _parse_params_json(row.get("params_json"))
     masked, has_key = _mask_params(params)
+    if not has_key:
+        has_key = _file_has_key(row)
     out = dict(row)
     out["params_json"] = masked
     out["has_api_key"] = has_key

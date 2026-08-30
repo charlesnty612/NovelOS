@@ -144,6 +144,15 @@ function ModelProfilesPanel() {
                   >
                     {Number(m.enabled) === 1 ? 'enabled' : 'disabled'}
                   </span>
+                  <span
+                    className="badge badge--archived"
+                    data-testid={`profile-thinking-badge-${m.profile_id}`}
+                  >
+                    思考：
+                    {THINKING_BADGE_LABEL[inferThinkingMode(
+                      (m.params as Record<string, unknown>) ?? {},
+                    )]}
+                  </span>
                   {defaultCapabilities.length > 0 ? (
                     <span
                       className="muted small"
@@ -765,6 +774,121 @@ interface ParamsState {
   apiKey: string;
 }
 
+type ThinkingMode =
+  | 'default'
+  | 'off'
+  | 'on'
+  | 'adaptive'
+  | 'low'
+  | 'medium'
+  | 'high'
+  // V3.8：Kimi 专属「max」档，写入时仍走 reasoning_effort（与 low/medium/high 同路）。
+  | 'max';
+
+const THINKING_OPTIONS: { value: ThinkingMode; label: string; hint?: string }[] = [
+  { value: 'default', label: '默认（跟随端点）' },
+  { value: 'off', label: '关闭思考' },
+  { value: 'on', label: '开启思考' },
+  { value: 'adaptive', label: '自适应（MiniMax M 系列）', hint: 'MiniMax M 系专用' },
+  { value: 'low', label: '开启·低档' },
+  { value: 'medium', label: '开启·中档' },
+  { value: 'high', label: '开启·高档' },
+  { value: 'max', label: '开启·最高档（Kimi）', hint: 'Kimi 专属档位' },
+];
+
+/**
+ * 抽取 host（小写）——兼容 ``https://api.openai.com/v1`` / ``http://127.0.0.1:11434`` 等。
+ */
+function hostOf(baseUrl: string): string {
+  if (!baseUrl) return '';
+  const s = baseUrl.trim().toLowerCase();
+  const m = s.match(/^[a-z][a-z0-9+\-.]*:\/\/([^/?#]+)/);
+  if (m && m[1]) return m[1];
+  // 兜底：非标准 url，截取首段
+  const noProto = s.replace(/^[a-z][a-z0-9+\-.]*:\/\//, '');
+  return noProto.split('/')[0] ?? '';
+}
+
+/**
+ * 按 provider + base_url 收窄思考模式下拉（V3.8）。
+ * 没有「协议层的端点能力查询接口」，因此我们自己维护端点 → 推荐档位映射。
+ *
+ * 返回的顺序就是下拉展示顺序；与 ``THINKING_OPTIONS`` 的相对顺序保持一致。
+ */
+function getThinkingOptions(
+  provider: string,
+  baseUrl: string,
+): { value: ThinkingMode; label: string; hint?: string }[] {
+  const host = hostOf(baseUrl);
+  const isProvider = (p: string) => provider === p;
+  // Provider 自带（不依赖 host）—— Ollama / Anthropic / Mock 一律退回全量。
+  if (isProvider('anthropic') || isProvider('ollama') || isProvider('mock')) {
+    return THINKING_OPTIONS;
+  }
+  // MiniMax M 系：仅 default / off / adaptive。
+  if (host.includes('minimax')) {
+    return THINKING_OPTIONS.filter((o) =>
+      ['default', 'off', 'adaptive'].includes(o.value),
+    );
+  }
+  // DeepSeek：default / off / low / medium / high
+  if (host.includes('deepseek')) {
+    return THINKING_OPTIONS.filter((o) =>
+      ['default', 'off', 'low', 'medium', 'high'].includes(o.value),
+    );
+  }
+  // Kimi：default / off / low / high / max（不含 on/adaptive）
+  if (host.includes('kimi.com')) {
+    return THINKING_OPTIONS.filter((o) =>
+      ['default', 'off', 'low', 'high', 'max'].includes(o.value),
+    );
+  }
+  // OpenAI：仅当 host 含 ``api.openai.com`` 或独立 ``provider==='openai'`` 时收窄。
+  // ``provider==='openai_compatible'`` 不一定指向 OpenAI 官方（如用户指向私有端点），
+  // 因此只有 host 命中时才走 OpenAI 档位；其余代理类端点一律退回全量。
+  if (isProvider('openai') || host.includes('api.openai.com')) {
+    return THINKING_OPTIONS.filter((o) =>
+      ['default', 'off', 'low', 'medium', 'high'].includes(o.value),
+    );
+  }
+  // 未知端点：全量
+  return THINKING_OPTIONS;
+}
+
+/**
+ * 从 params 推断「思考模式」下拉的初值：
+ * - thinking.type === 'disabled' → 'off'
+ * - thinking.type === 'enabled'  → 'on'
+ * - thinking.type === 'adaptive' → 'adaptive'（MiniMax M 系列专用值）
+ * - reasoning_effort ∈ {low,medium,high} → 对应档位
+ * - 都没有 → 'default'（不显式写入 params）
+ */
+function inferThinkingMode(params: Record<string, unknown>): ThinkingMode {
+  const thinking = params['thinking'];
+  if (thinking && typeof thinking === 'object') {
+    const t = thinking as Record<string, unknown>;
+    if (t['type'] === 'disabled') return 'off';
+    if (t['type'] === 'enabled') return 'on';
+    if (t['type'] === 'adaptive') return 'adaptive';
+  }
+  const effort = params['reasoning_effort'];
+  if (effort === 'low' || effort === 'medium' || effort === 'high') {
+    return effort;
+  }
+  return 'default';
+}
+
+const THINKING_BADGE_LABEL: Record<ThinkingMode, string> = {
+  default: '默认',
+  off: '关',
+  on: '开',
+  adaptive: '自适应',
+  low: '低',
+  medium: '中',
+  high: '高',
+  max: '最高',
+};
+
 function ModelProfileFormModal({
   title,
   initial,
@@ -788,10 +912,18 @@ function ModelProfileFormModal({
   const [enabled, setEnabled] = useState<boolean>(
     initial ? Number(initial.enabled) === 1 : true,
   );
+  // 思考模式：从 initial.params 推断初值，编辑表单打开时即正确回显。
+  const [thinkingMode, setThinkingMode] = useState<ThinkingMode>(
+    inferThinkingMode(initialParams),
+  );
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // 编辑模式下「清除已存密钥」独立标志位：仅显式请求时才传 api_key=""。
   const [clearKeyRequested, setClearKeyRequested] = useState(false);
+  // V3.8「拉取模型」状态：候选项、加载中、提示。切换 provider 或成功拉取时刷新 hint。
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchHint, setFetchHint] = useState<string | null>(null);
 
   const isMock = provider === 'mock';
   const isAnthropic = provider === 'anthropic';
@@ -802,6 +934,62 @@ function ModelProfileFormModal({
     : isOllama
       ? '留空 = 本地 http://127.0.0.1:11434'
       : 'https://api.openai.com/v1';
+
+  // V3.8「拉取模型」：调用后端代理端点，把模型 id 写回 <datalist>。
+  // - Anthropic 允许不填 base_url（走官方默认）；
+  // - Ollama 允许不填 base_url（走本地默认）；
+  // - Mock 不需要拉取（按钮始终禁用，datalist 显示 mock-model）；
+  // - 其余要求填 base_url。
+  const baseUrlFilledForFetch = params.baseUrl.trim().length > 0;
+  const canFetchModels =
+    isMock ||
+    (isAnthropic || isOllama) ||
+    baseUrlFilledForFetch;
+
+  const handleFetchModels = async () => {
+    setErr(null);
+    setFetchHint(null);
+    setFetchingModels(true);
+    try {
+      const payload: {
+        provider: string;
+        base_url?: string;
+        profile_id?: string;
+      } = {
+        provider,
+      };
+      if (params.baseUrl.trim()) payload.base_url = params.baseUrl.trim();
+      if (initial?.profile_id) payload.profile_id = initial.profile_id;
+      // 用户若在表单上填了新 api_key，随请求发（后端会优先用之）；否则后端走
+      // resolve_api_key 解析。注意：前端永远不显示 / 也不打日志密文。
+      const inlineApiKey = params.apiKey.trim();
+      const resp = await modelProfilesApi.fetchAvailableModels({
+        ...payload,
+        ...(inlineApiKey ? { api_key: inlineApiKey } : {}),
+      });
+      const ids = Array.isArray(resp?.models)
+        ? resp.models.filter((x): x is string => typeof x === 'string' && x.length > 0)
+        : [];
+      setAvailableModels(ids);
+      setFetchHint(ids.length > 0 ? `已拉取 ${ids.length} 个模型` : '未取到模型，请检查 base_url / 密钥');
+    } catch (e: unknown) {
+      // 复用 err 横幅；fetchHint 同时给一行 inline 提示。
+      const msg = e instanceof Error ? e.message : '拉取模型列表失败';
+      setErr(msg);
+      setFetchHint(msg);
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  // 切换 provider / base_url 时清掉旧候选，避免与新端点不匹配。
+  // 留 base_url 时的逐字符清空不禁用——候选人放掉就放掉，由用户主动重拉。
+  useEffect(() => {
+    setAvailableModels([]);
+    setFetchHint(null);
+    // 注：依赖 provider 即覆盖性切换；base_url 不入依赖以免抖动。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider]);
 
   const hasApiKey = !!initial?.has_api_key;
   const canShowClearKeyButton = !!initial && hasApiKey && !isMock && !isOllama;
@@ -832,17 +1020,59 @@ function ModelProfileFormModal({
       setErr('该 provider 需要 base_url');
       return;
     }
-    const paramsOut: Record<string, unknown> = {};
+    // paramsOut 以 initialParams 为基底（快照），表单管理的键（base_url / api_key /
+// thinking / reasoning_effort）覆盖，其余键（如 timeout_s / service_tier 等）
+// 原样保留——避免编辑档案时静默丢掉后端 params 中已有的键。
+    const paramsOut: Record<string, unknown> = { ...initialParams };
     if (!isMock) {
       const trimmedUrl = params.baseUrl.trim();
-      if (trimmedUrl) paramsOut['base_url'] = trimmedUrl;
+      if (trimmedUrl) {
+        paramsOut['base_url'] = trimmedUrl;
+      } else {
+        delete paramsOut['base_url'];
+      }
       if (!isOllama) {
         if (clearKeyRequested) {
           paramsOut['api_key'] = '';
         } else if (params.apiKey.trim() !== '') {
           paramsOut['api_key'] = params.apiKey.trim();
+        } else {
+          // 用户留空且未请求清除 → 删除残留掩码 '***'，让后端按「不修改」处理。
+          if (paramsOut['api_key'] === '***') delete paramsOut['api_key'];
         }
+      } else {
+        // Ollama 不接受 api_key，从输出里剔除
+        delete paramsOut['api_key'];
       }
+    } else {
+      // Mock provider 不关心 base_url/api_key，从输出里剔除以保持干净
+      delete paramsOut['base_url'];
+      delete paramsOut['api_key'];
+    }
+    // 思考模式：表单是该字段的唯一管理面，按选项写/删 thinking / reasoning_effort。
+    if (!isMock) {
+      delete paramsOut['thinking'];
+      delete paramsOut['reasoning_effort'];
+      if (thinkingMode === 'off') {
+        paramsOut['thinking'] = { type: 'disabled' };
+      } else if (thinkingMode === 'on') {
+        paramsOut['thinking'] = { type: 'enabled' };
+      } else if (thinkingMode === 'adaptive') {
+        // MiniMax M 系列专用值：enabled 不是合法枚举（仅 adaptive/disabled）
+        paramsOut['thinking'] = { type: 'adaptive' };
+      } else if (
+        thinkingMode === 'low' ||
+        thinkingMode === 'medium' ||
+        thinkingMode === 'high' ||
+        thinkingMode === 'max'
+      ) {
+        paramsOut['reasoning_effort'] = thinkingMode;
+      }
+      // 'default' → 两键均不写入
+    } else {
+      // mock provider 没有「思考」概念，强制清除避免残留
+      delete paramsOut['thinking'];
+      delete paramsOut['reasoning_effort'];
     }
     setSubmitting(true);
     try {
@@ -903,12 +1133,49 @@ function ModelProfileFormModal({
 
         <div className="form-row">
           <label>model *</label>
-          <input
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="如 gpt-4o-mini / mock-echo / deepseek-chat"
-            data-testid="profile-model"
-          />
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="如 gpt-4o-mini / mock-echo / deepseek-chat"
+              list="profile-model-options"
+              style={{ flex: 1 }}
+              data-testid="profile-model"
+            />
+            <button
+                type="button"
+                className="btn btn--sm"
+                onClick={handleFetchModels}
+                disabled={!canFetchModels || fetchingModels}
+                title={
+                  !canFetchModels
+                    ? '请先填写 base_url'
+                    : '从当前 provider + base_url 拉取可选模型'
+                }
+                data-testid="profile-fetch-models"
+              >
+                {fetchingModels ? '拉取中…' : '拉取模型'}
+              </button>
+          </div>
+          {/* V3.8：拉取得到的候选列表（仅供浏览器自动补全 / datalist 提示候选，不限定手输）。
+              mock 端点直接给 mock-model 占位，避免用户空白无候选。 */}
+          <datalist id="profile-model-options">
+            {(isMock
+              ? ['mock-model']
+              : availableModels
+            ).map((id) => (
+              <option key={id} value={id} />
+            ))}
+          </datalist>
+          {fetchHint ? (
+            <div
+              className="muted small"
+              data-testid="profile-fetch-models-hint"
+              role={fetchHint.startsWith('已拉取') ? 'status' : undefined}
+            >
+              {fetchHint}
+            </div>
+          ) : null}
         </div>
 
         {!isMock ? (
@@ -982,6 +1249,54 @@ function ModelProfileFormModal({
             />{' '}
             启用（enabled=1 时可被环节分配命中）
           </label>
+        </div>
+
+        <div className="form-row">
+          <label>思考模式</label>
+          <select
+            value={thinkingMode}
+            onChange={(e) => setThinkingMode(e.target.value as ThinkingMode)}
+            disabled={isMock}
+            title={
+              isMock
+                ? 'Mock provider 不支持思考模式'
+                : '按当前 provider + base_url 自动收窄候选；写入 params 的 thinking / reasoning_effort 字段'
+            }
+            data-testid="profile-thinking-select"
+          >
+            {(() => {
+              // V3.8：按端点收窄候选档位。
+              const narrowed = getThinkingOptions(provider, params.baseUrl);
+              const values = narrowed.map((o) => o.value);
+              // 编辑档案时，初值 inferThinkingMode 可能落在当前端点不支持的选项里
+              // （如 MiniMax 域编辑老档案存的是 'on' / 'medium'）—— 渲染期回退为
+              // 'default'，并附一行 muted 提示。
+              const currentInList = (values as string[]).includes(thinkingMode);
+              return (
+                <>
+                  {narrowed.map((o) => (
+                    <option key={o.value} value={o.value} title={o.hint ?? ''}>
+                      {o.label}
+                    </option>
+                  ))}
+                  {!currentInList ? (
+                    <option value={thinkingMode} hidden>
+                      {thinkingMode}
+                    </option>
+                  ) : null}
+                </>
+              );
+            })()}
+          </select>
+          {(() => {
+            const values = getThinkingOptions(provider, params.baseUrl).map((o) => o.value);
+            if ((values as string[]).includes(thinkingMode)) return null;
+            return (
+              <div className="muted small" data-testid="profile-thinking-out-of-list">
+                当前保存的思考参数不在该端点支持列表内，保存时将按所选选项写入。
+              </div>
+            );
+          })()}
         </div>
 
         <div style={{ display: 'flex', gap: 8, marginTop: 12, justifyContent: 'flex-end' }}>

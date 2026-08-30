@@ -55,3 +55,16 @@ Content-Type: application/json
 - chapters.status PLANNED→DRAFTED 由 Service 走白名单；当前状态非 PLANNED 时不会自动跳变。
 - 允许对 `DRAFTED` 章节重跑 `write` 以追加新 draft 版本（支撑人工改稿后重写的最小闭环）；`REVIEWED` / `COMMITTED` 章节重跑 `write` 会被拒绝（run FAILED，见 `packages/workflows/chapter_write/pipeline.py` `_save_draft_node` 硬校验）。
 - 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4、`docs/agents/agent-contracts-v0.md` §4、`docs/agents/prompts/writer-v1.md`、`docs/agents/prompts/scene_planner-v1.md`。
+
+## 模型路由（能力 → capability）
+
+| 节点 | 默认 capability | 说明 |
+|---|---|---|
+| `writer`（revise 模式：revision_note + 既有 draft） | `light` | 与 critic / summarizer 共用轻量模型，省创作额度；适用于定向局部修改 |
+| `writer`（write / fresh_write 模式） | `creative_writing`（默认） | 全章重写走创作型模型，保持文风上限 |
+| `polisher` | `creative_writing`（默认） | 不做能力覆盖，保持原行为 |
+| `scene_planner` | `creative_writing`（默认） | 不做能力覆盖，保持原行为 |
+
+`writer` 节点的 `revise` / `write` 由 `_writer_node` 在算出 `mode` 后决定是否传 `capability_override="light"`——`None` 时维持原 `capability_for("writer")` 链路，行为对其他节点零影响。
+
+注意：run 级 `model_overrides`（profile_id）始终优先于 capability 绑定；profile_id 传的是单档案钉死，优先级最高（见 `packages/core/agent_runtime/runner.py` `run_agent(..., profile_id=...)`）。`mock_script` 路径不消费 `capability_override`，mock 测试链路不受影响。

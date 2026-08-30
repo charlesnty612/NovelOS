@@ -92,7 +92,8 @@ describe('WorldTab - 关键流', () => {
     expect(screen.getByText('北境雪山')).toBeInTheDocument();
     expect(screen.getByText('故事开始的偏僻小镇')).toBeInTheDocument();
     // data_json 预览：climate: subtropical
-    expect(screen.getByText(/subtropical/)).toBeInTheDocument();
+    // 注意：人读块 + 折叠中的 raw JSON 都会出现该字面量
+    expect(screen.getAllByText(/subtropical/).length).toBeGreaterThan(0);
   });
 
   it('b) 切到 factions：调 factionsApi.list + 渲染势力名', async () => {

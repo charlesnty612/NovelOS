@@ -335,6 +335,27 @@ def _validate_volume_outliner(payload: dict[str, Any]) -> None:
         raise AgentOutputError("volume_outliner output missing required array 'chapter_seeds'")
 
 
+def _validate_polisher(payload: dict[str, Any]) -> None:
+    """Polisher（P1 文风润色）契约：schema_version + 关键字段。
+
+    Schema 与 ``docs/agents/prompts/polisher-v1.md`` §7 对齐：
+    - required: schema_version, prompt_version, polished_text, changes_summary
+    - polished_text 必须是字符串（允许空串以便 mock 测试兜底）
+    - changes_summary 必须是字符串（≤100 字由调用方软校验）
+    """
+    for key in ("schema_version", "prompt_version", "polished_text", "changes_summary"):
+        if key not in payload:
+            raise AgentOutputError(f"polisher output missing required field: {key!r}")
+    if payload.get("schema_version") != "polisher-output.v1":
+        raise AgentOutputError(
+            f"polisher schema_version must be 'polisher-output.v1', got {payload.get('schema_version')!r}"
+        )
+    if not isinstance(payload.get("polished_text"), str):
+        raise AgentOutputError("polisher polished_text must be a string")
+    if not isinstance(payload.get("changes_summary"), str):
+        raise AgentOutputError("polisher changes_summary must be a string")
+
+
 _VALIDATORS = {
     "observer": _validate_observer,
     "director": _validate_director,
@@ -345,6 +366,7 @@ _VALIDATORS = {
     "world_builder": _validate_world_builder,
     "character_designer": _validate_character_designer,
     "volume_outliner": _validate_volume_outliner,
+    "polisher": _validate_polisher,
 }
 
 

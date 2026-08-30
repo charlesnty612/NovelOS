@@ -25,10 +25,18 @@
 
 from __future__ import annotations
 
+import json
+
+import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 
 from packages.core.logging_config import get_logger
 from packages.core.model_router import ModelRouter, ProfileService, ProviderError
+from packages.core.model_router.providers import (
+    AnthropicProvider,
+    OllamaProvider,
+    resolve_api_key,
+)
 from packages.core.model_router.security import (
     _dump_params_json,
     _mask_response,
@@ -38,6 +46,66 @@ from packages.core.model_router.security import (
 )
 
 log = get_logger("novelos.routers.model_profiles")
+
+# ---------------------------------------------------------------------------
+# V3.8（拉取可用模型）内部常量
+# ---------------------------------------------------------------------------
+
+# 拉取模型列表总超时（秒）。各家列表接口通常很快，但需兜底防挂起。
+_FETCH_LIST_TIMEOUT_S = 10.0
+
+
+def _provider_default_base_url(provider: str) -> str | None:
+    """返回 provider 的官方 base_url。无 key 也能匿名调用 / 拉取列表的 provider
+    （Ollama、Anthropic）需要这个；其它（OpenAI 兼容）由调用方提供。"""
+    if provider == "anthropic":
+        return AnthropicProvider.DEFAULT_BASE_URL
+    if provider == "ollama":
+        return OllamaProvider.DEFAULT_BASE_URL
+    return None
+
+
+def _extract_ids_openai_compatible(data: object) -> list[str]:
+    """OpenAI 兼容 /models 响应：``{"data": [{"id": "..."}, ...]}``。"""
+    if not isinstance(data, dict):
+        return []
+    items = data.get("data")
+    if not isinstance(items, list):
+        return []
+    ids: list[str] = []
+    for it in items:
+        if isinstance(it, dict):
+            v = it.get("id")
+            if isinstance(v, str) and v:
+                ids.append(v)
+    return ids
+
+
+def _extract_ids_anthropic(data: object) -> list[str]:
+    """Anthropic /v1/models 响应：``{"data": [{"id": "..."}, ...]}``。"""
+    return _extract_ids_openai_compatible(data)
+
+
+def _extract_ids_ollama(data: object) -> list[str]:
+    """Ollama /api/tags 响应：``{"models": [{"name": "..."}, ...]}``。"""
+    if not isinstance(data, dict):
+        return []
+    items = data.get("models")
+    if not isinstance(items, list):
+        return []
+    ids: list[str] = []
+    for it in items:
+        if isinstance(it, dict):
+            v = it.get("name")
+            if isinstance(v, str) and v:
+                ids.append(v)
+    return ids
+
+
+def _dedup_sorted(ids: list[str]) -> list[str]:
+    """排序去重（保持稳定插入序以稳定输出，但用户体验上看到有序列表更直接）。"""
+    return sorted({i for i in ids if isinstance(i, str) and i})
+
 
 router = APIRouter(tags=["model_profiles"])
 
@@ -245,6 +313,159 @@ def test_model_profile(profile_id: str, request: Request) -> dict:
         "detail": result.get("detail") or "",
         "status_code": result.get("status_code"),
     }
+
+
+# ---------------------------------------------------------------------------
+# V3.8 拉取可选模型列表（POST /model-profiles/available-models）
+# ---------------------------------------------------------------------------
+
+
+@router.post("/model-profiles/available-models")
+def list_available_models(payload: dict) -> dict:
+    """按 ``provider / base_url / api_key / profile_id`` 调用各家模型列表接口。
+
+    用途：模型档案编辑表单「拉取模型」按钮的支撑端点。后端代理请求以
+    避免浏览器跨域、CORS 与密文外带；前端只看到列表不接触 key。
+
+    请求体（所有键均可选除 ``provider``）：
+    - ``provider`` (str, 必填) —— ``mock / openai_compatible / anthropic / ollama`` 等。
+    - ``base_url`` (str, 可选) —— 若空，按 provider 选用官方默认；OpenAI 兼容 / 自建
+      端点必须提供。
+    - ``api_key`` (str, 可选) —— 明文直接用；缺省走 ``resolve_api_key``：先查档案
+      ``profile_id``、再 ``provider`` 默认 env（``NOVELOS_API_KEY_<PROVIDER>``）。
+    - ``profile_id`` (str, 可选) —— 已有档案 ID；用于上面提到的解析优先级。
+
+    错误处理：
+    - ``400`` —— 必填缺失 / 该 provider 必须有 key 但解析不到；detail 仅文案不含 key。
+    - ``502`` —— 拉取失败（超时、非 2xx、解析坏 JSON）。detail 仅文案不含 key。
+
+    响应：
+    - ``{"models": ["id1", "id2", ...]}`` —— 排序去重后的字符串数组。
+    """
+    provider = payload.get("provider")
+    if not (isinstance(provider, str) and provider):
+        raise HTTPException(status_code=422, detail="provider required")
+
+    raw_base_url = payload.get("base_url")
+    base_url: str | None = None
+    if isinstance(raw_base_url, str) and raw_base_url.strip():
+        base_url = raw_base_url.strip()
+
+    raw_api_key = payload.get("api_key")
+    inline_api_key: str | None = None
+    if isinstance(raw_api_key, str) and raw_api_key.strip():
+        inline_api_key = raw_api_key.strip()
+        # 安全：不接受脱敏占位符作为「真密钥」。
+        if inline_api_key == "***":
+            inline_api_key = None
+
+    raw_profile_id = payload.get("profile_id")
+    profile_id: str | None = None
+    if isinstance(raw_profile_id, str) and raw_profile_id.strip():
+        profile_id = raw_profile_id.strip()
+
+    # ---- mock：固定假列表，无需任何外部调用 ----
+    if provider == "mock":
+        return {"models": ["mock-model"]}
+
+    # ---- ollama：无需 key；缺 base_url 用本地默认 ----
+    if provider == "ollama":
+        target_base = base_url or OllamaProvider.DEFAULT_BASE_URL
+        url = f"{target_base.rstrip('/')}/api/tags"
+        try:
+            resp = httpx.get(url, timeout=_FETCH_LIST_TIMEOUT_S)
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"拉取模型列表失败：无法连接 Ollama（{type(exc).__name__}）",
+            ) from exc
+        if resp.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail=f"拉取模型列表失败：上游 HTTP {resp.status_code}",
+            )
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"拉取模型列表失败：响应非 JSON（{type(exc).__name__}）",
+            ) from exc
+        return {"models": _dedup_sorted(_extract_ids_ollama(data))}
+
+    # ---- 解析 API key（优先入参，再走 secrets / env） ----
+    api_key: str | None = inline_api_key
+    if api_key is None:
+        api_key = resolve_api_key(
+            provider,
+            None,
+            profile_id=profile_id,
+        )
+
+    # ---- anthropic：必须 key（/v1/models 走鉴权） ----
+    if provider == "anthropic":
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="拉取模型列表失败：需先配置 Anthropic 密钥",
+            )
+        target_base = base_url or AnthropicProvider.DEFAULT_BASE_URL
+        url = f"{target_base.rstrip('/')}/v1/models"
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": AnthropicProvider.ANTHROPIC_VERSION,
+        }
+        try:
+            resp = httpx.get(url, headers=headers, timeout=_FETCH_LIST_TIMEOUT_S)
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"拉取模型列表失败：无法连接 Anthropic（{type(exc).__name__}）",
+            ) from exc
+        if resp.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail=f"拉取模型列表失败：上游 HTTP {resp.status_code}",
+            )
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"拉取模型列表失败：响应非 JSON（{type(exc).__name__}）",
+            ) from exc
+        return {"models": _dedup_sorted(_extract_ids_anthropic(data))}
+
+    # ---- openai_compatible / 其他：必须 base_url；key 可选（本地 / Ollama 等） ----
+    if not base_url:
+        raise HTTPException(
+            status_code=400,
+            detail=f"拉取模型列表失败：{provider!r} 需提供 base_url",
+        )
+    url = f"{base_url.rstrip('/')}/models"
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        resp = httpx.get(url, headers=headers, timeout=_FETCH_LIST_TIMEOUT_S)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"拉取模型列表失败：无法连接（{type(exc).__name__}）",
+        ) from exc
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"拉取模型列表失败：上游 HTTP {resp.status_code}",
+        )
+    try:
+        data = resp.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"拉取模型列表失败：响应非 JSON（{type(exc).__name__}）",
+        ) from exc
+    return {"models": _dedup_sorted(_extract_ids_openai_compatible(data))}
 
 
 __all__ = ["router"]

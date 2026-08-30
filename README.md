@@ -141,4 +141,12 @@ cd apps/web && npm run test
   配置发送到对应服务（对齐 PRD §102：默认 Local Only，云端调用需 Explicit Consent）。
 - mock provider 开箱即用，无需任何密钥即可跑通全链路与测试。
 
+## 密钥管理（V3.8）
+
+API key 集中在仓库根 `secrets.json`（结构 `{"api_keys": {<档案ID / provider / 环境变量名>: "<key>"}}`）。
+解析优先级：`secrets[<profile_id>]` → `secrets[<provider>]` → `secrets[<env_name>]`
+→ `params_json.api_key`（存量兼容）→ 环境变量。路径可由 `NOVELOS_SECRETS_FILE` 覆盖；
+文件已被 `.gitignore` 屏蔽（含 `secrets.*.json` 通配），请勿提交明文 key。详见
+`packages/core/secrets_store.py`。
+
 更多上下文见 `docs/impl/IMPLEMENTATION-PLAN-v0.md`、`#NovelOS.md`。

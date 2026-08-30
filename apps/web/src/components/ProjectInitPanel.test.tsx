@@ -137,6 +137,9 @@ describe('ProjectInitPanel (P1 project-init)', () => {
     vi.mocked(projectsApi.initStatus).mockRejectedValue(new Error('init-status not mocked'));
     // 清理 sessionStorage（避免跨用例残留）
     sessionStorage.clear();
+    // 单测中把 poll 间隔压到 1ms，避免 5s 默认超时下被 2000ms 间隔卡住。
+    (window as unknown as { __novelosPollIntervalMs?: number }).__novelosPollIntervalMs = 1;
+    (window as unknown as { __novelosPollTimeoutMs?: number }).__novelosPollTimeoutMs = 5000;
   });
 
   it('提交按钮在 logline 为空时禁用', async () => {
@@ -833,6 +836,127 @@ describe('ProjectInitPanel (P1 project-init)', () => {
 
     const status = await screen.findByTestId('stage-model-status');
     expect(status).toHaveTextContent(/下一关起生效/);
+  });
+
+  // ---------------- P1.2 review 视图「本次实际使用」行 -----------------
+
+  it('review 视图在 stage_models 含本关 agent 时渲染「本次实际使用：xxx」（短名剥前缀）', async () => {
+    // POST init 直接 PAUSED 同步返回 + 紧跟 GET /runs/{id} 异步取 stage_models
+    vi.mocked(projectsApi.init).mockResolvedValueOnce({
+      run_id: 'run_stage_models',
+      status: 'PAUSED',
+      current_node: 'world_builder',
+      project_id: 'prj_1',
+      pause_payload: {
+        stage: 'world',
+        stage_index: 1,
+        stages_total: 4,
+        degraded: false,
+        draft: worldDraft,
+      },
+    } as ProjectInitResponse);
+    vi.mocked(workflowsApi.get).mockResolvedValueOnce({
+      run_id: 'run_stage_models',
+      status: 'PAUSED',
+      current_node: 'world_builder',
+      pause_payload: {
+        stage: 'world',
+        stage_index: 1,
+        stages_total: 4,
+        degraded: false,
+        draft: worldDraft,
+      },
+      workflow_name: 'project-init',
+      nodes: [],
+      stage_models: {
+        world_builder: 'openai_compatible/k3-256k',
+        premise_designer: 'mock/mock',
+      },
+    } as never);
+
+    render(
+      <ProjectInitPanel projectId="prj_1" project={baseProject} onDone={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByTestId('project-init-toggle'));
+    await waitFor(() => {
+      expect(screen.getByTestId('project-init-form')).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByTestId('project-init-logline'), {
+      target: { value: '少年得古籍，逆天改命' },
+    });
+    fireEvent.click(screen.getByTestId('project-init-submit'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('review-pane')).toBeInTheDocument();
+    });
+
+    // 等待 panel 内部 GET 异步拉到的 stage_models 触发渲染（best-effort）
+    const used = await screen.findByTestId('stage-used-model');
+    expect(used).toBeInTheDocument();
+    // 短名：剥掉 provider 前缀
+    expect(used).toHaveTextContent('本次实际使用：k3-256k');
+    expect(used).toHaveTextContent(/本次实际使用/);
+    // 不应再包含 provider 前缀
+    expect(used.textContent ?? '').not.toContain('openai_compatible/');
+    // title 属性挂全名，便于悬停查看
+    expect(used.getAttribute('title')).toBe('openai_compatible/k3-256k');
+  });
+
+  it('stage_models 缺失时不渲染「本次实际使用」行（不影响下拉）', async () => {
+    vi.mocked(projectsApi.init).mockResolvedValueOnce({
+      run_id: 'run_no_stage_models',
+      status: 'PAUSED',
+      current_node: 'premise_designer',
+      project_id: 'prj_1',
+      pause_payload: {
+        stage: 'premise',
+        stage_index: 0,
+        stages_total: 4,
+        degraded: false,
+        draft: premiseDraft,
+      },
+    } as ProjectInitResponse);
+    // GET /runs/{id} 返回空 stage_models（PAUSED 但 ai_call_logs 暂未落）
+    vi.mocked(workflowsApi.get).mockResolvedValueOnce({
+      run_id: 'run_no_stage_models',
+      status: 'PAUSED',
+      current_node: 'premise_designer',
+      pause_payload: {
+        stage: 'premise',
+        stage_index: 0,
+        stages_total: 4,
+        degraded: false,
+        draft: premiseDraft,
+      },
+      workflow_name: 'project-init',
+      nodes: [],
+      stage_models: {},
+    } as never);
+
+    render(
+      <ProjectInitPanel projectId="prj_1" project={baseProject} onDone={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByTestId('project-init-toggle'));
+    await waitFor(() => {
+      expect(screen.getByTestId('project-init-form')).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByTestId('project-init-logline'), {
+      target: { value: '少年得古籍，逆天改命' },
+    });
+    fireEvent.click(screen.getByTestId('project-init-submit'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('review-pane')).toBeInTheDocument();
+    });
+    // 给异步 GET 一个轮询机会
+    await waitFor(() => {
+      expect(workflowsApi.get).toHaveBeenCalled();
+    });
+    // 等一会让 stage_models=null 落地后断言「本次实际使用」行缺失
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByTestId('stage-used-model')).toBeNull();
+    // 下拉本身不受影响
+    expect(screen.getByTestId('stage-model-select')).toBeInTheDocument();
   });
 
   // ---------------- 新增：结构化编辑器 4 项验证 --------------------------
@@ -1720,7 +1844,7 @@ describe('ProjectInitPanel (P1 project-init)', () => {
     };
   };
 
-  it('a) init-status 返回 outline 未 done、其余 done → outline 强制勾选 disabled，premise/world/character 默认不勾选', async () => {
+  it('a) init-status 返回 outline 未 done、其余 done → outline 默认勾选可手动取消，premise/world/character 默认不勾选', async () => {
     vi.mocked(projectsApi.initStatus).mockResolvedValue(
       buildInitStatusResponse([
         { stage: 'premise', done: true },
@@ -1758,9 +1882,9 @@ describe('ProjectInitPanel (P1 project-init)', () => {
     expect(premiseCb.checked).toBe(false);
     expect(worldCb.checked).toBe(false);
     expect(characterCb.checked).toBe(false);
-    // (2) outline 未 done → 强制勾选
+    // (2) outline 未 done → 默认勾选；不再强制 disabled（用户可按需取消）
     expect(outlineCb.checked).toBe(true);
-    expect(outlineCb.disabled).toBe(true);
+    expect(outlineCb.disabled).toBe(false);
 
     // (3) 徽标：done → 灰绿，未 done → 灰红
     expect(screen.getByTestId('init-stage-premise-badge')).toHaveTextContent(/已有设定/);
@@ -1776,6 +1900,10 @@ describe('ProjectInitPanel (P1 project-init)', () => {
     });
     const [payload] = vi.mocked(projectsApi.init).mock.calls[0]!;
     expect(payload.selected_stages).toEqual(['outline']);
+
+    // (5) 用户可取消 outline（不强制）：勾选态变为 false
+    fireEvent.click(outlineCb);
+    expect(outlineCb.checked).toBe(false);
   });
 
   it('b) 手动勾上 premise 后提交 → selected_stages 含 premise（且含 outline）', async () => {
@@ -1827,7 +1955,7 @@ describe('ProjectInitPanel (P1 project-init)', () => {
     expect(payload.selected_stages).toHaveLength(2);
   });
 
-  it('c) 未 done 环节不可取消（点击无效仍勾选）', async () => {
+  it('c) 未 done 环节默认勾选且可自由取消', async () => {
     vi.mocked(projectsApi.initStatus).mockResolvedValue(
       buildInitStatusResponse([
         { stage: 'premise', done: false },
@@ -1845,21 +1973,21 @@ describe('ProjectInitPanel (P1 project-init)', () => {
       expect(screen.getByTestId('init-stage-premise')).toBeInTheDocument();
     });
 
-    // premise & outline 强制勾选且 disabled
+    // premise & outline 默认勾选、不再强制 disabled
     const premiseCb = screen.getByTestId('init-stage-premise') as HTMLInputElement;
     const outlineCb = screen.getByTestId('init-stage-outline') as HTMLInputElement;
     expect(premiseCb.checked).toBe(true);
-    expect(premiseCb.disabled).toBe(true);
+    expect(premiseCb.disabled).toBe(false);
     expect(outlineCb.checked).toBe(true);
-    expect(outlineCb.disabled).toBe(true);
+    expect(outlineCb.disabled).toBe(false);
 
-    // 即便用 fireEvent.click 强制触发 onChange（绕过 disabled），state 仍应保持勾选
+    // 用户可点击取消未 done 环节（state 跟随翻转）
     fireEvent.click(premiseCb);
-    expect(premiseCb.checked).toBe(true);
+    expect(premiseCb.checked).toBe(false);
     fireEvent.click(outlineCb);
-    expect(outlineCb.checked).toBe(true);
+    expect(outlineCb.checked).toBe(false);
 
-    // world 已 done → 默认不勾选且可手动取消
+    // world 已 done → 默认不勾选且可手动切换
     const worldCb = screen.getByTestId('init-stage-world') as HTMLInputElement;
     expect(worldCb.checked).toBe(false);
     fireEvent.click(worldCb);
@@ -2005,5 +2133,249 @@ describe('ProjectInitPanel (P1 project-init)', () => {
     });
     const [payload] = vi.mocked(projectsApi.init).mock.calls[0]!;
     expect(payload.brief.chapter_word_count).toBe(3500);
+  });
+
+  // ---------------- Bug 修复：resume/init 异步化后的 RUNNING 轮询 ------------
+  // 后端 POST /runs/{id}/resume 与 POST /projects/init 已异步化：HTTP 响应固定返回
+  // status=RUNNING，真实终态靠 GET /runs/{id} 轮询。前端必须轮询拿到终态再走
+  // 原 PAUSED/COMPLETED 分支，否则会误报「run 终态异常：status=RUNNING」。
+
+  it('A) resume 首响应 RUNNING → 轮询到 PAUSED → 进入 review 视图（含 stage_models）', async () => {
+    // init 同步 PAUSED 进入 review 视图（用既有路径）
+    vi.mocked(projectsApi.init).mockResolvedValueOnce({
+      run_id: 'run_async_resume_paused',
+      status: 'PAUSED',
+      current_node: 'premise_designer',
+      project_id: 'prj_1',
+      pause_payload: {
+        stage: 'premise',
+        stage_index: 0,
+        stages_total: 4,
+        degraded: false,
+        draft: premiseDraft,
+      },
+    } as ProjectInitResponse);
+    // 放行首响应：RUNNING（后端异步化契约）
+    vi.mocked(workflowsApi.resumeInit).mockResolvedValueOnce({
+      run_id: 'run_async_resume_paused',
+      status: 'RUNNING',
+      current_node: null,
+      project_id: 'prj_1',
+    } as ProjectInitResponse);
+    // 后续 GET 轮询：先 RUNNING 一次，再 PAUSED（带 stage_models）
+    vi.mocked(workflowsApi.get)
+      .mockResolvedValueOnce({
+        run_id: 'run_async_resume_paused',
+        status: 'RUNNING',
+        current_node: 'world_builder',
+        pause_payload: null,
+        workflow_name: 'project-init',
+        nodes: [],
+        stage_models: {},
+      } as never)
+      .mockResolvedValueOnce({
+        run_id: 'run_async_resume_paused',
+        status: 'PAUSED',
+        current_node: 'world_builder',
+        pause_payload: {
+          stage: 'world',
+          stage_index: 1,
+          stages_total: 4,
+          degraded: false,
+          draft: worldDraft,
+        },
+        workflow_name: 'project-init',
+        nodes: [],
+        stage_models: {
+          world_builder: 'openai_compatible/k3-256k',
+          premise_designer: 'openai_compatible/mock',
+        },
+      } as never);
+
+    render(
+      <ProjectInitPanel projectId="prj_1" project={baseProject} onDone={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByTestId('project-init-toggle'));
+    await waitFor(() => {
+      expect(screen.getByTestId('project-init-form')).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByTestId('project-init-logline'), {
+      target: { value: '少年得古籍，逆天改命' },
+    });
+    fireEvent.click(screen.getByTestId('project-init-submit'));
+
+    // 进入 premise review
+    await waitFor(() => {
+      expect(screen.getByTestId('revision-premi-premise')).toBeInTheDocument();
+    });
+    // 触发 resume：首响应 RUNNING，前端必须轮询
+    fireEvent.click(screen.getByTestId('revision-submit'));
+
+    // (a) 轮询调用了 GET /runs/{id}（至少一次）
+    await waitFor(() => {
+      expect(workflowsApi.get).toHaveBeenCalled();
+    });
+    // (b) 轮询到了 world PAUSED → review 视图切到 world（第 2 / 4 步）
+    await waitFor(() => {
+      expect(screen.getByTestId('revision-premi-world')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('revision-premi-world')).toHaveTextContent(
+      /第 2 \/ 4 步.*世界观/,
+    );
+    // (c) 无错误 banner（不再报「run 终态异常：status=RUNNING」）
+    expect(screen.queryByText(/run 终态异常/)).toBeNull();
+    // (d) stage_models 已落到 review 视图（短名剥前缀）
+    const used = await screen.findByTestId('stage-used-model');
+    expect(used).toHaveTextContent('本次实际使用：k3-256k');
+    expect(used.textContent ?? '').not.toContain('openai_compatible/');
+  });
+
+  it('B) resume 首响应 RUNNING → 轮询到 COMPLETED → done 视图 + onDone 回调', async () => {
+    // init 同步 PAUSED（最后一关 outline）→ review
+    vi.mocked(projectsApi.init).mockResolvedValueOnce({
+      run_id: 'run_async_resume_done',
+      status: 'PAUSED',
+      current_node: 'volume_outliner',
+      project_id: 'prj_1',
+      pause_payload: {
+        stage: 'outline',
+        stage_index: 3,
+        stages_total: 4,
+        degraded: false,
+        draft: outlineDraft,
+      },
+    } as ProjectInitResponse);
+    // 放行首响应：RUNNING
+    vi.mocked(workflowsApi.resumeInit).mockResolvedValueOnce({
+      run_id: 'run_async_resume_done',
+      status: 'RUNNING',
+      current_node: null,
+      project_id: 'prj_1',
+    } as ProjectInitResponse);
+    // GET 轮询：RUNNING → COMPLETED
+    vi.mocked(workflowsApi.get)
+      .mockResolvedValueOnce({
+        run_id: 'run_async_resume_done',
+        status: 'RUNNING',
+        current_node: 'persist_all',
+        pause_payload: null,
+        workflow_name: 'project-init',
+        nodes: [],
+        stage_models: {},
+      } as never)
+      .mockResolvedValueOnce({
+        run_id: 'run_async_resume_done',
+        status: 'COMPLETED',
+        current_node: 'persist_all',
+        pause_payload: null,
+        workflow_name: 'project-init',
+        nodes: [],
+        stage_models: {},
+      } as never);
+
+    const onDone = vi.fn();
+    render(
+      <ProjectInitPanel
+        projectId="prj_1"
+        project={baseProject}
+        onDone={onDone}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('project-init-toggle'));
+    await waitFor(() => {
+      expect(screen.getByTestId('project-init-form')).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByTestId('project-init-logline'), {
+      target: { value: '少年得古籍，逆天改命' },
+    });
+    fireEvent.click(screen.getByTestId('project-init-submit'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('revision-premi-outline')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId('revision-submit'));
+
+    // 轮询到 COMPLETED → done
+    await waitFor(() => {
+      expect(screen.getByTestId('done-result')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('done-result')).toHaveTextContent(
+      /run_id=run_async_resume_done/,
+    );
+    expect(screen.getByTestId('done-result')).toHaveTextContent(/Story Bible/);
+    // 无错误 banner
+    expect(screen.queryByText(/run 终态异常/)).toBeNull();
+    // onDone 用 polled COMPLETED 响应回调
+    expect(onDone).toHaveBeenCalledTimes(1);
+    const [resp] = onDone.mock.calls[0]!;
+    expect(resp.run_id).toBe('run_async_resume_done');
+    expect(resp.status).toBe('COMPLETED');
+  });
+
+  it('C) init 异步化首响应 RUNNING → 轮询到 PAUSED → 进入 review 视图', async () => {
+    // init 首响应：RUNNING（后端 init 也异步化路径）
+    vi.mocked(projectsApi.init).mockResolvedValueOnce({
+      run_id: 'run_async_init_paused',
+      status: 'RUNNING',
+      current_node: null,
+      project_id: 'prj_1',
+    } as ProjectInitResponse);
+    // GET 轮询：RUNNING → PAUSED
+    vi.mocked(workflowsApi.get)
+      .mockResolvedValueOnce({
+        run_id: 'run_async_init_paused',
+        status: 'RUNNING',
+        current_node: 'premise_designer',
+        pause_payload: null,
+        workflow_name: 'project-init',
+        nodes: [],
+        stage_models: {},
+      } as never)
+      .mockResolvedValueOnce({
+        run_id: 'run_async_init_paused',
+        status: 'PAUSED',
+        current_node: 'premise_designer',
+        pause_payload: {
+          stage: 'premise',
+          stage_index: 0,
+          stages_total: 4,
+          degraded: false,
+          draft: premiseDraft,
+        },
+        workflow_name: 'project-init',
+        nodes: [],
+        stage_models: {
+          premise_designer: 'openai_compatible/gpt-4o-mini',
+        },
+      } as never);
+
+    render(
+      <ProjectInitPanel projectId="prj_1" project={baseProject} onDone={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByTestId('project-init-toggle'));
+    await waitFor(() => {
+      expect(screen.getByTestId('project-init-form')).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByTestId('project-init-logline'), {
+      target: { value: '少年得古籍，逆天改命' },
+    });
+    fireEvent.click(screen.getByTestId('project-init-submit'));
+
+    // (a) 调了 GET /runs/{id}（轮询已启动）
+    await waitFor(() => {
+      expect(workflowsApi.get).toHaveBeenCalled();
+    });
+    // (b) 轮询到 PAUSED → 进入 review 视图（第 1 / 4 步 premise）
+    await waitFor(() => {
+      expect(screen.getByTestId('revision-premi-premise')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('revision-premi-premise')).toHaveTextContent(
+      /第 1 \/ 4 步.*题材定位/,
+    );
+    // (c) 无错误 banner
+    expect(screen.queryByText(/run 终态异常/)).toBeNull();
+    // (d) stage_models 已传入 ReviewPane
+    const used = await screen.findByTestId('stage-used-model');
+    expect(used).toHaveTextContent('本次实际使用：gpt-4o-mini');
   });
 });

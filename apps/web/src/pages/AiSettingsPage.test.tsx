@@ -25,6 +25,7 @@ vi.mock('../api/endpoints', async () => {
       update: vi.fn(),
       remove: vi.fn(),
       test: vi.fn(),
+      fetchAvailableModels: vi.fn(),
     },
     capabilityBindingsApi: {
       list: vi.fn(),
@@ -439,5 +440,211 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     // 给一点时间确认没有副作用被触发
     await new Promise((r) => setTimeout(r, 10));
     expect(capabilityBindingsApi.bind).not.toHaveBeenCalled();
+  });
+
+  // -------------------- 思考模式 + 参数保留 ---------------------------------
+
+  it('档案卡展示「思考：关/开/低/中/高/默认」徽标', async () => {
+    // mpf_001 默认无思考配置 → 徽标应为「思考：默认」
+    renderPage();
+    const badge = await screen.findByTestId('profile-thinking-badge-mpf_001');
+    expect(badge).toHaveTextContent('思考：默认');
+  });
+
+  it('编辑档案：思考模式下拉按 initialParams 回显 + 保存时 params 不丢已有键', async () => {
+    // 编辑带 thinking={type:'disabled'}+timeout_s=42 的档案：
+    // 打开表单时下拉应回显「关闭思考」；不改思考直接保存 → params 同时保留 timeout_s 与 thinking。
+    const profileWithThinking: ModelProfile = {
+      ...baseProfile,
+      profile_id: 'mpf_t1',
+      name: 'thinking-disabled',
+      params: {
+        base_url: 'https://api.openai.com/v1',
+        api_key: '***',
+        timeout_s: 42,
+        thinking: { type: 'disabled' },
+      },
+    };
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([profileWithThinking]);
+    vi.mocked(modelProfilesApi.update).mockResolvedValue(profileWithThinking);
+
+    renderPage();
+
+    const editBtn = await screen.findByTestId('model-profile-edit-mpf_t1');
+    fireEvent.click(editBtn);
+
+    // 下拉回显「关闭思考」
+    const sel = (await screen.findByTestId(
+      'profile-thinking-select',
+    )) as HTMLSelectElement;
+    expect(sel.value).toBe('off');
+
+    // 档案卡徽标同步显示「思考：关」
+    expect(
+      screen.getByTestId('profile-thinking-badge-mpf_t1'),
+    ).toHaveTextContent('思考：关');
+
+    // 不改思考，直接保存
+    fireEvent.click(screen.getByTestId('profile-save'));
+
+    await waitFor(() => {
+      expect(modelProfilesApi.update).toHaveBeenCalledTimes(1);
+    });
+    const [, payload] = vi.mocked(modelProfilesApi.update).mock.calls[0]!;
+    const paramsOut = (payload as Record<string, unknown>).params as Record<string, unknown>;
+    // 参数不丢回归：timeout_s 原样保留
+    expect(paramsOut).toHaveProperty('timeout_s', 42);
+    // thinking 仍为 disabled
+    expect(paramsOut).toHaveProperty('thinking');
+    expect(
+      (paramsOut['thinking'] as Record<string, unknown>)['type'],
+    ).toBe('disabled');
+    // 没有 reasoning_effort
+    expect(Object.prototype.hasOwnProperty.call(paramsOut, 'reasoning_effort')).toBe(false);
+  });
+
+  it('编辑档案：切到「开启·中档」保存 → reasoning_effort=medium 且无 thinking 键', async () => {
+    const profileWithThinking: ModelProfile = {
+      ...baseProfile,
+      profile_id: 'mpf_t2',
+      name: 'thinking-on',
+      params: {
+        base_url: 'https://api.openai.com/v1',
+        api_key: '***',
+        thinking: { type: 'disabled' },
+      },
+    };
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([profileWithThinking]);
+    vi.mocked(modelProfilesApi.update).mockResolvedValue(profileWithThinking);
+
+    renderPage();
+    fireEvent.click(await screen.findByTestId('model-profile-edit-mpf_t2'));
+
+    const sel = await screen.findByTestId('profile-thinking-select');
+    fireEvent.change(sel, { target: { value: 'medium' } });
+
+    fireEvent.click(screen.getByTestId('profile-save'));
+
+    await waitFor(() => {
+      expect(modelProfilesApi.update).toHaveBeenCalledTimes(1);
+    });
+    const [, payload] = vi.mocked(modelProfilesApi.update).mock.calls[0]!;
+    const paramsOut = (payload as Record<string, unknown>).params as Record<string, unknown>;
+    expect(paramsOut).toHaveProperty('reasoning_effort', 'medium');
+    expect(Object.prototype.hasOwnProperty.call(paramsOut, 'thinking')).toBe(false);
+  });
+
+  it('编辑档案：切回「默认」保存 → params 同时无 thinking 与 reasoning_effort', async () => {
+    const profileWithEffort: ModelProfile = {
+      ...baseProfile,
+      profile_id: 'mpf_t3',
+      name: 'thinking-medium',
+      params: {
+        base_url: 'https://api.openai.com/v1',
+        api_key: '***',
+        reasoning_effort: 'medium',
+      },
+    };
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([profileWithEffort]);
+    vi.mocked(modelProfilesApi.update).mockResolvedValue(profileWithEffort);
+
+    renderPage();
+    fireEvent.click(await screen.findByTestId('model-profile-edit-mpf_t3'));
+
+    const sel = (await screen.findByTestId(
+      'profile-thinking-select',
+    )) as HTMLSelectElement;
+    // initialParams 含 reasoning_effort='medium' → 应回显「开启·中档」
+    expect(sel.value).toBe('medium');
+
+    fireEvent.change(sel, { target: { value: 'default' } });
+    fireEvent.click(screen.getByTestId('profile-save'));
+
+    await waitFor(() => {
+      expect(modelProfilesApi.update).toHaveBeenCalledTimes(1);
+    });
+    const [, payload] = vi.mocked(modelProfilesApi.update).mock.calls[0]!;
+    const paramsOut = (payload as Record<string, unknown>).params as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(paramsOut, 'thinking')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(paramsOut, 'reasoning_effort')).toBe(false);
+  });
+
+  // -------------------- V3.8 拉取模型 + 思考模式端点收窄 ----------------------------
+
+  it('mock provider：拉取按钮始终可点，datalist 出现 mock-model', async () => {
+    // mock 不需要 base_url，按钮可点；内部直返 [mock-model]。
+    vi.mocked(modelProfilesApi.fetchAvailableModels).mockResolvedValue({
+      models: ['mock-model'],
+    });
+
+    renderPage();
+
+    const newBtn = await screen.findByTestId('new-model-profile');
+    fireEvent.click(newBtn);
+
+    // 默认 provider 是 openai_compatible，需要切到 mock 才能看到「无需 base_url 即可拉取」路径
+    const providerSel = (await screen.findByTestId(
+      'profile-provider',
+    )) as HTMLSelectElement;
+    fireEvent.change(providerSel, { target: { value: 'mock' } });
+
+    const fetchBtn = await screen.findByTestId('profile-fetch-models');
+    expect(fetchBtn).toBeEnabled();
+
+    fireEvent.click(fetchBtn);
+
+    await waitFor(() => {
+      expect(modelProfilesApi.fetchAvailableModels).toHaveBeenCalledTimes(1);
+    });
+
+    // datalist 出现 mock-model 候选。
+    const dataList = document.getElementById(
+      'profile-model-options',
+    ) as HTMLDataListElement | null;
+    expect(dataList).toBeTruthy();
+    const opts = dataList ? Array.from(dataList.querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value) : [];
+    expect(opts).toContain('mock-model');
+  });
+
+  it('MiniMax 域名：思考下拉只含 default / off / adaptive', async () => {
+    const minimaxProfile: ModelProfile = {
+      ...baseProfile,
+      profile_id: 'mpf_mini',
+      name: 'minimax-default',
+      provider: 'openai_compatible',
+      params: { base_url: 'https://api.minimax.chat/v1' },
+    };
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([minimaxProfile]);
+
+    renderPage();
+    const editBtn = await screen.findByTestId('model-profile-edit-mpf_mini');
+    fireEvent.click(editBtn);
+
+    const sel = (await screen.findByTestId('profile-thinking-select')) as HTMLSelectElement;
+    const values = Array.from(sel.querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value);
+    expect(values).toEqual(['default', 'off', 'adaptive']);
+  });
+
+  it('未知端点：思考下拉显示全量选项（含 max）', async () => {
+    const unknownProfile: ModelProfile = {
+      ...baseProfile,
+      profile_id: 'mpf_unk',
+      name: 'unknown-endpoint',
+      provider: 'openai_compatible',
+      params: { base_url: 'https://llm.example-private.com/v1' },
+    };
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([unknownProfile]);
+
+    renderPage();
+    const editBtn = await screen.findByTestId('model-profile-edit-mpf_unk');
+    fireEvent.click(editBtn);
+
+    const sel = (await screen.findByTestId('profile-thinking-select')) as HTMLSelectElement;
+    const values = Array.from(sel.querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value);
+    // 全量 8 项含 max
+    expect(values).toContain('max');
+    expect(values).toContain('adaptive');
+    expect(values).toContain('on');
+    expect(values).toContain('low');
   });
 });

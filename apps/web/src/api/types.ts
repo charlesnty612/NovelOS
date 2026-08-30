@@ -311,6 +311,9 @@ export interface WorkflowRun {
   // P1.1 恢复挂起的初始化：单 run GET 在 PAUSED 时携带的 pause_payload；
   // 非 PAUSED / list 行可能缺省。前端 ProjectInitPanel 用其直接恢复 review 视图。
   pause_payload?: ProjectInitPausePayload | null;
+  // P1.2 审阅卡「本次实际使用」：PAUSED 时携带，按 agent 名聚合 ai_call_logs
+  // 最新一次成功调用的 model_id；非 PAUSED 缺省。前端卡片在下拉旁渲染一行小字。
+  stage_models?: Record<string, string> | null;
 }
 
 // ---- workflow start payload / responses -----------------------------------
@@ -1018,6 +1021,12 @@ export interface ProjectInitPayload {
    *   合法取值：'premise' | 'world' | 'character' | 'outline'（与 init-status 的 stage 对齐）。
    */
   selected_stages?: string[] | null;
+  /**
+   * 单次 run 级模型档案覆盖：本次初始化全部 4 个 AI 节点统一使用该 model_profiles
+   * 档案；不影响全局 capability_bindings。后端会校验 profile 存在，不存在 → 400。
+   * null / 缺省 → 走全局 capability_bindings。
+   */
+  model_profile_id?: string | null;
 }
 
 // ---- P1 project-init：分步审阅 pause_payload 契约 --------------------------
@@ -1143,6 +1152,18 @@ export interface ModelProfileTestResult {
   latency_ms: number;
   detail?: string | null;
   status_code?: number | null;
+}
+
+/** V3.8 「拉取模型」端点（POST /model-profiles/available-models）载荷与响应。 */
+export interface FetchAvailableModelsPayload {
+  provider: string;
+  base_url?: string;
+  api_key?: string;
+  profile_id?: string;
+}
+
+export interface FetchAvailableModelsResponse {
+  models: string[];
 }
 
 export interface CapabilityBindingProfile {

@@ -773,3 +773,232 @@ def test_review_report_includes_ai_pattern_hits(tmp_path: Path):
             assert "仿佛" in review_report["forbidden_word_hits"]
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# V3.9.1：追读力（platform-retention）维度
+# - 改动 1：critic prompt §3 新增「8. 追读力审查」。本测试断言 sync 后
+#   critic ACTIVE prompt 文本含「追读力」字样（输入契约 / prompt 漂移防护）。
+# - 改动 2：mock critic 路径——plan key_beats 含爽点 beat、draft 通篇压抑时，
+#   critic 应按 §3.7「节拍核销」+ §3.8「追读力」报「[beat N 缺失]」前缀的
+#   other 类 issue（保持输出契约不变）。
+# ---------------------------------------------------------------------------
+
+
+def test_critic_prompt_contains_retention_clause_after_sync(tmp_path: Path):
+    """输入契约：sync_from_docs 后，prompts 表 critic:v1 ACTIVE 行的 content
+    必须含「追读力」字样——防 prompt 漂移导致 V3.9.1 维度静默丢失。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            db_path = app.state.settings.db_path
+            conn = get_connection(db_path)
+            try:
+                # 1. critic 行存在
+                agent_row = conn.execute(
+                    "SELECT agent_id FROM agents WHERE name = ?", ("critic",),
+                ).fetchone()
+                assert agent_row is not None, "critic agent row missing in agents table"
+                # 2. (critic, v1) ACTIVE 行存在
+                prompt_row = conn.execute(
+                    """
+                    SELECT content FROM prompts
+                    WHERE agent_id = ? AND version = ? AND status = 'ACTIVE'
+                    """,
+                    (agent_row["agent_id"], "v1"),
+                ).fetchone()
+                assert prompt_row is not None, "critic:v1 ACTIVE row missing"
+                content = prompt_row["content"]
+                # 3. 追读力条款落库
+                assert "追读力" in content, (
+                    "critic prompt content missing '追读力' clause; "
+                    "V3.9.1 dimension was not synced. content head: "
+                    f"{content[:120]!r}"
+                )
+                # 4. 与源文件保持一致（防漂移）
+                source_path = Path.cwd().resolve() / "docs" / "agents" / "prompts" / "critic-v1.md"
+                assert source_path.exists(), f"critic source prompt missing: {source_path}"
+                assert content == source_path.read_text(encoding="utf-8"), (
+                    "prompts.critic:v1 content drifted from docs/agents/prompts/critic-v1.md"
+                )
+            finally:
+                conn.close()
+
+    asyncio.run(run())
+
+
+# 一个明显压抑的 draft（无任何爽点兑现场景、无章末钩子、首屏平铺）
+OPPRESSED_PROSE = (
+    "连绵的雨从清晨下到黄昏。灰瓦上的水痕一道道淌下来，檐角的铜铃被风拨弄，"
+    "却始终无人应答。林渊在廊下坐了一日，案上的茶早已凉透。"
+    "他想起幼时学剑的旧事，想起师尊的责备，也想起那些再也回不去的山门。"
+    "\n\n"
+    "夜深时，他仍坐在原处。袖中的手攥着一枚无人在意的旧玉牌。"
+    "雨声渐小，灯油将尽。他闭上眼，把今夜的疲倦连同白日的沉默一同咽下。"
+    "待晨光破窗，他仍将坐在这里。"
+)
+
+
+def _critic_missing_payoff_script() -> list[str]:
+    """合规 critic 输出：plan 含爽点 beat 但 draft 无兑现场景 →
+    critic 按 §3.7 + §3.8 报「[beat N 缺失]」前缀的 other 类 issue。"""
+    return [
+        json.dumps(
+            {
+                "schema_version": "critic-report.v1",
+                "prompt_version": "critic:v1",
+                "chapter_id": "ch_xxx",
+                "overall_comment": "本章意图为爽点兑现，但正文通篇压抑，节拍缺失。",
+                "strengths": [],
+                "issues": [
+                    {
+                        "category": "other",
+                        "severity": "high",
+                        "quote": "他闭上眼，把今夜的疲倦连同白日的沉默一同咽下",
+                        "suggestion": (
+                            "[beat 2 缺失] plan 要求爽点/打脸类节拍兑现，"
+                            "正文未出现任何场景化释放；请在末段前补一个具体动作。"
+                        ),
+                    },
+                    {
+                        "category": "pacing",
+                        "severity": "low",
+                        "quote": "待晨光破窗，他仍将坐在这里",
+                        "suggestion": (
+                            "章末收束偏静，建议留一句悬念（未到的信、门口的脚步）拉读者留存。"
+                        ),
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+    ]
+
+
+def test_critic_retention_mock_path_with_missing_payoff_beat(tmp_path: Path):
+    """mock 路径：plan key_beats 含爽点类 beat，draft 通篇压抑 →
+    critic 输入契约允许 critic 报「[beat N 缺失]」前缀的 other 类 issue
+    （§3.7 节拍核销 + §3.9.1 追读力），输出契约仍复用 other/pacing 枚举。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "雨夜")
+
+            # plan + write 用压抑 draft；critic 用「[beat N 缺失]」合规输出
+            director_with_payoff = [
+                json.dumps(
+                    {
+                        "schema_version": "director-plan.v1",
+                        "prompt_version": "director:v1",
+                        "chapter_id": "ch_xxx",
+                        "chapter_goal": "林渊压抑之后终于在公开场合一剑震住全场",
+                        "core_conflict": "多年隐忍 vs 当众亮剑",
+                        "turning_point": "林渊出剑，旁观者震惊",
+                        "expected_role": "payoff",
+                        "key_beats": [
+                            {
+                                "beat_id": "beat_002",
+                                "purpose": "爽点：林渊当众出剑，旁人侧写震惊",
+                                "involved_characters": [],
+                                "involved_locations": [],
+                                "involved_hooks": [],
+                                "involved_debts": [],
+                                "risk_level": "LOW",
+                                "narrative_question_served": "爽感兑现",
+                            }
+                        ],
+                        "character_changes_planned": [],
+                        "information_releases": [],
+                        "hook_handling": [],
+                        "debt_handling": [],
+                        "proposed_new_entities": [],
+                        "deviations": [],
+                        "knowledge_leakage_check": {"uses_hidden_knowledge": False, "leakage_details": None},
+                        "open_questions": [],
+                        "notes_for_planner": "建议场景数 1",
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+            writer_script = [
+                json.dumps(
+                    {
+                        "schema_version": "writer-output.v1",
+                        "prompt_version": "writer:v1",
+                        "chapter_id": "ch_xxx",
+                        "prose": OPPRESSED_PROSE,
+                        "self_report": {
+                            "slots_filled": ["slot_001"],
+                            "word_count": len(OPPRESSED_PROSE),
+                            "scene_count": 1,
+                            "deviations": [],
+                            "forbidden_word_hits": [],
+                            "self_check_notes": "",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+            mock_providers = {
+                "director": director_with_payoff,
+                "writer": writer_script,
+                "critic": _critic_missing_payoff_script(),
+            }
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "爽点兑现", "mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock_providers, "critic_mode": "always"},
+            )
+            assert r.status_code == 201, r.text
+            paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+            payload = paused["pause_payload"]
+            assert payload["critic_status"] == "ok"
+            cr = payload["critic_report"]
+            assert cr["schema_version"] == "critic-report.v1"
+            issues = cr["issues"]
+            # 至少一条 §3.7「[beat N 缺失]」前缀的 other 类 issue
+            missing_beat_issues = [
+                i for i in issues
+                if i["category"] == "other"
+                and i["suggestion"].startswith("[beat ")
+                and "缺失" in i["suggestion"]
+            ]
+            assert missing_beat_issues, (
+                f"critic must report [beat N 缺失] other issue when payoff beat missing; got {issues!r}"
+            )
+            mb = missing_beat_issues[0]
+            # 缺失型问题 severity 至少 medium；plan 关键节拍缺失按 §3.8 可升 high
+            assert mb["severity"] in ("medium", "high"), mb["severity"]
+            # 输出契约：枚举仍合法 + quote 溯源到 OPPRESSED_PROSE
+            for issue in issues:
+                assert issue["category"] in (
+                    "pacing", "character", "logic", "foreshadowing", "ai_flavor", "other"
+                )
+                assert issue["severity"] in ("high", "medium", "low")
+                assert issue["quote"] in OPPRESSED_PROSE, (
+                    f"quote must be a substring of draft: {issue['quote']!r}"
+                )
+
+    asyncio.run(run())

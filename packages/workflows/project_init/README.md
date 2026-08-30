@@ -64,6 +64,8 @@ PAUSED 时 `POST /api/projects/init` 与 `POST /api/runs/{run_id}/resume` 响应
 }
 ```
 
+PAUSED 时 `GET /api/runs/{run_id}` 响应体同时附 `stage_models`：按 agent 名（`premise_designer` / `world_builder` / `character_designer` / `volume_outliner`）聚合 `ai_call_logs` 最新一次成功调用的 `model_id`（`error IS NULL`），用于审阅卡片区分「下拉显示的全局绑定」与「本次实际使用的模型」。非 PAUSED 不携带。
+
 ### 人工修订回灌
 
 通过通用端点 `POST /api/runs/{run_id}/resume`，body 为 `human_input`：
@@ -100,6 +102,22 @@ PAUSED 时 `POST /api/projects/init` 与 `POST /api/runs/{run_id}/resume` 响应
 
 - 复用 `POST /api/runs/{run_id}/resume` 通用端点，未改 engine.py / ResumeRequest。
 - `mock_providers` 在 checkpoint 中持久化，跨 resume 仍可用（列表模式耗尽后重复末条）。
+
+## 单次 run 模型档案覆盖
+
+`POST /api/projects/init` 请求体支持可选字段 `model_profile_id: str | None`：
+
+```json
+{
+  "brief": { "genre": "玄幻", "logline": "故事简介" },
+  "model_profile_id": "mprof_x"
+}
+```
+
+- 显式提供 `model_profile_id`：启动时校验该档案存在于 `model_profiles` 表；本次初始化的 4 个 AI 节点（`premise_designer`、`world_builder`、`character_designer`、`volume_outliner`）统一使用该档案调用 LLM；不存在返回 400。
+- 省略、`null` 或空字符串：不注入覆盖字段，4 个节点继续走全局 `capability_bindings` / `model_configs`。
+- 该字段是 run 级局部上下文，不修改 `capability_bindings`，也不改变其他工作流或其他 run 的模型选择。
+- mock_script 存在时，LLM 仍由 mock 输出驱动；模型档案选择不会改变既有 mock 行为。
 
 ## 环节完成状态查询（V3.x init-status）
 
@@ -151,6 +169,35 @@ PAUSED 时 `POST /api/projects/init` 与 `POST /api/runs/{run_id}/resume` 响应
 - 第一轮初始化完成四环节但因故放弃（生成内容已落库）→ 重发起 `selected_stages=["outline"]`
   仅重跑 outline，其余三关从落库重建为下游 AI 的输入；
 - 与 `step_mode` 不冲突：被选的环节在 `step_mode=true` 时仍按规则暂停。
+
+## 部分生成与占位数据跳过
+
+部分生成（`selected_stages` 仅含子集环节）时，未选环节的输出走
+`_rebuild_stage_from_db` 从落库数据重建为下游 AI 输入。当重建结果
+`_degraded=True`（DB 里也没有可重建内容）时，`_persist_all_node` 主动跳过对应写入：
+
+- `outline._degraded=True`：跳过 volume upsert / chapters 重建序列 / plot_event。
+  返回结构 `outline_skipped=True`、`volume_id=None`、`chapter_ids=[]`、`event_id=None`；
+  DB 该 project 的 `volumes` / `chapters` / `plot_events` 表行数保持 0，绝不写
+  占位空卷 / 占位章节 / 占位 plot_event。`_normalize_chapter_seeds` 的
+  `_fallback_chapter_seeds` 兜底仍保留用于全量生成 AI 输出为空时的兼容路径。
+- `premise._degraded=True` 且 `ctx["project_id"]` 已存在：跳过 `projects` 行
+  update（保留用户原始 premise / name）。`project_id` 缺失的新建项目分支
+  仍按 brief 创建挂载点（character / world 也需要 project_id 挂载）。
+- `selected_stages` 不含 `premise` 时**无论重建结果如何**都跳过 `projects`
+  行 update（防复合文本套娃污染）。理由：`_rebuild_premise_from_db` 从
+  `projects.premise`（库中已存的「定位：…卖点：…一句话：…」复合文本）重建
+  的 `positioning` 是整段复合文本，若再走 `_build_premise_text` 落库会叠一
+  层「定位：」+「一句话：」前缀形成套娃。仅当 premise 环节本次真跑了
+  （`_stage_selected(ctx, "premise") is True`）才允许 `project_svc.update`。
+  配合 `_build_premise_text` 内层防御（positioning 已带「定位：」则剥一层），
+  任何残余路径都不会再叠前缀。
+- character / world 重建结果空（`characters` / `locations` / `factions` /
+  `world_rules` 无行）：循环本身为 no-op，无副作用，无需特判。
+
+`apps/web/src/components/ProjectInitPanel.tsx` 的「本次生成的环节」多选框对所有
+环节开放勾选/取消：未 done 默认勾选、done 默认不勾，用户可按需取消；提交时
+`payload.selected_stages` 始终透传给后端。
 
 ## 依赖
 - 上游：`packages/domain/*`、`packages/core/agent_runtime/`、`packages/core/workflow_runtime/`。

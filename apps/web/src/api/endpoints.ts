@@ -34,6 +34,8 @@ import type {
   DeconstructStartResponse,
   Draft,
   DraftCreatePayload,
+  FetchAvailableModelsPayload,
+  FetchAvailableModelsResponse,
   HealthResponse,
   Hook,
   HookCreatePayload,
@@ -345,13 +347,20 @@ export const modelConfigsApi = {
 };
 
 // -------------------------------------------------------------- model profiles
-// model_profiles 行字段：profile_id / name / provider / model / params / enabled /
-// has_api_key。params 由后端存为 JSON 字符串（与 model_configs 一致），前端拿到后
-// coerceJson 解析为对象便于表单读写。读路径下 params.api_key 已被脱敏为 "***"。
-function normalizeProfile(row: ModelProfile): ModelProfile {
+// model_profiles 行字段：profile_id / name / provider / model / params_json /
+// enabled / has_api_key。后端读路径（_mask_response）返回 params_json（dict，含
+// 脱敏后的 api_key="***"）；历史字段名 params 仅在测试夹具出现。
+// 读路径下 params_json.api_key 已被脱敏为 "***"，不回填明文输入框。
+// 读路径下 params_json.api_key 已被脱敏为 "***"，不回填明文输入框。
+// 导出仅为测试：回归用例锁死「后端 params_json 键 → 前端 params 字段」映射。
+export function normalizeProfile(row: ModelProfile): ModelProfile {
   return {
     ...row,
-    params: (coerceJson(row.params) as Record<string, unknown>) ?? {},
+    params:
+      (coerceJson(
+        (row as unknown as { params_json?: unknown }).params_json ??
+          row.params,
+      ) as Record<string, unknown>) ?? {},
     has_api_key: row.has_api_key ?? false,
   };
 }
@@ -372,6 +381,14 @@ export const modelProfilesApi = {
   remove: (id: string) => api.delete<void>(`/model-profiles/${id}`),
   test: (id: string) =>
     api.post<ModelProfileTestResult>(`/model-profiles/${id}/test`, {}),
+  // V3.8「拉取模型」：后端代理调 provider 的模型列表接口。
+  // 对应 packages/core/api/routers/model_profiles.py POST /model-profiles/available-models。
+  // 入参可为空字符串——交由后端按 provider 走默认；apikey 不发（后端走 resolve_api_key）。
+  fetchAvailableModels: (payload: FetchAvailableModelsPayload) =>
+    api.post<FetchAvailableModelsResponse>(
+      '/model-profiles/available-models',
+      payload,
+    ),
 };
 
 // -------------------------------------------------------------- capability bindings

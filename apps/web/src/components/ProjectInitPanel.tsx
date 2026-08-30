@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '../api/client';
 import {
   capabilityBindingsApi,
@@ -40,6 +40,96 @@ const DEFAULT_CHAPTER_SEED_COUNT = 10;
 const CHAPTER_SEED_COUNT_MIN = 1;
 const CHAPTER_SEED_COUNT_MAX = 500;
 const DEFAULT_CHAPTER_WORD_COUNT = 3000;
+// 后端 resume 已异步化（POST /runs/{id}/resume 固定立即返回 status=RUNNING，
+// 真实终态靠 GET /runs/{id} 轮询）。前端在 init / resume / regenerate 三个入口
+// 都可能拿到 RUNNING，需要轮询到终态再走原有 PAUSED/COMPLETED 分支。
+const POLL_INTERVAL_MS = 2000;
+const POLL_TIMEOUT_MS = 600000;
+const POLL_TIMEOUT_MESSAGE =
+  '生成仍在后台进行，已等待超时；请稍后刷新页面在运行记录中查看结果';
+
+/**
+ * 测试覆盖：单测中通过在 window 上挂 __novelosPollIntervalMs / __novelosPollTimeoutMs
+ * 注入更短的间隔/超时（默认 1ms/1000ms），避免在 fake timers 或短超时下被卡住。
+ * 仅在 NODE_ENV !== 'production' 时生效（避免被滥用为生产可调参数）。
+ */
+function getPollIntervalMs(): number {
+  if (
+    typeof process !== 'undefined' &&
+    process.env.NODE_ENV !== 'production' &&
+    typeof window !== 'undefined'
+  ) {
+    const v = (window as unknown as { __novelosPollIntervalMs?: number })
+      .__novelosPollIntervalMs;
+    if (typeof v === 'number' && v > 0) return v;
+  }
+  return POLL_INTERVAL_MS;
+}
+function getPollTimeoutMs(): number {
+  if (
+    typeof process !== 'undefined' &&
+    process.env.NODE_ENV !== 'production' &&
+    typeof window !== 'undefined'
+  ) {
+    const v = (window as unknown as { __novelosPollTimeoutMs?: number })
+      .__novelosPollTimeoutMs;
+    if (typeof v === 'number' && v > 0) return v;
+  }
+  return POLL_TIMEOUT_MS;
+}
+
+/**
+ * 轮询结果 + 即时响应统一形态：包含 init 同步响应（ProjectInitResponse，无 stage_models）
+ * 与 GET 轮询响应（WorkflowRun，含 stage_models）的并集。
+ */
+type FinalRun =
+  | ProjectInitResponse
+  | (WorkflowRun & { project_id?: string | null });
+
+/**
+ * 轮询 GET /runs/{runId} 直到 run 进入「终态」。
+ * 终态：PAUSED（带 pause_payload）/ COMPLETED / FAILED / CANCELLED。
+ * 仍 RUNNING / PENDING 时继续等待；超过 timeoutMs 抛 Error。
+ *
+ * 用于后端 resume / init 已异步化的场景：HTTP 响应只回 RUNNING，
+ * UI 必须轮询拿到真实终态才能进入 review / done。
+ */
+async function pollRunUntilTerminal(
+  runId: string,
+  opts: { intervalMs?: number; timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<WorkflowRun> {
+  const intervalMs = opts.intervalMs ?? getPollIntervalMs();
+  const timeoutMs = opts.timeoutMs ?? getPollTimeoutMs();
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    if (opts.signal?.aborted) {
+      throw new Error('轮询已取消');
+    }
+    const cur = await workflowsApi.get(runId);
+    if (opts.signal?.aborted) {
+      throw new Error('轮询已取消');
+    }
+    const status = cur.status;
+    if (status === 'PAUSED' && cur.pause_payload) return cur;
+    if (status === 'COMPLETED' || status === 'FAILED' || status === 'CANCELLED') {
+      return cur;
+    }
+    // RUNNING / PENDING：再等一轮
+    if (Date.now() >= deadline) {
+      throw new Error(POLL_TIMEOUT_MESSAGE);
+    }
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(resolve, intervalMs);
+      if (opts.signal) {
+        const onAbort = () => {
+          clearTimeout(t);
+          reject(new Error('轮询已取消'));
+        };
+        opts.signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  }
+}
 // 后端 ProjectInitRequest.chapter_seed_count 校验为 Field(ge=1, le=500)；
 // 推导出的 chapter_seed_count 落在 [10, 500]，与后端推导 clamp 一致（100 万字 ÷ 3000 ≈ 333 章可真实提交）。
 const DERIVED_SEED_COUNT_MIN = 10;
@@ -76,8 +166,9 @@ type InitStatusLoadState = 'loading' | 'ok' | 'failed';
 
 // stage 勾选维度（与 STAGE_LABELS.stage 对齐）：
 // - stage：环节 id
-// - forced：true 表示「未 done 强制勾选且 disabled」；false 表示 done 默认不勾选（用户可选）
-// - done：来自 init-status
+// - forced：保留字段恒为 false（向后兼容旧测试断言；语义上所有环节都允许
+//          自由勾选/取消，不再锁定未 done 环节）
+// - done：来自 init-status（用于展示「已有设定 / 未生成」徽标）
 // - label / detail：来自 init-status 的展示字段
 type StageSelection = {
   stage: string;
@@ -226,6 +317,11 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
   const [pausePayload, setPausePayload] = useState<ProjectInitPausePayload | null>(
     null,
   );
+  // 本次 run 各 AI 节点实际调用的 model_id（按 agent 名聚合）；
+  // 来源：GET /runs/{id} PAUSED 时携带的 stage_models。null 表示尚未拉到。
+  const [stageModels, setStageModels] = useState<Record<string, string> | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [finalResp, setFinalResp] = useState<ProjectInitResponse | null>(null);
 
@@ -233,6 +329,25 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
   const [bindings, setBindings] = useState<CapabilityBinding[]>([]);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
   const [bindingsLoaded, setBindingsLoaded] = useState(false);
+
+  // 本次初始化模型档案覆盖：'' = 默认（走全局 capability_bindings），
+  // 其它值 = model_profiles.profile_id；后端会校验存在，不存在 → 400。
+  // profiles 在 review 视图按需加载；idle-form 这里先有 state，渲染时若
+  // profiles 未加载则只展示「默认绑定」option。
+  const [initModelProfileId, setInitModelProfileId] = useState<string>('');
+
+  // 组件挂载标记：异步轮询进行中若卸载组件，setState 会触发 React 警告。
+  // 同时持有 AbortController 用于在卸载时立即取消轮询（pollRunUntilTerminal 内部使用）。
+  const mountedRef = useRef<boolean>(true);
+  const pollAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pollAbortRef.current?.abort();
+      pollAbortRef.current = null;
+    };
+  }, []);
 
   // 恢复挂起的初始化：面板展开时探测项目 runs；
   // 过滤 workflow_name==='project-init' && status==='PAUSED' 的最新一条。
@@ -243,10 +358,11 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
   const [resuming, setResuming] = useState(false);
   const [dismissedKey, setDismissedKey] = useState<Set<string>>(() => new Set());
 
-  // 环节勾选状态：挂载时并行拉 init-status；用户可改 done 的环节勾选，forced 的不能改。
+  // 环节勾选状态：挂载时并行拉 init-status；用户可自由勾选/取消所有环节。
   // - initStatusLoad：'loading' / 'ok' / 'failed'——决定默认勾选策略
   // - selectedStages：本次提交要生成的环节 id 列表（始终为数组）
-  // - stageMetaById：从 init-status 解析出的每关元数据（含 forced / done / label / detail）
+  // - stageMetaById：从 init-status 解析出的每关元数据（含 done / label / detail；
+  //                  forced 字段恒为 false，仅保留以兼容旧测试断言）
   const [initStatusLoad, setInitStatusLoad] =
     useState<InitStatusLoadState>('loading');
   const [selectedStages, setSelectedStages] = useState<string[]>([]);
@@ -328,7 +444,7 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
 
   // 首次展开时并行拉 init-status；失败静默（不阻塞表单）。
   // - done 的环节：默认不勾选（沿用已有设定）；用户想重做可手动勾上。
-  // - 未 done 的环节：强制勾选且 disabled（不能跳过，下游无数据）。
+  // - 未 done 的环节：默认勾选（保守）；用户可手动取消只跑部分环节。
   // - 请求失败：全部默认勾选（保守，不跳过任何环节）。
   useEffect(() => {
     if (!expanded) return;
@@ -343,15 +459,15 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
         const meta: Record<string, StageSelection> = {};
         const defaults: string[] = [];
         for (const s of resp.stages ?? []) {
-          const forced = !s.done;
+          // 所有环节都允许自由勾选/取消；done 默认不勾、未 done 默认勾。
           meta[s.stage] = {
             stage: s.stage,
-            forced,
+            forced: false,
             done: !!s.done,
             label: s.label ?? s.stage,
             detail: s.detail ?? null,
           };
-          if (forced) defaults.push(s.stage);
+          if (!s.done) defaults.push(s.stage);
         }
         setStageMetaById(meta);
         setSelectedStages(defaults);
@@ -383,12 +499,8 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
 
   // ---------------- helpers ---------------------------------------------
 
-  // 环节勾选 toggle：仅对 forced=false（done）的环节生效；forced（未 done）下"未勾选"等同禁止
-  // （父组件传 next 时这里已是 false，但 disabled=true 会拦截 click；onChange 仍会触发，父层兜底）。
+  // 环节勾选 toggle：所有环节都可自由勾选/取消（不再有强制锁定）。
   const handleToggleStage = (stage: string, next: boolean) => {
-    const meta = stageMetaById[stage];
-    // 未 done 的环节强制勾选——不允许取消
-    if (meta?.forced && !next) return;
     setSelectedStages((prev) => {
       const has = prev.includes(stage);
       if (next && !has) return [...prev, stage];
@@ -412,7 +524,8 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
     } else {
       const def: string[] = [];
       for (const meta of Object.values(stageMetaById)) {
-        if (meta.forced) def.push(meta.stage);
+        // 默认：未 done → 勾选；done → 不勾选
+        if (!meta.done) def.push(meta.stage);
       }
       setSelectedStages(def);
     }
@@ -439,6 +552,7 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
       }
       setRunId(detail.run_id);
       setPausePayload(pp);
+      setStageModels(detail.stage_models ?? null);
       setPanelState('review');
       ensureBindingsLoaded();
       setSuspendedRun(null);
@@ -492,6 +606,12 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
     });
   };
 
+  // 面板展开即预热 model profiles 列表（让 idle-form 的「本次初始化模型」下拉
+  // 有内容；失败静默降级为只展示「默认绑定」option）。
+  useEffect(() => {
+    if (expanded) ensureBindingsLoaded();
+  }, [expanded]);
+
   const renderApiError = (e: unknown): string => {
     if (e instanceof ApiError) {
       const detail =
@@ -544,33 +664,65 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
     if (stepMode) payload.step_mode = true;
     // 始终传勾选中的 stage 数组（不用省略逻辑）；后端按 selected_stages 过滤环节。
     payload.selected_stages = [...selectedStages];
+    // 单次 run 级模型档案覆盖：'' = 走全局 capability_bindings（不传字段，
+    // 后端按 None 处理）；非空 = model_profiles.profile_id。
+    const trimmedProfile = initModelProfileId.trim();
+    if (trimmedProfile) payload.model_profile_id = trimmedProfile;
 
     setPanelState('busy');
+    const abort = new AbortController();
+    pollAbortRef.current = abort;
     try {
       const resp = await projectsApi.init(payload);
       setRunId(resp.run_id);
-      if (resp.status === 'PAUSED' && resp.pause_payload) {
-        setPausePayload(resp.pause_payload);
+      // 后端 init 也已异步化：HTTP 响应可能直接返回 RUNNING（不带 pause_payload），
+      // 必须轮询 GET /runs/{id} 拿到真实终态后再走原分支。
+      const polled =
+        resp.status === 'RUNNING' || resp.status === 'PENDING'
+          ? await pollRunUntilTerminal(resp.run_id, { signal: abort.signal })
+          : null;
+      if (!mountedRef.current) return;
+      const final: FinalRun = polled ?? resp;
+      if (final.status === 'PAUSED' && final.pause_payload) {
+        setPausePayload(final.pause_payload);
+        // polled 响应是 WorkflowRun（含 stage_models）；同步响应无此字段。
+        // 若 init 直接同步 PAUSED，继续走原有 best-effort 异步 GET 拿 stage_models。
+        setStageModels(polled ? polled.stage_models ?? null : null);
         setPanelState('review');
         ensureBindingsLoaded();
-      } else {
-        // COMPLETED / FAILED（无 pause_payload）→ 一次性模式终态
-        setFinalResp(resp);
-        if (resp.status === 'COMPLETED') {
-          setPanelState('done');
-          onDone(resp);
-        } else {
-          // FAILED：保留在当前面板，暴露 ErrorBanner 后让用户决定下一步
-          setPanelState('idle');
-          setError(
-            `run 终态异常：status=${resp.status}` +
-              (resp.current_node ? `, current_node=${resp.current_node}` : ''),
-          );
+        if (!polled) {
+          void (async () => {
+            if (!mountedRef.current) return;
+            try {
+              const detail = await workflowsApi.get(resp.run_id);
+              if (!mountedRef.current) return;
+              setStageModels(detail.stage_models ?? null);
+            } catch {
+              // ignore: stage_models 缺省时卡片不渲染该行
+            }
+          })();
         }
+      } else if (final.status === 'COMPLETED') {
+        setFinalResp(final);
+        setStageModels(null);
+        setPanelState('done');
+        onDone(final);
+      } else {
+        // FAILED / 其他：保留在当前面板，暴露 ErrorBanner 后让用户决定下一步
+        setPanelState('idle');
+        setError(
+          `run 终态异常：status=${final.status}` +
+            (final.current_node ? `, current_node=${final.current_node}` : ''),
+        );
       }
     } catch (e: unknown) {
+      if (!mountedRef.current) return;
       setPanelState('idle');
       setError(renderApiError(e));
+    } finally {
+      if (pollAbortRef.current === abort) {
+        pollAbortRef.current = null;
+      }
     }
   };
 
@@ -582,32 +734,51 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
     if (!stageMeta) return;
     setError(null);
     setPanelState('busy-resume');
+    // 后端 resume 已异步化：HTTP 响应固定为 RUNNING，必须轮询 GET /runs/{id}
+    // 拿到真实终态（PAUSED / COMPLETED / FAILED）后再走原分支。
+    const abort = new AbortController();
+    pollAbortRef.current = abort;
     workflowsApi
       .resumeInit(runId, {
         human_input: { revisions: { [stageMeta.outputKey]: parsed } },
       })
-      .then((resp) => {
-        if (resp.status === 'PAUSED' && resp.pause_payload) {
-          setPausePayload(resp.pause_payload);
+      .then(async (resp) => {
+        const polled =
+          resp.status === 'RUNNING' || resp.status === 'PENDING'
+            ? await pollRunUntilTerminal(runId, { signal: abort.signal })
+            : null;
+        if (!mountedRef.current) return;
+        const final: FinalRun = polled ?? resp;
+        if (final.status === 'PAUSED' && final.pause_payload) {
+          setPausePayload(final.pause_payload);
+          // polled 响应是 WorkflowRun（含 stage_models）；同步响应无此字段。
+          setStageModels(polled ? polled.stage_models ?? null : null);
           setPanelState('review');
           ensureBindingsLoaded();
-        } else if (resp.status === 'COMPLETED') {
-          setFinalResp(resp);
+        } else if (final.status === 'COMPLETED') {
+          setFinalResp(final);
           setPausePayload(null);
+          setStageModels(null);
           setPanelState('done');
-          onDone(resp);
+          onDone(final);
         } else {
           // 其他状态（含 FAILED）：保留在 review，由 ErrorBanner 展示
           setPanelState('review');
           setError(
-            `run 终态异常：status=${resp.status}` +
-              (resp.current_node ? `, current_node=${resp.current_node}` : ''),
+            `run 终态异常：status=${final.status}` +
+              (final.current_node ? `, current_node=${final.current_node}` : ''),
           );
         }
       })
       .catch((e: unknown) => {
+        if (!mountedRef.current) return;
         setPanelState('review');
         setError(renderApiError(e));
+      })
+      .finally(() => {
+        if (pollAbortRef.current === abort) {
+          pollAbortRef.current = null;
+        }
       });
   };
 
@@ -623,33 +794,51 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
     if (!runId) return;
     setError(null);
     setPanelState('busy-resume');
+    // 后端 resume 已异步化：与 handleResume 同处理流程（HTTP 响应固定 RUNNING → 轮询终态）。
+    const abort = new AbortController();
+    pollAbortRef.current = abort;
     workflowsApi
       .resumeInit(runId, {
         human_input: { regenerate_note: note },
         regenerate: true,
       })
-      .then((resp) => {
-        if (resp.status === 'PAUSED' && resp.pause_payload) {
-          setPausePayload(resp.pause_payload);
+      .then(async (resp) => {
+        const polled =
+          resp.status === 'RUNNING' || resp.status === 'PENDING'
+            ? await pollRunUntilTerminal(runId, { signal: abort.signal })
+            : null;
+        if (!mountedRef.current) return;
+        const final: FinalRun = polled ?? resp;
+        if (final.status === 'PAUSED' && final.pause_payload) {
+          setPausePayload(final.pause_payload);
+          // polled 响应是 WorkflowRun（含 stage_models）；同步响应无此字段。
+          setStageModels(polled ? polled.stage_models ?? null : null);
           setPanelState('review');
           ensureBindingsLoaded();
-        } else if (resp.status === 'COMPLETED') {
-          setFinalResp(resp);
+        } else if (final.status === 'COMPLETED') {
+          setFinalResp(final);
           setPausePayload(null);
+          setStageModels(null);
           setPanelState('done');
-          onDone(resp);
+          onDone(final);
         } else {
           // 其他状态（含 FAILED）：保留在 review，由 ErrorBanner 展示
           setPanelState('review');
           setError(
-            `run 终态异常：status=${resp.status}` +
-              (resp.current_node ? `, current_node=${resp.current_node}` : ''),
+            `run 终态异常：status=${final.status}` +
+              (final.current_node ? `, current_node=${final.current_node}` : ''),
           );
         }
       })
       .catch((e: unknown) => {
+        if (!mountedRef.current) return;
         setPanelState('review');
         setError(renderApiError(e));
+      })
+      .finally(() => {
+        if (pollAbortRef.current === abort) {
+          pollAbortRef.current = null;
+        }
       });
   };
 
@@ -729,6 +918,9 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
               stepMode={stepMode}
               setStepMode={setStepMode}
               busy={busyAny}
+              initModelProfileId={initModelProfileId}
+              setInitModelProfileId={setInitModelProfileId}
+              initProfiles={profiles}
               error={error}
               canSubmit={canSubmit}
               seedCount={seedCount}
@@ -749,6 +941,7 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
               error={error}
               bindings={bindings}
               profiles={profiles}
+              stageModels={stageModels}
               onSubmit={handleResume}
               onRegenerate={handleRegenerate}
               onAbandon={reset}
@@ -881,6 +1074,11 @@ interface IdleFormProps {
   error: string | null;
   canSubmit: boolean;
   seedCount: number | null;
+  /** 本次初始化模型档案：'' = 走全局 capability_bindings。 */
+  initModelProfileId: string;
+  setInitModelProfileId: (v: string) => void;
+  /** 已启用的 model_profiles 列表（驱动下拉 options）。 */
+  initProfiles: ModelProfile[];
   /** 环节勾选：当前选中的 stage id 列表；onToggleStage 处理单关勾选切换。 */
   selectedStages: string[];
   onToggleStage: (stage: string, next: boolean) => void;
@@ -918,6 +1116,9 @@ function IdleForm(props: IdleFormProps) {
     busy,
     error,
     canSubmit,
+    initModelProfileId,
+    setInitModelProfileId,
+    initProfiles,
     selectedStages,
     onToggleStage,
     stageMetaById,
@@ -1077,8 +1278,7 @@ function IdleForm(props: IdleFormProps) {
         >
           {STAGE_LABELS.map((s) => {
             const meta = stageMetaById[s.stage];
-            // meta 缺失（极端时序）：按"未 done 强制勾选"兜底
-            const forced = meta?.forced ?? true;
+            // meta 缺失（极端时序）：按"未 done 兜底"展示徽标；不再锁定勾选。
             const done = meta?.done ?? false;
             const label = meta?.label ?? s.label;
             const detail = meta?.detail ?? null;
@@ -1096,8 +1296,7 @@ function IdleForm(props: IdleFormProps) {
                 <input
                   type="checkbox"
                   checked={checked}
-                  disabled={busy || forced}
-                  // 未 done 强制勾选：阻止取消（点击无效，state 不变）
+                  disabled={busy}
                   onChange={(e) => onToggleStage(s.stage, e.target.checked)}
                   data-testid={`init-stage-${s.stage}`}
                 />
@@ -1122,7 +1321,7 @@ function IdleForm(props: IdleFormProps) {
           })}
         </div>
         <div className="muted small" style={{ marginTop: 4 }}>
-          已完成的环节默认不勾选（沿用已有设定）；未完成的环节将生成。
+          已完成的环节默认不勾选（沿用已有设定）；未完成的环节默认勾选（将生成），可按需取消，仅生成勾选的环节。
         </div>
       </div>
 
@@ -1148,6 +1347,28 @@ function IdleForm(props: IdleFormProps) {
           </span>
         </label>
       ) : null}
+
+      {/* 本次初始化模型档案覆盖：'' = 走全局 capability_bindings / model_configs
+          （默认）；非空 = model_profiles.profile_id。本次 run 全部 4 个 AI 节点
+          统一使用该档案调用 LLM；不影响其他 run 与全局 binding。 */}
+      <Field label="本次初始化模型" hint="覆盖全局绑定；留空走环节绑定（默认）">
+        <select
+          className="input"
+          value={initModelProfileId}
+          onChange={(e) => setInitModelProfileId(e.target.value)}
+          disabled={busy}
+          data-testid="project-init-model-profile"
+        >
+          <option value="">默认绑定（全局）</option>
+          {initProfiles
+            .filter((p) => Number(p.enabled) === 1)
+            .map((p) => (
+              <option key={p.profile_id} value={p.profile_id}>
+                {p.name}（{p.provider}/{p.model}）
+              </option>
+            ))}
+        </select>
+      </Field>
 
       <div
         style={{
@@ -1194,6 +1415,8 @@ interface ReviewPaneProps {
   error: string | null;
   bindings: CapabilityBinding[];
   profiles: ModelProfile[];
+  /** 本次 run 各 AI 节点实际调用的 model_id（按 agent 名聚合），来自 GET /runs/{id} PAUSED 时的 stage_models。null = 未拉到，不渲染。 */
+  stageModels: Record<string, string> | null;
   onSubmit: (parsed: Record<string, unknown>) => void;
   onRegenerate: (note: string) => void;
   onAbandon: () => void;
@@ -1206,6 +1429,7 @@ function ReviewPane({
   error,
   bindings,
   profiles,
+  stageModels,
   onSubmit,
   onRegenerate,
   onAbandon,
@@ -1225,6 +1449,23 @@ function ReviewPane({
   const currentBinding = bindings.find((b) => b.capability === stageMeta.capability);
   const currentProfileId = currentBinding?.profile_ids[0] ?? '';
   const enabledProfiles = profiles.filter((p) => Number(p.enabled) === 1);
+
+  // 本次实际使用的模型：stage → agent 名（与 project-init pipeline 节点 id 对齐）。
+  // 从 stage_models 中按当前 stage 取 model_id；model_id 含 '/' 时剥掉 provider 前缀
+  // （如 `openai_compatible/k3-256k` → `k3-256k`），与下拉 option 文案（name（model））风格一致。
+  const STAGE_TO_AGENT: Record<string, string> = {
+    premise: 'premise_designer',
+    world: 'world_builder',
+    character: 'character_designer',
+    outline: 'volume_outliner',
+  };
+  const usedAgentName = STAGE_TO_AGENT[stageMeta.stage];
+  const usedModelId = usedAgentName ? stageModels?.[usedAgentName] : undefined;
+  const usedModelShort = usedModelId
+    ? usedModelId.includes('/')
+      ? usedModelId.split('/').slice(1).join('/')
+      : usedModelId
+    : null;
   const [modelMsg, setModelMsg] = useState<{
     kind: 'ok' | 'error';
     text: string;
@@ -1417,6 +1658,15 @@ function ReviewPane({
             data-testid="stage-model-status"
           >
             {modelMsg.text}
+          </span>
+        ) : null}
+        {usedModelShort ? (
+          <span
+            className="muted small"
+            data-testid="stage-used-model"
+            title={usedModelId ?? undefined}
+          >
+            本次实际使用：{usedModelShort}
           </span>
         ) : null}
       </div>
