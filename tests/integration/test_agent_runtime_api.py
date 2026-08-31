@@ -81,6 +81,7 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
                 "deconstructor_chapter", "deconstructor_aggregate",
                 "summarizer", "critic", "scene_planner", "polisher",
                 "premise_designer", "world_builder", "character_designer", "volume_outliner",
+                "deep_reviewer",
             }
             assert expected == set(payload["agents"]), (
                 f"agents mismatch: got {payload['agents']}"

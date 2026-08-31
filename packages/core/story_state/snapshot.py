@@ -52,6 +52,8 @@ import json
 import sqlite3
 from typing import Any
 
+from .snapshots import _parse_required_json
+
 # ----------------------------------------------------------------------------- helpers
 
 
@@ -570,4 +572,172 @@ __all__ = [
     "build_initial_state",
     "materialize_snapshot",
     "rebuild_snapshot_collections_from_db",
+    "repair_current_snapshot_world",
 ]
+
+
+# ----------------------------------------------------------------------------- production repair
+
+
+def _summarize_world_entry_shape(entry: Any) -> str:
+    """将 world bucket 条目形态映射成可读标签，用于修复前后对比摘要。"""
+    if entry is None:
+        return "missing"
+    if isinstance(entry, str):
+        return "str"
+    if isinstance(entry, dict):
+        keys = sorted(entry.keys())
+        return "dict(" + ",".join(keys) + ")"
+    return type(entry).__name__
+
+
+def repair_current_snapshot_world(
+    db_path: str,
+    project_id: str,
+) -> dict:
+    """生产数据修复：以 DB 为权威重建该项目最新 ``story_states`` 快照的 world
+    三集合（locations / factions / world_rules）。
+
+    修复 wfr_3cb2182a30f6：rollback 逆清理旧形状 hint 整条目替换把
+    ``world.factions[fac]`` 污染成 ``str``、``world.locations[loc]`` 污染成
+    残壳 dict（丢 name/statement/data_json），后续 commit 在 applier 抛
+    TypeError。本函数直接把快照的 world 三集合按当前 DB 实表重建回正确形态，
+    并 UPDATE story_states.snapshot_json（同连接，原子）。**只动 world 三集合，
+    不动 characters / hooks / debts / events / recent_events / state_version。**
+
+    Parameters
+    ----------
+    db_path : str
+        SQLite 数据库文件路径（与 StoryStateService.db_path 同源）。
+    project_id : str
+        项目 id。
+
+    Returns
+    -------
+    dict
+        修复摘要 ``{
+            "project_id": str,
+            "state_version": int,
+            "before": {
+                "locations": {wid: "<shape>"},
+                "factions": {wid: "<shape>"},
+                "world_rules": [{"world_rule_id": rid, "shape": "<shape>"}],
+            },
+            "after": {... 同 before 的结构 ...},
+            "repaired": bool,  # 任一条目形状变化即 True
+        }``
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        # 取该项目最新 story_states 行
+        row = conn.execute(
+            """
+            SELECT state_version, snapshot_json
+            FROM story_states
+            WHERE project_id = ?
+            ORDER BY state_version DESC
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+        if row is None:
+            return {
+                "project_id": project_id,
+                "state_version": None,
+                "before": {"locations": {}, "factions": {}, "world_rules": []},
+                "after": {"locations": {}, "factions": {}, "world_rules": []},
+                "repaired": False,
+                "note": "no story_states row for project",
+            }
+        state_version = row["state_version"]
+        snap = _parse_required_json(row["snapshot_json"], {})
+        world = snap.get("world") if isinstance(snap, dict) else {}
+        if not isinstance(world, dict):
+            world = {}
+
+        # 修复前形状摘要
+        before_locations = {
+            wid: _summarize_world_entry_shape(v)
+            for wid, v in (world.get("locations") or {}).items()
+        }
+        before_factions = {
+            wid: _summarize_world_entry_shape(v)
+            for wid, v in (world.get("factions") or {}).items()
+        }
+        before_rules = []
+        for r in (world.get("world_rules") or []):
+            if isinstance(r, dict):
+                before_rules.append({
+                    "world_rule_id": r.get("world_rule_id"),
+                    "shape": _summarize_world_entry_shape(r),
+                })
+            else:
+                before_rules.append({
+                    "world_rule_id": None,
+                    "shape": _summarize_world_entry_shape(r),
+                })
+
+        # 以 DB 为权威重建 world 三集合
+        rebuilt_world = _load_world(conn, project_id)
+        # 仅替换三集合；保留 current_time_in_story / active_resources / world 其它键
+        new_world = dict(world)
+        new_world["locations"] = rebuilt_world["locations"]
+        new_world["factions"] = rebuilt_world["factions"]
+        new_world["world_rules"] = rebuilt_world["world_rules"]
+
+        # 修复后形状摘要
+        after_locations = {
+            wid: _summarize_world_entry_shape(v)
+            for wid, v in new_world["locations"].items()
+        }
+        after_factions = {
+            wid: _summarize_world_entry_shape(v)
+            for wid, v in new_world["factions"].items()
+        }
+        after_rules = [
+            {
+                "world_rule_id": r.get("world_rule_id"),
+                "shape": _summarize_world_entry_shape(r),
+            }
+            for r in new_world["world_rules"]
+        ]
+
+        # 判定是否真有变化
+        repaired = (
+            before_locations != after_locations
+            or before_factions != after_factions
+            or before_rules != after_rules
+        )
+
+        if repaired:
+            # 写回 story_states.snapshot_json（同连接）
+            snap["world"] = new_world
+            # state_version 由 commit 维护，本函数不递增；仅覆写 snapshot_json
+            conn.execute(
+                """
+                UPDATE story_states
+                SET snapshot_json = ?
+                WHERE project_id = ? AND state_version = ?
+                """,
+                (_dump(snap), project_id, state_version),
+            )
+            conn.commit()
+
+        return {
+            "project_id": project_id,
+            "state_version": state_version,
+            "before": {
+                "locations": before_locations,
+                "factions": before_factions,
+                "world_rules": before_rules,
+            },
+            "after": {
+                "locations": after_locations,
+                "factions": after_factions,
+                "world_rules": after_rules,
+            },
+            "repaired": repaired,
+        }
+    finally:
+        conn.close()

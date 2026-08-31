@@ -1411,3 +1411,320 @@ describe('ChapterDetailPage - FAILED run 错误文案不误判为「已驳回」
     expect(screen.queryByText('已驳回')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 深度二审（deep_review）：
+// - 审校步骤勾选「深度二审（Kimi，+约1分钟）」 → startReview 请求体带 deep_review:true。
+// - pause_payload 含 deep_review_report → 在审批卡片下方渲染「深度二审（三层清单）」分栏。
+// - 未开启 / 字段缺省 → 不渲染；坏形状 → 降级提示，不炸。
+// ---------------------------------------------------------------------------
+
+describe('ChapterDetailPage - 深度二审 (deep_review)', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(chaptersApi.delete).mockReset();
+    vi.mocked(chaptersApi.update).mockReset();
+    vi.mocked(chaptersApi.createDraft).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(workflowsApi.startPlan).mockReset();
+    vi.mocked(workflowsApi.startWrite).mockReset();
+    vi.mocked(workflowsApi.startReview).mockReset();
+    vi.mocked(workflowsApi.startCommit).mockReset();
+    vi.mocked(workflowsApi.resume).mockReset();
+    vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(modelProfilesApi.create).mockReset();
+    vi.mocked(modelProfilesApi.update).mockReset();
+    vi.mocked(modelProfilesApi.remove).mockReset();
+    vi.mocked(modelProfilesApi.test).mockReset();
+
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([]);
+    vi.mocked(workflowsApi.startReview).mockResolvedValue({
+      run_id: 'wfr_review_deep',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+    vi.mocked(workflowsApi.startPlan).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun);
+  });
+
+  it('a) 默认不勾深度二审：startReview 请求体不带 deep_review 键', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-header')).toBeInTheDocument();
+    });
+    const cb = screen.getByTestId('wf-review-deep-checkbox') as HTMLInputElement;
+    expect(cb).toBeInTheDocument();
+    expect(cb.checked).toBe(false);
+
+    const reviewBtn = screen.getByTestId('wf-btn-review');
+    expect(reviewBtn).not.toBeDisabled();
+    fireEvent.click(reviewBtn);
+
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.startReview)).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(workflowsApi.startReview).mock.calls[0];
+    const payload = call[2] as Record<string, unknown> | undefined;
+    expect(payload).toBeDefined();
+    expect(payload!['deep_review']).toBeUndefined();
+  });
+
+  it('b) 勾选深度二审后点审校：startReview 请求体带 deep_review: true', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-header')).toBeInTheDocument();
+    });
+    const cb = screen.getByTestId('wf-review-deep-checkbox') as HTMLInputElement;
+    fireEvent.click(cb);
+    expect(cb.checked).toBe(true);
+
+    fireEvent.click(screen.getByTestId('wf-btn-review'));
+
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.startReview)).toHaveBeenCalledTimes(1);
+    });
+    const payload = vi.mocked(workflowsApi.startReview).mock
+      .calls[0][2] as Record<string, unknown>;
+    expect(payload['deep_review']).toBe(true);
+  });
+
+  it('c) 取消勾选：请求体不再带 deep_review', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-header')).toBeInTheDocument();
+    });
+    const cb = screen.getByTestId('wf-review-deep-checkbox') as HTMLInputElement;
+    fireEvent.click(cb);
+    expect(cb.checked).toBe(true);
+    fireEvent.click(cb);
+    expect(cb.checked).toBe(false);
+
+    fireEvent.click(screen.getByTestId('wf-btn-review'));
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.startReview)).toHaveBeenCalledTimes(1);
+    });
+    const payload = vi.mocked(workflowsApi.startReview).mock
+      .calls[0][2] as Record<string, unknown>;
+    expect(payload['deep_review']).toBeUndefined();
+  });
+
+  it('d) pause_payload.deep_review_report 存在时渲染分栏（verdict + issues）', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const pausedRun: WorkflowRun = {
+      run_id: 'wfr_review_paused',
+      workflow_id: 'chapter-review',
+      chapter_id: 'ch_001',
+      status: 'PAUSED',
+      current_node: 'author_review',
+      checkpoint_json: {
+        author_review: {
+          __pause_payload__: {
+            stage: 'chapter-review',
+            message: '请人工决议',
+            deep_review_report: {
+              verdict: 'revise',
+              overall_comment: '行为链一致性需补强',
+              issues: [
+                {
+                  layer: 'setting',
+                  severity: 'high',
+                  quote: '青木城所在大陆...',
+                  suggestion: '对齐第 3 章设定',
+                },
+                {
+                  layer: 'beat',
+                  severity: 'medium',
+                  quote: '本章末段对决',
+                  suggestion: '把节拍拉长一拍',
+                },
+                {
+                  layer: 'behavior',
+                  severity: 'low',
+                  quote: '主角面对挑衅的反应',
+                  suggestion: '按人物卡修正',
+                },
+              ],
+            },
+          },
+        },
+      },
+      error: null,
+      retry_count: 0,
+      started_at: new Date(Date.now() - 60_000).toISOString(),
+      ended_at: null,
+      nodes: [],
+      workflow_name: 'chapter-review',
+    } as WorkflowRun;
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([pausedRun]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
+
+    renderPage();
+
+    const section = await waitFor(() =>
+      screen.getByTestId('deep-review-report'),
+    );
+    expect(section).toBeInTheDocument();
+
+    const verdict = screen.getByTestId('deep-review-verdict');
+    expect(verdict.getAttribute('data-verdict')).toBe('revise');
+    expect(verdict.textContent).toMatch(/建议改/);
+
+    expect(screen.getByTestId('deep-review-overall').textContent).toMatch(
+      /行为链一致性/,
+    );
+
+    const issues = screen.getByTestId('deep-review-issues');
+    expect(issues.getAttribute('data-issue-count')).toBe('3');
+    const issueRows = screen.getAllByTestId('deep-review-issue');
+    expect(issueRows).toHaveLength(3);
+    expect(issueRows[0].getAttribute('data-layer')).toBe('setting');
+    expect(issueRows[0].getAttribute('data-severity')).toBe('high');
+    expect(screen.getAllByTestId('deep-review-issue-quote').length).toBe(3);
+    expect(screen.getAllByTestId('deep-review-issue-suggestion').length).toBe(3);
+  });
+
+  it('e) verdict=pass 时显示「通过」徽标', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const pausedRun: WorkflowRun = {
+      run_id: 'wfr_review_pass',
+      workflow_id: 'chapter-review',
+      chapter_id: 'ch_001',
+      status: 'PAUSED',
+      current_node: 'author_review',
+      checkpoint_json: {
+        author_review: {
+          __pause_payload__: {
+            stage: 'chapter-review',
+            message: '请人工决议',
+            deep_review_report: {
+              verdict: 'pass',
+              overall_comment: '三层均无问题',
+              issues: [],
+            },
+          },
+        },
+      },
+      error: null,
+      retry_count: 0,
+      started_at: new Date().toISOString(),
+      ended_at: null,
+      nodes: [],
+      workflow_name: 'chapter-review',
+    } as WorkflowRun;
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([pausedRun]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
+
+    renderPage();
+
+    const verdict = await waitFor(() =>
+      screen.getByTestId('deep-review-verdict'),
+    );
+    expect(verdict.getAttribute('data-verdict')).toBe('pass');
+    expect(verdict.textContent).toMatch(/通过/);
+    expect(screen.queryByTestId('deep-review-issues')).toBeNull();
+    expect(screen.getByText(/未发现明显问题/)).toBeInTheDocument();
+  });
+
+  it('f) pause_payload 不含 deep_review_report → 不渲染分栏', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const pausedRun: WorkflowRun = {
+      run_id: 'wfr_review_no_deep',
+      workflow_id: 'chapter-review',
+      chapter_id: 'ch_001',
+      status: 'PAUSED',
+      current_node: 'author_review',
+      checkpoint_json: {
+        author_review: {
+          __pause_payload__: {
+            stage: 'chapter-review',
+            message: '请人工决议',
+          },
+        },
+      },
+      error: null,
+      retry_count: 0,
+      started_at: new Date().toISOString(),
+      ended_at: null,
+      nodes: [],
+      workflow_name: 'chapter-review',
+    } as WorkflowRun;
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([pausedRun]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('approval-card')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('deep-review-report')).toBeNull();
+    expect(screen.queryByTestId('deep-review-report-malformed')).toBeNull();
+  });
+
+  it('g) deep_review_report 坏形状（非对象） → 降级提示，不炸', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const pausedRun: WorkflowRun = {
+      run_id: 'wfr_review_bad',
+      workflow_id: 'chapter-review',
+      chapter_id: 'ch_001',
+      status: 'PAUSED',
+      current_node: 'author_review',
+      checkpoint_json: {
+        author_review: {
+          __pause_payload__: {
+            stage: 'chapter-review',
+            message: '请人工决议',
+            deep_review_report: 'not-an-object',
+          },
+        },
+      },
+      error: null,
+      retry_count: 0,
+      started_at: new Date().toISOString(),
+      ended_at: null,
+      nodes: [],
+      workflow_name: 'chapter-review',
+    } as WorkflowRun;
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([pausedRun]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
+
+    renderPage();
+
+    const malformed = await waitFor(() =>
+      screen.getByTestId('deep-review-report-malformed'),
+    );
+    expect(malformed).toBeInTheDocument();
+    expect(malformed.textContent).toMatch(/形状异常/);
+  });
+});

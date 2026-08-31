@@ -76,6 +76,22 @@ class DraftStatusNotAllowed(ChapterError):
         self.current = current
 
 
+class RevisionNoteStatusNotAllowed(ChapterError):
+    """当前 chapter.status 不允许写入/清除 revision_note（仅 PLANNED / DRAFTED /
+    REVIEWED 允许；COMMITTED/RELEASED 视为正文已锁定，不再接受改稿意见）。
+
+    Sprint 6 任务书给死：revision_note 必须有专用端点（``PATCH
+    /api/chapters/{chapter_id}/revision-note``），不再走评审驳回路径。
+    """
+
+    def __init__(self, current: str) -> None:
+        super().__init__(
+            f"revision_note update not allowed when chapter status is {current!r} "
+            f"(only 'PLANNED', 'DRAFTED' or 'REVIEWED' accepted)"
+        )
+        self.current = current
+
+
 class DraftVersionConflict(ChapterError):
     """同 chapter 下 (chapter_id, version) 重复。
 
@@ -384,6 +400,82 @@ class ChapterService:
             "created_at": now,
         }
 
+    # ============================================================== Sprint 6
+    # revision_note：改稿意见专用入口（task R1），替代走评审驳回路径的 hack。
+    # ----------------------------------------------------------------------
+
+    # revision_note 仅在 chapter 处于「未锁定」状态可写：COMMITTED / RELEASED
+    # 正文已锁定，不接受改稿意见。PLANNED / DRAFTED / REVIEWED 放行。
+    _REVISION_NOTE_ALLOWED_STATUS: frozenset[str] = frozenset(
+        {"PLANNED", "DRAFTED", "REVIEWED"}
+    )
+
+    def update_revision_note(self, chapter_id: str, note: str) -> dict | None:
+        """写入或清除 chapter 的改稿意见（``plan_json.revision_note``）。
+
+        - chapter 不存在 → ``None``（router 转 404，与 ``get`` / ``create_draft`` 一致）。
+        - chapter.status ∉ {PLANNED, DRAFTED, REVIEWED} →
+          ``RevisionNoteStatusNotAllowed``（router 转 409）。
+        - ``note`` 非空白字符串 → 写入 ``plan_json["revision_note"] = note``；
+          空白/空串 → 删除该键（语义=清除改稿意见）。
+        - 原 ``plan_json`` 为 NULL/空 → 视为 ``{}`` 再操作；写回保留其它键。
+        - 返回更新后的 chapter dict（走 ``_row_to_dict`` 保证序列化一致）。
+        """
+        now = now_iso()
+        conn = get_connection(self.db_path)
+        try:
+            # 1) chapter 存在性 + 当前 status 校验
+            cur = conn.execute(
+                "SELECT status, plan_json FROM chapters WHERE chapter_id = ?",
+                (chapter_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            current_status = row["status"]
+            if current_status not in self._REVISION_NOTE_ALLOWED_STATUS:
+                raise RevisionNoteStatusNotAllowed(current_status)
+
+            # 2) 解析 plan_json（NULL/空 → {}）；不破坏其它键
+            raw_plan = row["plan_json"]
+            if raw_plan:
+                try:
+                    plan = json.loads(raw_plan)
+                    if not isinstance(plan, dict):
+                        # 历史脏数据：plan_json 不是 dict 形态，视为 {}，避免破坏 schema
+                        plan = {}
+                except json.JSONDecodeError:
+                    plan = {}
+            else:
+                plan = {}
+
+            # 3) 写入或清除 revision_note（空白字符串视为清除）
+            if note and note.strip():
+                plan["revision_note"] = note
+            else:
+                plan.pop("revision_note", None)
+
+            # 4) UPDATE plan_json + updated_at（ensure_ascii=False 与既有口径一致）
+            conn.execute(
+                """
+                UPDATE chapters
+                   SET plan_json = ?, updated_at = ?
+                 WHERE chapter_id = ?
+                """,
+                (json.dumps(plan, ensure_ascii=False), now, chapter_id),
+            )
+            conn.commit()
+
+            # 5) 走读路径返回完整行（保证字段类型一致）
+            cur = conn.execute(
+                "SELECT * FROM chapters WHERE chapter_id = ?",
+                (chapter_id,),
+            )
+            updated_row = cur.fetchone()
+        finally:
+            conn.close()
+        return self._row_to_dict(updated_row) if updated_row else None
+
 
 __all__ = [
     "ChapterService",
@@ -391,5 +483,6 @@ __all__ = [
     "ChapterTransitionError",
     "DraftStatusNotAllowed",
     "DraftVersionConflict",
+    "RevisionNoteStatusNotAllowed",
     "ChapterError",
 ]

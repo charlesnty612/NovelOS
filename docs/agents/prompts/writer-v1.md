@@ -206,8 +206,24 @@
 8. **保留 `self_report.slots_filled` 一致性**：修订版 `slots_filled` 必须等于 `scene_plan.scenes[].slots[].slot_id` 的并集（与 write 模式同口径）；不要因为是修订模式就跳过 slot。
 9. **`deviations[]` 必须显式记录每一处针对 `draft_text` 的具体改动**：每条改动用 `kind='continuity_micro_adjustment'`，`from` 写修订前原文片段（≤ 30 字）、`to` 写修订后新文片段（≤ 30 字）、`reason` 引用 `revision_note` 的对应条目原文。
 10. **不要把 `draft_text` / `revision_note` 本身写进正文**——它们是元数据，不是叙事内容。
+11. **必须在正文末尾追加机读「核销表」（REVISION-CHECKLIST）尾块**：在 `prose` 字符串的**最末尾**，独占一行起追加 `---REVISION-CHECKLIST---` 分隔行 + 一行 JSON 数组，且**只允许在 `prose` 字符串内出现这一次**（不要写到 `self_report` 里）。
+    - 格式严格如下（前缀行 + JSON 行，分隔行独占、不可有缩进）：
+      ```
+      ---REVISION-CHECKLIST---
+      [{"item":"意见原文摘要（≤40字）","status":"done|partial|skipped","note":"落点或原因（≤40字）"}]
+      ```
+    - 数组长度 = `revision_note` 中可独立核销的条目数（按行 / 分号 / 编号拆分）；每条意见对应一个对象。
+    - `status` 枚举：`done`（意见已落实）/ `partial`（部分落实，未能完整执行）/ `skipped`（未执行，理由必填于 `note`）。
+    - 尾块是机读契约——下游管线会按 `---REVISION-CHECKLIST---` 行切分：前半存为 prose（落 `drafts.content`），后半解析为核销表落 `run` 节点产出，便于审查改稿意见是否被真正执行。
+    - 例（与 §8.2 输出配套）：
+      ```
+      …（正文到此结束）
 
-`mode === 'write'`（或 `draft_text` / `revision_note` 缺失）：走 §6 的常规 write 模式，忽略 `draft_text` 字段。
+      ---REVISION-CHECKLIST---
+      [{"item":"压缩苏婉清第二段内心戏到2句","status":"done","note":"第二段由5句压缩为2句"},{"item":"加快对话节奏","status":"partial","note":"前3句对白已收紧，后段仍偏长"}]
+      ```
+
+`mode === 'write'`（或 `draft_text` / `revision_note` 缺失）：走 §6 的常规 write 模式，忽略 `draft_text` 字段。**不要**在 write 模式的 `prose` 中追加 `---REVISION-CHECKLIST---` 尾块（核销表仅 revise 模式使用）。
 
 ---
 
@@ -242,6 +258,8 @@
 ```
 
 `required` 字段：`schema_version`、`prompt_version`、`chapter_id`、`prose`、`self_report`、`self_report.slots_filled`、`self_report.word_count`、`self_report.scene_count`、`self_report.deviations`。
+
+> **`prose` 字段（revise 模式说明）**：revise 模式下，`prose` 字符串的最末尾会按 §6.1 第 11 条约定追加 `---REVISION-CHECKLIST---` 尾块（分隔行 + JSON 行）。该尾块是机读契约，**不进** `self_report`，也不影响 `prose` 的语义（语义上是「正文 + 机读尾块」整体）。下游管线会按分隔行切分：前半 = 真正文（落 `drafts.content`），后半 = 核销表（落 `run` 节点 `revision_checklist` 产出）。write 模式下 `prose` 不含该尾块。
 
 **self_report 长度纪律**：`self_report` 下所有字段（`slots_filled` 列表元素、`word_count` 数字文本、`scene_count`、`deviations[]` 各条目的 `kind` / `slot_id` / `scene_id` / `from` / `to` / `reason` 等、`forbidden_word_hits[]` 元素、`self_check_notes`）**合计不超过 150 字（中文字符数）**。这是硬上限，超出会被下游软截断 + warn，并显著拉高单章输出 token（实测每多 50 字 self_report ≈ 多 60-80 completion tokens）。超出时优先压缩 `deviations[].reason` 与 `self_check_notes`——把 `from` / `to` 留作事实记录即可，不需要长解释。
 

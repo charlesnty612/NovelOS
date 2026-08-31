@@ -1183,3 +1183,259 @@ def test_chapter_review_with_nonexistent_draft_version_fails(tmp_path: Path):
             assert "no draft version 99" in (failed.get("error") or ""), failed.get("error")
 
     asyncio.run(run())
+
+
+def test_chapter_review_auto_revise_loop_propagates_model_overrides(tmp_path: Path):
+    """P0 自动改稿回路：resume body 带 ``model_overrides`` 时，回路重跑的 write 与 review
+    子 run 的 checkpoint_json 中必须原样携带同一份 overrides（首轮档案不丢失）。
+
+    验证点：
+    - 原 review run 的 checkpoint_json 含 ``model_overrides``（首轮即生效）；
+    - resume body 显式给 overrides → 回路内 write / review 子 run 的 checkpoint_json
+      也含**同一份** overrides（透传）；
+    - 第二轮 review PAUSED（回路跑成功一整轮）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            first_mock = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+            }
+
+            # 1) plan + write v1（首轮不带 overrides，保持简单）
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "意图", "mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+
+            # 2) 首轮 review → PAUSED（也不带 overrides）
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+            first_review_run_id = paused["run_id"]
+
+            # 3) resume revise + model_overrides + auto_revise_max=2：触发回路
+            overrides = {"creative_writing": "mprof_auto_revise_passthrough"}
+            revise_mock = {
+                "director": _director_script(),
+                "writer": _writer_revised_script(),
+            }
+            r = await _request(
+                app, "POST", f"/api/runs/{first_review_run_id}/resume",
+                json={
+                    "human_input": {"approved": False, "revise": True, "note": "改稿"},
+                    "auto_revise_max": 2,
+                    "mock_providers": revise_mock,
+                    "model_overrides": overrides,
+                },
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "RUNNING"
+            assert r.json()["run_id"] == first_review_run_id
+
+            # 等首轮 review 走到 FAILED(rejected-for-revision) → 回路启动
+            await _wait_run_terminal(app, first_review_run_id, expected=("FAILED",))
+
+            # 4) 轮询找回路产生的「新 chapter-write run」+「新 chapter-review PAUSED run」
+            import time as _list_t
+            _list_deadline = _list_t.monotonic() + 120.0
+            new_write_run_id: str | None = None
+            new_review_run_id: str | None = None
+            while _list_t.monotonic() < _list_deadline:
+                rr = await _request(app, "GET", f"/api/projects/{pid}/runs")
+                assert rr.status_code == 200, rr.text
+                rows = rr.json()
+                review_rows = [
+                    row for row in rows
+                    if row.get("workflow_name") == "chapter-review"
+                    and row["run_id"] != first_review_run_id
+                ]
+                write_rows = [
+                    row for row in rows
+                    if row.get("workflow_name") == "chapter-write"
+                ]
+                paused_new = [row for row in review_rows if row["status"] == "PAUSED"]
+                if paused_new and write_rows:
+                    new_review_run_id = max(
+                        paused_new,
+                        key=lambda r0: r0.get("started_at") or "",
+                    )["run_id"]
+                    new_write_run_id = max(
+                        write_rows,
+                        key=lambda r0: r0.get("started_at") or "",
+                    )["run_id"]
+                    break
+                await asyncio.sleep(0.3)
+
+            assert new_write_run_id is not None, "daemon 未在 120s 内产出新 chapter-write run"
+            assert new_review_run_id is not None, "daemon 未在 120s 内产出新 PAUSED chapter-review run"
+
+            # 5) 断言：回路内 write / review 子 run 的 checkpoint_json 中都携带 overrides
+            # （与首轮跑 test_write_model_overrides_passthrough_through_ctx 同口径：
+            # 在任意 node checkpoint 或合并 ctx 中匹配到即可。）
+            async def _ckpt_has_overrides(run_id: str) -> bool:
+                rr = await _request(app, "GET", f"/api/runs/{run_id}")
+                assert rr.status_code == 200, rr.text
+                ckpt = rr.json().get("checkpoint_json") or {}
+                for _node_id, node_ckpt in ckpt.items():
+                    if not isinstance(node_ckpt, dict):
+                        continue
+                    ctx_blob = node_ckpt.get("ctx")
+                    merged = (
+                        {**{k: v for k, v in ckpt.items() if k != "ctx"}, **(ctx_blob if isinstance(ctx_blob, dict) else {})}
+                        if isinstance(ckpt.get("ctx"), dict)
+                        else {**ckpt, **(ctx_blob if isinstance(ctx_blob, dict) else {})}
+                    )
+                    if isinstance(merged.get("model_overrides"), dict) and merged["model_overrides"] == overrides:
+                        return True
+                    if isinstance(node_ckpt.get("model_overrides"), dict) and node_ckpt["model_overrides"] == overrides:
+                        return True
+                return False
+
+            assert await _ckpt_has_overrides(new_write_run_id), (
+                f"回路内 chapter-write 子 run（{new_write_run_id}）未携带 model_overrides={overrides}"
+            )
+            assert await _ckpt_has_overrides(new_review_run_id), (
+                f"回路内 chapter-review 子 run（{new_review_run_id}）未携带 model_overrides={overrides}"
+            )
+
+    asyncio.run(run())
+
+
+def test_chapter_review_auto_revise_loop_without_overrides_inherits_from_review_run(tmp_path: Path):
+    """回归：resume body 不传 model_overrides 且原 review run checkpoint_json 内也无 overrides
+    时，回路子 run 的 checkpoint_json 中不应出现 model_overrides 键（保证缺省零行为变更）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            first_mock = {
+                "director": _director_script(),
+                "writer": _writer_script(),
+            }
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "意图", "mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": first_mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+            paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+            first_review_run_id = paused["run_id"]
+
+            revise_mock = {
+                "director": _director_script(),
+                "writer": _writer_revised_script(),
+            }
+            r = await _request(
+                app, "POST", f"/api/runs/{first_review_run_id}/resume",
+                json={
+                    "human_input": {"approved": False, "revise": True, "note": "改稿"},
+                    "auto_revise_max": 2,
+                    "mock_providers": revise_mock,
+                    # 故意不传 model_overrides
+                },
+            )
+            assert r.status_code == 200, r.text
+            await _wait_run_terminal(app, first_review_run_id, expected=("FAILED",))
+
+            import time as _list_t
+            _list_deadline = _list_t.monotonic() + 120.0
+            new_write_run_id: str | None = None
+            new_review_run_id: str | None = None
+            while _list_t.monotonic() < _list_deadline:
+                rr = await _request(app, "GET", f"/api/projects/{pid}/runs")
+                assert rr.status_code == 200, rr.text
+                rows = rr.json()
+                review_rows = [
+                    row for row in rows
+                    if row.get("workflow_name") == "chapter-review"
+                    and row["run_id"] != first_review_run_id
+                ]
+                write_rows = [
+                    row for row in rows
+                    if row.get("workflow_name") == "chapter-write"
+                ]
+                paused_new = [row for row in review_rows if row["status"] == "PAUSED"]
+                if paused_new and write_rows:
+                    new_review_run_id = max(
+                        paused_new,
+                        key=lambda r0: r0.get("started_at") or "",
+                    )["run_id"]
+                    new_write_run_id = max(
+                        write_rows,
+                        key=lambda r0: r0.get("started_at") or "",
+                    )["run_id"]
+                    break
+                await asyncio.sleep(0.3)
+
+            assert new_write_run_id is not None
+            assert new_review_run_id is not None
+
+            async def _ckpt_omits_overrides(run_id: str) -> None:
+                rr = await _request(app, "GET", f"/api/runs/{run_id}")
+                assert rr.status_code == 200, rr.text
+                ckpt = rr.json().get("checkpoint_json") or {}
+                for node_id, node_ckpt in ckpt.items():
+                    if not isinstance(node_ckpt, dict):
+                        continue
+                    if "model_overrides" in node_ckpt:
+                        raise AssertionError(
+                            f"未传 model_overrides 时回路子 run {run_id} 的 {node_id} 不应携带该键；"
+                            f"实际={node_ckpt!r}"
+                        )
+
+            await _ckpt_omits_overrides(new_write_run_id)
+            await _ckpt_omits_overrides(new_review_run_id)
+
+    asyncio.run(run())

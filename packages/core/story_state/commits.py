@@ -54,6 +54,21 @@ from .write_through import apply_inverse_cleanup_to_state, write_through
 from .write_through import encode_who_knows as _encode_who_knows
 
 
+# 修复 wfr_3cb2182a30f6：rollback 逆清理 hint 改为字段级 {world_id, field, value}，
+# DB 侧 UPDATE 恢复仅在 value 是「整条目 dict（含 name 或 statement 键）」时才执行。
+# 字段级 value（str / 局部 dict）一律跳过 DB UPDATE——避免把 name/statement/data_json
+# 误覆盖为空（生产实锤：locations.loc_0c2d79799e71.data_json 被抹成 {}）。
+def _looks_like_entry_dict(value) -> bool:
+    """判断 hint.value 是否像 location/faction/world_rule 整条目 dict。
+
+    判定：value 是 dict 且至少含 "name" 或 "statement" 键（locations/factions/
+    world_rules 必填列）。str/None/局部 dict（如 {"behavior": "..."}）一律返回 False。
+    """
+    if not isinstance(value, dict):
+        return False
+    return "name" in value or "statement" in value
+
+
 def project_id_for_chapter(service_self, conn: sqlite3.Connection, chapter_id: str) -> str | None:
     row = conn.execute("SELECT project_id FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()
     return row["project_id"] if row else None
@@ -613,13 +628,21 @@ def commit_delta(
             for wid in _inverse_cleanup.get("remove_world_rule_ids") or []:
                 conn.execute("DELETE FROM world_rules WHERE world_rule_id = ?", (wid,))
             # 世界实体：逆 update → 恢复 before data_json
+            # 修复 wfr_3cb2182a30f6：hint 改为字段级 {world_id, field, value}；
+            # 此处仅在 value 形如「整条目 dict（含 name 或 statement 键）」时才做
+            # 条目级 UPDATE 恢复；字段级 value（str/局部 dict）不 UPDATE DB 列，
+            # 避免 data_json 被抹成 {} / name 被误覆盖。
             for entry in _inverse_cleanup.get("restore_location_states") or []:
                 if not isinstance(entry, dict):
                     continue
-                before = entry.get("before")
                 wid = entry.get("world_id")
-                if not wid or not isinstance(before, dict):
+                value = entry.get("value")
+                if not wid or not _looks_like_entry_dict(value):
+                    # 字段级 hint 或缺值：DB 侧不做 UPDATE（write_through 已在步骤 5
+                    # 按逆 delta 的 after 写透，且 5.5 以 DB 为权威重建快照，DB 已是
+                    # 正确值；这里不再覆盖）。
                     continue
+                before = value if isinstance(value, dict) else {}
                 # 写回完整 before 形态（name/statement/data_json/visibility/who_knows）
                 conn.execute(
                     """
@@ -641,10 +664,11 @@ def commit_delta(
             for entry in _inverse_cleanup.get("restore_faction_states") or []:
                 if not isinstance(entry, dict):
                     continue
-                before = entry.get("before")
                 wid = entry.get("world_id")
-                if not wid or not isinstance(before, dict):
+                value = entry.get("value")
+                if not wid or not _looks_like_entry_dict(value):
                     continue
+                before = value if isinstance(value, dict) else {}
                 conn.execute(
                     """
                     UPDATE factions
@@ -665,10 +689,11 @@ def commit_delta(
             for entry in _inverse_cleanup.get("restore_world_rule_states") or []:
                 if not isinstance(entry, dict):
                     continue
-                before = entry.get("before")
                 wid = entry.get("world_id")
-                if not wid or not isinstance(before, dict):
+                value = entry.get("value")
+                if not wid or not _looks_like_entry_dict(value):
                     continue
+                before = value if isinstance(value, dict) else {}
                 conn.execute(
                     """
                     UPDATE world_rules
@@ -866,6 +891,11 @@ def rollback_commit(
     cleanup["remove_hook_ids"] = [x for x in cleanup["remove_hook_ids"] if x]
 
     # world_changes：按 kind 分桶收集（逆 add → DELETE；逆 update → 恢复 before）
+    # 修复 wfr_3cb2182a30f6：hint 形状改为字段级 {world_id, field, value}，
+    # value=逆 change.after=原 change.before；field=逆 change.field=原 change.field。
+    # 旧形状 {"world_id", "before": <原 change.after>} 会被消费方整条目替换进
+    # snapshot bucket，导致 factions[wid]=str / locations[wid]=残壳 dict，
+    # 后续 commit 在 applier._set_top_level 抛 TypeError。
     for w in inv.get("world_changes") or []:
         kind = w.get("world_kind")
         wid = w.get("world_id")
@@ -877,21 +907,21 @@ def rollback_commit(
                 cleanup["remove_location_ids"].append(wid)
             elif op == "update":
                 cleanup["restore_location_states"].append(
-                    {"world_id": wid, "before": w.get("before")}
+                    {"world_id": wid, "field": w.get("field"), "value": w.get("after")}
                 )
         elif kind == "faction":
             if op == "remove":
                 cleanup["remove_faction_ids"].append(wid)
             elif op == "update":
                 cleanup["restore_faction_states"].append(
-                    {"world_id": wid, "before": w.get("before")}
+                    {"world_id": wid, "field": w.get("field"), "value": w.get("after")}
                 )
         elif kind == "rule":
             if op == "remove":
                 cleanup["remove_world_rule_ids"].append(wid)
             elif op == "update":
                 cleanup["restore_world_rule_states"].append(
-                    {"world_id": wid, "before": w.get("before")}
+                    {"world_id": wid, "field": w.get("field"), "value": w.get("after")}
                 )
         # politics/economy/event/time 等无对应领域表，跳过
 

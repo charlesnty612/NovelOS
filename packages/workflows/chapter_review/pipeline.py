@@ -1,5 +1,5 @@
 """chapter_review 工作流（Sprint 4-A；revise 语义 Sprint 5 补全，闭环 PRD §59/§87；
-V1.3 新增 critic 节点；P0 默认 always）。
+V1.3 新增 critic 节点；P0 默认 always；V1.3 新增 deep_review 二审 AI 节点）。
 
 节点列表：
 - ``basic_checks`` (Transform) —— 草稿存在性、字数偏离 target ±15% 记 warning 进
@@ -10,7 +10,18 @@ V1.3 新增 critic 节点；P0 默认 always）。
   **仅建议、不拦截**：任何失败（prompt 缺失 / provider 异常 / 输出不合规）→ 降级
   ``critic_status='failed'`` 且 ``critic_report=None``，**不**阻断人工审批 / run 终态。
   P0 默认模式改为 ``always``（每章都评），``NOVELOS_CRITIC_MODE`` / ``ctx['critic_mode']`` 仍覆盖。
-- ``author_review`` (Human) —— payload=review_report + critic_report；human_input 三态决议：
+- ``deep_review`` (AI) —— V1.3 二审 AI 节点。调 ``deep_reviewer`` agent 按仓根
+  REVIEW-CHECKLIST.md 三层清单（设定一致性→节拍核销→行为链连续性）核销生成
+  **建议性**结构化报告；写入 ctx["deep_review_report"]，并合并进 author_review 的
+  pause_payload（键名 ``deep_review_report``），供人工审批界面渲染。
+  **仅建议、不拦截**：任何失败（prompt 缺失 / provider 异常 / 输出不合规）→ 降级
+  ``deep_review_status='failed'`` 且 ``deep_review_report=None``，**不**阻断人工审批 / run 终态。
+  **可选节点**：默认 ``ctx.get("deep_review") is None/False → skipped``（不调 AI），
+  ``ctx["deep_review"] is True → always``；与 critic 默认 always 形成差异化——critic 写法层每章评，
+  deep_reviewer 事实层按需启用。``ctx['deep_review']`` 由请求体 ``deep_review`` 字段透传。
+  verdict=revise **不**触发自动驳回（advisory 原则）。
+- ``author_review`` (Human) —— payload=review_report + critic_report + deep_review_report；
+  human_input 三态决议：
   ``{"approved": true}`` 通过；``{"approved": false}`` 拒绝（run FAILED）；
   ``{"approved": false, "revise": true, "note": str?}`` 驳回并改稿（run FAILED、
   error='rejected-for-revision'，chapter 保持 DRAFTED，note 落 plan_json.revision_note）。
@@ -34,6 +45,7 @@ from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
 
 DEFAULT_FORBIDDEN_WORDS = ["仿佛", "如同", "本章目标"]
 _CRITIC_PROMPT_VERSION = "critic:v1"
+_DEEP_REVIEWER_PROMPT_VERSION = "deep_reviewer:v1"
 # 单章目标字数默认。与 chapter_plan / project-init 的 DEFAULT_CHAPTER_WORD_COUNT(3000)
 # 同一口径（用户拍板单章约 3000 字）；builders._DEFAULT_TARGET_WORD_COUNT(2200) 是
 # context_engine 侧的另一 fallback 口径，两处允许不同：本值仅在请求体与 plan_json
@@ -548,6 +560,165 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _deep_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
+    """V1.3 二审 AI 节点。
+
+    行为：
+    1. ``ctx.get("deep_review")`` falsy → 返回 ``deep_review_status='skipped'``，
+       **不调 AI**、不写 deep_review_report（与 critic 默认 always 形成差异化）。
+    2. truthy → 调 ``run_agent(..., agent_name='deep_reviewer', expected='deep_reviewer', mock_script=...)``
+       跑三层清单核销（设定一致性 → 节拍核销 → 行为链连续性）。
+    3. 任何异常（PromptNotFound / Provider / 契约校验失败 / 输出字段缺失）→ 降级
+       ``deep_review_status='failed'`` + ``deep_review_report=None``，**不**抛错。
+    4. ``deep_review_status='ok'`` 时 ``deep_review_report`` 写入 ctx，供 author_review
+       合并进 pause_payload。
+
+    输入载荷与 critic 节点保持最大复用：
+    - ``draft_text`` / ``plan_summary`` / ``settings_digest`` 取法照抄 critic 节点
+      （即 ``_collect_critic_inputs`` + ``_collect_settings_digest``，二者项目级上下文与
+      critic 完全一致——避免重复 SQL）。
+    - ``prev_chapter_summaries``：当前项目暂未启用 summarizer 的「按章节一句话摘要」字段
+      透传——本节点传空数组；待 summarizer 落库后由上层补齐并经 run_agent 注入。
+      此处留 TODO 注释待后续 summarizer 章节摘要接入。
+    - ``critic_report``：若 critic 节点已跑出 ``critic_status='ok'``，把 ``ctx["critic_report"]``
+      透传给 deep_reviewer 作为盲区对照基准（§3.4 边界）。
+
+    返回 ``{"deep_review_status": "ok|failed|skipped", "deep_review_report": dict|None,
+    "deep_review_error": str|None, "deep_review_skipped": bool}``。
+    """
+    # 可选节点开关：默认 None / False → 跳过（不调 AI）；True → 调 AI
+    if not ctx.get("deep_review"):
+        _log.info(
+            "chapter_review.deep_review skipped: chapter_id=%s (deep_review=%r)",
+            ctx.get("chapter_id"), ctx.get("deep_review"),
+        )
+        return {
+            "deep_review_status": "skipped",
+            "deep_review_report": None,
+            "deep_review_error": None,
+            "deep_review_skipped": True,
+        }
+
+    db_path = ctx["db_path"]
+    chapter_id = ctx["chapter_id"]
+    mock_script = (ctx.get("mock_providers") or {}).get("deep_reviewer")
+
+    try:
+        draft_text, project_id, plan_summary = _collect_critic_inputs(
+            db_path, chapter_id, draft_version=ctx.get("draft_version")
+        )
+        settings_digest = _collect_settings_digest(db_path, project_id)
+    except Exception as exc:  # noqa: BLE001 —— 输入收集失败即降级
+        _log.warning(
+            "chapter_review.deep_review inputs collection failed: chapter_id=%s err=%s",
+            chapter_id, exc,
+        )
+        return {
+            "deep_review_status": "failed",
+            "deep_review_report": None,
+            "deep_review_error": f"inputs: {exc}",
+            "deep_review_skipped": False,
+        }
+
+    payload = {
+        "agent": "deep_reviewer",
+        "prompt_version": _DEEP_REVIEWER_PROMPT_VERSION,
+        "chapter": {
+            "title": None,
+            "target_word_count": int(ctx.get("target_word_count") or _DEFAULT_TARGET_WORD_COUNT),
+            "expected_role": ctx.get("expected_role"),
+            "chapter_id": chapter_id,
+        },
+        "draft_text": draft_text,
+        "plan_summary": plan_summary,
+        "settings_digest": settings_digest,
+        # TODO：summarizer 节点产出「按章节一句话摘要」表后，由上层 pipeline 注入；
+        # 当前项目未启用 summarizer 的章节摘要字段，先传空数组。
+        "prev_chapter_summaries": [],
+        # critic 报告作为盲区对照基准（§3.4 边界）；critic 未跑出 ok 时传 null
+        "critic_report": (
+            ctx.get("critic_report")
+            if ctx.get("critic_status") == "ok"
+            else None
+        ),
+    }
+
+    try:
+        out = run_agent(
+            db_path,
+            "deep_reviewer",
+            payload,
+            ctx.get("run_id") or "",
+            node_run_id=ctx.get("_current_node_run_id"),
+            expected="deep_reviewer",
+            mock_script=mock_script,
+            profile_id=(ctx.get("model_overrides") or {}).get(
+                capability_for("deep_reviewer")
+            ),
+        )
+        if not isinstance(out, dict):
+            raise ValueError(f"deep_reviewer output not dict: {type(out).__name__}")
+        # 软校验：非缺失型 quote 必须能溯源到 draft_text（trim 后 substring）；缺失型（layer=beat
+        # 且 suggestion 以 [beat N 缺失] 前缀）允许 quote=""。不溯源的 issue 直接丢弃。
+        issues = out.get("issues")
+        if isinstance(issues, list):
+            cleaned_issues: list[dict[str, Any]] = []
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    continue
+                quote = issue.get("quote")
+                if not isinstance(quote, str):
+                    continue
+                quote_trim = quote.strip()
+                # 缺失型允许空串：layer=beat 且 suggestion 以 "[beat N" 前缀且包含 "缺失"
+                layer = issue.get("layer")
+                suggestion = issue.get("suggestion")
+                is_missing_beat = (
+                    layer == "beat"
+                    and isinstance(suggestion, str)
+                    and suggestion.lstrip().startswith("[beat ")
+                    and "缺失" in suggestion
+                )
+                if not quote_trim:
+                    if is_missing_beat:
+                        cleaned_issues.append(issue)
+                    else:
+                        _log.warning(
+                            "chapter_review.deep_review dropped empty quote (non-missing): "
+                            "chapter_id=%s layer=%s",
+                            chapter_id, layer,
+                        )
+                    continue
+                if quote_trim not in draft_text:
+                    _log.warning(
+                        "chapter_review.deep_review dropped untraceable issue: "
+                        "chapter_id=%s quote=%r",
+                        chapter_id, quote[:30],
+                    )
+                    continue
+                cleaned_issues.append(issue)
+            out["issues"] = cleaned_issues
+        elif issues is not None:
+            out["issues"] = []
+        return {
+            "deep_review_status": "ok",
+            "deep_review_report": out,
+            "deep_review_error": None,
+            "deep_review_skipped": False,
+        }
+    except Exception as exc:  # noqa: BLE001 —— 任何 LLM / 契约 / parse 失败均降级
+        _log.warning(
+            "chapter_review.deep_review degraded: chapter_id=%s err=%s",
+            chapter_id, exc,
+        )
+        return {
+            "deep_review_status": "failed",
+            "deep_review_report": None,
+            "deep_review_error": str(exc),
+            "deep_review_skipped": False,
+        }
+
+
 def _author_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
     """Human 节点：抛 PauseRequested 等 author 决议。
     human_input={"approved": true} → 通过；其他（"approved":false 或缺 approved）→ 拒绝。
@@ -557,6 +728,15 @@ def _author_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
     report = ctx.get("review_report") or {}
     critic_report = ctx.get("critic_report") if ctx.get("critic_status") == "ok" else None
     critic_status = ctx.get("critic_status") or "skipped"
+    # V1.3：deep_review_report 键始终存在于 pause_payload（未开启 / 失败时为 None）；
+    # 仅当 deep_review_status='ok' 时并入实际报告值——前端按 critic_status /
+    # deep_review_status 分别渲染（与 critic_report 同口径：键恒在、值按状态切换）。
+    deep_review_report = (
+        ctx.get("deep_review_report")
+        if ctx.get("deep_review_status") == "ok"
+        else None
+    )
+    deep_review_status = ctx.get("deep_review_status") or "skipped"
     # V3 P0-1：把 critic_mode/skipped 透传到 pause_payload，便于前端观测
     payload = {
         "stage": "chapter-review",
@@ -566,6 +746,9 @@ def _author_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "critic_report": critic_report,
         "critic_mode": ctx.get("critic_mode"),
         "critic_skipped": bool(ctx.get("critic_skipped")),
+        "deep_review_status": deep_review_status,
+        "deep_review_report": deep_review_report,
+        "deep_review_skipped": bool(ctx.get("deep_review_skipped")),
     }
     # 先把 human_input 已批准的标志 merge 进 ctx（提供给 mark_reviewed 用）
     hi = ctx.get("human_input") or {}
@@ -660,6 +843,9 @@ def _build_nodes() -> list[WorkflowNode]:
         WorkflowNode(
             "critic_review", "AI", _critic_review_node, agent_name="critic"
         ),
+        WorkflowNode(
+            "deep_review", "AI", _deep_review_node, agent_name="deep_reviewer"
+        ),
         WorkflowNode("author_review", "Human", _author_review_node),
         WorkflowNode("mark_reviewed", "State", _mark_reviewed_node),
     ]
@@ -669,8 +855,10 @@ WORKFLOW = {
     "name": "chapter-review",
     "version": "v1",
     "description": (
-        "basic_checks → critic_review(AI, advisory, default always) → author_review(Human) → mark_reviewed "
-        "(DRAFTED→REVIEWED)；revise 驳回改稿闭环；critic 仅做建议、不拦截"
+        "basic_checks → critic_review(AI, advisory, default always) → "
+        "deep_review(AI, advisory, opt-in via deep_review=true) → "
+        "author_review(Human) → mark_reviewed(DRAFTED→REVIEWED)；"
+        "revise 驳回改稿闭环；critic / deep_reviewer 仅做建议、不拦截"
     ),
     "nodes": _build_nodes(),
     # V1.0 checkpoint 写放大优化（Sprint V1.5）：author_review 是 Human 节点（可 PAUSE）；
@@ -680,12 +868,18 @@ WORKFLOW = {
     # 完整字数/禁用词扫描结果），落盘只增体积不影响 resume——可安全 exclude。
     # 注：author_review 的 __pause_payload__ 单独存在 ctx['author_review'] 内，不受 exclude 影响，
     # 前端仍可读到 review_report / critic_report（reviewer UI 必需）。
+    # V1.3 deep_review_report 加入 exclude：与 critic_report 同口径，不影响 resume（mark_reviewed
+    # 不读 deep_review_report）。
     "checkpoint_exclude": [
         "review_report",
         "critic_report",
         "critic_status",
         "critic_error",
         "critic_skipped",
+        "deep_review_report",
+        "deep_review_status",
+        "deep_review_error",
+        "deep_review_skipped",
     ],
 }
 

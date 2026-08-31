@@ -17,6 +17,7 @@ from .service import (
     ChapterService,
     ChapterTransitionError,
     DraftStatusNotAllowed,
+    RevisionNoteStatusNotAllowed,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "Draft",
     "DraftCreate",
     "DraftStatusNotAllowed",
+    "RevisionNoteStatusNotAllowed",
 ]

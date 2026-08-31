@@ -11,6 +11,24 @@
      降级为 ``op='update'`` 并用现有行填 before（或对应状态字段）。
   3. **drop-duplicate**：insert-to-update 后 ``after`` 与当前值完全一致，
      直接丢弃该 change；``new_events`` / ``new_hooks`` 的 id 已存在时也直接丢弃。
+  4. **id-prefix-reconcile**（F3 修复）：``char_xxx`` / ``fac_xxx`` 前缀的 id
+     若在原前缀表里不存在，但**同一 hex 后缀**在对方表里唯一存在 → 改写为正确
+     前缀。仅处理 char↔fac 双桶（location / hook / debt 等其它前缀不做）。
+     覆盖位置：``character_changes.character_id`` / ``world_changes.world_id``
+     （kind=faction 时）/ ``relationship_changes.from_character_id`` /
+     ``to_id`` / ``new_events[*].participants[]``。
+     零命中 / 多命中 → 不动（让 validator 报错，避免猜测）。
+  5. **change-id-uniquify**（F4 修复）：delta 内每条 change 的 ``change_id`` 必须
+     在**同一数组内唯一**（七类数组：``character_changes`` / ``world_changes`` /
+     ``relationship_changes`` / ``new_events`` / ``resolved_hooks`` / ``new_hooks``
+     / ``debt_changes``）。生产事故 wfr_6765f6de4d76 现场：observer 照抄示例
+     字面量 ``cc:01HXXXXXXXX`` 到多条 change，validator 以「delta 内 change_id
+     重复」拒绝。规则：
+     - 占位符检测：change_id 含 ≥ 3 个连续 ``X`` / ``x`` → 视为占位符；
+     - 重复检测：change_id 与本数组先前已见 change_id 重复 → 视为重复。
+     任一命中 → 重写为 ``<原前缀>:<uuid4 hex 前 12 位>``（原前缀=冒号前部分；
+     无冒号则用数组默认前缀），repairs 留痕 ``rule="change_id_uniquify"``，
+     含 ``from_id`` / ``to_id`` / ``array`` / ``index``。
 
 - 修不了的不动，继续走 ``validate_delta`` 与既有按腿重试逻辑。
 - 所有修复以 ``list[dict]`` 形式返回，供 pipeline 写入 ctx / 质量审计。
@@ -28,6 +46,8 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -307,6 +327,250 @@ def _build_entity_index(
     return index
 
 
+def _split_id_prefix(value: Any) -> tuple[str, str] | None:
+    """把 'char_xxx' / 'fac_xxx' 切成 (prefix, suffix) 用于前缀调和；非 char_/fac_ 返回 None。"""
+    if not isinstance(value, str) or "_" not in value:
+        return None
+    prefix, _, suffix = value.partition("_")
+    if prefix not in ("char", "fac") or not suffix:
+        return None
+    return prefix, suffix
+
+
+def _reconcile_id_prefix(
+    value: Any,
+    index: dict[str, dict[str, Any]],
+) -> tuple[Any, dict[str, Any] | None]:
+    """字符↔组织 ID 前缀调和（F3 修复）。
+
+    生产事故 wfr_6d77d905b4b1：observer 引用既有实体时把 ``fac_e98a1ca56b66`` 错写为
+    ``char_e98a1ca56b66``，validator 在 ``character_changes.character_id`` / 关系端点 /
+    事件参与者等位置上以「id 不在 snapshot」为由拒绝，导致 run FAILED。
+
+    规则：对 char/ / fac/ 前缀的 id：
+    1. 原前缀表里**已存在** → 不动。
+    2. 原前缀表里**不存在**，但**同一 hex 后缀**在对方表（characters↔factions）里
+       **唯一存在** → 改写为正确前缀并返回 ``id_prefix_reconcile`` 修复记录。
+    3. 原前缀表里不存在且对方表里零命中 / 多命中 → 不动（让 validator 报错，
+       避免猜测制造幻觉）。
+
+    仅处理 char_ ↔ fac_ 双桶调和；location / hook / debt 等其它前缀不做。
+
+    返回：``(new_value, repair_record_or_None)``。
+    """
+    parts = _split_id_prefix(value)
+    if parts is None:
+        return value, None
+    prefix, suffix = parts
+    own_bucket = "characters" if prefix == "char" else "factions"
+    other_bucket = "factions" if prefix == "char" else "characters"
+    other_prefix = "fac" if prefix == "char" else "char"
+
+    # 原前缀表里已存在 → 不动
+    if value in index.get(own_bucket, {}):
+        return value, None
+
+    # 在对方表里按后缀唯一定位
+    other_matches: list[str] = []
+    for other_id in index.get(other_bucket, {}).keys():
+        if not isinstance(other_id, str):
+            continue
+        other_parts = _split_id_prefix(other_id)
+        if other_parts is None:
+            continue
+        if other_parts[1] == suffix:
+            other_matches.append(other_id)
+
+    if len(other_matches) != 1:
+        # 零命中或多命中：让 validator 报错（避免猜测制造幻觉）
+        return value, None
+
+    new_value = other_matches[0]
+    repair = {
+        "rule": "id_prefix_reconcile",
+        "from_id": value,
+        "to_id": new_value,
+        "from_prefix": prefix,
+        "to_prefix": other_prefix,
+    }
+    return new_value, repair
+
+
+def _apply_id_reconcile(
+    item: dict[str, Any],
+    field: str,
+    index: dict[str, dict[str, Any]],
+    *,
+    extra_record: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """对 item[field] 做前缀调和；返回 (new_item, repairs)。无变化时 repairs 为空。"""
+    if field not in item:
+        return item, []
+    new_value, repair = _reconcile_id_prefix(item.get(field), index)
+    if repair is None:
+        return item, []
+    new_item = {**item, field: new_value}
+    # 配套字段同步：character_id / world_id / hook_id / debt_id / target_id 等别名同源时一起改
+    if field == "character_id" and item.get("target_id") == item.get(field):
+        new_item["target_id"] = new_value
+    elif field == "world_id" and item.get("target_id") == item.get(field):
+        new_item["target_id"] = new_value
+    elif field == "event_id" and item.get("target_id") == item.get(field):
+        new_item["target_id"] = new_value
+    elif field == "hook_id" and item.get("target_id") == item.get(field):
+        new_item["target_id"] = new_value
+    elif field == "debt_id" and item.get("target_id") == item.get(field):
+        new_item["target_id"] = new_value
+    rec = {"field": field, **repair}
+    if extra_record:
+        rec.update(extra_record)
+    return new_item, [rec]
+
+
+# 数组 → change_id 默认前缀对照（与 observer-v1.md §6-26 一致）。
+_ARRAY_CHANGE_ID_PREFIX: dict[str, str] = {
+    "character_changes": "cc",
+    "world_changes": "wc",
+    "relationship_changes": "rc",
+    "new_events": "ev",
+    "resolved_hooks": "rh",
+    "new_hooks": "nh",
+    "debt_changes": "dc",
+}
+
+# 占位符模式：含 ≥3 个连续 X / x（如 cc:01HXXXXX / cc:01Hxxx / cc:01HXXXXXXXX）。
+_PLACEHOLDER_X_RE = re.compile(r"[Xx]{3,}")
+
+
+def _is_placeholder_change_id(value: Any) -> bool:
+    """判定 change_id 是否为占位符：含 ≥3 个连续 X / x 视为占位符。
+
+    生产事故 wfr_6765f6de4d76：observer 照抄示例字面量 ``cc:01HXXXXXXXX``
+    到多条 change。占位符被自动重写是确定性的（信息可唯一确定）。
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    return bool(_PLACEHOLDER_X_RE.search(value))
+
+
+def _normalize_change_id(
+    value: Any,
+    default_prefix: str,
+) -> tuple[str | None, str]:
+    """从 change_id 字符串里提取（prefix, suffix）；无冒号则 prefix 视作 default_prefix。
+
+    返回 ``(prefix, suffix)``：
+    - 解析成功 → ``(prefix, suffix)``；
+    - 非字符串 / 空串 / 无法解析 → ``(None, "")``（调用方应跳过重写）。
+    """
+    if not isinstance(value, str) or not value:
+        return None, ""
+    if ":" in value:
+        prefix, _, suffix = value.partition(":")
+        prefix = prefix.strip()
+        suffix = suffix.strip()
+        if prefix and suffix:
+            return prefix, suffix
+    # 无冒号或解析异常：把整串当 suffix，前缀用数组默认前缀
+    return default_prefix, value
+
+
+def _generate_unique_change_id(default_prefix: str, seen: set[str]) -> str:
+    """生成 ``<prefix>:<uuid4 hex 前 12 位>`` 并保证不被 ``seen`` 命中。
+
+    极小概率（≈ 2^-48）下 uuid4 前 12 位会与已见冲突，循环重试一次（最多两次）。
+    """
+    for _ in range(4):
+        candidate = f"{default_prefix}:{uuid.uuid4().hex[:12]}"
+        if candidate not in seen:
+            seen.add(candidate)
+            return candidate
+    # 极端兜底：追加后缀扰动
+    candidate = f"{default_prefix}:{uuid.uuid4().hex[:12]}{uuid.uuid4().hex[:2]}"
+    seen.add(candidate)
+    return candidate
+
+
+def _uniquify_change_ids(
+    items: list[Any],
+    array_name: str,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """F4 修复：对数组内每条 change 的 ``change_id`` 做去重 + 占位符检测。
+
+    规则：
+    1. 遍历数组维护 ``seen`` 集合；
+    2. 对每条 change：
+       - 非字典 / 无 ``change_id`` 字段 → 原样保留（不属于本规则处理范围）；
+       - ``change_id`` 含 ≥3 个连续 X / x → 占位符，触发重写；
+       - ``change_id`` 已在 ``seen`` → 重复，触发重写；
+       - 唯一且非占位符 → 原样保留。
+    3. 重写规则：``<原前缀>:<uuid4 hex 前 12 位>``，原前缀=冒号前部分（无冒号则用
+       数组默认前缀），写入 ``change_id`` 并把新值加入 ``seen``；同时生成一条
+       ``{"rule": "change_id_uniquify", "array": ..., "index": ..., "from_id": ..., "to_id": ...}``
+       修复记录。
+    """
+    if not isinstance(items, list) or not items:
+        return items, []
+    default_prefix = _ARRAY_CHANGE_ID_PREFIX.get(array_name, "cc")
+    seen: set[str] = set()
+    repaired: list[Any] = []
+    repairs: list[dict[str, Any]] = []
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict) or "change_id" not in item:
+            repaired.append(item)
+            continue
+        old_value = item.get("change_id")
+        if not isinstance(old_value, str) or not old_value:
+            repaired.append(item)
+            continue
+        # 命中占位符 或 已在 seen → 重写
+        if _is_placeholder_change_id(old_value) or old_value in seen:
+            original_prefix, _ = _normalize_change_id(old_value, default_prefix)
+            # 占位符场景下若解析不出有意义的前缀，回退到数组默认前缀
+            prefix_for_new = original_prefix or default_prefix
+            new_value = _generate_unique_change_id(prefix_for_new, seen)
+            new_item = {**item, "change_id": new_value}
+            repairs.append(
+                {
+                    "array": array_name,
+                    "index": idx,
+                    "rule": "change_id_uniquify",
+                    "from_id": old_value,
+                    "to_id": new_value,
+                }
+            )
+            repaired.append(new_item)
+            continue
+        # 唯一且非占位符 → 不动
+        seen.add(old_value)
+        repaired.append(item)
+    return repaired, repairs
+
+
+def _reconcile_participants(
+    participants: Any,
+    index: dict[str, dict[str, Any]],
+    *,
+    extra_record: dict[str, Any] | None = None,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """对 participants 列表逐项做前缀调和；返回 (new_list, repairs)。"""
+    if not isinstance(participants, list):
+        return participants if isinstance(participants, list) else [], []
+    new_list: list[Any] = []
+    repairs: list[dict[str, Any]] = []
+    for j, p in enumerate(participants):
+        new_value, repair = _reconcile_id_prefix(p, index)
+        if repair is None:
+            new_list.append(p)
+            continue
+        new_list.append(new_value)
+        rec = {"field": f"participants[{j}]", **repair}
+        if extra_record:
+            rec.update(extra_record)
+        repairs.append(rec)
+    return new_list, repairs
+
+
 def _repair_character_changes(
     items: list[dict[str, Any]],
     index: dict[str, dict[str, Any]],
@@ -323,6 +587,19 @@ def _repair_character_changes(
         facet = item.get("facet")
         field = item.get("field")
         entity = index["characters"].get(cid) if isinstance(cid, str) and cid else None
+
+        # F3：先做 character_id ↔ faction_id 前缀调和（op 无关）
+        if isinstance(cid, str) and cid:
+            new_item, reconcile_repairs = _apply_id_reconcile(
+                item, "character_id", index,
+                extra_record={"array": "character_changes", "index": idx},
+            )
+            if reconcile_repairs:
+                repairs.extend(reconcile_repairs)
+                item = new_item
+                cid = item.get("character_id")
+                target_id = cid
+                entity = index["characters"].get(cid) if isinstance(cid, str) and cid else None
 
         if op == "update" and item.get("before") is None and entity is not None:
             key = _field_key(field)
@@ -429,6 +706,19 @@ def _repair_world_changes(
         if bucket and isinstance(wid, str) and wid:
             entity = index[bucket].get(wid)
 
+        # F3：faction 前缀调和（仅 faction kind；location/rule 不做 char↔fac 调和）
+        if kind == "faction" and isinstance(wid, str) and wid:
+            new_item, reconcile_repairs = _apply_id_reconcile(
+                item, "world_id", index,
+                extra_record={"array": "world_changes", "index": idx},
+            )
+            if reconcile_repairs:
+                repairs.extend(reconcile_repairs)
+                item = new_item
+                wid = item.get("world_id")
+                target_id = wid
+                entity = index["factions"].get(wid) if isinstance(wid, str) and wid else None
+
         if op == "update" and item.get("before") is None and entity is not None:
             key = _field_key(field)
             data_json = entity.get("data_json") or {}
@@ -512,6 +802,19 @@ def _repair_relationship_changes(
         rid = item.get("target_id")
         target_id = rid
         entity = index["relationships"].get(rid) if isinstance(rid, str) and rid else None
+
+        # F3：关系端点 from/to 是 char_/fac_ 前缀时做前缀调和（端点身份透明）
+        for ep_field in ("from_character_id", "to_character_id"):
+            ep_value = item.get(ep_field)
+            if not isinstance(ep_value, str) or not ep_value:
+                continue
+            new_item, reconcile_repairs = _apply_id_reconcile(
+                item, ep_field, index,
+                extra_record={"array": "relationship_changes", "index": idx},
+            )
+            if reconcile_repairs:
+                repairs.extend(reconcile_repairs)
+                item = new_item
 
         if op == "update" and item.get("before") is None and entity is not None:
             current = entity.get("state_json") or {}
@@ -664,6 +967,17 @@ def _repair_new_events(
                 }
             )
             continue
+
+        # F3：participants 列表逐项做 char↔fac 前缀调和（event_id 本身是新增 id，不调和）
+        if "participants" in item:
+            new_parts, part_repairs = _reconcile_participants(
+                item.get("participants"), index,
+                extra_record={"array": "new_events", "index": idx},
+            )
+            if part_repairs:
+                repairs.extend(part_repairs)
+                item = {**item, "participants": new_parts}
+
         repaired.append(item)
     return repaired, repairs
 
@@ -768,6 +1082,25 @@ def repair_delta(
     )
     repaired["new_hooks"] = nh_items
     all_repairs.extend(nh_repairs)
+
+    # F4 修复：delta 内 change_id 唯一性 + 占位符检测（change_id_uniquify）。
+    # 在所有 _repair_* 之后统一跑一次，按数组独立维护 seen 集合；其它 _repair_*
+    # 可能因 drop-duplicate / insert-to-update 删 / 改 change，但不会影响本规则
+    # （占位符形态与数组内唯一性是 change_id 自身属性，与 target_id 等无关）。
+    for arr_name in (
+        "character_changes",
+        "world_changes",
+        "relationship_changes",
+        "new_events",
+        "resolved_hooks",
+        "new_hooks",
+        "debt_changes",
+    ):
+        uni_items, uni_repairs = _uniquify_change_ids(
+            list(repaired.get(arr_name) or []), arr_name,
+        )
+        repaired[arr_name] = uni_items
+        all_repairs.extend(uni_repairs)
 
     return repaired, all_repairs
 

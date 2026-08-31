@@ -429,11 +429,68 @@ def _validate_polisher(payload: dict[str, Any]) -> None:
         raise AgentOutputError("polisher changes_summary must be a string")
 
 
+_VALID_DEEP_REVIEW_LAYERS = frozenset({"setting", "beat", "behavior"})
+_VALID_DEEP_REVIEW_SEVERITIES = frozenset({"high", "medium", "low"})
+
+
+def _validate_deep_reviewer(payload: dict[str, Any]) -> None:
+    """Deep Reviewer（V1.3 二审 AI）契约：结构合规 + 枚举合法。
+
+    Schema 与 ``docs/agents/prompts/deep_reviewer-v1.md`` §7 对齐：
+    - required: schema_version, prompt_version, chapter_id, verdict, overall_comment, issues
+    - verdict ∈ {pass, revise}
+    - issues 必须是 list（允许空）；每条 issues[i] 必含 layer / severity / quote / suggestion
+    - issues[i].layer ∈ {setting, beat, behavior}
+    - issues[i].severity ∈ {high, medium, low}
+
+    ``quote`` 可溯源 / 长度上限 / severity 标尺 / 层内顺序由调用方
+    （chapter_review._deep_review_node）做软校验；本契约只校验**结构层**。
+    """
+    for key in ("schema_version", "prompt_version", "chapter_id", "verdict", "overall_comment", "issues"):
+        if key not in payload:
+            raise AgentOutputError(f"deep_reviewer output missing required field: {key!r}")
+    if payload.get("schema_version") != "deep-review.v1":
+        raise AgentOutputError(
+            f"deep_reviewer schema_version must be 'deep-review.v1', "
+            f"got {payload.get('schema_version')!r}"
+        )
+    verdict = payload.get("verdict")
+    if verdict not in ("pass", "revise"):
+        raise AgentOutputError(
+            f"deep_reviewer verdict must be 'pass' or 'revise', got {verdict!r}"
+        )
+    if not isinstance(payload["overall_comment"], str):
+        raise AgentOutputError("deep_reviewer overall_comment must be a string")
+    if not isinstance(payload["issues"], list):
+        raise AgentOutputError(
+            f"deep_reviewer issues must be a list, got {type(payload['issues']).__name__}"
+        )
+    for idx, issue in enumerate(payload["issues"]):
+        if not isinstance(issue, dict):
+            raise AgentOutputError(f"deep_reviewer issues[{idx}] must be an object")
+        for k in ("layer", "severity", "quote", "suggestion"):
+            if k not in issue:
+                raise AgentOutputError(
+                    f"deep_reviewer issues[{idx}] missing required field: {k!r}"
+                )
+        if issue["layer"] not in _VALID_DEEP_REVIEW_LAYERS:
+            raise AgentOutputError(
+                f"deep_reviewer issues[{idx}].layer {issue['layer']!r} "
+                f"not in {sorted(_VALID_DEEP_REVIEW_LAYERS)}"
+            )
+        if issue["severity"] not in _VALID_DEEP_REVIEW_SEVERITIES:
+            raise AgentOutputError(
+                f"deep_reviewer issues[{idx}].severity {issue['severity']!r} "
+                f"not in {sorted(_VALID_DEEP_REVIEW_SEVERITIES)}"
+            )
+
+
 _VALIDATORS = {
     "observer": _validate_observer,
     "director": _validate_director,
     "writer": _validate_writer,
     "critic": _validate_critic,
+    "deep_reviewer": _validate_deep_reviewer,
     "scene_planner": _validate_scene_planner,
     "premise_designer": _validate_premise_designer,
     "world_builder": _validate_world_builder,

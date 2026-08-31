@@ -346,6 +346,13 @@ export interface WorkflowStartPayload {
    * 指定版本号 ⇒ 审该版。后端对不存在的版本会报错,前端不做校验。
    */
   draft_version?: number | null;
+  /**
+   * 深度二审开关（仅 chapter-review 生效）：true ⇒ 在常规审校完成后由 Kimi
+   * 跑一次「设定 / 节拍 / 行为链」三层清单二审，pause_payload 中会带
+   * deep_review_report；缺省 / false ⇒ 不跑、报告字段不存在或为 null。
+   * 后端对不存在的版本会报错,前端不做校验；约 +1 分钟。
+   */
+  deep_review?: boolean | null;
 }
 
 export interface WorkflowStartResponse {
@@ -398,6 +405,27 @@ export interface CriticReport {
   issues: CriticIssue[];
 }
 
+// ---- deep review（Kimi 三层清单二审） ------------------------------------
+// 仅在 startReview 时传 deep_review=true 时由后端生成并写入 pause_payload。
+// verdict='pass' 表示三层均无高/中风险问题；'revise' 表示存在需要改稿的问题。
+// 后端在未开启 deep_review 时该字段为 null 或缺省；前端须容忍 None / 缺省。
+export type DeepReviewLayer = 'setting' | 'beat' | 'behavior';
+export type DeepReviewSeverity = 'high' | 'medium' | 'low';
+export type DeepReviewVerdict = 'pass' | 'revise';
+
+export interface DeepReviewIssue {
+  layer: DeepReviewLayer;
+  severity: DeepReviewSeverity;
+  quote: string;
+  suggestion: string;
+}
+
+export interface DeepReviewReport {
+  verdict: DeepReviewVerdict;
+  overall_comment: string;
+  issues: DeepReviewIssue[];
+}
+
 export interface ChapterReviewPausePayload {
   stage: 'chapter-review';
   message: string;
@@ -414,6 +442,9 @@ export interface ChapterReviewPausePayload {
   critic_status?: 'ok' | 'failed' | 'skipped' | string;
   /** V1.3：critic_status='ok' 时为结构化报告；其余为 null。UI 须容忍 null。 */
   critic_report?: CriticReport | null;
+  /** 深度二审报告（仅在 startReview 时传 deep_review=true 时存在）；未开启或
+   *  失败时为 null / 缺省。UI 须容忍 null/缺省/坏形状（按需降级）。 */
+  deep_review_report?: DeepReviewReport | null;
 }
 
 export interface ChapterCommitPausePayload {

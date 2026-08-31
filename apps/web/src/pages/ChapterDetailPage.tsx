@@ -188,6 +188,11 @@ export function ChapterDetailPage() {
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [reviseLooping, setReviseLooping] = useState(false);
+
+  // 「审校」动作专属：深度二审开关（Kimi 三层清单：设定/节拍/行为链）。
+  // 默认不勾；勾选时 review 请求体带 deep_review:true，pause_payload 会
+  // 多一个 deep_review_report 分栏。开启后审校约 +1 分钟。
+  const [deepReview, setDeepReview] = useState(false);
   const handleStartWorkflow = useCallback(
     async (
       action: 'plan' | 'write' | 'review' | 'commit',
@@ -199,6 +204,9 @@ export function ChapterDetailPage() {
         /** 写作模式（仅 write 生效）：true ⇒ 全新重写。临时字段，在此处剥离后
          *  按 action==='write' 决定是否写入请求 payload 的 fresh_write 键。 */
         fresh_write?: boolean;
+        /** 深度二审开关（仅 review 生效）：true ⇒ review 请求体带 deep_review: true。
+         *  临时字段,在此处剥离后按 action==='review' 决定是否并入请求 payload。 */
+        deep_review?: boolean;
       },
     ) => {
       // 防呆：章节已有 plan_json 时，「生成计划」需二次确认（覆盖会丢字数规划）
@@ -239,6 +247,7 @@ export function ChapterDetailPage() {
         const {
           model_profile_id: _omit,
           fresh_write: rawFreshWrite,
+          deep_review: rawDeepReview,
           ...basePayload
         } = payload ?? {};
         void _omit;
@@ -246,8 +255,13 @@ export function ChapterDetailPage() {
         // 写作模式：仅 write 动作支持；其他动作剥离后丢弃。
         const wantsFreshWrite =
           action === 'write' && rawFreshWrite === true;
+        // 深度二审开关：仅 review 动作支持；其他动作剥离后丢弃。
+        const wantsDeepReview =
+          action === 'review' && rawDeepReview === true;
         const hasBusinessFields =
-          Object.keys(basePayload).length > 0 || wantsFreshWrite;
+          Object.keys(basePayload).length > 0 ||
+          wantsFreshWrite ||
+          wantsDeepReview;
         // 无业务字段且无 override 时透传 undefined，保持向后兼容（与旧契约一致）。
         const requestPayload: WorkflowStartPayload | undefined =
           !hasOverride && !hasBusinessFields
@@ -257,9 +271,16 @@ export function ChapterDetailPage() {
                 ...basePayload,
                 model_overrides: { [capability as string]: profileId },
                 ...(wantsFreshWrite ? { fresh_write: true } : {}),
+                ...(wantsDeepReview ? { deep_review: true } : {}),
               }
             : wantsFreshWrite
-            ? ({ ...basePayload, fresh_write: true } as WorkflowStartPayload)
+            ? ({
+                ...basePayload,
+                fresh_write: true,
+                ...(wantsDeepReview ? { deep_review: true } : {}),
+              } as WorkflowStartPayload)
+            : wantsDeepReview
+            ? ({ ...basePayload, deep_review: true } as WorkflowStartPayload)
             : (basePayload as WorkflowStartPayload);
         let resp: WorkflowStartResponse;
         if (action === 'plan') resp = await workflowsApi.startPlan(projectId, chapterId, requestPayload);
@@ -361,6 +382,8 @@ export function ChapterDetailPage() {
           submitting={submitting}
           selectedDraftVersion={selectedDraftVersion}
           onStart={handleStartWorkflow}
+          deepReview={deepReview}
+          onDeepReviewChange={setDeepReview}
         />
       ) : chapterCall.loading ? (
         <div className="muted">加载章节中…</div>
@@ -479,6 +502,8 @@ function ChapterHeader({
   submitting,
   selectedDraftVersion,
   onStart,
+  deepReview,
+  onDeepReviewChange,
 }: {
   chapter: Chapter;
   activeRunStatus: 'PENDING' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | null;
@@ -492,8 +517,12 @@ function ChapterHeader({
       target_word_count?: number;
       model_profile_id?: string | null;
       fresh_write?: boolean;
+      deep_review?: boolean;
     },
   ) => Promise<void>;
+  /** 「审校」步骤深度二审（Kimi 三层清单）开关 */
+  deepReview: boolean;
+  onDeepReviewChange: (v: boolean) => void;
 }) {
   const activeRunInfo =
     activeRunStatus === 'RUNNING' || activeRunStatus === 'PENDING'
@@ -626,6 +655,10 @@ function ChapterHeader({
                         : null,
                       fresh_write:
                         b.action === 'write' ? writeMode === 'fresh' : undefined,
+                      // 「审校」专属：勾选深度二审时透传给 handleStartWorkflow，
+                      // 未勾选时透传 undefined（避免误带 false 触发旧契约歧义）。
+                      deep_review:
+                        b.action === 'review' ? deepReview : undefined,
                     })
                   }
                 >
@@ -667,14 +700,39 @@ function ChapterHeader({
                   </select>
                 ) : null}
                 {/* 「审校」专属：动态提示将审哪版,让用户在点之前就知道。
-                    草稿尚未加载时(selectedDraftVersion=null)显示「暂未选择」。 */}
+                    草稿尚未加载时(selectedDraftVersion=null)显示「暂未选择」。
+                    + 深度二审（Kimi 三层清单）开关：默认不勾，勾选时 review
+                    请求体带 deep_review:true，pause_payload 多一段
+                    deep_review_report 分栏。 */}
                 {b.action === 'review' ? (
-                  <div
-                    className="wf-step__extra muted small"
-                    data-testid="wf-review-target-hint"
-                  >
-                    将审校：草稿 v{selectedDraftVersion ?? '暂未选择'}
-                  </div>
+                  <>
+                    <div
+                      className="wf-step__extra muted small"
+                      data-testid="wf-review-target-hint"
+                    >
+                      将审校：草稿 v{selectedDraftVersion ?? '暂未选择'}
+                    </div>
+                    <label
+                      className="wf-step__extra muted small"
+                      data-testid="wf-review-deep-toggle"
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        cursor: submitting ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        data-testid="wf-review-deep-checkbox"
+                        checked={deepReview}
+                        disabled={submitting}
+                        onChange={(e) => onDeepReviewChange(e.target.checked)}
+                        style={{ marginRight: 2 }}
+                      />
+                      深度二审（Kimi，+约1分钟）
+                    </label>
+                  </>
                 ) : null}
               </div>
             );
@@ -910,9 +968,181 @@ function WorkflowPanel({
           />
         </div>
       ) : null}
+
+      {/* 深度二审报告：仅在 chapter-review PAUSED 且 pause_payload 含
+          deep_review_report（开启 deep_review 才有）时渲染。critic_report
+          失败/缺省时不渲染；字段坏形状按需降级，不炸页。 */}
+      {detailRun && detailRun.status === 'PAUSED' && pausePayload ? (
+        <DeepReviewReportSection pausePayload={pausePayload} />
+      ) : null}
     </div>
   );
 }
+
+// ---- DeepReviewReportSection ----
+// 深度二审（Kimi 三层清单：设定 / 节拍 / 行为链）报告分栏。
+// 数据来源：pause_payload['deep_review_report']。仅在字段存在且为合法对象时渲染；
+// 未开启 deep_review / 字段缺失 / 坏形状（issues 不是数组等）一律降级为不渲染或
+// 友好提示，不抛错、不炸页。verdict 与 severity 用既有的 badge 样式承载。
+function DeepReviewReportSection({
+  pausePayload,
+}: {
+  pausePayload: Record<string, unknown>;
+}) {
+  const raw = pausePayload['deep_review_report'];
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return (
+      <div className="panel__section" data-testid="deep-review-report-malformed">
+        <div className="panel__section-title">深度二审（三层清单）</div>
+        <div className="muted small">报告形状异常，无法展示</div>
+      </div>
+    );
+  }
+  const report = raw as {
+    verdict?: string;
+    overall_comment?: string;
+    issues?: unknown;
+  };
+  const verdict = typeof report.verdict === 'string' ? report.verdict : '';
+  const overallComment =
+    typeof report.overall_comment === 'string' ? report.overall_comment : '';
+  const issuesRaw = Array.isArray(report.issues) ? report.issues : [];
+  // verdict 徽标：pass=绿/通过；revise=橙/建议改；其他值降级为弱提示。
+  const verdictLabel =
+    verdict === 'pass'
+      ? '通过'
+      : verdict === 'revise'
+      ? '建议改'
+      : verdict
+      ? verdict
+      : '未知';
+  const verdictColor =
+    verdict === 'pass'
+      ? 'var(--color-success, #2e7d32)'
+      : verdict === 'revise'
+      ? 'var(--color-warn, #c97a16)'
+      : 'var(--color-text-muted, #6b7280)';
+  const issues = issuesRaw
+    .map((it, i) => {
+      if (!it || typeof it !== 'object') return null;
+      const o = it as Record<string, unknown>;
+      const layer =
+        typeof o['layer'] === 'string' ? (o['layer'] as string) : '';
+      const severity =
+        typeof o['severity'] === 'string' ? (o['severity'] as string) : '';
+      const quote = typeof o['quote'] === 'string' ? (o['quote'] as string) : '';
+      const suggestion =
+        typeof o['suggestion'] === 'string'
+          ? (o['suggestion'] as string)
+          : '';
+      if (!layer && !severity && !quote && !suggestion) return null;
+      return { idx: i, layer, severity, quote, suggestion };
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+  return (
+    <div className="panel__section" data-testid="deep-review-report">
+      <div className="panel__section-title">深度二审（三层清单）</div>
+      <div
+        className="small"
+        style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}
+      >
+        <span
+          className="badge"
+          data-testid="deep-review-verdict"
+          data-verdict={verdict || 'unknown'}
+          style={{ color: verdictColor, borderColor: verdictColor }}
+        >
+          {verdictLabel}
+        </span>
+        {overallComment ? (
+          <span className="muted small" data-testid="deep-review-overall">
+            {overallComment}
+          </span>
+        ) : null}
+      </div>
+      {issues.length > 0 ? (
+        <ul
+          data-testid="deep-review-issues"
+          data-issue-count={issues.length}
+          style={{ listStyle: 'none', padding: 0, margin: '8px 0 0 0' }}
+        >
+          {issues.map((it) => (
+            <li
+              key={`dri-${it.idx}`}
+              data-testid="deep-review-issue"
+              data-layer={it.layer}
+              data-severity={it.severity}
+              style={{
+                borderLeft: '3px solid var(--color-border-strong)',
+                paddingLeft: 8,
+                marginTop: 4,
+              }}
+            >
+              <div
+                className="small"
+                style={{
+                  display: 'flex',
+                  gap: 6,
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span
+                  className="badge"
+                  data-testid="deep-review-issue-layer"
+                  title={`layer=${it.layer}`}
+                >
+                  {DEEP_REVIEW_LAYER_LABEL[it.layer] ?? it.layer ?? '未知层'}
+                </span>
+                <span
+                  className="badge"
+                  data-testid="deep-review-issue-severity"
+                  title={`severity=${it.severity}`}
+                >
+                  {DEEP_REVIEW_SEVERITY_LABEL[it.severity] ?? it.severity ?? '—'}
+                </span>
+              </div>
+              {it.quote ? (
+                <div
+                  className="muted small"
+                  data-testid="deep-review-issue-quote"
+                  style={{ marginTop: 2 }}
+                >
+                  「{it.quote}」
+                </div>
+              ) : null}
+              {it.suggestion ? (
+                <div
+                  data-testid="deep-review-issue-suggestion"
+                  style={{ marginTop: 2 }}
+                >
+                  {it.suggestion}
+                </div>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="muted small" style={{ marginTop: 6 }}>
+          未发现明显问题
+        </div>
+      )}
+    </div>
+  );
+}
+
+const DEEP_REVIEW_LAYER_LABEL: Record<string, string> = {
+  setting: '设定',
+  beat: '节拍',
+  behavior: '行为链',
+};
+
+const DEEP_REVIEW_SEVERITY_LABEL: Record<string, string> = {
+  high: '高',
+  medium: '中',
+  low: '低',
+};
 
 function RunTimeline({ run }: { run: WorkflowRun }) {
   if (!run.nodes || run.nodes.length === 0) {

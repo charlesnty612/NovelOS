@@ -402,6 +402,48 @@ def _latest_draft_text(db_path: str, chapter_id: str) -> str:
     return row["content"] or ""
 
 
+# 修订模式机读核销表（writer-v1.md §6.1 第 11 条）尾块标记。
+# 约定：writer revise 模式输出 prose 末尾追加独占一行的
+# "---REVISION-CHECKLIST---" 分隔行 + 一行 JSON 数组。管线按此分隔行切分，
+# 前半 = 真正正文（落 drafts.content），后半 = 核销表（落 run 节点产出）。
+_REVISION_CHECKLIST_MARKER = "---REVISION-CHECKLIST---"
+
+
+def _parse_revision_checklist(prose: str) -> tuple[str, list[dict[str, Any]] | None]:
+    """从 prose 末尾剥离 REVISION-CHECKLIST 尾块；返回 (clean_prose, checklist_or_None)。
+
+    行为契约（与 writer-v1.md §6.1 第 11 条 + 测试断言对齐）：
+    - 仅当 prose 含 `---REVISION-CHECKLIST---` 分隔行（独占一行）时进入切分逻辑；
+      缺失 → 返回 ``(prose.rstrip(), None)``（不报错，revise 模式允许模型漏写）。
+    - 切分后，分隔行后的剩余文本先 rstrip（剥掉模型可能留的尾部空白），
+      再尝试 ``json.loads``：成功且为 list → 返回核销表；失败/非 list → ``None``（fail-soft）。
+    - 前半（正文侧）rstrip 一次，去掉分隔行前的多余空行；不改变正文内容本身。
+
+    调用方须依据 ``checklist is None`` 决定是否在 ctx 写 ``revision_checklist=None``
+    + log warning（不阻断 writer run）。
+    """
+    if not isinstance(prose, str):
+        return ("", None)
+    if _REVISION_CHECKLIST_MARKER not in prose:
+        return (prose.rstrip(), None)
+    # 仅在分隔行**独占一行**时切分（避免误切正文内偶然出现的同名行；不过核销表
+    # 约定就是独占一行，故首处命中即认定为契约边界）。
+    head, _, tail = prose.partition(_REVISION_CHECKLIST_MARKER)
+    checklist_text = tail.strip()
+    if not checklist_text:
+        # 分隔行后为空 → 模型把分隔行写出但忘了 JSON → 当作缺失，fail-soft
+        return (head.rstrip(), None)
+    try:
+        parsed = json.loads(checklist_text)
+    except (TypeError, ValueError):
+        return (head.rstrip(), None)
+    if not isinstance(parsed, list):
+        return (head.rstrip(), None)
+    # 仅保留 dict 元素；非 dict 元素丢弃（不阻断）
+    items: list[dict[str, Any]] = [it for it in parsed if isinstance(it, dict)]
+    return (head.rstrip(), items)
+
+
 def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     run_id = ctx["run_id"]
@@ -454,6 +496,34 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
             capability_for("writer")
         ),
     )
+
+    # 修订模式机读核销表（writer-v1.md §6.1 第 11 条）：从 prose 末尾剥离
+    # `---REVISION-CHECKLIST---` 尾块，前半 = 真正正文（落 drafts.content），
+    # 后半 = 核销表（落 run 节点 revision_checklist 产出，便于审查改稿意见是否
+    # 被真正执行）。fail-soft：尾块缺失/JSON 坏 → checklist=None + log warning，
+    # 正文保持原样不阻断。
+    revision_checklist: list[dict[str, Any]] | None = None
+    if mode == "revise" and isinstance(out, dict):
+        raw_prose = out.get("prose") or ""
+        clean_prose, revision_checklist = _parse_revision_checklist(raw_prose)
+        if revision_checklist is None:
+            _log.warning(
+                "chapter_write.writer revision_checklist parse failed: "
+                "chapter_id=%s mode=revise (missing marker or bad JSON)",
+                chapter_id,
+            )
+        # 无论剥离成功与否，都用 clean_prose 覆盖 out["prose"]——保证下游
+        # polisher / save_draft 不会把核销表尾块混进草稿正文 / word_count 统计。
+        out["prose"] = clean_prose
+        # word_count 只统计剥离后正文：模型在 self_report.word_count 里通常按
+        # 全文长度（含核销表 JSON 行）统计，会拉高 word_count 字段；此处覆写为
+        # clean_prose 的字符数，确保 save_draft 落库的 word_count 与
+        # drafts.content 实际长度一致。
+        sr = out.get("self_report")
+        if isinstance(sr, dict):
+            sr["word_count"] = len(clean_prose)
+            out["self_report"] = sr
+
     # V3.1.1 V-P0：writer 本节点真实落库模型 id（mock 路径无 ai_call_logs 行 → None）。
     # 用于 drafts.model_id 记录真实 provider/model，避免列表页无法区分模型。
     writer_model_id: str | None = None
@@ -472,11 +542,15 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     if row is not None:
         writer_model_id = row["model_id"]
     # writer_input 透出到 ctx（→ checkpoint_json）供测试断言；生产仅作为可观测钩子。
+    # revision_checklist：仅 revise 模式且尾块解析成功时为 list；其余情况为 None
+    # （write 模式 / revise 但尾块缺失或 JSON 坏）。进 ctx → checkpoint_json / run
+    # 节点产出，run detail 可见，便于审查改稿意见是否被真正执行。
     return {
         "writer_output": out,
         "_writer_context_mode": context_mode,
         "writer_input": payload,
         "writer_model_id": writer_model_id,
+        "revision_checklist": revision_checklist,
     }
 
 

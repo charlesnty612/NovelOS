@@ -37,7 +37,10 @@
 from __future__ import annotations
 
 import copy
+import logging
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 # recent_events 最大保留条数（对齐任务书口径 50）。
 RECENT_EVENTS_CAP = 50
@@ -130,6 +133,18 @@ def _apply_world_changes(state: dict, items: list[dict]) -> None:
             bucket = world.setdefault(bucket_key, {})
             entry = bucket.get(wid)
             if op in ("add", "update"):
+                # 修复 wfr_3cb2182a30f6：bucket[wid] 非 None 且非 dict 时（被旧形状
+                # hint 整条目替换污染过，例如 factions[fac]='some-str' 或
+                # locations[loc]={'state': {...}} 残壳），换新 {} 入桶并 log warning，
+                # 避免 _set_top_level 在非 dict 上抛 TypeError。
+                if entry is not None and not isinstance(entry, dict):
+                    _logger.warning(
+                        "applier._apply_world_changes: bucket[%r] 被污染（类型=%s），"
+                        "换新 dict 入桶（kind=%s, world_id=%r）",
+                        wid, type(entry).__name__, kind, wid,
+                    )
+                    entry = {}
+                    bucket[wid] = entry
                 if entry is None:
                     # 新建条目：用 after 整体填充（允许 after 为 dict 含 name/statement/...）
                     entry = {}

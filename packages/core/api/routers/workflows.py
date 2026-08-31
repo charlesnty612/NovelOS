@@ -94,6 +94,11 @@ class StartWorkflowRequest(BaseModel):
     # chapter-review 指定审校稿版本：用户对比多模型多版本草稿时，可指定审 v7/v8 等
     # 特定版本（不再强制只审最新稿）。None → 维持既有"取最新 draft"语义。
     draft_version: int | None = Field(default=None, ge=1)
+    # V1.3：deep_review 二审 AI 节点开关。仅 chapter-review 节点读取；其他 workflow 忽略。
+    # None/False → 跳过 deep_reviewer（不调 AI）；True → 调 deep_reviewer 按三层清单核销。
+    # verdict=revise 不驳回 run（advisory），与 critic 默认 always 形成差异化——critic 写法层
+    # 每章评，deep_reviewer 事实层按需启用。
+    deep_review: bool | None = None
 
 
 class ProjectInitRequest(BaseModel):
@@ -171,6 +176,11 @@ class ResumeRequest(BaseModel):
     # 重生成：true 时重跑当前挂起节点自身（而非下一节点）；可与 human_input.regenerate_note
     # 配合传一条重生成意见，pipeline 会注入到对应 AI 节点的 payload。
     regenerate: bool | None = None
+    # 单次 run 级模型档案覆盖：与 StartWorkflowRequest.model_overrides 同语义。
+    # 自动改稿回路（auto_revise）触发时，回路内重跑的 write / review 子 run 必须把同一份
+    # model_overrides 透传到各自 ctx，避免首轮指定的档案在改稿回路里丢失。
+    # None → 不覆盖（保持现状）；缺省从原 review run 的 ctx 中继承（如能取到）。
+    model_overrides: dict[str, str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +424,7 @@ def _auto_revise_loop(
     chapter_id: str,
     mock_providers: dict[str, list[str]] | None,
     max_iter: int,
+    model_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """P0 自动改稿回路：重跑 chapter-write → chapter-review 直到 approved 或达上限。
 
@@ -423,8 +434,18 @@ def _auto_revise_loop(
 
     缺陷 1（P0 高）修复：当 write 或 review 子 run 等待超时（payload 含 ``timeout=True``，
     即 run 仍 RUNNING）时，不继续下一轮——后台线程会自行到终态，前端通过 GET /runs 轮询。
+
+    ``model_overrides``：触发回路的 resume 请求的 model_overrides（已按「请求体 >
+    原 review run ctx」优先级解析）。非 None 时透传到回路内每轮 write / review 子 run 的
+    ctx，保持与首轮 run 一致的模型档案覆盖；None 时不写入 ctx（与既有「缺省不出现键」
+    行为一致，避免下游误读为「空覆盖」）。
     """
     final_payload: dict[str, Any] | None = None
+    # 仅当非 None 时构造 initial_ctx_extra，避免 None 覆盖行为（缺省不出现键）。
+    # 与 _start_workflow 的处理口径保持一致。
+    initial_ctx_extra: dict[str, Any] | None = (
+        {"model_overrides": model_overrides} if model_overrides is not None else None
+    )
     for iteration in range(1, max_iter + 1):
         log.info(
             "auto_revise loop iteration %d/%d for chapter %s",
@@ -432,7 +453,8 @@ def _auto_revise_loop(
         )
         # 1) 重跑 chapter-write：revision_note 已在 plan_json 中由上一轮 load_plan 带上
         write_payload = _run_workflow_return_payload(
-            engine, db_path, "chapter-write", project_id, chapter_id, mock_providers
+            engine, db_path, "chapter-write", project_id, chapter_id, mock_providers,
+            initial_ctx_extra=initial_ctx_extra,
         )
         # 缺陷 1（P0 高）：子 run 超时（仍在后台执行），不触发下一轮 review，
         # 直接返回该 payload；后台 run 列表可见，前端轮询。
@@ -447,7 +469,8 @@ def _auto_revise_loop(
 
         # 2) 重跑 chapter-review
         review_payload = _run_workflow_return_payload(
-            engine, db_path, "chapter-review", project_id, chapter_id, mock_providers
+            engine, db_path, "chapter-review", project_id, chapter_id, mock_providers,
+            initial_ctx_extra=initial_ctx_extra,
         )
         # 缺陷 1（P0 高）：同上，review 超时短路
         if review_payload.get("timeout") or review_payload["status"] == "RUNNING":
@@ -539,6 +562,10 @@ def _start_workflow(
     # chapter-review 指定草稿版本：仅 chapter-review 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。
     if body.draft_version is not None:
         initial_ctx["draft_version"] = body.draft_version
+    # V1.3 deep_review 二审 AI 开关：仅 chapter-review 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。
+    # 仅当显式 True 才塞 ctx（None/False 一律不塞，避免下游误读为「未指定」）。
+    if body.deep_review is True:
+        initial_ctx["deep_review"] = True
 
     engine = _engine(request)
     try:
@@ -951,8 +978,24 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                     if isinstance(legacy_mp, dict):
                         mp = legacy_mp
 
+                # 解析「回路用 model_overrides」：与 mock_providers 同样的「请求体 > 原
+                # run ctx」语义。请求体显式给出（含空 dict）一律以请求体为准；请求体 None
+                # 时从原 review run 的 checkpoint_json（即其 ctx）中尝试继承一份 dict。
+                # 继承失败 / 非 dict / None → 回路不写 model_overrides（保持现状）。
+                effective_model_overrides: dict[str, str] | None
+                if body.model_overrides is not None:
+                    effective_model_overrides = body.model_overrides
+                else:
+                    _ckpt_for_ov = run.get("checkpoint_json") or {}
+                    _ov_legacy = _ckpt_for_ov.get("model_overrides")
+                    if isinstance(_ov_legacy, dict):
+                        effective_model_overrides = _ov_legacy
+                    else:
+                        effective_model_overrides = None
+
                 # 防御快照：daemon 线程不能持有 Request / Body 引用，避免 GC 后访问异常；
-                # db_path / workflow 元数据 / mock_providers 都重新解出原始值再传入线程。
+                # db_path / workflow 元数据 / mock_providers / model_overrides 都重新解出
+                # 原始值再传入线程。
                 _thread_db_path = str(db_path)
                 _thread_engine = engine
                 _thread_run_id = run_id
@@ -960,6 +1003,7 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                 _thread_chapter_id = chapter_id_for_loop
                 _thread_mp = mp
                 _thread_auto_revise_max = auto_revise_max
+                _thread_model_overrides = effective_model_overrides
 
                 def _auto_revise_runner() -> None:
                     """daemon 线程体：等当前 resume run 终态 → 判 rejected → 调 _auto_revise_loop。
@@ -995,6 +1039,7 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                                 _thread_chapter_id,
                                 _thread_mp,
                                 _thread_auto_revise_max,
+                                _thread_model_overrides,
                             )
                     except Exception as exc:  # noqa: BLE001
                         log.exception(

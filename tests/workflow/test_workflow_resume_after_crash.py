@@ -184,7 +184,8 @@ def test_resume_via_new_engine_instance(tmp_path: Path):
             paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
             run_id = paused["run_id"]
 
-            # 校验：workflow_run_nodes 含 3 行（V1.3：basic_checks + critic_review + author_review PENDING）
+            # 校验：workflow_run_nodes 含至少 3 行（V1.3：basic_checks + critic_review + author_review PENDING；
+            # V1.3+ 可选含 deep_review，因 deep_review 默认跳过不落节点行）。
             conn = get_connection(db_path)
             try:
                 rows = conn.execute(
@@ -193,7 +194,7 @@ def test_resume_via_new_engine_instance(tmp_path: Path):
                 ).fetchall()
             finally:
                 conn.close()
-            assert len(rows) == 3, rows
+            assert len(rows) >= 3, rows
             statuses = {r["node_id"]: r["status"] for r in rows}
             assert statuses["basic_checks"] == "COMPLETED"
             assert statuses["critic_review"] in ("COMPLETED", "FAILED")

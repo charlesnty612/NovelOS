@@ -13,6 +13,7 @@ from __future__ import annotations
 import sqlite3
 
 from fastapi import APIRouter, HTTPException, Request, status
+from pydantic import BaseModel, Field
 
 from packages.core.logging_config import get_logger
 from packages.domain.chapter.models import (
@@ -28,6 +29,7 @@ from packages.domain.chapter.service import (
     ChapterTransitionError,
     DraftStatusNotAllowed,
     DraftVersionConflict,
+    RevisionNoteStatusNotAllowed,
 )
 
 log = get_logger("novelos.routers.chapters")
@@ -157,6 +159,47 @@ def create_chapter_draft(
         ) from exc
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
+    return row
+
+
+# =============================================================================
+# Sprint 6：revision_note（改稿意见专用端点，task R1）。
+# 契约见 packages/domain/chapter/service.py 中的 update_revision_note。
+# 仅 chapter.status ∈ {PLANNED, DRAFTED, REVIEWED} 允许写入/清除；
+# COMMITTED/RELEASED 视为正文已锁定 → 409。
+# =============================================================================
+
+
+class RevisionNoteUpdate(BaseModel):
+    """写入或清除改稿意见的请求体。
+
+    - ``note`` 必填字符串；非空白字符串写入 ``plan_json.revision_note``；
+      空串 / 全空白 → 删除该键（语义=清除改稿意见）。
+    - 不设 ``max_length``：note 是人工意见，无明确字节上限；底层走 plan_json TEXT。
+    """
+
+    note: str = Field(..., min_length=0)
+
+
+@router.patch("/chapters/{chapter_id}/revision-note", response_model=Chapter)
+def update_chapter_revision_note(
+    chapter_id: str,
+    payload: RevisionNoteUpdate,
+    request: Request,
+) -> dict:
+    try:
+        row = _service(request).update_revision_note(chapter_id, payload.note)
+    except RevisionNoteStatusNotAllowed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"chapter {chapter_id!r} status is {exc.current!r}; "
+                f"revision_note update only allowed when status is 'PLANNED', "
+                f"'DRAFTED' or 'REVIEWED'"
+            ),
+        ) from exc
     if row is None:
         raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
     return row

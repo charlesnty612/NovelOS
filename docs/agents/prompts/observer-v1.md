@@ -197,6 +197,25 @@
     - **微小瞬态不要成条提取**：例如「位置小幅移动且无剧情意义」「情绪短时波动（持续 < 1 段）」「资源数值微调（< 10%）」「动作修饰性的外观描写变化」——这些都不进任何 change 数组。
     - **正常一章 7 个数组合计 ≤ 24 条**；超出即视为「过度报告」，宁可丢弃低 confidence 项。
     - **当 draft_text 整体变化很少时（如仅 1-2 段对话推进）**：宁可输出大部分数组为空，也要把每条 change 写到 evidence / confidence 都站得住。
+25. **ID 保真（强制字符级一致）**：引用既有实体时，**必须逐字复制** `previous_state` / snapshot 中该实体的 id（含完整前缀）——禁止凭记忆改写前缀或自造 id。覆盖位置：`character_changes[*].character_id` / `world_changes[*].world_id`（kind=faction 时）/ `relationship_changes[*].from_character_id` / `to_character_id` / `new_events[*].participants[]`。具体：
+    - `char_xxx`（character）与 `fac_xxx`（faction）后缀可能完全相同（hex 后缀重合），但**前缀一字之差即语义相反**——下游 validator 会按前缀归桶查 FK，错写会让 `commit` 阶段在 `inject_validate` 被拒（生产事故 wfr_6d77d905b4b1：observer 引用 `fac_e98a1ca56b66` 时错写成 `char_e98a1ca56b66`，导致 run FAILED）。
+    - **拿不准的实体不引用**：若不能从 `previous_state` 中确认实体的精确 id（不光是名字）——宁可**整条 change 不写**，也不要给出模糊前缀的 id。
+    - `event_id` / `hook_id` / `debt_id` / `location_id` 同样必须从 `previous_state` / `director_plan_summary` / `config.recent_event_ids` 等来源**精确复制**——禁止凭印象生成新 id（new_events[*].event_id 例外，由你按 §7.4 规则新生成）。
+    - delta_repair 端有「前缀调和」兜底（`id_prefix_reconcile` 规则：错写 char_/fac_ 但对方表唯一命中同后缀时自动改写 + 留痕），但**这不是 observer 偷懒的理由**——兜底仅修复「唯一命中」场景，零命中 / 多命中会直接失败；observer 必须从源头保证 id 字符级一致。
+26. **change_id 全局唯一（同 delta 内零重复）**：每个 change 的 `change_id` 在**同一 delta 内必须全局唯一**，任何两个 change 条目不得共享同一 change_id（生产事故 wfr_6765f6de4d76 现场：模型照抄示例字面量 `cc:01HXXXXXXXX` 到多条 change，validator 以「delta 内 change_id 重复」拒绝）。规则：
+    - **格式**：`<数组前缀>:<12 位小写 hex>`。hex 部分建议取 ULID/UUIDv7 前 12 位，便于人工 audit、跨章去重与下游 join；禁止使用 `XXXX` / `xxxx` / `xxxxxxxx` 等占位符；禁止复用 Prompt 示例中出现的字面量（如 `cc:01HXXXXX` / `cc:01HCHAR001` 等）。
+    - **数组前缀对照表**（与 state-delta-v0.md §2.3 建议一致；七个数组一一对应）：
+        | 数组 | change_id 前缀 |
+        |---|---|
+        | `character_changes` | `cc:` |
+        | `world_changes` | `wc:` |
+        | `relationship_changes` | `rc:` |
+        | `new_events` | `ev:` |
+        | `resolved_hooks` | `rh:` |
+        | `new_hooks` | `nh:` |
+        | `debt_changes` | `dc:` |
+    - **跨数组独立**：同一前缀只在本数组内必须唯一；不同数组的前缀天然隔开（如 `cc:01H...` 与 `wc:01H...` 互不冲突）。
+    - **validator 兜底**：validator 在 `validate_delta` 阶段会做一次 delta 内 change_id 重复预检（任意两条 share change_id 即拒绝）；即便模型输出端漏检，下游 commit 也会被拦截。delta_repair 端另有 `change_id_uniquify` 兜底规则：检测到占位符形态（含 ≥3 连续 X/x）或与本数组先前 change_id 重复时，按 `<原前缀>:<uuid4 hex 前 12 位>` 自动重写并留痕。**兜底不取代源头唯一性**：observer 必须从源头生成不重复的 change_id，禁止依赖兜底。
 
 ---
 
@@ -214,7 +233,7 @@
 {
   "character_changes": [
     {
-      "change_id": "string, 如 cc:01HXXXXX",
+      "change_id": "string，格式 <数组前缀>:<12 位小写 hex>，每条 change 全局唯一，禁止复用本示例字面量",
       "op": "add | update | remove",
       "target_id": "string, character_id",
       "character_id": "string, 等于 target_id",
@@ -363,13 +382,13 @@
 
 | 数组 | required 字段 | 固定 op | 枚举 / 备注 |
 |---|---|---|---|
-| `character_changes` | change_id, op, target_id, character_id, facet, field, before*, after*, confidence, evidence, risk_level | add/update/remove | facet ∈ {definition, state} |
-| `world_changes` | change_id, op, target_id, world_kind, world_id, field, before*, after*, confidence, evidence, risk_level | add/update/remove | world_kind ∈ {location, faction, rule, politics, economy, event, time} |
-| `relationship_changes` | change_id, op, target_id, from_character_id, to_character_id, relation_type, before*, after*, confidence, evidence, risk_level | add/update/remove | before/after 为 object；from/to 端点可为 character_id 或 faction_id（见 §6-22） |
-| `new_events` | change_id, op, target_id, event_id, type, participants, time, confidence, evidence, risk_level | const `add` | type ∈ {revelation, conflict, decision, encounter, transition, other}；time.timeline_day ≥ 1；participants ≥ 1（可为 character_id 或 faction_id）；**event_id 必须全新唯一——见下文 §7.4** |
-| `resolved_hooks` | change_id, op, target_id, hook_id, to_status, payoff_summary, confidence, evidence, risk_level | const `update` | to_status 五态之一 |
-| `new_hooks` | change_id, op, target_id, hook_id, name, importance, description, confidence, evidence, risk_level | const `add` | importance ∈ [0, 1] |
-| `debt_changes` | change_id, op, target_id, debt_id, status_after, confidence, evidence, risk_level | add/update/remove | status_after ∈ {open, acknowledged, paid, forgiven} |
+| `character_changes` | change_id, op, target_id, character_id, facet, field, before*, after*, confidence, evidence, risk_level | add/update/remove | facet ∈ {definition, state}；change_id 唯一（见 §6-26） |
+| `world_changes` | change_id, op, target_id, world_kind, world_id, field, before*, after*, confidence, evidence, risk_level | add/update/remove | world_kind ∈ {location, faction, rule, politics, economy, event, time}；change_id 唯一（见 §6-26） |
+| `relationship_changes` | change_id, op, target_id, from_character_id, to_character_id, relation_type, before*, after*, confidence, evidence, risk_level | add/update/remove | before/after 为 object；from/to 端点可为 character_id 或 faction_id（见 §6-22）；change_id 唯一（见 §6-26） |
+| `new_events` | change_id, op, target_id, event_id, type, participants, time, confidence, evidence, risk_level | const `add` | type ∈ {revelation, conflict, decision, encounter, transition, other}；time.timeline_day ≥ 1；participants ≥ 1（可为 character_id 或 faction_id）；**event_id 必须全新唯一——见下文 §7.4**；change_id 唯一（见 §6-26） |
+| `resolved_hooks` | change_id, op, target_id, hook_id, to_status, payoff_summary, confidence, evidence, risk_level | const `update` | to_status 五态之一；change_id 唯一（见 §6-26） |
+| `new_hooks` | change_id, op, target_id, hook_id, name, importance, description, confidence, evidence, risk_level | const `add` | importance ∈ [0, 1]；change_id 唯一（见 §6-26） |
+| `debt_changes` | change_id, op, target_id, debt_id, status_after, confidence, evidence, risk_level | add/update/remove | status_after ∈ {open, acknowledged, paid, forgiven}；change_id 唯一（见 §6-26） |
 
 > `before*` / `after*` 的具体 required 状态依赖 `op`：update 时 before/after 均必填；add 时 after 必填；remove 时 before/after 可为 null（remove 时 `reason` 必填）。
 

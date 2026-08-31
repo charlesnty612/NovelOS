@@ -167,6 +167,10 @@ def apply_inverse_cleanup_to_state(state: dict, cleanup: dict) -> None:
                 if not (isinstance(r, dict) and r.get("world_rule_id") in rm_rules)
             ]
         # 逆 update → 恢复 before 状态（locations/factions）
+        # 修复 wfr_3cb2182a30f6：hint 形状改为字段级 {world_id, field, value}，
+        # 此处按字段级写入（field 取末段为键）；entry 非 dict 或 field 为空时
+        # 跳过并 log warning（旧形状 {"world_id", "before"} 不再兼容；如发现
+        # 残留旧形状，识别并丢弃避免再次污染快照）。
         for hint_key, snapshot_key in (
             ("restore_location_states", "locations"),
             ("restore_faction_states", "factions"),
@@ -176,11 +180,50 @@ def apply_inverse_cleanup_to_state(state: dict, cleanup: dict) -> None:
                 bucket = world[snapshot_key]
                 for entry in restores:
                     if not isinstance(entry, dict):
+                        _logger.warning(
+                            "rollback cleanup: %s 条目非 dict（%r），跳过", hint_key, entry
+                        )
                         continue
                     wid = entry.get("world_id")
-                    if isinstance(wid, str) and wid in bucket:
-                        bucket[wid] = entry.get("before")
+                    field = entry.get("field") or ""
+                    value = entry.get("value")
+                    # 旧形状（仅 {world_id, before}）识别：显式丢弃以免污染
+                    if "field" not in entry and "value" not in entry and "before" in entry:
+                        _logger.warning(
+                            "rollback cleanup: %s 收到旧形状 hint（world_id=%r），丢弃",
+                            hint_key, wid,
+                        )
+                        continue
+                    if not isinstance(wid, str) or wid not in bucket:
+                        continue
+                    target = bucket[wid]
+                    if not isinstance(target, dict):
+                        _logger.warning(
+                            "rollback cleanup: %s bucket[%r] 非 dict（实际=%s），跳过字段恢复",
+                            hint_key, wid, type(target).__name__,
+                        )
+                        continue
+                    if not field:
+                        _logger.warning(
+                            "rollback cleanup: %s field 为空（world_id=%r），跳过",
+                            hint_key, wid,
+                        )
+                        continue
+                    # 字段级恢复：field 取末段为键写入 value（与 applier._set_top_level 对齐）
+                    key = field.split(".")[-1]
+                    # data_json.<key> 路径：进入子 dict
+                    if field.startswith("data_json.") and field.count(".") == 1 and field.split(".", 1)[1]:
+                        sub_key = field.split(".", 1)[1]
+                        dj = target.get("data_json")
+                        if not isinstance(dj, dict):
+                            dj = {}
+                            target["data_json"] = dj
+                        dj[sub_key] = value
+                    else:
+                        target[key] = value
         # 逆 update → 恢复 world_rules（list 形态）
+        # 修复 wfr_3cb2182a30f6：field 非空 → 该项[field 末段]=value（保留 world_rule_id）；
+        # field 为空且 value 是 dict → 逐键 merge（不丢 world_rule_id）；其他跳过。
         restore_rules = cleanup.get("restore_world_rule_states") or []
         if restore_rules and isinstance(world.get("world_rules"), list):
             rule_index = {
@@ -190,11 +233,53 @@ def apply_inverse_cleanup_to_state(state: dict, cleanup: dict) -> None:
             }
             for entry in restore_rules:
                 if not isinstance(entry, dict):
+                    _logger.warning(
+                        "rollback cleanup: restore_world_rule_states 条目非 dict（%r），跳过",
+                        entry,
+                    )
                     continue
                 rid = entry.get("world_id")
                 idx = rule_index.get(rid)
-                if idx is not None:
-                    world["world_rules"][idx] = entry.get("before")
+                if idx is None:
+                    continue
+                rule = world["world_rules"][idx]
+                if not isinstance(rule, dict):
+                    _logger.warning(
+                        "rollback cleanup: world_rules[%r] 非 dict（实际=%s），跳过",
+                        rid, type(rule).__name__,
+                    )
+                    continue
+                field = entry.get("field") or ""
+                value = entry.get("value")
+                if "field" not in entry and "value" not in entry and "before" in entry:
+                    _logger.warning(
+                        "rollback cleanup: restore_world_rule_states 收到旧形状 hint（world_rule_id=%r），丢弃",
+                        rid,
+                    )
+                    continue
+                if field:
+                    key = field.split(".")[-1]
+                    if field.startswith("data_json.") and field.count(".") == 1 and field.split(".", 1)[1]:
+                        sub_key = field.split(".", 1)[1]
+                        dj = rule.get("data_json")
+                        if not isinstance(dj, dict):
+                            dj = {}
+                            rule["data_json"] = dj
+                        dj[sub_key] = value
+                    else:
+                        rule[key] = value
+                elif isinstance(value, dict):
+                    # 字段级 value 缺失 + value 是 dict → 逐键 merge（保留 world_rule_id）
+                    for k, v in value.items():
+                        if k == "world_rule_id":
+                            # 防御：不允许 hint 覆盖实体的世界规则 id
+                            continue
+                        rule[k] = v
+                else:
+                    _logger.warning(
+                        "rollback cleanup: restore_world_rule_states field 为空且 value 非 dict（world_rule_id=%r），跳过",
+                        rid,
+                    )
 
     # characters[*].relationships：按 (from,to,type) 删；逆 update 恢复 before
     rm_rel_keys = set(
