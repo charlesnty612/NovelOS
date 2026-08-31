@@ -138,7 +138,11 @@
 4. **信息隔离**：`information_boundary` 列出本场景不能揭示的具体信息项（如「黑玉佩真正来历」「林渊父亲真实死因」）。
 5. **钩子具体**：`ending_hook` 不要写「留下悬念」这种空话；要写明悬念内容（如「苏婉清发现林渊袖口血迹」）。
 6. **slot 顺序**：slots 必须按场景内时间顺序排列，不可倒叙或交叉。
-7. **字数分配**：根据 `target_word_count` 大致分配各 scene 字数（可在 `notes_for_writer` 中标注），但 Writer 有最终裁量权。
+7. **字数分配（必填）**：每个 scene 必须输出 `target_words`（整数，且 `target_words ≥ 0`）。
+   期望总和约等于 `target_word_count`；若声明的总和落在 `target_word_count` 的 **90%–110%**
+   区间内，writer 装配侧保留原值；若超出 110% 或低于 90%，由
+   `context_engine.builders._inject_scene_word_budget` 自动等分兜底（`divmod` + 余数
+   补首场景）。等分是默认推荐，亦可按叙事权重自主分配，但不得全部置 0 / null / 缺失。
 8. **视角一致**：同一 scene 内 `pov` 不变；`pov_character_id` 非空时，本 scene 的心理描写仅限该角色可感知范围。
 9. **revision_note 优先**：若 `revision_note` 与 Director plan 冲突，以 `revision_note` 的约束为准，并在 `deviations` 中记录。
 10. **失败透明**：若 Director plan 过空无法规划，输出 1 个兜底 scene（见 §7），并在 `notes_for_writer` 说明。
@@ -171,6 +175,7 @@
       "pov_character_id": "character_id 或 null",
       "information_boundary": ["string, 本场景不能揭示的信息项"],
       "ending_hook": "string 或 null, 场景结尾钩子",
+      "target_words": "integer ≥ 0, 本场景字数预算（§6 Rule 7 必填；总和应在 target_word_count 的 90~100%）",
       "slots": [
         {
           "slot_id": "string, 全局唯一",
@@ -397,6 +402,6 @@
 
 ## Open Questions
 
-1. **PRD 未规定**：单 scene 字数分配是否写入 slot 级别。本 v1 仅在 `notes_for_writer` 中做粗略分配，不强制 slot 字数。
+1. ~~**PRD 未规定**：单 scene 字数分配是否写入 slot 级别。本 v1 仅在 `notes_for_writer` 中做粗略分配，不强制 slot 字数。~~ **V3.7+ 字数闭环**：已升级为强制约束——§6 Rule 7 要求每个 scene 必填 `target_words`（总和 = target_word_count 的 90~100%）。降级 stub 由 `context_engine.builders._inject_scene_word_budget` 兜底（等分 + 余数补首场景）。
 2. **PRD 未规定**：revision_note 与 Director plan 冲突时，是否允许 Scene Planner 调整 beats 顺序。本 v1 允许在 `deviations` 中记录，但 beat 总体顺序不变。
 3. **待验证**：多场景 chapter 中，是否需要在 scene 间插入转场 slot。本 v1 由 Writer 通过 `recent_prose` 与 scene 首句自行处理，Scene Planner 不额外生成转场 slot。

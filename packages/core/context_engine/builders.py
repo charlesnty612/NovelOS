@@ -1387,6 +1387,63 @@ def _fingerprint_plan_json(plan_json_raw: Any) -> str:
         return _FINGERPRINT_UNCACHED
 
 
+def _inject_scene_word_budget(
+    scene_plan: dict[str, Any] | None, target_word_count: int,
+) -> dict[str, Any]:
+    """为每个 scene 注入 ``target_words`` 预算，透传给 writer。
+
+    来源：scene_planner-v1 §6 Rule 7 要求每个 scene 必填 ``target_words``（整数，
+    总和 = target_word_count 的 90~100%）。但降级 stub / 旧版 prompt 可能不填，
+    这里做兜底：缺值场景按等分补齐（首场景补余数），已填则按"总数 90~110% 内
+    归一化"重算——避免模型被自己瞎填的总和误导。
+
+    输出 scene_plan 永远带 ``scenes[*].target_words`` 字段；target_word_count<=0
+    时不补（无预算可言）。不影响 ``scene_id / purpose / characters`` 等既有
+    字段；只做浅拷贝，不破坏原 scene_plan。
+    """
+    if not isinstance(scene_plan, dict):
+        return {"scenes": []} if not isinstance(scene_plan, dict) else scene_plan  # type: ignore[return-value]
+    scenes_raw = scene_plan.get("scenes")
+    if not isinstance(scenes_raw, list) or not scenes_raw:
+        return scene_plan
+    if target_word_count <= 0:
+        # 无预算：原样返回（让 writer 走默认 ±15% 硬带）。
+        return scene_plan
+
+    scenes: list[dict[str, Any]] = [s for s in scenes_raw if isinstance(s, dict)]
+    n = len(scenes)
+    # 已声明的 target_words 收集（视作相对权重）
+    declared: list[int | None] = []
+    for s in scenes:
+        tw = s.get("target_words")
+        if isinstance(tw, int) and tw > 0:
+            declared.append(tw)
+        elif isinstance(tw, float) and tw.is_integer() and int(tw) > 0:
+            declared.append(int(tw))
+        else:
+            declared.append(None)
+
+    # 总和归一化：已填总和 > target*1.1 或 < target*0.9 → 等分；否则按等分。
+    valid = [d for d in declared if d is not None]
+    if valid and 0.9 * target_word_count <= sum(valid) <= 1.1 * target_word_count:
+        budget = list(declared)  # type: ignore[assignment]
+    else:
+        base, rem = divmod(target_word_count, n)
+        budget = [base] * n
+        # 余数补到首场景（确定性强）
+        if rem and n > 0:
+            budget[0] = budget[0] + rem
+
+    out_scenes: list[dict[str, Any]] = []
+    for idx, src in enumerate(scenes):
+        new_scene = dict(src)
+        new_scene["target_words"] = int(budget[idx])
+        out_scenes.append(new_scene)
+    out_plan = dict(scene_plan)
+    out_plan["scenes"] = out_scenes
+    return out_plan
+
+
 def _fingerprint_scene_plan(scene_plan: Any) -> str:
     """计算 scene_plan 的稳定指纹（json.dumps sort_keys=True 的 sha256 前 16）。
 
@@ -1812,7 +1869,7 @@ def _build_writer_input_uncached(
             "key_beats": director_plan.get("key_beats", []),
             "notes_for_planner": director_plan.get("notes_for_planner"),
         },
-        "scene_plan": scene_plan,
+        "scene_plan": _inject_scene_word_budget(scene_plan, target_word_count),
         "character_state_excerpts": character_excerpts,
         "world_state_excerpts": world_excerpts,
         "recent_prose": {

@@ -13,8 +13,26 @@
   writer 原始 prose，**不**阻断 save_draft。
   mock 直通：若 ``ctx["mock_providers"]`` 含 'writer' 但不含 'polisher'，跳过润色
   原样透传（既有 mock 测试不受影响；真实链路始终润色）。
+- ``length_check`` (Transform) —— 字数闭环实测节点（V3.7+ P1）：
+  用 :func:`packages.core.quality.wordcount.classify_prose_length` 权威口径实测
+  polished_prose（缺则 writer_output.prose）字数，读项目级 word_band_json 覆盖
+  （与 chapter_review._basic_checks_node 同口径）。
+  输出 ``length_report = {visible_chars, target, band_low, band_high, status,
+  within_band}`` + ``target_word_count`` + ``word_band_cfg`` 三个独立 key
+  （便于 condense 节点与 save_draft 复用），并把 ``length_check_passed`` 布尔
+  写入 ctx 供 condense 路由判定。
+- ``condense`` (AI) —— 仅在 length_check 未通过且未超过 2 轮时执行。
+  复用 polisher 的 capability 绑定（``capability_for('polisher')``），prompt
+  携带实测字数、目标带上下限、需净减比例，遵循 writer-v1 规则 20 的压缩纪律
+  （优先砍铺垫/重复意象/冗词，不砍节拍、不删场景、保持文风与既有设定用语）。
+  任何失败 → 兜底保留当前 polished_prose 放行，``condense_status='failed'``，
+  **不**阻断 save_draft。两轮后仍超带 → ``condense_status='over_band_after_2_rounds'``
+  放行，save_draft 在 deviations 中标注实测字数与偏差。
 - ``save_draft`` (State) —— 写 drafts 表 + chapters.status PLANNED→DRAFTED。
   优先取 ``polished_prose``（无则回落 ``writer_output.prose``）。
+  word_count 改用权威实测（``ctx['length_report']['visible_chars']``），
+  不再采信 self_report.word_count（实证 ch4-6：writer 自报 3008-3172
+  vs 实际 4721-5842，偏差 50%+）。超带偏差注记追加到 chapter plan_json.deviations。
 """
 
 from __future__ import annotations
@@ -32,7 +50,12 @@ from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.model_router.router import capability_for
 from packages.core.quality.ai_patterns import scan_ai_patterns
-from packages.core.quality.wordcount import visible_chars
+from packages.core.quality.wordcount import (
+    classify_prose_length,
+    resolve_band_config,
+    visible_chars,
+    word_band,
+)
 from packages.core.workflow_runtime.engine import WorkflowNode
 
 _log = logging.getLogger(__name__)
@@ -671,6 +694,353 @@ def _polish_node(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# 字数闭环：length_check + condense（V3.7+ P1 字数闭环节点）
+# ---------------------------------------------------------------------------
+
+# condense 最大重试轮次（含 condense 节点的执行次数）；超过则放行并标注偏差。
+_MAX_CONDENSE_ROUNDS = 2
+
+
+def _resolve_chapter_word_band(
+    db_path: str, chapter_id: str
+) -> tuple[int, dict[str, Any]]:
+    """读 chapter → project → projects.word_band_json，覆盖 → resolve_band_config。
+
+    返回 ``(chapter_project_id_or_empty, band_cfg)``。band_cfg 始终是合法可
+    ``**word_band(...)`` 展开的 dict（无覆盖 = 模块默认 0.85/1.15/1200）。
+
+    与 chapter_review/pipeline.py _basic_checks_node L111-156 同口径（共用
+    ``resolve_band_config``），保证 review 侧与 write 侧字数带读源唯一。
+
+    防御：``resolve_band_config`` 在 ratios/floor 非法值时会抛 ``ValueError``
+    （如 low_ratio > high_ratio 倒挂、floor=负数等）。此处捕获并落默认带 + 告警，
+    与项目内「非法 JSON → 视为无覆盖」的 fail-soft 风格一致。chapter_review 侧
+    ``_basic_checks_node`` 是独立函数、未复用本 helper，行为差异不在本任务范围
+    （已记 Known Issue / 后续可一并覆盖）。
+    """
+    cfg: dict[str, Any] = {
+        "low_ratio": 0.85,
+        "high_ratio": 1.15,
+        "floor": 1200,
+    }
+    chapter_project_id = ""
+    try:
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT project_id FROM chapters WHERE chapter_id = ?",
+                (chapter_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is not None and row["project_id"]:
+            chapter_project_id = row["project_id"]
+    except Exception:  # noqa: BLE001
+        return chapter_project_id, resolve_band_config(None)
+
+    if not chapter_project_id:
+        return chapter_project_id, resolve_band_config(None)
+
+    try:
+        conn2 = get_connection(db_path)
+        try:
+            try:
+                band_row = conn2.execute(
+                    "SELECT word_band_json FROM projects WHERE project_id = ?",
+                    (chapter_project_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                band_row = None
+        finally:
+            conn2.close()
+    except Exception:  # noqa: BLE001
+        band_row = None
+
+    if band_row is None or not band_row["word_band_json"]:
+        return chapter_project_id, resolve_band_config(None)
+    try:
+        parsed = json.loads(band_row["word_band_json"])
+    except (TypeError, ValueError):
+        return chapter_project_id, resolve_band_config(None)
+    if not isinstance(parsed, dict):
+        return chapter_project_id, resolve_band_config(None)
+    try:
+        return chapter_project_id, resolve_band_config(parsed)
+    except ValueError as exc:
+        # 非法值（low_ratio > high_ratio 倒挂 / floor 负数等）→ 落默认 + 告警。
+        _log.warning(
+            "chapter_write._resolve_chapter_word_band: invalid word_band_json "
+            "project_id=%s err=%s; fall back to default band",
+            chapter_project_id, exc,
+        )
+        return chapter_project_id, resolve_band_config(None)
+
+
+def _resolve_target_word_count(ctx: dict[str, Any], plan: dict[str, Any]) -> int:
+    """解析本章目标字数（与 _writer_node / review._basic_checks 同口径）。
+
+    优先级：ctx 显式传入 → plan_json.expected_word_count → plan_json.target_word_count
+    → 默认 3000。
+    """
+    raw = ctx.get("target_word_count")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            pass
+    expected = plan.get("expected_word_count") if isinstance(plan, dict) else None
+    if expected:
+        try:
+            return max(1, int(expected))
+        except (TypeError, ValueError):
+            pass
+    legacy = plan.get("target_word_count") if isinstance(plan, dict) else None
+    if legacy:
+        try:
+            return max(1, int(legacy))
+        except (TypeError, ValueError):
+            pass
+    return 3000
+
+
+def _length_check_node(ctx: dict[str, Any]) -> dict[str, Any]:
+    """字数闭环：权威口径实测 polished_prose 字数，断是否在项目字数带内。
+
+    输入优先级：``polished_prose``（polisher/fallback 后）→ ``writer_output.prose``。
+    不调 LLM，pure Transform；纯依赖 ``visible_chars`` / ``classify_prose_length``。
+
+    输出字段（ctx → checkpoint_json / run 节点产出均可见）：
+    - ``length_report``：classify_prose_length 完整 dict（visible_chars/target/
+      band_low/band_high/deviation_pct/status）外加 ``within_band`` bool
+      （=status == 'in_band'）。
+    - ``target_word_count``：本节点选用的目标字数，供 condense / save_draft 复用。
+    - ``word_band_cfg``：本节点选用的 band 配置 dict，供 condense prompt 注入。
+    - ``length_check_passed``：bool，True ⇒ condense 跳过，False ⇒ condense 触发。
+
+    不抛错：DB 异常 / 空 prose 走保守路径（status='under', visible=0，
+    within_band=False），下游 condense 若无可压缩文本会走 0 长度不动。
+    """
+    db_path = ctx["db_path"]
+    chapter_id = ctx["chapter_id"]
+    plan = ctx.get("loaded_plan") or {}
+    target = _resolve_target_word_count(ctx, plan)
+    _, band_cfg = _resolve_chapter_word_band(db_path, chapter_id)
+
+    writer_output = ctx.get("writer_output") or {}
+    raw_prose = ctx.get("polished_prose")
+    if not isinstance(raw_prose, str) or not raw_prose.strip():
+        raw_prose = writer_output.get("prose") or ""
+    if not isinstance(raw_prose, str):
+        raw_prose = ""
+
+    report = classify_prose_length(
+        raw_prose, target, **band_cfg,
+    )
+    report["within_band"] = report["status"] == "in_band"
+    # condense_rounds 已跑几轮（ctx 累积；首轮 length_check 默认 0）。
+    rounds_used = int(ctx.get("condense_rounds") or 0)
+    return {
+        "length_report": report,
+        "target_word_count": target,
+        "word_band_cfg": band_cfg,
+        "length_check_passed": report["within_band"],
+        # 主会话约定：唯一计数键 ctx['condense_rounds']，length_check 仅 echo 不改写。
+        "condense_rounds": rounds_used,
+    }
+
+
+def _condense_node(ctx: dict[str, Any]) -> dict[str, Any]:
+    """字数闭环：超带时调 polisher capability 做压缩（最多 2 轮）。
+
+    触发条件：``length_check_passed`` False 且 ``condense_rounds < _MAX_CONDENSE_ROUNDS (2)``。
+    不触发条件：带内 / 已达 2 轮 → 直接放行。
+
+    计数器约定（smart 审查 P2 一致性收口）：
+    - **唯一计数键** ``ctx['condense_rounds']``（length_check / condense /
+      save_draft / 偏差注记 全部读同一把 key）。
+    - 计轮规则：真正调 LLM（无论是 mock 还是真实）→ ``condense_rounds + 1``；
+      skipped_in_band / skipped_empty / skipped_no_mock / over_band_after_2_rounds
+      **均不计轮**（不 +1；早返回路径 preserve rounds_used 不动）。
+    - 返回值补 ``condense_status`` 供观测（早返回路径也带，便于 run detail 一眼看清）。
+
+    输出确定性守卫（防 LLM 返回空 / 更长 / 非字符串把坏草灌进 drafts）：
+    - 空串 / 非 str / visible_chars >= 压缩前 visible_chars → 拒收，保留当前 prose，
+      ``condense_status='failed_no_shrink'``，**计 1 轮**（调用过 LLM 但产出无效）。
+
+    行为契约：
+    - payload 必须携带实测数字与目标带（**不**让 LLM 自报字数自决目标）。
+    - prompt 注入 writer-v1 §6.1 规则 20 压缩纪律（优先砍铺垫/重复意象/冗词，
+      不砍节拍、不删场景、保持文风与既有设定用语）。
+    - 任何失败（prompt 缺失 / provider 异常 / 契约失败）→ 兜底保留当前
+      polished_prose 不动；``condense_status='failed'``，**不**阻断 save_draft。
+    - 输出 ``condensed_prose``（=新 polished_prose 候选），并把 ``condense_rounds``
+      +1 写回 ctx，供下一次 length_check 计数。
+    """
+    db_path = ctx["db_path"]
+    run_id = ctx.get("run_id", "")
+    chapter_id = ctx["chapter_id"]
+    mock_providers = ctx.get("mock_providers") or {}
+
+    report = ctx.get("length_report") or {}
+    rounds_used = int(ctx.get("condense_rounds") or 0)
+    within = bool(ctx.get("length_check_passed"))
+
+    # ---- 早返回路径：均不计轮，preserve rounds_used ----
+    if within:
+        return {
+            "polished_prose": ctx.get("polished_prose") or "",
+            "condense_status": "skipped_in_band",
+            "condense_rounds": rounds_used,
+        }
+
+    if rounds_used >= _MAX_CONDENSE_ROUNDS:
+        # 已达 2 轮上限仍超带：放行 + 标注偏差（save_draft 会写到 deviations）。
+        return {
+            "polished_prose": ctx.get("polished_prose") or "",
+            "condense_status": "over_band_after_2_rounds",
+            "condense_rounds": rounds_used,
+            "condense_report": report,
+        }
+
+    current_prose = ctx.get("polished_prose")
+    if not isinstance(current_prose, str) or not current_prose.strip():
+        # 没东西可压缩（length_check 走兜底 0 字路径）→ 跳过不调 LLM；不计轮。
+        return {
+            "polished_prose": current_prose or "",
+            "condense_status": "skipped_empty",
+            "condense_rounds": rounds_used,
+        }
+
+    visible = int(report.get("visible_chars") or visible_chars(current_prose))
+    target = int(report.get("target") or ctx.get("target_word_count") or 3000)
+    band_low = int(report.get("band_low") or 0)
+    band_high = int(report.get("band_high") or target)
+    excess = max(0, visible - band_high)
+    excess_pct = round(visible / target * 100, 1) if target > 0 else 0.0
+    target_pct = round(target / visible * 100, 1) if visible > 0 else 0.0
+
+    payload: dict[str, Any] = {
+        "agent": "condense",
+        "prompt_version": "condense:v1",
+        "draft_text": current_prose,
+        "length_context": {
+            "visible_chars": visible,
+            "target": target,
+            "band_low": band_low,
+            "band_high": band_high,
+            "excess_chars": excess,
+            "excess_pct": excess_pct,
+            "target_pct": target_pct,
+            "round": rounds_used + 1,
+            "max_rounds": _MAX_CONDENSE_ROUNDS,
+        },
+        "condense_directive": (
+            "实测当前正文「{visible} 字」，目标字数带 [low={low}, high={high}] "
+            "（target={target}）。当前超出 band_high 约 {excess_pct}%（约 {excess} 字），"
+            "需净减至 band_high 以内（净减至 target 的 {target_pct}% 量级）。\n\n"
+            "压缩纪律（writer-v1 §6.1 规则 20）：\n"
+            "1. 优先砍铺垫、重复意象、冗词、装饰性修辞；\n"
+            "2. 不砍节拍、不删场景、不改情节线、不删关键人物动作；\n"
+            "3. 保持既有文风与人称设定；\n"
+            "4. 保持既有设定用语（角色名、地名、专有名词不替换）。\n\n"
+            "输出 JSON：{{\"polished_text\": <压缩后正文>, "
+            "\"changes_summary\": <改动说明>}}"
+        ).format(
+            visible=visible,
+            low=band_low,
+            high=band_high,
+            target=target,
+            excess_pct=excess_pct,
+            excess=excess,
+            target_pct=target_pct,
+        ),
+    }
+
+    # mock 直通：condense 不在 mock_providers 字典 → 原样透传（与既有
+    # writer-only mock 流一致；mock_providers 含 condense 时走真实 mock）。
+    condense_mock = mock_providers.get("condense") if isinstance(mock_providers, dict) else None
+    if not condense_mock:
+        # 既无 mock 也无真实模型：保守不动（fail-soft，不阻断）；不计轮
+        # （没调 LLM，不应占用本就跑不完的 2 轮预算）。
+        return {
+            "polished_prose": current_prose,
+            "condense_status": "skipped_no_mock",
+            "condense_rounds": rounds_used,
+        }
+
+    if not run_id:
+        # 单测路径可能没传 run_id；安全降级为「不入库」占位
+        run_id = ""
+
+    next_rounds = rounds_used + 1  # 调 LLM 必计 1 轮
+
+    try:
+        out = run_agent(
+            db_path,
+            "polisher",  # 复用 polisher capability 绑定（capability_for('polisher')=creative_writing）
+            payload,
+            run_id,
+            node_run_id=ctx.get("_current_node_run_id"),
+            expected="polisher",
+            mock_script=condense_mock,
+            profile_id=(ctx.get("model_overrides") or {}).get(
+                capability_for("polisher")
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "chapter_write.condense degraded: chapter_id=%s err=%s",
+            chapter_id, exc,
+        )
+        return {
+            "polished_prose": current_prose,
+            "condense_status": "failed",
+            "condense_rounds": next_rounds,
+            "condense_error": str(exc),
+        }
+
+    if not isinstance(out, dict):
+        return {
+            "polished_prose": current_prose,
+            "condense_status": "failed",
+            "condense_rounds": next_rounds,
+        }
+    new_prose = out.get("polished_text")
+    if not isinstance(new_prose, str):
+        return {
+            "polished_prose": current_prose,
+            "condense_status": "failed",
+            "condense_rounds": next_rounds,
+        }
+
+    # ---- 输出确定性守卫：拒空 / 拒更长 ----
+    # 0 字 / 空串显然无效；visible_chars 没缩短（>= 原 visible）意味着 LLM 没做
+    # 实压缩或反而扩写 —— 一律拒收，避免坏草灌进 drafts。
+    new_visible = visible_chars(new_prose)
+    if new_visible == 0 or new_visible >= visible:
+        _log.warning(
+            "chapter_write.condense rejected output: chapter_id=%s "
+            "orig_visible=%d new_visible=%d",
+            chapter_id, visible, new_visible,
+        )
+        return {
+            "polished_prose": current_prose,
+            "condense_status": "failed_no_shrink",
+            "condense_rounds": next_rounds,
+            "condense_error": (
+                f"condense output visible_chars={new_visible} (orig={visible})"
+            ),
+        }
+
+    return {
+        "polished_prose": new_prose,
+        "condense_status": "ok",
+        "condense_rounds": next_rounds,
+        "condense_changes_summary": out.get("changes_summary") or "",
+    }
+
+
 def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
@@ -681,13 +1051,78 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
         ctx.get("polished_prose") or writer_output.get("prose") or ""
     )
     self_report = writer_output.get("self_report") or {}
-    word_count = int(self_report.get("word_count") or len(prose))
+    # V3.7+ P1 字数闭环：word_count 改用权威实测（length_report.visible_chars）。
+    # 实证 ch4-6：writer self_report.word_count 自报 3008-3172 vs 实测 4721-5842，
+    # 偏差 50%+，不能再采信 self_report。
+    length_report = ctx.get("length_report") or {}
+    if "visible_chars" in length_report:
+        word_count = int(length_report["visible_chars"])
+    else:
+        # 兜底：length_check 节点未运行 / 被跳过（如 scene_planner 失败降级到 stub
+        # 仍会跑 length_check），回到作者自报（仅作 fallback）。
+        word_count = int(self_report.get("word_count") or visible_chars(prose))
     prompt_version = writer_output.get("prompt_version") or "writer:v1"
 
     draft_id = new_id("dr")
     now = now_iso()
     conn = get_connection(db_path)
     try:
+        # 字数闭环偏差注记：仅当 condense_rounds >= 2（已穷尽压缩预算）且仍超带
+        # 时才写「2 轮后仍超带」注记（smart 审查 P2：避免 round=0 / mock 缺失
+        # 跳过等早返回路径也错误触发此文案）。其他场景（带内 / 单轮已落带）
+        # 不写 deviations，避免污染下游 W-LEN 报告。
+        condense_rounds_now = int(ctx.get("condense_rounds") or 0)
+        if (
+            condense_rounds_now >= _MAX_CONDENSE_ROUNDS
+            and not bool(ctx.get("length_check_passed"))
+            and isinstance(length_report, dict)
+            and length_report.get("status") in ("over", "under")
+        ):
+            dev_entry = {
+                "from": "word_count_target",
+                "to": (
+                    f"实测 {int(length_report.get('visible_chars') or word_count)} 字 "
+                    f"(target={int(length_report.get('target') or 0)}, "
+                    f"band=[{int(length_report.get('band_low') or 0)},"
+                    f"{int(length_report.get('band_high') or 0)}], "
+                    f"deviation_pct={float(length_report.get('deviation_pct') or 0.0)}%, "
+                    f"status={length_report.get('status')})"
+                ),
+                "reason": (
+                    f"字数闭环 condense 2 轮后仍超带，按生产实证 ch4-6 规律"
+                    "（writer 原始产出 4721-5842 字 vs 自报 3008-3172，偏差 50%+）"
+                    "标记为 report-only 兜底；下游评审 W-LEN 报告应据此评估。"
+                ),
+                "source": "chapter_write.length_check",
+                "round": condense_rounds_now,
+                "created_at": now,
+            }
+            try:
+                chap_row = conn.execute(
+                    "SELECT plan_json FROM chapters WHERE chapter_id = ?",
+                    (chapter_id,),
+                ).fetchone()
+                plan_obj: dict[str, Any] = {}
+                if chap_row is not None and chap_row["plan_json"]:
+                    try:
+                        parsed_plan = json.loads(chap_row["plan_json"])
+                        if isinstance(parsed_plan, dict):
+                            plan_obj = parsed_plan
+                    except (TypeError, ValueError):
+                        plan_obj = {}
+                deviations = plan_obj.get("deviations")
+                if not isinstance(deviations, list):
+                    deviations = []
+                deviations.append(dev_entry)
+                plan_obj["deviations"] = deviations
+                conn.execute(
+                    "UPDATE chapters SET plan_json = ?, updated_at = ? "
+                    "WHERE chapter_id = ?",
+                    (json.dumps(plan_obj, ensure_ascii=False), now, chapter_id),
+                )
+            except sqlite3.OperationalError:
+                # 缺列 / 缺表：兜底不阻断 save_draft
+                pass
         # 先看是否有 draft 行（按 chapter + version 累计）
         max_row = conn.execute(
             "SELECT MAX(version) AS v FROM drafts WHERE chapter_id = ?",
@@ -757,6 +1192,8 @@ def _build_nodes() -> list[WorkflowNode]:
         ),
         WorkflowNode("writer", "AI", _writer_node, agent_name="writer"),
         WorkflowNode("polisher", "AI", _polish_node, agent_name="polisher"),
+        WorkflowNode("length_check", "Transform", _length_check_node),
+        WorkflowNode("condense", "AI", _condense_node, agent_name="polisher"),
         WorkflowNode("save_draft", "State", _save_draft_node),
     ]
 
@@ -766,8 +1203,9 @@ WORKFLOW = {
     "version": "v1",
     "description": (
         "Director Plan → Scene Planner(AI) → Writer prose → Polisher(AI) → "
-        "drafts table; chapter status PLANNED→DRAFTED; scene_planner / polisher "
-        "失败均降级不阻断 writer"
+        "length_check(权威实测+项目字数带) → condense(超带≤2轮,polisher capability) → "
+        "drafts table; chapter status PLANNED→DRAFTED; "
+        "scene_planner / polisher / condense 失败均降级不阻断 writer"
     ),
     "nodes": _build_nodes(),
 }

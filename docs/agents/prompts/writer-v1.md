@@ -96,6 +96,7 @@
         "time_in_story": "string",
         "pov": "first_person | third_person_limited | third_person_omniscient",
         "pov_character_id": "character_id 或 null",
+        "target_words": "integer ≥ 0, V3.7+ 字数闭环：每 scene 字数预算（context_engine.builders._inject_scene_word_budget 注入；总和 = chapter.target_word_count 的 90~110%；超出 110% / 低于 90% 走等分兜底，余数补首场景）",
         "slots": [
           {
             "slot_id": "DIALOGUE_01",
