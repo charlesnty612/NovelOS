@@ -459,6 +459,74 @@ def test_applier_defends_against_non_dict_bucket_entry():
     assert new_state["world"]["factions"]["fac_b"]["data_json"]["behavior"] == "new"
 
 
+# ----------------------------------------------------------------- 3b. applier rule 分支非 dict 守卫（P2-1）
+
+
+def test_applier_defends_against_non_dict_world_rule_element(caplog):
+    """P2-1：world_rules 列表若混入 str 元素（旧形状污染），apply_delta 的
+    update/remove 路径不应抛 AttributeError——非 dict 元素应被跳过且产生 warning。"""
+    import logging
+
+    polluted = _baseline_world_state()
+    # 在 world_rules list 头部混入一个 str（模拟旧形状污染残留）
+    polluted["world"]["world_rules"].insert(0, "污染str-应被跳过")
+
+    # update 路径：被污染 str 不抛 AttributeError；合法的 rule_c 应被正常处理
+    # （applier rule update 走 _set_top_level(r, "name", after.get("name")) 等，
+    # after 是 dict 时按 name/statement/data_json 整体替换；此处不关心具体字段，
+    # 仅验证不抛、str 元素被跳过、warning 命中）。
+    delta_update = {
+        "world_changes": [
+            {
+                "change_id": "wc_rule_up",
+                "op": "update",
+                "target_id": "rule_c",
+                "world_id": "rule_c",
+                "world_kind": "rule",
+                "field": "",
+                "after": {"name": "Rule C Renamed"},
+            },
+        ],
+    }
+    with caplog.at_level(logging.WARNING, logger="packages.core.story_state.applier"):
+        new_state = apply_delta(polluted, delta_update)
+    # 污染的 str 应仍在原位（被跳过），未抛 AttributeError
+    assert new_state["world"]["world_rules"][0] == "污染str-应被跳过"
+    rule_c = next(
+        r for r in new_state["world"]["world_rules"]
+        if isinstance(r, dict) and r.get("world_rule_id") == "rule_c"
+    )
+    # rule_c 本身可被正常 update（name 字段被改名）
+    assert rule_c["name"] == "Rule C Renamed"
+    # 至少一条 warning 命中 rule 分支非 dict 守卫
+    assert any("world_rules 含非 dict 元素" in rec.message for rec in caplog.records)
+
+    # remove 路径：被污染 str 应被过滤掉（不抛异常）
+    polluted2 = _baseline_world_state()
+    polluted2["world"]["world_rules"].insert(0, "污染str-应被过滤")
+    delta_remove = {
+        "world_changes": [
+            {
+                "change_id": "wc_rule_rm",
+                "op": "remove",
+                "target_id": "rule_c",
+                "world_id": "rule_c",
+                "world_kind": "rule",
+            },
+        ],
+    }
+    with caplog.at_level(logging.WARNING, logger="packages.core.story_state.applier"):
+        new_state2 = apply_delta(polluted2, delta_remove)
+    # 污染的 str 应被过滤，rule_c 应被移除
+    rules_after = new_state2["world"]["world_rules"]
+    assert "污染str-应被过滤" not in rules_after
+    assert all(
+        not (isinstance(r, dict) and r.get("world_rule_id") == "rule_c")
+        for r in rules_after
+    )
+    assert any("world_rules 含非 dict 元素" in rec.message for rec in caplog.records)
+
+
 # ----------------------------------------------------------------- 4. repair_current_snapshot_world
 
 
@@ -625,3 +693,63 @@ def test_repair_current_snapshot_world_restores_from_db(tmp_path: Path):
     # 再调一次：repaired=False（幂等）
     summary2 = repair_current_snapshot_world(db_path, pid)
     assert summary2["repaired"] is False
+
+
+# ----------------------------------------------------------------- 5. repair_current_snapshot_world 非 dict world 守卫（P2-2）
+
+
+def _inject_non_dict_world(db_path: str, project_id: str) -> None:
+    """将 story_states.snapshot_json 的 world 整体替换为 str，模拟
+    materialize 之外的极端污染（解析出非 dict world）。"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT state_version, snapshot_json FROM story_states "
+            "WHERE project_id = ? ORDER BY state_version DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        snap = json.loads(row["snapshot_json"])
+        snap["world"] = "this-should-be-a-dict"  # 强制 world 为 str
+        conn.execute(
+            "UPDATE story_states SET snapshot_json = ? WHERE project_id = ? AND state_version = ?",
+            (json.dumps(snap, ensure_ascii=False), project_id, row["state_version"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_repair_current_snapshot_world_handles_non_dict_world(tmp_path: Path):
+    """P2-2：snapshot_json 的 world 为 str 时 repair 不抛 TypeError，
+    按空 dict 路径处理，world 三集合被重建为 DB 权威集合。"""
+    db_path, pid = _setup_minimal_db(tmp_path)
+    _inject_non_dict_world(db_path, pid)
+
+    # 不应抛 TypeError
+    summary = repair_current_snapshot_world(db_path, pid)
+
+    # repair 不抛异常；world 三集合被按 DB 重建
+    assert summary["state_version"] is not None
+    assert isinstance(summary["after"]["locations"], dict)
+    assert isinstance(summary["after"]["factions"], dict)
+    assert isinstance(summary["after"]["world_rules"], list)
+    # world 至少有一项重建（来自 DB 权威）
+    assert len(summary["after"]["locations"]) >= 1 or len(summary["after"]["factions"]) >= 1
+
+    # 落盘后 world 应为 dict（含三集合键）
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT snapshot_json FROM story_states WHERE project_id = ? "
+            "ORDER BY state_version DESC LIMIT 1",
+            (pid,),
+        ).fetchone()
+        snap = json.loads(row["snapshot_json"])
+        assert isinstance(snap["world"], dict)
+        assert "locations" in snap["world"]
+        assert "factions" in snap["world"]
+        assert "world_rules" in snap["world"]
+    finally:
+        conn.close()

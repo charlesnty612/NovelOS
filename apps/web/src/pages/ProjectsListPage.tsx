@@ -11,6 +11,7 @@ import type {
   Project,
   ProjectCreatePayload,
   ProjectStatus,
+  ProjectWordBand,
 } from '../api/types';
 import { formatDateTime } from '../utils/format';
 
@@ -334,6 +335,19 @@ function ProjectFormModal({
     initial?.target_words != null ? String(initial.target_words) : '',
   );
   const [status, setStatus] = useState<ProjectStatus>(initial?.status ?? 'ACTIVE');
+  // V3.7：字数带覆盖三个输入。空串 = 该键走默认；全空 = 提交时省略 word_band 键
+  // （创建场景无覆盖；编辑场景保留原值）。编辑模式下显示「清除」按钮可显式传 null。
+  // 初始值来自 initial.word_band；undefined/null（无覆盖）→ 留空（与「全空=默认」语义一致）。
+  const initBand = initial?.word_band ?? undefined;
+  const [bandLowRatio, setBandLowRatio] = useState<string>(
+    initBand?.low_ratio != null ? String(initBand.low_ratio) : '',
+  );
+  const [bandHighRatio, setBandHighRatio] = useState<string>(
+    initBand?.high_ratio != null ? String(initBand.high_ratio) : '',
+  );
+  const [bandFloor, setBandFloor] = useState<string>(
+    initBand?.floor != null ? String(initBand.floor) : '',
+  );
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -349,14 +363,72 @@ function ProjectFormModal({
       setErr('目标字数必须是 ≥0 的整数');
       return;
     }
+    // V3.7：word_band 三键解析（空串 → 该键缺省）
+    const parseOpt = (s: string): number | null => {
+      const v = s.trim();
+      if (v === '') return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const lr = parseOpt(bandLowRatio);
+    const hr = parseOpt(bandHighRatio);
+    const fl = parseOpt(bandFloor);
+    if (
+      (bandLowRatio.trim() !== '' && lr === null) ||
+      (bandHighRatio.trim() !== '' && hr === null) ||
+      (bandFloor.trim() !== '' && fl === null)
+    ) {
+      setErr('字数带覆盖必须是数字');
+      return;
+    }
+    // V3.7：word_band payload 构建
+    // - 三键全空 → 提交时省略 word_band 键（保留后端原值；创建场景无覆盖）
+    // - 任一非空 → 提交 dict（后端走 resolve_band_config 校验）
+    const allEmpty =
+      bandLowRatio.trim() === '' && bandHighRatio.trim() === '' && bandFloor.trim() === '';
+    const payload: Partial<ProjectCreatePayload> & {
+      status?: ProjectStatus;
+      word_band?: ProjectWordBand | null;
+    } = {
+      name: name.trim(),
+      premise: premise.trim() === '' ? null : premise.trim(),
+      genre: genre.trim() === '' ? null : genre.trim(),
+      target_words: tw,
+      status,
+    };
+    if (!allEmpty) {
+      const band: ProjectWordBand = {};
+      if (lr !== null) band.low_ratio = lr;
+      if (hr !== null) band.high_ratio = hr;
+      if (fl !== null) band.floor = fl;
+      payload.word_band = band;
+    }
+    setSubmitting(true);
+    try {
+      await onSubmit(payload);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : '保存失败');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // V3.7：编辑模式下「清除覆盖」——把三个输入清空并显式提交 null（落 DB NULL）。
+  // 仅在 initial?.word_band 非空（即项目当前有覆盖）时显示该按钮。
+  const handleClearBand = async () => {
+    setErr(null);
+    setBandLowRatio('');
+    setBandHighRatio('');
+    setBandFloor('');
     setSubmitting(true);
     try {
       await onSubmit({
         name: name.trim(),
         premise: premise.trim() === '' ? null : premise.trim(),
         genre: genre.trim() === '' ? null : genre.trim(),
-        target_words: tw,
+        target_words: targetWords.trim() === '' ? null : Number(targetWords),
         status,
+        word_band: null,
       });
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : '保存失败');
@@ -364,6 +436,12 @@ function ProjectFormModal({
       setSubmitting(false);
     }
   };
+
+  const hasBandOverride =
+    initial?.word_band != null &&
+    (initial.word_band.low_ratio != null ||
+      initial.word_band.high_ratio != null ||
+      initial.word_band.floor != null);
 
   return (
     <div
@@ -438,6 +516,66 @@ function ProjectFormModal({
             </select>
           </div>
         ) : null}
+
+        {/* V3.7：字数带覆盖（可选）——留空=不覆盖；与后端 resolve_band_config 校验对齐。
+            三个键全留空：提交时省略 word_band 键；任一非空：提交 dict。 */}
+        <div className="form-row">
+          <label>字数带覆盖（可选）</label>
+          <p className="muted small" style={{ margin: '0 0 6px' }}>
+            调整「偏离目标 ±15% 警告」与「下限 1200 字」的项目级覆盖；留空使用后端默认。
+          </p>
+          <div className="form-grid">
+            <div className="form-row">
+              <label>下带比例</label>
+              <input
+                type="number"
+                step="0.01"
+                min={0.01}
+                max={1}
+                value={bandLowRatio}
+                placeholder="0.85"
+                onChange={(e) => setBandLowRatio(e.target.value)}
+                data-testid="project-band-low-ratio"
+              />
+            </div>
+            <div className="form-row">
+              <label>上带比例</label>
+              <input
+                type="number"
+                step="0.01"
+                min={1}
+                value={bandHighRatio}
+                placeholder="1.15"
+                onChange={(e) => setBandHighRatio(e.target.value)}
+                data-testid="project-band-high-ratio"
+              />
+            </div>
+          </div>
+          <div className="form-row" style={{ marginTop: 6 }}>
+            <label>下限字数</label>
+            <input
+              type="number"
+              min={0}
+              step={50}
+              value={bandFloor}
+              placeholder="1200"
+              onChange={(e) => setBandFloor(e.target.value)}
+              data-testid="project-band-floor"
+            />
+          </div>
+          {hasBandOverride ? (
+            <button
+              type="button"
+              className="btn btn--sm"
+              onClick={handleClearBand}
+              disabled={submitting}
+              data-testid="project-clear-band"
+              style={{ marginTop: 6 }}
+            >
+              清除字数带覆盖
+            </button>
+          ) : null}
+        </div>
 
         <div
           style={{

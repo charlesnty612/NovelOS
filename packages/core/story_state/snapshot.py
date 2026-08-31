@@ -626,6 +626,17 @@ def repair_current_snapshot_world(
             "after": {... 同 before 的结构 ...},
             "repaired": bool,  # 任一条目形状变化即 True
         }``
+
+    Notes
+    -----
+    设计内副作用（P2-3 备注）：本函数直接覆写最新 ``story_states`` 行的
+    ``snapshot_json``，但**不**更新 ``state_version`` / ``commit_id``，
+    **不**重算 ``commits.snapshot_ref`` 的 digest/一致性。理由：
+    ``story_states`` schema 仅含 ``project_id / state_version /
+    snapshot_json / commit_id / created_at``，无 digest 列；
+    ``commits.snapshot_ref`` 无一致性校验；下次 commit 即自然覆盖。
+    故「最新快照与上一 commit 不完全同构」是修复的预期副作用，
+    不破坏任何一致性检查，无需在调用方做额外补偿。
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -681,6 +692,16 @@ def repair_current_snapshot_world(
         # 以 DB 为权威重建 world 三集合
         rebuilt_world = _load_world(conn, project_id)
         # 仅替换三集合；保留 current_time_in_story / active_resources / world 其它键
+        # 防御（P2-2）：world 在上文已强制为 dict，理论上非 dict 不会到达此处；
+        # 但仍显式守卫一次：若为非 dict（极端情况下 snap.get('world') 越过了上面的
+        # isinstance 判断），按空 dict 路径处理，与函数内 world.get 守卫口径一致。
+        if not isinstance(world, dict):
+            _logger.warning(
+                "repair_current_snapshot_world: world 非 dict（类型=%s），"
+                "按空 dict 路径处理",
+                type(world).__name__,
+            )
+            world = {}
         new_world = dict(world)
         new_world["locations"] = rebuilt_world["locations"]
         new_world["factions"] = rebuilt_world["factions"]

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from packages.core.quality.wordcount import (
     classify_prose_length,
+    resolve_band_config,
     visible_chars,
     word_band,
 )
@@ -184,3 +185,134 @@ def test_classify_payload_uses_word_band_consistent():
     target = 2200
     out = classify_prose_length("中" * 2200, target_word_count=target)
     assert (out["band_low"], out["band_high"]) == word_band(target)
+
+
+# ---------------------------------------------------------------------------
+# resolve_band_config（项目级覆盖折叠）
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_band_config_none_returns_module_defaults():
+    """overrides=None ⇒ 全默认（与无覆盖项目行为零差异）。"""
+    cfg = resolve_band_config(None)
+    assert cfg == {"low_ratio": 0.85, "high_ratio": 1.15, "floor": 1200}
+
+
+def test_resolve_band_config_empty_dict_returns_module_defaults():
+    """overrides={} ⇒ 全默认。"""
+    cfg = resolve_band_config({})
+    assert cfg == {"low_ratio": 0.85, "high_ratio": 1.15, "floor": 1200}
+
+
+def test_resolve_band_config_partial_keys_fill_defaults():
+    """只给一个键，其余走默认。"""
+    cfg = resolve_band_config({"low_ratio": 0.9})
+    assert cfg == {"low_ratio": 0.9, "high_ratio": 1.15, "floor": 1200}
+
+    cfg2 = resolve_band_config({"floor": 1500})
+    assert cfg2 == {"low_ratio": 0.85, "high_ratio": 1.15, "floor": 1500}
+
+
+def test_resolve_band_config_all_keys_override():
+    """三键全给 ⇒ 全部生效。"""
+    cfg = resolve_band_config({"low_ratio": 0.8, "high_ratio": 1.2, "floor": 1000})
+    assert cfg == {"low_ratio": 0.8, "high_ratio": 1.2, "floor": 1000}
+
+
+def test_resolve_band_config_unknown_keys_ignored():
+    """未知键静默忽略（DB 演进预留扩展）。"""
+    cfg = resolve_band_config({"low_ratio": 0.9, "future_key": 999})
+    assert cfg == {"low_ratio": 0.9, "high_ratio": 1.15, "floor": 1200}
+
+
+def test_resolve_band_config_non_dict_raises():
+    """overrides 非 dict（str / list / int）→ ValueError。"""
+    for bad in ["foo", [1, 2], 42]:
+        try:
+            resolve_band_config(bad)  # type: ignore[arg-type]
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError for {bad!r}")
+
+
+def test_resolve_band_config_low_ratio_bounds():
+    """low_ratio 越界：<=0 或 >1 → ValueError。"""
+    for bad in [0, -0.1, 1.01, 2.0]:
+        try:
+            resolve_band_config({"low_ratio": bad})
+        except ValueError as exc:
+            assert "low_ratio" in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for low_ratio={bad!r}")
+
+
+def test_resolve_band_config_high_ratio_lower_than_one():
+    """high_ratio < 1 → ValueError。"""
+    try:
+        resolve_band_config({"high_ratio": 0.5})
+    except ValueError as exc:
+        assert "high_ratio" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_resolve_band_config_high_ratio_lower_than_low_ratio():
+    """high_ratio < low_ratio → ValueError（带单调性）。"""
+    try:
+        resolve_band_config({"low_ratio": 0.95, "high_ratio": 0.9})
+    except ValueError as exc:
+        assert "low_ratio" in str(exc) or "high_ratio" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_resolve_band_config_floor_must_be_non_negative_int():
+    """floor 非法：负数 / 浮点 / bool / 字符串 → ValueError。"""
+    for bad in [-1, 1.5, True, "1200"]:
+        try:
+            resolve_band_config({"floor": bad})  # type: ignore[arg-type]
+        except ValueError as exc:
+            assert "floor" in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for floor={bad!r}")
+
+
+def test_resolve_band_config_floor_accepts_int_and_numeric_int():
+    """floor=1200 (int) 与 floor=1200.0 (float) 均接受；输出统一为 int。"""
+    cfg_int = resolve_band_config({"floor": 1200})
+    assert cfg_int["floor"] == 1200
+    assert isinstance(cfg_int["floor"], int)
+
+    cfg_float = resolve_band_config({"floor": 1200.0})
+    assert cfg_float["floor"] == 1200
+    # int(1200.0) → 1200（类型归一为 int）
+
+
+def test_resolve_band_config_low_ratio_one_allowed():
+    """low_ratio=1 是合法边界（=high_ratio=1 时带退化单点）。"""
+    cfg = resolve_band_config({"low_ratio": 1.0, "high_ratio": 1.0})
+    assert cfg["low_ratio"] == 1.0
+    assert cfg["high_ratio"] == 1.0
+
+
+def test_resolve_band_config_returned_dict_keys_round_trip_word_band():
+    """返回 dict 可直接 **kwargs 展开到 word_band，输出与手填参数一致。"""
+    overrides = {"low_ratio": 0.9, "high_ratio": 1.1, "floor": 1500}
+    cfg = resolve_band_config(overrides)
+    target = 3000
+    assert word_band(target, **cfg) == word_band(
+        target, low_ratio=0.9, high_ratio=1.1, floor=1500,
+    )
+
+
+def test_resolve_band_config_no_override_matches_default_word_band():
+    """回归锚定：resolve_band_config(None) 后 word_band(3000) 输出与模块默认一致。
+
+    注：``int(3000 * 1.15)`` 在 IEEE 754 下是 3449（不 3450），浮点 round 效应——
+    与现状 word_band(3000) 默认调用输出字节相同；此断言锁死「无覆盖项目零行为变化」。
+    """
+    cfg = resolve_band_config(None)
+    assert word_band(3000, **cfg) == word_band(3000)
+    # 显式量化（与 word_band 当前实现对齐）
+    assert word_band(3000, **cfg) == (2550, 3449)

@@ -3,6 +3,15 @@
 
 export type ProjectStatus = 'ACTIVE' | 'PAUSED' | 'ARCHIVED';
 
+// V3.7：项目级字数带覆盖（projects.word_band_json 反序列化）。
+// 三键全可选；后端 resolve_band_config 校验合法性，未知键忽略。
+// 无覆盖项目（DB NULL）→ 后端响应里 word_band = undefined，UI 按空态处理。
+export interface ProjectWordBand {
+  low_ratio?: number;
+  high_ratio?: number;
+  floor?: number;
+}
+
 export interface Project {
   project_id: string;
   name: string;
@@ -12,6 +21,8 @@ export interface Project {
   status: ProjectStatus;
   created_at: string;
   updated_at: string;
+  /** V3.7：项目级字数带覆盖；undefined = 项目无覆盖（走后端默认 0.85/1.15/1200） */
+  word_band?: ProjectWordBand | null;
 }
 
 export interface ProjectCreatePayload {
@@ -27,6 +38,13 @@ export interface ProjectUpdatePayload {
   genre?: string | null;
   target_words?: number | null;
   status?: ProjectStatus;
+  /**
+   * V3.7：项目级字数带覆盖。
+   * - 字段未提供（undefined） → 后端保留原值
+   * - 显式 null → 清除覆盖（落 DB NULL）
+   * - 显式对象 → 后端校验 + 序列化存 word_band_json
+   */
+  word_band?: ProjectWordBand | null;
 }
 
 // --- V1.4 Sprint 16 / MVP：项目备份 / 恢复 -----------------------------------

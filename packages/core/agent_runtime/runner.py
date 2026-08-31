@@ -12,7 +12,10 @@
 - Provider 调用最多 2 次（首次 + 1 次重试）；重试机制：
   1. 解析失败 / 契约校验失败 → 拼一条「上次输出无法解析/不合规：<错误>。请只输出合法 JSON。」
      追加到 user 末尾，再次调用。
-  2. 重试仍失败 → 抛 :class:`AgentOutputError`（由 router 转 502/500）。
+  2. 空流（:class:`ProviderError` 消息含 ``"empty stream: no content chunks received"``）→
+     自动重试 1 次（messages 不变，不追加 ``_RETRY_HINT``，属于上游抖动而非输出解析问题）；
+     仍空流则按 Provider 失败路径抛错，错误消息注明已重试。
+  3. 重试仍失败 → 抛 :class:`AgentOutputError`（由 router 转 502/500）。
 - Mock 测试通道：``mock_script`` 非空时跳过 :class:`ModelRouter`，直接构造 :class:`MockProvider`
   并注入脚本；用于测试「先坏后好」「两次都坏」等场景。
 - ``ai_call_logs`` 落库：调用次数写 ``retry_count``（0 / 1）；成功后写 ``output_json`` / ``token_usage`` /
@@ -42,6 +45,7 @@ from typing import Any
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.model_router import MockProvider, ModelRouter, capability_for
+from packages.core.model_router.exceptions import ProviderError
 
 from .exceptions import AgentOutputError
 from .prompts import PromptRegistry
@@ -55,6 +59,11 @@ _MAX_CONTEXT_IDS = 100
 # 文本截断上限防止超长堆栈进库。
 _RETRY_WARN_PREFIX = "warn: first attempt invalid:"
 _WARN_MAX_LEN = 300
+# 上游 Provider 空流抖动吸收：MiniMax / DeepSeek 等 provider 间歇性返回零 content
+# chunk 时抛 ``ProviderError(self.name, "empty stream: no content chunks received ...")``。
+# runner 捕获该消息后自动重试 1 次（messages 不变）；其它 ProviderError 一律不重试。
+_EMPTY_STREAM_MARKER = "empty stream: no content chunks received"
+_EMPTY_STREAM_WARN = "warn: empty stream retried"
 
 
 def _collect_context_ids(payload: dict[str, Any]) -> list[str]:
@@ -246,7 +255,8 @@ def run_agent(
     抛出：
     - :class:`PromptNotFoundError` ——无 ACTIVE prompt。
     - :class:`ModelNotConfiguredError`（来自 :class:`ModelRouter`）——无 model config。
-    - :class:`ProviderError`（来自 provider）——HTTP / 解析失败（不重试，因属 Provider 错误）。
+    - :class:`ProviderError`（来自 provider）——HTTP / 解析失败；空流例外（消息含
+      ``"empty stream: no content chunks received"``）会自动重试 1 次，第二次仍空流则抛出。
     - :class:`AgentOutputError` ——解析 / 契约重试 1 次仍失败。
 
     注：所有异常出口都会把 ``workflow_runs`` 收尾为 ``FAILED``（孤儿 RUNNING 行兜底）。
@@ -324,42 +334,81 @@ def run_agent(
         # 三级解析兜底（json_repair）触发累积：True 时在成功落库 error 列追加
         # ``warn: JSON auto-repaired``。修复未重试一次成功时 retry_count=0 也照常写 warn。
         repair_warn: str | None = None
+        # 空流重试标记：本次 attempt 内 provider 抛空流且已自动重试 1 次成功 → True，
+        # 在成功落库 error 列追加 ``warn: empty stream retried``（与 output-invalid 的
+        # retry_count 语义正交，retry_count 仍只计 output-invalid 重试，保持既有断言）。
+        empty_stream_retried = False
 
         for attempt in range(2):  # 0 = 首次，1 = 1 次重试
             if attempt > 0:
                 retry_count = 1
                 # 重试：在 user 末尾追加提示，再次调用
                 messages[1]["content"] = user_payload_text + _RETRY_HINT.format(err=last_error or "无法解析")
-            try:
-                # mock_script 路径直接调 mock provider；否则走失败转移（首次/retry 各取一次）
-                if provider is not None:
-                    completion = provider.complete(messages)
-                else:
-                    completion, config_row = ModelRouter(db_path).call_with_fallback(
-                        capability, messages, profile_id=profile_id
+            # 空流重试小循环（最多 2 次 provider 调用）：吸收上游 provider 间歇性零 content
+            # 抖动。messages 不变（非输出解析问题）；第二次仍空流则走原 Provider 失败路径。
+            completion: dict[str, Any] | None = None
+            empty_stream_already_retried = False
+            while True:
+                try:
+                    # mock_script 路径直接调 mock provider；否则走失败转移（首次/retry 各取一次）
+                    if provider is not None:
+                        completion = provider.complete(messages)
+                    else:
+                        completion, config_row = ModelRouter(db_path).call_with_fallback(
+                            capability, messages, profile_id=profile_id
+                        )
+                        model_id = f"{config_row['provider']}/{config_row['model']}"
+                    if empty_stream_already_retried:
+                        # 空流重试本次 attempt 内成功 → 标记一次，便于后续 success 路径拼 warn
+                        empty_stream_retried = True
+                    break  # 调用成功，跳出空流重试小循环
+                except Exception as exc:  # noqa: BLE001
+                    exc_str = str(exc)
+                    is_empty_stream = _EMPTY_STREAM_MARKER in exc_str
+                    if is_empty_stream and not empty_stream_already_retried:
+                        # 首次空流：标记 + 重调，messages 不变（非输出解析问题）
+                        empty_stream_already_retried = True
+                        continue
+                    # 第二次空流 或 非空流 ProviderError：走原失败路径
+                    # 第二次空流时给错误消息加后缀，便于诊断「已重试过仍未恢复」
+                    if is_empty_stream:
+                        # 重新构造同型异常以附加「已重试过仍未恢复」诊断后缀
+                        # （ProviderError 签名是 (provider, message, *, status_code)，
+                        # 其它 ModelRouterError 子类用单 message 参数走 __init__）
+                        if isinstance(exc, ProviderError):
+                            final_exc: BaseException = ProviderError(
+                                getattr(exc, "provider", "unknown"),
+                                f"{exc_str} [empty stream retried once, still empty]",
+                                status_code=getattr(exc, "status_code", None),
+                            )
+                        else:
+                            final_exc = exc.__class__(
+                                f"{exc_str} [empty stream retried once, still empty]"
+                            )
+                    else:
+                        final_exc = exc
+                    latency = int((time.monotonic() - start) * 1000)
+                    _record_call(
+                        db_path,
+                        call_id=new_id("aic"),
+                        run_id=run_id,
+                        node_run_id=node_run_id,
+                        agent_id=agent_id,
+                        model_id=model_id,
+                        prompt_version=prompt_version,
+                        input_context_ids=context_ids,
+                        output=None,
+                        token_usage=None,
+                        latency_ms=latency,
+                        error=f"provider error: {final_exc}",
+                        retry_count=0,
                     )
-                    model_id = f"{config_row['provider']}/{config_row['model']}"
-            except Exception as exc:  # noqa: BLE001
-                # Provider 失败：不重试，直接记日志并抛
-                latency = int((time.monotonic() - start) * 1000)
-                _record_call(
-                    db_path,
-                    call_id=new_id("aic"),
-                    run_id=run_id,
-                    node_run_id=node_run_id,
-                    agent_id=agent_id,
-                    model_id=model_id,
-                    prompt_version=prompt_version,
-                    input_context_ids=context_ids,
-                    output=None,
-                    token_usage=None,
-                    latency_ms=latency,
-                    error=f"provider error: {exc}",
-                    retry_count=0,
-                )
-                _finalize_agent_run_status(db_path, run_id, node_run_id, status="FAILED", error=str(exc))
-                finalised = True
-                raise
+                    _finalize_agent_run_status(
+                        db_path, run_id, node_run_id,
+                        status="FAILED", error=str(final_exc),
+                    )
+                    finalised = True
+                    raise final_exc
 
             raw_text = completion.get("text") or ""
             token_usage = completion.get("usage") or {"prompt": 0, "completion": 0, "total": 0}
@@ -429,11 +478,16 @@ def run_agent(
         # 都没有时保持现状 error=None，不污染正常成功路径。
         # 新增 repair_warn（json_repair 三级兜底触发），拼接顺序：
         # retry warn → repair warn → observer warn（根因 → 修复痕迹 → 剥离痕迹）。
+        # 新增 empty_stream_warn（provider 空流重试 1 次成功），与 retry_warn 正交
+        # （retry_count 仍只计 output-invalid 重试，避免破坏既有断言与指标）。
         retry_warn: str | None = None
         if retry_count == 1 and last_error:
             truncated = last_error[:_WARN_MAX_LEN]
             retry_warn = f"{_RETRY_WARN_PREFIX} {truncated}"
-        warn_parts = [w for w in (retry_warn, repair_warn, observer_warn) if w]
+        empty_stream_warn = _EMPTY_STREAM_WARN if empty_stream_retried else None
+        warn_parts = [
+            w for w in (retry_warn, empty_stream_warn, repair_warn, observer_warn) if w
+        ]
         error_text = " | ".join(warn_parts) if warn_parts else None
         _record_call(
             db_path,

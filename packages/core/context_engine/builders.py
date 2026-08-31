@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from packages.core.db import get_connection
-from packages.core.quality.wordcount import word_band
+from packages.core.quality.wordcount import resolve_band_config, word_band
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -1412,8 +1412,9 @@ def _cache_reset() -> None:
 def _invalidate_cache_for_chapter(project_id: str, chapter_no: int) -> int:
     """显式失效指定 (project_id, chapter_no) 的所有 role 键。返回失效条数。
 
-    V2.0 Wave C P1-1：5 元键 (project_id, state_version, chapter_no, role, content_fp)，
-    第 3 元索引仍是 chapter_no。chapter_commit 成功后兜底调用以避免脏命中。
+    V2.0 Wave C P1-1：缓存键为多元组，第 1 元 project_id、第 3 元索引是 chapter_no
+    （键尾后续追加过 content 指纹与 word_band 指纹等元，均不影响此处索引口径）。
+    chapter_commit 成功后兜底调用以避免脏命中。
     """
     global _assembly_cache
     removed = 0
@@ -1723,6 +1724,23 @@ def _build_writer_input_uncached(
         project_id = chapter["project_id"]
         # Sprint 15 / V1.3：取项目最近 ≤2 篇文风样例，每篇截断 ≤1000 字。
         style_samples = _author_style_samples(conn, project_id)
+        # V3.7：项目级字数带覆盖（projects.word_band_json）。
+        # 列缺失 / 异常 / 解析失败 → 视为无覆盖（与模块默认一致，零行为变化）。
+        word_band_overrides: dict | None = None
+        try:
+            prow = conn.execute(
+                "SELECT word_band_json FROM projects WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            prow = None
+        if prow is not None and prow["word_band_json"]:
+            try:
+                parsed = json.loads(prow["word_band_json"])
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                word_band_overrides = parsed
     finally:
         conn.close()
 
@@ -1765,8 +1783,10 @@ def _build_writer_input_uncached(
         db_path, project_id, chapter_id, director_plan,
     )
 
-    # V3.7：writer payload 注入字数带（不含 floor，prompt Rule 15 已静态声明 1200 下限）
-    _wb_low, _wb_high = word_band(target_word_count)
+    # V3.7：writer payload 注入字数带——支持项目级覆盖（projects.word_band_json）。
+    # 无覆盖（None / 列缺失 / JSON 非法）→ resolve_band_config(None) 返回模块默认，
+    # word_band(...) 输出与原硬编码 word_band(target_word_count) 逐字段一致。
+    _wb_low, _wb_high = word_band(target_word_count, **resolve_band_config(word_band_overrides))
     payload: dict[str, Any] = {
         "agent": "writer",
         "prompt_version": "writer:v1",
@@ -1946,9 +1966,14 @@ def build_writer_input(
     )
     scene_fp = _fingerprint_scene_plan(scene_plan)
     relevance_flag = "on" if relevance_trim_final else "off"
+    # V3.7：缓存键追加 wb_fp（项目字数带覆盖指纹）——同一项目改 word_band_json 后
+    # payload.chapter.word_band 会变；旧键命中会拿到陈旧 word_band。无覆盖项目指纹恒为
+    # "none"，与现状行为完全一致。
+    wb_raw = _peek_project_word_band_json(db_path, project_id)
+    wb_fp = _fingerprint_word_band_json(wb_raw)
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
-        scene_fp, context_mode, relevance_flag,
+        scene_fp, context_mode, relevance_flag, wb_fp,
     )
     if scene_fp != _FINGERPRINT_UNCACHED:
         cached = _cache_get(cache_key)
@@ -2424,6 +2449,53 @@ def _peek_project_id_from_chapter(db_path: str | Path, chapter_id: str) -> str |
         return row["project_id"] if row else None
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# V3.7：项目级字数带覆盖（projects.word_band_json）轻量预读
+# ---------------------------------------------------------------------------
+
+
+def _peek_project_word_band_json(
+    db_path: str | Path, project_id: str | None,
+) -> str | None:
+    """轻量读 ``projects.word_band_json``；列缺失 / 异常 / 无项目 → None。
+
+    供 build_writer_input 缓存键预判用——返回原文（JSON 字符串）以构造稳定指纹；
+    解析失败不在此处处理（uncached 路径由 ``resolve_band_config`` 兜底）。
+    """
+    if not project_id:
+        return None
+    try:
+        conn = get_connection(db_path)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        try:
+            row = conn.execute(
+                "SELECT word_band_json FROM projects WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # 0023 未跑过的极老库 → 列不存在 → 视为无覆盖（与无覆盖行为零差异）。
+            return None
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    val = row["word_band_json"]
+    return val if val else None
+
+
+def _fingerprint_word_band_json(raw: str | None) -> str:
+    """``projects.word_band_json`` 轻量指纹（用于 writer 缓存键）。
+
+    None / 空串 → ``"none"``（稳定指纹）；非空 → sha256[:16]（与 plan_fp 同款风格）。
+    """
+    if not raw:
+        return "none"
+    h = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return h[:16]
 
 
 # ---------------------------------------------------------------------------

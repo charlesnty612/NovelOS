@@ -92,6 +92,10 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # - 同步给 commits.rollback_of 加部分唯一索引（idx_commits_rollback_of），
     #   双重回滚在 SQLite 层被拦截。
     assert "0022_faction_relationship_endpoints.sql" in result["applied"]
+    # V3.7 字数带覆盖：0023_project_word_band.sql
+    # - 给 projects 加 word_band_json TEXT 可空列（NULL=无覆盖走模块默认 0.85/1.15/1200）；
+    # - 仅 ALTER TABLE 加列，不增表（总表 38 不变）。
+    assert "0023_project_word_band.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
@@ -123,6 +127,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0020_backfill_init_plot_event_description.sql",
         "0021_repair_ch2_status_after_double_rollback.sql",
         "0022_faction_relationship_endpoints.sql",
+        "0023_project_word_band.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -158,6 +163,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0021_repair_ch2_status_after_double_rollback.sql" in second["skipped"]
     # faction 端点修复 + commits.rollback_of 部分唯一索引：0022 也应被幂等跳过
     assert "0022_faction_relationship_endpoints.sql" in second["skipped"]
+    # V3.7 字数带覆盖：0023_project_word_band.sql 也应被幂等跳过
+    assert "0023_project_word_band.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -197,6 +204,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0020_backfill_init_plot_event_description.sql",
         "0021_repair_ch2_status_after_double_rollback.sql",
         "0022_faction_relationship_endpoints.sql",
+        "0023_project_word_band.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -210,6 +218,50 @@ def test_get_connection_enables_foreign_keys(tmp_path: Path):
     finally:
         conn.close()
     assert fk == 1
+
+
+# ---------------------------------------------------------------------------
+# V3.7：0023_project_word_band.sql 专项回归
+# ---------------------------------------------------------------------------
+
+
+def test_0023_word_band_column_exists_and_nullable(tmp_path: Path):
+    """0023 给 projects 加 word_band_json TEXT 可空列（NULL=无覆盖走默认）。
+
+    与已有 0008（foreshadow_overdue_chapters NOT NULL DEFAULT 30）形成对照：
+    word_band_json 不带 DEFAULT，全靠 NULL 语义表达「无覆盖」。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        cols = conn.execute("PRAGMA table_info(projects)").fetchall()
+    finally:
+        conn.close()
+    col_map = {c["name"]: c for c in cols}
+    assert "word_band_json" in col_map, "word_band_json column missing after 0023"
+    col = col_map["word_band_json"]
+    assert col["type"].upper() == "TEXT", f"expected TEXT, got {col['type']!r}"
+    assert col["notnull"] == 0, "word_band_json must be nullable"
+    assert col["dflt_value"] is None, "word_band_json has no DEFAULT (NULL=无覆盖)"
+
+
+def test_0023_word_band_migration_is_idempotent(tmp_path: Path):
+    """0023 跑两遍不炸（ALTER ADD COLUMN 不带 IF NOT EXISTS，靠 _migrations 追踪）。"""
+    db_path = _fresh_db(tmp_path)
+    first = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0023_project_word_band.sql" in first["applied"]
+
+    second = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0023_project_word_band.sql" not in second["applied"]
+    assert "0023_project_word_band.sql" in second["skipped"]
+    # 表数不变（0023 不增表）。
+    assert second["tables"] == first["tables"]
+
+    # 第三次再跑也安全。
+    third = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0023_project_word_band.sql" not in third["applied"]
+    assert third["tables"] == first["tables"]
 
 
 def test_business_table_count_is_34(tmp_path: Path):

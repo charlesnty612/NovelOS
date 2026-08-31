@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Fixed（2026-08-31 午后批次：F5 遗留 P2 + runner 空流自动重试）
+- **F5 审计遗留 P2 ×3 收口**：①applier world_rules rule 分支补 `isinstance(r, dict)` 守卫（update/remove 双路径，非 dict 元素跳过+告警，与 dict 桶防御同风格）——rule 列表元素被污染成 str 时 `r.get("world_rule_id")` 不再抛 AttributeError；②snapshot.repair_current_snapshot_world 在 `dict(world)` 前补 isinstance 守卫（非 dict→空 dict+告警，属 L666-667 强制 dict 之外的防御纵深）；③同函数 docstring 补「设计内副作用」Notes（覆写最新快照不更新 state_version/commit_id、不重算 hash，schema 无 digest 列，下次 commit 自然覆盖）。2 新集成用例。
+- **runner 空流自动重试（agent_runtime/runner.py）**：provider「零内容块空流」失败单独加一次自动重试（`_EMPTY_STREAM_MARKER` 判定，messages 原样重调、不追加 _RETRY_HINT——空流非输出解析问题）；二次仍空流→重抛 ProviderError 附 `[empty stream retried once, still empty]` 注记；重试成功在 ai_call_logs.error 落 `warn: empty stream retried`；retry_count 语义不变（仍只计 output-invalid 重试），mock_script 路径同覆盖。吸收 MiniMax 间歇性空流抖动（deepseek 空流事故留档建议落地），模型绑定/档案零改动。4 新单测。
+- **字数带覆盖审查 P2 二连修**：①`ProjectCreate` 补 word_band 字段 + create 路径校验/落库（此前创建模态与编辑共用表单，新建时填覆盖会被 Pydantic 静默丢弃）——POST /projects 携带 word_band 合法落库/非法 422，与 PATCH 同口径，2 新用例；②builders._invalidate_cache_for_chapter 注释「5 元键」更新为现行多元键口径（功能本正确，纯注释同步）。
+
+### Ops（2026-08-31：ch2 定稿称谓勘误——「确定性重放」SOP 首航）
+- **ch2 v7 称谓勘误（顾晚舟角色卡=女性，v6 定稿两处男性称谓遗留）**：「顾先生」→「顾姑娘」（L71）、顾晚舟指代「他只是站在那里」→「她」（L77）。操作路径：回滚 ch3 v5（cmt_519fd2a267a2）→ 回滚 ch2 v6（cmt_e44835df89d9）→ v7 补丁草稿（dr_e63b00046b0d）→ **原 delta 确定性重放**（ch2=dlt_483e98ffcb8d 摘除顾晚舟 add 条目→cmt_8f2e4d57b4c7；ch3=dlt_5d5cbc2c9715 原样→cmt_5ef99fe69905，零 LLM 调用零漂移）→ 章节状态 PATCH 回 COMMITTED。验证：实体计数/快照 world 三集合/hooks 与回滚前基线逐项全等，宝源当 data_json 完好。
+- **observer 重跑不确定性实证（为何不推荐重跑）**：ch2 重提交两次 observer 重跑均产出新问题——一次把角色更新错塞 world_changes[faction]（无调和目标→校验失败，F3 规则不适用）；一次虚构「第二势力」fac_d5a64a584288_unknown（推断性加戏，原提交无此实体，已拒批）。定稿纯文字勘误一律走 delta 重放，剧情级修改才走 write/review/commit 全流程。
+
+### Known Issues（2026-08-31 记档）
+- **rollback 对 character-add 的逆向 remove 空转**：顾晚舟 char_cd61839a578f 在双回滚后域表行与快照项均完整幸存（实体计数 5→5），逆向清理未覆盖角色系（F5 修的是 world 系 restore hint）；重放 delta 时须摘除对应 add 条目防重复，已在重放 SOP 中固化。修复列入 P2 backlog。
+
+### Added（项目级字数带覆盖：V3.7 字数带硬约束可配置化）
+- **projects.word_band_json 配置列（迁移 0023）**：给 projects 表加 `word_band_json TEXT` 可空列（NULL=无覆盖走模块默认 0.85/1.15/1200）。前端编辑表单「字数带覆盖（可选）」三键（下带比例 low_ratio 默认 0.85 / 上带比例 high_ratio 默认 1.15 / 下限 floor 默认 1200），全留空=不覆盖（提交体省略 word_band 键）、任一非空=提交 dict（后端 resolve_band_config 校验非法→422）；「清除字数带覆盖」按钮显式传 null 落 DB NULL。后端 service 读路径把 word_band_json 解析成 word_band 字段（非法 JSON 视为 None 不炸），ProjectUpdate 通过 Pydantic model_fields_set 区分「未提供」与「显式 null」。消费点两处接线：①writers._build_writer_input_uncached + cache key 第 8 元 wb_fp（项目覆盖变更不脏命中）；②chapter_review._basic_checks_node。无覆盖项目行为零变化（旧库无该列 → OperationalError 兜底 + 字数带逐字段一致）。单测 resolve_band_config 13 用例 + API PATCH 设置/读取/null 清除/422 4 用例 + chapter_review pipeline 带覆盖项目 W-LEN 判定 2 用例 + 迁移幂等 1 用例。
+
 ### Added（2026-08-31 清晨批次：审校模块双层化——REVIEW-CHECKLIST 产品化）
 - **deep_review 二审 AI 节点（chapter_review 管线）**：仓根 REVIEW-CHECKLIST 三层清单（设定一致性→节拍核销→行为链连续性）从「主控手工派 smart」产品化为管线能力。critic 与 author_review 之间新增可选节点：run 请求体 `deep_review: true` 开启（缺省/False 走 skipped 不调 AI），agent=deep_reviewer 走 reasoning 能力（Kimi 档），输出严格 JSON（verdict pass/revise + issues[layer/severity/quote/suggestion]），fail-soft 降级绝不阻断主流程，verdict=revise 不自动驳回（advisory 原则与 critic 一致）；报告并入 author_review 的 pause_payload.deep_review_report。新建提示词 deep_reviewer-v1.md（severity 标尺=五类硬缺陷才允许 high）；structured_output 新增 _validate_deep_reviewer 六字段校验；prompts._AGENT_TO_CAPABILITY 与 router.AGENT_CAPABILITY 双源同步 + CAPABILITY_LABELS 收录（环节绑定页可见）。前端 ChapterDetailPage：审校步骤加「深度二审」开关（默认关），审批卡新增「深度二审（三层清单）」分栏（verdict 徽标+issues 列表，缺省/坏形状降级不炸）。后端 7 + 前端 7 新用例。
 - **critic 提示词 P0 校准（critic-v1.md）**：§3.9 新增「章内自洽审查」——同一事实（时间/称谓/物件/数字）全章多处出现逐一交叉比对，互斥报 logic/high（生产实证：ch3「今早刚收」×3 与「当期三个月」自相矛盾被 critic 漏报）；§6.12 新增 severity 标尺——high 锁死五类硬缺陷（无源信息/行为链断裂/藏点对象错位/台词矛盾/节拍完全缺失），写法/节奏/视角类建议封顶 medium（生产实证：critic 把「决心落点只有情绪共鸣」写法建议误标 high）；§9 补 E-CRT-08/09 验收规则。

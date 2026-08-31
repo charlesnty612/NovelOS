@@ -166,7 +166,17 @@ def _apply_world_changes(state: dict, items: list[dict]) -> None:
                     }
                 )
             elif op == "update":
+                # 防御（P2-1）：world_rules 列表若被旧形状污染成 str 元素，
+                # r.get 会抛 AttributeError；非 dict 元素跳过 + warning，
+                # 与 location/faction 桶非 dict 守卫风格一致。
                 for r in rules:
+                    if not isinstance(r, dict):
+                        _logger.warning(
+                            "applier._apply_world_changes: world_rules 含非 dict 元素（类型=%s），"
+                            "跳过（world_id=%r）",
+                            type(r).__name__, wid,
+                        )
+                        continue
                     if r.get("world_rule_id") == wid:
                         if isinstance(after, dict):
                             _set_top_level(r, "name", after.get("name"))
@@ -174,7 +184,18 @@ def _apply_world_changes(state: dict, items: list[dict]) -> None:
                             _set_top_level(r, "data_json", after.get("data_json"))
                         break
             elif op == "remove":
-                world["world_rules"] = [r for r in rules if r.get("world_rule_id") != wid]
+                # 防御（P2-1）：同 update，非 dict 元素跳过 + warning。
+                world["world_rules"] = []
+                for r in rules:
+                    if not isinstance(r, dict):
+                        _logger.warning(
+                            "applier._apply_world_changes: world_rules 含非 dict 元素（类型=%s），"
+                            "跳过（world_id=%r）",
+                            type(r).__name__, wid,
+                        )
+                        continue
+                    if r.get("world_rule_id") != wid:
+                        world["world_rules"].append(r)
             continue
 
         if kind in _RUNTIME_KINDS:

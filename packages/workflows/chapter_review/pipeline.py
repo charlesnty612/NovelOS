@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
@@ -40,7 +41,7 @@ from packages.core.db import get_connection
 from packages.core.ids import now_iso
 from packages.core.model_router.router import capability_for
 from packages.core.quality.ai_patterns import scan_ai_patterns
-from packages.core.quality.wordcount import classify_prose_length
+from packages.core.quality.wordcount import classify_prose_length, resolve_band_config
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
 
 DEFAULT_FORBIDDEN_WORDS = ["仿佛", "如同", "本章目标"]
@@ -113,20 +114,53 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
     chapter_id = ctx["chapter_id"]
     # 目标字数：请求体显式传入 > plan_json.expected_word_count > 默认 3000
     target = int(ctx.get("target_word_count") or 0)
-    if not target:
+    # V3.7：项目级字数带覆盖——先一次性从 chapters 行取 project_id + plan_json，
+    # 再读 projects.word_band_json 折叠覆盖。无覆盖时输出与原逐字节一致。
+    word_band_overrides: dict | None = None
+    chapter_project_id: str | None = None
+    try:
+        conn = get_connection(db_path)
         try:
-            conn = get_connection(db_path)
+            prow = conn.execute(
+                "SELECT project_id, plan_json FROM chapters WHERE chapter_id = ?",
+                (chapter_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if prow is not None:
+            chapter_project_id = prow["project_id"]
+            if not target and prow["plan_json"]:
+                try:
+                    plan = json.loads(prow["plan_json"])
+                    target = int(plan.get("expected_word_count") or 0)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    # 无论 target 是否显式传入，都尝试读项目覆盖（与 target 来源解耦——ctx 传
+    # target 也应跟随项目覆盖；这是 V3.7 升级语义的关键）。
+    if chapter_project_id:
+        try:
+            conn2 = get_connection(db_path)
             try:
-                prow = conn.execute(
-                    "SELECT plan_json FROM chapters WHERE chapter_id = ?", (chapter_id,)
-                ).fetchone()
+                try:
+                    band_row = conn2.execute(
+                        "SELECT word_band_json FROM projects WHERE project_id = ?",
+                        (chapter_project_id,),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    band_row = None
             finally:
-                conn.close()
-            if prow and prow["plan_json"]:
-                plan = json.loads(prow["plan_json"])
-                target = int(plan.get("expected_word_count") or 0)
-        except Exception:
-            target = 0
+                conn2.close()
+        except Exception:  # noqa: BLE001 —— 防御性：读库失败视为无覆盖
+            band_row = None
+        if band_row is not None and band_row["word_band_json"]:
+            try:
+                parsed = json.loads(band_row["word_band_json"])
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                word_band_overrides = parsed
     if not target:
         target = _DEFAULT_TARGET_WORD_COUNT
 
@@ -160,7 +194,10 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
     reviewed_version = int(draft_row["version"])
     # V3.7：字数带硬约束 —— ±15% 升 warning（带 rule_id），超 ±30% 追加到 errors。
     # classify 既出 visible_chars（word_count）又出 band / status / deviation_pct，避免重复调用。
-    classify = classify_prose_length(prose, target)
+    # 无覆盖项目：折叠输出与原 wordcount 默认参数（low_ratio=0.85/high_ratio=1.15/floor=1200）逐字段一致。
+    classify = classify_prose_length(
+        prose, target, **resolve_band_config(word_band_overrides),
+    )
     word_count = classify["visible_chars"]
     deviation_pct = classify["deviation_pct"]
     abs_dev_pct = abs(deviation_pct)

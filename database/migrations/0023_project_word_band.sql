@@ -1,0 +1,31 @@
+-- =============================================================================
+-- NovelOS Database Migration 0023: projects.word_band_json（项目级字数带覆盖）
+--
+-- 背景（V3.7 章节字数带硬约束升级）：
+--   - writer / chapter_review 当前消费 wordcount.word_band(target, low_ratio=0.85,
+--     high_ratio=1.15, floor=1200) 的全局硬编码口径（packages/core/quality/wordcount.py
+--     L33-56）。当某些项目希望放宽/收紧「±15% 警告 / 1200 下限」时只能改源码。
+--   - 本迁移给 projects 表加 word_band_json TEXT 列（NULL = 用默认）承接项目级
+--     覆盖 dict（仅可选键 low_ratio / high_ratio / floor），由 wordcount 出口新函数
+--     resolve_band_config(overrides) 校验 + 补默认值。无覆盖项目行为零变化（与现状
+--     逐字段一致）。
+--
+-- 列语义：
+--   - word_band_json: TEXT，存储 JSON 字符串，例 {"low_ratio":0.9,"high_ratio":1.1,"floor":1500}
+--   - NULL ⇒ 项目无覆盖，按模块默认（0.85/1.15/1200）生效
+--   - 非 NULL 但 JSON 非法 / 字段非法 ⇒ service 层读取路径解析失败 → 视为 NULL + 不炸
+--     （防御性，与 0022 历史回滚策略对齐）
+--
+-- 幂等策略：
+--   - ADD COLUMN 不带 IF NOT EXISTS：sqlite3 ALTER TABLE 不支持该语法，
+--     由 packages.core.db.apply_migrations 按文件粒度追踪（_migrations 记录），
+--     第二次跑直接跳过整文件。
+--   - 列加完后 _migrations 记录本文件，下次 apply_migrations 命中跳过。
+--   - 单列 ALTER 不引入数据迁移（NULL 语义与旧库对齐，无需回填）。
+-- =============================================================================
+
+ALTER TABLE projects ADD COLUMN word_band_json TEXT;
+
+-- =============================================================================
+-- 迁移结束 (0023)
+-- =============================================================================
