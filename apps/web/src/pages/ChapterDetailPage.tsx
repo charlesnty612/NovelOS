@@ -27,6 +27,7 @@ import {
   countHighRiskChanges,
   getButtonAvailability,
   getPipelineStepStates,
+  isCancelledByUserNode,
   isRejectedForRevisionRun,
   isRejectedRun,
   isRunForChapter,
@@ -353,6 +354,43 @@ export function ChapterDetailPage() {
     (poll.data != null &&
       (poll.data.status === 'RUNNING' || poll.data.status === 'PENDING'));
 
+  // 「停止当前工作流」按钮：banner 展示的 run 处于 RUNNING 时允许取消。
+  // 取消成功后端置 CANCELLED，轮询自然把横幅撤下；409（run 已不在 RUNNING）也
+  // 视为「已结束」——刷新详情即可。错误用 message 兜底，UI 不炸。
+  const handleCancelRun = useCallback(async () => {
+    if (!runningDetail) return;
+    try {
+      await workflowsApi.cancelRun(runningDetail.run_id);
+      // 成功：触发既有刷新链路，poll 也会停到非 RUNNING，banner 自然消失
+      await Promise.all([
+        chapterCall.reload(),
+        runsCall.reload(),
+        detail.reload(),
+      ]);
+    } catch (e: unknown) {
+      // 409：run 已不在 RUNNING（终态/PAUSED）→ 视为已结束，刷新即可，不报错
+      if (e instanceof ApiError && e.status === 409) {
+        await Promise.all([
+          chapterCall.reload(),
+          runsCall.reload(),
+          detail.reload(),
+        ]);
+        return;
+      }
+      // 404：run 不存在 → 同样刷新兜底
+      if (e instanceof ApiError && e.status === 404) {
+        await Promise.all([
+          chapterCall.reload(),
+          runsCall.reload(),
+          detail.reload(),
+        ]);
+        return;
+      }
+      // 其它错误：信息抛给 ErrorBanner（与既有 actionErr 共用通道）
+      setActionErr(e instanceof Error ? e.message : '停止工作流失败');
+    }
+  }, [runningDetail, chapterCall, runsCall, detail]);
+
   // 渲染
   return (
     <div>
@@ -405,7 +443,7 @@ export function ChapterDetailPage() {
         </div>
       ) : chapter && isRunningBannerVisible ? (
         <div style={{ marginTop: 12 }}>
-          <WorkflowRunningBanner detail={runningDetail} />
+          <WorkflowRunningBanner detail={runningDetail} onCancel={handleCancelRun} />
         </div>
       ) : null}
 
@@ -1166,7 +1204,13 @@ function RunTimeline({ run }: { run: WorkflowRun }) {
             </span>
           </div>
           {n.error ? (
-            isRejectedForRevisionRun(n.error) ? (
+            isCancelledByUserNode(n.error) ? (
+              // 用户协作式取消：当前节点被取消探针标 FAILED(error='cancelled by user')。
+              // 非真失败——用户主动停手；用中性 InfoBanner 避免红色 ErrorBanner 误导为出错。
+              <InfoBanner>
+                本节点已被用户主动取消（cancelled by user），非失败。
+              </InfoBanner>
+            ) : isRejectedForRevisionRun(n.error) ? (
               // 「按建议修改/驳回并改稿」主动驳回：改稿回路会自动重跑 write→review，
               // 非真失败，用中性 InfoBanner 而非红色 ErrorBanner。
               <InfoBanner>
@@ -1222,13 +1266,27 @@ function formatElapsed(seconds: number): string {
   return s === 0 ? `${m} 分` : `${m} 分 ${s} 秒`;
 }
 
-function WorkflowRunningBanner({ detail }: { detail: WorkflowRun | null }) {
+function WorkflowRunningBanner({
+  detail,
+  onCancel,
+}: {
+  detail: WorkflowRun | null;
+  /** 父组件传入的取消回调：POST /runs/{id}/cancel，由父组件统一处理 200/409/404/其它错误。 */
+  onCancel: () => Promise<void> | void;
+}) {
   // 本地每秒 +1，让「已运行 X 秒」看起来在跳；started_at 没拿到时退化为 0。
   const [tick, setTick] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(id);
   }, []);
+
+  // 「停止当前工作流」按钮的本地状态：未确认 / 待确认 / 提交中。
+  // 切换 run 后重置到 idle（避免上一轮的确认态遗留下来）。
+  const [cancelPhase, setCancelPhase] = useState<'idle' | 'confirming' | 'submitting'>('idle');
+  useEffect(() => {
+    setCancelPhase('idle');
+  }, [detail?.run_id]);
 
   if (!detail) {
     // 提交中、详情尚未到达：用兜底文案
@@ -1292,6 +1350,36 @@ function WorkflowRunningBanner({ detail }: { detail: WorkflowRun | null }) {
     return '正在执行（约需 1-3 分钟，请勿关闭）';
   })();
 
+  // 取消按钮可见性：仅在 detail.status === 'RUNNING' 时展示。
+  // - PENDING：未真正开始跑（不要展示「停止」按钮，避免歧义）
+  // - PAUSED / 终态（COMPLETED/FAILED/CANCELLED）：banner 在父组件已不展示，此处兜底不出按钮
+  const showCancelBtn = detail.status === 'RUNNING';
+  // 二次确认中的「提交中」判定：用 isCancelSubmitting 抽象布尔，避免 TS 在
+  // cancelPhase === 'confirming' 命中的三元里把 cancelPhase 缩窄为字面量 'confirming'
+  // 导致后续 === 'submitting' 比较报 TS2367。
+  const submittingForCancel = cancelPhase === 'submitting';
+
+  const handleClickCancel = () => {
+    if (submittingForCancel) return;
+    setCancelPhase('confirming');
+  };
+  const handleConfirmCancel = async () => {
+    if (submittingForCancel) return;
+    setCancelPhase('submitting');
+    try {
+      await onCancel();
+      // 父组件成功路径会刷详情/banner 自动消失；停留在 submitting 态
+      // （无 run_id 变化则 effect 不触发重置），让用户在等待中看到「停止中…」。
+    } catch {
+      // 父组件自行处理错误（ErrorBanner / 静默刷新），本组件恢复 idle 允许重试
+      setCancelPhase('idle');
+    }
+  };
+  const handleAbortCancel = () => {
+    if (submittingForCancel) return;
+    setCancelPhase('idle');
+  };
+
   return (
     <div
       className="alert alert--info"
@@ -1301,16 +1389,77 @@ function WorkflowRunningBanner({ detail }: { detail: WorkflowRun | null }) {
       data-current-node={currentNodeName ?? ''}
       data-run-id={detail.run_id}
     >
-      <div style={{ fontWeight: 600 }}>
-        ⏳ 正在执行：{actionLabel}（{workflowName}）
-      </div>
-      <div className="muted small" style={{ marginTop: 4 }}>
-        {hasNodeProgress && currentNodeName
-          ? `节点：${currentNodeName}（第 ${currentIdx + 1}/${nodes.length} 步）· 已运行 ${formatElapsed(elapsedSec)}`
-          : `执行中 · 已运行 ${formatElapsed(elapsedSec)}`}
-      </div>
-      <div className="muted small" style={{ marginTop: 2 }}>
-        {hintText}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 12,
+        }}
+      >
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 600 }}>
+            ⏳ 正在执行：{actionLabel}（{workflowName}）
+          </div>
+          <div className="muted small" style={{ marginTop: 4 }}>
+            {hasNodeProgress && currentNodeName
+              ? `节点：${currentNodeName}（第 ${currentIdx + 1}/${nodes.length} 步）· 已运行 ${formatElapsed(elapsedSec)}`
+              : `执行中 · 已运行 ${formatElapsed(elapsedSec)}`}
+          </div>
+          <div className="muted small" style={{ marginTop: 2 }}>
+            {hintText}
+          </div>
+        </div>
+        {showCancelBtn ? (
+          cancelPhase === 'confirming' ? (
+            <div
+              data-testid="wf-cancel-confirm"
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'flex-end',
+                gap: 6,
+                maxWidth: 360,
+              }}
+            >
+              <div
+                className="small"
+                style={{ textAlign: 'right', lineHeight: 1.4 }}
+              >
+                确认停止当前工作流？已完成的节点会保留，正在执行的节点结果将被丢弃。
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  type="button"
+                  className="btn btn--sm"
+                  data-testid="wf-cancel-abort"
+                  onClick={handleAbortCancel}
+                  disabled={submittingForCancel}
+                >
+                  再想想
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--sm btn--danger"
+                  data-testid="wf-cancel-confirm-btn"
+                  onClick={handleConfirmCancel}
+                  disabled={submittingForCancel}
+                >
+                  {submittingForCancel ? '停止中…' : '确认停止'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="btn btn--sm btn--danger"
+              data-testid="wf-cancel-btn"
+              onClick={handleClickCancel}
+              style={{ flexShrink: 0 }}
+            >
+              停止工作流
+            </button>
+          )
+        ) : null}
       </div>
     </div>
   );
@@ -1321,18 +1470,26 @@ function NodeStatusBadge({
   error,
 }: {
   status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
-  /** 节点 error：FAILED 时区分两态——
-   *   rejected-for-revision = 按建议修改/驳回并改稿（中性徽标「已驳回·改稿」）
-   *   rejected              = 纯驳回（中性徽标「已驳回」）
-   * 两者都避免与真失败的红色 FAILED 混淆。判断顺序：rejected-for-revision 含子串 rejected,先判。 */
+  /** 节点 error：FAILED 时区分多态——
+   *   cancelled by user      = 用户协作式取消（中性徽标「已取消」，复用 badge--chapter-rejected 灰蓝系）
+   *   rejected-for-revision  = 按建议修改/驳回并改稿（中性「已驳回·改稿」）
+   *   rejected               = 纯驳回（中性「已驳回」）
+   * 三态都用中性徽标，避免被误判为真失败（红色 FAILED）。
+   * 判断顺序必须先 cancelled by user（精确匹配），再 rejected-for-revision（含子串 rejected），
+   * 再 rejected（精确匹配），最后才落真失败红徽标。 */
   error?: string | null;
 }) {
   const err = error ?? '';
+  const cancelledByUser =
+    status === 'FAILED' && isCancelledByUserNode(err);
   const rejectedForRevision =
-    status === 'FAILED' && isRejectedForRevisionRun(err);
+    !cancelledByUser && status === 'FAILED' && isRejectedForRevisionRun(err);
   const rejectedOnly =
-    !rejectedForRevision && status === 'FAILED' && isRejectedRun(err);
-  const cls = rejectedForRevision || rejectedOnly
+    !cancelledByUser &&
+    !rejectedForRevision &&
+    status === 'FAILED' &&
+    isRejectedRun(err);
+  const cls = cancelledByUser || rejectedForRevision || rejectedOnly
     ? 'badge badge--chapter-rejected'
     : status === 'COMPLETED'
     ? 'badge badge--chapter-committed'
@@ -1343,7 +1500,9 @@ function NodeStatusBadge({
     : status === 'SKIPPED'
     ? 'badge badge--archived'
     : 'badge badge--chapter-planned';
-  const label = rejectedForRevision
+  const label = cancelledByUser
+    ? '已取消'
+    : rejectedForRevision
     ? '已驳回·改稿'
     : rejectedOnly
     ? '已驳回'

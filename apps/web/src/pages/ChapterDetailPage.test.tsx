@@ -4,6 +4,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ChapterDetailPage } from './ChapterDetailPage';
 import { chaptersApi, modelProfilesApi, qualityApi, workflowsApi } from '../api/endpoints';
+import { ApiError } from '../api/client';
 import type {
   Chapter,
   Draft,
@@ -33,6 +34,7 @@ vi.mock('../api/endpoints', () => ({
     startCommit: vi.fn(),
     resume: vi.fn(),
     resumeInit: vi.fn(),
+    cancelRun: vi.fn(),
   },
   modelProfilesApi: {
     list: vi.fn(),
@@ -94,6 +96,7 @@ describe('ChapterDetailPage - 生成计划防呆', () => {
     vi.mocked(workflowsApi.startCommit).mockReset();
     vi.mocked(workflowsApi.resume).mockReset();
     vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
     vi.mocked(modelProfilesApi.list).mockReset();
     vi.mocked(modelProfilesApi.create).mockReset();
     vi.mocked(modelProfilesApi.update).mockReset();
@@ -313,6 +316,7 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
     vi.mocked(workflowsApi.startCommit).mockReset();
     vi.mocked(workflowsApi.resume).mockReset();
     vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
     vi.mocked(modelProfilesApi.list).mockReset();
     vi.mocked(modelProfilesApi.create).mockReset();
     vi.mocked(modelProfilesApi.update).mockReset();
@@ -826,6 +830,7 @@ describe('ChapterDetailPage - 按次模型档案选择', () => {
     vi.mocked(workflowsApi.startCommit).mockReset();
     vi.mocked(workflowsApi.resume).mockReset();
     vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
     vi.mocked(modelProfilesApi.list).mockReset();
     vi.mocked(modelProfilesApi.create).mockReset();
     vi.mocked(modelProfilesApi.update).mockReset();
@@ -1092,6 +1097,7 @@ describe('ChapterDetailPage - 审校指定草稿版本', () => {
     vi.mocked(workflowsApi.startCommit).mockReset();
     vi.mocked(workflowsApi.resume).mockReset();
     vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
     vi.mocked(modelProfilesApi.list).mockReset();
     vi.mocked(modelProfilesApi.create).mockReset();
     vi.mocked(modelProfilesApi.update).mockReset();
@@ -1208,6 +1214,7 @@ describe('ChapterDetailPage - 工作流四步流水线展示态', () => {
     vi.mocked(workflowsApi.startCommit).mockReset();
     vi.mocked(workflowsApi.resume).mockReset();
     vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
     vi.mocked(modelProfilesApi.list).mockReset();
     vi.mocked(modelProfilesApi.create).mockReset();
     vi.mocked(modelProfilesApi.update).mockReset();
@@ -1413,6 +1420,166 @@ describe('ChapterDetailPage - FAILED run 错误文案不误判为「已驳回」
 });
 
 // ---------------------------------------------------------------------------
+// 协作式取消：节点被取消探针标 FAILED(error='cancelled by user')。
+// 前端不能用红色 ErrorBanner / 红色 failed 徽标误导用户，需渲染中性徽标 + 中性 InfoBanner。
+// ---------------------------------------------------------------------------
+
+describe('ChapterDetailPage - 用户主动取消节点（非真失败）', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(chaptersApi.delete).mockReset();
+    vi.mocked(chaptersApi.update).mockReset();
+    vi.mocked(chaptersApi.createDraft).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(workflowsApi.startPlan).mockReset();
+    vi.mocked(workflowsApi.startWrite).mockReset();
+    vi.mocked(workflowsApi.startReview).mockReset();
+    vi.mocked(workflowsApi.startCommit).mockReset();
+    vi.mocked(workflowsApi.resume).mockReset();
+    vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(modelProfilesApi.create).mockReset();
+    vi.mocked(modelProfilesApi.update).mockReset();
+    vi.mocked(modelProfilesApi.remove).mockReset();
+    vi.mocked(modelProfilesApi.test).mockReset();
+
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([]);
+    vi.mocked(workflowsApi.startPlan).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun);
+  });
+
+  // 构造一个被用户取消的 run：CANCELLED 状态 + nodes 含一个被探针标 FAILED 的节点。
+  // 该节点 error === 'cancelled by user'（精确匹配），不应被误判为真失败。
+  function buildCancelledRun(): WorkflowRun {
+    return {
+      run_id: 'wfr_user_cancelled_001',
+      workflow_id: 'chapter-write',
+      chapter_id: 'ch_001',
+      status: 'CANCELLED',
+      current_node: null,
+      checkpoint_json: {},
+      error: null,
+      retry_count: 0,
+      started_at: new Date(Date.now() - 60_000).toISOString(),
+      ended_at: new Date().toISOString(),
+      workflow_name: 'chapter-write',
+      nodes: [
+        {
+          node_run_id: 'nrun_planner_cancelled',
+          run_id: 'wfr_user_cancelled_001',
+          node_id: 'planner',
+          agent_id: null,
+          status: 'COMPLETED',
+          input_json: {},
+          output_json: null,
+          prompt_version: null,
+          model_id: null,
+          token_usage_json: null,
+          latency_ms: null,
+          error: null,
+          started_at: new Date(Date.now() - 60_000).toISOString(),
+          ended_at: new Date(Date.now() - 50_000).toISOString(),
+        },
+        {
+          node_run_id: 'nrun_writer_cancelled',
+          run_id: 'wfr_user_cancelled_001',
+          node_id: 'writer',
+          agent_id: null,
+          status: 'FAILED',
+          input_json: {},
+          output_json: null,
+          prompt_version: null,
+          model_id: null,
+          token_usage_json: null,
+          latency_ms: null,
+          // 引擎协作式取消在 checkpoint 前探针标 FAILED(error='cancelled by user')
+          error: 'cancelled by user',
+          started_at: new Date(Date.now() - 40_000).toISOString(),
+          ended_at: new Date(Date.now() - 5_000).toISOString(),
+        },
+      ],
+    } as unknown as WorkflowRun;
+  }
+
+  it('a) 节点行渲染「已取消」中性徽标，不出现红色徽标', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const cancelledRun = buildCancelledRun();
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([cancelledRun]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(cancelledRun);
+
+    renderPage();
+
+    // 节点徽标应显示「已取消」——文案精确锁定（仅校验 RunTimeline 节点行内的徽标，不动 runs 列表行）。
+    // 节点时间线位于 <ol> 内,通过 ol 上下文拿「已取消」徽标才能精确锁定 NodeStatusBadge。
+    await waitFor(() => {
+      const nodeBadges = Array.from(
+        document.querySelectorAll('ol li .badge'),
+      ).filter((b) => (b.textContent ?? '').trim() === '已取消');
+      expect(nodeBadges.length).toBeGreaterThan(0);
+    });
+    const nodeBadges = Array.from(
+      document.querySelectorAll('ol li .badge'),
+    ).filter((b) => (b.textContent ?? '').trim() === '已取消');
+    const nodeClasses = nodeBadges.map((b) => b.className);
+    // 节点行徽标应是中性 badge--chapter-rejected（不挂红色 failed 类）
+    expect(
+      nodeClasses.some((c) => /badge--chapter-rejected/.test(c)),
+    ).toBe(true);
+    expect(
+      nodeClasses.some((c) => /badge--chapter-failed/.test(c)),
+    ).toBe(false);
+    // 已驳回相关文案不应出现（不是驳回语义）
+    expect(screen.queryByText('已驳回')).toBeNull();
+    expect(screen.queryByText('已驳回·改稿')).toBeNull();
+  });
+
+  it('b) 节点行不渲染红色 ErrorBanner「cancelled by user」（用中性 InfoBanner 或不渲染）', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const cancelledRun = buildCancelledRun();
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([cancelledRun]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(cancelledRun);
+
+    renderPage();
+
+    // 触发选中 + 详情后渲染节点时间线（细节 + info banner）
+    await waitFor(() => {
+      expect(screen.getByText('writer')).toBeInTheDocument();
+    });
+    // 整页 .alert--error 不应含 'cancelled by user' 文案
+    const errorAlerts = Array.from(document.querySelectorAll('.alert--error'));
+    const allErrorText = errorAlerts.map((e) => e.textContent ?? '').join(' | ');
+    expect(allErrorText).not.toMatch(/cancelled by user/);
+    // 中性 InfoBanner（alert--info）应含「已被用户主动取消」（节点 + 顶部运行中横幅外的「已被用户主动取消」文案）
+    const infoAlerts = Array.from(document.querySelectorAll('.alert--info'));
+    const allInfoText = infoAlerts.map((e) => e.textContent ?? '').join(' | ');
+    expect(allInfoText).toMatch(/已被用户主动取消|cancelled by user/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 深度二审（deep_review）：
 // - 审校步骤勾选「深度二审（Kimi，+约1分钟）」 → startReview 请求体带 deep_review:true。
 // - pause_payload 含 deep_review_report → 在审批卡片下方渲染「深度二审（三层清单）」分栏。
@@ -1435,6 +1602,7 @@ describe('ChapterDetailPage - 深度二审 (deep_review)', () => {
     vi.mocked(workflowsApi.startCommit).mockReset();
     vi.mocked(workflowsApi.resume).mockReset();
     vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
     vi.mocked(modelProfilesApi.list).mockReset();
     vi.mocked(modelProfilesApi.create).mockReset();
     vi.mocked(modelProfilesApi.update).mockReset();
@@ -1726,5 +1894,221 @@ describe('ChapterDetailPage - 深度二审 (deep_review)', () => {
     );
     expect(malformed).toBeInTheDocument();
     expect(malformed.textContent).toMatch(/形状异常/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 「停止当前工作流」按钮：banner 内嵌的协作式取消入口。
+// - 仅 RUNNING 时可见/可用；PENDING / PAUSED / 终态不渲染。
+// - 点击 → 内联确认态，文案「确认停止当前工作流？…」精确锁定；
+//   确认 → POST /runs/{id}/cancel；409 → 静默刷新（视为已结束），其它错误由 ErrorBanner 展示。
+// ---------------------------------------------------------------------------
+
+describe('ChapterDetailPage - 停止当前工作流按钮', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(chaptersApi.delete).mockReset();
+    vi.mocked(chaptersApi.update).mockReset();
+    vi.mocked(chaptersApi.createDraft).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(workflowsApi.startPlan).mockReset();
+    vi.mocked(workflowsApi.startWrite).mockReset();
+    vi.mocked(workflowsApi.startReview).mockReset();
+    vi.mocked(workflowsApi.startCommit).mockReset();
+    vi.mocked(workflowsApi.resume).mockReset();
+    vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(modelProfilesApi.create).mockReset();
+    vi.mocked(modelProfilesApi.update).mockReset();
+    vi.mocked(modelProfilesApi.remove).mockReset();
+    vi.mocked(modelProfilesApi.test).mockReset();
+
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([]);
+    vi.mocked(workflowsApi.startPlan).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun);
+  });
+
+  it('a) 有 RUNNING run 时：banner 内显示「停止工作流」按钮', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const runningList: WorkflowRun[] = [
+      {
+        run_id: 'wfr_cancel_running',
+        workflow_id: 'chapter-write',
+        chapter_id: 'ch_001',
+        status: 'RUNNING',
+        current_node: 'writer',
+        checkpoint_json: {},
+        error: null,
+        retry_count: 0,
+        started_at: new Date(Date.now() - 30_000).toISOString(),
+        ended_at: null,
+        nodes: [],
+        workflow_name: 'chapter-write',
+      } as WorkflowRun,
+    ];
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue(runningList);
+    vi.mocked(workflowsApi.get).mockResolvedValue(
+      buildRunningDetail({ run_id: 'wfr_cancel_running' }),
+    );
+
+    renderPage();
+
+    const cancelBtn = await waitFor(() =>
+      screen.getByTestId('wf-cancel-btn'),
+    );
+    expect(cancelBtn).toBeInTheDocument();
+    expect(cancelBtn.textContent).toMatch(/停止工作流/);
+  });
+
+  it('b) 无 RUNNING run（仅终态 / 无 run / PAUSED）时：banner 不显示取消按钮', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    // 全部终态：列表里没有 RUNNING/PENDING 的行，banner 不应在文档中
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([
+      {
+        run_id: 'wfr_cancel_done',
+        workflow_id: 'chapter-write',
+        chapter_id: 'ch_001',
+        status: 'COMPLETED',
+        current_node: null,
+        checkpoint_json: {},
+        error: null,
+        retry_count: 0,
+        started_at: new Date().toISOString(),
+        ended_at: new Date().toISOString(),
+        nodes: [],
+        workflow_name: 'chapter-write',
+      } as WorkflowRun,
+    ]);
+
+    renderPage();
+
+    // banner 自身不应渲染（activeRun 为空）
+    expect(screen.queryByTestId('workflow-running-banner')).toBeNull();
+    expect(screen.queryByTestId('wf-cancel-btn')).toBeNull();
+  });
+
+  it('c) 确认后调用 cancelRun，入参 = banner 展示的 run_id', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const targetRunId = 'wfr_cancel_confirm_target';
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([
+      {
+        run_id: targetRunId,
+        workflow_id: 'chapter-write',
+        chapter_id: 'ch_001',
+        status: 'RUNNING',
+        current_node: 'writer',
+        checkpoint_json: {},
+        error: null,
+        retry_count: 0,
+        started_at: new Date(Date.now() - 30_000).toISOString(),
+        ended_at: null,
+        nodes: [],
+        workflow_name: 'chapter-write',
+      } as WorkflowRun,
+    ]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(
+      buildRunningDetail({ run_id: targetRunId }),
+    );
+    vi.mocked(workflowsApi.cancelRun).mockResolvedValue({
+      run_id: targetRunId,
+      status: 'CANCELLED',
+    });
+
+    renderPage();
+
+    // 1) 点「停止工作流」→ 内联确认态出现，文案精确锁定
+    const cancelBtn = await waitFor(() => screen.getByTestId('wf-cancel-btn'));
+    fireEvent.click(cancelBtn);
+    const confirm = await waitFor(() =>
+      screen.getByTestId('wf-cancel-confirm'),
+    );
+    expect(confirm.textContent).toMatch(
+      /确认停止当前工作流？已完成的节点会保留，正在执行的节点结果将被丢弃。/,
+    );
+
+    // 2) 点「确认停止」→ 调用 cancelRun(run_id)
+    const confirmBtn = screen.getByTestId('wf-cancel-confirm-btn');
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.cancelRun)).toHaveBeenCalledTimes(1);
+    });
+    expect(vi.mocked(workflowsApi.cancelRun)).toHaveBeenCalledWith(targetRunId);
+  });
+
+  it('d) cancelRun 返回 409：触发刷新但不报错炸屏（视为已结束）', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    const runId409 = 'wfr_cancel_409';
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([
+      {
+        run_id: runId409,
+        workflow_id: 'chapter-write',
+        chapter_id: 'ch_001',
+        status: 'RUNNING',
+        current_node: 'writer',
+        checkpoint_json: {},
+        error: null,
+        retry_count: 0,
+        started_at: new Date(Date.now() - 30_000).toISOString(),
+        ended_at: null,
+        nodes: [],
+        workflow_name: 'chapter-write',
+      } as WorkflowRun,
+    ]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(
+      buildRunningDetail({ run_id: runId409 }),
+    );
+    // cancelRun 模拟后端 409（run 已不在 RUNNING）；抛真实 ApiError 让父组件的
+    //  instanceof 守卫命中「视为已结束、刷新即可」分支，不进 ErrorBanner 通道。
+    vi.mocked(workflowsApi.cancelRun).mockImplementation(async () => {
+      throw new ApiError(409, 'run not running');
+    });
+
+    renderPage();
+
+    const cancelBtn = await waitFor(() => screen.getByTestId('wf-cancel-btn'));
+    fireEvent.click(cancelBtn);
+    const confirmBtn = await waitFor(() =>
+      screen.getByTestId('wf-cancel-confirm-btn'),
+    );
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.cancelRun)).toHaveBeenCalledTimes(1);
+    });
+    // 触发刷新链路——listByProject / get 应被轮询/重拉多次（不严格次数，仅验证被调用）
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.listByProject)).toHaveBeenCalled();
+    });
+    // 不应把 409 抛到 ErrorBanner 通道（页面不应出现 alert--error）
+    // 顶部 ErrorBanner 在 page 中只展示 chapterCall.error / actionErr；409 不进 actionErr。
+    const errorAlerts = document.querySelectorAll('.alert--error');
+    // 过滤掉非本次取消导致的 ErrorBanner（chaptersApi.get 等也会走 ErrorBanner，但 mock 都是成功，无 error）
+    expect(Array.from(errorAlerts).map((e) => e.textContent).join('|')).not.toMatch(
+      /run not running|409/,
+    );
   });
 });

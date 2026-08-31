@@ -231,6 +231,20 @@ export function isRejectedForRevisionRun(error: string | null | undefined): bool
 }
 
 /**
+ * run 节点是否「用户主动取消」（协作式 cancel 命中 checkpoint 前探针后被标 FAILED + 此 error）。
+ *
+ * 后端语义（packages/core/workflow_runtime/engine.py）：发起 cancel_run 后，被取消的当前节点
+ * 标 FAILED(error='cancelled by user')（复用真失败枚举，F3 取舍见 CHANGELOG）——前端必须用
+ * 精确字符串区分：是用户主动停手、不是真失败。
+ *
+ * 顺序陷阱：必须先判 isCancelledByUserNode 再判真失败，否则会落红色 ErrorBanner 误导用户。
+ */
+export function isCancelledByUserNode(error: string | null | undefined): boolean {
+  if (error == null) return false;
+  return error.trim() === 'cancelled by user';
+}
+
+/**
  * 提取 pause payload 中的「high risk 变更条数」。
  * chapter-commit.high_risk_approval 的 payload 形如
  *   { stage, message, delta_id, changes: { character_changes, world_changes } }

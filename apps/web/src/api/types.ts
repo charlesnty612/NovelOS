@@ -30,6 +30,13 @@ export interface ProjectCreatePayload {
   premise?: string | null;
   genre?: string | null;
   target_words?: number | null;
+  /**
+   * V3.7：项目级字数带覆盖。
+   * - 字段未提供（undefined） → 后端不写入 word_band_json（与 PATCH 缺省行为对齐）
+   * - 显式 null → 显式清除（落 DB NULL），与 PATCH 同口径
+   * - 显式对象 → 后端 resolve_band_config 校验 + 序列化存 word_band_json
+   */
+  word_band?: ProjectWordBand | null;
 }
 
 export interface ProjectUpdatePayload {

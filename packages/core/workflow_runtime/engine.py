@@ -15,6 +15,12 @@
 - 启动自愈：:func:`recover_interrupted_runs` 在 lifespan startup 把残留
   ``status='RUNNING'`` 的 run 收尾为 FAILED（工作线程随进程死亡，单进程
   部署下启动瞬间不可能存在真正还在跑的 run）。PAUSED / 终态 run 不动。
+- 协作式取消：:meth:`cancel_run` 把 RUNNING run 置为 CANCELLED（端点语义）。
+  ``_run_nodes`` 节点循环**开始前**与**执行完毕 checkpoint 前**各查一次
+  DB 状态：若已 CANCELLED 则停止推进——开始前命中时把刚 insert 的 RUNNING
+  节点行收尾为 CANCELLED、剩余节点不再 insert；checkpoint 前命中时当前节点
+  标 CANCELLED 且丢弃 output（不推进下游、不写 checkpoint）。LLM 节点不
+  杀进程，让后台调用跑完结果丢弃即可（避免跨进程信号复杂度）。
 
 设计要点：
 - checkpoint_json 每节点完成后落盘；崩溃后 :meth:`resume` 从最近一个 COMPLETED 节点的
@@ -114,6 +120,23 @@ def _get_agent_id(conn: sqlite3.Connection, agent_name: str | None) -> str | Non
         return None
     row = conn.execute("SELECT agent_id FROM agents WHERE name = ?", (agent_name,)).fetchone()
     return row["agent_id"] if row else None
+
+
+def _fetch_run_status(db_path: str | Path, run_id: str) -> str | None:
+    """单行 SELECT workflow_runs.status；run 不存在 → None。
+
+    协作式取消的探针：节点循环开始前 / checkpoint 前各调一次，确认 run
+    是否已被外部置为 CANCELLED。轻量、无锁；SQLite 跨线程由 WAL + busy_timeout
+    保证。返回的 status 是 DB 权威值——内存里持有的旧快照不可信。
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status FROM workflow_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["status"] if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +452,63 @@ class WorkflowEngine:
         thread.start()
         return run_id
 
+    # -------------------------------------------------------------- cancel_run
+    def cancel_run(self, run_id: str) -> dict[str, str]:
+        """协作式取消 RUNNING run（端点语义）。
+
+        状态机：
+        - run 不存在 → 抛 ``ValueError("workflow run ... not found")``。
+          由 API 路由层映射为 HTTP 404。
+        - status=RUNNING → UPDATE 为 CANCELLED（带 ended_at），返回
+          ``{"run_id", "status": "CANCELLED", "previous_status": "RUNNING"}``。
+        - status ∈ {COMPLETED, FAILED, CANCELLED, PAUSED} → 抛 ``ValueError``
+          含 "must be RUNNING to cancel"，由 API 路由层映射为 HTTP 409。
+          PAUSED run 的取消走 resume 后再 reject/approve 决议路径，不在本端点范围。
+
+        协作式取消语义：仅 UPDATE run 行 + 写 ended_at；后台节点循环下一次
+        探针（节点开始前 / checkpoint 前）查 DB 时命中 CANCELLED 即停止推进
+        并把当前节点标 CANCELLED + 丢弃 output。LLM 节点不杀进程，让后台
+        调用自然跑完、结果丢弃即可。
+        """
+        current = _fetch_run_status(self.db_path, run_id)
+        if current is None:
+            raise ValueError(f"workflow run {run_id!r} not found")
+        if current != "RUNNING":
+            raise ValueError(
+                f"workflow run {run_id!r} status={current!r}, must be RUNNING to cancel"
+            )
+
+        conn = get_connection(self.db_path)
+        try:
+            # 单条 UPDATE：仅在 status='RUNNING' 时翻转（防御 TOCTOU：API 层
+            # 校验后到此处窄窗口内 run 状态被改——节点异常/PAUSE/CANCELLED
+            # 都可能——WHERE 兜底避免覆盖其他终态）。affected=0 → 不动。
+            cur = conn.execute(
+                """
+                UPDATE workflow_runs
+                SET status = 'CANCELLED', ended_at = ?
+                WHERE run_id = ? AND status = 'RUNNING'
+                """,
+                (now_iso(), run_id),
+            )
+            if cur.rowcount == 0:
+                # 竞态：UPDATE 未命中说明状态已被改（例如 _run_nodes 刚置 FAILED）
+                # → 不覆盖，抛 409。
+                raise ValueError(
+                    f"workflow run {run_id!r} status changed concurrently; "
+                    f"current status is no longer RUNNING"
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        log.info("workflow run %s cancelled via cancel_run", run_id)
+        return {
+            "run_id": run_id,
+            "status": "CANCELLED",
+            "previous_status": "RUNNING",
+        }
+
     # -------------------------------------------------------------- internal: _prepare_resume_ctx
     def _prepare_resume_ctx(
         self,
@@ -489,6 +569,20 @@ class WorkflowEngine:
         """顺序执行 nodes[start_index:]；处理 PauseRequested / 异常 / checkpoint 落盘。"""
         for idx in range(start_index, len(nodes)):
             node = nodes[idx]
+
+            # 协作式取消探针 1（节点开始前）：run 已 CANCELLED → 把当前节点标
+            # CANCELLED（不写 output）、剩余节点不再 insert、run 收尾 CANCELLED、
+            # 正常 return（不抛错）。LLM 调用若已在跑，让它自然结束结果丢弃即可。
+            if _fetch_run_status(self.db_path, run_id) == "CANCELLED":
+                self._finalize_run(
+                    run_id, status="CANCELLED", ctx=ctx, current_node=None
+                )
+                log.info(
+                    "workflow run %s cancelled before node %s (start probe)",
+                    run_id, node.node_id,
+                )
+                return
+
             node_run_id = self._insert_node_row(run_id, node, ctx)
             t0 = time.monotonic()
 
@@ -531,10 +625,43 @@ class WorkflowEngine:
             # 节点成功：合并输出进 ctx
             if output is None:
                 output = {}
+            # 即便最终被取消，节点 fn 仍可能已调过 LLM 拿到产出——探针 2 在
+            # checkpoint 前丢弃该 output；此处先把 output 暂存 ctx 但不写
+            # workflow_runs.checkpoint_json（探针 2 命中时跳过 _update_run_checkpoint）。
+            # 保留 ctx 是为 COMPLETED 路径写 checkpoint 时不丢上下文。
             ctx[node.node_id] = output
             ctx.update(output)  # 顶层 key 直接 merge，便于跨节点引用
 
             latency = int((time.monotonic() - t0) * 1000)
+
+            # 协作式取消探针 2（checkpoint 前）：run 已 CANCELLED → 节点标
+            # FAILED（携带 error='cancelled by user' 区分真实失败）+ 丢弃
+            # output（不写 output_json、不推进下游、不写 checkpoint）、run 收尾
+            # CANCELLED、return。COMPLETED 路径不命中此分支时按既有口径写
+            # COMPLETED + checkpoint。
+            #
+            # 节点行用 FAILED 而非 CANCELLED：workflow_run_nodes.status CHECK
+            # 仅含 PENDING/RUNNING/COMPLETED/FAILED/SKIPPED（0001_init.sql L407），
+            # 扩枚举需重建表会破坏 ai_call_logs FK 引用（FK 指向 wfrn 表名，
+            # SQLite ALTER TABLE RENAME 不更新 FK 引用的表名），代价高于节点行
+            # 复用 FAILED。error 字段足以在审计时区分「真失败」与「用户取消」。
+            if _fetch_run_status(self.db_path, run_id) == "CANCELLED":
+                self._update_node_row(
+                    node_run_id,
+                    status="FAILED",
+                    output=None,
+                    latency_ms=latency,
+                    error="cancelled by user",
+                )
+                self._finalize_run(
+                    run_id, status="CANCELLED", ctx=ctx, current_node=node.node_id
+                )
+                log.info(
+                    "workflow run %s cancelled after node %s (checkpoint probe)",
+                    run_id, node.node_id,
+                )
+                return
+
             self._update_node_row(
                 node_run_id,
                 status="COMPLETED",
@@ -546,7 +673,8 @@ class WorkflowEngine:
             # 每节点完成后写 checkpoint + 更新 current_node（崩溃可恢复）
             self._update_run_checkpoint(run_id, ctx, current_node=node.node_id)
 
-        # 全部节点完成 → COMPLETED
+        # 全部节点完成 → COMPLETED（_finalize_run 不会覆盖 CANCELLED——status
+        # 在终态集合里走 L665 同分支；防御性断言此时 run 必非终态）。
         self._finalize_run(run_id, status="COMPLETED", ctx=ctx, current_node=None)
 
     # -------------------------------------------------------------- internal: DB helpers
@@ -662,7 +790,9 @@ class WorkflowEngine:
         scrubbed = _scrub_ctx_for_checkpoint(ctx or {}, getattr(self, "_checkpoint_exclude", None))
         conn = get_connection(self.db_path)
         try:
-            if status in ("COMPLETED", "FAILED", "CANCELLED"):
+            if status == "CANCELLED":
+                # CANCELLED 收尾无守卫：cancel_run 已置 CANCELLED + ended_at，此处
+                # 幂等重写（status=CANCELLED / ended_at=now / checkpoint 落盘）无害。
                 conn.execute(
                     """
                     UPDATE workflow_runs
@@ -671,6 +801,29 @@ class WorkflowEngine:
                     """,
                     (status, now_iso(), _dump_json(scrubbed), current_node, error, run_id),
                 )
+            elif status in ("COMPLETED", "FAILED"):
+                # 守卫：WHERE status='RUNNING'。场景——节点 fn 完成（或抛异常）后
+                # _update_node_row / _update_run_checkpoint 之间的 5-20ms 窗口内，
+                # cancel_run 已把 run 翻 CANCELLED 并返回 200。若此处无守卫，
+                # 本 UPDATE 会把 CANCELLED 覆盖回 COMPLETED/FAILED，取消契约被击穿。
+                # resume 路径已先 _mark_run_running 翻 RUNNING，不受影响；PAUSED
+                # 走 else 分支不动。
+                # rowcount=0 → run 已被外部置 CANCELLED，cancel_run 已写 ended_at，
+                # 此处不写 ended_at 覆盖、静默跳过收尾；debug 日志便于审计。
+                cur = conn.execute(
+                    """
+                    UPDATE workflow_runs
+                    SET status = ?, ended_at = ?, checkpoint_json = ?, current_node = ?, error = ?
+                    WHERE run_id = ? AND status = 'RUNNING'
+                    """,
+                    (status, now_iso(), _dump_json(scrubbed), current_node, error, run_id),
+                )
+                if cur.rowcount == 0:
+                    log.debug(
+                        "_finalize_run skip: run %s status=%r (already not RUNNING); "
+                        "likely cancelled during finalize window",
+                        run_id, status,
+                    )
             else:  # PAUSED: 保留 ended_at = NULL（仍可 resume）
                 conn.execute(
                     """
@@ -813,4 +966,5 @@ __all__ = [
     "WorkflowNode",
     "PauseRequested",
     "recover_interrupted_runs",
+    "_fetch_run_status",
 ]

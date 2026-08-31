@@ -7,6 +7,7 @@
 - ``POST /projects/{project_id}/chapters/{chapter_id}/commit``  — 启动 chapter-commit
 - ``GET  /runs/{run_id}``                                          — run + 节点明细
 - ``POST /runs/{run_id}/resume``                                   — 恢复 PAUSED run（P0 支持 auto_revise 自动改稿回路）
+- ``POST /runs/{run_id}/cancel``                                   — 协作式取消 RUNNING run
 - ``GET  /projects/{project_id}/runs``                             — list runs
 - ``GET  /chapters/{chapter_id}/context-preview``                  — Sprint 13 下半 dry-run
 
@@ -1059,6 +1060,60 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                 )
 
     return out
+
+
+# ---------------------------------------------------------------------------
+# 工作流运行取消（协作式）
+# ---------------------------------------------------------------------------
+
+
+@router.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
+    """协作式取消 RUNNING workflow run。
+
+    状态机（端点语义）：
+    - run 不存在 → 404，``detail="run ... not found"``。
+    - status=RUNNING → :meth:`WorkflowEngine.cancel_run` UPDATE 为 CANCELLED，
+      200 ``{"run_id": ..., "status": "CANCELLED"}``。后台节点循环在下一次探针
+      （节点开始前 / checkpoint 前）命中 CANCELLED 即停止推进并丢弃产出。
+    - status ∈ {COMPLETED, FAILED, CANCELLED, PAUSED} → 409，detail 含当前
+      status。PAUSED run 的取消走 resume 后的驳回/决议路径，不在本端点范围。
+
+    设计要点：
+    - 幂等：重复取消已 CANCELLED 的 run 按 409 处理即可（与「终态 409」一致）。
+    - engine.cancel_run 内部 WHERE status='RUNNING' 兜底 TOCTOU：API 层校验
+      后到 SQL 执行的窄窗口内状态被改 → rowcount=0 → engine 抛 ValueError →
+      本端点分桶映射 409。
+    """
+    settings = request.app.state.settings
+    db_path = settings.db_path
+
+    run = get_run(db_path, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+    if run["status"] != "RUNNING":
+        # 终态 / PAUSED 一律 409；body 含当前状态便于客户端区分。
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"run {run_id!r} status={run['status']!r}, "
+                f"must be RUNNING to cancel"
+            ),
+        )
+
+    engine = _engine(request)
+    try:
+        engine.cancel_run(run_id)
+    except ValueError as exc:
+        # 兜底分桶：与 resume_run 端点同口径。
+        msg = str(exc)
+        log.debug("cancel_run ValueError: %s", msg)
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=msg) from exc
+        # "must be RUNNING to cancel" 或 TOCTOU "status changed concurrently" 都 → 409
+        raise HTTPException(status_code=409, detail=msg) from exc
+
+    return {"run_id": run_id, "status": "CANCELLED"}
 
 
 # workflow_name → 人类可读中文名（list 端点用；与 UI 列表文案对齐）

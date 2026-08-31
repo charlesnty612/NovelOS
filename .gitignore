@@ -3,6 +3,8 @@ __pycache__/
 *.pyo
 .pytest_cache/
 node_modules/
+# Windows MSYS 重定向垃圾文件（Shell `> nul` 误用 nul 文件名时产出）
+/nul
 dist/
 data/
 *.db

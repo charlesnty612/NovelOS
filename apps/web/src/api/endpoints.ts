@@ -315,6 +315,12 @@ export const workflowsApi = {
   // 与 chapter-review 走同一条路由，但 payload 形态不同——类型层面单独封装以避免误用。
   resumeInit: (runId: string, payload: ProjectInitResumeRequestPayload) =>
     api.post<ProjectInitResponse>(`/runs/${runId}/resume`, payload),
+  // 协作式取消：POST /runs/{run_id}/cancel。
+  // 200 → {run_id, status:'CANCELLED'}；run 非 RUNNING（终态/PAUSED）→ 409；
+  // 不存在 → 404。引擎在探针命中 CANCELLED 后停止推进，无需前端轮询状态变更。
+  // 成功/409 后统一 reload run 详情与列表让 UI 自然回落。
+  cancelRun: (runId: string) =>
+    api.post<{ run_id: string; status: 'CANCELLED' }>(`/runs/${runId}/cancel`, {}),
 };
 
 // -------------------------------------------------------------- model configs
