@@ -72,6 +72,7 @@ export function ChaptersPage() {
           }
         />
       ) : (
+        <div className="table-wrap">
         <table className="table" data-testid="chapter-list">
           <thead>
             <tr>
@@ -117,6 +118,7 @@ export function ChaptersPage() {
             ))}
           </tbody>
         </table>
+        </div>
       )}
 
       {creating ? (

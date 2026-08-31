@@ -18,6 +18,7 @@ import type {
 import { tryParseJsonObject } from '../../utils/format';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 const TYPE_OPTIONS: { value: EventType; label: string }[] = [
   { value: 'revelation', label: '揭露 revelation' },
@@ -92,6 +93,8 @@ export function PlotTab({ projectId }: PlotTabProps) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  // V3.22「交互反馈统一」：删除事件前 ConfirmDialog 二次确认。
+  const [pendingDeleteEventId, setPendingDeleteEventId] = useState<string | null>(null);
 
   const reload = async () => {
     setLoading(true);
@@ -146,8 +149,12 @@ export function PlotTab({ projectId }: PlotTabProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  const handleDelete = async (id: string) => {
-    if (!window.confirm('确认删除该事件？')) return;
+  const handleDelete = (id: string) => {
+    setPendingDeleteEventId(id);
+  };
+
+  const doDelete = async (id: string) => {
+    setPendingDeleteEventId(null);
     try {
       await eventsApi.delete(id);
       await reload();
@@ -339,6 +346,19 @@ export function PlotTab({ projectId }: PlotTabProps) {
             setCreating(false);
             await reload();
           }}
+        />
+      ) : null}
+
+      {pendingDeleteEventId ? (
+        <ConfirmDialog
+          open={true}
+          title="删除剧情事件"
+          body="确认删除该事件？"
+          confirmText="删除"
+          danger
+          testId="plot-event-delete-confirm"
+          onCancel={() => setPendingDeleteEventId(null)}
+          onConfirm={() => void doDelete(pendingDeleteEventId)}
         />
       ) : null}
     </div>

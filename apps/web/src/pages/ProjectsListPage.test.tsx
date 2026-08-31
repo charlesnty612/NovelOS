@@ -5,7 +5,7 @@
 // - 编辑 → 归档：确认 → 调 projectsApi.update(status: ARCHIVED)
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { ProjectsListPage } from './ProjectsListPage';
@@ -125,6 +125,10 @@ describe('ProjectsListPage - 关键流', () => {
     await waitFor(() => {
       expect(screen.getByTestId('project-card-prj_new')).toBeInTheDocument();
     });
+
+    // 成功后出现「已保存」反馈横幅
+    const banner = await screen.findByTestId('projects-saved-banner');
+    expect(banner).toHaveTextContent(/已保存/);
   });
 
   it('c) 创建项目失败：projectsApi.create 抛 ApiError → ErrorBanner 显示错误，modal 不关闭', async () => {
@@ -152,8 +156,6 @@ describe('ProjectsListPage - 关键流', () => {
       baseProject({ project_id: 'prj_001', name: '即将归档', status: 'ACTIVE' }),
     ]);
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-
     const user = userEvent.setup();
     renderPage();
 
@@ -169,13 +171,17 @@ describe('ProjectsListPage - 关键流', () => {
 
     // 编辑 modal 出现 + 「归档」按钮（extraActions）
     const archiveBtn = await waitFor(() =>
-      screen.getByRole('button', { name: '归档' }),
+      screen.getByTestId('project-archive-btn'),
     );
     await user.click(archiveBtn);
 
-    await waitFor(() => {
-      expect(confirmSpy).toHaveBeenCalled();
-    });
+    // V3.22「交互反馈统一」：归档前 ConfirmDialog 弹窗；点确认按钮触发实际归档。
+    const dialog = await waitFor(() =>
+      screen.getByTestId('archive-confirm'),
+    );
+    const confirmBtn = within(dialog).getByTestId('archive-confirm-confirm');
+    await user.click(confirmBtn);
+
     await waitFor(() => {
       expect(projectsApi.update).toHaveBeenCalled();
     });
@@ -187,6 +193,8 @@ describe('ProjectsListPage - 关键流', () => {
     expect(archiveCall).toBeDefined();
     expect(archiveCall![0]).toBe('prj_001');
 
-    confirmSpy.mockRestore();
+    // 归档成功后出现「已归档」反馈横幅
+    const banner = await screen.findByTestId('projects-saved-banner');
+    expect(banner).toHaveTextContent(/已归档/);
   });
 });

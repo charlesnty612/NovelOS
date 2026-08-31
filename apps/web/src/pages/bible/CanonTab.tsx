@@ -20,6 +20,7 @@ import type {
 } from '../../api/types';
 import { EmptyState } from '../../components/EmptyState';
 import { ErrorBanner } from '../../components/ErrorBanner';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { formatDateTime, parseReportMarkdown } from '../../utils/format';
 
 interface CanonTabProps {
@@ -50,6 +51,8 @@ export function CanonTab({ projectId }: CanonTabProps) {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CanonDetail | null>(null);
+  // V3.22「交互反馈统一」：删除参照系前 ConfirmDialog 二次确认。
+  const [pendingDeleteCanonId, setPendingDeleteCanonId] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailErr, setDetailErr] = useState<string | null>(null);
 
@@ -104,8 +107,12 @@ export function CanonTab({ projectId }: CanonTabProps) {
     }
   };
 
-  const handleDelete = async (canonId: string) => {
-    if (!window.confirm('确认删除该参照系？关联的章节 extracts 会一并删除。')) return;
+  const handleDelete = (canonId: string) => {
+    setPendingDeleteCanonId(canonId);
+  };
+
+  const doDelete = async (canonId: string) => {
+    setPendingDeleteCanonId(null);
     try {
       await referenceApi.deleteCanon(canonId);
       if (selectedId === canonId) {
@@ -286,6 +293,19 @@ export function CanonTab({ projectId }: CanonTabProps) {
           ) : null}
         </aside>
       </div>
+
+      {pendingDeleteCanonId ? (
+        <ConfirmDialog
+          open={true}
+          title="删除参照系"
+          body="确认删除该参照系？关联的章节 extracts 会一并删除。"
+          confirmText="删除"
+          danger
+          testId="canon-delete-confirm"
+          onCancel={() => setPendingDeleteCanonId(null)}
+          onConfirm={() => void doDelete(pendingDeleteCanonId)}
+        />
+      ) : null}
     </div>
   );
 }

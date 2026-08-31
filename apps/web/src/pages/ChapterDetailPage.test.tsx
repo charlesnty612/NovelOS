@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ChapterDetailPage } from './ChapterDetailPage';
 import { chaptersApi, modelProfilesApi, qualityApi, workflowsApi } from '../api/endpoints';
@@ -140,8 +140,6 @@ describe('ChapterDetailPage - 生成计划防呆', () => {
     });
     vi.mocked(chaptersApi.get).mockResolvedValue(chWithPlan);
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
-
     renderPage();
 
     await waitFor(() => {
@@ -154,11 +152,19 @@ describe('ChapterDetailPage - 生成计划防呆', () => {
 
     fireEvent.click(planBtn);
 
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
-    expect(confirmSpy.mock.calls[0][0]).toMatch(/章节已有计划/);
-    expect(vi.mocked(workflowsApi.startPlan)).not.toHaveBeenCalled();
+    // V3.22「交互反馈统一」：用 ConfirmDialog（testid=plan-reconfirm）替代 window.confirm。
+    const dialog = await waitFor(() =>
+      screen.getByTestId('plan-reconfirm'),
+    );
+    expect(within(dialog).getByText(/章节已有计划/)).toBeInTheDocument();
+    // 点「取消」不应调 startPlan
+    const cancelBtn = within(dialog).getByTestId('plan-reconfirm-cancel');
+    fireEvent.click(cancelBtn);
 
-    confirmSpy.mockRestore();
+    await waitFor(() => {
+      expect(screen.queryByTestId('plan-reconfirm')).not.toBeInTheDocument();
+    });
+    expect(vi.mocked(workflowsApi.startPlan)).not.toHaveBeenCalled();
   });
 
   it('章节已有 plan_json 时确认通过后会调 startPlan', async () => {
@@ -168,8 +174,6 @@ describe('ChapterDetailPage - 生成计划防呆', () => {
     vi.mocked(chaptersApi.get).mockResolvedValue(chWithPlan);
     vi.mocked(workflowsApi.startPlan).mockResolvedValue(planResponse('wfr_plan_002'));
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-
     renderPage();
 
     await waitFor(() => {
@@ -178,9 +182,12 @@ describe('ChapterDetailPage - 生成计划防呆', () => {
 
     fireEvent.click(screen.getByTestId('wf-btn-plan'));
 
-    await waitFor(() => {
-      expect(confirmSpy).toHaveBeenCalledTimes(1);
-    });
+    // 点 ConfirmDialog 确认按钮 → 重跑 handleStartWorkflow
+    const dialog = await waitFor(() =>
+      screen.getByTestId('plan-reconfirm'),
+    );
+    fireEvent.click(within(dialog).getByTestId('plan-reconfirm-confirm'));
+
     await waitFor(() => {
       expect(vi.mocked(workflowsApi.startPlan)).toHaveBeenCalledTimes(1);
     });
@@ -189,16 +196,12 @@ describe('ChapterDetailPage - 生成计划防呆', () => {
       'ch_001',
       undefined,
     );
-
-    confirmSpy.mockRestore();
   });
 
   it('章节无 plan_json 时不弹确认，直接调 startPlan', async () => {
     const chNoPlan = baseChapter({ plan_json: {} });
     vi.mocked(chaptersApi.get).mockResolvedValue(chNoPlan);
     vi.mocked(workflowsApi.startPlan).mockResolvedValue(planResponse('wfr_plan_003'));
-
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     renderPage();
 
@@ -211,9 +214,7 @@ describe('ChapterDetailPage - 生成计划防呆', () => {
     await waitFor(() => {
       expect(vi.mocked(workflowsApi.startPlan)).toHaveBeenCalledTimes(1);
     });
-    expect(confirmSpy).not.toHaveBeenCalled();
-
-    confirmSpy.mockRestore();
+    expect(screen.queryByTestId('plan-reconfirm')).not.toBeInTheDocument();
   });
 
   it('非 plan 操作（write/review/commit）即使有 plan_json 也不弹确认', async () => {
@@ -226,8 +227,6 @@ describe('ChapterDetailPage - 生成计划防呆', () => {
     vi.mocked(workflowsApi.startWrite).mockResolvedValue({
       ...planResponse('wfr_write_001'),
     });
-
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     renderPage();
 
@@ -243,9 +242,7 @@ describe('ChapterDetailPage - 生成计划防呆', () => {
     await waitFor(() => {
       expect(vi.mocked(workflowsApi.startWrite)).toHaveBeenCalledTimes(1);
     });
-    expect(confirmSpy).not.toHaveBeenCalled();
-
-    confirmSpy.mockRestore();
+    expect(screen.queryByTestId('plan-reconfirm')).not.toBeInTheDocument();
   });
 });
 
@@ -1532,6 +1529,13 @@ describe('ChapterDetailPage - 用户主动取消节点（非真失败）', () =>
 
     renderPage();
 
+    // CANCELLED 属终态，时间线默认折叠；展开 <details> 后再断言节点行徽标。
+    await waitFor(() => {
+      expect(screen.getByTestId('run-timeline-details')).toBeInTheDocument();
+    });
+    const timelineDetails = screen.getByTestId('run-timeline-details') as HTMLDetailsElement;
+    timelineDetails.open = true;
+
     // 节点徽标应显示「已取消」——文案精确锁定（仅校验 RunTimeline 节点行内的徽标，不动 runs 列表行）。
     // 节点时间线位于 <ol> 内,通过 ol 上下文拿「已取消」徽标才能精确锁定 NodeStatusBadge。
     await waitFor(() => {
@@ -1564,6 +1568,13 @@ describe('ChapterDetailPage - 用户主动取消节点（非真失败）', () =>
 
     renderPage();
 
+    // CANCELLED 终态默认折叠；展开 <details> 后再断言节点内 InfoBanner / ErrorBanner 文案。
+    await waitFor(() => {
+      expect(screen.getByTestId('run-timeline-details')).toBeInTheDocument();
+    });
+    const timelineDetails = screen.getByTestId('run-timeline-details') as HTMLDetailsElement;
+    timelineDetails.open = true;
+
     // 触发选中 + 详情后渲染节点时间线（细节 + info banner）
     await waitFor(() => {
       expect(screen.getByText('writer')).toBeInTheDocument();
@@ -1577,6 +1588,159 @@ describe('ChapterDetailPage - 用户主动取消节点（非真失败）', () =>
     const allInfoText = infoAlerts.map((e) => e.textContent ?? '').join(' | ');
     expect(allInfoText).toMatch(/已被用户主动取消|cancelled by user/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// 节点时间线默认折叠 / 展开：
+// - 终态（COMPLETED/FAILED/CANCELLED）默认折叠（避免长 run 把页面拉长）；
+// - 进行中（RUNNING/PAUSED）默认展开（用户正在盯进度）。
+// - summary 行展示「共 N 个节点 · 最新：<lastNode.node_id>」。
+// 既有用户取消节点的断言若依赖 ol li 细节，需先展开 details 再断言。
+// ---------------------------------------------------------------------------
+
+describe('ChapterDetailPage - 节点时间线默认折叠 / 展开', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(chaptersApi.delete).mockReset();
+    vi.mocked(chaptersApi.update).mockReset();
+    vi.mocked(chaptersApi.createDraft).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(workflowsApi.startPlan).mockReset();
+    vi.mocked(workflowsApi.startWrite).mockReset();
+    vi.mocked(workflowsApi.startReview).mockReset();
+    vi.mocked(workflowsApi.startCommit).mockReset();
+    vi.mocked(workflowsApi.resume).mockReset();
+    vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(modelProfilesApi.create).mockReset();
+    vi.mocked(modelProfilesApi.update).mockReset();
+    vi.mocked(modelProfilesApi.remove).mockReset();
+    vi.mocked(modelProfilesApi.test).mockReset();
+
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([]);
+    vi.mocked(workflowsApi.startPlan).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun);
+  });
+
+  // 构造一个 run：带两个节点、状态可由调用方传入（终态或进行中）。
+  function buildRunWithNodes(status: WorkflowRun['status']): WorkflowRun {
+    return {
+      run_id: 'wfr_collapse_001',
+      workflow_id: 'chapter-write',
+      chapter_id: 'ch_001',
+      status,
+      current_node: status === 'RUNNING' ? 'writer' : null,
+      checkpoint_json: {},
+      error: null,
+      retry_count: 0,
+      started_at: new Date(Date.now() - 60_000).toISOString(),
+      ended_at: status === 'RUNNING' || status === 'PENDING' || status === 'PAUSED' ? null : new Date().toISOString(),
+      workflow_name: 'chapter-write',
+      nodes: [
+        {
+          node_run_id: 'nrun_planner_a',
+          run_id: 'wfr_collapse_001',
+          node_id: 'planner',
+          agent_id: null,
+          status: 'COMPLETED',
+          input_json: {},
+          output_json: null,
+          prompt_version: null,
+          model_id: null,
+          token_usage_json: null,
+          latency_ms: 1234,
+          error: null,
+          started_at: new Date(Date.now() - 60_000).toISOString(),
+          ended_at: new Date(Date.now() - 50_000).toISOString(),
+        },
+        {
+          node_run_id: 'nrun_writer_a',
+          run_id: 'wfr_collapse_001',
+          node_id: 'writer',
+          agent_id: null,
+          status: status === 'RUNNING' ? 'RUNNING' : 'COMPLETED',
+          input_json: {},
+          output_json: null,
+          prompt_version: null,
+          model_id: null,
+          token_usage_json: null,
+          latency_ms: status === 'RUNNING' ? null : 4567,
+          error: null,
+          started_at: new Date(Date.now() - 40_000).toISOString(),
+          ended_at: status === 'RUNNING' ? null : new Date(Date.now() - 5_000).toISOString(),
+        },
+      ],
+    } as unknown as WorkflowRun;
+  }
+
+  it.each<WorkflowRun['status']>(['COMPLETED', 'FAILED', 'CANCELLED'])(
+    '终态 %s：节点时间线默认折叠，details 无 open',
+    async (status) => {
+      vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+      const run = buildRunWithNodes(status);
+      vi.mocked(workflowsApi.listByProject).mockResolvedValue([run]);
+      vi.mocked(workflowsApi.get).mockResolvedValue(run);
+
+      renderPage();
+
+      // summary 行出现（折叠状态下也应可见）
+      await waitFor(() => {
+        expect(screen.getByTestId('run-timeline-summary')).toBeInTheDocument();
+      });
+      const details = screen.getByTestId('run-timeline-details') as HTMLDetailsElement;
+      // 终态默认折叠：details.open 必须为 false。
+      expect(details.open).toBe(false);
+      // summary 应包含节点数与最后一个节点的 node_id
+      expect(screen.getByTestId('run-timeline-summary').textContent).toMatch(/共\s*2\s*个节点/);
+      expect(screen.getByTestId('run-timeline-summary').textContent).toMatch(/writer/);
+    },
+  );
+
+  it.each<WorkflowRun['status']>(['RUNNING', 'PAUSED'])(
+    '进行中 %s：节点时间线默认展开，details 有 open',
+    async (status) => {
+      vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+      const run = buildRunWithNodes(status);
+      vi.mocked(workflowsApi.listByProject).mockResolvedValue([run]);
+      vi.mocked(workflowsApi.get).mockResolvedValue(run);
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByTestId('run-timeline-summary')).toBeInTheDocument();
+      });
+      const details = screen.getByTestId('run-timeline-details') as HTMLDetailsElement;
+      // 进行中默认展开：details.open 必须为 true。
+      expect(details.open).toBe(true);
+      // 展开后 ol 内应可见节点 <li>
+      await waitFor(() => {
+        expect(document.querySelectorAll('ol li').length).toBeGreaterThan(0);
+      });
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ import type {
 } from '../api/types';
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useApiCall } from '../hooks/useApiCall';
 import { formatDateTime } from '../utils/format';
 import { ApiError } from '../api/client';
@@ -84,6 +85,9 @@ function ModelProfilesPanel() {
   >({});
   // 该档案在「设为默认」分支中上一次失败的错误信息；展示在档案卡底部 ErrorBanner。
   const [setDefaultError, setSetDefaultError] = useState<string | null>(null);
+  // V3.22「交互反馈统一」：删除档案二次确认 + 保存成功短暂条幅。
+  const [deleteProfileId, setDeleteProfileId] = useState<string | null>(null);
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
 
   return (
     <div className="panel" data-testid="model-profiles-panel">
@@ -239,35 +243,7 @@ function ModelProfilesPanel() {
                     </button>
                     <button
                       className="btn btn--sm btn--danger"
-                      onClick={async () => {
-                        if (!window.confirm(`确认删除模型档案 ${m.profile_id}？`)) return;
-                        try {
-                          await modelProfilesApi.remove(m.profile_id);
-                          void list.reload();
-                        } catch (e: unknown) {
-                          // 后端删除遇 409 时按 wire 契约 detail 列出 capability；
-                          // 若 detail 已给出明确指引，直接透传；否则附前端兜底文案。
-                          if (e instanceof ApiError && e.status === 409) {
-                            setTestResult({
-                              profile_id: m.profile_id,
-                              ok: false,
-                              latency_ms: 0,
-                              detail: `${e.detail}（请先在「环节分配」中解除绑定）`,
-                              status_code: e.status,
-                            });
-                          } else {
-                            const msg =
-                              e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
-                            setTestResult({
-                              profile_id: m.profile_id,
-                              ok: false,
-                              latency_ms: 0,
-                              detail: `删除失败 · ${msg}`,
-                              status_code: null,
-                            });
-                          }
-                        }
-                      }}
+                      onClick={() => setDeleteProfileId(m.profile_id)}
                       data-testid={`model-profile-delete-${m.profile_id}`}
                     >
                       删除
@@ -385,7 +361,9 @@ function ModelProfilesPanel() {
           onSubmit={async (payload: ModelProfileCreatePayload) => {
             await modelProfilesApi.create(payload);
             setCreating(false);
-            list.reload();
+            void list.reload();
+            setSavedNotice('已保存');
+            window.setTimeout(() => setSavedNotice(null), 2500);
           }}
         />
       ) : null}
@@ -398,7 +376,59 @@ function ModelProfilesPanel() {
           onSubmit={async (payload: ModelProfileUpdatePayload) => {
             await modelProfilesApi.update(editing.profile_id, payload);
             setEditing(null);
-            list.reload();
+            void list.reload();
+            setSavedNotice('已保存');
+            window.setTimeout(() => setSavedNotice(null), 2500);
+          }}
+        />
+      ) : null}
+
+      {/* V3.22「交互反馈统一」：删除档案二次确认 + 保存/删除成功短暂条幅 */}
+      {savedNotice ? (
+        <div data-testid="model-profiles-saved-banner" style={{ marginTop: 8 }}>
+          <InfoBanner>{savedNotice}</InfoBanner>
+        </div>
+      ) : null}
+      {deleteProfileId ? (
+        <ConfirmDialog
+          open={true}
+          title="删除模型档案"
+          body={`确认删除模型档案 ${deleteProfileId}？`}
+          confirmText="删除"
+          danger
+          testId="model-profile-delete-confirm"
+          onCancel={() => setDeleteProfileId(null)}
+          onConfirm={async () => {
+            const id = deleteProfileId;
+            setDeleteProfileId(null);
+            try {
+              await modelProfilesApi.remove(id);
+              void list.reload();
+              setSavedNotice('已删除');
+              window.setTimeout(() => setSavedNotice(null), 2500);
+            } catch (e: unknown) {
+              // 后端删除遇 409 时按 wire 契约 detail 列出 capability；
+              // 若 detail 已给出明确指引，直接透传；否则附前端兜底文案。
+              if (e instanceof ApiError && e.status === 409) {
+                setTestResult({
+                  profile_id: id,
+                  ok: false,
+                  latency_ms: 0,
+                  detail: `${e.detail}（请先在「环节分配」中解除绑定）`,
+                  status_code: e.status,
+                });
+              } else {
+                const msg =
+                  e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
+                setTestResult({
+                  profile_id: id,
+                  ok: false,
+                  latency_ms: 0,
+                  detail: `删除失败 · ${msg}`,
+                  status_code: null,
+                });
+              }
+            }
           }}
         />
       ) : null}
@@ -596,7 +626,7 @@ function SaveIndicator({ state }: { state: SaveState }) {
       <span
         className="muted small"
         data-testid="cap-binding-saved"
-        style={{ color: 'seagreen' }}
+        style={{ color: 'var(--color-success)' }}
       >
         已保存 ✓
       </span>
@@ -605,7 +635,7 @@ function SaveIndicator({ state }: { state: SaveState }) {
     return (
       <span
         className="small"
-        style={{ color: 'crimson' }}
+        style={{ color: 'var(--color-error)' }}
         data-testid="cap-binding-error"
       >
         失败：{state.message}
@@ -722,6 +752,7 @@ function AgentsPanel() {
               <div className="muted small" style={{ marginBottom: 6 }}>
                 共 {prompts.data.length} 个版本（按 version 数字降序）
               </div>
+              <div className="table-wrap">
               <table className="table">
                 <thead>
                   <tr>
@@ -747,6 +778,7 @@ function AgentsPanel() {
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           )
         ) : (

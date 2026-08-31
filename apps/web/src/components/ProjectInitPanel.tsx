@@ -1306,7 +1306,7 @@ function IdleForm(props: IdleFormProps) {
                 <span
                   className="small"
                   style={{
-                    color: done ? 'seagreen' : 'crimson',
+                    color: done ? 'var(--color-success)' : 'var(--color-error)',
                     opacity: 0.8,
                   }}
                   data-testid={`init-stage-${s.stage}-badge`}
@@ -1653,7 +1653,7 @@ function ReviewPane({
           <span
             className="small"
             style={{
-              color: modelMsg.kind === 'ok' ? 'seagreen' : 'crimson',
+              color: modelMsg.kind === 'ok' ? 'var(--color-success)' : 'var(--color-error)',
             }}
             data-testid="stage-model-status"
           >

@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { ApiError } from '../api/client';
 import { continuationApi } from '../api/endpoints';
 import type { ContinueVariant } from '../api/types';
 import { ErrorBanner, InfoBanner } from './ErrorBanner';
+import { ProseText } from './ProseText';
+import { formatApiError } from '../utils/formatApiError';
 
 interface Props {
   projectId: string;
@@ -13,8 +14,8 @@ interface Props {
 type Phase = 'idle' | 'generating' | 'reviewing' | 'error';
 
 interface ErrorState {
-  status: number | null;
-  message: string;
+  // 原始异常对象，渲染时统一走 formatApiError 输出文案。
+  original: unknown;
 }
 
 interface SuccessState {
@@ -65,8 +66,7 @@ export function ContinuePanel({ projectId, chapterId, disabled = false }: Props)
       setInstruction(draftInstruction);
       setPhase('reviewing');
     } catch (e: unknown) {
-      const { status, message } = extractError(e);
-      setError({ status, message });
+      setError({ original: e });
       setPhase('error');
     }
   };
@@ -96,8 +96,7 @@ export function ContinuePanel({ projectId, chapterId, disabled = false }: Props)
       setPhase('idle');
       setDraftInstruction('');
     } catch (e: unknown) {
-      const { status, message } = extractError(e);
-      setError({ status, message });
+      setError({ original: e });
     } finally {
       setAdopting(false);
     }
@@ -140,11 +139,7 @@ export function ContinuePanel({ projectId, chapterId, disabled = false }: Props)
 
       {error ? (
         <div data-testid="continue-error">
-          <ErrorBanner>
-            {error.status != null
-              ? `ApiError(${error.status}): ${error.message}`
-              : error.message}
-          </ErrorBanner>
+          <ErrorBanner>{formatApiError(error.original)}</ErrorBanner>
         </div>
       ) : null}
 
@@ -246,7 +241,7 @@ function VariantsGrid({
                 <span className="muted small">· {v.tokens} tokens</span>
               ) : null}
             </div>
-            <pre
+            <div
               className="prose-block"
               style={{
                 maxHeight: 240,
@@ -256,8 +251,8 @@ function VariantsGrid({
               }}
               data-testid={`continue-variant-text-${v.index}`}
             >
-              {v.text}
-            </pre>
+              <ProseText text={v.text} />
+            </div>
             <div style={{ marginTop: 6, display: 'flex', justifyContent: 'flex-end' }}>
               <button
                 className="btn btn--sm btn--primary"
@@ -273,14 +268,4 @@ function VariantsGrid({
       </div>
     </div>
   );
-}
-
-function extractError(e: unknown): { status: number | null; message: string } {
-  if (e instanceof ApiError) {
-    return { status: e.status, message: e.detail };
-  }
-  if (e instanceof Error) {
-    return { status: null, message: e.message };
-  }
-  return { status: null, message: '生成失败' };
 }

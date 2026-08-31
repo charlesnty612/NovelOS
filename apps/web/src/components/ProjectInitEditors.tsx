@@ -308,7 +308,7 @@ function FieldWrap({
       {errorText ? (
         <div
           className="small"
-          style={{ color: 'crimson', marginTop: 2 }}
+          style={{ color: 'var(--color-error)', marginTop: 2 }}
           data-testid={`revision-error-${label}`}
         >
           {errorText}

@@ -300,10 +300,10 @@ export function BranchesPanel({ projectId, initialBranches }: Props) {
 
 function BranchStatusBadge({ status }: { status: Branch['status'] }) {
   const palette: Record<Branch['status'], { bg: string; fg: string; label: string }> = {
-    ACTIVE: { bg: '#1f6feb', fg: '#fff', label: 'ACTIVE' },
-    MERGED: { bg: '#2da44e', fg: '#fff', label: 'MERGED' },
-    DISCARDED: { bg: '#6e7681', fg: '#fff', label: 'DISCARDED' },
-    ARCHIVED: { bg: '#8b5cf6', fg: '#fff', label: 'ARCHIVED' },
+    ACTIVE: { bg: 'var(--color-primary)', fg: '#fff', label: 'ACTIVE' },
+    MERGED: { bg: 'var(--color-success)', fg: '#fff', label: 'MERGED' },
+    DISCARDED: { bg: 'var(--color-archived)', fg: '#fff', label: 'DISCARDED' },
+    ARCHIVED: { bg: 'var(--color-accent)', fg: '#fff', label: 'ARCHIVED' },
   };
   const it = palette[status] ?? palette.ACTIVE;
   return (

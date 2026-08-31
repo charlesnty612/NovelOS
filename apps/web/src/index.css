@@ -20,7 +20,13 @@
   --color-danger-hover: #b93333;
   --color-warn: #c97a16;
   --color-success: #2a9d6a;
+  --color-success-deep: #1f6e4a;
   --color-archived: #888888;
+  --color-accent: #8b5cf6;
+
+  /* 语义令牌（与上面"用途名"令牌一一映射，便于按语义引用，避免散落硬编码） */
+  --color-error: var(--color-danger);
+  --color-warning: var(--color-warn);
 
   --radius-sm: 4px;
   --radius-md: 6px;
@@ -132,6 +138,10 @@ a:hover {
   background: var(--color-bg-sidebar-hover);
   text-decoration: none;
 }
+.app-sidebar__item:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
 .app-sidebar__item--active {
   background: var(--color-bg-sidebar-active);
   color: #fff;
@@ -188,6 +198,10 @@ a:hover {
 .btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+.btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 .btn--primary {
   background: var(--color-primary);
@@ -331,7 +345,7 @@ a:hover {
 }
 .badge--chapter-released {
   background: #cfeedb;
-  color: #1f6e4a;
+  color: var(--color-success-deep);
 }
 .badge--chapter-running {
   background: #eaf2ff;
@@ -405,6 +419,16 @@ a:hover {
 }
 
 /* -------- 通用表格 -------- */
+.table-wrap {
+  /* 表格横向溢出容器：保证窄屏/列多时可滚动而不破坏 table 的 overflow:hidden 圆角 */
+  overflow-x: auto;
+  /* 容器不超出父级；表格 intrinsic 宽度由内层 .table 的 min-width 提供 */
+  max-width: 100%;
+}
+/* 容器内表格：超宽时由 .table-wrap 横向滚动，不撑破页面 */
+.table-wrap .table {
+  min-width: max-content;
+}
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -553,13 +577,19 @@ a:hover {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: var(--space-3);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.9;
   word-break: break-word;
+  max-width: 44em;
   max-height: 480px;
   overflow-y: auto;
+}
+
+.prose-block__p {
+  text-indent: 2em;
+  margin: 0 0 0.4em;
+  white-space: pre-wrap;
 }
 
 .kv-list {
@@ -732,15 +762,15 @@ a:hover {
   background: rgba(0, 0, 0, 0.04);
 }
 .quality-overall--low {
-  color: var(--color-error, #c00);
+  color: var(--color-error);
   background: rgba(204, 0, 0, 0.08);
 }
 .quality-overall--mid {
-  color: var(--color-warning, #b70);
+  color: var(--color-warning);
   background: rgba(187, 112, 0, 0.10);
 }
 .quality-overall--high {
-  color: var(--color-success, #080);
+  color: var(--color-success);
   background: rgba(0, 136, 0, 0.10);
 }
 

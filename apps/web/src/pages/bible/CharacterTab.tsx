@@ -10,6 +10,7 @@ import { formatDateTime } from '../../utils/format';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
 import { ReadableJson, RawJsonDetails } from '../../components/ReadableJson';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 const ROLE_OPTIONS: { value: CharacterRole; label: string }[] = [
   { value: 'protagonist', label: '主角 protagonist' },
@@ -32,6 +33,8 @@ export function CharacterTab({ projectId }: CharacterTabProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState<Character | null>(null);
   const [creating, setCreating] = useState(false);
+  // V3.22「交互反馈统一」：删除角色前 ConfirmDialog 二次确认。
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   const reload = async () => {
     setLoading(true);
@@ -58,7 +61,11 @@ export function CharacterTab({ projectId }: CharacterTabProps) {
   const selected = list.find((c) => c.character_id === selectedId) ?? null;
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm('确认删除该角色？相关 state 历史也会被级联删除。')) return;
+    setPendingDeleteId(id);
+  };
+
+  const doDelete = async (id: string) => {
+    setPendingDeleteId(null);
     try {
       await charactersApi.delete(id);
       if (selectedId === id) setSelectedId(null);
@@ -191,6 +198,19 @@ export function CharacterTab({ projectId }: CharacterTabProps) {
             setEditing(null);
             await reload();
           }}
+        />
+      ) : null}
+
+      {pendingDeleteId ? (
+        <ConfirmDialog
+          open={true}
+          title="删除角色"
+          body="确认删除该角色？相关 state 历史也会被级联删除。"
+          confirmText="删除"
+          danger
+          testId="character-delete-confirm"
+          onCancel={() => setPendingDeleteId(null)}
+          onConfirm={() => void doDelete(pendingDeleteId)}
         />
       ) : null}
     </div>

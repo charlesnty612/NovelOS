@@ -4,7 +4,7 @@
 // - 表单字段（name / role / personality 等 5 个 CORE_FIELDS）正常更新。
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('../../api/endpoints', () => {
@@ -296,8 +296,6 @@ describe('CharacterTab 关键流', () => {
       charactersApi.delete as unknown as ReturnType<typeof vi.fn>
     ).mockResolvedValue(undefined);
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-
     const user = userEvent.setup();
     render(<CharacterTab projectId="p1" />);
 
@@ -311,13 +309,18 @@ describe('CharacterTab 关键流', () => {
     expect(rowDeleteBtn).toBeTruthy();
     await user.click(rowDeleteBtn);
 
+    // V3.22「交互反馈统一」：删除前 ConfirmDialog 弹窗；点确认按钮触发实际删除。
+    const dialog = await waitFor(() =>
+      screen.getByTestId('character-delete-confirm'),
+    );
+    const confirmBtn = within(dialog).getByTestId('character-delete-confirm-confirm');
+    await user.click(confirmBtn);
+
     await waitFor(() => {
       expect(charactersApi.delete).toHaveBeenCalledWith('char_001');
     });
     // reload → listByProject 被调第二次
     expect(listFn).toHaveBeenCalledTimes(2);
-
-    confirmSpy.mockRestore();
   });
 
   it('c) API 失败：listByProject 抛错 → ErrorBanner 显示错误，不渲染表格', async () => {

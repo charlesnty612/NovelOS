@@ -13,6 +13,7 @@ import type {
 } from '../../api/types';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import {
   DEBT_STATUS_LABEL,
   HOOK_STATUS_LABEL,
@@ -62,6 +63,9 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
   const [creatingHook, setCreatingHook] = useState(false);
   const [editingDebt, setEditingDebt] = useState<Debt | null>(null);
   const [creatingDebt, setCreatingDebt] = useState(false);
+  // V3.22「交互反馈统一」：伏笔/债务删除前 ConfirmDialog 二次确认。
+  const [pendingDeleteHookId, setPendingDeleteHookId] = useState<string | null>(null);
+  const [pendingDeleteDebtId, setPendingDeleteDebtId] = useState<string | null>(null);
 
   const reload = async () => {
     setLoading(true);
@@ -105,8 +109,14 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
   const visibleHooks =
     hookFilter === 'all' ? hooks : hooks.filter((h) => h.status === hookFilter);
 
-  const handleDeleteHook = async (id: string) => {
-    if (!window.confirm('确认删除该伏笔？')) return;
+  const handleDeleteHook = (id: string) => {
+    setPendingDeleteHookId(id);
+  };
+  const handleDeleteDebt = (id: string) => {
+    setPendingDeleteDebtId(id);
+  };
+  const doDeleteHook = async (id: string) => {
+    setPendingDeleteHookId(null);
     try {
       await hooksApi.delete(id);
       await reload();
@@ -114,8 +124,8 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
       setErr(e instanceof Error ? e.message : '删除失败');
     }
   };
-  const handleDeleteDebt = async (id: string) => {
-    if (!window.confirm('确认删除该债务？')) return;
+  const doDeleteDebt = async (id: string) => {
+    setPendingDeleteDebtId(null);
     try {
       await debtsApi.delete(id);
       await reload();
@@ -382,6 +392,31 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
             setEditingDebt(null);
             await reload();
           }}
+        />
+      ) : null}
+
+      {pendingDeleteHookId ? (
+        <ConfirmDialog
+          open={true}
+          title="删除伏笔"
+          body="确认删除该伏笔？"
+          confirmText="删除"
+          danger
+          testId="hook-delete-confirm"
+          onCancel={() => setPendingDeleteHookId(null)}
+          onConfirm={() => void doDeleteHook(pendingDeleteHookId)}
+        />
+      ) : null}
+      {pendingDeleteDebtId ? (
+        <ConfirmDialog
+          open={true}
+          title="删除叙事债务"
+          body="确认删除该债务？"
+          confirmText="删除"
+          danger
+          testId="debt-delete-confirm"
+          onCancel={() => setPendingDeleteDebtId(null)}
+          onConfirm={() => void doDeleteDebt(pendingDeleteDebtId)}
         />
       ) : null}
     </div>

@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError } from '../api/client';
-import { ErrorBanner } from '../components/ErrorBanner';
+import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { StatusBadge } from '../components/StatusBadge';
 import { EmptyState } from '../components/EmptyState';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useApiCall } from '../hooks/useApiCall';
 import { backupApi, projectsApi } from '../api/endpoints';
 import type {
@@ -26,6 +27,9 @@ export function ProjectsListPage() {
   const [showImport, setShowImport] = useState(false);
   const [importErr, setImportErr] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  // V3.22「交互反馈统一」：归档确认弹窗受控状态；保存成功短暂条幅。
+  const [archiveTarget, setArchiveTarget] = useState<Project | null>(null);
+  const [savedBanner, setSavedBanner] = useState<string | null>(null);
 
   return (
     <div>
@@ -55,6 +59,11 @@ export function ProjectsListPage() {
       </p>
 
       <ErrorBanner>{error}</ErrorBanner>
+      {savedBanner ? (
+        <div data-testid="projects-saved-banner">
+          <InfoBanner>{savedBanner}</InfoBanner>
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="muted">加载中…</div>
@@ -126,7 +135,9 @@ export function ProjectsListPage() {
           onSubmit={async (payload) => {
             await projectsApi.create(payload as ProjectCreatePayload);
             setShowCreate(false);
-            reload();
+            setSavedBanner('已保存');
+            void reload();
+            window.setTimeout(() => setSavedBanner(null), 2500);
           }}
         />
       ) : null}
@@ -139,31 +150,45 @@ export function ProjectsListPage() {
           onSubmit={async (payload) => {
             await projectsApi.update(editing.project_id, payload);
             setEditing(null);
-            reload();
+            setSavedBanner('已保存');
+            void reload();
+            window.setTimeout(() => setSavedBanner(null), 2500);
           }}
           extraActions={({ submitting }) =>
             editing.status !== 'ARCHIVED' ? (
               <button
                 className="btn btn--danger"
                 disabled={submitting}
-                onClick={async () => {
-                  if (
-                    !window.confirm(
-                      `确认归档「${editing.name}」？归档后该项目不再出现在主列表中。`,
-                    )
-                  )
-                    return;
-                  await projectsApi.update(editing.project_id, {
-                    status: 'ARCHIVED' as ProjectStatus,
-                  });
-                  setEditing(null);
-                  reload();
-                }}
+                onClick={() => setArchiveTarget(editing)}
+                data-testid="project-archive-btn"
               >
                 归档
               </button>
             ) : null
           }
+        />
+      ) : null}
+
+      {archiveTarget ? (
+        <ConfirmDialog
+          open={true}
+          title="归档项目"
+          body={`确认归档「${archiveTarget.name}」？归档后该项目不再出现在主列表中。`}
+          confirmText="归档"
+          danger
+          testId="archive-confirm"
+          onCancel={() => setArchiveTarget(null)}
+          onConfirm={async () => {
+            const target = archiveTarget;
+            setArchiveTarget(null);
+            await projectsApi.update(target.project_id, {
+              status: 'ARCHIVED' as ProjectStatus,
+            });
+            setEditing(null);
+            setSavedBanner('已归档');
+            void reload();
+            window.setTimeout(() => setSavedBanner(null), 2500);
+          }}
         />
       ) : null}
 

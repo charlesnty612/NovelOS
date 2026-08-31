@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { ApiError } from '../api/client';
 import { exportApi } from '../api/endpoints';
 import { ErrorBanner } from './ErrorBanner';
+import { formatApiError } from '../utils/formatApiError';
 
 type ExportFormat = 'txt' | 'docx' | 'fanqie';
 
@@ -103,9 +104,9 @@ export function ExportPanel({ projectId }: ExportPanelProps) {
       setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
     } catch (e: unknown) {
       if (e instanceof ApiError) {
-        setError(`${e.status}: ${e.detail}`);
+        setError(formatApiError(e));
       } else {
-        setError(e instanceof Error ? e.message : '导出失败');
+        setError(e instanceof Error ? `操作失败：${e.message}` : '操作失败：导出失败');
       }
     } finally {
       setBusy(false);

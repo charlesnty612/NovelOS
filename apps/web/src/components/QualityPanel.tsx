@@ -8,6 +8,7 @@ import type {
 } from '../api/types';
 import { ApiError } from '../api/client';
 import { ErrorBanner } from './ErrorBanner';
+import { formatApiError } from '../utils/formatApiError';
 
 type SubscoreKey =
   | 'plot'
@@ -104,9 +105,11 @@ export function QualityPanel({
       onEvaluated(rep);
     } catch (e: unknown) {
       if (e instanceof ApiError) {
-        setSubmitErr(`评估失败（${e.status}）：${e.detail}`);
+        // 走统一 formatApiError 文案；前缀「评估失败」由本面板附加（语义化）。
+        // 为保持口径与其它面板一致，去掉手动拼的「（status）：detail」。
+        setSubmitErr(formatApiError(e));
       } else {
-        setSubmitErr(e instanceof Error ? e.message : '评估失败');
+        setSubmitErr(e instanceof Error ? `评估失败：${e.message}` : '评估失败');
       }
     } finally {
       setSubmitting(false);

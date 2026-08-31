@@ -9,6 +9,7 @@ import { formatDateTime, formatJson, tryParseJsonObject } from '../../utils/form
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
 import { ReadableJson, RawJsonDetails } from '../../components/ReadableJson';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 type Kind = 'locations' | 'factions' | 'world-rules';
 
@@ -48,6 +49,8 @@ export function WorldTab({ projectId }: WorldTabProps) {
   const [err, setErr] = useState<string | null>(null);
   const [editing, setEditing] = useState<WorldEntity | null>(null);
   const [creating, setCreating] = useState(false);
+  // V3.22「交互反馈统一」：删除世界观实体前 ConfirmDialog 二次确认。
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   const reload = async (k: Kind = kind) => {
     setLoading(true);
@@ -66,8 +69,12 @@ export function WorldTab({ projectId }: WorldTabProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, kind]);
 
-  const handleDelete = async (id: string) => {
-    if (!window.confirm(`确认删除该${meta.singular}？`)) return;
+  const handleDelete = (id: string) => {
+    setPendingDeleteId(id);
+  };
+
+  const doDelete = async (id: string) => {
+    setPendingDeleteId(null);
     try {
       await meta.client.delete(id);
       await reload();
@@ -190,6 +197,19 @@ export function WorldTab({ projectId }: WorldTabProps) {
             setEditing(null);
             await reload();
           }}
+        />
+      ) : null}
+
+      {pendingDeleteId ? (
+        <ConfirmDialog
+          open={true}
+          title={`删除${meta.singular}`}
+          body={`确认删除该${meta.singular}？`}
+          confirmText="删除"
+          danger
+          testId="world-entity-delete-confirm"
+          onCancel={() => setPendingDeleteId(null)}
+          onConfirm={() => void doDelete(pendingDeleteId)}
         />
       ) : null}
     </div>

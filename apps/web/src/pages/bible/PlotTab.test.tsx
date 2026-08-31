@@ -9,7 +9,7 @@
 //   5) API 失败 → ErrorBanner。
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('../../api/endpoints', () => {
@@ -481,7 +481,6 @@ describe('PlotTab 人读视图', () => {
   });
 
   it('i) 删除按钮：confirm + eventsApi.delete + reload', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     (
       eventsApi.delete as unknown as ReturnType<typeof vi.fn>
     ).mockResolvedValue(undefined);
@@ -502,10 +501,16 @@ describe('PlotTab 人读视图', () => {
     expect(rowDel).toBeTruthy();
     await user.click(rowDel);
 
+    // V3.22「交互反馈统一」：删除前 ConfirmDialog 弹窗；点确认按钮触发实际删除。
+    const dialog = await waitFor(() =>
+      screen.getByTestId('plot-event-delete-confirm'),
+    );
+    const confirmBtn = within(dialog).getByTestId('plot-event-delete-confirm-confirm');
+    await user.click(confirmBtn);
+
     await waitFor(() => {
       expect(eventsApi.delete).toHaveBeenCalledTimes(1);
     });
     expect(eventsApi.delete).toHaveBeenCalledWith('evt_001');
-    confirmSpy.mockRestore();
   });
 });

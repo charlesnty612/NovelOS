@@ -205,7 +205,7 @@ describe('ExportPanel (V1.4 / Sprint 16)', () => {
     fireEvent.click(screen.getByTestId('export-book-txt'));
 
     await waitFor(() => {
-      expect(screen.getByText(/404:/)).toBeInTheDocument();
+      expect(screen.getByText(/操作失败（404）/)).toBeInTheDocument();
     });
     // 不应触发下载
     expect(anchorInstances.length).toBe(0);
@@ -227,7 +227,7 @@ describe('ExportPanel (V1.4 / Sprint 16)', () => {
     fireEvent.click(screen.getByTestId('export-book-txt'));
 
     await waitFor(() => {
-      expect(screen.getByText(/400:/)).toBeInTheDocument();
+      expect(screen.getByText(/操作失败（400）/)).toBeInTheDocument();
     });
   });
 });

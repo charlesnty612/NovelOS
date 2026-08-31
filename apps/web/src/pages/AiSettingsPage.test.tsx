@@ -613,6 +613,33 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     expect(Object.prototype.hasOwnProperty.call(paramsOut, 'thinking')).toBe(false);
   });
 
+  // -------------------- 保存反馈 ------------------------------------------------
+
+  it('新建档案成功：渲染「已保存」model-profiles-saved-banner', async () => {
+    vi.mocked(modelProfilesApi.create).mockResolvedValue({
+      ...baseProfile,
+      profile_id: 'mpf_new',
+      name: 'fast-creative',
+    });
+
+    renderPage();
+    fireEvent.click(await screen.findByTestId('new-model-profile'));
+    fireEvent.change(screen.getByTestId('profile-name'), {
+      target: { value: 'fast-creative' },
+    });
+    fireEvent.change(screen.getByTestId('profile-model'), {
+      target: { value: 'gpt-4o-mini' },
+    });
+    fireEvent.change(screen.getByTestId('profile-base-url'), {
+      target: { value: 'https://api.openai.com/v1' },
+    });
+    fireEvent.click(screen.getByTestId('profile-save'));
+
+    const banner = await screen.findByTestId('model-profiles-saved-banner');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent(/已保存/);
+  });
+
   // -------------------- V3.8 拉取模型 + 思考模式端点收窄 ----------------------------
 
   it('mock provider：拉取按钮始终可点，候选下拉出现 mock-model', async () => {

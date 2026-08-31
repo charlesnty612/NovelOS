@@ -14,6 +14,7 @@ import type {
 import { QualityPanel } from '../components/QualityPanel';
 import { ContextPreviewPanel } from '../components/ContextPreviewPanel';
 import { ContinuePanel } from '../components/ContinuePanel';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
 import {
@@ -21,6 +22,7 @@ import {
   WorkflowRunStatusBadge,
 } from '../components/ChapterStatusBadge';
 import { ApprovalCard } from '../components/ApprovalCard';
+import { ProseText } from '../components/ProseText';
 import { useApiCall } from '../hooks/useApiCall';
 import { usePoll } from '../hooks/usePoll';
 import {
@@ -189,6 +191,24 @@ export function ChapterDetailPage() {
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [reviseLooping, setReviseLooping] = useState(false);
+  // V3.22「交互反馈统一」：替换 window.confirm。
+  // - planReconfirm: plan 二次确认（覆盖会丢字数规划）—— 用 PendingAction 持有原 action+payload，
+  //   用户在 ConfirmDialog 点确认后再次调 handleStartWorkflow。
+  // - deleteConfirm: 删除章节二次确认。
+  // - deleting: 删除中按钮 disabled 防连点。
+  interface PendingAction {
+    action: 'plan' | 'write' | 'review' | 'commit';
+    payload?: {
+      author_intent?: string;
+      target_word_count?: number;
+      model_profile_id?: string | null;
+      fresh_write?: boolean;
+      deep_review?: boolean;
+    };
+  }
+  const [planReconfirm, setPlanReconfirm] = useState<PendingAction | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // 「审校」动作专属：深度二审开关（Kimi 三层清单：设定/节拍/行为链）。
   // 默认不勾；勾选时 review 请求体带 deep_review:true，pause_payload 会
@@ -209,22 +229,26 @@ export function ChapterDetailPage() {
          *  临时字段,在此处剥离后按 action==='review' 决定是否并入请求 payload。 */
         deep_review?: boolean;
       },
+      opts?: { confirmed?: boolean },
     ) => {
-      // 防呆：章节已有 plan_json 时，「生成计划」需二次确认（覆盖会丢字数规划）
-      if (action === 'plan' && chapter) {
-        const plan = chapter.plan_json;
-        const hasPlan =
-          plan != null &&
-          typeof plan === 'object' &&
-          !Array.isArray(plan) &&
-          Object.keys(plan).length > 0;
-        if (hasPlan) {
-          const ok = window.confirm(
-            '章节已有计划，重新生成将覆盖当前计划（含字数规划），确定继续？',
-          );
-          if (!ok) return;
+// 防呆：章节已有 plan_json 时，「生成计划」需二次确认（覆盖会丢字数规划）
+        if (action === 'plan' && chapter && !opts?.confirmed) {
+          const plan = chapter.plan_json;
+          const hasPlan =
+            plan != null &&
+            typeof plan === 'object' &&
+            !Array.isArray(plan) &&
+            Object.keys(plan).length > 0;
+          if (hasPlan) {
+            // V3.22「交互反馈统一」：用 ConfirmDialog 替代 window.confirm。
+            // 把待执行 action+payload 暂存到 planReconfirm，弹窗确认后由 useEffect 重跑。
+            setPlanReconfirm({
+              action,
+              payload: payload as PendingAction['payload'],
+            });
+            return;
+          }
         }
-      }
       setActionErr(null);
       setSubmitting(true);
       try {
@@ -514,17 +538,55 @@ export function ChapterDetailPage() {
         <div style={{ marginTop: 16 }}>
           <button
             className="btn"
-            onClick={() => {
-              if (window.confirm(`确认删除第 ${chapter.number} 章？`)) {
-                void chaptersApi.delete(chapterId).then(() => {
-                  navigate(`/projects/${projectId}/chapters`);
-                });
-              }
-            }}
+            disabled={deleting}
+            data-testid="chapter-delete-btn"
+            onClick={() => setDeleteConfirm(true)}
           >
-            删除章节
+            {deleting ? '删除中…' : '删除章节'}
           </button>
         </div>
+      ) : null}
+
+      {planReconfirm ? (
+        <ConfirmDialog
+          open={true}
+          title="覆盖章节计划"
+          body="章节已有计划，重新生成将覆盖当前计划（含字数规划），确定继续？"
+          confirmText="覆盖"
+          danger
+          testId="plan-reconfirm"
+          onCancel={() => setPlanReconfirm(null)}
+          onConfirm={() => {
+            const next = planReconfirm;
+            setPlanReconfirm(null);
+            void handleStartWorkflow(next.action, next.payload, { confirmed: true });
+          }}
+        />
+      ) : null}
+
+      {deleteConfirm && chapter ? (
+        <ConfirmDialog
+          open={true}
+          title="删除章节"
+          body={`确认删除第 ${chapter.number} 章？此操作不可撤销。`}
+          confirmText="删除"
+          danger
+          testId="chapter-delete-confirm"
+          onCancel={() => {
+            if (deleting) return;
+            setDeleteConfirm(false);
+          }}
+          onConfirm={async () => {
+            setDeleteConfirm(false);
+            setDeleting(true);
+            try {
+              await chaptersApi.delete(chapterId);
+              navigate(`/projects/${projectId}/chapters`);
+            } finally {
+              setDeleting(false);
+            }
+          }}
+        />
       ) : null}
     </div>
   );
@@ -870,9 +932,9 @@ function PlanPanel({
       <ErrorBanner>{err}</ErrorBanner>
 
       {!editing ? (
-        <pre className="json-block">
-          {formatJson(chapter.plan_json) || '（空）'}
-        </pre>
+        <div className="prose-block" data-testid="plan-prose">
+          <ProseText text={formatJson(chapter.plan_json) || '（空）'} />
+        </div>
       ) : (
         <>
           <div className="muted small" style={{ marginBottom: 6 }}>
@@ -1190,8 +1252,33 @@ function RunTimeline({ run }: { run: WorkflowRun }) {
       </div>
     );
   }
+  // 进行中（RUNNING/PAUSED）默认展开，便于用户盯进度；
+  // 终态（COMPLETED/FAILED/CANCELLED）默认收起，避免长 run 把页面无限拉长。
+  // PENDING 既不是进行中也不是终态，默认收起。
+  const defaultOpen = run.status === 'RUNNING' || run.status === 'PAUSED';
+  // 摘要：取最后一个节点的信息作为最新状态一栏（节点名 + 状态徽标）。
+  const lastNode = run.nodes[run.nodes.length - 1];
+  // 仅「初始值受控」：useState 用 defaultOpen 初始化 + 切 run 时重置，
+  // 之后用户手动展开/收起的操作不再被 usePoll 每 2s 重渲染打回。
+  // details 仍保留 open 属性反映初始状态（DOM 行为兼容既有断言）。
+  const [open, setOpen] = useState<boolean>(defaultOpen);
+  useEffect(() => {
+    setOpen(defaultOpen);
+  }, [run.run_id, defaultOpen]);
   return (
-    <ol style={{ paddingLeft: 18, margin: 0 }}>
+    <details
+      open={open}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+      data-testid="run-timeline-details"
+    >
+      <summary
+        className="muted small"
+        data-testid="run-timeline-summary"
+        style={{ cursor: 'pointer', marginTop: 4 }}
+      >
+        共 {run.nodes.length} 个节点 · 最新：{lastNode.node_id}
+      </summary>
+      <ol style={{ paddingLeft: 18, margin: '4px 0 0 0' }}>
       {run.nodes.map((n) => (
         <li key={n.node_run_id} style={{ marginBottom: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1238,6 +1325,7 @@ function RunTimeline({ run }: { run: WorkflowRun }) {
         </li>
       ))}
     </ol>
+    </details>
   );
 }
 
@@ -1692,7 +1780,7 @@ function DraftsPanel({
                 data-testid="draft-textarea"
               />
             ) : selected ? (
-              <pre
+              <div
                 className="prose-block"
                 data-testid="draft-content"
                 data-layout-ver="8"
@@ -1704,8 +1792,8 @@ function DraftsPanel({
                   overflowY: 'auto',
                 }}
               >
-                {selected.content}
-              </pre>
+                <ProseText text={selected.content} />
+              </div>
             ) : (
               <div className="muted">从左侧选择一份 draft 查看。</div>
             )}
