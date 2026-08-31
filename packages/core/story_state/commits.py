@@ -627,6 +627,21 @@ def commit_delta(
                 conn.execute("DELETE FROM factions WHERE faction_id = ?", (wid,))
             for wid in _inverse_cleanup.get("remove_world_rule_ids") or []:
                 conn.execute("DELETE FROM world_rules WHERE world_rule_id = ?", (wid,))
+            # 角色实体：逆 add→remove 需 DELETE characters 行 + character_states
+            # 全量行 + 涉及该 character_id 的悬挂 relationships 行。字段级 remove
+            # 只 pop core_json/state_json 的 key，不删行——故必须在此显式 DELETE。
+            # 顺序：character_states（子表）→ characters（主表）→ relationships
+            # （FK 已摘除，按字符端点清理，无 FK 约束挂起）。
+            for cid in _inverse_cleanup.get("remove_character_ids") or []:
+                conn.execute("DELETE FROM character_states WHERE character_id = ?", (cid,))
+                conn.execute("DELETE FROM characters WHERE character_id = ?", (cid,))
+                # 防御性兜底：清理以该角色为端点的悬挂 relationships 行
+                # （正常情况下本提交新增的关系已被 remove_relationship_keys 删过，
+                # 此处仅作为 FK 已摘除后的兜底清扫，不影响历史 commit 的关系）。
+                conn.execute(
+                    "DELETE FROM relationships WHERE from_character_id = ? OR to_character_id = ?",
+                    (cid, cid),
+                )
             # 世界实体：逆 update → 恢复 before data_json
             # 修复 wfr_3cb2182a30f6：hint 改为字段级 {world_id, field, value}；
             # 此处仅在 value 形如「整条目 dict（含 name 或 statement 键）」时才做
@@ -836,6 +851,7 @@ def rollback_commit(
         # 取原 commit 所在分支的当前 version 作为逆 delta 的 previous_state_version
         if original_branch_id is None:
             current_version, _snap = latest_snapshot_version(conn, project_id)
+            branch_row = None
         else:
             branch_row = conn.execute(
                 "SELECT name FROM branches WHERE branch_id = ?", (original_branch_id,)
@@ -846,6 +862,28 @@ def rollback_commit(
                 current_version, _snap = branch_current_state(conn, project_id, original_branch_id)
         # 决定本次 rollback 落点：默认原分支（branch_id 仅作接口占位；当前实现维持原分支）
         _ = branch_id
+
+        # 加载「提交前快照」识别既有角色 ID 集合（用于 remove_character_ids
+        # 的字段级/实体级分流）。语义：「被回滚 commit 的 previous_state_version
+        # 处的快照」中存在 character_id → 该角色是字段级 add 的对象，不走实体级
+        # DELETE；不存在 → 视为该 commit 实体级首次引入的角色，触发实体 DELETE。
+        # 守卫失效场景一律保守**不删**（remove_character_ids 留空）——欠删遗留
+        # 幽灵实体可人工清理，过删是既有角色数据丢失：
+        # - prev_v 缺失或快照读取失败（pre_snap=None）；
+        # - 非 main 分支（分支快照物化在 branch_snapshots，主快照语义不准）。
+        preexisting_char_ids: set = set()
+        prev_v = delta_row["previous_state_version"]
+        char_entity_delete_enabled = prev_v is not None and (
+            branch_row is None or branch_row["name"] == "main"
+        )
+        if char_entity_delete_enabled:
+            pre_snap = service_self.get_snapshot(project_id, prev_v)
+            if isinstance(pre_snap, dict):
+                for _c in pre_snap.get("characters") or []:
+                    if isinstance(_c, dict) and isinstance(_c.get("character_id"), str):
+                        preexisting_char_ids.add(_c["character_id"])
+            else:
+                char_entity_delete_enabled = False
     finally:
         conn.close()
 
@@ -885,6 +923,11 @@ def rollback_commit(
         "restore_relationship_states": [],
         "remove_debt_ids": [],
         "restore_debt_states": [],
+        # 角色：逆 add→remove 需实体级 DELETE（字段级 remove 只 pop
+        # core_json/state_json 的 key，不删 characters/character_states 行——
+        # 角色实体级清理须显式收集 character_id，由 commit_delta 在 cleanup
+        # 阶段对 characters / character_states 行 DELETE）。
+        "remove_character_ids": [],
     }
     # 过滤空值
     cleanup["remove_event_ids"] = [x for x in cleanup["remove_event_ids"] if x]
@@ -924,6 +967,36 @@ def rollback_commit(
                     {"world_id": wid, "field": w.get("field"), "value": w.get("after")}
                 )
         # politics/economy/event/time 等无对应领域表，跳过
+
+    # character_changes：按 op 分桶
+    # - 逆 add → op=remove：需 DELETE characters 行 + character_states 全量行 +
+    #   涉及该 character_id 的悬挂 relationships 行（防御性兜底；正常情况下
+    #   本提交内 add 的关系已被 remove_relationship_keys 删过）。字段级 remove
+    #   只 pop core_json/state_json 的 key，无法回收实体行。
+    # - 逆 update → op=update：write_through 已在 commit_delta 步骤 5 把
+    #   characters.core_json / character_states.state_json 按逆 delta 的
+    #   after 写透；hints 阶段不重复维护。
+    # - 「提交前快照已有角色」守卫：cid in preexisting_char_ids → 跳过实体级
+    #   DELETE（该 change 是字段级 add，回滚由逆 delta 的字段级 remove 恢复）；
+    #   否则视为该 commit 实体级首次引入的角色，触发实体回收。生产实证：
+    #   char_08f503251717 的 state.knowledge/state.belief/state.goal 等 7 条
+    #   字段级 add 必须走字段恢复路径，不能误杀既有角色。
+    seen_char_ids: set = set()
+    for cc in inv.get("character_changes") or []:
+        if not char_entity_delete_enabled:
+            # 守卫失效（快照缺失/非 main 分支）：保守不删，remove_character_ids 留空
+            break
+        cid = cc.get("character_id")
+        op = cc.get("op")
+        if not cid or op != "remove":
+            continue
+        if cid in preexisting_char_ids:
+            # 既有角色的字段级 add：字段由逆 delta 字段级 remove 恢复，跳过实体 DELETE
+            continue
+        if cid in seen_char_ids:
+            continue
+        seen_char_ids.add(cid)
+        cleanup["remove_character_ids"].append(cid)
 
     # relationship_changes：按 (from,to,type) 收集
     # 逆 update 的 before 形态语义：

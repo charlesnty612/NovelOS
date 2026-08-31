@@ -119,6 +119,10 @@ def apply_inverse_cleanup_to_state(state: dict, cleanup: dict) -> None:
     - 剔除 ``characters[*].relationships`` 中 ``(from,to,type)`` 匹配
       ``remove_relationship_keys`` 的条目；
     - 剔除 ``debts`` 中 ``debt_id`` 在 ``remove_debt_ids`` 的条目；
+    - 剔除 ``characters`` 中 ``character_id`` 在 ``remove_character_ids`` 的
+      条目（含对应角色的 ``relationships`` 子列表中悬挂条目）——实体级回收，
+      配套 ``commit_delta`` 阶段对 ``characters`` / ``character_states`` 行的
+      DELETE；
     - 恢复 ``restore_*`` hints 中 world/character/relationship/debt 的 before 值
       （update 逆 update 路径）。
 
@@ -126,8 +130,10 @@ def apply_inverse_cleanup_to_state(state: dict, cleanup: dict) -> None:
     的 story_states 即「回滚后」语义；rollback 后 GET state 直接拿到该快照，无需 post-facto
     修改。
 
-    注：character facet=state 不在逆清理覆盖范围（character_states 表是 append-only
-    版本化设计，rollback 不撤销历史 state 版本——见 ``build_inverse_delta`` 注释）。
+    注：character facet=state 字段级历史（character_states 的 state_version 追加
+    行）不在逆清理覆盖范围——append-only 版本化设计，rollback 不撤销历史 state 版本
+    （见 ``build_inverse_delta`` 注释）；仅当逆 change 为 op=remove（实体级回收）
+    时，才通过 ``remove_character_ids`` 走实体 DELETE。
     """
     remove_event_ids = set(cleanup.get("remove_event_ids") or [])
     remove_hook_ids = set(cleanup.get("remove_hook_ids") or [])
@@ -358,6 +364,71 @@ def apply_inverse_cleanup_to_state(state: dict, cleanup: dict) -> None:
                 target["status"] = before["status"]
             if "severity" in before:
                 target["severity"] = before["severity"]
+
+    # characters（list 形态）：按 character_id 实体级剔除（逆 add→remove 路径）。
+    # 配套 commit_delta 阶段对 characters/character_states 行 DELETE；
+    # 快照侧剔除后，世界/关系等下游消费者拿到的是无残留名单。
+    # 防御性清理：被剔除角色作为 from/to 端点的悬挂 relationships 子列表条目
+    # 一并删除（正常情况下本提交 add 的关系已被 remove_relationship_keys 删过，
+    # 此处仅作为兜底；非本提交的关系以 character_id 仍在的「在场角色」作为
+    # 关系侧宿主，删除角色后必须同步剔除，否则重放会读到悬挂条目）。
+    rm_char_ids = set(cleanup.get("remove_character_ids") or [])
+    if rm_char_ids:
+        characters = state.get("characters")
+        if not isinstance(characters, list):
+            # 快照 characters 非 list：快照侧剔除整体跳过，但 commit_delta 的
+            # 领域表 DELETE 照常执行——DB 与快照分叉必须可观测（当前无触发路径，
+            # rebuild 强制 characters 为 list，此分支纯防御纵深）。
+            _logger.warning(
+                "rollback cleanup: state.characters 非 list（%r），remove_character_ids 快照侧剔除跳过",
+                type(characters).__name__,
+            )
+        if isinstance(characters, list):
+            state["characters"] = [
+                c for c in characters
+                if not (isinstance(c, dict) and c.get("character_id") in rm_char_ids)
+            ]
+            # 防御性：剩余角色的 relationships 子列表中 from/to 端点指向
+            # 已删除角色的条目也剔除（保留其他端点的关系）。
+            for char in state["characters"]:
+                if not isinstance(char, dict):
+                    continue
+                rels = char.get("relationships")
+                if not isinstance(rels, list):
+                    continue
+                char["relationships"] = [
+                    r for r in rels
+                    if not (
+                        isinstance(r, dict)
+                        and (
+                            r.get("from_character_id") in rm_char_ids
+                            or r.get("to_character_id") in rm_char_ids
+                        )
+                    )
+                ]
+        # 若顶层存在 relationships 桶（faction/federation 形态），同样清理
+        # 指向已删除角色的悬挂条目。snapshot 重建聚合一般不会留下这种条目，
+        # 但历史 commit 关系可能在 world.factions[*].relationships 上挂载。
+        world = state.get("world")
+        if isinstance(world, dict):
+            factions = world.get("factions")
+            if isinstance(factions, dict):
+                for fac in factions.values():
+                    if not isinstance(fac, dict):
+                        continue
+                    rels = fac.get("relationships")
+                    if not isinstance(rels, list):
+                        continue
+                    fac["relationships"] = [
+                        r for r in rels
+                        if not (
+                            isinstance(r, dict)
+                            and (
+                                r.get("from_character_id") in rm_char_ids
+                                or r.get("to_character_id") in rm_char_ids
+                            )
+                        )
+                    ]
 
 
 def write_through(

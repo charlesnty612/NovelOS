@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Fixed（2026-08-31 午后批次：rollback 角色 add 实体级回收）
+- **rollback 对 character-add 的逆向 remove 空转根治（顾晚舟生产事故）**：逆 delta 把角色 add 转成 op=remove 是字段级语义（applier L117-119 / write_through L436-437 只 pop core_json/state_json key），写透路径从不删 characters/character_states 行——rollback 只清掉了字段值、留下幽灵实体行+快照条目（生产实证 ch2 双回滚后 char_cd61839a578f 实体计数 5→5）。闭环：①cleanup dict 新增 `remove_character_ids` 桶，rollback_commit 从逆 delta 的 character_changes 收集 `op == "remove"` 的 character_id（按 character_id 去重保序）；②`commit_delta` 清理段对每个 cid 依次 DELETE `character_states`（子表）→ `characters`（主表）→ `relationships` 中以该 cid 为端点的悬挂行（FK 已摘除的兜底）；③`apply_inverse_cleanup_to_state` 实体级回收——剔除 `state["characters"]` 中命中 cid 的条目，剩余角色 `relationships` 子列表与 `world.factions[*].relationships` 中以已删 cid 为端点的悬挂条目一并剔除（防快照重建读出悬挂引用）；④docstring 修正「character facet=state 不在逆清理覆盖范围」为 append-only 版本化语义（state 历史不撤销），新增实体级 `remove_character_ids` 路径。**字段级 add 守卫**：「提交前快照（delta_row.previous_state_version 处的 main snapshot）」中存在 character_id → 该 add 是字段级，跳过实体级 DELETE（字段由逆 delta 字段级 remove 恢复）；不存在 → 视为该 commit 实体级首次引入的角色，触发实体回收。生产实证：state_deltas 里 char_08f503251717 等 7 条字段级 add 必须走字段恢复路径，不能误杀既有角色。仅 main 分支（或无分支）路径读主快照判定 preexisting；**守卫失效场景（非 main 分支 / prev_v 缺失 / 快照读取失败）一律保守不删**——`char_entity_delete_enabled=False` 使 `remove_character_ids` 留空、实体 DELETE 整体不触发（欠删可人工清理，过删是既有角色数据丢失）。范围约束：实体删除只由「逆 add」触发，不误杀历史角色（commit1 add + commit2 update → 仅回滚 commit2 时角色存活）；不影响 factions/locations/world_rules/relationships/debts 既有清理路径。5 新单测（add 全清 / add+relationships+events+hooks 全清 / 既有角色 update 回归 / 历史角色不被逆 update 误杀 / **既有角色字段级 add 角色存活**）。Known Issues 原条已撤档。
+
 ### Fixed（2026-08-31 午后批次：F5 遗留 P2 + runner 空流自动重试）
 - **F5 审计遗留 P2 ×3 收口**：①applier world_rules rule 分支补 `isinstance(r, dict)` 守卫（update/remove 双路径，非 dict 元素跳过+告警，与 dict 桶防御同风格）——rule 列表元素被污染成 str 时 `r.get("world_rule_id")` 不再抛 AttributeError；②snapshot.repair_current_snapshot_world 在 `dict(world)` 前补 isinstance 守卫（非 dict→空 dict+告警，属 L666-667 强制 dict 之外的防御纵深）；③同函数 docstring 补「设计内副作用」Notes（覆写最新快照不更新 state_version/commit_id、不重算 hash，schema 无 digest 列，下次 commit 自然覆盖）。2 新集成用例。
 - **runner 空流自动重试（agent_runtime/runner.py）**：provider「零内容块空流」失败单独加一次自动重试（`_EMPTY_STREAM_MARKER` 判定，messages 原样重调、不追加 _RETRY_HINT——空流非输出解析问题）；二次仍空流→重抛 ProviderError 附 `[empty stream retried once, still empty]` 注记；重试成功在 ai_call_logs.error 落 `warn: empty stream retried`；retry_count 语义不变（仍只计 output-invalid 重试），mock_script 路径同覆盖。吸收 MiniMax 间歇性空流抖动（deepseek 空流事故留档建议落地），模型绑定/档案零改动。4 新单测。
@@ -14,7 +17,7 @@
 - **observer 重跑不确定性实证（为何不推荐重跑）**：ch2 重提交两次 observer 重跑均产出新问题——一次把角色更新错塞 world_changes[faction]（无调和目标→校验失败，F3 规则不适用）；一次虚构「第二势力」fac_d5a64a584288_unknown（推断性加戏，原提交无此实体，已拒批）。定稿纯文字勘误一律走 delta 重放，剧情级修改才走 write/review/commit 全流程。
 
 ### Known Issues（2026-08-31 记档）
-- **rollback 对 character-add 的逆向 remove 空转**：顾晚舟 char_cd61839a578f 在双回滚后域表行与快照项均完整幸存（实体计数 5→5），逆向清理未覆盖角色系（F5 修的是 world 系 restore hint）；重放 delta 时须摘除对应 add 条目防重复，已在重放 SOP 中固化。修复列入 P2 backlog。
+- （本批已撤档：rollback 角色 add 实体级回收修复合入上方 Fixed）
 
 ### Added（项目级字数带覆盖：V3.7 字数带硬约束可配置化）
 - **projects.word_band_json 配置列（迁移 0023）**：给 projects 表加 `word_band_json TEXT` 可空列（NULL=无覆盖走模块默认 0.85/1.15/1200）。前端编辑表单「字数带覆盖（可选）」三键（下带比例 low_ratio 默认 0.85 / 上带比例 high_ratio 默认 1.15 / 下限 floor 默认 1200），全留空=不覆盖（提交体省略 word_band 键）、任一非空=提交 dict（后端 resolve_band_config 校验非法→422）；「清除字数带覆盖」按钮显式传 null 落 DB NULL。后端 service 读路径把 word_band_json 解析成 word_band 字段（非法 JSON 视为 None 不炸），ProjectUpdate 通过 Pydantic model_fields_set 区分「未提供」与「显式 null」。消费点两处接线：①writers._build_writer_input_uncached + cache key 第 8 元 wb_fp（项目覆盖变更不脏命中）；②chapter_review._basic_checks_node。无覆盖项目行为零变化（旧库无该列 → OperationalError 兜底 + 字数带逐字段一致）。单测 resolve_band_config 13 用例 + API PATCH 设置/读取/null 清除/422 4 用例 + chapter_review pipeline 带覆盖项目 W-LEN 判定 2 用例 + 迁移幂等 1 用例。
