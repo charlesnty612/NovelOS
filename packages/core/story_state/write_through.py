@@ -680,15 +680,25 @@ def write_through(
             pass
 
     # relationship_changes
+    # 身份语义（与 0017 唯一索引 / 迁移 0022 摘除 from/to FK 一致）：
+    # relationship 身份=端点对 (project_id, from_character_id, to_character_id)，
+    # 主键 ``relationship_id`` 历史约定为 ``"<from>:<to>"`` 格式、不含 type。
+    # relation_type 是端点对的**属性**，可随 update 变更（换型 update=同 pair
+    # 行 UPDATE relation_type 列）；原实现按 (from,to,新型) 精确 SELECT，未命中
+    # 即走 INSERT，撞上既有 (from,to) 行主键→UNIQUE 失败。
+    # 生产事故 wfr_9d7eb9cb1eeb 即此：库中已有 ``char_08:char_cd`` 行（type=
+    # antagonistic_exchange），新 delta 携带 update 同 pair type=alliance，
+    # SELECT 漏判 → INSERT 撞 PK。
     for rel in delta.get("relationship_changes") or []:
         from_id = rel.get("from_character_id")
         to_id = rel.get("to_character_id")
         rel_type = rel.get("relation_type")
         op = rel.get("op")
         after = rel.get("after")
-        # 三态语义：对齐 hooks/debts 既有分支——缺失/None=沿用（不写该列），
-        # 非 None=显式覆盖。visibility 缺失默认 'PUBLIC'（与迁移 0014 DDL 默认
-        # 值一致；后续 inverse/rollback 阶段 commit 前 latest 行即落入 default）。
+        # 三态语义：who_knows 缺失/None=沿用（不写该列）、非 None=显式覆盖；
+        # visibility 缺省回退 'PUBLIC' 并显式写入（rel_vis 恒非 None，与迁移
+        # 0014 DDL 默认值一致；inverse/rollback 阶段 commit 前 latest 行即落入
+        # default）。
         rel_who = encode_who_knows(read_who_knows(rel))
         rel_vis = read_visibility(rel) or "PUBLIC"
         existing = conn.execute(
@@ -700,89 +710,167 @@ def write_through(
         ).fetchone()
         if op in ("add", "update"):
             if existing is None:
-                rid = rel.get("target_id") or new_id("rel")
-                try:
-                    conn.execute(
-                        """
-                        INSERT INTO relationships
-                            (relationship_id, project_id, from_character_id, to_character_id,
-                             relation_type, state_json, last_state_version,
-                             visibility, who_knows)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            rid, project_id, from_id, to_id, rel_type,
-                            _dump(after or {}), new_version, rel_vis, rel_who,
-                        ),
-                    )
-                except sqlite3.IntegrityError:
-                    # 0017 唯一索引 ``idx_relationships_unique`` 兜底：并发 add 在
-                    # SELECT-then-INSERT 窗口内产生冲突 → 转 UPDATE 分支幂等。
-                    # 重查现有行（对方事务可能刚提交，existing 行还没在本连接可见）
-                    existing = conn.execute(
-                        """
-                        SELECT relationship_id FROM relationships
-                        WHERE project_id = ? AND from_character_id = ?
-                          AND to_character_id = ? AND relation_type = ?
-                        """,
-                        (project_id, from_id, to_id, rel_type),
-                    ).fetchone()
-                    if existing is None:
-                        # 不应发生：唯一索引报错却查不到行 → 让调用方感知
-                        raise
-                    # 兜底分支同样按三态语义：who_knows 缺失=不更新该列；
-                    # visibility 缺失=沿用实体现状。
+                # 兜底查找「同 (from,to) 端点对、不限 type 的既有行」：仅在 op=update
+                # 时启用（生产事故 wfr_9d7eb9cb1eeb 根因：换型 update 按 (from,to,新型)
+                # SELECT 漏判，转 INSERT 撞既有行主键炸 UNIQUE）。
+                #   ① target_id 非空时按主键直接命中（最常见：observer/validator
+                #      显式 target_id == 既有 relationship_id）；
+                #   ② 否则按 (project_id, from, to) 不限 type 取 LIMIT 1（兜底
+                #      target_id 缺失/未给但同 pair 已有旧型行）；
+                #   ③ 均未命中走 INSERT（add 始终走 INSERT：同 pair 不同 type 是新
+                #      row，不撞 0017 唯一索引）。
+                # add 不做 pair 兜底：add(rival) 同 pair 已有 ally 行是新增不同型
+                # 关系（原代码语义），不应被吞并到旧行。
+                swap_row = None
+                if op == "update":
+                    rel_target_id = rel.get("target_id")
+                    if isinstance(rel_target_id, str) and rel_target_id:
+                        # 端点对条件必须随主键一起限定：target_id 若指向异 pair
+                        # 的行（错位/脏数据），按主键直改会写错行（smart 审计 P2）。
+                        swap_row = conn.execute(
+                            """
+                            SELECT relationship_id, relation_type FROM relationships
+                            WHERE project_id = ? AND relationship_id = ?
+                              AND from_character_id = ? AND to_character_id = ?
+                            """,
+                            (project_id, rel_target_id, from_id, to_id),
+                        ).fetchone()
+                    if swap_row is None:
+                        swap_row = conn.execute(
+                            """
+                            SELECT relationship_id, relation_type FROM relationships
+                            WHERE project_id = ? AND from_character_id = ?
+                              AND to_character_id = ?
+                            ORDER BY relationship_id
+                            LIMIT 1
+                            """,
+                            (project_id, from_id, to_id),
+                        ).fetchone()
+                if swap_row is not None:
+                    # 同 pair 既有行→走 UPDATE 分支（含 relation_type 列覆盖），
+                    # 不走 INSERT——避免撞上既有行主键炸 UNIQUE。known issue：
+                    # rollback 逆 update 不恢复旧 relation_type（before/after
+                    # 只携带 state_json），本路径不修复，留作 known limit。
                     if rel_who is not None:
                         conn.execute(
                             """
                             UPDATE relationships
                             SET state_json = ?, last_state_version = ?,
-                                visibility = ?, who_knows = ?
+                                visibility = ?, who_knows = ?,
+                                relation_type = ?
                             WHERE relationship_id = ?
                             """,
                             (
                                 _dump(after or {}), new_version, rel_vis, rel_who,
-                                existing["relationship_id"],
+                                rel_type, swap_row["relationship_id"],
                             ),
                         )
                     else:
                         conn.execute(
                             """
                             UPDATE relationships
-                            SET state_json = ?, last_state_version = ?, visibility = ?
+                            SET state_json = ?, last_state_version = ?,
+                                visibility = ?, relation_type = ?
                             WHERE relationship_id = ?
                             """,
                             (
                                 _dump(after or {}), new_version, rel_vis,
-                                existing["relationship_id"],
+                                rel_type, swap_row["relationship_id"],
                             ),
                         )
+                else:
+                    rid = rel.get("target_id") or new_id("rel")
+                    try:
+                        conn.execute(
+                            """
+                            INSERT INTO relationships
+                                (relationship_id, project_id, from_character_id, to_character_id,
+                                 relation_type, state_json, last_state_version,
+                                 visibility, who_knows)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                rid, project_id, from_id, to_id, rel_type,
+                                _dump(after or {}), new_version, rel_vis, rel_who,
+                            ),
+                        )
+                    except sqlite3.IntegrityError:
+                        # 0017 唯一索引 ``idx_relationships_unique`` 兜底：并发 add/update
+                        # 在 SELECT-then-INSERT 窗口内产生冲突 → 转 UPDATE 分支幂等。
+                        # 重查现有行（对方事务可能刚提交，existing 行还没在本连接可见）
+                        existing = conn.execute(
+                            """
+                            SELECT relationship_id, relation_type FROM relationships
+                            WHERE project_id = ? AND from_character_id = ?
+                              AND to_character_id = ? AND relation_type = ?
+                            """,
+                            (project_id, from_id, to_id, rel_type),
+                        ).fetchone()
+                        if existing is None:
+                            # 不应发生：唯一索引报错却查不到行 → 让调用方感知
+                            raise
+                        # 兜底分支同样按三态语义：who_knows 缺失=不更新该列；
+                        # visibility 缺省回退 PUBLIC 并显式写入（rel_vis 恒非
+                        # None——`read_visibility(rel) or "PUBLIC"`，与 DDL 默认
+                        # 一致；不是「沿用实体现状」，审计 P2 勘误）。relation_type
+                        # 同新型，等值写入是无害 no-op（与换型路径一致性）。
+                        if rel_who is not None:
+                            conn.execute(
+                                """
+                                UPDATE relationships
+                                SET state_json = ?, last_state_version = ?,
+                                    visibility = ?, who_knows = ?,
+                                    relation_type = ?
+                                WHERE relationship_id = ?
+                                """,
+                                (
+                                    _dump(after or {}), new_version, rel_vis, rel_who,
+                                    rel_type, existing["relationship_id"],
+                                ),
+                            )
+                        else:
+                            conn.execute(
+                                """
+                                UPDATE relationships
+                                SET state_json = ?, last_state_version = ?,
+                                    visibility = ?, relation_type = ?
+                                WHERE relationship_id = ?
+                                """,
+                                (
+                                    _dump(after or {}), new_version, rel_vis,
+                                    rel_type, existing["relationship_id"],
+                                ),
+                            )
             else:
                 # 已存在关系按三态语义 UPDATE：who_knows 缺失=不写该列；
-                # visibility 缺失=沿用（与 hooks/debts 同款口径）。
+                # visibility 缺省回退 PUBLIC 并显式写入（rel_vis 恒非 None，非
+                # 「沿用」——审计 P2 勘误；与迁移 0014 DDL 默认值一致）。三元组
+                # 精确命中时 relation_type 本就相同，等值写入是无害 no-op。
                 if rel_who is not None:
                     conn.execute(
                         """
                         UPDATE relationships
                         SET state_json = ?, last_state_version = ?,
-                            visibility = ?, who_knows = ?
+                            visibility = ?, who_knows = ?,
+                            relation_type = ?
                         WHERE relationship_id = ?
                         """,
                         (
                             _dump(after or {}), new_version, rel_vis, rel_who,
-                            existing["relationship_id"],
+                            rel_type, existing["relationship_id"],
                         ),
                     )
                 else:
                     conn.execute(
                         """
                         UPDATE relationships
-                        SET state_json = ?, last_state_version = ?, visibility = ?
+                        SET state_json = ?, last_state_version = ?,
+                            visibility = ?, relation_type = ?
                         WHERE relationship_id = ?
                         """,
                         (
                             _dump(after or {}), new_version, rel_vis,
-                            existing["relationship_id"],
+                            rel_type, existing["relationship_id"],
                         ),
                     )
         elif op == "remove":

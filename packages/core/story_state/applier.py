@@ -315,15 +315,42 @@ def _apply_relationship_changes(state: dict, items: list[dict]) -> None:
         if rels is None:
             # 端点不在 characters / factions 中（validator 已拒，静默忽略）
             continue
+        # 匹配优先级（与 write_through 对齐）：身份=端点对 (from,to)；
+        #   ① (from,to,type) 三元组精确匹配：同型 update 走这里原位替换；
+        #   ② 换型 update：三元组未命中时回退按 (from,to) 端点对（不限 type）
+        #      匹配首条→原位替换（旧型条目被新型条目替换，无副本）；
+        #   ③ add + target_id 显式给出且列表已有同 relationship_id 条目：
+        #      幂等防重，原位替换（避免双 apply 产生副本）。
+        # 任一命中均复用既有索引位 → 列表长度不变，避免快照同 pair 出现两条
+        # 不同 type 的条目（且 relationship_id 相同）。
         match_idx = None
         for i, r in enumerate(rels):
             if (
-                r.get("from_character_id") == from_id
+                isinstance(r, dict)
+                and r.get("from_character_id") == from_id
                 and r.get("to_character_id") == to_id
                 and r.get("relation_type") == rel_type
             ):
                 match_idx = i
                 break
+        if match_idx is None and op == "update":
+            for i, r in enumerate(rels):
+                if (
+                    isinstance(r, dict)
+                    and r.get("from_character_id") == from_id
+                    and r.get("to_character_id") == to_id
+                ):
+                    # 换型 update：同 pair 任意 type 的旧条目原位替换为新型
+                    match_idx = i
+                    break
+        if match_idx is None and op == "add":
+            # add 幂等防重：target_id 显式给出且列表已有同 rid 条目→原位替换
+            rel_target_id = change.get("target_id")
+            if isinstance(rel_target_id, str) and rel_target_id:
+                for i, r in enumerate(rels):
+                    if isinstance(r, dict) and r.get("relationship_id") == rel_target_id:
+                        match_idx = i
+                        break
         if op in ("add", "update"):
             entry = {
                 "relationship_id": change.get("target_id"),
