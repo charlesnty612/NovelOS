@@ -21,6 +21,9 @@
 - **审查修复轮**：P2-1 details 受控 open 被轮询打回（见上）；P2-2 table-wrap 对 width:100% 表格不生效（补 max-width/min-width 组合）；P3 三连（ContinuePanel 复用 formatApiError / ConfirmDialog aria 兜底 / ProseText key 与空段）。
 - **测试**：vitest 34 文件 407 用例全绿（新增 ProseText 3 / ConfirmDialog 9 / formatApiError 5 / 折叠 5 / saved-banner 3 等）；`npm run build`（tsc -b + vite）全绿。记档缺口：bible Canon/World/Ledger 三 Tab 删除流无测试（既有缺口非回归）。
 
+### Fixed（2026-09-01：草稿正文 44em 行长限制回退）
+- 批次A 给 `.prose-block` 加的 `max-width: 44em` 在宽面板（草稿/审校正文区）导致文字提前换行、右侧留出大段空白（用户截图反馈）。草稿区诉求是填满容器宽度而非书籍式窄栏，移除该限制（44em 阅读宽度理念不适用于本系统的宽面板场景）；其余排版优化（sans/14px/行高 1.9/首行缩进/480px 定高滚动）保留。改动仅 `apps/web/src/index.css` 一行，dist 已重建上线。
+
 
 ### Added（chapter-write 字数闭环：治理实证 ch4-6 writer 自报 3008-3172 vs 实际 4721-5842 的系统性超带）
 - **length_check / condense 节点（chapter_write/pipeline.py）**：在 polisher 与 save_draft 之间插入两个节点。length_check（Transform，纯 deterministic）用 `packages.core.quality.wordcount.classify_prose_length` 权威口径实测 polished_prose（缺则 writer_output.prose）字数，读项目 `word_band_json` 覆盖（与 chapter_review._basic_checks_node 同口径，`resolve_band_config` 单一权威）；condense（AI，复用 polisher capability=creative_writing）仅在带外时触发，最多 2 轮，prompt 必携带实测数字 / 目标带 / 需净减比例 + writer-v1 §6.1 规则 20 压缩纪律（优先砍铺垫/重复意象/冗词，不砍节拍、不删场景、保持文风与既有设定用语）。两轮仍超 → 放行 + `condense_status='over_band_after_2_rounds'`。14 新单测（length_check 三态/项目覆盖生效/condense 三分支/save_draft 偏差注记/权威字数存库/builders per-scene 分摊）。

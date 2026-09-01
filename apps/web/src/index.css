@@ -581,7 +581,6 @@ a:hover {
   font-size: 14px;
   line-height: 1.9;
   word-break: break-word;
-  max-width: 44em;
   max-height: 480px;
   overflow-y: auto;
 }
