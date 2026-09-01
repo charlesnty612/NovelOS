@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Fixed（人工改稿闭环三连修：改稿必重审 + commit 时序守卫 + 版本列表「未审」角标，2026-09-01）
+- **A·改稿降级（`packages/domain/chapter/service.py`）**：`create_draft` 在 INSERT 新 draft 的**同事务**内，若章节原状态为 REVIEWED 则降级回 DRAFTED——堵住「审校通过→人工改一段→直接 commit 定稿未审改动」的口子（与 continuation adopt 口径对齐并收编为唯一属主，adopt 内联降级 SQL 已删）。DRAFTED 不受影响；COMMITTED 仍 409。
+- **B·commit 审校时序守卫（`routers/workflows.py` + `chapter_commit/pipeline.py`）**：最新草稿 `created_at` 晚于最近一次 COMPLETED chapter-review 的 `ended_at`（=存在未审改动）→ `start_commit` 端点同步 409（detail 含版本号与两个时间）；`_commit_node` 加同款兜底 raise，防绕过端点的 generic 启动路径。无 COMPLETED review / 无草稿不拦（保持原行为，由既有 REVIEWED 校验兜底）；FAILED/CANCELLED/PAUSED review 不计入阈值。同时修复 `_commit_node` 连接生命周期（conn 提升 try/finally）。
+- **C·版本列表「未审」角标**：章节详情响应新增 `last_review_completed_at`（`ChapterService.get_last_review_completed_at`，与路由层 helper 同款 SQL、避免横向依赖；`Chapter` 模型放开 `extra='allow'`）；前端 DraftsPanel 版本行对晚于该时间的草稿渲染 warn 色系「未审」徽标，一眼分辨已审/未审版本。
+- **测试**：新增 14 用例（create_draft 降级×3 / commit 守卫 API×5+helper 单元×2 / pipeline 兜底 workflow 级×2 / last_review_completed_at 集成×2 / 前端角标×2）。审查后全仓 pytest 1639 绿 + 补测后 tests/api 235 绿、tests/workflow 204 绿；vitest 409 绿；build 绿、dist 已重建。
+
 ### Added（工作流运行取消：POST cancel 端点 + 引擎协作式取消 + auto_revise 不链 CANCELLED）
 - **`POST /api/runs/{run_id}/cancel` 端点（`packages/core/api/routers/workflows.py`）**：协作式取消 RUNNING workflow run。状态机——404（run 不存在）/ 409（终态 COMPLETED/FAILED/CANCELLED 或 PAUSED，detail 含当前 status；PAUSED 的取消走 resume 后驳回/决议路径）/ 200 `{"run_id":..., "status":"CANCELLED"}`（RUNNING → UPDATE CANCELLED + ended_at）。幂等：重复取消已 CANCELLED 的 run 按 409 处理。引擎 cancel_run 内部 `WHERE status='RUNNING'` 兜底 TOCTOU——窄窗口内状态被改 → rowcount=0 → 抛 ValueError → 端点分桶映射 409。语义与既有 resume 端点的 ValueError 分桶（404/409/400）保持一致。
 - **引擎协作式取消（`packages/core/workflow_runtime/engine.py`）**：`WorkflowEngine.cancel_run(run_id)` UPDATE RUNNING → CANCELLED；`_run_nodes` 节点循环两处探针（节点开始前 / 节点 fn 执行完毕 checkpoint 前）单行 SELECT `workflow_runs.status`——命中 CANCELLED 则停止推进：开始前命中 → 直接 `_finalize_run('CANCELLED')` 收尾、零节点行（后续节点不再 insert）；checkpoint 前命中 → 当前节点标 **FAILED**（复用真实失败枚举）+ error='cancelled by user'（区分真失败）+ output_json=NULL、`_finalize_run('CANCELLED')`、return。LLM 节点不杀进程——后台调用自然跑完结果丢弃即可，避免跨进程信号复杂度。`_finalize_run` 已支持 CANCELLED 终态（既有 L665 分支）直接复用，无 schema 变化。`_fetch_run_status` 模块级辅助暴露供测试与外部探针使用。

@@ -76,9 +76,14 @@ def list_chapters(project_id: str, request: Request) -> list[dict]:
 
 @router.get("/chapters/{chapter_id}", response_model=Chapter)
 def get_chapter(chapter_id: str, request: Request) -> dict:
-    row = _service(request).get(chapter_id)
+    svc = _service(request)
+    row = svc.get(chapter_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
+    # 「最近一次 COMPLETED review 的 ended_at」：供前端版本列表渲染「未审」角标。
+    # 无 COMPLETED review run 时为 None；service 层负责 SQL（与 workflows router
+    # 的 _latest_completed_review_end 同款但走领域层，避免路由间横向依赖）。
+    row["last_review_completed_at"] = svc.get_last_review_completed_at(chapter_id)
     return row
 
 

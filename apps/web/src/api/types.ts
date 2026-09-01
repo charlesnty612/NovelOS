@@ -251,6 +251,10 @@ export interface Chapter {
   who_knows: string[] | null;
   created_at: string;
   updated_at: string;
+  /** 最近一次 COMPLETED 状态 chapter-review run 的 ended_at；
+   *  用于版本列表渲染「未审」角标。无 COMPLETED review 时为 null（此时视为「该章节
+   *  从未审过，全部 draft 都不带「未审」标记，避免在用户首次走流水线时被噪声覆盖）。 */
+  last_review_completed_at?: string | null;
 }
 
 export interface ChapterCreatePayload {

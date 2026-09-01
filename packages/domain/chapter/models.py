@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 ChapterStatus = Literal["PLANNED", "DRAFTED", "REVIEWED", "COMMITTED", "RELEASED"]
 """Chapters 表 status 枚举（与 DDL CHECK 对齐）。"""
@@ -51,7 +51,14 @@ class ChapterUpdate(BaseModel):
 
 
 class Chapter(BaseModel):
-    """章节完整表示，对应数据库行。"""
+    """章节完整表示，对应数据库行。
+
+    ``extra='allow'``：保留 router / service 临时附加的派生字段（如
+    ``last_review_completed_at``），允许响应序列化输出，避免 router 必须为
+    每个派生字段都改一次模型。
+    """
+
+    model_config: ConfigDict = ConfigDict(extra="allow")
 
     chapter_id: str
     project_id: str

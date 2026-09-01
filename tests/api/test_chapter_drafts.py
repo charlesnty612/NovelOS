@@ -340,3 +340,94 @@ def test_duplicate_chapter_version_triggers_integrity_error(tmp_path: Path):
                 conn.close()
 
     asyncio.run(run())
+
+
+# =============================================================================
+# REVIEWED → DRAFTED 降级（人工改稿必须撤销已审校状态）
+# =============================================================================
+
+
+def test_create_draft_on_reviewed_downgrades_to_drafted(tmp_path: Path):
+    """REVIEWED 章节人工保存新草稿后,chapters.status 必须降为 DRAFTED,
+    防止未重新审校的改稿直接 commit 定稿。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid, status="DRAFTED")
+            # 推进到 REVIEWED
+            r = await _request(
+                app, "PATCH", f"/api/chapters/{cid}", json={"status": "REVIEWED"}
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "REVIEWED"
+
+            r = await _request(
+                app, "POST", f"/api/chapters/{cid}/drafts",
+                json={"content": "人工改稿正文"},
+            )
+            assert r.status_code == 201, r.text
+            assert r.json()["version"] == 1
+
+            # DB 直查确认降级
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "DRAFTED"
+
+    asyncio.run(run())
+
+
+def test_create_draft_on_reviewed_with_existing_drafts_still_downgrades(tmp_path: Path):
+    """REVIEWED 章节已有 v1 草稿,新增 v2 草稿后 status 仍降为 DRAFTED。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid, status="DRAFTED")
+            # 先创建 v1 草稿
+            r = await _request(
+                app, "POST", f"/api/chapters/{cid}/drafts",
+                json={"content": "v1"},
+            )
+            assert r.status_code == 201, r.text
+            # 推进到 REVIEWED
+            r = await _request(
+                app, "PATCH", f"/api/chapters/{cid}", json={"status": "REVIEWED"}
+            )
+            assert r.status_code == 200, r.text
+
+            # 人工加 v2
+            r = await _request(
+                app, "POST", f"/api/chapters/{cid}/drafts",
+                json={"content": "v2"},
+            )
+            assert r.status_code == 201, r.text
+            assert r.json()["version"] == 2
+
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.json()["status"] == "DRAFTED"
+
+    asyncio.run(run())
+
+
+def test_create_draft_on_drafted_keeps_status(tmp_path: Path):
+    """DRAFTED 章节 create_draft 后 status 保持 DRAFTED（不误升）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid, status="DRAFTED")
+
+            r = await _request(
+                app, "POST", f"/api/chapters/{cid}/drafts",
+                json={"content": "正文"},
+            )
+            assert r.status_code == 201, r.text
+
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.json()["status"] == "DRAFTED"
+
+    asyncio.run(run())

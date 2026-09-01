@@ -490,6 +490,7 @@ export function ChapterDetailPage() {
             <DraftsPanel
               chapterId={chapterId}
               chapterStatus={chapter.status}
+              lastReviewCompletedAt={chapter.last_review_completed_at ?? null}
               drafts={draftsCall.data ?? []}
               draftsLoading={draftsCall.loading}
               draftsError={draftsCall.error}
@@ -1602,6 +1603,7 @@ function NodeStatusBadge({
 function DraftsPanel({
   chapterId,
   chapterStatus,
+  lastReviewCompletedAt,
   drafts,
   draftsLoading,
   draftsError,
@@ -1611,6 +1613,9 @@ function DraftsPanel({
 }: {
   chapterId: string;
   chapterStatus: Chapter['status'];
+  /** 最近一次 COMPLETED 状态 chapter-review run 的 ended_at（ISO 字符串）；
+   *  null 表示该章节从未审过。用于在版本列表行渲染「未审」角标。 */
+  lastReviewCompletedAt: string | null;
   drafts: Draft[];
   draftsLoading: boolean;
   draftsError: string | null;
@@ -1746,6 +1751,19 @@ function DraftsPanel({
                       data-testid={`draft-model-${d.draft_id}`}
                     >
                       {d.model_id}
+                    </span>
+                  ) : null}
+                  {/* 「未审」徽标：该 draft 严格晚于最近一次 COMPLETED review 的
+                      ended_at 才算「审校后又改稿 / 续写」。ISO 字符串可字典序比较。
+                      lastReviewCompletedAt 为 null（该章节从未审过）则不显示，
+                      避免在用户首次走流水线时被噪声覆盖。 */}
+                  {lastReviewCompletedAt && d.created_at > lastReviewCompletedAt ? (
+                    <span
+                      className="badge badge--unreviewed"
+                      title={`未审：该版本生成于 ${formatDateTime(lastReviewCompletedAt)} 那次审校之后`}
+                      data-testid={`draft-unreviewed-${d.draft_id}`}
+                    >
+                      未审
                     </span>
                   ) : null}
                   <span className="muted small">{d.created_by}</span>

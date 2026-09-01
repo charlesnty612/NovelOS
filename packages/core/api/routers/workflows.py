@@ -262,6 +262,64 @@ def _check_active_run_for_chapter(
     return {"run_id": row["run_id"], "status": row["status"]}
 
 
+def _latest_completed_review_end(db_path: str, chapter_id: str) -> str | None:
+    """返回指定 chapter 最近一次 COMPLETED 状态 chapter-review run 的 ended_at（ISO 字符串）。
+
+    用于 chapter-commit 时序守卫：拿「最近一次审校完成时间」与最新 draft.created_at 比较，
+    阻断「审过 v5、改出 v6、commit 定稿 v6」的口子。
+
+    返回：
+    - 最近一次 COMPLETED review 的 ended_at（ISO 字符串，now_iso() 产物，可直接字符串比较）；
+    - 无 COMPLETED review run → None（调用方视为「无需本守卫兜底，由既有 REVIEWED 校验兜底」）。
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT wr.ended_at FROM workflow_runs wr
+            JOIN workflows wf ON wf.workflow_id = wr.workflow_id
+            WHERE wr.chapter_id = ?
+              AND wf.name = 'chapter-review'
+              AND wr.status = 'COMPLETED'
+            ORDER BY wr.ended_at DESC
+            LIMIT 1
+            """,
+            (chapter_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or row["ended_at"] is None:
+        return None
+    return row["ended_at"]
+
+
+def _latest_draft_after(db_path: str, chapter_id: str, threshold_iso: str) -> dict[str, Any] | None:
+    """返回该 chapter 在 ``threshold_iso`` 之后创建的最新草稿行（version / created_at）；无则 None。
+
+    用于 chapter-commit 时序守卫：threshold 通常为最近一次 COMPLETED review 的 ended_at，
+    若最新草稿在其之后 → 说明审校后又人工改稿 / 续写，commit 必须拒收。
+
+    注意：``created_at`` 是 ISO 字符串（now_iso() 产物），可直接字典序比较；调用方需自行
+    保证 threshold_iso 来自同一时间体系（workflow_runs.ended_at 写入路径一致）。
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT version, created_at FROM drafts
+            WHERE chapter_id = ? AND created_at > ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (chapter_id, threshold_iso),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {"version": int(row["version"]), "created_at": row["created_at"]}
+
+
 def _init_genesis_if_needed(db_path: str, project_id: str, chapter_id: str) -> None:
     """如无快照则调 init_genesis 创建 v1 快照；供 chapter-write / commit 等依赖 state 的节点使用。"""
     from packages.core.story_state.service import StoryStateService
@@ -860,12 +918,45 @@ def start_commit(
     body: StartWorkflowRequest,
     request: Request,
 ) -> dict[str, Any]:
+    # 时序守卫：最近一次 COMPLETED chapter-review 之后若又产生了更新草稿，commit 必须拒收。
+    # 兜底 create_draft 状态降级（REVIEWED→DRAFTED）覆盖不到的口子，例如：
+    # - review RUNNING 期间人工改稿（review 还没 COMPLETED 不会触发降级）；
+    # - 历史遗留数据（章节已是 REVIEWED 但草稿晚于最近一次审校完成时间）。
+    # 无 COMPLETED review 或无草稿时不拦，由既有 REVIEWED 状态机校验兜底。
+    _guard_commit_draft_freshness(request, chapter_id)
     return _start_workflow(
         workflow_name="chapter-commit",
         request=request,
         project_id=project_id,
         chapter_id=chapter_id,
         body=body,
+    )
+
+
+def _guard_commit_draft_freshness(request: Request, chapter_id: str) -> None:
+    """chapter-commit 时序守卫：draft.created_at > 最近一次 COMPLETED review.ended_at → 409。
+
+    阈值语义：取该 chapter 最近一次 COMPLETED 状态的 chapter-review run 的 ended_at；
+    若此时存在 created_at 严格更晚的 draft 行，说明审校完成后又人工改稿 / 续写，
+    应在 commit 启动阶段拒收，避免「审过 v5、改出 v6、commit 定稿 v6」。
+
+    不拦场景：
+    - 无 COMPLETED review run → 返回（视为「首次 commit」，由既有 REVIEWED 校验兜底）；
+    - 草稿 created_at 均 ≤ review.ended_at → 返回（说明审校稿与最新草稿一致）。
+    """
+    db_path = request.app.state.settings.db_path
+    review_end = _latest_completed_review_end(db_path, chapter_id)
+    if review_end is None:
+        return
+    latest_draft = _latest_draft_after(db_path, chapter_id, review_end)
+    if latest_draft is None:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"最新草稿 v{latest_draft['version']} 晚于最近一次审校完成时间"
+            f"（{review_end}），存在未审改动，请先重新审校再提交"
+        ),
     )
 
 

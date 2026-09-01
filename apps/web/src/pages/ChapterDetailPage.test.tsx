@@ -1189,6 +1189,155 @@ describe('ChapterDetailPage - 审校指定草稿版本', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 草稿版本列表「未审」角标：
+// - chapter.last_review_completed_at 存在且 draft.created_at 严格晚于该时刻
+//   → 行内出现「未审」徽标；
+// - created_at ≤ last_review_completed_at → 不出现；
+// - chapter.last_review_completed_at 为 null（该章节从未审过）→ 任何 draft
+//   都不出现「未审」徽标（避免在用户首次走流水线时被噪声覆盖）。
+// ---------------------------------------------------------------------------
+
+describe('ChapterDetailPage - 草稿版本「未审」角标', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(chaptersApi.delete).mockReset();
+    vi.mocked(chaptersApi.update).mockReset();
+    vi.mocked(chaptersApi.createDraft).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(workflowsApi.startPlan).mockReset();
+    vi.mocked(workflowsApi.startWrite).mockReset();
+    vi.mocked(workflowsApi.startReview).mockReset();
+    vi.mocked(workflowsApi.startCommit).mockReset();
+    vi.mocked(workflowsApi.resume).mockReset();
+    vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(modelProfilesApi.create).mockReset();
+    vi.mocked(modelProfilesApi.update).mockReset();
+    vi.mocked(modelProfilesApi.remove).mockReset();
+    vi.mocked(modelProfilesApi.test).mockReset();
+
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([]);
+    vi.mocked(workflowsApi.startPlan).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun);
+  });
+
+  it('last_review_completed_at 之后才生成的 draft 行出现「未审」徽标；之前的行不出现', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(
+      baseChapter({
+        status: 'DRAFTED',
+        last_review_completed_at: '2026-08-24T10:30:00+00:00',
+      }),
+    );
+    // v1 创建时间早于最近一次审校完成时间 → 审过；
+    // v2 创建时间晚于最近一次审校完成时间 → 未审。
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([
+      {
+        draft_id: 'drf_v2',
+        chapter_id: 'ch_001',
+        version: 2,
+        content: 'v2 内容',
+        created_by: 'writer',
+        prompt_version: null,
+        model_id: null,
+        created_at: '2026-08-24T11:00:00+00:00',
+      },
+      {
+        draft_id: 'drf_v1',
+        chapter_id: 'ch_001',
+        version: 1,
+        content: 'v1 内容',
+        created_by: 'writer',
+        prompt_version: null,
+        model_id: null,
+        created_at: '2026-08-24T10:00:00+00:00',
+      },
+    ] as Draft[]);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('draft-row-drf_v2')).toBeInTheDocument();
+    });
+
+    // 1) v2 严格晚于 10:30 → 行内有「未审」徽标
+    const v2Row = screen.getByTestId('draft-row-drf_v2');
+    expect(within(v2Row).getByTestId('draft-unreviewed-drf_v2')).toHaveTextContent(
+      '未审',
+    );
+    // 2) v1 早于 10:30 → 行内不出现「未审」徽标
+    const v1Row = screen.getByTestId('draft-row-drf_v1');
+    expect(within(v1Row).queryByTestId('draft-unreviewed-drf_v1')).toBeNull();
+  });
+
+  it('chapter.last_review_completed_at 为 null 时任何 draft 行都不出现「未审」徽标', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(
+      baseChapter({
+        status: 'DRAFTED',
+        last_review_completed_at: null,
+      }),
+    );
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([
+      {
+        draft_id: 'drf_v2',
+        chapter_id: 'ch_001',
+        version: 2,
+        content: 'v2 内容',
+        created_by: 'writer',
+        prompt_version: null,
+        model_id: null,
+        created_at: '2026-08-24T11:00:00+00:00',
+      },
+      {
+        draft_id: 'drf_v1',
+        chapter_id: 'ch_001',
+        version: 1,
+        content: 'v1 内容',
+        created_by: 'writer',
+        prompt_version: null,
+        model_id: null,
+        created_at: '2026-08-24T10:00:00+00:00',
+      },
+    ] as Draft[]);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('draft-row-drf_v2')).toBeInTheDocument();
+    });
+
+    // 任何 draft 行都不应有「未审」徽标：避免在用户首次走流水线时被噪声覆盖。
+    expect(
+      screen.queryByTestId('draft-unreviewed-drf_v2'),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId('draft-unreviewed-drf_v1'),
+    ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 四步流水线展示态（plan→write→review→commit）：
 // - done / current / todo 三态由 status + plan_json 共同推导；
 // - current 步骤的按钮带 btn--primary；

@@ -49,8 +49,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from packages.core.db import get_connection
-from packages.core.ids import now_iso
 from packages.core.logging_config import get_logger
 from packages.core.model_router import ModelRouter
 from packages.domain.chapter.service import ChapterService
@@ -349,7 +347,8 @@ def adopt_continuation(
     - 校验同 continue（404 / 409）。
     - 新 draft 的 version = ``COALESCE(MAX(version), 0) + 1``；content =
       ``old + "\\n" + new``（old 为空则仅 new）。
-    - 若原 status == REVIEWED，降级为 DRAFTED（直接 UPDATE，绕过状态机白名单）。
+    - REVIEWED → DRAFTED 降级由 ``ChapterService.create_draft`` 内部同事务完成，
+      本接口不再写 chapters.status（避免重复降级 & 绕过 ALLOWED_NEXT 白名单）。
     """
     db_path = str(request.app.state.settings.db_path)
     _ensure_project(request, project_id)
@@ -375,20 +374,10 @@ def adopt_continuation(
         raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
     new_version = int(created["version"])
 
-    # 降级：REVIEWED → DRAFTED（直接 SQL UPDATE，绕过 ALLOWED_NEXT 白名单）。
-    new_status = chapter.get("status") or "DRAFTED"
-    if new_status == "REVIEWED":
-        conn = get_connection(db_path)
-        try:
-            conn.execute(
-                "UPDATE chapters SET status = 'DRAFTED', updated_at = ? "
-                "WHERE chapter_id = ?",
-                (now_iso(), chapter_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        new_status = "DRAFTED"
+    # 响应 status：create_draft 已处理 REVIEWED → DRAFTED 降级，
+    # 这里按预取的预审状态给出最终态，避免响应与 DB 不一致。
+    prior_status = chapter.get("status") or "DRAFTED"
+    new_status = "DRAFTED" if prior_status == "REVIEWED" else prior_status
 
     return {
         "version": new_version,

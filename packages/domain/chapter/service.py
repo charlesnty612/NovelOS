@@ -290,6 +290,46 @@ class ChapterService:
             conn.close()
         return row["project_id"] if row else None
 
+    # ------------------------------------------------------------ last review
+    def get_last_review_completed_at(self, chapter_id: str) -> str | None:
+        """返回指定 chapter 最近一次 COMPLETED 状态 chapter-review run 的 ``ended_at``。
+
+        用于章节详情页版本列表「未审」角标：与最新 draft.created_at 比较，
+        凡是 created_at 严格大于该时间戳的 draft 都属于「审校后又改稿 / 续写」，
+        在 UI 上提示用户该版本尚未经过审校。
+
+        SQL 与 ``packages.core.api.routers.workflows._latest_completed_review_end``
+        同款（避免路由间横向依赖，在领域层独立查询）：
+        ``JOIN workflows wf ON wf.workflow_id = wr.workflow_id``，
+        ``wf.name = 'chapter-review'``，``wr.status = 'COMPLETED'``，
+        按 ``ended_at`` DESC 取 1。
+
+        返回：
+        - 最近一次 COMPLETED review 的 ``ended_at``（ISO 字符串，
+          与 ``workflows.ended_at`` 写入路径一致，可直接字典序比较）；
+        - 无 COMPLETED review run → ``None``（UI 视为「该章节从未审过，所有
+          draft 都属于未审，与旧版行为一致」）。
+        """
+        conn = get_connection(self.db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT wr.ended_at FROM workflow_runs wr
+                JOIN workflows wf ON wf.workflow_id = wr.workflow_id
+                WHERE wr.chapter_id = ?
+                  AND wf.name = 'chapter-review'
+                  AND wr.status = 'COMPLETED'
+                ORDER BY wr.ended_at DESC
+                LIMIT 1
+                """,
+                (chapter_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None or row["ended_at"] is None:
+            return None
+        return row["ended_at"]
+
     # ============================================================== Sprint 5
     # drafts：人工改稿能力（task A1）。
     # ----------------------------------------------------------------------
@@ -329,6 +369,9 @@ class ChapterService:
           避免并发竞态下产生重复 version。
         - ``created_by`` 固定 ``"human"``；``prompt_version`` / ``model_id`` 为 ``None``。
         - ``draft_id`` 用 ``new_id("dr")``；``created_at`` 用 ``now_iso()``。
+        - 若原 status 为 REVIEWED，INSERT 同事务内将 chapters.status 降级为 DRAFTED
+          （与 ``continuation`` adopt 同款降级，绕过 ALLOWED_NEXT 白名单），确保
+          未重新审校的改稿无法直接 commit 定稿。
         """
         if not content:
             # 防御性二次校验：router 层已用 pydantic ``min_length=1`` 拦截；此处兜底
@@ -356,7 +399,10 @@ class ChapterService:
             )
             next_version = int(cur.fetchone()["v"]) + 1
 
-            # 3) INSERT
+            # 3) INSERT + 同事务降级（REVIEWED → DRAFTED）
+            # 降级必须与新 draft 落库原子化：避免 draft 已落库但 status 未降
+            # 留下「未重新审校的改稿可直接 commit」的口子。降级 UPDATE 走
+            # 绕过 ALLOWED_NEXT 白名单的直写（同 continuation adopt 原写法）。
             draft_id = new_id("dr")
             try:
                 conn.execute(
@@ -379,6 +425,12 @@ class ChapterService:
                         "created_at": now,
                     },
                 )
+                if current_status == "REVIEWED":
+                    conn.execute(
+                        "UPDATE chapters SET status = 'DRAFTED', updated_at = ? "
+                        "WHERE chapter_id = ?",
+                        (now_iso(), chapter_id),
+                    )
                 conn.commit()
             except sqlite3.IntegrityError as exc:
                 # idx_drafts_chapter_version UNIQUE 违反：手工/并发导致的版本冲突。

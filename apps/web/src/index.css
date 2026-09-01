@@ -371,6 +371,14 @@ a:hover {
   background: #eef0f4;
   color: #5a6472;
 }
+/* 草稿「未审」徽标：版本在最近一次 COMPLETED 审校之后才生成（典型场景：
+   审过 v5 后又人工改稿 / 续写出 v6），提示用户「这版尚未走完审校」。
+   与 .badge--chapter-warn 区分：本徽标仅出现在 drafts 列表行，不与
+   chapter 状态徽标同义；配色沿用 --color-warn 暖色系以保证视觉一致。 */
+.badge--unreviewed {
+  background: #fff2e0;
+  color: var(--color-warn);
+}
 
 .toolbar {
   display: flex;

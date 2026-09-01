@@ -1794,15 +1794,45 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
     conn = get_connection(db_path)
     try:
         cur = conn.execute("SELECT status FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()
+        if cur is None:
+            raise ValueError(f"chapter {chapter_id!r} not found")
+        # 状态机：必须先 REVIEWED 才能 COMMITTED；DRAFTED 直接 commit 拒绝
+        if cur["status"] != "REVIEWED":
+            raise ValueError(
+                f"chapter {chapter_id!r} status={cur['status']!r}；请先跑 chapter-review 把它推到 REVIEWED"
+            )
+
+        # 时序守卫：最近一次 COMPLETED chapter-review 之后若又产生了更新草稿，commit 必须拒收。
+        # 与 API 层 start_commit 的 _guard_commit_draft_freshness 同语义——API 层堵端点入口，
+        # 此处堵绕过端点的 generic 启动路径（如 engine 直接 start_with_nodes 或未来新增的入口）。
+        # 阈值/查询逻辑不复用 router 层（避免 workflow → API 层反向依赖），本文件内私有实现。
+        review_end_row = conn.execute(
+            """
+            SELECT wr.ended_at FROM workflow_runs wr
+            JOIN workflows wf ON wf.workflow_id = wr.workflow_id
+            WHERE wr.chapter_id = ?
+              AND wf.name = 'chapter-review'
+              AND wr.status = 'COMPLETED'
+            ORDER BY wr.ended_at DESC
+            LIMIT 1
+            """,
+            (chapter_id,),
+        ).fetchone()
+        if review_end_row is not None and review_end_row["ended_at"] is not None:
+            review_end = review_end_row["ended_at"]
+            latest_draft = conn.execute(
+                "SELECT version, created_at FROM drafts "
+                "WHERE chapter_id = ? AND created_at > ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (chapter_id, review_end),
+            ).fetchone()
+            if latest_draft is not None:
+                raise ValueError(
+                    f"最新草稿 v{latest_draft['version']} 晚于最近一次审校完成时间"
+                    f"（{review_end}），存在未审改动，请先重新审校再提交"
+                )
     finally:
         conn.close()
-    if cur is None:
-        raise ValueError(f"chapter {chapter_id!r} not found")
-    # 状态机：必须先 REVIEWED 才能 COMMITTED；DRAFTED 直接 commit 拒绝
-    if cur["status"] != "REVIEWED":
-        raise ValueError(
-            f"chapter {chapter_id!r} status={cur['status']!r}；请先跑 chapter-review 把它推到 REVIEWED"
-        )
 
     svc = StoryStateService(db_path)
     author_approval = {
