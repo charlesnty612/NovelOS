@@ -59,6 +59,7 @@ import type {
   ProjectUpdatePayload,
   PromptVersion,
   QualityReport,
+  ReaderProfile,
   ResumeRequestPayload,
   SnapshotResponse,
   StyleSample,
@@ -473,21 +474,81 @@ export const debtsApi = {
 
 // -------------------------------------------------------------- reference canon
 // 对应 packages/core/api/routers/reference.py：
-//   POST   /projects/{pid}/deconstruct    —— 启动拆书（同步执行到底，返回完整 status）
-//   GET    /projects/{pid}/canons         —— 列表 active canon 摘要
-//   GET    /canons/{canon_id}             —— 全文 + report_md + extracts
-//   DELETE /canons/{canon_id}             —— 级联删除（204）
+//   POST   /projects/{pid}/deconstruct         —— 启动拆书（同步执行到底，返回完整 status）
+//   POST   /projects/{pid}/deconstruct-upload  —— 上传 .txt/.epub 启动拆书（multipart/form-data）
+//   GET    /projects/{pid}/canons              —— 列表 active canon 摘要
+//   GET    /canons/{canon_id}                  —— 全文 + report_md + extracts
+//   DELETE /canons/{canon_id}                  —— 级联删除（204）
+//   POST   /projects/{pid}/canons/{canon_id}/to-style-sample
+//                                           —— 合成文风样例卡并落入 author_style_samples
 //
 // 设计要点：
 // - deconstruct 是同步长任务（无 Human 节点），无需轮询；返回 canon_id 时直接刷新列表。
 // - 失败 / FAILED：响应含 error 字段；前端展示 ErrorBanner。
+// - to-style-sample：服务端按 style_params/techniques 合成风格卡；同标题二次写入 → 409。
+// - uploadDeconstruct 走原生 fetch + FormData：client.ts 默认
+//   Content-Type: application/json + JSON.stringify(body) 不兼容 multipart；
+//   这里直接构造 FormData，浏览器自动设置 boundary，credentials 与 api.* 同源策略对齐。
 export const referenceApi = {
   deconstruct: (pid: string, payload: DeconstructPayload) =>
     api.post<DeconstructStartResponse>(`/projects/${pid}/deconstruct`, payload),
+  // 上传 .txt / .epub 文件启动拆书；服务端按扩展名分发：txt utf-8→gb18030、epub stdlib 解析。
+  // bookTitle / readerProfile 可省略；epub 时服务端会从 dc:title 兜底。
+  uploadDeconstruct: async (
+    pid: string,
+    file: File,
+    options?: { book_title?: string; reader_profile?: ReaderProfile },
+  ): Promise<DeconstructStartResponse> => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (options?.book_title) fd.append('book_title', options.book_title);
+    if (options?.reader_profile) fd.append('reader_profile', options.reader_profile);
+    const { ApiError } = await import('./client');
+    let resp: Response;
+    try {
+      // F9 修复：网络层失败（断网 / CORS / 服务端进程死亡）捕获后包装成
+      // ``new ApiError(0, msg)``——与 client.request 的错误归一一致（client.ts
+      // 在 fetch reject 时也走 ``new ApiError(0, msg)`` 路径）。**不**裸抛
+      // TypeError，避免 UI 端 catch 路径需要额外分支处理。
+      resp = await fetch(
+        `/api/projects/${pid}/deconstruct-upload`,
+        {
+          method: 'POST',
+          body: fd,
+          credentials: 'same-origin',
+        },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'network error';
+      throw new ApiError(0, msg);
+    }
+    // 与 client.request 的错误归一一致：非 2xx 抛 ApiError{status, detail}。
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      let detail = resp.statusText || `HTTP ${resp.status}`;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === 'object' && 'detail' in parsed) {
+          const d = (parsed as { detail: unknown }).detail;
+          detail = typeof d === 'string' ? d : JSON.stringify(d);
+        }
+      } catch {
+        detail = text || detail;
+      }
+      throw new ApiError(resp.status, detail);
+    }
+    return (await resp.json()) as DeconstructStartResponse;
+  },
   listCanons: (pid: string) =>
     api.get<CanonSummary[]>(`/projects/${pid}/canons`),
   getCanon: (canonId: string) => api.get<CanonDetail>(`/canons/${canonId}`),
   deleteCanon: (canonId: string) => api.delete<void>(`/canons/${canonId}`),
+  // 文风样例合成：确定性格式化合成（不调 LLM），复用 author_style_samples 校验。
+  writeToStyleSample: (pid: string, canonId: string) =>
+    api.post<StyleSample>(
+      `/projects/${pid}/canons/${canonId}/to-style-sample`,
+      {},
+    ),
 };
 
 // -------------------------------------------------------------- context preview

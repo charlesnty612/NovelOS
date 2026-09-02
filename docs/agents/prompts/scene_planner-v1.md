@@ -119,6 +119,26 @@
   "recent_prose": {
     "last_chapter_excerpt": "string, 上一章结尾 200-400 字（可为空）",
     "last_scene_excerpt": "string, 上一场结尾 100-200 字（可为空）"
+  },
+  "reference_canon": {
+    "canon_id": "string 或 null（参照系 ID；缺席 = 本项目无参照系）",
+    "emotion_curve": [
+      {
+        "chapter_index": "integer",
+        "valence": "integer ∈ [-9, +9]",
+        "marker_type": "buildup | turn | climax | release | ..."
+      }
+    ],
+    "payoff_list": [
+      {
+        "payoff_id": "string",
+        "chapter_index": "integer",
+        "type": "抽象爽点类型（face_slap / level_up / ...）",
+        "intensity": "number 0-1",
+        "setup_chapter": "integer",
+        "payoff_chapter": "integer"
+      }
+    ]
   }
 }
 ```
@@ -127,6 +147,11 @@
 > - `available_characters` / `available_locations` 可能为空（新项目或未启用 world 模块），此时仍要产出 scene plan，但 `characters` / `location` 可置空 / null。
 > - `director_plan.revision_note` 存在时，必须把它纳入规划考量（如额外约束、禁止方向）。
 > - `style_constraints.pov` 为默认视角；单个 scene 的 `pov` 应与其保持一致，除非 Director 明确指示切换。
+
+> **关于 `reference_canon`（Sprint 11+ 多 consumer 扩展）**：
+> - **缺席语义**：`reference_canon` 字段不存在或 `canon_id == null` ⇒ 当前项目尚未生成参照系（未跑 deconstruct-book / 未加载 canon）；按 `director_plan` + `world_state_excerpts` 自行规划，**不报错、不得索要** canon。
+> - **存在语义**：参照系是**结构锚点**，用于 Scene Planner 的张力曲线设计（`emotion_curve` 对齐）与 Scene 级爽点排布（`payoff_list` 选合适 Scene 兑现）。它**不**是情节抄写源：`emotion_curve.valence` / `marker_type` 与 `payoff_list.type` 是抽象模式，禁止把 `payoff_list` 中的具象描述（如角色名 / 招式名）复用到 `purpose` / `information_boundary` / `slots[].constraints`。
+> - **合规注记**：这是参数化抽象结论，**不包含、也不得要求原文片段**；参考其规律，**禁止仿写其表达**（与 director §5 `reference_canon` 同口径）。
 
 ---
 

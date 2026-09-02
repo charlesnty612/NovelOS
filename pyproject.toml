@@ -17,6 +17,9 @@ dependencies = [
     "pydantic==2.13.4",
     "jsonschema==4.26.0",
     "httpx==0.28.1",
+    # V3.x 拆书文件上传（multipart/form-data）：FastAPI/Starlette 的
+    # Form/File 依赖 python-multipart；不引第三方解析库，沿用 FastAPI 官方依赖。
+    "python-multipart==0.0.32",
     # 结构化输出第三级兜底：json_repair 用于 LLM 偶发的语法错误（缺逗号 / 未转义引号等），
     # 仅作为 strict=False 失败后的最后一道防线；不替代前两级「干净 JSON 零开销」路径。
     # 0.63.4 是 2026-08-25 发布版本（pypi latest），稳定且与 Python 3.11 兼容。

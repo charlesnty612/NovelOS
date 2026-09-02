@@ -154,11 +154,29 @@
     "psychological_ratio": "number, 0-1",
     "forbidden_words": ["string, ... 禁用词"],
     "reference_works": ["string, ... 参考作品名"]
+  },
+  "reference_canon": {
+    "canon_id": "string 或 null（参照系 ID；缺席 = 本项目无参照系）",
+    "style_params": {
+      "sentence_length_distribution": { "mean": "number", "median": "number", "max": "number 或 p90" },
+      "dialogue_ratio": "number 0-1",
+      "action_ratio": "number 0-1",
+      "pov": "first_person | third_limited | third_omniscient",
+      "paragraph_length_distribution": { "mean": "number", "median": "number", "max": "number" },
+      "psychological_ratio": "number 0-1",
+      "environment_ratio": "number 0-1"
+    }
   }
 }
 ```
 
 > **层概念引用**：上述输入字段对应 `docs/architecture/context-engine-v0.md` 的分层（L2-L7）。本 Prompt 不复制层定义，只声明消费哪些字段。
+
+> **关于 `reference_canon`（Sprint 11+ 多 consumer 扩展）**：
+> - **缺席语义**：`reference_canon` 字段不存在或 `canon_id == null` ⇒ 当前项目尚未生成参照系（未跑 deconstruct-book / 未加载 canon）；按 `style_constraints` + `author_style_samples` 自行落笔，**不报错、不得索要** canon。
+> - **存在语义**：参照系是**结构锚点**，writer 仅消费其中的 `style_params`（文风参数）；用于校准本章句长分布、对白比例、动作比例、心理比例与叙述视角。它**不**是情节抄写源：禁止把 `style_params` 当作「参照作品文风套用指令」——只能把它当作文风参数的参考值（与 §4.3「项目 StyleGuide 优先」对齐），不复制其行文措辞。
+> - **优先级**：项目的 StyleGuide（如有）**覆盖** `style_params`；`style_params` 仅作「参考值」，不得反客为主。
+> - **合规注记**：这是参数化抽象结论，**不包含、也不得要求原文片段**；参考其规律，**禁止仿写其表达**（与 director / scene_planner 同口径）。
 
 ---
 

@@ -10,7 +10,7 @@
 // - canon_json 仅展示关键字段（logline / spine 条数 / rhythm 中位数 / style_params 摘要），
 //   全量 JSON 走 <pre> 折叠块，避免主面板被超长 canon 撑爆。
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { referenceApi } from '../../api/endpoints';
 import type {
   CanonDetail,
@@ -21,6 +21,7 @@ import type {
 import { EmptyState } from '../../components/EmptyState';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { formatApiError } from '../../utils/formatApiError';
 import { formatDateTime, parseReportMarkdown } from '../../utils/format';
 
 interface CanonTabProps {
@@ -47,6 +48,9 @@ export function CanonTab({ projectId }: CanonTabProps) {
   const [bookTitle, setBookTitle] = useState('');
   const [readerProfile, setReaderProfile] = useState<ReaderProfile>('male_fantasy');
   const [text, setText] = useState('');
+  // V3.x 文件上传：选了文件则走 uploadDeconstruct，与粘贴正文二选一。
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -79,29 +83,40 @@ export function CanonTab({ projectId }: CanonTabProps) {
       setErr('请填写书名');
       return;
     }
-    if (!text.trim()) {
-      setErr('请粘贴参照书全文');
+    // 文件 / 粘贴正文二选一：有文件走 uploadDeconstruct，无文件才要求粘贴正文。
+    if (!uploadFile && !text.trim()) {
+      setErr('请粘贴参照书全文，或选择 .txt / .epub 文件');
       return;
     }
     setSubmitting(true);
     setErr(null);
     try {
-      const resp: DeconstructStartResponse = await referenceApi.deconstruct(projectId, {
-        book_title: bookTitle.trim(),
-        text: text,
-        reader_profile: readerProfile,
-      });
+      let resp: DeconstructStartResponse;
+      if (uploadFile) {
+        resp = await referenceApi.uploadDeconstruct(projectId, uploadFile, {
+          book_title: bookTitle.trim(),
+          reader_profile: readerProfile,
+        });
+      } else {
+        resp = await referenceApi.deconstruct(projectId, {
+          book_title: bookTitle.trim(),
+          text: text,
+          reader_profile: readerProfile,
+        });
+      }
       if (resp.status !== 'COMPLETED') {
         setErr(`拆书未完成（status=${resp.status}）${resp.error ? `：${resp.error}` : ''}`);
       } else {
         // 成功：清空表单，刷新列表，自动选中新 canon
         setBookTitle('');
         setText('');
+        setUploadFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
         await reloadList();
         if (resp.canon_id) setSelectedId(resp.canon_id);
       }
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : '拆书失败');
+      setErr(formatApiError(e));
     } finally {
       setSubmitting(false);
     }
@@ -157,7 +172,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
       <div className="toolbar">
         <div className="muted small">
           参照系 Reference Canon（PRD v1.2 D1）—— 借结构不借表达。仅消费抽象模式（节奏 / 伏笔 /
-          势力拓扑 / 爽点分布 / 文风统计），不含原文。
+          势力拓扑 / 爽点分布 / 文风统计），不含原文。支持上传 .txt / .epub 文件代替粘贴正文。
         </div>
       </div>
 
@@ -196,11 +211,57 @@ export function CanonTab({ projectId }: CanonTabProps) {
           <textarea
             rows={6}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              // 用户重新编辑正文 → 取消已选文件，避免文件与正文并存造成歧义。
+              if (uploadFile) {
+                setUploadFile(null);
+                if (fileInputRef.current) fileInputRef.current.value = '';
+              }
+            }}
             disabled={submitting}
-            placeholder="粘贴整本参照书正文"
+            placeholder={
+              uploadFile
+                ? '已选择文件，无需再粘贴正文（如需改为粘贴正文，请先点上方「清除」）'
+                : '粘贴整本参照书正文'
+            }
             data-testid="deconstruct-text"
           />
+        </div>
+        <div className="form-row">
+          <label>或上传文件（.txt / .epub，≤ 20MB）</label>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,.epub"
+            disabled={submitting}
+            onChange={(e) => {
+              const f = e.target.files?.[0] ?? null;
+              setUploadFile(f);
+              // 选了文件 → 清空正文，避免两边同时存在造成歧义。
+              if (f) setText('');
+            }}
+            data-testid="deconstruct-file"
+          />
+          {uploadFile ? (
+            <div className="muted small" style={{ marginTop: 4 }} data-testid="deconstruct-file-info">
+              已选：{uploadFile.name}（{(uploadFile.size / 1024).toFixed(1)} KB）
+              {' · '}
+              <button
+                type="button"
+                className="btn btn--sm"
+                style={{ marginLeft: 4 }}
+                disabled={submitting}
+                onClick={() => {
+                  setUploadFile(null);
+                  if (fileInputRef.current) fileInputRef.current.value = '';
+                }}
+                data-testid="deconstruct-file-clear"
+              >
+                清除
+              </button>
+            </div>
+          ) : null}
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
           <button
@@ -321,8 +382,55 @@ function CanonDetailView({ detail }: { detail: CanonDetail }) {
   const spine = Array.isArray(cj['spine']) ? (cj['spine'] as unknown[]) : [];
   const rhythm = (cj['rhythm'] ?? {}) as Record<string, unknown>;
   const styleParams = (cj['style_params'] ?? {}) as Record<string, unknown>;
+  // 文风样例面板同步：拆书 canon → author_style_samples 一次性按钮。
+  // 失败在详情头部 ErrorBanner 单独呈现（不污染顶部 err）；成功展示轻反馈。
+  const [writeInfo, setWriteInfo] = useState<string | null>(null);
+  const [writeErr, setWriteErr] = useState<string | null>(null);
+  const [writeBusy, setWriteBusy] = useState(false);
+  // v0.1.2：主角人设（顶层 optional）；任一子字段非法类型 → 跳过该子字段
+  const protagonist = (cj['protagonist'] ?? null) as
+    | Record<string, unknown>
+    | null;
+  const protagonistIdentity =
+    protagonist && typeof protagonist['identity'] === 'string'
+      ? (protagonist['identity'] as string)
+      : '';
+  const protagonistCoreDrive =
+    protagonist && typeof protagonist['core_drive'] === 'string'
+      ? (protagonist['core_drive'] as string)
+      : '';
+  const protagonistTags: string[] = Array.isArray(protagonist?.['personality_tags'])
+    ? (protagonist!['personality_tags'] as unknown[]).filter(
+        (t): t is string => typeof t === 'string',
+      )
+    : [];
+  const protagonistFoils: string[] = Array.isArray(protagonist?.['foil_techniques'])
+    ? (protagonist!['foil_techniques'] as unknown[]).filter(
+        (t): t is string => typeof t === 'string',
+      )
+    : [];
+  const hasProtagonist =
+    protagonist != null &&
+    (protagonistIdentity !== '' ||
+      protagonistCoreDrive !== '' ||
+      protagonistTags.length > 0 ||
+      protagonistFoils.length > 0);
 
   const reportBlocks = parseReportMarkdown(detail.report_md);
+
+  const handleWriteToStyleSample = async (d: CanonDetail) => {
+    setWriteInfo(null);
+    setWriteErr(null);
+    setWriteBusy(true);
+    try {
+      await referenceApi.writeToStyleSample(d.project_id, d.canon_id);
+      setWriteInfo('已写入文风样例面板');
+    } catch (e: unknown) {
+      setWriteErr(formatApiError(e));
+    } finally {
+      setWriteBusy(false);
+    }
+  };
 
   // rhythm 摘要：mini/major climax 中位数 + chapter_end_hook_rate
   const rhythmSummary: string[] = [];
@@ -361,6 +469,67 @@ function CanonDetailView({ detail }: { detail: CanonDetail }) {
         <div className="detail-pane__section">
           <div className="detail-pane__section-title">logline</div>
           <div data-testid="canon-logline">{logline}</div>
+        </div>
+      ) : null}
+
+      <div style={{ marginTop: 8 }}>
+        <button
+          className="btn btn--sm btn--primary"
+          disabled={writeBusy}
+          onClick={() => void handleWriteToStyleSample(detail)}
+          data-testid="canon-write-to-style-sample"
+        >
+          {writeBusy ? '写入中…' : '写入文风样例面板'}
+        </button>
+        {writeInfo ? (
+          <span
+            className="muted small"
+            style={{ marginLeft: 8 }}
+            data-testid="canon-write-to-style-sample-info"
+          >
+            {writeInfo}
+          </span>
+        ) : null}
+        {writeErr ? (
+          <span className="small" style={{ marginLeft: 8, color: '#b00020' }} data-testid="canon-write-to-style-sample-err">
+            {writeErr}
+          </span>
+        ) : null}
+      </div>
+
+      {hasProtagonist ? (
+        <div className="detail-pane__section" data-testid="canon-protagonist-block">
+          <div className="detail-pane__section-title">主角人设（v0.1.2）</div>
+          {protagonistIdentity ? (
+            <div>
+              <span className="muted small">一句话定位：</span>
+              <span data-testid="canon-protagonist-identity">{protagonistIdentity}</span>
+            </div>
+          ) : null}
+          {protagonistCoreDrive ? (
+            <div>
+              <span className="muted small">核心诉求：</span>
+              <span data-testid="canon-protagonist-core-drive">{protagonistCoreDrive}</span>
+            </div>
+          ) : null}
+          {protagonistTags.length > 0 ? (
+            <div>
+              <span className="muted small">性格标签：</span>
+              <span data-testid="canon-protagonist-personality-tags">
+                {protagonistTags.join('、')}
+              </span>
+            </div>
+          ) : null}
+          {protagonistFoils.length > 0 ? (
+            <div data-testid="canon-protagonist-foil-techniques">
+              <span className="muted small">配角衬托：</span>
+              <ul style={{ margin: '4px 0 0 18px' }}>
+                {protagonistFoils.map((f, i) => (
+                  <li key={i}>{f}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

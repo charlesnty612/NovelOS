@@ -181,6 +181,12 @@
       "major_climax_interval": "{ median: integer, p25: integer, p75: integer }",
       "chapter_end_hook_rate": "number 0-1",
       "golden_three_compliance": "object"
+    },
+    "protagonist": {
+      "identity": "string 或 null（主角一句话定位，抽象模式）",
+      "personality_tags": ["string", "...", "≤6 项，每项 ≤12 字，性格标签"],
+      "core_drive": "string 或 null（核心诉求 / 根本欲望，≤120 字）",
+      "foil_techniques": ["string", "...", "≤4 项，每项 ≤60 字，配角衬托 / 对照手法"]
     }
   }
 }
@@ -190,6 +196,7 @@
 > - **缺席语义**：`reference_canon` 字段不存在或 `canon_id == null` ⇒ 当前项目尚未生成参照系（未跑 deconstruct-book / 未加载 canon）；按 `author_intent + story_state_snapshot` 自行规划，不报错。
 > - **存在语义**：参照系是**结构锚点**，用于 `chapter_goal` / `expected_role` 的方向对齐（function_tag 节奏是否合理、payoff 强度档位是否过满）。它**不**是情节抄写源：禁止在 `chapter_goal` / `key_beats[].purpose` / `character_changes_planned[].from|to` 中复制参照系 `title_pattern` / `chapter_digest` 之外的具象表达（人名/地名/场景描述/对话句）。
 > - 唯一可借用：参照系中的**结构模式短语**（如「主角类型 1 在某类型场景中完成类型行为」「`min=N-median=M-p75=P`」），其余皆视为越界。
+> - **主角人设子字段（v0.1.2 增）**：`protagonist` 是**可选**子键——若 canon_json 未生成该块、或仅生成部分子字段（`identity` / `core_drive` / `personality_tags[]` / `foil_techniques[]` 任一可缺），Director 按 `author_intent + story_state_snapshot + character_state_excerpts` 自行规划人设方向，**不报错**。当 `protagonist` 全部子字段都缺失时，`protagonist` 键不出现在 inject 字典里——视为无 protagonist 输入。
 
 > **层概念引用**：上述输入字段对应 `docs/architecture/context-engine-v0.md` 的分层（Project / Story State / Character State / Plot Context / Chapter Context / Memory / Agent Private Context）。本 Prompt 不复制层定义，只声明消费哪些字段。
 
@@ -217,6 +224,7 @@
     - **辨识性特征锁定**：涉及核心原著角色时，须在 `key_beats[].purpose` 或对应 slot 的 `constraints` 中显式锁定其辨识性外貌/气质要素（具体角色以 `character_state_excerpts` / 角色档案的 `core_traits_summary` 为准），不得让下游 Planner/Writer 自行想象外貌。
     - **原著时间线约束**：涉及原著时间线专属要素时，必须与既有设定一致——任何被上游认定为"后期专属"的强者、势力、道具、灾变事件，早期 chapter 不得放行。判断标准以 `world_state_excerpts.world_rules_relevant` / 角色 `arc_stage` / `plot_graph_excerpt.upcoming_planned_events` 为准；若必须突破，必须在 `deviations[]` 中显式声明并给出依据。
     - **可核验性**：每条 `key_beats` 若引用原著角色，须能通过 `character_state_excerpts` 或角色档案核对；引用原著时间线要素须能在 `world_state_excerpts` / `plot_graph_excerpt` 中找到对应锚点；找不到锚点 = 规划失败，禁止凭印象编排。
+17. **主角人设校准（v0.1.2 增）**：当 `reference_canon.protagonist` 存在时，`protagonist.personality_tags` 与 `protagonist.core_drive` 仅作为 `key_beats[].purpose` 中"主角行事动机"的方向锚点（隐式使用，不必在 plan 中显式照抄）；`protagonist.foil_techniques` 中描述的对照手法（如"导师托举与牺牲"）可用于 `expected_role` / `key_beats[].purpose` 的对照手法规划，但禁止复制其具象短语进入 `chapter_goal` / `chapter_digest` 的具象描述。`protagonist` 子字段缺失时（注入端已 silent skip），按 `character_state_excerpts` 与项目自身人设文档规划。
 
 ---
 

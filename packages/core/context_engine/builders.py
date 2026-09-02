@@ -1358,7 +1358,7 @@ _CACHE_MAX_SIZE = 256
 # - 内容指纹计算失败（不可序列化）→ 跳过缓存（直接走 uncached），避免脏命中。
 # 失效仍以 state_version + chapter_no 为主线；commit 完成后调
 # ``_invalidate_cache_for_chapter`` 显式兜底（state_version 推进也会带走它）。
-_assembly_cache: dict[tuple[str, int, int, str, str], dict[str, Any]] = {}
+_assembly_cache: dict[tuple, dict[str, Any]] = {}
 _cache_lock = _threading.Lock()
 
 # 内容指纹长度（sha256 hexdigest 前 16 字符 = 64 bit；冲突概率可忽略）
@@ -1486,12 +1486,12 @@ def _invalidate_cache_for_chapter(project_id: str, chapter_no: int) -> int:
     return removed
 
 
-def _cache_get(key: tuple[str, int, int, str, str]) -> dict[str, Any] | None:
+def _cache_get(key: tuple) -> dict[str, Any] | None:
     with _cache_lock:
         return _assembly_cache.get(key)
 
 
-def _cache_put(key: tuple[str, int, int, str, str], value: dict[str, Any]) -> None:
+def _cache_put(key: tuple, value: dict[str, Any]) -> None:
     """写入缓存；超过上限按 dict 插入顺序淘汰最旧（dict 有序）。"""
     global _assembly_cache
     with _cache_lock:
@@ -1506,28 +1506,50 @@ def _cache_put(key: tuple[str, int, int, str, str], value: dict[str, Any]) -> No
 
 
 # ---------------------------------------------------------------------------
-# Reference canon 注入（Sprint 11 下半）
+# Reference canon 注入（Sprint 11 下半 + 多 consumer 扩展）
 # ---------------------------------------------------------------------------
 
 # 顶层 director_input 注入键 + 截断上限；缺字段容错跳过。
 _REFERENCE_CANON_SPINE_CAP = 20
 _REFERENCE_CANON_PAYOFF_CAP = 30
+# Scene Planner 专用：emotion_curve 单章数组，参照书可能上千章；截断 ≤50。
+_REFERENCE_CANON_EMOTION_CAP = 50
+# Writer 专用：style_params 整体 JSON 序列化后总字符上限；超出逐项删减并标记。
+_REFERENCE_CANON_STYLE_MAX_CHARS = 1500
+# Director 专用：protagonist.personality_tags / foil_techniques 截断上限。
+_REFERENCE_CANON_PROTAGONIST_TAGS_CAP = 6
+_REFERENCE_CANON_PROTAGONIST_FOILS_CAP = 4
+
+# consumer 取值（与 agent-contracts + docs/reference-canon/reference-canon-v0.md §4.1 对齐）
+_REFERENCE_CANON_CONSUMER_DIRECTOR = "director"
+_REFERENCE_CANON_CONSUMER_PLANNER = "scene_planner"
+_REFERENCE_CANON_CONSUMER_WRITER = "writer"
 
 
 def _reference_canon_excerpt(
-    conn: sqlite3.Connection, project_id: str
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    consumer: str = _REFERENCE_CANON_CONSUMER_DIRECTOR,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """查该项目最新 active reference_canon（按 created_at DESC）。
 
-    返回 (director_inject, audit_payload) 元组：
-    - director_inject：注入到 director_input 的 reference_canon 键（None 表示无 canon）。
+    返回 (inject, audit_payload) 元组：
+    - inject：注入到对应 agent payload 的 reference_canon 键（None 表示无 canon）。
     - audit_payload：溯源审计 dict（含 canon_id + consumed_fields），落到 ctx 顶层
       ``_reference_canon_consumed``，随 ctx 进入 workflow run 的 checkpoint_json。
+
+    参数：
+    - ``consumer``：消费方标识，按消费字段集裁剪：
+        * ``"director"``（默认）：logline / spine(≤20) / payoff_list(≤30) / rhythm / protagonist(personality_tags ≤6, foil_techniques ≤4)；
+        * ``"scene_planner"``：emotion_curve(≤50) / payoff_list(≤30，与 director 同口径)；
+        * ``"writer"``：style_params（整体 JSON ≤1500 字符，超出逐项删减）。
 
     设计：
     - MVP 单参照系（多书加权合并策略见 docs/reference-canon/reference-canon-v0.md §4.1 OV-2，defer）。
     - canon_json 解析失败 → 容错返回 (None, None)，不抛错。
-    - 缺字段（logline/spine/payoff_list/rhythm）→ 跳过该字段，consumed_fields 不计。
+    - 缺字段 → 跳过该字段，consumed_fields 不计。
+    - director 行为与 Sprint 11 下半实现逐字段一致（key 名 / 顺序 / 截断上限不变）。
     """
     row = conn.execute(
         """
@@ -1554,28 +1576,160 @@ def _reference_canon_excerpt(
     consumed: list[str] = []
     inject: dict[str, Any] = {"canon_id": canon_id}
 
-    logline = cj.get("logline")
-    if isinstance(logline, str) and logline.strip():
-        inject["logline"] = logline
-        consumed.append("logline")
+    if consumer == _REFERENCE_CANON_CONSUMER_DIRECTOR:
+        logline = cj.get("logline")
+        if isinstance(logline, str) and logline.strip():
+            inject["logline"] = logline
+            consumed.append("logline")
 
-    spine = cj.get("spine")
-    if isinstance(spine, list):
-        inject["spine"] = spine[:_REFERENCE_CANON_SPINE_CAP]
-        consumed.append("spine")
+        spine = cj.get("spine")
+        if isinstance(spine, list):
+            inject["spine"] = spine[:_REFERENCE_CANON_SPINE_CAP]
+            consumed.append("spine")
 
-    payoff_list = cj.get("payoff_list")
-    if isinstance(payoff_list, list):
-        inject["payoff_list"] = payoff_list[:_REFERENCE_CANON_PAYOFF_CAP]
-        consumed.append("payoff_list")
+        payoff_list = cj.get("payoff_list")
+        if isinstance(payoff_list, list):
+            inject["payoff_list"] = payoff_list[:_REFERENCE_CANON_PAYOFF_CAP]
+            consumed.append("payoff_list")
 
-    rhythm = cj.get("rhythm")
-    if isinstance(rhythm, dict):
-        inject["rhythm"] = rhythm
-        consumed.append("rhythm")
+        rhythm = cj.get("rhythm")
+        if isinstance(rhythm, dict):
+            inject["rhythm"] = rhythm
+            consumed.append("rhythm")
+
+        # 主角人设（v0.1.2 新增，顶层 optional）：identity / core_drive 全量注入，
+        # personality_tags 截前 6，foil_techniques 截前 4；任一子字段非法类型
+        # （非 str / 非 list）→ 跳过该子字段。整块仅在至少 1 个有效子字段时注入。
+        protagonist = cj.get("protagonist")
+        if isinstance(protagonist, dict):
+            protagonist_inject: dict[str, Any] = {}
+            identity = protagonist.get("identity")
+            if isinstance(identity, str) and identity.strip():
+                protagonist_inject["identity"] = identity
+            core_drive = protagonist.get("core_drive")
+            if isinstance(core_drive, str) and core_drive.strip():
+                protagonist_inject["core_drive"] = core_drive
+            personality_tags = protagonist.get("personality_tags")
+            if isinstance(personality_tags, list):
+                tag_strs = [
+                    t for t in personality_tags if isinstance(t, str) and t.strip()
+                ]
+                if tag_strs:
+                    protagonist_inject["personality_tags"] = tag_strs[
+                        :_REFERENCE_CANON_PROTAGONIST_TAGS_CAP
+                    ]
+            foil_techniques = protagonist.get("foil_techniques")
+            if isinstance(foil_techniques, list):
+                ft_strs = [
+                    t for t in foil_techniques if isinstance(t, str) and t.strip()
+                ]
+                if ft_strs:
+                    protagonist_inject["foil_techniques"] = ft_strs[
+                        :_REFERENCE_CANON_PROTAGONIST_FOILS_CAP
+                    ]
+            if protagonist_inject:
+                inject["protagonist"] = protagonist_inject
+                consumed.append("protagonist")
+    elif consumer == _REFERENCE_CANON_CONSUMER_PLANNER:
+        # Scene Planner 吃 emotion_curve（张力曲线）+ payoff_list（Scene 级爽点排布）。
+        # emotion_curve 按 chapter_index 取连续段：优先取靠近中间 ±_REFERENCE_CANON_EMOTION_CAP
+        # 范围的连续窗口（保留最新一端用于对齐节奏）；若总长 ≤ CAP 则全量。
+        emotion_curve = cj.get("emotion_curve")
+        if isinstance(emotion_curve, list) and emotion_curve:
+            window = _select_emotion_window(emotion_curve, _REFERENCE_CANON_EMOTION_CAP)
+            inject["emotion_curve"] = window
+            consumed.append("emotion_curve")
+
+        payoff_list = cj.get("payoff_list")
+        if isinstance(payoff_list, list):
+            inject["payoff_list"] = payoff_list[:_REFERENCE_CANON_PAYOFF_CAP]
+            consumed.append("payoff_list")
+    elif consumer == _REFERENCE_CANON_CONSUMER_WRITER:
+        # Writer 吃 style_params：JSON 字段值（dict），整体序列化 ≤1500 字符；
+        # 超出时按字段优先级逐项删减（保留 sentence_length_distribution +
+        # dialogue_ratio + action_ratio + psychological_ratio + pov；paragraph_length_distribution
+        # 与 environment_ratio 可省略），并打 ``__style_params_truncated__`` 标记。
+        style_params = cj.get("style_params")
+        if isinstance(style_params, dict) and style_params:
+            trimmed, was_truncated = _trim_style_params(
+                style_params, _REFERENCE_CANON_STYLE_MAX_CHARS,
+            )
+            inject["style_params"] = trimmed
+            if was_truncated:
+                inject["__style_params_truncated__"] = True
+            consumed.append("style_params")
+    # 未知 consumer 视为无字段注入（保安全，避免误塞）
 
     audit = {"canon_id": canon_id, "consumed_fields": consumed}
     return inject, audit
+
+
+def _select_emotion_window(
+    curve: list[Any], cap: int
+) -> list[Any]:
+    """emotion_curve 截断：取末尾 cap 条（保留最近节奏信号）。
+
+    Scene Planner 主要关心"近期节奏信号"——前 1000 章的情绪点对当前章节的张力曲线
+    设计参考价值有限。优先保留尾部 cap 条；若总长 ≤ cap 则全量。
+    """
+    if len(curve) <= cap:
+        return list(curve)
+    return list(curve[-cap:])
+
+
+def _trim_style_params(
+    style_params: dict[str, Any], max_chars: int
+) -> tuple[dict[str, Any], bool]:
+    """style_params 字符截断：按字段优先级逐项删减到 ≤max_chars 字符（JSON 序列化口径）。
+
+    字段优先级（高→低）：
+      1. ``pov``（强制保留，单值）
+      2. ``dialogue_ratio``（对白比例）
+      3. ``action_ratio``（动作比例）
+      4. ``psychological_ratio``（心理比例）
+      5. ``sentence_length_distribution``（句长分布）
+      6. ``environment_ratio``（环境比例）
+      7. ``paragraph_length_distribution``（段落长度，可省略）
+
+    返回 ``(trimmed_dict, was_truncated)``。
+    """
+    priority = (
+        "pov", "dialogue_ratio", "action_ratio", "psychological_ratio",
+        "sentence_length_distribution", "environment_ratio",
+        "paragraph_length_distribution",
+    )
+    picked: dict[str, Any] = {}
+    for key in priority:
+        if key in style_params:
+            picked[key] = style_params[key]
+    try:
+        encoded = json.dumps(picked, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return picked, False
+    if len(encoded) <= max_chars:
+        return picked, False
+    # 逐项删减（从低优先级往高）
+    for key in reversed(priority):
+        if key in picked:
+            picked.pop(key)
+            try:
+                encoded = json.dumps(picked, ensure_ascii=False)
+            except (TypeError, ValueError):
+                continue
+            if len(encoded) <= max_chars:
+                return picked, True
+    # 即便删完仍超（极少见，全字段都是巨型 nested）→ 截断字符串本身（兜底）
+    if not picked:
+        return {}, True
+    try:
+        encoded = json.dumps(picked, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return picked, True
+    if len(encoded) <= max_chars:
+        return picked, True
+    # 兜底：硬截断到 max_chars 以内的可解析片段。Style 是 dict，硬截字符串会破坏
+    # JSON——这里只标 truncated 并原样保留，调用方按"未消费"处理（不注入）。
+    return {}, True
 
 
 # ---------------------------------------------------------------------------
@@ -1749,7 +1903,11 @@ def build_director_input(
         db_path, project_id, chapter_id,
     )
     plan_fp = _fingerprint_plan_json(plan_raw)
-    cache_key = (project_id, state_version, chapter_no, "director", plan_fp)
+    # F5 修复：缓存键追加 active canon_id；拆书落新 canon 后旧 director 装配缓存自然失效。
+    active_canon_id = _peek_active_canon_id(db_path, project_id) or "__none__"
+    cache_key = (
+        project_id, state_version, chapter_no, "director", plan_fp, active_canon_id,
+    )
     if plan_fp != _FINGERPRINT_UNCACHED:
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -1798,6 +1956,10 @@ def _build_writer_input_uncached(
                 parsed = None
             if isinstance(parsed, dict):
                 word_band_overrides = parsed
+        # Reference Canon：writer 消费 style_params（文风参数）。与 director 共用连接。
+        reference_canon_inject, reference_canon_audit = _reference_canon_excerpt(
+            conn, project_id, consumer=_REFERENCE_CANON_CONSUMER_WRITER,
+        )
     finally:
         conn.close()
 
@@ -1886,6 +2048,13 @@ def _build_writer_input_uncached(
         "recalled_passages": recalled_passages,
         "retrieved_memory": [],
     }
+
+    # Reference Canon 注入：writer 消费 style_params（文风参数）。
+    # 与 director 一致——无 canon 时不出现 reference_canon / _reference_canon_consumed。
+    if reference_canon_inject is not None:
+        payload["reference_canon"] = reference_canon_inject
+    if reference_canon_audit is not None:
+        payload["_reference_canon_consumed"] = reference_canon_audit
 
     # P2 Context Engine：章节级相关性裁剪。默认开启，可在调用层 / 环境变量关闭。
     _apply_relevance_trim(
@@ -2028,9 +2197,11 @@ def build_writer_input(
     # "none"，与现状行为完全一致。
     wb_raw = _peek_project_word_band_json(db_path, project_id)
     wb_fp = _fingerprint_word_band_json(wb_raw)
+    # F5 修复：缓存键追加 active canon_id；拆书落新 canon 后旧 writer 装配缓存自然失效。
+    active_canon_id = _peek_active_canon_id(db_path, project_id) or "__none__"
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
-        scene_fp, context_mode, relevance_flag, wb_fp,
+        scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id,
     )
     if scene_fp != _FINGERPRINT_UNCACHED:
         cached = _cache_get(cache_key)
@@ -2553,6 +2724,52 @@ def _fingerprint_word_band_json(raw: str | None) -> str:
         return "none"
     h = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return h[:16]
+
+
+# ---------------------------------------------------------------------------
+# F5 修复：缓存键混入「项目最新 active canon_id」
+# ---------------------------------------------------------------------------
+# 拆书落新 canon 后，旧 director / writer 装配缓存自然失效（避免
+# 「拆书重落了 style_params / payoff_list / emotion_curve 但装配还命中
+# 老 canon 的缓存」导致的 stale 数据 → 写入草稿）。无 active canon 时
+# 缓存键固定占位 ``"__none__"``，与历史「无 canon 走不注入」语义一致。
+#
+# 成本说明：单行 ``SELECT id ... ORDER BY created_at DESC LIMIT 1``（走
+# reference_canons 索引，无全表扫）；与 ``_peek_chapter_no_state_version``
+# / ``_peek_project_word_band_json`` 同口径「缓存键预判轻量读」，
+# 远小于 excerpt 重建成本（后者走多表 JOIN + 章节正文 FTS5）。
+# ---------------------------------------------------------------------------
+
+
+def _peek_active_canon_id(
+    db_path: str | Path, project_id: str | None,
+) -> str | None:
+    """轻量读该项目最新 active reference_canon 的 ``canon_id``；无 → None。
+
+    表缺失（老库 / 迁移未跑）→ 返回 ``None``；与无 canon 行为一致。
+    """
+    if not project_id:
+        return None
+    try:
+        conn = get_connection(db_path)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        try:
+            row = conn.execute(
+                """
+                SELECT canon_id FROM reference_canons
+                WHERE project_id = ? AND status = 'active'
+                ORDER BY created_at DESC, canon_id DESC
+                LIMIT 1
+                """,
+                (project_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return row["canon_id"] if row else None
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

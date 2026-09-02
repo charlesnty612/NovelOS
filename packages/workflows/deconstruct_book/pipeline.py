@@ -701,6 +701,30 @@ def _render_report_md(canon_json: dict[str, Any]) -> str:
     lines.append(f"- psychological_ratio: {style.get('psychological_ratio')}")
     lines.append(f"- environment_ratio: {style.get('environment_ratio')}")
 
+    # 主角人设（v0.1.2 新增，可选）：仅在 protagonist 存在且为非空 dict 时渲染。
+    protagonist = canon_json.get("protagonist")
+    if isinstance(protagonist, dict) and protagonist:
+        lines.append("")
+        lines.append("## 主角人设")
+        identity = protagonist.get("identity")
+        if isinstance(identity, str) and identity.strip():
+            lines.append(f"- 一句话定位：{identity.strip()}")
+        personality_tags = protagonist.get("personality_tags")
+        if isinstance(personality_tags, list) and personality_tags:
+            tag_strs = [
+                str(t) for t in personality_tags if isinstance(t, str) and t.strip()
+            ]
+            if tag_strs:
+                lines.append(f"- 性格标签：{'、'.join(tag_strs)}")
+        core_drive = protagonist.get("core_drive")
+        if isinstance(core_drive, str) and core_drive.strip():
+            lines.append(f"- 核心诉求：{core_drive.strip()}")
+        foil_techniques = protagonist.get("foil_techniques")
+        if isinstance(foil_techniques, list) and foil_techniques:
+            for ft in foil_techniques:
+                if isinstance(ft, str) and ft.strip():
+                    lines.append(f"- 配角衬托：{ft.strip()}")
+
     return "\n".join(lines)
 
 

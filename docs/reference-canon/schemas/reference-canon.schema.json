@@ -198,6 +198,43 @@
           }
         }
       }
+    },
+    "protagonist": {
+      "type": "object",
+      "description": "主角人设（顶层 optional，v0.1.2 新增）。LLM 信号不足时可省略整块；任一子字段缺失不影响其他子字段。",
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "一句话定位；抽象模式（如\"草根逆袭型主角\"）。"
+        },
+        "personality_tags": {
+          "type": "array",
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 12
+          },
+          "description": "性格标签；抽象短语，禁专有名词。"
+        },
+        "core_drive": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "核心诉求 / 根本欲望；抽象模式。"
+        },
+        "foil_techniques": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "description": "配角衬托 / 对照手法；抽象短语。"
+        }
+      }
     }
   },
   "$defs": {

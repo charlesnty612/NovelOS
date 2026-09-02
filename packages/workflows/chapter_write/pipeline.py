@@ -46,6 +46,10 @@ from typing import Any
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.agent_runtime.structured_output import strip_think_blocks
 from packages.core.context_engine import build_writer_input
+from packages.core.context_engine.builders import (
+    _REFERENCE_CANON_CONSUMER_PLANNER,
+    _reference_canon_excerpt,
+)
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.model_router.router import capability_for
@@ -200,6 +204,25 @@ def _collect_scene_planner_inputs(
 
     project_id = chap_row["project_id"] if chap_row else None
 
+    # Reference Canon 注入：scene_planner 消费 emotion_curve（张力曲线）+ payoff_list
+    # （Scene 级爽点排布）。与 director / writer 共用同一 excerpt 函数（consumer=planner
+    # 走 emotion_curve + payoff_list 分支）。无 active canon → 不注入 reference_canon 键，
+    # 与 director 缺席语义保持一致。
+    reference_canon_inject: dict | None = None
+    reference_canon_audit: dict | None = None
+    if project_id:
+        conn3 = get_connection(db_path)
+        try:
+            reference_canon_inject, reference_canon_audit = _reference_canon_excerpt(
+                conn3, project_id, consumer=_REFERENCE_CANON_CONSUMER_PLANNER,
+            )
+        except sqlite3.OperationalError:
+            # 老库 / 缺表 → 视为无 canon，不阻断 Scene Planner 装配。
+            reference_canon_inject = None
+            reference_canon_audit = None
+        finally:
+            conn3.close()
+
     # style_constraints：优先读项目级；暂无则本地默认。
     style_constraints: dict[str, Any]
     if project_id:
@@ -241,7 +264,7 @@ def _collect_scene_planner_inputs(
         finally:
             conn2.close()
 
-    return {
+    payload: dict[str, Any] = {
         "agent": "scene_planner",
         "prompt_version": _SCENE_PLANNER_PROMPT_VERSION,
         "chapter": {
@@ -274,6 +297,14 @@ def _collect_scene_planner_inputs(
         "style_constraints": style_constraints,
         "recent_prose": {"last_chapter_excerpt": "", "last_scene_excerpt": ""},
     }
+
+    # Reference Canon（emotion_curve + payoff_list）。无 canon 时不注入该键——
+    # 与 director 缺席语义保持一致（scene_planner 不得索要 canon）。
+    if reference_canon_inject is not None:
+        payload["reference_canon"] = reference_canon_inject
+    if reference_canon_audit is not None:
+        payload["_reference_canon_consumed"] = reference_canon_audit
+    return payload
 
 
 def _load_project_style_constraints(
@@ -358,23 +389,90 @@ def _scene_planner_node(ctx: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(scenes, list) or not scenes:
             raise ValueError("scene_planner output missing non-empty 'scenes'")
         # 只把 scene_planner 的核心 scenes 包装成 scene_plan；保留完整输出供观测。
-        return {
+        # F4 修复：scene_planner 节点输出透出 ``_reference_canon_consumed`` 审计键
+        # 到 ctx（→ checkpoint_json），与 director / writer 节点的审计闭环对齐。
+        # 仅透出审计键（{canon_id, consumed_fields}），不把 reference_canon 业务
+        # 数据塞进 checkpoint（payload 内的 reference_canon 业务键仅供 scene_planner
+        # 本节点消费，不进入 ctx）。
+        scene_planner_audit: dict[str, Any] | None = None
+        project_id_for_audit = None
+        conn_sp = get_connection(db_path)
+        try:
+            chap_row = conn_sp.execute(
+                "SELECT project_id FROM chapters WHERE chapter_id = ?", (chapter_id,)
+            ).fetchone()
+            project_id_for_audit = chap_row["project_id"] if chap_row else None
+        except sqlite3.OperationalError:
+            project_id_for_audit = None
+        finally:
+            conn_sp.close()
+        if project_id_for_audit:
+            try:
+                conn_sp2 = get_connection(db_path)
+                try:
+                    _, scene_planner_audit = _reference_canon_excerpt(
+                        conn_sp2,
+                        project_id_for_audit,
+                        consumer=_REFERENCE_CANON_CONSUMER_PLANNER,
+                    )
+                except sqlite3.OperationalError:
+                    scene_planner_audit = None
+                finally:
+                    conn_sp2.close()
+            except Exception:  # noqa: BLE001 —— 审计键获取失败不阻断主流程
+                scene_planner_audit = None
+        ret: dict[str, Any] = {
             "scene_plan": {"scenes": scenes},
             "scene_planner_output": out,
             "scene_planner_status": "ok",
         }
+        if scene_planner_audit is not None:
+            ret["_reference_canon_consumed"] = scene_planner_audit
+        return ret
     except Exception as exc:  # noqa: BLE001 —— 任何失败均降级，不阻断 writer
         _log.warning(
             "chapter_write.scene_planner degraded: chapter_id=%s err=%s",
             chapter_id, exc,
         )
         fallback = _scene_planner_fallback(ctx)
-        return {
+        # scene_planner 失败/降级时也尝试透出审计键（与 writer 失败兜底语义对齐），
+        # 便于「该章生成消费了哪份 canon」在审计层可观测。
+        scene_planner_audit_fb: dict[str, Any] | None = None
+        project_id_for_audit = None
+        conn_sp3 = get_connection(db_path)
+        try:
+            chap_row = conn_sp3.execute(
+                "SELECT project_id FROM chapters WHERE chapter_id = ?", (chapter_id,)
+            ).fetchone()
+            project_id_for_audit = chap_row["project_id"] if chap_row else None
+        except sqlite3.OperationalError:
+            project_id_for_audit = None
+        finally:
+            conn_sp3.close()
+        if project_id_for_audit:
+            try:
+                conn_sp4 = get_connection(db_path)
+                try:
+                    _, scene_planner_audit_fb = _reference_canon_excerpt(
+                        conn_sp4,
+                        project_id_for_audit,
+                        consumer=_REFERENCE_CANON_CONSUMER_PLANNER,
+                    )
+                except sqlite3.OperationalError:
+                    scene_planner_audit_fb = None
+                finally:
+                    conn_sp4.close()
+            except Exception:  # noqa: BLE001
+                scene_planner_audit_fb = None
+        ret_fb: dict[str, Any] = {
             **fallback,
             "scene_planner_output": None,
             "scene_planner_status": "failed",
             "scene_planner_error": str(exc),
         }
+        if scene_planner_audit_fb is not None:
+            ret_fb["_reference_canon_consumed"] = scene_planner_audit_fb
+        return ret_fb
 
 
 def _resolve_writer_context_mode(ctx: dict[str, Any]) -> str:

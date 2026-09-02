@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added（拆书模块四连改：消费面接通 + 人设维度 + 文风样例联动 + 文件上传，2026-09-02）
+- **P1·ReferenceCanon 消费面接通（builders.py + chapter_write/pipeline.py + 两份 prompt）**：`_reference_canon_excerpt` 泛化为 consumer 参数——director 原四字段逐字不变；scene_planner 新吃 emotion_curve（末尾 ≤50 条窗口）+ payoff_list（≤30）；writer 新吃 style_params（按字段优先级删减至 ≤1500 字符，带 `__style_params_truncated__` 标记）。scene_planner-v1/writer-v1 prompt 补 reference_canon 可选键契约+缺席语义+「参数化参考、禁原文」合规注记；`_reference_canon_consumed` 审计三 builder 全覆盖（含 scene_planner 透出 checkpoint）。
+- **P2·protagonist 人设维度（规范+schema+aggregate prompt+G-sim+Director+前端五处同步）**：ReferenceCanon 新增顶层 optional `protagonist`（identity≤80/personality_tags≤6×≤12/core_drive≤120/foil_techniques≤8×≤60），schema v0.1.2；G-sim `_collect_strings` 递归天然覆盖（13 字重叠实测拦截）；Director excerpt 增 protagonist（foils≤4 截断）；CanonTab 详情加「主角人设」区块；report_md 条件渲染。存量 canon 缺席语义双向兜底。
+- **P3·canon→文风样例联动（reference.py + CanonTab）**：`POST /projects/{pid}/canons/{cid}/to-style-sample`——确定性模板合成「拆书风格卡」（logline+style_params 逐条转写+techniques，≤4800 字符，零原文片段、不调 LLM），复用 create_style_sample 既有校验（≤5000 字/≤10 篇）；style_params 空→400、同标题→409。前端详情抽屉加「写入文风样例面板」按钮+轻反馈。
+- **P4·拆书文件上传（reference.py + CanonTab + 新依赖）**：`POST /projects/{pid}/deconstruct-upload`（multipart，20MB 上限）——.txt 解码链 utf-8→gb18030→utf-16→400；.epub stdlib 解析（zipfile+xml.etree 按 OPF spine 顺序拼接、去标签、unescape），单 member >5MB→400、加密 member→400、正文 >300 万字符→400；与粘贴共用 `_start_deconstruct_internal` 同一启动路径。新增依赖 `python-multipart==0.0.32`（== 锁死 + uv.lock 已同步）。前端文件/粘贴二选一互斥。
+- **审查修复轮（smart 审查 10 项全修）**：tsc 两处编译错误（ReaderProfile import/类型断言）；txt 解码 500→三段链+400；scene_planner 审计透出 checkpoint；director/writer 缓存键混入 active canon_id（拆新书后旧缓存自然失效，顺带修复 Sprint 11 遗留）；epub zip 炸弹单文件 5MB 预检+加密 flag 拒绝；规范文档 planner/style_params 矛盾行修正；fetch reject 归一 ApiError(0)；prompt 序号整理。to-style-sample 409 判重竞态裁决接受不修（单用户 UI+防抖）。
+- **测试**：pytest 1680 绿 / vitest 416 绿 / build 绿；新增用例覆盖三 consumer 注入与截断、protagonist schema 五类、G-sim 新字段拦截、风格卡四态、上传九类（编码/spine 顺序/坏 zip/超限/加密）、缓存失效、审计透出。
+
 ### Fixed（人工改稿闭环三连修：改稿必重审 + commit 时序守卫 + 版本列表「未审」角标，2026-09-01）
 - **A·改稿降级（`packages/domain/chapter/service.py`）**：`create_draft` 在 INSERT 新 draft 的**同事务**内，若章节原状态为 REVIEWED 则降级回 DRAFTED——堵住「审校通过→人工改一段→直接 commit 定稿未审改动」的口子（与 continuation adopt 口径对齐并收编为唯一属主，adopt 内联降级 SQL 已删）。DRAFTED 不受影响；COMMITTED 仍 409。
 - **B·commit 审校时序守卫（`routers/workflows.py` + `chapter_commit/pipeline.py`）**：最新草稿 `created_at` 晚于最近一次 COMPLETED chapter-review 的 `ended_at`（=存在未审改动）→ `start_commit` 端点同步 409（detail 含版本号与两个时间）；`_commit_node` 加同款兜底 raise，防绕过端点的 generic 启动路径。无 COMPLETED review / 无草稿不拦（保持原行为，由既有 REVIEWED 校验兜底）；FAILED/CANCELLED/PAUSED review 不计入阈值。同时修复 `_commit_node` 连接生命周期（conn 提升 try/finally）。

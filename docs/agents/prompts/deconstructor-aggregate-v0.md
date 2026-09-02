@@ -56,6 +56,7 @@
 7. `rhythm` — 节奏参数（mini/major climax 间隔分布 + 章末钩子率 + 黄金三章达标）。
 8. `style_params` — 文风参数（对齐 PRD §97 Style System）。
 9. `metadata` — 元信息（source_book_title / deconstruct_date / deconstruct_version / target_reader_profile / license_check_status）。
+10. `protagonist`（顶层可选，v0.1.2 新增）— 主角人设（identity 一句话定位 / personality_tags 性格标签数组 / core_drive 核心诉求 / foil_techniques 配角衬托手法数组）。**信号不足时可省略该字段**，不要编造。
 
 你的输出是 **JSON**（见 §B.7 Output Schema），只含业务载荷。
 
@@ -219,6 +220,18 @@
 | `target_reader_profile` | enum | 输入 `target_reader_profile`（7 枚举之一） |
 | `license_check_status` | object | 输入 `source_book_meta.license_check_status`（required `checked` / `license` / `compatible`，均为合法值） |
 
+#### B.6.1.10 `protagonist`（顶层可选，v0.1.2 新增）
+
+> 设计理由：拆书任务对"人设"维度有独立需求（性格标签 / 核心诉求 / 配角衬托手法），但 LLM 在缺乏充分信号时可能漏产出，故设为顶层 optional（不进 `required`）。Prompt 要求"必须尽力产出；信号不足时省略该字段或仅产出 1-2 个有把握的子字段"。
+
+- `protagonist` 是 object；以下子字段均**可选**（Director 注入端按"缺则跳过"语义消费）：
+  - `identity`（string, ≤80 字）：一句话定位，抽象模式（如"草根逆袭型主角"）；不出现具名 / 势力名 / 物品名。
+  - `personality_tags`（array of string, ≤6 项，每项 ≤12 字）：性格标签数组；抽象短语（"隐忍"、"好强"、"重情"）；uniqueItems（避免重复）。
+  - `core_drive`（string, ≤120 字）：核心诉求 / 根本欲望；抽象模式（"打破同辈压制登上巅峰"）。
+  - `foil_techniques`（array of string, ≤8 项，每项 ≤60 字）：配角衬托 / 对照手法，抽象（"前期压制-中期对等-后期反压"、"同辈对照镜映"）。
+- 输出前抽象化终审：4 子字段均不得含专有名词或原文片段（≥8 字连续重合即阻断）。
+- 与 `faction_map` / `techniques` 的关系：`protagonist` 独立于 `faction_map`（势力拓扑）与 `techniques`（技法落点），是「角色（主角）」维度的范式；`foil_techniques` 是「配角衬托」子集，与 `techniques[].name_pattern` 互不重叠。
+
 ### B.6.2 抽象化终审规则（输出前逐字段扫描）
 
 1. `logline` / `spine[].title_pattern` / `spine[].summary_pattern` / `faction_map.factions[].type_pattern` / `techniques[].name_pattern|location_pattern|effect_pattern`：**禁止**任何专有名词（人 / 势力 / 地点 / 招数 / 物品原名）；
@@ -239,6 +252,10 @@
 | `techniques[].effect_pattern` | ≤80 字 |
 | `metadata.source_book_title` | ≤200 字（schema 放宽） |
 | `payoff_list[].payoff_id` | 不限（标识符） |
+| `protagonist.identity` | ≤80 字 |
+| `protagonist.core_drive` | ≤120 字 |
+| `protagonist.personality_tags[]` | 每项 ≤12 字；≤6 项 |
+| `protagonist.foil_techniques[]` | 每项 ≤60 字；≤8 项 |
 
 ### B.6.4 rhythm 统计口径锁定
 
@@ -348,9 +365,21 @@
       "license": "<LICENSE_PLACEHOLDER>",
       "compatible": true
     }
+  },
+  "protagonist": {
+    "identity": "草根逆袭型主角（≤80 字抽象模式示例）",
+    "personality_tags": ["隐忍", "重情", "好强", "克制", "机敏", "守信"],
+    "core_drive": "打破同辈压制登上巅峰，证明出身不决定上限（≤120 字抽象模式示例）",
+    "foil_techniques": [
+      "前期压制-中期对等-后期反压（抽象对照手法示例）",
+      "同辈对照镜映主角成长（≤60 字抽象示例）",
+      "反派长辈的镜像对照（≤60 字抽象示例）"
+    ]
   }
 }
 ```
+
+> **protagonist 示例说明**：4 子字段必须齐全（如有信号）；`personality_tags` ≤6 / `foil_techniques` ≤8 是上限；缺信号时整块省略。
 
 ### B.7.2 字段约束摘要（与 Schema 同步）
 
@@ -365,6 +394,7 @@
 | `rhythm` | mini_climax_interval / major_climax_interval / chapter_end_hook_rate / golden_three_compliance | IntervalDistribution 仅 median/p25/p75；chapter_end_hook_rate ∈ [0,1]；golden_three_compliance 5 字段必填 |
 | `style_params` | sentence_length_distribution / dialogue_ratio / action_ratio / pov / paragraph_length_distribution / psychological_ratio / environment_ratio | pov ∈ 3 枚举；所有 ratio ∈ [0,1]；LengthDistribution 仅 mean/median/max |
 | `metadata` | source_book_title / deconstruct_date / deconstruct_version / target_reader_profile / license_check_status | source_book_title ≤200；deconstruct_date ISO-8601；target_reader_profile ∈ 7 枚举；license_check_status 3 字段必填 |
+| `protagonist`（顶层 optional，v0.1.2） | — | identity ≤80；personality_tags ≤6 项 / 每项 ≤12 字；core_drive ≤120；foil_techniques ≤8 项 / 每项 ≤60 字；4 子字段均 optional |
 
 ### B.7.3 Schema 不允许的输出（示例）
 
@@ -674,7 +704,7 @@
 1. **E-DEC-B-01 Schema 合规**：JSON Schema 校验 `docs/reference-canon/schemas/reference-canon.schema.json` 通过；任意顶层或嵌套字段缺失/类型错误/多余字段（`additionalProperties: false`）= 不通过。
 2. **E-DEC-B-02 抽象化原文片段扫描**：所有 string 字段值（除 `metadata.source_book_title` 外）在所有 `chapter_extracts[].event_pattern` / `chapter_digest` / `hook_marker` 与源书原文 raw_text 中检索，**连续 ≥8 字**重合 = 不通过。
 3. **E-DEC-B-03 原名扫描（人 / 势力 / 地点 / 招式 / 物品）**：所有 string 字段值（除 `metadata.source_book_title` 与 `metadata.license_check_status.license` 外）不得含原文专有名词；命中即不通过。
-4. **E-DEC-B-04 string 字段 ≤80 字**：`logline` / `spine[].title_pattern` / `spine[].summary_pattern` / `faction_map.factions[].type_pattern` / `techniques[].name_pattern|location_pattern|effect_pattern` 全部 ≤80 字；`metadata.source_book_title` ≤200 字；超长 = 不通过。
+4. **E-DEC-B-04 string 字段 ≤80 字**：`logline` / `spine[].title_pattern` / `spine[].summary_pattern` / `faction_map.factions[].type_pattern` / `techniques[].name_pattern|location_pattern|effect_pattern` 全部 ≤80 字；`metadata.source_book_title` ≤200 字；`protagonist.identity` ≤80 字；`protagonist.core_drive` ≤120 字；`protagonist.personality_tags[]` 每项 ≤12 字；`protagonist.foil_techniques[]` 每项 ≤60 字；超长 = 不通过。
 5. **E-DEC-B-05 function_tag 枚举**：`spine[].function_tag` ∈ {`hook`, `setup`, `escalation`, `turn`, `climax`, `resolution`}；缺失或非法 = 不通过。
 6. **E-DEC-B-06 valence / intensity 范围**：`emotion_curve[].valence` ∈ [-9, +9]；`payoff_list[].intensity` ∈ [1, 5]；越界 = 不通过。
 7. **E-DEC-B-07 枚举合法性**：
@@ -695,6 +725,7 @@
 15. **E-DEC-B-15 source_book_title 隔离**：`metadata.source_book_title` 是**唯一**可出现原书书名的字段；其他任何 string 字段含书名 / 章节标题 / 招式名 / 物品名等具名信息 = 不通过。
 16. **E-DEC-B-16 修辞扫描**：所有 string 字段值不得含比喻 / 夸张修辞（启发式正则：「如同」「仿佛」「像是」「宛如」「一般般」）；命中 = warning。
 17. **E-DEC-B-17 spine 章节连续性**：`spine[].chapter_index` 必须覆盖 `chapter_extracts[].chapter_index` 的去重集合；遗漏或多出 = 不通过。
+18. **E-DEC-B-18 protagonist 字段合法（v0.1.2 新增）**：`protagonist` 顶层 optional（不进 `required`）；若存在则为 object 且 `additionalProperties: false`；`personality_tags` ≤6 项、`foil_techniques` ≤8 项；任一子字段缺失/类型非法不影响其它子字段。整块缺信号可省略。
 
 ---
 
