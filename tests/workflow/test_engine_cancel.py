@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
 
@@ -310,11 +309,22 @@ def test_engine_stop_before_node_when_run_already_cancelled(tmp_path: Path) -> N
     """start_with_nodes_async 之后立即外部翻 CANCELLED；后台线程两处探针之一命中 → run 收尾 CANCELLED、已执行的节点标 FAILED/error='cancelled by user'、未触达的节点不存在。
 
     测试时序不可控：cancel 可能在「idx=0 _insert_node_row 之前」（探针 1，0 行）
-    或「idx=0 节点 fn 完成后」（探针 2，1 行 FAILED）。两种都是正确实现路径——
-    关键不变量：run=CANCELLED + 任何已存在的节点行必须标 FAILED + error='cancelled by user' + output=NULL + 后续节点不执行。
+    或「idx=0 节点 fn 执行完毕、checkpoint 探针前」（探针 2，1 行 FAILED）。
+    两种都是正确实现路径——关键不变量：run=CANCELLED + 任何已存在的节点行必须
+    标 FAILED + error='cancelled by user' + output=NULL + 后续节点不执行。
+
+    n1 的 fn 故意睡 0.3s：让「立即取消」必然落在 n1 执行窗口内，杜绝
+    「cancel 晚于 n1 完全落库（合法但破坏本不变量）」的竞态假阳性
+    （2026-09-06：checkpoint 落盘路径新增软上限逻辑后该窗口概率上升，实测量化）。
     """
     engine = _make_engine(tmp_path)
-    nodes = [_ai_node("n1", {"k": "v1"}), _ai_node("n2", {"k": "v2"}), _ai_node("n3", {"k": "v3"})]
+
+    def _slow_n1(_ctx):
+        time.sleep(0.3)
+        return {"k": "v1"}
+
+    n1 = WorkflowNode(node_id="n1", kind="AI", fn=_slow_n1)
+    nodes = [n1, _ai_node("n2", {"k": "v2"}), _ai_node("n3", {"k": "v3"})]
 
     run_id = engine.start_with_nodes_async("cancel-start-probe", nodes)
 

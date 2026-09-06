@@ -58,7 +58,6 @@ from packages.core.quality.wordcount import (
     classify_prose_length,
     resolve_band_config,
     visible_chars,
-    word_band,
 )
 from packages.core.workflow_runtime.engine import WorkflowNode
 
@@ -817,11 +816,6 @@ def _resolve_chapter_word_band(
     ``_basic_checks_node`` 是独立函数、未复用本 helper，行为差异不在本任务范围
     （已记 Known Issue / 后续可一并覆盖）。
     """
-    cfg: dict[str, Any] = {
-        "low_ratio": 0.85,
-        "high_ratio": 1.15,
-        "floor": 1200,
-    }
     chapter_project_id = ""
     try:
         conn = get_connection(db_path)
@@ -1187,7 +1181,7 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
                     f"status={length_report.get('status')})"
                 ),
                 "reason": (
-                    f"字数闭环 condense 2 轮后仍超带，按生产实证 ch4-6 规律"
+                    "字数闭环 condense 2 轮后仍超带，按生产实证 ch4-6 规律"
                     "（writer 原始产出 4721-5842 字 vs 自报 3008-3172，偏差 50%+）"
                     "标记为 report-only 兜底；下游评审 W-LEN 报告应据此评估。"
                 ),

@@ -31,15 +31,11 @@ P1-1 密钥脱敏（Sprint 12）：
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from fastapi import APIRouter, HTTPException, Request, status
 
 from packages.core.logging_config import get_logger
 from packages.core.model_router import ModelConfigService, ModelRouter, ProviderError
 from packages.core.model_router.security import (
-    _MASK,
     _dump_params_json,
     _mask_response,
     _normalize_params,

@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import httpx
@@ -95,12 +94,11 @@ def test_get_legacy_available_true_when_model_configs_has_enabled_row(tmp_path: 
         async with app.router.lifespan_context(app):
             # 写一条 model_config 行（直接走 DB，绕过 service）
             settings = app.state.settings
+
             from packages.core.db import get_connection
             from packages.core.ids import new_id
-            from datetime import datetime, timezone
 
             cid = new_id("mcf")
-            ts = datetime.now(timezone.utc).isoformat()
             conn = get_connection(settings.db_path)
             try:
                 conn.execute(

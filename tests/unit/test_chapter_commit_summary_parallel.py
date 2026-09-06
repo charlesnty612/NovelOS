@@ -18,10 +18,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
+from packages.workflows.chapter_commit import observer as _observer_mod
+from packages.workflows.chapter_commit import summary as _summary_mod
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
@@ -246,8 +246,7 @@ def test_summarize_node_consumes_summary_early_skips_second_run_agent(tmp_path, 
     _insert_draft(db_path, cid, "本章正文" * 50)
     run_id, node_run_id = _register_summarizer_agent(db_path)
 
-    from packages.workflows.chapter_commit import pipeline as _pipeline
-    real_run_agent = _pipeline.run_agent
+    real_run_agent = _summary_mod.run_agent
     second_call_count = {"n": 0}
 
     def _spy_run_agent(db_path, agent_name, payload, rid, **kwargs):
@@ -255,7 +254,7 @@ def test_summarize_node_consumes_summary_early_skips_second_run_agent(tmp_path, 
             second_call_count["n"] += 1
         return real_run_agent(db_path, agent_name, payload, rid, **kwargs)
 
-    monkeypatch.setattr(_pipeline, "run_agent", _spy_run_agent)
+    monkeypatch.setattr(_summary_mod, "run_agent", _spy_run_agent)
     from packages.workflows.chapter_commit.pipeline import _summarize_node
 
     ctx = {
@@ -363,7 +362,6 @@ def test_summarize_node_summary_early_missing_required_fields_falls_back(tmp_pat
 
 def test_run_observer_with_summary_in_parallel_invokes_three_futures(tmp_path, monkeypatch):
     """三路并发：两条腿 + summary 都跑，返回 summary_early 含 output。"""
-    import packages.workflows.chapter_commit.pipeline as _pipeline
 
     calls = []
 
@@ -381,7 +379,7 @@ def test_run_observer_with_summary_in_parallel_invokes_three_futures(tmp_path, m
             "debt_changes": [],
         }
 
-    monkeypatch.setattr(_pipeline, "run_agent", _fake_runner)
+    monkeypatch.setattr(_observer_mod, "run_agent", _fake_runner)
 
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
@@ -423,7 +421,6 @@ def test_run_observer_with_summary_in_parallel_invokes_three_futures(tmp_path, m
 
 def test_run_observer_with_summary_in_parallel_summary_exception_silent(tmp_path, monkeypatch):
     """summary 异常被吞：summary_early=None；双腿 future.result() 正常返回。"""
-    import packages.workflows.chapter_commit.pipeline as _pipeline
 
     def _fake_runner(db_path, agent_name, payload, run_id, **kwargs):
         if kwargs.get("expected") == "summarizer":
@@ -433,7 +430,7 @@ def test_run_observer_with_summary_in_parallel_summary_exception_silent(tmp_path
             "new_events": [], "resolved_hooks": [], "new_hooks": [], "debt_changes": [],
         }
 
-    monkeypatch.setattr(_pipeline, "run_agent", _fake_runner)
+    monkeypatch.setattr(_observer_mod, "run_agent", _fake_runner)
 
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
@@ -470,7 +467,6 @@ def test_run_observer_with_summary_in_parallel_summary_exception_silent(tmp_path
 
 def test_run_observer_with_summary_in_parallel_skips_when_no_draft(tmp_path, monkeypatch):
     """草稿缺失 → summary 早产返回 {"skipped": True}，双腿仍正常。"""
-    import packages.workflows.chapter_commit.pipeline as _pipeline
 
     calls = []
 
@@ -481,7 +477,7 @@ def test_run_observer_with_summary_in_parallel_skips_when_no_draft(tmp_path, mon
             "new_events": [], "resolved_hooks": [], "new_hooks": [], "debt_changes": [],
         }
 
-    monkeypatch.setattr(_pipeline, "run_agent", _fake_runner)
+    monkeypatch.setattr(_observer_mod, "run_agent", _fake_runner)
 
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
@@ -533,8 +529,8 @@ def test_workflow_resume_summary_early_excluded_checkpoint_self_heals(tmp_path, 
     5. 即使 ``summary_early`` 从 checkpoint 被剔除，summarize 节点走 _summarize_node
        的早产短路分支（ctx 内存里仍存在），与断点恢复幂等。
     """
-    from packages.core.workflow_runtime.engine import WorkflowEngine
     import packages.workflows.chapter_commit.pipeline as _pipeline
+    from packages.core.workflow_runtime.engine import WorkflowEngine
 
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
@@ -618,9 +614,9 @@ def test_workflow_resume_summary_early_excluded_checkpoint_self_heals(tmp_path, 
     # ---- 构造 WorkflowEngine 跑完整章节提交工作流。
     from packages.core.workflow_runtime.engine import WorkflowNode
     from packages.workflows.chapter_commit.pipeline import (
-        _summarize_node,
-        _high_risk_approval_node,
         WORKFLOW,
+        _high_risk_approval_node,
+        _summarize_node,
     )
     engine = WorkflowEngine(db_path)
     # 关键：build_observer_ctx 是上游 Transform 节点，需要 prepare observer_input
@@ -680,7 +676,6 @@ def test_workflow_resume_summary_early_excluded_checkpoint_self_heals(tmp_path, 
         summary_count = dict(row)["n"]
         # ai_call_logs 中 summarizer agent 的调用次数：observer_node stub 完全不调
         # run_agent('summarizer')（早产结果由 stub 直接构造），所以 summarizer 行 = 0。
-        from packages.core.workflow_runtime.runs import get_run as _get_run
         # 找 summarizer 的 agent_id：先查 agents 表。
         agent_row = conn.execute(
             "SELECT agent_id FROM agents WHERE name = 'summarizer'",

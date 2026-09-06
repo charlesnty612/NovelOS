@@ -31,7 +31,6 @@ import pytest
 from packages.core.story_state.applier import apply_delta
 from packages.core.story_state.write_through import write_through
 
-
 # ---------------------------------------------------------------------------
 # DDL（最小化：与既有 write_through 测试一致——不开 FK；含 0017 唯一索引）
 # ---------------------------------------------------------------------------

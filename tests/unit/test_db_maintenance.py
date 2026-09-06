@@ -8,6 +8,10 @@
 3. ``_fix_stale`` 幂等：第二次执行返回 0。
 4. CLI 入口 ``list`` / ``fix [--apply]`` 冒烟：list 打印格式正确；
    fix dry-run 不动库；fix --apply 真正写入。
+5. ``prune-logs``：``_find_old_logs`` 只命中超保留期行；``_prune_logs``
+   幂等；``--export`` 归档 JSON 全列可回读；CLI dry-run 不删 / --apply
+   真删；ai_call_logs 表不存在时 fail-soft 返回 0。
+6. ``vacuum``：``_vacuum`` 返回前后页统计且页数不增。
 
 测试策略
 --------
@@ -23,13 +27,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "db_maintenance.py"
@@ -335,3 +338,156 @@ def test_cli_missing_db_returns_exit_2(tmp_path: Path) -> None:
     proc = _run_cli("--db", str(missing), "list")
     assert proc.returncode == 2
     assert "not found" in proc.stderr.lower() or "not found" in proc.stdout.lower()
+
+
+# --------------------------------------------------------------------------- #
+# prune-logs / vacuum（2026-09-06 审查批次二）
+# --------------------------------------------------------------------------- #
+
+
+def _make_ai_call_logs_schema(db_path: Path) -> None:
+    """建最小 ai_call_logs 表（列名对齐 0001_init.sql）。"""
+    conn = _open_conn(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE ai_call_logs (
+                call_id                TEXT PRIMARY KEY,
+                run_id                 TEXT,
+                node_run_id            TEXT,
+                agent_id               TEXT,
+                model_id               TEXT,
+                prompt_version         TEXT,
+                input_context_ids_json TEXT,
+                output_json            TEXT,
+                token_usage_json       TEXT,
+                latency_ms             INTEGER,
+                cost                   REAL,
+                error                  TEXT,
+                retry_count            INTEGER NOT NULL DEFAULT 0,
+                created_at             TEXT NOT NULL
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_log(db_path: Path, *, call_id: str, age_days: int) -> None:
+    created_at = (
+        datetime.now(timezone.utc) - timedelta(days=age_days)
+    ).isoformat()
+    conn = _open_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO ai_call_logs (call_id, created_at) VALUES (?, ?)",
+            (call_id, created_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_find_old_logs_only_matches_expired(tmp_path: Path) -> None:
+    db = tmp_path / "novelos.db"
+    _make_ai_call_logs_schema(db)
+    _insert_log(db, call_id="aic_fresh", age_days=10)
+    _insert_log(db, call_id="aic_old", age_days=120)
+
+    mod = _load_module()
+    conn = _open_conn(db)
+    try:
+        rows = mod._find_old_logs(conn, days=90)
+    finally:
+        conn.close()
+    assert [r["call_id"] for r in rows] == ["aic_old"]
+
+
+def test_prune_logs_idempotent_and_keeps_fresh(tmp_path: Path) -> None:
+    db = tmp_path / "novelos.db"
+    _make_ai_call_logs_schema(db)
+    _insert_log(db, call_id="aic_fresh", age_days=10)
+    _insert_log(db, call_id="aic_old", age_days=120)
+
+    mod = _load_module()
+    conn = _open_conn(db)
+    try:
+        assert mod._prune_logs(conn, days=90) == 1
+        assert mod._prune_logs(conn, days=90) == 0  # 幂等
+        remaining = [
+            r["call_id"]
+            for r in conn.execute("SELECT call_id FROM ai_call_logs").fetchall()
+        ]
+    finally:
+        conn.close()
+    assert remaining == ["aic_fresh"]
+
+
+def test_export_old_logs_writes_full_columns(tmp_path: Path) -> None:
+    db = tmp_path / "novelos.db"
+    _make_ai_call_logs_schema(db)
+    _insert_log(db, call_id="aic_old", age_days=120)
+
+    mod = _load_module()
+    export_path = tmp_path / "archive" / "logs.json"
+    conn = _open_conn(db)
+    try:
+        n = mod._export_old_logs(conn, days=90, export_path=export_path)
+    finally:
+        conn.close()
+
+    assert n == 1
+    payload = json.loads(export_path.read_text(encoding="utf-8"))
+    assert payload["count"] == 1
+    assert payload["rows"][0]["call_id"] == "aic_old"
+    # 全列导出：created_at 在列集中
+    assert "created_at" in payload["rows"][0]
+
+
+def test_cli_prune_logs_dry_run_and_apply(tmp_path: Path) -> None:
+    db = tmp_path / "novelos.db"
+    _make_ai_call_logs_schema(db)
+    _make_schema(db)
+    _insert_log(db, call_id="aic_old", age_days=120)
+
+    # dry-run 不删
+    proc = _run_cli("--db", str(db), "prune-logs", "--days", "90")
+    assert proc.returncode == 0, proc.stderr
+    assert "[dry-run] would delete 1" in proc.stdout
+    assert "aic_old" in proc.stdout
+    conn = _open_conn(db)
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM ai_call_logs").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1
+
+    # --apply 真删
+    proc = _run_cli("--db", str(db), "prune-logs", "--days", "90", "--apply")
+    assert proc.returncode == 0, proc.stderr
+    assert "[apply] deleted 1" in proc.stdout
+    conn = _open_conn(db)
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM ai_call_logs").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0
+
+
+def test_cli_prune_logs_missing_table_is_fail_soft(tmp_path: Path) -> None:
+    db = tmp_path / "novelos.db"
+    _make_schema(db)  # 只有 workflow_runs，无 ai_call_logs
+
+    proc = _run_cli("--db", str(db), "prune-logs", "--days", "90")
+    assert proc.returncode == 0, proc.stderr
+    assert "[skip]" in proc.stdout
+
+
+def test_cli_vacuum_runs(tmp_path: Path) -> None:
+    db = tmp_path / "novelos.db"
+    _make_schema(db)
+
+    proc = _run_cli("--db", str(db), "vacuum")
+    assert proc.returncode == 0, proc.stderr
+    assert "[vacuum]" in proc.stdout

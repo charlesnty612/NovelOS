@@ -18,7 +18,6 @@ monkeypatch ``packages.workflows.chapter_commit.pipeline.run_agent`` 抓 kwargs�
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +26,6 @@ import pytest
 from packages.core.config import Settings
 from packages.core.db import apply_migrations
 from packages.workflows.chapter_commit import pipeline as cc_pipeline
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -108,8 +106,15 @@ def _patched_run_agent(
             "debt_changes": [],
         }
 
+    # 拆分后 run_agent 的消费方在 observer / summary 子模块（2026-09-06 批次三）；
+    # 两处都 patch 以覆盖 observer 双腿与 summarizer 腿。
     monkeypatch.setattr(
-        "packages.workflows.chapter_commit.pipeline.run_agent",
+        "packages.workflows.chapter_commit.observer.run_agent",
+        fake_run_agent,
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "packages.workflows.chapter_commit.summary.run_agent",
         fake_run_agent,
         raising=True,
     )

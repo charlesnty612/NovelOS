@@ -7,7 +7,8 @@
 - ``GET  /projects/{project_id}/canons``       —— 列出项目下全部 active canon；按 created_at DESC
 - ``GET  /canons/{canon_id}``                  —— 单一 canon 全文（canon_json + report_md）
 - ``DELETE /canons/{canon_id}``                —— 级联删除 canon + 关联 extracts；204
-- ``POST /projects/{project_id}/canons/{canon_id}/to-style-sample`` —— 把拆书 canon 合成文风样例卡并落入 author_style_samples；201
+- ``POST /projects/{project_id}/canons/{canon_id}/to-style-sample``
+  —— 把拆书 canon 合成文风样例卡并落入 author_style_samples；201
 
 错误码映射：
 - 404 — project / canon 不存在；
@@ -38,12 +39,12 @@ from xml.etree import ElementTree as ET
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 
+from packages.core.db import get_connection
 from packages.core.logging_config import get_logger
 from packages.core.model_router import ModelNotConfiguredError, ModelRouter
 from packages.core.workflow_registry import get_workflow
 from packages.core.workflow_runtime.engine import WorkflowEngine
 from packages.core.workflow_runtime.runs import get_run
-from packages.core.db import get_connection
 from packages.domain.project.service import ProjectService
 from packages.domain.reference import ReferenceService
 
@@ -525,7 +526,7 @@ def start_deconstruct_upload(
             status_code=422,
             detail=(
                 "book_title 不能为空；epub 也未读取到 dc:title，"
-                f"请显式填写 book_title 表单字段"
+                "请显式填写 book_title 表单字段"
             ),
         )
 

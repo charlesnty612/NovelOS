@@ -21,10 +21,8 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import sqlite3
-import tempfile
 from pathlib import Path
 
 import httpx
@@ -33,11 +31,9 @@ from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.story_state.applier import apply_delta
 from packages.core.story_state.snapshot import (
-    build_initial_state,
     repair_current_snapshot_world,
 )
 from packages.core.story_state.write_through import apply_inverse_cleanup_to_state
-
 
 # ----------------------------------------------------------------- helpers (integration)
 
@@ -140,7 +136,7 @@ def test_rollback_world_field_level_restore_keeps_dict_shape_and_db_data_json(tm
     async def run():
         async with app.router.lifespan_context(app):
             pid = await _make_project(app)
-            cid = await _make_character(app, pid)
+            await _make_character(app, pid)
             chap = await _make_chapter(app, pid)
             # 提前建好 location / faction / rule
             loc_id = await _make_location(app, pid, "Village")
@@ -545,7 +541,6 @@ def _setup_minimal_db(tmp_path: Path) -> tuple[str, str]:
                     f"/api/projects/{pid}/characters",
                     json={"name": "Alice", "role": "protagonist"},
                 )
-                cid = r.json()["character_id"]
                 r = await client.post(
                     f"/api/projects/{pid}/chapters",
                     json={"number": 1, "title": "第一章"},

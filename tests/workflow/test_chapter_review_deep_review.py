@@ -24,7 +24,6 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 from packages.core.model_router.router import AGENT_CAPABILITY
 
-
 # ---------------------------------------------------------------------------
 # 脚手架（裁剪自 test_chapter_review_critic.py，保持口径一致）
 # ---------------------------------------------------------------------------

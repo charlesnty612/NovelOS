@@ -454,8 +454,8 @@ def test_apply_relevance_trim_keeps_involved_entities_full():
     assert alice.get("core") == "设定"
     assert bob.get("relevance_summary") is True
 
-    temple = next(l for l in payload["world_state_excerpts"]["locations"] if l["location_id"] == "loc_temple")
-    village = next(l for l in payload["world_state_excerpts"]["locations"] if l["location_id"] == "loc_village")
+    temple = next(e for e in payload["world_state_excerpts"]["locations"] if e["location_id"] == "loc_temple")
+    village = next(e for e in payload["world_state_excerpts"]["locations"] if e["location_id"] == "loc_village")
     assert temple.get("data") == "详细"
     assert village.get("relevance_summary") is True
 

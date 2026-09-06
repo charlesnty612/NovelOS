@@ -1169,7 +1169,7 @@ def test_rollback_inverse_cleanup_covers_all_collections(tmp_path: Path):
                 f"rollback 后 snapshot.world.factions 残留 fac_rbck: {final_snap.get('world', {}).get('factions')}"
             )
             assert "rule_rbck" not in (final_snap.get("world", {}).get("world_rules") or []), (
-                f"rollback 后 snapshot.world.world_rules 残留 rule_rbck"
+                "rollback 后 snapshot.world.world_rules 残留 rule_rbck"
             )
             snap_char_ids = {c.get("character_id") for c in (final_snap.get("characters") or [])}
             assert "char_actor" in snap_char_ids, (
@@ -1179,7 +1179,7 @@ def test_rollback_inverse_cleanup_covers_all_collections(tmp_path: Path):
                 f"rollback 后 snapshot.characters 应保留 char_target（未引用）: {snap_char_ids}"
             )
             assert not any(d.get("debt_id") == "dbt_rbck" for d in final_snap.get("debts", [])), (
-                f"rollback 后 snapshot.debts 残留 dbt_rbck"
+                "rollback 后 snapshot.debts 残留 dbt_rbck"
             )
 
     asyncio.run(run())

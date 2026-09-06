@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from packages.core.db import apply_migrations, get_connection

@@ -445,7 +445,11 @@ def section_per_chapter(rows: list[dict[str, Any]]) -> str:
     ]
     for r in rows:
         out.append(fmt_row(r))
-    out += ["", "（sv = state_version；p/c = prompt/completion；dev% = 偏离 target 百分比；status = under/in_band/over）", ""]
+    out += [
+        "",
+        "（sv = state_version；p/c = prompt/completion；dev% = 偏离 target 百分比；status = under/in_band/over）",
+        "",
+    ]
     return "\n".join(out)
 
 

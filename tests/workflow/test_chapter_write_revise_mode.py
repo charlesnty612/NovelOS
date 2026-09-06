@@ -23,8 +23,6 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
 
-
-
 # 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
 async def _get_run_via_http(app, run_id: str) -> dict | None:
     import httpx
@@ -45,7 +43,8 @@ async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED
     SQLite 跨连接视角 + 后台线程落库时延：单节点 mock 流程通常 < 1s 跑完，
     但 polling 必须等到节点行 FAILED/COMPLETED 也写入——轮询间隔 0.2s 足以。
     """
-    import asyncio, time
+    import asyncio
+    import time
     deadline = time.monotonic() + timeout
     last_run = None
     while time.monotonic() < deadline:
@@ -255,7 +254,6 @@ def test_chapter_write_revise_mode_injects_draft_and_note(tmp_path: Path):
             assert r.status_code == 201, r.text
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            first_write_run_id = r.json()["run_id"]
 
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",

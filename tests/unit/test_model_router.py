@@ -127,7 +127,6 @@ def _make_handler(payload: dict, status_code: int = 200):
 
 
 def test_openai_provider_uses_params_timeout_and_omits_it_from_body():
-    payload = {"choices": [{"message": {"content": "hello"}}]}
     captured = {}
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.content)

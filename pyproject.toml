@@ -43,6 +43,11 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 
+[tool.ruff.lint.per-file-ignores]
+# 测试文件豁免 E501：断言消息 / 长 mock payload / 长 URL 属测试语料，折行损可读性。
+# 生产代码（packages / scripts）保持 120 严格约束（2026-09-06 审查批次一）。
+"tests/**" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
@@ -50,4 +55,5 @@ pythonpath = ["."]
 [dependency-groups]
 dev = [
     "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
 ]

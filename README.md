@@ -45,7 +45,7 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0011_fts_index.sql，34 张物理业务表 + 1 张虚表 chapter_fts；V2.0 Wave B 三连迁移：0009_branch_snapshots / 0010_trigger_keys / 0011_fts_index）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0023_project_word_band.sql，35 张物理业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖）
 tests/                   pytest（unit / integration / workflow / api / evals）
 scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
 docs/                    设计文档、PRD、实现计划（docs/impl/IMPLEMENTATION-PLAN-v0.md）
@@ -77,6 +77,16 @@ python -m packages.core.api.main
 ```
 
 浏览器打开 http://127.0.0.1:18081 即可使用（后端同时托管 SPA 与 `/api`）。
+
+## 开发规范
+
+提交前跑一遍 lint 与测试（ruff 配置已固化在本 pyproject，测试文件豁免 E501）：
+
+```bash
+python -m ruff check packages scripts tests
+python -m pytest -q
+```
+
 
 端口差异说明（V2.0 Wave C 任务三 统一收敛）：
 

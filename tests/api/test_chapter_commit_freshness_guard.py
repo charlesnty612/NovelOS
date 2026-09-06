@@ -24,7 +24,6 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
 
-
 # ---------------------------------------------------------------------------
 # 测试夹具
 # ---------------------------------------------------------------------------

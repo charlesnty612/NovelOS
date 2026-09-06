@@ -44,9 +44,9 @@ from packages.core.ids import new_id, now_iso  # noqa: E402
 from packages.workflows.chapter_write.pipeline import (  # noqa: E402
     _condense_node,
     _length_check_node,
-    _save_draft_node,
     _resolve_chapter_word_band,
     _resolve_target_word_count,
+    _save_draft_node,
 )
 
 MIGRATIONS_DIR = ROOT / "database" / "migrations"

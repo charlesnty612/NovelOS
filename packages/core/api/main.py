@@ -26,7 +26,15 @@ from packages.core.config import Settings, get_settings
 from packages.core.db import apply_migrations
 from packages.core.logging_config import configure_logging, get_logger
 
-__version__ = "3.5.0"
+# 版本号单一来源：读 pyproject 安装元数据（pip install -e 后即与 pyproject 同步），
+# 元数据不可用（未安装/裸解释器）时回落 "dev"。health / FastAPI version / 纯后端
+# root 端点共用本常量，杜绝与 pyproject 双源漂移（2026-09-06 审查 P1-2）。
+try:
+    from importlib.metadata import version as _pkg_version
+
+    __version__: str = _pkg_version("novelos")
+except Exception:  # noqa: BLE001 —— 元数据缺失不能阻断启动
+    __version__ = "dev"
 log = get_logger("novelos.api")
 
 

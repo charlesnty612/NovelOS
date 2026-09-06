@@ -18,10 +18,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
-
-import pytest
 
 from packages.core.db import apply_migrations, get_connection
 from packages.core.model_router.router import (
@@ -29,7 +26,6 @@ from packages.core.model_router.router import (
     CAPABILITY_LABELS,
     capability_for,
 )
-
 
 # ---------------------------------------------------------------------------
 # 1. 迁移注册

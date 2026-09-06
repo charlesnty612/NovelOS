@@ -30,7 +30,6 @@ from packages.core.story_state.applier import apply_delta
 from packages.core.story_state.delta_repair import repair_delta
 from packages.core.story_state.validator import validate_delta
 
-
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------

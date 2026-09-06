@@ -84,6 +84,66 @@ def _scrub_ctx_for_checkpoint(
     return scrubbed
 
 
+# ---------------------------------------------------------------------------
+# checkpoint 体积软上限（2026-09-06 审查批次二）
+# ---------------------------------------------------------------------------
+
+_CHECKPOINT_MAX_BYTES = 512 * 1024
+"""checkpoint_json 序列化后的软上限（512KB）。超出时按顶层键体积从大到小
+逐个替换为截断标记，直到回到上限内。
+
+取舍：checkpoint 的恢复语义只服务「PAUSED 后 resume」与崩溃审计；PAUSED
+落盘路径（``_finalize_run`` PAUSED 分支）**不做截断**，保证人工审阅 resume
+拿到全量 ctx；崩溃恢复在单进程部署下由 ``recover_interrupted_runs`` 收尾为
+FAILED（不可 resume），故每节点 checkpoint / 终态落盘可以安全截断。
+"""
+
+_CHECKPOINT_TRUNCATED_KEY = "__checkpoint_truncated__"
+"""截断标记键；值携带 original_bytes 供审计估算被截掉的体积。"""
+
+_CHECKPOINT_MIN_TRUNCATE_BYTES = 4096
+"""小于该体积的顶层值不截断（控制流信号 / 小 payload 保真优先）。"""
+
+
+def _cap_checkpoint_payload(
+    scrubbed: Any, max_bytes: int = _CHECKPOINT_MAX_BYTES
+) -> tuple[Any, int]:
+    """对 scrub 后的 checkpoint 载荷做体积软上限，返回 ``(capped, truncated_n)``。
+
+    - 序列化后 ≤ ``max_bytes`` → 原样返回（零拷贝，热路径零开销）。
+    - 超出 → 顶层键按各自 JSON 体积从大到小逐个替换为
+      ``{"__checkpoint_truncated__": True, "original_bytes": n}``，直到回到
+      上限内；体积 ≤ ``_CHECKPOINT_MIN_TRUNCATE_BYTES`` 的小值不截。
+    - 序列化失败（不可 JSON 值）→ 原样返回，不抛（checkpoint 落盘不能被
+      软上限逻辑打断）。
+    """
+    if not isinstance(scrubbed, dict) or not scrubbed:
+        return scrubbed, 0
+    try:
+        total = len(_dump_json(scrubbed).encode("utf-8"))
+        if total <= max_bytes:
+            return scrubbed, 0
+        sized: list[tuple[str, int]] = []
+        for k, v in scrubbed.items():
+            try:
+                n = len(_dump_json(v).encode("utf-8"))
+            except (TypeError, ValueError):
+                n = 0
+            sized.append((k, n))
+        capped = dict(scrubbed)
+        truncated = 0
+        for k, n in sorted(sized, key=lambda kv: kv[1], reverse=True):
+            if total <= max_bytes or n <= _CHECKPOINT_MIN_TRUNCATE_BYTES:
+                break
+            marker = {_CHECKPOINT_TRUNCATED_KEY: True, "original_bytes": n}
+            capped[k] = marker
+            total = total - n + len(_dump_json(marker).encode("utf-8"))
+            truncated += 1
+        return capped, truncated
+    except Exception:  # noqa: BLE001 —— 软上限失败不阻断 checkpoint 落盘
+        return scrubbed, 0
+
+
 class WorkflowRunConflict(Exception):
     """同 chapter 下已存在 RUNNING/PENDING run，启动被拒（409 语义）。
 
@@ -748,6 +808,12 @@ class WorkflowEngine:
         current_node: str,
     ) -> None:
         scrubbed = _scrub_ctx_for_checkpoint(ctx, getattr(self, "_checkpoint_exclude", None))
+        capped, truncated_n = _cap_checkpoint_payload(scrubbed)
+        if truncated_n:
+            log.debug(
+                "checkpoint capped for run %s: %d top-level values truncated",
+                run_id, truncated_n,
+            )
         conn = get_connection(self.db_path)
         try:
             conn.execute(
@@ -756,7 +822,7 @@ class WorkflowEngine:
                 SET checkpoint_json = ?, current_node = ?
                 WHERE run_id = ?
                 """,
-                (_dump_json(scrubbed), current_node, run_id),
+                (_dump_json(capped), current_node, run_id),
             )
             conn.commit()
         finally:
@@ -788,6 +854,16 @@ class WorkflowEngine:
         error: str | None = None,
     ) -> None:
         scrubbed = _scrub_ctx_for_checkpoint(ctx or {}, getattr(self, "_checkpoint_exclude", None))
+        # PAUSED 落盘不截断（人工审阅 resume 需要全量 ctx）；其余终态做软上限
+        if status == "PAUSED":
+            capped, truncated_n = scrubbed, 0
+        else:
+            capped, truncated_n = _cap_checkpoint_payload(scrubbed)
+        if truncated_n:
+            log.debug(
+                "final checkpoint capped for run %s (%s): %d values truncated",
+                run_id, status, truncated_n,
+            )
         conn = get_connection(self.db_path)
         try:
             if status == "CANCELLED":
@@ -799,7 +875,7 @@ class WorkflowEngine:
                     SET status = ?, ended_at = ?, checkpoint_json = ?, current_node = ?, error = ?
                     WHERE run_id = ?
                     """,
-                    (status, now_iso(), _dump_json(scrubbed), current_node, error, run_id),
+                    (status, now_iso(), _dump_json(capped), current_node, error, run_id),
                 )
             elif status in ("COMPLETED", "FAILED"):
                 # 守卫：WHERE status='RUNNING'。场景——节点 fn 完成（或抛异常）后
@@ -816,7 +892,7 @@ class WorkflowEngine:
                     SET status = ?, ended_at = ?, checkpoint_json = ?, current_node = ?, error = ?
                     WHERE run_id = ? AND status = 'RUNNING'
                     """,
-                    (status, now_iso(), _dump_json(scrubbed), current_node, error, run_id),
+                    (status, now_iso(), _dump_json(capped), current_node, error, run_id),
                 )
                 if cur.rowcount == 0:
                     log.debug(
@@ -831,7 +907,7 @@ class WorkflowEngine:
                     SET status = ?, checkpoint_json = ?, current_node = ?, error = ?
                     WHERE run_id = ?
                     """,
-                    (status, _dump_json(scrubbed), current_node, error, run_id),
+                    (status, _dump_json(capped), current_node, error, run_id),
                 )
             conn.commit()
         finally:
@@ -967,4 +1043,7 @@ __all__ = [
     "PauseRequested",
     "recover_interrupted_runs",
     "_fetch_run_status",
+    "_cap_checkpoint_payload",
+    "_CHECKPOINT_MAX_BYTES",
+    "_CHECKPOINT_TRUNCATED_KEY",
 ]

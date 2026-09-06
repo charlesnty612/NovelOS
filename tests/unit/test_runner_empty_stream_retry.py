@@ -25,7 +25,6 @@ from packages.core.agent_runtime.runner import create_adhoc_run, run_agent
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 from packages.core.model_router.exceptions import ProviderError
-from packages.core.model_router.providers import MockProvider
 
 
 def _now() -> str:

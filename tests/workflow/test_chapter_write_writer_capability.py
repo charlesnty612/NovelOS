@@ -20,7 +20,6 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 from packages.workflows.chapter_write import pipeline as cw_pipeline
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------

@@ -4,6 +4,32 @@
 
 ## [Unreleased]
 
+### Added（2026-09-06 全项目审查落地：四批次优化，P1 缺陷清零 + 数据生命周期 + 巨型文件拆分 + 工程基建）
+
+> 来源：docs/reviews/全项目审查与优化建议-2026-09-06.md（16 项发现，本批全部落地）。
+
+- **批次一·工程卫生**：
+  - **P1 修复 `snapshot.py:699` 未定义 `_logger`（F821）**——防御分支引用不存在的 logger，一旦触发即 NameError；改用模块级 `logging.getLogger("novelos.story_state.snapshot")`（非 dict world 活路径已有 `test_repair_current_snapshot_world_handles_non_dict_world` 覆盖）。
+  - **版本号单源**——`main.py.__version__` 改从 `importlib.metadata.version("novelos")` 读取（fallback "dev"），health 端点不再报过期 3.5.0；测试本就与同源常量比较，零改动。
+  - **ruff 清零 + 门禁固化**——264 项 → 0：`--fix` 收编 I001/F401/W292/F541/E401；手工修 8 处生产 E501、F841×17（含 `pipeline.run_agent` 未用导入、`cfg` 死代码、`saw_done` 无读变量等）、E741×4、E402×5；`tests/**` 显式豁免 E501（断言长串属测试语料，写入 pyproject per-file-ignores 并注明理由）；README 补「开发规范」节。
+  - **杂项清理**——删仓根 `nul` 再生物与 `apps/desktop/` S0 残骸（含 node_modules）；README 仓库结构段迁移/表数对齐现行（0001~0023、35 张业务表）；补 `packages/domain/knowledge`、`packages/domain/volume` 两个缺失 README；`data/` 运维产物（backup_*.json、4 个 .bak_*.db、探针/冒烟日志、m1_run/provider_dump）归档至 `data/archive/`。
+- **批次二·数据生命周期**：
+  - **`db_maintenance.py` 增 `prune-logs` 子命令**——清理 `ai_call_logs` 早于保留期（`--days` 默认 90）的行（该表此前无任何清理机制，长跑后 DB 无界膨胀）；默认 dry-run、`--apply` 真删、`--export PATH` 删除前全列 JSON 归档；表不存在 fail-soft；`main()` 重构为显式分支结构。
+  - **`db_maintenance.py` 增 `vacuum` 子命令**——VACUUM 回收已删行磁盘空间，打印前后页统计。
+  - **checkpoint_json 512KB 软上限（engine）**——`_cap_checkpoint_payload`：超限时顶层值按体积降序替换为 `{"__checkpoint_truncated__": true, "original_bytes": n}` 标记（≤4KB 小值保真）；**PAUSED 落盘不截断**（人工审阅 resume 需全量 ctx），每节点 checkpoint 与 COMPLETED/FAILED/CANCELLED 终态截断；单进程部署下崩溃恢复本就由 `recover_interrupted_runs` 收尾 FAILED，恢复语义无损。
+  - **修复既有竞态用例 `test_engine_stop_before_node_when_run_already_cancelled`**——cancel 落在「n1 完全落库后、n2 探针前」的合法窗口时不变量被误判失败（checkpoint 路径新增软上限逻辑后窗口概率上升）；n1 fn 注入 0.3s 执行时长使 cancel 必然落在执行窗口内，8/8 复跑稳定。
+- **批次三·巨型文件拆分（导出面全部不变）**：
+  - **`context_engine/builders.py`（3678 行）→ 7 模块 + 门面**——`builders_common`（共享 helper）/ `relevance` / `cache` / `canon` / `director_input` / `writer_input` / `observer_input`；`builders.py` 变 269 行纯再导出门面（显式 import + 全量 `__all__`，含全部私有名——`builders.X` 与 `from builders import X` 零行为变化）。AST 依赖分析定层序并验证无环；**拆分实测抓出一个隐患**：`_cache_reset` 的 `global` 重绑定使门面/测试持有的 dict 旧引用失联——改为原地 `clear()`（语义不变），2 个缓存测试由红转绿。
+  - **`chapter_commit/pipeline.py`（2262 行）→ 5 模块 + 门面**——`pipeline_common`（开关/mock 过滤/修订指导）/ `observer`（双腿拆分与聚合）/ `gate`（质量门禁与高危审批）/ `commit`（delta 构建/校验注入/commit）/ `summary`（摘要节点）；`pipeline.py` 保留 `_build_nodes`/`WORKFLOW` 组装与全量再导出（单行 `noqa: F401` 显式声明 re-export）。
+  - **测试 patch 目标随拆分迁移**——`pipeline.run_agent` 的 monkeypatch 目标迁到新属主模块（observer/summary，3 个测试文件）；`test_chapter_write_length_closure` 等经 facade re-export 的导入零改动。
+  - **前端 `ChapterDetailPage`（1823 行）抽 `hooks/useChapterRunOrchestration.ts`**——runs 列表/选中/2s 轮询/run 详情/pausePayload/quality_gate checkpoint 提取整体抽离；页面经 `runsReload`/`detailReload` 消费；tsc + vitest 416 全绿。
+- **批次四·契约与测试基建**：
+  - **OpenAPI 类型 codegen 试点**——`scripts/export_openapi.py`（app.openapi() 落盘，89 paths / 34 schemas）+ `scripts/gen_frontend_types.py`（内置极简 codegen：schema → TS interface，确定性输出入库 `apps/web/src/api/types.generated.ts`）；`npm run gen:types` 一键重生成。定位为「后端 schema 漂移对照面」，运行时类型仍以手写 types.ts 为权威。
+  - **契约测试 `tests/api/test_openapi_contract.py`**——openapi 必含关键模型与字段（宽松口径：快照 ⊆ 实际，加字段不报错、删/改名才报）；types.generated.ts 与当前 schema 同步断言；3 用例。附注：WorkflowRun/QualityReport/ModelProfile 等端点返回裸 dict 无 response_model、不进 OpenAPI——补齐属后续优化。
+  - **pytest-xdist 落地**——`uv add --dev pytest-xdist>=3.8.0`（pyproject + uv.lock 同步）；`pytest -n 4` 全仓验证绿，dev 反馈环 10min → ~4min。
+- **测试**：pytest 全量绿（含新增 db_maintenance prune/vacuum 6 用例、checkpoint cap 4 用例、契约 3 用例）；vitest 416 绿；`tsc -b` + `vite build` 绿、dist 已重建；ruff 全仓 0 error。
+
+
 ### Added（拆书模块四连改：消费面接通 + 人设维度 + 文风样例联动 + 文件上传，2026-09-02）
 - **P1·ReferenceCanon 消费面接通（builders.py + chapter_write/pipeline.py + 两份 prompt）**：`_reference_canon_excerpt` 泛化为 consumer 参数——director 原四字段逐字不变；scene_planner 新吃 emotion_curve（末尾 ≤50 条窗口）+ payoff_list（≤30）；writer 新吃 style_params（按字段优先级删减至 ≤1500 字符，带 `__style_params_truncated__` 标记）。scene_planner-v1/writer-v1 prompt 补 reference_canon 可选键契约+缺席语义+「参数化参考、禁原文」合规注记；`_reference_canon_consumed` 审计三 builder 全覆盖（含 scene_planner 透出 checkpoint）。
 - **P2·protagonist 人设维度（规范+schema+aggregate prompt+G-sim+Director+前端五处同步）**：ReferenceCanon 新增顶层 optional `protagonist`（identity≤80/personality_tags≤6×≤12/core_drive≤120/foil_techniques≤8×≤60），schema v0.1.2；G-sim `_collect_strings` 递归天然覆盖（13 字重叠实测拦截）；Director excerpt 增 protagonist（foils≤4 截断）；CanonTab 详情加「主角人设」区块；report_md 条件渲染。存量 canon 缺席语义双向兜底。

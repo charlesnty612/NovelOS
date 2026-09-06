@@ -44,11 +44,9 @@
 from __future__ import annotations
 
 import copy
-import json
 import os
 import re
 import uuid
-from pathlib import Path
 from typing import Any
 
 from packages.core.db import get_connection
@@ -93,7 +91,8 @@ def _build_entity_index(
             "locations":  {location_id:  {"data_json": ..., "exists": True}},
             "factions":   {faction_id:   {"data_json": ..., "exists": True}},
             "world_rules":{world_rule_id:{"data_json": ..., "exists": True}},
-            "relationships": {relationship_id: {"state_json": ..., "from_id": ..., "to_id": ..., "rel_type": ..., "exists": True}},
+            "relationships": {relationship_id: {"state_json": ..., "from_id": ...,
+                                                "to_id": ..., "rel_type": ..., "exists": True}},
             "hooks":      {hook_id:      {"status": ..., "exists": True}},
             "debts":      {debt_id:      {"status": ..., "severity": ..., "exists": True}},
             "events":     {event_id:     {"exists": True}},
@@ -255,7 +254,9 @@ def _build_entity_index(
                 ).fetchall()
                 for r in rows:
                     data_json = _parse_required_json(r["data_json"], {})
-                    _ensure("locations", r["location_id"], {"data_json": data_json if isinstance(data_json, dict) else {}})
+                    _ensure("locations", r["location_id"], {
+                        "data_json": data_json if isinstance(data_json, dict) else {}
+                    })
 
                 # factions
                 rows = conn.execute(
@@ -264,7 +265,9 @@ def _build_entity_index(
                 ).fetchall()
                 for r in rows:
                     data_json = _parse_required_json(r["data_json"], {})
-                    _ensure("factions", r["faction_id"], {"data_json": data_json if isinstance(data_json, dict) else {}})
+                    _ensure("factions", r["faction_id"], {
+                        "data_json": data_json if isinstance(data_json, dict) else {}
+                    })
 
                 # world_rules
                 rows = conn.execute(
@@ -273,7 +276,9 @@ def _build_entity_index(
                 ).fetchall()
                 for r in rows:
                     data_json = _parse_required_json(r["data_json"], {})
-                    _ensure("world_rules", r["world_rule_id"], {"data_json": data_json if isinstance(data_json, dict) else {}})
+                    _ensure("world_rules", r["world_rule_id"], {
+                        "data_json": data_json if isinstance(data_json, dict) else {}
+                    })
 
                 # relationships
                 rows = conn.execute(

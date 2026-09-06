@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from packages.core.story_state.delta_repair import repair_delta
 from packages.core.story_state.validator import validate_delta
 
@@ -671,7 +669,7 @@ def test_repair_id_prefix_reconcile_in_relationship_endpoints():
                 "op": "add",
                 "target_id": "rel_new",
                 "from_character_id": f"char_{_F3_HEX}",  # 实际是 character
-                "to_character_id": f"char_other_aa",
+                "to_character_id": "char_other_aa",
                 "relation_type": "ally",
                 "after": {"intensity": 0.8},
                 "confidence": 0.9,
@@ -682,7 +680,7 @@ def test_repair_id_prefix_reconcile_in_relationship_endpoints():
                 "change_id": "rc_2",
                 "op": "add",
                 "target_id": "rel_new2",
-                "from_character_id": f"char_a",
+                "from_character_id": "char_a",
                 "to_character_id": f"char_{_F3_HEX}",  # 实际是 character
                 "relation_type": "ally",
                 "after": {"intensity": 0.7},

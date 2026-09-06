@@ -18,12 +18,11 @@
 from __future__ import annotations
 
 from packages.workflows.chapter_commit.pipeline import (
+    _DEBT_OPEN_STATUSES,
+    _HOOK_OPEN_STATUSES,
     _collect_resolvable_ids,
     _inject_resolvable_ids_into_config,
-    _HOOK_OPEN_STATUSES,
-    _DEBT_OPEN_STATUSES,
 )
-
 
 # -----------------------------------------------------------------------------
 # _collect_resolvable_ids

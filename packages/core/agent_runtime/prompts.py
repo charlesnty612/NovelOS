@@ -50,7 +50,7 @@ _AGENT_TO_CAPABILITY: dict[str, str] = {
     "summarizer": "light",      # V3 P0-2
     "critic": "light",          # V3 P0-2
     "deep_reviewer": "reasoning",  # V1.3 二审 AI：三层清单核销（设定一致性→节拍核销→行为链连续性），推理型
-    "scene_planner": "creative_writing",  # V3.9.2+：运行于 chapter-write 管线，按管线阶段归入正文写作（V3.9.2 前归 reasoning）
+    "scene_planner": "creative_writing",  # V3.9.2+：运行于 chapter-write 管线，归入正文写作（V3.9.2 前归 reasoning）
     "premise_designer": "premise_design",       # V3.7 project-init
     "world_builder": "world_building",          # V3.7 project-init
     "character_designer": "character_design",   # V3.7 project-init

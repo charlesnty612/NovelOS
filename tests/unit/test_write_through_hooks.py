@@ -27,7 +27,6 @@ import pytest
 
 from packages.core.story_state.write_through import write_through
 
-
 # ---------------------------------------------------------------------------
 # DB fixture：最小化项目/章节/hooks 表，匹配 0001_init.sql 关键列+CHECK。
 # ---------------------------------------------------------------------------

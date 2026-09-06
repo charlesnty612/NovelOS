@@ -16,7 +16,6 @@ import json
 from pathlib import Path
 
 import httpx
-import pytest
 
 from packages.core.api.main import create_app
 from packages.core.config import Settings

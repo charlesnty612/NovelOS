@@ -14,14 +14,11 @@
 
 from __future__ import annotations
 
-import pytest
-
 from packages.core.quality.ai_patterns import (
     AI_PATTERN_FORBIDDEN_WORDS,
     DEFAULT_DASH_THRESHOLD_PER_1K,
     scan_ai_patterns,
 )
-
 
 # ---------------------------------------------------------------------------
 # 基础行为

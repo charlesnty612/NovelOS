@@ -331,7 +331,6 @@ class OpenAICompatibleProvider:
 
                 text_parts: list[str] = []
                 usage_raw: dict[str, Any] = {}
-                saw_done = False
                 # finish_reason：OpenAI 流式在每个 content chunk 的 ``choices[0]``
                 # 给 ``finish_reason``（最后一条非空 content chunk 通常是 ``stop``，
                 # ``length`` 表示 max_tokens 截断）。记录**最后一次**非 None 值，避免
@@ -362,7 +361,6 @@ class OpenAICompatibleProvider:
                         continue
                     payload = line[len("data:"):].strip()
                     if payload == "[DONE]":
-                        saw_done = True
                         break
                     try:
                         chunk = json.loads(payload)

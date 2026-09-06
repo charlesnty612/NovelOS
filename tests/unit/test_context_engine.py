@@ -22,7 +22,6 @@ from pathlib import Path
 from packages.core.context_engine.builders import build_director_input
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
-
 from packages.workflows.chapter_write.pipeline import _collect_scene_planner_inputs
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

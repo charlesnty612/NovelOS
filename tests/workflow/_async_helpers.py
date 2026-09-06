@@ -12,7 +12,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 # 需要注入到测试文件顶部的 helper 代码
 HELPER_PY = '''
 # 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload

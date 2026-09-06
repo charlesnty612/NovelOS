@@ -61,6 +61,7 @@ from .models import QualityContext, QualityReport
 from .payoff import PayoffContext
 from .payoff import evaluate as payoff_evaluate
 from .style_trend import DECAY_THRESHOLD, RULE_ID, WINDOW, check_style_trend
+
 # V3.7：字数度量与字数带（详见 README §13 + wordcount 模块 docstring）
 from .wordcount import classify_prose_length, visible_chars, word_band
 

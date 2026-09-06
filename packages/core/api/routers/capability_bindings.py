@@ -66,7 +66,7 @@ def upsert_capability_binding(capability: str, payload: dict, request: Request) 
     settings = request.app.state.settings
     svc = BindingService(settings.db_path)
     try:
-        binding = svc.upsert(capability, deduped)
+        svc.upsert(capability, deduped)
     except UnknownCapabilityError as exc:
         raise HTTPException(
             status_code=404, detail=f"capability {exc.args[0]!r} not found"

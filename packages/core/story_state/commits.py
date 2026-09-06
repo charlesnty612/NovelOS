@@ -51,7 +51,6 @@ from .snapshot import (
 from .snapshots import _dump, latest_snapshot_version
 from .validator import validate_delta
 from .write_through import apply_inverse_cleanup_to_state, write_through
-from .write_through import encode_who_knows as _encode_who_knows
 
 
 # 修复 wfr_3cb2182a30f6：rollback 逆清理 hint 改为字段级 {world_id, field, value}，

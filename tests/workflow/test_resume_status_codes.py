@@ -14,15 +14,14 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from pathlib import Path
 
 import httpx
 
 from packages.core.api.main import create_app
+from packages.core.api.routers.workflows import log as wf_log
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
-from packages.core.api.routers.workflows import log as wf_log
 
 
 def _setup_app(tmp_path: Path):
@@ -49,7 +48,6 @@ def test_resume_unknown_run_maps_to_404(tmp_path: Path, caplog, monkeypatch) -> 
     # caplog 在已有 configure_logging 的环境里对 novelos.* logger propagate 不可靠；
     # 改用 monkeypatch 替换 logger.debug 为可断言 spy。
     debug_calls: list[str] = []
-    orig_debug = wf_log.debug
     def _spy_debug(msg, *args, **kwargs):
         debug_calls.append(msg % args if args else str(msg))
     monkeypatch.setattr(wf_log, "debug", _spy_debug)
@@ -104,7 +102,6 @@ def test_resume_non_paused_run_maps_to_409(tmp_path: Path, caplog, monkeypatch) 
     # caplog 在已有 configure_logging 的环境里对 novelos.* logger propagate 不可靠；
     # 改用 monkeypatch 替换 logger.debug 为可断言 spy。
     debug_calls: list[str] = []
-    orig_debug = wf_log.debug
     def _spy_debug(msg, *args, **kwargs):
         debug_calls.append(msg % args if args else str(msg))
     monkeypatch.setattr(wf_log, "debug", _spy_debug)
@@ -183,7 +180,6 @@ def test_resume_value_error_409_via_mocked_resume_async(tmp_path: Path, caplog, 
     # caplog 在已有 configure_logging 的环境里对 novelos.* logger propagate 不可靠；
     # 改用 monkeypatch 替换 logger.debug 为可断言 spy。
     debug_calls: list[str] = []
-    orig_debug = wf_log.debug
     def _spy_debug(msg, *args, **kwargs):
         debug_calls.append(msg % args if args else str(msg))
     monkeypatch.setattr(wf_log, "debug", _spy_debug)
@@ -268,7 +264,6 @@ def test_resume_value_error_404_via_mocked_resume_async(tmp_path: Path, caplog, 
     # caplog 在已有 configure_logging 的环境里对 novelos.* logger propagate 不可靠；
     # 改用 monkeypatch 替换 logger.debug 为可断言 spy。
     debug_calls: list[str] = []
-    orig_debug = wf_log.debug
     def _spy_debug(msg, *args, **kwargs):
         debug_calls.append(msg % args if args else str(msg))
     monkeypatch.setattr(wf_log, "debug", _spy_debug)

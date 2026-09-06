@@ -30,6 +30,7 @@ import sqlite3
 from pathlib import Path
 
 import httpx
+import pytest
 
 from packages.core.api.main import create_app
 from packages.core.config import Settings
@@ -235,8 +236,8 @@ def test_double_rollback_blocked_by_db_unique_index(tmp_path: Path):
     无关 bug：纯 relationship_changes 的 delta 会触发 build_inverse_delta 中
     rollback_reason 未赋值；不属于本次任务范围）。
     """
-    import sqlite3 as _sqlite3
     import datetime as _dt
+    import sqlite3 as _sqlite3
     import uuid as _uuid
 
     app = _create_app(tmp_path)
@@ -351,5 +352,3 @@ def test_double_rollback_blocked_by_db_unique_index(tmp_path: Path):
         conn.close()
 
 
-# 局部 pytest 导入（test 文件用 pytest.raises）
-import pytest

@@ -24,7 +24,6 @@ import pytest
 from packages.core.story_state.delta_repair import repair_delta
 from packages.core.story_state.write_through import write_through
 
-
 # ---------------------------------------------------------------------------
 # DDL（最小化：匹配 0001_init.sql + 0017 唯一索引的关键列）
 # ---------------------------------------------------------------------------

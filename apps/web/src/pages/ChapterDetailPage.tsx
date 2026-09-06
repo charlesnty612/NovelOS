@@ -5,7 +5,6 @@ import type {
   Chapter,
   Draft,
   ModelProfile,
-  QualityGateCheckpoint,
   QualityReport,
   WorkflowRun,
   WorkflowStartPayload,
@@ -24,7 +23,7 @@ import {
 import { ApprovalCard } from '../components/ApprovalCard';
 import { ProseText } from '../components/ProseText';
 import { useApiCall } from '../hooks/useApiCall';
-import { usePoll } from '../hooks/usePoll';
+import { useChapterRunOrchestration } from '../hooks/useChapterRunOrchestration';
 import {
   countHighRiskChanges,
   getButtonAvailability,
@@ -32,12 +31,8 @@ import {
   isCancelledByUserNode,
   isRejectedForRevisionRun,
   isRejectedRun,
-  isRunForChapter,
-  pickActiveRun,
-  pickLatestRun,
 } from '../utils/chapterState';
 import { formatDateTime, formatJson, tryParseJsonObject } from '../utils/format';
-import { extractPausePayload } from '../utils/pausePayload';
 import { ApiError } from '../api/client';
 
 export function ChapterDetailPage() {
@@ -86,90 +81,17 @@ export function ChapterDetailPage() {
     void reloadQuality();
   }, [reloadQuality]);
 
-  // ---- workflow runs（按 started_at DESC） ----
-  const runsCall = useApiCall<WorkflowRun[]>(
-    () => workflowsApi.listByProject(projectId),
-    [projectId],
-  );
-  const chapterRuns = useMemo(
-    () =>
-      (runsCall.data ?? [])
-        .filter((r) => isRunForChapter(r, chapterId))
-        .slice()
-        .sort((a, b) =>
-          a.started_at < b.started_at ? 1 : a.started_at > b.started_at ? -1 : 0,
-        ),
-    [runsCall.data, chapterId],
-  );
-
-  // ---- 选中 run（默认最新） ----
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  // runs 重新加载后：若没选中，则选最新一条；若有但已不存在则重置
-  useEffect(() => {
-    if (chapterRuns.length === 0) {
-      setSelectedRunId(null);
-      return;
-    }
-    if (!selectedRunId || !chapterRuns.find((r) => r.run_id === selectedRunId)) {
-      setSelectedRunId(pickLatestRun(chapterRuns, chapterId)?.run_id ?? null);
-    }
-  }, [chapterRuns, selectedRunId, chapterId]);
-
-  const selectedRunSummary =
-    chapterRuns.find((r) => r.run_id === selectedRunId) ?? null;
-
-  // ---- 轮询选中 run：RUNNING 时 2s 拉一次，PAUSED/终态停 ----
-  const activeRun = pickActiveRun(chapterRuns, chapterId);
-  const pollTargetId = activeRun ? activeRun.run_id : null;
-  const poll = usePoll<WorkflowRun>({
-    fn: () => workflowsApi.get(pollTargetId as string),
-    intervalMs: 2000,
-    enabled: !!pollTargetId,
-    stopWhen: (latest) => {
-      if (!latest) return true;
-      return latest.status !== 'RUNNING' && latest.status !== 'PENDING';
-    },
-    stopOnError: true,
-    onResult: (latest) => {
-      // 轮询到结果后同步刷新 chapter / drafts / runs
-      void chapterCall.reload();
-      void draftsCall.reload();
-      void runsCall.reload();
-      // 异步化后：run 停到 PAUSED 时，detail（checkpoint 详情，含 pause_payload）
-      // 是在 RUNNING 阶段拉的、不含暂停载荷——必须重拉，审批卡才渲染得出来。
-      // （detail 声明在本 hook 之后，闭包调用时机在渲染完成后，安全。）
-      if (latest.status === 'PAUSED') void detail.reload();
-    },
-  });
-
-  // 详情（节点时间线）只在选中 run 后再拉
-  const detail = useApiCall<WorkflowRun>(
-    () => workflowsApi.get(selectedRunId as string),
-    [selectedRunId],
-  );
-  const detailRun = detail.data;
-  const pausePayload = extractPausePayload(detailRun?.checkpoint_json) ?? undefined;
-
-  // V1.4：从选中 run 的 checkpoint_json 中提取 quality_gate 节点暴露字段（参照系消费
-  // + 改稿引导）。无 quality_gate 节点时为 null；QualityPanel 按空态处理。
-  const qualityGateCheckpoint = useMemo<QualityGateCheckpoint | null>(() => {
-    const ckpt = detailRun?.checkpoint_json;
-    if (!ckpt || typeof ckpt !== 'object') return null;
-    const qg = (ckpt as Record<string, unknown>)['quality_gate'];
-    if (!qg || typeof qg !== 'object') return null;
-    const obj = qg as Record<string, unknown>;
-    return {
-      blocked: Boolean(obj['blocked']),
-      mode: (typeof obj['mode'] === 'string' ? (obj['mode'] as string) : 'report'),
-      reference_consumption:
-        (obj['reference_consumption'] as QualityGateCheckpoint['reference_consumption']) ??
-        { source: 'project_refs_dir', files: [], total_chars: 0, files_count: 0 },
-      revision_guidance:
-        (Array.isArray(obj['revision_guidance'])
-          ? (obj['revision_guidance'] as QualityGateCheckpoint['revision_guidance'])
-          : []) ?? [],
-    };
-  }, [detailRun?.checkpoint_json]);
+  // ---- run 编排（runs 列表/选中/轮询/详情）抽离至 useChapterRunOrchestration ----
+  const handlePollTick = useCallback(() => {
+    void chapterCall.reload();
+    void draftsCall.reload();
+  }, [chapterCall, draftsCall]);
+  const orch = useChapterRunOrchestration({ projectId, chapterId, onPollTick: handlePollTick });
+  const {
+    chapterRuns, selectedRunId, setSelectedRunId, selectedRunSummary,
+    activeRun, poll, detail, detailRun, pausePayload, qualityGateCheckpoint,
+    runsReload, detailReload,
+  } = orch;
 
   // ---- 草稿选中版本（受控，提升至父组件，供审校按钮读取 payload）----
   // drafts 是 version DESC 排序（drafts[0] 即最新一版）；选中版本变化时同步刷新
@@ -322,14 +244,14 @@ export function ChapterDetailPage() {
         else resp = await workflowsApi.startCommit(projectId, chapterId, requestPayload);
         // 启动后立刻刷新 + 选中该 run
         setSelectedRunId(resp.run_id);
-        await Promise.all([chapterCall.reload(), runsCall.reload(), draftsCall.reload()]);
+        await Promise.all([chapterCall.reload(), runsReload(), draftsCall.reload()]);
       } catch (e: unknown) {
         setActionErr(e instanceof Error ? e.message : '启动失败');
       } finally {
         setSubmitting(false);
       }
     },
-    [projectId, chapterId, chapter, chapterCall, runsCall, draftsCall, selectedDraftVersion],
+    [projectId, chapterId, chapter, chapterCall, draftsCall, selectedDraftVersion],
   );
 
   const handleResume = useCallback(
@@ -355,7 +277,7 @@ export function ChapterDetailPage() {
           if (opts.note) human_input['note'] = opts.note;
         }
         await workflowsApi.resume(selectedRunSummary.run_id, { human_input });
-        await Promise.all([chapterCall.reload(), runsCall.reload(), draftsCall.reload(), detail.reload()]);
+        await Promise.all([chapterCall.reload(), runsReload(), draftsCall.reload(), detailReload()]);
       } catch (e: unknown) {
         setActionErr(e instanceof Error ? e.message : '审批失败');
         throw e;
@@ -364,7 +286,7 @@ export function ChapterDetailPage() {
         setReviseLooping(false);
       }
     },
-    [selectedRunSummary, chapterCall, runsCall, draftsCall, detail],
+    [selectedRunSummary, chapterCall, runsReload, draftsCall, detailReload],
   );
 
   // V1.5 / 横幅：构造「正在运行」实时详情。优先用 poll 拉到的最新详情（含 nodes /
@@ -388,16 +310,16 @@ export function ChapterDetailPage() {
       // 成功：触发既有刷新链路，poll 也会停到非 RUNNING，banner 自然消失
       await Promise.all([
         chapterCall.reload(),
-        runsCall.reload(),
-        detail.reload(),
+        runsReload(),
+        detailReload(),
       ]);
     } catch (e: unknown) {
       // 409：run 已不在 RUNNING（终态/PAUSED）→ 视为已结束，刷新即可，不报错
       if (e instanceof ApiError && e.status === 409) {
         await Promise.all([
           chapterCall.reload(),
-          runsCall.reload(),
-          detail.reload(),
+          runsReload(),
+          detailReload(),
         ]);
         return;
       }
@@ -405,15 +327,15 @@ export function ChapterDetailPage() {
       if (e instanceof ApiError && e.status === 404) {
         await Promise.all([
           chapterCall.reload(),
-          runsCall.reload(),
-          detail.reload(),
+          runsReload(),
+          detailReload(),
         ]);
         return;
       }
       // 其它错误：信息抛给 ErrorBanner（与既有 actionErr 共用通道）
       setActionErr(e instanceof Error ? e.message : '停止工作流失败');
     }
-  }, [runningDetail, chapterCall, runsCall, detail]);
+  }, [runningDetail, chapterCall]);
 
   // 渲染
   return (

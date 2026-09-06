@@ -21,7 +21,6 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 from packages.workflows.chapter_review.pipeline import _collect_settings_digest
 
-
 # ---------------------------------------------------------------------------
 # 复用 test_chapter_review_critic 的脚手架（最小裁剪，避免 import 拉全文件）
 # ---------------------------------------------------------------------------

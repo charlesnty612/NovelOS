@@ -18,6 +18,7 @@ from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations
 
+
 # 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
 async def _get_run_via_http(app, run_id: str) -> dict | None:
     import httpx
@@ -30,7 +31,8 @@ async def _get_run_via_http(app, run_id: str) -> dict | None:
 
 
 async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 30.0) -> dict:
-    import asyncio, time
+    import asyncio
+    import time
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         run = await _get_run_via_http(app, run_id)

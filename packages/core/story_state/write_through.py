@@ -33,9 +33,6 @@ from typing import Any
 
 from packages.core.ids import new_id, now_iso
 
-
-_logger = logging.getLogger(__name__)
-
 from .snapshots import _parse_required_json
 from .write_helpers import (
     dump_json as _dump_json,
@@ -46,6 +43,8 @@ from .write_helpers import (
 from .write_helpers import (
     encode_who_knows as _encode_who_knows_shared,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def _dump(value: Any) -> str:
@@ -283,7 +282,8 @@ def apply_inverse_cleanup_to_state(state: dict, cleanup: dict) -> None:
                         rule[k] = v
                 else:
                     _logger.warning(
-                        "rollback cleanup: restore_world_rule_states field 为空且 value 非 dict（world_rule_id=%r），跳过",
+                        "rollback cleanup: restore_world_rule_states field 为空且 value 非 dict"
+                        "（world_rule_id=%r），跳过",
                         rid,
                     )
 

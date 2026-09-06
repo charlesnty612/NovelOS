@@ -49,10 +49,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import sqlite3
 from typing import Any
 
 from .snapshots import _parse_required_json
+
+logger = logging.getLogger("novelos.story_state.snapshot")
 
 # ----------------------------------------------------------------------------- helpers
 
@@ -696,7 +699,7 @@ def repair_current_snapshot_world(
         # 但仍显式守卫一次：若为非 dict（极端情况下 snap.get('world') 越过了上面的
         # isinstance 判断），按空 dict 路径处理，与函数内 world.get 守卫口径一致。
         if not isinstance(world, dict):
-            _logger.warning(
+            logger.warning(
                 "repair_current_snapshot_world: world 非 dict（类型=%s），"
                 "按空 dict 路径处理",
                 type(world).__name__,

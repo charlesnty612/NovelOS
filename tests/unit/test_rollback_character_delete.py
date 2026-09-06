@@ -28,7 +28,6 @@ import httpx
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 
-
 # ----------------------------------------------------------------- helpers
 
 
@@ -160,7 +159,6 @@ def test_rollback_character_add_deletes_character_row_and_states_and_snapshot(tm
             r = await _request(app, "GET", f"/api/projects/{pid}/state")
             assert r.status_code == 200
             baseline_count = len(r.json().get("characters") or [])
-            baseline_ids = {c["character_id"] for c in (r.json().get("characters") or [])}
 
             # 通过 REST 新建一个角色（characters 行 INSERT）
             cid = await _new_character_via_rest(app, pid, name="新登场角色")
@@ -408,7 +406,7 @@ def test_rollback_character_update_keeps_character_and_restores_before(tmp_path:
                 "new_hooks": [],
                 "debt_changes": [],
             }
-            commit1 = await _commit_delta(app, pid, d1)
+            await _commit_delta(app, pid, d1)
 
             # 第二次 update：state.location = "Cave"（逆回滚需恢复 Forest）
             d2 = {

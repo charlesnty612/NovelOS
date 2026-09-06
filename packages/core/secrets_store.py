@@ -32,7 +32,6 @@ import json
 import os
 from pathlib import Path
 from threading import RLock
-from typing import Any
 
 from .logging_config import get_logger
 

@@ -191,7 +191,7 @@ def test_plot_row_to_timeline_reads_visibility_and_who_knows(tmp_path: Path):
     db_path = _bootstrap(tmp_path)
     pid = _make_project(db_path)
     plot_svc = PlotService(db_path)
-    ev = plot_svc.create_event(
+    plot_svc.create_event(
         project_id=pid,
         type="conflict",
         time={"timeline_day": 2},

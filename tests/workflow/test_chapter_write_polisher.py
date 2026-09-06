@@ -18,7 +18,6 @@ from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
-
 # ---------------------------------------------------------------------------
 # 异步轮询 / 装配 helpers（与既有 chapter_write 测试一致）
 # ---------------------------------------------------------------------------

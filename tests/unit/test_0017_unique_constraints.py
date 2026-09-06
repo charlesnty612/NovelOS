@@ -34,7 +34,6 @@ from packages.core.workflow_runtime.engine import (
     WorkflowRunConflict,
 )
 
-
 # ---------------------------------------------------------------------------
 # 共享 DDL fixture（白盒验证 write_through / engine 配套，不走 migrations）
 # ---------------------------------------------------------------------------
@@ -290,7 +289,6 @@ def test_engine_double_start_same_chapter_raises_conflict(tmp_path: Path) -> Non
         time.sleep(0.8)
         return {}
 
-    slow_nodes = [WorkflowNode(node_id="slow", kind="State", fn=_slow_fn)]
 
     # 第一个 start：用线程跑（在后台停留 RUNNING 状态），主线程即可发起第二个 start
     import threading

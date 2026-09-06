@@ -59,7 +59,7 @@ AGENT_CAPABILITY: dict[str, str] = {
     "summarizer": "light",      # V3 P0-2：结构化提取走轻量模型
     "critic": "light",          # V3 P0-2：LLM 评审员走轻量模型
     "deep_reviewer": "reasoning",  # V1.3 二审 AI：三层清单核销（设定一致性→节拍核销→行为链连续性），推理型
-    "scene_planner": "creative_writing",  # V3.9.2+：运行于 chapter-write 管线，按管线阶段归入正文写作（V3.9.2 前归 reasoning）
+    "scene_planner": "creative_writing",  # V3.9.2+：运行于 chapter-write 管线，归入正文写作（V3.9.2 前归 reasoning）
     # V3.7 project-init 四个 agent 显式映射：避免 ``capability_for`` 默认回退
     # reasoning——把「题材定位 / 世界观 / 角色设计 / 卷纲」与正文写作分离，
     # 前端可独立分配更便宜的小模型。

@@ -35,11 +35,8 @@ from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
-from packages.domain.chapter.models import ChapterCreate
-from packages.domain.chapter.service import ChapterService
 from packages.domain.character.models import CharacterCreate, CharacterUpdate
 from packages.domain.character.service import CharacterService
-from packages.domain.plot.models import PLOT_EVENT_TYPES
 from packages.domain.plot.service import PlotService
 from packages.domain.project.models import ProjectCreate, ProjectUpdate
 from packages.domain.project.service import ProjectService
@@ -948,7 +945,6 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
     if not title:
         title = "未命名项目"
     genre = (premise.get("genre") or brief.get("genre") or "").strip()
-    logline = (premise.get("logline") or brief.get("logline") or "").strip()
     target_words = premise.get("target_words") or brief.get("target_words")
 
     premise_text = _build_premise_text(premise, brief)

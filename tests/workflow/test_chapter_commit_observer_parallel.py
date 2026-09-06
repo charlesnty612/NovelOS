@@ -23,11 +23,11 @@ from pathlib import Path
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
+from packages.workflows.chapter_commit import observer as _observer_mod
 from packages.workflows.chapter_commit.pipeline import (
     _observer_parallel_enabled,
     _run_observer_legs_in_parallel,
 )
-
 
 
 # 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
@@ -50,7 +50,8 @@ async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED
     SQLite 跨连接视角 + 后台线程落库时延：单节点 mock 流程通常 < 1s 跑完，
     但 polling 必须等到节点行 FAILED/COMPLETED 也写入——轮询间隔 0.2s 足以。
     """
-    import asyncio, time
+    import asyncio
+    import time
     deadline = time.monotonic() + timeout
     last_run = None
     while time.monotonic() < deadline:
@@ -141,8 +142,7 @@ def _install_sleepy_observer(monkeypatch, sleep_seconds: float) -> list[tuple[fl
     # 改为：monkey-patch ``packages.workflows.chapter_commit.pipeline.run_agent``，让
     # observer 路径上的 run_agent 同步执行 sleep + 返回 7 数组 noop；其它节点原样透传。
     timings: list[tuple[float, str]] = []
-    import packages.workflows.chapter_commit.pipeline as _pipeline
-    real_run_agent = _pipeline.run_agent
+    real_run_agent = _observer_mod.run_agent
 
     def _patched(db_path, agent_name, payload, run_id, **kwargs):
         expected = kwargs.get("expected")
@@ -157,7 +157,7 @@ def _install_sleepy_observer(monkeypatch, sleep_seconds: float) -> list[tuple[fl
             }
         return real_run_agent(db_path, agent_name, payload, run_id, **kwargs)
 
-    monkeypatch.setattr(_pipeline, "run_agent", _patched)
+    monkeypatch.setattr(_observer_mod, "run_agent", _patched)
     return timings
 
 
@@ -475,7 +475,7 @@ def test_observer_parallel_unit_helper_invokes_run_agent_twice(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "packages.workflows.chapter_commit.pipeline.run_agent", _fake_runner
+        "packages.workflows.chapter_commit.observer.run_agent", _fake_runner
     )
 
     leg_a_payload = {"extraction_scope": "entities"}
@@ -527,7 +527,7 @@ def test_observer_parallel_unit_helper_one_leg_failure_propagates(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "packages.workflows.chapter_commit.pipeline.run_agent", _fake_runner
+        "packages.workflows.chapter_commit.observer.run_agent", _fake_runner
     )
 
     raised = False

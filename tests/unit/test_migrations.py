@@ -800,8 +800,9 @@ def test_0020_backfills_empty_shell_plot_event_description(tmp_path: Path):
     - timeline_events 对应行（event_id 匹配且 description IS NULL）被回填；
     - 已正常描述的事件 / 已 commit 的事件 / 非空壳事件均不被覆盖。
     """
-    from packages.core.ids import new_id, now_iso
     import json
+
+    from packages.core.ids import new_id, now_iso
 
     db_path = _fresh_db(tmp_path)
     apply_migrations(db_path, MIGRATIONS_DIR)
@@ -1029,8 +1030,9 @@ def test_0020_backfills_empty_shell_plot_event_description(tmp_path: Path):
 
 def test_0020_idempotent_rerun_no_changes(tmp_path: Path):
     """V3.10 init 空壳修复：0020 重跑 SQL 不应改写已回填的行（幂等）。"""
-    from packages.core.ids import new_id, now_iso
     import json
+
+    from packages.core.ids import new_id, now_iso
 
     db_path = _fresh_db(tmp_path)
     apply_migrations(db_path, MIGRATIONS_DIR)
