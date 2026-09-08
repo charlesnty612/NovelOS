@@ -21,3 +21,30 @@ packages/novelos.egg-info/
 # 集中存储 API key 的密钥文件（V3.8）；可被环境变量 NOVELOS_SECRETS_FILE 覆盖
 secrets.json
 secrets.*.json
+
+# ==== 内容层 / 操作痕迹 分仓（2026-09-08 起）====
+# 软件、内容、操作痕迹三仓分离：以下内容层与痕迹层已迁出到
+#   内容仓:   D:/zcodeproject/NovelOS-Content
+#   痕迹仓:   D:/zcodeproject/NovelOS-Artifacts
+# 软件仓（本仓）只保留软件工具层与运行时依赖的少量工程文档（docs/agents|impl|adr|
+# evaluation|reference-canon/schemas|roadmap 部分|story-state pivot|v1.2 调研）。
+# 以下规则防止内容/痕迹文件被重新加回软件仓。
+# 注：白名单 docs/ 目录已在索引中保留，这里只忽略已迁出的路径形态。
+/docs/evals/
+/docs/deconstruct/
+/docs/reviews/
+/docs/analysis/
+/docs/architecture/
+/docs/data-model/
+/docs/state-model/
+/docs/testing/
+/docs/PRD设计评审-主控版-2026-08-23.md
+/PRD评估报告-2026-08-23.md
+/#NovelOS.md
+/单章耗时诊断报告.md
+# 参照系正文文档迁出；schema 留软件仓（deconstruct_book 运行时读）
+/docs/reference-canon/*.md
+# 内容仓自身（若被放到本仓同层，避免递归纳管）
+/NovelOS-Content/
+/NovelOS-Artifacts/
+
