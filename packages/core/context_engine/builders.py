@@ -265,5 +265,4 @@ __all__ = [
     "build_director_input",
     "build_observer_input",
     "build_writer_input",
-    "__all__",
 ]

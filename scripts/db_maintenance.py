@@ -277,9 +277,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser(
+    list_p = sub.add_parser(
         "list",
         help="列出疑似 stale 的 RUNNING 行（只读，不修改库）。",
+    )
+    list_p.add_argument(
+        "--older-than-minutes",
+        type=int,
+        default=DEFAULT_OLDER_THAN_MINUTES,
+        metavar="N",
+        help=f"stale 阈值（分钟，默认 {DEFAULT_OLDER_THAN_MINUTES}）。",
     )
 
     fix_p = sub.add_parser(
@@ -341,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
     conn = get_connection(db_path)
     try:
         if args.command == "list":
-            rows = _find_stale(conn, minutes=DEFAULT_OLDER_THAN_MINUTES)
+            rows = _find_stale(conn, minutes=args.older_than_minutes)
             _print_list(rows)
             return 0
 

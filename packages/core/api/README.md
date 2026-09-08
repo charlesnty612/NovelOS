@@ -31,7 +31,7 @@
 | `app` | `packages/core/api/main.py` | 默认 FastAPI 实例（uvicorn 入口） |
 | `__version__ = "0.1.0"` | `packages/core/api/main.py` | API 版本号 |
 | `lifespan(app)` | `packages/core/api/main.py` | 异步上下文管理器，启动时执行迁移 |
-| `GET /api/health` | `packages/core/api/main.py` | 返回 `{status:"ok", version, tables:35}`（V3.4：0015 加 `volumes` 后 35 业务表；口径为总表数减 `_migrations`、排除 `chapter_fts%` 影子表） |
+| `GET /api/health` | `packages/core/api/main.py` | 返回 `{status:"ok", version, tables:37}`（口径为总表数减 `_migrations`、排除 `chapter_fts%` 影子表） |
 | `GET /api/chapters/{chapter_id}/context-preview` | `packages/core/api/routers/workflows.py`（Sprint 13 下半新增） | dry-run，返回 context 装配预览（layers + token 估算 + items；只读、不调 LLM、不写库） |
 | `GET /api/ai-call-logs` | `packages/core/api/routers/ai_call_logs.py`（Sprint 13 下半新增） | 分页列出 ai_call_logs 摘要（默认 limit=50，上限 200；支持 `?project_id=`（JOIN workflow_runs + chapters）、`?node=` 过滤）；不含 API key |
 | `GET /api/ai-call-logs/{log_id}` | 同上 | 单条详情（含 `input_context_ids` + `output` 解析后 JSON） |
@@ -68,7 +68,7 @@ NOVELOS_PORT=19090 python -m packages.core.api.main
 
 # 浏览器
 curl http://127.0.0.1:18081/api/health
-# → {"status":"ok","version":"0.1.0","tables":31}
+# → {"status":"ok","version":"0.1.0","tables":37}
 
 # 测试（httpx ASGI transport）
 pytest tests/integration/test_health.py -q
@@ -95,7 +95,7 @@ pytest tests/integration/test_health.py -q
 
 - **CORS 白名单**：当前仅 `127.0.0.1:5173` 与 `localhost:5173`；后续若新增前端端口必须同步更新。
 - **迁移触发**：lifespan 启动时无条件执行迁移；幂等由 `apply_migrations` 内部保证。
-- **`tables` 计算**：`count_tables` 包含 `_migrations` 表（runner 自建），端点输出 `max(tables-1, 0)`，业务表恒为 31。
+- **`tables` 计算**：`count_tables` 包含 `_migrations` 表（runner 自建），端点输出 `max(tables-1, 0)`，业务表恒为 37。
 - **路由前缀**：业务路由应挂在 `/api` 前缀下，与 vite dev proxy 配合。
 - **SPA 路由注册顺序**：SPA fallback catch-all `/{full_path:path}` 必须最后注册；`/api/health` / 业务路由 / `root()` 必须先注册，否则 SPA 会吃掉 API 请求或吃掉 `GET /` 服务信息。
 - **NOVELOS_PORT vs NOVELOS_API_PORT**：两个端口变量语义不同——`NOVELOS_PORT` 只影响 `packages/core/api/main.py:__main__` 入口；`NOVELOS_API_PORT` 只影响 `Settings.api_port`（被 `scripts/serve.py` 消费）。不要混用。

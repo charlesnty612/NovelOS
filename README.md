@@ -45,14 +45,14 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0023_project_word_band.sql，35 张物理业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0023_project_word_band.sql，37 张物理业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖）
 tests/                   pytest（unit / integration / workflow / api / evals）
 scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
 docs/                    设计文档、PRD、实现计划（docs/impl/IMPLEMENTATION-PLAN-v0.md）
 prompts/                 Agent prompt 源文件（agents/sync 会同步到库内）
 ```
 
-> 注：`apps/desktop/` 是 S0 时代的桌面骨架（未随 Sprint 推进维护）；当前唯一前端为 `apps/web/`。
+
 
 ## 快速开始
 
@@ -63,7 +63,7 @@ jsonschema / httpx；测试另需 pytest / ruff）。
 # 1) 安装依赖
 pip install -e ".[dev]"
 
-# 2) 执行数据库迁移（生成 data/novelos.db；35 张业务表 + _migrations）
+# 2) 执行数据库迁移（生成 data/novelos.db；37 张业务表 + _migrations）
 python scripts/migrate.py
 
 # 3) 前端构建（构建产物 apps/web/dist，后端会自动托管）
@@ -94,17 +94,16 @@ python -m pytest -q
   `packages/core/config.py:Settings.api_port`，`python -m packages.core.api.main`
   与 `python scripts/serve.py` 都通过该字段读取。
 - 优先级：`NOVELOS_PORT` > `NOVELOS_API_PORT` > 默认 18081（兼容旧变量）。
-- 前端 dev 代理从 `NOVELOS_PORT` / `NOVELOS_API_PORT` 读后端端口（见
-  `apps/web/vite.config.ts`；`apps/desktop/vite.config.ts` 为停维护骨架，仅供参考）；改端口后需重启
-  vite dev 才生效。
+- 前端 dev 代理从 `NOVELOS_PORT` / `NOVELOS_API_PORT` 读后端端口（见 `apps/web/vite.config.ts`）；
+  改端口后需重启 vite dev 才生效。
 
-健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=35`，业务表数）。
+健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=37`，业务表数；含 `_migrations` 物理共 38 张）。
 
 ## 测试
 
 ```bash
-# 后端全量（当前基线 约 1041 passed，2 skipped）
-python -m pytest tests/ -q --ignore=tests/evals
+# 后端全量（当前基线 1693 passed，2 skipped；-n 4 并行，约 4 分钟）
+python -m pytest tests/ -q --ignore=tests/evals -n 4
 
 # Golden 回归 eval（当前 3/3）
 python scripts/eval_regression.py
@@ -115,7 +114,7 @@ python scripts/smoke_e2e.py
 # 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
 python scripts/real_llm_e2e.py
 
-# 前端单测（vitest；当前 202）
+# 前端单测（vitest；当前 416）
 cd apps/web && npm run test
 ```
 
@@ -127,16 +126,19 @@ cd apps/web && npm run test
 | `NOVELOS_DB_PATH` | `{data_dir}/novelos.db` | 覆盖默认 db 路径 |
 | `NOVELOS_LOG_LEVEL` | `INFO` | 日志级别 |
 | `NOVELOS_API_HOST` | `127.0.0.1` | 后端监听地址 |
-| `NOVELOS_API_PORT` | `8000` | 后端监听端口（`scripts/serve.py` 使用） |
+| `NOVELOS_API_PORT` | `18081` | 后端监听端口（`scripts/serve.py` 使用；优先级低于 `NOVELOS_PORT`） |
 | `NOVELOS_PORT` | `18081` | 便捷端口变量（`python -m packages.core.api.main` 使用；优先级高于 `NOVELOS_API_PORT`） |
 | `NOVELOS_WEB_DIST` | `apps/web/dist` | SPA 构建产物目录（存在 `index.html` 才启用托管） |
 | `NOVELOS_QUALITY_GATE` | `enforce` | quality gate 模式：`enforce`（error 级阻断）/ `report`（不阻断） |
+| `NOVELOS_CRITIC_MODE` | `always` | critic 评审模式：`always`（每章必评）/ `sample`（抽样）等；未设置回落到 pipeline 内定 always（每章） |
+| `NOVELOS_SUMMARY_PARALLEL` | `on` | commit 三路并发：`on`（summarizer 并入 observer 双腿并发池）/ `off` |
+| `NOVELOS_AUTO_REVISE_MAX` | `2` | 自动改稿回路最大轮数：`0` 禁用，正整数生效 |
 | `NOVELOS_API_KEY_<PROVIDER>` | — | provider API Key（`<PROVIDER>` 大写，如 `NOVELOS_API_KEY_OPENAI`）；也可在 model_configs 的 `params_json.api_key` 配置 |
 | `NOVELOS_DISABLED_MODULES` | — | 禁用模块列表（V3.3 轻量方案），逗号分隔；模块名 = `packages/core/api/routers/` 下的文件名去 `.py`（如 `simulation,reference,arc`）。被禁模块的 HTTP 路由**不挂载**，对应端点返回 404；不影响 workflow 注册（边界见 `docs/roadmap/v3.3-v3.5-candidates-design.md` §四） |
 
 ## 版本与更新日志
 
-当前版本 **V2.0.0**（git tag `v2.0.0`）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
+当前版本 **v3.8.0**（与 `pyproject.toml` 版本号单源一致；`apps/web/package.json` 为 3.5.0，属发版流程待对齐项）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x 路线登记在同文件
 「Known Issues / 路线登记」一节。
 

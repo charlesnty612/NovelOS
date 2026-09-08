@@ -62,7 +62,7 @@ def test_openapi_contains_key_schemas_with_required_fields(tmp_path: Path) -> No
 def test_generated_ts_matches_openapi(tmp_path: Path) -> None:
     """types.generated.ts 与当前 app schema 同步（关键字段宽松断言）。"""
     app = _make_app(tmp_path)
-    schema = app.openapi()
+    _schema = app.openapi()
 
     generated = (REPO_ROOT / "apps/web/src/api/types.generated.ts").read_text(
         encoding="utf-8"

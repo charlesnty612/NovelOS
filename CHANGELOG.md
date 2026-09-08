@@ -4,6 +4,28 @@
 
 ## [Unreleased]
 
+### Changed（2026-09-08 README 同步至 4d04505 现状：基线数字/版本口径/遗留引用清理）
+
+> 版本留痕同步（用户拍板：版本节口径跟随 `pyproject.toml`）。
+
+- **测试基线数字更新**——后端「约 1041 passed / 2 skipped」→「1693 passed / 2 skipped，`-n 4` 并行约 4 分钟」；前端 vitest「202」→「416」。README 代码块与 `git log` 基线（commit 4d04505：pytest 1693 / vitest 416 / ruff 0）对齐。
+- **环境变量表三处修正/补齐**——`NOVELOS_API_PORT` 默认值 8000 → 18081（与 `config.py` 端口优先级口径一致：`NOVELOS_PORT` > `NOVELOS_API_PORT` > 默认 18081）；补 `NOVELOS_CRITIC_MODE`（默认 always，与 `chapter_review/pipeline.py` 内定一致）、`NOVELOS_SUMMARY_PARALLEL`（默认 on）、`NOVELOS_AUTO_REVISE_MAX`（默认 2）三项此前缺失的变量。
+- **健康检查口径补注**——`tables=37` 为业务表数；含 `_migrations` 物理共 38 张（README 此前写 35，与 smoke_e2e.py L67 注释口径统一）。
+- **版本节同步 v3.8.0**——当前版本从「V2.0.0（git tag v2.0.0）」改为「v3.8.0（与 `pyproject.toml` 单源一致）」，并注明 `apps/web/package.json` 仍为 3.5.0、属发版流程待对齐项（本轮不做版本号 bump，只同步文档口径）。
+- **遗留引用清理**——`apps/desktop/` 已于 4d04505 从仓库删除，README 仓库结构段下方「注：apps/desktop/ 是 S0 骨架」与端口差异说明中「apps/desktop/vite.config.ts 为停维护骨架，仅供参考」两处引用同步移除。
+
+### Changed（2026-09-08 P1 清理：全项目复审发现落地 + 业务表口径统一 37/38）
+
+> 来源：docs/reviews/全项目复审-2026-09-08.md（P1 项）。审查子代理 PASS（2 minor nit 不阻塞）。
+
+- **业务表口径统一 37/38（4 文件 7 处）**——README L48/L66/L100、`packages/core/api/README.md` L34/L71/L98、`db.py:117` docstring 全部从过期 35/36（api/README 残留 31/34）统一为「业务表 37 / 含 `_migrations` 总数 38」。实测 `count_tables()` 返回 38（排除 `sqlite_%` 与 `chapter_fts%` 影子表后含 `_migrations`），`test_health.py:44` 断言 `tables == 37` 与代码真值一致。
+- **`builders.py` 门面 `__all__` 移除自指元素**——拆分时误把字符串 `"__all__"` 收进 `__all__` 列表（L268），破坏「导出名单」语义契约；删除后 116 元素 0 重复 0 自指，`from builders import *` 语义完好。
+- **ruff F841 归零（全仓 0 error）**——`tests/api/test_openapi_contract.py:65` `schema = app.openapi()` 赋值未用（批次四新增测试自带 lint 错，4d04505 声称 ruff 0 有水分），按仓库惯用约定改 `_schema`；全仓 `ruff check` 通过。
+- **`db_maintenance.py list` 子命令支持 `--older-than-minutes`**——此前 `list` 硬编码 `DEFAULT_OLDER_THAN_MINUTES=30`，与 `fix` 的参数能力不对称；补同名参数（default 30 行为不变），`list --help` 与 fix 结构对称。
+- **删除 `WorkflowEngine.start()` 死入口**——`engine.py` L241-261 `raise NotImplementedError` 保留入口全仓零调用方（只 `start_with_nodes` 被 routers/pipelines/smoke/evals 消费）；同步模块 docstring L30 由 `start()` 改 `start_with_nodes()`。
+- **测试**：ruff 0；pytest 相关 91 用例零回归（含 test_openapi_contract/test_db_maintenance/test_health/test_engine_* 等）。全量 pytest 基线另计（上一轮实测 1677 passed / 2 skipped）。
+- **范围外留档（下轮处理）**：`scripts/smoke_e2e.py:67,72` 注释仍写「35 业务表」、`docs/data-model/data-model-v0.md:3` 写「34 张」、api/README 的 V3.4 演化轨迹提示——均与本轮口径漂移，不在本 diff 范围。
+
 ### Added（2026-09-06 全项目审查落地：四批次优化，P1 缺陷清零 + 数据生命周期 + 巨型文件拆分 + 工程基建）
 
 > 来源：docs/reviews/全项目审查与优化建议-2026-09-06.md（16 项发现，本批全部落地）。

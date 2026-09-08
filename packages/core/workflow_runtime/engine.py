@@ -27,7 +27,7 @@
   下一个节点继续。
 - AI 节点的 mock_script 从 ``ctx["mock_providers"][agent_name]`` 取（list 形式：第一次返回 [0]、
   耗尽重复末条，与 MockProvider 语义对齐）。
-- run_id 在 start() 内生成并插入；所有 workflow_run_nodes 行同 run_id 关联。
+- run_id 在 start_with_nodes() 内生成并插入；所有 workflow_run_nodes 行同 run_id 关联。
 - pause/resume 场景下，PAUSED run 不再被任何新执行路径修改，仅 resume() 接手。
 """
 
@@ -237,28 +237,6 @@ class WorkflowEngine:
             return _ensure_workflow(conn, name)
         finally:
             conn.close()
-
-    # -------------------------------------------------------------- start
-    def start(
-        self,
-        workflow_name: str,
-        *,
-        chapter_id: str | None = None,
-        initial_ctx: dict[str, Any] | None = None,
-        mock_providers: dict[str, list[str]] | None = None,
-    ) -> str:
-        """启动一个 workflow run。
-
-        必须传入 ``nodes`` 的方式：调用方负责从
-        :mod:`packages.core.workflow_registry`（按 workflow_name）查到
-        ``nodes: list[WorkflowNode]``，再调 :meth:`_run_nodes` 完成执行。本方法只负责 run 行与
-        ctx 初始化，避免循环依赖。
-
-        返回 ``run_id``。
-        """
-        raise NotImplementedError(
-            "use start_with_nodes() instead; this entry point is reserved for future orchestration"
-        )
 
     # -------------------------------------------------------------- start_with_nodes
     def start_with_nodes(
