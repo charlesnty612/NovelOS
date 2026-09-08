@@ -36,7 +36,9 @@ secrets.*.json
 /docs/analysis/
 /docs/architecture/
 /docs/data-model/
-/docs/state-model/
+# state-model 的 schema 是 story_state.validator 运行时依赖（保留），正文设计文档迁内容仓
+/docs/state-model/*.md
+!/docs/state-model/schemas/
 /docs/testing/
 /docs/PRD设计评审-主控版-2026-08-23.md
 /PRD评估报告-2026-08-23.md
