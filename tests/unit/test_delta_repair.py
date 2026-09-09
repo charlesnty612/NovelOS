@@ -606,7 +606,7 @@ def test_repair_id_prefix_reconcile_char_to_fac_in_character_changes():
     # snapshot 同时含 character + faction（让前缀调和仍能唯一定位到 faction）
     snapshot = {
         "characters": [{"character_id": "char_other"}],
-        "world": {"factions": {f"fac_{_F3_HEX}": {"name": "宝源当沈家"}}},
+        "world": {"factions": {f"fac_{_F3_HEX}": {"name": "恒昌当沈氏"}}},
     }
     repaired, repairs = repair_delta(delta, snapshot=snapshot)
 
@@ -719,7 +719,7 @@ def test_repair_id_prefix_reconcile_in_relationship_endpoints():
     )
     snap2 = {
         "characters": [{"character_id": "char_a"}],
-        "world": {"factions": {f"fac_{_F3_HEX}": {"name": "宝源当沈家"}}},
+        "world": {"factions": {f"fac_{_F3_HEX}": {"name": "恒昌当沈氏"}}},
     }
     rep2, repairs2 = repair_delta(delta2, snapshot=snap2)
     assert any(r["rule"] == "id_prefix_reconcile" for r in repairs2)
@@ -749,7 +749,7 @@ def test_repair_id_prefix_reconcile_in_new_events_participants():
     )
     snapshot = {
         "characters": [{"character_id": "char_a"}],
-        "world": {"factions": {f"fac_{_F3_HEX}": {"name": "宝源当沈家"}}},
+        "world": {"factions": {f"fac_{_F3_HEX}": {"name": "恒昌当沈氏"}}},
     }
     repaired, repairs = repair_delta(delta, snapshot=snapshot)
     id_prefix_repairs = [r for r in repairs if r["rule"] == "id_prefix_reconcile"]

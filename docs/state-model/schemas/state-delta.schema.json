@@ -1,0 +1,545 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novelos.local/schemas/state-delta-v0.json",
+  "title": "NovelOS State Delta v0",
+  "description": "Observer 输出的状态变更提案，对齐 NovelOS PRD #NovelOS.md §33、§65。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "delta_id",
+    "delta_version",
+    "schema_version",
+    "chapter_id",
+    "workflow_run_id",
+    "previous_state_version",
+    "created_by",
+    "created_at",
+    "character_changes",
+    "world_changes",
+    "relationship_changes",
+    "new_events",
+    "resolved_hooks",
+    "new_hooks",
+    "debt_changes"
+  ],
+  "properties": {
+    "delta_id": {
+      "type": "string",
+      "description": "全局唯一 ID，建议 ULID 或 UUIDv7。",
+      "minLength": 1
+    },
+    "delta_version": {
+      "type": "integer",
+      "description": "Schema 语义版本号，当前固定为 1。",
+      "const": 1
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "锁定的 JSON Schema 版本标识。",
+      "const": "state-delta-v0"
+    },
+    "chapter_id": {
+      "type": "string",
+      "description": "本 Delta 所归属的章节 ID。",
+      "minLength": 1
+    },
+    "workflow_run_id": {
+      "type": "string",
+      "description": "触发本 Delta 的 Workflow Run ID（对齐 PRD §67 workflow_runs 表）。",
+      "minLength": 1
+    },
+    "previous_state_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Observer 生成本 Delta 时读取到的当前 Canonical Story State 版本号；State Committer 落库前再次比对，若与当前 state_version 不一致则拒绝 Commit（乐观锁）。对齐 state-delta-v0.md §6.2。"
+    },
+    "created_by": {
+      "type": "string",
+      "description": "生成 Delta 的 Agent 名，如 observer:v1。",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Observer 完成时刻，ISO-8601。"
+    },
+    "supersedes": {
+      "type": ["string", "null"],
+      "description": "重试场景下指向被取代的旧 delta_id。",
+      "minLength": 1
+    },
+    "notes": {
+      "type": ["string", "null"],
+      "description": "自由备注，不参与校验。"
+    },
+    "character_changes": {
+      "type": "array",
+      "description": "Character 字段变更，对齐 PRD §16、§17。",
+      "items": { "$ref": "#/$defs/character_change" }
+    },
+    "world_changes": {
+      "type": "array",
+      "description": "World State 字段变更，对齐 PRD §18。",
+      "items": { "$ref": "#/$defs/world_change" }
+    },
+    "relationship_changes": {
+      "type": "array",
+      "description": "Character 之间关系变更。",
+      "items": { "$ref": "#/$defs/relationship_change" }
+    },
+    "new_events": {
+      "type": "array",
+      "description": "新增 Plot Event，对齐 PRD §19。",
+      "items": { "$ref": "#/$defs/new_event" }
+    },
+    "resolved_hooks": {
+      "type": "array",
+      "description": "已结算的 Hook，对齐 PRD §21。",
+      "items": { "$ref": "#/$defs/resolved_hook" }
+    },
+    "new_hooks": {
+      "type": "array",
+      "description": "新增 Hook，对齐 PRD §21。",
+      "items": { "$ref": "#/$defs/new_hook" }
+    },
+    "debt_changes": {
+      "type": "array",
+      "description": "Narrative Debt 变更，对齐 PRD §22。",
+      "items": { "$ref": "#/$defs/debt_change" }
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chapter_id", "excerpt"],
+      "properties": {
+        "chapter_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scene_id": {
+          "type": ["string", "null"]
+        },
+        "excerpt": {
+          "type": "string",
+          "minLength": 1
+        },
+        "span": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "start": { "type": "integer", "minimum": 0 },
+            "end": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["start", "end"]
+        }
+      }
+    },
+    "op_enum": {
+      "type": "string",
+      "enum": ["add", "update", "remove"]
+    },
+    "risk_level_enum": {
+      "type": "string",
+      "enum": ["LOW", "MEDIUM", "HIGH"],
+      "description": "对齐 PRD §89。"
+    },
+    "character_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change_id",
+        "op",
+        "target_id",
+        "character_id",
+        "facet",
+        "field",
+        "confidence",
+        "evidence",
+        "risk_level"
+      ],
+      "properties": {
+        "change_id": { "type": "string", "minLength": 1 },
+        "op": { "$ref": "#/$defs/op_enum" },
+        "target_id": { "type": "string", "minLength": 1 },
+        "character_id": { "type": "string", "minLength": 1 },
+        "facet": {
+          "type": "string",
+          "enum": ["definition", "state"],
+          "description": "对齐 PRD §17。"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1,
+          "description": "字段路径，例如 state.location。"
+        },
+        "before": {
+          "description": "update 时必填；add/remove 时可为 null。"
+        },
+        "after": {
+          "description": "add/update 时必填；remove 时可为 null。"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "risk_level": { "$ref": "#/$defs/risk_level_enum" },
+        "notes": { "type": ["string", "null"] },
+        "visibility": {
+          "type": ["string", "null"],
+          "enum": ["PUBLIC", "VISIBLE", "RESTRICTED", "HIDDEN", null],
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状。"
+        },
+        "who_knows": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状，非空数组 = 显式设置。"
+        },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "world_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change_id",
+        "op",
+        "target_id",
+        "world_kind",
+        "world_id",
+        "field",
+        "confidence",
+        "evidence",
+        "risk_level"
+      ],
+      "properties": {
+        "change_id": { "type": "string", "minLength": 1 },
+        "op": { "$ref": "#/$defs/op_enum" },
+        "target_id": { "type": "string", "minLength": 1 },
+        "world_kind": {
+          "type": "string",
+          "enum": ["location", "faction", "rule", "politics", "economy", "event", "time"],
+          "description": "对齐 PRD §18。"
+        },
+        "world_id": { "type": "string", "minLength": 1 },
+        "field": { "type": "string", "minLength": 1 },
+        "before": {},
+        "after": {},
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "risk_level": { "$ref": "#/$defs/risk_level_enum" },
+        "notes": { "type": ["string", "null"] },
+        "visibility": {
+          "type": ["string", "null"],
+          "enum": ["PUBLIC", "VISIBLE", "RESTRICTED", "HIDDEN", null],
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状。"
+        },
+        "who_knows": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状，非空数组 = 显式设置。"
+        },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "relationship_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change_id",
+        "op",
+        "target_id",
+        "from_character_id",
+        "to_character_id",
+        "relation_type",
+        "confidence",
+        "evidence",
+        "risk_level"
+      ],
+      "properties": {
+        "change_id": { "type": "string", "minLength": 1 },
+        "op": { "$ref": "#/$defs/op_enum" },
+        "target_id": { "type": "string", "minLength": 1 },
+        "from_character_id": { "type": "string", "minLength": 1 },
+        "to_character_id": { "type": "string", "minLength": 1 },
+        "relation_type": { "type": "string", "minLength": 1 },
+        "before": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "after": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "risk_level": { "$ref": "#/$defs/risk_level_enum" },
+        "notes": { "type": ["string", "null"] },
+        "visibility": {
+          "type": ["string", "null"],
+          "enum": ["PUBLIC", "VISIBLE", "RESTRICTED", "HIDDEN", null],
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状。"
+        },
+        "who_knows": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状，非空数组 = 显式设置。"
+        },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "new_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change_id",
+        "op",
+        "target_id",
+        "event_id",
+        "type",
+        "participants",
+        "time",
+        "confidence",
+        "evidence",
+        "risk_level"
+      ],
+      "properties": {
+        "change_id": { "type": "string", "minLength": 1 },
+        "op": {
+          "type": "string",
+          "const": "add",
+          "description": "new_events 数组语义固定为 add。"
+        },
+        "target_id": { "type": "string", "minLength": 1 },
+        "event_id": { "type": "string", "minLength": 1 },
+        "type": {
+          "type": "string",
+          "enum": ["revelation", "conflict", "decision", "encounter", "transition", "other"],
+          "description": "对齐 PRD §19 type。"
+        },
+        "cause": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "effects": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "location": { "type": ["string", "null"] },
+        "time": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["timeline_day"],
+          "properties": {
+            "timeline_day": { "type": "integer", "minimum": 1 },
+            "in_story_date": { "type": ["string", "null"] }
+          }
+        },
+        "status": {
+          "type": "string",
+          "enum": ["planned", "recorded", "resolved", "abandoned"],
+          "description": "对齐 PRD §19 status；Observer 可省略，默认 planned。"
+        },
+        "description": { "type": ["string", "null"] },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "risk_level": { "$ref": "#/$defs/risk_level_enum" },
+        "notes": { "type": ["string", "null"] },
+        "visibility": {
+          "type": ["string", "null"],
+          "enum": ["PUBLIC", "VISIBLE", "RESTRICTED", "HIDDEN", null],
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状。"
+        },
+        "who_knows": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状，非空数组 = 显式设置。"
+        }
+      }
+    },
+    "resolved_hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change_id",
+        "op",
+        "target_id",
+        "hook_id",
+        "to_status",
+        "payoff_summary",
+        "confidence",
+        "evidence",
+        "risk_level"
+      ],
+      "properties": {
+        "change_id": { "type": "string", "minLength": 1 },
+        "op": {
+          "type": "string",
+          "const": "update"
+        },
+        "target_id": { "type": "string", "minLength": 1 },
+        "hook_id": { "type": "string", "minLength": 1 },
+        "from_status": {
+          "type": ["string", "null"],
+          "enum": ["OPEN", "ACTIVE", "ESCALATED", "RESOLVED", "ABANDONED", null],
+          "description": "Hook 状态变更前值（对齐 PRD §21 五态），可省略表示沿用现况。"
+        },
+        "to_status": {
+          "type": "string",
+          "enum": ["OPEN", "ACTIVE", "ESCALATED", "RESOLVED", "ABANDONED"],
+          "description": "Hook 状态变更后值；resolved_hooks 数组语义下通常为 RESOLVED，对齐 PRD §21。"
+        },
+        "payoff_chapter_id": { "type": ["string", "null"] },
+        "payoff_summary": { "type": "string", "minLength": 1 },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "risk_level": { "$ref": "#/$defs/risk_level_enum" },
+        "notes": { "type": ["string", "null"] },
+        "visibility": {
+          "type": ["string", "null"],
+          "enum": ["PUBLIC", "VISIBLE", "RESTRICTED", "HIDDEN", null],
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状。"
+        },
+        "who_knows": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状，非空数组 = 显式设置。"
+        }
+      }
+    },
+    "new_hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change_id",
+        "op",
+        "target_id",
+        "hook_id",
+        "name",
+        "importance",
+        "description",
+        "confidence",
+        "evidence",
+        "risk_level"
+      ],
+      "properties": {
+        "change_id": { "type": "string", "minLength": 1 },
+        "op": {
+          "type": "string",
+          "const": "add"
+        },
+        "target_id": { "type": "string", "minLength": 1 },
+        "hook_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "importance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "expected_payoff_chapter_id": { "type": ["string", "null"] },
+        "description": { "type": "string", "minLength": 1 },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "risk_level": { "$ref": "#/$defs/risk_level_enum" },
+        "notes": { "type": ["string", "null"] },
+        "visibility": {
+          "type": ["string", "null"],
+          "enum": ["PUBLIC", "VISIBLE", "RESTRICTED", "HIDDEN", null],
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状。"
+        },
+        "who_knows": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状，非空数组 = 显式设置。"
+        }
+      }
+    },
+    "debt_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change_id",
+        "op",
+        "target_id",
+        "debt_id",
+        "status_after",
+        "confidence",
+        "evidence",
+        "risk_level"
+      ],
+      "properties": {
+        "change_id": { "type": "string", "minLength": 1 },
+        "op": { "$ref": "#/$defs/op_enum" },
+        "target_id": { "type": "string", "minLength": 1 },
+        "debt_id": { "type": "string", "minLength": 1 },
+        "description": { "type": ["string", "null"] },
+        "severity_before": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "severity_after": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "deadline_chapter_id": { "type": ["string", "null"] },
+        "status_before": {
+          "type": ["string", "null"],
+          "enum": ["open", "acknowledged", "paid", "forgiven"]
+        },
+        "status_after": {
+          "type": "string",
+          "enum": ["open", "acknowledged", "paid", "forgiven"]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "risk_level": { "$ref": "#/$defs/risk_level_enum" },
+        "notes": { "type": ["string", "null"] },
+        "visibility": {
+          "type": ["string", "null"],
+          "enum": ["PUBLIC", "VISIBLE", "RESTRICTED", "HIDDEN", null],
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状。"
+        },
+        "who_knows": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "对齐 docs/state-model/knowledge-permission-v0.md §6 契约；缺失 = 沿用实体现状，非空数组 = 显式设置。"
+        },
+        "reason": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

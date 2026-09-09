@@ -1,7 +1,7 @@
 """一次性数据迁移：把 m1_run 库中的日常数据搬回默认库（2026-08-28）。
 
 背景：服务进程曾按 scripts/m1_long_run.py 的方式以 ``NOVELOS_DATA_DIR=data/m1_run``
-启动，导致日常数据（火影项目、模型配置）落在长跑脚本的工作库。本脚本把：
+启动，导致日常数据（旧项目A项目、模型配置）落在长跑脚本的工作库。本脚本把：
 - ``projects`` 中指定项目及其所有含 ``project_id`` 列的子表行；
 - ``model_profiles`` 中来自旧 ``model_configs`` 迁移的三个 MiniMax-M3 档案；
 搬回默认库 ``data/novelos.db``。m1 压测的测试项目（m1_*）不搬。
@@ -16,7 +16,7 @@ import sys
 
 MAIN_DB = "data/novelos.db"
 M1_DB = "data/m1_run/novelos.db"
-PROJECT_ID = "prj_8365f42af5a6"  # 火影：从辉夜时代开始长生
+PROJECT_ID = "prj_8365f42af5a6"  # 旧项目A：从旧项目A时代开始
 
 
 def _tables_with_project_id(conn: sqlite3.Connection) -> list[str]:

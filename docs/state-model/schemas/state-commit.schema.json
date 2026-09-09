@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novelos.local/schemas/state-commit-v0.json",
+  "title": "NovelOS State Commit v0",
+  "description": "State Committer 落库后的不可变提交记录，对齐 NovelOS PRD #NovelOS.md §35、§91。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "commit_id",
+    "schema_version",
+    "chapter_id",
+    "previous_state",
+    "delta",
+    "validation",
+    "author_approval",
+    "timestamp",
+    "workflow_run",
+    "resulting_state_version"
+  ],
+  "properties": {
+    "commit_id": {
+      "type": "string",
+      "description": "全局唯一 ID，建议 ULID 或 UUIDv7。",
+      "minLength": 1
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "state-commit-v0"
+    },
+    "chapter_id": {
+      "type": "string",
+      "description": "对齐 PRD §91 必填字段。",
+      "minLength": 1
+    },
+    "previous_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state_version", "snapshot_ref", "hash"],
+      "properties": {
+        "state_version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "提交前 Canonical Story State 的版本号。"
+        },
+        "snapshot_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "提交前快照引用（文件路径或对象存储 URI）。"
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "description": "快照内容 SHA-256。"
+        }
+      }
+    },
+    "delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["delta_id", "delta_version", "schema_version", "delta_ref"],
+      "properties": {
+        "delta_id": { "type": "string", "minLength": 1 },
+        "delta_version": { "type": "integer", "const": 1 },
+        "schema_version": { "type": "string", "const": "state-delta-v0" },
+        "delta_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Delta 文件的存储引用。"
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_valid",
+        "guardrail_results",
+        "validator_agent",
+        "checked_at"
+      ],
+      "properties": {
+        "schema_valid": {
+          "type": "boolean"
+        },
+        "guardrail_results": {
+          "type": "array",
+          "minItems": 5,
+          "items": { "$ref": "#/$defs/guardrail_result" },
+          "description": "对齐 PRD §86 五硬门槛。"
+        },
+        "validator_agent": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checked_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "author_approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "status"],
+      "properties": {
+        "required": {
+          "type": "boolean",
+          "description": "是否因 HIGH 风险或系统策略要求作者审批。"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["not_required", "pending", "approved", "rejected"]
+        },
+        "approver": { "type": ["string", "null"] },
+        "approved_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "high_risk_change_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": { "type": ["string", "null"] }
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "提交时刻，对齐 PRD §91 必填字段。"
+    },
+    "workflow_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_run_id", "workflow_id", "step_id", "agent"],
+      "properties": {
+        "workflow_run_id": { "type": "string", "minLength": 1 },
+        "workflow_id": { "type": "string", "minLength": 1 },
+        "step_id": { "type": "string", "minLength": 1 },
+        "agent": { "type": "string", "minLength": 1 }
+      }
+    },
+    "resulting_state_version": {
+      "type": "integer",
+      "minimum": 2,
+      "description": "提交后产生的 state_version，单调递增。"
+    },
+    "rollback_of": {
+      "type": ["string", "null"],
+      "description": "若本 Commit 是为回滚某次错误 Commit 而产生，指向被回滚的 commit_id。"
+    },
+    "rollback_commits": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "回滚本 Commit 的后续 Commit 列表。"
+    },
+    "branch_id": {
+      "type": ["string", "null"],
+      "description": "所属分支 ID，默认 main。"
+    }
+  },
+  "$defs": {
+    "guardrail_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "schema_validity",
+            "timeline_consistency",
+            "character_contradiction",
+            "world_rule_contradiction",
+            "knowledge_leakage"
+          ],
+          "description": "对齐 PRD §86 五硬门槛。"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pass", "warn", "fail"]
+        },
+        "details": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

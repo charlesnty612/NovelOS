@@ -487,18 +487,18 @@ describe('ApprovalCard', () => {
             facet: 'state',
             field: 'state.rule',
             before: null,
-            after: '沈鹤龄向沈知遥明令两条当铺规矩：其一，不得擅入死当库最里头那间。',
+            after: '沈伯向沈默明令两条当铺规矩：其一，不得擅入绝当库最里头那间。',
             confidence: 0.92,
             evidence: {
               chapter_id: 'ch_03',
               scene_id: 's_03_02',
-              excerpt: '「从今往后，死当库最里头那间，你不许进。」',
+              excerpt: '「从今往后，绝当库最里头那间，你不许进。」',
               span: [410, 438],
             },
             notes: '新增的家规需要当事人确认',
             risk_level: 'MEDIUM',
             visibility: 'private',
-            who_knows: ['沈鹤龄', '沈知遥'],
+            who_knows: ['沈伯', '沈默'],
           },
         ],
         world_changes: [
@@ -510,18 +510,18 @@ describe('ApprovalCard', () => {
             world_kind: 'rule',
             field: 'definition',
             before: null,
-            after: '死当库最里头那间为沈鹤龄明确禁止进入的区域。',
+            after: '绝当库最里头那间为沈伯明确禁止进入的区域。',
             confidence: 0.95,
             evidence: {
               chapter_id: 'ch_03',
               scene_id: 's_03_02',
-              excerpt: '「从今往后，死当库最里头那间，你不许进。」',
+              excerpt: '「从今往后，绝当库最里头那间，你不许进。」',
               span: [410, 438],
             },
             notes: '',
             risk_level: 'HIGH',
             visibility: 'public',
-            who_knows: ['沈鹤龄', '沈知遥'],
+            who_knows: ['沈伯', '沈默'],
           },
         ],
       },
@@ -557,15 +557,15 @@ describe('ApprovalCard', () => {
     expect(within(firstItem).getByTestId('high-risk-change-risk')).toHaveTextContent('高风险');
     expect(within(firstItem).getByTestId('high-risk-change-op')).toHaveTextContent('新增');
     expect(within(firstItem).getByTestId('high-risk-change-type')).toHaveTextContent('规则');
-    // after 文本「新增：死当库最里头那间为沈鹤龄明确禁止进入的区域。」出现
+    // after 文本「新增：绝当库最里头那间为沈伯明确禁止进入的区域。」出现
     expect(
       within(firstItem).getByTestId('high-risk-change-value').textContent,
-    ).toContain('新增：死当库最里头那间为沈鹤龄明确禁止进入的区域。');
+    ).toContain('新增：绝当库最里头那间为沈伯明确禁止进入的区域。');
     // 引文出现且截断到 80 字（标题含全文）
     const notesLine = within(firstItem).getByTestId('high-risk-change-notes');
     expect(notesLine.textContent).toContain('引文：');
     const valueEl = within(firstItem).getByTestId('high-risk-change-value');
-    expect(valueEl.getAttribute('title') ?? '').toContain('死当库最里头那间为沈鹤龄明确禁止进入的区域。');
+    expect(valueEl.getAttribute('title') ?? '').toContain('绝当库最里头那间为沈伯明确禁止进入的区域。');
     // 第二条（character MEDIUM）：类型徽标「人物」、操作「更新」、风险「中风险」
     const secondItem = items[1]!;
     expect(within(secondItem).getByTestId('high-risk-change-risk')).toHaveTextContent('中风险');

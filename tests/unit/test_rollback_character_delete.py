@@ -576,7 +576,7 @@ def test_rollback_preexisting_character_field_add_keeps_character(tmp_path: Path
     facet=state 新字段 → rollback → **角色存活**、characters/
     character_states 行仍在、被 add 的字段被字段级 remove 正确移除。
 
-    关键：与顾晚舟生产事故同源 bug 的反向断言——char_08f503251717 的
+    关键：与顾青生产事故同源 bug 的反向断言——char_08f503251717 的
     state.knowledge/state.belief/state.goal 等 7 条字段级 add，回滚后角色
     必须保留（既有角色不能被误删），新加字段由逆 delta 字段级 remove 恢复。
     """

@@ -886,7 +886,7 @@ def test_rollback_inverse_cleanup_covers_all_collections(tmp_path: Path):
     - 守卫语义：「提交前快照（``delta_row.previous_state_version`` 处的 main
       snapshot）」中存在 character_id → 该 add 是字段级，**不走实体级 DELETE**
       （留给逆 delta 的字段级 remove 恢复）；不存在 → 视为该 commit 实体级首
-      次引入的角色，触发实体回收（顾晚舟生产事故场景——但顾晚舟于 ch2 commit
+      次引入的角色，触发实体回收（顾青生产事故场景——但顾青于 ch2 commit
       之前快照已存在，故 ch2 rollback 时不会触发实体 DELETE，需重放 SOP）。
     - 本 fixture 的 ``char_actor`` 在 init_genesis **之前**就 SQL INSERT 到
       characters 表——``build_initial_state`` 从 characters 表 SELECT 构造

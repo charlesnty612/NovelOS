@@ -2,8 +2,8 @@
 
 2026-08-30 V-Prompt-Migration 触发：
 - writer-v1.md 规则 18/19、director-v1.md 规则 15、scene_planner-v1.md 规则 11
-  曾混入「火影」项目专属设定（火影/死当共用 prompt，污染其他项目）。
-- 已迁移到火影项目 prj_8365f42af5a6 的 world_rules 表，本测试防回归。
+  曾混入「旧项目A」项目专属设定（旧项目A/绝当共用 prompt，污染其他项目）。
+- 已迁移到旧项目A项目 prj_8365f42af5a6 的 world_rules 表，本测试防回归。
 
 关键词选择口径：两字及以上、明确绑定到具体作品的术语。「瑞」单字过宽不列。
 """
@@ -75,7 +75,7 @@ def test_writer_v1_has_generic_rules_18_19() -> None:
     for marker in EXPECTED_GENERIC_MARKERS:
         assert marker in text, f"writer-v1.md missing generic marker {marker!r}"
 
-    # 残留拦截：日式神话时代是火影专属词，不得再出现在 writer 全局 prompt。
+    # 残留拦截：日式神话时代是旧项目A专属词，不得再出现在 writer 全局 prompt。
     assert "日式神话时代" not in text, (
         "writer-v1.md 仍残留「日式神话时代」——应迁回项目 world_rules"
     )

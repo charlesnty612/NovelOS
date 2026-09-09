@@ -1,6 +1,6 @@
 -- =============================================================================
 -- NovelOS Database Migration 0021: 一次性事故修复——ch2 状态校正
---   背景（2026-08-31 生产事故）：《死当》第 2 章（ch_d5a64a584288）的 commit
+--   背景（2026-08-31 生产事故）：《绝当》第 2 章（ch_d5a64a584288）的 commit
 --   cmt_6c9faba70b8c 被 rollback 两次（rollback 当时无幂等守卫，代码修复见
 --   同批次 commits.py 改动）。rollback 不联动 chapter.status，章节卡在
 --   COMMITTED，save_draft 拒绝补丁改稿；PATCH COMMITTED→DRAFTED 又被状态机
