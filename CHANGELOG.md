@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### Added（2026-09-09 内容同步器 CLI：软件/内容分仓运行时闭环）
+
+> 来源：软件层/内容层/操作痕迹三仓分离后，运行时写小说产出「内容归内容」的归档通路（主会话定架构，实现→审查 PASS-with-nits→打回小修闭环）。
+
+- **`scripts/content_sync.py` + `packages/core/content_sync/`**——按「每本书一个独立子目录」把 SQLite 中某 project 的创作产出同步到内容仓（默认 `D:/zcodeproject/NovelOS-Content`），实现内容版本管理闭环。三子命令：`list`（列出已同步书）、`init`（建书骨架+manifest）、`push`（全量同步）。
+- **产出目录约定**（每书独立、互不污染）：`novel/`（全书 txt + 按卷/章 txt，复用 `exporter.builder.build_txt`）、`canon/`（characters/world_rules/plot_events/timeline_events/volumes 五个 JSON）、`story_state/`（按 `state_version` 命名去重）、`backup/`（复用 `BackupService.export_project` 单 JSON 包，带时间戳）、`manifest.json`（project 元信息+章节/草稿/版本计数+最近同步时间）。
+- **slug 派生**：NFKD 归一化→lowercase→`[a-z0-9-]`，非 ASCII 纯中文 fallback `book-<project_id 末 8>`；Windows 设备保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）统一加 `book-` 前缀防 `mkdir` 拒绝；冲突追加 `-2/-3`，同 project_id push 复用既有 manifest 目录保证路径稳定。
+- **幂等与安全**：story_state 按版本天然去重（已存在跳过）；backup 每次新建带时间戳、同秒冲突 `<ts>-1` 起递增不覆盖；chapter/volume number 为 NULL/非法时显式记 `result.errors` 并跳过（绝不让「第None章」落盘）；queries 层仅 SELECT、不写 schema、不调 LLM；路径穿越经 slugify 归一化不会逃出内容仓；退出码 0=全成功 / 1=参数或 project 不存在 / 2=部分产物失败。
+- **测试**：`tests/unit/test_content_sync_{slug,service}.py` **49 用例全绿**（slug 派生/唯一性/稳定、Windows 保留名 9 例、story_state 幂等、manifest 容错 7 例、同秒 backup 兜底、不同书隔离、CLI 三子命令与退出码）；ruff 0；真实 DB 端到端 init→push→push 复测通过（二次 push slug 稳定、backup `<ts>`/`<ts>-1` 各一份、5 类产物齐全）。
+- **已知取舍（留档）**：`build_volume_txt` 目前跨模块引用 `exporter.builder` 下划线私有 helper（`_chapter_heading/_latest_draft_content/_project_name`），exporter 重构会 break——下轮可将三 helper 提升为公开 API；`_prepare_book_dir` 每次扫全部 manifest 为 O(N)，书本数上千时才需优化。
+
+
 ### Changed（2026-09-08 README 同步至 4d04505 现状：基线数字/版本口径/遗留引用清理）
 
 > 版本留痕同步（用户拍板：版本节口径跟随 `pyproject.toml`）。
