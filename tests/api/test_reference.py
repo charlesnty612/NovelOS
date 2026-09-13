@@ -828,6 +828,113 @@ def test_upload_txt_utf16_decodes_correctly(tmp_path: Path):
     assert "少年崛起" in text
 
 
+# ---------------------------------------------------------------------------
+# multipart 非 UTF-8 乱码兜底解码（2026-09-13 canon 标题乱码事故修复）
+# ---------------------------------------------------------------------------
+#
+# 事故形态：Git Bash 把 curl argv 中文转 GBK 字节发出；starlette 对 multipart
+# 字段/文件名的解码策略是 utf-8 失败回退 latin-1（_user_safe_decode），原始
+# 字节不丢失 → 端侧 _repair_mojibake 逆变换（latin-1 编码回字节 → gb18030
+# 解码）无损还原。正文 txt 的解码链（_decode_txt）与表单字段是两回事，别混淆。
+
+
+def test_repair_mojibake_gbk_bytes_restored():
+    """GBK 字节被 latin-1 兜底解码的乱码串 → 逆变换还原原文。"""
+    from packages.core.api.routers.reference import _repair_mojibake
+
+    garbled = "题材库·男主快穿".encode("gbk").decode("latin-1")
+    assert _repair_mojibake(garbled) == "题材库·男主快穿"
+
+
+def test_repair_mojibake_passthrough_normal_utf8():
+    """正常 UTF-8 解码的中文串（含 >U+00FF 字符）→ 原样返回，不碰。"""
+    from packages.core.api.routers.reference import _repair_mojibake
+
+    assert _repair_mojibake("正常的 UTF-8 书名") == "正常的 UTF-8 书名"
+
+
+def test_repair_mojibake_passthrough_ascii_and_none():
+    """纯 ASCII 与 None → 原样返回（第一道守卫）。"""
+    from packages.core.api.routers.reference import _repair_mojibake
+
+    assert _repair_mojibake("ascii-title") == "ascii-title"
+    assert _repair_mojibake("") == ""
+    assert _repair_mojibake(None) is None
+
+
+def test_repair_mojibake_non_gbk_latin1_untouched():
+    """latin-1 可编码但 gb18030 解不开的串 → 原样返回（第二道守卫）。
+
+    单个 latin-1 字节 0xE9 不是合法 GBK  lead byte 组合 → 解码失败 → 不动。
+    """
+    from packages.core.api.routers.reference import _repair_mojibake
+
+    assert _repair_mojibake("café") == "café"
+
+
+def test_upload_gbk_form_title_repaired_end_to_end(tmp_path: Path):
+    """端点级变异验证：book_title 以 GBK 原始字节到达（Git Bash argv 事故
+    形态）→ 修复后入库书名是正确中文。
+
+    手工拼 multipart body（httpx 的 files=/data= 只会发 UTF-8，模拟不出
+    事故形态）。撤掉 _repair_mojibake 接线后本测试必红（starlette latin-1
+    兜底把 GBK 字节存成乱码）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                conn.execute(
+                    "INSERT INTO model_configs "
+                    "(config_id, capability, provider, model, params_json, enabled) "
+                    "VALUES (?, ?, ?, ?, ?, 1)",
+                    (
+                        "cfg_test_reasoning_gbk",
+                        "reasoning",
+                        "openai_compatible",
+                        "mock-model",
+                        json.dumps({"api_key": "sk-test"}),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            boundary = "----NovelOSGbkTitleTest"
+            gbk_title_bytes = "乱码测试书".encode("gbk")
+            txt_bytes = _SAMPLE_BOOK_TEXT.encode("utf-8")
+            body = (
+                f"--{boundary}\r\n"
+                'Content-Disposition: form-data; name="book_title"\r\n'
+                "\r\n"
+            ).encode("ascii") + gbk_title_bytes + (
+                f"\r\n--{boundary}\r\n"
+                'Content-Disposition: form-data; name="file"; '
+                'filename="book.txt"\r\n'
+                "Content-Type: text/plain\r\n"
+                "\r\n"
+            ).encode("ascii") + txt_bytes + f"\r\n--{boundary}--\r\n".encode("ascii")
+
+            r = await _request(
+                app, "POST",
+                f"/api/projects/{pid}/deconstruct-upload",
+                content=body,
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}"
+                },
+            )
+            assert r.status_code == 201, r.text
+            body_json = r.json()
+            assert body_json["book_title"] == "乱码测试书", body_json
+            # run 成败无所谓（无真实模型），书名修复发生在启动 workflow 之前
+
+    asyncio.run(run())
+
+
 def test_upload_txt_random_binary_returns_400_with_friendly_detail(tmp_path: Path):
     """F1 修复：随机二进制（utf-8/gb18030/utf-16 都解码不开）→ 400 + 中文提示。
 

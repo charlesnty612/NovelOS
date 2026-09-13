@@ -110,6 +110,41 @@ def _normalize_ext(filename: str | None) -> str:
     return "." + filename.rsplit(".", 1)[-1].lower()
 
 
+# CJK 检测：乱码修复的采纳判据（逆变换结果须含汉字才采纳）。
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _repair_mojibake(s: str | None) -> str | None:
+    """修复「非 UTF-8 字节被 starlette 按 latin-1 兜底解码」造成的乱码。
+
+    事故实证（2026-09-13 拆书 canon 标题乱码）：Git Bash 把 curl argv 里的
+    中文转成 GBK 字节发出；starlette 对 multipart 字段/文件名的解码策略是
+    utf-8 失败回退 latin-1（formparsers._user_safe_decode），原始字节不丢
+    失、全部落在 U+0000~U+00FF，可以逆变换无损还原。
+
+    修复链：latin-1 原样编码回字节 → gb18030 解码（GBK 系超集）。
+    三道守卫：空/None 不动；纯 ASCII 不动（无 >=0x80 字符）；含 >U+00FF
+    字符不动（正常 UTF-8 路径已正确解码）；逆变换结果须含 CJK 才采纳。
+
+    残余风险：真正的 latin-1 西欧文本（如带重音的外文书名）存在理论误修
+    面——本工具域是中文网文拆书，不存在该输入类，接受此风险（比静默存
+    乱码的事故代价低一个量级）。
+    """
+    if not s:
+        return s
+    if all(ord(c) < 0x80 for c in s):
+        return s
+    try:
+        raw = s.encode("latin-1")
+    except UnicodeEncodeError:
+        return s  # 含 >U+00FF 字符（正常 UTF-8 路径解码的中文），无需修复
+    try:
+        repaired = raw.decode("gb18030")
+    except UnicodeDecodeError:
+        return s
+    return repaired if _CJK_RE.search(repaired) else s
+
+
 def _decode_txt(raw: bytes) -> str:
     """txt 解码：utf-8（含 BOM）→ gb18030 → utf-16；都失败抛 UnicodeDecodeError。
 
@@ -506,8 +541,10 @@ def start_deconstruct_upload(
         )
 
     # 2) 按扩展名解析为正文；epub 时同时拿 dc:title 兜底。
+    #    文件名同样过乱码修复（multipart filename 与表单字段同一解码路径）。
+    repaired_filename = _repair_mojibake(file.filename)
     try:
-        text, epub_title_fallback = _parse_upload_to_text(file.filename, raw)
+        text, epub_title_fallback = _parse_upload_to_text(repaired_filename, raw)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -518,7 +555,9 @@ def start_deconstruct_upload(
         )
 
     # 3) 书名兜底链：表单 book_title > epub dc:title > 422。
-    title = book_title.strip() if isinstance(book_title, str) else ""
+    #    book_title 过乱码修复（GBK argv 事故形态，见 _repair_mojibake）。
+    raw_title = book_title.strip() if isinstance(book_title, str) else ""
+    title = (_repair_mojibake(raw_title) or "").strip()
     if not title and epub_title_fallback:
         title = epub_title_fallback.strip()
     if not title:
