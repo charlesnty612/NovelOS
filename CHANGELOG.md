@@ -27,7 +27,7 @@
 - **CSS 地基（残次感第 1 名）**：`.input` 并进 `.form-row` 控件同一条规则（27 个裸控件一次对齐）；补 `.alert--warning`/`.badge--{info,warn,ok,active,archived}`/`.spinner`/`.skeleton`/`.empty`；可交互元素 `:focus-visible` 全域可见（`:where()` 零特异性）；新令牌 `--color-warn-*`/`--color-focus-ring` 收编 18 处裸 hex。
 - **状态覆盖**：`<Loading>`/`<SkeletonRows>`/`<ErrorBoundary>`（包住路由树）新组件；18 处「加载中…」灰字全替换；总览页加载期整页骨架（消灭空白页）；删除/归档/连接测试失败全部改错误通道有反馈（原 5 处静默）；QualityPanel 嵌套解引用加防御（原形状一变即白屏）。
 - **交互完整**：`Modal` 基座（Esc/初始焦点/焦点循环/滚动锁/嵌套栈顶/焦点归还），全站 9 个自写弹窗迁移（原仅 ConfirmDialog 有 Esc）；Bible 六 tab 落 URL `?tab=`（刷新/后退/书签可复现）+ roving tabindex + 方向键；章节标题 inline 改名（接后端已支持的 PATCH title，补功能缺口）；Story Bible 非法子路径规范化。
-- **章节详情页 IA 重构（1814→667 行）**：拆 6 个子组件；下部收进分段 tabs（草稿/章节计划/质量/上下文/危险操作）且选中落 URL；**运行记录面板常驻**（PAUSED 审批卡不漏看）；分区懒加载+访问过保留挂载；危险操作隔离红描边。**1722px 魔法定高删除**（改 260px 版本列表+正文自适应网格）——**推翻 2026-09-01「定高终案不动」旧拍板（CHANGELOG:182），留痕待用户终裁**（一行 CSS 可回退）。
+- **章节详情页 IA 重构（1814→667 行）**：拆 6 个子组件；下部收进分段 tabs（草稿/章节计划/质量/上下文/危险操作）且选中落 URL；**运行记录面板常驻**（PAUSED 审批卡不漏看）；分区懒加载+访问过保留挂载；危险操作隔离红描边。**1722px 魔法定高删除**（改 260px 版本列表+正文自适应网格）——**推翻 2026-09-01「定高终案不动」旧拍板（CHANGELOG:182）**；2026-09-13 用户目检后终裁：**新自适应方案定型**（如需回退一行 CSS 即可）。
 - **AI 调用日志页重做**：选中与列表解耦（原点一行全表重拉闪烁）+ 详情按 call_id 缓存；主从布局；人读化详情（中文标签事实表+关键指标条+raw 折叠）；项目/结果/时间过滤条。
 - **文案去术语（调试台体质）**：侧栏「Sprint 5 · 一期」→「NovelOS v3.9.0」；`节点时间线（选中 run 的 checkpoint_json）`/`计划（plan_json）`/`Workflow runs`/`（dry-run）`/enabled/disabled/ACTIVE/MERGED 等英文枚举与调试后缀全站清（改中文标签）；总览「后端健康」卡改人话。
 - **顺手抓的真 bug**：编辑弹窗「归档」按钮缺 `type="button"` 导致点归档误发整单 PATCH；`Index.css` 并发写丢 `.alert--warning` 块（联调补回并记坑）；ProjectInitPanel 种子数提示 1-100 与实际校验 1-500 不符。
