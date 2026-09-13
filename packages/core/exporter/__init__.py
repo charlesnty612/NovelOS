@@ -21,7 +21,10 @@ from .builder import (
     build_docx,
     build_fanqie_package,
     build_txt,
+    chapter_heading,
+    latest_draft_content,
     plan_to_outline,
+    project_name,
 )
 from .docx import build_minimal_docx
 
@@ -32,4 +35,9 @@ __all__ = [
     "build_fanqie_package",
     "plan_to_outline",
     "build_minimal_docx",
+    # V3.9 批次 5.14：章节渲染 helper 由私有名提升为公开 API
+    # （``content_sync.build_volume_txt`` 等跨模块复用的稳定入口）。
+    "project_name",
+    "latest_draft_content",
+    "chapter_heading",
 ]

@@ -66,6 +66,24 @@ def _seed_world_rule(db_path: Path, project_id: str, name: str, statement: str) 
         conn.close()
 
 
+def _seed_world_rule_explicit_id(
+    db_path: Path, project_id: str, rule_id: str, name: str, statement: str,
+) -> None:
+    """直接 SQL 插入一条 world_rule 并**显式指定 world_rule_id**（F-3 cap 用例需要
+    按 id 升序断言 LIMIT 命中的是哪一批，new_id 非单调故不能用它）。"""
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO world_rules (world_rule_id, project_id, name, statement, data_json, "
+            "visibility, who_knows, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, '{}', 'PUBLIC', NULL, '2026-08-28T00:00:00Z', '2026-08-28T00:00:00Z')",
+            (rule_id, project_id, name, statement),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _seed_character(
     db_path: Path,
     project_id: str,
@@ -101,7 +119,7 @@ def _seed_character(
 
 
 def test_settings_digest_collects_world_rules_and_characters(tmp_path: Path):
-    """_collect_settings_digest 从 DB 拉 world_rules 全量 + characters 前 8 条
+    """_collect_settings_digest 从 DB 拉 world_rules（前 20 条）+ characters 前 8 条
     （含 core_json.one_line）。"""
     app = _create_app(tmp_path)
     db_path = app.state.settings.db_path
@@ -199,7 +217,7 @@ def test_settings_digest_skips_malformed_core_json(tmp_path: Path):
 
 
 def test_settings_digest_limits_characters_to_eight(tmp_path: Path):
-    """characters 超过 8 → 只取 8 条；world_rules 不截断。"""
+    """characters 超过 8 → 只取 8 条；world_rules 未超 20 条上限时不截断。"""
     app = _create_app(tmp_path)
     db_path = app.state.settings.db_path
 
@@ -226,6 +244,63 @@ def test_settings_digest_limits_characters_to_eight(tmp_path: Path):
     selected_names = {c["name"] for c in chars}
     assert selected_names.issubset(all_names)
     assert len(selected_names) == 8
+
+
+def test_settings_digest_caps_world_rules_at_twenty(tmp_path: Path):
+    """F-3：world_rules 超过 20 条 → 只取 world_rule_id 升序的前 20 条（确定性）。
+
+    改造前为「全量注入」：规则多的项目会无上限撑大 critic prompt。
+    """
+    app = _create_app(tmp_path)
+    db_path = app.state.settings.db_path
+
+    async def setup():
+        async with app.router.lifespan_context(app):
+            return await _make_project(app)
+
+    pid = asyncio.run(setup())
+    # 显式 id（wrule_000..wrule_024）→ 便于按 ORDER BY world_rule_id ASC 断言命中批次
+    for i in range(25):
+        _seed_world_rule_explicit_id(
+            db_path, pid, f"wrule_{i:03d}", f"规则{i:03d}", f"statement {i:03d}",
+        )
+
+    digest = _collect_settings_digest(str(db_path), pid)
+    rules = [d for d in digest if d["kind"] == "world_rule"]
+    assert len(rules) == 20
+    assert [r["name"] for r in rules] == [f"规则{i:03d}" for i in range(20)]
+    # 尾部 5 条被 cap 掉
+    assert "规则024" not in {r["name"] for r in rules}
+
+
+def test_settings_digest_truncates_long_world_rule_statement(tmp_path: Path):
+    """F-3：单条 statement 超过 500 字符 → 截断到 500 并追加截断标记；未超 limit 原样保留。"""
+    from packages.workflows.chapter_review.pipeline import (
+        _WORLD_RULE_STATEMENT_MAX_CHARS,
+        _WORLD_RULE_TRUNCATED_SUFFIX,
+    )
+
+    app = _create_app(tmp_path)
+    db_path = app.state.settings.db_path
+
+    async def setup():
+        async with app.router.lifespan_context(app):
+            return await _make_project(app)
+
+    pid = asyncio.run(setup())
+    long_statement = "禁" * (_WORLD_RULE_STATEMENT_MAX_CHARS + 137)
+    _seed_world_rule_explicit_id(db_path, pid, "wrule_000", "长规则", long_statement)
+    _seed_world_rule_explicit_id(
+        db_path, pid, "wrule_001", "短规则", "禁" * _WORLD_RULE_STATEMENT_MAX_CHARS,
+    )
+
+    digest = _collect_settings_digest(str(db_path), pid)
+    by_name = {d["name"]: d["one_line"] for d in digest}
+    truncated = by_name["长规则"]
+    assert truncated == "禁" * _WORLD_RULE_STATEMENT_MAX_CHARS + _WORLD_RULE_TRUNCATED_SUFFIX
+    assert truncated.endswith(_WORLD_RULE_TRUNCATED_SUFFIX)
+    # 恰好等于上限 → 不截断、不带标记
+    assert by_name["短规则"] == "禁" * _WORLD_RULE_STATEMENT_MAX_CHARS
 
 
 def test_settings_digest_empty_when_project_id_invalid(tmp_path: Path):

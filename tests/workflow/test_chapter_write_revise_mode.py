@@ -207,20 +207,27 @@ def _observer_noop_script() -> list[str]:
     ]
 
 
-def _read_writer_input_from_checkpoint(db_path: str, run_id: str) -> dict | None:
-    """从 workflow_runs.checkpoint_json 读 writer_input（_writer_node 返回值）。"""
+def _read_writer_input_from_writer_node(db_path: str, run_id: str) -> dict | None:
+    """从 writer 节点行 output_json 读 writer_input（_writer_node 返回值）。
+
+    V3.9 批次 2.4 起 chapter-write 声明了 ``checkpoint_exclude``（writer_input /
+    节点镜像键等大 payload 不再落 checkpoint_json，见 chapter_write/pipeline.py
+    WORKFLOW），节点产出的权威副本在 ``workflow_run_nodes.output_json``——本 helper
+    随之改读该表；被断言的行为（revise 模式注入 draft_text / revision_note）不变。
+    """
     conn = get_connection(db_path)
     try:
         row = conn.execute(
-            "SELECT checkpoint_json FROM workflow_runs WHERE run_id = ?",
+            "SELECT output_json FROM workflow_run_nodes "
+            "WHERE run_id = ? AND node_id = 'writer' ORDER BY rowid DESC LIMIT 1",
             (run_id,),
         ).fetchone()
     finally:
         conn.close()
-    if row is None or not row["checkpoint_json"]:
+    if row is None or not row["output_json"]:
         return None
-    ckpt = json.loads(row["checkpoint_json"])
-    return ckpt.get("writer_input")
+    node_output = json.loads(row["output_json"])
+    return node_output.get("writer_input")
 
 
 # ---------------------------------------------------------------------------
@@ -279,8 +286,8 @@ def test_chapter_write_revise_mode_injects_draft_and_note(tmp_path: Path):
             assert v1_content and len(v1_content) > 0
 
             # baseline：v1 这次 write 是 write 模式（无 revision_note）
-            v1_writer_input = _read_writer_input_from_checkpoint(db_path, v1_run_id)
-            assert v1_writer_input is not None, "v1 writer_input 应落 checkpoint_json"
+            v1_writer_input = _read_writer_input_from_writer_node(db_path, v1_run_id)
+            assert v1_writer_input is not None, "v1 writer_input 应落 writer 节点产出"
             assert v1_writer_input.get("mode") == "write"
             assert not v1_writer_input.get("draft_text"), "v1 不应有 draft_text"
             assert not v1_writer_input.get("revision_note"), "v1 不应有 revision_note"
@@ -312,8 +319,8 @@ def test_chapter_write_revise_mode_injects_draft_and_note(tmp_path: Path):
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             v2_run_id = r.json()["run_id"]
 
-            writer_input = _read_writer_input_from_checkpoint(db_path, v2_run_id)
-            assert writer_input is not None, "v2 writer_input 应落 checkpoint_json"
+            writer_input = _read_writer_input_from_writer_node(db_path, v2_run_id)
+            assert writer_input is not None, "v2 writer_input 应落 writer 节点产出"
 
             # 主断言：模式 = revise、draft_text = v1 content、revision_note 非空
             assert writer_input.get("mode") == "revise", (
@@ -383,7 +390,7 @@ def test_chapter_write_default_mode_is_write_no_revision_note(tmp_path: Path):
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             write_run_id = r.json()["run_id"]
 
-            writer_input = _read_writer_input_from_checkpoint(db_path, write_run_id)
+            writer_input = _read_writer_input_from_writer_node(db_path, write_run_id)
             assert writer_input is not None
             assert writer_input.get("mode") == "write"
             assert writer_input.get("draft_text") == "", "无 draft → draft_text 应为空串"
@@ -468,7 +475,7 @@ def test_chapter_write_fresh_write_overrides_revise_to_write(tmp_path: Path):
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             v2_run_id = r.json()["run_id"]
 
-            writer_input = _read_writer_input_from_checkpoint(db_path, v2_run_id)
+            writer_input = _read_writer_input_from_writer_node(db_path, v2_run_id)
             assert writer_input is not None
             assert writer_input.get("mode") == "write", (
                 f"fresh_write=True 应强制 mode='write'，got {writer_input.get('mode')!r}"
@@ -546,7 +553,7 @@ def test_chapter_write_without_fresh_write_remains_revise(tmp_path: Path):
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             run_id = r.json()["run_id"]
 
-            writer_input = _read_writer_input_from_checkpoint(db_path, run_id)
+            writer_input = _read_writer_input_from_writer_node(db_path, run_id)
             assert writer_input is not None
             assert writer_input.get("mode") == "revise", (
                 f"不带 fresh_write 应保持 revise 模式，got {writer_input.get('mode')!r}"

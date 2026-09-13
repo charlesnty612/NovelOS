@@ -60,7 +60,7 @@ interface ReviewReportShape {
   word_band?: { low?: number; high?: number };
   forbidden_word_hits?: string[];
   warnings?: string[];
-  /** V3.7：字数严重级条目（>±30% 外缘），报告型展示给作者，不阻断 run。 */
+  /** V3.7/V3.9 5.2：字数严重级条目（带外偏离超过带边缘到 target 的距离），报告型展示给作者，不阻断 run。 */
   errors?: ReviewReportErrorItem[];
 }
 

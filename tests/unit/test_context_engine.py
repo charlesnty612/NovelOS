@@ -577,9 +577,11 @@ def test_canon_change_invalidates_director_and_writer_cache(tmp_path: Path):
     # 同一 canon_id 再次装配 → 命中缓存（不重新算）
     out3 = build_director_input(db_path, pid, cid, "意图")
     out3w = build_writer_input(db_path, cid, {})
-    # 断言命中缓存（返回的就是缓存里的对象引用，与上一次结果完全相同）
-    assert out3 is out2
-    assert out3w is out2w
+    # 断言命中缓存：V3.9 批次 1.4 起命中返回深拷贝，内容一致但非同一对象
+    assert out3 == out2
+    assert out3 is not out2
+    assert out3w == out2w
+    assert out3w is not out2w
 
 
 def test_writer_input_injects_style_params_from_canon(tmp_path: Path):

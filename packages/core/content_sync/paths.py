@@ -19,6 +19,17 @@
             <slug>-backup-<YYYYmmdd-HHMMSS>.json
         manifest.json
 
+题材包（题材库 P3a）走独立的 ``genres/`` 命名空间::
+
+    <content-dir>/
+        genres/
+            <pack-slug>/
+                pack.json              # 运行时 payload + 元信息（genre-push 写出）
+            manifest.json ?            # 不写：pack 清单在内容仓根 manifest.json 的 genres 段
+        manifest.json                  # 内容仓根清单：genres 段 = {synced_at, packs[]}
+        <book-slug>/
+            ...                        # 书目录结构同上
+
 设计要点：
 
 - 默认内容仓路径使用正斜杠形式的 ``D:/zcodeproject/NovelOS-Content``，与
@@ -27,6 +38,9 @@
 - 子目录中文名 ``novel / canon / story_state / backup`` 固定，文件名前缀
   （如 ``全书-`` / ``第N章-``）按可读性优先中文；CLI 读取时按这些名字匹配，
   不依赖遍历顺序。
+- ``genres/`` 下同一个 pack 目录里既可能有人编辑的 10 维题材资产（编辑面），
+  也可能有 ``pack.json``（运行面）；两者是**双轨**而非同一份数据，见
+  :mod:`packages.core.content_sync.service` 模块头与 content_sync README。
 """
 
 from __future__ import annotations
@@ -39,8 +53,15 @@ from typing import Any
 __all__ = [
     "BOOK_DIRS",
     "BOOK_SLUG_HINT",
+    "CONTENT_MANIFEST_FILENAME",
     "DEFAULT_CONTENT_DIR",
+    "GENRES_DIR",
+    "GENRE_PACK_FILENAME",
+    "GenrePackDoc",
     "Manifest",
+    "content_manifest_path",
+    "genre_pack_path",
+    "genres_dir",
     "manifest_path",
 ]
 
@@ -122,6 +143,93 @@ def story_state_filename(state_version: int) -> str:
 def manifest_path(book_dir: Path) -> Path:
     """manifest.json 在书目录里的固定位置。"""
     return book_dir / "manifest.json"
+
+
+# ---------------------------------------------------------------------------
+# 题材包（genres/ 命名空间）
+# ---------------------------------------------------------------------------
+
+# 题材包命名空间目录（内容仓根下）。
+GENRES_DIR = "genres"
+
+# 单包运行时 payload 文件名（与 10 维编辑面文件并存的「运行面」）。
+GENRE_PACK_FILENAME = "pack.json"
+
+# 内容仓根清单文件名（书清单 + ``genres`` 段：同步时间 / pack 清单）。
+CONTENT_MANIFEST_FILENAME = "manifest.json"
+
+
+def genres_dir(content_dir: Path | str) -> Path:
+    """``<content-dir>/genres``。"""
+    return Path(content_dir) / GENRES_DIR
+
+
+def genre_pack_path(pack_dir: Path | str) -> Path:
+    """``<content-dir>/genres/<slug>/pack.json``。"""
+    return Path(pack_dir) / GENRE_PACK_FILENAME
+
+
+def content_manifest_path(content_dir: Path | str) -> Path:
+    """``<content-dir>/manifest.json``（内容仓根清单）。"""
+    return Path(content_dir) / CONTENT_MANIFEST_FILENAME
+
+
+@dataclass
+class GenrePackDoc:
+    """``genres/<slug>/pack.json`` 的反序列化形态。
+
+    语义：**DB 行元信息 + payload** 的落盘封装——payload 是运行面唯一真相
+    （软件层只消费它），元信息用于 pull 时定位 / 更新既有 pack 行。
+
+    字段与 :class:`packages.core.genre.model.GenrePack` 对齐；``synced_at``
+    是内容仓侧写入时间（审计用，pull 不消费）。
+    """
+
+    pack_id: str
+    name: str
+    genre_tag: str
+    version: int
+    payload: dict[str, Any] = field(default_factory=dict)
+    source_path: str | None = None
+    synced_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "GenrePackDoc":
+        """容错反序列化（缺字段兜底、类型异常降级，不抛错）。
+
+        必需字段（``pack_id`` / ``payload``）缺失由调用方（pull）校验；
+        本函数只保证「形状安全」：payload 非 dict → 空 dict，version 非
+        整数 → 0。
+        """
+        if not isinstance(data, dict):
+            return cls(pack_id="", name="", genre_tag="", version=0)
+
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+
+        try:
+            version = int(data.get("version") or 0)
+        except (TypeError, ValueError):
+            version = 0
+
+        pack_id = data.get("pack_id")
+        name = data.get("name")
+        genre_tag = data.get("genre_tag")
+        source_path = data.get("source_path")
+        synced_at = data.get("synced_at")
+        return cls(
+            pack_id=str(pack_id) if pack_id is not None else "",
+            name=str(name) if name is not None else "",
+            genre_tag=str(genre_tag) if genre_tag is not None else "",
+            version=version,
+            payload=payload,
+            source_path=str(source_path) if source_path is not None else None,
+            synced_at=str(synced_at) if synced_at is not None else "",
+        )
 
 
 @dataclass

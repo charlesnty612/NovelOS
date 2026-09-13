@@ -38,7 +38,9 @@ Sprint 6 的 Quality 子模块，按 ``docs/evaluation/quality-scoring-v0.md`` �
 - LLM judge 接入时必须保持 rule-based + LLM 双轨；并把 judge model_versions 写入
   ``QualityReport.meta``。
 - 修改 §2.1 公式必须同步更新 ``aggregate.formula_text``（hash 自动重算）。
-- 修改 Guardrail severity 时同步更新 :data:`.issues.MVP_SEVERITY_MATRIX`。
+- 修改 Guardrail severity 时同步更新 :data:`.issues.MVP_SEVERITY_MATRIX`（含规则级
+  ``MVP_RULE_OVERRIDES`` 与阻断白名单 ``BLOCKING_RULES``）；三者内容已纳入
+  ``scoring_formula_hash``，变更时同时更新 README §4 与 spec §3.7/§4（V3.9 批次 3.1/3.5）。
 - 与 Story State service 集成时通过复用 ``packages.core.story_state.validator.validate_delta``
   （已在 :mod:`.guardrails` 内调用）；不要在 engine 内直接读 DB。
 """
@@ -46,16 +48,30 @@ Sprint 6 的 Quality 子模块，按 ``docs/evaluation/quality-scoring-v0.md`` �
 from __future__ import annotations
 
 # 暴露常用 guardrails / scorings 便于测试 / 集成
-from . import guardrails, scoring
+from . import ai_flavor, guardrails, scoring
 from .aggregate import (
     SUBSCORE_NAMES,
     WEIGHTS,
     compute_overall,
     formula_hash,
     formula_text,
+    severity_config_text,
 )
 from .engine import QualityEngine
-from .issues import MVP_SEVERITY_MATRIX, Category, Issue, Severity, loc, make_issue, mvp_max_severity
+from .issues import (
+    BLOCKING_RULES,
+    MVP_RULE_OVERRIDES,
+    MVP_SEVERITY_MATRIX,
+    Category,
+    Issue,
+    Severity,
+    is_blocking_issue,
+    loc,
+    make_issue,
+    mvp_max_severity,
+    rule_default_severity,
+    severity_config_fingerprint,
+)
 from .models import Issue as IssueModel
 from .models import QualityContext, QualityReport
 from .payoff import PayoffContext
@@ -76,12 +92,16 @@ __all__ = [
     "make_issue",
     "loc",
     "mvp_max_severity",
+    "rule_default_severity",
+    "is_blocking_issue",
+    "severity_config_fingerprint",
     # 聚合
     "compute_overall",
     "WEIGHTS",
     "SUBSCORE_NAMES",
     "formula_hash",
     "formula_text",
+    "severity_config_text",
     # style 趋势监测（M2-C）
     "check_style_trend",
     "WINDOW",
@@ -90,10 +110,13 @@ __all__ = [
     # payoff
     "payoff_evaluate",
     # 模块
+    "ai_flavor",
     "guardrails",
     "scoring",
     # 常量
     "MVP_SEVERITY_MATRIX",
+    "MVP_RULE_OVERRIDES",
+    "BLOCKING_RULES",
     "Severity",
     "Category",
     # V3.7 字数度量（wordcount）

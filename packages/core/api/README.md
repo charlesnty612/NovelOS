@@ -31,13 +31,21 @@
 | `app` | `packages/core/api/main.py` | 默认 FastAPI 实例（uvicorn 入口） |
 | `__version__ = "0.1.0"` | `packages/core/api/main.py` | API 版本号 |
 | `lifespan(app)` | `packages/core/api/main.py` | 异步上下文管理器，启动时执行迁移 |
-| `GET /api/health` | `packages/core/api/main.py` | 返回 `{status:"ok", version, tables:37}`（口径为总表数减 `_migrations`、排除 `chapter_fts%` 影子表） |
+| `GET /api/health` | `packages/core/api/main.py` | 返回 `{status:"ok", version, tables:38}`（口径为总表数减 `_migrations`、排除 `chapter_fts%` 影子表） |
 | `GET /api/chapters/{chapter_id}/context-preview` | `packages/core/api/routers/workflows.py`（Sprint 13 下半新增） | dry-run，返回 context 装配预览（layers + token 估算 + items；只读、不调 LLM、不写库） |
 | `GET /api/ai-call-logs` | `packages/core/api/routers/ai_call_logs.py`（Sprint 13 下半新增） | 分页列出 ai_call_logs 摘要（默认 limit=50，上限 200；支持 `?project_id=`（JOIN workflow_runs + chapters）、`?node=` 过滤）；不含 API key |
 | `GET /api/ai-call-logs/{log_id}` | 同上 | 单条详情（含 `input_context_ids` + `output` 解析后 JSON） |
 | `GET /api/projects/{pid}/style-samples` | `packages/core/api/routers/author_style_samples.py`（Sprint 15 / V1.3） | 列出项目级作者文风样例（按 `created_at DESC`）。注入 writer 上下文用，详见 `packages/core/context_engine/README.md`。 |
 | `POST /api/projects/{pid}/style-samples` | 同上 | 新增文风样例（201）。`content` ≤ 5000 字 / 单项目 ≤ 10 篇（超限 422）。 |
 | `DELETE /api/projects/{pid}/style-samples/{sample_id}` | 同上 | 删除单条（204）；不存在 / 不属于该项目 → 404。 |
+| `POST /api/projects/{pid}/genre-packs` | `packages/core/api/routers/genre.py`（题材库 P1a） | 创建题材包（201）。payload 过 `docs/state-model/schemas/genre-pack.schema.json`（v1.0.0），不合规 → 422（`detail.errors`）；`pack_id` 冲突 → 422；项目不存在 → 404。详见 `packages/core/genre/README.md`。 |
+| `GET /api/genre-packs` | 同上 | 列出题材包摘要（`created_at DESC`；`?genre_tag=` 精确过滤）。 |
+| `GET /api/genre-packs/{pack_id}` | 同上 | 题材包全文（`payload` 已解析）；不存在 → 404。 |
+| `PUT /api/genre-packs/{pack_id}` | 同上 | 更新；提供 `payload` 时 `version` 自增（director 装配缓存键指纹跟随）。 |
+| `DELETE /api/genre-packs/{pack_id}` | 同上 | 删除（204）；仍被项目绑定 → 409；不存在 → 404。 |
+| `GET /api/projects/{pid}/genre-pack` | 同上 | 项目当前题材包绑定 `{project_id, pack_id, bound, pack}`；未绑定 → `pack=null`。 |
+| `POST /api/projects/{pid}/genre-pack/bind` | 同上 | 绑定（单 slot，覆盖式）；项目 / 题材包不存在 → 404。 |
+| `POST /api/projects/{pid}/genre-pack/unbind` | 同上 | 解绑（幂等 200）；项目不存在 → 404。 |
 | `GET /api/projects/{pid}/backup` | `packages/core/api/routers/backup.py`（V1.4 / Sprint 16 / MVP） | 下载项目备份 JSON 包（22 张业务表行 + metadata 自证字段，含 `api_keys_stripped=true` 等）；`Content-Type: application/json; charset=utf-8` + `Content-Disposition: attachment; filename="backup-<pid>.json"`。项目不存在 → 404。详见 `packages/core/backup/README.md`。 |
 | `POST /api/projects/import-backup` | 同上 | 接收 JSON body（备份包），导入为**新项目**（不覆盖源项目）；返回 201 + 新 `projects` 行 dict。坏 `format / version / 表名 / 缺字段 / 事务失败` → 422。事务失败整体回滚，不残留半成品。 |
 | `GET /api/projects/{pid}/export?format={txt\|docx\|fanqie}[&chapter_no=...]` | `packages/core/api/routers/export.py`（V1.4 / Sprint 16） | 整书 / 单章 / 番茄投稿包导出。`fanqie` 忽略 `chapter_no`；`chapter_no` 缺省=整书。404=项目不存在；400=非法 format 或单章缺参。文件名走 RFC 5987（ASCII 兜底 + `filename*=UTF-8''…`）。详见 `packages/core/exporter/README.md`。 |
@@ -68,7 +76,7 @@ NOVELOS_PORT=19090 python -m packages.core.api.main
 
 # 浏览器
 curl http://127.0.0.1:18081/api/health
-# → {"status":"ok","version":"0.1.0","tables":37}
+# → {"status":"ok","version":"0.1.0","tables":38}
 
 # 测试（httpx ASGI transport）
 pytest tests/integration/test_health.py -q
@@ -95,7 +103,7 @@ pytest tests/integration/test_health.py -q
 
 - **CORS 白名单**：当前仅 `127.0.0.1:5173` 与 `localhost:5173`；后续若新增前端端口必须同步更新。
 - **迁移触发**：lifespan 启动时无条件执行迁移；幂等由 `apply_migrations` 内部保证。
-- **`tables` 计算**：`count_tables` 包含 `_migrations` 表（runner 自建），端点输出 `max(tables-1, 0)`，业务表恒为 37。
+- **`tables` 计算**：`count_tables` 包含 `_migrations` 表（runner 自建），端点输出 `max(tables-1, 0)`，业务表恒为 38。
 - **路由前缀**：业务路由应挂在 `/api` 前缀下，与 vite dev proxy 配合。
 - **SPA 路由注册顺序**：SPA fallback catch-all `/{full_path:path}` 必须最后注册；`/api/health` / 业务路由 / `root()` 必须先注册，否则 SPA 会吃掉 API 请求或吃掉 `GET /` 服务信息。
 - **NOVELOS_PORT vs NOVELOS_API_PORT**：两个端口变量语义不同——`NOVELOS_PORT` 只影响 `packages/core/api/main.py:__main__` 入口；`NOVELOS_API_PORT` 只影响 `Settings.api_port`（被 `scripts/serve.py` 消费）。不要混用。

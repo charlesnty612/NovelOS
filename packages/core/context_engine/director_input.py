@@ -10,15 +10,18 @@ from packages.core.db import get_connection
 
 from .builders_common import (
     _DEFAULT_TARGET_WORD_COUNT,
+    _DIRECTOR_SUMMARY_TOKEN_BUDGET,
+    _attach_assembly_meta,
     _build_trigger_corpus,
     _character_state_excerpts,
+    _genre_pack_excerpt,
     _hook_ledger_excerpt,
     _narrative_debt_excerpt,
     _open_foreshadow_list,
-    _peek_active_canon_id,
-    _peek_chapter_no_state_version_plan,
+    _peek_chapter_context,
     _plot_graph_excerpt,
     _previous_chapter_tail,
+    _project_max_state_version,
     _project_overdue_chapters,
     _recent_chapter_summaries,
     _row_to_chapter,
@@ -29,7 +32,9 @@ from .builders_common import (
 from .cache import (
     _FINGERPRINT_UNCACHED,
     _cache_get,
+    _cache_namespace_tag,
     _cache_put,
+    _fingerprint_author_intent,
     _fingerprint_plan_json,
 )
 from .canon import (
@@ -140,8 +145,14 @@ def _build_director_input_uncached(
     target_word_count: int,
     *,
     plan_json_override: dict[str, Any] | None = None,
+    peek: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """无缓存版 director 装配；build_director_input 用本函数 + 缓存包装。"""
+    """无缓存版 director 装配；build_director_input 用本函数 + 缓存包装。
+
+    ``peek``（V3.9 批次 2.3）：调用方已用 :func:`_peek_chapter_context` 预读的上下文
+    （单连接 JOIN 结果）。传了就直接复用其 ``state_version``（省掉一次取快照连接），
+    不传则退回同连接轻查询 :func:`_project_max_state_version`。
+    """
     conn = get_connection(db_path)
     try:
         proj_row = conn.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,)).fetchone()
@@ -153,11 +164,14 @@ def _build_director_input_uncached(
         project = _row_to_project(proj_row)
         chapter = _row_to_chapter(chap_row)
 
-        # story_state_snapshot
-        from packages.core.story_state.service import StoryStateService
-
-        snap = StoryStateService(db_path).get_current_state(project_id)
-        state_version = int(snap.get("state_version") or 0)
+        # story_state_snapshot：只要 state_version。
+        # V3.9 批次 2.3：旧实现调 StoryStateService.get_current_state 读 + JSON 解析整份
+        # snapshot_json，仅为取这个整数；改为 MAX(state_version) 轻查询（口径见
+        # _project_max_state_version），并在 peek 已带入时直接复用。
+        if peek is not None:
+            state_version = int(peek.get("state_version") or 0)
+        else:
+            state_version = _project_max_state_version(conn, project_id)
 
         # Sprint 14：摘要链 + 前章尾段 + 开放伏笔清单（任务书 §A / §B）。
         # recent_chapter_summaries 按 chapter_no 倒序，最多 _RECENT_SUMMARY_CAP；
@@ -170,9 +184,10 @@ def _build_director_input_uncached(
         recent_summaries_raw = _recent_chapter_summaries(
             conn, project_id, current_chapter_no=current_chapter_no or None,
         )
-        # MVP token 预算：摘要链单独按 800 token 上限截断（≈ 3200 字符；保守避免抢 L2 配额）。
-        recent_summaries, _ = _truncate_summaries_to_token_budget(
-            recent_summaries_raw, available_tokens=800,
+        # V3.9 批次 2.1：预算从写死 800 改为具名常量（2000，见 _DIRECTOR_SUMMARY_TOKEN_BUDGET
+        # 的最坏情况演算）；截断结果（truncated）随 _assembly_meta.summary_truncated 上报。
+        recent_summaries, summaries_truncated = _truncate_summaries_to_token_budget(
+            recent_summaries_raw, available_tokens=_DIRECTOR_SUMMARY_TOKEN_BUDGET,
         )
         open_foreshadow = _open_foreshadow_list(
             conn, project_id,
@@ -201,6 +216,9 @@ def _build_director_input_uncached(
         hook_excerpt = _hook_ledger_excerpt(conn, project_id)
         debt_excerpt = _narrative_debt_excerpt(conn, project_id)
         reference_canon_inject, reference_canon_audit = _reference_canon_excerpt(conn, project_id)
+        # 题材库 P1a：项目绑定题材包时的 director 注入段（结构模板摘要 / 爽点类型
+        # 清单 + 密度约束文本化 / pacing 摘要）；未绑定 → (None, None) 零注入。
+        genre_pack_inject, genre_pack_audit = _genre_pack_excerpt(conn, project_id)
     finally:
         conn.close()
 
@@ -261,6 +279,11 @@ def _build_director_input_uncached(
         payload["reference_canon"] = reference_canon_inject
     if reference_canon_audit is not None:
         payload["_reference_canon_consumed"] = reference_canon_audit
+    # 题材库 P1a：题材包注入段 + 溯源审计（双 slot 与 reference_canon 并存互不覆盖）。
+    if genre_pack_inject is not None:
+        payload["genre_pack"] = genre_pack_inject
+    if genre_pack_audit is not None:
+        payload["_genre_pack_consumed"] = genre_pack_audit
     # Sprint 14：摘要链 + 前章尾段 + 开放伏笔清单。
     # 沿用 agent-contracts §3.1「不在权威契约内」的扩展键惯例；无 chapter_summaries 行 /
     # 无 planted 状态伏笔 / 无前章 → 给空列表 / 空 dict，调用方按空态处理。
@@ -270,7 +293,9 @@ def _build_director_input_uncached(
     # V2.0 Wave C 任务一：FTS 召回片段。无索引 / 无命中时为空 list。
     payload["recalled_passages"] = recalled_passages
 
-    return payload
+    # V3.9 批次 2.1：附非注入侧元字段（_assembly_meta，含 token 预算兜底告警 +
+    # 摘要链是否被截断）；缓存存的是含 meta 的完整 payload，命中与未命中结果一致。
+    return _attach_assembly_meta(payload, summary_truncated=summaries_truncated)
 
 
 def build_director_input(
@@ -280,37 +305,70 @@ def build_director_input(
     author_intent: str,
     *,
     target_word_count: int = _DEFAULT_TARGET_WORD_COUNT,
+    namespace: str = "",
 ) -> dict[str, Any]:
     """组装 Director 输入（agent-contracts §3.1 + V2.0 Wave C 任务一 召回 + 任务二 缓存）。
 
     缓存（V2.0 Wave C 任务二）：L0/L1 装配结果按
-    ``(project_id, state_version, chapter_no, "director", plan_fp)`` 键做进程内缓存；
-    同一 (project, state_version, chapter, plan_json 内容) 第二次调用直接返回缓存 dict。
+    ``(project_id, state_version, chapter_no, "director", plan_fp, active_canon_id,
+    intent_fp, target_word_count, genre_pack_ref, ns)`` 键做进程内缓存；
+    同一 (project, state_version, chapter, plan_json 内容, canon, 作者意图, 目标字数,
+    题材包, 命名空间) 第二次调用直接返回缓存条目。
 
     V2.0 Wave C P1-1 修复：键追加 ``plan_fp``（chapters.plan_json 原文 sha256[:16]），
     解决 plan_json UPDATE 后 state_version 不变时的脏命中。``plan_fp == 'uncached'``
     时跳过缓存（不可序列化场景），避免脏命中。
 
+    V3.9 批次 1.4 修复：``author_intent`` 与 ``target_word_count`` 都进 payload
+    （``author_intent.raw`` / ``chapter.target_word_count``），旧键缺这两个维度会
+    互相脏命中。现键含 ``intent_fp``（sha256(author_intent)[:16]，None → 'none'）
+    与 ``target_word_count`` 原文（int，与 state_version/chapter_no 同款直接入键）。
+
+    题材库 P1a：键再追加 ``genre_pack_ref``（项目绑定题材包的 ``<pack_id>@<version>``
+    指纹；未绑定 → ``'__none__'``）。题材包内容进 payload（``genre_pack`` 段），
+    换包 / 换版本（PUT 改 payload 时 version 自增）必须各自 miss，否则旧装配脏命中。
+
+    ``namespace``（关键词参数，默认 ``""``）：键尾命名空间标记。``preview_context``
+    传 ``"preview"`` 拆开 dry-run 与生产的键空间，避免预览的空意图 / 默认 2200 字
+    条目被生产命中。生产调用不传即保持原行为。
+
+    命中返回**深拷贝**，调用方可安全就地改写（见 :mod:`...cache`）。
+
+    V3.9 批次 2.3：键预判从「2 个 ``_peek_*``（其一带 StoryStateService 整份快照解析）」
+    收敛为单连接单条 JOIN 的 :func:`_peek_chapter_context`，结果复用给 uncached 装配
+    （``state_version`` 直接带入，不再二次取快照）。
+
     详细说明见 :func:`_build_director_input_uncached`（无缓存装配实现）与模块顶部注释。
     """
-    # 先读章节号 + state_version + plan_json 原文用于缓存键（不命中再全量装配）
-    chapter_no, state_version, plan_raw = _peek_chapter_no_state_version_plan(
-        db_path, project_id, chapter_id,
-    )
-    plan_fp = _fingerprint_plan_json(plan_raw)
+    # 单连接 peek：chapter_no / state_version / plan_json 原文 / word_band / active canon
+    # / 绑定题材包指纹（不命中再全量装配；peek 结果一并传给 uncached 复用）
+    peek = _peek_chapter_context(db_path, chapter_id, project_id=project_id)
+    chapter_no = peek["chapter_no"]
+    state_version = peek["state_version"]
+    plan_fp = _fingerprint_plan_json(peek["plan_json_raw"])
     # F5 修复：缓存键追加 active canon_id；拆书落新 canon 后旧 director 装配缓存自然失效。
-    active_canon_id = _peek_active_canon_id(db_path, project_id) or "__none__"
+    active_canon_id = peek["active_canon_id"] or "__none__"
+    # 题材库 P1a：缓存键追加题材包指纹（``<pack_id>@<version>``，未绑定 → ``__none__``）。
+    # 未加该维度 → 换题材包 / 升 payload 版本后旧装配脏命中（V3.9 批次 1B 教训：
+    # 进 payload 的装配输入必须有对应键维度）。
+    genre_pack_ref = peek["genre_pack_ref"] or "__none__"
+    intent_fp = _fingerprint_author_intent(author_intent)
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, active_canon_id,
+        intent_fp, target_word_count, genre_pack_ref, _cache_namespace_tag(namespace),
     )
-    if plan_fp != _FINGERPRINT_UNCACHED:
+    cacheable = (
+        plan_fp != _FINGERPRINT_UNCACHED and intent_fp != _FINGERPRINT_UNCACHED
+    )
+    if cacheable:
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
 
     payload = _build_director_input_uncached(
         db_path, project_id, chapter_id, author_intent, target_word_count,
+        peek=peek,
     )
-    if plan_fp != _FINGERPRINT_UNCACHED:
+    if cacheable:
         _cache_put(cache_key, payload)
     return payload

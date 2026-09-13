@@ -36,6 +36,9 @@ import type {
   DraftCreatePayload,
   FetchAvailableModelsPayload,
   FetchAvailableModelsResponse,
+  GenreBinding,
+  GenrePack,
+  GenrePackSummary,
   HealthResponse,
   Hook,
   HookCreatePayload,
@@ -310,6 +313,22 @@ export const workflowsApi = {
       `/projects/${pid}/chapters/${cid}/commit`,
       payload,
     ),
+  // V3.9 批次 4.1：quality_gate enforce 阻断后的「按门禁建议改稿」。
+  // 后端语义：复用 plan_json.revision_note（门禁阻断时写入）启动 write（revise 模式），
+  // write 完成后自动接力 chapter-review；无 gate_blocked 标记 → 409。
+  // 仅需 mock_providers / model_overrides（其它智能字段由章节自身状态决定）。
+  gateRevise: (
+    pid: string,
+    cid: string,
+    payload: {
+      mock_providers?: Record<string, string[]> | null;
+      model_overrides?: Record<string, string> | null;
+    } = {},
+  ) =>
+    api.post<WorkflowStartResponse>(
+      `/projects/${pid}/chapters/${cid}/gate-revise`,
+      payload,
+    ),
   resume: (runId: string, payload: ResumeRequestPayload) =>
     api.post<WorkflowStartResponse>(`/runs/${runId}/resume`, payload),
   // P1 project-init：分步审阅放行（POST /runs/{id}/resume，body 为 revisions）。
@@ -549,6 +568,32 @@ export const referenceApi = {
       `/projects/${pid}/canons/${canonId}/to-style-sample`,
       {},
     ),
+};
+
+// -------------------------------------------------------------- genre packs（题材库）
+// 对应 packages/core/api/routers/genre.py：
+//   GET    /genre-packs                        —— 列表摘要（?genre_tag= 精确过滤）
+//   GET    /genre-packs/{pack_id}              —— 详情（payload 已解析为对象）
+//   GET    /projects/{pid}/genre-pack          —— 项目当前绑定（含 pack 全文）
+//   POST   /projects/{pid}/genre-pack/bind     —— 绑定（单 slot，覆盖式；404 = 项目/pack 不存在）
+//   POST   /projects/{pid}/genre-pack/unbind   —— 解绑（幂等：未绑定也 200，bound=false）
+// 设计要点：
+// - 绑定是**项目单 slot**（与 canon 叠加参照双 slot 并存，互不覆盖）；
+// - 绑定响应已是「绑定详情」，调用方拿到后无需二次 GET 即可刷新面板。
+export const genreApi = {
+  listPacks: (genreTag?: string) =>
+    api.get<GenrePackSummary[]>('/genre-packs', { genre_tag: genreTag }),
+  getPack: (packId: string) => api.get<GenrePack>(`/genre-packs/${packId}`),
+  getBinding: (pid: string) =>
+    api.get<GenreBinding>(`/projects/${pid}/genre-pack`),
+  bind: (pid: string, packId: string) =>
+    api.post<GenreBinding>(`/projects/${pid}/genre-pack/bind`, {
+      pack_id: packId,
+    }),
+  // 解绑响应固定为 {project_id, pack_id: null, bound: false, pack: null}；
+  // 后端只在项目不存在时 404。
+  unbind: (pid: string) =>
+    api.post<GenreBinding>(`/projects/${pid}/genre-pack/unbind`, {}),
 };
 
 // -------------------------------------------------------------- context preview

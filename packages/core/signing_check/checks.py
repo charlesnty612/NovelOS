@@ -8,14 +8,20 @@
   「如何修复」的引导性建议（启发式，非保证）。
 - 平台依据：番茄男频公开规则（黄金三章、单章 1500-2200 字、签约窗口 2/5/8 万共 3 次机会）。
   词典词条来源为番茄编辑指南与公开网文写作共识；后续可按平台口径微调。
+- 题材库 P2：``run_checks(..., opening_rules=...)`` 追加**题材开篇检查段**——
+  题材包 payload.opening_rules（黄金三章特化规则）的逐条机检。失败 / 无法机检一律
+  ``info`` 级（report-only 提示，**不**阻断），判定为纯子串启发式（见
+  :func:`evaluate_genre_opening`）。
 """
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
+from packages.core.genre.consumers import OPENING_RULE_MAX_CHAPTER
 from packages.core.quality.wordcount import visible_chars
 
 # ---------------------------------------------------------------------------
@@ -84,6 +90,178 @@ _SIGN_5W: Final[int] = 50_000
 _SIGN_8W: Final[int] = 80_000
 # echo_words 频次阈值：每千字
 _ECHO_PER_KCH_THRESHOLD: Final[float] = 5.0
+
+# ---------------------------------------------------------------------------
+# 题材开篇规则（P2）：关键词抽取口径
+# ---------------------------------------------------------------------------
+
+# 量词/章号片段（「第1章」「300字」「2次」…）：先从规则文本里剔除，避免把数字当关键词。
+_RULE_QUANTIFIER_RE: Final[re.Pattern[str]] = re.compile(
+    r"第?\s*[0-9０-９一二三四五六七八九十百千]+\s*[章字次处个条项天日周月秒分]"
+)
+# 约束语法词（情态 / 语篇 / 量词）：替换为分隔符——「必须」「出现」「开篇」等不是
+# 可机检信号；剩余 ≥2 字的片段才是候选关键词。
+_RULE_NOISE_WORDS: Final[tuple[str, ...]] = (
+    "必须", "需要", "不得", "不能", "不应", "应当", "应该", "建议", "要求", "确保",
+    "出现", "存在", "包含", "完成", "覆盖", "建立", "交代", "呈现", "给出", "做到",
+    "开篇", "首章", "黄金三章", "本章", "正文", "读者",
+    "以内", "之内", "之前", "之后", "以前", "以后", "至少", "至多", "不超过", "不少于",
+    "最多", "最少", "留下", "提到", "写明",
+    "章", "字", "次", "处", "个", "条", "项", "第", "且", "或", "与", "和", "在", "要",
+    "需", "应", "即", "等", "并", "而", "中", "上", "下", "时", "起", "的", "了", "是",
+    "有", "不", "内", "前", "后", "则", "为", "以", "从", "到", "把", "被", "能", "会",
+)
+# 分隔符：非中英文数字的字符都是边界（标点 / 空白 / 符号）。
+_RULE_SEPARATOR_RE: Final[re.Pattern[str]] = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")
+
+
+def _rule_keywords(*texts: str) -> list[str]:
+    """从规则文本抽取可机检关键词（去重保序、≥2 字）。
+
+    启发式口径（无分词依赖，与既有词典扫描同款子串判定）：
+    1. 剔除章号 / 数量片段（``第1章`` / ``300字``）；
+    2. 把约束语法词替换为分隔符（``必须`` / ``出现`` / ``开篇`` …）；
+    3. 按非中英文字符切分，保留长度 ≥2 的片段。
+
+    抽取不到关键词（返回空列表）→ 该规则报「无法机检」而不是猜。
+    """
+
+    merged = " ".join(t for t in texts if t)
+    if not merged:
+        return []
+    merged = _RULE_QUANTIFIER_RE.sub(" ", merged)
+    for word in _RULE_NOISE_WORDS:
+        merged = merged.replace(word, " ")
+    seen: set[str] = set()
+    keywords: list[str] = []
+    for token in _RULE_SEPARATOR_RE.split(merged):
+        token = token.strip()
+        if len(token) < 2 or token in seen:
+            continue
+        seen.add(token)
+        keywords.append(token)
+    return keywords
+
+
+def _rule_label(rule: dict[str, Any]) -> str:
+    """规则的人读标签：description 优先，缺席退回 requirement（截断到 40 字）。"""
+
+    label = (rule.get("description") or rule.get("requirement") or "").strip()
+    return label[:40] + ("…" if len(label) > 40 else "")
+
+
+def evaluate_genre_opening(
+    chapters: list[dict], opening_rules: list[dict] | None,
+) -> list[dict[str, Any]]:
+    """题材开篇规则逐条机检（纯函数；与 :func:`run_checks` 追加的 CheckItem 同源判定）。
+
+    参数：
+        chapters: ``[{"number": int, "text": str}, ...]``（与 :func:`run_checks` 同形）。
+        opening_rules: 题材包 payload.opening_rules 的规范化条目（见
+            ``packages.core.genre.consumers.opening_rules``）；``None`` / 空 → ``[]``。
+
+    返回：``[{"check_id", "chapter_no", "requirement", "status", "detail"}]``，
+    ``status ∈ {pass, fail, unverifiable, not_written}``：
+
+    - ``pass``：目标章（``chapter_no`` 或 1~3 章整体窗口）命中至少一个关键词；
+    - ``fail``：目标章已存在，但未命中任何关键词；
+    - ``unverifiable``：规则文本抽不出可机检关键词（语义型要求，交人工核对）；
+    - ``not_written``：目标章尚未写正文。
+
+    **口径声明（启发式非保证）**：关键词为子串匹配，命中即视为满足——宽松判定
+    （宁可漏报不误报）；失败与无法机检只为作者自检提示，不构成平台结论。
+    """
+
+    if not opening_rules:
+        return []
+    chapters_by_n = _chapter_by_number(chapters)
+    results: list[dict[str, Any]] = []
+    for rule in opening_rules:
+        if not isinstance(rule, dict):
+            continue
+        check_id = str(rule.get("check_id") or "").strip()
+        requirement = str(rule.get("requirement") or "").strip()
+        if not check_id or not requirement:
+            continue
+        chapter_no = rule.get("chapter_no")
+        if not isinstance(chapter_no, int) or isinstance(chapter_no, bool):
+            chapter_no = None
+        scope, scope_desc = _opening_scope(chapters_by_n, chapter_no)
+        result: dict[str, Any] = {
+            "check_id": check_id,
+            "chapter_no": chapter_no,
+            "description": str(rule.get("description") or "").strip(),
+            "requirement": requirement,
+            "status": "not_written",
+            "detail": "",
+        }
+        if not scope:
+            result["detail"] = f"尚未写到{scope_desc}，题材开篇规则暂不体检"
+            results.append(result)
+            continue
+        keywords = _rule_keywords(requirement, str(rule.get("description") or ""))
+        if not keywords:
+            result["status"] = "unverifiable"
+            result["detail"] = "规则无可机检关键词（语义型要求），请人工核对"
+            results.append(result)
+            continue
+        text = "\n".join(chapters_by_n[n] for n in scope)
+        hits = [w for w in keywords if w in text]
+        if hits:
+            result["status"] = "pass"
+            result["detail"] = f"{scope_desc}命中 {','.join(hits)}"
+        else:
+            result["status"] = "fail"
+            result["detail"] = f"{scope_desc}未命中 {','.join(keywords)}"
+        results.append(result)
+    return results
+
+
+def _opening_scope(
+    chapters_by_n: dict[int, str], chapter_no: int | None,
+) -> tuple[list[int], str]:
+    """规则的作用章范围 → ``(章号列表, 人读描述)``；目标章缺失 → ``([], 描述)``。"""
+
+    if chapter_no is not None:
+        return ([chapter_no] if chapter_no in chapters_by_n else []), f"第{chapter_no}章"
+    scope = [n for n in sorted(chapters_by_n) if 1 <= n <= OPENING_RULE_MAX_CHAPTER]
+    return scope, f"第1~{OPENING_RULE_MAX_CHAPTER}章"
+
+
+def _opening_rule_item(verdict: dict[str, Any]) -> CheckItem:
+    """规则判定 → :class:`CheckItem`（pass → ``pass``；其余（含 fail）→ ``info``）。"""
+
+    label = _rule_label(verdict)
+    check_id = str(verdict.get("check_id") or "")
+    detail = str(verdict.get("detail") or "")
+    status = str(verdict.get("status") or "")
+    if status == "pass":
+        return CheckItem(
+            key=f"genre_opening_{check_id}",
+            level="pass",
+            detail=f"题材开篇规则「{label}」满足：{detail}",
+            advice="保持：题材开篇规则已落实",
+        )
+    if status == "unverifiable":
+        return CheckItem(
+            key=f"genre_opening_{check_id}",
+            level="info",
+            detail=f"题材开篇规则「{label}」无法机检：{detail}",
+            advice="语义型题材要求不在签约体检的机检范围；请在人工审稿时核对",
+        )
+    if status == "not_written":
+        return CheckItem(
+            key=f"genre_opening_{check_id}",
+            level="info",
+            detail=f"题材开篇规则「{label}」：{detail}",
+            advice="写到对应章节后再次体检",
+        )
+    return CheckItem(
+        key=f"genre_opening_{check_id}",
+        level="info",
+        detail=f"题材开篇规则「{label}」未满足：{detail}",
+        advice=f"题材要求：{verdict.get('requirement', '')}（info 级提示，不阻断签约流程）",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -388,14 +566,19 @@ def _check_signing_window(total_chars: int) -> CheckItem:
 def run_checks(
     chapters: list[dict],
     protagonist_names: list[str],
+    opening_rules: list[dict] | None = None,
 ) -> list[CheckItem]:
     """对一组章节执行全部签约体检检查。
 
     参数：
         chapters: ``[{"number": int, "text": str}, ...]``（按章号升序，重复 number 取首条）。
         protagonist_names: 主角名列表（来自 ``characters.role='protagonist'``）。
+        opening_rules: 题材包 payload.opening_rules 的规范化条目（题材库 P2；可选）。
+            非空 → 报告末尾追加题材开篇检查段（每条约一条 CheckItem：满足 → ``pass``，
+            未满足 / 无法机检 / 章未写 → ``info``，**不**阻断）。
 
-    返回：``list[CheckItem]``，按平台规则顺序排列（开篇 → 黄金三章 → 节奏 → 签约窗口）。
+    返回：``list[CheckItem]``，按平台规则顺序排列（开篇 → 黄金三章 → 节奏 → 签约窗口
+    → 题材开篇）。
     少于 1 章时返回单条 ``info``「暂无正文」。
     """
 
@@ -429,11 +612,16 @@ def run_checks(
     total_chars = sum(_count_chars(t) for t in chapters_by_n.values())
     items.append(_check_signing_window(total_chars))
 
+    # 题材开篇检查段（题材库 P2）：逐条规则一条 CheckItem，失败 / 无法机检为 info 级。
+    for verdict in evaluate_genre_opening(chapters, opening_rules):
+        items.append(_opening_rule_item(verdict))
+
     return items
 
 
 __all__ = [
     "CheckItem",
+    "evaluate_genre_opening",
     "run_checks",
     "CONFLICT_WORDS",
     "GOLDEN_FINGER_WORDS",

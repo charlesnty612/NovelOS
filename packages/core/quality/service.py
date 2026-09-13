@@ -33,6 +33,7 @@ import difflib
 import json
 import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,10 @@ from packages.core.quality.models import QualityContext, QualityReport
 
 __all__ = [
     "QualityService",
+    "CharStats",
     "compute_char_stats",
+    "compute_char_stats_detail",
+    "classify_created_by",
     "build_quality_context",
     "load_reference_texts",
     "capture_reference_consumption",
@@ -115,7 +119,12 @@ class QualityService:
         - ``issues_json`` 落 ``[Issue]``（pydantic dump）。
         - ``report_id`` 不沿用 QualityEngine 已生成的 ID（避免重放覆盖）；用
           ``report.report_id`` 作为业务标识（spec §1.1）。
+        - V3.9 批次 4.3：``report.draft_version`` 为 None 时，落库前取当前最新 draft
+          的 version 补全（并回写 report 对象，调用方 dump 出去即带该版本）；
+          该章尚无 draft 时保持 None（列可空，兼容存量行）。
         """
+        if report.draft_version is None:
+            report.draft_version = _read_latest_draft_version(self.db_path, chapter_id)
         dump = report.model_dump(by_alias=True)
         scores = {
             "overall": dump.get("overall"),
@@ -140,10 +149,10 @@ class QualityService:
                 """
                 INSERT INTO quality_reports
                     (report_id, project_id, chapter_id, commit_id, run_id,
-                     overall, scores_json, issues_json, created_at)
+                     overall, scores_json, issues_json, draft_version, created_at)
                 VALUES
                     (:report_id, :project_id, :chapter_id, :commit_id, :run_id,
-                     :overall, :scores_json, :issues_json, :created_at)
+                     :overall, :scores_json, :issues_json, :draft_version, :created_at)
                 """,
                 {
                     "report_id": report.report_id,
@@ -154,6 +163,7 @@ class QualityService:
                     "overall": int(report.overall),
                     "scores_json": scores_json,
                     "issues_json": issues_json,
+                    "draft_version": report.draft_version,
                     "created_at": now,
                 },
             )
@@ -324,17 +334,101 @@ def _diff_added_chars(prev: str, curr: str) -> int:
     return added
 
 
-def compute_char_stats(db_path: Path | str, chapter_id: str) -> tuple[int, int]:
-    """REQ-Q8 字符数统计：返回 ``(ai_chars, human_chars)``。
+# ---------------------------------------------------------------------------
+# created_by 分类（V3.9 批次 3.3：Q8 统计口径修正）
+# ---------------------------------------------------------------------------
+#
+# 生产端 drafts.created_by 实际取值（grep 生产代码 + data/novelos.db 实测）：
+# - ``writer:v1``：``chapter_write/pipeline.py`` save_draft 硬编码（生产写作全部走这里）；
+# - ``human``：``domain/chapter/service.py`` 人工改稿；
+# - ``agent:*``：部分测试 / 早期调用方的显式前缀写法。
+#
+# 旧实现只认 ``agent:*`` 为 AI、``human`` 为人工，其余忽略 ⇒ 生产 'writer:v1' 全被丢弃，
+# Q8 恒 NO_DATA 或只统计到人工侧。现按证据扩展：
+
+AI_SIDE_PREFIXES: tuple[str, ...] = ("agent:",)
+"""显式 AI 侧 created_by 前缀（第一优先）。"""
+
+INFERRED_AI_PREFIXES: tuple[str, ...] = (
+    "writer:",
+    "polisher:",
+    "scene_planner:",
+    "condense:",
+    "observer:",
+)
+"""非 agent: 前缀但可判定为 AI 产出的生产者前缀（按 prompt_version 形式推断）。
+
+覆盖生产写作链路各 AI 环节（writer / polisher / scene_planner / condense）以及
+observer 的 delta 产出（若被人工固化进 drafts）。判定为 AI 侧时按口径 note 留痕
+「按 prompt_version 推断为 AI」，不静默归类。
+"""
+
+
+@dataclass(frozen=True)
+class CharStats:
+    """REQ-Q8 统计结果明细（V3.9 批次 3.3）。
+
+    字段：
+        ai_chars / human_chars: 与旧接口一致的 AI / 人工字符数。
+        inferred_ai_chars: 其中来自 ``INFERRED_AI_PREFIXES`` 的 AI 字符数（口径 note 用）。
+        unknown_created_by: 无法判定归属的 created_by 值（排序去重，报告留痕用）。
+        versions: 参与的 draft 版本数。
+    """
+
+    ai_chars: int
+    human_chars: int
+    inferred_ai_chars: int
+    unknown_created_by: tuple[str, ...]
+    versions: int
+
+    @property
+    def note(self) -> str | None:
+        """生成 Q8 口径 note；无可留痕内容时返回 None。"""
+        parts: list[str] = []
+        if self.inferred_ai_chars > 0:
+            parts.append(
+                f"{self.inferred_ai_chars} 字符按 created_by 前缀（prompt_version 形如 "
+                "writer:v1）推断为 AI 产出"
+            )
+        if self.unknown_created_by:
+            vals = ", ".join(repr(v) for v in self.unknown_created_by[:5])
+            parts.append(f"{len(self.unknown_created_by)} 种未知 created_by 未计入（{vals}）")
+        if not parts:
+            return None
+        return "Q8 统计口径：" + "；".join(parts)
+
+
+def classify_created_by(created_by: str) -> str:
+    """把 ``drafts.created_by`` 归到 ``"ai" | "human" | "unknown"``。
+
+    - ``agent:*`` → ai（显式前缀）
+    - ``human`` → human
+    - :data:`INFERRED_AI_PREFIXES` 前缀 → ai（推断，调用方负责在报告留 note）
+    - 其余 → unknown（既不记 AI 也不记人工，避免污染占比）
+    """
+    cb = (created_by or "").strip()
+    if not cb:
+        return "unknown"
+    if cb.startswith(AI_SIDE_PREFIXES):
+        return "ai"
+    if cb == "human":
+        return "human"
+    if cb.startswith(INFERRED_AI_PREFIXES):
+        return "ai"
+    return "unknown"
+
+
+def compute_char_stats_detail(db_path: Path | str, chapter_id: str) -> CharStats:
+    """REQ-Q8 字符数统计（明细版）：返回 :class:`CharStats`。
 
     读 ``drafts`` 表按 ``version`` 升序，遍历每个版本：
 
-    - ``version == 1``（chapter 的首个版本）：无论 ``created_by`` 是 ``agent:*`` 还是
-      ``human``，都按 ``len(content)`` 计到对应桶里——首个版本没有「上一版本」可 diff，
-      全量计入。
-    - 后续版本（``version >= 2``）：按 ``created_by`` 派发到 ``ai_chars`` 或
-      ``human_chars`` 桶；用 :func:`_diff_added_chars` 计算该版本相对于「版本序上一份
-      draft（含任何 ``created_by``）」的新增工作量。
+    - ``version == 1``（chapter 的首个版本）：无论 ``created_by`` 归类如何，都按
+      ``len(content)`` 计到对应桶里——首个版本没有「上一版本」可 diff，全量计入。
+    - 后续版本（``version >= 2``）：按 :func:`classify_created_by` 派发到
+      ``ai_chars`` / ``human_chars`` 桶；用 :func:`_diff_added_chars` 计算该版本相对于
+      「版本序上一份 draft（含任何 created_by）」的新增工作量。
+    - ``unknown`` 分类的版本不计入任一桶，但记进 ``unknown_created_by`` 供报告留痕。
 
     这样语义与任务书给定的「首个版本全量计 / 后续版本 diff 增量计」一致；diff 即便
     跨桶（AI→人工 或 人工→AI）也能正确归到本版本对应桶。
@@ -354,7 +448,9 @@ def compute_char_stats(db_path: Path | str, chapter_id: str) -> tuple[int, int]:
         conn.close()
 
     ai_chars = 0
+    inferred_ai_chars = 0
     human_chars = 0
+    unknown: set[str] = set()
     prev_content = ""
     for idx, r in enumerate(rows):
         content = r["content"] or ""
@@ -364,13 +460,33 @@ def compute_char_stats(db_path: Path | str, chapter_id: str) -> tuple[int, int]:
             delta = len(content)
         else:
             delta = _diff_added_chars(prev_content, content)
-        if created_by.startswith("agent:"):
+        side = classify_created_by(created_by)
+        if side == "ai":
             ai_chars += delta
-        elif created_by == "human":
+            if not created_by.strip().startswith(AI_SIDE_PREFIXES):
+                inferred_ai_chars += delta
+        elif side == "human":
             human_chars += delta
-        # 其它 created_by 忽略
+        else:
+            unknown.add(created_by.strip())
         prev_content = content
-    return ai_chars, human_chars
+    return CharStats(
+        ai_chars=ai_chars,
+        human_chars=human_chars,
+        inferred_ai_chars=inferred_ai_chars,
+        unknown_created_by=tuple(sorted(unknown)),
+        versions=len(rows),
+    )
+
+
+def compute_char_stats(db_path: Path | str, chapter_id: str) -> tuple[int, int]:
+    """REQ-Q8 字符数统计：返回 ``(ai_chars, human_chars)``。
+
+    兼容旧接口（q8-export 端点等）；明细（口径 note / 未知 created_by）见
+    :func:`compute_char_stats_detail`。
+    """
+    detail = compute_char_stats_detail(db_path, chapter_id)
+    return detail.ai_chars, detail.human_chars
 
 
 # ============================================================================
@@ -521,6 +637,27 @@ def _read_latest_draft(db_path: str | Path, chapter_id: str) -> str:
     return (row["content"] if row else "") or ""
 
 
+def _read_latest_draft_version(db_path: str | Path, chapter_id: str) -> int | None:
+    """读该 chapter 最新一份 draft 的 version（按 version DESC）。无 draft → None。
+
+    V3.9 批次 4.3：QualityService.save_report 用它把报告的 ``draft_version``
+    钉到「本次评估所对应的草稿版本」；无草稿（如 API 侧对空章节评估）时为 None。
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT version FROM drafts
+            WHERE chapter_id = ?
+            ORDER BY version DESC LIMIT 1
+            """,
+            (chapter_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row["version"]) if row is not None else None
+
+
 def _read_chapter_plan(db_path: str | Path, chapter_id: str) -> dict[str, Any]:
     """读 chapters.plan_json 字典；schema 允许空 dict。"""
     conn = get_connection(db_path)
@@ -629,8 +766,12 @@ def build_quality_context(
     - ``run_id`` —— workflow_run_id（仅回显）。
 
     该函数为 chapter_commit pipeline 与 API evaluate 端点共用，避免重复实现。
+
+    V3.9 批次 3.3：Q8 字符数走 :func:`compute_char_stats_detail`，把「按 prompt_version
+    推断为 AI / 未知 created_by」的口径 note 一并放进 :class:`QualityContext`，
+    由 engine 透传给 ``req_q8`` 写进报告 issues。
     """
-    ai_chars, human_chars = compute_char_stats(db_path, chapter_id)
+    stats = compute_char_stats_detail(db_path, chapter_id)
     plan = _read_chapter_plan(db_path, chapter_id)
     draft = _read_latest_draft(db_path, chapter_id)
     reference_texts = load_reference_texts(db_path, project_id)
@@ -648,8 +789,9 @@ def build_quality_context(
         payoff_history=payoff_history,
         reference_texts=reference_texts,
         whitelist=[],
-        ai_chars=ai_chars,
-        human_chars=human_chars,
+        ai_chars=stats.ai_chars,
+        human_chars=stats.human_chars,
+        char_stats_note=stats.note,
         previous_drafts=previous_drafts,
         run_id=run_id,
     )

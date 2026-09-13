@@ -623,7 +623,10 @@ def test_chapter_commit_observer_split_o3_meta_has_per_leg_chars(
             assert isinstance(smeta.get("leg_b_chars"), int)
             assert smeta["leg_a_chars"] > 0
             assert smeta["leg_b_chars"] > 0
-            assert smeta.get("leg_a_total_chars") == smeta["leg_a_chars"] + smeta["leg_b_chars"]
+            # V3.9 批次 5.6：总量字段由 leg_a_total_chars 更名为 leg_total_chars
+            # （旧名与实际语义「两腿之和」不符）。
+            assert smeta.get("leg_total_chars") == smeta["leg_a_chars"] + smeta["leg_b_chars"]
+            assert "leg_a_total_chars" not in smeta
             # recent_event_ids_count：项目首次 commit 时 plot_events 为空 → 0
             assert smeta.get("recent_event_ids_count") == 0
             # per-leg trim stats

@@ -1,7 +1,9 @@
 """番茄签约体检模块（V2.0 Wave D — 番茄签约体检）。
 
 对外接口：
-- :func:`run_checks` —— 纯函数，输入章节与主角名，输出 :class:`CheckItem` 列表；
+- :func:`run_checks` —— 纯函数，输入章节与主角名，输出 :class:`CheckItem` 列表
+  （题材库 P2 起可传 ``opening_rules`` 追加题材开篇检查段）；
+- :func:`evaluate_genre_opening` —— 题材开篇规则逐条机检（纯函数，P2）；
 - :func:`run_signing_check` —— 入口服务，串联 DB 读数与 :func:`run_checks`；
 - :func:`format_summary` —— 把检查结果渲染为可嵌入导出包的纯文本摘要。
 
@@ -13,11 +15,12 @@
 
 from __future__ import annotations
 
-from .checks import CheckItem, run_checks
+from .checks import CheckItem, evaluate_genre_opening, run_checks
 from .service import format_summary, run_signing_check
 
 __all__ = [
     "CheckItem",
+    "evaluate_genre_opening",
     "run_checks",
     "run_signing_check",
     "format_summary",

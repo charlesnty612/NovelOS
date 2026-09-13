@@ -5,6 +5,7 @@
 - ``POST /projects/{project_id}/chapters/{chapter_id}/write``   — 启动 chapter-write
 - ``POST /projects/{project_id}/chapters/{chapter_id}/review``  — 启动 chapter-review
 - ``POST /projects/{project_id}/chapters/{chapter_id}/commit``  — 启动 chapter-commit
+- ``POST /projects/{project_id}/chapters/{chapter_id}/gate-revise`` — 按门禁建议改稿（V3.9 4.1）
 - ``GET  /runs/{run_id}``                                          — run + 节点明细
 - ``POST /runs/{run_id}/resume``                                   — 恢复 PAUSED run（P0 支持 auto_revise 自动改稿回路）
 - ``POST /runs/{run_id}/cancel``                                   — 协作式取消 RUNNING run
@@ -32,19 +33,34 @@ P0 自动改稿回路：
   auto_revise 改稿回路在 daemon 线程（``auto-revise-{run_id}``）内执行，HTTP 不再阻塞
   等回路结束（最长可能几十分钟）。前端通过 ``GET /runs/{id}`` 或 list 端点轮询拿
   回路产生的子 run 状态。
+
+V3.9 批次 4.1（失败闭环）：
+- ``gate-revise`` 端点复用既有 write（revise 模式，消费 ``plan_json.revision_note``）
+  → review 的链路，把「quality_gate enforce 阻断 → 只能手工改稿」补成「一键按门禁建议改稿」。
+- 阻断落点（``plan_json.revision_note`` + ``gate_blocked``）由 chapter_commit 的
+  quality_gate 节点写入；本模块只提供触发路径与接力。
+
+V3.9 批次 4.2（回路治理）：
+- 回路级取消：auto_revise 回路登记在进程内注册表；``POST /runs/{id}/cancel`` 取消任一
+  回路子 run 时把回路标记为 cancelled，回路线程每轮启动子 run 前检查标记 + 已记录子 run
+  的 DB 状态，命中即终止（详见 ``_AUTO_REVISE_LOOPS`` 注释）。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
+import time
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from packages.core.db import get_connection
+from packages.core.ids import new_id
 from packages.core.logging_config import get_logger
 from packages.core.model_router.profiles import ProfileService
 from packages.core.workflow_registry import get_workflow
@@ -182,6 +198,22 @@ class ResumeRequest(BaseModel):
     # model_overrides 透传到各自 ctx，避免首轮指定的档案在改稿回路里丢失。
     # None → 不覆盖（保持现状）；缺省从原 review run 的 ctx 中继承（如能取到）。
     model_overrides: dict[str, str] | None = None
+
+
+class GateReviseRequest(BaseModel):
+    """「按门禁建议改稿」请求体（V3.9 批次 4.1）。
+
+    只收「本次改稿 + 接力审校」用得到的透传字段：
+    - ``mock_providers``：mock 脚本（write 与接力 review 共用同一份）；
+    - ``model_overrides``：与其它 start 端点同语义的单次 run 级模型档案覆盖；
+    - ``critic_mode`` / ``deep_review``：接力审校时会读取的开关。
+    改稿意见本身不在这里传——它在 quality_gate 阻断时已写入 ``plan_json.revision_note``。
+    """
+
+    mock_providers: dict[str, list[str]] | None = None
+    model_overrides: dict[str, str] | None = None
+    critic_mode: str | None = Field(default=None, pattern="^(off|sample|always)$")
+    deep_review: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +424,175 @@ def _collect_stage_models(db_path: str, run_id: str) -> dict[str, str]:
     return seen
 
 
+def _read_pending_gate_block(db_path: str, chapter_id: str) -> dict[str, Any] | None:
+    """读 ``chapters.plan_json.gate_blocked``（quality_gate enforce 阻断落点）。
+
+    返回 dict 形态的标记（含 mode / rule_ids / blocked_at）；无标记、
+    chapter 不存在、plan_json 非法 → None。
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT plan_json FROM chapters WHERE chapter_id = ?", (chapter_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or not row["plan_json"]:
+        return None
+    try:
+        plan = json.loads(row["plan_json"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(plan, dict):
+        return None
+    blocked = plan.get("gate_blocked")
+    return blocked if isinstance(blocked, dict) else None
+
+
+def _chain_review_after_write(
+    engine: WorkflowEngine,
+    db_path: str,
+    project_id: str,
+    chapter_id: str,
+    write_run_id: str,
+    mock_providers: dict[str, list[str]] | None,
+    initial_ctx_extra: dict[str, Any] | None,
+) -> None:
+    """daemon 线程体：等 write 子 run 终态 → COMPLETED 则接力 chapter-review。
+
+    V3.9 批次 4.1「按门禁建议改稿」的第二段：write（revise 模式，消费
+    ``plan_json.revision_note``）完成后自动启动审校；审校会停在 author_review
+    等作者决议，批准后章节回到 REVIEWED、可重新提交。
+
+    write 未 COMPLETED（FAILED / CANCELLED / 超时仍在跑）→ 不接力审校，
+    交由前端轮询 run 列表处理。复用 :func:`_run_workflow_return_payload`
+    （与 auto_revise 回路启动子 run 同一口径）。异常只记日志，不外抛（HTTP 已返回）。
+    """
+    import time as _t
+
+    try:
+        deadline = _t.monotonic() + _RUN_WAIT_DEADLINE_SECONDS
+        cur: dict[str, Any] | None = None
+        while _t.monotonic() < deadline:
+            cur = get_run(db_path, write_run_id)
+            if cur is not None and cur["status"] in (
+                "COMPLETED", "FAILED", "CANCELLED",
+            ):
+                break
+            _t.sleep(0.5)
+        if cur is None or cur["status"] != "COMPLETED":
+            log.info(
+                "gate-revise chain: write run %s status=%s，不接力审校",
+                write_run_id, cur["status"] if cur else None,
+            )
+            return
+        _run_workflow_return_payload(
+            engine, db_path, "chapter-review", project_id, chapter_id,
+            mock_providers, initial_ctx_extra=initial_ctx_extra,
+        )
+        log.info(
+            "gate-revise chain: chapter_id=%s 已接力 chapter-review（write_run=%s）",
+            chapter_id, write_run_id,
+        )
+    except Exception as exc:  # noqa: BLE001 —— daemon 线程，异常不外抛
+        log.exception(
+            "gate-revise chain crashed: chapter_id=%s write_run=%s err=%s",
+            chapter_id, write_run_id, exc,
+        )
+
+
+# ---------------------------------------------------------------------------
+# V3.9 批次 4.2：auto_revise 回路级取消（进程内注册表）
+# ---------------------------------------------------------------------------
+#
+# 设计取舍：回路只存活在本进程的 daemon 线程里（进程重启即消失），因此回路状态也放在
+# 进程内注册表，不落库——落库会产生「重启后 active 标记永远挂着」的僵尸状态，还会扩大
+# 存储面（任务书要求不扩大存储面）。记录形态：
+#   {loop_id: {"chapter_id", "project_id", "parent_run_id", "max_iter",
+#              "child_run_ids": [...], "cancelled": bool,
+#              "cancelled_reason": str | None, "started_at": float}}
+# 取消入口沿用既有 ``POST /runs/{run_id}/cancel``：取消任一属于本回路的子 run 时，
+# 注册表把该回路标记 cancelled；``_auto_revise_loop`` 每轮启动子 run 前同时检查
+#   1) 注册表 cancelled 标记（覆盖「回路正在两轮之间、当前没有 RUNNING 子 run」的窗口），
+#   2) 已记录子 run 在本进程 DB 里的状态是否 CANCELLED（兜底注册表缺失/竞态）。
+# 命中即终止回路，不再启动下一轮 write / review。
+_AUTO_REVISE_LOOPS: dict[str, dict[str, Any]] = {}
+_AUTO_REVISE_LOOPS_LOCK = threading.Lock()
+
+
+def _register_auto_revise_loop(
+    *,
+    loop_id: str,
+    parent_run_id: str | None,
+    chapter_id: str,
+    project_id: str,
+    max_iter: int,
+) -> None:
+    with _AUTO_REVISE_LOOPS_LOCK:
+        _AUTO_REVISE_LOOPS[loop_id] = {
+            "chapter_id": chapter_id,
+            "project_id": project_id,
+            "parent_run_id": parent_run_id,
+            "max_iter": int(max_iter),
+            "child_run_ids": [],
+            "cancelled": False,
+            "cancelled_reason": None,
+            "started_at": time.monotonic(),
+        }
+
+
+def _finish_auto_revise_loop(loop_id: str) -> None:
+    with _AUTO_REVISE_LOOPS_LOCK:
+        _AUTO_REVISE_LOOPS.pop(loop_id, None)
+
+
+def _record_auto_revise_child(loop_id: str, run_id: str) -> None:
+    if not run_id:
+        return
+    with _AUTO_REVISE_LOOPS_LOCK:
+        rec = _AUTO_REVISE_LOOPS.get(loop_id)
+        if rec is None or run_id in rec["child_run_ids"]:
+            return
+        rec["child_run_ids"].append(run_id)
+
+
+def _mark_auto_revise_loops_cancelled_for_run(
+    run_id: str, *, reason: str = "child-run-cancelled",
+) -> list[str]:
+    """把「子 run ``run_id`` 所属」的活跃回路标记为 cancelled；返回命中的 loop_id 列表。"""
+    hit: list[str] = []
+    with _AUTO_REVISE_LOOPS_LOCK:
+        for loop_id, rec in _AUTO_REVISE_LOOPS.items():
+            if run_id not in rec["child_run_ids"]:
+                continue
+            if not rec["cancelled"]:
+                rec["cancelled"] = True
+                rec["cancelled_reason"] = reason
+            hit.append(loop_id)
+    return hit
+
+
+def _auto_revise_loop_cancelled(loop_id: str, db_path: str) -> tuple[bool, str]:
+    """回路是否应终止；返回 ``(cancelled, reason)``。"""
+    with _AUTO_REVISE_LOOPS_LOCK:
+        rec = _AUTO_REVISE_LOOPS.get(loop_id)
+        snapshot = dict(rec) if rec is not None else None
+    if snapshot is None:
+        return False, ""
+    if snapshot["cancelled"]:
+        return True, str(snapshot.get("cancelled_reason") or "cancelled")
+    for child_run_id in snapshot["child_run_ids"]:
+        child = get_run(db_path, child_run_id)
+        if child is not None and child.get("status") == "CANCELLED":
+            with _AUTO_REVISE_LOOPS_LOCK:
+                cur = _AUTO_REVISE_LOOPS.get(loop_id)
+                if cur is not None and not cur["cancelled"]:
+                    cur["cancelled"] = True
+                    cur["cancelled_reason"] = f"child-run-{child_run_id}-cancelled"
+            return True, f"child-run-{child_run_id}-cancelled"
+    return False, ""
+
+
 def _run_workflow_return_payload(
     engine: WorkflowEngine,
     db_path: str,
@@ -402,6 +603,7 @@ def _run_workflow_return_payload(
     initial_ctx_extra: dict[str, Any] | None = None,
     *,
     wait_deadline_seconds: float | None = None,
+    on_run_started: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """启动指定 workflow 并返回标准响应 payload（run_id / status / current_node / pause_payload）。
 
@@ -409,6 +611,10 @@ def _run_workflow_return_payload(
     若 run 仍未到终态（仍 RUNNING/PENDING），payload 显式标记 ``timeout=True`` 并附加人类可读
     ``detail``，明确告知调用方后台 run 仍在执行；不杀后台线程（它会自行到终态）。
     ``wait_deadline_seconds`` 仅用于测试注入，生产调用方不传。
+
+    ``on_run_started``：子 run 落库（status=RUNNING）后的即时回调，供 auto_revise 回路的
+    注册表在其「在途」阶段就登记该子 run（否则用户在子 run RUNNING 期间取消时，
+    回路线程还可能再启动下一轮）。None → 不回调（既有调用方零影响）。
     """
     workflow = get_workflow(workflow_name)
     if workflow is None:
@@ -433,6 +639,12 @@ def _run_workflow_return_payload(
         mock_providers=mock_providers,
         checkpoint_exclude=workflow.get("checkpoint_exclude"),
     )
+    if on_run_started is not None:
+        # 回调只在注册表登记（O(1)、无 IO）；异常不外抛，避免影响子 run 等待逻辑。
+        try:
+            on_run_started(run_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("on_run_started callback failed: run_id=%s err=%s", run_id, exc)
 
     # 异步启动后本函数仅被 auto_revise 回路内部使用：调用方依赖返回的
     # status 判断本轮 write/review 是否 COMPLETED/PAUSED/FAILED，因此必须
@@ -484,6 +696,8 @@ def _auto_revise_loop(
     mock_providers: dict[str, list[str]] | None,
     max_iter: int,
     model_overrides: dict[str, str] | None = None,
+    *,
+    parent_run_id: str | None = None,
 ) -> dict[str, Any]:
     """P0 自动改稿回路：重跑 chapter-write → chapter-review 直到 approved 或达上限。
 
@@ -494,10 +708,16 @@ def _auto_revise_loop(
     缺陷 1（P0 高）修复：当 write 或 review 子 run 等待超时（payload 含 ``timeout=True``，
     即 run 仍 RUNNING）时，不继续下一轮——后台线程会自行到终态，前端通过 GET /runs 轮询。
 
+    V3.9 批次 4.2：回路在进程内注册表登记（``loop_id``），每轮启动子 run **前**检查
+    回路是否已被取消（cancel 端点取消任一子 run → 注册表标记；或已记录子 run 的 DB 状态
+    为 CANCELLED）。命中即终止回路，不再启动下一轮 write/review，返回 CANCELLED payload。
+
     ``model_overrides``：触发回路的 resume 请求的 model_overrides（已按「请求体 >
     原 review run ctx」优先级解析）。非 None 时透传到回路内每轮 write / review 子 run 的
     ctx，保持与首轮 run 一致的模型档案覆盖；None 时不写入 ctx（与既有「缺省不出现键」
     行为一致，避免下游误读为「空覆盖」）。
+
+    ``parent_run_id``：触发本回路的父 review run（仅用于注册表可读性与日志）。
     """
     final_payload: dict[str, Any] | None = None
     # 仅当非 None 时构造 initial_ctx_extra，避免 None 覆盖行为（缺省不出现键）。
@@ -505,50 +725,80 @@ def _auto_revise_loop(
     initial_ctx_extra: dict[str, Any] | None = (
         {"model_overrides": model_overrides} if model_overrides is not None else None
     )
-    for iteration in range(1, max_iter + 1):
-        log.info(
-            "auto_revise loop iteration %d/%d for chapter %s",
-            iteration, max_iter, chapter_id,
-        )
-        # 1) 重跑 chapter-write：revision_note 已在 plan_json 中由上一轮 load_plan 带上
-        write_payload = _run_workflow_return_payload(
-            engine, db_path, "chapter-write", project_id, chapter_id, mock_providers,
-            initial_ctx_extra=initial_ctx_extra,
-        )
-        # 缺陷 1（P0 高）：子 run 超时（仍在后台执行），不触发下一轮 review，
-        # 直接返回该 payload；后台 run 列表可见，前端轮询。
-        if write_payload.get("timeout") or write_payload["status"] == "RUNNING":
-            log.warning(
-                "auto_revise_loop 短路: write 超时（run_id=%s），不再触发 review",
-                write_payload.get("run_id"),
-            )
-            return write_payload
-        if write_payload["status"] != "COMPLETED":
-            return write_payload
+    loop_id = new_id("arloop")
+    _register_auto_revise_loop(
+        loop_id=loop_id,
+        parent_run_id=parent_run_id,
+        chapter_id=chapter_id,
+        project_id=project_id,
+        max_iter=max_iter,
+    )
+    def on_run_started(child_run_id: str) -> None:
+        _record_auto_revise_child(loop_id, child_run_id)
 
-        # 2) 重跑 chapter-review
-        review_payload = _run_workflow_return_payload(
-            engine, db_path, "chapter-review", project_id, chapter_id, mock_providers,
-            initial_ctx_extra=initial_ctx_extra,
-        )
-        # 缺陷 1（P0 高）：同上，review 超时短路
-        if review_payload.get("timeout") or review_payload["status"] == "RUNNING":
-            log.warning(
-                "auto_revise_loop 短路: review 超时（run_id=%s），不再触发下一轮 write",
-                review_payload.get("run_id"),
+    try:
+        for iteration in range(1, max_iter + 1):
+            # 0) 回路级取消：启动任何子 run 之前先查「父级意图」——
+            #    注册表 cancelled 标记（cancel 端点取消任一子 run 时置位）
+            #    或已记录子 run 在 DB 中已是 CANCELLED。
+            cancelled, reason = _auto_revise_loop_cancelled(loop_id, db_path)
+            if cancelled:
+                log.info(
+                    "auto_revise loop %s 已被取消（%s）：第 %d/%d 轮不再启动子 run",
+                    loop_id, reason, iteration, max_iter,
+                )
+                return {
+                    "run_id": parent_run_id or "",
+                    "status": "CANCELLED",
+                    "current_node": None,
+                }
+            log.info(
+                "auto_revise loop iteration %d/%d for chapter %s",
+                iteration, max_iter, chapter_id,
             )
-            return review_payload
-        if review_payload["status"] == "COMPLETED":
-            return review_payload
-        if review_payload["status"] == "PAUSED":
-            return review_payload
+            # 1) 重跑 chapter-write：revision_note 已在 plan_json 中由上一轮 load_plan 带上
+            write_payload = _run_workflow_return_payload(
+                engine, db_path, "chapter-write", project_id, chapter_id, mock_providers,
+                initial_ctx_extra=initial_ctx_extra,
+                on_run_started=on_run_started,
+            )
+            # 缺陷 1（P0 高）：子 run 超时（仍在后台执行），不触发下一轮 review，
+            # 直接返回该 payload；后台 run 列表可见，前端轮询。
+            if write_payload.get("timeout") or write_payload["status"] == "RUNNING":
+                log.warning(
+                    "auto_revise_loop 短路: write 超时（run_id=%s），不再触发 review",
+                    write_payload.get("run_id"),
+                )
+                return write_payload
+            if write_payload["status"] != "COMPLETED":
+                return write_payload
 
-        # FAILED：检查是否为 rejected-for-revision，是则继续下一轮
-        run = get_run(db_path, review_payload["run_id"])
-        error = (run or {}).get("error") or ""
-        if "rejected-for-revision" not in str(error):
-            return review_payload
-        final_payload = review_payload
+            # 2) 重跑 chapter-review
+            review_payload = _run_workflow_return_payload(
+                engine, db_path, "chapter-review", project_id, chapter_id, mock_providers,
+                initial_ctx_extra=initial_ctx_extra,
+                on_run_started=on_run_started,
+            )
+            # 缺陷 1（P0 高）：同上，review 超时短路
+            if review_payload.get("timeout") or review_payload["status"] == "RUNNING":
+                log.warning(
+                    "auto_revise_loop 短路: review 超时（run_id=%s），不再触发下一轮 write",
+                    review_payload.get("run_id"),
+                )
+                return review_payload
+            if review_payload["status"] == "COMPLETED":
+                return review_payload
+            if review_payload["status"] == "PAUSED":
+                return review_payload
+
+            # FAILED：检查是否为 rejected-for-revision，是则继续下一轮
+            run = get_run(db_path, review_payload["run_id"])
+            error = (run or {}).get("error") or ""
+            if "rejected-for-revision" not in str(error):
+                return review_payload
+            final_payload = review_payload
+    finally:
+        _finish_auto_revise_loop(loop_id)
 
     # 达到上限仍未 approved：返回最后一轮 review 的 FAILED payload
     return final_payload or {
@@ -960,6 +1210,88 @@ def _guard_commit_draft_freshness(request: Request, chapter_id: str) -> None:
     )
 
 
+@router.post(
+    "/projects/{project_id}/chapters/{chapter_id}/gate-revise",
+    status_code=status.HTTP_201_CREATED,
+)
+def start_gate_revise(
+    project_id: str,
+    chapter_id: str,
+    body: GateReviseRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """按门禁建议改稿（V3.9 批次 4.1）：一键把 quality_gate 阻断变成改稿闭环。
+
+    语义：
+    - 前置：chapter 的 ``plan_json.gate_blocked`` 非空（quality_gate enforce 阻断时写入的
+      标记；改稿意见 ``plan_json.revision_note`` 同批写入）→ 无标记 → 409；
+    - 启动 chapter-write：``revision_note`` 存在 ⇒ write 节点走 revise 模式（定向改稿）；
+    - write COMPLETED 后 daemon 线程（``gate-revise-{run_id}``）接力 chapter-review，
+      审校停在 author_review 等作者决议；作者批准后章节回到 REVIEWED，可重新提交；
+    - 复用 :func:`_start_workflow`（chapter 校验 / 活跃 run 并发防护 / 409 语义）与
+      :func:`_run_workflow_return_payload`（同 auto_revise 回路的子 run 口径），
+      不新建并行机制。
+
+    返回：与其他 start 端点同形（``{run_id, status, current_node}``，201）。
+    """
+    _check_chapter(request, project_id, chapter_id)
+    settings = request.app.state.settings
+    db_path = str(settings.db_path)
+
+    if _read_pending_gate_block(db_path, chapter_id) is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"chapter {chapter_id!r} has no pending quality-gate block; "
+                f"gate-revise 仅在 quality_gate enforce 阻断后可用"
+            ),
+        )
+
+    payload = _start_workflow(
+        workflow_name="chapter-write",
+        request=request,
+        project_id=project_id,
+        chapter_id=chapter_id,
+        body=StartWorkflowRequest(
+            mock_providers=body.mock_providers,
+            model_overrides=body.model_overrides,
+            critic_mode=body.critic_mode,
+            deep_review=body.deep_review,
+        ),
+    )
+
+    # 接力审校的 ctx 透传：与 _start_workflow 同口径（仅非 None / 显式 True 才写入键）。
+    review_ctx_extra: dict[str, Any] = {}
+    if body.model_overrides is not None:
+        review_ctx_extra["model_overrides"] = body.model_overrides
+    if body.critic_mode is not None:
+        review_ctx_extra["critic_mode"] = body.critic_mode
+    if body.deep_review is True:
+        review_ctx_extra["deep_review"] = True
+
+    engine = _engine(request)
+    t = threading.Thread(
+        target=_chain_review_after_write,
+        args=(
+            engine,
+            db_path,
+            project_id,
+            chapter_id,
+            payload["run_id"],
+            body.mock_providers,
+            review_ctx_extra or None,
+        ),
+        name=f"gate-revise-{payload['run_id']}",
+        daemon=True,
+    )
+    t.start()
+    log.info(
+        "gate-revise chain started: chapter_id=%s write_run=%s thread=%s",
+        chapter_id, payload["run_id"], t.name,
+    )
+    return payload
+
+
 @router.get("/runs/{run_id}")
 def get_run_endpoint(run_id: str, request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
@@ -1132,6 +1464,7 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                                 _thread_mp,
                                 _thread_auto_revise_max,
                                 _thread_model_overrides,
+                                parent_run_id=_thread_run_id,
                             )
                     except Exception as exc:  # noqa: BLE001
                         log.exception(
@@ -1175,6 +1508,9 @@ def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
     - engine.cancel_run 内部 WHERE status='RUNNING' 兜底 TOCTOU：API 层校验
       后到 SQL 执行的窄窗口内状态被改 → rowcount=0 → engine 抛 ValueError →
       本端点分桶映射 409。
+    - V3.9 4.2：被取消的 run 若属于某个 auto_revise 回路（进程内注册表登记过），
+      取消成功后把该回路标记 cancelled —— 回路线程下一轮启动子 run 前检查该标记即
+      终止，不再「取消一个子 run 又冒出下一轮」。响应体不变（仍是 {run_id, status}）。
     """
     settings = request.app.state.settings
     db_path = settings.db_path
@@ -1203,6 +1539,15 @@ def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail=msg) from exc
         # "must be RUNNING to cancel" 或 TOCTOU "status changed concurrently" 都 → 409
         raise HTTPException(status_code=409, detail=msg) from exc
+
+    # V3.9 批次 4.2：被取消的 run 若属于某个 auto_revise 回路 → 把回路也标记为取消；
+    # 回路线程在下一轮启动子 run 前看到标记即终止（不再启动新的 write/review）。
+    cancelled_loops = _mark_auto_revise_loops_cancelled_for_run(run_id)
+    if cancelled_loops:
+        log.info(
+            "cancel_run %s stopped auto_revise loop(s): %s",
+            run_id, cancelled_loops,
+        )
 
     return {"run_id": run_id, "status": "CANCELLED"}
 

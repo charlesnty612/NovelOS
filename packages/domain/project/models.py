@@ -91,6 +91,11 @@ class Project(BaseModel):
 
     ``word_band`` 字段：读路径把 ``projects.word_band_json`` 解析成 dict
     （非法 JSON 视为 None，不炸）；写路径由 ProjectUpdate 入口，service 序列化。
+
+    ``genre_pack_id``（题材库 P1b）：项目绑定的题材包 id（单 slot，
+    ``projects.genre_pack_id`` 可空列，迁移 0025）；未绑定 / 极老库缺列 → None。
+    绑定写路径在 ``packages/core/api/routers/genre.py``（bind / unbind 端点），本模型
+    只做**读侧暴露**（GET /projects 列表与详情同步）。
     """
 
     project_id: str
@@ -109,6 +114,13 @@ class Project(BaseModel):
         description=(
             "字数带覆盖（low_ratio / high_ratio / floor）；None = 项目无覆盖，"
             "消费点走模块默认 0.85 / 1.15 / 1200。"
+        ),
+    )
+    genre_pack_id: str | None = Field(
+        default=None,
+        description=(
+            "绑定的题材包 id（题材库单 slot）；None = 未绑定 / 极老库缺列。"
+            "绑定与解绑走 POST /projects/{pid}/genre-pack/bind|unbind。"
         ),
     )
 

@@ -6,7 +6,13 @@ P1 缺陷：用户误点「生成计划」覆盖了已有的 plan_json，导致�
 契约：
 - 若原 plan_json.expected_word_count > 0，重生成时新 plan 继承该值；
 - 若 director 自己产出 expected_word_count 且 >0，优先用 director 的；
-- 否则用默认 2200（对齐 build_director_input 默认 target_word_count）。
+- 否则用默认 ``wordcount.DEFAULT_TARGET_WORD_COUNT``（3000）。
+
+⚠️ V3.9 批次 5.1 行为变更：本文件的「默认字数」断言由 2200 改为 3000。改造前
+chapter_plan 的代码兜底写死 2200（docstring 却承诺 3000），与 writer / review /
+preview 的 3000 口径三处分叉；现全部收敛到 wordcount.DEFAULT_TARGET_WORD_COUNT。
+影响：director 未产出字数且章节 plan_json 无既有字数的 plan 现在按 3000 规划
+（原先 2200），下面沿用 2200 期望值的用例已同步修订。
 """
 
 from __future__ import annotations
@@ -143,7 +149,7 @@ def test_chapter_plan_preserves_existing_expected_word_count(tmp_path: Path):
 
             mock_providers = {"director": _director_script_with_no_word_count()}
 
-            # 1) 第一次 chapter-plan（director 不产出 expected_word_count → 用默认 2200）
+            # 1) 第一次 chapter-plan（director 不产出 expected_word_count → 用默认 3000）
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
                 json={"mock_providers": mock_providers},
@@ -154,7 +160,8 @@ def test_chapter_plan_preserves_existing_expected_word_count(tmp_path: Path):
 
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             ch = r.json()
-            assert ch["plan_json"]["expected_word_count"] == 2200
+            # V3.9 批次 5.1 行为变更：兜底由 2200 收敛到单源 DEFAULT_TARGET_WORD_COUNT=3000
+            assert ch["plan_json"]["expected_word_count"] == 3000
 
             # 2) 人工把 expected_word_count 改成 3000（模拟用户/编辑手动调过字数）
             plan = dict(ch["plan_json"])
@@ -188,7 +195,7 @@ def test_chapter_plan_preserves_existing_expected_word_count(tmp_path: Path):
 
 
 def test_chapter_plan_uses_default_when_no_inherit_and_no_director(tmp_path: Path):
-    """原 plan 为空 + director 不带 expected_word_count → 用默认 2200。"""
+    """原 plan 为空 + director 不带 expected_word_count → 用默认 3000（V3.9 批次 5.1）。"""
     app = _create_app(tmp_path)
 
     async def run():
@@ -209,7 +216,8 @@ def test_chapter_plan_uses_default_when_no_inherit_and_no_director(tmp_path: Pat
 
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             ch = r.json()
-            assert ch["plan_json"]["expected_word_count"] == 2200
+            # V3.9 批次 5.1 行为变更：兜底 2200 → 单源 DEFAULT_TARGET_WORD_COUNT=3000
+            assert ch["plan_json"]["expected_word_count"] == 3000
 
     asyncio.run(run())
 

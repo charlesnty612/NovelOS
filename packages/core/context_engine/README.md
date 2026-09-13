@@ -6,8 +6,8 @@
 ## 职责与边界
 
 做：
-- `build_director_input(db_path, project_id, chapter_id, author_intent, target_word_count=2200)` — 组装 Director 输入（按 `agent-contracts-v0.md` §3.1）。
-- `build_writer_input(db_path, chapter_id, scene_plan, target_word_count=2200)` — 组装 Writer 输入（按 §4.1）。
+- `build_director_input(db_path, project_id, chapter_id, author_intent, target_word_count=3000)` — 组装 Director 输入（按 `agent-contracts-v0.md` §3.1）。
+- `build_writer_input(db_path, chapter_id, scene_plan, target_word_count=3000)` — 组装 Writer 输入（按 §4.1）。
 - `build_observer_input(db_path, chapter_id, min_excerpt_chars_low_confidence=80, max_changes_per_array=50)` — 组装 Observer 输入（按 §5.1）。
 - 读取 chapters.plan_json 作为 `director_plan` / `director_plan_summary`。
 - 读取 characters + character_states（最新 state_version）+ locations / factions / world_rules + hooks（OPEN/ACTIVE/ESCALATED）+ narrative_debts（open/acknowledged）。
@@ -16,7 +16,9 @@
 
 不做：
 - 不直接调用 LLM（属 workflow）。
-- 不做 token 预算分配 / 层级压缩（**Deviation**：MVP 简化版按字段全量塞入，完整版留后续 Sprint）。
+- 不做 token 硬裁剪 / 层级压缩（**Deviation**：按字段全量塞入 + 各字段 cap + 摘要链预算截断；
+  批次 2.1 起增加全局预算**告警**字段 `_assembly_meta`，超预算只标记、不改写已装配内容——
+  一刀切割会破坏 JSON 契约，完整 L0-L9 分层压缩仍留后续 Sprint）。
 
 ## 对外接口
 
@@ -44,7 +46,7 @@ preview_context(
     *,
     author_intent: str = "",
     scene_plan: dict | None = None,
-    target_word_count: int = 2200,
+    target_word_count: int = 3000,
 ) -> dict
 ```
 
@@ -55,7 +57,9 @@ preview_context(
   - L0 — 项目元数据（chapter / project / knowledge_permissions / constraints）
   - L1 — 业务摘要（character_state_excerpts / world_state_excerpts / plot_graph_excerpt / hook_ledger_excerpt / narrative_debt_excerpt / reference_canon）
   - L2 — 章节专属（author_intent / story_state_snapshot / director_plan / scene_plan / recent_prose / style_constraints / draft_text / director_plan_summary / previous_state）
-- **token_estimate** 粗略估算：`max(1, len(json.dumps(value, ensure_ascii=False)) // 4)`（4 字节 ≈ 1 token；中文粗略近似）。MVP 不引入真实分词器；`token_budget` 硬编码 8000。
+- **token_estimate** 粗略估算：`max(1, len(json.dumps(value, ensure_ascii=False)) // 4)`（4 字节 ≈ 1 token；中文粗略近似）。MVP 不引入真实分词器；`token_budget` = `builders_common._ASSEMBLY_TOKEN_BUDGET`（8000）。
+  V3.9 批次 2.1：估算函数与预算常量都由 `builders_common` 单点提供（`_estimate_tokens` / `_ASSEMBLY_TOKEN_BUDGET`），
+  与各 builder 返回的 `_assembly_meta`（`estimate_tokens` / `token_budget` / `token_budget_exceeded`）**同源同口径**。
 - **items** 数组：`[{kind, id, name, ...}]` —— kind 覆盖 character / location / faction / world_rule / plot_event / hook / debt / reference_canon / recent_prose / draft_text / author_intent / director_plan / style_constraints / previous_state 等。
 - **异常透传**：`ValueError("chapter ... not found")` / `ValueError("project ... not found")`，由 router 转 404。
 
@@ -63,7 +67,9 @@ REST 端点：`GET /api/chapters/{chapter_id}/context-preview`（挂在 `routers
 
 ## 默认参数
 
-- `target_word_count=2200`（对齐 PRD §124 番茄单章 2000-2500）。
+- `target_word_count=3000`（V3.9 5.1 起统一为 `wordcount.DEFAULT_TARGET_WORD_COUNT`；
+  旧值 2200 源于 PRD §124 番茄 2000-2500 中点，与管线层 3000 长期矛盾已收敛——
+  番茄带差异由 projects.word_band_json 项目级配置承载）。
 - `style_constraints` 默认：`{pov: third_limited, dialogue_ratio: 0.4, forbidden_words: ["仿佛", "如同", "本章目标"]}`。
 - `knowledge_permissions` 默认：
   - Director / Observer：`your_visibility=["AUTHOR","DIRECTOR"], forbidden_kinds=["HIDDEN"]`
@@ -87,13 +93,16 @@ REST 端点：`GET /api/chapters/{chapter_id}/context-preview`（挂在 `routers
 
 | 键 | 注入位置 | 内容 | 说明 |
 | --- | --- | --- | --- |
-| `recent_chapter_summaries` | director_input 顶层 | `[{chapter_no, summary, chapter_id}]` | 按 `chapter_no` 倒序取最近 5 章摘要（来自 `chapter_summaries` 表，迁移 `0007_chapter_summaries.sql` 落地）。每条 ≤ 200 字。token 超预算时按"先砍最旧"截断。 |
+| `recent_chapter_summaries` | director_input 顶层 | `[{chapter_no, summary, chapter_id}]` | 按 `chapter_no` 倒序取最近 `_RECENT_SUMMARY_CAP`（=40）章摘要（来自 `chapter_summaries` 表，迁移 `0007_chapter_summaries.sql` 落地）。每条 ≤ `_RECENT_SUMMARY_PER_CHARS`（=400）字。超 `_DIRECTOR_SUMMARY_TOKEN_BUDGET`（=2000 token）时按"先砍最旧"截断，截断与否见 `_assembly_meta.summary_truncated`（V3.9 批次 2.1 前的旧口径：5 章 / 每条 200 字 / 800 token——上限恒不触发，机制实为死代码）。 |
 | `previous_chapter_tail` | director_input 顶层 | `{chapter_no, chapter_id, tail_text}` | 前一章（chapter_no - 1）最新 draft 末尾 300 字原文；无前章 → `{}`。 |
 | `open_foreshadow_list` | director_input 顶层 | `[{hook_id, name, status, introduced_chapter_no, importance, overdue, chapters_since_introduced}]` | planted 状态伏笔清单（status ∈ {OPEN, ACTIVE, ESCALATED}）。排序（Sprint 15 / V1.3 SQL 修复后全部下推 SQL）：`overdue_flag DESC → importance DESC → introduced 早的优先 → hook_id ASC`；`LIMIT 20`。**SQL 直接截断**——伏笔 > 20 条时 overdue 项不再被预取 + 内存排序截断丢失。overdue 阈值 **项目级可配**：从 `projects.foreshadow_overdue_chapters` 读取，缺失 / NULL 回退 30。 |
 
 token 预算与截断策略：
 
-- 三组新内容源在 builder 内 **预截断**：摘要链单独按 800 token 上限截断；前章尾段固定 300 字；开放伏笔清单按重要性+ overdue 排序后取 20 条。
+- 三组新内容源在 builder 内 **预截断**：摘要链按 `_DIRECTOR_SUMMARY_TOKEN_BUDGET`（2000 token）截断；前章尾段固定 300 字；开放伏笔清单按重要性+ overdue 排序后取 20 条。
+- **V3.9 批次 2.1（预算真兜底）**：`_truncate_summaries_to_token_budget` 的预算由调用方以具名常量传入（不再是写死的 800），并与 `_RECENT_SUMMARY_CAP / _RECENT_SUMMARY_PER_CHARS` 一起调到「预算成为真正约束」的量级；
+  最坏 40 ×（400 字 + JSON 骨架）≈ 4600 token > 2000 → 截断必然可触发；生产口径（摘要 ≤200 字）在 31 章以后同样触发。
+  三个 build_* 入口的返回 payload 另带 `_assembly_meta`（见下节）。
 - preview（`preview_context`）的 L1 `token_estimate` 把三组新内容源计入；每条以 `kind=chapter_summary / previous_chapter_tail / open_foreshadow` 显示在 items 数组中。
 - 缺字段（无 chapter_summaries 行 / 无 planted 状态伏笔 / 无前章）→ 给空列表 / 空 dict；调用方（Director / Writer / Observer Prompt）按空态处理。
 
@@ -298,18 +307,40 @@ never 模式另起独立条目 `kind=suppressed_character` / `suppressed_locatio
 
 ## V2.0 Wave C 任务二：装配缓存（L0/L1）
 
-`build_director_input` / `build_writer_input` 的 L0/L1 装配结果按
-`(project_id, state_version, chapter_no, role, content_fp)` 做进程内缓存：
+`build_director_input` / `build_writer_input` 的 L0/L1 装配结果做进程内缓存。
+键（V3.9 批次 1.4 后的完整形态）：
+
+```text
+director: (project_id, state_version, chapter_no, "director", plan_fp,
+           active_canon_id, intent_fp, target_word_count, ns)
+writer:   (project_id, state_version, chapter_no, "writer", scene_fp,
+           context_mode, relevance_flag, wb_fp, active_canon_id,
+           target_word_count, ns)
+```
 
 - 键必须含 `state_version` —— state 推进后自然失效；
 - `role ∈ {"director", "writer"}` —— L2 (observer) 不缓存（commit 期间持续变化）；
-- **V2.0 Wave C P1-1 修复**：第 5 元 `content_fp` = 内容指纹
+- **V2.0 Wave C P1-1 修复**：`content_fp` = 内容指纹
   - `director`：`sha256(chapters.plan_json 原文)[:16]`（`NULL → 'none'`）
   - `writer`：`sha256(json.dumps(scene_plan, sort_keys=True))[:16]`（`None → 'none'`）
   - 不可序列化 → `'uncached'` → 跳过缓存（直接走 uncached），
     避免脏命中场景下缓存可用性反而下降。
   - **解决脏命中**：plan_json 被 UPDATE 但 state_version 不变时，键自然失效；
     writer 传不同 scene_plan 时，键也自然失效。
+- `active_canon_id`（F5）/ `context_mode`、`relevance_flag`、`wb_fp`（V3.2/V3.7）
+  同前：拆书落新 canon、paged/full 切换、word_band_json 变更均自然失效。
+- **V3.9 批次 1.4 补齐**：进 payload 的装配参数必须进键——
+  - `intent_fp` = `sha256(author_intent)[:16]`（`None → 'none'`，空串按原文计算）；
+  - `target_word_count` 原文（int，与 state_version 同款直接入键）——它决定
+    `chapter.target_word_count` / `chapter.word_band` / 每 scene `target_words`；
+  - `ns` = 命名空间标记（`cache._cache_namespace_tag`）：生产 `"ns:"`，
+    preview dry-run `"ns:preview"`（`_PREVIEW_CACHE_NAMESPACE`）。前端挂载章节
+    详情页即自动打预览（默认空意图 / 默认字数 3000，V3.9 5.1 起与生产同默认值），
+    若共用键空间会把空意图写进生产条目，作者意图被静默丢弃。
+- **命中返回深拷贝**（`copy.deepcopy`，写入口同样存拷贝）：调用方会就地改写装配
+  结果（`chapter_plan` 改 `chapter.expected_role`、`chapter_write` 补
+  `mode/draft_text/revision_note`、paged 装配改 `context_mode`），共享同一 dict
+  会让脏数据滞留缓存被后续命中读到。payload 为纯 JSON 结构，拷贝开销可忽略。
 - 线程安全：`threading.Lock` 保护 dict 读写；
 - 上限 256 条（dict 插入顺序淘汰最旧）；
 - 仅缓存纯装配 dict，不缓存连接 / 副作用对象；
@@ -321,14 +352,23 @@ never 模式另起独立条目 `kind=suppressed_character` / `suppressed_locatio
   （任一异常吞掉——失效失败不阻断 commit）。
 
 测试（`tests/unit/test_v2_wave_c_retrieval.py`）：
-- 连续两次装配第二次命中缓存（`p1 is p2`）；
-- state_version 变化后重装（`p1 is not p2`）；
-- 多线程并发读同一键最终命中缓存；
-- **P1-1 新增**：`test_director_cache_does_not_hit_stale_plan_json`（plan_json
-  UPDATE 后必须返回新对象）、`test_writer_cache_distinguishes_scene_plan`
-  （同 chapter 不同 scene_plan 返回不同对象）、
+- 连续两次装配第二次命中缓存（V3.9 批次 1.4 起断言**内容相等 + 非同一对象**）；
+- state_version / plan_json 变化后必须真装配（用 spy 统计 `_build_*_uncached`
+  调用次数——深拷贝后 `p1 is not p2` 恒真，不再是命中信号）；
+- 多线程并发读同一键最终稳定为单一条目；
+- **P1-1 新增**：`test_director_cache_does_not_hit_stale_plan_json`、
+  `test_writer_cache_distinguishes_scene_plan`、
   `test_chapter_commit_invalidate_clears_cache` /
   `test_chapter_commit_node_invalidates_cache_in_pipeline`（commit 后显式失效）。
+
+测试（`tests/unit/test_context_engine_cache_dimensions.py`，V3.9 批次 1.4）：
+- 换 `author_intent` / `target_word_count`（director）与 `target_word_count`
+  （writer）必 miss，回到原值仍命中自己的条目；
+- preview 与生产**同参数**也各建一次（命名空间隔离），缓存中两条键、预览那条带
+  `"preview"` 标记；
+- preview 默认口径（空意图 / 默认字数 3000，V3.9 5.1 起与生产一致）不覆盖生产条目；
+- 就地改写命中返回的 payload（`mode` / `draft_text` / `chapter.expected_role` /
+  `scene.target_words`）不影响缓存内对象。
 
 ## P2 Context Engine 补全（Context Engine 缺口关闭）
 
@@ -340,6 +380,8 @@ never 模式另起独立条目 `kind=suppressed_character` / `suppressed_locatio
 
 - ACTIVE = 尚未 MERGED / DISCARDED / ARCHIVED 的活跃分支；
 - 注入字段：`{branch_id, name, parent_branch_id, base_state_version, status}`；
+- V3.9 批次 2.2：补 `LIMIT _UNRESOLVED_BRANCHES_CAP`（20）——旧实现「全部 ACTIVE 无上限」，
+  分支多时会把整个列表拖进 prompt；排序仍为 `branch_id ASC`（确定性稳定序）。
 - `preview_context` L1 新增 `kind="unresolved_branch"` 展示。
 
 ### 2. `world_state_excerpts.sensory_anchors` 感官锚点
@@ -413,3 +455,73 @@ build_writer_input(
   未涉及实体降级、纯函数行为；
 - `test_writer_input_paged.py` 模块级设置 `NOVELOS_CONTEXT_RELEVANCE=off`，
   以保持对 paged 模式裁剪的独立观测。
+
+## V3.9 批次 2：上下文治理（token 预算真兜底 / 注入项 cap / peek 收敛）
+
+三项治理代码级改动，验收口径：公开函数签名与返回结构不变（新增的 `_assembly_meta` 属
+下划线前缀的非注入侧元字段）、既有 pytest 基线不破。
+
+### 2.1 token 预算真兜底（`_assembly_meta`）
+
+- **问题**：`preview._TOKEN_BUDGET = 8000` 纯展示；唯一真裁剪 `_truncate_summaries_to_token_budget`
+  的调用点写死 800 token，而上限 `_RECENT_SUMMARY_CAP(5) × _RECENT_SUMMARY_PER_CHARS(200)` 字
+  ≈ 330 token —— 截断恒不触发（死代码）。
+- **修法**：
+  - 预算参数由调用方以具名常量传入：`_DIRECTOR_SUMMARY_TOKEN_BUDGET = 2000`；
+    `_RECENT_SUMMARY_CAP` 5 → 40、`_RECENT_SUMMARY_PER_CHARS` 200 → 400，让**预算**成为
+    真正的约束（最坏 ≈4600 token，必然触发；生产 ≤200 字摘要在 31 章后触发）；
+  - 三个 build_* 入口（director / writer / observer）返回的 payload 顶层新增
+    `_assembly_meta`：`{estimate_tokens, token_budget, token_budget_exceeded[, summary_truncated]}`；
+    估算口径 `_estimate_tokens`（= `len(json.dumps(..., ensure_ascii=False)) // 4`，至少 1），
+    与 `preview_context` 的展示口径同源；
+  - **超预算只告警、不阻断、不改写**已装配内容（真裁剪仍靠各字段 cap 与摘要链预算截断——
+    一刀切割会破坏 JSON 契约）；`token_budget_exceeded` 供 workflow / 前端观测。
+  - writer paged 模式在分页裁剪后**重算** meta（避免报送裁剪前体积）。
+- 注意：`_assembly_meta` 会随 payload 一起进入 agent user message（与既有
+  `_reference_canon_consumed` / `_suppressed_*` 同款约定）——它是元数据、不是 prompt 内容，
+  消费方不得依赖其参与生成。
+
+### 2.2 无上限注入项加 cap
+
+| 项 | 旧 | 新 |
+| --- | --- | --- |
+| `hook_ledger_excerpt` | 全量 planted 状态，`ORDER BY hook_id` | `ORDER BY importance DESC, hook_id ASC LIMIT 20` |
+| `narrative_debt_excerpt` | 全量 open/acknowledged，`ORDER BY debt_id` | `ORDER BY severity DESC, debt_id ASC LIMIT 20` |
+| `plot_graph_excerpt.unresolved_branches` | 全部 ACTIVE | `ORDER BY branch_id ASC LIMIT 20` |
+
+- 三项都补「主键兜底」稳定序：同 importance / severity 时按 id 升序，输出确定性。
+- **`hook_ledger_excerpt` 与 `open_foreshadow_list` 并存不合并**（语义不同，详见
+  `_hook_ledger_excerpt` docstring）：前者是**台账视图**（原始状态机字段、按重要性），
+  后者是**待核销视图**（JOIN 章节算 overdue、按逾期优先）。
+
+### 2.3 缓存命中路径 peek 收敛（连接数 5 → 1）
+
+- **问题**：四个 `_peek_*` 各自 `get_connection`（每连接 3 条 PRAGMA 固定成本），其中两个为拿
+  `state_version` 走 `StoryStateService.get_current_state` —— 读 + JSON 解析**整份 snapshot_json**；
+  writer 缓存命中路径实测 15.9ms / 5 连接慢于未命中 8.7ms。
+- **修法**：
+  - 新增 `_peek_chapter_context(db_path, chapter_id, *, project_id=None)`：**1 连接 1 条 JOIN**
+    取 `chapters.number/project_id/plan_json` + `MAX(story_states.state_version)` +
+    active `canon_id` + `projects.word_band_json` 原文，结果同时喂给 uncached 装配复用
+    （`peek=` 参数，省掉 word_band 二次查询与 state_version 二次取快照）；
+  - `state_version` 一律改 `SELECT MAX(state_version) FROM story_states WHERE project_id = ?`
+    轻查询（口径与 `get_current_state` 的 state_version 一致：无快照 → 0）；
+  - 四个旧 `_peek_*` 保留为薄封装（签名 / 返回值不变，`builders.__all__` 与
+    `chapter_commit._commit_node` 的用法不受影响）；
+  - 极老库（`reference_canons` / `projects.word_band_json` 缺失）→ 逐项降级读，不抛错。
+- **实测**（临时计时脚本，冷装配 40 次均值 / 命中 200 次均值）：writer 命中 15.875ms/5 连接/5 SQL →
+  **2.022ms/1 连接/1 SQL**；director 命中 11.603ms/3/3 → **2.245ms/1/1**；
+  writer 冷装配 22.5ms/9 → 10.6ms/5，director 冷装配 21.6ms/6 → 7.9ms/3。
+
+### 测试
+
+- `tests/unit/test_context_peek_convergence.py`：命中路径 1 连接 1 SQL、合并 peek 与四个旧薄封装
+  同值、`state_version` 与 `StoryStateService` 口径一致、命中==冷装配 payload 相等、
+  极老库降级、peek 不读 `snapshot_json`。
+- `tests/unit/test_context_token_budget.py`：估算口径与 preview 同源、`_assembly_meta` 三键语义
+  （小 payload 不超标 / 大 payload 置位且不改写内容 / 幂等）、三入口均带 meta、paged 重算。
+- `tests/unit/test_context_injection_caps.py`：hooks / debts / branches 各 21 条 → 20 条 + 排序断言 +
+  两套伏笔视图并存。
+- 修订：`test_sprint14_summaries.py`（摘要链 cap 与真截断）、`test_v2_wave_c_retrieval.py`
+  （state_version 改用真实 `story_states` 行推进，不再 mock `get_current_state`）、
+  `test_observer_input_trim.py`（`_assembly_meta` 为派生度量，不参与 full/trimmed 逐字节相等）。

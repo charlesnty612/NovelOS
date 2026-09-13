@@ -322,3 +322,160 @@ def test_empty_stream_retry_success_but_output_invalid_still_triggers_attempt_re
     assert row is not None
     assert "provider error:" in (row["error"] or "")
     assert "empty stream" in (row["error"] or "")
+
+
+# ---------------------------------------------------------------------------
+# V3.9 批次 5.11：workflow_runs.retry_count（run 级 LLM 重试累计）
+#
+# 口径：runner 是唯一写入方，每次真实发生的 LLM 重试调用 +1（跨节点累加）；
+# 与 ai_call_logs.retry_count（单次调用的 0/1 标记）独立。
+# ---------------------------------------------------------------------------
+
+
+def _read_run_retry_count(db_path: str, run_id: str) -> int | None:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT retry_count FROM workflow_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["retry_count"] if row else None
+
+
+def test_run_retry_count_bumped_on_empty_stream_retry(tmp_path: Path, monkeypatch):
+    """空流重试成功 → workflow_runs.retry_count=1（ai_call_logs.retry_count 仍 0）。"""
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    _seed_observer(tmp_path, db_path)
+
+    call_count = {"n": 0}
+
+    def _patched_complete(self, messages, params=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ProviderError("minimax", "empty stream: no content chunks received")
+        return _build_valid_completion(self, messages, params)
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    run_agent(
+        db_path,
+        "observer",
+        {"chapter_id": "ch_xxx"},
+        run_id,
+        expected="observer",
+        mock_script=lambda i: "{}",
+    )
+
+    assert call_count["n"] == 2
+    assert _read_run_retry_count(db_path, run_id) == 1
+    # 两个 retry_count 口径独立：run 级计这次真实重试，call 级仍只计 output-invalid
+    assert _read_ai_call_log(db_path, run_id)["retry_count"] == 0
+
+
+def test_run_retry_count_bumped_on_output_invalid_retry(tmp_path: Path, monkeypatch):
+    """解析/契约失败触发的 _RETRY_HINT 重试 → workflow_runs.retry_count=1。"""
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    _seed_observer(tmp_path, db_path)
+
+    call_count = {"n": 0}
+
+    def _patched_complete(self, messages, params=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return {
+                "text": "not a json {{{ broken",
+                "usage": {"prompt": 10, "completion": 5, "total": 15},
+            }
+        return _build_valid_completion(self, messages, params)
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    run_agent(
+        db_path,
+        "observer",
+        {"chapter_id": "ch_xxx"},
+        run_id,
+        expected="observer",
+        mock_script=lambda i: "{}",
+    )
+
+    assert call_count["n"] == 2
+    assert _read_run_retry_count(db_path, run_id) == 1
+    assert _read_ai_call_log(db_path, run_id)["retry_count"] == 1
+
+
+def test_run_retry_count_stays_zero_without_retry(tmp_path: Path, monkeypatch):
+    """首次即成功 → workflow_runs.retry_count 保持建行时的 0。"""
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    _seed_observer(tmp_path, db_path)
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete",
+        _build_valid_completion,
+    )
+
+    run_id = create_adhoc_run(db_path)
+    run_agent(
+        db_path,
+        "observer",
+        {"chapter_id": "ch_xxx"},
+        run_id,
+        expected="observer",
+        mock_script=lambda i: "{}",
+    )
+
+    assert _read_run_retry_count(db_path, run_id) == 0
+
+
+def test_run_retry_count_accumulates_across_both_retry_paths(tmp_path: Path, monkeypatch):
+    """两条重试路径同一次调用内叠加：空流重试 + attempt 重试 + 空流重试 = 3。
+
+    调用序（同 case d）：attempt0 空流 → 空流重试返回非法 JSON（output-invalid）
+    → attempt1 发起（_RETRY_HINT 重试）+1 → 空流 → 空流重试 +1 → 仍空流 → 失败。
+    """
+    settings = _prepare_db(tmp_path)
+    db_path = settings.db_path
+    _seed_observer(tmp_path, db_path)
+
+    call_count = {"n": 0}
+
+    def _patched_complete(self, messages, params=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ProviderError("minimax", "empty stream: no content chunks received")
+        if call_count["n"] == 2:
+            return {
+                "text": "not a json {{{ broken",
+                "usage": {"prompt": 10, "completion": 5, "total": 15},
+            }
+        raise ProviderError("minimax", "empty stream: no content chunks received")
+
+    monkeypatch.setattr(
+        "packages.core.model_router.providers.MockProvider.complete", _patched_complete
+    )
+
+    run_id = create_adhoc_run(db_path)
+    with pytest.raises(ProviderError):
+        run_agent(
+            db_path,
+            "observer",
+            {"chapter_id": "ch_xxx"},
+            run_id,
+            expected="observer",
+            mock_script=lambda i: "{}",
+        )
+
+    assert call_count["n"] == 4
+    assert _read_run_retry_count(db_path, run_id) == 3
+    # run 仍按 provider 失败路径收尾为 FAILED（计数不改变终态语义）
+    assert _read_run_status(db_path, run_id)[0] == "FAILED"

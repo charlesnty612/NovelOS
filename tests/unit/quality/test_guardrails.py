@@ -554,16 +554,34 @@ def test_q7_pass_short():
 
 
 # ============================================================================
-# REQ-Q8
+# REQ-Q8（V3.9 批次 3.3：默认 warning，显式 strict 才 error）
 # ============================================================================
 
 
-def test_q8_human_ratio_error():
+def test_q8_human_ratio_low_default_warning():
+    """< 30% 红线默认 warning（工具是 AI 写作工具，纯 AI 章不能默认全拦）。"""
     issues = g.req_q8(ai_chars=80, human_chars=20)
-    assert any(
-        i.severity == "error" and i.rule_id == "RULE_Q8_HUMAN_RATIO_LOW"
-        for i in issues
-    )
+    picked = [i for i in issues if i.rule_id == "RULE_Q8_HUMAN_RATIO_LOW"]
+    assert picked, issues
+    assert picked[0].severity == "warning"
+    assert g.Q8_STRICT_ENV_VAR in picked[0].message
+
+
+def test_q8_human_ratio_low_strict_env_upgrades_to_error(monkeypatch):
+    """显式 NOVELOS_QUALITY_Q8_STRICT=1 ⇒ 升级 error（并会阻断，见白名单）。"""
+    monkeypatch.setenv(g.Q8_STRICT_ENV_VAR, "1")
+    assert g.q8_error_severity() == "error"
+    issues = g.req_q8(ai_chars=80, human_chars=20)
+    picked = [i for i in issues if i.rule_id == "RULE_Q8_HUMAN_RATIO_LOW"]
+    assert picked and picked[0].severity == "error"
+    from packages.core.quality.issues import is_blocking_issue
+
+    assert is_blocking_issue(picked[0])
+
+
+def test_q8_error_severity_default_is_warning(monkeypatch):
+    monkeypatch.delenv(g.Q8_STRICT_ENV_VAR, raising=False)
+    assert g.q8_error_severity() == "warning"
 
 
 def test_q8_human_ratio_warning():
@@ -582,3 +600,17 @@ def test_q8_pass():
 def test_q8_no_data_info():
     issues = g.req_q8(0, 0)
     assert any(i.rule_id == "RULE_Q8_NO_DATA" for i in issues)
+
+
+def test_q8_stats_note_emitted_as_info():
+    """统计口径 note（按 prompt_version 推断为 AI）以 info issue 留痕。"""
+    issues = g.req_q8(ai_chars=100, human_chars=0, note="Q8 统计口径：100 字符按 prompt_version 推断为 AI")
+    assert any(i.rule_id == "RULE_Q8_STATS_NOTE" and i.severity == "info" for i in issues)
+    picked = [i for i in issues if i.rule_id == "RULE_Q8_HUMAN_RATIO_LOW"]
+    assert picked and picked[0].severity == "warning"
+
+
+def test_q8_no_data_includes_note():
+    issues = g.req_q8(0, 0, note="Q8 统计口径：2 个未知 created_by 未计入")
+    no_data = [i for i in issues if i.rule_id == "RULE_Q8_NO_DATA"]
+    assert no_data and "未知 created_by" in no_data[0].message

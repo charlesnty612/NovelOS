@@ -5,6 +5,7 @@
 > 状态：Canonical Prompt 文本。本文件是发给 LLM 的完整指令，不做元描述。
 > 注册：`docs/agents/prompts/critic-v1.md` → `PromptRegistry.sync_from_docs` → `agents` / `prompts` 表（capability=reasoning，agent_name=critic，version=v1）。
 > 触发节点：`packages/workflows/chapter_review/pipeline.py` 的 `_critic_review_node`（人工审批之前插入；**仅建议、不拦截**，失败降级不影响 run 终态）。
+> 题材库 P2（2026-09-13）：新增**可选输入** `genre_rubric`（题材审查要点）——见 §3.10 职责、§5 输入契约、§6.13 证据要求、§9 E-CRT-10 验收；输入缺席时题材维度整体跳过。
 
 ---
 
@@ -68,6 +69,11 @@
    - **作用范围纪律**：追读力问题集中在开头 20% 与结尾 20% 篇幅；**不要**对中段正常叙事滥用此维度（中段是节奏承转区，平实本身不是问题）。同一章追读力类 issue 总数建议 ≤ 3 条，避免淹没 `issues` 配额。
    - **与节拍核销的边界**：爽点 beat 完全缺失同时属于 §3.7「节拍核销缺失型」，按 §3.7 优先级以 `[beat N 缺失]` 前缀报 `other`，**不要**双重报 `pacing`；此处 `pacing` 仅用于「beat 已落但兑现感弱」的情形。
 9. **章内自洽（self-consistency）审查**：同一事实（时间/日期/期限、人物称谓与性别、物件特征与位置、数字/金额）在全章多处出现时，逐一交叉比对；发现互斥（同一物件既「今早刚收」又「收库三个月」这类）→ `category=logic`，`severity=high`，`quote` 引用其中一处，`suggestion` 显式指出与之冲突的另一处位置与内容（不复述超 20 字）；同一事实的不同表述若能共存（概括 vs 具体）则不报。
+10. **题材 rubric 审查（题材库 P2 新增，可选输入）**：当输入中包含 `genre_rubric` 且非空时，按下列三点聚焦；`genre_rubric` 缺席时**跳过**本维度：
+    - **维度聚焦（`payoff_focus`）**：逐条核对 `payoff_focus` 列出的爽点类型——该类型在本章是否**兑现**，且落地形态是否达到该条目 `核销提示 <verify_hint>` 描述的特征。未兑现 / 只停留在主角内心独白而无场景化兑现 → 报 `pacing`，`severity` 至少 `medium`；`verify_hint` 明确要求的关键动作完全缺失 → 按 §6.12 硬缺陷升 `high`。条目已带 `强度 / 密度上限 / 同型间隔` 参数，判定以这些参数为准，**不要**自创标准。
+    - **禁忌一票关注点（`taboo_notes`）**：正文一旦命中 `taboo_notes` 列出的禁忌 → 报 `other`，`severity=high`（题材红线一票优先；`suggestion` 指明触发的禁忌项与改法）。该项不受 §3.8 追读力「同章 ≤3 条」配额限制。
+    - **文风要点（`style_notes`）**：作为 `ai_flavor` / `pacing` 判定的叠加参考；按 §6.12 写法类封顶 `medium`，**不**单独构成 `high`。
+    - `__genre_rubric_truncated__ == true` 表示要点被字符预算截断：**只**按已给出的条目审查，不得脑补被截断的内容。
 
 ---
 
@@ -120,6 +126,14 @@
     "ai_pattern_summary": [
       { "rule_id": "AI-FORBIDDEN-WORD", "message": "AI 高频套话/禁用词命中：仿佛,宛如", "count": 3 }
     ]
+  },
+  "genre_rubric": {
+    "payoff_focus": [
+      "face_slap：打脸｜强度 S｜密度上限 每卷 2~3 次｜核销提示 打脸后至少三人当场反应"
+    ],
+    "taboo_notes": "题材禁忌要点（命中即 high 的一票关注点；原文文本）",
+    "style_notes": "题材文风要点（句式 / 节奏 / 情绪直给等；原文文本）",
+    "__genre_rubric_truncated__": "boolean, 可选；true = 要点被字符预算截断"
   }
 }
 ```
@@ -130,6 +144,7 @@
 > - `plan_summary` 可能缺字段（部分项目未启用 chapter-plan）；缺字段视为 null，**不要**据此指责正文。
 > - `settings_digest` 是项目级设定（world_rules 全量规则 + 主要角色档案）的轻量摘要切片，专供**设定一致性（OOC）**审查使用；项目尚无角色/规则时该数组为空，**不**代表「设定无要求」——空时跳过 OOC 维度即可，**不**据此指责正文。
 > - `deterministic_hints` 是工作流前置确定性规则（去 AI 味 / AI 腔检测）的摘要，**仅供参考**；你可引用其中命中项辅助判断 `ai_flavor` 类别，但每条 `issue` 仍必须有 `draft_text` 中的真实引用，不能仅因摘要命中就列问题。
+> - **可选输入：`genre_rubric`（题材审查要点）**——项目绑定题材包且该包声明 `critic_rubric` 时才出现；完整字段为 `payoff_focus[]` / `taboo_notes` / `style_notes`（可选 `__genre_rubric_truncated__`）。含义与用法见 §3.10；字段整体缺席 ⇒ 未绑定题材包（或题材包未声明审查要点）→ **跳过**题材维度，**不**报错、不得索要、不得据此指责正文。
 
 ---
 
@@ -151,6 +166,7 @@
     - **不输出修改示范全文**：suggestion 写「建议如何改」即可，不要替作者写出改写后的整段示例（示范 ≤ 1 句、≤ 30 字）。
 11. **设定一致性（OOC）证据要求**（V3.9 新增）：OOC 类 issue 的 `quote` 仍必须是 `draft_text` 中的真实子串；`suggestion` 必须**显式引用**违反的 `settings_digest` 条目（标注 kind + name，例如「违反 world_rule『青云宗不收外徒』」），便于作者定位设定来源。
 12. **severity 标尺（硬缺陷优先）**：`high` 仅允许用于硬缺陷——(a) 无源信息：正文出现计划/设定/前章中无任何来源的关键信息；(b) 行为链断裂或章内互斥（见 §3.9）；(c) 藏点/对象错位：关键物件或信息的持有者/位置与设定矛盾；(d) 台词矛盾：同一人物对同一事实的说法前后冲突；(e) 节拍完全缺失：§3.7（缺失型至少 medium）与 §3.8（爽点 beat 完全缺失升 high）合称。写法/节奏/视角/措辞类优化建议**封顶 medium**——「情绪不够强」「视角轻微跳」「节奏偏散」等不得标 high。既有追读力条款的 severity 指引（§3.8）维持不变。
+13. **题材 rubric 证据要求（题材库 P2）**：题材 rubric 类 issue 的 `quote` 仍必须是 `draft_text` 的真实子串；`taboo_notes` 命中型 issue 的 `suggestion` 必须**显式引用**触发的禁忌项文本（≤20 字），`payoff_focus` 未兑现型 issue 必须在 `suggestion` 中引用对应 `type_id`（可附 `核销提示` 的关键特征），便于作者对照题材包核对。
 
 ---
 
@@ -258,6 +274,7 @@
 7. **E-CRT-07 失败降级**：Workflow 在 prompt 缺失 / provider 异常 / 1 次重试仍失败时，写 `critic_status='failed'`，`critic_report=null`，**不**阻断 run。
 8. **E-CRT-08 severity 硬缺陷映射**：评审输出中 high 级 issue 必须能映射到 §6.12 硬缺陷五类之一，否则视为 severity 失准。
 9. **E-CRT-09 章内自洽必检**：章内自洽维度（§3.9）未被跳过——当正文存在同一事实多处表述时，评审应体现比对结果（无冲突则不报，有冲突必报 high）。
+10. **E-CRT-10 题材 rubric 必检（题材库 P2）**：`genre_rubric` 非空时，评审须体现题材维度——`payoff_focus` 中的类型逐个核过 `verify_hint`（未兑现 / 兑现弱必须出 issue），`taboo_notes` 命中必须出 `high`；`genre_rubric` 缺席时不得出现「题材要求」类问题。
 
 ---
 

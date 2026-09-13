@@ -6,11 +6,21 @@
 全仓 prose 字数一律引用本模块，避免出现 "len(prose)"、"len(text.replace(...))"
 等口径漂移。band 计算与三态分类由 :func:`word_band` / :func:`classify_prose_length`
 统一出口。
+
+V3.9 批次 5.1：单章目标字数默认值收敛到 :data:`DEFAULT_TARGET_WORD_COUNT`
+（chapter_plan / chapter_write / chapter_review / preview 一律 import 本常量，
+不再各写一份字面量）。
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+# 单章目标字数默认（**全仓单一权威源**）：chapter_plan 传参默认与代码兜底、
+# chapter_write（scene_planner / writer / length_check / condense）、
+# chapter_review._basic_checks 兜底、context_engine.preview 默认一律引用本常量。
+# 与 project-init 的 DEFAULT_CHAPTER_WORD_COUNT(3000) 同口径（用户拍板单章约 3000 字）。
+DEFAULT_TARGET_WORD_COUNT = 3000
 
 # writer 纪律 Rule 15：计划低于此值时下限保护到 1200。
 _MIN_BAND_FLOOR = 1200

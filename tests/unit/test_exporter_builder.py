@@ -27,7 +27,15 @@ from packages.core.exporter import (
     build_docx,
     build_fanqie_package,
     build_txt,
+    chapter_heading,
+    latest_draft_content,
     plan_to_outline,
+    project_name,
+)
+from packages.core.exporter.builder import (
+    _chapter_heading,
+    _latest_draft_content,
+    _project_name,
 )
 from packages.core.ids import new_id, now_iso
 
@@ -326,3 +334,35 @@ def test_build_fanqie_package_uses_plan_json_outline(tmp_path: Path):
     assert "目标：主角觉醒" in outline
     assert "冲突：灵根被封" in outline
     assert "目标：初次试炼" in outline
+
+
+# ---------------------------------------------------------------------------
+# V3.9 批次 5.14：章节渲染 helper 公开 API（project_name / latest_draft_content /
+# chapter_heading）直通测试。私有下划线名保留为别名，行为与公开名逐字节一致。
+# ---------------------------------------------------------------------------
+
+
+def test_project_name_public_helper_returns_name_and_empty_for_unknown(tmp_path: Path):
+    s = _setup(tmp_path)
+    pid = _create_project(s.db_path, "公开名测试")
+    assert project_name(str(s.db_path), pid) == "公开名测试"
+    assert project_name(str(s.db_path), "prj_not_exists") == ""
+
+
+def test_latest_draft_content_public_helper_takes_max_version(tmp_path: Path):
+    s = _setup(tmp_path)
+    pid = _create_project(s.db_path, "草稿")
+    cid = _create_chapter(s.db_path, pid, 1, "章一")
+    assert latest_draft_content(str(s.db_path), cid) == ""  # 无 draft → 空串
+    _insert_draft(s.db_path, cid, 1, "v1 正文")
+    _insert_draft(s.db_path, cid, 2, "v2 正文")
+    assert latest_draft_content(str(s.db_path), cid) == "v2 正文"
+
+
+def test_chapter_heading_public_helper_and_underscore_alias_identity():
+    assert chapter_heading(3, "风起") == "第3章 风起"
+    assert chapter_heading(3, None) == "第3章"
+    # 旧下划线名是同一函数对象的别名（零行为变化，供遗留引用继续可用）
+    assert _project_name is project_name
+    assert _latest_draft_content is latest_draft_content
+    assert _chapter_heading is chapter_heading

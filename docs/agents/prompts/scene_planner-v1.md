@@ -5,6 +5,7 @@
 > 状态：Canonical Prompt 文本。
 > 注册：`docs/agents/prompts/scene_planner-v1.md` → `PromptRegistry.sync_from_docs` → `agents` / `prompts` 表（V3.9.2+ capability=creative_writing，V3.9.2 前 capability=reasoning，agent_name=scene_planner，version=v1）。
 > 触发节点：`packages/workflows/chapter_write/pipeline.py` 的 `_scene_planner_node`（load_plan 之后、writer 之前；失败降级到原 stub 逻辑，不阻断 writer）。
+> 题材库 P1b/P2（2026-09-13）：新增可选输入 `genre_pack`（题材爽点摘要 + 配比声明）与 **`scene_type` 输出契约**——见 §3 职责、§5 输入契约、§6 Rule 12、§7 输出字段、§9 E-SPL-10。
 
 ---
 
@@ -41,6 +42,11 @@
 4. 每个 scene 附加：
    - `information_boundary`：本场景**不能**揭示的信息（防剧透 / 知识隔离）。
    - `ending_hook`：场景结尾留给读者的钩子（可为 null）。
+5. **题材配比落实（题材库 P1b 起；P2 显式化输出契约）**：项目绑定题材包且包声明了
+   `ratio_declarations` 时，除 §6 Rule 7 的 `target_words` 外，每个 scene 还必须输出
+   `scene_type` —— 本 scene 在题材配比维度中的归属（取值与 `ratio_declarations` 的
+   键一致）。`scene_type` 与 `target_words` 共同构成配比的「标注 + 预算」两半：
+   核销层按同 `scene_type` 的 `target_words` 占比对账声明份额（Rule 12）。
 
 ---
 
@@ -139,6 +145,25 @@
         "payoff_chapter": "integer"
       }
     ]
+  },
+  "genre_pack": {
+    "pack_id": "string（题材包 ID；本键整体缺席 = 本项目未绑定题材包）",
+    "name": "string",
+    "genre_tag": "string",
+    "version": "integer",
+    "payoff_types": [
+      {
+        "type_id": "string（规定性爽点类型，核销按此记账）",
+        "name": "string",
+        "strength": "S | M | s",
+        "density_cap": "string, 密度上限原文（如「每卷 2~3 次」）",
+        "min_interval_chapters": "integer, 同型爽点最小间隔章数（可选）",
+        "density_constraint": "string, 文本化密度约束（「密度上限 X；同型最小间隔 N 章」）"
+      }
+    ],
+    "ratio_declarations": { "action": "number 0-1", "transition": "number 0-1" },
+    "ratio_instruction": "string, 由声明派生的配比指令文本（逐 scene 标注 scene_type + target_words）",
+    "__genre_pack_truncated__": "boolean, 可选；true = 爽点摘要被预算 / 条数截断"
   }
 }
 ```
@@ -152,6 +177,13 @@
 > - **缺席语义**：`reference_canon` 字段不存在或 `canon_id == null` ⇒ 当前项目尚未生成参照系（未跑 deconstruct-book / 未加载 canon）；按 `director_plan` + `world_state_excerpts` 自行规划，**不报错、不得索要** canon。
 > - **存在语义**：参照系是**结构锚点**，用于 Scene Planner 的张力曲线设计（`emotion_curve` 对齐）与 Scene 级爽点排布（`payoff_list` 选合适 Scene 兑现）。它**不**是情节抄写源：`emotion_curve.valence` / `marker_type` 与 `payoff_list.type` 是抽象模式，禁止把 `payoff_list` 中的具象描述（如角色名 / 招式名）复用到 `purpose` / `information_boundary` / `slots[].constraints`。
 > - **合规注记**：这是参数化抽象结论，**不包含、也不得要求原文片段**；参考其规律，**禁止仿写其表达**（与 director §5 `reference_canon` 同口径）。
+
+> **可选输入：`genre_pack`（题材爽点摘要 + 配比声明；题材库 P1b/P2）**：
+> - **缺席语义**：`genre_pack` 字段不存在 ⇒ 当前项目未绑定题材包（或题材包为空）；按 `director_plan` 自行规划，**不报错、不得索要**，且**不输出** `scene_type`（不引入题材假设）。
+> - **爽点摘要（`payoff_types`）**：题材的**规定性**爽点分类法——逐条带 `density_cap` / `min_interval_chapters` / 文本化 `density_constraint`。规划时把本章要兑现的爽点落到具体 scene / slot：同一 `type_id` 的出现间隔不得小于 `min_interval_chapters`，密度不得超过 `density_cap` 声明的上限；`strength=S/M/s` 提示该型爽点适合的层级（卷级 / 章级中型 / 章级小型）。
+> - **配比声明（`ratio_declarations` + `ratio_instruction`）**：配比是**硬约束**——按 §6 Rule 12 的 `scene_type` 输出契约落实；`ratio_instruction` 是同一约束的指令文本，两者冲突时以 `ratio_declarations` 的键为准。
+> - **截断标记**：`__genre_pack_truncated__ == true` ⇒ 爽点摘要被字符预算 / 条数截断；只按已给出的条目规划，**不要**脑补被截断的条目。
+> - **合规注记**：题材包只做约束与聚焦，**不是**情节抄写源；不得把题材条目的文本复述进 `purpose` / `slots[].constraints`（同 `reference_canon` 口径）。
 
 ---
 
@@ -175,6 +207,10 @@
     - **辨识性特征沿传**：若某 beat 的 `purpose` 显式锁定了原著角色的外貌/气质要素（具体以 `character_state_excerpts` / 角色档案为准），对应 slot 的 `constraints[]` 必须**逐字保留**这些锁定要素，禁止改写或省略；不得让 Writer 在 slot 中自行决定角色外貌。
     - **原著时间线沿传**：Director 已声明的"早期 chapter 不得出现的后期要素"（其他被认定为后期专属的强者 / 势力 / 道具 / 灾变）必须**原样进入** `information_boundary[]`，作为本 chapter / 本 scene 的硬性禁用清单；Writer 误用即视为违反 §4 Forbidden-2（使用计划外实体）。
     - **可核验性**：scene 涉及原著角色 / 原著时间线要素时，对应 slot 的 `characters` / `location` 必须在 `available_characters` / `available_locations` 内可查；引用必须可追溯回 `director_plan.key_beats`，禁止 Scene Planner 自创原著要素引用。
+12. **`scene_type` 输出契约（题材库 P1b 核销口径；P2 显式化）**：输入 `genre_pack.ratio_declarations` 非空时，**每个 scene 必须输出 `scene_type`**；否则不输出该字段。契约三条：
+    - **取值与配比维度一致**：`scene_type` 取值必须取自 `ratio_declarations` 的**键**（如声明 `{"action": 0.7, "transition": 0.3}` → 每个 scene 的 `scene_type ∈ {action, transition}`）；禁止声明外的自造取值（核销层按 `ratio_declarations` 归一化后对账，未知取值不计入任何维度）。
+    - **配比与 `target_words` 的关系**：`scene_type` 是**分摊维度标注**，`target_words` 是**预算落实**——同一 `scene_type` 的 scene 的 `target_words` 之和在本章 `target_word_count` 中的占比，应贴近该维度的声明份额（核销阈值 ±10%）；Rule 7 的总和约束（90%~110%）优先，两者冲突时先满足 Rule 7，再为每个 scene 标注最贴近的维度。
+    - **缺席即放弃核销**：声明了配比却漏标 `scene_type` ⇒ 核销层按「该项跳过」处理（不报错，但配比偏差无从对账，等于放弃题材约束）；不得为凑配比把全部 scene 标成同一维度。
 
 ---
 
@@ -201,6 +237,7 @@
       "information_boundary": ["string, 本场景不能揭示的信息项"],
       "ending_hook": "string 或 null, 场景结尾钩子",
       "target_words": "integer ≥ 0, 本场景字数预算（§6 Rule 7 必填；总和应在 target_word_count 的 90~100%）",
+      "scene_type": "string, 可选；题材配比维度标注（§6 Rule 12：输入 genre_pack.ratio_declarations 非空时必填，取值 = 声明的键）",
       "slots": [
         {
           "slot_id": "string, 全局唯一",
@@ -227,6 +264,8 @@
 ```
 
 `required` 字段：`schema_version`、`prompt_version`、`chapter_id`、`scenes`。
+
+`scenes[]` 的 `scene_type` 为**可选字段**（契约见 §6 Rule 12）：输入有 `genre_pack.ratio_declarations` 时逐 scene 必填、取值限于声明键；输入无题材配比时省略该字段。
 
 `scenes` 数组**不允许为空**；若 `key_beats` 为空，输出 1 个兜底 scene：
 
@@ -409,6 +448,7 @@
 7. **E-SPL-07 信息边界**：`information_boundary` 必须为数组，不得省略。
 8. **E-SPL-08 视角一致**：同一 scene 内 `pov` 不变；`pov` 为 `third_person_limited` 时 `pov_character_id` 非空。
 9. **E-SPL-09 失败降级**：Workflow 在 prompt 缺失 / provider 异常 / 1 次重试仍失败时，回退到原 stub 机械映射逻辑，**不**阻断 writer run。
+10. **E-SPL-10 `scene_type` 契约（题材库 P1b/P2）**：输入 `genre_pack.ratio_declarations` 非空时，每个 scene 必须含 `scene_type` 且取值 ∈ 声明键；同 `scene_type` 的 `target_words` 占比与该维度声明份额偏离 >10% = 不通过（由核销层 `GENRE-RATIO-DEVIATION` 对账）。输入无 `genre_pack` / 无配比声明时，`scene_type` 允许缺席。
 
 ---
 

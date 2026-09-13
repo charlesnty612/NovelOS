@@ -255,8 +255,12 @@ def test_pacing_short_no_op():
 
 
 # ============================================================================
-# foreshadowing
+# foreshadowing（V3.9 批次 3.2：埋设/兑现双通道）
 # ============================================================================
+
+
+def _hooks(n: int) -> list[dict]:
+    return [{"hook_id": f"h{i}"} for i in range(n)]
 
 
 def test_foreshadowing_no_hooks_neutral():
@@ -266,16 +270,69 @@ def test_foreshadowing_no_hooks_neutral():
 
 
 def test_foreshadowing_all_resolved():
+    """只兑不埋 = 100（兑现是满分锚点）。"""
     score, _ = score_foreshadowing(
         {},
-        _delta(new_hooks=[{"hook_id": "h1"}], resolved_hooks=[{"hook_id": "h2"}]),
+        _delta(new_hooks=[], resolved_hooks=_hooks(2)),
     )
-    assert score == 50  # 1/(1+1) * 100
+    assert score == 100
 
 
-def test_foreshadowing_full():
+def test_foreshadowing_mix_new_and_resolved():
+    """埋 1 兑 1 = round(100 × (1 + 0.9) / 2) = 95。"""
     score, _ = score_foreshadowing(
         {},
-        _delta(new_hooks=[{"hook_id": "h1"}], resolved_hooks=[{"hook_id": "h1"}]),
+        _delta(new_hooks=_hooks(1), resolved_hooks=_hooks(1)),
     )
-    assert score == 50  # 1/2 * 100
+    assert score == 95
+
+
+def test_foreshadowing_plant_only_beats_neutral():
+    """铺垫章（只埋不兑）不得低于中性分 85 —— 旧口径的结构性倒挂修复点。
+
+    旧公式为纯兑现率：埋 3 兑 0 ⇒ 0 分（低于「完全不涉及钩子」的 85 中性分，
+    诱导作者无视伏笔）；新公式 = round(100 × (R + 0.9N) / (R + N)) ⇒ 90。
+    """
+    for n in (1, 3, 5, 20):
+        score, _ = score_foreshadowing({}, _delta(new_hooks=_hooks(n)))
+        assert score == 90, f"埋 {n} 兑 0 应为 90（中性偏上），实际 {score}"
+        assert score >= 85
+
+
+def test_foreshadowing_value_table():
+    """双通道公式取值表（对照表见 README §5.2 / 批次 3 报告）。"""
+    cases = [
+        # (new, resolved, expected)
+        (0, 0, 85),  # 不涉及钩子 ⇒ 中性分（info）
+        (1, 0, 90),  # 只埋
+        (3, 0, 90),  # 铺垫章（旧口径 0 分）
+        (0, 1, 100),  # 只兑
+        (0, 5, 100),
+        (1, 1, 95),  # 埋+兑
+        (3, 1, 92),  # round(100 × 3.7 / 4) = round(92.5) = 92（banker's rounding）
+        (1, 3, 98),  # round(100 × 3.9 / 4) = round(97.5) = 98
+        (3, 3, 95),
+        (2, 1, 93),  # round(100 × 2.8 / 3) = 93
+        (1, 2, 97),  # round(100 × 2.9 / 3) = 97
+        (5, 1, 92),  # round(100 × 5.5 / 6) = round(91.67) = 92
+    ]
+    for new_n, resolved_n, expected in cases:
+        score, _ = score_foreshadowing(
+            {}, _delta(new_hooks=_hooks(new_n), resolved_hooks=_hooks(resolved_n))
+        )
+        assert score == expected, f"new={new_n} resolved={resolved_n} → {score} != {expected}"
+
+
+def test_foreshadowing_same_involvement_resolved_higher():
+    """同为「涉及 2 个钩子」，兑得多者分更高（兑现权重 > 埋设权重）。"""
+    plant_heavy, _ = score_foreshadowing({}, _delta(new_hooks=_hooks(2)))
+    even, _ = score_foreshadowing(
+        {}, _delta(new_hooks=_hooks(1), resolved_hooks=_hooks(1))
+    )
+    payoff_heavy, _ = score_foreshadowing({}, _delta(resolved_hooks=_hooks(2)))
+    assert plant_heavy < even < payoff_heavy
+    assert payoff_heavy == 100
+
+
+def test_foreshadowing_not_dict_delta():
+    assert score_foreshadowing({}, None)[0] == 100  # type: ignore[arg-type]

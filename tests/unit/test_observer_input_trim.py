@@ -706,9 +706,16 @@ def test_observer_input_full_and_trimmed_top_level_keys_consistent(tmp_path: Pat
     # trimmed 仅新增 snapshot_trim_stats
     assert trim_top - full_top == {"snapshot_trim_stats"}
     assert full_top - trim_top == set()
-    # 公共键（除 previous_state 外）逐字节一致
-    for k in full_top & trim_top - {"previous_state", "snapshot_trim_stats"}:
+    # 公共键（除 previous_state / snapshot_trim_stats / _assembly_meta 外）逐字节一致。
+    # `_assembly_meta`（V3.9 批次 2.1）是对各自 payload 体积的派生度量，两种模式
+    # 的 previous_state 不同 → estimate_tokens 本就不同，不参与逐字节相等断言。
+    for k in full_top & trim_top - {"previous_state", "snapshot_trim_stats", "_assembly_meta"}:
         assert full_payload[k] == trim_payload[k]
+    # `_assembly_meta` 两侧都在，口径自洽（同一预算常量 / 派生度量不参与相等断言）
+    for meta in (full_payload["_assembly_meta"], trim_payload["_assembly_meta"]):
+        assert meta["token_budget"] == 8000
+        assert meta["token_budget_exceeded"] is False
+        assert meta["estimate_tokens"] > 0
 
 
 def test_observer_input_full_byte_equivalent_to_old_implementation(tmp_path: Path):
@@ -754,3 +761,160 @@ def test_observer_input_invalid_snapshot_mode_raises(tmp_path: Path):
         assert "snapshot_mode" in str(e)
     else:
         raise AssertionError("expected ValueError for invalid snapshot_mode")
+
+
+# ---------------------------------------------------------------------------
+# V3.9 批次 5.5：resolved hooks / paid debts「最近 5 条」按时间序选条
+#
+# 缺陷现场：实体 id 形如 ``hook_<uuid4().hex[:12]>``（随机），旧实现按 id 字典序
+# 取末尾 N 条 → 实际取到「任意 N 条」。修正后排序键为 (created_at, id) 双键，
+# created_at 由 ``build_observer_input`` 从 hooks / narrative_debts 表补齐。
+# 突变验证：以下 fixture 刻意让 id 字典序与时间序**相反**，若排序退回纯 id 序，
+# 选中的是 id 最大的 5 条（与断言集合不相交的部分即失败面）。
+# ---------------------------------------------------------------------------
+
+
+def _anti_correlated_created_at(ids: list[str], *, day_base: int = 20) -> dict[str, str]:
+    """构造「id 字典序与时间序相反」的 created_at 映射（id 越小时间越新）。"""
+    return {
+        eid: f"2026-01-{day_base - idx:02d}T00:00:00+00:00"
+        for idx, eid in enumerate(sorted(ids))
+    }
+
+
+def _id_tail(ids: list[str], keep: int) -> set[str]:
+    """旧实现口径：按 id 字典序取末尾 keep 条。"""
+    return set(sorted(ids)[-keep:])
+
+
+def test_trim_snapshot_resolved_hooks_selected_by_created_at():
+    """8 条 resolved hook → 保留 created_at 最新的 5 条（而非 id 末尾 5 条）。"""
+    snap = _make_big_snapshot(n_hooks_open=0, n_hooks_resolved=8)
+    all_ids = [h["hook_id"] for h in snap["hooks"]]
+    created_at = _anti_correlated_created_at(all_ids)
+
+    trimmed, stats = _trim_snapshot_for_observer(
+        snap, resolved_history_keep=5, entity_created_at=created_at,
+    )
+
+    kept_ids = {h["hook_id"] for h in trimmed["hooks"]}
+    newest_5 = {
+        eid for eid, _ts in sorted(created_at.items(), key=lambda kv: kv[1])[-5:]
+    }
+    assert kept_ids == newest_5
+    assert stats["hooks_resolved_kept"] == 5
+    assert stats["hooks_resolved_trimmed"] == 3
+    # 突变验证：旧口径（id 末尾 5 条）与时间最近 5 条不相交 → fixture 有区分力
+    assert kept_ids != _id_tail(all_ids, 5)
+
+
+def test_trim_snapshot_paid_debts_selected_by_created_at():
+    """7 条 paid debt → 保留 created_at 最新的 5 条（而非 id 末尾 5 条）。"""
+    snap = _make_big_snapshot(n_debts_open=0, n_debts_resolved=7)
+    all_ids = [d["debt_id"] for d in snap["debts"]]
+    created_at = _anti_correlated_created_at(all_ids)
+
+    trimmed, stats = _trim_snapshot_for_observer(
+        snap, resolved_history_keep=5, entity_created_at=created_at,
+    )
+
+    kept_ids = {d["debt_id"] for d in trimmed["debts"]}
+    newest_5 = {
+        eid for eid, _ts in sorted(created_at.items(), key=lambda kv: kv[1])[-5:]
+    }
+    assert kept_ids == newest_5
+    assert stats["debts_resolved_kept"] == 5
+    assert stats["debts_resolved_trimmed"] == 2
+    assert kept_ids != _id_tail(all_ids, 5)
+
+
+def test_trim_snapshot_resolved_history_id_order_is_safe_fallback():
+    """不传 entity_created_at（旧调用方 / 纯函数直用）→ 退回 id 序，行为不变。"""
+    snap = _make_big_snapshot(n_hooks_open=0, n_hooks_resolved=8, n_debts_open=0, n_debts_resolved=7)
+
+    trimmed, _stats = _trim_snapshot_for_observer(snap, resolved_history_keep=5)
+
+    assert {h["hook_id"] for h in trimmed["hooks"]} == _id_tail(
+        [h["hook_id"] for h in snap["hooks"]], 5,
+    )
+    assert {d["debt_id"] for d in trimmed["debts"]} == _id_tail(
+        [d["debt_id"] for d in snap["debts"]], 5,
+    )
+
+
+def test_trim_snapshot_resolved_history_unknown_entity_sorts_oldest():
+    """映射里查不到的实体 → 时间键为空串（排最前），仍受 touched 强制保留兜底。"""
+    snap = _make_big_snapshot(n_hooks_open=0, n_hooks_resolved=8)
+    all_ids = [h["hook_id"] for h in snap["hooks"]]
+    created_at = _anti_correlated_created_at(all_ids[:5])  # 后 3 条无时间键
+    touched = {"hooks": {all_ids[7]}, "characters": set(), "locations": set(),
+               "factions": set(), "world_rules": set(), "debts": set(), "events": set(),
+               "relationships": set(), "relationship_keys": set()}
+
+    trimmed, _stats = _trim_snapshot_for_observer(
+        snap, resolved_history_keep=5, entity_created_at=created_at, touched=touched,
+    )
+
+    kept_ids = {h["hook_id"] for h in trimmed["hooks"]}
+    # 有时间键的 5 条全部保留；无时间键的 3 条（空串排最前）被裁——除 touched 的那条
+    assert kept_ids == set(all_ids[:5]) | {all_ids[7]}
+
+
+def test_build_observer_input_trims_resolved_history_by_created_at(tmp_path: Path):
+    """端到端：build_observer_input(trimmed) 从 DB 补齐 created_at 后按时间选条。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    _insert_commit_with_payload(db_path, pid, cid, {"character_changes": []}, version=1)
+
+    hook_ids = [f"hook_resolved_{i:03d}" for i in range(8)]
+    debt_ids = [f"debt_paid_{i:03d}" for i in range(7)]
+    hook_ts = _anti_correlated_created_at(hook_ids)
+    debt_ts = _anti_correlated_created_at(debt_ids)
+
+    conn = get_connection(db_path)
+    try:
+        for hid in hook_ids:
+            conn.execute(
+                """
+                INSERT INTO hooks (hook_id, project_id, name, introduced_chapter_id,
+                                   status, importance, expected_payoff_chapter_id,
+                                   payoff_chapter_id, visibility, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'RESOLVED', 0.5, NULL, ?, 'PUBLIC', ?, ?)
+                """,
+                (hid, pid, f"已结{hid}", cid, cid, hook_ts[hid], hook_ts[hid]),
+            )
+        for did in debt_ids:
+            conn.execute(
+                """
+                INSERT INTO narrative_debts (debt_id, project_id, description,
+                                             created_chapter_id, severity,
+                                             deadline_chapter_id, status, visibility,
+                                             created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0.4, NULL, 'paid', 'VISIBLE', ?, ?)
+                """,
+                (did, pid, f"已偿{did}", cid, debt_ts[did], debt_ts[did]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    payload = build_observer_input(db_path, cid, snapshot_mode="trimmed")
+
+    kept_hooks = {
+        h["hook_id"] for h in payload["previous_state"]["hooks"]
+        if h.get("status") == "RESOLVED"
+    }
+    kept_debts = {
+        d["debt_id"] for d in payload["previous_state"]["debts"]
+        if d.get("status") == "paid"
+    }
+    newest_hooks = {eid for eid, _t in sorted(hook_ts.items(), key=lambda kv: kv[1])[-5:]}
+    newest_debts = {eid for eid, _t in sorted(debt_ts.items(), key=lambda kv: kv[1])[-5:]}
+    assert kept_hooks == newest_hooks
+    assert kept_debts == newest_debts
+    # 突变验证：旧口径的 id 末尾 5 条与实际保留集合不同（fixture 与真实 DB 路径同验）
+    assert kept_hooks != _id_tail(hook_ids, 5)
+    assert kept_debts != _id_tail(debt_ids, 5)
+    assert payload["snapshot_trim_stats"]["hooks_resolved_kept"] == 5
+    assert payload["snapshot_trim_stats"]["debts_resolved_kept"] == 5

@@ -15,16 +15,19 @@
 
 from __future__ import annotations
 
+from .ai_flavor import AI_FLAVOR_MARKERS, marker_hits_per_kchars
 from .guardrails import (
-    AI_MARKERS,
     HOOK_MARKERS,
     _dialogue_chars,
-    _marker_count,
     _norm,
     _paragraphs,
     _sentence_lengths,
 )
 from .issues import Issue, make_issue
+
+# style 子分的 AI 味词表（V3.9 批次 3.4）：与 ai_trace 套话表共享 ai_flavor 常量，
+# 本模块只负责「密度阈值」判定（分工见 ai_flavor 模块 docstring）。
+AI_MARKERS: tuple[str, ...] = AI_FLAVOR_MARKERS
 
 # ============================================================================
 # 常量（建议值待校准）
@@ -82,6 +85,20 @@ PACING_PARAGRAPH_TARGET: int = 5
 
 # ---- foreshadowing (§3.6) -----
 FORESHADOW_NO_HOOKS_NEUTRAL: int = 85
+"""本章完全不涉及钩子（new_hooks / resolved_hooks 均为空）时的中性分。"""
+
+FORESHADOW_PLANT_WEIGHT: float = 0.9
+"""埋设通道权重（V3.9 批次 3.2「埋设/兑现双通道」公式）。
+
+推导（取值表见 ``docs/evaluation/quality-scoring-v0.md`` §3.6 与 README §5.2）：
+
+- 兑现（resolved_hooks）是价值事件，权重 1.0；埋设（new_hooks）是贡献，按权重 w 计入；
+- 约束 A：只埋不兑的铺垫章得分必须 ≥ 中性分 85，否则「多埋钩子反而比不埋低分」，
+  会诱导作者无视伏笔 ⇒ w ≥ 0.85；
+- 约束 B：只兑不埋 = 100（满分锚点）；埋 + 兑应高于只埋（兑现的增量价值）；
+- 取 w = 0.9：只埋 1~N = 90（中性偏上）；埋 1 兑 1 = 95；埋 3 兑 1 = 92；只兑 = 100。
+- 长期不兑不做数值惩罚（避免与中性分倒挂），由 payoff H-2 / H-3 warning 标出。
+"""
 
 
 # ============================================================================
@@ -291,7 +308,7 @@ def score_style(draft: str) -> tuple[int, list[Issue]]:
 
     n_chars = len(draft or "")
     if n_chars > 0:
-        marker_per_k = _marker_count(draft or "", AI_MARKERS) / (n_chars / 1000.0)
+        marker_per_k = marker_hits_per_kchars(draft or "", AI_MARKERS)
         if marker_per_k >= STYLE_AI_MARKER_PER_KCHARS:
             score -= STYLE_AI_MARKER_DEDUCTION
 
@@ -363,10 +380,20 @@ def score_pacing(draft: str) -> tuple[int, list[Issue]]:
 
 
 def score_foreshadowing(snapshot: dict, delta: dict) -> tuple[int, list[Issue]]:
-    """§3.6 foreshadowing 子分。
+    """§3.6 foreshadowing 子分（V3.9 批次 3.2 起为「埋设 / 兑现双通道」）。
 
-    涉及钩子数 = ``len(new_hooks) + len(resolved_hooks)``；兑现率 = ``resolved / 涉及 * 100``。
-    涉及 0 ⇒ 85 中性 + info。
+    ```
+    score = round(100 × (resolved + 0.9 × new) / (resolved + new))
+    ```
+
+    - 只兑不埋 = 100；只埋不兑 = 90（中性偏上，见 :data:`FORESHADOW_PLANT_WEIGHT` 推导）；
+      埋 + 兑高于只埋（兑现增量价值）；
+    - 完全不涉及钩子 ⇒ 85 中性 + info（与旧口径一致）；
+    - 长期不兑不进数值惩罚 —— 由 payoff H-2 / H-3 warning 标出。
+
+    旧口径（V3.9.2 前）为纯兑现率 ``resolved / (new + resolved)``：铺垫期章节
+    （只埋不兑）结构性地拿 0 分，且低于「完全不涉及钩子」的 85 中性分，属于倒挂；
+    本函数即修复该行为（前后对照表见 README §5.2）。
     """
     issues: list[Issue] = []
     if not isinstance(delta, dict):
@@ -391,8 +418,9 @@ def score_foreshadowing(snapshot: dict, delta: dict) -> tuple[int, list[Issue]]:
         )
         return FORESHADOW_NO_HOOKS_NEUTRAL, issues
 
-    rate = len(resolved) / involved
-    return max(0, int(rate * 100)), issues
+    weighted = len(resolved) + FORESHADOW_PLANT_WEIGHT * len(new_hooks)
+    score = int(round(100.0 * weighted / involved))
+    return max(0, min(100, score)), issues
 
 
 __all__ = [

@@ -40,7 +40,8 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     #   重建——表数不变，业务表 34，总表 35。
     # V3.4 多卷与规模（组织层）：0015_volumes 加 volumes 业务表 → 业务表 35（34+1），总表 36。
     # V3.7 模型档案 + 环节绑定：0016 加 model_profiles + capability_bindings → 业务表 37（35+2），总表 38。
-    assert result["tables"] == 38, f"expected 38 (37+_migrations), got {result['tables']}"
+    # 题材库 P1a：0025_genre_packs 加 genre_packs 业务表 → 业务表 38（37+1），总表 39。
+    assert result["tables"] == 39, f"expected 39 (38+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
     # Sprint 5 review F2：0002_drafts_unique.sql 也应被应用
@@ -96,6 +97,16 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # - 给 projects 加 word_band_json TEXT 可空列（NULL=无覆盖走模块默认 0.85/1.15/1200）；
     # - 仅 ALTER TABLE 加列，不增表（总表 38 不变）。
     assert "0023_project_word_band.sql" in result["applied"]
+    # V3.9 批次 4.3：0024_quality_reports_draft_version.sql
+    # - 给 quality_reports 加 draft_version INTEGER 可空列（NULL=未记录）；
+    # - 仅 ALTER TABLE 加列，不增表（总表 38 不变）。
+    assert "0024_quality_reports_draft_version.sql" in result["applied"]
+    # 题材库 P1a（2026-09-13）：0025_genre_packs.sql
+    # - 新建 genre_packs 表（题材包结构化 payload + 版本线）；
+    # - 给 projects 加 genre_pack_id TEXT 可空列 + REFERENCES genre_packs(pack_id)
+    #   ON DELETE SET NULL（SQLite ADD COLUMN 带 REFERENCES 要求默认值为 NULL，满足）；
+    # - 新增 1 张业务表（业务表 37 → 38，总表 38 → 39）。
+    assert "0025_genre_packs.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
@@ -128,6 +139,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0021_repair_ch2_status_after_double_rollback.sql",
         "0022_faction_relationship_endpoints.sql",
         "0023_project_word_band.sql",
+        "0024_quality_reports_draft_version.sql",
+        "0025_genre_packs.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -165,6 +178,11 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0022_faction_relationship_endpoints.sql" in second["skipped"]
     # V3.7 字数带覆盖：0023_project_word_band.sql 也应被幂等跳过
     assert "0023_project_word_band.sql" in second["skipped"]
+    # V3.9 批次 4.3：0024_quality_reports_draft_version.sql 也应被幂等跳过
+    assert "0024_quality_reports_draft_version.sql" in second["skipped"]
+    # 题材库 P1a：0025_genre_packs.sql 也应被幂等跳过（CREATE TABLE / ADD COLUMN 无
+    # IF NOT EXISTS，幂等靠 _migrations 文件粒度追踪）
+    assert "0025_genre_packs.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -205,6 +223,8 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0021_repair_ch2_status_after_double_rollback.sql",
         "0022_faction_relationship_endpoints.sql",
         "0023_project_word_band.sql",
+        "0024_quality_reports_draft_version.sql",
+        "0025_genre_packs.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -285,13 +305,16 @@ def test_business_table_count_is_34(tmp_path: Path):
     # V2.0 Wave C 任务一：0011_fts_index 加 FTS5 虚表，但口径排除 → 业务表仍 34
     # V3.4 多卷与规模（组织层）：0015_volumes 加 volumes 业务表 → 业务表 35
     # V3.7 模型档案 + 环节绑定：0016 加 model_profiles + capability_bindings → 业务表 37
-    assert len(names) == 37, f"expected 37 business tables, got {len(names)}"
+    # 题材库 P1a：0025_genre_packs 加 genre_packs → 业务表 38
+    assert len(names) == 38, f"expected 38 business tables, got {len(names)}"
     # 抽检：PRD §67 关键表
     for expected in ("projects", "characters", "chapters", "commits", "state_deltas", "ai_call_logs"):
         assert expected in names, f"missing table {expected}"
     assert "quality_reports" in names, "quality_reports table should exist (Sprint 6 下半)"
     assert "reference_canons" in names, "reference_canons table should exist (Sprint 11 上半)"
     assert "canon_extracts" in names, "canon_extracts table should exist (Sprint 11 上半)"
+    # 题材库 P1a：题材包主表（独立资源，与 canon 分开）
+    assert "genre_packs" in names, "genre_packs table should exist (题材库 P1a)"
     assert "chapter_summaries" in names, "chapter_summaries table should exist (Sprint 14)"
     assert "author_style_samples" in names, "author_style_samples table should exist (Sprint 15 / V1.3)"
     assert "branch_snapshots" in names, "branch_snapshots table should exist (V2.0 Wave B 任务一)"
@@ -333,6 +356,140 @@ def test_0012_quality_reports_has_judge_json_column(tmp_path: Path):
     assert judge_col["type"] == "TEXT", judge_col
     assert judge_col["notnull"] == 0, judge_col
     assert judge_col["dflt_value"] is None, judge_col
+
+
+def test_0024_quality_reports_has_draft_version_column(tmp_path: Path):
+    """V3.9 批次 4.3：0024 给 quality_reports 加 draft_version INTEGER（默认 NULL）。
+
+    NULL 语义 = 未记录（存量行 / 评估时该章尚无 draft），与 QualityReport.draft_version
+    的可空口径对齐。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        cols = conn.execute("PRAGMA table_info(quality_reports)").fetchall()
+    finally:
+        conn.close()
+    col_map = {c["name"]: c for c in cols}
+    assert "draft_version" in col_map, (
+        f"quality_reports missing draft_version after 0024; got={set(col_map)}"
+    )
+    col = col_map["draft_version"]
+    assert col["type"].upper() == "INTEGER", col
+    assert col["notnull"] == 0, col
+    assert col["dflt_value"] is None, col
+
+
+def test_0024_draft_version_migration_is_idempotent(tmp_path: Path):
+    """0024 跑两遍不炸（ALTER ADD COLUMN 靠 _migrations 追踪幂等）；表数不变。"""
+    db_path = _fresh_db(tmp_path)
+    first = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0024_quality_reports_draft_version.sql" in first["applied"]
+
+    second = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0024_quality_reports_draft_version.sql" not in second["applied"]
+    assert "0024_quality_reports_draft_version.sql" in second["skipped"]
+    assert second["tables"] == first["tables"]
+
+
+def test_0025_genre_packs_table_and_project_binding_column(tmp_path: Path):
+    """题材库 P1a：0025 建 genre_packs 表 + projects.genre_pack_id 可空绑定列。
+
+    - 绑定列必须可空（NULL = 未绑定），默认值为 NULL（SQLite ADD COLUMN + REFERENCES
+      的兼容性前提）；
+    - 外键指向 genre_packs.pack_id，删除动作 SET NULL（service 层另有 409 前置拦截）。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        pack_cols = {c["name"]: c for c in conn.execute("PRAGMA table_info(genre_packs)").fetchall()}
+        proj_cols = {c["name"]: c for c in conn.execute("PRAGMA table_info(projects)").fetchall()}
+        fks = conn.execute("PRAGMA foreign_key_list(projects)").fetchall()
+    finally:
+        conn.close()
+
+    assert set(pack_cols) == {
+        "pack_id", "name", "genre_tag", "version", "payload_json",
+        "source_path", "created_at", "updated_at",
+    }, f"genre_packs columns mismatch; got={set(pack_cols)}"
+    assert pack_cols["pack_id"]["pk"] == 1, pack_cols["pack_id"]
+
+    assert "genre_pack_id" in proj_cols, (
+        f"projects missing genre_pack_id after 0025; got={set(proj_cols)}"
+    )
+    bind_col = proj_cols["genre_pack_id"]
+    assert bind_col["type"].upper() == "TEXT", bind_col
+    assert bind_col["notnull"] == 0, bind_col
+    assert bind_col["dflt_value"] is None, bind_col
+
+    fk = next((f for f in fks if f["from"] == "genre_pack_id"), None)
+    assert fk is not None, f"projects.genre_pack_id 缺 FK 约束; fks={[tuple(f) for f in fks]}"
+    assert fk["table"] == "genre_packs" and fk["to"] == "pack_id", fk
+    assert fk["on_delete"] == "SET NULL", fk
+
+
+def test_0025_project_binding_fk_enforced_and_set_null_on_pack_delete(tmp_path: Path):
+    """0025 绑定列的外键真被 SQLite 执行（ADD COLUMN REFERENCES 的版本兼容性验证）。
+
+    - 指向不存在的 pack_id → IntegrityError（外键拒绝）；
+    - 删除被绑定的 pack → projects.genre_pack_id 置 NULL（ON DELETE SET NULL）。
+      注：service / router 层的 DELETE 走 409 前置拦截，本用例只验证 DDL 兜底行为。
+    """
+    from packages.core.ids import new_id, now_iso
+
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    pid = new_id("prj")
+    now = now_iso()
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO projects (project_id, name, premise, genre, target_words, "
+            "status, created_at, updated_at) VALUES (?, '题材项目', NULL, NULL, NULL, "
+            "'ACTIVE', ?, ?)",
+            (pid, now, now),
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE projects SET genre_pack_id = 'gp_not_exist' WHERE project_id = ?",
+                (pid,),
+            )
+        conn.rollback()
+
+        conn.execute(
+            "INSERT INTO genre_packs (pack_id, name, genre_tag, version, payload_json, "
+            "source_path, created_at, updated_at) VALUES ('gp_tmp', '快穿', '快穿', 1, "
+            "'{}', NULL, ?, ?)",
+            (now, now),
+        )
+        conn.execute(
+            "UPDATE projects SET genre_pack_id = 'gp_tmp' WHERE project_id = ?", (pid,)
+        )
+        conn.commit()
+        conn.execute("DELETE FROM genre_packs WHERE pack_id = 'gp_tmp'")
+        conn.commit()
+        row = conn.execute(
+            "SELECT genre_pack_id FROM projects WHERE project_id = ?", (pid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["genre_pack_id"] is None, "删除 pack 后绑定列应被 SET NULL"
+
+
+def test_0025_genre_packs_migration_is_idempotent(tmp_path: Path):
+    """0025 跑两遍不炸（CREATE TABLE / ADD COLUMN 靠 _migrations 追踪幂等）；表数不变。"""
+    db_path = _fresh_db(tmp_path)
+    first = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0025_genre_packs.sql" in first["applied"]
+
+    second = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0025_genre_packs.sql" not in second["applied"]
+    assert "0025_genre_packs.sql" in second["skipped"]
+    assert second["tables"] == first["tables"]
+    assert first["tables"] == 39, f"expected 39 (38 business + _migrations), got {first['tables']}"
 
 
 def test_0013_plot_events_has_description_column(tmp_path: Path):

@@ -8,45 +8,56 @@
 - 不重做 token 预算分配（MVP 沿用 builder 的"按字段全量塞入"口径；
   完整 L0-L9 留后续 Sprint，详见 ``packages/core/context_engine/README.md``）。
 - ``token_estimate`` 用 ``len(json.dumps(value, ensure_ascii=False)) // 4``（粗略：
-  4 字节 ≈ 1 token；中文场景粗略近似，足以做上限告警）。
-- ``token_budget`` 硬编码 8000（与 PRD §124 target_word_count=2200 × ~3.6 对齐，
-  MVP 估算口径；后续若引入真实分词器再替换）。
+  4 字节 ≈ 1 token；中文场景粗略近似，足以做上限告警）。V3.9 批次 2.1 起该口径由
+  ``builders_common._estimate_tokens`` 单点提供——preview 展示值与各 builder 的
+  ``_assembly_meta.estimate_tokens`` 同源，不再各算一套。
+- ``token_budget`` = ``builders_common._ASSEMBLY_TOKEN_BUDGET``（8000；该常量由装配侧
+  单点持有，本模块只做展示）；语义仍是**展示用**（装配侧不按它裁剪，超预算只在
+  ``_assembly_meta.token_budget_exceeded`` 置标记，见批次 2.1）。
 - V2.0 Wave C 任务二：preview dry-run 同样受益于 builders 的进程内缓存；
   连续两次预览第二次命中缓存，token 估算完全一致。
+- V3.9 批次 1.4：preview 的装配缓存键带独立命名空间 ``"preview"``
+  （``preview_context`` → ``namespace=_PREVIEW_CACHE_NAMESPACE``）——dry-run 默认
+  空意图 / 默认目标字数（V3.9 批次 5.1 起即 ``DEFAULT_TARGET_WORD_COUNT`` = 3000，
+  此前为 2200），若与生产共用键空间会把空意图与默认字数写进生产条目
+  （前端章节详情页挂载即自动打预览，随后「生成计划」会静默丢掉作者意图）。
 - V2.0 Wave C 任务一：L1 增加 ``recalled_passage`` 新 kind（FTS5 召回片段）展示。
+- 题材库 P1b：L1 增加 ``genre_pack`` 摘要行——绑定题材包时展示
+  ``<名称>（<题材> · v<版本>）爽点型 N 个 · 结构：…``（含 consumed_fields），
+  **未绑定也展示一行「未绑定题材包（题材维度空态）」**（状态显式，不留白）。
 - 异常透传：chapter / project 不存在 → ``ValueError``（由 router 转 404）。
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
+
+from packages.core.quality.wordcount import DEFAULT_TARGET_WORD_COUNT
 
 from .builders import (
     build_director_input,
     build_observer_input,
     build_writer_input,
 )
+from .builders_common import (
+    _ASSEMBLY_TOKEN_BUDGET,
+    _estimate_tokens,
+)
+from .cache import _PREVIEW_CACHE_NAMESPACE
 
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
 
-# MVP token 预算上限（详细分词留后续 Sprint）。
-_TOKEN_BUDGET = 8000
-
-# 中英文混合文本粗略估算：4 字节 ≈ 1 token；空对象保证至少 1 token 便于 UI 显式标 0 vs 1。
-_TOKEN_DIVISOR = 4
+# MVP token 预算上限（详细分词留后续 Sprint）；与 builders 的 ``_assembly_meta``
+# 共用同一常量（展示与装配告警口径一致）。
+_TOKEN_BUDGET = _ASSEMBLY_TOKEN_BUDGET
 
 
 def _token_estimate(value: Any) -> int:
-    """粗略 token 估算：序列化字节数 / 4，至少 1。"""
-    try:
-        serialized = json.dumps(value, ensure_ascii=False)
-    except (TypeError, ValueError):
-        serialized = str(value)
-    return max(1, len(serialized) // _TOKEN_DIVISOR)
+    """粗略 token 估算：序列化字节数 / 4，至少 1（实现见 ``builders_common._estimate_tokens``）。"""
+    return _estimate_tokens(value)
 
 
 def _push_item(
@@ -273,6 +284,38 @@ def _extract_l1(
             payoff_count=len(canon.get("payoff_list") or []),
         )
 
+    # 题材库 P1b：题材包摘要行（绑定与否都展示状态——未绑定也给一行「未绑定题材包」，
+    # 让 dry-run 一眼可见该项目的题材维度是空态而非「已绑定但无内容」）。
+    genre_pack = director.get("genre_pack")
+    if isinstance(genre_pack, dict):
+        payoff_types = genre_pack.get("payoff_types")
+        structure = genre_pack.get("structure_templates")
+        structure_model = (
+            structure.get("structure_model") if isinstance(structure, dict) else None
+        )
+        label = (
+            f"{genre_pack.get('name') or genre_pack.get('pack_id')}"
+            f"（{genre_pack.get('genre_tag') or '-'} · v{genre_pack.get('version')}）"
+            f" 爽点型 {len(payoff_types) if isinstance(payoff_types, list) else 0} 个"
+        )
+        if structure_model:
+            label += f" · 结构：{str(structure_model)[:40]}"
+        _push_item(
+            items,
+            kind="genre_pack",
+            id_=str(genre_pack.get("pack_id") or "_genre"),
+            name=label[:120],
+            status="bound",
+            pack_id=genre_pack.get("pack_id"),
+            version=genre_pack.get("version"),
+            consumed_fields=list((director.get("_genre_pack_consumed") or {}).get("consumed_fields") or []),
+        )
+    else:
+        _push_item(
+            items, kind="genre_pack", id_="_genre",
+            name="未绑定题材包（题材维度空态）", status="unbound",
+        )
+
     # Sprint 14：摘要链（Sprint 14-A）+ 前章尾段（L1 「上一章结尾」）。
     for s in director.get("recent_chapter_summaries") or []:
         _push_item(
@@ -428,7 +471,7 @@ def preview_context(
     *,
     author_intent: str = "",
     scene_plan: dict[str, Any] | None = None,
-    target_word_count: int = 2200,
+    target_word_count: int = DEFAULT_TARGET_WORD_COUNT,
 ) -> dict[str, Any]:
     """dry-run：返回 chapter 关联的 LLM context 装配预览（只读）。
 
@@ -453,10 +496,12 @@ def preview_context(
     director = build_director_input(
         db_path, project_id, chapter_id, author_intent,
         target_word_count=target_word_count,
+        namespace=_PREVIEW_CACHE_NAMESPACE,
     )
     writer = build_writer_input(
         db_path, chapter_id, scene_plan or {},
         target_word_count=target_word_count,
+        namespace=_PREVIEW_CACHE_NAMESPACE,
     )
     observer = build_observer_input(db_path, chapter_id)
 
@@ -479,7 +524,7 @@ def preview_context(
         },
         {
             "id": "L1",
-            "label": "业务摘要（角色 / 世界 / 伏笔 / 债务 / 参照系 / 摘要链 / 前章尾段 / 开放伏笔 / 召回片段）",
+            "label": "业务摘要（角色 / 世界 / 伏笔 / 债务 / 参照系 / 题材包 / 摘要链 / 前章尾段 / 开放伏笔 / 召回）",
             "token_estimate": _token_estimate({
                 "character_state_excerpts": director.get("character_state_excerpts"),
                 "world_state_excerpts": director.get("world_state_excerpts"),
@@ -487,6 +532,7 @@ def preview_context(
                 "hook_ledger_excerpt": director.get("hook_ledger_excerpt"),
                 "narrative_debt_excerpt": director.get("narrative_debt_excerpt"),
                 "reference_canon": director.get("reference_canon"),
+                "genre_pack": director.get("genre_pack"),
                 "recent_chapter_summaries": director.get("recent_chapter_summaries"),
                 "previous_chapter_tail": director.get("previous_chapter_tail"),
                 "open_foreshadow_list": director.get("open_foreshadow_list"),

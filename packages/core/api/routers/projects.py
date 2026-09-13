@@ -1,4 +1,4 @@
-"""Projects REST 路由（Sprint 1 + V3.7 字数带覆盖）。
+"""Projects REST 路由（Sprint 1 + V3.7 字数带覆盖 + 题材库 P1b 读侧暴露）。
 
 挂在 ``/api`` 前缀下，由 ``packages/core/api/main.py`` 的 ``discover_routers()`` 自动发现。
 对齐 DDL：``projects`` 表（``database/migrations/0001_init.sql`` line 34-44）。
@@ -6,6 +6,11 @@
 V3.7：PATCH /projects/{project_id} 支持 ``word_band`` 字段——dict 落 ``word_band_json``
 列、null 清除覆盖、缺省保留。校验在 router 层走
 :func:`packages.core.quality.wordcount.resolve_band_config`，非法值 → 422。
+
+题材库 P1b：GET /projects（列表）与 GET /projects/{project_id}（详情）响应经
+``Project`` 模型同步暴露 ``genre_pack_id``（绑定题材包 id；未绑定 / 极老库缺列 →
+null）。绑定写路径在 :mod:`packages.core.api.routers.genre`（bind / unbind），
+本路由只读。
 """
 
 from __future__ import annotations

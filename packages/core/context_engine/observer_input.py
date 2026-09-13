@@ -13,6 +13,7 @@ from packages.core.db import get_connection
 from .builders_common import (
     _DEBT_OPEN_STATUSES,
     _HOOK_OPEN_STATUSES,
+    _attach_assembly_meta,
     _collect_touched_entity_ids,
     _director_plan_summary,
     _latest_draft,
@@ -122,6 +123,53 @@ def _load_event_chapter_no_map(
     return out
 
 
+def _load_entity_created_at_map(
+    conn: sqlite3.Connection, project_id: str,
+) -> dict[str, str]:
+    """从 hooks / narrative_debts 表取 ``实体 id → created_at``（ISO）映射。
+
+    用途（V3.9 批次 5.5）：resolved/abandoned hooks 与 paid/forgiven debts 的
+    「最近 N 条」必须按时间序选条——实体 id 形如 ``hook_<uuid4().hex[:12]>``
+    （见 :mod:`packages.core.ids`），字典序随机，按 id 取末尾等价「任意 N 条」。
+    快照里的 hook/debt dict **不带** created_at（``story_state/snapshot.py`` 的
+    SELECT 未取该列），故时间键只能走一次轻量 SQL 补齐：单 project 的 hooks +
+    narrative_debts 通常 ≤100 行，单次查询 P99 < 5ms。
+
+    返回：``{entity_id: created_at}``（hook 与 debt 共用一个命名空间，两者 id
+    前缀不同不会撞键）。缺行 / created_at 为空的条目不在 dict 中——调用方按
+    「无时间键 → 退化 id 序」处理。
+    """
+    out: dict[str, str] = {}
+    for sql in (
+        "SELECT hook_id AS eid, created_at AS created FROM hooks WHERE project_id = ?",
+        "SELECT debt_id AS eid, created_at AS created FROM narrative_debts WHERE project_id = ?",
+    ):
+        rows = conn.execute(sql, (project_id,)).fetchall()
+        for r in rows:
+            eid = r["eid"]
+            created = r["created"]
+            if isinstance(eid, str) and eid and isinstance(created, str) and created:
+                out[eid] = created
+    return out
+
+
+def _history_sort_key(
+    item: dict,
+    id_field: str,
+    entity_created_at: dict[str, str] | None,
+) -> tuple[str, str]:
+    """「最近 N 条」排序键：``(created_at, id)`` 双键（时间优先，id 兜底）。
+
+    ISO-8601 字符串字典序与时间序一致（同 UTC 偏移口径，见 ``ids.now_iso``）。
+    created_at 缺失（未传映射 / 实体不在库中 / 调用方走纯函数路径）→ 空串，
+    此时键退化为 ``(, id)``，排序与修正前逐条一致（老行为可控回退）。
+    """
+    eid = item.get(id_field)
+    eid = eid if isinstance(eid, str) else ""
+    created = entity_created_at.get(eid) if entity_created_at else None
+    return (created if isinstance(created, str) else "", eid)
+
+
 def _summarize_character(char: dict) -> dict:
     return {
         "character_id": char.get("character_id"),
@@ -180,6 +228,7 @@ def _trim_snapshot_for_observer(
     current_chapter_no: int | None = None,
     event_chapter_no_map: dict[str, int] | None = None,
     compact_open_hooks_debts: bool = True,
+    entity_created_at: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """对 observer 输入快照做「分代裁剪」。
 
@@ -188,7 +237,10 @@ def _trim_snapshot_for_observer(
         keep_recent_commits：扫描 commits 表的最近 N 个 delta。仅当 ``touched is None``
             时使用；若调用方已自行计算 ``touched``，可直接传入以避免重复 IO。
         resolved_history_keep：resolved/abandoned hooks 与 paid/forgiven debts
-            的「保留最近多少条」上限（按 hook_id/debt_id 字典序取末尾 N 条）。
+            的「保留最近多少条」上限。排序键为 ``(created_at, id)`` 双键字典序
+            （V3.9 批次 5.5 修正：此前只按 **随机** hook_id/debt_id 字典序取末尾，
+            等价「任意 N 条」）；created_at 由 ``entity_created_at`` 提供，缺该
+            参数或缺条目的实体退化为纯 id 序（与修正前逐条一致）。
         touched：可选预计算的「被 touch 的实体 ID 集合」（结构同
             ``_collect_touched_entity_ids`` 返回值）。
         events_window_chapters（V3.1.1 O-1）：events 滚动窗口大小（章）。None
@@ -205,6 +257,10 @@ def _trim_snapshot_for_observer(
             hooks 与 open/acknowledged debts 在 payload 中以压缩字段形式
             出现（见 ``_compact_open_hook`` / ``_compact_open_debt``）；False
             保持全量（与 M3 老行为一致）。
+        entity_created_at（V3.9 批次 5.5）：可选 ``{实体 id: created_at(ISO)}``
+            （hook 与 debt 混装），由调用方从 hooks / narrative_debts 表补齐
+            （见 ``_load_entity_created_at_map``）。快照本身不带 created_at，
+            不传该参数时排序退化为纯 id 序（老行为）。
 
     返回：
         (trimmed_snapshot, stats_dict)
@@ -425,9 +481,12 @@ def _trim_snapshot_for_observer(
     trimmed["world"] = world_out
 
     # ---- hooks ----
+    # V3.9 批次 5.5：「最近 N 条」按 (created_at, id) 排序；条目先与排序键一起
+    # 收集，避免建好摘要后再去找不回时间键（摘要不带 created_at）。
     hooks_in = snap.get("hooks") or []
     hooks_open_out: list[dict] = []
     hooks_resolved_out: list[dict] = []
+    hooks_resolved_entries: list[tuple[tuple[str, str], dict]] = []
     if isinstance(hooks_in, list):
         for h in hooks_in:
             if not isinstance(h, dict):
@@ -440,15 +499,18 @@ def _trim_snapshot_for_observer(
                 else:
                     hooks_open_out.append(h)
             elif isinstance(status, str) and status in ("RESOLVED", "ABANDONED"):
-                hooks_resolved_out.append(_summarize_hook(h))
-    if hooks_resolved_out:
-        hooks_resolved_out.sort(key=lambda x: x.get("hook_id") or "")
-        if len(hooks_resolved_out) > resolved_history_keep:
-            kept = hooks_resolved_out[-resolved_history_keep:]
-            trimmed_count = len(hooks_resolved_out) - resolved_history_keep
+                hooks_resolved_entries.append(
+                    (_history_sort_key(h, "hook_id", entity_created_at), _summarize_hook(h))
+                )
+    if hooks_resolved_entries:
+        hooks_resolved_entries.sort(key=lambda kv: kv[0])
+        if len(hooks_resolved_entries) > resolved_history_keep:
+            kept_entries = hooks_resolved_entries[-resolved_history_keep:]
+            trimmed_count = len(hooks_resolved_entries) - resolved_history_keep
         else:
-            kept = hooks_resolved_out
+            kept_entries = hooks_resolved_entries
             trimmed_count = 0
+        kept_ids = {entry.get("hook_id") for _k, entry in kept_entries}
         for h in hooks_in:
             if not isinstance(h, dict):
                 continue
@@ -458,10 +520,12 @@ def _trim_snapshot_for_observer(
             hid = h.get("hook_id")
             if not (isinstance(hid, str) and hid in touched_hooks):
                 continue
-            if not any(k.get("hook_id") == hid for k in kept):
-                kept.append(h)
-        kept.sort(key=lambda x: x.get("hook_id") or "")
-        hooks_resolved_out = kept
+            if hid in kept_ids:
+                continue
+            kept_entries.append((_history_sort_key(h, "hook_id", entity_created_at), h))
+            kept_ids.add(hid)
+        kept_entries.sort(key=lambda kv: kv[0])
+        hooks_resolved_out = [entry for _k, entry in kept_entries]
         stats["hooks_resolved_kept"] = len(hooks_resolved_out)
         stats["hooks_resolved_trimmed"] = trimmed_count
     else:
@@ -471,9 +535,11 @@ def _trim_snapshot_for_observer(
     trimmed["hooks"] = hooks_open_out + hooks_resolved_out
 
     # ---- debts ----
+    # V3.9 批次 5.5：同 hooks，按 (created_at, debt_id) 取最近 N 条。
     debts_in = snap.get("debts") or []
     debts_open_out: list[dict] = []
     debts_resolved_out: list[dict] = []
+    debts_resolved_entries: list[tuple[tuple[str, str], dict]] = []
     if isinstance(debts_in, list):
         for d in debts_in:
             if not isinstance(d, dict):
@@ -486,15 +552,18 @@ def _trim_snapshot_for_observer(
                 else:
                     debts_open_out.append(d)
             elif isinstance(status, str) and status in ("paid", "forgiven"):
-                debts_resolved_out.append(_summarize_debt(d))
-    if debts_resolved_out:
-        debts_resolved_out.sort(key=lambda x: x.get("debt_id") or "")
-        if len(debts_resolved_out) > resolved_history_keep:
-            kept = debts_resolved_out[-resolved_history_keep:]
-            trimmed_count = len(debts_resolved_out) - resolved_history_keep
+                debts_resolved_entries.append(
+                    (_history_sort_key(d, "debt_id", entity_created_at), _summarize_debt(d))
+                )
+    if debts_resolved_entries:
+        debts_resolved_entries.sort(key=lambda kv: kv[0])
+        if len(debts_resolved_entries) > resolved_history_keep:
+            kept_entries = debts_resolved_entries[-resolved_history_keep:]
+            trimmed_count = len(debts_resolved_entries) - resolved_history_keep
         else:
-            kept = debts_resolved_out
+            kept_entries = debts_resolved_entries
             trimmed_count = 0
+        kept_ids = {entry.get("debt_id") for _k, entry in kept_entries}
         for d in debts_in:
             if not isinstance(d, dict):
                 continue
@@ -504,10 +573,12 @@ def _trim_snapshot_for_observer(
             did = d.get("debt_id")
             if not (isinstance(did, str) and did in touched_debts):
                 continue
-            if not any(k.get("debt_id") == did for k in kept):
-                kept.append(d)
-        kept.sort(key=lambda x: x.get("debt_id") or "")
-        debts_resolved_out = kept
+            if did in kept_ids:
+                continue
+            kept_entries.append((_history_sort_key(d, "debt_id", entity_created_at), d))
+            kept_ids.add(did)
+        kept_entries.sort(key=lambda kv: kv[0])
+        debts_resolved_out = [entry for _k, entry in kept_entries]
         stats["debts_resolved_kept"] = len(debts_resolved_out)
         stats["debts_resolved_trimmed"] = trimmed_count
     else:
@@ -597,7 +668,10 @@ def build_observer_input(
         keep_recent_commits：trimmed 模式下识别「被 touch 过实体」时扫描的最近
             commit 数（默认 3）。≥1 才生效；≤0 等价未 touch（全部走摘要）。
         resolved_history_keep：trimmed 模式下 resolved/abandoned hooks 与
-            paid/forgiven debts 的保留上限（默认 5）。
+            paid/forgiven debts 的保留上限（默认 5）。V3.9 批次 5.5 起按
+            ``(created_at, id)`` 双键选「最近 N 条」（created_at 由本函数从
+            hooks / narrative_debts 表补齐）；修正前只按随机 id 字典序取末尾，
+            实际取到的是任意 N 条。
         events_window_chapters（V3.1.1 O-1）：trimmed 模式下 events 滚动窗口
             大小（章，默认 6）。None / 0 / 负数等价禁用窗口——events 全部保留
             （兼容旧行为）。窗口保留规则：introduced_chapter_no ∈
@@ -719,6 +793,19 @@ def build_observer_input(
             except sqlite3.Error:
                 event_chapter_no_map = None
 
+        # V3.9 批次 5.5：resolved/paid 历史「最近 N 条」的时间键。快照不带
+        # created_at（snapshot.py SELECT 未取该列），必须从 hooks / narrative_debts
+        # 表补一次轻量查询；DB 出错时回退 None（排序退化为 id 序，不阻断装配）。
+        entity_created_at: dict[str, str] | None = None
+        try:
+            conn4 = get_connection(db_path)
+            try:
+                entity_created_at = _load_entity_created_at_map(conn4, project_id)
+            finally:
+                conn4.close()
+        except sqlite3.Error:
+            entity_created_at = None
+
         trimmed_snap, stats = _trim_snapshot_for_observer(
             snap,
             keep_recent_commits=keep_recent_commits,
@@ -727,6 +814,7 @@ def build_observer_input(
             events_window_chapters=events_window_chapters,
             current_chapter_no=current_chapter_no,
             event_chapter_no_map=event_chapter_no_map,
+            entity_created_at=entity_created_at,
         )
         # 体积量化（before/after JSON 字节数）
         try:
@@ -741,4 +829,6 @@ def build_observer_input(
         payload["previous_state"] = trimmed_snap
         payload["snapshot_trim_stats"] = stats
 
-    return payload
+    # V3.9 批次 2.1：附非注入侧元字段（token 预算兜底告警；observer payload 含整份
+    # 快照，估算只做标记，不改写内容）。
+    return _attach_assembly_meta(payload)

@@ -19,34 +19,24 @@
 
 from __future__ import annotations
 
+import os
 import re
 import statistics
-from typing import Iterable
 
 from packages.core.story_state.validator import validate_delta
 
-from .issues import Issue, Severity, make_issue
+from .ai_flavor import AI_FLAVOR_MARKERS, marker_hits_per_kchars
+from .issues import Issue, Severity, make_issue, rule_default_severity
 
 # ============================================================================
 # 常量区（集中维护；阈值均为建议值待校准）
 # ============================================================================
 
 
-# REQ-Q7 AI 标记词（spec §4.7）
-AI_MARKERS: tuple[str, ...] = (
-    "首先",
-    "其次",
-    "再次",
-    "最后",
-    "不仅",
-    "更重要的是",
-    "然而",
-    "但是",
-    "总而言之",
-    "综上所述",
-    "值得注意的是",
-    "由此可见",
-)
+# REQ-Q7 AI 标记词（spec §4.7）。
+# V3.9 批次 3.4：词表唯一属主迁到 ``ai_flavor.AI_FLAVOR_MARKERS``（与 ai_trace 套话表共享，
+# 避免两处各写一份转折/议论词导致口径漂移）；本模块保留 ``AI_MARKERS`` 名字向后兼容。
+AI_MARKERS: tuple[str, ...] = AI_FLAVOR_MARKERS
 
 # 爽感钩子标记词（H-1 与 pacing/style 共用）
 HOOK_MARKERS: tuple[str, ...] = (
@@ -109,6 +99,28 @@ Q7_MIN_CHARS_FOR_FLAT: int = 1000
 # REQ-Q8 阈值（spec §4.8 给出）
 Q8_ERROR_RATIO: float = 0.30
 Q8_WARN_RATIO: float = 0.40
+
+# V3.9 批次 3.3：Q8 默认降为 warning（矩阵规则级覆盖见 issues.MVP_RULE_OVERRIDES）；
+# 显式设置本环境变量才把 < 红线的占比升级为 error（合规阻断模式）。
+Q8_STRICT_ENV_VAR: str = "NOVELOS_QUALITY_Q8_STRICT"
+_Q8_STRICT_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
+
+def _q8_strict_enabled() -> bool:
+    """``NOVELOS_QUALITY_Q8_STRICT`` 是否为真值（默认关闭）。"""
+    return os.environ.get(Q8_STRICT_ENV_VAR, "").strip().lower() in _Q8_STRICT_TRUTHY
+
+
+def q8_error_severity() -> Severity:
+    """Q8 人工占比 < :data:`Q8_ERROR_RATIO` 时应产出的 severity。
+
+    - 默认：``issues.MVP_RULE_OVERRIDES`` 的规则级默认值（``"warning"``）；
+    - 显式设置 ``NOVELOS_QUALITY_Q8_STRICT=1``：升级为 ``"error"``（会阻断——见
+      ``issues.BLOCKING_RULES``）。
+    """
+    if _q8_strict_enabled():
+        return "error"
+    return rule_default_severity("RULE_Q8_HUMAN_RATIO_LOW", "compliance")
 
 
 # ============================================================================
@@ -183,13 +195,6 @@ def _sentence_stdev(draft: str) -> float:
     if len(lens) < 2:
         return 0.0
     return statistics.pstdev(lens)
-
-
-def _marker_count(draft: str, markers: Iterable[str]) -> int:
-    """统计 markers 中每个词在 draft 出现的总次数（子串匹配）。"""
-    if not draft:
-        return 0
-    return sum(draft.count(m) for m in markers)
 
 
 def _lookups_by_id(snapshot: dict) -> dict[str, dict]:
@@ -666,10 +671,10 @@ def req_q7(draft: str) -> list[Issue]:
     if not draft:
         return out
 
-    # 指标 1：每千字 marker
+    # 指标 1：每千字 marker（密度定义与 style 共用 ai_flavor.marker_hits_per_kchars）
     n_chars = len(draft)
     if n_chars > 0:
-        per_kchars = _marker_count(draft, AI_MARKERS) / (n_chars / 1000.0)
+        per_kchars = marker_hits_per_kchars(draft, AI_MARKERS)
         if per_kchars >= Q7_MARKER_PER_KCHARS:
             out.append(
                 make_issue(
@@ -716,32 +721,61 @@ def req_q7(draft: str) -> list[Issue]:
 # ============================================================================
 
 
-def req_q8(ai_chars: int, human_chars: int) -> list[Issue]:
+def req_q8(ai_chars: int, human_chars: int, *, note: str | None = None) -> list[Issue]:
     """§4.8 REQ-Q8 人工加工占比。
 
-    total == 0 ⇒ info（Q8_NO_DATA）。
-    ratio = human / total：< 0.30 ⇒ error；0.30-0.40 ⇒ warning；其他 pass。
+    判定：
+    - total == 0 ⇒ info（Q8_NO_DATA）；``note`` 非空时把口径说明一并写进 message；
+    - ratio = human / total：< 0.30 ⇒ RULE_Q8_HUMAN_RATIO_LOW；0.30-0.40 ⇒
+      RULE_Q8_HUMAN_RATIO_LOW_WARN；其他 pass；
+    - ``note``（如「writer:v1 按 prompt_version 推断为 AI」，V3.9 批次 3.3）非空时追加
+      一条 info ``RULE_Q8_STATS_NOTE`` 留痕统计口径。
+
+    severity 口径（V3.9 批次 3.3 裁决，见 README §4.3 / spec §4.8）：
+    < 红线时默认 **warning**（本工具是 AI 写作工具，纯 AI 章 human_ratio=0 若判 error
+    会在 enforce 默认下全拦）；作者显式 ``NOVELOS_QUALITY_Q8_STRICT=1`` 才升级为 error 阻断。
     """
     total = (ai_chars or 0) + (human_chars or 0)
+    stats_note: list[Issue] = []
+    if note:
+        stats_note.append(
+            make_issue(
+                severity="info",
+                category="compliance",
+                rule_id="RULE_Q8_STATS_NOTE",
+                message=note,
+            )
+        )
+
     if total <= 0:
+        base_msg = "未记录 ai_chars / human_chars"
+        if note:
+            base_msg = f"{base_msg}；{note}"
         return [
             make_issue(
                 severity="info",
                 category="compliance",
                 rule_id="RULE_Q8_NO_DATA",
-                message="未记录 ai_chars / human_chars",
+                message=base_msg,
             )
         ]
 
     ratio = (human_chars or 0) / total
     if ratio < Q8_ERROR_RATIO:
+        severity = q8_error_severity()
+        message = f"人工占比 {ratio:.2%} < {Q8_ERROR_RATIO:.0%}"
+        if severity != "error":
+            message += (
+                f"（默认 {severity}；设置 {Q8_STRICT_ENV_VAR}=1 可升级为 error 阻断）"
+            )
         return [
             make_issue(
-                severity="error",
+                severity=severity,
                 category="compliance",
                 rule_id="RULE_Q8_HUMAN_RATIO_LOW",
-                message=f"人工占比 {ratio:.2%} < {Q8_ERROR_RATIO:.0%}",
-            )
+                message=message,
+            ),
+            *stats_note,
         ]
     if ratio < Q8_WARN_RATIO:
         return [
@@ -750,9 +784,10 @@ def req_q8(ai_chars: int, human_chars: int) -> list[Issue]:
                 category="compliance",
                 rule_id="RULE_Q8_HUMAN_RATIO_LOW_WARN",
                 message=f"人工占比 {ratio:.2%} 接近红线 {Q8_ERROR_RATIO:.0%}",
-            )
+            ),
+            *stats_note,
         ]
-    return []
+    return stats_note
 
 
 __all__ = [
@@ -764,6 +799,8 @@ __all__ = [
     "req_q6",
     "req_q7",
     "req_q8",
+    "q8_error_severity",
+    "Q8_STRICT_ENV_VAR",
     "AI_MARKERS",
     "HOOK_MARKERS",
     "CONFLICT_MARKERS",

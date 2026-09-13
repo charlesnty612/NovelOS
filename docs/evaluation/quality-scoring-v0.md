@@ -1,10 +1,10 @@
 # Quality Scoring & Guardrails 规范 v0
 
-> 版本：v0.1（v0 设计稿基础上增补 v1.2 爽感维度与合规 Guardrail 三件套）
+> 版本：v0.2（V3.9 批次 3 修订：七维均权 / blocking-informational 聚合 / Q8 默认降级 / foreshadowing 双通道；见附录 A）
 > 适用范围：NovelOS Workflow（PRD §40 + §79 + §106）的 Quality Engine、State Commit 门禁、Regression Eval
-> 主会话方案决策日期：2026-08-23
+> 主会话方案决策日期：2026-08-23（V3.9 修订：2026-09-13）
 > 撰写日期：2026-08-23
-> 状态：v0.1（v1.2 修订），随 PRD v1.2 生效；权重、阈值、基线值均为"建议值"，必须经首批 golden 章节评测后方可固化
+> 状态：v0.2（V3.9 批次 3 修订），随 PRD v1.2 生效；权重、阈值、基线值均为"建议值"，必须经首批 golden 章节评测后方可固化
 
 ---
 
@@ -32,7 +32,7 @@
 
 ```jsonc
 {
-  "overall": 86,            // int [0, 100]，六子分加权聚合；§2 公式
+  "overall": 86,            // int [0, 100]；V3.9 起为七子分均权聚合（原六子分加权见 §2.1 演化史）
   "plot": 91,               // int [0, 100]；§3.1
   "character": 89,          // int [0, 100]；§3.2
   "continuity": 94,         // int [0, 100]；§3.3
@@ -67,9 +67,10 @@
 ```jsonc
 {
   "severity": "error" | "warning" | "info",
-  // 对应 PRD §86 / §89 风险等级；error 必阻断 Commit
-  "category": "schema_validity | timeline_consistency | character_contradiction | world_rule_contradiction | knowledge_leakage | plot | character | continuity | style | pacing | foreshadowing | payoff | compliance",
-  // 前 5 类与 Guardrail 一一对应；后 6 类与子分一一对应；payoff 对应 §3.7 爽感体检 H-1~H-5；compliance 对应 §4.6/§4.7/§4.8 合规 Guardrail（REQ-Q6/Q7/Q8）
+  // 对应 PRD §86 / §89 风险等级；error 语义 V3.9 起分 blocking（必阻断 Commit）/
+  // informational（只进 issues，不归零、不阻断），判定见 packages/core/quality/README.md §4.3
+  "category": "schema_validity | timeline_consistency | character_contradiction | world_rule_contradiction | knowledge_leakage | plot | character | continuity | style | pacing | foreshadowing | ai_trace | payoff | compliance",
+  // 前 5 类与 Guardrail 一一对应；中 7 类与子分一一对应（ai_trace 为 V3.1 AI 痕迹维度）；payoff 对应 §3.7 爽感体检 H-1~H-5；compliance 对应 §4.6/§4.7/§4.8 合规 Guardrail（REQ-Q6/Q7/Q8）
   "location": "<chapter_id>:<scene_id>:<span_id?>",
   // 没有 span 时退化为 "<chapter_id>:<scene_id>"
   "rule_id": "RULE_<short_name>",
@@ -92,7 +93,18 @@
 
 ## 2. Overall 聚合公式
 
-### 2.1 公式 v0（建议值，需校准）
+> **V3.9 修订注（R14，2026-09-13）**：本节原为六子分加权（0.20/0.20/0.20/0.15/0.15/0.10）。
+> ai_trace 维度接入后，**代码现状（权威口径）为七维均权平均**：
+>
+> ```
+> overall = round((plot + character + continuity + style + pacing + foreshadowing + ai_trace) / 7)
+> ```
+>
+> 历史加权表保留在下面（演化史，**不再生效**，不要按它校准）：
+> 均权理由——ai_trace 是新增维度，重新分配权重会引入主观偏好；平均权重对作者/平台解释成本最低。
+> 变更需同步 `packages/core/quality/README.md` §5.4/§7 并触发公式 hash（见 §2.2）。
+
+### 2.1 公式 v0（~~建议值，需校准~~ 已被 V3.9 七维均权取代）
 
 ```
 overall = round(
@@ -105,7 +117,7 @@ overall = round(
 )
 ```
 
-**权重设定理由（PRD §82 十维目标 → 六子分的归并）**：
+**权重设定理由（PRD §82 十维目标 → 六子分的归并；历史依据，随上式加权表作废，归并思路仍有效）**：
 
 | PRD §82 维度 | 对应子分 | 备注 |
 |---|---|---|
@@ -122,7 +134,11 @@ overall = round(
 
 **Guardrail 触发的扣减规则（不破坏加权公式）**：
 
-1. 任何 Guardrail 出现 `error` 级命中 → `overall = 0`，**绕过加权公式**（对齐 PRD §86 "严重失败不得 Commit"）。
+1. ~~任何 Guardrail 出现 `error` 级命中 → `overall = 0`，**绕过加权公式**~~
+   **V3.9 批次 3.1 修订（悬崖聚合改造）**：`error` 分 **blocking / informational** 两组，
+   只有 **blocking** 组（`severity=="error"` 且 `rule_id ∈ BLOCKING_RULES`）⇒ `overall = 0`
+   并触发 quality_gate enforce 阻断；informational error 保留七维平均部分分，只进 `issues[]`。
+   入表清单与变更流程见 `packages/core/quality/README.md` §4.3/§4.4。
 2. 仅 `warning` 级命中 → `overall` 不变，但写入 `issues[]`，由人类 Author 决定是否放弃提交。
 3. `info` 级命中 → 仅记录，不扣分、不阻断。
 
@@ -148,6 +164,10 @@ overall = round(
 ```
 
 - 公式变更需更新 `scoring_version` 与 `_meta.scoring_formula_hash`，并触发一次完整 Regression（§5）。
+  **V3.9 批次 3.1**：`scoring_formula_hash` 的输入扩展为「公式文本 + severity 配置指纹」
+  （`MVP_SEVERITY_MATRIX` / `MVP_RULE_OVERRIDES` / `BLOCKING_RULES`，见
+  `packages/core/quality/issues.py::severity_config_fingerprint`）——矩阵/白名单变更 = 公式变更，
+  历史报告可按 hash 区分评分口径（`packages/core/quality/README.md` §4.4 变更流程）。
 
 ---
 
@@ -247,6 +267,17 @@ overall = round(
 
 ### 3.6 foreshadowing（伏笔）
 
+> **V3.9 批次 3.2 修订（埋设/兑现双通道）**：原口径「兑现率 × 100」只奖兑现不奖埋设，
+> 铺垫期章节结构性得 0 分（低于「不涉及钩子」的 85 中性分），出现「多埋反而低分」的倒挂。
+> 现行 rule-based 口径：
+>
+> ```
+> score = round(100 × (resolved + 0.9 × new) / (resolved + new))   # 涉及 0 ⇒ 85 中性
+> ```
+>
+> 兑现权重 1.0、埋设权重 0.9（推导与取值表见 `packages/core/quality/README.md` §5.2）；
+> 长期不兑不做数值惩罚，由 H-2/H-3 warning 标出。LLM judge 部分（0.5 权重）仍 deferred。
+
 - **测量来源**：**混合**。
 - **输入材料**：
   - `Hook Ledger`（PRD §21 / 并行文档 `docs/state-model/hook-ledger-v0.md`（待产出）；当前阶段回退到 `state_snapshot_pre.plot_event` 中的"伏笔类"事件）；
@@ -269,11 +300,13 @@ overall = round(
 
 | # | 指标 | 测量来源 | 建议阈值（待校准） | severity 默认 | 说明 |
 |---|---|---|---|---|---|
-| H-1 | **章末钩子检出率** | rule-based（末段 N 字内疑问/悬念/反转标记词 + LLM judge 双评核验） | ≥ 85% 的 Scene 结尾含钩子标记 | warning（< 70% 升 error） | 锚定参照书 chapter_end_hook_rate；未达标章节写入 issues 并建议改写末段。 |
+| H-1 | **章末钩子检出率** | rule-based（末段 N 字内疑问/悬念/反转标记词 + LLM judge 双评核验） | ≥ 85% 的 Scene 结尾含钩子标记 | warning（~~< 70% 升 error~~ **封顶 warning**） | 锚定参照书 chapter_end_hook_rate；未达标章节写入 issues 并建议改写末段。 |
 | H-2 | **爽点密度**（三章小高潮/五章大高潮拟合） | 混合（rule-based 拟合曲线 + LLM judge 标注小/大高潮点） | 三章滑动窗口内至少 1 个小高潮（intensity ≥ 3）拟合度 ≥ 0.7；五章滑动窗口内至少 1 个大高潮（intensity ≥ 4）拟合度 ≥ 0.7 | warning | 与参照书 `rhythm.mini_climax_interval` / `major_climax_interval` 的中位数做比对；偏离过大则提示。 |
-| H-3 | **连续水章预警** | rule-based（连续 2 章内无 payoff_list 命中且 valence 区间 [-2, +2]） | 连续 2 章无爽点 → warning；连续 3 章无爽点 → error | warning / error | 写入 issues 时附"建议插入爽点位置"。 |
+| H-3 | **连续水章预警** | rule-based（连续 2 章内无 payoff_list 命中且 valence 区间 [-2, +2]） | 连续 2 章无爽点 → warning；连续 3 章无爽点 → ~~error~~ **warning**（V3.9.1 矩阵封顶；见下） | ~~warning / error~~ **warning** | 写入 issues 时附"建议插入爽点位置"。 |
 | H-4 | **黄金三章专项**（新书期模式） | 混合（前 300 字文本扫描冲突词 + 章末钩子检出 + 三章内小高潮位置） | 三项全达标：前 300 字冲突 / 三章钩子 / 三章内首次小高潮 | warning（新书期）/ info（其他） | 仅当 chapter_index ∈ [1, 3] 时启用；不达标触发爽感体检报告专列。 |
-| H-5 | **战力与境界递进一致性** | rule-based（境界名词一致 + 越级碾压检测） | 同一境界词跨章引用 100% 一致；不允许跨大境界越级碾压无代价 | warning（一致性问题）/ error（越级碾压） | 境界名词一致：抽取本章新引入境界词与 Canonical State 比对；越级碾压：比对`opponent_layer`与`protagonist_layer`差距，差距 ≥ 2 个大层且无代价标记 → error。 |
+| H-5 | **战力与境界递进一致性** | rule-based（境界名词一致 + 越级碾压检测） | 同一境界词跨章引用 100% 一致；不允许跨大境界越级碾压无代价 | warning（一致性问题）/ ~~error（越级碾压）~~* | 境界名词一致：抽取本章新引入境界词与 Canonical State 比对；越级碾压：比对`opponent_layer`与`protagonist_layer`差距，差距 ≥ 2 个大层且无代价标记 → error（**MVP 未实现**）。 |
+
+\* H-5 越级碾压的 error 升级路径 MVP 不实现；境界一致性问题只产 warning。
 
 **集成方式**：
 
@@ -281,7 +314,10 @@ overall = round(
 - 爽感体检报告作为 `chapter_review` 的固定 section（与 plot/character/continuity/style/pacing/foreshadowing 并列），由 Quality Engine 在 Commit 前渲染；
 - 不进入 §2.1 加权公式（避免双计）；仅以 issues 形式暴露。
 
-**MVP 收窄决策**：本节五项指标 MVP 阶段全部以 **warning** 级运行（仅 H-3 的"连续 3 章无爽点"与 H-5 的"越级碾压"按 error）；V1 与 PRD v1.2 §86 升级路径联动，再视情况调整阈值与 severity。
+**MVP 收窄决策**：本节五项指标 MVP 阶段全部以 **warning** 级运行（~~仅 H-3 的"连续 3 章无爽点"与 H-5 的"越级碾压"按 error~~——**V3.9.1 起 `MVP_SEVERITY_MATRIX["payoff"]` 封顶 `warning`**，
+`payoff._payoff_severity()` 真读矩阵，故 H-3 ≥3 章命中不阻断；H-5 越级碾压 MVP 不实现。
+矩阵变更流程见 `packages/core/quality/README.md` §4.4；改矩阵必须同步本表 + README + `issues.py` 三处，
+并触发 `scoring_formula_hash` 变化）。V1 与 PRD v1.2 §86 升级路径联动，再视情况调整阈值与 severity。
 
 ---
 
@@ -373,22 +409,31 @@ overall = round(
 - **MVP 定位**：v1.2 决策将 G-ai 在 MVP 阶段固化为 warning（不阻断），仅作提示与人工复核触发；error 级于 V1 启用。
 - 命中时写入 issues[]，category=compliance。
 
-### 4.8 REQ-Q8 人工加工占比（v0.1（v1.2 修订）增补，对齐 D2 G-human）
+### 4.8 REQ-Q8 人工加工占比（v0.1（v1.2 修订）增补，对齐 D2 G-human；**V3.9 批次 3.3 修订**）
 
 | status | 规则 |
 |---|---|
-| **error** | 章节人工加工占比 < 30%（按 AI 生成 / 人工修改字数比统计）。 |
+| ~~**error**~~ **warning（默认）** | 章节人工加工占比 < 30%（按 AI 生成 / 人工修改字数比统计）。**V3.9 裁决：默认 warning 不阻断**；作者显式设置 `NOVELOS_QUALITY_Q8_STRICT=1` 才升级为 error（该 rule_id 在 `BLOCKING_RULES` 内，恢复阻断）。 |
 | **warning** | 占比 30%-40%（接近红线）。 |
 | **pass** | 占比 ≥ 40%（留足安全余量）。 |
 
 - **统计口径**：按章节记录 `ai_generated_chars` / `human_modified_chars` / `total_chars`，统计 `human_modified_chars / total_chars`；人工修订包括作者手动修改 / 增删 / 重写 / 合并段落等任何状态从 `generated` 流转至 `human_edited` 的字符。
+- **口径修订（V3.9 批次 3.3）**：实现层 `drafts.created_by` 三态分类——`agent:*` 显式 AI、
+  `human` 人工、生产写作链路的 `writer:v1` / `polisher:v1` 等（prompt_version 形式）**推断为 AI**
+  并在报告写 `RULE_Q8_STATS_NOTE` 留痕；纯未知格式不计入任何一侧（NO_DATA 提示）。
+  证据：生产 `chapter_write/pipeline.py` 硬编码 `created_by='writer:v1'`，旧实现按
+  `agent:*` 判定 ⇒ Q8 恒 NO_DATA。
+- **默认降级理由**：本工具本身是 AI 写作工具，生产章节 = 纯 AI 章（`human_ratio = 0`）；
+  若维持 error，`NOVELOS_QUALITY_GATE=enforce`（默认）会把每一章都拦死。校正统计后 Q8 的
+  正确语义是「合规提示 + 自证导出」（见 `packages/core/quality/README.md` §4.5 留痕）。
 - **后台可查可导**：Workbench 提供章节级 / 项目级人工加工占比面板；支持导出 CSV 自证合规（应对番茄平台审核）。
 - **红线条款**：番茄 2026 治理口径——AI 辅助内容须 ≥ 30% 人工加工；AI 创作占比超 30%-40% 判违规。本 v0 采用 30% 作为 error 红线、40% 作为建议目标值（高于红线 10pp 留缓冲），待首轮校准后调整。
 - 命中时写入 issues[]，category=compliance。
 
 ### 4.9 Guardrail 与 Scoring 的衔接
 
-- 任意 Guardrail `error` ⇒ `overall = 0` ⇒ 强制阻断 Commit（绕过 §2 加权）；
+- 任意 **blocking** Guardrail `error`（`rule_id ∈ BLOCKING_RULES`）⇒ `overall = 0` ⇒ 强制阻断 Commit（绕过 §2 加权）；
+  informational error（severity=error 但不在白名单）⇒ 保留七维平均部分分（V3.9 批次 3.1）；
 - 仅 Guardrail `warning` ⇒ 子分（plot / character / continuity）按 §3.3 流程扣半，并写入 `issues[]`；不阻断；
 - Guardrail `info` ⇒ 无分；只写 issues。
 
@@ -533,11 +578,12 @@ function decide_release(baseline, aggregate):
         and aggregate.guardrails.character_contradiction   == "pass" or "warning"
         and aggregate.guardrails.world_rule_contradiction == "pass" or "warning"
         and aggregate.guardrails.req_q6_similarity_check_ok     # §4.6 REQ-Q6 MVP 即为阻断级
-        and aggregate.guardrails.req_q8_human_ratio_check_ok   # §4.8 REQ-Q8 MVP 即为阻断级
+        and aggregate.guardrails.req_q8_human_ratio_check_ok   # §4.8 REQ-Q8；V3.9 3.3 起默认 warning（strict 才 error/阻断）
         # timeline / knowledge_leakage V1 阶段纳入；MVP 仅写入报告（§4 收窄）
         and aggregate.guardrails.timeline_consistency_v1_check_ok      # 即便 warning 也不阻断
         and aggregate.guardrails.knowledge_leakage_v1_check_ok
     )
+    # V3.9 R7：no_regression_flag（关键子分 baseline −3 硬阈）已作废，见 §6.3 裁决注
     no_regression_flag = (
         aggregate.plot           >= baseline.plot - 3 and
         aggregate.character      >= baseline.character - 3 and
@@ -561,9 +607,18 @@ function decide_release(baseline, aggregate):
 
 1. **Overall ≤ MIN_OVERALL_FOR_RELEASE**（默认 70，§7）；
 2. **Overall 与 baseline 绝对差 > TOLERANCE_OVERALL**（默认 2 分）；
-3. **任意 Guardrail 命中 error**（MVP 阶段 schema_validity / character_contradiction / world_rule_contradiction 三条 + 合规阻断 REQ-Q6 / REQ-Q8）；
-4. **关键子分（character / continuity / foreshadowing）相对 baseline 下降 > 3**（对齐 §85 反例："文笔评分提高但人物一致性下降不能上线"——把 style 提升视为中性，把 character / continuity / foreshadowing 视为硬约束子分）；
+3. **任意 Guardrail 命中 error**（MVP 阶段 schema_validity / character_contradiction / world_rule_contradiction 三条 + 合规阻断 REQ-Q6 / REQ-Q8；**V3.9 批次 3.1 后为 blocking 分组**
+   ——`severity=="error"` 且 `rule_id ∈ BLOCKING_RULES`，清单见 `packages/core/quality/README.md` §4.3）；
+4. ~~**关键子分（character / continuity / foreshadowing）相对 baseline 下降 > 3**（对齐 §85 反例："文笔评分提高但人物一致性下降不能上线"——把 style 提升视为中性，把 character / continuity / foreshadowing 视为硬约束子分）~~；
 5. **任意 Guardrail 的 hit_rate 较 baseline 上升 > 10%**（即使单次没命中 error，但频次恶化也阻断）。
+
+> **V3.9 批次 3 裁决（R7，2026-09-13）：条件 4 作废 —— 本轮不落地且不再计划落地。**
+> 理由：条件 4 依赖「同一 case 长期 baseline 对比」，而 V3.9 批次 3.1 已把口径改为
+> **blocking / informational 分组 + 部分分聚合**（`overall` 不再是二值悬崖），子分单章
+> 绝对差 −3 失去解释力——真正需要盯住的是 blocking 规则命中与 H-2/H-3 类的**跨章趋势**
+> （后者由 `style_trend`（M2-C）与 payoff warning 承担）。`docs/roadmap/v3.9-业务逻辑优化与治理.md`
+> R7 裁决表同步留痕（"悬崖聚合改造后该 spec 口径已过时"）。
+> 若未来重建回归门禁，方向是「blocking 规则命中率 + 关键子分滚动均值」而非单章 −3 硬阈。
 
 ### 6.4 报告落盘
 
@@ -611,9 +666,9 @@ function decide_release(baseline, aggregate):
 
 | PRD 节 | 本文覆盖位置 | 备注 |
 |---|---|---|
-| §37 Quality Engine 四类检查 | §3.1-§3.6 六子分；§4 五 Guardrail | Structural → §4.1 schema；Narrative → §3.1 plot / §3.6 foreshadowing；Style → §3.4 style / §3.5 pacing；Continuity → §3.3 + §4.2-4.5 |
+| §37 Quality Engine 四类检查 | §3.1-§3.6 六子分 + ai_trace（V3.1 增补）= 七子分；§4 五 Guardrail | Structural → §4.1 schema；Narrative → §3.1 plot / §3.6 foreshadowing；Style → §3.4 style / §3.5 pacing；Continuity → §3.3 + §4.2-4.5 |
 | §38 Quality Score 结构 | §1 字段；§2 公式 | 字段名、顺序、类型严格沿用 §38 |
-| §82 十维质量目标 | §2.1 权重理由表 | 十维 → 六子分的归并解释 |
+| §82 十维质量目标 | §2.1 权重理由表 | 十维 → 六子分的归并解释（V3.9 起聚合为七维均权） |
 | §83 成功指标 | §7 基线 | 产品指标不在本文；AI 指标中的人物/剧情/世界观/伏笔/时间线/重复/AI 味 → 覆盖到子分与 Guardrail |
 | §84 Evaluation Dataset | §5 Ground Truth 规范 | 目录布局、标注规范、一致性抽检、与四类 golden 的对应 |
 | §85 Regression 原则 | §6 评测流程 | PRD §85 反例 → §6.3 条件 4 |
@@ -658,3 +713,4 @@ function decide_release(baseline, aggregate):
 |---|---|---|
 | v0 | 2026-08-23 | 首版；与 PRD §37/§38/§82/§83/§84/§85/§86/§110 + 评估报告 R7/R9 对齐；MVP 收窄决策固化 |
 | v0.1 | 2026-08-23 | 增补 §3.7 男频爽感维度（H-1~H-5 五项指标：章末钩子检出率/爽点密度/连续水章预警/黄金三章专项/战力境界递进一致性）；§4.6/§4.7/§4.8 新增 REQ-Q6 参照书相似度 / REQ-Q7 AI 痕迹自检 / REQ-Q8 人工加工占比三条 Guardrail（对齐 `docs/v1.2-调研综合与设计决策-2026-08-23.md` D2 G-sim / G-ai / G-human）；§4.x 编号顺延。原 §4.6 Guardrail 与 Scoring 的衔接 → §4.9。本版所有阈值均为"建议值，待校准"。 |
+| v0.2 | 2026-09-13 | V3.9 批次 3 修订（R14/R7/3.1/3.2/3.3/3.5）：§2 overall 统一为七维均权（旧加权表标删除线留演化史）；error 分 blocking/informational 两组（§2.1 规则 1、§4.9）；`scoring_formula_hash` 覆盖 severity 矩阵（§2.2）；§3.6 foreshadowing 改埋设/兑现双通道（resolved + 0.9×new）；§3.7 H-3 标 warning（矩阵封顶）、H-5 越级碾压标未实现；§4.8 Q8 默认降为 warning（显式 `NOVELOS_QUALITY_Q8_STRICT=1` 才 error，含 created_by 推断口径）；§6.3 条件 4「baseline −3」标删除线并给出 R7 裁决理由；§1.1/§1.3 补 ai_trace 维度与 error 语义说明。 |

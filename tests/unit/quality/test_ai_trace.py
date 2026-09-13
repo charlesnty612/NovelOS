@@ -272,12 +272,22 @@ def test_engine_cross_chapter_uses_previous_drafts():
     assert report.ai_trace < 100
 
 
-def test_engine_q8_error_zero_overrides_ai_trace():
-    """error issue 阻断整体 overall=0（与 ai_trace 无关；验证聚合阻断逻辑）。"""
-    ctx = _pass_ctx(extra={"ai_chars": 90, "human_chars": 10})  # Q8 触发 error
+def test_engine_q8_low_ratio_no_longer_zeroes(monkeypatch):
+    """V3.9 批次 3.3：Q8 默认 warning（不阻断）→ overall 保留部分分。
+
+    旧行为钉住的是「Q8 error ⇒ overall=0」；现行口径：默认 warning，
+    只有显式 strict（NOVELOS_QUALITY_Q8_STRICT=1）才恢复 error 阻断。
+    """
+    ctx = _pass_ctx(extra={"ai_chars": 90, "human_chars": 10})
+    from packages.core.quality import guardrails as g
+
+    monkeypatch.delenv(g.Q8_STRICT_ENV_VAR, raising=False)
     report = QualityEngine().evaluate(ctx)
-    assert report.overall == 0
-    # ai_trace 仍计算但不影响阻断语义
+    assert report.overall > 0
+    assert any(
+        i.rule_id == "RULE_Q8_HUMAN_RATIO_LOW" and i.severity == "warning"
+        for i in report.issues
+    )
     assert 0 <= report.ai_trace <= 100
 
 

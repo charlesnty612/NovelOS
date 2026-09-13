@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from packages.core.context_engine.builders import (
@@ -37,6 +38,27 @@ def _fresh_db(tmp_path: Path) -> Path:
     db_path = tmp_path / "test.db"
     apply_migrations(db_path, MIGRATIONS_DIR)
     return db_path
+
+
+def _insert_state_version(db_path: Path, project_id: str, version: int) -> None:
+    """写一行 story_states（V3.9 批次 2.3 起 state_version 由 MAX(state_version) 取）。
+
+    批次 2.3 之前缓存键的 state_version 走 ``StoryStateService.get_current_state``，
+    测试可以 monkeypatch 它来伪造版本推进；收敛后即为「DB 里真实存在的最新版本」，
+    因此用例改为直接写行。故意用裸 sqlite3 连接（不打开 FK PRAGMA）：
+    ``story_states.commit_id`` 的 FK 指向 commits，而缓存键只关心 state_version 维度，
+    无需为它铺 branches / state_deltas / commits 全套行。
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "INSERT INTO story_states (project_id, state_version, snapshot_json,"
+            " commit_id, created_at) VALUES (?, ?, '{}', 'cmt_test', ?)",
+            (project_id, version, now_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _insert_project(db_path: Path, name: str = "项目") -> str:
@@ -416,89 +438,94 @@ def test_preview_shows_recalled_passages(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_assembly_cache_hit_second_call_returns_same_object(tmp_path: Path):
+def test_assembly_cache_hit_second_call_returns_equal_content(tmp_path: Path):
+    """同一键第二次调用命中缓存（V3.9 批次 1.4：命中返回深拷贝，不再是同一对象）。"""
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, 1, content="", plan_json='{"chapter_goal": "x"}')
     _cache_reset()
     p1 = build_director_input(db_path, pid, cid, author_intent="abc")
     p2 = build_director_input(db_path, pid, cid, author_intent="abc")
-    # 同一键应返回缓存（Python dict id 相同）
-    assert p1 is p2
+    # 内容一致（命中缓存），但为独立对象——调用方就地改写不得污染缓存条目
+    assert p1 == p2
+    assert p1 is not p2
 
 
 def test_assembly_cache_invalidate_when_state_version_changes(tmp_path: Path, monkeypatch):
-    """state_version 变化 → 缓存键失效 → 第二次装配返回新对象。
+    """state_version 变化 → 缓存键失效 → 第二次装配真重装。
 
-    用 monkeypatch 直接替换 StoryStateService.get_current_state 返回不同 version，
-    避免走完整 delta 提交链路（与缓存测试聚焦目标无关）。
+    V3.9 批次 2.3：state_version 口径改为 ``MAX(story_states.state_version)``（不再经过
+    StoryStateService / 整份快照解析），因此用真实写行推进版本，并以 spy 统计
+    ``_build_director_input_uncached`` 的装配次数（深拷贝后 ``p1 is not p2`` 恒真，
+    不再是命中信号）。
     """
+    from packages.core.context_engine import director_input as di_mod
+
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, 1, content="", plan_json="{}")
     _cache_reset()
+    _insert_state_version(db_path, pid, 7)
 
-    from packages.core.story_state import service as svc_mod
-    version_box = {"v": 0}
+    calls = {"n": 0}
+    real_uncached = di_mod._build_director_input_uncached
 
-    def fake_get_current_state(self, project_id, *, branch_id=None):
-        version_box["v"] += 1  # 每次调用都 +1，模拟 state_version 推进
-        return {
-            "state_version": version_box["v"],
-            "characters": [],
-            "world": {},
-            "events": [],
-            "hooks": [],
-            "debt": [],
-            "knowledge": {},
-        }
+    def counting_uncached(*args, **kwargs):
+        calls["n"] += 1
+        return real_uncached(*args, **kwargs)
 
-    monkeypatch.setattr(
-        svc_mod.StoryStateService, "get_current_state", fake_get_current_state,
-    )
+    monkeypatch.setattr(di_mod, "_build_director_input_uncached", counting_uncached)
+
     p1 = build_director_input(db_path, pid, cid, author_intent="abc")
+    assert calls["n"] == 1
+    assert p1["story_state_snapshot"]["current_state_version"] == 7
+
+    # 版本推进 → 键维度变化 → 必须重装
+    _insert_state_version(db_path, pid, 8)
     p2 = build_director_input(db_path, pid, cid, author_intent="abc")
-    # state_version 变化 → 应重装（不同对象）
-    assert p1 is not p2
+    assert calls["n"] == 2, "state_version 推进必须重装，不能命中缓存"
+    assert p2["story_state_snapshot"]["current_state_version"] == 8
     assert p1["story_state_snapshot"]["current_state_version"] != \
         p2["story_state_snapshot"]["current_state_version"]
 
 
 def test_writer_cache_invalidated_on_state_version_change(tmp_path: Path, monkeypatch):
+    """state_version 变化 → writer 缓存键失效 → 每次都真装配。
+
+    V3.9 批次 1.4 起命中返回深拷贝（``p1 is not p2`` 恒真、不再是有效信号），
+    改为统计 ``_build_writer_input_uncached`` 的真实装配次数。
+    V3.9 批次 2.3：state_version 由 ``MAX(story_states.state_version)`` 取，用真实写行推进。
+    """
+    from packages.core.context_engine import writer_input as wi_mod
+
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, 1, content="", plan_json="{}")
     _cache_reset()
+    _insert_state_version(db_path, pid, 1)
 
-    from packages.core.story_state import service as svc_mod
-    version_box = {"v": 0}
+    calls = {"n": 0}
+    real_uncached = wi_mod._build_writer_input_uncached
 
-    def fake_get_current_state(self, project_id, *, branch_id=None):
-        version_box["v"] += 1
-        return {
-            "state_version": version_box["v"],
-            "characters": [],
-            "world": {},
-            "events": [],
-            "hooks": [],
-            "debt": [],
-            "knowledge": {},
-        }
+    def counting_uncached(*args, **kwargs):
+        calls["n"] += 1
+        return real_uncached(*args, **kwargs)
 
-    monkeypatch.setattr(
-        svc_mod.StoryStateService, "get_current_state", fake_get_current_state,
-    )
-    p1 = build_writer_input(db_path, cid, scene_plan={})
-    p2 = build_writer_input(db_path, cid, scene_plan={})
-    assert p1 is not p2
+    monkeypatch.setattr(wi_mod, "_build_writer_input_uncached", counting_uncached)
+    build_writer_input(db_path, cid, scene_plan={})
+    assert calls["n"] == 1
+    _insert_state_version(db_path, pid, 2)  # 版本推进 → 键失效
+    build_writer_input(db_path, cid, scene_plan={})
+    assert calls["n"] == 2, "state_version 变化必须重装，不能命中缓存"
 
 
 def test_assembly_cache_thread_safe_basic(tmp_path: Path, monkeypatch):
     """基本线程安全：多线程并发读同一键，缓存最终生效（不要求首次 race-free）。
 
-    monkeypatch get_current_state 返回固定 version，让所有线程读到同一键。
-    首次并发 miss 允许多个线程都做装配，但 ``_cache_put`` 后所有线程应拿到
-    同一缓存对象（即同 dict id）。
+    V3.9 批次 2.3：state_version 由 ``story_states`` 的 MAX 取，先写一行固定版本
+    让所有线程读到同一键（原先 monkeypatch ``get_current_state`` 已不再被读取）。
+    首次并发 miss 允许多个线程都做装配，但之后该键只应保留一条缓存条目，
+    且后续调用返回内容一致（V3.9 批次 1.4 起命中返回深拷贝，不再断言同一对象）。
     """
     import threading
 
@@ -506,23 +533,8 @@ def test_assembly_cache_thread_safe_basic(tmp_path: Path, monkeypatch):
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, 1, content="", plan_json="{}")
     _cache_reset()
+    _insert_state_version(db_path, pid, 1)
 
-    from packages.core.story_state import service as svc_mod
-
-    def fake_get_current_state(self, project_id, *, branch_id=None):
-        return {
-            "state_version": 1,
-            "characters": [],
-            "world": {},
-            "events": [],
-            "hooks": [],
-            "debt": [],
-            "knowledge": {},
-        }
-
-    monkeypatch.setattr(
-        svc_mod.StoryStateService, "get_current_state", fake_get_current_state,
-    )
     results: list[dict] = []
     lock = threading.Lock()
 
@@ -536,11 +548,16 @@ def test_assembly_cache_thread_safe_basic(tmp_path: Path, monkeypatch):
         t.start()
     for t in threads:
         t.join()
-    # 所有线程的结果应 dict 等价（id 可能不同因首次并发 miss 后才 cache），
-    # 但缓存最终应稳定为单一对象——第二次串行调用应命中
+    # 所有线程的结果应 dict 等价（首次并发 miss 时可能各自装配）
     p_after = build_director_input(db_path, pid, cid, author_intent="abc")
-    # 后续调用应命中缓存（即 p_after 是 results 中某个对象的同一对象）
-    assert any(p_after is r for r in results)
+    assert all(p_after == r for r in results)
+    # 缓存最终应稳定为单一键（后续调用命中同一键）
+    from packages.core.context_engine import builders as cb
+
+    director_keys = [
+        k for k in cb._assembly_cache if k[0] == pid and k[3] == "director"
+    ]
+    assert len(director_keys) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -565,19 +582,23 @@ def test_director_cache_does_not_hit_stale_plan_json(tmp_path: Path, monkeypatch
     )
     _cache_reset()
 
-    # 锁住 state_version 不变
-    from packages.core.story_state import service as svc_mod
+    # 锁住 state_version（V3.9 批次 2.3：真实写一行，peek 取 MAX(state_version)）
+    _insert_state_version(db_path, pid, 1)
 
-    monkeypatch.setattr(
-        svc_mod.StoryStateService, "get_current_state",
-        lambda self, project_id, *, branch_id=None: {
-            "state_version": 1, "characters": [], "world": {},
-            "events": [], "hooks": [], "debt": [], "knowledge": {},
-        },
-    )
+    from packages.core.context_engine import director_input as di_mod
+
+    calls = {"n": 0}
+    real_uncached = di_mod._build_director_input_uncached
+
+    def counting_uncached(*args, **kwargs):
+        calls["n"] += 1
+        return real_uncached(*args, **kwargs)
+
+    monkeypatch.setattr(di_mod, "_build_director_input_uncached", counting_uncached)
 
     p1 = build_director_input(db_path, pid, cid, author_intent="abc")
     assert p1["author_intent"]["raw"] == "abc"
+    assert calls["n"] == 1
     # plan_v1 时 active_characters 来自 _recall_passages；这里只验证键
     # _build_director_input_uncached 内部读取的是 plan_json
     # 我们通过 SQL UPDATE plan_json 内容来验证指纹区分
@@ -595,28 +616,19 @@ def test_director_cache_does_not_hit_stale_plan_json(tmp_path: Path, monkeypatch
         conn.close()
 
     p2 = build_director_input(db_path, pid, cid, author_intent="abc")
-    # 内容指纹变化 → 不同对象（不是缓存命中）
-    assert p1 is not p2, "plan_json UPDATE 后必须返回新对象，不能命中陈旧缓存"
+    # 内容指纹变化 → 必须重装（不是缓存命中）
+    assert calls["n"] == 2, "plan_json UPDATE 后必须重新装配，不能命中陈旧缓存"
     # 状态保持稳定（state_version 没变）
     assert p2["story_state_snapshot"]["current_state_version"] == 1
 
 
-def test_writer_cache_distinguishes_scene_plan(tmp_path: Path, monkeypatch):
+def test_writer_cache_distinguishes_scene_plan(tmp_path: Path):
     """P1-1 修复：同一 chapter 不同 scene_plan 必须返回不同对象。"""
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, 1, content="", plan_json='{"chapter_goal": "x"}')
     _cache_reset()
-
-    from packages.core.story_state import service as svc_mod
-
-    monkeypatch.setattr(
-        svc_mod.StoryStateService, "get_current_state",
-        lambda self, project_id, *, branch_id=None: {
-            "state_version": 1, "characters": [], "world": {},
-            "events": [], "hooks": [], "debt": [], "knowledge": {},
-        },
-    )
+    _insert_state_version(db_path, pid, 1)
 
     scene_a = {"purpose": "场景 A", "characters": ["林夕"]}
     scene_b = {"purpose": "场景 B", "characters": ["林夕"]}
@@ -629,30 +641,22 @@ def test_writer_cache_distinguishes_scene_plan(tmp_path: Path, monkeypatch):
     assert p_b["scene_plan"]["purpose"] == "场景 B"
 
 
-def test_writer_cache_same_scene_plan_returns_same_object(tmp_path: Path, monkeypatch):
-    """同 scene_plan 第二次调用仍命中缓存。"""
+def test_writer_cache_same_scene_plan_returns_equal_content(tmp_path: Path):
+    """同 scene_plan 第二次调用仍命中缓存（V3.9 批次 1.4：命中返回深拷贝）。"""
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, 1, content="", plan_json='{"chapter_goal": "x"}')
     _cache_reset()
-
-    from packages.core.story_state import service as svc_mod
-
-    monkeypatch.setattr(
-        svc_mod.StoryStateService, "get_current_state",
-        lambda self, project_id, *, branch_id=None: {
-            "state_version": 1, "characters": [], "world": {},
-            "events": [], "hooks": [], "debt": [], "knowledge": {},
-        },
-    )
+    _insert_state_version(db_path, pid, 1)
 
     scene = {"purpose": "场景 X", "location": "Cave"}
     p1 = build_writer_input(db_path, cid, scene)
     p2 = build_writer_input(db_path, cid, scene)
-    assert p1 is p2
+    assert p1 == p2
+    assert p1 is not p2
 
 
-def test_chapter_commit_invalidate_clears_cache(tmp_path: Path, monkeypatch):
+def test_chapter_commit_invalidate_clears_cache(tmp_path: Path):
     """P1-1 修复：chapter_commit._commit_node 成功后必须显式失效本章缓存。
 
     不依赖完整 workflow 引擎，直接调 _commit_node 验证：
@@ -666,17 +670,8 @@ def test_chapter_commit_invalidate_clears_cache(tmp_path: Path, monkeypatch):
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, 1, content="")
     cb._cache_reset()
-
-    # 先建立缓存键
-    from packages.core.story_state import service as svc_mod
-
-    monkeypatch.setattr(
-        svc_mod.StoryStateService, "get_current_state",
-        lambda self, project_id, *, branch_id=None: {
-            "state_version": 1, "characters": [], "world": {},
-            "events": [], "hooks": [], "debt": [], "knowledge": {},
-        },
-    )
+    # 先建立缓存键（V3.9 批次 2.3：state_version 取自 story_states，写一行固定版本）
+    _insert_state_version(db_path, pid, 1)
 
     _ = build_director_input(db_path, pid, cid, author_intent="v1")  # 仅需副作用：写缓存
     assert any(k[0] == pid for k in cb._assembly_cache), "应有缓存键"
@@ -718,6 +713,7 @@ def test_chapter_commit_node_invalidates_cache_at_runtime(tmp_path: Path, monkey
     """
     from packages.core.context_engine import builders as cb
     from packages.core.ids import new_id, now_iso
+    from packages.core.story_state import service as svc_mod
     from packages.workflows.chapter_commit import pipeline as cp
 
     db_path = _fresh_db(tmp_path)
@@ -725,16 +721,9 @@ def test_chapter_commit_node_invalidates_cache_at_runtime(tmp_path: Path, monkey
     cid = _insert_chapter(db_path, pid, 1, content="")
     cb._cache_reset()
 
-    # 先建缓存键
-    from packages.core.story_state import service as svc_mod
-
-    monkeypatch.setattr(
-        svc_mod.StoryStateService, "get_current_state",
-        lambda self, project_id, *, branch_id=None: {
-            "state_version": 1, "characters": [], "world": {},
-            "events": [], "hooks": [], "debt": [], "knowledge": {},
-        },
-    )
+    # 先建缓存键（V3.9 批次 2.3：state_version 取自 story_states，写一行固定版本；
+    # 下面的 monkeypatch commit_delta 会在 commit 时插入新版本行）
+    _insert_state_version(db_path, pid, 1)
     build_director_input(db_path, pid, cid, author_intent="v0")
     assert len(cb._assembly_cache) >= 1
 

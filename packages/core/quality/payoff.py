@@ -1,8 +1,14 @@
 """爽感维度 H-1~H-5（packages.core.quality.payoff）。
 
 对齐 ``docs/evaluation/quality-scoring-v0.md`` §3.7，男频爽感体检报告。
-**MVP 收窄**：H-1~H-5 全部 warning，仅 H-3 连续 ≥3 章与 H-5 越级碾压可升 error；
-本文件按 H-1~H-5 命中条件返回对应 severity。
+
+**severity 现状（V3.9 批次 3.5 对齐代码）**：H-1~H-5 的 severity 由
+:func:`issues.mvp_max_severity("payoff")` 决定（经 :func:`_payoff_severity`），
+而 ``MVP_SEVERITY_MATRIX["payoff"]["mvp_max"]`` 在 V3.9.1 后为 ``"warning"``——
+即使 H-3 命中「连续 ≥3 章 0 payoff」也只是 warning，**不会**升 error、**不会**阻断；
+spec §3.7 表里「H-3 连续 3 章 → error / H-5 越级碾压 → error」为历史口径，
+已由矩阵收窄取代（见 spec §3.7 MVP 收窄决策 + README §4.2）。
+修改 payoff severity 的正确方式是改矩阵那一行（不要在规则里硬编码 error）。
 
 调用签名：
 
@@ -10,7 +16,7 @@
   字段：``draft / chapter_number / payoff_history / snapshot / delta``。
 - 全部为纯函数；不在子分中再额外写 issue（与 guardrails / scoring 无关）。
 
-越级碾压（H-5 升级 error 路径）MVP 不实现——只实现境界名词一致性 warning。
+越级碾压（H-5）MVP 不实现——只实现境界名词一致性 warning。
 """
 
 from __future__ import annotations
@@ -142,7 +148,11 @@ def _h2_no_climax_3ch(ctx: PayoffContext) -> list[Issue]:
 
 
 def _h3_filler(ctx: PayoffContext) -> list[Issue]:
-    """H-3：连续 2 章 0 payoff ⇒ warning；连续 ≥3 章 ⇒ error。"""
+    """H-3：连续 2 章 0 payoff ⇒ warning；连续 ≥3 章 ⇒ 读矩阵上限（当前 warning）。
+
+    severity 不硬编码：走 :func:`_payoff_severity`（矩阵 ``payoff.mvp_max``）；V3.9.1 后
+    矩阵封顶 warning，故 ≥3 章命中不阻断。
+    """
     issues: list[Issue] = []
     hist = list(ctx.payoff_history or [])
     has_now = _has_payoff_this_chapter(ctx)

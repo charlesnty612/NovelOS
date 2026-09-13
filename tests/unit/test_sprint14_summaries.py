@@ -202,7 +202,13 @@ def test_director_input_includes_new_l1_keys(tmp_path: Path):
 
 
 def test_recent_summaries_takes_last_n_by_chapter_no_desc(tmp_path: Path):
-    """recent_chapter_summaries 按 chapter_no DESC 取最近 N 章；不含当前章自身。"""
+    """recent_chapter_summaries 按 chapter_no DESC 取最近 N 章；不含当前章自身。
+
+    V3.9 批次 2.1：``_RECENT_SUMMARY_CAP`` 5 → 40，条数上限退化为防御性硬顶，
+    真正的约束是 token 预算（8000 字符以内的短摘要 8 条远离预算，全部保留）。
+    """
+    from packages.core.context_engine.builders_common import _RECENT_SUMMARY_CAP
+
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     current_cid = _insert_chapter(db_path, pid, number=10)
@@ -215,10 +221,11 @@ def test_recent_summaries_takes_last_n_by_chapter_no_desc(tmp_path: Path):
 
     out = build_director_input(db_path, pid, current_cid, "意图")
     summaries = out["recent_chapter_summaries"]
-    # 最近 5 章：chapter_no 8..4
-    assert len(summaries) == 5, summaries
+    # 历史只有 8 章 < CAP（40）→ 全部保留，chapter_no 8..1 倒序
+    assert len(summaries) == 8, summaries
+    assert _RECENT_SUMMARY_CAP > 8
     chapter_nos = [s["chapter_no"] for s in summaries]
-    assert chapter_nos == [8, 7, 6, 5, 4], chapter_nos
+    assert chapter_nos == [8, 7, 6, 5, 4, 3, 2, 1], chapter_nos
     # 当前章 10 不在结果中
     assert all(s["chapter_no"] != 10 for s in summaries)
 
@@ -509,20 +516,92 @@ def test_summarize_node_truncates_long_summary(tmp_path: Path):
 
 
 def test_summaries_truncation_strategy_drops_oldest_first(tmp_path: Path):
-    """_RECENT_SUMMARY_CAP=5：注入 8 章摘要 → 最近 5 章（chapter_no 最高）保留。"""
+    """V3.9 批次 2.1：token 预算**真触发**——超预算时按「先砍最旧」截断。
+
+    构造 40 章 × 400 字摘要（≈ 4600 token）远超 ``_DIRECTOR_SUMMARY_TOKEN_BUDGET``
+    （2000）；旧实现（CAP=5 / 每条 200 字 / 预算 800）恒不触发，本用例钉住新机制。
+    """
+    from packages.core.context_engine.builders_common import (
+        _DIRECTOR_SUMMARY_TOKEN_BUDGET,
+        _RECENT_SUMMARY_CAP,
+        _RECENT_SUMMARY_PER_CHARS,
+        _truncate_summaries_to_token_budget,
+    )
+
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
-    cur_cid = _insert_chapter(db_path, pid, number=10)
-    for no in range(1, 9):  # 1..8
+    cur_cid = _insert_chapter(db_path, pid, number=_RECENT_SUMMARY_CAP + 1)
+    for no in range(1, _RECENT_SUMMARY_CAP + 1):  # 1..40
         hcid = _insert_chapter(db_path, pid, number=no)
-        # 每条摘要用 150 字（接近 200 上限）以充分消耗 token 预算
-        _insert_summary(db_path, pid, hcid, no, "字" * 150)
+        # 每条摘要吃满单条字符上限（400 字）以充分消耗 token 预算
+        _insert_summary(db_path, pid, hcid, no, "字" * _RECENT_SUMMARY_PER_CHARS)
 
     out = build_director_input(db_path, pid, cur_cid, "意图")
     summaries = out["recent_chapter_summaries"]
-    assert len(summaries) == 5
-    # 取最高 5 章号（8..4）
-    assert [s["chapter_no"] for s in summaries] == [8, 7, 6, 5, 4]
+    meta = out["_assembly_meta"]
+
+    assert meta["summary_truncated"] is True, meta
+    # 截断确有发生：保留条数少于输入条数，但非空
+    assert 0 < len(summaries) < _RECENT_SUMMARY_CAP, summaries
+    # 保留的是章节号最高的一批（先砍最旧），最旧的 chapter_no=1 必被砍掉
+    kept_nos = [s["chapter_no"] for s in summaries]
+    assert kept_nos == list(
+        range(_RECENT_SUMMARY_CAP, _RECENT_SUMMARY_CAP - len(summaries), -1)
+    ), kept_nos
+    assert 1 not in kept_nos
+    # 单条字符上限仍生效
+    assert all(len(s["summary"]) <= _RECENT_SUMMARY_PER_CHARS for s in summaries)
+
+    # 纯函数口径复核：恰好再塞一条更旧摘要 → 必被砍回 → truncated=True
+    probe = summaries + [{
+        "chapter_id": "ch_oldest", "chapter_no": 0, "summary": "更旧的摘要",
+    }]
+    kept, truncated = _truncate_summaries_to_token_budget(
+        probe, available_tokens=_DIRECTOR_SUMMARY_TOKEN_BUDGET,
+    )
+    assert truncated is True
+    assert kept == summaries
+
+
+def test_summaries_within_budget_not_truncated(tmp_path: Path):
+    """摘要链未超预算 → summary_truncated=False，条数不受影响（机制不误伤短链）。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cur_cid = _insert_chapter(db_path, pid, number=4)
+    for no in range(1, 4):
+        hcid = _insert_chapter(db_path, pid, number=no)
+        _insert_summary(db_path, pid, hcid, no, f"第 {no} 章短摘要")
+
+    out = build_director_input(db_path, pid, cur_cid, "意图")
+    assert out["_assembly_meta"]["summary_truncated"] is False, out["_assembly_meta"]
+    assert [s["chapter_no"] for s in out["recent_chapter_summaries"]] == [3, 2, 1]
+
+
+def test_summaries_budget_triggers_at_production_summary_length(tmp_path: Path):
+    """生产口径（摘要写入端 ≤200 字）下预算同样真触发。
+
+    写入端 ``packages/workflows/chapter_commit/summary.py::_SUMMARY_MAX_CHARS = 200``；
+    ``_RECENT_SUMMARY_CAP``（40）× 200 字 ≈ 2600 token > ``_DIRECTOR_SUMMARY_TOKEN_BUDGET``
+    （2000）→ 截断发生。旧口径（5 章 / 800 token）在同样数据下恒不触发。
+    """
+    from packages.core.context_engine.builders_common import (
+        _DIRECTOR_SUMMARY_TOKEN_BUDGET,
+        _RECENT_SUMMARY_CAP,
+    )
+
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cur_cid = _insert_chapter(db_path, pid, number=_RECENT_SUMMARY_CAP + 1)
+    for no in range(1, _RECENT_SUMMARY_CAP + 1):
+        hcid = _insert_chapter(db_path, pid, number=no)
+        _insert_summary(db_path, pid, hcid, no, "字" * 200)  # 写入端上限
+
+    out = build_director_input(db_path, pid, cur_cid, "意图")
+    summaries = out["recent_chapter_summaries"]
+
+    assert out["_assembly_meta"]["summary_truncated"] is True
+    assert 0 < len(summaries) < _RECENT_SUMMARY_CAP
+    assert _DIRECTOR_SUMMARY_TOKEN_BUDGET == 2000
 
 
 # ---------------------------------------------------------------------------

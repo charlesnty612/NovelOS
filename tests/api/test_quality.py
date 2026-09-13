@@ -150,6 +150,77 @@ def test_evaluate_then_latest_returns_report(tmp_path: Path):
     asyncio.run(run())
 
 
+def test_evaluate_report_exposes_latest_draft_version(tmp_path: Path):
+    """V3.9 批次 4.3：evaluate 落库的报告带当前最新草稿版本，GET 读回同一值。
+
+    该 chapter 无 draft 时 draft_version 为 None（列可空，兼容存量报告）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid)
+
+            # 无 draft：draft_version=None
+            r = await _request(app, "POST", f"/api/chapters/{cid}/quality/evaluate")
+            assert r.status_code == 201, r.text
+            assert r.json()["draft_version"] is None, r.json()
+
+            _insert_drafts(
+                app.state.settings.db_path,
+                cid,
+                [(1, "第一版正文", "human:editor"), (2, "第二版正文", "human:editor")],
+            )
+
+            r = await _request(app, "POST", f"/api/chapters/{cid}/quality/evaluate")
+            assert r.status_code == 201, r.text
+            body = r.json()
+            assert body["draft_version"] == 2, body
+
+            r2 = await _request(app, "GET", f"/api/chapters/{cid}/quality")
+            assert r2.status_code == 200, r2.text
+            assert r2.json()["draft_version"] == 2, r2.json()
+
+    asyncio.run(run())
+
+
+def test_evaluate_q8_counts_writer_v1_as_ai(tmp_path: Path):
+    """V3.9 批次 3.3 端到端：生产形态 ``created_by='writer:v1'`` 计入 AI 侧。
+
+    改造前：ai=0/human=0 ⇒ RULE_Q8_NO_DATA；
+    现行：ai>0 ⇒ Q8 warning（默认不阻断）+ ``RULE_Q8_STATS_NOTE`` 口径留痕，
+    且 report.overall > 0（不再被 Q8 归零）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            cid = await _make_chapter(app, pid)
+            _insert_drafts(
+                app.state.settings.db_path,
+                cid,
+                [(1, "这是一整章由写作代理生成的正文内容。" * 5, "writer:v1")],
+            )
+
+            r = await _request(app, "POST", f"/api/chapters/{cid}/quality/evaluate")
+            assert r.status_code == 201, r.text
+            body = r.json()
+            rule_ids = [i["rule_id"] for i in body["issues_json"]]
+            assert "RULE_Q8_NO_DATA" not in rule_ids, body["issues_json"]
+            q8 = [i for i in body["issues_json"] if i["rule_id"] == "RULE_Q8_HUMAN_RATIO_LOW"]
+            assert q8 and q8[0]["severity"] == "warning", body["issues_json"]
+            assert "RULE_Q8_STATS_NOTE" in rule_ids, body["issues_json"]
+            # 注：本端点 delta={} ⇒ schema_validity 产 blocking error（overall=0），与 Q8 无关；
+            # Q8 的「不归零」行为由 tests/unit/quality/test_q8_stats.py（带合法 delta）覆盖。
+            assert any(i["rule_id"] == "SCHEMA_VALIDATION_FAILED" for i in body["issues_json"])
+
+    asyncio.run(run())
+
+
 def test_latest_returns_404_when_no_report(tmp_path: Path):
     """chapter 存在但无 report → 404。"""
     app = _create_app(tmp_path)

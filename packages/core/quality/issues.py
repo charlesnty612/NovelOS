@@ -7,6 +7,9 @@
 2. 提供轻量构造器 ``make_issue(...)`` 简化调用方代码（自动填充 location/evidence_refs 缺省）。
 3. 维护 ``MVP_SEVERITY_MATRIX``：把每个 category 在 MVP 阶段允许的最高严重度固化为可读的常量
    表（与 §4 收窄决策一致；规约变更时只改这一处即可）。
+4. V3.9 批次 3.1：维护 ``BLOCKING_RULES``（阻断白名单）与 ``is_blocking_issue``——
+   error 级 issue 分 **blocking / informational** 两组，只有 blocking 组把 overall 归零
+   （见 :mod:`.aggregate`）；矩阵与白名单内容一并参与 ``scoring_formula_hash``。
 
 设计要点：
 
@@ -115,7 +118,14 @@ def make_issue(
 # - schema_validity / character_contradiction / world_rule_contradiction / compliance → "error"
 # - timeline_consistency / knowledge_leakage                              → "warning"
 # - 其余子分 / payoff                                                     → "warning"
-# - payoff 范围内仅 H-3 连续 3 章 / H-5 越级碾压 升 error（H-5 越级 MVP 不实现）。
+# - payoff 范围内仅 H-3 连续 3 章 / H-5 越级碾压可升 error（H-5 越级 MVP 不实现）；
+#   V3.9.1 后 payoff 矩阵封顶 warning，故 _payoff_severity() 实际恒为 warning。
+# - compliance 内 Q8 默认封顶 warning（V3.9 批次 3.3 裁决，规则级覆盖见 MVP_RULE_OVERRIDES）。
+#
+# 变更流程（V3.9 批次 3.5）：矩阵 / 规则级覆盖 / 阻断白名单任一变更 = 评分口径变更，
+# 必须同步 (1) 本文件，(2) packages/core/quality/README.md §4，(3)
+# docs/evaluation/quality-scoring-v0.md §3.7/§4；``scoring_formula_hash`` 会随之变化
+# （由 aggregate.formula_hash 自动覆盖），并需跑 tests/unit/quality 回归。
 MVP_SEVERITY_MATRIX: dict[str, dict[str, str]] = {
     "schema_validity": {"mvp_max": "error"},
     "character_contradiction": {"mvp_max": "error"},
@@ -145,6 +155,71 @@ def mvp_max_severity(category: str) -> Severity:
     return "warning"
 
 
+# 规则级默认 severity（category 粒度不足以表达「同一 category 内不同规则的默认封顶」）。
+# 仅覆盖需要偏离 category 矩阵的规则；未列出的规则用 mvp_max_severity(category)。
+MVP_RULE_OVERRIDES: dict[str, str] = {
+    # V3.9 批次 3.3 裁决：Q8 默认降为 warning。
+    # 本工具是 AI 写作工具，生产 drafts.created_by='writer:v1'（统计修正后）⇒ 纯 AI 章
+    # human_ratio=0；若维持 error，enforce 默认会把所有纯 AI 章全拦。作者显式设置
+    # NOVELOS_QUALITY_Q8_STRICT=1（见 guardrails.q8_error_severity）才升级回 error 阻断。
+    "RULE_Q8_HUMAN_RATIO_LOW": "warning",
+}
+
+
+# 阻断白名单（V3.9 批次 3.1）：只有「severity == 'error' 且 rule_id 在表内」的 issue
+# 才把 overall 归零并触发 quality_gate enforce 阻断；其余 error 只进 issues 列表
+# （informational error，不压死 overall）。
+#
+# 入表标准：错误会破坏「提交物本身可用 / 合规」——结构性损坏（schema / 世界状态 /
+# 角色状态写坏）、参照书抄袭红线、评分本身失败（子分缺失）。
+BLOCKING_RULES: frozenset[str] = frozenset(
+    {
+        "SCHEMA_VALIDATION_FAILED",  # §4.1 schema_validity：delta 不符合 schema
+        "RULE_CHAR_DEAD_ACTIVE",  # §4.3 已死亡角色被写活动字段（状态写坏）
+        "RULE_WORLD_HARD_RULE_CHANGED",  # §4.4 hard 世界规则被改写（世界观写坏）
+        "RULE_Q6_OVERLAP_RATE",  # §4.6 参照书重叠率超红线（抄袭风险）
+        "RULE_Q8_HUMAN_RATIO_LOW",  # §4.8 人工占比红线；默认 warning，NOVELOS_QUALITY_Q8_STRICT=1 时才产 error
+        "scoring_missing_subscore",  # §2.1 子分缺失（无法给出有效评分，系统级）
+    }
+)
+"""error 级 issue 中真正阻断的 rule_id 白名单（V3.9 批次 3.1）。"""
+
+
+def rule_default_severity(rule_id: str, category: str) -> Severity:
+    """规则级默认 severity：先查 ``MVP_RULE_OVERRIDES``，未命中回退 category 矩阵。"""
+    override = MVP_RULE_OVERRIDES.get(rule_id)
+    if override in ("error", "warning", "info"):
+        return override  # type: ignore[return-value]
+    return mvp_max_severity(category)
+
+
+def is_blocking_issue(issue: Any) -> bool:
+    """判断一条 issue 是否为 blocking（V3.9 批次 3.1）。
+
+    条件：``severity == "error"`` 且 ``rule_id`` 在 :data:`BLOCKING_RULES` 内。
+    其余 error（informational）保留在 issues 列表中，但不把 overall 归零。
+    """
+    if issue is None:
+        return False
+    return (
+        getattr(issue, "severity", None) == "error"
+        and getattr(issue, "rule_id", None) in BLOCKING_RULES
+    )
+
+
+def severity_config_fingerprint() -> str:
+    """severity 配置的规范化文本指纹（供 ``scoring_formula_hash`` 覆盖矩阵内容）。
+
+    覆盖三块：逐 category 的 ``mvp_max``、规则级覆盖 ``MVP_RULE_OVERRIDES``、
+    阻断白名单 ``BLOCKING_RULES``。三者任一变更 ⇒ 指纹变 ⇒ formula_hash 变，
+    历史报告可按 hash 区分评分口径。
+    """
+    parts = [f"{cat}={row.get('mvp_max', '')}" for cat, row in sorted(MVP_SEVERITY_MATRIX.items())]
+    parts.extend(f"rule:{rid}={val}" for rid, val in sorted(MVP_RULE_OVERRIDES.items()))
+    parts.append("blocking:" + ",".join(sorted(BLOCKING_RULES)))
+    return "|".join(parts)
+
+
 __all__ = [
     "Severity",
     "Category",
@@ -152,5 +227,10 @@ __all__ = [
     "loc",
     "make_issue",
     "MVP_SEVERITY_MATRIX",
+    "MVP_RULE_OVERRIDES",
+    "BLOCKING_RULES",
     "mvp_max_severity",
+    "rule_default_severity",
+    "is_blocking_issue",
+    "severity_config_fingerprint",
 ]

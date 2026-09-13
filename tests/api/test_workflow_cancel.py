@@ -119,6 +119,52 @@ def test_cancel_running_run_returns_200_and_marks_cancelled(tmp_path: Path) -> N
         conn.close()
 
 
+def test_cancel_child_run_marks_auto_revise_loop_cancelled(tmp_path: Path) -> None:
+    """V3.9 4.2：取消 auto_revise 回路的子 run → 注册表把该回路标记 cancelled。
+
+    端点响应契约不变（仍是 {run_id, status}）；回路标记是回路线程下一轮启动前的
+    「父级意图」检查依据（详见 tests/unit/test_auto_revise_loop_cancel.py）。
+    """
+    from packages.core.api.routers import workflows as wf
+
+    app, settings = _setup_app(tmp_path)
+
+    conn = get_connection(settings.db_path)
+    try:
+        wf_id = _ensure_workflow(conn, "chapter-write")
+        run_id = _insert_run(conn, wf_id=wf_id, status="RUNNING")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 模拟回路线程已登记该子 run
+    wf._AUTO_REVISE_LOOPS.clear()
+    wf._register_auto_revise_loop(
+        loop_id="arloop_test",
+        parent_run_id="wfr_parent",
+        chapter_id="ch_x",
+        project_id="prj_x",
+        max_iter=2,
+    )
+    wf._record_auto_revise_child("arloop_test", run_id)
+
+    async def _do():
+        async with _make_client(app) as client:
+            return await client.post(f"/api/runs/{run_id}/cancel")
+
+    try:
+        r = _run(_do())
+        assert r.status_code == 200, f"期望 200，实际 {r.status_code}: {r.text}"
+        assert r.json() == {"run_id": run_id, "status": "CANCELLED"}, r.json()
+        assert wf._AUTO_REVISE_LOOPS["arloop_test"]["cancelled"] is True
+        assert (
+            wf._AUTO_REVISE_LOOPS["arloop_test"]["cancelled_reason"]
+            == "child-run-cancelled"
+        )
+    finally:
+        wf._AUTO_REVISE_LOOPS.clear()
+
+
 def test_cancel_already_cancelled_run_returns_409(tmp_path: Path) -> None:
     """幂等：已 CANCELLED 的 run 再 cancel → 409（与终态 409 一致）。"""
     app, settings = _setup_app(tmp_path)

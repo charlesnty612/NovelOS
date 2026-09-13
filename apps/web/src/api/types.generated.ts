@@ -235,6 +235,92 @@ export interface DraftCreate {
   content: string;
 }
 
+export interface GateReviseRequest {
+  /** 「按门禁建议改稿」请求体（V3.9 批次 4.1）。 */
+  mock_providers?: Record<string, unknown> | null;
+  /** 「按门禁建议改稿」请求体（V3.9 批次 4.1）。 */
+  model_overrides?: Record<string, unknown> | null;
+  /** 「按门禁建议改稿」请求体（V3.9 批次 4.1）。 */
+  critic_mode?: string | null;
+  /** 「按门禁建议改稿」请求体（V3.9 批次 4.1）。 */
+  deep_review?: boolean | null;
+}
+
+export interface GenreBindRequest {
+  /** 绑定请求体：``{"pack_id": "..."}``。 */
+  pack_id: string;
+}
+
+export interface GenrePack {
+  /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
+  pack_id: string;
+  /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
+  name: string;
+  /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
+  genre_tag: string;
+  /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
+  version: number;
+  /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
+  payload: Record<string, unknown>;
+  /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
+  source_path: string | null;
+  /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
+  created_at: string;
+  /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
+  updated_at: string;
+  /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
+  bound_project_count?: number;
+}
+
+export interface GenrePackCreate {
+  /** 创建题材包请求体（POST /projects/{pid}/genre-packs）。 */
+  name: string;
+  /** 创建题材包请求体（POST /projects/{pid}/genre-packs）。 */
+  genre_tag: string;
+  /** 创建题材包请求体（POST /projects/{pid}/genre-packs）。 */
+  payload?: Record<string, unknown>;
+  /** 显式 pack_id（内容仓 slug）；省略则生成 gp_<12hex>。 */
+  pack_id?: string | null;
+  /** 内容仓来源路径（审计用；软件层不解析）。 */
+  source_path?: string | null;
+}
+
+export interface GenrePackSummary {
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  pack_id: string;
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  name: string;
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  genre_tag: string;
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  version: number;
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  source_path?: string | null;
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  created_at: string;
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  updated_at: string;
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  payoff_type_count?: number;
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  structure_model?: string | null;
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  chapter_words_target?: number | null;
+  /** 题材包摘要投影（列表端点 / 绑定响应 / 预览）。 */
+  bound_project_count?: number;
+}
+
+export interface GenrePackUpdate {
+  /** 更新题材包请求体（PUT /genre-packs/{pack_id}）；提供 payload 时 version 自增。 */
+  name?: string | null;
+  /** 更新题材包请求体（PUT /genre-packs/{pack_id}）；提供 payload 时 version 自增。 */
+  genre_tag?: string | null;
+  /** 更新题材包请求体（PUT /genre-packs/{pack_id}）；提供 payload 时 version 自增。 */
+  payload?: Record<string, unknown> | null;
+  /** 更新题材包请求体（PUT /genre-packs/{pack_id}）；提供 payload 时 version 自增。 */
+  source_path?: string | null;
+}
+
 export interface HTTPValidationError {
   detail?: Array<ValidationError>;
 }
@@ -298,6 +384,8 @@ export interface Project {
   foreshadow_overdue_chapters?: number | null;
   /** 字数带覆盖（low_ratio / high_ratio / floor）；None = 项目无覆盖，消费点走模块默认 0.85 / 1.15 / 1200。 */
   word_band?: Record<string, unknown> | null;
+  /** 绑定的题材包 id（题材库单 slot）；None = 未绑定 / 极老库缺列。绑定与解绑走 POST /projects/{pid}/genre-pack/bind|unbind。 */
+  genre_pack_id?: string | null;
 }
 
 export interface ProjectCreate {

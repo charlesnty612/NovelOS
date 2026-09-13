@@ -340,6 +340,12 @@ class WorkflowEngine:
 
         供 :meth:`start_with_nodes`（同步）与 :meth:`start_with_nodes_async`（异步）
         共用，保持两者落库口径一致。
+
+        ``retry_count``：建行置 0，之后由 agent 层累加——每次真实发生的 LLM 重试
+        （``_RETRY_HINT`` 解析/契约重试、provider 空流重试）在
+        ``agent_runtime/runner.py::_bump_run_retry_count`` 里
+        ``retry_count = retry_count + 1``（V3.9 批次 5.11；引擎自身不写该列，
+        各写入方只动各自列，互不覆盖）。
         """
         conn = get_connection(self.db_path)
         try:

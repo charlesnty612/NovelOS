@@ -45,7 +45,7 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0023_project_word_band.sql，37 张物理业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0025_genre_packs.sql，38 张物理业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包）
 tests/                   pytest（unit / integration / workflow / api / evals）
 scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
 docs/                    设计文档、PRD、实现计划（docs/impl/IMPLEMENTATION-PLAN-v0.md）
@@ -63,7 +63,7 @@ jsonschema / httpx；测试另需 pytest / ruff）。
 # 1) 安装依赖
 pip install -e ".[dev]"
 
-# 2) 执行数据库迁移（生成 data/novelos.db；37 张业务表 + _migrations）
+# 2) 执行数据库迁移（生成 data/novelos.db；38 张业务表 + _migrations）
 python scripts/migrate.py
 
 # 3) 前端构建（构建产物 apps/web/dist，后端会自动托管）
@@ -97,7 +97,7 @@ python -m pytest -q
 - 前端 dev 代理从 `NOVELOS_PORT` / `NOVELOS_API_PORT` 读后端端口（见 `apps/web/vite.config.ts`）；
   改端口后需重启 vite dev 才生效。
 
-健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=37`，业务表数；含 `_migrations` 物理共 38 张）。
+健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=38`，业务表数；含 `_migrations` 物理共 39 张）。
 
 ## 测试
 
@@ -129,7 +129,8 @@ cd apps/web && npm run test
 | `NOVELOS_API_PORT` | `18081` | 后端监听端口（`scripts/serve.py` 使用；优先级低于 `NOVELOS_PORT`） |
 | `NOVELOS_PORT` | `18081` | 便捷端口变量（`python -m packages.core.api.main` 使用；优先级高于 `NOVELOS_API_PORT`） |
 | `NOVELOS_WEB_DIST` | `apps/web/dist` | SPA 构建产物目录（存在 `index.html` 才启用托管） |
-| `NOVELOS_QUALITY_GATE` | `enforce` | quality gate 模式：`enforce`（error 级阻断）/ `report`（不阻断） |
+| `NOVELOS_QUALITY_GATE` | `enforce` | quality gate 模式：`enforce`（blocking error 级阻断）/ `report`（不阻断）；blocking 白名单见 `packages/core/quality/issues.py:BLOCKING_RULES` |
+| `NOVELOS_QUALITY_Q8_STRICT` | 未设置 | 置 `1` 时 Q8 人工占比红线从默认 warning 升回 error（V3.9 批次 3.3 裁决：AI 写作工具默认不阻断） |
 | `NOVELOS_CRITIC_MODE` | `always` | critic 评审模式：`always`（每章必评）/ `sample`（抽样）等；未设置回落到 pipeline 内定 always（每章） |
 | `NOVELOS_SUMMARY_PARALLEL` | `on` | commit 三路并发：`on`（summarizer 并入 observer 双腿并发池）/ `off` |
 | `NOVELOS_AUTO_REVISE_MAX` | `2` | 自动改稿回路最大轮数：`0` 禁用，正整数生效 |

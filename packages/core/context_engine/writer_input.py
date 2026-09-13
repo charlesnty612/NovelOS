@@ -15,17 +15,18 @@ from .builders_common import (
     _AUTHOR_STYLE_SAMPLES_INSTRUCTION,
     _DEFAULT_STYLE_CONSTRAINTS,
     _DEFAULT_TARGET_WORD_COUNT,
+    _GENRE_PACK_CONSUMER_WRITER,
     _HOOK_OPEN_STATUSES,
+    _attach_assembly_meta,
     _author_style_samples,
     _build_trigger_corpus,
     _character_state_excerpts,
     _collect_touched_entity_ids,
     _fingerprint_word_band_json,
+    _genre_pack_excerpt,
     _inject_scene_word_budget,
-    _peek_active_canon_id,
-    _peek_chapter_no_state_version,
+    _peek_chapter_context,
     _peek_project_id_from_chapter,
-    _peek_project_word_band_json,
     _recent_prose_tail,
     _row_to_chapter,
     _safe_copy,
@@ -34,6 +35,7 @@ from .builders_common import (
 from .cache import (
     _FINGERPRINT_UNCACHED,
     _cache_get,
+    _cache_namespace_tag,
     _cache_put,
     _fingerprint_scene_plan,
 )
@@ -50,6 +52,47 @@ from .relevance import (
 )
 
 
+def _merge_genre_style(
+    style_constraints: Any,
+    genre_inject: dict[str, Any] | None,
+    *,
+    has_author_style_samples: bool,
+) -> dict[str, Any] | None:
+    """题材包 ``style_constraints`` 段 → writer 的 ``style_constraints.genre_style``。
+
+    规则（roadmap P1b §2「writer 文风消费」）：
+    - 未绑定 / 题材包未声明文风段（``genre_inject`` 为 None）→ 返回 None（零注入）；
+    - 既有 ``style_constraints`` 已含 ``genre_style`` → 返回 None（不覆盖既有键，
+      保留调用方 / 项目级配置的显式优先权）；
+    - 产出的子键自带溯源（``pack_id`` / ``version`` / ``source="<pack_id>@<version>"``）；
+    - 既有 ``author_style_samples`` 非空时附 ``priority="below_author_style_samples"``
+      ——作者本人样例优先于题材体例（题材体例只约束句式 / 用词风格的**下限**）。
+    """
+    if not isinstance(genre_inject, dict):
+        return None
+    style = genre_inject.get("style_constraints")
+    if not isinstance(style, dict) or not style:
+        return None
+    if isinstance(style_constraints, dict) and "genre_style" in style_constraints:
+        return None
+    pack_id = genre_inject.get("pack_id")
+    version = genre_inject.get("version")
+    merged: dict[str, Any] = dict(style)
+    merged.setdefault(
+        "source",
+        f"{pack_id}@{version}" if pack_id else "genre_pack",
+    )
+    if isinstance(pack_id, str) and pack_id:
+        merged.setdefault("pack_id", pack_id)
+    if isinstance(version, int) and not isinstance(version, bool):
+        merged.setdefault("version", version)
+    if genre_inject.get("__style_constraints_truncated__"):
+        merged["__truncated__"] = True
+    if has_author_style_samples:
+        merged["priority"] = "below_author_style_samples"
+    return merged
+
+
 def _build_writer_input_uncached(
     db_path: str | Path,
     chapter_id: str,
@@ -57,8 +100,13 @@ def _build_writer_input_uncached(
     target_word_count: int,
     *,
     relevance_trim: bool = True,
+    peek: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """无缓存版 writer 装配。"""
+    """无缓存版 writer 装配。
+
+    ``peek``（V3.9 批次 2.3）：调用方 :func:`_peek_chapter_context` 的单连接预读结果。
+    传了就直接复用其 ``word_band_json`` 原文（省掉一次 projects 查询），不再二次读库。
+    """
     conn = get_connection(db_path)
     try:
         chap_row = conn.execute("SELECT * FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()
@@ -71,16 +119,23 @@ def _build_writer_input_uncached(
         # V3.7：项目级字数带覆盖（projects.word_band_json）。
         # 列缺失 / 异常 / 解析失败 → 视为无覆盖（与模块默认一致，零行为变化）。
         word_band_overrides: dict | None = None
-        try:
-            prow = conn.execute(
-                "SELECT word_band_json FROM projects WHERE project_id = ?",
-                (project_id,),
-            ).fetchone()
-        except sqlite3.OperationalError:
-            prow = None
-        if prow is not None and prow["word_band_json"]:
+        if peek is not None:
+            # V3.9 批次 2.3：复用 peek 的单连接结果（同一行，口径与下面 SQL 一致）。
+            wb_raw = peek.get("word_band_json")
+        else:
+            wb_raw = None
             try:
-                parsed = json.loads(prow["word_band_json"])
+                prow = conn.execute(
+                    "SELECT word_band_json FROM projects WHERE project_id = ?",
+                    (project_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                prow = None
+            if prow is not None:
+                wb_raw = prow["word_band_json"]
+        if wb_raw:
+            try:
+                parsed = json.loads(wb_raw)
             except (ValueError, TypeError):
                 parsed = None
             if isinstance(parsed, dict):
@@ -88,6 +143,11 @@ def _build_writer_input_uncached(
         # Reference Canon：writer 消费 style_params（文风参数）。与 director 共用连接。
         reference_canon_inject, reference_canon_audit = _reference_canon_excerpt(
             conn, project_id, consumer=_REFERENCE_CANON_CONSUMER_WRITER,
+        )
+        # 题材库 P1b：writer 消费题材包 style_constraints（题材体例）。未绑定 /
+        # 题材包未声明文风段 → (None, None)（零注入）。
+        genre_pack_inject, genre_pack_audit = _genre_pack_excerpt(
+            conn, project_id, consumer=_GENRE_PACK_CONSUMER_WRITER,
         )
     finally:
         conn.close()
@@ -185,6 +245,20 @@ def _build_writer_input_uncached(
     if reference_canon_audit is not None:
         payload["_reference_canon_consumed"] = reference_canon_audit
 
+    # 题材库 P1b：题材体例合并进既有 style_constraints 的 ``genre_style`` 子键。
+    # - **不覆盖**既有 style_constraints 键（默认语言 / 视角 / 禁用词等保持原值）；
+    # - 既有 author_style_samples（作者本人样例）优先级更高 → 合并段带
+    #   ``priority="below_author_style_samples"`` 标记（样例非空时）。
+    genre_style = _merge_genre_style(
+        payload["style_constraints"],
+        genre_pack_inject,
+        has_author_style_samples=bool(style_samples),
+    )
+    if genre_style is not None:
+        payload["style_constraints"]["genre_style"] = genre_style
+    if genre_pack_audit is not None:
+        payload["_genre_pack_consumed"] = genre_pack_audit
+
     # P2 Context Engine：章节级相关性裁剪。默认开启，可在调用层 / 环境变量关闭。
     _apply_relevance_trim(
         payload,
@@ -192,7 +266,8 @@ def _build_writer_input_uncached(
         plan_json=director_plan,
         scene_plan=scene_plan,
     )
-    return payload
+    # V3.9 批次 2.1：附非注入侧元字段（只告警不阻断）。paged 路径会在二次裁剪后覆盖重算。
+    return _attach_assembly_meta(payload)
 
 
 def build_writer_input(
@@ -203,6 +278,7 @@ def build_writer_input(
     target_word_count: int = _DEFAULT_TARGET_WORD_COUNT,
     context_mode: str = "full",
     relevance_trim: bool | None = None,
+    namespace: str = "",
 ) -> dict[str, Any]:
     """组装 Writer 输入（agent-contracts §4.1 + Sprint 15/V1.3 author_style_samples
     + V2.0 Wave B 任务二 条件触发动态注入 + V2.0 Wave C 任务一 召回 + 任务二 缓存
@@ -240,28 +316,54 @@ def build_writer_input(
 
     P2 Context Engine：缓存键追加第 7 元 ``relevance``（``"on"`` / ``"off"``）——
     防止 relevance_trim 开关/环境变量变化导致脏命中。
+
+    V3.9 批次 1.4 修复：缓存键追加 ``target_word_count`` 原文（int）——它决定
+    ``chapter.target_word_count`` / ``chapter.word_band`` / 每 scene ``target_words``，
+    旧键缺这一维度会让不同目标字数互相脏命中。
+
+    题材库 P1b：键尾（命名空间前）追加 ``genre_pack_ref``（项目绑定题材包的
+    ``<pack_id>@<version>`` 指纹；未绑定 → ``'__none__'``）。题材体的
+    ``style_constraints`` 经 ``genre_style`` 子键进 payload，换包 / 换版本必须
+    各自 miss，否则 writer 读到旧题材体例（与 director 键同形的 V3.9 批次 1B 教训）。
+
+    ``namespace``（关键词参数，默认 ``""``）：键尾命名空间标记。``preview_context``
+    传 ``"preview"`` 拆开 dry-run 与生产的键空间（预览默认 2200 字 / 空 scene），
+    生产调用不传即保持原行为。命中返回**深拷贝**，调用方可安全就地改写。
+
+    V3.9 批次 2.3：键预判从 4 个 ``_peek_*``（project_id / chapter_no+state_version /
+    word_band / canon 各建一连接，其中 state_version 走 StoryStateService 解析整份
+    snapshot_json）收敛为单连接单条 JOIN 的 :func:`_peek_chapter_context`；peek 结果
+    透传给 uncached 装配复用（word_band_json 原文 / project_id），命中路径 DB 连接
+    5 → 1。
     """
     if context_mode not in ("full", "paged"):
         raise ValueError(
             f"context_mode must be 'full' or 'paged', got {context_mode!r}"
         )
     relevance_trim_final = _resolve_relevance_trim(relevance_trim)
-    project_id = _peek_project_id_from_chapter(db_path, chapter_id)
-    chapter_no, state_version = _peek_chapter_no_state_version(
-        db_path, project_id, chapter_id,
-    )
+    # V3.9 批次 2.3：键预判从 4 个 ``_peek_*``（4 连接，其一解析整份快照）收敛为
+    # 单连接单条 JOIN；peek 结果复用给 uncached 装配（word_band_json 原文）。
+    peek = _peek_chapter_context(db_path, chapter_id)
+    project_id = peek["project_id"]
+    chapter_no = peek["chapter_no"]
+    state_version = peek["state_version"]
     scene_fp = _fingerprint_scene_plan(scene_plan)
     relevance_flag = "on" if relevance_trim_final else "off"
     # V3.7：缓存键追加 wb_fp（项目字数带覆盖指纹）——同一项目改 word_band_json 后
     # payload.chapter.word_band 会变；旧键命中会拿到陈旧 word_band。无覆盖项目指纹恒为
     # "none"，与现状行为完全一致。
-    wb_raw = _peek_project_word_band_json(db_path, project_id)
-    wb_fp = _fingerprint_word_band_json(wb_raw)
+    wb_fp = _fingerprint_word_band_json(peek["word_band_json"])
     # F5 修复：缓存键追加 active canon_id；拆书落新 canon 后旧 writer 装配缓存自然失效。
-    active_canon_id = _peek_active_canon_id(db_path, project_id) or "__none__"
+    active_canon_id = peek["active_canon_id"] or "__none__"
+    # 题材库 P1b：缓存键追加题材包指纹（``<pack_id>@<version>``，未绑定 → ``__none__``）。
+    # 题材包 style_constraints（genre_style）进 payload ⇒ 必须进键：换包 / 换版本
+    # （PUT 改 payload → version 自增）/ 绑定 / 解绑都要 miss，否则旧装配脏命中
+    # （与 director 键同形的单点口径，见 ``_peek_chapter_context``）。
+    genre_pack_ref = peek["genre_pack_ref"] or "__none__"
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
         scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id,
+        target_word_count, genre_pack_ref, _cache_namespace_tag(namespace),
     )
     if scene_fp != _FINGERPRINT_UNCACHED:
         cached = _cache_get(cache_key)
@@ -271,11 +373,13 @@ def build_writer_input(
         payload = _build_writer_input_paged(
             db_path, chapter_id, scene_plan, target_word_count,
             relevance_trim=relevance_trim_final,
+            peek=peek,
         )
     else:
         payload = _build_writer_input_uncached(
             db_path, chapter_id, scene_plan, target_word_count,
             relevance_trim=relevance_trim_final,
+            peek=peek,
         )
     if scene_fp != _FINGERPRINT_UNCACHED:
         _cache_put(cache_key, payload)
@@ -515,6 +619,7 @@ def _build_writer_input_paged(
     keep_recent_commits: int = _WRITER_KEEP_RECENT_COMMITS,
     resolved_history_keep: int = _WRITER_RESOLVED_HOOKS_KEEP,
     relevance_trim: bool = True,
+    peek: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """writer 分页模式装配（L0/L1/L2 裁剪）。
 
@@ -525,10 +630,14 @@ def _build_writer_input_paged(
     P2 Context Engine：通过 ``relevance_trim`` 参数让分页模式同样经过/跳过
     章节级相关性裁剪；裁剪顺序在分页裁剪之前（``_build_writer_input_uncached``
     内部已完成），因此分页 stats 统计的是 relevance_trim 之后的二次裁剪。
+
+    V3.9 批次 2.3：``peek``（调用方已做的单连接预读）透传给 uncached 并供本函数取
+    ``project_id``，省掉一次 ``_peek_project_id_from_chapter`` 连接。
     """
     full_payload = _build_writer_input_uncached(
         db_path, chapter_id, scene_plan, target_word_count,
         relevance_trim=relevance_trim,
+        peek=peek,
     )
     # 裁剪前快照：仅保留被裁剪的 3 个键，便于 stats 体积量化
     # （深拷贝防止后续 in-place 修改干扰）。
@@ -539,7 +648,10 @@ def _build_writer_input_paged(
     }
 
     # 1. 收集 touched 实体（DB IO 失败 → 空集合 → 全部走摘要路径，保安全）
-    project_id = _peek_project_id_from_chapter(db_path, chapter_id)
+    project_id = (
+        peek["project_id"] if peek is not None
+        else _peek_project_id_from_chapter(db_path, chapter_id)
+    )
     touched: dict[str, set[str]] | None = None
     if project_id:
         conn = get_connection(db_path)
@@ -700,4 +812,5 @@ def _build_writer_input_paged(
 
     full_payload["context_mode"] = "paged"
     full_payload["context_paging_stats"] = stats
-    return full_payload
+    # V3.9 批次 2.1：分页裁剪后再算一次 _assembly_meta（uncached 里算的是裁剪前体积）。
+    return _attach_assembly_meta(full_payload)

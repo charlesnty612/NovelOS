@@ -6,7 +6,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.story_state.delta_repair import repair_delta
@@ -14,13 +13,15 @@ from packages.core.story_state.service import StoryStateService
 from packages.core.story_state.validator import validate_delta
 
 from .observer import (
-    _OBSERVER_RETRY_HINT_TEMPLATE,
+    _call_observer,
     _extract_leg_payload,
     _merge_observer_legs,
     _pick_retry_mock,
     _trim_observer_input_for_leg,
 )
 from .pipeline_common import (
+    # V3.9 批次 5.3：重试提示模板单源在 pipeline_common（此前 observer.py 另有一份副本）。
+    _OBSERVER_RETRY_HINT_TEMPLATE,
     _classify_validator_errors_to_legs,
     _has_high_risk_change,
     _inject_resolvable_ids_into_config,
@@ -145,6 +146,11 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 )
                 # V3.10 O-4：narrative 腿 retry payload 重新注入可核销白名单
                 # （_trim_observer_input_for_leg 不动 config 子树，retry 时需要补一次）。
+                # 注（口径说明，非本次改动）：retry payload 由 ctx['observer_input']
+                # 重建——那份 payload 没有经过 _observer_node 的首次白名单注入，所以
+                # **entities 腿** retry 的 config 不含 resolvable_hook_ids /
+                # resolvable_debt_ids（该白名单只有 narrative 腿消费，entities 腿不受影响）；
+                # previous_state 的按腿裁剪口径与首次调用一致。
                 if leg == "narrative":
                     snapshot_for_resolvable = (
                         (ctx.get("observer_input") or {}).get("previous_state")
@@ -154,15 +160,12 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
                     )
                 # mock_script：取下一条响应（list 模式弹 idx+1），单条/字符串保持原样
                 retry_mock = _pick_retry_mock(original_mock_script, leg)
-                retry_out = run_agent(
+                retry_out = _call_observer(
                     db_path,
-                    "observer",
                     retry_payload,
                     run_id,
                     node_run_id=node_run_id,
-                    expected="observer",
                     mock_script=retry_mock,
-                    capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
                     # V3.9.4：observer 单次 run 级覆盖透传（与首次调用口径一致）
                     profile_id=(ctx.get("model_overrides") or {}).get("observer"),
                 )
@@ -183,17 +186,16 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 retry_mock_script = [picked] if isinstance(picked, str) else picked
             else:
                 retry_mock_script = original_mock_script
-            observer_payload = run_agent(
+            observer_payload = _call_observer(
                 db_path,
-                "observer",
                 retry_payload,
                 run_id,
                 node_run_id=node_run_id,
-                expected="observer",
                 mock_script=retry_mock_script,
                 # V3.9.4：observer 单次 run 级覆盖透传（off 路径未显式 capability_override，
                 # 沿用既有 capability_for('observer') 解析行为，不改变业务逻辑）。
                 profile_id=(ctx.get("model_overrides") or {}).get("observer"),
+                capability_override=None,
             )
             leg_outputs["all"] = (
                 dict(observer_payload) if isinstance(observer_payload, dict) else {}
@@ -216,6 +218,25 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 f"observer delta failed validation: errors={errors}"
             )
 
+    # ------------------------------------------------------------------ 三层校验的分工
+    # V3.9 批次 5.4 结论（证据：validator.validate_delta 的 snapshot 参数语义 +
+    # 本文件三处调用点 + commits.submit_delta 的公共边界，见报告）：
+    #   第 1 层 / 第 2 层（上方 122 行与 211 行）：基准 = ``snapshot_for_validate``
+    #     （= ``ctx['observer_input']['previous_state']``，即 observer 自己看到的那份
+    #     trimmed 快照），因此校验结论与 LLM 的输入视角同源——失败信息才能用于
+    #     引导同一份 payload 重试（_classify_validator_errors_to_legs 按数组名路由到
+    #     对应腿），并让 ``repair_delta`` 能在同一基准上补齐 before。
+    #   第 3 层（下方 svc.submit_delta → commits.submit_delta 内的 validate_delta）：
+    #     基准 = schema + 业务规则，**不含**引用存在性（``validate_delta`` 的
+    #     ``snapshot=None`` 语义，见 validator.py:561-563/582-584）。差异是刻意的：
+    #     ``submit_delta`` 是 StoryStateService 的公共边界，调用方（API / 仿真 /
+    #     测试）手里未必有 observer 快照，而引用存在性校验必须有一份快照才有意义；
+    #     服务层不自行回查 DB 取当前状态，以免与调用方视角错位（observer 所见快照
+    #     与 DB 最新状态在并发章节写状态下可能不同——这正是本管线显式传快照的原因）。
+    #     也正因第 3 层是第 1/2 层的**真子集**（同样的 schema + 业务规则，少一层
+    #     引用存在性），同一 delta 在管线内不可能「前两层通过、第三层失败」；
+    #     下面的防御分支实际只兜住非管线调用方的语义差异。
+    # ------------------------------------------------------------------
     submit_result = svc.submit_delta(delta)
     if submit_result.get("status") != "validated":
         # 防御保留：理论上 validate_delta 通过后 service 也会通过；若仍失败按原口径报错

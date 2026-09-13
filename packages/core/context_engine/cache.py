@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import threading as _threading
@@ -13,6 +14,10 @@ _CACHE_MAX_SIZE = 256
 # - director 键第 5 元 = sha256(plan_json 原文)[:16]（plan_json None → 'none'）；
 # - writer 键第 5 元 = sha256(json.dumps(scene_plan, sort_keys=True))[:16]（None → 'none'）；
 # - 内容指纹计算失败（不可序列化）→ 跳过缓存（直接走 uncached），避免脏命中。
+# V3.9 批次 1.4：键再补齐「进 payload 的装配参数」维度——director 加 author_intent
+# 指纹与 target_word_count（两者都进 payload），writer 加 target_word_count（决定
+# chapter.target_word_count / word_band / 每 scene target_words）；键尾加命名空间标记
+# 拆开 preview dry-run 与生产的键空间（见 ``_cache_namespace_tag``）。
 # 失效仍以 state_version + chapter_no 为主线；commit 完成后调
 # ``_invalidate_cache_for_chapter`` 显式兜底（state_version 推进也会带走它）。
 _assembly_cache: dict[tuple, dict[str, Any]] = {}
@@ -24,6 +29,20 @@ _FINGERPRINT_LEN = 16
 _FINGERPRINT_NONE = "none"
 # 「跳过缓存」的指纹占位（与 'none' 区分；调用方据此判走 uncached）
 _FINGERPRINT_UNCACHED = "uncached"
+
+# preview dry-run（``preview_context``）的独立命名空间：默认口径是空意图 +
+# 2200 字，与生产参数同值时也必须互不命中（前端挂载章节详情页即自动打预览，
+# 若共用键空间会把空意图/默认字数写进生产条目，作者意图被静默丢弃）。
+_PREVIEW_CACHE_NAMESPACE = "preview"
+
+
+def _cache_namespace_tag(namespace: str | None) -> str:
+    """把命名空间归一化为缓存键末元（生产 ``"ns:"``、预览 ``"ns:preview"``）。
+
+    恒占一位（生产调用也追加），键形状统一；``"ns:"`` 前缀保证该元取值不会与
+    role / mode / 指纹等既有维度混淆。
+    """
+    return f"ns:{namespace or ''}"
 
 
 def _fingerprint_plan_json(plan_json_raw: Any) -> str:
@@ -59,6 +78,26 @@ def _fingerprint_scene_plan(scene_plan: Any) -> str:
         return _FINGERPRINT_UNCACHED
 
 
+def _fingerprint_author_intent(author_intent: Any) -> str:
+    """计算 author_intent 的稳定指纹（sha256 前 16 字符，与 plan_fp 同款风格）。
+
+    - ``None`` → ``_FINGERPRINT_NONE``；空串按原文（``""``）计算，与 None 区分；
+    - 非 str → ``json.dumps(sort_keys=True, ensure_ascii=False)`` 后计算；
+    - 不可序列化 → ``_FINGERPRINT_UNCACHED``，调用方据此跳过缓存。
+    """
+    try:
+        if author_intent is None:
+            return _FINGERPRINT_NONE
+        normalized = (
+            author_intent
+            if isinstance(author_intent, str)
+            else json.dumps(author_intent, sort_keys=True, ensure_ascii=False)
+        )
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:_FINGERPRINT_LEN]
+    except Exception:  # noqa: BLE001 —— 不可序列化时跳过缓存
+        return _FINGERPRINT_UNCACHED
+
+
 def _cache_reset() -> None:
     """测试辅助：清空装配缓存。
 
@@ -91,12 +130,22 @@ def _invalidate_cache_for_chapter(project_id: str, chapter_no: int) -> int:
 
 
 def _cache_get(key: tuple) -> dict[str, Any] | None:
+    """读缓存；命中返回**深拷贝**，未命中返回 None。
+
+    V3.9 批次 1.4：调用方会就地改写装配结果（chapter_plan 改
+    ``chapter.expected_role``、chapter_write 补 ``mode/draft_text/revision_note``、
+    paged 装配改 ``context_mode`` 等），共享同一 dict 会让脏数据滞留缓存被后续
+    命中读到。改为双向拷贝隔离（此处 + ``_cache_put``），payload 为纯 JSON 结构
+    （≤ 百 KB 量级），deepcopy 开销可忽略。
+    """
     with _cache_lock:
-        return _assembly_cache.get(key)
+        cached = _assembly_cache.get(key)
+        return copy.deepcopy(cached) if cached is not None else None
 
 
 def _cache_put(key: tuple, value: dict[str, Any]) -> None:
-    """写入缓存；超过上限按 dict 插入顺序淘汰最旧（dict 有序）。"""
+    """写入缓存（存深拷贝，调用方后续就地改写不影响缓存）；
+    超过上限按 dict 插入顺序淘汰最旧（dict 有序）。"""
     global _assembly_cache
     with _cache_lock:
         if len(_assembly_cache) >= _CACHE_MAX_SIZE:
@@ -106,4 +155,4 @@ def _cache_put(key: tuple, value: dict[str, Any]) -> None:
                 del _assembly_cache[oldest_key]
             except StopIteration:
                 pass
-        _assembly_cache[key] = value
+        _assembly_cache[key] = copy.deepcopy(value)

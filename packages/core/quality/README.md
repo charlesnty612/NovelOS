@@ -13,8 +13,9 @@ packages/core/quality/
 ├── __init__.py          # 公共 API 导出
 ├── README.md            # 本文件
 ├── models.py            # pydantic：Issue / QualityContext / QualityReport
-├── issues.py            # Issue 构造器 / severity 矩阵常量
-├── aggregate.py         # 七维平均 compute_overall + scoring_formula_hash
+├── issues.py            # Issue 构造器 / severity 矩阵 / 阻断白名单 BLOCKING_RULES
+├── aggregate.py         # 七维平均 compute_overall + scoring_formula_hash（覆盖 severity 矩阵）
+├── ai_flavor.py         # AI 味共享词表（scan_ai_patterns 权威源 + 密度工具）
 ├── ai_trace.py          # AI 痕迹子分（章内/跨章重复 + 套话命中）
 ├── scoring.py           # 六子分 rule-based
 ├── guardrails.py        # 8 条 Guardrail（spec §4.1-§4.8）；公共 helper compute_shingles
@@ -34,19 +35,23 @@ from packages.core.quality import (
     Issue,                  # 单条问题
     compute_overall,        # §2.1 公式（直接调用，便于测试）
     MVP_SEVERITY_MATRIX,    # severity 矩阵常量（自检/文档用）
+    BLOCKING_RULES,         # 阻断白名单（V3.9 批次 3.1）
+    is_blocking_issue,      # blocking / informational 判定
     guardrails, scoring,    # 子模块（内部 helper）
 )
 
 # 公共 helper：13 字滑动 shingle 计算（spec §4.6 / Q6 / ai_trace 复用入口）
 from packages.core.quality.guardrails import compute_shingles
 from packages.core.quality.ai_trace import compute_ai_trace
+# AI 味共享词表 + 密度工具（V3.9 批次 3.4）
+from packages.core.quality.ai_flavor import AI_FLAVOR_MARKERS, AI_CLICHES, scan_ai_patterns
 ```
 
 `QualityEngine.evaluate(ctx: QualityContext) -> QualityReport`：
 
 - 纯函数，无副作用。
 - 编排顺序固定：guardrails → compliance → payoff → 6 子分（continuity 复用已收集 issues）→ 聚合 → 报告。
-- 报告 `_meta` 字段固定 4 键：`scoring_version="quality-scoring-v0"` / `llm_judge="deferred"` / `evaluated_at=now_iso()` / `scoring_formula_hash=<§2.1 公式 sha256 前 16 位>`。
+- 报告 `_meta` 字段固定 4 键：`scoring_version="quality-scoring-v0"` / `llm_judge="deferred"` / `evaluated_at=now_iso()` / `scoring_formula_hash=<公式 + severity 配置指纹 sha256 前 16 位>`。
 
 ---
 
@@ -66,10 +71,11 @@ from packages.core.quality.ai_trace import compute_ai_trace
 | `reference_texts` | list[str] | 否 | REQ-Q6 参照书。 |
 | `whitelist` | list[str] | 否 | REQ-Q6 公共 shingle 白名单。 |
 | `ai_chars` / `human_chars` | int | 否 | REQ-Q8 字符数。 |
+| `char_stats_note` | str \| None | 否 | REQ-Q8 统计口径 note（V3.9 3.3 新增）：`build_quality_context` 按 `drafts.created_by` 推断出 AI 侧字符 / 遇到未知 created_by 时写入；engine 透传给 `req_q8` 作为 info issue（`RULE_Q8_STATS_NOTE`）留痕。 |
 | `previous_drafts` | list[str] | 否 | ai_trace 跨章子信号：同项目最近 N 章正文（章节号降序），由 `build_quality_context` 现场拉取；缺失则跨章子信号降级满分。 |
 | `commit_id` / `run_id` | str \| None | 否 | 仅做回显。 |
 
-**输出 `QualityReport`**（pydantic）：九字段（七子分 + overall + issues） + `_meta` + 回显字段；`_meta` 使用 JSON 别名 `_meta`（Python 属性名 `meta`）。
+**输出 `QualityReport`**（pydantic）：九字段（七子分 + overall + issues） + `_meta` + 回显字段；`_meta` 使用 JSON 别名 `_meta`（Python 属性名 `meta`）。回显字段含 `draft_version`（V3.9 4.3 新增，可空）：落库时由 `QualityService.save_report` 取当前最新 `drafts.version` 补全，无草稿时为 `None`，用于改稿重评后把历史报告对应回草稿版本。
 
 ---
 
@@ -91,22 +97,91 @@ class Issue(BaseModel):
 
 13 个 `category`：`schema_validity / timeline_consistency / character_contradiction / world_rule_contradiction / knowledge_leakage / plot / character / continuity / style / pacing / foreshadowing / payoff / compliance`。
 
-### 4.2 MVP severity 矩阵（主会话拍板口径）
+### 4.2 MVP severity 矩阵（主会话拍板口径；V3.9 批次 3.1/3.3/3.5 校正）
 
 | category | MVP 最高 | 实现来源 |
 |---|---|---|
 | schema_validity | **error** | spec §4.1 |
 | character_contradiction | **error** | spec §4.3 |
 | world_rule_contradiction | **error** | spec §4.4 |
-| compliance（REQ-Q6 / Q7 / Q8） | **error**（仅 Q6 / Q8 error；Q7 仅 warning） | spec §4.6/4.7/4.8 |
+| compliance（REQ-Q6 / Q7 / Q8） | **error**（Q6 error；Q7 仅 warning；**Q8 默认 warning**——见 §4.3） | spec §4.6/4.7/4.8 + V3.9 3.3 |
 | timeline_consistency | warning | spec §4.2，MVP 收窄 |
 | knowledge_leakage | warning | spec §4.5，MVP 收窄 |
 | 其余子分（plot/character/continuity/style/pacing/foreshadowing） | warning | spec §3.1-§3.6 |
-| payoff（H-1~H-5） | warning（H-3 连续 ≥3 章 / H-5 越级可升 error） | spec §3.7 |
+| payoff（H-1~H-5） | **warning**（矩阵封顶；H-3 连续 ≥3 章命中时读矩阵也只得 warning，**不阻断**） | spec §3.7 + V3.9.1 收窄 |
 
-矩阵常量导出为 `from packages.core.quality import MVP_SEVERITY_MATRIX` 与 `mvp_max_severity(cat)`。
+矩阵常量导出为 `from packages.core.quality import MVP_SEVERITY_MATRIX` 与 `mvp_max_severity(cat)`；
+规则级偏离（如 Q8）在 `MVP_RULE_OVERRIDES`，读取用 `rule_default_severity(rule_id, category)`。
 
 **升级到 error**：把规格行的 severity 改为 `error` 即可；M0→V1 升级示例见 §6。
+注意 `payoff` 行：矩阵封顶 warning，且 `payoff._payoff_severity()` 真读矩阵（V3.9.1 后）——
+因此 H-3 连续 ≥3 章命中不会阻断。**改 payoff severity 的正确方式是改矩阵那一行**，
+不要在规则里硬编码 error（历史文档曾写「H-3 可升 error」，已按代码现状校正，见 §5.3）。
+
+### 4.3 blocking / informational 分组（V3.9 批次 3.1 悬崖聚合改造）
+
+`severity == "error"` 不再一律把 overall 归零。判定入口是
+`issues.is_blocking_issue(issue)`：
+
+```
+blocking ⟺ severity == "error" 且 rule_id ∈ BLOCKING_RULES
+```
+
+| 分组 | 含义 | overall | quality_gate（enforce） |
+|---|---|---|---|
+| **blocking** | 提交物本身坏了 / 合规红线 / 评不出来 | `0` | 抛 ValueError 阻断 run |
+| **informational** | severity 是 error（例如未来某个新规则/显式 strict 前的 Q8），但错误不破坏提交物可用性 | 保留七维平均部分分 | 只落库，不阻断 |
+
+`BLOCKING_RULES` 白名单（`packages/core/quality/issues.py`，6 条）：
+
+| rule_id | 入表理由 |
+|---|---|
+| `SCHEMA_VALIDATION_FAILED` | delta 不符合 schema：提交物结构损坏 |
+| `RULE_CHAR_DEAD_ACTIVE` | 已死亡角色被写 location/goal/action：角色状态写坏 |
+| `RULE_WORLD_HARD_RULE_CHANGED` | hard 世界规则被 remove / 改 statement：世界观写坏 |
+| `RULE_Q6_OVERLAP_RATE` | 与参照书 13 字 shingle 重叠率 > 2%：抄袭红线 |
+| `RULE_Q8_HUMAN_RATIO_LOW` | 人工占比红线；**默认 warning**（见 §4.5），仅 `NOVELOS_QUALITY_Q8_STRICT=1` 时产 error 并阻断 |
+| `scoring_missing_subscore` | 子分缺失：无法给出有效评分（系统级） |
+
+**Q8 裁决（3.3）**：见 §4.5。
+
+### 4.4 severity 矩阵变更流程（V3.9 批次 3.5，必读）
+
+矩阵 / 规则级覆盖 / 阻断白名单是**评分口径的一部分**，任一变更必须：
+
+1. 改 `packages/core/quality/issues.py`（`MVP_SEVERITY_MATRIX` / `MVP_RULE_OVERRIDES` / `BLOCKING_RULES`）；
+2. 同步本 README §4（本表 + 白名单表）与 `docs/evaluation/quality-scoring-v0.md` §3.7 / §4
+   （`payoff.py` docstring 若描述 severity 也一并改）——**三处必须同口径**；
+3. `aggregate.formula_hash()` 会自动变（输入含 `severity_config_fingerprint()`：矩阵 + 规则覆盖 +
+   白名单），历史报告 `_meta.scoring_formula_hash` 可区分新旧口径；不要手写 hash；
+4. 跑 `python -m pytest tests/unit/quality -q`（`test_severity_matrix.py` / `test_aggregate.py`
+   对矩阵内容、白名单、hash 敏感度做了快照与突变验证）。
+
+### 4.5 Q8 口径裁决（V3.9 批次 3.3，留痕）
+
+**现象（改造前）**：`compute_char_stats` 只认 `created_by` 的 `agent:*` 前缀与 `human`，
+其余忽略；生产 `chapter_write/pipeline.py` 写 draft 时硬编码 `created_by='writer:v1'`
+⇒ Q8 统计不到 AI 侧字符，恒 `RULE_Q8_NO_DATA`（或只统计到人工侧，占比虚高）。
+
+**证据**：生产代码只有两处写 drafts——`chapter_write/pipeline.py`（`writer:v1`）与
+`domain/chapter/service.py`（`human`）；`data/novelos.db` 实测 44 行 draft：
+`writer:v1` ×36、`human` ×8。旧口径下这 36 行全部被丢弃。
+
+**统计修正（V3.9 3.3）**：`classify_created_by` 三态——
+`agent:*` → ai（显式）；`human` → human；`writer:` / `polisher:` / `scene_planner:` /
+`condense:` / `observer:` 前缀 → ai（**按 prompt_version 推断为 AI**，报告写
+`RULE_Q8_STATS_NOTE` info 留痕）；其余 → unknown（不计入任何桶，同样留痕）。
+纯未知格式且无其它字符 ⇒ 仍 `RULE_Q8_NO_DATA`。
+
+**裁决**：< 30% 红线时 **默认 warning**（不再阻断）。理由：本工具就是 AI 写作工具，
+生产章节是纯 AI 章（`human_ratio = 0`）——若维持 error，`NOVELOS_QUALITY_GATE=enforce`
+默认模式下每一章都会被 Q8 拦死，门禁形同不可用；校正统计后 Q8 的正确语义是
+「合规提示 + 自证导出」，阻断只应由作者显式开启。作者可设
+`NOVELOS_QUALITY_Q8_STRICT=1` 升级回 error（该规则在白名单内，届时恢复阻断）。
+矩阵一侧对应 `MVP_RULE_OVERRIDES["RULE_Q8_HUMAN_RATIO_LOW"] = "warning"`。
+
+**口径 note 落点**：`QualityReport.issues` 中的 `RULE_Q8_STATS_NOTE`（info）+ CSV 导出
+（§12，数字与 guardrail 同函数同口径）。
 
 ---
 
@@ -123,7 +198,7 @@ class Issue(BaseModel):
 | `knowledge_leakage(snapshot, delta)` | 仅对显式声明 `who_knows` 的 event/hook 做严格校验；新 knowledge 命中受限实体描述但角色不在 who_knows ⇒ RULE_KNOWLEDGE_LEAK warning。 | warning |
 | `req_q6(draft, references, whitelist)` | 13 字滑动 shingle；任意公共 ⇒ RULE_Q6_NGRAM_OVERLAP warning；总重叠字符占比 > 2% ⇒ RULE_Q6_OVERLAP_RATE error；`reference_texts` 空 ⇒ info。 | warning + error + info |
 | `req_q7(draft)` | 每千字 AI marker ≥ 5 ⇒ warning；段落首词"然而/但是"占比 > 20% ⇒ warning；句长总体标准差 < 3（≥1000 字）⇒ warning。 | warning |
-| `req_q8(ai_chars, human_chars)` | ratio < 30% ⇒ RULE_Q8_HUMAN_RATIO_LOW error；30%–40% ⇒ warning；ratio 缺失 ⇒ info。 | error / warning / info |
+| `req_q8(ai_chars, human_chars, note=None)` | ratio < 30% ⇒ RULE_Q8_HUMAN_RATIO_LOW（**默认 warning**；`NOVELOS_QUALITY_Q8_STRICT=1` 时 error）；30%–40% ⇒ warning；ratio 缺失 ⇒ info；`note` 非空 ⇒ info `RULE_Q8_STATS_NOTE`（口径留痕）。 | warning / error（显式 strict）/ info |
 
 ### 5.2 六子分 rule-based 实现要点
 
@@ -132,9 +207,31 @@ class Issue(BaseModel):
 | plot | 100 起；key_beats 未命中 -5/条；`len(new_events) > key_beats + 2` ⇒ 每超额 -10；plan 缺 key_beats ⇒ 85 + info。 | 0 |
 | character | 一致率 × 100；mismatch 与 `RULE_CHAR_BEFORE_MISMATCH` 共用判定（guardrail 已写 issue，子分不重复 push）。 | 0 |
 | continuity | 100 起；按 `_CONTINUITY_DEDUCTIONS` 表扣分；同 rule_id 一章只扣一次；warning × 0.5 / error 全额；累计扣至 0 下限。 | 0 |
-| style | 100 起；句均字长出 [12, 28] -10；trigram 重复率 > 8% -15 + warning；AI markers 每千字 ≥ 5 -15；对话占比出 [0.15, 0.65] -5。 | 0 |
+| style | 100 起；句均字长出 [12, 28] -10；trigram 重复率 > 8% -15 + warning；AI markers 每千字 ≥ 5 -15（词表/密度与 ai_trace 共享，见 §5.5）；对话占比出 [0.15, 0.65] -5。 | 0 |
 | pacing | 100 起；5 段对话密度极差 < 0.05 -20；末段无钩子 -15；段落 < 1 不扣分。MVP 代理实现。 | 0 |
-| foreshadowing | 兑现率 × 100 = resolved / (new_hooks + resolved_hooks)；涉及 0 ⇒ 85 + info。 | 0 |
+| foreshadowing | **埋设/兑现双通道**（V3.9 批次 3.2）：`score = round(100 × (resolved + 0.9 × new) / (resolved + new))`；涉及 0 ⇒ 85 + info。 | 0 |
+
+**foreshadowing 公式推导与取值表（V3.9 批次 3.2）**
+
+改造前为纯兑现率 `resolved / (new + resolved) × 100`，只奖兑现不奖埋设：铺垫期章节
+（只埋不兑）结构性得 0 分，甚至低于「完全不涉及钩子」的 85 中性分——多埋钩子反而低分，
+属于倒挂。改造后两条通道都计入：
+
+- 兑现（resolved）是价值事件，权重 **1.0**；
+- 埋设（new）是贡献，权重 **w = 0.9**：由两条约束定值——(A) 只埋不兑必须 ≥ 中性分 85
+  （否则倒挂，诱导无视伏笔）⇒ w ≥ 0.85；(B) 只兑不埋 = 100 且兑 > 埋（同数量下）⇒ w < 1.0；
+- 长期不兑不做数值惩罚（H-2 / H-3 warning 负责标记），因此埋设权重贴近 1 但不等于 1。
+
+| new（埋） | resolved（兑） | 旧口径 | 新口径 | 变化 |
+|---|---|---|---|---|
+| 0 | 0 | 85（中性） | 85（中性 + info） | 0 |
+| 1 / 3 / 5 / 20 | 0 | **0** | **90** | +90（倒挂修复） |
+| 0 | 1 / 3 | 100 | 100 | 0 |
+| 1 | 1 | 50 | 95 | +45 |
+| 3 | 1 | 25 | 92 | +67 |
+| 1 | 3 | 75 | 98 | +23 |
+| 3 | 3 | 50 | 95 | +45 |
+| 20 | 10 | 33 | 93 | +60 |
 
 ### 5.3 爽感 H-1~H-5
 
@@ -142,7 +239,7 @@ class Issue(BaseModel):
 |---|---|---|
 | H-1 | 末 200 字无 HOOK_MARKERS ⇒ RULE_H1_NO_END_HOOK warning。 | warning |
 | H-2 | 最近 3 章 payoff 全 0 且本章无 resolved/debt paid ⇒ RULE_H2_NO_CLIMAX_3CH warning。 | warning |
-| H-3 | 连续 2 章 0 payoff ⇒ RULE_H3_FILLER_2CH warning；连续 ≥ 3 章 ⇒ RULE_H3_FILLER_3CH error。 | warning / error |
+| H-3 | 连续 2 章 0 payoff ⇒ RULE_H3_FILLER_2CH warning；连续 ≥3 章 ⇒ RULE_H3_FILLER_3CH，severity 读 `MVP_SEVERITY_MATRIX["payoff"]`（V3.9.1 后 = **warning**，不阻断）。 | warning（矩阵封顶） |
 | H-4 | 仅 `chapter_number ∈ {1,2,3}` 启用：前 300 字无 CONFLICT_MARKERS ⇒ warning；末段无钩子 ⇒ warning；`chapter_number == 3` 三章 payoff 全 0 ⇒ warning。 | warning |
 | H-5 | 境界类实体（name 命中"境/期/阶/层/重天"任一）跨 statement 不一致 ⇒ RULE_H5_REALM_INCONSISTENT warning；越级碾压检测 MVP 不实现。 | warning |
 
@@ -155,7 +252,7 @@ class Issue(BaseModel):
 |---|---|---|
 | 章内重复 `intra_chapter` | 13 字 shingle（复用 `compute_shingles`）；重复 shingle 占比 = `extras / total` | <5% 0；5-15% 20；15-50% 50；≥50% 70 |
 | 跨章重复 `cross_chapter` | 当前章节 shingle 集合 ∩ 最近 3 章 shingle 池 / 当前集合大小 | <10% 0；10-25% 20；25-45% 40；≥45% 60 |
-| 套话命中 `cliche` | 内置默认 ~30 条中文 AI 高频套话（"不禁""嘴角勾起""眼中闪过一丝""深吸一口气""空气仿佛凝固"等），每千字命中数 → 阶梯扣分 | <0.5/千字 0；0.5-1.5 12；1.5-3.0 28；≥3.0 45 |
+| 套话命中 `cliche` | 共享中文 AI 高频套话表 `ai_flavor.AI_CLICHES`（~47 条，与 style 的转折/议论词同源），每千字命中数 → 阶梯扣分 | <0.5/千字 0；0.5-1.5 12；1.5-3.0 28；≥3.0 45（实现语义） |
 
 合成公式（见 `ai_trace._FORMULA_TEXT`）：
 
@@ -176,11 +273,28 @@ overall = round((plot + character + continuity + style + pacing + foreshadowing 
 
 **已知局限（ai_trace）**：
 
-1. 套话表是默认中文（~30 条）；跨语言 / 细分题材（如玄幻特定套话）需扩展 `AI_CLICHES` 常量。
+1. 套话表是默认中文（~47 条）；跨语言 / 细分题材（如玄幻特定套话）需扩展
+   `ai_flavor.AI_CLICHE_DESCRIPTORS` / `AI_CLICHE_CONNECTIVES`（不要在本模块另起一份表）。
 2. shingle 窗口固定 13 字（与 Q6 一致）；短句散文比例高时敏感度下降。
 3. 跨章子信号在 `previous_drafts` 为空时降级满分（不阻断）；项目首章 / 单章节评测不扣分。
 4. 不引入新第三方依赖；不读 LLM；纯确定性 rule-based。
 5. 不产出 error 级 issue —— ai_trace 是 score 子分，不阻断提交（与 continuity / style / pacing 同档）。
+
+### 5.5 AI 味信号分工（V3.9 批次 3.4「四算合一」）
+
+「AI 味」此前有四条各自计算的通道，转折/议论类词（然而、但是、不仅…）在 style 与
+ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/core/quality/ai_flavor.py`：
+
+| 通道 | 职责 | 词表 / 工具 |
+|---|---|---|
+| `ai_patterns.scan_ai_patterns` | **权威信号源**：禁用词 / 三连句式 / 他她排比 / 章尾升华 / 标点滥用 / 解释腔的模式级命中清单（chapter_review 的 basic_hints 消费，不进子分） | `AI_PATTERN_FORBIDDEN_WORDS` 等（ai_patterns 内） |
+| `scoring.score_style` | **密度阈值**：`AI_FLAVOR_MARKERS` 每千字 ≥ 5 ⇒ -15 | 共享 `AI_FLAVOR_MARKERS` + `marker_hits_per_kchars` |
+| `ai_trace.cliche_density` | **跨章重复 + 套话阶梯**：`AI_CLICHES` 每千字命中阶梯扣分；跨章用 13 字 shingle | 共享 `AI_CLICHES`（= descriptors + connectives）+ `marker_hits_per_kchars` |
+| critic LLM `ai_flavor` 维度 | LLM 主观评分 | 本轮不接入评分（R9 留档，见 §6.1） |
+
+行为约束：本次统一**只换来源不改阈值**——`tests/unit/quality/test_ai_flavor.py` 锁定了
+5 个 fixture 的 style / ai_trace 旧值（`100/100`、`70/73`、`75/80`、`60/73`、`85/80`），
+以及 `AI_CLICHES` 与改造前原文的多重集相等；词表任何增删都会让测试变红。
 
 ---
 
@@ -189,8 +303,13 @@ overall = round((plot + character + continuity + style + pacing + foreshadowing 
 以下能力在 MVP 阶段**不实现**或**降级**；V1 / Sprint 7 接入时请按本清单回填：
 
 1. **LLM judge 全部 deferred**（spec §3.1/§3.2/§3.4/§3.5/§3.6 的 LLM 0.6 权重部分）。
-   接入路径：替换 `scoring.score_*` 中的计算结果合并一份 LLM judge 分（双评取低）。
-   `_meta` 字段 `llm_judge="deferred"` 需在接入后改为 `"active"` 并补充 `judge_model_versions`。
+   现状：`_meta.llm_judge = "deferred"`；judge 四维分（pacing/style/logic/dialogue）由
+   `scripts/m2_judge.py` + `QualityService.save_judge_score` 写入 `quality_reports.judge_json`
+   作为**旁路探针**，不参与 `scores_json` / `overall` / `scoring_formula_hash`。
+   **决策指针（V3.9 R9）**：judge 接入评分本轮不做——M2 双轨对比已证规则分与 judge 口径不一致，
+   需先积累数据（`docs/evaluation/m2-verification.md`）；留档为 V4.x 候选。
+   接入路径（届时）：替换 `scoring.score_*` 内的结果合并 LLM judge 分（双评取低），
+   `_meta.llm_judge` 改 `"active"` 并补 `judge_model_versions`。
 2. **REQ-Q6 embedding 双轨**（spec §4.6）未实现；仅 13 字滑动 shingle。
    接入路径：在 `req_q6` 内追加 embedding 相似度分支（阈值 0.85 / 0.92）。
 3. **H-5 越级碾压检测**（spec §3.7）未实现；只实现境界名词一致性 warning。
@@ -198,13 +317,15 @@ overall = round((plot + character + continuity + style + pacing + foreshadowing 
 4. **§3.5 pacing 真实张力曲线**（spec §3.5）未实现；MVP 代理为 5 段对话密度极差 + 末段钩子。
    接入路径：用 Scene 级 plan 张力等级做 Pearson 相关。
 5. **§4.5 knowledge_leakage V1 升级 error**；MVP 仅 warning。
-   接入路径：在 `guardrails.knowledge_leakage` 把检查后的 Issue severity 由 `warning` 改为 `error`，并同步更新 `MVP_SEVERITY_MATRIX["knowledge_leakage"]["mvp_max"]`。
+   接入路径：在 `guardrails.knowledge_leakage` 把检查后的 Issue severity 由 `warning` 改为 `error`，并同步更新 `MVP_SEVERITY_MATRIX["knowledge_leakage"]["mvp_max"]`（并按 §4.4 流程同步文档 + hash）。
 6. **§4.2 timeline_consistency V1 升级 error**；MVP 仅 warning。同上路径。
 7. **未建模字段一律 pass**（spec §3.3 / §4.5 收窄）：连续性规则严格按已建模字段生效，未建模字段不报告；Hook Ledger 未落地前 foreshadowing 数据源回退到 `plot_event`。
-8. **ai_trace 套话表是中文默认**（~30 条）；跨语言 / 细分题材（如玄幻特定套话）需扩展 `AI_CLICHES`。
-   接入路径：在 `packages/core/quality/ai_trace.py` 中追加 / 替换 `AI_CLICHES` 元组。
+8. **ai_trace 套话表是中文默认**（~47 条）；跨语言 / 细分题材（如玄幻特定套话）需扩展
+   `ai_flavor.AI_CLICHE_DESCRIPTORS` / `AI_CLICHE_CONNECTIVES`（V3.9 批次 3.4 起唯一属主在 `ai_flavor.py`）。
 9. **ai_trace 跨章子信号取最近 3 章**（`PREVIOUS_CHAPTERS_LIMIT=3`）；项目首章（无历史）该子信号降级满分不阻断。
    接入路径：调整 `ai_trace.PREVIOUS_CHAPTERS_LIMIT`。
+10. **critic LLM `ai_flavor` 维度不进评分**（V3.9 批次 3.4 决策）：规则侧信号已统一到
+    `ai_flavor.py`；LLM 维度与规则分的对齐留待 R9（judge 接入评分）一起评估。
 
 ---
 
@@ -213,15 +334,18 @@ overall = round((plot + character + continuity + style + pacing + foreshadowing 
 所有数字均为"建议值待校准"，**未经首批 golden 章节评测前禁止用作产品口径**：
 
 - §2.1 overall：七维平均（`plot + character + continuity + style + pacing + foreshadowing + ai_trace) / 7`）
+- blocking error：`rule_id ∈ BLOCKING_RULES` ⇒ overall = 0；其余 error 为 informational（§4.3）
 - Q6：13 字 shingles / 2% 重叠率
 - Q7：每千字 5 marker / 20% 段落首词 / 3.0 标准差 / 1000 字阈值
-- Q8：30% 红线 / 40% 缓冲
+- Q8：30% 红线 / 40% 缓冲；< 红线默认 warning（`NOVELOS_QUALITY_Q8_STRICT=1` 升 error，§4.5）
+- foreshadowing：`round(100 × (R + 0.9N) / (R + N))`，涉及 0 ⇒ 85（§5.2）
 - ai_trace：见 §5.4；三子信号权重 0.40 / 0.35 / 0.25；shingle 窗口 13；跨章取最近 3 章
 - §3.3 扣分表见 `scoring._CONTINUITY_DEDUCTIONS`
 - §3.4/§3.5 风格与节奏常量集中在 `scoring.py` 模块顶
 
 **维护约定**：阈值/权重变更后必须：
 
+0. severity 矩阵 / 白名单变更：按 §4.4 流程（三处文档 + hash + 回归测试）。
 1. 同步更新 `aggregate.formula_text()`（`_FORMULA_TEXT`），`_meta.scoring_formula_hash` 自动重算。
 2. 在 SPEC v0 → v1 的 PR 中显式列出 baseline 偏离（避免评分漂移被遗忘）。
 3. `tests/unit/quality/test_aggregate.py` 中硬编码 `87` 等断言需要更新（先调测试，再调实现，最后跑 §6 Regression）。
@@ -237,12 +361,16 @@ overall = round((plot + character + continuity + style + pacing + foreshadowing 
 3. **Issue dataclass 已合并为唯一 pydantic 类**：`packages.core.quality.issues.Issue` 与 `models.Issue` 是同一类。
    不要在代码里出现 `dataclass`-based Issue 占位——会让 QualityReport 序列化报错。
 4. **`_meta` 用 pydantic alias**：Python 端属性名是 `meta`；JSON / dump 时通过 `model_dump(by_alias=True)` 输出 `_meta`。
-5. **issue 严重性升级路径明确**：在 `guardrails` / `payoff` 等具体规则处把
-   `_make_issue(severity="error")` 改为 `"warning"` 即降低；升级到 error 也是同样在
-   规则产出处修改。阻断语义是「任何 `severity=="error"` 的 issue ⇒ overall=0」
-   （见 `aggregate.compute_overall` 注释），因此"改 matrix 不改引擎"是误判——
-   matrix 仅用于自检/文档化展示，规则是否产出 error 由规则本身决定。
-   注意：扩大 error 产出类别（如子分规则也产出 error）会改变阻断范围，需重新评估。
+5. **issue 严重性升级路径明确（V3.9 批次 3.1/3.5 更正）**：
+   - **category 上限**改 `issues.MVP_SEVERITY_MATRIX`；**规则级偏离**改
+     `issues.MVP_RULE_OVERRIDES`（如 Q8）；**阻断资格**改 `issues.BLOCKING_RULES`。
+   - 具体规则产出处也可以直接决定 severity（如 `req_q8` 走 `q8_error_severity()` 读规则默认值 +
+     `NOVELOS_QUALITY_Q8_STRICT` 开关；`payoff._payoff_severity()` 读矩阵）——**规则内不得写死 error**。
+   - 阻断语义：`severity=="error"` **且** `rule_id ∈ BLOCKING_RULES` ⇒ overall=0 且 gate 阻断；
+     其余 error 为 informational（只进 issues）。因此"改 matrix 不改引擎"的说法在 V3.9.1 前后都不对：
+     矩阵/白名单既影响规则读值，也影响 `scoring_formula_hash`（见 §4.4 变更流程）。
+   - 扩大 error 产出类别（如子分规则也产出 error）会改变阻断范围：若该 rule_id 不在白名单，
+     只会保留部分分；若要阻断必须显式入表并走 §4.4 流程。
 6. **本包零数据库迁移**：所有评估均为纯函数，State Delta 字段以 dict 形态传入。
 7. **新加 rule_id 必须以 `RULE_` 开头**（除 SCHEMA_VALIDATION_FAILED / scoring_missing_subscore 等系统级）。
 
@@ -280,7 +408,10 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
   - :class:`QualityService.latest_report` / :class:`QualityService.list_reports` —— 按 chapter /
     project 查询；按 ``created_at`` 降序。
   - :func:`compute_char_stats` —— REQ-Q8 字符数统计（按 ``drafts.version`` 升序、首个版本
-    ``len(content)``、后续 ``difflib.SequenceMatcher`` 算 ``replace+insert`` 增量）。
+    ``len(content)``、后续 ``difflib.SequenceMatcher`` 算 ``replace+insert`` 增量）；
+    V3.9 批次 3.3 起 ``created_by`` 三态分类（``agent:*`` 显式 AI / ``human`` / 生产
+    ``writer:v1`` 等按 prompt_version 推断为 AI），明细与口径 note 见
+    :func:`compute_char_stats_detail`。
   - :func:`build_quality_context` —— 现场组装 :class:`QualityContext`（pipeline 与 API 共用；
     自动拉取最近 3 章正文填充 ``previous_drafts`` 供 ai_trace 跨章子信号使用）。
   - :func:`load_reference_texts` / :func:`compute_payoff_history` —— 组装 helper。
@@ -299,11 +430,15 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
 - 跑 :class:`QualityEngine.evaluate`；
 - 落库到 ``quality_reports``（独立事务，与 :meth:`StoryStateService.commit_delta`
   的事务互不污染）；
-- ``NOVELOS_QUALITY_GATE`` = ``"enforce"``（**默认**）时任一 ``severity=='error'`` ⇒ 抛
-  ``ValueError('quality gate blocked: [...]')`` 让 run FAILED、chapter 保持 REVIEWED。
+- ``NOVELOS_QUALITY_GATE`` = ``"enforce"``（**默认**）时任一 **blocking** error
+  （``issues.is_blocking_issue``，见 §4.3）⇒ 抛
+  ``ValueError('quality gate blocked: [...]')`` 让 run FAILED、chapter 保持 REVIEWED；
+  informational error（severity=error 但不在白名单）只落库不阻断（与 ``compute_overall`` 同口径，
+  V3.9 批次 3.1）。
 - ``"report"`` 模式：error 仅落库不阻断，方便评审 / REQ-Q8 等 MVP 阻断观察。
 - 模式优先级：``ctx["quality_gate_mode"]``（``/api/.../commit`` 请求体字段）→
   ``NOVELOS_QUALITY_GATE`` 环境变量 → 默认 ``"enforce"``。
+- 节点返回 ``quality_error_count``（全部 error）与 ``quality_blocking_count``（白名单内）两个计数。
 
 ### 11.4 报告查询 API：``packages.core.api.routers.quality``
 
@@ -326,13 +461,23 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
   渲染（``quality-subscores.children.length === 7``）、ai_trace 标签与条形、issue
   分组（payoff 单列）、evaluate 按钮回调、空态。
 
-### 11.6 测试覆盖（Sprint 6 下半增量 + ai_trace 增量）
+### 11.6 测试覆盖（Sprint 6 下半增量 + ai_trace 增量 + V3.9 批次 3 增量）
 
 - ``tests/api/test_quality.py`` —— 8 例：evaluate / latest 404 / list 降序 / list 404 /
   unknown chapter / chapter-commit enforce 阻断 / chapter-commit report 不阻断 / payload
   完整性（七子分 + _meta）。
 - ``tests/unit/quality/test_ai_trace.py`` —— 15 例覆盖子信号 + 集成路径（高分 / 低分 /
   套话 / 无历史 / 报告含 ai_trace / 七维平均）。
+- ``tests/unit/quality/test_severity_matrix.py``（V3.9 3.1）—— 阻断白名单快照、
+  blocking/informational 判定、Q8 规则级默认值、矩阵一致性。
+- ``tests/unit/quality/test_aggregate.py``（V3.9 3.1）—— blocking 归零 / informational
+  保留部分分 / formula_hash 覆盖矩阵、白名单、规则覆盖（突变验证）。
+- ``tests/unit/quality/test_gate_blocking.py``（V3.9 3.1）—— quality_gate 节点对
+  informational error 不阻断、blocking error 阻断并落 ``gate_blocked``。
+- ``tests/unit/quality/test_q8_stats.py``（V3.9 3.3）—— ``writer:v1`` → AI 侧、口径 note、
+  真实 DB 接线（build_quality_context + engine）、strict 开关。
+- ``tests/unit/quality/test_ai_flavor.py``（V3.9 3.4）—— 词表单一来源、与改造前套话表逐条相等、
+  style / ai_trace 5 个 fixture 分数不变。
 - ``tests/unit/test_migrations.py`` —— 计数更新到 29（28 business + quality_reports）。
 - ``tests/integration/test_health.py`` —— ``data["tables"]`` 从 28 升到 29。
 - ``apps/web/src/components/QualityPanel.test.tsx`` —— 7 例覆盖前端面板行为。
@@ -360,6 +505,8 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
   - 按 ``chapter_number`` 升序；``human_ratio`` 为百分比保留 1 位小数；``total=0`` 时
     输出 ``0.0``（与 ``req_q8`` 给出 ``RULE_Q8_NO_DATA`` info 对齐——作者仍能看清章节存在但
     还没贡献字数，不是 bug）。
+- **注意（V3.9 3.3）**：导出数字与评估同为「AI 侧含按 prompt_version 推断的 ``writer:v1``」口径；
+  导出 CSV 不带 note 列，口径说明以质量报告 ``RULE_Q8_STATS_NOTE`` 为准。
 - **错误码**：project 不存在 → 404（与 ``GET /projects/{pid}/quality`` 一致）。
 
 ### 12.2 合规立场
@@ -407,13 +554,14 @@ NovelOS 是**本地单机写作工具**，既不是「向公众提供生成式�
 
 ### 13.2 阈值常量
 
-| 常量 | 值 | 说明 |
+| 参数 | 默认 | 说明 |
 |---|---|---|
 | `_MIN_BAND_FLOOR` | 1200 | band 低带保护下限（writer 纪律 Rule 15） |
-| `_WARNING_RATIO` | 0.15 | 偏离 target 比例超过此值 ⇒ review 升 warning |
-| `_ERROR_RATIO` | 0.30 | 偏离 target 比例超过此值 ⇒ review 升 error |
+| `word_band(low_ratio, high_ratio)` | 0.15 / 0.30 | 带构造参数（wordcount.word_band）；V3.9 5.2 起 review 的 warning/error 判据不再用固定比例，改为「出带即 warning、带外偏离超过带边缘到 target 的距离即 error」——阈值与项目自定义带同源 |
 
-阈值走 default 参数注入；如需项目级覆盖，传 ``low_ratio`` / ``high_ratio`` / ``floor`` 即可。
+`_WARNING_RATIO` / `_ERROR_RATIO` 仍是 band 构造默认值（wordcount.py），但 V3.9 5.2 起
+review 的 warning/error 判据不再直接引用这两个比例——改为带边缘判据后与项目自定义带同源
+（默认带下数值等价）。如需项目级覆盖，传 ``low_ratio`` / ``high_ratio`` / ``floor`` 即可。
 
 ### 13.3 集成位置
 

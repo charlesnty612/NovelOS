@@ -45,6 +45,10 @@ from packages.core.context_engine.builders import (  # noqa: E402
 )
 from packages.core.db import apply_migrations, get_connection  # noqa: E402
 from packages.core.ids import new_id, now_iso  # noqa: E402
+from packages.core.quality.wordcount import (  # noqa: E402
+    DEFAULT_TARGET_WORD_COUNT,
+    word_band,
+)
 from packages.workflows.chapter_write.pipeline import (  # noqa: E402
     _resolve_writer_context_mode,
 )
@@ -624,7 +628,8 @@ def test_full_and_paged_use_separate_cache_entries(tmp_path: Path):
 
 
 def test_chapter_word_band_default_target(tmp_path: Path):
-    """默认 target=2200 时，chapter.word_band.low/high=1870/2530，键序 word_band 在末尾。"""
+    """默认 target（V3.9 批次 5.1 起为 DEFAULT_TARGET_WORD_COUNT=3000）时，
+    chapter.word_band 由 word_band(3000) 生成，键序 word_band 在末尾。"""
     _cache_reset()
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
@@ -636,7 +641,8 @@ def test_chapter_word_band_default_target(tmp_path: Path):
     payload = build_writer_input(db_path, cid, _SCENE_PLAN, context_mode="full")
     ch = payload["chapter"]
     assert "word_band" in ch
-    assert ch["word_band"] == {"low": 1870, "high": 2530}
+    _low, _high = word_band(DEFAULT_TARGET_WORD_COUNT)
+    assert ch["word_band"] == {"low": _low, "high": _high}
     # 键序：word_band 必须位于 chapter 子对象末尾（chapter_id 之后）
     keys = list(ch.keys())
     assert keys[-1] == "word_band"
@@ -676,4 +682,5 @@ def test_chapter_word_band_paged_inherits(tmp_path: Path):
     payload = build_writer_input(db_path, cid, _SCENE_PLAN, context_mode="paged")
     ch = payload["chapter"]
     assert "word_band" in ch
-    assert ch["word_band"] == {"low": 1870, "high": 2530}
+    _low, _high = word_band(DEFAULT_TARGET_WORD_COUNT)
+    assert ch["word_band"] == {"low": _low, "high": _high}

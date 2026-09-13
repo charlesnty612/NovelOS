@@ -19,6 +19,12 @@ V3.7 字数带覆盖（word_band_json）：
 - 读取：所有读路径（get / list / update 返回行 / create 返回行）通过
   :func:`_coerce_word_band` 把 ``word_band_json`` 解析成 ``word_band`` 字段。
   非法 JSON 视为 None（防御性 + 不炸），与备份模块对损坏数据的容忍策略对齐。
+
+题材库 P1b（genre_pack_id 读侧暴露）：
+- ``projects.genre_pack_id`` 可空列（迁移 0025）由绑定端点写（见
+  ``packages/core/api/routers/genre.py``）；本服务只保证所有返回行都带
+  ``genre_pack_id`` 键（极老库缺列 → None），供 Project 响应模型直接消费。
+  绑定 / 解绑**不**经本服务（单一属主：genre 路由 + GenrePackService）。
 """
 
 from __future__ import annotations
@@ -56,6 +62,19 @@ def _coerce_word_band(raw: object) -> dict | None:
     return None
 
 
+def _coerce_genre_pack_id(raw: object) -> str | None:
+    """把 ``projects.genre_pack_id`` 列值归一为 str | None（题材库 P1b 读侧暴露）。
+
+    - None / 空串 → None；
+    - 字符串 → 去空白后返回（空 → None）；
+    - 其它类型（脏数据）→ None（防御性，不炸 Project 响应）。
+    """
+    if isinstance(raw, str):
+        text = raw.strip()
+        return text or None
+    return None
+
+
 class ProjectService:
     """项目领域服务（projects 表 CRUD）。"""
 
@@ -89,6 +108,8 @@ class ProjectService:
                 else None
             ),
             "word_band": getattr(payload, "word_band", None),
+            # 题材库 P1b：新建项目恒未绑定（绑定走 genre 路由）；显式置键供响应模型消费。
+            "genre_pack_id": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -126,6 +147,8 @@ class ProjectService:
         d = dict(row)
         # V3.7：word_band_json → word_band（dict 暴露给上层）
         d["word_band"] = _coerce_word_band(d.get("word_band_json"))
+        # 题材库 P1b：genre_pack_id 归一（极老库缺列 → None）
+        d["genre_pack_id"] = _coerce_genre_pack_id(d.get("genre_pack_id"))
         return d
 
     # -------------------------------------------------------------------- list
@@ -154,6 +177,7 @@ class ProjectService:
         for r in rows:
             d = dict(r)
             d["word_band"] = _coerce_word_band(d.get("word_band_json"))
+            d["genre_pack_id"] = _coerce_genre_pack_id(d.get("genre_pack_id"))
             out.append(d)
         return out
 
@@ -216,6 +240,7 @@ class ProjectService:
             return None
         d = dict(row)
         d["word_band"] = _coerce_word_band(d.get("word_band_json"))
+        d["genre_pack_id"] = _coerce_genre_pack_id(d.get("genre_pack_id"))
         return d
 
     # ------------------------------------------------------------------- delete
@@ -258,4 +283,4 @@ class ProjectService:
         return bool(row["cnt"] > 0)
 
 
-__all__ = ["ProjectService", "_coerce_word_band"]
+__all__ = ["ProjectService", "_coerce_word_band", "_coerce_genre_pack_id"]

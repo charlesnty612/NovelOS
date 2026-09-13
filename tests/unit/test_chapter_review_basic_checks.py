@@ -8,6 +8,11 @@
 - 字数口径统一：visible_chars 折叠空白（与 visible_chars() 一致）。
 - word_band 字段、deviation_pct 字段、within_range 字段都被填充。
 - 缺 draft 仍按既有契约抛 ValueError。
+
+注（V3.9 批次 5.2）：本文件全部用**默认字数带**（0.85/1.15/1200）——该配置下两个阈值
+恰好等于「偏离 target ±15% / ±30%」，故既有期望值不变。判定实现已改为由生效带派生
+（warning = 出带；error = 带外偏离 > 该侧带边缘到 target 的距离），项目覆盖带的场景见
+``test_chapter_review_word_band_override.py``。
 """
 
 from __future__ import annotations

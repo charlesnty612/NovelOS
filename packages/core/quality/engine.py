@@ -87,7 +87,9 @@ class QualityEngine:
         # ---- Compliance（REQ-Q6 / Q7 / Q8）----
         issues.extend(req_q6(ctx.draft or "", ctx.reference_texts, ctx.whitelist))
         issues.extend(req_q7(ctx.draft or ""))
-        issues.extend(req_q8(ctx.ai_chars, ctx.human_chars))
+        issues.extend(
+            req_q8(ctx.ai_chars, ctx.human_chars, note=ctx.char_stats_note)
+        )
 
         # ---- Payoff（H-1~H-5，独立 push issues）----
         payoff_ctx = PayoffContext(

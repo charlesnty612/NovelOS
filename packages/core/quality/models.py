@@ -64,6 +64,7 @@ class QualityContext(BaseModel):
         payoff_history: 最近若干章每章 payoff 计数（resolved_hooks + paid debts 数）。
         reference_texts / whitelist: REQ-Q6 参照书与白名单。
         ai_chars / human_chars: REQ-Q8 字符数。
+        char_stats_note: REQ-Q8 统计口径 note（V3.9 批次 3.3；可空）。
         commit_id / run_id: 仅做报告回显。
     """
 
@@ -78,6 +79,9 @@ class QualityContext(BaseModel):
     whitelist: list[str] = Field(default_factory=list)
     ai_chars: int = 0
     human_chars: int = 0
+    # V3.9 批次 3.3：Q8 统计口径 note（如「writer:v1 按 prompt_version 推断为 AI」；
+    # 无推断 / 无未知格式时为 None）。engine 透传给 req_q8 作为 info 留痕。
+    char_stats_note: Optional[str] = None
     # ai_trace 跨章子信号：同项目最近 N 章正文（章节号降序）。
     # service / pipeline 现场拉取后传入；engine 不直接读 DB。
     previous_drafts: list[str] = Field(default_factory=list)
@@ -125,6 +129,10 @@ class QualityReport(BaseModel):
     chapter_number: int = 0
     commit_id: Optional[str] = None
     run_id: Optional[str] = None
+    # V3.9 批次 4.3：本报告评估的草稿版本（``drafts.version``）。
+    # ``None`` = 未知（存量报告 / 落库时该章尚无 draft）；落库时由
+    # :meth:`QualityService.save_report` 取「当前最新 draft 版本」补全。
+    draft_version: Optional[int] = None
 
 
 __all__ = ["Issue", "QualityContext", "QualityReport"]

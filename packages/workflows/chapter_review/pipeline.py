@@ -2,14 +2,26 @@
 V1.3 新增 critic 节点；P0 默认 always；V1.3 新增 deep_review 二审 AI 节点）。
 
 节点列表：
-- ``basic_checks`` (Transform) —— 草稿存在性、字数偏离 target ±15% 记 warning 进
-  ctx["review_report"]、禁用词扫描（默认 forbidden_words=[仿佛,如同,本章目标]）。
+- ``basic_checks`` (Transform) —— 草稿存在性、字数带判定进 ctx["review_report"]
+  （出带记 warning；带外偏离超过该侧带边缘到 target 的距离记 error。两级阈值全部由
+  ``resolve_band_config`` 生效带派生，见 V3.9 批次 5.2）、禁用词扫描（默认
+  forbidden_words=[仿佛,如同,本章目标]）；V3.9 批次 5.7 起同时一次性取齐
+  critic / deep_review 共享输入（ctx["review_inputs"]，见下）；题材库 P1b 起项目
+  绑定题材包时额外产出 ``review_report.genre_check``（核销层 v1：配比偏差 +
+  节奏红线，``GENRE-`` 前缀 issue 恒 warning，**report-only 不阻断**；未绑定 →
+  该段整体缺席，零行为变化）。题材库 P2：绑定题材包时另做两件事——(a) payload
+  ``style_constraints.forbidden_words`` 非空 → 确定性禁词扫描，命中以
+  ``[GENRE-FORBIDDEN-WORD] <词> ×N`` 进 ``review_report.warnings``（warning 级）；
+  (b) payload ``critic_rubric`` 投影为 ``genre_rubric`` 段随 ``review_inputs``
+  下传 critic / deep_review（两者 payload 同得该键）。
 - ``critic_review`` (AI) —— V1.3 LLM 评审员。调 ``critic`` agent 对草稿生成**建议性**
   结构化报告；写入 ctx["critic_report"]，并合并进 author_review 的 pause_payload
   （键名 ``critic_report``），供人工审批界面渲染。
   **仅建议、不拦截**：任何失败（prompt 缺失 / provider 异常 / 输出不合规）→ 降级
   ``critic_status='failed'`` 且 ``critic_report=None``，**不**阻断人工审批 / run 终态。
   P0 默认模式改为 ``always``（每章都评），``NOVELOS_CRITIC_MODE`` / ``ctx['critic_mode']`` 仍覆盖。
+  V3.9 4.2 起：已采纳进 ``plan_json.revision_note`` 的建议（``plan_json.suggested_hashes``
+  记归一化 hash）在新一轮报告中直接过滤，避免「每轮重写后再生再推荐」的放大。
 - ``deep_review`` (AI) —— V1.3 二审 AI 节点。调 ``deep_reviewer`` agent 按仓根
   REVIEW-CHECKLIST.md 三层清单（设定一致性→节拍核销→行为链连续性）核销生成
   **建议性**结构化报告；写入 ctx["deep_review_report"]，并合并进 author_review 的
@@ -30,28 +42,51 @@ V1.3 新增 critic 节点；P0 默认 always；V1.3 新增 deep_review 二审 AI
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection
+from packages.core.genre.consumers import (
+    count_forbidden_word_hits,
+    critic_rubric,
+    forbidden_words,
+)
+from packages.core.genre.service import GenrePackService
+from packages.core.genre.verifier import verify_chapter
 from packages.core.ids import now_iso
 from packages.core.model_router.router import capability_for
 from packages.core.quality.ai_patterns import scan_ai_patterns
-from packages.core.quality.wordcount import classify_prose_length, resolve_band_config
+from packages.core.quality.wordcount import (
+    DEFAULT_TARGET_WORD_COUNT,
+    classify_prose_length,
+    resolve_band_config,
+)
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
 
 DEFAULT_FORBIDDEN_WORDS = ["仿佛", "如同", "本章目标"]
 _CRITIC_PROMPT_VERSION = "critic:v1"
+# V3.9 批次 4.2：critic 建议去重——归一化（去首尾空白 + 内部空白折叠为单空格）后
+# sha1 前 12 位。已采纳进 revision_note 的建议 hash 记在 plan_json.suggested_hashes，
+# 下一轮 critic 报告里同 hash 的 issue 直接过滤，避免「每轮重写后再生再推荐」的放大。
+_SUGGESTED_HASH_LIMIT = 50
+# V3.9 批次 5 / F-3：settings_digest 的 world_rules 注入上限——改造前为「全量无上限」
+# （规则多的项目会把 prompt 撑大且无边界）；条数 cap + 单条 statement 字符 cap，
+# 与批次 2A 给 builders 加的 *_CAP / *_PER_CHARS 同风格（见 builders_common）。
+# 取数排序仍为 world_rule_id ASC（确定性稳定序，cap 前后同一批规则）。
+_WORLD_RULES_CAP = 20
+_WORLD_RULE_STATEMENT_MAX_CHARS = 500
+_WORLD_RULE_TRUNCATED_SUFFIX = "…（已截断）"
 _DEEP_REVIEWER_PROMPT_VERSION = "deep_reviewer:v1"
-# 单章目标字数默认。与 chapter_plan / project-init 的 DEFAULT_CHAPTER_WORD_COUNT(3000)
-# 同一口径（用户拍板单章约 3000 字）；builders._DEFAULT_TARGET_WORD_COUNT(2200) 是
-# context_engine 侧的另一 fallback 口径，两处允许不同：本值仅在请求体与 plan_json
-# 均未给出 expected_word_count 时兜底。
-_DEFAULT_TARGET_WORD_COUNT = 3000
+# 单章目标字数默认（V3.9 批次 5.1）：全仓单源 = wordcount.DEFAULT_TARGET_WORD_COUNT(3000)，
+# 仅供「请求体与 plan_json 均未给出 expected_word_count」时兜底。
+# 注：context_engine 装配侧另有内部 fallback（builders_common._DEFAULT_TARGET_WORD_COUNT=2200），
+# 只在调用方完全未传 target_word_count 时生效，与本兜底不同层、不在本单源范围。
 
 _log = logging.getLogger(__name__)
 
@@ -84,6 +119,61 @@ def _should_invoke_critic(mode: str, chapter_number: int | None) -> bool:
     return chapter_number % 5 == 0
 
 
+def _collect_genre_check(db_path: str, chapter_id: str) -> dict[str, Any] | None:
+    """核销层 v1 挂点（题材库 P1b）：返回 ``genre_check`` 段，未绑定题材包 → None。
+
+    - report-only：核销结果只进 ``review_report.genre_check``（结构见
+      :meth:`packages.core.genre.verifier.GenreCheckResult.to_dict`），issues 另以
+      ``[GENRE-…] <message>`` 文本追加进 ``review_report.warnings``（评审 UI 可读通道）；
+    - **不阻断**：issue 恒 ``severity='warning'`` 且 ``rule_id`` 以 ``GENRE-`` 开头，
+      不在 quality 阻断白名单（``packages.core.quality.issues.BLOCKING_RULES``）内，
+      不产生 error、不触发质量门禁；
+    - 无绑定题材包 → ``None``（调用方整段跳过，零行为变化）；
+    - verifier 内部已全容错，这里再兜一层异常（核销失败绝不阻断评审）。
+    """
+    try:
+        result = verify_chapter(db_path, chapter_id)
+    except Exception as exc:  # noqa: BLE001 —— 核销失败不阻断评审
+        _log.warning(
+            "chapter_review.genre_check failed: chapter_id=%s err=%s", chapter_id, exc,
+        )
+        return None
+    if not result.bound:
+        return None
+    return result.to_dict()
+
+
+def _collect_genre_review_data(db_path: str, project_id: str) -> dict[str, Any]:
+    """题材库 P2 读侧投影：**一次**读项目绑定题材包，供本节点两处消费。
+
+    - ``forbidden_words``：``style_constraints.forbidden_words`` → basic_checks 的
+      题材禁词确定性扫描（``[GENRE-FORBIDDEN-WORD] <词> ×N``，warning 级）；
+    - ``rubric``：``critic_rubric`` → ``genre_rubric`` 段（critic / deep_review 共享，
+      经 ``review_inputs`` 下传）；未声明 / 无法投影 → ``None``。
+
+    全部容错：未绑定 / payload 非法 / 读库异常（含迁移未跑的极老库）→ 空投影
+    （``{"forbidden_words": [], "rubric": None}``），评审路径零行为变化。
+    """
+
+    empty: dict[str, Any] = {"forbidden_words": [], "rubric": None}
+    if not project_id:
+        return empty
+    try:
+        binding = GenrePackService(db_path).get_project_binding(project_id)
+    except Exception as exc:  # noqa: BLE001 —— 题材包读失败不阻断评审
+        _log.warning(
+            "chapter_review.genre_pack read failed: project_id=%s err=%s", project_id, exc,
+        )
+        return empty
+    if not binding or not binding.get("bound"):
+        return empty
+    payload = ((binding.get("pack") or {}).get("payload")) or {}
+    return {
+        "forbidden_words": forbidden_words(payload),
+        "rubric": critic_rubric(payload),
+    }
+
+
 def _fetch_chapter_number(db_path: str, chapter_id: str) -> int | None:
     """从 chapters 表取 number 字段；章节不存在或异常 → None（视同 always）。"""
     try:
@@ -112,12 +202,14 @@ def _fetch_chapter_number(db_path: str, chapter_id: str) -> int | None:
 def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
-    # 目标字数：请求体显式传入 > plan_json.expected_word_count > 默认 3000
+    # 目标字数：请求体显式传入 > plan_json.expected_word_count > 默认（全仓单源 3000）
     target = int(ctx.get("target_word_count") or 0)
     # V3.7：项目级字数带覆盖——先一次性从 chapters 行取 project_id + plan_json，
     # 再读 projects.word_band_json 折叠覆盖。无覆盖时输出与原逐字节一致。
+    # V3.9 批次 5.7：plan_json 解析结果同时供 review_inputs（critic / deep_review 共享）复用。
     word_band_overrides: dict | None = None
     chapter_project_id: str | None = None
+    plan_dict: dict[str, Any] = {}
     try:
         conn = get_connection(db_path)
         try:
@@ -129,12 +221,9 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
             conn.close()
         if prow is not None:
             chapter_project_id = prow["project_id"]
-            if not target and prow["plan_json"]:
-                try:
-                    plan = json.loads(prow["plan_json"])
-                    target = int(plan.get("expected_word_count") or 0)
-                except Exception:
-                    pass
+            plan_dict = _parse_plan_json(prow["plan_json"])
+            if not target:
+                target = int(plan_dict.get("expected_word_count") or 0)
     except Exception:
         pass
     # 无论 target 是否显式传入，都尝试读项目覆盖（与 target 来源解耦——ctx 传
@@ -162,7 +251,7 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
             if isinstance(parsed, dict):
                 word_band_overrides = parsed
     if not target:
-        target = _DEFAULT_TARGET_WORD_COUNT
+        target = DEFAULT_TARGET_WORD_COUNT
 
     conn = get_connection(db_path)
     try:
@@ -192,18 +281,30 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     prose = draft_row["content"] or ""
     reviewed_version = int(draft_row["version"])
-    # V3.7：字数带硬约束 —— ±15% 升 warning（带 rule_id），超 ±30% 追加到 errors。
+    # V3.7 字数带硬约束；V3.9 批次 5.2：warning / error 两级阈值**全部由生效字数带派生**
+    # ——``resolve_band_config`` 是唯一阈值源，项目覆盖 band 后两级判定同步跟随，
+    # 不再与写死的 ±15% / ±30% 互相矛盾：
+    # - warning：出带（classify 的 status）。带边缘本身就是阈值——改造前写死 |dev|<=15%，
+    #   项目把带收窄到 (1800,2200) 后 1720/2000=-14% 仍判「在带内」，与 word_band 自相矛盾；
+    # - error：带外偏离超过**该侧带边缘到 target 的距离**（默认 0.85/1.15 ⇒ 偏离 target 超
+    #   ±30%，与改造前逐值一致；带越宽则 error 阈值同步放宽）。
     # classify 既出 visible_chars（word_count）又出 band / status / deviation_pct，避免重复调用。
-    # 无覆盖项目：折叠输出与原 wordcount 默认参数（low_ratio=0.85/high_ratio=1.15/floor=1200）逐字段一致。
     classify = classify_prose_length(
         prose, target, **resolve_band_config(word_band_overrides),
     )
     word_count = classify["visible_chars"]
     deviation_pct = classify["deviation_pct"]
-    abs_dev_pct = abs(deviation_pct)
     band_low, band_high = classify["band_low"], classify["band_high"]
-    within_range = abs_dev_pct <= 15.0
-    over_band = abs_dev_pct > 30.0
+    within_range = classify["status"] == "in_band"
+    # 带外偏离幅度（带内恒 0）与该侧 error 阈值（band 边缘到 target 的距离）
+    edge_deviation = max(0, band_low - word_count, word_count - band_high)
+    if word_count < band_low:
+        edge_distance = target - band_low
+    elif word_count > band_high:
+        edge_distance = band_high - target
+    else:
+        edge_distance = 0
+    over_band = edge_deviation > edge_distance
 
     # V3.8：去 AI 味确定性检测（纯规则、不调用 LLM）
     ai_hits = scan_ai_patterns(prose)
@@ -214,6 +315,15 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
             forbidden_hits.extend(hit.get("words", []))
     forbidden_hits = sorted(set(forbidden_hits))
 
+    # 题材库 P2：题材包读侧投影（**一次**读绑定，两处消费——禁词扫描在本节点，
+    # genre_rubric 经 review_inputs 下传 critic / deep_review）。未绑定 / 无声明 →
+    # 空投影，与题材库前行为逐字节一致。
+    genre_data = (
+        _collect_genre_review_data(db_path, chapter_project_id)
+        if chapter_project_id
+        else {"forbidden_words": [], "rubric": None}
+    )
+
     warnings: list[str] = []
     errors: list[dict[str, Any]] = []
     if not within_range:
@@ -222,16 +332,16 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
             f"deviation={deviation_pct:+.1f}% (band {band_low}~{band_high})"
         )
     if over_band:
-        # 超 ±30%：error 级条目，供 author_review / 前端 reviewer UI 消费
-        # （与 signing_check/quality_gate 的阻断语义对齐——errors 不阻断 run，但
-        # 在 review UI 上以「严重」色渲染，作者可见）。
+        # 带外偏离超过该侧带边缘到 target 的距离：error 级条目，供 author_review /
+        # 前端 reviewer UI 消费（与 signing_check/quality_gate 的阻断语义对齐——
+        # errors 不阻断 run，但在 review UI 上以「严重」色渲染，作者可见）。
         errors.append({
             "rule_id": "W-LEN-DEVIATION",
             "severity": "error",
             "message": (
                 f"[W-LEN-DEVIATION] visible={word_count} target={target} "
-                f"deviation={deviation_pct:+.1f}% exceeds band {band_low}~{band_high} "
-                f"(±30% 阈值)"
+                f"deviation={deviation_pct:+.1f}% beyond band {band_low}~{band_high} "
+                f"by {edge_deviation} 字 > 带边缘距 target {edge_distance} 字"
             ),
             "word_band": {"low": band_low, "high": band_high},
             "visible_chars": word_count,
@@ -240,6 +350,10 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
         })
     if forbidden_hits:
         warnings.append(f"禁用词命中：{','.join(forbidden_hits)}")
+    # 题材库 P2：题材禁词确定性扫描（子串计数，与 quality.ai_flavor 的词典机制同款口径）。
+    # 命中 → warning 级文本行（不进 errors、不阻断）；未命中 / 未声明禁用词 → 零输出。
+    for word, count in count_forbidden_word_hits(prose, genre_data.get("forbidden_words") or ()):
+        warnings.append(f"[GENRE-FORBIDDEN-WORD] {word} ×{count}")
     for hit in ai_hits:
         if hit.get("severity") == "error":
             errors.append(hit)
@@ -260,68 +374,180 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "warnings": warnings,
         "errors": errors,
     }
-    return {"review_report": report}
-
-
-def _collect_critic_inputs(
-    db_path: str, chapter_id: str, draft_version: int | None = None
-) -> tuple[str, str, dict[str, Any]]:
-    """收集 critic 节点所需输入：draft_text、project_id、plan_summary。
-
-    返回 ``(draft_text, project_id, plan_summary_dict)``。任一环节失败抛 ValueError，
-    让 critic 节点降级。
-
-    ``draft_version``：用户显式指定时按版本取；None 时维持"取最新"语义。
-    """
-    conn = get_connection(db_path)
-    try:
-        chap_row = conn.execute(
-            """
-            SELECT project_id, title, plan_json
-            FROM chapters WHERE chapter_id = ?
-            """,
-            (chapter_id,),
-        ).fetchone()
-        if chap_row is None:
-            raise ValueError(f"chapter {chapter_id!r} not found")
-        if draft_version:
-            draft_row = conn.execute(
-                "SELECT content FROM drafts WHERE chapter_id = ? AND version = ?",
-                (chapter_id, int(draft_version)),
-            ).fetchone()
-        else:
-            draft_row = conn.execute(
-                """
-                SELECT content FROM drafts WHERE chapter_id = ?
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                (chapter_id,),
-            ).fetchone()
-    finally:
-        conn.close()
-    if draft_row is None:
-        if draft_version:
-            raise ValueError(f"chapter {chapter_id!r} has no draft version {draft_version}")
-        raise ValueError(f"chapter {chapter_id!r} has no draft")
-    project_id = chap_row["project_id"]
-    raw = chap_row["plan_json"] or "{}"
-    try:
-        plan = json.loads(raw) if isinstance(raw, str) else (raw or {})
-    except (TypeError, ValueError):
-        plan = {}
-    if not isinstance(plan, dict):
-        plan = {}
-    plan_summary = {
-        "chapter_goal": plan.get("chapter_goal"),
-        "key_beats": plan.get("key_beats") or [],
+    # 题材库 P1b：核销层 v1（配比偏差 + 节奏红线）挂点——report-only，不阻断。
+    # 未绑定题材包 → 整段跳过（report 无 genre_check 键，零行为变化）。
+    genre_check = _collect_genre_check(db_path, chapter_id)
+    if genre_check is not None:
+        report["genre_check"] = genre_check
+        # issues 的 informational 通道：结构化条目已在 genre_check.issues
+        # （与 quality Issue dump 同形：rule_id / severity / category / message /
+        # location / suggestion / evidence_refs），此处再补文本行便于评审 UI 直读。
+        for issue in genre_check.get("issues") or []:
+            warnings.append(f"[{issue.get('rule_id')}] {issue.get('message')}")
+    # V3.9 批次 5.7：critic / deep_review 共享取数——本节点（必跑首节点）一次取齐，
+    # 两个 AI 节点直接消费 ctx["review_inputs"]，不再各自把同一批 SQL 重跑一遍。
+    if chapter_project_id is None:
+        # 章节行缺失（draft 孤儿）：与改造前 critic 的取数口径一致 → 标记不可用，
+        # critic / deep_review 按既有「inputs 失败」路径降级，不误用空项目上下文。
+        review_inputs: dict[str, Any] | None = None
+        review_inputs_error: str | None = f"chapter {chapter_id!r} not found"
+    else:
+        review_inputs = _collect_review_inputs(
+            db_path,
+            chapter_project_id,
+            draft_text=prose,
+            plan=plan_dict,
+            genre_rubric=genre_data.get("rubric"),
+        )
+        review_inputs_error = None
+    return {
+        "review_report": report,
+        "review_inputs": review_inputs,
+        "review_inputs_error": review_inputs_error,
     }
-    return (draft_row["content"] or ""), project_id, plan_summary
+
+
+def _parse_plan_json(raw: Any) -> dict[str, Any]:
+    """chapters.plan_json（JSON 字符串 / 已是 dict）→ dict；非法 / 非 dict → ``{}``。
+
+    与 :func:`_safe_load_json`（chapter_plan）同口径，不抛错（fail-soft）。
+    """
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _collect_review_inputs(
+    db_path: str,
+    project_id: str,
+    *,
+    draft_text: str,
+    plan: dict[str, Any],
+    genre_rubric: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """一次性取齐 critic / deep_review 共享输入（V3.9 批次 5.7）。
+
+    在 ``basic_checks``（必跑首节点）调用，结果存 ``ctx["review_inputs"]``；两个
+    AI 节点只消费不重查——改造前 critic 与 deep_review 各自把同一批 SQL 跑一遍
+    （draft / chapters / world_rules / characters / hooks，同一 run 内重复取数）。
+
+    返回：
+      - ``draft_text``：审校正文（与 review_report 同一次读取，版本一致）
+      - ``project_id``：章节所属项目
+      - ``plan_summary``：``{"chapter_goal", "key_beats"}``（两个 AI 节点 payload）
+      - ``suggested_hashes``：已采纳建议 hash（critic 去重专用，deep_review 不用）
+      - ``open_hooks``：项目开放伏笔（critic payload）
+      - ``settings_digest``：设定摘要（world_rules + 角色档案，两节点共用）
+      - ``genre_rubric``：题材审查要点（题材库 P2；由 basic_checks 单次读题材包投影，
+        未被绑定 / 未声明 ``critic_rubric`` → ``None``）
+
+    ``open_hooks`` / ``settings_digest`` 取数失败一律降级为空列表（不抛错）——
+    与改造前两个 AI 节点各自的 try/except 语义一致：设定上下文缺失不阻断评审。
+    """
+    if project_id:
+        try:
+            open_hooks = _collect_open_hooks(db_path, project_id)
+        except Exception as exc:  # noqa: BLE001 —— 取数失败降级为空，不阻断 critic
+            _log.warning(
+                "chapter_review.open_hooks collection failed: project_id=%s err=%s",
+                project_id, exc,
+            )
+            open_hooks = []
+    else:
+        open_hooks = []
+    return {
+        "draft_text": draft_text,
+        "project_id": project_id,
+        "plan_summary": {
+            "chapter_goal": plan.get("chapter_goal"),
+            "key_beats": plan.get("key_beats") or [],
+        },
+        "suggested_hashes": _read_suggested_hashes(plan),
+        "open_hooks": open_hooks,
+        "settings_digest": _collect_settings_digest(db_path, project_id),
+        "genre_rubric": genre_rubric,
+    }
+
+
+def _require_review_inputs(ctx: dict[str, Any]) -> dict[str, Any]:
+    """取 ``basic_checks`` 预取的共享输入（V3.9 批次 5.7）。
+
+    生产链路 basic_checks 为必跑首节点，键恒在；直调节点（单测 / 复用）或章节行
+    缺失时不可用 → 抛 ``ValueError``，由调用节点按既有「inputs 收集失败」路径降级。
+    **不回退重查**：重查会抵消共享收益，且与 basic_checks 已审的草稿版本可能不一致。
+    """
+    inputs = ctx.get("review_inputs")
+    if isinstance(inputs, dict):
+        return inputs
+    raise ValueError(
+        str(ctx.get("review_inputs_error") or "review_inputs missing（basic_checks 未运行）")
+    )
+
+
+def _normalize_suggestion(text: Any) -> str:
+    """建议文本归一化：去首尾空白 + 内部连续空白折叠为单空格。"""
+    return re.sub(r"\s+", " ", str(text or "").strip())
+
+
+def _suggestion_hash(text: Any) -> str:
+    """建议文本的归一化 hash（sha1 前 12 位十六进制）。
+
+    写入（``_mark_reviewed_node`` 落 ``plan_json.suggested_hashes``）与过滤
+    （``_critic_review_node`` 丢弃重复 issue）必须走同一函数，保证口径一致。
+    """
+    normalized = _normalize_suggestion(text)
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def _merge_suggested_hashes(existing: Any, note: str) -> list[str]:
+    """把 note 的逐行 hash 并入已有列表（去重、保持出现顺序、尾部截断到上限）。
+
+    逐行口径与前端「按建议修改」的组装方式对齐：ApprovalCard 把勾选的 critic
+    suggestion 以 ``\\n`` 连接后作为 note 下发，故每行即一条被采纳的建议。
+    自由文本行也会被 hash——同文本再次被 critic 提出时同样视为「已建议过」。
+    """
+    hashes: list[str] = [
+        h for h in (existing if isinstance(existing, list) else []) if isinstance(h, str) and h
+    ]
+    for line in str(note or "").splitlines():
+        if not _normalize_suggestion(line):
+            continue
+        h = _suggestion_hash(line)
+        if h not in hashes:
+            hashes.append(h)
+    return hashes[-_SUGGESTED_HASH_LIMIT:]
+
+
+def _read_suggested_hashes(plan: dict[str, Any]) -> list[str]:
+    raw = plan.get("suggested_hashes")
+    return [h for h in (raw if isinstance(raw, list) else []) if isinstance(h, str) and h]
+
+
+def _clip_world_rule_statement(statement: Any) -> str:
+    """world_rule.statement 的单条字符 cap（V3.9 批次 5 / F-3）。
+
+    非字符串 → ``""``；超 ``_WORLD_RULE_STATEMENT_MAX_CHARS`` → 截断并追加标记，
+    保证单条规则注入 prompt 的长度有界。
+    """
+    if not isinstance(statement, str):
+        return ""
+    if len(statement) <= _WORLD_RULE_STATEMENT_MAX_CHARS:
+        return statement
+    return statement[:_WORLD_RULE_STATEMENT_MAX_CHARS] + _WORLD_RULE_TRUNCATED_SUFFIX
 
 
 def _collect_settings_digest(db_path: str, project_id: str) -> list[dict[str, Any]]:
-    """V3.9：组装 critic 的设定上下文摘要。
+    """V3.9：组装 critic / deep_review 的设定上下文摘要。
 
-    - world_rules 全部规则的 name + statement（顺序：world_rule_id ASC）。
+    - world_rules 前 ``_WORLD_RULES_CAP``(20) 条的 name + statement（顺序：
+      world_rule_id ASC，确定性稳定序）；单条 statement 截断到
+      ``_WORLD_RULE_STATEMENT_MAX_CHARS``(500) 字符 + 截断标记（F-3：改造前是全量注入）。
     - 主要角色档案：name + core_json 中的 one_line 字段（缺则用 statement 兜底）。
     - 上限 8 个角色（按 character_id ASC 截断）。
     - core_json 是非法 JSON 字符串 → **跳过该角色**（其余角色保留），不抛错。
@@ -342,8 +568,8 @@ def _collect_settings_digest(db_path: str, project_id: str) -> list[dict[str, An
         try:
             rule_rows = conn.execute(
                 "SELECT name, statement FROM world_rules "
-                "WHERE project_id = ? ORDER BY world_rule_id ASC",
-                (project_id,),
+                "WHERE project_id = ? ORDER BY world_rule_id ASC LIMIT ?",
+                (project_id, _WORLD_RULES_CAP),
             ).fetchall()
             char_rows = conn.execute(
                 "SELECT name, core_json FROM characters "
@@ -366,7 +592,7 @@ def _collect_settings_digest(db_path: str, project_id: str) -> list[dict[str, An
         digest.append({
             "kind": "world_rule",
             "name": r["name"],
-            "one_line": r["statement"] if isinstance(r["statement"], str) else "",
+            "one_line": _clip_world_rule_statement(r["statement"]),
         })
     for r in char_rows:
         if not isinstance(r["name"], str):
@@ -449,17 +675,21 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
     """V1.3 LLM 评审员节点。
 
     行为：
-    1. 取最新 draft_text + plan_summary + 项目下 open_hooks。
+    1. 消费 ``basic_checks`` 预取的共享输入（``ctx["review_inputs"]``：draft_text /
+       plan_summary / open_hooks / settings_digest / suggested_hashes / genre_rubric）
+       ——V3.9 批次 5.7 起不再自取（同 run 内 deep_review 也要用同一批数据，原先各查一遍）；
+       其中 ``genre_rubric``（题材库 P2）为可选输入，非 None 时进 payload。
     2. 调 ``run_agent(..., agent_name='critic', expected='critic', mock_script=...)``。
        runner 内部走 parse_json → validate_contract("critic") → 写 ai_call_logs；本节点只
        关心最终输出 payload。
-    3. 任何异常（PromptNotFound / Provider / 契约校验失败 / 输出字段缺失）→ 降级
-       ``critic_status='failed'`` + ``critic_report=None``，**不**抛错。
+    3. 任何异常（PromptNotFound / Provider / 契约校验失败 / 输出字段缺失 / 共享输入
+       不可用）→ 降级 ``critic_status='failed'`` + ``critic_report=None``，**不**抛错。
     4. ``critic_status='ok'`` 时 ``critic_report`` 写入 ctx，供 author_review 合并进 pause_payload。
 
     V3 P0-1：critic 采样模式开关（off / sample / always）。跳过时返回 ``critic_status='skipped'``
     + ``critic_skipped=True`` + ``critic_mode=<mode>``，工作流状态机不受影响（author_review
     Human 节点仍按 PauseRequested 走，pause_payload 中 ``critic_status='skipped'`` 不合并 critic_report）。
+    V3.9 批次 5.7：章节号只在 ``sample`` 模式需要，``always`` / ``off`` 下不再白查库。
 
     返回 ``{"critic_status": "ok|failed|skipped", "critic_report": dict|None,
     "critic_error": str|None, "critic_skipped": bool, "critic_mode": str}``。
@@ -468,9 +698,11 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
     chapter_id = ctx["chapter_id"]
     mock_script = (ctx.get("mock_providers") or {}).get("critic")
 
-    # V3 P0-1：解析 critic_mode 并按 chapter_number 判定是否跳过
+    # V3 P0-1：解析 critic_mode 并按 chapter_number 判定是否跳过。
+    # V3.9 批次 5.7：_fetch_chapter_number 只在 sample 模式调用（always 下必然调用
+    # critic、off 下必然跳过，两种模式下章节号都无用）。
     mode = _resolve_critic_mode(ctx)
-    chapter_number = _fetch_chapter_number(db_path, chapter_id)
+    chapter_number = _fetch_chapter_number(db_path, chapter_id) if mode == "sample" else None
     if not _should_invoke_critic(mode, chapter_number):
         _log.info(
             "chapter_review.critic skipped: chapter_id=%s mode=%s chapter_number=%s",
@@ -485,16 +717,10 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        draft_text, project_id, plan_summary = _collect_critic_inputs(
-            db_path, chapter_id, draft_version=ctx.get("draft_version")
-        )
-        open_hooks = _collect_open_hooks(db_path, project_id)
-        # V3.9：设定上下文摘要（world_rules + 角色档案 one_line），供 critic 做 OOC 审查。
-        # 失败 / 空 → settings_digest=[]，不阻断 critic（与 §5 契约一致）。
-        settings_digest = _collect_settings_digest(db_path, project_id)
-    except Exception as exc:  # noqa: BLE001 —— 输入收集失败即降级
+        shared = _require_review_inputs(ctx)
+    except ValueError as exc:  # 共享输入不可用 → 与改造前「取数失败」同一降级路径
         _log.warning(
-            "chapter_review.critic inputs collection failed: chapter_id=%s err=%s",
+            "chapter_review.critic inputs unavailable: chapter_id=%s err=%s",
             chapter_id, exc,
         )
         return {
@@ -504,6 +730,14 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
             "critic_skipped": False,
             "critic_mode": mode,
         }
+    draft_text = shared.get("draft_text") or ""
+    plan_summary = shared.get("plan_summary") or {}
+    open_hooks = shared.get("open_hooks") or []
+    settings_digest = shared.get("settings_digest") or []
+    suggested_hashes = shared.get("suggested_hashes") or []
+    # 题材库 P2：题材审查要点（basic_checks 单次读题材包投影，≤1000 字符、超限带
+    # __genre_rubric_truncated__ 标记）；未绑定 / 未声明 → 不注入该键。
+    genre_rubric = shared.get("genre_rubric")
 
     # V3.8：把确定性检测结果摘要注入 critic payload，供 LLM 参考。
     # 优先从 basic_checks 已产出的 review_report 读取；若未经历该节点（单测/异常），
@@ -524,7 +758,7 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "prompt_version": _CRITIC_PROMPT_VERSION,
         "chapter": {
             "title": None,
-            "target_word_count": int(ctx.get("target_word_count") or _DEFAULT_TARGET_WORD_COUNT),
+            "target_word_count": int(ctx.get("target_word_count") or DEFAULT_TARGET_WORD_COUNT),
             "expected_role": ctx.get("expected_role"),
             "chapter_id": chapter_id,
         },
@@ -534,6 +768,9 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "settings_digest": settings_digest,
         "deterministic_hints": deterministic_hints,
     }
+    # 题材库 P2：题材审查要点（可选输入；缺席 = 未绑定题材包 / 未声明 critic_rubric）。
+    if genre_rubric is not None:
+        payload["genre_rubric"] = genre_rubric
 
     try:
         out = run_agent(
@@ -572,6 +809,26 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
             out["issues"] = cleaned_issues
         elif issues is not None:
             out["issues"] = []
+        # V3.9 批次 4.2：丢弃「已采纳进 revision_note」的重复建议（同内容 hash）。
+        # 只过滤 critic 报告呈现面，不改其它字段；过滤条数写进报告供观测。
+        if suggested_hashes and isinstance(out.get("issues"), list):
+            known = set(suggested_hashes)
+            kept: list[dict[str, Any]] = []
+            dropped = 0
+            for issue in out["issues"]:
+                if not isinstance(issue, dict):
+                    continue
+                if _suggestion_hash(issue.get("suggestion")) in known:
+                    dropped += 1
+                    continue
+                kept.append(issue)
+            if dropped:
+                out["issues"] = kept
+                out["deduped_suggestion_count"] = dropped
+                _log.info(
+                    "chapter_review.critic dropped %d already-suggested issue(s): "
+                    "chapter_id=%s", dropped, chapter_id,
+                )
         if strengths is None:
             out["strengths"] = []
         elif not isinstance(strengths, list):
@@ -605,20 +862,23 @@ def _deep_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
        **不调 AI**、不写 deep_review_report（与 critic 默认 always 形成差异化）。
     2. truthy → 调 ``run_agent(..., agent_name='deep_reviewer', expected='deep_reviewer', mock_script=...)``
        跑三层清单核销（设定一致性 → 节拍核销 → 行为链连续性）。
-    3. 任何异常（PromptNotFound / Provider / 契约校验失败 / 输出字段缺失）→ 降级
-       ``deep_review_status='failed'`` + ``deep_review_report=None``，**不**抛错。
+    3. 任何异常（PromptNotFound / Provider / 契约校验失败 / 输出字段缺失 / 共享输入
+       不可用）→ 降级 ``deep_review_status='failed'`` + ``deep_review_report=None``，
+       **不**抛错。
     4. ``deep_review_status='ok'`` 时 ``deep_review_report`` 写入 ctx，供 author_review
        合并进 pause_payload。
 
-    输入载荷与 critic 节点保持最大复用：
-    - ``draft_text`` / ``plan_summary`` / ``settings_digest`` 取法照抄 critic 节点
-      （即 ``_collect_critic_inputs`` + ``_collect_settings_digest``，二者项目级上下文与
-      critic 完全一致——避免重复 SQL）。
+    输入载荷与 critic 节点保持最大复用（V3.9 批次 5.7 起改为**直接消费** basic_checks
+    预算好的 ``ctx["review_inputs"]``——draft_text / plan_summary / settings_digest 与
+    critic 完全同一份数据，同 run 内不再各查一遍相同 SQL）：
+    - ``draft_text`` / ``plan_summary`` / ``settings_digest``：取自 ``review_inputs``。
     - ``prev_chapter_summaries``：当前项目暂未启用 summarizer 的「按章节一句话摘要」字段
       透传——本节点传空数组；待 summarizer 落库后由上层补齐并经 run_agent 注入。
       此处留 TODO 注释待后续 summarizer 章节摘要接入。
     - ``critic_report``：若 critic 节点已跑出 ``critic_status='ok'``，把 ``ctx["critic_report"]``
       透传给 deep_reviewer 作为盲区对照基准（§3.4 边界）。
+    - ``genre_rubric``：题材审查要点（题材库 P2）——与 critic 同一份投影，非 None 时进
+      payload（deep_review 同样可得）。
 
     返回 ``{"deep_review_status": "ok|failed|skipped", "deep_review_report": dict|None,
     "deep_review_error": str|None, "deep_review_skipped": bool}``。
@@ -641,13 +901,10 @@ def _deep_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
     mock_script = (ctx.get("mock_providers") or {}).get("deep_reviewer")
 
     try:
-        draft_text, project_id, plan_summary = _collect_critic_inputs(
-            db_path, chapter_id, draft_version=ctx.get("draft_version")
-        )
-        settings_digest = _collect_settings_digest(db_path, project_id)
-    except Exception as exc:  # noqa: BLE001 —— 输入收集失败即降级
+        shared = _require_review_inputs(ctx)
+    except ValueError as exc:  # 共享输入不可用 → 与改造前「取数失败」同一降级路径
         _log.warning(
-            "chapter_review.deep_review inputs collection failed: chapter_id=%s err=%s",
+            "chapter_review.deep_review inputs unavailable: chapter_id=%s err=%s",
             chapter_id, exc,
         )
         return {
@@ -656,13 +913,18 @@ def _deep_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
             "deep_review_error": f"inputs: {exc}",
             "deep_review_skipped": False,
         }
+    draft_text = shared.get("draft_text") or ""
+    plan_summary = shared.get("plan_summary") or {}
+    settings_digest = shared.get("settings_digest") or []
+    # 题材库 P2：deep_review 与 critic 同得 genre_rubric（同一份 review_inputs）。
+    genre_rubric = shared.get("genre_rubric")
 
     payload = {
         "agent": "deep_reviewer",
         "prompt_version": _DEEP_REVIEWER_PROMPT_VERSION,
         "chapter": {
             "title": None,
-            "target_word_count": int(ctx.get("target_word_count") or _DEFAULT_TARGET_WORD_COUNT),
+            "target_word_count": int(ctx.get("target_word_count") or DEFAULT_TARGET_WORD_COUNT),
             "expected_role": ctx.get("expected_role"),
             "chapter_id": chapter_id,
         },
@@ -679,6 +941,9 @@ def _deep_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
             else None
         ),
     }
+    # 题材库 P2：题材审查要点（与 critic 同一份；缺席 = 未绑定 / 未声明 critic_rubric）。
+    if genre_rubric is not None:
+        payload["genre_rubric"] = genre_rubric
 
     try:
         out = run_agent(
@@ -843,6 +1108,11 @@ def _mark_reviewed_node(ctx: dict[str, Any]) -> dict[str, Any]:
                     plan = {}
                 if note:
                     plan["revision_note"] = note
+                    # V3.9 批次 4.2：记录本次采纳的建议 hash（逐行归一化 hash），
+                    # 供下一轮 critic 报告过滤同内容建议；空行为跳过，列表有上限。
+                    plan["suggested_hashes"] = _merge_suggested_hashes(
+                        plan.get("suggested_hashes"), note
+                    )
                 else:
                     plan.pop("revision_note", None)
                 conn.execute(
@@ -907,6 +1177,10 @@ WORKFLOW = {
     # 前端仍可读到 review_report / critic_report（reviewer UI 必需）。
     # V1.3 deep_review_report 加入 exclude：与 critic_report 同口径，不影响 resume（mark_reviewed
     # 不读 deep_review_report）。
+    # V3.9 批次 5.7：review_inputs（basic_checks 预取的共享输入：draft_text / plan_summary /
+    # settings_digest / open_hooks / suggested_hashes）**不**进 exclude——critic 与 deep_review
+    # 均消费它，resume 重建 ctx 后键仍可达（引擎 resume 从 PAUSED 节点后继续，不回跑 AI 节点）；
+    # 体积以 draft_text 为主（≈正文 UTF-8 字节数），远低于引擎 512KB checkpoint 软上限。
     "checkpoint_exclude": [
         "review_report",
         "critic_report",

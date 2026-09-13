@@ -26,6 +26,9 @@
 | `build_docx(db_path, project_id, scope)` | 同上 | 最小合法 OOXML docx；同段结构 |
 | `build_fanqie_package(db_path, project_id)` | 同上 | 前 ~1 万字正文 + 全书大纲 |
 | `plan_to_outline(plan_json)` | 同上 | 把 chapter-plan 写回的 `plan_json` dict 渲染成可读大纲 |
+| `project_name(db_path, project_id)` | 同上 | 项目名（缺行 → 空串）；V3.9 批次 5.14 由 `_project_name` 提升 |
+| `latest_draft_content(db_path, chapter_id)` | 同上 | 该章最新 draft（`version DESC`）正文；无 draft → 空串；V3.9 批次 5.14 由 `_latest_draft_content` 提升 |
+| `chapter_heading(number, title)` | 同上 | 章节标题行（`第N章 标题`）；V3.9 批次 5.14 由 `_chapter_heading` 提升 |
 | `build_minimal_docx(title, paragraphs)` | `packages/core/exporter/docx.py` | 手工打包 docx 字节流（测试与 builder 共用） |
 | `FANQIE_TARGET_CHARS = 10000` | `builder.py` | 番茄包正文目标字数（README 注明） |
 | `FANQIE_DELIMITER` | `builder.py` | 正文与大纲之间的分隔串 |

@@ -23,6 +23,10 @@
   （``retry_count == 1`` 且 ``last_error`` 非空），把首次失败原因以 ``warn: first attempt invalid: ...``
   写入 ``error``；若同时存在 observer 越权剥离的 ``warn: stripped keys=[...]``，两段用 `` | `` 拼接；
   都没有时 ``error=None``，不污染正常成功路径。
+- ``workflow_runs.retry_count``（V3.9 批次 5.11）：本模块是唯一写入方——每次真实发生的
+  LLM 重试调用（``_RETRY_HINT`` 解析/契约重试、provider 空流重试）累计 +1，跨节点跨 agent
+  累加；引擎建行时置 0（``engine._insert_run_row``），此后不再改写。与 ``ai_call_logs.retry_count``
+  （单次调用内的 0/1 标记）口径不同，详见 :func:`_bump_run_retry_count`。
 - ``input_context_ids_json``：从 input_payload 里挑 ``*_id`` 键值，去重、截断到 100 条。
 
 契约校验三档（agent-contracts §3.2 / §4.2 / §5.2）：
@@ -44,12 +48,15 @@ from typing import Any
 
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
+from packages.core.logging_config import get_logger
 from packages.core.model_router import MockProvider, ModelRouter, capability_for
 from packages.core.model_router.exceptions import ProviderError
 
 from .exceptions import AgentOutputError
 from .prompts import PromptRegistry
 from .structured_output import extract_json, strip_observer_violations, validate_contract
+
+log = get_logger("novelos.agent_runtime.runner")
 
 _ID_KEY_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*_id$")
 _RETRY_HINT = "\n\n[System note] 上次输出无法解析/不合规：{err}。请只输出合法 JSON，不要附加解释。"
@@ -227,6 +234,36 @@ def _update_workflow_run(
         conn.close()
 
 
+def _bump_run_retry_count(db_path: Path | str, run_id: str) -> None:
+    """``workflow_runs.retry_count += 1``（V3.9 批次 5.11）。
+
+    口径：**每次真实发生后的 LLM 重试调用计一次**——含两条重试路径
+    （解析/契约失败触发的 ``_RETRY_HINT`` 重试、provider 空流抖动触发的自动
+    重试）。与 ``ai_call_logs.retry_count``（只计 output-invalid 重试，0/1）语义
+    不同：那是**单次调用**内的重试标记，这是**run 级**累计重试次数（跨节点、
+    跨 agent 累加），用于「这条 run 的 LLM 抖动有多重」的观测与排障。
+
+    并发安全：单条 ``UPDATE ... SET retry_count = retry_count + 1`` 由 SQLite
+    隐式事务保证原子（读改写不落 Python 侧），配合 ``get_connection`` 的 WAL +
+    busy_timeout；引擎侧其余写入（status / checkpoint / current_node）只动各自
+    列，不会覆盖本列。异常静默丢弃（计数是观测旁路，不能反噬 agent 调用）。
+    """
+    try:
+        conn = get_connection(db_path)
+    except sqlite3.Error:
+        return
+    try:
+        conn.execute(
+            "UPDATE workflow_runs SET retry_count = retry_count + 1 WHERE run_id = ?",
+            (run_id,),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        log.debug("bump retry_count failed for run %s (non-fatal)", run_id)
+    finally:
+        conn.close()
+
+
 def _get_agent_id(conn: sqlite3.Connection, agent_name: str) -> str | None:
     row = conn.execute("SELECT agent_id FROM agents WHERE name = ?", (agent_name,)).fetchone()
     return row["agent_id"] if row else None
@@ -344,6 +381,8 @@ def run_agent(
                 retry_count = 1
                 # 重试：在 user 末尾追加提示，再次调用
                 messages[1]["content"] = user_payload_text + _RETRY_HINT.format(err=last_error or "无法解析")
+                # V3.9 批次 5.11：run 级重试计数（output-invalid 重试路径）
+                _bump_run_retry_count(db_path, run_id)
             # 空流重试小循环（最多 2 次 provider 调用）：吸收上游 provider 间歇性零 content
             # 抖动。messages 不变（非输出解析问题）；第二次仍空流则走原 Provider 失败路径。
             completion: dict[str, Any] | None = None
@@ -368,6 +407,8 @@ def run_agent(
                     if is_empty_stream and not empty_stream_already_retried:
                         # 首次空流：标记 + 重调，messages 不变（非输出解析问题）
                         empty_stream_already_retried = True
+                        # V3.9 批次 5.11：run 级重试计数（空流重试路径）
+                        _bump_run_retry_count(db_path, run_id)
                         continue
                     # 第二次空流 或 非空流 ProviderError：走原失败路径
                     # 第二次空流时给错误消息加后缀，便于诊断「已重试过仍未恢复」

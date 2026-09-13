@@ -5,14 +5,18 @@ project → character → model_config → chapter → 四工作流
 （plan → write → review → commit）的端到端链路，断言：
 
 1. GET /                                        → 200 + HTML（SPA 托管 apps/web/dist）
-2. GET /api/health                              → 200，tables=32（32 业务表 + _migrations = 33 总表）
+2. GET /api/health                              → 200，tables=38（业务表 38；含 _migrations 物理共 39）
 3. POST /api/projects                           → 201 + project_id
 4. POST /api/projects/{pid}/characters          → 201 + character_id（1 个主角）
 5. POST /api/projects/{pid}/world-rules         → 201 + world_rule_id（1 条世界规则；PRD §110 第 3 步「创建世界」）
 6. POST /api/model-configs                      → 201（capability=reasoning 与 creative_writing 各 1 条 mock）
 7. POST /api/projects/{pid}/chapters            → 201 + chapter_id（第 1 章）
-8. 四条工作流端点（plan → write → review → commit）→ 201；
-   review / commit 若返回 PAUSED → POST /runs/{rid}/resume {"human_input":{"approved":true}}
+8. 四条工作流端点（plan → write → review → commit）→ 201；V3.5 起 start 异步化
+   （响应固定 ``status=RUNNING``），每步必须轮询 ``GET /api/runs/{rid}`` 到终态
+   （COMPLETED/FAILED/CANCELLED）后才 start 下一步——否则同 chapter 尚有活跃 run 时
+   会被 409 拒绝（routers/workflows.py ``_check_active_run_for_chapter``）；
+   review / commit 停在 Human 节点时返回 PAUSED → POST
+   /runs/{rid}/resume {"human_input":{"approved":true}} 后继续轮询到 COMPLETED。
 9. 最终断言：
    - chapters.status == "COMMITTED"
    - GET /projects/{pid}/state 快照含 observer 新增内容（hook / event / character state）
@@ -25,6 +29,9 @@ project → character → model_config → chapter → 四工作流
 执行：``python scripts/smoke_e2e.py``
 - 默认端口 18081；若被占，自动回退 18099（NOVELOS_PORT 透传子进程）。
 - 默认数据库 ./data/smoke_e2e_<pid>_<ts>.db；结束后删除（-wal/-shm 一并清理）。
+- 服务端日志 ./data/smoke_e2e_<pid>_<ts>.log：绿跑随手删，失败/异常保留并打印路径。
+- 每步轮询 run 终态，超时（plan/write 120s，review/commit 180s）或 FAILED/CANCELLED
+  即该步失败，错误信息携带 run.error 与 current_node。
 - 失败抛 SystemExit(1)，成功打印 PASS 并 exit 0。
 
 可重复：每次以 pid+时间戳后缀的临时 db + 子进程 uvicorn 隔离，幂等。
@@ -37,8 +44,13 @@ project → character → model_config → chapter → 四工作流
 - observer 契约：顶层恰为 7 个 change 数组；条目受 docs/state-model/schemas/state-delta.schema.json
   约束（evidence 必含 chapter_id/excerpt，op=add 必含 after，change_id 全局唯一；
   risk_level=HIGH 会触发 high_risk_approval Human 暂停 → 全用 LOW 避免多余审批）。
-- review 的 author_review / commit 的 high_risk_approval 均为 Human 节点 → PAUSED 后 resume。
-- health.tables = 业务表数（31）；总表（含 _migrations）为 32。
+- review 的 author_review / commit 的 high_risk_approval 均为 Human 节点 → PAUSED 后
+  resume（human_input={"approved": true}），再轮询到 COMPLETED 才算该步完成。
+  （本次 mock observer delta 全 LOW 且无 world_changes，commit 不会真的 PAUSED；
+  脚本仍按同一契约处理，防 fixture 变化后回退成静默挂起。）
+- 每步 start 后必须轮询到终态：start/resume 端点 V3.5 起异步化，响应恒为 RUNNING，
+  真实终态只在 ``GET /api/runs/{run_id}`` 上（COMPLETED / FAILED / CANCELLED）。
+- health.tables = 业务表数（38）；含 _migrations 物理共 39。
 """
 
 from __future__ import annotations
@@ -64,12 +76,26 @@ SERVER_START_TIMEOUT_S = 30
 ENDPOINT_READY_TIMEOUT_S = 30
 HTTP_TIMEOUT_S = 60.0
 
-# health.tables = 业务表数（35 业务表；含 _migrations 总表 36，health 返回减 1 后的业务表数）
-EXPECTED_BUSINESS_TABLES = 35
+# health.tables = 业务表数（业务表 38；含 _migrations 物理共 39，health 返回减 1 后的业务表数）
+# 真值核对：``count_tables()`` 排除 sqlite_% 与 chapter_fts% 影子表后返回 39（含 _migrations），
+# 与 README §健康检查、packages/core/db.py docstring、tests/integration/test_health.py 同口径。
+EXPECTED_BUSINESS_TABLES = 38
 # V2.0 Wave B 任务一：0009_branch_snapshots.sql 加 branch_snapshots → 34 业务表
 # V2.0 Wave B 任务二：0010_trigger_keys.sql 仅 ALTER TABLE 加列，不增表 → 仍 34 业务表
 # V3.3：0014_knowledge_reveal.sql 重建 reveal_policies（表早已存在于基线，不增数）→ 仍 34 业务表
 # V3.4：0015_volumes.sql 加 volumes → 35 业务表
+# V3.7：0016_model_profiles.sql 加 model_profiles + capability_bindings → 37 业务表
+# 题材库 P1a：0025_genre_packs.sql 加 genre_packs → 38 业务表
+
+# run 终态（引擎状态机；PAUSED 是「等人工决议」的中间态，resume 后继续推进）。
+RUN_TERMINAL_STATUSES = ("COMPLETED", "FAILED", "CANCELLED")
+RUN_POLL_INTERVAL_S = 0.5
+# 每步「start/resume → 终态」总超时（秒）：plan/write 各 1 个 mock AI 节点，余量充足；
+# review（basic_checks → critic → deep_review → author_review 暂停 → mark_reviewed）与
+# commit（observer 校验 + 快照落库 + 可能的高风险审批）给更宽裕的余量。
+RUN_TIMEOUTS_S = {"plan": 120.0, "write": 120.0, "review": 180.0, "commit": 180.0}
+# 单个 run 最多 resume 次数（同一 workflow 连续多个 Human 节点的防御上限）。
+MAX_RESUMES_PER_RUN = 5
 
 
 # ---------------------------------------------------------------------------
@@ -116,13 +142,29 @@ def _assert(condition: bool, message: str) -> None:
 
 
 def _kill_proc(proc: subprocess.Popen[bytes]) -> None:
-    """终止 uvicorn 子进程。
+    """终止 uvicorn 子进程（Windows 下连同进程树）。
 
-    注意：Windows 下 ``CTRL_BREAK_EVENT`` 发给共享控制台会连带杀掉父进程
-    （0xC000013A），因此这里只做温和的 ``terminate()`` → ``kill()`` 兜底。
+    注意 1：Windows 下 ``CTRL_BREAK_EVENT`` 发给共享控制台会连带杀掉父进程
+    （0xC000013A），因此这里不做控制台信号。
+    注意 2：``.venv\\Scripts\\python.exe`` 是启动器 stub，真正的解释器（uvicorn
+    服务）是它的**子进程**：只 ``terminate()`` stub 会留下孤儿服务进程继续持有
+    临时 db 句柄，紧随其后的 unlink 报 WinError 32（临时 db 残留）。故 Windows
+    上先用 ``taskkill /T /F`` 连树一起杀；失败再回落 terminate → kill。
     """
     if proc.poll() is not None:
         return
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception:  # noqa: BLE001 —— taskkill 不可用/超时不阻断后续兜底
+            pass
+        if proc.poll() is not None:
+            return
     try:
         proc.terminate()
         proc.wait(timeout=5)
@@ -347,6 +389,7 @@ def run_smoke() -> int:
     api_base = f"{base_url}/api"
 
     failures: list[str] = []
+    succeeded = False
     try:
         # 等待端口 + health 可读
         _wait_for_port(DEFAULT_HOST, port, timeout=SERVER_START_TIMEOUT_S)
@@ -366,7 +409,7 @@ def run_smoke() -> int:
         except AssertionError as e:
             failures.append(f"GET /: {e}")
 
-        # ---- (2) GET /api/health → 200，tables=32（32 业务表 + _migrations = 33 总表）
+        # ---- (2) GET /api/health → 200，tables=38（业务表 38；含 _migrations 物理共 39）
         try:
             r = client.get("/api/health")
             _assert(r.status_code == 200, f"/api/health status={r.status_code}")
@@ -502,33 +545,92 @@ def run_smoke() -> int:
             _assert(r.status_code == 201, f"start {workflow} status={r.status_code} body={r.text[:300]}")
             return r.json()
 
-        def _resume_if_paused(payload: dict, workflow: str) -> None:
-            run_id = payload.get("run_id")
-            status = payload.get("status")
-            if status != "PAUSED" or not run_id:
-                return
-            print(f"[smoke] ... {workflow} paused at human node (run_id={run_id}) → resume approve")
-            # 防御：最多 resume 5 次（连续 Human 节点场景）
-            for _ in range(5):
-                r = client.post(f"/api/runs/{run_id}/resume", json={"human_input": {"approved": True}})
-                _assert(r.status_code == 200, f"resume {run_id} status={r.status_code} body={r.text[:200]}")
-                body = r.json()
-                if body.get("status") != "PAUSED":
-                    return
-                run_id = body.get("run_id") or run_id
-            raise AssertionError(f"run {run_id} stayed PAUSED after 5 resumes")
+        def _get_run(run_id: str) -> dict:
+            """GET /api/runs/{run_id}：终态/暂停态的真实来源（start/resume 响应恒为 RUNNING）。"""
+            r = client.get(f"/api/runs/{run_id}")
+            _assert(
+                r.status_code == 200,
+                f"GET /api/runs/{run_id} status={r.status_code} body={r.text[:200]}",
+            )
+            return r.json()
+
+        def _await_settled(run_id: str, workflow: str, deadline: float) -> dict:
+            """轮询到 PAUSED 或终态；deadline 超时抛 TimeoutError（带当前状态与节点）。"""
+            last: dict = {}
+            while True:
+                last = _get_run(run_id)
+                status = last.get("status")
+                if status == "PAUSED" or status in RUN_TERMINAL_STATUSES:
+                    return last
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"{workflow} run {run_id} 未在超时内进入终态: status={status!r} "
+                        f"current_node={last.get('current_node')!r}"
+                    )
+                time.sleep(RUN_POLL_INTERVAL_S)
+
+        def _run_step(workflow: str) -> tuple[dict, float]:
+            """start → 轮询终态（Human 节点 PAUSED 则 resume approved 后继续轮询）。
+
+            返回 (终态 run dict, 耗时秒)；非 COMPLETED 终态抛 AssertionError 并带
+            run.error / current_node——上一步不落到终态就 start 下一步会撞 409，
+            故每步都在这里等干净。
+            """
+            started = time.monotonic()
+            run_id = _start(workflow)["run_id"]
+            deadline = started + RUN_TIMEOUTS_S[workflow]
+            resumes = 0
+            while True:
+                run = _await_settled(run_id, workflow, deadline)
+                if run.get("status") != "PAUSED":
+                    break
+                if resumes >= MAX_RESUMES_PER_RUN:
+                    raise AssertionError(
+                        f"run {run_id} 仍在 PAUSED（已 resume {resumes} 次，"
+                        f"current_node={run.get('current_node')!r}）"
+                    )
+                resumes += 1
+                node = run.get("current_node")
+                stage = (run.get("pause_payload") or {}).get("stage")
+                print(
+                    f"[smoke] ... {workflow} PAUSED at human node "
+                    f"{node!r} (stage={stage!r}, run_id={run_id}) → resume approved"
+                )
+                r = client.post(
+                    f"/api/runs/{run_id}/resume", json={"human_input": {"approved": True}}
+                )
+                _assert(
+                    r.status_code == 200,
+                    f"resume {run_id} status={r.status_code} body={r.text[:200]}",
+                )
+                # resume 亦异步化：响应固定 RUNNING，回到循环继续轮询真实终态。
+
+            elapsed = time.monotonic() - started
+            status = run.get("status")
+            if status != "COMPLETED":
+                raise AssertionError(
+                    f"{workflow} run {run_id} 终态={status!r} "
+                    f"(current_node={run.get('current_node')!r}, error={run.get('error')!r})"
+                )
+            return run, elapsed
 
         workflow_ids: dict[str, str] = {}
         for wf in ("plan", "write", "review", "commit"):
             if not chapter_id:
                 break
             try:
-                body = _start(wf)
-                _resume_if_paused(body, wf)
-                workflow_ids[wf] = body["run_id"]
-                print(f"[smoke] OK POST .../{wf}  (run_id={body['run_id']})")
-            except AssertionError as e:
+                run, elapsed = _run_step(wf)
+                workflow_ids[wf] = run["run_id"]
+                print(
+                    f"[smoke] OK POST .../{wf}  (run_id={run['run_id']}, "
+                    f"status={run['status']}, {elapsed:.1f}s)"
+                )
+            except (AssertionError, TimeoutError) as e:
                 failures.append(f"workflow {wf}: {e}")
+                # 链路严格串行：前序 run 未 COMPLETED 时，后续步骤的输入态不成立
+                # （chapter 状态 / 草稿 / 审校标记），继续 start 只会叠加 409 噪声。
+                print(f"[smoke] ... {wf} 未落到 COMPLETED，链路中断")
+                break
 
         # ---- (9) 断言最终态
         if chapter_id:
@@ -610,13 +712,20 @@ def run_smoke() -> int:
                 cwd=str(REPO_ROOT),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=60,
             )
             if sync_proc.returncode == 0:
                 print("[state-sync] SYNC OK")
             elif sync_proc.returncode == 1:
                 print("[state-sync] DRIFT detected on tmp_db", tmp_db)
-                print(sync_proc.stdout.rstrip() or sync_proc.stderr.rstrip())
+                # F-6 收尾：子进程输出非 UTF-8（如父进程 -X utf8 而子进程 cp936）时
+                # text=True reader 线程抛 UnicodeDecodeError 会使 stdout 保持 None，
+                # 这里 errors="replace" 兜底 + or 链防空，保证真实漂移明细不被吞。
+                print(
+                    (sync_proc.stdout or sync_proc.stderr or "").rstrip()
+                )
                 failures.append(
                     "[state-sync] DRIFT detected (see check_state_sync output above)"
                 )
@@ -644,13 +753,14 @@ def run_smoke() -> int:
                 print(f"  - {f}")
             return 1
         print("\n[smoke] PASS  (PRD §110 全链路 9 组断言全绿 + 状态同步巡检 SYNC OK)")
+        succeeded = True
         return 0
 
     finally:
         # 清理
         _kill_proc(proc)
         log_file.close()
-        # 删临时 db（保留日志便于排错）
+        # 删临时 db（-wal/-shm 一并删）
         for ext in ("", "-wal", "-shm"):
             p = Path(str(tmp_db) + ext)
             if p.exists():
@@ -658,7 +768,13 @@ def run_smoke() -> int:
                     p.unlink()
                 except OSError:
                     pass
-        if log_path.exists():
+        # 服务端日志只在失败/异常时保留（绿跑日志无参考价值，data/ 不落垃圾）
+        if succeeded:
+            try:
+                log_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        elif log_path.exists():
             print(f"[smoke] server log: {log_path}")
 
 

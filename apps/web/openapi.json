@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "NovelOS API",
-    "version": "3.8.0"
+    "version": "dev"
   },
   "paths": {
     "/api/health": {
@@ -1563,6 +1563,387 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{project_id}/genre-packs": {
+      "post": {
+        "tags": [
+          "genre"
+        ],
+        "summary": "Create Genre Pack",
+        "description": "创建题材包（201）；``payload`` 不合 schema → 422；``pack_id`` 冲突 → 422。",
+        "operationId": "create_genre_pack_api_projects__project_id__genre_packs_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenrePackCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenrePack"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/genre-packs": {
+      "get": {
+        "tags": [
+          "genre"
+        ],
+        "summary": "List Genre Packs",
+        "description": "列出题材包摘要（``created_at DESC``；``?genre_tag=`` 精确过滤）。",
+        "operationId": "list_genre_packs_api_genre_packs_get",
+        "parameters": [
+          {
+            "name": "genre_tag",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 80
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Genre Tag"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GenrePackSummary"
+                  },
+                  "title": "Response List Genre Packs Api Genre Packs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/genre-packs/{pack_id}": {
+      "get": {
+        "tags": [
+          "genre"
+        ],
+        "summary": "Get Genre Pack",
+        "description": "题材包全文（payload 已解析为 dict）。",
+        "operationId": "get_genre_pack_api_genre_packs__pack_id__get",
+        "parameters": [
+          {
+            "name": "pack_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Pack Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenrePack"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "genre"
+        ],
+        "summary": "Update Genre Pack",
+        "description": "更新题材包；提供 ``payload`` 时 version 自增（装配缓存键指纹跟随）。",
+        "operationId": "update_genre_pack_api_genre_packs__pack_id__put",
+        "parameters": [
+          {
+            "name": "pack_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Pack Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenrePackUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenrePack"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "genre"
+        ],
+        "summary": "Delete Genre Pack",
+        "description": "删除题材包；仍被项目绑定 → 409（先 unbind 再删）。",
+        "operationId": "delete_genre_pack_api_genre_packs__pack_id__delete",
+        "parameters": [
+          {
+            "name": "pack_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Pack Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{project_id}/genre-pack": {
+      "get": {
+        "tags": [
+          "genre"
+        ],
+        "summary": "Get Project Genre Pack",
+        "description": "项目当前题材包绑定：``{project_id, pack_id, bound, pack}``（未绑 → pack=None）。",
+        "operationId": "get_project_genre_pack_api_projects__project_id__genre_pack_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Project Genre Pack Api Projects  Project Id  Genre Pack Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{project_id}/genre-pack/bind": {
+      "post": {
+        "tags": [
+          "genre"
+        ],
+        "summary": "Bind Project Genre Pack",
+        "description": "绑定题材包到项目（单 slot；已有绑定 → 覆盖）。\n\n404：项目或题材包不存在。响应含覆盖后的绑定详情（``{project_id, pack_id,\nbound, pack}``）。",
+        "operationId": "bind_project_genre_pack_api_projects__project_id__genre_pack_bind_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenreBindRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Bind Project Genre Pack Api Projects  Project Id  Genre Pack Bind Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{project_id}/genre-pack/unbind": {
+      "post": {
+        "tags": [
+          "genre"
+        ],
+        "summary": "Unbind Project Genre Pack",
+        "description": "解绑项目题材包（幂等：未绑定也返回 200，``bound=false``）。\n\n404：项目不存在。",
+        "operationId": "unbind_project_genre_pack_api_projects__project_id__genre_pack_unbind_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Unbind Project Genre Pack Api Projects  Project Id  Genre Pack Unbind Post"
+                }
               }
             }
           },
@@ -5653,6 +6034,70 @@
         }
       }
     },
+    "/api/projects/{project_id}/chapters/{chapter_id}/gate-revise": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Start Gate Revise",
+        "description": "按门禁建议改稿（V3.9 批次 4.1）：一键把 quality_gate 阻断变成改稿闭环。\n\n语义：\n- 前置：chapter 的 ``plan_json.gate_blocked`` 非空（quality_gate enforce 阻断时写入的\n  标记；改稿意见 ``plan_json.revision_note`` 同批写入）→ 无标记 → 409；\n- 启动 chapter-write：``revision_note`` 存在 ⇒ write 节点走 revise 模式（定向改稿）；\n- write COMPLETED 后 daemon 线程（``gate-revise-{run_id}``）接力 chapter-review，\n  审校停在 author_review 等作者决议；作者批准后章节回到 REVIEWED，可重新提交；\n- 复用 :func:`_start_workflow`（chapter 校验 / 活跃 run 并发防护 / 409 语义）与\n  :func:`_run_workflow_return_payload`（同 auto_revise 回路的子 run 口径），\n  不新建并行机制。\n\n返回：与其他 start 端点同形（``{run_id, status, current_node}``，201）。",
+        "operationId": "start_gate_revise_api_projects__project_id__chapters__chapter_id__gate_revise_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "chapter_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chapter Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GateReviseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Start Gate Revise Api Projects  Project Id  Chapters  Chapter Id  Gate Revise Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/runs/{run_id}": {
       "get": {
         "tags": [
@@ -5757,7 +6202,7 @@
           "workflows"
         ],
         "summary": "Cancel Run",
-        "description": "协作式取消 RUNNING workflow run。\n\n状态机（端点语义）：\n- run 不存在 → 404，``detail=\"run ... not found\"``。\n- status=RUNNING → :meth:`WorkflowEngine.cancel_run` UPDATE 为 CANCELLED，\n  200 ``{\"run_id\": ..., \"status\": \"CANCELLED\"}``。后台节点循环在下一次探针\n  （节点开始前 / checkpoint 前）命中 CANCELLED 即停止推进并丢弃产出。\n- status ∈ {COMPLETED, FAILED, CANCELLED, PAUSED} → 409，detail 含当前\n  status。PAUSED run 的取消走 resume 后的驳回/决议路径，不在本端点范围。\n\n设计要点：\n- 幂等：重复取消已 CANCELLED 的 run 按 409 处理即可（与「终态 409」一致）。\n- engine.cancel_run 内部 WHERE status='RUNNING' 兜底 TOCTOU：API 层校验\n  后到 SQL 执行的窄窗口内状态被改 → rowcount=0 → engine 抛 ValueError →\n  本端点分桶映射 409。",
+        "description": "协作式取消 RUNNING workflow run。\n\n状态机（端点语义）：\n- run 不存在 → 404，``detail=\"run ... not found\"``。\n- status=RUNNING → :meth:`WorkflowEngine.cancel_run` UPDATE 为 CANCELLED，\n  200 ``{\"run_id\": ..., \"status\": \"CANCELLED\"}``。后台节点循环在下一次探针\n  （节点开始前 / checkpoint 前）命中 CANCELLED 即停止推进并丢弃产出。\n- status ∈ {COMPLETED, FAILED, CANCELLED, PAUSED} → 409，detail 含当前\n  status。PAUSED run 的取消走 resume 后的驳回/决议路径，不在本端点范围。\n\n设计要点：\n- 幂等：重复取消已 CANCELLED 的 run 按 409 处理即可（与「终态 409」一致）。\n- engine.cancel_run 内部 WHERE status='RUNNING' 兜底 TOCTOU：API 层校验\n  后到 SQL 执行的窄窗口内状态被改 → rowcount=0 → engine 抛 ValueError →\n  本端点分桶映射 409。\n- V3.9 4.2：被取消的 run 若属于某个 auto_revise 回路（进程内注册表登记过），\n  取消成功后把该回路标记 cancelled —— 回路线程下一轮启动子 run 前检查该标记即\n  终止，不再「取消一个子 run 又冒出下一轮」。响应体不变（仍是 {run_id, status}）。",
         "operationId": "cancel_run_api_runs__run_id__cancel_post",
         "parameters": [
           {
@@ -7575,6 +8020,338 @@
         "title": "DraftCreate",
         "description": "创建草稿请求体（人工改稿入口）。\n\n- ``content`` 必填且长度 ≥ 1（pydantic 校验）；上限 500_000 字符（约 50 万字，\n  远大于单章实际目标 ~2200 字；用于防止超大 body DoS）。\n- 不暴露 ``version / created_by / created_at``：version 由 Service 按\n  ``max(version)+1`` 计算；created_by 在人工改稿场景下固定为 ``\"human\"``；\n  created_at 由 ``now_iso()`` 写入。"
       },
+      "GateReviseRequest": {
+        "properties": {
+          "mock_providers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mock Providers"
+          },
+          "model_overrides": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Overrides"
+          },
+          "critic_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(off|sample|always)$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Critic Mode"
+          },
+          "deep_review": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deep Review"
+          }
+        },
+        "type": "object",
+        "title": "GateReviseRequest",
+        "description": "「按门禁建议改稿」请求体（V3.9 批次 4.1）。\n\n只收「本次改稿 + 接力审校」用得到的透传字段：\n- ``mock_providers``：mock 脚本（write 与接力 review 共用同一份）；\n- ``model_overrides``：与其它 start 端点同语义的单次 run 级模型档案覆盖；\n- ``critic_mode`` / ``deep_review``：接力审校时会读取的开关。\n改稿意见本身不在这里传——它在 quality_gate 阻断时已写入 ``plan_json.revision_note``。"
+      },
+      "GenreBindRequest": {
+        "properties": {
+          "pack_id": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Pack Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pack_id"
+        ],
+        "title": "GenreBindRequest",
+        "description": "绑定请求体：``{\"pack_id\": \"...\"}``。"
+      },
+      "GenrePack": {
+        "properties": {
+          "pack_id": {
+            "type": "string",
+            "title": "Pack Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "genre_tag": {
+            "type": "string",
+            "title": "Genre Tag"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "bound_project_count": {
+            "type": "integer",
+            "title": "Bound Project Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "pack_id",
+          "name",
+          "genre_tag",
+          "version",
+          "payload",
+          "source_path",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "GenrePack",
+        "description": "题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。"
+      },
+      "GenrePackCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "genre_tag": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Genre Tag"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "pack_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pack Id",
+            "description": "显式 pack_id（内容仓 slug）；省略则生成 gp_<12hex>。"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path",
+            "description": "内容仓来源路径（审计用；软件层不解析）。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "genre_tag"
+        ],
+        "title": "GenrePackCreate",
+        "description": "创建题材包请求体（POST /projects/{pid}/genre-packs）。\n\n``pack_id`` 可显式指定（内容仓 slug，如 ``genre-male-quicktrans-v1``）；\n省略时由 service 生成 ``gp_<12hex>``。``payload`` 原样透传（jsonschema 校验权威）。"
+      },
+      "GenrePackSummary": {
+        "properties": {
+          "pack_id": {
+            "type": "string",
+            "title": "Pack Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "genre_tag": {
+            "type": "string",
+            "title": "Genre Tag"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "payoff_type_count": {
+            "type": "integer",
+            "title": "Payoff Type Count",
+            "default": 0
+          },
+          "structure_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Structure Model"
+          },
+          "chapter_words_target": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chapter Words Target"
+          },
+          "bound_project_count": {
+            "type": "integer",
+            "title": "Bound Project Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "pack_id",
+          "name",
+          "genre_tag",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "GenrePackSummary",
+        "description": "题材包摘要投影（列表端点 / 绑定响应 / 预览）。\n\n派生字段（``payoff_type_count`` / ``structure_model`` / ``chapter_words_target``）\n从 payload 解析；缺字段/解析失败 → 计数 0 / None（不炸）。"
+      },
+      "GenrePackUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "genre_tag": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 80,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genre Tag"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          }
+        },
+        "type": "object",
+        "title": "GenrePackUpdate",
+        "description": "更新题材包请求体（PUT /genre-packs/{pack_id}）；提供 payload 时 version 自增。"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -7880,6 +8657,18 @@
             ],
             "title": "Word Band",
             "description": "字数带覆盖（low_ratio / high_ratio / floor）；None = 项目无覆盖，消费点走模块默认 0.85 / 1.15 / 1200。"
+          },
+          "genre_pack_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genre Pack Id",
+            "description": "绑定的题材包 id（题材库单 slot）；None = 未绑定 / 极老库缺列。绑定与解绑走 POST /projects/{pid}/genre-pack/bind|unbind。"
           }
         },
         "type": "object",
@@ -7894,7 +8683,7 @@
           "updated_at"
         ],
         "title": "Project",
-        "description": "项目完整表示，对应数据库行。\n\n``word_band`` 字段：读路径把 ``projects.word_band_json`` 解析成 dict\n（非法 JSON 视为 None，不炸）；写路径由 ProjectUpdate 入口，service 序列化。"
+        "description": "项目完整表示，对应数据库行。\n\n``word_band`` 字段：读路径把 ``projects.word_band_json`` 解析成 dict\n（非法 JSON 视为 None，不炸）；写路径由 ProjectUpdate 入口，service 序列化。\n\n``genre_pack_id``（题材库 P1b）：项目绑定的题材包 id（单 slot，\n``projects.genre_pack_id`` 可空列，迁移 0025）；未绑定 / 极老库缺列 → None。\n绑定写路径在 ``packages/core/api/routers/genre.py``（bind / unbind 端点），本模型\n只做**读侧暴露**（GET /projects 列表与详情同步）。"
       },
       "ProjectCreate": {
         "properties": {

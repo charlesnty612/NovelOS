@@ -1251,3 +1251,101 @@ export interface CapabilityBinding {
 export interface CapabilityBindPayload {
   profile_ids: string[];
 }
+
+// ---------------------------------------------------------------------------
+// 题材库（genre_pack，P3b 前端面板）
+//   对齐 packages/core/genre/model.py 与 packages/core/api/routers/genre.py。
+//   手写类型（types.generated.ts 由 scripts/gen_frontend_types.py 统一 regen，
+//   本批次不动生成文件）。
+// ---------------------------------------------------------------------------
+
+/** 爽点类型条目（payload.payoff_types[]）：规定性条目，含密度与疲劳管理参数。 */
+export interface GenrePayoffType {
+  type_id: string;
+  name: string;
+  /** 强度分级：S=卷级 / M=章级中型 / s=章级小型。 */
+  strength?: 'S' | 'M' | 's' | null;
+  /** 密度上限原文文本（如「每卷 2~3 次」）。 */
+  density_cap?: string | null;
+  min_interval_chapters?: number | null;
+  description?: string | null;
+  applicable?: string | null;
+  fatigue_risk?: string | null;
+  verify_hint?: string | null;
+  mapped_tropes?: string[];
+  source?: string | null;
+  stale?: boolean | null;
+}
+
+/** payload 消费子集（5 段 + P2 追加段；后端 extra="allow"，未知键原样保留）。 */
+export interface GenrePackPayload {
+  schema_version?: string;
+  payoff_types?: GenrePayoffType[];
+  structure_templates?: Record<string, unknown> | null;
+  pacing?: Record<string, unknown> | null;
+  ratio_declarations?: Record<string, number> | null;
+  style_constraints?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+/** GET /genre-packs 行（列表摘要，无 payload 全文）。 */
+export interface GenrePackSummary {
+  pack_id: string;
+  name: string;
+  genre_tag: string;
+  version: number;
+  source_path: string | null;
+  created_at: string;
+  updated_at: string;
+  payoff_type_count: number;
+  structure_model: string | null;
+  chapter_words_target: number | null;
+  bound_project_count: number;
+}
+
+/** 题材包全文（GET /genre-packs/{pack_id} / 绑定响应里的 pack）。 */
+export interface GenrePack {
+  pack_id: string;
+  name: string;
+  genre_tag: string;
+  version: number;
+  payload: GenrePackPayload;
+  source_path: string | null;
+  created_at: string;
+  updated_at: string;
+  bound_project_count: number;
+}
+
+/** 项目 → 题材包绑定（单 slot；未绑定 → bound=false, pack=null）。 */
+export interface GenreBinding {
+  project_id: string;
+  pack_id: string | null;
+  bound: boolean;
+  pack: GenrePack | null;
+}
+
+/** 核销层 v1 issue（review_report.genre_check.issues[]；恒 warning，report-only）。 */
+export interface GenreCheckIssue {
+  rule_id: string;
+  severity: string;
+  category: string;
+  message: string;
+  location?: Record<string, unknown> | null;
+  suggestion?: string | null;
+  evidence_refs?: string[];
+}
+
+/** review_report 的 genre_check 段（bound=false 时整段缺席）。 */
+export interface GenreCheck {
+  bound: boolean;
+  checked: boolean;
+  pack_id?: string | null;
+  pack_version?: number | null;
+  issues: GenreCheckIssue[];
+  issue_count?: number;
+  rule_ids?: string[];
+  ratio_check?: Record<string, unknown> | null;
+  redline_check?: Record<string, unknown> | null;
+  skipped?: string[];
+  error?: string | null;
+}

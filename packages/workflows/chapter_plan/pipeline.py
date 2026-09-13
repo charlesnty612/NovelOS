@@ -19,6 +19,7 @@ from packages.core.agent_runtime.runner import run_agent
 from packages.core.context_engine import build_director_input
 from packages.core.db import get_connection
 from packages.core.model_router.router import capability_for
+from packages.core.quality.wordcount import DEFAULT_TARGET_WORD_COUNT
 from packages.core.workflow_runtime.engine import WorkflowNode
 
 
@@ -33,7 +34,7 @@ def _build_ctx_node(ctx: dict[str, Any]) -> dict[str, Any]:
         project_id,
         chapter_id,
         intent,
-        target_word_count=ctx.get("target_word_count", 3000),
+        target_word_count=ctx.get("target_word_count") or DEFAULT_TARGET_WORD_COUNT,
     )
     payload["chapter"]["expected_role"] = ctx.get("expected_role", "setup")
     return {"director_input": payload}
@@ -65,7 +66,8 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     保字数契约：若章节当前 plan_json 已含 ``expected_word_count``（>0），
     重生成时继承该值，避免误点「生成计划」覆盖掉已规划的单章字数。
-    默认 3000（对齐 NovelOS 单章字数标准，与 project-init 的 DEFAULT_CHAPTER_WORD_COUNT 一致）。
+    兜底默认取 ``quality.wordcount.DEFAULT_TARGET_WORD_COUNT``（3000，全仓单源；
+    与 project-init 的 DEFAULT_CHAPTER_WORD_COUNT 同口径）。
     """
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
@@ -94,9 +96,12 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
     elif inherit_expected is not None:
         expected_word_count = inherit_expected
     else:
-        expected_word_count = 2200
+        # V3.9 批次 5.1：兜底与 build_director_input 传参默认同为全仓单源 3000
+        # （改造前此处为 2200，与同文件 docstring / writer / review 口径不一致）。
+        expected_word_count = DEFAULT_TARGET_WORD_COUNT
 
     plan_payload: dict[str, Any] = {
+        # 白名单：director 新增字段须**人工登记本表**，否则静默丢弃（不落 plan_json）。
         "chapter_goal": director_output.get("chapter_goal"),
         "core_conflict": director_output.get("core_conflict"),
         "turning_point": director_output.get("turning_point"),
@@ -154,11 +159,11 @@ def _safe_load_json(raw: Any) -> Any:
 
 
 def _build_nodes() -> list[WorkflowNode]:
-    """构造节点列表；AI 节点的 fn 接受 ctx 但需读取 ``_current_node_run_id``——
-    WorkflowEngine 在调用 fn 时把 node_run_id 写不进 ctx（因 fn 返回后才写）；
-    所以我们在 fn 内部通过 SQL 查询最近一行的 node_run_id。
+    """构造节点列表。
 
-    MVP 简化：依赖 workflow_run_nodes 表按 started_at DESC 取最新行。
+    AI 节点（director）从 ctx 读 ``_current_node_run_id``：引擎在每次调用节点 fn
+    之前把当前节点行 id 注入 ctx（``engine._run_nodes`` 的
+    ``ctx["_current_node_run_id"] = node_run_id``），fn 内无需自行查询。
     """
     return [
         WorkflowNode("build_ctx", "Transform", _build_ctx_node),

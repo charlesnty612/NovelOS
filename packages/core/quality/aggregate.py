@@ -16,9 +16,14 @@ overall = round((plot + character + continuity + style + pacing + foreshadowing 
 
 规则：
 
-1. 任一 error 级 issue（categories 限定：guardrail 五条 + compliance）⇒ overall = 0。
+1. blocking error（``issues.is_blocking_issue``）⇒ overall = 0；
+   informational error（severity=="error" 但 rule_id 不在阻断白名单）只进 issues 列表，
+   不压死 overall（V3.9 批次 3.1「悬崖聚合改造」）。
 2. 任一子分缺失（None）⇒ push 一条 ``scoring_missing_subscore`` issue，并把 overall 设为 0。
 3. warning 与 info 不阻断。
+
+``scoring_formula_hash`` 的输入 = 公式文本 + :func:`issues.severity_config_fingerprint`
+（severity 矩阵 / 规则级覆盖 / 阻断白名单），矩阵变更即公式变更，历史报告可按 hash 区分口径。
 
 ``compute_overall`` 与 :mod:`.engine` 衔接：它只修改 overall 数值与追加 issues，
 不读 QualityReport 实例。
@@ -29,7 +34,7 @@ from __future__ import annotations
 import hashlib
 from typing import Optional
 
-from .issues import Issue, make_issue
+from .issues import Issue, is_blocking_issue, make_issue, severity_config_fingerprint
 
 # ============================================================================
 # 权重（七子分固定；不得在调用方覆盖）
@@ -57,18 +62,30 @@ SUBSCORE_NAMES: tuple[str, ...] = tuple(WEIGHTS.keys())
 
 _FORMULA_TEXT: str = (
     "overall = round((plot + character + continuity + style + pacing + "
-    "foreshadowing + ai_trace) / 7)"
+    "foreshadowing + ai_trace) / 7); "
+    "blocking error (severity=='error' AND rule_id IN BLOCKING_RULES) => overall = 0; "
+    "informational error => issues only; missing subscore => overall = 0"
 )
 
 
 def formula_hash() -> str:
-    """返回 §2.1 + ai_trace 公式字符串的 sha256 前 16 位 hex。"""
-    return hashlib.sha256(_FORMULA_TEXT.encode("utf-8")).hexdigest()[:16]
+    """返回公式字符串 + severity 配置指纹的 sha256 前 16 位 hex。
+
+    V3.9 批次 3.1：severity 矩阵 / 规则级覆盖 / 阻断白名单内容纳入 hash 输入，
+    矩阵变更 = 评分口径变更，历史报告可按 hash 区分。
+    """
+    payload = f"{_FORMULA_TEXT}\n{severity_config_fingerprint()}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def formula_text() -> str:
     """返回 overall 公式原文（仅供自检 / 文档化使用）。"""
     return _FORMULA_TEXT
+
+
+def severity_config_text() -> str:
+    """返回 severity 配置指纹原文（自检 / 报告展示用；与 formula_hash 输入一致）。"""
+    return severity_config_fingerprint()
 
 
 # ============================================================================
@@ -83,11 +100,17 @@ def compute_overall(
     """计算 overall 并按规则补写缺失子分 / 阻断 issue。
 
     参数：
-        subscores: 六子分 dict；任意子分缺 / None ⇒ push scoring_missing_subscore。
+        subscores: 七子分 dict；任意子分缺 / None ⇒ push scoring_missing_subscore。
         issues: 调用方维护的 issues 列表；本函数**就地追加** missing subscore issue。
 
     返回：
         (overall, updated_issues) — updated_issues 与传入为同一对象（便于流水线串联）。
+
+    阻断口径（V3.9 批次 3.1）：
+        - blocking error（severity=="error" 且 rule_id ∈ ``BLOCKING_RULES``）⇒ overall = 0；
+        - informational error（severity=="error" 但 rule_id 不在白名单）⇒ 保留在 issues，
+          overall 仍按七维平均给出部分分；
+        - missing subscore ⇒ 追加 error issue，overall = 0（系统级阻断）。
     """
     if issues is None:
         issues = []
@@ -111,14 +134,11 @@ def compute_overall(
             )
         )
 
-    # 2) 任意 error 阻断（来自 guardrail / compliance / subscore-missing 等）
-    # 实现口径：任何 severity=="error" 的 issue 都把 overall 设为 0；
-    # 比 quality-scoring-v0 §2.1 "Guardrail error" 的描述更宽（v0 只点名 Guardrail 五条 + compliance）。
-    # 当前所有 error 产出确实来自 Guardrail/合规类与 scoring_missing_subscore，
-    # 与 v0 口径无行为偏差；若未来子分规则产出 error，须重新评估此分支语义。
-    blocked = any(
-        isinstance(it, Issue) and it.severity == "error" for it in issues
-    )
+    # 2) blocking error 阻断（V3.9 批次 3.1：error 分 blocking / informational 两组）
+    # blocking 组 = severity=="error" 且 rule_id ∈ BLOCKING_RULES（结构性损坏 / 合规红线 /
+    # 评分缺失，见 issues.BLOCKING_RULES 注释）；informational error 仅进 issues 列表，
+    # 不把 overall 归零。
+    blocked = any(is_blocking_issue(it) for it in issues)
 
     if blocked or missing:
         return 0, issues
@@ -138,4 +158,11 @@ def compute_overall(
     return max(0, min(100, overall)), issues
 
 
-__all__ = ["compute_overall", "WEIGHTS", "SUBSCORE_NAMES", "formula_hash", "formula_text"]
+__all__ = [
+    "compute_overall",
+    "WEIGHTS",
+    "SUBSCORE_NAMES",
+    "formula_hash",
+    "formula_text",
+    "severity_config_text",
+]

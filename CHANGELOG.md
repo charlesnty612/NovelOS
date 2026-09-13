@@ -4,6 +4,77 @@
 
 ## [Unreleased]
 
+### Changed（2026-09-13 V3.9 业务逻辑优化与治理：四批次 + 顺手债 + 题材库全落地）
+
+> 来源：`docs/roadmap/v3.9-业务逻辑优化与治理.md`（批次 1/2/3/4 + 批次 5 顺手债 + F-1~F-8 动态发现）与 `docs/roadmap/题材库-评估与落地计划-2026-09-13.md`（P0~P3）。批次 3（质量评分体系）单独条目见下。方法：三路线程并行代码级审查（全部论断带 file:line 主会话复核）→ 文件互斥并行实施 → 逐批主会话审查（含突变验证抽查）→ 全量验证。
+
+**批次 1（正确性修复）**
+- **condense 字数压缩生产不可达（P1 实锤修复）**：`chapter_write` condense 节点的 mock 守卫错误——无 mock 即 `skipped_no_mock`，生产环境永远走不到 LLM 压缩（CHANGELOG 此前记录的字数闭环实际未在生产运行）。守卫改为 polisher 同款语义（生产 `mock_script=None` 真调），「≤2 轮」循环收进节点内部兑现（每轮 payload 用最新实测重建，拒空/拒更长每轮生效，异常 fail-soft 不阻断）；节点回写压缩后 `length_report`/`length_check_passed`，下游 save_draft 读到压缩后真相。`save_draft` 的 `word_count` 改对最终 prose 取权威实测（原读压缩前旧值）；「2 轮后仍超带」偏差注记随轮数真实可达。
+- **`_inject_scene_word_budget` `int(None)` 崩溃修复**：部分 scene 声明 `target_words` 且已声明子集和落在 90%~110% 时未声明 scene 保留 None 导致 writer 节点可达性崩溃；未声明 scene 按剩余预算均分（余数补首个，剩余≤0 给保底值），已声明值不动。
+- **装配缓存脏命中修复（P1）**：director 键补 `author_intent`/`target_word_count`、writer 键补 `target_word_count`（进 payload 的参数全入键）；命中返回/写入存深拷贝（调用方就地改写不再回灌缓存）；preview 拆 `ns:preview` 键空间（前端挂载自动打预览不再污染生产条目）。钉住旧身份行为的 3 个测试用例按新契约更新。
+
+**批次 2（上下文治理）**
+- **peek 收敛**：四个 `_peek_*`（为拿 state_version 解析整份 snapshot_json、各自建连）收敛为单连接单 JOIN `_peek_chapter_context` + `SELECT MAX(state_version)` 轻查询；实测 writer 缓存命中 **15.9ms→2.19ms**、连接 5→1，冷装配 22.5→10.6ms。
+- **token 预算真兜底**：director 摘要链预算参数化（`_DIRECTOR_SUMMARY_TOKEN_BUDGET=2000`，`_RECENT_SUMMARY_CAP` 5→40、`_PER_CHARS` 200→400，原 800-token 截断机制实测恒不触发）；三个 build_* 入口 payload 增 `_assembly_meta`（estimate_tokens/token_budget_exceeded，超预算只标记不阻断不改写）。注：`_assembly_meta` 经 run_agent 序列化进 prompt（同 `_reference_canon_consumed` 路径），剥离评估列入收尾后全面审查（F-1）。
+- **无上限注入项加 cap**：`hook_ledger_excerpt`/`narrative_debt_excerpt`/plot `branches` 各 LIMIT 20 + 确定性排序；critic `settings_digest` world_rules LIMIT 20 + 每条 500 字符截断（F-3）。
+- **chapter-write checkpoint 写放大治理**：WORKFLOW 增 `checkpoint_exclude`（writer_input + 7 个节点镜像键——镜像键与 workflow_run_nodes.output_json 逐字节重复是隐藏大头）；实测 checkpoint **133,630→4,471 B（-96.7%）**，生产既有 run 重算降 77~80%。resume 安全性三重论证（序列化期浅拷贝剔除/run 无 Human 节点/recover 不重建 ctx）。
+
+**批次 4（失败闭环）**
+- **质量门禁阻断有出路**：enforce 阻断时（raise 前）把 `revision_guidance` 落 `plan_json.revision_note` + `gate_blocked` 标记（通过自动清除）；新端点 `POST .../gate-revise`（write revise 模式 → daemon 接力 review）；前端「质量门禁阻断」横幅 + 一键改稿。
+- **auto_revise 回路治理**：进程内回路注册表 + 子 run DB 态兜底实现回路级取消（取消任一路子 run 即终止回路，不扩大存储面）；critic 建议按归一化 sha1 去重（已采纳进 revision_note 的为准，上限 50）。
+- **QualityReport.draft_version**：模型可空字段 + 迁移 0024，落库时取最新 draft 版本回填——改稿重评后历史报告可对应草稿版本。
+
+**批次 5（顺手债 sweep，A/C/D 三路）**
+- 目标字数单源化：`wordcount.DEFAULT_TARGET_WORD_COUNT=3000`，plan 兜底 2200→3000（与 docstring 承诺一致）、preview 默认同改、builders 内部 fallback 同改（PRD §124 的 2200 中点口径由项目级 word_band_json 承载）；**行为变更**：未显式指定字数的 plan 现按 3000 规划，钉住 2200 的测试已修订并注释。
+- review 字数阈值双源消除：warning/error 改「带边缘判据」（出带即 warning、带外偏离超过带边缘到 target 的距离即 error），默认带下与旧 ±15%/±30% 逐值一致（突变验证证明），项目自定义带自动跟随。
+- observer `run_agent` 7+2 处近复制收敛到唯一 `_call_observer`（零变更重构，测试数对照硬验收）；`_recover_run_status` 死代码删除；merge 契约文档按真实实现重写（不读 change_id，delta_repair 是重写而非丢弃——原契约声称的机制不存在）；delta 三重校验走文档路线（第三层为前两层真子集、服务层是公共边界，证据链留 commit.py 注释）。
+- observer resolved/paid「最近 5 条」按随机 hook_id 取错 → `(created_at, id)` 双键（快照缺该列，DB 补齐映射）；leg 元数据按 `ai_call_logs.output_json` 同一性精确归属（roadmap 处方 ORDER BY created_at 经实证不可行——与 rowid 同源同秒，F-5 留痕），观测字段改名 `leg_total_chars`。
+- critic/deep_review 共享取数前移 basic_checks（同一 run 不再双跑相同 SQL）；`_fetch_chapter_number` 仅 sample 模式调用；评审 review_inputs 预取。
+- `workflow_runs.retry_count` 接线（runner 两条重试路径累加，与 ai_call_logs 的调用级 0/1 口径不同，注释声明）；exporter 三私有 helper 提升公开 API（下划线别名保留，content_sync 改引公开版）；版本对齐 pyproject 3.8.0→**3.9.0** + apps/web 3.5.0→3.9.0；表数口径 37→38 全点联动（db.py docstring/README/api-README/smoke 断言/health 测试）。
+- 误导注释修正：`_build_nodes` 废弃机制描述、save_plan 白名单警示、revision_note 落点注释；wordcount 测试手写 3450→生成期望值（实为 3449，F-2）。
+
+**F-6 smoke_e2e 断链修复（实机发现）**：start 端点 V3.5 异步化后脚本不等待终态 → 409 连锁失效（resume 逻辑也从未触发）；统一 `_run_step`（轮询 + PAUSED 批准续跑），实机 4 连绿（全链 5.5s）+ 失败路径注入验证；顺带根治 Windows 服务进程树残留（taskkill /F /T）与 DRIFT 分支 UnicodeDecodeError。
+
+**测试口径变更声明**：本批按「行为修正」修订的钉住旧错误行为测试清单——`test_chapter_plan_preserve_word_count`（2200→3000）、`test_context_engine_cache_dimensions`（preview 默认）、`test_writer_input_paged`（band 生成值）、`test_chapter_review_word_band_override` 两例（带边缘判据）、`test_chapter_commit_observer_split_o3`（leg_total_chars 改名）；其余新增用例全部带突变验证（各批报告留档）。
+
+### Added（2026-09-13 V3.9 题材库全落地：评估 → P0 内容 → P1 软件 → P2 规则化 → P3 同步与前端）
+
+> 来源：`docs/roadmap/题材库-评估与落地计划-2026-09-13.md`（含对既有机制「关键洞察被推翻」的批判性复核留痕，评估表登记为 R16/R17）。**软件/内容分层硬约束守住**：题材正文零行进软件仓；审核禁忌只进内容仓。
+
+- **P0 内容骨架**：`NovelOS-Content/genres/男主快穿/` 10 维资产（元数据/结构模板/黄金三章/节奏字数/爽点分类法 8 型/人设 archetype 库/位面库/桥段映射+审核红线权威清单/番茄体文风/平台规则）+ 维护公约（来源标注/拆书回填流程/季度热度复盘/红线更新即生效）。
+- **P1a 地基**：迁移 0025（`genre_packs` 表 + `projects.genre_pack_id`，业务表 37→38）+ `packages/core/genre/` 五件套（自有 schema v1.0.0，`additionalProperties: false` 守住「软件层只承载消费子集」）+ 8 端点 CRUD/绑定 + director 注入（缓存键 pack 指纹，preview/生产/降级三路径同形——吸收批次 1B 脏命中教训）。
+- **P1b 消费与核销层 v1**：scene_planner 吃爽点摘要（40 条/1500 字符预算+截断标记）+ 配比指令（`scene_type` 可选契约）；writer 文风合并（`genre_style` 子键不覆盖、作者样例优先）；**核销层三规则**（GENRE-RATIO-DEVIATION 配比偏离>10% / GENRE-WORD-BAND-DEVIATION / GENRE-REDLINE-HIT，warning 级、BLOCKING_RULES 零触碰、未绑定整段缺席零行为变化）；writer 缓存键 11→12 元；preview/Project 响应同步。
+- **P2 规则化**：schema v1.1.0（`opening_rules`/`critic_rubric` 可选段，v1 线 minor 兼容）；signing_check `genre_opening` 段（子串启发式，失败/不可核 info 级不阻断）；critic/deep_review payload `genre_rubric`（payoff_focus 逐个核 verify_hint + taboo 命中即 high 一票关注）；scene_planner-v1.md Rule 12 scene_type 输出契约（配比核销模型遵从度的关键）；basic_checks 题材禁词确定性扫描。
+- **P3 同步与前端**：content_sync `genre-push/pull`（slug 规则：中文名 fallback `pack-<id末8>`/保留名防护/同 pack 路径稳定复用；写侧 schema 严校验不落盘；pull 幂等 no-op 不升版本；退出码沿用既有约定）+ StoryBiblePage「题材」标签页（绑定/解绑/爽点型表格/genre_check issues 展示）。**双轨关系**：内容仓 10 维文件=人编辑面，pack.json=运行面，v1 不做自动聚合。
+- **内容仓联动**：`docs/data-model/data-model-v0.md` 表数口径订正（38 业务表，F-7）。
+
+### Changed（2026-09-13 V3.9 批次 3：质量评分体系——悬崖聚合 / foreshadowing 双通道 / Q8 口径 / AI 味词表 / 文档对齐）
+
+> 来源：`docs/roadmap/v3.9-业务逻辑优化与治理.md` 批次 3（3.1~3.5）。**行为变更 3 处**（3.1 聚合、3.2 foreshadowing、3.3 Q8 默认 severity），3.4 为行为不变的共享词表重构。
+> 受影响面：`packages/core/quality/`（全部）、`packages/workflows/chapter_commit/gate.py`、`docs/evaluation/quality-scoring-v0.md`、`tests/unit/quality/`、`tests/api` 既有 Q8 钉住测试。
+
+- **3.1 悬崖聚合改造**：`error` 分 blocking / informational 两组，仅 blocking（`rule_id ∈ issues.BLOCKING_RULES`：SCHEMA_VALIDATION_FAILED / RULE_CHAR_DEAD_ACTIVE / RULE_WORLD_HARD_RULE_CHANGED / RULE_Q6_OVERLAP_RATE / RULE_Q8_HUMAN_RATIO_LOW / scoring_missing_subscore）把 `overall` 归零并触发 gate 阻断；informational error 保留七维平均部分分、只进 issues。`chapter_commit/gate.py` 阻断判定同步改 `is_blocking_issue`（节点返回新增 `quality_blocking_count`）。`scoring_formula_hash` 输入扩展为「公式文本 + severity 配置指纹（矩阵 / 规则级覆盖 / 白名单）」⇒ 旧 hash `51a11a5c5d415dcc` → 新 `a945c6602f6a9f92`。
+- **3.2 foreshadowing 双通道（钉住旧行为的测试更新）**：`resolved / (new + resolved)` → `round(100 × (resolved + 0.9 × new) / (resolved + new))`，修复「铺垫章 0 分 < 不涉及钩子的 85 中性分」倒挂。对照：埋 3 兑 0 = 0 → **90**；埋 1 兑 1 = 50 → **95**；只兑 = 100 不变。`tests/unit/quality/test_scoring.py` 原 `assert score == 50` 两例按新口径更新（这正是本批次要修的错误行为）。
+- **3.3 Q8 口径修正 + 默认降级（钉住旧行为的测试更新）**：`compute_char_stats` 新增 `writer:v1` 等 prompt_version 前缀 → AI 侧（含口径 note `RULE_Q8_STATS_NOTE`），未知 created_by 不计入且留痕（证据：生产 drafts 44 行中 `writer:v1` ×36、`human` ×8）。< 30% 红线默认 **warning**（`MVP_RULE_OVERRIDES`），显式 `NOVELOS_QUALITY_Q8_STRICT=1` 才 error/阻断；理由：本工具是 AI 写作工具，维持 error 会让 enforce 默认拦死全部纯 AI 章（README §4.5 留痕）。`tests/unit/quality/test_engine.py::test_engine_q8_error_zero`、`test_ai_trace.py::test_engine_q8_error_zero_overrides_ai_trace`、`test_guardrails.py::test_q8_human_ratio_error` 三例按新裁决更新。
+- **3.4 AI 味四算合一（行为不变）**：新增 `packages/core/quality/ai_flavor.py` 为唯一词表源（`AI_FLAVOR_MARKERS` / `AI_CLICHES` + 密度工具 `marker_hits_per_kchars`）；`guardrails.AI_MARKERS`、`ai_trace.AI_CLICHES` 改为引用。style/ai_trace 5 个 fixture 分数逐项不变（100/100、70/73、75/80、60/73、85/80）；critic LLM 维度进评分仍不做（R9 留档，README §6.1 决策指针）。
+- **3.5 文档对齐（R14/R7）**：`docs/evaluation/quality-scoring-v0.md` 升 v0.2——§2.1 旧六子分权重表标删除线留演化史、error 语义改 blocking/informational、`scoring_formula_hash` 覆盖矩阵、§3.6 双通道、§3.7 H-3 标 warning（矩阵封顶）/H-5 越级标未实现、§4.8 Q8 默认 warning 与统计口径、§6.3 条件 4「baseline −3」标删除线并给 R7 理由；`payoff.py` docstring 与 `quality/README.md`（§4.2~§4.5 矩阵+白名单+变更流程、§5.2 取值表、§5.5 分工）同步。`4.4 severity 矩阵变更流程`：改矩阵必须同步三处 + hash 变 + 回归测试。
+- **测试**：`tests/unit/quality` 196 例全绿（新增 `test_severity_matrix.py` / `test_q8_stats.py` / `test_ai_flavor.py` / `test_gate_blocking.py` 及各文件突变验证用例）；`tests/api -k "quality or gate or scoring"` + `tests/unit -k "ai_trace or payoff or foreshadow"` + `tests/workflow -k "commit or gate or quality"` 全绿；ruff 0。
+
+### Added（2026-09-11 竞品对标调研：InkOS 结论入库）
+
+> 来源：用户提供当红开源同类项目 `Narcooo/inkos`（GitHub 9.7k stars，AGPL-3.0，TypeScript monorepo）并要求对比找补强点。方法：4 路 MiniMax-M3 子代理并行调研（InkOS 源码全貌 / 外部口碑 / NovelOS 能力矩阵 / 实证交叉验证）+ 主会话逐条复核关键结论。**本轮零代码改动。**
+
+- **`docs/roadmap/竞品对标-inkos-2026-09-11.md`（新增）**——完整对标结论留档，含 InkOS 画像（结构 / 三层存储 / 44 provider endpoint / 单章流水线 / 原子写与写锁实现）、232 条 open issue 的六类痛点归纳（逐条带 issue 编号）、五条假设的验证判定、NovelOS 对位优势表、补强建议、未能确认项与复现方法。目的是免去日后重复调研。
+- **核心结论**：InkOS 的传播杠杆是 `skills/SKILL.md` + 33 个 CLI 命令使其可被外部 Coding Agent 调用（进 ClawHub / SkillsLLM 技能市场），非「AI 写小说」概念；但 **9.7k stars 与工程质量不匹配**——232 条 open issue 中大量 2026-05 起的老 bug 未关，`pushed_at` 停在 2026-08-25。
+- **用户痛点高度同源且集中在 NovelOS 已规避的领域**：① 数据完整性（#387 三本书写不到三章即文件缺失、#275 导入章节覆盖重建真相文件）；② 上下文膨胀（#80 五十章后单章修复 40 分钟、#84 摘要 50 章后不可用）；③ 模型配置（#300 硬编码白名单只认 72 个模型、#379 强制要求上游实现可选端点 `/models` 否则拒绝保存）。
+- **两处主会话先验判断被推翻（留痕以免重蹈）**：① 「InkOS 以 JSON/MD 为唯一真相源、无事务保证」——**错**，实际有 `commitAtomicFileSet` 原子提交（`utils/atomic-file-set.ts:46-115`）、跨进程写锁（心跳 30s + 租约 3min）、索引自愈（`state/manager.ts:480-548` 的 `rebuildChapterIndexFromFiles`）；准确差异是「原子性 ≠ 可回溯性」与「原子写仅覆盖特殊路径」。② 「NovelOS 完全没有 token 预算机制」——**不准**，`_truncate_summaries_to_token_budget`（`context_engine/builders_common.py:953-972`）在跑，但只作用于 director 摘要链、预算固定 800 token（`director_input.py:174-175`）。
+- **实测确认的真实缺口（1 条）**：`_TOKEN_BUDGET = 8000` 定义于 `context_engine/preview.py:37`，全仓仅 3 处引用（定义 + `preview.py:525-526` 两个返回字段），**无任何代码读它做裁剪或失败**，`within_budget` 仅展示用。即 NovelOS 的上下文裁剪是「按字段降级」，缺全局 token 硬顶兜底——与 InkOS #80/#84 同源风险，建议把既有 `_truncate_summaries_to_token_budget` 从「仅 director 摘要链」推广到全局装配。
+- **架构无关、自用也会踩的一条（待自查）**：InkOS #260 用户设定「权谋线 / 感情线各占一半」而实际输出感情戏近零，改 focus.md / 重写 / 审计驳回均只能维持两三章。NovelOS `scene_planner` 已硬约束 `target_words`（形式约束，`builders_common.py:986`），但「内容配比」类约束是否在 director / scene_planner 阶段显式声明并逐章核销，本次未见明确机制，列入自查项。
+- **定位裁决（用户 2026-09-11）**：NovelOS 为**纯自用工具**。据此搁置三项：CLI 原子命令层 + SKILL.md（自用场景 agent 可读代码调用 HTTP，投入产出比不成立；且实测 `pyproject.toml` 无 `[project.scripts]`）、LICENSE 声明（实测项目**无 LICENSE 文件**、`pyproject.toml` 无 `license` 字段；私有自用无影响，**若日后转公开发布则为硬阻塞**）、Docker 部署与账户鉴权。明确不必跟风：互动影游 / Open World / 剧本分镜、33 维审计规模、复杂文风指纹系统、多语言文档。
+- **许可边界（已核实）**：InkOS 全仓 AGPL-3.0-only（LICENSE + 三个包 `license` 字段一致），**只可借鉴设计思路、不可复制代码**；`SKILL.md` 的 YAML frontmatter 协议格式（AgentSkills / OpenClaw）属开放格式可参照，正文受 AGPL 约束。
+- **源码快照**：`D:\zcodeproject\_refs\inkos`（HEAD `0910483`，v1.8.0，约 31 MB 含 `.git`），供后续查阅。
+- **审查与订正**：文档落地后派独立审查子代理逐条核验 file:line 引用与数字（InkOS 11 处 + NovelOS 7 处引用点全部准确）。订正 3 处数字错误：studio 测试文件 21→**59**（总数 ≈267→**306**）、内置 skill 目录 14→**15**（原文还错记为「README 称 15 而实测 14」的不一致，实为一致）、studio 页面路由 25→**23**；另订正 CLI 命令口径（33 个命令文件 / program.ts 内 34 次 `addCommand`，daemon.ts 含 up/down）、TUI 文件 18→19、openrouter 白名单「60+」→59、`ProductionRunSnapshot` 字段名 `runId`→`id`，并为 stars 补注时效增长。
+
 ### Added（2026-09-09 内容同步器 CLI：软件/内容分仓运行时闭环）
 
 > 来源：软件层/内容层/操作痕迹三仓分离后，运行时写小说产出「内容归内容」的归档通路（主会话定架构，实现→审查 PASS-with-nits→打回小修闭环）。

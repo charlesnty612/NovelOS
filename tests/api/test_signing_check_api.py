@@ -211,3 +211,69 @@ def test_fanqie_export_contains_signing_check_summary(tmp_path: Path):
             assert "ch2_golden_finger" in text
 
     asyncio.run(run())
+# ---------------------------------------------------------------------------
+# 集成：题材开篇检查段（题材库 P2）
+# ---------------------------------------------------------------------------
+
+
+def test_signing_check_endpoint_includes_genre_opening_section(tmp_path: Path):
+    """绑定题材包（API 创建 + 绑定）→ 端点响应含 genre_opening 段与题材 items。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app, "题材体检")
+            await _make_protagonist(app, pid, "李晨")
+            await _make_chapter_with_draft(
+                app, pid, 1, "起",
+                "李晨被人当面羞辱，系统绑定。「你算什么？」" + "字" * 1700 + "突然？",
+            )
+            pack = {
+                "name": "男主快穿",
+                "genre_tag": "快穿",
+                "pack_id": "gp_api_p2",
+                "payload": {
+                    "schema_version": "genre-pack.v1.1.0",
+                    "opening_rules": [
+                        {
+                            "check_id": "sys_bind_ch1",
+                            "description": "系统绑定不得晚于第 1 章",
+                            "chapter_no": 1,
+                            "requirement": "第 1 章必须出现系统绑定",
+                        },
+                        {
+                            "check_id": "hook_tail_ch1",
+                            "chapter_no": 1,
+                            "requirement": "第 1 章必须出现倒计时",
+                        },
+                    ],
+                },
+            }
+            created = await _request(
+                app, "POST", f"/api/projects/{pid}/genre-packs", json=pack,
+            )
+            assert created.status_code == 201, created.text
+            bound = await _request(
+                app,
+                "POST",
+                f"/api/projects/{pid}/genre-pack/bind",
+                json={"pack_id": "gp_api_p2"},
+            )
+            assert bound.status_code == 200, bound.text
+
+            r = await _request(app, "GET", f"/api/projects/{pid}/signing-check")
+            assert r.status_code == 200, r.text
+            body = r.json()
+            section = body["genre_opening"]
+            assert section["pack_id"] == "gp_api_p2"
+            by_id = {rule["check_id"]: rule for rule in section["rules"]}
+            assert by_id["sys_bind_ch1"]["status"] == "pass"
+            assert by_id["hook_tail_ch1"]["status"] == "fail"
+            # 失败为 info 级（fail_count 只有平台规则贡献）
+            assert body["summary"]["fail_count"] == sum(
+                1 for it in body["items"] if it["level"] == "fail"
+            )
+            genre_items = [it for it in body["items"] if it["key"].startswith("genre_opening_")]
+            assert {it["level"] for it in genre_items} == {"pass", "info"}
+
+    asyncio.run(run())

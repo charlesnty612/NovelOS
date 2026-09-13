@@ -8,8 +8,9 @@
       计算重复 shingle 占比。占比越高扣分越多。
 - b. 跨章重复率（cross_chapter）：与同项目最近 N 章已提交正文比对 shingles 重合率。
       拿不到历史章节时降级满分并记 note（不阻断）。
-- c. AI 套话命中（cliche_hit）：内置一张默认中文 AI 高频套话表（约 30 条），按每千字
-      命中次数阶梯扣分。套话表定义为模块级常量，方便后续扩展。
+- c. AI 套话命中（cliche_hit）：共享中文 AI 高频套话表（:data:`AI_CLICHES`，~47 条），
+      按每千字命中次数阶梯扣分。词表唯一属主是 :mod:`.ai_flavor`（V3.9 批次 3.4），
+      其中转折/议论类与 style 的 ``AI_FLAVOR_MARKERS`` 共享同一份常量。
 
 合成公式（write 模块顶部 ``_FORMULA_TEXT``）：
 
@@ -39,7 +40,9 @@
 - 纯函数：除 :func:`compute_shingles` 外不依赖 DB / 网络 / LLM；
 - 章内/跨章重复判定与 Q6 / §3.4 trigram 重复共用 :func:`compute_shingles` 入口，避免
   在多个模块各自实现 shingle 计算；
-- 套话表为模块级 tuple 常量，方便后续扩展并保证可序列化；
+- 套话词表集中在 :mod:`.ai_flavor`（tuple 常量，保证可序列化；扩展只改那一处），
+  本模块只负责「跨章重复 + 套话阶梯扣分」——
+  **分工**：style 管单章密度阈值，ai_trace 管跨章重复与套话阶梯，scan_ai_patterns 管模式级检测；
 - 不产出 error 级 issue——ai_trace 是 score 子分，不是 guardrail；其结果以子分形式
   表达，不阻断提交。
 """
@@ -48,71 +51,16 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from .ai_flavor import AI_CLICHES, marker_hits_per_kchars
 from .guardrails import _norm, compute_shingles
 
 # ============================================================================
-# AI 高频套话表（默认；模块级常量，便于扩展）
+# AI 高频套话表（V3.9 批次 3.4：词表唯一属主迁到 ai_flavor）
 # ============================================================================
 #
-# 收录标准：网文社区吐槽的中文 AI 高频套话；多为短句或短语，作为子串匹配。
-# 新增套话直接改本表即可（无需改 scoring 逻辑）。
-
-AI_CLICHES: tuple[str, ...] = (
-    # 神情 / 微反应
-    "不禁",
-    "仿佛",
-    "嘴角勾起",
-    "嘴角微微上扬",
-    "眼中闪过一丝",
-    "眼中闪过一抹",
-    "眼底闪过",
-    "眼底深处",
-    "眸子微微一缩",
-    "眉头微皱",
-    "眉头紧锁",
-    "神色微变",
-    # 情绪
-    "深吸一口气",
-    "深吸了一口",
-    "倒吸一口凉气",
-    "倒吸了一口凉气",
-    "心情复杂",
-    "心下一凛",
-    "心中一震",
-    "心底涌起",
-    # 氛围 / 描写
-    "空气仿佛凝固",
-    "空气骤然凝固",
-    "空气瞬间凝固",
-    "凝固了一般",
-    "时间仿佛停止",
-    "仿佛凝固",
-    "落针可闻",
-    "一片死寂",
-    "整个空间",
-    # 转折 / 议论
-    "然而",
-    "但是",
-    "不仅",
-    "更重要的是",
-    "值得注意的是",
-    "由此可见",
-    "总而言之",
-    "综上所述",
-    # 套路化叙事
-    "不置可否",
-    "嗤笑一声",
-    "冷冷一笑",
-    "淡淡开口",
-    "淡淡说道",
-    "淡淡地开口",
-    "沉声开口",
-    "沉声说道",
-    "声音低沉",
-    "一字一句",
-    # 数量 ~30
-)
-"""中文 AI 高频套话表（默认 ~30 条）。模块级 tuple 常量；扩展时直接追加。"""
+# :data:`AI_CLICHES`（= ai_flavor.AI_CLICHE_DESCRIPTORS + AI_CLICHE_CONNECTIVES）是
+# 本模块套话子信号的词表；其中转折/议论类与 style 的 AI_FLAVOR_MARKERS 共享同一份常量，
+# 不再两边各写一遍。收录标准与扩展方式见 ai_flavor 模块 docstring。
 
 
 # ============================================================================
@@ -267,16 +215,13 @@ def cliche_density(
 ) -> tuple[float, int]:
     """AI 套话命中子信号。
 
-    返回 ``(per_kchars, deduction)``：per_kchars 是每千字命中次数；deduction 是
-    按 :data:`_CLICHE_BUCKETS` 阶梯扣分。空文本 ⇒ ``(0.0, 0)``。
+    返回 ``(per_kchars, deduction)``：per_kchars 是每千字命中次数（密度工具与 style
+    共用 :func:`ai_flavor.marker_hits_per_kchars`）；deduction 是按
+    :data:`_CLICHE_BUCKETS` 阶梯扣分。空文本 ⇒ ``(0.0, 0)``。
     """
     if not draft or not cliches:
         return 0.0, 0
-    n_chars = len(draft)
-    if n_chars <= 0:
-        return 0.0, 0
-    hits = sum(draft.count(c) for c in cliches)
-    per_k = hits / (n_chars / 1000.0)
+    per_k = marker_hits_per_kchars(draft, cliches)
     return per_k, _bucket_deduct(per_k, _CLICHE_BUCKETS)
 
 

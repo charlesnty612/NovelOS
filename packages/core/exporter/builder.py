@@ -6,6 +6,9 @@
 - :func:`build_docx(project_id, scope)` -> ``bytes``
 - :func:`build_fanqie_package(project_id)` -> ``bytes``
 - :func:`plan_to_outline(plan_json)` -> ``str``
+- :func:`project_name` / :func:`latest_draft_content` / :func:`chapter_heading`
+  -> 章节渲染 helper（V3.9 批次 5.14 由私有名下划线版提升；旧名保留别名，
+  ``content_sync.build_volume_txt`` 复用同一实现）
 
 ``scope`` 是 ``dataclass`` 风格 dict，字段：
 
@@ -61,7 +64,8 @@ class ExportScope:
 # ---------------------------------------------------------------------------
 
 
-def _project_name(db_path: str, project_id: str) -> str:
+def project_name(db_path: str, project_id: str) -> str:
+    """项目名（缺行 → 空串）。公开 API（V3.9 批次 5.14）。"""
     conn = get_connection(db_path)
     try:
         row = conn.execute(
@@ -78,7 +82,8 @@ def _committed_chapters(db_path: str, project_id: str) -> list[dict[str, Any]]:
     return ChapterService(db_path).list_by_project(project_id)
 
 
-def _latest_draft_content(db_path: str, chapter_id: str) -> str:
+def latest_draft_content(db_path: str, chapter_id: str) -> str:
+    """该章最新 draft（``version DESC``）正文；无 draft → 空串。公开 API（V3.9 批次 5.14）。"""
     conn = get_connection(db_path)
     try:
         row = conn.execute(
@@ -95,11 +100,23 @@ def _latest_draft_content(db_path: str, chapter_id: str) -> str:
     return row["content"] if row else ""
 
 
-def _chapter_heading(number: int, title: str | None) -> str:
+def chapter_heading(number: int, title: str | None) -> str:
+    """章节标题行（``第N章 标题``；无标题 → ``第N章``）。公开 API（V3.9 批次 5.14）。"""
     label = f"第{number}章"
     if title:
         label += f" {title}"
     return label
+
+
+# 兼容别名（V3.9 批次 5.14）：三个 helper 曾是私有名，``content_sync`` 等模块
+# 跨模块引用下划线名属实现细节泄漏，故提升为公开 API；旧下划线名保留为别名，
+# 任何遗留引用（含本模块内部的旧调用点）行为零变化。
+# 本模块内部沿用别名调用：``build_txt`` / ``build_docx`` / ``build_fanqie_package``
+# 里有同名局部变量 ``project_name``（赋值即声明为局部），改调公开名会 UnboundLocalError；
+# 与其改局部变量名，不如保持别名调用——公开名与别名绑定同一函数对象，无行为差异。
+_project_name = project_name
+_latest_draft_content = latest_draft_content
+_chapter_heading = chapter_heading
 
 
 def plan_to_outline(plan_json: Mapping[str, Any] | None) -> str:

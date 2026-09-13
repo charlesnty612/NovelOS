@@ -13,7 +13,10 @@ from unittest.mock import patch
 
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
-from packages.workflows.chapter_review.pipeline import _critic_review_node
+from packages.workflows.chapter_review.pipeline import (
+    _basic_checks_node,
+    _critic_review_node,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
@@ -98,6 +101,9 @@ def test_critic_payload_includes_deterministic_hints(tmp_path: Path):
         "run_id": new_id("run"),
         "_current_node_run_id": new_id("nr"),
     }
+    # V3.9 批次 5.7：critic 改为消费 basic_checks 预取的共享输入（ctx["review_inputs"]），
+    # 不再自行取数——直调节点前按真实链路先跑 basic_checks 并把输出并入 ctx。
+    ctx.update(_basic_checks_node(ctx))
 
     with patch("packages.workflows.chapter_review.pipeline.run_agent") as mock_run:
         mock_run.return_value = _critic_output_ok()
@@ -126,6 +132,9 @@ def test_critic_payload_deterministic_hints_empty_when_clean(tmp_path: Path):
         "run_id": new_id("run"),
         "_current_node_run_id": new_id("nr"),
     }
+    # V3.9 批次 5.7：critic 改为消费 basic_checks 预取的共享输入（ctx["review_inputs"]），
+    # 不再自行取数——直调节点前按真实链路先跑 basic_checks 并把输出并入 ctx。
+    ctx.update(_basic_checks_node(ctx))
 
     with patch("packages.workflows.chapter_review.pipeline.run_agent") as mock_run:
         mock_run.return_value = _critic_output_ok()

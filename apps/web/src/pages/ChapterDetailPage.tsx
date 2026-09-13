@@ -337,6 +337,36 @@ export function ChapterDetailPage() {
     }
   }, [runningDetail, chapterCall]);
 
+  // ---- V3.9 批次 4.1：quality_gate enforce 阻断 → 「按门禁建议改稿」 ----
+  // 阻断标记由 chapter_commit 的 quality_gate 节点写入 plan_json.gate_blocked
+  // （改稿建议同批写入 plan_json.revision_note）；有标记即渲染入口。门禁通过后
+  // 后端清除标记，入口自动消失。触发后复用 write（revise）→ review 链路。
+  const gateBlock = useMemo<{ ruleIds: string[] } | null>(() => {
+    const plan = chapter?.plan_json;
+    if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return null;
+    const raw = (plan as Record<string, unknown>)['gate_blocked'];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const ids = (raw as Record<string, unknown>)['rule_ids'];
+    return { ruleIds: Array.isArray(ids) ? ids.map((v) => String(v)) : [] };
+  }, [chapter?.plan_json]);
+
+  const [gateRevising, setGateRevising] = useState(false);
+  const handleGateRevise = useCallback(async () => {
+    setActionErr(null);
+    setSubmitting(true);
+    setGateRevising(true);
+    try {
+      const resp = await workflowsApi.gateRevise(projectId, chapterId);
+      setSelectedRunId(resp.run_id);
+      await Promise.all([chapterCall.reload(), runsReload(), draftsCall.reload()]);
+    } catch (e: unknown) {
+      setActionErr(e instanceof Error ? e.message : '按门禁建议改稿启动失败');
+    } finally {
+      setGateRevising(false);
+      setSubmitting(false);
+    }
+  }, [projectId, chapterId, chapterCall, draftsCall, runsReload]);
+
   // 渲染
   return (
     <div>
@@ -371,6 +401,45 @@ export function ChapterDetailPage() {
         />
       ) : chapterCall.loading ? (
         <div className="muted">加载章节中…</div>
+      ) : null}
+
+      {/* V3.9 4.1：quality_gate 阻断出路。gate_blocked 标记在门禁阻断时写入
+          plan_json，改稿建议同批写进 plan_json.revision_note；点击后按建议改稿
+          （write revise → 自动接力 review）。门禁通过后后端清除标记，入口消失。 */}
+      {chapter && gateBlock ? (
+        <div
+          className="alert"
+          data-testid="gate-block-banner"
+          style={{
+            marginTop: 12,
+            background: '#fff6e5',
+            border: '1px solid #f0d9a8',
+            color: '#8a5a00',
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>质量门禁阻断：本稿未通过提交校验</div>
+          <div className="muted small" style={{ marginTop: 4 }}>
+            命中规则：
+            {gateBlock.ruleIds.length > 0 ? gateBlock.ruleIds.join('、') : '（见门禁报告）'}
+            。门禁已把可执行改稿建议写入 plan_json.revision_note；点击右侧按钮将按建议改稿
+            （写正文 revise → 自动重新审校），审校通过后再提交。
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <button
+              className="btn btn--primary"
+              data-testid="gate-revise-btn"
+              disabled={submitting || !!activeRun}
+              title={
+                activeRun
+                  ? '已有工作流在运行，请等待结束'
+                  : '按门禁建议改稿并自动重审'
+              }
+              onClick={() => void handleGateRevise()}
+            >
+              {gateRevising ? '提交中…' : '按门禁建议改稿'}
+            </button>
+          </div>
+        </div>
       ) : null}
 
       {/* V1.5：运行中横幅。RUNNING/PENDING 时显示节点进度 + 已运行时长；

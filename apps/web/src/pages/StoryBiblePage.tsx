@@ -5,8 +5,9 @@ import { CharacterTab } from './bible/CharacterTab';
 import { WorldTab } from './bible/WorldTab';
 import { PlotTab } from './bible/PlotTab';
 import { LedgerTab } from './bible/LedgerTab';
+import { GenreTab } from './bible/GenreTab';
 
-type BibleTab = 'characters' | 'world' | 'plot' | 'ledger' | 'canon';
+type BibleTab = 'characters' | 'world' | 'plot' | 'ledger' | 'canon' | 'genre';
 
 export function StoryBiblePage() {
   const { pid } = useParams();
@@ -56,6 +57,13 @@ export function StoryBiblePage() {
         >
           参照系
         </div>
+        <div
+          className={`tabs__tab ${tab === 'genre' ? 'tabs__tab--active' : ''}`}
+          onClick={() => setTab('genre')}
+          data-testid="tab-genre"
+        >
+          题材
+        </div>
       </div>
 
       {tab === 'characters' ? <CharacterTab projectId={projectId} /> : null}
@@ -63,6 +71,7 @@ export function StoryBiblePage() {
       {tab === 'plot' ? <PlotTab projectId={projectId} /> : null}
       {tab === 'ledger' ? <LedgerTab projectId={projectId} /> : null}
       {tab === 'canon' ? <CanonTab projectId={projectId} /> : null}
+      {tab === 'genre' ? <GenreTab projectId={projectId} /> : null}
     </div>
   );
 }

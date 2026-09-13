@@ -40,6 +40,8 @@ from packages.core.quality.models import QualityReport as _QualityReport
 # Observer delta 校验失败重试提示模板（注入 payload._retry_hint 引导 LLM 修正）。
 # 真实 LLM（如 MiniMax-M3）曾出现 ``character_changes[0].op='update' 但 before 为 None``
 # 这类业务校验失败：让 observer 修正后重新完整输出 7 个 change 数组 JSON。
+# V3.9 批次 5.3：本处是**单源**——commit.py 的重试路径与 observer.py 的再导出都取自
+# 这里，此前 observer.py 另有一份逐字相同的副本（任一处改动都可能只生效一半）。
 _OBSERVER_RETRY_HINT_TEMPLATE = (
     "\n\n[Validation note] 上一次输出的 delta 未通过业务校验：{errors}。"
     "请按反馈修正后重新完整输出 7 个 change 数组的合法 JSON（保持 schema_version="
@@ -64,9 +66,16 @@ _OBSERVER_RETRY_HINT_TEMPLATE = (
 # - leg_a (entities)：character_changes + relationship_changes + world_changes
 # - leg_b (narrative)：new_events + new_hooks + resolved_hooks + debt_changes
 #
-# 合并：leg_a 优先（同 key 冲突时 entity leg 覆盖，避免 narrative leg 误覆盖
-# canonical 状态字段）。同 key 由 change_id 判定；change_id 缺失时按数组内
-# 出现顺序（保留 leg_a 的全部条目，再追加 leg_b 中不冲突的条目）。
+# 合并（V3.9 批次 5.12：按 ``_merge_observer_legs`` 的真实行为描述）：按**数组归属**
+# 整取，不做逐条 change_id 去重——
+# - leg_a 负责的数组（character_changes / relationship_changes / world_changes）：
+#   取 leg_a 列表，leg_b 的同名数组整段丢弃（narrative leg 的输出不会覆盖 canonical
+#   状态字段）；
+# - leg_b 负责的数组（new_events / new_hooks / resolved_hooks / debt_changes）：
+#   取 leg_b 列表；leg_a 若防御性带了非空条目，追加在 leg_b 条目之后。
+# 同数组内的 change_id 冲突（含双腿重复变更）不在此处丢弃：留给下游 ``repair_delta``
+# 的 ``change_id_uniquify`` 规则重写（保留全部条目、改后者的 id），详见
+# packages/core/story_state/delta_repair.py:499-552。
 #
 # 重试语义：解析 validator errors 中出现的数组名，把仅与某一腿关联的 errors
 # 路由到对应腿（其它腿保持首次响应）。无法归类（如 errors 涉及跨腿的字段）

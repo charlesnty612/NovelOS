@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novelos.local/schemas/genre-pack.schema.json",
+  "title": "Genre Pack Payload",
+  "description": "NovelOS 题材包 payload v1.1.0 —— 题材库（跨作品聚合的题材公约资产）中**软件层消费子集**的结构化载体。对齐 docs/roadmap/题材库-评估与落地计划-2026-09-13.md §二（10 维）与 §四（架构裁决）。权威版本线 v1.1.0：主版本 v1 线内兼容（minor / patch 只做加法，旧 v1.0.0 payload 继续有效），跨主版本另起 schema 文件。**内容不变量**：内容仓（NovelOS-Content/genres/<题材>/）为编辑面，pack payload 为运行面——新增消费维度走 minor 版本（只加可选段，不改既有段语义）。缺席字段语义宽容——未出现的段=该题材包不声明该维度，消费方跳过（不注入、不报错）；出现的字段按本 schema 校验类型与取值。语义边界：本文件只描述机制可消费的结构，题材正文（含审核禁忌清单）只进内容仓 NovelOS-Content/genres/<题材>/。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^genre-pack\\.v1\\.[0-9]+\\.[0-9]+$",
+      "description": "payload schema 版本线锚点；v1 线内 minor / patch 兼容（如 genre-pack.v1.0.0 与 genre-pack.v1.1.0 均可被本 schema 消费）。"
+    },
+    "payoff_types": {
+      "type": "array",
+      "maxItems": 200,
+      "description": "爽点类型分类法（规定性，非单书节拍清单）：每型带密度上限 / 同型最小间隔 / 疲劳管理，供 director 注入与规划期硬约束消费。",
+      "items": { "$ref": "#/$defs/PayoffType" }
+    },
+    "structure_templates": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "全书结构模板（卷级骨架 + 卷内节拍 + 跨卷主线悬念）；缺席=不声明结构模板。",
+      "properties": {
+        "structure_model": {
+          "type": "string",
+          "maxLength": 400,
+          "description": "一句话结构模型（如「单元剧：单元=卷」）。"
+        },
+        "full_book_skeleton": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "maxLength": 400 },
+          "description": "阶段骨架：键=阶段名（opening_arc / escalation_arcs / mid_twist_arc / climax_arcs / resolution_arc 等），值=该阶段的要求描述。"
+        },
+        "arc_beat_template": {
+          "type": "array",
+          "maxItems": 40,
+          "description": "卷内节拍模板（有序）：穿入 → 冲突升级 → 高潮 → 结算等，含章数区间与硬要求。",
+          "items": { "$ref": "#/$defs/ArcBeat" }
+        },
+        "mainline_suspense": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "跨卷主线悬念设计（角色 / 常见设计 / 出现节奏）。",
+          "properties": {
+            "role": { "type": "string", "maxLength": 200 },
+            "common_designs": {
+              "type": "array",
+              "maxItems": 20,
+              "items": { "type": "string", "maxLength": 200 }
+            },
+            "cadence": { "type": "string", "maxLength": 200 }
+          }
+        },
+        "volume_count_expectation": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "卷数期望（长篇导向题材的规模预算）。",
+          "properties": {
+            "min": { "type": "integer", "minimum": 1 },
+            "typical": { "type": "integer", "minimum": 1 },
+            "max": { "type": "integer", "minimum": 1 },
+            "note": { "type": "string", "maxLength": 200 }
+          }
+        },
+        "source": { "type": "string", "maxLength": 120 },
+        "verify_status": { "type": "string", "maxLength": 200 }
+      }
+    },
+    "pacing": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "节奏 / 字数公约：章字数带、爽点密度规则、单元与全书预算、节奏红线。缺席=不声明。",
+      "properties": {
+        "chapter_words": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "章字数区间（绝对值）。",
+          "properties": {
+            "min": { "type": "integer", "minimum": 1 },
+            "target": { "type": "integer", "minimum": 1 },
+            "max": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "chapter_word_band": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "章字数硬带（与 packages.core.quality.wordcount 的 word_band 同口径：low/high 为绝对值下上限，floor 为下限保护）。",
+          "properties": {
+            "low": { "type": "integer", "minimum": 1 },
+            "high": { "type": "integer", "minimum": 1 },
+            "floor": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "density_rules": {
+          "type": "array",
+          "maxItems": 50,
+          "description": "密度规则（文本化公约，逐条注入）：如「每章 ≥1 小爽点」「每 N 章 ≥1 中型爽点」。",
+          "items": { "type": "string", "maxLength": 200 }
+        },
+        "arc_words": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "单元（卷）字数预算区间。",
+          "properties": {
+            "min": { "type": "integer", "minimum": 1 },
+            "max": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "book_words": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "全书字数预算区间。",
+          "properties": {
+            "min": { "type": "integer", "minimum": 1 },
+            "max": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "redlines": {
+          "type": "array",
+          "maxItems": 50,
+          "description": "节奏红线（违反即事故，供核销层/评审标注消费）。",
+          "items": { "type": "string", "maxLength": 200 }
+        },
+        "source": { "type": "string", "maxLength": 120 },
+        "verify_status": { "type": "string", "maxLength": 200 }
+      }
+    },
+    "ratio_declarations": {
+      "$ref": "#/$defs/RatioDeclarations"
+    },
+    "style_constraints": {
+      "$ref": "#/$defs/StyleConstraints"
+    },
+    "opening_rules": {
+      "type": "array",
+      "maxItems": 30,
+      "description": "黄金三章题材特化规则（P2 新增段）：逐条声明「第几章必须做到什么」，供 signing_check 的题材开篇检查段消费（纯规则，失败=info 提示，report-only 不阻断）。缺席=不声明题材开篇规则。",
+      "items": { "$ref": "#/$defs/OpeningRule" }
+    },
+    "critic_rubric": {
+      "$ref": "#/$defs/CriticRubric"
+    }
+  },
+  "$defs": {
+    "PayoffType": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type_id", "name"],
+      "description": "单个爽点类型：规定性条目（含密度与疲劳管理参数）。",
+      "properties": {
+        "type_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{1,63}$",
+          "description": "类型标识（snake_case，全包唯一，核销层按此记账）。"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "类型显示名。"
+        },
+        "strength": {
+          "type": "string",
+          "enum": ["S", "M", "s"],
+          "description": "强度分级：S=卷级 / M=章级中型 / s=章级小型。"
+        },
+        "description": { "type": "string", "maxLength": 500 },
+        "applicable": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "适用段落（如「冲突升级段、高潮段」）。"
+        },
+        "density_cap": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "密度上限的**原文文本**（如「每卷 2~3 次」「每 2 章 ≤1 次」）；注入时按此文本化。"
+        },
+        "min_interval_chapters": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "同型爽点最小间隔章数（0=不约束）。"
+        },
+        "fatigue_risk": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "疲劳管理说明（该型贬值条件与加码要求）。"
+        },
+        "mapped_tropes": {
+          "type": "array",
+          "maxItems": 20,
+          "description": "桥段映射（题材包内 tropes 维度的条目名）。",
+          "items": { "type": "string", "maxLength": 80 }
+        },
+        "verify_hint": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "核销判定提示（写后可校验的落地特征）。"
+        },
+        "source": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "来源标注：curated（人工策展）/ deconstructed:<书名>（拆书回填）。"
+        },
+        "stale": {
+          "type": "boolean",
+          "description": "过期标记（热度漂移时标 stale 而不删除）。"
+        }
+      }
+    },
+    "ArcBeat": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["beat"],
+      "description": "卷内节拍模板的一条。",
+      "properties": {
+        "beat": { "type": "string", "maxLength": 80, "description": "节拍名（穿入 / 冲突升级 / 高潮 / 结算 等）。" },
+        "chapters": { "type": "string", "maxLength": 40, "description": "章数区间文本（如「3~6」）。" },
+        "content": { "type": "string", "maxLength": 400, "description": "该节拍的内容要求。" },
+        "must": { "type": "string", "maxLength": 300, "description": "硬约束（违反即标注）。" }
+      }
+    },
+    "RatioDeclarations": {
+      "type": "object",
+      "description": "内容配比声明（与 R2 同体，P1b 核销层的第一公民输入）：键=配比维度（爽点类型 / 情绪 / 场景类型…），值=0~1 份额。缺席=不声明配比。",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      }
+    },
+    "StyleConstraints": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "文风层约束（题材体例）；P1b 起供 writer 注入消费，P1a 仅入库与校验。",
+      "properties": {
+        "language": { "type": "string", "maxLength": 40 },
+        "pov": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "叙述视角（题材体例的文字口径，不强制枚举对齐 style_params.pov）。"
+        },
+        "sentence_style": { "type": "string", "maxLength": 300 },
+        "forbidden_words": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "type": "string", "maxLength": 40 }
+        },
+        "notes": { "type": "string", "maxLength": 500 }
+      }
+    },
+    "OpeningRule": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["check_id", "requirement"],
+      "description": "题材开篇规则的一条（P2）：signing_check 按 chapter_no 定位章节、以 requirement 中的可机检关键词做子串判定（无 LLM；无可提取关键词时该条报 info「无法机检」）。",
+      "properties": {
+        "check_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{1,63}$",
+          "description": "规则标识（snake_case，全包唯一；体检报告 key = genre_opening_<check_id>）。"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "规则的人读描述（如「系统绑定不得晚于第 1 章」）。"
+        },
+        "chapter_no": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3,
+          "description": "规则适用章号（黄金三章窗口 1~3）；缺席=在 1~3 章整体窗口上判定。"
+        },
+        "requirement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400,
+          "description": "规则要求原文（须含可机检关键词，如「第 1 章必须出现系统绑定」）。"
+        }
+      }
+    },
+    "CriticRubric": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "critic / deep_review 的题材审查要点（P2）：运行时文本化（payoff_focus 逐条带上对应 payoff_types 的 name / strength / density_cap / verify_hint）后注入 payload 的 genre_rubric 段，总预算 1000 字符（超限截断并打 __genre_rubric_truncated__）。缺席=不注入 genre_rubric 段（零行为变化）。",
+      "properties": {
+        "payoff_focus": {
+          "type": "array",
+          "maxItems": 40,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$" },
+          "description": "需要 critic 逐条核验的爽点类型 type_id 清单（引用 payoff_types[].type_id；未被 payoff_types 声明的 id 原样保留）。"
+        },
+        "taboo_notes": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "题材禁忌要点（命中即 high severity 的一票关注点；只承载机制可呈现的要点，题材正文/平台审核清单留在内容仓）。"
+        },
+        "style_notes": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "题材文风要点（评审聚焦：句式 / 节奏 / 情绪直给等）。"
+        }
+      }
+    }
+  }
+}

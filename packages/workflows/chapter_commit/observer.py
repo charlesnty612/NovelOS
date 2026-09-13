@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import time
 from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
@@ -17,6 +18,10 @@ from .pipeline_common import (
     _OBSERVER_ALL_ARRAYS,
     _OBSERVER_LEG_A_SET,
     _OBSERVER_LEG_B_SET,
+    # 重试提示模板单源在 pipeline_common（V3.9 批次 5.3）；此处仅为
+    # ``from ...chapter_commit.observer import _OBSERVER_RETRY_HINT_TEMPLATE``
+    # 的历史导入面保留再导出（commit.py / pipeline.py 门面 / 既有测试）。
+    _OBSERVER_RETRY_HINT_TEMPLATE,  # noqa: F401
     _filter_mock_for_leg,
     _inject_resolvable_ids_into_config,
     _observer_parallel_enabled,
@@ -27,25 +32,19 @@ from .summary import (
     _prepare_summarizer_call,
 )
 
-# Observer delta 校验失败重试提示模板（注入 payload._retry_hint 引导 LLM 修正）。
-# 真实 LLM（如 MiniMax-M3）曾出现 ``character_changes[0].op='update' 但 before 为 None``
-# 这类业务校验失败：让 observer 修正后重新完整输出 7 个 change 数组 JSON。
-_OBSERVER_RETRY_HINT_TEMPLATE = (
-    "\n\n[Validation note] 上一次输出的 delta 未通过业务校验：{errors}。"
-    "请按反馈修正后重新完整输出 7 个 change 数组的合法 JSON（保持 schema_version="
-    "state-delta-v0 外的其它元信息字段由后续节点注入，无需在本次输出中包含）。"
-    "特别注意：凡 snapshot 中不存在前值的实体（本章首次出现的人物/地点/设定），"
-    "必须用 add 而非 update；update 必须给出与 snapshot 一致的 before。"
-)
-
 
 def _merge_observer_legs(leg_a: dict[str, Any], leg_b: dict[str, Any]) -> dict[str, Any]:
-    """合并两条腿的 7 数组输出。
+    """合并两条腿的 7 数组输出（V3.9 批次 5.12：按真实行为描述的契约）。
 
     规则：
     1. 7 数组齐全；任一腿缺某数组 → 视为空列表。
-    2. 同数组内：leg_a 优先；leg_b 中与 leg_a change_id 冲突的条目丢弃。
-    3. change_id 缺失或非字符串 → 按数组内出现顺序追加（保留双方全部）。
+    2. 按**数组归属**整取，不做逐条去重：
+       - leg_a 负责的数组（character/relationship/world_changes）→ 取 leg_a 列表，
+         leg_b 的同名数组整段丢弃；
+       - leg_b 负责的数组（new_events/new_hooks/resolved_hooks/debt_changes）→
+         取 leg_b 列表；leg_a 若防御性带了非空条目，追加在 leg_b 条目**之后**。
+    3. 本函数不读 ``change_id``：同数组内的 id 冲突（含双腿重复变更）留给下游
+       ``repair_delta`` 的 ``change_id_uniquify`` 规则重写，不在此处丢弃条目。
     """
     merged: dict[str, Any] = {}
     for arr_name in _OBSERVER_ALL_ARRAYS:
@@ -62,6 +61,74 @@ def _merge_observer_legs(leg_a: dict[str, Any], leg_b: dict[str, Any]) -> dict[s
             # leg_b 负责：a_list 应为空；防御性兜底时仍按 leg_b 优先
             merged[arr_name] = list(b_list) if not a_list else (list(b_list) + list(a_list))
     return merged
+
+
+def _call_observer(
+    db_path: Any,
+    payload: dict[str, Any],
+    run_id: str,
+    *,
+    node_run_id: str | None,
+    mock_script: Any = None,
+    capability_override: str | None = "observer",
+    profile_id: str | None = None,
+) -> dict[str, Any]:
+    """observer 的**唯一** run_agent 调用形态（V3.9 批次 5.3 去重）。
+
+    去重前单次 / 双腿串行 / 双腿并发 / 双腿+summary 并发 / retry 腿 / retry 单次
+    六类调用点各自内联一份近复制（``observer.py`` 7 处 + ``commit.py`` 2 处），
+    实际只有 ``capability_override`` 一项差异：
+
+    - ``"observer"``：拆分路径（双腿 / retry 腿）——V3.9.3 起 observer 是独立环节，
+      显式锁定，不再走 light；
+    - ``None``：单次大调用路径（split off 及其 retry）——沿用
+      ``capability_for("observer")`` 解析行为（与 V3.9.3 前一致）。
+
+    ``run_agent`` 内部是 ``capability_override or capability_for(agent_name)``
+    （``runner.py:286/289``），所以显式传 ``None`` 与不传该参数完全等价；
+    ``mock_script`` / ``profile_id`` 同理（``None`` = 默认行为）。
+    """
+    return run_agent(
+        db_path,
+        "observer",
+        payload,
+        run_id,
+        node_run_id=node_run_id,
+        expected="observer",
+        mock_script=mock_script,
+        capability_override=capability_override,
+        profile_id=profile_id,
+    )
+
+
+def _submit_observer_legs(
+    pool: concurrent.futures.ThreadPoolExecutor,
+    *,
+    db_path: Any,
+    run_id: str,
+    node_run_id: str | None,
+    leg_a_payload: dict[str, Any],
+    leg_b_payload: dict[str, Any],
+    leg_a_mock: Any,
+    leg_b_mock: Any,
+    profile_id: str | None,
+) -> tuple[concurrent.futures.Future, concurrent.futures.Future]:
+    """把两条腿提交进同一个池——并发路径的唯一提交点（V3.9 批次 5.3 去重）。
+
+    两条腿都先 submit 再 await（调用方负责 ``.result()``），保证并发语义：
+    ``_run_observer_legs_in_parallel``（max_workers=2）与
+    ``_run_observer_with_summary_in_parallel``（max_workers=3）复用本函数，
+    此前两份逐字重复的 leg 闭包（``_run_leg_a`` / ``_run_leg_b``）由此收敛。
+    """
+    future_a = pool.submit(
+        _call_observer, db_path, leg_a_payload, run_id,
+        node_run_id=node_run_id, mock_script=leg_a_mock, profile_id=profile_id,
+    )
+    future_b = pool.submit(
+        _call_observer, db_path, leg_b_payload, run_id,
+        node_run_id=node_run_id, mock_script=leg_b_mock, profile_id=profile_id,
+    )
+    return future_a, future_b
 
 
 def _build_observer_ctx_node(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -119,17 +186,16 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     # env 开关 + ctx 显式覆盖
     if ctx.get("observer_split") is False or not _observer_split_enabled():
         # 旧单次路径（V3.1.1 O-2 之前；保证回退兼容）
-        out = run_agent(
+        out = _call_observer(
             db_path,
-            "observer",
             base_payload,
             run_id,
             node_run_id=node_run_id,
-            expected="observer",
             mock_script=mock_script,
             # V3.9.4：observer 单次 run 级 model_overrides 透传（off 路径未显式
             # capability_override，沿用既有 capability_for('observer') 解析行为）。
             profile_id=(ctx.get("model_overrides") or {}).get("observer"),
+            capability_override=None,
         )
         return {
             "observer_payload": out,
@@ -211,26 +277,20 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         # off / 兼容回退：原串行提交，保持既有行为
         # 单次 run 级 model_overrides：observer 键 → profile_id 透传
         _observer_profile_id = (ctx.get("model_overrides") or {}).get("observer")
-        leg_a_out = run_agent(
+        leg_a_out = _call_observer(
             db_path,
-            "observer",
             leg_a_payload,
             run_id,
             node_run_id=node_run_id,
-            expected="observer",
             mock_script=leg_a_mock,
-            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
             profile_id=_observer_profile_id,
         )
-        leg_b_out = run_agent(
+        leg_b_out = _call_observer(
             db_path,
-            "observer",
             leg_b_payload,
             run_id,
             node_run_id=node_run_id,
-            expected="observer",
             mock_script=leg_b_mock,
-            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
             profile_id=_observer_profile_id,
         )
 
@@ -243,13 +303,20 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         # 该节点会消费同一 ai_call_logs 行做聚合，本节点只关心成功首调）。
         expected_calls=2,
         merged_at=now_iso(),
+        # V3.9 批次 5.6：两腿返回值用于把 ai_call_logs 行精确归属到 leg_a / leg_b
+        # （并发落库顺序不可预测，仅按 rowid 推断会把两腿 token/latency 互换）。
+        leg_a_out=leg_a_out,
+        leg_b_out=leg_b_out,
     )
     # V3.1.1 O-3：把 per-leg payload 字符数 + 按腿 trim stats 挂到 observer_split_meta，
     # 便于量化 O-3 收益（与 O-2 时的 ~120k tokens / 全量 payload 对比）。
     if isinstance(meta, dict):
         meta["leg_a_chars"] = leg_a_chars
         meta["leg_b_chars"] = leg_b_chars
-        meta["leg_a_total_chars"] = leg_a_chars + leg_b_chars
+        # V3.9 批次 5.6：总量字段原名 ``leg_a_total_chars``，实为两腿之和（与 leg_a
+        # 无关），改名避免观测方误读；消费方已同步（tests/workflow/
+        # test_chapter_commit_observer_split_o3.py）。
+        meta["leg_total_chars"] = leg_a_chars + leg_b_chars
         meta["leg_a_trim_stats"] = leg_a_trim_stats
         meta["leg_b_trim_stats"] = leg_b_trim_stats
         # V3.5：并发模式标记 + wall_time（仅并发路径有值；off 路径为 None）。
@@ -261,10 +328,10 @@ def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:
             # V3.7：summary 早产成功时复用同 wall，便于观测同池收益；早产失败/未触发时省略字段。
             if summary_early is not None and not summary_early.get("skipped"):
                 meta["summary_parallel_wall_ms"] = int(parallel_wall_ms)
-            # SQLite rowid 在并发 commit 下不保证 leg_a 先 leg_b 后——记录此点
-            # 让观测者明确 leg_a / leg_b 字段可能交换（不影响业务正确性）。
+            # V3.9 批次 5.6：leg 归属不再依赖落库顺序（按 output_json 精确归属，
+            # 见 _aggregate_observer_split_meta）；此键保留，语义更新为当前归属方式。
             meta["ordering_note"] = (
-                "concurrent_legs_rowid_order_unstable"
+                "concurrent_legs_attributed_by_output_json"
                 if parallel_enabled
                 else "serial"
             )
@@ -314,50 +381,33 @@ def _run_observer_legs_in_parallel(
     V3.9.4：新增 ``profile_id`` 参数透传 observer 单次 run 级 model_overrides 覆盖
     （由 :func:`_observer_node` 从 ctx['model_overrides']['observer'] 解析后传入）。
     mock 路径不消费 profile_id，与既有契约一致。
+
+    V3.9 批次 5.3：leg 闭包与另一并发函数逐字重复 → 统一走 :func:`_submit_observer_legs`
+    （腿调用形态单源 :func:`_call_observer`）。
     """
-    import time as _time
-
-    def _run_leg_a() -> dict[str, Any]:
-        return run_agent(
-            db_path,
-            "observer",
-            leg_a_payload,
-            run_id,
-            node_run_id=node_run_id,
-            expected="observer",
-            mock_script=leg_a_mock,
-            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
-            profile_id=profile_id,  # V3.9.4：observer 覆盖透传
-        )
-
-    def _run_leg_b() -> dict[str, Any]:
-        return run_agent(
-            db_path,
-            "observer",
-            leg_b_payload,
-            run_id,
-            node_run_id=node_run_id,
-            expected="observer",
-            mock_script=leg_b_mock,
-            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
-            profile_id=profile_id,  # V3.9.4：observer 覆盖透传
-        )
-
     # max_workers=2：恰好容纳两条腿；不再扩张，避免 provider 侧被并发请求压垮。
     # ThreadPoolExecutor 默认 shutdown 语义是 with-block 退出时 wait 全部完成——
     # 即使 future.result() 抛异常，两腿都会被 join 后才退出。
-    start = _time.monotonic()
+    start = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=2, thread_name_prefix="observer-leg",
     ) as pool:
-        future_a = pool.submit(_run_leg_a)
-        future_b = pool.submit(_run_leg_b)
-        # as_completed：任一腿完成就返回，但需为每条腿 .result() 检查异常——这里直接
-        # 按「submit 顺序」取结果：leg_a / leg_b 的归属由调用方按变量绑定恢复，不依赖
-        # 完成时间。
+        future_a, future_b = _submit_observer_legs(
+            pool,
+            db_path=db_path,
+            run_id=run_id,
+            node_run_id=node_run_id,
+            leg_a_payload=leg_a_payload,
+            leg_b_payload=leg_b_payload,
+            leg_a_mock=leg_a_mock,
+            leg_b_mock=leg_b_mock,
+            profile_id=profile_id,
+        )
+        # 按「submit 顺序」取结果：leg_a / leg_b 的归属由调用方按变量绑定恢复，
+        # 不依赖完成时间。
         leg_a_out = future_a.result()
         leg_b_out = future_b.result()
-    wall_ms = int((_time.monotonic() - start) * 1000)
+    wall_ms = int((time.monotonic() - start) * 1000)
     return leg_a_out, leg_b_out, wall_ms
 
 
@@ -378,6 +428,8 @@ def _run_observer_with_summary_in_parallel(
     - 本函数保留原双腿函数不动；调用方按需选择（summary_parallel 开关）。
     - 第三 future ``_run_summary`` 内部 try/except 捕获一切异常，绝不让 summary
       失败炸掉 observer 节点；失败时返回 ``{"skipped": True}`` 让下游走兜底。
+    - V3.9 批次 5.3：双腿部分与上述函数共用 :func:`_submit_observer_legs`（此前两份
+      leg 闭包逐字重复）。
 
     返回 ``(leg_a_out, leg_b_out, wall_ms, summary_early)``：
     - summary_early 形态：
@@ -387,7 +439,6 @@ def _run_observer_with_summary_in_parallel(
       - ``None`` ——summary 异常被吞掉，让下游 summarize 节点自愈重跑。
     """
     import logging as _logging
-    import time as _time
 
     # V3.9.4：observer 单次 run 级 model_overrides 透传（summary 走 light 键，互不串）。
     _observer_profile_id = (ctx.get("model_overrides") or {}).get("observer")
@@ -395,51 +446,12 @@ def _run_observer_with_summary_in_parallel(
         capability_for("summarizer")
     )
 
-    def _run_leg_a() -> dict[str, Any]:
-        return run_agent(
-            db_path,
-            "observer",
-            leg_a_payload,
-            run_id,
-            node_run_id=node_run_id,
-            expected="observer",
-            mock_script=leg_a_mock,
-            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
-            profile_id=_observer_profile_id,
-        )
-
-    def _run_leg_b() -> dict[str, Any]:
-        return run_agent(
-            db_path,
-            "observer",
-            leg_b_payload,
-            run_id,
-            node_run_id=node_run_id,
-            expected="observer",
-            mock_script=leg_b_mock,
-            capability_override="observer",  # V3.9.3：observer 拆为独立环节（不再走 light）
-            profile_id=_observer_profile_id,
-        )
-
-    def _recover_run_status() -> None:
-        """早产失败→恢复 run 状态防污染（已退化为 no-op）。
-
-        历史行为：runner 异常路径会把 run 行盖成 FAILED，本函数改回 COMPLETED
-        兜底。2026-08 异步化改造后（1）runner 对引擎托管调用（node_run_id 非空）
-        一律不再盖戳（见 runner._finalize_agent_run_status）；（2）本函数自己盖
-        的 COMPLETED 反而成为污染源——异步轮询方（前端 2s 轮询 / 集成测试等待环）
-        会在 observer 节点仍在执行时读到假 COMPLETED 终态。run 终态完全由
-        ``engine._run_nodes`` 的 ``_finalize_run`` 收口，这里保留 no-op 维持
-        三条失败路径调用对称。
-        """
-        return None
-
     def _run_summary() -> dict[str, Any] | None:
         """第三路：summarizer LLM 早产。
 
         任一异常（prepare 缺失 / run_agent 失败 / 其它）→ log warning +
-        ``_recover_run_status()`` 防 runner 内部 FAILED 污染 +
         返回 None，让下游 summarize 节点按原 prepare+run_agent 路径自愈完成。
+        run 终态由 ``engine._run_nodes`` 的 ``_finalize_run`` 收口，本路径不碰 run 行。
         """
         try:
             prepared = _prepare_summarizer_call(ctx)
@@ -448,9 +460,6 @@ def _run_observer_with_summary_in_parallel(
                 "chapter_commit.observer early summarize prepare failed: "
                 "chapter_id=%s err=%s", ctx.get("chapter_id"), exc,
             )
-            # 注意：prepare 阶段不调 run_agent，不会有 runner 兜底的 FAILED 状态。
-            # 仍调一次恢复函数做幂等的 noop，保证两条路径走向完全对称。
-            _recover_run_status()
             return None
         if prepared is None:
             return {"skipped": True}
@@ -471,9 +480,6 @@ def _run_observer_with_summary_in_parallel(
                 "chapter_commit.observer early summarize run_agent failed: "
                 "chapter_id=%s err=%s", ctx.get("chapter_id"), exc,
             )
-            # runner 内部异常路径已 _update_workflow_run(FAILED)（runner.py:321/364/396）。
-            # 在本吞异常分支里强制恢复为 COMPLETED，避免 run 状态被污染。
-            _recover_run_status()
             return None
         return {
             "skipped": False,
@@ -484,12 +490,21 @@ def _run_observer_with_summary_in_parallel(
         }
 
     # max_workers=3：恰好容纳两腿 + summary；不再扩张，避免 provider 侧并发请求过多。
-    start = _time.monotonic()
+    start = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=3, thread_name_prefix="observer-leg+sum",
     ) as pool:
-        future_a = pool.submit(_run_leg_a)
-        future_b = pool.submit(_run_leg_b)
+        future_a, future_b = _submit_observer_legs(
+            pool,
+            db_path=db_path,
+            run_id=run_id,
+            node_run_id=node_run_id,
+            leg_a_payload=leg_a_payload,
+            leg_b_payload=leg_b_payload,
+            leg_a_mock=leg_a_mock,
+            leg_b_mock=leg_b_mock,
+            profile_id=_observer_profile_id,
+        )
         future_s = pool.submit(_run_summary)
         leg_a_out = future_a.result()
         leg_b_out = future_b.result()
@@ -502,12 +517,53 @@ def _run_observer_with_summary_in_parallel(
                 "chapter_commit.observer summary future unexpected exception: "
                 "chapter_id=%s err=%s", ctx.get("chapter_id"), exc,
             )
-            # future.result() 自身冒泡的异常：通常是 _run_summary 之外的代码 bug。
-            # 同样恢复 run 状态防污染（幂等）。
-            _recover_run_status()
             summary_early = None
-    wall_ms = int((_time.monotonic() - start) * 1000)
+    wall_ms = int((time.monotonic() - start) * 1000)
     return leg_a_out, leg_b_out, wall_ms, summary_early
+
+
+def _row_output_json(row: Any) -> Any:
+    """解析 ``ai_call_logs.output_json``；缺失 / 非法 JSON → ``None``（不参与 leg 归属）。"""
+    try:
+        raw = row["output_json"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _attribute_rows_to_legs(
+    rows: list[Any],
+    leg_a_out: dict[str, Any] | None,
+    leg_b_out: dict[str, Any] | None,
+) -> list[Any]:
+    """把 ai_call_logs 行按 ``output_json`` 同一性归属为 ``[leg_a 行, leg_b 行, ...]``。
+
+    V3.9 批次 5.6：``ai_call_logs`` 没有 leg 列，并发提交下两腿的落库顺序由 provider
+    返回先后决定，因此**不能**用 ``rowid`` 推断归属。但 runner 落库的 ``output_json``
+    就是该次 ``run_agent`` 的返回值（``runner._record_call(output=output_log)``，
+    ``runner.py:492-509``），而两条腿的返回值在调用方手里——用它做同一性匹配即可精确
+    归属，无启发式。
+
+    匹配不上的行（output 缺失 / 非 JSON / 调用方未传 leg 输出）按入参顺序补齐，
+    保证返回顺序恒为 ``leg_a 先 leg_b 后``（该顺序此时仅为「未归属行的兜底」，
+    与 SQL 的 ``created_at, rowid`` 双键稳定序一致）。
+    """
+    remaining = list(rows)
+    ordered: list[Any] = []
+    for leg_out in (leg_a_out, leg_b_out):
+        if not isinstance(leg_out, dict):
+            continue
+        hit = next((r for r in remaining if _row_output_json(r) == leg_out), None)
+        if hit is not None:
+            remaining.remove(hit)
+            ordered.append(hit)
+    ordered.extend(remaining)
+    return ordered
 
 
 def _aggregate_observer_split_meta(
@@ -517,14 +573,20 @@ def _aggregate_observer_split_meta(
     node_run_id: str | None,
     expected_calls: int,
     merged_at: str,
+    leg_a_out: dict[str, Any] | None = None,
+    leg_b_out: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """聚合 observer 双 leg 的 tokens / latency_ms / retry_count。
 
-    路径：``ai_call_logs`` WHERE ``run_id=? AND node_run_id=? AND agent='observer'``
-    取最近 ``expected_calls`` 条（按 created_at DESC 倒序后回正为 leg_a 先 leg_b 后）；
-    单次大调用时（off 路径）不会调用本函数，故此处的「按 created_at 排序 +
-    假定 leg_a 先 leg_b 后」足以区分两腿。极端情况下两腿几乎同时落库（毫秒级
-    差异），仍可按 ``rowid`` 倒序稳定回放顺序。
+    取数：``ai_call_logs`` WHERE ``run_id=? AND node_run_id=? AND agent='observer'``，
+    按 ``(created_at, rowid)`` 双键升序取最近 ``expected_calls`` 条。
+
+    leg 归属（V3.9 批次 5.6 修正）：旧实现按 ``rowid`` 排序后取最后两行，并假定
+    「leg_a 先 leg_b 后」；并发路径下两腿落库顺序由 provider 返回先后决定，会把两腿的
+    token / latency 互换（``created_at`` 是秒级精度、且记的是**完成**时刻，单独用也
+    无法承担归属）。现改为：调用方传入两腿返回值时按 ``output_json`` 同一性精确归属
+    （见 :func:`_attribute_rows_to_legs`）；``leg_a_out`` / ``leg_b_out`` 缺省（None）
+    时退回上述双键稳定序，语义与旧实现一致但不再受 rowid 抖动影响。
     """
     try:
         conn = get_connection(db_path)
@@ -536,24 +598,26 @@ def _aggregate_observer_split_meta(
             "merged_at": merged_at,
         }
     try:
-        # 取本节点 observer 全部调用（按 rowid ASC；同一 run_id+node_run_id 下
-        # 两腿调用按代码顺序落库，rowid 顺序 = 调用顺序）
         rows = conn.execute(
             """
-            SELECT a.call_id, a.token_usage_json, a.latency_ms, a.retry_count, a.created_at
+            SELECT a.call_id, a.token_usage_json, a.latency_ms, a.retry_count,
+                   a.created_at, a.output_json
             FROM ai_call_logs a
             JOIN agents ag ON ag.agent_id = a.agent_id
             WHERE a.run_id = ? AND ag.name = 'observer'
               AND (? IS NULL OR a.node_run_id = ?)
-            ORDER BY a.rowid ASC
+            ORDER BY a.created_at ASC, a.rowid ASC
             """,
             (run_id, node_run_id, node_run_id),
         ).fetchall()
     finally:
         conn.close()
 
+    window = rows[-expected_calls:] if expected_calls > 0 else []
+    ordered = _attribute_rows_to_legs(window, leg_a_out, leg_b_out)
+
     legs: list[dict[str, Any]] = []
-    for r in rows[-2:] if len(rows) >= 2 else rows:
+    for r in ordered:
         try:
             usage = json.loads(r["token_usage_json"]) if r["token_usage_json"] else {}
         except (TypeError, ValueError):
