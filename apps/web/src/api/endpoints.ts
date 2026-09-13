@@ -379,7 +379,6 @@ export const modelConfigsApi = {
 // enabled / has_api_key。后端读路径（_mask_response）返回 params_json（dict，含
 // 脱敏后的 api_key="***"）；历史字段名 params 仅在测试夹具出现。
 // 读路径下 params_json.api_key 已被脱敏为 "***"，不回填明文输入框。
-// 读路径下 params_json.api_key 已被脱敏为 "***"，不回填明文输入框。
 // 导出仅为测试：回归用例锁死「后端 params_json 键 → 前端 params 字段」映射。
 export function normalizeProfile(row: ModelProfile): ModelProfile {
   return {
@@ -679,6 +678,7 @@ export const backupApi = {
     document.body.appendChild(a);
     a.click();
     a.remove();
+    // 下载触发后立即释放对象 URL（全站下载路径统一时机，见 ExportPanel）。
     URL.revokeObjectURL(url);
   },
 

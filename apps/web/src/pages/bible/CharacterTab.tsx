@@ -11,6 +11,8 @@ import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
 import { ReadableJson, RawJsonDetails } from '../../components/ReadableJson';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { Loading } from '../../components/Loading';
+import { Modal } from '../../components/Modal';
 
 const ROLE_OPTIONS: { value: CharacterRole; label: string }[] = [
   { value: 'protagonist', label: '主角 protagonist' },
@@ -92,7 +94,7 @@ export function CharacterTab({ projectId }: CharacterTabProps) {
       <div className="layout-2col">
         <div>
           {loading ? (
-            <div className="muted">加载中…</div>
+            <Loading />
           ) : list.length === 0 ? (
             <EmptyState
               title="还没有角色"
@@ -107,56 +109,59 @@ export function CharacterTab({ projectId }: CharacterTabProps) {
               }
             />
           ) : (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>名称</th>
-                  <th>角色</th>
-                  <th>可见性</th>
-                  <th>最新 state v</th>
-                  <th className="right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {list.map((c) => (
-                  <tr
-                    key={c.character_id}
-                    onClick={() => setSelectedId(c.character_id)}
-                    style={{
-                      cursor: 'pointer',
-                      background:
-                        c.character_id === selectedId ? '#f3f7ff' : undefined,
-                    }}
-                  >
-                    <td>{c.name}</td>
-                    <td>{c.role}</td>
-                    <td>{c.visibility}</td>
-                    <td>v{c.latest_state_version}</td>
-                    <td className="right">
-                      <button
-                        className="btn btn--sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditing(c);
-                        }}
-                      >
-                        编辑
-                      </button>
-                      <button
-                        className="btn btn--sm btn--danger"
-                        style={{ marginLeft: 6 }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleDelete(c.character_id);
-                        }}
-                      >
-                        删除
-                      </button>
-                    </td>
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>名称</th>
+                    <th>角色</th>
+                    <th>可见性</th>
+                    <th>最新 state v</th>
+                    <th className="right">操作</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {list.map((c) => (
+                    <tr
+                      key={c.character_id}
+                      onClick={() => setSelectedId(c.character_id)}
+                      className={
+                        c.character_id === selectedId
+                          ? 'kv-list__row--active'
+                          : undefined
+                      }
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <td>{c.name}</td>
+                      <td>{c.role}</td>
+                      <td>{c.visibility}</td>
+                      <td>v{c.latest_state_version}</td>
+                      <td className="right">
+                        <button
+                          className="btn btn--sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditing(c);
+                          }}
+                        >
+                          编辑
+                        </button>
+                        <button
+                          className="btn btn--sm btn--danger"
+                          style={{ marginLeft: 6 }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDelete(c.character_id);
+                          }}
+                        >
+                          删除
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
 
@@ -429,19 +434,8 @@ function CharacterFormModal({
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={modalBackdrop}
-      onClick={onCancel}
-    >
-      <form
-        className="card"
-        style={{ width: 560, maxWidth: '92vw', maxHeight: '90vh', overflowY: 'auto' }}
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-      >
-        <div className="section-title">{title}</div>
+    <Modal title={title} onClose={onCancel} width={560}>
+      <form onSubmit={submit}>
         <ErrorBanner>{err}</ErrorBanner>
 
         <div className="form-grid">
@@ -511,16 +505,6 @@ function CharacterFormModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
-
-const modalBackdrop: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'rgba(15,20,35,0.4)',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  zIndex: 100,
-};

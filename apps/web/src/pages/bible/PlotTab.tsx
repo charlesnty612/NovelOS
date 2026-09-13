@@ -19,6 +19,8 @@ import { tryParseJsonObject } from '../../utils/format';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { Loading } from '../../components/Loading';
+import { Modal } from '../../components/Modal';
 
 const TYPE_OPTIONS: { value: EventType; label: string }[] = [
   { value: 'revelation', label: '揭露 revelation' },
@@ -177,138 +179,139 @@ export function PlotTab({ projectId }: PlotTabProps) {
 
       <ErrorBanner>{err}</ErrorBanner>
 
-      {loading ? (
-        <div className="muted">加载中…</div>
-      ) : null}
-
       <div className="layout-2col">
         <div>
           <div className="detail-pane__title">事件 Events</div>
-          {!loading && events.length === 0 ? (
+          {loading ? (
+            <Loading />
+          ) : events.length === 0 ? (
             <EmptyState
               title="还没有事件"
               hint="剧情事件用于标记重要节点。"
             />
           ) : (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>时间</th>
-                  <th>类型</th>
-                  <th>描述</th>
-                  <th>参与</th>
-                  <th>状态</th>
-                  <th className="right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {events.map((e) => {
-                  const t = describeTime(e.time);
-                  const desc = (e.description ?? '').trim();
-                  const isPlanned = e.status === 'planned';
-                  return (
-                    <tr
-                      key={e.id}
-                      data-testid="plot-event-row"
-                      className={isPlanned ? 'muted' : undefined}
-                    >
-                      <td className="muted small">
-                        <div>{t.primary}</div>
-                        {t.secondary ? (
-                          <div className="small">{t.secondary}</div>
-                        ) : null}
-                      </td>
-                      <td>
-                        <span
-                          className="badge"
-                          data-testid="plot-event-type"
-                          data-type={e.type}
-                        >
-                          {TYPE_LABEL[e.type] ?? e.type}
-                        </span>
-                      </td>
-                      <td data-testid="plot-event-desc">
-                        {desc !== '' ? (
-                          desc
-                        ) : (
-                          <span className="muted">（无描述）</span>
-                        )}
-                        {(e.location_id && locNameById[e.location_id]) ||
-                        (e.introduced_chapter_id &&
-                          chapterNoById[e.introduced_chapter_id] !== undefined) ? (
-                          <div className="muted small" style={{ marginTop: 2 }}>
-                            {e.location_id && locNameById[e.location_id]
-                              ? `📍 ${locNameById[e.location_id]}`
-                              : null}
-                            {e.location_id &&
-                            locNameById[e.location_id] &&
-                            e.introduced_chapter_id &&
-                            chapterNoById[e.introduced_chapter_id] !== undefined
-                              ? ' · '
-                              : null}
-                            {e.introduced_chapter_id &&
-                            chapterNoById[e.introduced_chapter_id] !== undefined
-                              ? `来源「第 ${
-                                  chapterNoById[e.introduced_chapter_id]
-                                } 章」`
-                              : null}
-                          </div>
-                        ) : null}
-                      </td>
-                      <td>
-                        {Array.isArray(e.participants) &&
-                        e.participants.length > 0 ? (
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                            {e.participants.map((p, i) => {
-                              const id =
-                                typeof p === 'string' ? p : String(p ?? '');
-                              const name = charNameById[id];
-                              return (
-                                <span
-                                  key={`${id}-${i}`}
-                                  className="badge"
-                                  data-character-id={id}
-                                >
-                                  {name ?? shortId(id)}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                      <td>
-                        <span
-                          className="badge"
-                          data-testid="plot-event-status"
-                          data-status={e.status}
-                        >
-                          {STATUS_LABEL[e.status] ?? e.status}
-                        </span>
-                      </td>
-                      <td className="right">
-                        <button
-                          className="btn btn--sm btn--danger"
-                          onClick={() => void handleDelete(e.id)}
-                        >
-                          删除
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>描述</th>
+                    <th>参与</th>
+                    <th>状态</th>
+                    <th className="right">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {events.map((e) => {
+                    const t = describeTime(e.time);
+                    const desc = (e.description ?? '').trim();
+                    const isPlanned = e.status === 'planned';
+                    return (
+                      <tr
+                        key={e.id}
+                        data-testid="plot-event-row"
+                        className={isPlanned ? 'muted' : undefined}
+                      >
+                        <td className="muted small">
+                          <div>{t.primary}</div>
+                          {t.secondary ? (
+                            <div className="small">{t.secondary}</div>
+                          ) : null}
+                        </td>
+                        <td>
+                          <span
+                            className="badge"
+                            data-testid="plot-event-type"
+                            data-type={e.type}
+                          >
+                            {TYPE_LABEL[e.type] ?? e.type}
+                          </span>
+                        </td>
+                        <td data-testid="plot-event-desc">
+                          {desc !== '' ? (
+                            desc
+                          ) : (
+                            <span className="muted">（无描述）</span>
+                          )}
+                          {(e.location_id && locNameById[e.location_id]) ||
+                          (e.introduced_chapter_id &&
+                            chapterNoById[e.introduced_chapter_id] !== undefined) ? (
+                            <div className="muted small" style={{ marginTop: 2 }}>
+                              {e.location_id && locNameById[e.location_id]
+                                ? `📍 ${locNameById[e.location_id]}`
+                                : null}
+                              {e.location_id &&
+                              locNameById[e.location_id] &&
+                              e.introduced_chapter_id &&
+                              chapterNoById[e.introduced_chapter_id] !== undefined
+                                ? ' · '
+                                : null}
+                              {e.introduced_chapter_id &&
+                              chapterNoById[e.introduced_chapter_id] !== undefined
+                                ? `来源「第 ${
+                                    chapterNoById[e.introduced_chapter_id]
+                                  } 章」`
+                                : null}
+                            </div>
+                          ) : null}
+                        </td>
+                        <td>
+                          {Array.isArray(e.participants) &&
+                          e.participants.length > 0 ? (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                              {e.participants.map((p, i) => {
+                                const id =
+                                  typeof p === 'string' ? p : String(p ?? '');
+                                const name = charNameById[id];
+                                return (
+                                  <span
+                                    key={`${id}-${i}`}
+                                    className="badge"
+                                    data-character-id={id}
+                                  >
+                                    {name ?? shortId(id)}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td>
+                          <span
+                            className="badge"
+                            data-testid="plot-event-status"
+                            data-status={e.status}
+                          >
+                            {STATUS_LABEL[e.status] ?? e.status}
+                          </span>
+                        </td>
+                        <td className="right">
+                          <button
+                            className="btn btn--sm btn--danger"
+                            onClick={() => void handleDelete(e.id)}
+                          >
+                            删除
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
 
         <div>
           <div className="detail-pane__title">时间线 Timeline</div>
           {timeline.length === 0 ? (
-            <div className="muted small">
-              （暂无时间线条目；新建事件后服务端会自动同步一条）
-            </div>
+            <EmptyState
+              title="暂无时间线条目"
+              hint="新建事件后服务端会自动同步一条。"
+            />
           ) : (
             <ol style={{ paddingLeft: 18, margin: 0 }}>
               {[...timeline]
@@ -426,27 +429,8 @@ function EventFormModal({ onCancel, onSubmit }: EventFormModalProps) {
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(15,20,35,0.4)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 100,
-      }}
-      onClick={onCancel}
-    >
-      <form
-        className="card"
-        style={{ width: 560, maxWidth: '92vw', maxHeight: '90vh', overflowY: 'auto' }}
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-      >
-        <div className="section-title">新建事件</div>
+    <Modal title="新建事件" onClose={onCancel} width={560}>
+      <form onSubmit={submit}>
         <ErrorBanner>{err}</ErrorBanner>
         <ErrorBanner>{jsonErr}</ErrorBanner>
 
@@ -534,6 +518,6 @@ function EventFormModal({ onCancel, onSubmit }: EventFormModalProps) {
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }

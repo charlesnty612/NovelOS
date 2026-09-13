@@ -14,7 +14,7 @@
 //
 // 通过 props 注入决定 / 拒绝动作，由父组件负责调 resume API。
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ErrorBanner, InfoBanner } from './ErrorBanner';
 import type {
   CriticIssue,
@@ -31,7 +31,6 @@ export interface ApproveOptions {
 }
 
 export interface ApprovalCardProps {
-  runId: string;
   stage: string;
   message: string;
   pausePayload: Record<string, unknown>;
@@ -77,6 +76,13 @@ const CRITIC_SEVERITY_LABEL: Record<CriticIssueSeverity, string> = {
   high: '高',
   medium: '中',
   low: '低',
+};
+
+/** 暂停节点的 stage → 作者可读中文（未知 stage 原样兜底）。 */
+const STAGE_LABEL: Record<string, string> = {
+  'chapter-review': '审校阶段',
+  'chapter-commit': '提交阶段',
+  'chapter-commit.high_risk_approval': '评审阶段 · 高风险审批',
 };
 
 /** 一条「建议」的可视化条目 + 用于 note 拼接的纯文本。
@@ -190,11 +196,12 @@ export function ApprovalCard(props: ApprovalCardProps) {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(
     () => new Set(suggestions.map((s) => s.key)),
   );
-  // 当建议列表变化（如 pausePayload 切换 run）时，重置勾选集合为全选。
-  // 用 useMemo 派生集合的稳定 hash 来检测变化，避免漏更新。
   const suggestionsKey = suggestions.map((s) => s.key).join('|');
+  // 当建议列表变化（如 pausePayload 切换 run）时，重置勾选集合为全选。
+  // 用派生集合的稳定 hash 作为依赖，避免漏更新；setState 必须放在 effect 里
+  // （render 期 setState 会触发额外渲染）。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useMemo(() => {
+  useEffect(() => {
     setSelectedKeys(new Set(suggestions.map((s) => s.key)));
   }, [suggestionsKey]);
 
@@ -223,7 +230,9 @@ export function ApprovalCard(props: ApprovalCardProps) {
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span className="badge badge--chapter-paused">PAUSED</span>
-        <span className="muted small">stage: {stage}</span>
+        <span className="muted small">
+          {STAGE_LABEL[stage] ?? stage}（stage: {stage}）
+        </span>
       </div>
       <div style={{ marginTop: 6, fontWeight: 600 }}>{message}</div>
 

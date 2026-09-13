@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   factionsApi,
   locationsApi,
@@ -10,6 +10,8 @@ import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
 import { ReadableJson, RawJsonDetails } from '../../components/ReadableJson';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { Loading } from '../../components/Loading';
+import { Modal } from '../../components/Modal';
 
 type Kind = 'locations' | 'factions' | 'world-rules';
 
@@ -51,6 +53,7 @@ export function WorldTab({ projectId }: WorldTabProps) {
   const [creating, setCreating] = useState(false);
   // V3.22「交互反馈统一」：删除世界观实体前 ConfirmDialog 二次确认。
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const kindTabRefs = useRef<Array<HTMLDivElement | null>>([]);
 
   const reload = async (k: Kind = kind) => {
     setLoading(true);
@@ -86,12 +89,40 @@ export function WorldTab({ projectId }: WorldTabProps) {
   return (
     <div>
       <div className="toolbar">
-        <div className="tabs" style={{ margin: 0, border: 'none' }}>
-          {(Object.keys(KIND_META) as Kind[]).map((k) => (
+        <div
+          className="tabs"
+          role="tablist"
+          aria-label="世界观实体类型"
+          style={{ margin: 0, border: 'none' }}
+        >
+          {(Object.keys(KIND_META) as Kind[]).map((k, i) => (
             <div
               key={k}
+              ref={(el) => {
+                kindTabRefs.current[i] = el;
+              }}
+              role="tab"
+              aria-selected={k === kind}
+              tabIndex={k === kind ? 0 : -1}
               className={`tabs__tab ${k === kind ? 'tabs__tab--active' : ''}`}
               onClick={() => setKind(k)}
+              onKeyDown={(e) => {
+                const keys = Object.keys(KIND_META) as Kind[];
+                let nextIndex: number;
+                if (e.key === 'ArrowRight') nextIndex = (i + 1) % keys.length;
+                else if (e.key === 'ArrowLeft')
+                  nextIndex = (i + keys.length - 1) % keys.length;
+                else if (e.key === 'Home') nextIndex = 0;
+                else if (e.key === 'End') nextIndex = keys.length - 1;
+                else if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setKind(k);
+                  return;
+                } else return;
+                e.preventDefault();
+                setKind(keys[nextIndex]);
+                kindTabRefs.current[nextIndex]?.focus();
+              }}
             >
               {KIND_META[k].title}
             </div>
@@ -106,7 +137,7 @@ export function WorldTab({ projectId }: WorldTabProps) {
       <ErrorBanner>{err}</ErrorBanner>
 
       {loading ? (
-        <div className="muted">加载中…</div>
+        <Loading />
       ) : list.length === 0 ? (
         <EmptyState
           title={`还没有${meta.singular}`}
@@ -121,44 +152,46 @@ export function WorldTab({ projectId }: WorldTabProps) {
           }
         />
       ) : (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>名称</th>
-              <th>陈述</th>
-              <th>可见性</th>
-              <th>更新时间</th>
-              <th className="right">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {list.map((e) => (
-              <tr key={e.id}>
-                <td>{e.name}</td>
-                <td className="muted" style={{ maxWidth: 360 }}>
-                  {e.statement}
-                </td>
-                <td>{e.visibility}</td>
-                <td className="muted small">{formatDateTime(e.updated_at)}</td>
-                <td className="right">
-                  <button
-                    className="btn btn--sm"
-                    onClick={() => setEditing(e)}
-                  >
-                    编辑
-                  </button>
-                  <button
-                    className="btn btn--sm btn--danger"
-                    style={{ marginLeft: 6 }}
-                    onClick={() => void handleDelete(e.id)}
-                  >
-                    删除
-                  </button>
-                </td>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>陈述</th>
+                <th>可见性</th>
+                <th>更新时间</th>
+                <th className="right">操作</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {list.map((e) => (
+                <tr key={e.id}>
+                  <td>{e.name}</td>
+                  <td className="muted" style={{ maxWidth: 360 }}>
+                    {e.statement}
+                  </td>
+                  <td>{e.visibility}</td>
+                  <td className="muted small">{formatDateTime(e.updated_at)}</td>
+                  <td className="right">
+                    <button
+                      className="btn btn--sm"
+                      onClick={() => setEditing(e)}
+                    >
+                      编辑
+                    </button>
+                    <button
+                      className="btn btn--sm btn--danger"
+                      style={{ marginLeft: 6 }}
+                      onClick={() => void handleDelete(e.id)}
+                    >
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {list.length > 0 ? (
@@ -259,27 +292,8 @@ function EntityFormModal({ title, initial, onCancel, onSubmit }: EntityFormModal
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(15,20,35,0.4)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 100,
-      }}
-      onClick={onCancel}
-    >
-      <form
-        className="card"
-        style={{ width: 560, maxWidth: '92vw', maxHeight: '90vh', overflowY: 'auto' }}
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-      >
-        <div className="section-title">{title}</div>
+    <Modal title={title} onClose={onCancel} width={560}>
+      <form onSubmit={submit}>
         <ErrorBanner>{err}</ErrorBanner>
         <ErrorBanner>{jsonErr}</ErrorBanner>
 
@@ -327,6 +341,6 @@ function EntityFormModal({ title, initial, onCancel, onSubmit }: EntityFormModal
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }

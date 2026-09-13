@@ -211,13 +211,11 @@ function VariantsGrid({
       {instruction.trim() ? (
         <InfoBanner>本次指令：{instruction.trim()}</InfoBanner>
       ) : null}
+      {/* 候选卡片网格：复用 .project-grid（auto-fill 卡片网格）——
+          窄屏自动收敛为单列，不再三列挤成窄条。 */}
       <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-          gap: 12,
-          marginTop: 8,
-        }}
+        className="project-grid"
+        style={{ marginTop: 8 }}
       >
         {variants.map((v) => (
           <div

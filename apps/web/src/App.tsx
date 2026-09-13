@@ -1,4 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Layout } from './layout/Layout';
 import { ProjectsListPage } from './pages/ProjectsListPage';
 import { ProjectOverviewPage } from './pages/ProjectOverviewPage';
@@ -11,20 +12,22 @@ import { NotFoundPage } from './pages/NotFoundPage';
 
 export function App() {
   return (
-    <Routes>
-      <Route element={<Layout />}>
-        <Route index element={<ProjectsListPage />} />
-        <Route path="projects">
-          <Route path=":pid/overview" element={<ProjectOverviewPage />} />
-          <Route path=":pid/bible/*" element={<StoryBiblePage />} />
-          <Route path=":pid/chapters" element={<ChaptersPage />} />
-          <Route path=":pid/chapters/:cid" element={<ChapterDetailPage />} />
-          <Route path=":pid/ai" element={<AiSettingsPage />} />
+    <ErrorBoundary>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<ProjectsListPage />} />
+          <Route path="projects">
+            <Route path=":pid/overview" element={<ProjectOverviewPage />} />
+            <Route path=":pid/bible/*" element={<StoryBiblePage />} />
+            <Route path=":pid/chapters" element={<ChaptersPage />} />
+            <Route path=":pid/chapters/:cid" element={<ChapterDetailPage />} />
+            <Route path=":pid/ai" element={<AiSettingsPage />} />
+          </Route>
+          <Route path="ai-logs" element={<AiCallLogsPage />} />
+          <Route path="*" element={<NotFoundPage />} />
+          <Route path="index" element={<Navigate to="/" replace />} />
         </Route>
-        <Route path="ai-logs" element={<AiCallLogsPage />} />
-        <Route path="*" element={<NotFoundPage />} />
-        <Route path="index" element={<Navigate to="/" replace />} />
-      </Route>
-    </Routes>
+      </Routes>
+    </ErrorBoundary>
   );
 }

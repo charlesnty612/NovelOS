@@ -25,6 +25,7 @@ import type {
 } from '../../api/types';
 import { EmptyState } from '../../components/EmptyState';
 import { ErrorBanner } from '../../components/ErrorBanner';
+import { Loading } from '../../components/Loading';
 import { formatApiError } from '../../utils/formatApiError';
 import { extractPausePayload } from '../../utils/pausePayload';
 
@@ -181,7 +182,7 @@ export function GenreTab({ projectId }: GenreTabProps) {
       <div className="card" style={{ marginBottom: 16 }} data-testid="genre-binding-card">
         <div className="detail-pane__title">当前绑定</div>
         {loading ? (
-          <div className="muted">加载中…</div>
+          <Loading />
         ) : pack ? (
           <div data-testid="genre-binding-info">
             <div className="form-grid">
@@ -253,28 +254,33 @@ export function GenreTab({ projectId }: GenreTabProps) {
       <div className="card" style={{ marginBottom: 16 }} data-testid="genre-payoff-panel">
         <div className="detail-pane__title">爽点类型（{payoffTypes.length}）</div>
         {payoffTypes.length === 0 ? (
-          <div className="muted">当前题材包未声明 payoff_types。</div>
+          <EmptyState
+            title="当前题材包未声明 payoff_types"
+            hint="可换一个含爽点类型的题材包，或检查题材包内容。"
+          />
         ) : (
-          <table className="table" data-testid="genre-payoff-table">
-            <thead>
-              <tr>
-                <th>type_id</th>
-                <th>名称</th>
-                <th>强度</th>
-                <th>密度上限</th>
-              </tr>
-            </thead>
-            <tbody>
-              {payoffTypes.map((t, idx) => (
-                <tr key={t.type_id || idx} data-testid="genre-payoff-row">
-                  <td className="muted small">{t.type_id}</td>
-                  <td>{t.name}</td>
-                  <td className="muted small">{t.strength || '—'}</td>
-                  <td className="muted small">{t.density_cap || '—'}</td>
+          <div className="table-wrap">
+            <table className="table" data-testid="genre-payoff-table">
+              <thead>
+                <tr>
+                  <th>type_id</th>
+                  <th>名称</th>
+                  <th>强度</th>
+                  <th>密度上限</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {payoffTypes.map((t, idx) => (
+                  <tr key={t.type_id || idx} data-testid="genre-payoff-row">
+                    <td className="muted small">{t.type_id}</td>
+                    <td>{t.name}</td>
+                    <td className="muted small">{t.strength || '—'}</td>
+                    <td className="muted small">{t.density_cap || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 

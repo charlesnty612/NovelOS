@@ -189,9 +189,9 @@ type PanelMode = 'idle-form' | 'review' | 'done';
 
 /**
  * 解析表单中的 chapter_seed_count 字符串。
- * - 空 / NaN / < 1 / > 100 视为无效（返回 null）。
- * - 与后端 ProjectInitRequest.chapter_seed_count 的 Field(ge=1, le=100) 对齐，
- *   让前端校验在 Pydantic 422 之前先拦截。
+ * - 空 / NaN / < 1 / > 500 视为无效（返回 null）。
+ * - 与后端 ProjectInitRequest.chapter_seed_count 的 Field(ge=1, le=500) 对齐
+ *   （packages/core/api/routers/workflows.py），让前端校验在 Pydantic 422 之前先拦截。
  */
 function parseSeedCount(raw: string): number | null {
   const trimmed = raw.trim();
@@ -207,8 +207,8 @@ function parseSeedCount(raw: string): number | null {
  * 公式与后端 _derive_chapter_seed_count 一致：round(target_words / chapter_word_count)，
  * clamp 到 [DERIVED_SEED_COUNT_MIN, DERIVED_SEED_COUNT_MAX]（前端版）。
  * - 任一输入为空/非正整数 → 返回 null（不重算，保持用户当前值）。
- * - 注意：后端允许范围是 [10, 500]，但前端 chapter_seed_count 走顶层字段（Field le=100），
- *   因此前端 clamp 到 [10, 100] 以确保提交不 422；推导出 >100 时由 UI 提示用户。
+ * - 后端允许范围 [10, 500]（pipeline._clamp）；前端推导保持同一区间，
+ *   与 chapter_seed_count 表单字段的可填范围 [1, 500] 一致，不会因推导值 422。
  */
 function deriveSeedCount(
   targetWordsRaw: string,
@@ -857,7 +857,7 @@ export function ProjectInitPanel({ projectId, project, onDone }: Props) {
       style={{ marginBottom: 16 }}
       data-testid="project-init-panel"
     >
-      <div className="detail-pane__title">AI 初始化设定（P1 project-init）</div>
+      <div className="detail-pane__title">AI 初始化设定</div>
 
       {!expanded ? (
         <div
@@ -1201,8 +1201,8 @@ function IdleForm(props: IdleFormProps) {
           label="章节种子数"
           hint={
             seedCountManual
-              ? '已手动设置（1-100，默认 10）'
-              : '1-100，默认 10；按目标字数÷单章字数自动推导'
+              ? '已手动设置（1-500，默认 10）'
+              : '1-500，默认 10；按目标字数÷单章字数自动推导'
           }
         >
           <input
@@ -1636,6 +1636,7 @@ function ReviewPane({
       >
         <span className="muted small">本关模型：</span>
         <select
+          className="input"
           value={currentProfileId}
           onChange={(e) => void handleModelChange(e.target.value)}
           disabled={busy}
@@ -1761,7 +1762,7 @@ function ReviewPane({
       </div>
 
       <div className="muted small" style={{ marginTop: 6 }}>
-        放弃本次初始化仅本地重置，后端 run 仍保持 PAUSED，不影响数据；后续可在项目总览页重新发起。
+        放弃本次初始化仅本地重置，后端本次运行仍保持已暂停状态，不影响数据；后续可在项目总览页重新发起。
       </div>
     </div>
   );
@@ -1779,17 +1780,23 @@ function StepsBar({ currentIndex }: { currentIndex: number }) {
       {STAGE_LABELS.map((s, i) => {
         const done = i < currentIndex;
         const active = i === currentIndex;
+        const borderColor = active
+          ? 'var(--color-primary)'
+          : done
+            ? 'var(--color-success)'
+            : 'var(--color-border)';
         return (
           <div
             key={s.stage}
             data-testid={`init-steps-item-${s.stage}`}
             style={{
               padding: '2px 8px',
-              borderRadius: 4,
-              border: '1px solid #888',
+              borderRadius: 'var(--radius-sm)',
+              border: `1px solid ${borderColor}`,
+              color: active ? 'var(--color-primary)' : undefined,
+              fontWeight: active ? 600 : undefined,
               opacity: done || active ? 1 : 0.45,
               fontSize: 12,
-              background: active ? 'var(--color-accent, #eef)' : undefined,
             }}
           >
             {done ? '✓ ' : active ? '● ' : ''}
@@ -1804,17 +1811,24 @@ function StepsBar({ currentIndex }: { currentIndex: number }) {
 // ============================================================================
 // 子组件：done 视图（终态展示）
 // ============================================================================
+// workflow run 状态 → 作者可读中文（DonePane 不再直出英文枚举）。
+const RUN_STATUS_LABEL: Record<string, string> = {
+  PENDING: '排队中',
+  RUNNING: '运行中',
+  PAUSED: '已暂停',
+  COMPLETED: '已完成',
+  FAILED: '失败',
+  CANCELLED: '已取消',
+};
+
 function DonePane({ finalResp }: { finalResp: ProjectInitResponse | null }) {
+  const status = finalResp?.status ?? '';
   return (
     <InfoBanner>
       <div data-testid="done-result">
-        初始化完成 run_id={finalResp?.run_id ?? '-'}（status=
-        {finalResp?.status ?? '-'}
-        {finalResp?.current_node
-          ? `，current_node=${finalResp.current_node}`
-          : ''}
-        ），请到 Story Bible 查看生成结果
-        {finalResp?.project_id ? '（project_id=' + finalResp.project_id + '）' : ''}。
+        初始化完成（run_id={finalResp?.run_id ?? '-'}，状态：
+        {RUN_STATUS_LABEL[status] ?? status ?? '—'}）。请到 Story Bible
+        查看生成结果。
       </div>
     </InfoBanner>
   );

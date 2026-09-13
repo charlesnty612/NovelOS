@@ -198,3 +198,63 @@ describe('ProjectsListPage - 关键流', () => {
     expect(banner).toHaveTextContent(/已归档/);
   });
 });
+
+// ---------- V3.10「交互完整」：失败有反馈 + 弹窗键盘可达 ----------
+describe('ProjectsListPage · 失败反馈与弹窗键盘（V3.10）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      baseProject({ project_id: 'prj_001', name: '待归档' }),
+    ]);
+  });
+
+  it('归档失败：错误进入 ErrorBanner，不再静默（此前无 catch）', async () => {
+    vi.mocked(projectsApi.update).mockRejectedValue(new ApiError(500, '数据库忙'));
+
+    renderPage();
+
+    // 打开编辑弹窗 → 点「归档」→ 确认
+    const editBtn = (await waitFor(() =>
+      screen.getByTestId('project-card-prj_001'),
+    )).querySelector('button.btn--sm') as HTMLButtonElement;
+    fireEvent.click(editBtn);
+    fireEvent.click(await screen.findByTestId('project-archive-btn'));
+
+    const dialog = await screen.findByTestId('archive-confirm');
+    fireEvent.click(within(dialog).getByTestId('archive-confirm-confirm'));
+
+    // 失败文案（formatApiError 口径）出现在 role=alert 横幅里
+    const alert = await screen.findByText(/数据库忙/);
+    expect(alert.closest('.alert')).toHaveAttribute('role', 'alert');
+  });
+
+  it('导入弹窗：初始焦点在文件输入框；Esc 关闭', async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('import-backup-btn'));
+    const fileInput = await screen.findByTestId('import-backup-file');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(fileInput);
+    });
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => {
+      expect(screen.queryByTestId('import-backup-modal')).toBeNull();
+    });
+  });
+
+  it('编辑弹窗：Esc 关闭', async () => {
+    renderPage();
+
+    const editBtn = (await waitFor(() =>
+      screen.getByTestId('project-card-prj_001'),
+    )).querySelector('button.btn--sm') as HTMLButtonElement;
+    fireEvent.click(editBtn);
+
+    await screen.findByTestId('project-name');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => {
+      expect(screen.queryByTestId('project-name')).toBeNull();
+    });
+  });
+});

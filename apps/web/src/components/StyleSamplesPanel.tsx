@@ -3,6 +3,8 @@ import { ApiError } from '../api/client';
 import { styleSamplesApi } from '../api/endpoints';
 import type { StyleSample } from '../api/types';
 import { ErrorBanner } from './ErrorBanner';
+import { EmptyState } from './EmptyState';
+import { ConfirmDialog } from './ConfirmDialog';
 
 const MAX_TITLE_LEN = 200;
 // 与后端 _MAX_CONTENT_CHARS = 5000 对齐（前端先做一次提示性校验，
@@ -19,7 +21,7 @@ interface Props {
  *
  * - 列表（标题 + 截断预览 + 创建时间 + 删除按钮）；
  * - 新增：title + content（textarea，超 5000 字禁用保存）；
- * - 删除走 DELETE；404 静默忽略（幂等）。
+ * - 删除走 DELETE，先经 ConfirmDialog 二次确认；404 静默忽略（幂等）。
  * - data-testid：style-samples-panel / -item / -title-{sid} / -add-title /
  *   -add-content / -add-submit / -delete-{sid}，便于 vitest 断言。
  */
@@ -29,6 +31,8 @@ export function StyleSamplesPanel({ projectId, initialSamples }: Props) {
   const [content, setContent] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 删除前二次确认（全站统一交互）：先记录待删 id，确认后才发 DELETE。
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setError(null);
@@ -80,8 +84,13 @@ export function StyleSamplesPanel({ projectId, initialSamples }: Props) {
     }
   }, [title, content, projectId, reload]);
 
-  const handleDelete = useCallback(
+  const handleDelete = useCallback(async (sid: string) => {
+    setPendingDeleteId(sid);
+  }, []);
+
+  const doDelete = useCallback(
     async (sid: string) => {
+      setPendingDeleteId(null);
       setError(null);
       setBusy(true);
       try {
@@ -113,8 +122,11 @@ export function StyleSamplesPanel({ projectId, initialSamples }: Props) {
       </div>
 
       {samples.length === 0 ? (
-        <div className="muted small" data-testid="style-samples-empty">
-          该项目暂无文风样例。
+        <div data-testid="style-samples-empty">
+          <EmptyState
+            title="该项目暂无文风样例"
+            hint="在下方添加一段散文样例，写正文时会被模仿其句式、用词与节奏。"
+          />
         </div>
       ) : (
         <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 12px 0' }}>
@@ -146,8 +158,8 @@ export function StyleSamplesPanel({ projectId, initialSamples }: Props) {
                 className="muted small"
                 style={{
                   marginTop: 4,
-                  maxHeight: 60,
                   overflow: 'hidden',
+                  whiteSpace: 'nowrap',
                   textOverflow: 'ellipsis',
                 }}
               >
@@ -203,6 +215,19 @@ export function StyleSamplesPanel({ projectId, initialSamples }: Props) {
           </span>
         </div>
       </div>
+
+      {pendingDeleteId ? (
+        <ConfirmDialog
+          open={true}
+          title="删除文风样例"
+          body="确认删除该文风样例？删除后不再注入 writer 上下文。"
+          confirmText="删除"
+          danger
+          testId="style-samples-delete-confirm"
+          onCancel={() => setPendingDeleteId(null)}
+          onConfirm={() => void doDelete(pendingDeleteId)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -2352,18 +2352,16 @@ describe('ChapterDetailPage - 停止当前工作流按钮', () => {
 
     renderPage();
 
-    // 1) 点「停止工作流」→ 内联确认态出现，文案精确锁定
+    // 1) 点「停止工作流」→ ConfirmDialog 二次确认出现，文案精确锁定
     const cancelBtn = await waitFor(() => screen.getByTestId('wf-cancel-btn'));
     fireEvent.click(cancelBtn);
-    const confirm = await waitFor(() =>
-      screen.getByTestId('wf-cancel-confirm'),
-    );
+    const confirm = await waitFor(() => screen.getByTestId('wf-cancel'));
     expect(confirm.textContent).toMatch(
       /确认停止当前工作流？已完成的节点会保留，正在执行的节点结果将被丢弃。/,
     );
 
     // 2) 点「确认停止」→ 调用 cancelRun(run_id)
-    const confirmBtn = screen.getByTestId('wf-cancel-confirm-btn');
+    const confirmBtn = screen.getByTestId('wf-cancel-confirm');
     fireEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -2404,9 +2402,7 @@ describe('ChapterDetailPage - 停止当前工作流按钮', () => {
 
     const cancelBtn = await waitFor(() => screen.getByTestId('wf-cancel-btn'));
     fireEvent.click(cancelBtn);
-    const confirmBtn = await waitFor(() =>
-      screen.getByTestId('wf-cancel-confirm-btn'),
-    );
+    const confirmBtn = await waitFor(() => screen.getByTestId('wf-cancel-confirm'));
     fireEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -2423,5 +2419,186 @@ describe('ChapterDetailPage - 停止当前工作流按钮', () => {
     expect(Array.from(errorAlerts).map((e) => e.textContent).join('|')).not.toMatch(
       /run not running|409/,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 前端批次 C（2026-09-13）信息架构重构回归：
+// - 下部分区 tabs（默认「草稿」，懒挂载；切走即卸载）
+// - 章节标题 inline 改名（chaptersApi.update 的 title 字段）
+// - 删除章节失败的就地反馈（此前 try/finally 无 catch，界面零反馈）
+// - 「停止工作流」二次确认取消路径（ConfirmDialog 复用）
+// ---------------------------------------------------------------------------
+
+describe('ChapterDetailPage - 信息架构（分区 tabs / 标题改名 / 删除反馈）', () => {
+  const draftV1: Draft = {
+    draft_id: 'drf_v1',
+    chapter_id: 'ch_001',
+    version: 1,
+    content: '正文第一版',
+    created_by: 'writer',
+    prompt_version: 'writer:v1',
+    model_id: null,
+    created_at: '2026-08-24T10:00:00+00:00',
+  };
+
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(chaptersApi.delete).mockReset();
+    vi.mocked(chaptersApi.update).mockReset();
+    vi.mocked(chaptersApi.createDraft).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(workflowsApi.startPlan).mockReset();
+    vi.mocked(workflowsApi.startWrite).mockReset();
+    vi.mocked(workflowsApi.startReview).mockReset();
+    vi.mocked(workflowsApi.startCommit).mockReset();
+    vi.mocked(workflowsApi.resume).mockReset();
+    vi.mocked(workflowsApi.resumeInit).mockReset();
+    vi.mocked(workflowsApi.cancelRun).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(modelProfilesApi.create).mockReset();
+    vi.mocked(modelProfilesApi.update).mockReset();
+    vi.mocked(modelProfilesApi.remove).mockReset();
+    vi.mocked(modelProfilesApi.test).mockReset();
+
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([draftV1]);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([]);
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun);
+  });
+
+  it('默认停在「草稿」分区；切到「章节计划」后草稿区隐藏、计划区渲染', async () => {
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('drafts-panel')).toBeVisible();
+    });
+    // 未访问过的分区不挂载（懒加载：上下文面板不会在未打开时发请求）
+    expect(screen.queryByTestId('plan-panel')).toBeNull();
+    expect(screen.queryByTestId('chapter-danger-zone')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('cdp-tab-plan'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('plan-panel')).toBeVisible();
+    });
+    // 访问过的草稿区保留挂载（切走再回来不丢编辑态），但不再可见
+    expect(screen.getByTestId('drafts-panel')).not.toBeVisible();
+    expect(screen.getByTestId('cdp-tab-plan')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+
+    // 「危险操作」是独立分区，删除按钮不再悬在页底
+    fireEvent.click(screen.getByTestId('cdp-tab-danger'));
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-danger-zone')).toBeVisible();
+    });
+    expect(screen.getByTestId('chapter-delete-btn')).toBeInTheDocument();
+  });
+
+  it('章节标题可 inline 改名：回车提交 chaptersApi.update(title)', async () => {
+    vi.mocked(chaptersApi.update).mockResolvedValue(
+      baseChapter({ status: 'DRAFTED', title: '改过的标题' }),
+    );
+
+    renderPage();
+
+    const renameBtn = await waitFor(() => screen.getByTestId('chapter-title-btn'));
+    fireEvent.click(renameBtn);
+
+    const input = screen.getByTestId('chapter-title-input') as HTMLInputElement;
+    // 预填当前标题，便于局部修改
+    expect(input.value).toBe('第一章');
+    fireEvent.change(input, { target: { value: '改过的标题' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(vi.mocked(chaptersApi.update)).toHaveBeenCalledWith('ch_001', {
+        title: '改过的标题',
+      });
+    });
+    // 保存成功后回到只读态
+    await waitFor(() => {
+      expect(screen.queryByTestId('chapter-title-input')).toBeNull();
+    });
+  });
+
+  it('标题改名取消（按钮）不发请求', async () => {
+    renderPage();
+
+    fireEvent.click(await waitFor(() => screen.getByTestId('chapter-title-btn')));
+    fireEvent.change(screen.getByTestId('chapter-title-input'), {
+      target: { value: '不想保存的标题' },
+    });
+    fireEvent.click(screen.getByTestId('chapter-title-cancel'));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('chapter-title-input')).toBeNull();
+    });
+    expect(vi.mocked(chaptersApi.update)).not.toHaveBeenCalled();
+  });
+
+  it('删除章节失败：错误在「危险操作」区就地展示，不再静默', async () => {
+    vi.mocked(chaptersApi.delete).mockRejectedValue(new Error('数据库被占用'));
+
+    renderPage();
+
+    fireEvent.click(await waitFor(() => screen.getByTestId('cdp-tab-danger')));
+    fireEvent.click(await waitFor(() => screen.getByTestId('chapter-delete-btn')));
+
+    const confirmBtn = await waitFor(() =>
+      screen.getByTestId('chapter-delete-confirm-confirm'),
+    );
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(vi.mocked(chaptersApi.delete)).toHaveBeenCalledWith('ch_001');
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/数据库被占用/)).toBeInTheDocument();
+    });
+    // 失败后按钮恢复可用，允许重试
+    const dangerZone = screen.getByTestId('chapter-danger-zone');
+    const deleteBtn = within(dangerZone).getByTestId('chapter-delete-btn');
+    expect(deleteBtn).not.toBeDisabled();
+  });
+
+  it('「停止工作流」确认框点「再想想」：不调用 cancelRun', async () => {
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([
+      buildRunningDetail({ run_id: 'wfr_cancel_abort' }),
+    ]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(
+      buildRunningDetail({ run_id: 'wfr_cancel_abort' }),
+    );
+
+    renderPage();
+
+    fireEvent.click(await waitFor(() => screen.getByTestId('wf-cancel-btn')));
+    const dialog = await waitFor(() => screen.getByTestId('wf-cancel'));
+    expect(dialog.textContent).toMatch(/已完成的节点会保留/);
+
+    fireEvent.click(screen.getByTestId('wf-cancel-cancel'));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('wf-cancel')).toBeNull();
+    });
+    expect(vi.mocked(workflowsApi.cancelRun)).not.toHaveBeenCalled();
   });
 });

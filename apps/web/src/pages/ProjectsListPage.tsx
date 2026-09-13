@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ApiError } from '../api/client';
-import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
+import { ErrorBanner } from '../components/ErrorBanner';
 import { StatusBadge } from '../components/StatusBadge';
 import { EmptyState } from '../components/EmptyState';
 import { ConfirmDialog } from '../components/ConfirmDialog';
+import { Loading } from '../components/Loading';
+import { Modal } from '../components/Modal';
 import { useApiCall } from '../hooks/useApiCall';
 import { backupApi, projectsApi } from '../api/endpoints';
 import type {
@@ -14,6 +15,7 @@ import type {
   ProjectStatus,
   ProjectWordBand,
 } from '../api/types';
+import { formatApiError } from '../utils/formatApiError';
 import { formatDateTime } from '../utils/format';
 
 export function ProjectsListPage() {
@@ -30,6 +32,41 @@ export function ProjectsListPage() {
   // V3.22「交互反馈统一」：归档确认弹窗受控状态；保存成功短暂条幅。
   const [archiveTarget, setArchiveTarget] = useState<Project | null>(null);
   const [savedBanner, setSavedBanner] = useState<string | null>(null);
+  // 归档失败的可见反馈：此前 onConfirm 里没有 catch，失败即静默（弹窗已关、按钮恢复）
+  const [actionErr, setActionErr] = useState<string | null>(null);
+  const savedTimer = useRef<number | null>(null);
+
+  // 成功反馈 2.5s 自动消失；卸载时清掉定时器（避免卸载后 setState）。
+  const flashSaved = (message: string) => {
+    setSavedBanner(message);
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+    savedTimer.current = window.setTimeout(() => {
+      savedTimer.current = null;
+      setSavedBanner(null);
+    }, 2500);
+  };
+
+  useEffect(
+    () => () => {
+      if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+    },
+    [],
+  );
+
+  const handleArchive = async (target: Project) => {
+    setArchiveTarget(null);
+    setActionErr(null);
+    try {
+      await projectsApi.update(target.project_id, {
+        status: 'ARCHIVED' as ProjectStatus,
+      });
+      setEditing(null);
+      flashSaved('已归档');
+      void reload();
+    } catch (e: unknown) {
+      setActionErr(formatApiError(e));
+    }
+  };
 
   return (
     <div>
@@ -59,14 +96,21 @@ export function ProjectsListPage() {
       </p>
 
       <ErrorBanner>{error}</ErrorBanner>
+      <ErrorBanner>{actionErr}</ErrorBanner>
       {savedBanner ? (
-        <div data-testid="projects-saved-banner">
-          <InfoBanner>{savedBanner}</InfoBanner>
+        // 成功条幅：role=status + aria-live=polite，读屏会播报（2.5s 后自动消失）
+        <div
+          className="alert alert--info"
+          role="status"
+          aria-live="polite"
+          data-testid="projects-saved-banner"
+        >
+          {savedBanner}
         </div>
       ) : null}
 
       {loading ? (
-        <div className="muted">加载中…</div>
+        <Loading />
       ) : data && data.length > 0 ? (
         <div className="project-grid" data-testid="project-grid">
           {data.map((p) => (
@@ -116,7 +160,7 @@ export function ProjectsListPage() {
       ) : (
         <EmptyState
           title="还没有项目"
-          hint="点击右上角“新建项目”，开始你的第一部小说。"
+          hint="点击右上角「新建项目」，开始你的第一部小说。"
           action={
             <button
               className="btn btn--primary"
@@ -135,9 +179,8 @@ export function ProjectsListPage() {
           onSubmit={async (payload) => {
             await projectsApi.create(payload as ProjectCreatePayload);
             setShowCreate(false);
-            setSavedBanner('已保存');
+            flashSaved('已保存');
             void reload();
-            window.setTimeout(() => setSavedBanner(null), 2500);
           }}
         />
       ) : null}
@@ -150,13 +193,15 @@ export function ProjectsListPage() {
           onSubmit={async (payload) => {
             await projectsApi.update(editing.project_id, payload);
             setEditing(null);
-            setSavedBanner('已保存');
+            flashSaved('已保存');
             void reload();
-            window.setTimeout(() => setSavedBanner(null), 2500);
           }}
           extraActions={({ submitting }) =>
             editing.status !== 'ARCHIVED' ? (
               <button
+                // 必须显式 type="button"：该按钮位于 <form> 内，缺省 type 会被当提交键，
+                // 点「归档」会顺带把整个表单也 PATCH 一次（双请求）。
+                type="button"
                 className="btn btn--danger"
                 disabled={submitting}
                 onClick={() => setArchiveTarget(editing)}
@@ -178,16 +223,8 @@ export function ProjectsListPage() {
           danger
           testId="archive-confirm"
           onCancel={() => setArchiveTarget(null)}
-          onConfirm={async () => {
-            const target = archiveTarget;
-            setArchiveTarget(null);
-            await projectsApi.update(target.project_id, {
-              status: 'ARCHIVED' as ProjectStatus,
-            });
-            setEditing(null);
-            setSavedBanner('已归档');
-            void reload();
-            window.setTimeout(() => setSavedBanner(null), 2500);
+          onConfirm={() => {
+            void handleArchive(archiveTarget);
           }}
         />
       ) : null}
@@ -209,17 +246,11 @@ export function ProjectsListPage() {
               const parsed = JSON.parse(text) as BackupPackage;
               const newProject = await backupApi.importBackup(parsed);
               setShowImport(false);
-              reload();
+              void reload();
               // 导入成功后直接跳到新项目总览
               navigate(`/projects/${newProject.project_id}/overview`);
             } catch (e: unknown) {
-              if (e instanceof ApiError) {
-                setImportErr(`${e.status}: ${e.detail}`);
-              } else if (e instanceof Error) {
-                setImportErr(e.message);
-              } else {
-                setImportErr('导入失败');
-              }
+              setImportErr(formatApiError(e));
             } finally {
               setImporting(false);
             }
@@ -262,35 +293,19 @@ function ImportBackupModal({
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(15,20,35,0.4)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 100,
-      }}
-      onClick={() => {
-        if (!importing) onCancel();
-      }}
+    <Modal
+      title="从备份导入项目"
+      onClose={onCancel}
+      width={480}
+      testId="import-backup-modal"
+      // 导入进行中禁止 Esc / 点遮罩关闭（仍可用「取消」按钮退出）
+      closable={!importing}
     >
-      <form
-        className="card"
-        style={{ width: 480, maxWidth: '90vw' }}
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={handleSubmit}
-        data-testid="import-backup-modal"
-      >
-        <div className="section-title">从备份导入项目</div>
-        <p className="muted small" style={{ marginTop: 4 }}>
-          选择一份此前导出的 NovelOS 备份 JSON（format = <code>novelos-backup</code>，
-          version = 1）。导入会创建一份**新**项目，不影响原项目。
-        </p>
-        <ErrorBanner>{error ?? localErr}</ErrorBanner>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        选择一份此前从 NovelOS 导出的备份 JSON 文件。导入会创建一个新项目，不影响原项目。
+      </p>
+      <ErrorBanner>{error ?? localErr}</ErrorBanner>
+      <form onSubmit={handleSubmit}>
         <div className="form-row">
           <label>备份文件 *</label>
           <input
@@ -333,7 +348,7 @@ function ImportBackupModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -432,7 +447,7 @@ function ProjectFormModal({
     try {
       await onSubmit(payload);
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : '保存失败');
+      setErr(formatApiError(e));
     } finally {
       setSubmitting(false);
     }
@@ -456,7 +471,7 @@ function ProjectFormModal({
         word_band: null,
       });
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : '保存失败');
+      setErr(formatApiError(e));
     } finally {
       setSubmitting(false);
     }
@@ -469,27 +484,14 @@ function ProjectFormModal({
       initial.word_band.floor != null);
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(15,20,35,0.4)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 100,
-      }}
-      onClick={onCancel}
+    <Modal
+      title={title}
+      onClose={onCancel}
+      width={480}
+      closable={!submitting}
+      testId={initial ? 'project-edit-modal' : 'project-create-modal'}
     >
-      <form
-        className="card"
-        style={{ width: 480, maxWidth: '90vw' }}
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={handleSubmit}
-      >
-        <div className="section-title">{title}</div>
+      <form onSubmit={handleSubmit}>
         <ErrorBanner>{err}</ErrorBanner>
         <div className="form-row">
           <label>名称 *</label>
@@ -625,6 +627,6 @@ function ProjectFormModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }

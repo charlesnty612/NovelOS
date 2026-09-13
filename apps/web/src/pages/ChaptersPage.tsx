@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { chaptersApi } from '../api/endpoints';
 import type { Chapter, ChapterCreatePayload } from '../api/types';
 import { ErrorBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
 import { ChapterStatusBadge } from '../components/ChapterStatusBadge';
+import { Loading } from '../components/Loading';
+import { Modal } from '../components/Modal';
 import { formatDateTime } from '../utils/format';
 
 export function ChaptersPage() {
@@ -16,7 +18,9 @@ export function ChaptersPage() {
   const [err, setErr] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const reload = async () => {
+  // reload 用 useCallback 绑定 projectId：effect 依赖 reload，无需 eslint-disable
+  // 掩盖「缺依赖」（项目没有 ESLint，死注释只会误导后来者）。
+  const reload = useCallback(async () => {
     setLoading(true);
     setErr(null);
     try {
@@ -27,12 +31,15 @@ export function ChaptersPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [projectId]);
 
   useEffect(() => {
     void reload();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [reload]);
+
+  const openChapter = (chapterId: string) => {
+    navigate(`/projects/${projectId}/chapters/${chapterId}`);
+  };
 
   return (
     <div>
@@ -50,18 +57,18 @@ export function ChaptersPage() {
         </button>
       </div>
       <p className="section-subtitle">
-        按章节号管理章节大纲、草稿与 AI 工作流。点击进入章节详情以运行 plan / write / review /
-        commit 流程。
+        按章节号管理章节大纲、草稿与 AI 工作流。进入章节详情可运行计划 / 写作 / 审校 /
+        提交四步流程。
       </p>
 
       <ErrorBanner>{err}</ErrorBanner>
 
       {loading ? (
-        <div className="muted">加载中…</div>
+        <Loading />
       ) : list.length === 0 ? (
         <EmptyState
           title="还没有章节"
-          hint="点击右上角「新建章节」，从 chapter 1 开始。"
+          hint="点击右上角「新建章节」，从第 1 章开始。"
           action={
             <button
               className="btn btn--primary"
@@ -76,22 +83,34 @@ export function ChaptersPage() {
         <table className="table" data-testid="chapter-list">
           <thead>
             <tr>
-              <th style={{ width: 80 }}>章号</th>
+              {/* 列宽收编 CSS 类（.table__col--*）——不再逐格写 inline width */}
+              <th className="table__col table__col--number">章号</th>
               <th>标题</th>
-              <th style={{ width: 120 }}>状态</th>
-              <th style={{ width: 180 }}>最近更新</th>
-              <th className="right" style={{ width: 100 }}>
-                操作
-              </th>
+              <th className="table__col table__col--status">状态</th>
+              <th className="table__col table__col--time">最近更新</th>
+              <th className="right table__col table__col--actions">操作</th>
             </tr>
           </thead>
           <tbody>
             {list.map((c) => (
               <tr
                 key={c.chapter_id}
-                onClick={() =>
-                  navigate(`/projects/${projectId}/chapters/${c.chapter_id}`)
-                }
+                // 双入口：整行可点（鼠标便利）+ 「进入」按钮（语义/键盘入口）。
+                // 行上只加 tabIndex 与 Enter/Space 处理，**不加 role**：<tr> 的隐式 row
+                // 语义必须保留（role="button" 会让表格结构对读屏失效，axe 的
+                // aria-required-children 也会报错）；键盘用户既能按 Tab 到行、按 Enter
+                // 进入，也能用更明确的「进入」按钮。
+                tabIndex={0}
+                className="table__row--link"
+                onClick={() => openChapter(c.chapter_id)}
+                onKeyDown={(e) => {
+                  // 子元素（「进入」按钮）自己处理键盘时不再重复触发
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    openChapter(c.chapter_id);
+                  }
+                }}
                 style={{ cursor: 'pointer' }}
                 data-testid={`chapter-row-${c.chapter_id}`}
               >
@@ -106,9 +125,7 @@ export function ChaptersPage() {
                     className="btn btn--sm"
                     onClick={(e) => {
                       e.stopPropagation();
-                      navigate(
-                        `/projects/${projectId}/chapters/${c.chapter_id}`,
-                      );
+                      openChapter(c.chapter_id);
                     }}
                   >
                     进入
@@ -180,19 +197,15 @@ function ChapterCreateModal({
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={modalBackdrop}
-      onClick={onCancel}
+    <Modal
+      title="新建章节"
+      onClose={onCancel}
+      width={420}
+      testId="chapter-create-modal"
+      // 提交中不允许 Esc / 点遮罩关闭（仍可用「取消」按钮退出）
+      closable={!submitting}
     >
-      <form
-        className="card"
-        style={{ width: 420, maxWidth: '90vw' }}
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={handleSubmit}
-      >
-        <div className="section-title">新建章节</div>
+      <form onSubmit={handleSubmit}>
         <ErrorBanner>{err}</ErrorBanner>
 
         <div className="form-grid">
@@ -232,16 +245,6 @@ function ChapterCreateModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
-
-const modalBackdrop: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'rgba(15,20,35,0.4)',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  zIndex: 100,
-};

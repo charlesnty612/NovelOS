@@ -1,7 +1,12 @@
 import { Outlet, useLocation, useParams, Link, matchPath } from 'react-router-dom';
 import { useApiCall } from '../hooks/useApiCall';
 import { projectsApi } from '../api/endpoints';
+import { Loading } from '../components/Loading';
+import { StatusBadge } from '../components/StatusBadge';
 import type { Project } from '../api/types';
+
+/** 侧栏底部版本标识；发版时随 pyproject / package.json 一同对齐（AGENTS 版本纪律）。 */
+const APP_VERSION_LABEL = 'NovelOS v3.9.0';
 
 interface NavItem {
   path: string;
@@ -15,7 +20,11 @@ export function Layout() {
   const pid = params.pid;
 
   // 当前项目信息（仅当进入项目内部时加载，顶部栏展示名称）
-  const { data: project } = useApiCall<Project>(
+  const {
+    data: project,
+    error: projectErr,
+    reload: reloadProject,
+  } = useApiCall<Project>(
     async () => (pid ? projectsApi.get(pid) : Promise.reject(new Error('no project'))),
     [pid],
   );
@@ -36,11 +45,6 @@ export function Layout() {
       ? matchPath({ path: item.path, end: true }, location.pathname)
       : !!matchPath({ path: item.path + '/*', end: false }, location.pathname);
 
-  const projectRootActive = !!matchPath(
-    { path: '/projects/:pid/*', end: false },
-    location.pathname,
-  );
-
   return (
     <div className="app-shell">
       <aside className="app-sidebar">
@@ -57,7 +61,21 @@ export function Layout() {
         {inProject ? (
           <div className="app-sidebar__section">
             <div className="app-sidebar__section-title">
-              {project?.name ?? '加载中…'}
+              {project ? (
+                project.name
+              ) : projectErr ? (
+                <button
+                  type="button"
+                  className="app-sidebar__retry"
+                  onClick={reloadProject}
+                  title={projectErr}
+                  data-testid="sidebar-project-retry"
+                >
+                  项目信息加载失败，点击重试
+                </button>
+              ) : (
+                <Loading className="app-sidebar__loading" />
+              )}
             </div>
             {projectNav.map((it) => (
               <Link
@@ -68,15 +86,11 @@ export function Layout() {
                 {it.label}
               </Link>
             ))}
-            {!projectRootActive ? null : null}
           </div>
         ) : null}
-        <div style={{ flex: 1 }} />
-        <div
-          className="app-sidebar__section app-sidebar__item--muted"
-          style={{ fontSize: 11 }}
-        >
-          Sprint 5 · 一期
+        <div className="app-sidebar__spacer" />
+        <div className="app-sidebar__section app-sidebar__item--muted app-sidebar__version">
+          {APP_VERSION_LABEL}
         </div>
       </aside>
 
@@ -88,8 +102,10 @@ export function Layout() {
         <div className="app-topbar__meta">
           {project ? (
             <>
-              <span style={{ marginRight: 12 }}>ID: {project.project_id}</span>
-              <span>状态：{project.status}</span>
+              <span className="app-topbar__id" title="项目 ID">
+                {project.project_id}
+              </span>
+              <StatusBadge status={project.status} />
             </>
           ) : (
             <span>本地优先 · 单机</span>

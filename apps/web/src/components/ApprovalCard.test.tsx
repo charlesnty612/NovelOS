@@ -4,7 +4,6 @@ import { ApprovalCard } from './ApprovalCard';
 
 describe('ApprovalCard', () => {
   const baseProps = {
-    runId: 'r1',
     stage: 'chapter-review',
     message: '请作者审查',
     pausePayload: {

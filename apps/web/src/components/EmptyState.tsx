@@ -10,16 +10,10 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div
-      style={{
-        textAlign: 'center',
-        padding: '40px 16px',
-        color: 'var(--color-text-muted)',
-      }}
-    >
-      <div style={{ fontSize: 15, marginBottom: 6 }}>{title}</div>
-      {hint ? <div className="small">{hint}</div> : null}
-      {action ? <div style={{ marginTop: 16 }}>{action}</div> : null}
+    <div className="empty">
+      <div className="empty__title">{title}</div>
+      {hint ? <div className="empty__hint">{hint}</div> : null}
+      {action ? <div className="empty__action">{action}</div> : null}
     </div>
   );
 }

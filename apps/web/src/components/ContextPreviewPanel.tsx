@@ -7,6 +7,7 @@ import type {
 import { ApiError } from '../api/client';
 import { ErrorBanner, InfoBanner } from './ErrorBanner';
 import { EmptyState } from './EmptyState';
+import { Loading } from './Loading';
 
 interface Props {
   chapterId: string;
@@ -46,6 +47,10 @@ const KIND_LABEL: Record<string, string> = {
   suppressed_faction: '势力(已剔除)',
   // V2.0 Wave C 任务一：FTS5 召回片段（章节正文跨长程呼应）
   recalled_passage: '召回片段',
+  // P2 Context Engine：L1 结构层条目
+  genre_pack: '题材包',
+  sensory_anchor: '感官锚点',
+  unresolved_branch: '未收束分支',
 };
 
 /**
@@ -88,7 +93,7 @@ export function ContextPreviewPanel({ chapterId }: Props) {
   return (
     <div className="panel" data-testid="context-preview-panel">
       <div className="panel__title">
-        AI 上下文明细（dry-run）
+        AI 上下文明细
         <div style={{ flex: 1 }} />
         <button
           className="btn btn--sm"
@@ -103,11 +108,12 @@ export function ContextPreviewPanel({ chapterId }: Props) {
       <ErrorBanner>{error}</ErrorBanner>
 
       {loading && !preview ? (
-        <div className="muted">加载上下文中…</div>
+        <Loading />
       ) : !preview ? (
-        <div className="muted small">
-          暂无上下文预览（该章节尚无完整数据；dry-run 不触发 LLM 调用）。
-        </div>
+        <EmptyState
+          title="暂无上下文预览"
+          hint="该章节尚无完整数据；预览不会触发 LLM 调用。"
+        />
       ) : (
         <ContextPreviewView preview={preview} />
       )}
@@ -154,7 +160,10 @@ function ContextPreviewView({ preview }: { preview: ContextPreviewResponse }) {
               </span>
             </div>
             {layer.items.length === 0 ? (
-              <div className="muted small">（该层无条目）</div>
+              <EmptyState
+                title="该层暂无条目"
+                hint="本章未装配到这一层的上下文。"
+              />
             ) : (
               <details>
                 <summary className="muted small">
@@ -195,13 +204,8 @@ function PreviewItemRow({ item }: { item: ContextPreviewItem }) {
       <span className="muted small">{item.id}</span>
       {injection !== 'full' ? (
         <span
-          className="badge badge--chapter-planned"
+          className={`badge ${injection === 'suppressed' ? 'badge--archived' : 'badge--warn'}`}
           data-testid={`preview-item-injection-${item.kind}-${injection}`}
-          style={
-            injection === 'suppressed'
-              ? { background: '#888', color: '#fff' }
-              : { background: '#f5a623', color: '#000' }
-          }
           title={
             injection === 'summary'
               ? '本章未触发该实体，仅注入一行摘要'
@@ -218,15 +222,14 @@ function PreviewItemRow({ item }: { item: ContextPreviewItem }) {
       ) : null}
       {isOverdue ? (
         <span
-          className="badge badge--chapter-planned"
+          className="badge badge--warn"
           data-testid={`preview-item-overdue-${item.kind}`}
-          style={{ background: '#c33', color: '#fff' }}
         >
           逾期
         </span>
       ) : null}
       {item.source ? (
-        <span className="badge badge--chapter-planned">{item.source}</span>
+        <span className="badge">{item.source}</span>
       ) : null}
     </li>
   );

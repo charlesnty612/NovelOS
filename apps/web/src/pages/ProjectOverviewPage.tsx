@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
+import { Loading, SkeletonRows } from '../components/Loading';
 import { ExportPanel } from '../components/ExportPanel';
 import { ProjectInitPanel } from '../components/ProjectInitPanel';
 import { StatusBadge } from '../components/StatusBadge';
@@ -78,124 +79,110 @@ export function ProjectOverviewPage() {
     }
   };
 
+  if (!project) {
+    return (
+      <div>
+        <h1 className="section-title">项目总览</h1>
+        <p className="section-subtitle">
+          当前项目的基本信息、数据库状态与故事状态快照。
+        </p>
+        <ErrorBanner>{projectErr}</ErrorBanner>
+        {projectErr ? null : (
+          <div className="card" data-testid="overview-loading">
+            <Loading text="正在加载项目总览…" />
+            <div className="spacer" />
+            <SkeletonRows n={3} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
       <h1 className="section-title">项目总览</h1>
       <p className="section-subtitle">
-        当前项目的基本信息、后端健康状态，以及 Story State 快照摘要。
+        当前项目的基本信息、数据库状态与故事状态快照。
       </p>
 
       <ErrorBanner>{projectErr}</ErrorBanner>
       <ErrorBanner>{backupErr}</ErrorBanner>
 
-      {project ? (
-        <div className="card" style={{ marginBottom: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ fontSize: 18, fontWeight: 600 }}>{project.name}</div>
-            <StatusBadge status={project.status} />
-            <div style={{ flex: 1 }} />
-            <button
-              type="button"
-              className="btn btn--sm"
-              disabled={backingUp}
-              onClick={() => void handleBackup()}
-              data-testid="project-backup-btn"
-              title="下载整项目 JSON 备份（含 23 张业务表（22+volumes）；不含 API key）"
-            >
-              {backingUp ? '备份中…' : '下载备份'}
-            </button>
-            <span className="muted small">ID：{project.project_id}</span>
-          </div>
-          <div className="spacer" />
-          <div className="form-grid">
-            <Field label="类型" value={project.genre ?? '未设置'} />
-            <Field
-              label="目标字数"
-              value={
-                project.target_words != null
-                  ? project.target_words.toLocaleString()
-                  : '未设置'
-              }
-            />
-            <Field label="创建时间" value={formatDateTime(project.created_at)} />
-            <Field label="最近更新" value={formatDateTime(project.updated_at)} />
-          </div>
-          {project.premise ? (
-            <>
-              <div className="spacer" />
-              <div className="muted small">简介</div>
-              <div>{project.premise}</div>
-            </>
-          ) : null}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="toolbar">
+          <div className="card-title">{project.name}</div>
+          <StatusBadge status={project.status} />
+          <div className="toolbar__spacer" />
+          <button
+            type="button"
+            className="btn btn--sm"
+            disabled={backingUp}
+            onClick={() => void handleBackup()}
+            data-testid="project-backup-btn"
+            title="下载整项目 JSON 备份（含 38 张业务表；不含 API key）"
+          >
+            {backingUp ? '备份中…' : '下载备份'}
+          </button>
+          <span className="muted small">ID：{project.project_id}</span>
         </div>
-      ) : null}
+        <div className="form-grid">
+          <Field label="类型" value={project.genre ?? '未设置'} />
+          <Field
+            label="目标字数"
+            value={
+              project.target_words != null
+                ? project.target_words.toLocaleString()
+                : '未设置'
+            }
+          />
+          <Field label="创建时间" value={formatDateTime(project.created_at)} />
+          <Field label="最近更新" value={formatDateTime(project.updated_at)} />
+        </div>
+        {project.premise ? (
+          <>
+            <div className="spacer" />
+            <div className="muted small">简介</div>
+            <div>{project.premise}</div>
+          </>
+        ) : null}
+      </div>
 
       {/* P1 project-init：项目总览页「AI 初始化设定」入口 */}
-      {project ? (
-        <ProjectInitPanel
-          projectId={projectId}
-          project={project}
-          onDone={() => reloadProject()}
-        />
-      ) : null}
+      <ProjectInitPanel
+        projectId={projectId}
+        project={project}
+        onDone={() => reloadProject()}
+      />
 
       {/* Sprint 15 / V1.3：项目级文风样例管理 */}
       <ErrorBanner>{styleErr}</ErrorBanner>
-      {project ? (
-        <StyleSamplesPanel
-          projectId={projectId}
-          initialSamples={styleSamples ?? []}
-        />
-      ) : null}
+      <StyleSamplesPanel
+        projectId={projectId}
+        initialSamples={styleSamples ?? []}
+      />
 
       {/* V1.5 / Sprint 17：What-if 分支（创建/查看/promote） */}
       <ErrorBanner>{branchesErr}</ErrorBanner>
-      {project ? (
-        <BranchesPanel
-          projectId={projectId}
-          initialBranches={branches ?? []}
-        />
-      ) : null}
+      <BranchesPanel projectId={projectId} initialBranches={branches ?? []} />
 
       {/* V1.4 / Sprint 16：导出（整书 / 单章 / 番茄投稿包） */}
-      {project ? <ExportPanel projectId={projectId} /> : null}
+      <ExportPanel projectId={projectId} />
 
       <div className="form-grid">
         <div className="card">
-          <div className="detail-pane__title">后端健康</div>
+          <div className="detail-pane__title">数据库状态</div>
           <ErrorBanner>{healthErr}</ErrorBanner>
-          {health ? (
-            <>
-              <div>
-                状态：<strong>{health.status}</strong>
-              </div>
-              {health.version ? <div>版本：{health.version}</div> : null}
-              {health.tables ? (
-                <div style={{ marginTop: 8 }}>
-                  <div className="muted small">表行数</div>
-                  <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
-                    {Object.entries(health.tables).map(([k, v]) => (
-                      <li key={k}>
-                        <span className="muted">{k}</span>：{v}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <div className="muted">加载中…</div>
-          )}
+          {health ? <HealthSummary health={health} /> : <Loading />}
         </div>
 
         <div className="card">
-          <div className="detail-pane__title">State 快照摘要</div>
+          <div className="detail-pane__title">故事状态快照</div>
           <ErrorBanner>{snapErr}</ErrorBanner>
           <SnapshotSummary snap={snapshot} commitsLength={commits?.length} />
           <ErrorBanner>{commitErr}</ErrorBanner>
           {commits ? (
             <div className="muted small" style={{ marginTop: 4 }}>
-              共 {commits.length} 条 commit
+              共 {commits.length} 次提交
               {commits[0] ? `；最新 v${commits[0].version}` : ''}
             </div>
           ) : null}
@@ -214,6 +201,47 @@ function Field({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** /api/health 的 tables 实际是「业务表数量」（int）；前端类型仍标注为
+ *  Record<string, number>，故两种形状都兼容，避免把面板渲染成空列表。 */
+function readTables(
+  tables: HealthResponse['tables'],
+): { count: number; rows: Record<string, number> | null } | null {
+  const raw: unknown = tables;
+  if (typeof raw === 'number') return { count: raw, rows: null };
+  if (raw && typeof raw === 'object') {
+    const rows = raw as Record<string, number>;
+    return { count: Object.keys(rows).length, rows };
+  }
+  return null;
+}
+
+function HealthSummary({ health }: { health: HealthResponse }) {
+  const tables = readTables(health.tables);
+  return (
+    <>
+      <div data-testid="health-summary">
+        数据库{tables ? ` · ${tables.count} 张表` : ''} ·{' '}
+        <strong>{health.status === 'ok' ? '正常' : health.status}</strong>
+      </div>
+      {health.version ? (
+        <div className="muted small">后端版本 {health.version}</div>
+      ) : null}
+      {tables?.rows ? (
+        <details className="disclosure">
+          <summary>查看各表行数</summary>
+          <ul className="disclosure__list">
+            {Object.entries(tables.rows).map(([name, rows]) => (
+              <li key={name}>
+                <span className="muted">{name}</span>：{rows}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </>
+  );
+}
+
 function SnapshotSummary({
   snap,
   commitsLength,
@@ -221,7 +249,7 @@ function SnapshotSummary({
   snap: SnapshotResponse | null;
   commitsLength: number | undefined;
 }) {
-  if (!snap) return <div className="muted">加载中…</div>;
+  if (!snap) return <Loading />;
   const version =
     typeof snap.version === 'number'
       ? snap.version
@@ -232,31 +260,23 @@ function SnapshotSummary({
     <>
       <InfoBanner>
         {version != null
-          ? `state_version 来自 /projects/{pid}/state 字段。`
+          ? `当前故事状态版本：v${version}`
           : commitsLength != null
-          ? `快照接口未返回 version 字段，按 commits 长度推断：当前共 ${commitsLength} 次提交。`
-          : '快照接口未返回 version 字段，且 commits 未加载。'}
+          ? `暂未取到状态版本，按提交次数推断：共 ${commitsLength} 次提交。`
+          : '暂未取到状态版本。'}
       </InfoBanner>
       <div className="form-grid" style={{ marginTop: 8 }}>
         <Stat
-          label="Characters"
+          label="角色"
           value={countIn(snap.characters, 'characters')}
-          hint="快照中角色数"
+          hint="快照中的角色数"
         />
+        <Stat label="伏笔" value={countArr(snap.hooks)} hint="未完结的伏笔" />
+        <Stat label="债务" value={countArr(snap.debts)} hint="叙事债务" />
         <Stat
-          label="Hooks"
-          value={countArr(snap.hooks)}
-          hint="未完结的伏笔"
-        />
-        <Stat
-          label="Debts"
-          value={countArr(snap.debts)}
-          hint="叙事债务"
-        />
-        <Stat
-          label="Events（累计/最近）"
+          label="事件"
           value={`${countArr(snap.events)} / ${countArr(snap.recent_events)}`}
-          hint="事件总数 / 最近事件数"
+          hint="累计 / 最近"
         />
       </div>
     </>
@@ -275,7 +295,7 @@ function Stat({
   return (
     <div>
       <div className="muted small">{label}</div>
-      <div style={{ fontSize: 18, fontWeight: 600 }}>{value}</div>
+      <div className="stat__value">{value}</div>
       <div className="muted small">{hint}</div>
     </div>
   );

@@ -8,6 +8,7 @@ import type {
 } from '../api/types';
 import { ApiError } from '../api/client';
 import { ErrorBanner } from './ErrorBanner';
+import { Loading } from './Loading';
 import { formatApiError } from '../utils/formatApiError';
 
 type SubscoreKey =
@@ -75,7 +76,7 @@ interface Props {
  * QualityPanel —— 章节详情页「质量评估」面板（Sprint 6 下半 + V1.4）。
  *
  * - 顶部按钮「运行质量评估」触发 POST evaluate。
- * - 展示最新一份 QualityReport：overall 大数字（按 70/85 阈值着色）+ 六子分条形 +
+ * - 展示最新一份 QualityReport：overall 大数字（按 70/85 阈值着色）+ 七维子分条形 +
  *   issues 列表（severity 着色徽章 + category + rule_id + message + suggestion）；
  *   category=='payoff' 的 issue 单独一组「爽感问题」。
  * - V1.4 扩展：
@@ -134,7 +135,7 @@ export function QualityPanel({
       <ErrorBanner>{submitErr || error}</ErrorBanner>
 
       {loading ? (
-        <div className="muted">加载评估中…</div>
+        <Loading text="加载评估中…" />
       ) : !report ? (
         <div className="muted small">
           暂无评估报告。点击上方「运行质量评估」生成。
@@ -144,11 +145,11 @@ export function QualityPanel({
           report={report}
           referenceConsumption={
             qualityGateCheckpoint?.reference_consumption ??
-            report.scores_json._meta.reference_consumption
+            report.scores_json._meta?.reference_consumption
           }
           revisionGuidance={
             qualityGateCheckpoint?.revision_guidance ??
-            report.scores_json._meta.revision_guidance
+            report.scores_json._meta?.revision_guidance
           }
         />
       )}
@@ -184,7 +185,7 @@ function QualityReportView({
         </div>
       </div>
 
-      {/* 六子分条形 */}
+      {/* 七维子分条形 */}
       <div className="quality-subscores" data-testid="quality-subscores">
         {SUBSCORE_KEYS.map((k) => {
           const v = subscores[k] ?? 0;
@@ -252,9 +253,10 @@ function QualityReportView({
       ) : null}
 
       <div className="muted small" data-testid="quality-meta">
-        scoring_version: {subscores._meta.scoring_version}
-        {' · '}formula_hash: {subscores._meta.scoring_formula_hash.slice(0, 8)}
-        {' · '}evaluated_at: {subscores._meta.evaluated_at}
+        scoring_version: {subscores._meta?.scoring_version ?? '—'}
+        {' · '}formula_hash:{' '}
+        {(subscores._meta?.scoring_formula_hash ?? '').slice(0, 8) || '—'}
+        {' · '}evaluated_at: {subscores._meta?.evaluated_at ?? '—'}
       </div>
 
       {/* V1.4：参照系消费可观测。无消费时不渲染区块。 */}

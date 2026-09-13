@@ -8,13 +8,17 @@
 // - 危险操作（danger=true）→ 确认按钮加 btn--danger 配色（var(--color-danger)）
 // - 支持自定义确认 / 取消文案
 //
+// V3.10「交互完整」：Esc / 初始焦点 / 焦点循环 / 关闭归还焦点 / 锁 body 滚动
+// 统一交给 components/Modal.tsx 的 useModalFocus，避免与 Modal 各写一份。
+//
 // 设计要点：
 // - 遮罩 click 也走 onCancel（与既有 modal 一致）
-// - 焦点管理：useEffect 把 cancelRef.current.focus() 放在每次 open=true 切换时；
-//   在 danger 模式下额外确保焦点不在 confirm 上
-// - 通过 portal-free 渲染（与既有 modal 保持一致），zIndex: 100
+// - DOM 结构保持不变：role="dialog" 与 testId 落在遮罩元素上（既有调用方与测试
+//   依赖该契约），useModalFocus 的容器同样是该遮罩，故 Tab 焦点循环覆盖卡片内全部控件
+// - 通过 portal-free 渲染（与既有 modal 保持一致），zIndex: 100（由 Modal.tsx 的样式口径）
 
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
+import { useModalFocus } from './Modal';
 
 export interface ConfirmDialogProps {
   open: boolean;
@@ -47,36 +51,19 @@ export function ConfirmDialog({
   onCancel,
   testId,
 }: ConfirmDialogProps) {
-  const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const confirmRef = useRef<HTMLButtonElement | null>(null);
-
-  // 每次 open 切换到 true：默认焦点放在「取消」上。
-  // 危险态下确保焦点绝对不在「确认」上（避免误按回车触发删除等不可逆操作）。
-  useEffect(() => {
-    if (!open) return;
-    const id = window.setTimeout(() => {
-      cancelRef.current?.focus();
-    }, 0);
-    return () => window.clearTimeout(id);
-  }, [open]);
-
-  // Esc 关闭：仅在 open 时挂载监听
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation();
-        onCancel();
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [open, onCancel]);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  // 初始焦点固定在「取消」：危险态下绝不停在确认键上（避免误按回车触发不可逆操作）。
+  const { containerRef } = useModalFocus({
+    enabled: open,
+    onClose: onCancel,
+    initialFocusRef: cancelRef,
+  });
 
   if (!open) return null;
 
   return (
     <div
+      ref={containerRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby={testId ? `${testId}-title` : undefined}
@@ -128,7 +115,6 @@ export function ConfirmDialog({
             {cancelText}
           </button>
           <button
-            ref={confirmRef}
             type="button"
             className={danger ? 'btn btn--danger' : 'btn btn--primary'}
             onClick={onConfirm}

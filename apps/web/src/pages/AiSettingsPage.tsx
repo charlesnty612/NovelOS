@@ -18,6 +18,8 @@ import type {
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
 import { ConfirmDialog } from '../components/ConfirmDialog';
+import { Loading } from '../components/Loading';
+import { Modal } from '../components/Modal';
 import { useApiCall } from '../hooks/useApiCall';
 import { formatDateTime } from '../utils/format';
 import { ApiError } from '../api/client';
@@ -30,19 +32,19 @@ const PROVIDER_OPTIONS = [
 ];
 
 export function AiSettingsPage() {
+  const { pid } = useParams();
   return (
     <div>
       <h1 className="section-title">AI 设置</h1>
       <p className="section-subtitle">
-        模型档案（model_profiles）与环节绑定（capability_bindings）统一管理本页；
-        Agent prompt 版本管理与本页同步。本期页面挂在项目路由下，仅展示该 scope 内可配置项；
-        模型配置是项目无关的全局表，这里仍展示完整列表。
+        在这里决定每个生产环节用哪个模型：先在「模型档案」里配好接口与密钥，再到「环节分配」
+        把档案指派给题材定位、正文写作等环节。Agent 提示词版本也在本页查看与同步。
       </p>
 
       <InfoBanner>
         <span data-testid="ai-settings-logs-link">
-          想查看每次 AI 调用的 prompt/response？前往{' '}
-          <Link to="/ai-logs">AI 调用日志</Link>。
+          想看每次 AI 调用实际发了什么、回了什么？前往{' '}
+          <Link to={`/ai-logs?project=${pid}`}>AI 调用日志</Link>。
         </span>
       </InfoBanner>
 
@@ -60,8 +62,6 @@ export function AiSettingsPage() {
 // =============================================================================
 
 function ModelProfilesPanel() {
-  const { pid } = useParams();
-  void pid;
   const list = useApiCall<ModelProfile[]>(
     () => modelProfilesApi.list(),
     [],
@@ -89,10 +89,18 @@ function ModelProfilesPanel() {
   const [deleteProfileId, setDeleteProfileId] = useState<string | null>(null);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
 
+  // 成功条幅 2.5s 自动消失。用 effect 承载而非在调用点 window.setTimeout：
+  // 卸载时自动清理定时器（否则组件已卸载仍会 setState）。
+  useEffect(() => {
+    if (!savedNotice) return;
+    const timer = window.setTimeout(() => setSavedNotice(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [savedNotice]);
+
   return (
     <div className="panel" data-testid="model-profiles-panel">
       <div className="panel__title">
-        模型档案（model_profiles）
+        模型档案
         <div style={{ flex: 1 }} />
         <button
           className="btn btn--sm btn--primary"
@@ -106,7 +114,7 @@ function ModelProfilesPanel() {
       <ErrorBanner>{list.error}</ErrorBanner>
 
       {list.loading ? (
-        <div className="muted">加载中…</div>
+        <Loading />
       ) : !list.data || list.data.length === 0 ? (
         <EmptyState
           title="还没有模型档案"
@@ -146,7 +154,7 @@ function ModelProfilesPanel() {
                       Number(m.enabled) === 1 ? 'badge--chapter-committed' : 'badge--archived'
                     }`}
                   >
-                    {Number(m.enabled) === 1 ? 'enabled' : 'disabled'}
+                    {Number(m.enabled) === 1 ? '启用' : '停用'}
                   </span>
                   <span
                     className="badge badge--archived"
@@ -193,26 +201,10 @@ function ModelProfilesPanel() {
                     </button>
                     <button
                       className="btn btn--sm"
-                      onClick={async () => {
-                        // 读路径 params.api_key 已被后端脱敏（"***"），前端只用
-                        // has_api_key 字段判断「已配置」状态，不回填明文到输入框。
-                        try {
-                          const detail = await modelProfilesApi
-                            .list()
-                            .then((rows) => rows.find((r) => r.profile_id === m.profile_id));
-                          setEditing(detail ?? null);
-                        } catch (e: unknown) {
-                          const msg =
-                            e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
-                          setTestResult({
-                            profile_id: m.profile_id,
-                            ok: false,
-                            latency_ms: 0,
-                            detail: `加载详情失败 · ${msg}`,
-                            status_code: null,
-                          });
-                        }
-                      }}
+                      // 直接用本行数据打开编辑（列表读路径已含 name/provider/model/params，
+                      // 且 params.api_key 已被后端脱敏成 "***"，不回填输入框）——此前这里
+                      // 又发一次全量 list() 再 find，纯属多余请求。
+                      onClick={() => setEditing(m)}
                       data-testid={`model-profile-edit-${m.profile_id}`}
                     >
                       编辑
@@ -336,7 +328,12 @@ function ModelProfilesPanel() {
       ) : null}
 
       {testResult ? (
-        <InfoBanner>
+        // 成功=信息通道（蓝）；失败=错误通道（红）。此前无论成败都塞进 InfoBanner，
+        // 与全站「红色=错误」的语义冲突（删除档案 409 也复用此处展示）。
+        <div
+          className={testResult.ok ? 'alert alert--info' : 'alert alert--error'}
+          role={testResult.ok ? 'status' : 'alert'}
+        >
           <code data-testid="model-profile-test-result">
             {testResult.profile_id}：
             <span
@@ -351,7 +348,7 @@ function ModelProfilesPanel() {
             {testResult.status_code != null ? ` · HTTP ${testResult.status_code}` : ''}
             {testResult.detail ? ` · ${testResult.detail}` : ''}
           </code>
-        </InfoBanner>
+        </div>
       ) : null}
 
       {creating ? (
@@ -363,7 +360,6 @@ function ModelProfilesPanel() {
             setCreating(false);
             void list.reload();
             setSavedNotice('已保存');
-            window.setTimeout(() => setSavedNotice(null), 2500);
           }}
         />
       ) : null}
@@ -378,15 +374,20 @@ function ModelProfilesPanel() {
             setEditing(null);
             void list.reload();
             setSavedNotice('已保存');
-            window.setTimeout(() => setSavedNotice(null), 2500);
           }}
         />
       ) : null}
 
       {/* V3.22「交互反馈统一」：删除档案二次确认 + 保存/删除成功短暂条幅 */}
       {savedNotice ? (
-        <div data-testid="model-profiles-saved-banner" style={{ marginTop: 8 }}>
-          <InfoBanner>{savedNotice}</InfoBanner>
+        <div
+          className="alert alert--info"
+          role="status"
+          aria-live="polite"
+          data-testid="model-profiles-saved-banner"
+          style={{ marginTop: 8 }}
+        >
+          {savedNotice}
         </div>
       ) : null}
       {deleteProfileId ? (
@@ -405,7 +406,6 @@ function ModelProfilesPanel() {
               await modelProfilesApi.remove(id);
               void list.reload();
               setSavedNotice('已删除');
-              window.setTimeout(() => setSavedNotice(null), 2500);
             } catch (e: unknown) {
               // 后端删除遇 409 时按 wire 契约 detail 列出 capability；
               // 若 detail 已给出明确指引，直接透传；否则附前端兜底文案。
@@ -450,6 +450,14 @@ const BINDING_LABELS_FALLBACK: Record<string, string> = {
   // V3.9.3：observer 拆为独立 capability；前端 AI 设置页能单独给 observer 分配模型。
   observer: '状态提取',
   light: '轻量评审',
+};
+
+// 提示词版本状态（prompts.status，DDL 枚举 DRAFT/ACTIVE/DEPRECATED）→ 中文标签。
+// 未知值原样透出，避免后端新增枚举时前端显示空。
+const PROMPT_STATUS_LABEL: Record<string, string> = {
+  DRAFT: '草稿',
+  ACTIVE: '启用',
+  DEPRECATED: '已弃用',
 };
 
 type SaveState =
@@ -519,20 +527,20 @@ function CapabilityBindingsPanel() {
 
   return (
     <div className="panel" data-testid="capability-bindings-panel">
-      <div className="panel__title">环节分配（capability_bindings）</div>
+      <div className="panel__title">环节分配</div>
       <div className="muted small" style={{ marginBottom: 6 }}>
-        把模型档案指派到 8 个生产环节；解绑即该环节回落后端历史默认链（适用旧版 model_configs 仍存在时）。
+        把模型档案指派到 8 个生产环节（题材定位、正文写作、状态提取等）；解绑表示该环节改用旧版默认配置。
       </div>
 
       <ErrorBanner>{list.error}</ErrorBanner>
       <ErrorBanner>{profiles.error}</ErrorBanner>
 
       {list.loading ? (
-        <div className="muted">加载中…</div>
+        <Loading />
       ) : !list.data || list.data.length === 0 ? (
         <EmptyState
           title="尚未获取到环节清单"
-          hint="后端 /capability-bindings 返回空或失败。"
+          hint="接口返回为空或请求失败，请稍后重试。"
         />
       ) : (
         <div className="kv-list" data-testid="capability-bindings-list">
@@ -579,7 +587,7 @@ function CapabilityBindingRow({
       </span>
       <span className="muted small">
         {binding.agents && binding.agents.length > 0
-          ? `agents: ${binding.agents.join(', ')}`
+          ? `关联 Agent：${binding.agents.join('、')}`
           : ''}
       </span>
       <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -589,7 +597,7 @@ function CapabilityBindingRow({
           disabled={state.kind === 'saving'}
           data-testid={`cap-binding-select-${binding.capability}`}
         >
-          <option value="">未绑定（回落旧版 model_configs 链）</option>
+          <option value="">未绑定（使用旧版默认配置）</option>
           {profiles.map((p: ModelProfile) => (
             <option key={p.profile_id} value={p.profile_id}>
               {p.name}（{p.model}）
@@ -673,7 +681,7 @@ function AgentsPanel() {
   return (
     <div className="panel" data-testid="agents-panel">
       <div className="panel__title">
-        Agents & Prompts
+        Agent 与提示词
         <div style={{ flex: 1 }} />
         <button
           className="btn btn--sm btn--primary"
@@ -695,7 +703,7 @@ function AgentsPanel() {
             }
           }}
         >
-          {syncing ? '同步中…' : '同步 prompts'}
+          {syncing ? '同步中…' : '同步提示词'}
         </button>
       </div>
 
@@ -704,19 +712,19 @@ function AgentsPanel() {
 
       {syncResult ? (
         <InfoBanner>
-          同步完成：扫描 {syncResult.scanned.length}、注册{' '}
-          {syncResult.registered.length}、内容更新 {syncResult.updated.length}。
+          同步完成：扫描 {syncResult.scanned.length} 个、新注册{' '}
+          {syncResult.registered.length} 个、内容更新 {syncResult.updated.length} 个。
         </InfoBanner>
       ) : null}
 
       <div className="panel__section">
-        <div className="panel__section-title">已注册 agents</div>
+        <div className="panel__section-title">已注册的 Agent</div>
         {list.loading ? (
-          <div className="muted">加载中…</div>
+          <Loading />
         ) : !list.data || list.data.length === 0 ? (
           <EmptyState
-            title="还没有 agent"
-            hint="点击右上角「同步 prompts」从 docs/agents/prompts 扫描。"
+            title="还没有 Agent"
+            hint="点击右上角「同步提示词」，从 docs/agents/prompts 扫描。"
           />
         ) : (
           <div className="kv-list">
@@ -740,17 +748,19 @@ function AgentsPanel() {
 
       <div className="panel__section">
         <div className="panel__section-title">
-          {selected ? `${selected.name} 的 prompts` : '选择一个 agent 查看 prompts'}
+          {selected ? `${selected.name} 的提示词` : '选择一个 Agent 查看提示词'}
         </div>
         {selected ? (
           prompts.loading ? (
-            <div className="muted">加载中…</div>
+            <Loading />
           ) : !prompts.data || prompts.data.length === 0 ? (
-            <div className="muted small">该 agent 没有 prompt；尝试同步 prompts。</div>
+            <div className="muted small">
+              该 Agent 暂无提示词，可点击右上角「同步提示词」拉取。
+            </div>
           ) : (
             <div>
               <div className="muted small" style={{ marginBottom: 6 }}>
-                共 {prompts.data.length} 个版本（按 version 数字降序）
+                共 {prompts.data.length} 个版本（新版本在前）
               </div>
               <div className="table-wrap">
               <table className="table">
@@ -766,7 +776,7 @@ function AgentsPanel() {
                   {prompts.data.map((p) => (
                     <tr key={p.prompt_id} data-testid={`prompt-row-${p.version}`}>
                       <td>{p.version}</td>
-                      <td>{p.status}</td>
+                      <td>{PROMPT_STATUS_LABEL[p.status] ?? p.status}</td>
                       <td className="muted small">{formatDateTime(p.updated_at)}</td>
                       <td>
                         <code className="small">
@@ -782,7 +792,7 @@ function AgentsPanel() {
             </div>
           )
         ) : (
-          <div className="muted small">从左侧列表选择一个 agent。</div>
+          <div className="muted small">从左侧列表选择一个 Agent。</div>
         )}
       </div>
     </div>
@@ -1033,7 +1043,6 @@ function ModelProfileFormModal({
     setAvailableModels([]);
     setFetchHint(null);
     // 注：依赖 provider 即覆盖性切换；base_url 不入依赖以免抖动。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
   const hasApiKey = !!initial?.has_api_key;
@@ -1043,26 +1052,26 @@ function ModelProfileFormModal({
       ? clearKeyRequested
         ? '清除已请求（点击保存生效）'
         : '已配置（留空则不修改）'
-      : '（可选；留空则由 resolve_api_key 从 NOVELOS_API_KEY_ANTHROPIC 解析）'
+      : '（可选；留空则运行时从环境变量读取）'
     : hasApiKey
       ? clearKeyRequested
         ? '清除已请求（点击保存生效）'
         : '已配置（留空则不修改）'
-      : '（可选；若不填，运行时由 resolve_api_key 从 env 解析）';
+      : '（可选；留空则运行时从环境变量读取）';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
     if (!name.trim()) {
-      setErr('name 不能为空');
+      setErr('名称不能为空');
       return;
     }
     if (!model.trim()) {
-      setErr('model 不能为空');
+      setErr('模型不能为空');
       return;
     }
     if (requireBaseUrl && !params.baseUrl.trim()) {
-      setErr('该 provider 需要 base_url');
+      setErr('该接口类型需要填写接口地址');
       return;
     }
     // paramsOut 以 initialParams 为基底（快照），表单管理的键（base_url / api_key /
@@ -1141,23 +1150,19 @@ function ModelProfileFormModal({
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={modalBackdrop}
-      onClick={onCancel}
+    <Modal
+      title={title}
+      onClose={onCancel}
+      width={520}
+      testId="model-profile-form-modal"
+      // 保存中不允许 Esc / 点遮罩关闭（仍可用「取消」按钮退出）
+      closable={!submitting}
     >
-      <form
-        className="card"
-        style={{ width: 520, maxWidth: '92vw' }}
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={handleSubmit}
-      >
-        <div className="section-title">{title}</div>
+      <form onSubmit={handleSubmit}>
         <ErrorBanner>{err}</ErrorBanner>
 
         <div className="form-row">
-          <label>name *</label>
+          <label>名称 *</label>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -1167,7 +1172,7 @@ function ModelProfileFormModal({
         </div>
 
         <div className="form-row">
-          <label>provider *</label>
+          <label>接口类型 *</label>
           <select
             value={provider}
             onChange={(e) => setProvider(e.target.value)}
@@ -1182,7 +1187,7 @@ function ModelProfileFormModal({
         </div>
 
         <div className="form-row">
-          <label>model *</label>
+          <label>模型 *</label>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input
               value={model}
@@ -1192,19 +1197,19 @@ function ModelProfileFormModal({
               data-testid="profile-model"
             />
             <button
-                type="button"
-                className="btn btn--sm"
-                onClick={handleFetchModels}
-                disabled={!canFetchModels || fetchingModels}
-                title={
-                  !canFetchModels
-                    ? '请先填写 base_url'
-                    : '从当前 provider + base_url 拉取可选模型'
-                }
-                data-testid="profile-fetch-models"
-              >
-                {fetchingModels ? '拉取中…' : '拉取模型'}
-              </button>
+              type="button"
+              className="btn btn--sm"
+              onClick={handleFetchModels}
+              disabled={!canFetchModels || fetchingModels}
+              title={
+                !canFetchModels
+                  ? '请先填写接口地址'
+                  : '按当前接口类型与地址拉取可选模型'
+              }
+              data-testid="profile-fetch-models"
+            >
+              {fetchingModels ? '拉取中…' : '拉取模型'}
+            </button>
           </div>
           {/* V3.8：拉取成功后显式列出完整候选（原生 datalist 会按输入框当前值
               过滤候选——当前值命中某一项时其余候选全部不可见，故弃用）。
@@ -1243,7 +1248,7 @@ function ModelProfileFormModal({
         {!isMock ? (
           <div className="form-grid">
             <div className="form-row">
-              <label>base_url {requireBaseUrl ? '*' : ''}</label>
+              <label>接口地址 {requireBaseUrl ? '*' : ''}</label>
               <input
                 value={params.baseUrl}
                 onChange={(e) =>
@@ -1254,10 +1259,10 @@ function ModelProfileFormModal({
               />
             </div>
             {isOllama ? (
-              <InfoBanner>Ollama 本地服务无需 API Key —— 表单不接收 key。</InfoBanner>
+              <InfoBanner>Ollama 本地服务无需 API 密钥 —— 表单不接收密钥。</InfoBanner>
             ) : (
               <div className="form-row">
-                <label>api_key</label>
+                <label>API 密钥</label>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                   <input
                     type="password"
@@ -1280,7 +1285,7 @@ function ModelProfileFormModal({
                       }}
                       disabled={clearKeyRequested}
                       data-testid="profile-clear-api-key"
-                      title="点击后保存将清空已存的 api_key"
+                      title="点击后保存将清空已存的密钥"
                     >
                       {clearKeyRequested ? '已请求清除' : '清除已存密钥'}
                     </button>
@@ -1290,7 +1295,7 @@ function ModelProfileFormModal({
                   <div className="muted small" data-testid="profile-api-key-hint">
                     {hasApiKey
                       ? clearKeyRequested
-                        ? '清除已请求：点击保存将清空已存的 api_key；如想保留请改填新值。'
+                        ? '清除已请求：点击保存将清空已存的密钥；如想保留请改填新值。'
                         : '已配置密钥。留空保存将保留原值；填入新值则覆盖；点右侧按钮可显式清除。'
                       : '当前未配置密钥。留空保存保持未配置。'}
                   </div>
@@ -1299,7 +1304,7 @@ function ModelProfileFormModal({
             )}
           </div>
         ) : (
-          <InfoBanner>Mock provider 不需要 base_url / api_key。</InfoBanner>
+          <InfoBanner>Mock 类型不需要接口地址与密钥。</InfoBanner>
         )}
 
         <div className="form-row">
@@ -1309,7 +1314,7 @@ function ModelProfileFormModal({
               checked={enabled}
               onChange={(e) => setEnabled(e.target.checked)}
             />{' '}
-            启用（enabled=1 时可被环节分配命中）
+            启用（启用后才可被环节分配选中）
           </label>
         </div>
 
@@ -1321,8 +1326,8 @@ function ModelProfileFormModal({
             disabled={isMock}
             title={
               isMock
-                ? 'Mock provider 不支持思考模式'
-                : '按当前 provider + base_url 自动收窄候选；写入 params 的 thinking / reasoning_effort 字段'
+                ? 'Mock 类型不支持思考模式'
+                : '按当前接口类型与地址自动收窄候选；保存到该档案的思考参数'
             }
             data-testid="profile-thinking-select"
           >
@@ -1355,7 +1360,7 @@ function ModelProfileFormModal({
             if ((values as string[]).includes(thinkingMode)) return null;
             return (
               <div className="muted small" data-testid="profile-thinking-out-of-list">
-                当前保存的思考参数不在该端点支持列表内，保存时将按所选选项写入。
+                当前保存的档位不在该接口支持范围内，保存时按所选档位写入。
               </div>
             );
           })()}
@@ -1375,16 +1380,6 @@ function ModelProfileFormModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
-
-const modalBackdrop: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'rgba(15,20,35,0.4)',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  zIndex: 100,
-};

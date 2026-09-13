@@ -736,3 +736,72 @@ describe('inferThinkingMode 回归（审查 2026-08-30）', () => {
     expect(inferThinkingMode({})).toBe('default');
   });
 });
+
+// -------------------- V3.10 整备回归：错误通道 / 请求去重 / 中文标签 --------------------
+
+describe('AiSettingsPage · V3.10 整备回归', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(agentsApi.list).mockResolvedValue([baseAgent]);
+    vi.mocked(agentsApi.listPrompts).mockResolvedValue([]);
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([baseProfile]);
+    vi.mocked(capabilityBindingsApi.list).mockResolvedValue(bindingsFixture);
+  });
+
+  it('「编辑」直接用行数据打开表单，不再多发一次 list()', async () => {
+    renderPage();
+
+    const editBtn = await screen.findByTestId('model-profile-edit-mpf_001');
+    const callsBefore = vi.mocked(modelProfilesApi.list).mock.calls.length;
+
+    fireEvent.click(editBtn);
+    // 表单打开（能拿到输入框）即说明行数据足够，无需重新拉列表
+    await screen.findByTestId('profile-api-key');
+
+    expect(vi.mocked(modelProfilesApi.list).mock.calls.length).toBe(callsBefore);
+  });
+
+  it('测试连接失败 → 错误通道（alert--error）；成功 → 信息通道（alert--info）', async () => {
+    vi.mocked(modelProfilesApi.test).mockRejectedValueOnce(
+      new Error('端点不可达'),
+    );
+
+    renderPage();
+    fireEvent.click(await screen.findByTestId('model-profile-test-mpf_001'));
+
+    const failed = await screen.findByTestId('model-profile-test-result');
+    expect(failed.closest('.alert')?.className).toContain('alert--error');
+    expect(failed).toHaveTextContent('端点不可达');
+
+    vi.mocked(modelProfilesApi.test).mockResolvedValue({
+      profile_id: 'mpf_001',
+      ok: true,
+      latency_ms: 12,
+      detail: null,
+      status_code: 200,
+    });
+    fireEvent.click(screen.getByTestId('model-profile-test-mpf_001'));
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId('model-profile-test-result').closest('.alert')?.className,
+      ).toContain('alert--info');
+    });
+  });
+
+  it('档案状态徽标中文化：启用 / 停用（不再直出 enabled / disabled）', async () => {
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([
+      baseProfile,
+      { ...baseProfile, profile_id: 'mpf_off', name: 'off-profile', enabled: 0 },
+    ]);
+
+    renderPage();
+
+    const onRow = await screen.findByTestId('model-profile-row-mpf_001');
+    const offRow = await screen.findByTestId('model-profile-row-mpf_off');
+    expect(onRow).toHaveTextContent('启用');
+    expect(offRow).toHaveTextContent('停用');
+    expect(onRow).not.toHaveTextContent('enabled');
+    expect(offRow).not.toHaveTextContent('disabled');
+  });
+});

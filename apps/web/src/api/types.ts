@@ -213,7 +213,8 @@ export interface Commit {
 export interface HealthResponse {
   status: string;
   version?: string;
-  tables?: Record<string, number>;
+  /** 迁移表数：现行后端返回数字；旧版返回 {表名: 行数} map（两种形状都兼容）。 */
+  tables?: number | Record<string, number>;
 }
 
 export interface SnapshotResponse {

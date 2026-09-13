@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useCallback, useRef, type KeyboardEvent } from 'react';
+import { Navigate, useParams, useSearchParams } from 'react-router-dom';
 import { CanonTab } from './bible/CanonTab';
 import { CharacterTab } from './bible/CharacterTab';
 import { WorldTab } from './bible/WorldTab';
@@ -7,12 +7,72 @@ import { PlotTab } from './bible/PlotTab';
 import { LedgerTab } from './bible/LedgerTab';
 import { GenreTab } from './bible/GenreTab';
 
-type BibleTab = 'characters' | 'world' | 'plot' | 'ledger' | 'canon' | 'genre';
+// tab 清单即 URL 契约：?tab=<key>（characters / world / plot / ledger / canon / genre）。
+const BIBLE_TABS = [
+  { key: 'characters', label: '角色' },
+  { key: 'world', label: '世界' },
+  { key: 'plot', label: '剧情' },
+  { key: 'ledger', label: '伏笔与债务' },
+  { key: 'canon', label: '参照系' },
+  { key: 'genre', label: '题材' },
+] as const;
+
+type BibleTab = (typeof BIBLE_TABS)[number]['key'];
+
+const DEFAULT_TAB: BibleTab = 'characters';
+
+function isBibleTab(value: string | null | undefined): value is BibleTab {
+  return value != null && BIBLE_TABS.some((t) => t.key === value);
+}
 
 export function StoryBiblePage() {
-  const { pid } = useParams();
-  const projectId = pid!;
-  const [tab, setTab] = useState<BibleTab>('characters');
+  const params = useParams();
+  const projectId = params['pid']!;
+  const splat = params['*'] ?? '';
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const activeTab: BibleTab = isBibleTab(tabParam) ? tabParam : DEFAULT_TAB;
+  const tabRefs = useRef<Array<HTMLDivElement | null>>([]);
+
+  // tab 状态以 URL 为唯一事实源（刷新 / 后退 / 分享都还原到同一页签）。
+  const selectTab = useCallback(
+    (next: BibleTab) => {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set('tab', next);
+      setSearchParams(nextParams);
+    },
+    [searchParams, setSearchParams],
+  );
+
+  // 路由声明是 :pid/bible/*；子路径不是合法页签 → 兜底默认页（保留合法 ?tab=）。
+  if (splat !== '') {
+    const nextTab = isBibleTab(splat)
+      ? splat
+      : isBibleTab(tabParam)
+        ? tabParam
+        : DEFAULT_TAB;
+    return <Navigate to={`/projects/${projectId}/bible?tab=${nextTab}`} replace />;
+  }
+
+  const handleTabKeyDown = (
+    e: KeyboardEvent<HTMLDivElement>,
+    index: number,
+  ) => {
+    const last = BIBLE_TABS.length - 1;
+    let nextIndex: number;
+    if (e.key === 'ArrowRight') nextIndex = index === last ? 0 : index + 1;
+    else if (e.key === 'ArrowLeft') nextIndex = index === 0 ? last : index - 1;
+    else if (e.key === 'Home') nextIndex = 0;
+    else if (e.key === 'End') nextIndex = last;
+    else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      selectTab(BIBLE_TABS[index].key);
+      return;
+    } else return;
+    e.preventDefault();
+    selectTab(BIBLE_TABS[nextIndex].key);
+    tabRefs.current[nextIndex]?.focus();
+  };
 
   return (
     <div>
@@ -21,57 +81,40 @@ export function StoryBiblePage() {
         管理本项目的角色、世界设定与剧情事件。所有数据都按项目隔离。
       </p>
 
-      <div className="tabs">
-        <div
-          className={`tabs__tab ${tab === 'characters' ? 'tabs__tab--active' : ''}`}
-          onClick={() => setTab('characters')}
-          data-testid="tab-characters"
-        >
-          角色
-        </div>
-        <div
-          className={`tabs__tab ${tab === 'world' ? 'tabs__tab--active' : ''}`}
-          onClick={() => setTab('world')}
-          data-testid="tab-world"
-        >
-          世界
-        </div>
-        <div
-          className={`tabs__tab ${tab === 'plot' ? 'tabs__tab--active' : ''}`}
-          onClick={() => setTab('plot')}
-          data-testid="tab-plot"
-        >
-          剧情
-        </div>
-        <div
-          className={`tabs__tab ${tab === 'ledger' ? 'tabs__tab--active' : ''}`}
-          onClick={() => setTab('ledger')}
-          data-testid="tab-ledger"
-        >
-          伏笔与债务
-        </div>
-        <div
-          className={`tabs__tab ${tab === 'canon' ? 'tabs__tab--active' : ''}`}
-          onClick={() => setTab('canon')}
-          data-testid="tab-canon"
-        >
-          参照系
-        </div>
-        <div
-          className={`tabs__tab ${tab === 'genre' ? 'tabs__tab--active' : ''}`}
-          onClick={() => setTab('genre')}
-          data-testid="tab-genre"
-        >
-          题材
-        </div>
+      <div className="tabs" role="tablist" aria-label="Story Bible 页签">
+        {BIBLE_TABS.map((t, i) => (
+          <div
+            key={t.key}
+            ref={(el) => {
+              tabRefs.current[i] = el;
+            }}
+            role="tab"
+            id={`bible-tab-${t.key}`}
+            aria-selected={activeTab === t.key}
+            aria-controls={`bible-panel-${t.key}`}
+            tabIndex={activeTab === t.key ? 0 : -1}
+            className={`tabs__tab ${activeTab === t.key ? 'tabs__tab--active' : ''}`}
+            onClick={() => selectTab(t.key)}
+            onKeyDown={(e) => handleTabKeyDown(e, i)}
+            data-testid={`tab-${t.key}`}
+          >
+            {t.label}
+          </div>
+        ))}
       </div>
 
-      {tab === 'characters' ? <CharacterTab projectId={projectId} /> : null}
-      {tab === 'world' ? <WorldTab projectId={projectId} /> : null}
-      {tab === 'plot' ? <PlotTab projectId={projectId} /> : null}
-      {tab === 'ledger' ? <LedgerTab projectId={projectId} /> : null}
-      {tab === 'canon' ? <CanonTab projectId={projectId} /> : null}
-      {tab === 'genre' ? <GenreTab projectId={projectId} /> : null}
+      <div
+        role="tabpanel"
+        id={`bible-panel-${activeTab}`}
+        aria-labelledby={`bible-tab-${activeTab}`}
+      >
+        {activeTab === 'characters' ? <CharacterTab projectId={projectId} /> : null}
+        {activeTab === 'world' ? <WorldTab projectId={projectId} /> : null}
+        {activeTab === 'plot' ? <PlotTab projectId={projectId} /> : null}
+        {activeTab === 'ledger' ? <LedgerTab projectId={projectId} /> : null}
+        {activeTab === 'canon' ? <CanonTab projectId={projectId} /> : null}
+        {activeTab === 'genre' ? <GenreTab projectId={projectId} /> : null}
+      </div>
     </div>
   );
 }

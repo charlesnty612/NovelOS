@@ -135,7 +135,11 @@ describe('StyleSamplesPanel (Sprint 15 / V1.3)', () => {
     render(
       <StyleSamplesPanel projectId="prj_1" initialSamples={baseSamples} />,
     );
+    // V3.10：删除前先经 ConfirmDialog 二次确认，确认后才发 DELETE。
     fireEvent.click(screen.getByTestId('style-samples-delete-asty_a1'));
+    fireEvent.click(
+      screen.getByTestId('style-samples-delete-confirm-confirm'),
+    );
 
     await waitFor(() => {
       expect(styleSamplesApi.remove).toHaveBeenCalledWith('prj_1', 'asty_a1');
@@ -143,5 +147,17 @@ describe('StyleSamplesPanel (Sprint 15 / V1.3)', () => {
     await waitFor(() => {
       expect(styleSamplesApi.list).toHaveBeenCalledWith('prj_1');
     });
+  });
+
+  it('删除前弹确认框，点「取消」不发 DELETE', async () => {
+    render(
+      <StyleSamplesPanel projectId="prj_1" initialSamples={baseSamples} />,
+    );
+    fireEvent.click(screen.getByTestId('style-samples-delete-asty_a1'));
+    expect(
+      screen.getByTestId('style-samples-delete-confirm'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('style-samples-delete-confirm-cancel'));
+    expect(styleSamplesApi.remove).not.toHaveBeenCalled();
   });
 });

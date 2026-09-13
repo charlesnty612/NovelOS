@@ -163,3 +163,45 @@ describe('ChaptersPage - 关键流', () => {
     expect(vi.mocked(chaptersApi.create)).not.toHaveBeenCalled();
   });
 });
+
+// ---------- V3.10「交互完整」：弹窗键盘可达 + 表格行键盘入口 ----------
+describe('ChaptersPage · 弹窗与键盘可达（V3.10）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(chaptersApi.listByProject).mockResolvedValue([baseChapter()]);
+  });
+
+  it('新建弹窗：初始焦点入第一个输入框；Esc 关闭', async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-row-ch_001')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('new-chapter-btn'));
+    const numberInput = await screen.findByTestId('chapter-number');
+
+    // 初始焦点 = 弹窗内第一个可交互元素
+    await waitFor(() => {
+      expect(document.activeElement).toBe(numberInput);
+    });
+
+    // Esc 关闭（此前自写 modal 没有 Esc，键盘用户被困）
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => {
+      expect(screen.queryByTestId('chapter-number')).toBeNull();
+    });
+  });
+
+  it('表格行键盘入口：行可聚焦（tabIndex=0），Enter 进入章节详情', async () => {
+    renderPage();
+    const row = await waitFor(() => screen.getByTestId('chapter-row-ch_001'));
+
+    row.focus();
+    expect(document.activeElement).toBe(row);
+
+    fireEvent.keyDown(row, { key: 'Enter' });
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-detail-stub')).toBeInTheDocument();
+    });
+  });
+});

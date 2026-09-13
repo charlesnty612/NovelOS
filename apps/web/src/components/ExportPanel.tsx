@@ -62,6 +62,9 @@ export function ExportPanel({ projectId }: ExportPanelProps) {
     const n = Number.parseInt(chapterNoInput.trim(), 10);
     return Number.isFinite(n) && n > 0 ? n : undefined;
   }, [chapterNoInput]);
+  // 填了内容但不是正整数 → 行内提示（替代此前的静默禁用）。
+  const chapterNoInvalid =
+    chapterNoInput.trim() !== '' && chapterNo === undefined;
 
   const triggerDownload = async (url: string) => {
     setError(null);
@@ -100,8 +103,9 @@ export function ExportPanel({ projectId }: ExportPanelProps) {
       document.body.appendChild(a);
       a.click();
       a.remove();
-      // 给浏览器一点时间触发下载，再 revoke
-      setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+      // 触发下载后立即释放：与 backupApi 下载路径同一时机（endpoints.ts），
+      // 避免两套 revoke 约定并存。
+      URL.revokeObjectURL(objUrl);
     } catch (e: unknown) {
       if (e instanceof ApiError) {
         setError(formatApiError(e));
@@ -158,6 +162,15 @@ export function ExportPanel({ projectId }: ExportPanelProps) {
           data-testid="export-chapter-no-input"
           style={{ width: 100 }}
         />
+        {chapterNoInvalid ? (
+          <span
+            className="small"
+            style={{ color: 'var(--color-danger)' }}
+            data-testid="export-chapter-no-error"
+          >
+            请输入正整数（例 3）
+          </span>
+        ) : null}
         <button
           type="button"
           className="btn btn--sm"
@@ -205,6 +218,3 @@ function parseFilename(contentDisposition: string): string | null {
   const m2 = /filename="?([^";]+)"?/i.exec(contentDisposition);
   return m2 && m2[1] ? m2[1] : null;
 }
-
-// 避免 lint 警告：exportApi 在测试侧以 mock 形式注入
-void exportApi;

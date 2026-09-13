@@ -9,6 +9,7 @@ import type {
   SnapshotResponse,
 } from '../api/types';
 import { ErrorBanner, InfoBanner } from './ErrorBanner';
+import { EmptyState } from './EmptyState';
 import { formatDateTime, formatJson } from '../utils/format';
 
 interface Props {
@@ -179,8 +180,11 @@ export function BranchesPanel({ projectId, initialBranches }: Props) {
       </div>
 
       {branches.length === 0 ? (
-        <div className="muted small" data-testid="branches-empty">
-          该项目暂无分支。
+        <div data-testid="branches-empty">
+          <EmptyState
+            title="该项目暂无分支"
+            hint="在下方输入分支名，基于当前 main 快照创建第一个分支。"
+          />
         </div>
       ) : (
         <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 12px 0' }}>
@@ -298,25 +302,25 @@ export function BranchesPanel({ projectId, initialBranches }: Props) {
   );
 }
 
+const BRANCH_STATUS_LABEL: Record<Branch['status'], string> = {
+  ACTIVE: '激活',
+  MERGED: '已合并',
+  DISCARDED: '已丢弃',
+  ARCHIVED: '已归档',
+};
+
+// 分支状态徽标：复用全局 .badge--* 语义类（不再自造 inline pill）。
+const BRANCH_STATUS_CLASS: Record<Branch['status'], string> = {
+  ACTIVE: 'badge badge--active',
+  MERGED: 'badge badge--ok',
+  DISCARDED: 'badge badge--warn',
+  ARCHIVED: 'badge badge--archived',
+};
+
 function BranchStatusBadge({ status }: { status: Branch['status'] }) {
-  const palette: Record<Branch['status'], { bg: string; fg: string; label: string }> = {
-    ACTIVE: { bg: 'var(--color-primary)', fg: '#fff', label: 'ACTIVE' },
-    MERGED: { bg: 'var(--color-success)', fg: '#fff', label: 'MERGED' },
-    DISCARDED: { bg: 'var(--color-archived)', fg: '#fff', label: 'DISCARDED' },
-    ARCHIVED: { bg: 'var(--color-accent)', fg: '#fff', label: 'ARCHIVED' },
-  };
-  const it = palette[status] ?? palette.ACTIVE;
   return (
-    <span
-      style={{
-        fontSize: 11,
-        padding: '2px 8px',
-        borderRadius: 10,
-        background: it.bg,
-        color: it.fg,
-      }}
-    >
-      {it.label}
+    <span className={BRANCH_STATUS_CLASS[status] ?? 'badge'}>
+      {BRANCH_STATUS_LABEL[status] ?? status}
     </span>
   );
 }
@@ -398,9 +402,9 @@ function BranchStateView({
         <pre
           className="muted small"
           style={{
-            background: '#f6f8fa',
+            background: 'var(--color-bg)',
             padding: 8,
-            borderRadius: 4,
+            borderRadius: 'var(--radius-sm)',
             overflow: 'auto',
             maxHeight: 240,
           }}

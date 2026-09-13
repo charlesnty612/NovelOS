@@ -14,6 +14,8 @@ import type {
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { EmptyState } from '../../components/EmptyState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { Loading } from '../../components/Loading';
+import { Modal } from '../../components/Modal';
 import {
   DEBT_STATUS_LABEL,
   HOOK_STATUS_LABEL,
@@ -145,7 +147,7 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
 
       <ErrorBanner>{err}</ErrorBanner>
 
-      {loading ? <div className="muted">加载中…</div> : null}
+      {loading ? <Loading /> : null}
 
       <div className="layout-2col">
         {/* ----------------- Hook 台账 ----------------- */}
@@ -184,7 +186,8 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
               hint="新建伏笔记录埋点 / 预期兑现 / 实际兑现章节。"
             />
           ) : (
-            <table className="table" data-testid="hook-table">
+            <div className="table-wrap">
+              <table className="table" data-testid="hook-table">
               <thead>
                 <tr>
                   <th>名称</th>
@@ -261,7 +264,8 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
                   );
                 })}
               </tbody>
-            </table>
+              </table>
+            </div>
           )}
         </div>
 
@@ -290,7 +294,8 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
               hint="新建债务记录已承诺但尚未处理的问题。"
             />
           ) : (
-            <table className="table" data-testid="debt-table">
+            <div className="table-wrap">
+              <table className="table" data-testid="debt-table">
               <thead>
                 <tr>
                   <th>描述</th>
@@ -339,7 +344,8 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
                   </tr>
                 ))}
               </tbody>
-            </table>
+              </table>
+            </div>
           )}
         </div>
       </div>
@@ -435,16 +441,6 @@ interface HookFormProps {
   onSubmit: (payload: HookUpdatePayload) => Promise<void>;
 }
 
-const MODAL_STYLE_BACKDROP: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'rgba(15,20,35,0.4)',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  zIndex: 100,
-};
-
 function HookFormModal({ title, chapters, initial, onCancel, onSubmit }: HookFormProps) {
   const [name, setName] = useState(initial?.name ?? '');
   const [importance, setImportance] = useState<number>(initial?.importance ?? 0.5);
@@ -483,14 +479,8 @@ function HookFormModal({ title, chapters, initial, onCancel, onSubmit }: HookFor
   };
 
   return (
-    <div role="dialog" aria-modal="true" style={MODAL_STYLE_BACKDROP} onClick={onCancel}>
-      <form
-        className="card"
-        style={{ width: 560, maxWidth: '92vw', maxHeight: '90vh', overflowY: 'auto' }}
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-      >
-        <div className="section-title">{title}</div>
+    <Modal title={title} onClose={onCancel} width={560}>
+      <form onSubmit={submit}>
         <ErrorBanner>{err}</ErrorBanner>
 
         <div className="form-row">
@@ -558,7 +548,7 @@ function HookFormModal({ title, chapters, initial, onCancel, onSubmit }: HookFor
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -607,14 +597,8 @@ function DebtFormModal({ title, chapters, initial, onSubmit, onCancel }: DebtFor
   };
 
   return (
-    <div role="dialog" aria-modal="true" style={MODAL_STYLE_BACKDROP} onClick={onCancel}>
-      <form
-        className="card"
-        style={{ width: 560, maxWidth: '92vw', maxHeight: '90vh', overflowY: 'auto' }}
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-      >
-        <div className="section-title">{title}</div>
+    <Modal title={title} onClose={onCancel} width={560}>
+      <form onSubmit={submit}>
         <ErrorBanner>{err}</ErrorBanner>
 
         <div className="form-row">
@@ -677,7 +661,7 @@ function DebtFormModal({ title, chapters, initial, onSubmit, onCancel }: DebtFor
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 

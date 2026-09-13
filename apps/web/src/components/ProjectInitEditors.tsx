@@ -252,7 +252,7 @@ export const STAGE_FIELDS: Record<string, FieldSpec[]> = {
  * 已知前置元数据（_degraded/error/schema_version/prompt_version 等）按未知键规则渲染，
  * 但这里给一个明确列表提示"它们属于后端元信息，原样透传即可"，便于代码可读。
  */
-const META_KEY_HINT = '后端元信息（编辑后会写回）';
+const META_KEY_HINT = '后端附加字段（原样保存）';
 
 // =============== 空模板构造 ======================================================
 
@@ -677,11 +677,11 @@ function NestedObjectField({
       <div
         data-testid={containerTid}
         style={{
-          border: '1px solid #ddd',
-          borderRadius: 4,
+          border: '1px solid var(--color-border)',
+          borderRadius: 'var(--radius-sm)',
           padding: 8,
           marginTop: 4,
-          background: 'var(--color-bg-soft, #fafafa)',
+          background: 'var(--color-bg)',
         }}
       >
         {nestedSpecs.map((sub) => (
@@ -812,7 +812,7 @@ function ObjectListField({
             key={idx}
             data-testid={`revision-card-${cardKey}`}
             className="card"
-            style={{ marginTop: 6, padding: 8, background: '#fff' }}
+            style={{ marginTop: 6, padding: 8, background: 'var(--color-bg-elev)' }}
           >
             <div
               style={{

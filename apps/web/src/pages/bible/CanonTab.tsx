@@ -21,6 +21,7 @@ import type {
 import { EmptyState } from '../../components/EmptyState';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { Loading } from '../../components/Loading';
 import { formatApiError } from '../../utils/formatApiError';
 import { formatDateTime, parseReportMarkdown } from '../../utils/format';
 
@@ -282,63 +283,67 @@ export function CanonTab({ projectId }: CanonTabProps) {
             参照系列表（{list.length}）
           </div>
           {loading ? (
-            <div className="muted">加载中…</div>
+            <Loading />
           ) : list.length === 0 ? (
             <EmptyState
               title="还没有参照系"
               hint="使用上方表单粘贴一本参照书进行拆书；拆书结果会自动落入本项目。"
             />
           ) : (
-            <table className="table" data-testid="canon-table">
-              <thead>
-                <tr>
-                  <th>书名</th>
-                  <th>读者档</th>
-                  <th>创建时间</th>
-                  <th>梗概摘要</th>
-                  <th className="right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {list.map((c) => (
-                  <tr
-                    key={c.canon_id}
-                    onClick={() => setSelectedId(c.canon_id)}
-                    style={{
-                      cursor: 'pointer',
-                      background: c.canon_id === selectedId ? '#f3f7ff' : undefined,
-                    }}
-                    data-testid="canon-row"
-                  >
-                    <td>{c.title}</td>
-                    <td className="muted small">{c.reader_profile}</td>
-                    <td className="muted small">{formatDateTime(c.created_at)}</td>
-                    <td style={{ maxWidth: 280 }}>{c.logline || '—'}</td>
-                    <td className="right">
-                      <button
-                        className="btn btn--sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedId(c.canon_id);
-                        }}
-                      >
-                        详情
-                      </button>
-                      <button
-                        className="btn btn--sm btn--danger"
-                        style={{ marginLeft: 6 }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleDelete(c.canon_id);
-                        }}
-                      >
-                        删除
-                      </button>
-                    </td>
+            <div className="table-wrap">
+              <table className="table" data-testid="canon-table">
+                <thead>
+                  <tr>
+                    <th>书名</th>
+                    <th>读者档</th>
+                    <th>创建时间</th>
+                    <th>梗概摘要</th>
+                    <th className="right">操作</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {list.map((c) => (
+                    <tr
+                      key={c.canon_id}
+                      onClick={() => setSelectedId(c.canon_id)}
+                      className={
+                        c.canon_id === selectedId
+                          ? 'kv-list__row--active'
+                          : undefined
+                      }
+                      style={{ cursor: 'pointer' }}
+                      data-testid="canon-row"
+                    >
+                      <td>{c.title}</td>
+                      <td className="muted small">{c.reader_profile}</td>
+                      <td className="muted small">{formatDateTime(c.created_at)}</td>
+                      <td style={{ maxWidth: 280 }}>{c.logline || '—'}</td>
+                      <td className="right">
+                        <button
+                          className="btn btn--sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedId(c.canon_id);
+                          }}
+                        >
+                          详情
+                        </button>
+                        <button
+                          className="btn btn--sm btn--danger"
+                          style={{ marginLeft: 6 }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDelete(c.canon_id);
+                          }}
+                        >
+                          删除
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
 
@@ -346,7 +351,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
           {!selectedId ? (
             <div className="muted">从左侧选择参照系查看详情。</div>
           ) : detailLoading ? (
-            <div className="muted">详情加载中…</div>
+            <Loading />
           ) : detailErr ? (
             <ErrorBanner>{detailErr}</ErrorBanner>
           ) : detail ? (
@@ -491,7 +496,11 @@ function CanonDetailView({ detail }: { detail: CanonDetail }) {
           </span>
         ) : null}
         {writeErr ? (
-          <span className="small" style={{ marginLeft: 8, color: '#b00020' }} data-testid="canon-write-to-style-sample-err">
+          <span
+            className="small"
+            style={{ marginLeft: 8, color: 'var(--color-danger)' }}
+            data-testid="canon-write-to-style-sample-err"
+          >
             {writeErr}
           </span>
         ) : null}
