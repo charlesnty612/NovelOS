@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from packages.core.api.routers import discover_routers
 from packages.core.config import Settings, get_settings
-from packages.core.db import apply_migrations
+from packages.core.db import apply_migrations, default_migrations_dir
 from packages.core.logging_config import configure_logging, get_logger
 
 # 版本号单一来源：读 pyproject 安装元数据（pip install -e 后即与 pyproject 同步），
@@ -102,17 +102,35 @@ async def lifespan(app: FastAPI):
         settings.db_path,
     )
     app.state.migration_result = result
+    # M4 自检：applied=0 且除 _migrations 外无表 = 迁移未执行（绝大多数是启动 CWD
+    # 错误导致默认迁移目录落空）。health 仍会报 ok、业务端点会全 500，故此处打
+    # ERROR 级日志，便于第一时间定位（默认目录已锚定仓库根，见 db.default_migrations_dir）。
+    if not result["applied"] and result["tables"] <= 1:
+        log.error(
+            "迁移未执行：applied=0 且 tables=%d（疑似工作目录错误）。默认迁移目录=%s，"
+            "db=%s；请核对启动 CWD 或显式传入迁移目录。",
+            result["tables"],
+            default_migrations_dir(),
+            settings.db_path,
+        )
 
     # 启动自愈：进程重启把残留 RUNNING run 收尾为 FAILED（详见 engine.recover_interrupted_runs）。
-    # 单进程部署下，RUNNING 必然是孤儿；不收尾会触发 409 阻断同 chapter 新 run。
+    # 收尾范围按实例归属过滤（F6）：只清本进程实例 + instance_id IS NULL 的历史行，
+    # 其他实例正在跑的 run 不动（多实例同库不再互杀）。
     try:
-        from packages.core.workflow_runtime.engine import recover_interrupted_runs
+        from packages.core.workflow_runtime.engine import (
+            current_instance_id,
+            recover_interrupted_runs,
+        )
 
-        recovered = recover_interrupted_runs(settings.db_path)
+        instance_id = current_instance_id()
+        recovered = recover_interrupted_runs(settings.db_path, instance_id)
         if recovered:
-            log.warning("startup recovered interrupted runs: %s", recovered)
+            log.warning(
+                "startup recovered interrupted runs (instance=%s): %s", instance_id, recovered
+            )
         else:
-            log.debug("startup recovered interrupted runs: none")
+            log.debug("startup recovered interrupted runs: none (instance=%s)", instance_id)
     except Exception as exc:  # noqa: BLE001 —— 自愈失败不能阻断启动
         log.warning("startup recovery hook failed (non-fatal): %s", exc)
 

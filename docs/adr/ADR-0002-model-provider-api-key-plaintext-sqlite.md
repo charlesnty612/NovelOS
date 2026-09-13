@@ -3,7 +3,7 @@
 > 状态：**Accepted**
 > 日期：2026-08-24
 > 生效：MVP
-> 关联：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §4.2 deviation #4；`packages/core/api/routers/model_configs.py`
+> 关联：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§4.2 deviation #4；`packages/core/api/routers/model_configs.py`
 > 起草：NovelOS 主控
 
 ---

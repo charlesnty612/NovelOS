@@ -68,4 +68,4 @@ curl -X POST http://127.0.0.1:8000/api/projects \
 - **删除 409**：依赖 SQLite FK 约束抛 ``IntegrityError``；router 层翻译；不要在 Service 层吞此异常。
 - **部分更新**：`update` 用 pydantic ``model_dump(exclude_unset=True)`` 区分「未提供」与「显式置 None」；
   目前没有必为 None 的字段，预留语义给未来扩展。
-- **权威文档**：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 1、PRD §15-22。
+- **权威文档**：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 1、PRD §15-22。

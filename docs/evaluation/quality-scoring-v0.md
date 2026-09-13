@@ -5,6 +5,7 @@
 > 主会话方案决策日期：2026-08-23（V3.9 修订：2026-09-13）
 > 撰写日期：2026-08-23
 > 状态：v0.2（V3.9 批次 3 修订），随 PRD v1.2 生效；权重、阈值、基线值均为"建议值"，必须经首批 golden 章节评测后方可固化
+> 三仓引用说明（2026-09-13）：文中引用的 `docs/state-model/*.md`、`docs/data-model/*`、`docs/reference-canon/*.md` 等 v0 设计文档已于 2026-09-08 三仓分离迁至内容仓 NovelOS-Content（同名相对路径）；`docs/evaluation/baseline/`、`docs/evaluation/runs/` 的运行数据迁至 NovelOS-Artifacts。下文各引用处标注为「已迁内容仓/痕迹仓」。
 
 ---
 
@@ -19,10 +20,10 @@
 
 **不在本文档范围内**：
 
-- 知识权限模型本身（参见已落地的 `docs/state-model/knowledge-permission-v0.md`，本文仅引用其字段与概念）；
-- State Delta / Commit Record 的字段定义（参见已落地的 `docs/state-model/state-delta-v0.md`）；
+- 知识权限模型本身（参见已落地的 `docs/state-model/knowledge-permission-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md），本文仅引用其字段与概念）；
+- State Delta / Commit Record 的字段定义（参见已落地的 `docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md））；
 - Prompt / Agent / Workflow 的实现细节（PRD §40-§80）；
-- 数据模型其余表（见 `docs/data-model/data-model-v0.md`（待产出）等并行文档）。
+- 数据模型其余表（见 `docs/data-model/data-model-v0.md`（已迁内容仓 NovelOS-Content:docs/data-model/data-model-v0.md）等并行文档）。
 
 ---
 
@@ -174,7 +175,7 @@ overall = round(
 ## 3. 子分定义（6 维）
 
 > 每个子分均给出：**测量来源 / 输入材料 / 计算流程 / 0-100 取值语义锚点 / 已知局限**。
-> **MVP 收窄决策**（主会话 2026-08-23 已定，本节"硬门槛"对齐之）：MVP 阶段 timeline_consistency、knowledge_leakage 仅按 warning 级别运行，**不阻断 Commit**；V1 再升级为 error 级硬门槛。理由：MVP 阶段出于工程节奏收窄——`docs/state-model/knowledge-permission-v0.md` 与 TimeModel schema 的 enforcement pipeline 虽已具备承载位（`visibility` / `who_knows` 已落库），但端到端的检测通路（含 Context Engine 过滤执行顺序、Observer 校验流）仍在 Sprint 6 Quality 子模块中成型；若直接以 error 级阻断，会让 Sprint 4 全部 chapter 因检测通路未通而无法 Commit，违背 §112 硬性工程原则。
+> **MVP 收窄决策**（主会话 2026-08-23 已定，本节"硬门槛"对齐之）：MVP 阶段 timeline_consistency、knowledge_leakage 仅按 warning 级别运行，**不阻断 Commit**；V1 再升级为 error 级硬门槛。理由：MVP 阶段出于工程节奏收窄——`docs/state-model/knowledge-permission-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md） 与 TimeModel schema 的 enforcement pipeline 虽已具备承载位（`visibility` / `who_knows` 已落库），但端到端的检测通路（含 Context Engine 过滤执行顺序、Observer 校验流）仍在 Sprint 6 Quality 子模块中成型；若直接以 error 级阻断，会让 Sprint 4 全部 chapter 因检测通路未通而无法 Commit，违背 §112 硬性工程原则。
 
 ### 3.1 plot（剧情）
 
@@ -280,7 +281,7 @@ overall = round(
 
 - **测量来源**：**混合**。
 - **输入材料**：
-  - `Hook Ledger`（PRD §21 / 并行文档 `docs/state-model/hook-ledger-v0.md`（待产出）；当前阶段回退到 `state_snapshot_pre.plot_event` 中的"伏笔类"事件）；
+  - `Hook Ledger`（PRD §21 / 并行文档 `docs/state-model/hook-ledger-v0.md`（已迁内容仓 NovelOS-Content; 该文件未产出，为 v0 规划引用）（待产出）；当前阶段回退到 `state_snapshot_pre.plot_event` 中的"伏笔类"事件）；
   - `chapter_draft` 中可识别的伏笔引用与兑现点。
 - **计算流程**：
   1. Rule-based 兑现率（权重 0.5）：当期 chapter 涉及的钩子数 / 实际兑现或推进数 × 100；MVP 不兑现的长伏笔不扣分（info 级记录）。
@@ -289,11 +290,11 @@ overall = round(
   - `90+`：每条已兑现的伏笔都能让读者回想"原来之前有提示"，铺垫不留痕。
   - `70`：兑现可见，但铺垫处 1-2 处过于刻意。
   - `50`：至少一条伏笔兑现突兀，或密度过低。
-- **已知局限**：PRD §21 把伏笔作为关键；MVP 阶段 Hook Ledger（`docs/state-model/hook-ledger-v0.md` 待产出）使用降级路径（plot_event），其落地后即可切换至 Hook Ledger 主路径。
+- **已知局限**：PRD §21 把伏笔作为关键；MVP 阶段 Hook Ledger（`docs/state-model/hook-ledger-v0.md`（已迁内容仓 NovelOS-Content; 该文件未产出，为 v0 规划引用） 待产出）使用降级路径（plot_event），其落地后即可切换至 Hook Ledger 主路径。
 
 ---
 
-## 3.7 男频爽感维度（v0.1（v1.2 修订）增补，对齐 `docs/v1.2-调研综合与设计决策-2026-08-23.md` D4）
+## 3.7 男频爽感维度（v0.1（v1.2 修订）增补，对齐 `docs/v1.2-调研综合与设计决策-2026-08-23.md`（历史文档：软件仓与内容仓均未保留该文件，此引用为当时记录） D4）
 
 > 本节为 v1.2 调研综合文档 D4 的落地：把"好看"的手艺从玄学拆为可机检的爽感指标，纳入 Quality Engine 作为"爽感体检报告"的固定组成部分。
 > **本节所有阈值均为"建议值，待校准"**：必须经首批番茄男频 golden + Top-10 爆款回放后方可固化。
@@ -326,7 +327,7 @@ overall = round(
 每条 Guardrail 的判定分三档：**通过 / warning / 阻断（error）**。
 
 > **MVP 收窄决策**（主会话 2026-08-23 已定，须在文档中固化）：MVP error 级阻断 = 三条硬门槛（§4.1/§4.3/§4.4）+ 合规阻断 §4.6(REQ-Q6)、§4.8(REQ-Q8)，Q6/Q8 自启用即为阻断级（与 PRD REQ-Q6~Q8 条目口径一致）；§4.7(REQ-Q7) MVP 为 warning。
-> **理由**：本阶段 Quality 子模块在 Sprint 6 才落地，`docs/state-model/knowledge-permission-v0.md` 的 `visibility` / `who_knows` 承载位虽已落库，但端到端检测通路（含 Context Engine 过滤顺序、Observer 校验）仍在 Sprint 6 整合；若直接以 error 级阻断，会让 Sprint 4 的所有 chapter 因检测通路未通而无法 Commit，违背 §112 硬性工程原则。V1 升级时仅需把这一节的 status 行从 `mvp: warning` 改为 `mvp: error`，无须改动公式。
+> **理由**：本阶段 Quality 子模块在 Sprint 6 才落地，`docs/state-model/knowledge-permission-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md） 的 `visibility` / `who_knows` 承载位虽已落库，但端到端检测通路（含 Context Engine 过滤顺序、Observer 校验）仍在 Sprint 6 整合；若直接以 error 级阻断，会让 Sprint 4 的所有 chapter 因检测通路未通而无法 Commit，违背 §112 硬性工程原则。V1 升级时仅需把这一节的 status 行从 `mvp: warning` 改为 `mvp: error`，无须改动公式。
 
 ### 4.1 schema_validity
 
@@ -334,7 +335,7 @@ overall = round(
 |---|---|
 | **error** | `chapter_plan` / `chapter_draft` / Observer Deltas 任一 JSON Schema 校验失败；缺失必填字段。 |
 | **warning** | 全部字段合法，但含 `additionalProperties` 之外的未声明字段。 |
-| **pass** | 严格通过 JSON Schema（参见已落地的 `docs/state-model/state-delta-v0.md` 中各 Delta / Commit Record 的 schema 章节）。 |
+| **pass** | 严格通过 JSON Schema（参见已落地的 `docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md） 中各 Delta / Commit Record 的 schema 章节）。 |
 
 - **检测点**：JSON Schema 校验器（基于 AJV 或等价库）的零失败。
 - **判定语义**：`error` ⇒ `overall = 0` 强制阻断 Commit（§2.1 规则 1）。
@@ -347,8 +348,8 @@ overall = round(
 | **warning**（MVP） | 同上规则命中，但仅写入 `issues[]`，不阻断。 |
 | **pass** | TimeModel 中所有 timestamp 严格单调（人物级、世界级各自 check）。 |
 
-- **检测点**：规则引擎（基于已落地的 `docs/state-model/state-delta-v0.md` 中 TimeModel 章节定义生效）。
-- **MVP 收窄边界**：MVP 阶段即便 `docs/state-model/state-delta-v0.md` 的 TimeModel schema 已落地，本规则仍采用"白名单豁免"——只对已建模字段生效；缺字段不报告，避免过度阻断。
+- **检测点**：规则引擎（基于已落地的 `docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md） 中 TimeModel 章节定义生效）。
+- **MVP 收窄边界**：MVP 阶段即便 `docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md） 的 TimeModel schema 已落地，本规则仍采用"白名单豁免"——只对已建模字段生效；缺字段不报告，避免过度阻断。
 
 ### 4.3 character_contradiction
 
@@ -378,11 +379,11 @@ overall = round(
 |---|---|
 | **error**（V1 起生效） | 角色获知不应知道的信息且该信息影响剧情（PR/Plot Event 类剧情级钩子）。 |
 | **warning**（MVP） | 同上命中；不阻断。 |
-| **pass** | 所有 `who_knows` 引用通过 Knowledge Permission 模型（见 `docs/state-model/knowledge-permission-v0.md`）。 |
+| **pass** | 所有 `who_knows` 引用通过 Knowledge Permission 模型（见 `docs/state-model/knowledge-permission-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md））。 |
 
-- **检测点**：Context Engine 的 visibility 过滤（参见 `docs/state-model/knowledge-permission-v0.md` 的 enforcement pipeline 概念） + Observer Delta 检查。
-- **MVP 降级**：即便 `docs/state-model/knowledge-permission-v0.md` 的 `visibility` / `who_knows` 承载位已落库，本规则仍对未声明 visibility 的字段**默认 pass**，仅对已声明 `who_knows` 的字段做严格校验——避免检测通路未通时假阳性。
-- **V1 升级触发条件**：端到端 Knowledge Permission 检测通路在 Sprint 6 Quality 子模块整合完成 + Hook Ledger（`docs/state-model/hook-ledger-v0.md` 待产出）落地。
+- **检测点**：Context Engine 的 visibility 过滤（参见 `docs/state-model/knowledge-permission-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md） 的 enforcement pipeline 概念） + Observer Delta 检查。
+- **MVP 降级**：即便 `docs/state-model/knowledge-permission-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md） 的 `visibility` / `who_knows` 承载位已落库，本规则仍对未声明 visibility 的字段**默认 pass**，仅对已声明 `who_knows` 的字段做严格校验——避免检测通路未通时假阳性。
+- **V1 升级触发条件**：端到端 Knowledge Permission 检测通路在 Sprint 6 Quality 子模块整合完成 + Hook Ledger（`docs/state-model/hook-ledger-v0.md`（已迁内容仓 NovelOS-Content; 该文件未产出，为 v0 规划引用） 待产出）落地。
 
 ### 4.6 REQ-Q6 参照书相似度（v0.1（v1.2 修订）增补，对齐 D2 G-sim）
 
@@ -390,7 +391,7 @@ overall = round(
 |---|---|
 | **error** | `chapter_draft` 与项目挂载的全部参照书 `ReferenceCanon` 产出之间文本 n-gram 重叠率 > 2% 或单段 embedding 相似度 > 0.92；检测节点挂 Commit Gate 前。 |
 | **warning** | 任意一处连续 13 字以上与参照书重合或单段相似度 > 0.85；写入 issues，不阻断。 |
-| **pass** | 双轨检测均低于阈值（详见 `docs/reference-canon/reference-canon-v0.md` §5）。 |
+| **pass** | 双轨检测均低于阈值（详见 `docs/reference-canon/reference-canon-v0.md`（已迁内容仓 NovelOS-Content:docs/reference-canon/reference-canon-v0.md） §5）。 |
 
 - **检测点**：Quality Engine 内嵌相似度模块，对照 `docs/reference-canon/schemas/reference-canon.schema.json` 落地的参照系与当前 draft 文本。
 - **MVP 收窄**：MVP 阶段阈值采用"建议值"（13 字 / 2% / 0.85 / 0.92），待首批 golden + Top-10 番茄男频回放校准；error 级硬门槛，但允许工程团队通过白名单豁免共用网文套话。
@@ -681,8 +682,8 @@ function decide_release(baseline, aggregate):
 
 > 以下问题在本规范 v0 内已采用"建议默认值"先行落地，但尚未闭环；任一项落实都会触动 §2 / §4 / §6 / §7 的数字与流程，必须在 v0 → v1 的版本升级中处理。
 
-1. **OV-1**：`docs/state-model/knowledge-permission-v0.md` 的 `who_knows` / `visibility` 承载位虽已落库，但端到端 enforcement pipeline（含 Context Engine 过滤执行顺序、Observer 的越界校验流）何时在 Sprint 6 Quality 子模块整合完成？——这是 §4.5 在 MVP 后续升级为 error 的前提。
-2. **OV-2**：Hook Ledger（`docs/state-model/hook-ledger-v0.md` 待产出）何时落地、并成为 Foreshadowing 子分（§3.6）的唯一数据源？当前 §3.6 使用降级路径（plot_event），待 Hook Ledger 落地后切换。
+1. **OV-1**：`docs/state-model/knowledge-permission-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md） 的 `who_knows` / `visibility` 承载位虽已落库，但端到端 enforcement pipeline（含 Context Engine 过滤执行顺序、Observer 的越界校验流）何时在 Sprint 6 Quality 子模块整合完成？——这是 §4.5 在 MVP 后续升级为 error 的前提。
+2. **OV-2**：Hook Ledger（`docs/state-model/hook-ledger-v0.md`（已迁内容仓 NovelOS-Content; 该文件未产出，为 v0 规划引用） 待产出）何时落地、并成为 Foreshadowing 子分（§3.6）的唯一数据源？当前 §3.6 使用降级路径（plot_event），待 Hook Ledger 落地后切换。
 3. **OV-3**：PlotSimulation（PRD §90）是否需要单独的"模拟态 Quality Score"？当前 §3 算法仅针对生产态 draft；模拟态是否需要"分支质量分"暂未决。
 4. **OV-4**：LLM judge 模型路由由谁配置？当前未指定 model_a / model_b。Proposal：在 `docs/agents/model-router-v0.md`（待产出）落定后回填。
 5. **OV-5**：Rubric 的"少扣/中/优"三档样例（§7.3）由谁撰写？需 Quality Lead + 编辑团队联合产出，本 v0 不含样例正文。
@@ -702,7 +703,7 @@ function decide_release(baseline, aggregate):
 | R3 | Knowledge Permission 落地延迟，§4.5 升级为 error 被迫推迟 | 中 | MVP 收窄已对齐；OV-1 闭环后即可升级 |
 | R4 | Golden 5 章与生产态章节差异大，Regression 跑"过拟合" | 重要 | v1 增补跨题材；引入 continuity_cases 对抗样例 |
 | R5 | Sprint 6 Quality 子模块实现延迟，导致本文档"暂时无主" | 致命 | Quality Lead 在 Sprint 6 启动前 1 周接管本文作为验收依据 |
-| R6 | 已落地的 `state-delta-v0.md` / `knowledge-permission-v0.md` 在字段名上与本文 §1.2 / §4.5 的引用不一致 | 中 | v0 发布前做字段名一致性 diff review，主会话协调 |
+| R6 | 已落地的 `state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md） / `knowledge-permission-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md） 在字段名上与本文 §1.2 / §4.5 的引用不一致 | 中 | v0 发布前做字段名一致性 diff review，主会话协调 |
 | R7 | Continuity 规则引擎在 PRD §114"七问"中若干新 State 字段未到齐前误报或漏报 | 中 | §3.3 已知局限已说明；规则严格按"已建模字段"生效，未建模字段默认 pass |
 
 ---
@@ -712,5 +713,5 @@ function decide_release(baseline, aggregate):
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v0 | 2026-08-23 | 首版；与 PRD §37/§38/§82/§83/§84/§85/§86/§110 + 评估报告 R7/R9 对齐；MVP 收窄决策固化 |
-| v0.1 | 2026-08-23 | 增补 §3.7 男频爽感维度（H-1~H-5 五项指标：章末钩子检出率/爽点密度/连续水章预警/黄金三章专项/战力境界递进一致性）；§4.6/§4.7/§4.8 新增 REQ-Q6 参照书相似度 / REQ-Q7 AI 痕迹自检 / REQ-Q8 人工加工占比三条 Guardrail（对齐 `docs/v1.2-调研综合与设计决策-2026-08-23.md` D2 G-sim / G-ai / G-human）；§4.x 编号顺延。原 §4.6 Guardrail 与 Scoring 的衔接 → §4.9。本版所有阈值均为"建议值，待校准"。 |
+| v0.1 | 2026-08-23 | 增补 §3.7 男频爽感维度（H-1~H-5 五项指标：章末钩子检出率/爽点密度/连续水章预警/黄金三章专项/战力境界递进一致性）；§4.6/§4.7/§4.8 新增 REQ-Q6 参照书相似度 / REQ-Q7 AI 痕迹自检 / REQ-Q8 人工加工占比三条 Guardrail（对齐 `docs/v1.2-调研综合与设计决策-2026-08-23.md`（历史文档：软件仓与内容仓均未保留该文件，此引用为当时记录） D2 G-sim / G-ai / G-human）；§4.x 编号顺延。原 §4.6 Guardrail 与 Scoring 的衔接 → §4.9。本版所有阈值均为"建议值，待校准"。 |
 | v0.2 | 2026-09-13 | V3.9 批次 3 修订（R14/R7/3.1/3.2/3.3/3.5）：§2 overall 统一为七维均权（旧加权表标删除线留演化史）；error 分 blocking/informational 两组（§2.1 规则 1、§4.9）；`scoring_formula_hash` 覆盖 severity 矩阵（§2.2）；§3.6 foreshadowing 改埋设/兑现双通道（resolved + 0.9×new）；§3.7 H-3 标 warning（矩阵封顶）、H-5 越级碾压标未实现；§4.8 Q8 默认降为 warning（显式 `NOVELOS_QUALITY_Q8_STRICT=1` 才 error，含 created_by 推断口径）；§6.3 条件 4「baseline −3」标删除线并给出 R7 裁决理由；§1.1/§1.3 补 ai_trace 维度与 error 语义说明。 |

@@ -10,8 +10,9 @@
 > - `docs/agents/prompts/arbiter-v0.md`（V1 生效，MVP 不启用）
 > 关联 Schema：
 > - `docs/state-model/schemas/state-delta.schema.json`（权威，唯一）
-> - `docs/architecture/context-engine-v0.md`
+> - `docs/architecture/context-engine-v0.md`（已迁内容仓 NovelOS-Content:docs/architecture/context-engine-v0.md）
 > 状态：本文件由 Prompt 编写子代理产出，**只**定义 I/O 契约与十问回答，不复制 Context Engine 内部层定义。
+> 时效说明（2026-09-13 补注）：本文为 2026-08-23 v0 定稿且未升版，I/O 契约仍以本文为准；文内引用的 `docs/architecture/` 等 v0 设计文档已迁内容仓 NovelOS-Content（见各处标注），软件仓保留本文与各 Prompt 文件。
 
 ---
 
@@ -65,7 +66,7 @@ Prompt 定义行为，Agent 定义能力，Workflow 决定何时调用。本契�
 | `knowledge_permissions.*` | object | Y | Context Engine（按层过滤后） | 必须含 `your_visibility` |
 | `constraints.*` | object | Y | Project Config | 含 style_constraints_id |
 
-> **层引用**：以上字段对应 `docs/architecture/context-engine-v0.md` 的层（L1 Project / L2 Story State / L3 Character State / L4 Plot Context / L5 Chapter Context / L9 Agent Private Context）。Context Engine 负责按 §23 知识权限过滤后填入；本契约只声明消费哪些字段，不规定 Context Engine 内部实现。
+> **层引用**：以上字段对应 `docs/architecture/context-engine-v0.md`（已迁内容仓 NovelOS-Content:docs/architecture/context-engine-v0.md） 的层（L1 Project / L2 Story State / L3 Character State / L4 Plot Context / L5 Chapter Context / L9 Agent Private Context）。Context Engine 负责按 §23 知识权限过滤后填入；本契约只声明消费哪些字段，不规定 Context Engine 内部实现。
 
 ### 3.2 输出契约
 
@@ -116,7 +117,7 @@ Prompt 定义行为，Agent 定义能力，Workflow 决定何时调用。本契�
 | `knowledge_permissions.*` | object | Y | Context Engine | `forbidden_kinds` 至少含 `HIDDEN` |
 | `style_constraints.*` | object | Y | Project Style Service | 含 `forbidden_words[]`、`pov`、`dialogue_ratio` 等 |
 
-> **层引用**：上述字段对应 `docs/architecture/context-engine-v0.md` 的层（L2-L7）。
+> **层引用**：上述字段对应 `docs/architecture/context-engine-v0.md`（已迁内容仓 NovelOS-Content:docs/architecture/context-engine-v0.md） 的层（L2-L7）。
 
 ### 4.2 输出契约
 
@@ -190,7 +191,7 @@ JSON 顶层**仅**含以下 7 个 change 数组（即便为空也必须存在为
 
 #### 5.2.2 元信息字段（Observer 不输出，由 Committer 注入）
 
-以下 10 个顶层字段**不由 Observer 编写**，由 **Workflow Runtime / State Committer 在 Schema 校验与提交前注入**（依据 state-delta-v0.md §2.2「Observer 或其上游 Agent 生成」）：
+以下 10 个顶层字段**不由 Observer 编写**，由 **Workflow Runtime / State Committer 在 Schema 校验与提交前注入**（依据 state-delta-v0.md（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md） §2.2「Observer 或其上游 Agent 生成」）：
 
 | 字段 | 类型 | 注入时机 | 注入者 |
 |---|---|---|---|
@@ -273,7 +274,7 @@ JSON 顶层**仅**含以下 7 个 change 数组（即便为空也必须存在为
 | `config.adopt_confidence_threshold` | number | N | Workflow Runtime | 默认 `0.5` |
 | `config.max_changes_per_array` | integer | N | Workflow Runtime | 默认 `50` |
 
-> **层引用**：同 §5.1，对应 `docs/architecture/context-engine-v0.md` 的层（L1-L5、L9）。Context Engine 负责按 §23 知识权限过滤后填入。
+> **层引用**：同 §5.1，对应 `docs/architecture/context-engine-v0.md`（已迁内容仓 NovelOS-Content:docs/architecture/context-engine-v0.md） 的层（L1-L5、L9）。Context Engine 负责按 §23 知识权限过滤后填入。
 
 ### 5A.2 输出契约
 

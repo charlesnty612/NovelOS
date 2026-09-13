@@ -269,7 +269,7 @@ apps/web/
 | GET | `/projects/{pid}/canons` | 该项目下 active canon 摘要列表 |
 | GET | `/canons/{canon_id}` | canon 全文（canon_json + report_md + extracts） |
 | DELETE | `/canons/{canon_id}` | 级联删除 canon + extracts（204） |
-| GET | `/projects/{pid}/backup` | 下载项目备份 JSON（22 张业务表 + metadata 自证字段，不含 API key；V1.4 Sprint 16 / MVP） |
+| GET | `/projects/{pid}/backup` | 下载项目备份 JSON（23 张业务表（22+volumes）+ metadata 自证字段，不含 API key；V1.4 Sprint 16 / MVP） |
 | POST | `/projects/import-backup` | 接收 JSON 包导入为**新项目**；坏 format/version/表名 → 422（V1.4 Sprint 16 / MVP） |
 | GET | `/projects/{pid}/branches` | 分支列表（main 优先，其余 ASC；V1.5 Sprint 17） |
 | POST | `/projects/{pid}/branches` | 创建分支 `{name, base_state_version?}`；同名 → 409 branch_name_conflict |

@@ -1,10 +1,12 @@
 """导出发布链路（V1.4，Sprint 16）。
 
 把 chapter / plan 数据组装成「作者发布」友好的纯文档产物：
-- 整书 txt：所有 COMMITTED 章节按 chapter_no 升序拼接
+- 整书 txt（作者 WIP 面）：项目全部章节按 chapter_no 升序拼接；非 COMMITTED 章节标题加
+  「【未定稿】」前缀标注
 - 单章 txt：指定 chapter 的正文（取该 chapter 最新 draft 的 content）
 - 整书 docx：同上内容的 OOXML docx（手工打包，无 python-docx 依赖）
-- 番茄投稿包 txt：前 N 章拼满 ~1 万字正文 + 分隔线 + 全书大纲（章节计划）
+- 番茄投稿包 txt（外发面）：只取 COMMITTED 章节，前 N 章拼满 ~1 万字正文
+  + 分隔线 + 全书大纲（章节计划）
 
 设计约束：
 - 只读：全程只 SELECT，不写库、不调 LLM；
@@ -17,6 +19,7 @@
 from __future__ import annotations
 
 from .builder import (
+    UNCOMMITTED_MARKER,
     ExportScope,
     build_docx,
     build_fanqie_package,
@@ -35,6 +38,8 @@ __all__ = [
     "build_fanqie_package",
     "plan_to_outline",
     "build_minimal_docx",
+    # V3.9 批次 4.1：作者 WIP 面非 COMMITTED 章节的标题前缀（外发面不做标注）。
+    "UNCOMMITTED_MARKER",
     # V3.9 批次 5.14：章节渲染 helper 由私有名提升为公开 API
     # （``content_sync.build_volume_txt`` 等跨模块复用的稳定入口）。
     "project_name",

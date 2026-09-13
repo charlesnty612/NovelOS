@@ -21,4 +21,4 @@
 ## 维护注意点
 - 同一 chapter 的 delta 必须按 `delta_index` 顺序提交；不允许跳跃。
 - 冲突检测：相同字段在同一 commit 内多 delta 出现时按「最新覆盖 + 记录冲突」策略。
-- 权威文档：PRD §34；`docs/state-model/state-delta-v0.md` §6.2；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4。
+- 权威文档：PRD §34；`docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md）§6.2；`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 4。

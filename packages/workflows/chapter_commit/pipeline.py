@@ -101,12 +101,31 @@ WORKFLOW = {
     # submit_result / snapshot_pre 均不被 commit 节点读——可安全 exclude。
     # 必保留：delta_id（commit 节点调 StoryStateService.commit_delta 用作入参；service 自己
     # 按 delta_id 从 state_deltas 表读回 delta 行，不依赖 ctx['delta'] 内容）。
+    #
+    # V3.9 全量检修 M2：节点镜像键补齐。引擎除顶层 merge 外还会把整套节点产出存
+    # ``ctx[node_id]``（engine.py:676 ``ctx[node.node_id] = output``）→ 与
+    # workflow_run_nodes.output_json 逐字节重复；不列进来则上面的数据键仍会经镜像
+    # 原样落盘（生产实测：commit run 89KB 中 59KB 是被排除数据）。
+    # 口径来源：chapter-write 的 7 node_id 全列先例（chapter_write/pipeline.py）。
+    #
+    # 两条**不排除**的例外（消费契约，误排即前端断供）：
+    # - ``high_risk_approval``：Human 节点镜像承载 ``__pause_payload__``（审批卡数据，
+    #   apps/web/src/utils/pausePayload.ts 从 checkpoint_json[node_id] 取）；
+    # - ``quality_gate``：前端 QualityPanel 从 ``checkpoint_json['quality_gate']`` 读
+    #   参照系消费 / 改稿引导（apps/web/src/hooks/useChapterRunOrchestration.ts）；
+    #   且该键与 gate 节点直接赋值的 ctx 顶层键同名，排除会一并抹掉 run 详情。
     "checkpoint_exclude": [
         "observer_input",
         "observer_payload",
         "delta",
         "submit_result",
         "snapshot_pre",
+        # ---- 节点镜像键（非 Human、非前端消费契约）----
+        "build_observer_ctx",   # 镜像内含 observer_input（大）
+        "observer",             # 镜像内含 observer_payload / observer_input
+        "inject_validate",      # 镜像内含 delta / submit_result（大）
+        "commit",
+        "summarize",
         # V3.7：observer 节点提前并发生成的 summarizer 早产结果。
         # 排除理由：
         # 1. PAUSED→resume 场景下，commit 节点之后才轮到 summarize；engine

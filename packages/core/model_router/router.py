@@ -425,13 +425,12 @@ class ModelRouter:
                     candidates = self.list_enabled("reasoning")
                     used_capability = "reasoning"
                     if candidates:
+                        # V3.9 检修：extra= 字段不会被 Formatter 渲染进 message，
+                        # 排障字段全丢——拼进 message 文本。
                         log.info(
-                            "model_router.light_fallback",
-                            extra={
-                                "requested": "light",
-                                "fallback_to": "reasoning",
-                                "candidates": len(candidates),
-                            },
+                            "model_router.light_fallback requested=light "
+                            "fallback_to=reasoning candidates=%d",
+                            len(candidates),
                         )
         if not candidates:
             raise ModelNotConfiguredError(capability)
@@ -444,9 +443,11 @@ class ModelRouter:
                 provider = self.get_provider(row, scripted=scripted)
             except Exception as exc:  # noqa: BLE001 —— 构造失败也视为一次尝试失败
                 msg = f"construct failed: {exc}"
-                log.warning("model_router.fallback.construct_failed", extra={
-                    "capability": capability, "config_id": cid, "error": msg,
-                })
+                log.warning(
+                    "model_router.fallback.construct_failed capability=%s "
+                    "config_id=%s error=%s",
+                    capability, cid, msg,
+                )
                 attempts.append((cid, msg))
                 last_exc = exc
                 continue
@@ -475,18 +476,21 @@ class ModelRouter:
                 return completion, row
             except ProviderError as exc:
                 msg = f"{exc} (status_code={exc.status_code})"
-                log.warning("model_router.fallback.provider_error", extra={
-                    "capability": capability, "config_id": cid, "error": str(exc),
-                    "status_code": exc.status_code,
-                })
+                log.warning(
+                    "model_router.fallback.provider_error capability=%s "
+                    "config_id=%s status_code=%s error=%s",
+                    capability, cid, exc.status_code, exc,
+                )
                 attempts.append((cid, msg))
                 last_exc = exc
                 continue
             except Exception as exc:  # noqa: BLE001 —— 网络/超时等非 ProviderError 也吞
                 msg = f"unexpected error: {exc}"
-                log.warning("model_router.fallback.unexpected", extra={
-                    "capability": capability, "config_id": cid, "error": msg,
-                })
+                log.warning(
+                    "model_router.fallback.unexpected capability=%s "
+                    "config_id=%s error=%s",
+                    capability, cid, msg,
+                )
                 attempts.append((cid, msg))
                 last_exc = exc
                 continue

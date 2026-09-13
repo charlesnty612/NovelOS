@@ -1,8 +1,10 @@
 # M2 验证报告：上限能力干预效果
 
+> 历史运行报告（2026-08-25 定稿）：数据为当时版本基线，与现行 V3.9 行为不保证一致；原始现场已迁痕迹仓 NovelOS-Artifacts。
+
 - 验证方式：在 M1 长跑同一项目上连续生成新章，用 LLM judge 探针（`scripts/m2_judge.py`）与规则引擎双轨对比。
 - 干预清单：director Rules 10-11（[payoff] 前置 + 字数纪律）、Rules 12-14（叙事推进纪律/停滞强制升级/交互密度下限）；writer Rules 13-17（反碎片化/字数纪律/对话占比/payoff 可感知兑现）；驱动脚本 TARGET_WORD_COUNT 700→1800。
-- 数据源：`docs/evaluation/m2-judge/judge_results.json`、`data/m1_run/chapters/ch0NN.json`。
+- 数据源：`docs/evaluation/m2-judge/judge_results.json`、`data/m1_run/chapters/ch0NN.json`（已迁痕迹仓 NovelOS-Artifacts:archive/m1_run/chapters/）。
 
 ## 四维评分轨迹（LLM judge 实评）
 

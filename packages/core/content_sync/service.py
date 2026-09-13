@@ -49,6 +49,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -881,7 +882,19 @@ def build_volume_txt(
 
 
 def _write_json(path: Path, payload: Any) -> None:
-    """原子写 JSON：``utf-8`` + ``ensure_ascii=False`` + indent。"""
+    """原子写 JSON：``utf-8`` + ``ensure_ascii=False`` + indent。
+
+    V3.9 检修：原先直接 ``write_text`` 落目标文件——写到一半进程被杀 / 磁盘满
+    （OSError / 中断）会留下**半截 JSON**，而内容仓文件是外部读者（人 + 编辑器
+    + 后续 pull）的输入，半截 JSON 比旧内容更糟。改为同目录临时文件 + ``os.replace``：
+    临时文件与目标同卷，替换是原子的——失败时目标文件保持旧内容不动。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, ensure_ascii=False, indent=2)
-    path.write_text(text, encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise

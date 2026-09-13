@@ -6,7 +6,9 @@ r"""Prompt Registry（Sprint 3）。
 - 按 agent 名取 ACTIVE 行最高版本号。
 
 设计要点：
-- 幂等：同名同 ``version`` 重复 sync 时更新 ``content`` 与 ``updated_at``，不新建行。
+- 幂等：同名同 ``version`` 重复 sync 不新建行；content 变化才 UPDATE。V3.9 检修：
+  content 完全相同 → **完全跳过 UPDATE**（不刷 ``updated_at``、不强制把行改回 ACTIVE），
+  避免每次启动把全部 prompt 行刷成新时间戳、覆盖人工审计信息。
 - 全部 prompt 都注册（director / writer / observer / arbiter / deconstructor_chapter /
   deconstructor_aggregate 等）。
 - 文件名解析正则：``^(?P<agent>[a-zA-Z][a-zA-Z_-]*)-v(?P<n>\d+)\.md$``；含连字符的
@@ -244,7 +246,8 @@ class PromptRegistry:
         返回 ``((agent_name, version_n), was_updated)``：
         - 新增 → ``was_updated=False``。
         - content 变化（已存在）→ ``was_updated=True``，content 与 updated_at 已刷新。
-        - content 完全相同 → ``was_updated=False``（updated_at 也刷一下便于审计）。
+        - content 完全相同 → ``was_updated=False``，且**完全跳过 UPDATE**（V3.9 检修：
+          不刷 updated_at、不强制回 ACTIVE；启动 sync 不得覆盖人工审计信息）。
         """
         version_label = f"v{version_n}"
         now = now_iso()
@@ -270,13 +273,17 @@ class PromptRegistry:
                 )
                 conn.commit()
                 return ((agent_name, version_n), False)
-            was_updated = row["content"] != content
+            if row["content"] == content:
+                # V3.9 检修：内容未变 → 完全跳过 UPDATE。此前无条件 UPDATE 会每次
+                # 启动把 updated_at 刷成当前时间、并把人工置为非 ACTIVE 的行强制改回
+                # ACTIVE，与「幂等 sync」语义相悖（updated_at 失去审计价值）。
+                return ((agent_name, version_n), False)
             conn.execute(
                 "UPDATE prompts SET content = ?, updated_at = ?, status = 'ACTIVE' WHERE prompt_id = ?",
                 (content, now, row["prompt_id"]),
             )
             conn.commit()
-            return ((agent_name, version_n), was_updated)
+            return ((agent_name, version_n), True)
         finally:
             conn.close()
 

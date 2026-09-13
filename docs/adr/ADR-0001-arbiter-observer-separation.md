@@ -3,7 +3,7 @@
 > 状态：**Accepted**
 > 日期：2026-08-23
 > 生效：V1（Observer Prompt v2 切换时启用）；MVP 阶段不启用
-> 关联：`#NovelOS.md` §33.1、§33.2；`docs/agents/agent-contracts-v0.md` §5A；`docs/agents/prompts/arbiter-v0.md`；`docs/agents/prompts/observer-v1.md`
+> 关联：`#NovelOS.md`（已迁内容仓 NovelOS-Content:#NovelOS.md） §33.1、§33.2；`docs/agents/agent-contracts-v0.md` §5A；`docs/agents/prompts/arbiter-v0.md`；`docs/agents/prompts/observer-v1.md`
 > 关联 Schema：`docs/state-model/schemas/state-delta.schema.json`
 > 起草：NovelOS 主控
 
@@ -134,7 +134,7 @@ PRD §33.1 把 Observer 定位为「整个 Canonical State 管线的咽喉，系
 
 ## 6. References
 
-- `#NovelOS.md` §33.1（Observer 可靠性机制）、§33.2（观察-裁决分离决议）、§113（Agent 十问）
+- `#NovelOS.md`（已迁内容仓 NovelOS-Content:#NovelOS.md） §33.1（Observer 可靠性机制）、§33.2（观察-裁决分离决议）、§113（Agent 十问）
 - `docs/agents/agent-contracts-v0.md` §5A、§7.4（Arbiter 契约）
 - `docs/agents/prompts/arbiter-v0.md`（Arbiter Prompt v0 设计稿）
 - `docs/state-model/schemas/state-delta.schema.json`（Schema 权威）

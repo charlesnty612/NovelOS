@@ -19,5 +19,5 @@
 
 ## 维护注意点
 - 推演过程不写主 State；所有写入限定在副本 namespace。
-- 必须可单测证明「推演不污染主 State」（`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 10 DoD）。
-- 权威文档：PRD §40；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 10/11。
+- 必须可单测证明「推演不污染主 State」（`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划） §2 Sprint 10 DoD）。
+- 权威文档：PRD §40；`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 10/11。

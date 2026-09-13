@@ -387,8 +387,8 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 ## 10. 关联文档
 
 - 权威规范：`docs/evaluation/quality-scoring-v0.md`
-- Knowledge Permission：`docs/state-model/knowledge-permission-v0.md`
-- State Delta：`docs/state-model/state-delta-v0.md` + `docs/state-model/schemas/state-delta.schema.json`
+- Knowledge Permission：`docs/state-model/knowledge-permission-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md）
+- State Delta：`docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md） + `docs/state-model/schemas/state-delta.schema.json`
 - Story State 复用入口：`packages/core/story_state/validator.py::validate_delta`
 - ID 与时间戳：`packages/core/ids.py::new_id/now_iso`
 - Sprint 6 集成任务（后续）：与 `packages/workflows/chapter_review/` 衔接，由 State Committer 调用。

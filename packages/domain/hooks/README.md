@@ -20,4 +20,4 @@
 ## 维护注意点
 - `expected_payoff` 校准必须基于黄金三章机检（Sprint 11）；不允许 LLM 直觉赋值。
 - 揭示策略 `reveal_policies`（v1.1 新增表）需与角色 `visibility` 联动校验。
-- 权威文档：`database/migrations/0001_init.sql`、PRD §22；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 9/11。
+- 权威文档：`database/migrations/0001_init.sql`、PRD §22；`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 9/11。

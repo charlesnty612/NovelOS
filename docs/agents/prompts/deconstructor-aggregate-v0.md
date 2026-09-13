@@ -6,7 +6,7 @@
 > 与本 Prompt §B.5 / §B.8 输入契约中的 `"agent": "deconstructor_aggregate"` 字段一致）。
 >
 > 对齐：
-> - `docs/reference-canon/reference-canon-v0.md` §3 拆书工作流（deconstruct-book）节点规范 T3
+> - `docs/reference-canon/reference-canon-v0.md`（已迁内容仓 NovelOS-Content:docs/reference-canon/reference-canon-v0.md） §3 拆书工作流（deconstruct-book）节点规范 T3
 > - PRD §55-§60 五类 Node（AI / State / Transform / Human / Simulation）—— 本 Prompt 为 AI Node
 > - PRD §62 Prompt 九段结构
 > - PRD §97 Style System（style_params 字段）

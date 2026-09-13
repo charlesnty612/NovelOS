@@ -178,3 +178,49 @@ def test_summarizer_get_active_prompt_returns_non_empty():
         )
     finally:
         tmp_dir.cleanup()
+
+
+def test_prompt_sync_skips_update_when_content_unchanged():
+    """V3.9 检修：content 未变 → 完全跳过 UPDATE。
+
+    突变化验（撤修复必红）：把 :meth:`PromptRegistry._upsert_prompt` 改回「无条件
+    UPDATE content / updated_at / status='ACTIVE'」，本用例对哨兵 updated_at 与
+    DEPRECATED 状态的断言即失败——启动 sync 不得刷新人工审计痕迹、不得把人工
+    置为非 ACTIVE 的行强制改回 ACTIVE。
+    """
+    db_path, _tmp_path, tmp_dir = _make_isolated_db()
+    try:
+        registry = PromptRegistry(db_path)
+        registry.sync_from_docs(str(PROMPTS_DIR))
+
+        sentinel_ts = "2000-01-01T00:00:00+00:00"
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE prompts SET updated_at = ?, status = 'DEPRECATED'",
+                (sentinel_ts,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        second = registry.sync_from_docs(str(PROMPTS_DIR))
+        assert second["updated"] == [], f"content 未变不应有任何 updated: {second['updated']}"
+
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT updated_at, status FROM prompts"
+            ).fetchall()
+            assert rows, "prompts 表不应为空"
+            for row in rows:
+                assert row["updated_at"] == sentinel_ts, (
+                    "content 未变的 prompt 行 updated_at 被 sync 刷新（审计痕迹丢失）"
+                )
+                assert row["status"] == "DEPRECATED", (
+                    "content 未变的 prompt 行 status 被 sync 强制改回 ACTIVE"
+                )
+        finally:
+            conn.close()
+    finally:
+        tmp_dir.cleanup()

@@ -1,7 +1,7 @@
 # agents.planner（Planner）
 
 > 职责：把 Director Plan 拆解为可执行的章节大纲（`chapter_outlines`）+ 时间线事件（`timeline_events`）+ 伏笔 / 债务更新提案。
-> 状态：空骨架（规划 Sprint 4）。
+> 状态：空骨架未实现（章节规划职责现由 `packages/workflows/chapter_plan/` 承担）。
 
 ## 职责与边界
 做：在 Director Plan 之下生成结构化大纲、事件序列、Hook/Debt 提案；为 Writer 提供作业蓝图。
@@ -9,7 +9,7 @@
 
 ## 对外接口（规划中）
 - `run(inputs: PlannerInputs) -> PlannerProposal`
-- 提示词：`docs/agents/prompts/planner.md`
+- 提示词：planner 角色未实现（章节规划由 `chapter_plan` 工作流承担），无对应 prompt 文件
 
 ## 依赖
 - 上游：`packages/agents/director/`、`packages/core/agent_runtime/`
@@ -20,4 +20,4 @@
 
 ## 维护注意点
 - PlannerProposal 必含可机检字段：`chapter_outline / events / hook_updates / debt_updates`。
-- 权威文档：PRD §30；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4。
+- 权威文档：PRD §30；`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 4。

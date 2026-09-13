@@ -1,7 +1,7 @@
 """BackupService（V1.4 Sprint 16 / MVP）—— 项目级 JSON 备份 / 恢复。
 
 职责：
-- :meth:`BackupService.export_project`：把指定项目相关的 22 张业务表 SELECT * 出来，
+- :meth:`BackupService.export_project`：把指定项目相关的 23 张业务表 SELECT * 出来，
   按 :data:`schema.EXPORTED_TABLES` 顺序组装成备份包 dict（含 metadata 标记与
   时间戳）。
 - :meth:`BackupService.import_project`：把备份包导入为**新项目**（不覆盖源项目）；
@@ -10,6 +10,10 @@
 设计要点：
 - 主键重映射：按 :data:`packages.core.backup.ids.TABLE_META` 生成新主键；所有外键
   列同步替换为新 namespace；原值不复用（避免导入项目与源项目 id 冲突）。
+- **全局 id 映射预建**（V3.9 F1）：任何 INSERT 之前先扫一遍包内全部表，把
+  「旧主键 → 新主键」一次性建进 ``project_id_map``。后建表的前向引用
+  （``story_states.commit_id`` → ``commits``、``chapters.volume_id`` → ``volumes``）
+  与 JSON 列内嵌 id 因此都能命中；逐表边插边建映射会让前向引用留在旧命名空间。
 - 复合主键：``character_states`` 保留 ``state_version`` 仅替换 ``character_id``；
   ``story_states`` 保留 ``state_version`` 替换 ``project_id / commit_id``。
 - 自引用外键：``branches.parent_branch_id`` / ``state_deltas.supersedes`` 在
@@ -17,6 +21,14 @@
   old_target)`` 记入 ``_self_ref_rewrites`` 内存清单；第二轮
   ``_rewrite_self_references`` 按该清单 + 全局 ``project_id_map`` 直接 UPDATE
   新行的对应列为映射后的新 id（不依赖库内 col IS NOT NULL 扫描）。
+- **JSON 列内嵌 id 重映射**（V3.9 F1）：``*_json`` / ``who_knows`` 列按
+  :data:`packages.core.backup.json_ids.JSON_ID_COLUMNS` 清单递归 walk（dict 的 key
+  与字符串值都按映射替换），保持 TEXT 形态入库。
+- **projects 行按包内实际列动态写**（V3.9 F4）：目标库真实列名走 ``PRAGMA table_info``
+  白名单，包内多余键丢弃——``word_band_json`` / ``genre_pack_id`` 等后加列不再被丢。
+- **提交前 FK 校验**（V3.9 F3）：``PRAGMA foreign_keys=OFF`` 期间悬挂引用不会写失败，
+  故提交前显式 ``PRAGMA foreign_key_check``；只报「本次导入引入」的违例（与导入前
+  基线做差集，库内既有历史违例不背锅），非空 → rollback + ValueError。
 - 导入事务：单连接 + 单事务；任意一步失败 → rollback + 抛 ValueError。
 - 新项目命名：``f"{原名}（导入）"``；新项目 id 用 new_id("prj")，status='ACTIVE'，
   foreshadow_overdue_chapters 默认 30（与 ProjectService 一致）。
@@ -40,6 +52,7 @@ from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 
 from .ids import TABLE_META, new_pk
+from .json_ids import JSON_ID_COLUMNS, remap_json_column
 from .schema import BACKUP_FORMAT, BACKUP_VERSION, EXPORTED_TABLES, validate_backup
 
 __all__ = ["BackupService"]
@@ -88,6 +101,61 @@ def _row_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     if row is None:
         return {}
     return {k: row[k] for k in row.keys()}
+
+
+# 提交前 FK 校验覆盖的表：导入写到的全部表 + projects 根（顺序无关）。
+_FK_CHECKED_TABLES: tuple[str, ...] = ("projects",) + EXPORTED_TABLES
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+    """取目标库该表的真实列名（列名白名单来源）。
+
+    只信 ``PRAGMA table_info``，**不**信包内键名——包是外部输入，列名进 SQL 前必须
+    经过目标库 schema 校验（同名表跨版本可能少列，旧库导入新包时应丢弃多余列）。
+    """
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return tuple(r["name"] for r in rows if r["name"])
+
+
+def _existing_tables(
+    conn: sqlite3.Connection, tables: tuple[str, ...]
+) -> tuple[str, ...]:
+    """过滤出目标库里真实存在的表。
+
+    ``PRAGMA foreign_key_check(<table>)`` 对不存在的表直接抛 OperationalError；
+    极老库（未跑到 0015 等）缺表时不该让备份导入变成「未预期异常」。
+    """
+    known = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    return tuple(t for t in tables if t in known)
+
+
+def _fk_violations(
+    conn: sqlite3.Connection, tables: tuple[str, ...]
+) -> set[tuple[str, Any, str, int]]:
+    """收集指定表的 FK 违例集合（``PRAGMA foreign_key_check``）。
+
+    返回元素 = ``(表名, 行 rowid, 父表, fk 序号)``。做成集合是为了能在「导入前
+    基线」与「导入后」之间做差集——只拦本次导入引入的悬挂引用。
+    """
+    out: set[tuple[str, Any, str, int]] = set()
+    for table in tables:
+        for row in conn.execute(f"PRAGMA foreign_key_check({table})"):
+            out.add((row[0], row[1], row[2], row[3]))
+    return out
+
+
+def _describe_fk_violation(
+    conn: sqlite3.Connection, table: str, rowid: Any, parent: str, fkid: int
+) -> str:
+    """把一条违例渲染成可读消息：``drafts.chapter_id (rowid=7) -> chapters``。"""
+    fk_list = conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+    from_col = next(
+        (r["from"] for r in fk_list if r["id"] == fkid), f"fk#{fkid}"
+    )
+    return f"{table}.{from_col} (rowid={rowid}) -> {parent}"
 
 
 class BackupService:
@@ -242,7 +310,8 @@ class BackupService:
         返回：新 projects 行 dict（结构与 ProjectService.create 返回一致）。
 
         异常：
-            ValueError：包格式非法、缺字段、表名非法、单步失败 → 整体回滚。
+            ValueError：包格式非法、缺字段、表名非法、单步失败（含提交前 FK 校验
+            发现本次导入引入的悬挂引用）→ 整体回滚。
         """
         # 1. 顶层校验（坏包 → 422 由 router 透出）
         validate_backup(data)
@@ -252,6 +321,10 @@ class BackupService:
         old_project_id = old_project["project_id"]
         new_project_id = new_id("prj")
         project_id_map: dict[str, str] = {old_project_id: new_project_id}
+        # 2.1 全局旧→新 id 映射预建（跨表一份）：先于任何 INSERT 把包内全部表的主键
+        # 都登记进来，保证前向引用（story_states.commit_id → commits、chapters.volume_id
+        # → volumes）与 JSON 列内嵌 id 在写入时就能命中映射。
+        self._build_id_map(data, project_id_map)
         # 自引用外键待改写清单：每项 = (table, pk_col, new_pk_value, old_target_value)
         # 第一轮 INSERT 时，遇到 branches.parent_branch_id / state_deltas.supersedes
         # 这两列会把 (新主键, 旧目标值) append 进来；第二轮按本清单 UPDATE 新行
@@ -264,7 +337,12 @@ class BackupService:
         try:
             conn.execute("PRAGMA foreign_keys = OFF")
             # 关 FK：跨表重映射期间，外键暂时悬挂（INSERT 后再 UPDATE）；
-            # 事务末尾统一提交前再启用 FK + 校验，失败则整体 rollback。
+            # 提交前用 PRAGMA foreign_key_check 显式校验（见 3.5），失败整体 rollback。
+            # 注意 SQLite 语义：``PRAGMA foreign_keys = ON`` 只影响**其后**的写入，
+            # 不会回扫已入库行——所以「开启 FK 再 SELECT 1」是空转，必须用
+            # foreign_key_check 才能发现悬挂引用（V3.9 F3 探针实证）。
+            fk_tables = _existing_tables(conn, _FK_CHECKED_TABLES)
+            fk_baseline = _fk_violations(conn, fk_tables)
 
             # 3.1 插入 projects 根（最特殊的一张表：主键替换 + name 后缀）
             now = now_iso()
@@ -288,10 +366,17 @@ class BackupService:
             #  已在 _import_table_rows 内做映射）
             # —— 此处不需额外操作。
 
-            # 3.5 启用 FK + 校验（任何 FK 违反都会抛 IntegrityError → rollback）
-            conn.execute("PRAGMA foreign_keys = ON")
-            # 触发一次空查询让 PRAGMA 检查生效
-            conn.execute("SELECT 1").fetchone()
+            # 3.5 提交前 FK 校验（V3.9 F3）：与导入前基线做差集，只拦本次导入引入的
+            # 悬挂引用（库内既有历史违例不背锅）；非空 → rollback + ValueError。
+            violations = _fk_violations(conn, fk_tables) - fk_baseline
+            if violations:
+                details = "; ".join(
+                    sorted(_describe_fk_violation(conn, *v) for v in violations)
+                )
+                raise ValueError(
+                    "backup import would create dangling foreign keys "
+                    f"({len(violations)}): {details}"
+                )
 
             conn.commit()
             return new_project_row
@@ -305,6 +390,30 @@ class BackupService:
                 pass
             conn.close()
 
+    # ---------------------------------------------------------------- id map
+
+    def _build_id_map(self, data: dict, project_id_map: dict[str, str]) -> None:
+        """预建「旧主键 → 新主键」全局映射（跨表一份，写库前全部就位）。
+
+        只处理单列主键表：复合主键表（``character_states`` / ``story_states``）
+        不产生新主键，其外键列由 :meth:`_import_table_rows` 走全局映射改写。
+
+        约定：id 相同的行复用同一新 id（重复行按同一实体处理），包内某表缺行时
+        自然跳过；缺主键列的行与 :meth:`_import_table_rows` 同口径直接报错。
+        """
+        for table in EXPORTED_TABLES:
+            pk_col = TABLE_META[table]["pk_col"]
+            if pk_col is None:
+                continue
+            for row in data["tables"].get(table) or []:
+                old_id = row.get(pk_col)
+                if old_id is None:
+                    raise ValueError(
+                        f"table {table!r} row missing pk_col {pk_col!r}"
+                    )
+                if old_id not in project_id_map:
+                    project_id_map[old_id] = new_pk(table)
+
     # ---------------------------------------------------------------- insert
 
     def _insert_new_project_row(
@@ -314,30 +423,31 @@ class BackupService:
         new_project_id: str,
         now: str,
     ) -> dict:
-        """插入新 projects 行；name 后缀『（导入）』，其余字段沿用源行。"""
+        """插入新 projects 行；name 后缀『（导入）』，其余字段按包内实际列透传。
+
+        V3.9 F4：列清单不再硬编码（曾丢 ``word_band_json``（0023）/
+        ``genre_pack_id``（0025）），改为「目标库真实列 ∩ 包内 project 行」——
+        列名一律取自 ``PRAGMA table_info(projects)`` 白名单，包内多余键丢弃，
+        目标库缺列（旧库导入新包）同样丢弃。
+        """
         new_name = f"{old_project['name']}（导入）"
-        new_row = {
+        new_row: dict[str, Any] = {
             "project_id": new_project_id,
             "name": new_name,
-            "premise": old_project.get("premise"),
-            "genre": old_project.get("genre"),
-            "target_words": old_project.get("target_words"),
             "status": "ACTIVE",  # 强制 ACTIVE，避免导入 ARCHIVED 项目后显示异常
-            "foreshadow_overdue_chapters": old_project.get(
-                "foreshadow_overdue_chapters", 30
-            ),
             "created_at": now,
             "updated_at": now,
         }
+        target_cols = _table_columns(conn, "projects")
+        for key, value in old_project.items():
+            if key in new_row or key not in target_cols:
+                continue
+            new_row[key] = value
+
+        columns = list(new_row.keys())
         conn.execute(
-            """
-            INSERT INTO projects
-                (project_id, name, premise, genre, target_words, status,
-                 foreshadow_overdue_chapters, created_at, updated_at)
-            VALUES
-                (:project_id, :name, :premise, :genre, :target_words, :status,
-                 :foreshadow_overdue_chapters, :created_at, :updated_at)
-            """,
+            f"INSERT INTO projects ({', '.join(columns)}) "
+            f"VALUES ({', '.join(':' + c for c in columns)})",
             new_row,
         )
         return new_row
@@ -354,7 +464,9 @@ class BackupService:
         pk_col = meta["pk_col"]
 
         # 1. 第一轮：生成新主键（含复合主键保留旧主键字段的特殊情形）
-        # 维护"本表 旧主键 → 新主键"映射，写入 project_id_map（统一命名空间）
+        # 维护"本表 旧主键 → 新主键"映射，写入 project_id_map（统一命名空间）。
+        # 主键通常已由 _build_id_map 预建；这里的兜底生成保证单独调用本方法
+        # （如测试）时行为不变。
         local_pk_map: dict[str, str] = {}
         if pk_col is not None:
             for row in rows:
@@ -363,10 +475,12 @@ class BackupService:
                     raise ValueError(
                         f"table {table!r} row missing pk_col {pk_col!r}"
                     )
-                new_id_value = new_pk(table)
+                new_id_value = project_id_map.get(old_id)
+                if new_id_value is None:
+                    new_id_value = new_pk(table)
+                    # 同步挂到全局命名空间（跨表查用）
+                    project_id_map[old_id] = new_id_value
                 local_pk_map[old_id] = new_id_value
-                # 同步挂到全局命名空间（跨表查用）
-                project_id_map[old_id] = new_id_value
         else:
             # 复合主键：character_states / story_states
             # 不需要 local_pk_map，但需要在第二阶段直接 UPDATE 外键列
@@ -404,6 +518,8 @@ class BackupService:
         # 额外保证 project_id 一定在列中（多数表都有 project_id；个别没有的如下处理）
         columns_clause = ", ".join(all_keys)
         placeholders = ", ".join(f":{k}" for k in all_keys)
+        # 含内嵌实体 id 的 JSON 列（V3.9 F1；详见 backup.json_ids）
+        json_cols = JSON_ID_COLUMNS.get(table, ())
 
         for row in rows:
             old_pk = row[pk_col]
@@ -435,12 +551,18 @@ class BackupService:
                         break
                 if is_self_ref:
                     continue
+                # JSON 列：解析后递归重映射内嵌 id（dict 的 key 与字符串值都查全局
+                # 映射），保持 TEXT 形态入库；NULL / 非法 JSON 原样落到下面的分支。
+                if k in json_cols:
+                    parsed, remapped = remap_json_column(v, project_id_map)
+                    if parsed:
+                        new_row[k] = remapped
+                        continue
                 # 其它外键列：在全局映射表中查；查到则替换，未查到保持原值
                 if isinstance(v, str) and v in project_id_map:
                     new_row[k] = project_id_map[v]
                     continue
-                # JSON 字段：尝试解析后透传；保持 TEXT 字符串形态入库
-                # （schema 中 *_json 列就是 TEXT，不二次序列化）
+                # 其余列（含未能解析的 JSON 列）：原值透传
                 new_row[k] = v
 
             conn.execute(
@@ -466,6 +588,9 @@ class BackupService:
 
         columns_clause = ", ".join(all_keys)
         placeholders = ", ".join(f":{k}" for k in all_keys)
+        # 含内嵌实体 id 的 JSON 列（story_states.snapshot_json /
+        # character_states.state_json / who_knows；详见 backup.json_ids）
+        json_cols = JSON_ID_COLUMNS.get(table, ())
 
         for row in rows:
             new_row: dict[str, Any] = {}
@@ -473,13 +598,14 @@ class BackupService:
                 v = row.get(k)
                 if table == "character_states" and k == "character_id":
                     new_row[k] = project_id_map.get(v, v)
-                elif table == "story_states":
-                    if k == "project_id":
-                        new_row[k] = project_id_map.get(v, v)
-                    elif k == "commit_id":
-                        new_row[k] = project_id_map.get(v, v) if v else v
-                    else:
-                        new_row[k] = v
+                elif table == "story_states" and k == "project_id":
+                    new_row[k] = project_id_map.get(v, v)
+                elif table == "story_states" and k == "commit_id":
+                    # commit_id：全局映射已在写库前预建，这里必然能命中本包内 commits
+                    new_row[k] = project_id_map.get(v, v) if v else v
+                elif k in json_cols:
+                    parsed, remapped = remap_json_column(v, project_id_map)
+                    new_row[k] = remapped if parsed else v
                 else:
                     new_row[k] = v
             conn.execute(

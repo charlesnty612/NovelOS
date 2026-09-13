@@ -6,7 +6,7 @@
 > 与本 Prompt §A.5 / §A.8 输入契约中的 `"agent": "deconstructor_chapter"` 字段一致）。
 >
 > 对齐：
-> - `docs/reference-canon/reference-canon-v0.md` §3 拆书工作流（deconstruct-book）节点规范 T2
+> - `docs/reference-canon/reference-canon-v0.md`（已迁内容仓 NovelOS-Content:docs/reference-canon/reference-canon-v0.md） §3 拆书工作流（deconstruct-book）节点规范 T2
 > - PRD §55-§60 五类 Node（AI / State / Transform / Human / Simulation）—— 本 Prompt 为 AI Node
 > - PRD §62 Prompt 九段结构
 > - PRD §103 许可证策略（AGPL 隔离 + 不分发）+ PRD §123 Reference Canon 硬边界
@@ -14,7 +14,7 @@
 > - REQ-Q6 参照书相似度（Quality Engine G-sim 挂点）
 >
 > Schema 权威：
-> - 本 Prompt 输出 `ChapterExtract`：以 `reference-canon-v0.md` §3.2 T2 表格为契约来源
+> - 本 Prompt 输出 `ChapterExtract`：以 `reference-canon-v0.md`（已迁内容仓 NovelOS-Content:docs/reference-canon/reference-canon-v0.md）§3.2 T2 表格为契约来源
 >   （**无独立 schema 文件**，与主会话对齐此原则；如有冲突以 reference-canon-v0.md §3.2 为准，
 >   并在 §A.9 Open Questions 标注）。
 >

@@ -214,4 +214,4 @@ PAUSED 时 `GET /api/runs/{run_id}` 响应体同时附 `stage_models`：按 agen
 - 修订必须为完整 dict（不是补丁）；下游不深合并，只替换。
 - selected_stages 跳过分支直接 `return`（不进 run_agent 也不抛 PauseRequested），
   因此 `workflow_run_nodes.output_json` 在重建节点处缺空（端到端用例的副产物）。
-- 权威文档：PRD §67（projects 表）；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 1。
+- 权威文档：PRD §67（projects 表）；`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 1。

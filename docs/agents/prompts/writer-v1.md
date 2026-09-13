@@ -170,7 +170,7 @@
 }
 ```
 
-> **层概念引用**：上述输入字段对应 `docs/architecture/context-engine-v0.md` 的分层（L2-L7）。本 Prompt 不复制层定义，只声明消费哪些字段。
+> **层概念引用**：上述输入字段对应 `docs/architecture/context-engine-v0.md`（已迁内容仓 NovelOS-Content:docs/architecture/context-engine-v0.md）的分层（L2-L7）。本 Prompt 不复制层定义，只声明消费哪些字段。
 
 > **关于 `reference_canon`（Sprint 11+ 多 consumer 扩展）**：
 > - **缺席语义**：`reference_canon` 字段不存在或 `canon_id == null` ⇒ 当前项目尚未生成参照系（未跑 deconstruct-book / 未加载 canon）；按 `style_constraints` + `author_style_samples` 自行落笔，**不报错、不得索要** canon。

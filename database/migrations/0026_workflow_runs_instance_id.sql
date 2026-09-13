@@ -1,0 +1,31 @@
+-- =============================================================================
+-- NovelOS Database Migration 0026: workflow_runs.instance_id（启动自愈归属标记）
+-- =============================================================================
+-- 背景（V3.9 全量检修 F6「启动自愈跨实例互杀」）：
+--   ``engine.recover_interrupted_runs`` 原先无差别清剿全部 ``status='RUNNING'`` 的 run。
+--   多实例（同库并行开发服务 / m1_long_run 长跑 + 另一实例调试）场景下，实例 B 启动
+--   会把实例 A 正在跑的 run 置 FAILED（历史事故旁证），A 的后台线程随后写库时被 409
+--   唯一索引 / 状态机拒绝，run 静默损坏。
+--
+-- 修法（软件层，见 packages/core/workflow_runtime/engine.py）：
+--   - 引擎写 run 行时带 ``instance_id``（当前服务进程实例 id，uuid4 hex）；
+--   - ``recover_interrupted_runs(db_path, instance_id)`` 只收敛
+--     ``instance_id = ? OR instance_id IS NULL`` 的 RUNNING run —— NULL 是 0026 之前的
+--     历史行，保持旧语义一次性收敛；此后新 run 一律带标记，跨实例不互杀。
+--
+-- 列语义：
+--   - instance_id TEXT 可空。NULL = 0026 前历史行（或刻意不带归属的裸库操作，
+--     如 agent_runtime.runner.create_adhoc_run）；非 NULL = 写行时的进程实例 id。
+--   - 无 DEFAULT：ADD COLUMN 不带默认值即 NULL，存量行零回填（与 0023/0024 同款策略）。
+--
+-- 幂等策略：
+--   - ADD COLUMN 不带 IF NOT EXISTS（sqlite3 不支持）；由 packages.core.db.apply_migrations
+--     按文件粒度追踪（_migrations 记录），第二次跑整文件跳过。
+--   - 纯加列，**不增表**：业务表仍 38（含 _migrations 物理共 39）；无数据迁移、无回填。
+-- =============================================================================
+
+ALTER TABLE workflow_runs ADD COLUMN instance_id TEXT;
+
+-- =============================================================================
+-- 迁移结束 (0026)
+-- =============================================================================

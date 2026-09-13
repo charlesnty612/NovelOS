@@ -41,6 +41,8 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # V3.4 多卷与规模（组织层）：0015_volumes 加 volumes 业务表 → 业务表 35（34+1），总表 36。
     # V3.7 模型档案 + 环节绑定：0016 加 model_profiles + capability_bindings → 业务表 37（35+2），总表 38。
     # 题材库 P1a：0025_genre_packs 加 genre_packs 业务表 → 业务表 38（37+1），总表 39。
+    # V3.9 全量检修 F6：0026_workflow_runs_instance_id 仅给 workflow_runs 加
+    #   instance_id 可空列（启动自愈归属标记）→ **不增表**，业务表仍 38，总表仍 39。
     assert result["tables"] == 39, f"expected 39 (38+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
@@ -107,6 +109,10 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     #   ON DELETE SET NULL（SQLite ADD COLUMN 带 REFERENCES 要求默认值为 NULL，满足）；
     # - 新增 1 张业务表（业务表 37 → 38，总表 38 → 39）。
     assert "0025_genre_packs.sql" in result["applied"]
+    # V3.9 全量检修 F6（启动自愈跨实例互杀）：0026_workflow_runs_instance_id.sql
+    # - 仅 ALTER TABLE workflow_runs 加 instance_id TEXT 可空列（归属标记）；
+    # - 不增表（业务表 38，总表 39 不变），无回填。
+    assert "0026_workflow_runs_instance_id.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
@@ -141,6 +147,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0023_project_word_band.sql",
         "0024_quality_reports_draft_version.sql",
         "0025_genre_packs.sql",
+        "0026_workflow_runs_instance_id.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -183,6 +190,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     # 题材库 P1a：0025_genre_packs.sql 也应被幂等跳过（CREATE TABLE / ADD COLUMN 无
     # IF NOT EXISTS，幂等靠 _migrations 文件粒度追踪）
     assert "0025_genre_packs.sql" in second["skipped"]
+    # V3.9 全量检修 F6：0026 也应被幂等跳过
+    assert "0026_workflow_runs_instance_id.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -225,6 +234,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0023_project_word_band.sql",
         "0024_quality_reports_draft_version.sql",
         "0025_genre_packs.sql",
+        "0026_workflow_runs_instance_id.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -306,6 +316,7 @@ def test_business_table_count_is_34(tmp_path: Path):
     # V3.4 多卷与规模（组织层）：0015_volumes 加 volumes 业务表 → 业务表 35
     # V3.7 模型档案 + 环节绑定：0016 加 model_profiles + capability_bindings → 业务表 37
     # 题材库 P1a：0025_genre_packs 加 genre_packs → 业务表 38
+    # V3.9 全量检修 F6：0026 仅给 workflow_runs 加 instance_id 列 → 业务表仍 38
     assert len(names) == 38, f"expected 38 business tables, got {len(names)}"
     # 抽检：PRD §67 关键表
     for expected in ("projects", "characters", "chapters", "commits", "state_deltas", "ai_call_logs"):
@@ -490,6 +501,40 @@ def test_0025_genre_packs_migration_is_idempotent(tmp_path: Path):
     assert "0025_genre_packs.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
     assert first["tables"] == 39, f"expected 39 (38 business + _migrations), got {first['tables']}"
+
+
+def test_0026_workflow_runs_instance_id_column(tmp_path: Path):
+    """V3.9 全量检修 F6：0026 给 workflow_runs 加 instance_id TEXT 可空列（归属标记）。
+
+    NULL = 0026 前历史行（recover_interrupted_runs 仍按旧语义一次性收敛）；
+    新行由引擎写入当前进程实例 id（uuid4 hex）。纯加列、不增表、无回填。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        cols = {c["name"]: c for c in conn.execute("PRAGMA table_info(workflow_runs)").fetchall()}
+    finally:
+        conn.close()
+    assert "instance_id" in cols, (
+        f"workflow_runs missing instance_id after 0026; got={set(cols)}"
+    )
+    col = cols["instance_id"]
+    assert col["type"].upper() == "TEXT", col
+    assert col["notnull"] == 0, col
+    assert col["dflt_value"] is None, col
+
+
+def test_0026_instance_id_migration_is_idempotent(tmp_path: Path):
+    """0026 跑两遍不炸（ADD COLUMN 靠 _migrations 追踪幂等）；表数不变（仍 38 业务表）。"""
+    db_path = _fresh_db(tmp_path)
+    first = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0026_workflow_runs_instance_id.sql" in first["applied"]
+
+    second = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0026_workflow_runs_instance_id.sql" not in second["applied"]
+    assert "0026_workflow_runs_instance_id.sql" in second["skipped"]
+    assert second["tables"] == first["tables"] == 39, (first["tables"], second["tables"])
 
 
 def test_0013_plot_events_has_description_column(tmp_path: Path):

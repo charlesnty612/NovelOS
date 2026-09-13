@@ -21,4 +21,4 @@
 ## 维护注意点
 - 所有 Agent 调用必经 `ai_call_logs` 落库（PRD §93）。
 - JSON 输出必须通过 schema 校验；解析失败由 `agent_runtime` 触发重试。
-- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 3/4、PRD §29-36。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 3/4、PRD §29-36。

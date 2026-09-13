@@ -1386,7 +1386,8 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
     # 整段搬进 daemon 线程（name=f"auto-revise-{run_id}"）执行；HTTP 立即返回 RUNNING，
     # 前端通过 GET /runs 轮询回路产生的子 run（write / review）。
     auto_revise_max = _resolve_auto_revise_max(body.auto_revise_max)
-    log.warning("[DEBUG] auto_revise entry: workflow=%s auto_revise_max=%s", workflow_name, auto_revise_max)
+    # V3.9 检修：原为 log.warning 的 `[DEBUG]` 级排障行，噪音混进告警通道 → 降 debug。
+    log.debug("auto_revise entry: workflow=%s auto_revise_max=%s", workflow_name, auto_revise_max)
     if (
         workflow_name == "chapter-review"
         and auto_revise_max > 0
@@ -1445,8 +1446,8 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                             if cur and cur["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
                                 break
                             _t.sleep(0.2)
-                        log.warning(
-                            "[DEBUG] resume final (async): run_id=%s status=%s err=%s",
+                        log.debug(
+                            "resume final (async): run_id=%s status=%s err=%s",
                             _thread_run_id,
                             cur["status"] if cur else None,
                             cur.get("error") if cur else None,

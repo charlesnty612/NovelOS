@@ -21,7 +21,7 @@
 ## 维护注意点
 - 工作流节点不写业务规则，只编排；所有规则在对应模块实现。
 - Human Node 必须显式挂起点，便于 Sprint 5 Workflow Panel 接管。
-- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 1/4/10、PRD §40、§55-65、§109。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 1/4/10、PRD §40、§55-65、§109。
 
 ## checkpoint_exclude 机制（Sprint V1.5）
 

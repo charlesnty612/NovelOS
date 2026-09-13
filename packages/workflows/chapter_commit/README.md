@@ -149,5 +149,5 @@ Content-Type: application/json
 
 - Observer 输出必须仅含 7 数组（`character_changes` / `world_changes` / `relationship_changes` / `new_events` / `resolved_hooks` / `new_hooks` / `debt_changes`）；元信息由本工作流 `inject_validate` 节点统一注入。
 - HIGH 触发条件：任意 change `risk_level == "HIGH"`，或 character_changes 中 `facet == "definition"`，或 world_changes 中 `world_kind == "rule"`。
-- `state_version` 严格 +1/commit（`docs/state-model/state-delta-v0.md` §6.2）；任何异常路径不会污染 state。
-- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4、`docs/agents/agent-contracts-v0.md` §5、`docs/state-model/state-delta-v0.md`。
+- `state_version` 严格 +1/commit（`docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md） §6.2）；任何异常路径不会污染 state。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 4、`docs/agents/agent-contracts-v0.md` §5、`docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md）。

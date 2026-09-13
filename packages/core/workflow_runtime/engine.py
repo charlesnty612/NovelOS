@@ -12,15 +12,22 @@
 - AI 节点 fn 内部调 :func:`packages.core.agent_runtime.runner.run_agent`（run_id/node_run_id 传入），
   ``mock_providers`` 参数（``{agent_name: [scripted_responses...]}``）透传给 run_agent 的 mock_script。
 - 节点异常：节点行 FAILED + error，run FAILED，不重试（重试在 run_agent 内部）。
-- 启动自愈：:func:`recover_interrupted_runs` 在 lifespan startup 把残留
-  ``status='RUNNING'`` 的 run 收尾为 FAILED（工作线程随进程死亡，单进程
-  部署下启动瞬间不可能存在真正还在跑的 run）。PAUSED / 终态 run 不动。
+- 启动自愈：:func:`recover_interrupted_runs` 在 lifespan startup 按 ``instance_id``
+  归属把残留 ``status='RUNNING'`` 的 run 收尾为 FAILED——只清「本实例 +
+  ``instance_id IS NULL``（0026 前历史行）」，跨实例（B 启动）不误杀（F6）。
+  **语义代价**：未设 ``NOVELOS_INSTANCE_ID`` 时实例 id 每次启动重生成，「上一次
+  的自己」崩溃留下的已打标 run 不在收敛范围（知情裁决，V3.9 对抗审查）——用
+  ``db_maintenance fix --apply`` 清理，常驻服务应固定 ``NOVELOS_INSTANCE_ID``。
+  PAUSED / 终态 run 不动。
 - 协作式取消：:meth:`cancel_run` 把 RUNNING run 置为 CANCELLED（端点语义）。
   ``_run_nodes`` 节点循环**开始前**与**执行完毕 checkpoint 前**各查一次
   DB 状态：若已 CANCELLED 则停止推进——开始前命中时把刚 insert 的 RUNNING
   节点行收尾为 CANCELLED、剩余节点不再 insert；checkpoint 前命中时当前节点
   标 CANCELLED 且丢弃 output（不推进下游、不写 checkpoint）。LLM 节点不
   杀进程，让后台调用跑完结果丢弃即可（避免跨进程信号复杂度）。
+  ``_finalize_run`` 的 PAUSED 分支同样带 ``WHERE status='RUNNING'`` 守卫：
+  cancel 先落地、Human 节点随后抛 PauseRequested 的窗口内不得把 CANCELLED
+  写回 PAUSED（M1）；守卫未命中且当前为 CANCELLED 时按 CANCELLED 语义收尾。
 
 设计要点：
 - checkpoint_json 每节点完成后落盘；崩溃后 :meth:`resume` 从最近一个 COMPLETED 节点的
@@ -29,16 +36,23 @@
   耗尽重复末条，与 MockProvider 语义对齐）。
 - run_id 在 start_with_nodes() 内生成并插入；所有 workflow_run_nodes 行同 run_id 关联。
 - pause/resume 场景下，PAUSED run 不再被任何新执行路径修改，仅 resume() 接手。
+- resume 两路径在 ``_prepare_resume_ctx`` 之前从注册表按 run 反查 workflow 定义，
+  取回 ``checkpoint_exclude`` 赋给本实例（新引擎实例没有 start 阶段的赋值，
+  不取回则 resume 后的 checkpoint scrub 全失效——M3）。
+- ``workflow_runs.instance_id``：写行时打上 ``current_instance_id()``，供启动自愈
+  按实例归属收敛（F6）。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
@@ -46,6 +60,32 @@ from packages.core.logging_config import get_logger
 from packages.core.workflow_runtime.runs import get_run as _get_run
 
 log = get_logger("novelos.workflow_runtime")
+
+
+# ---------------------------------------------------------------------------
+# 进程实例 id（F6：启动自愈归属）
+# ---------------------------------------------------------------------------
+
+_PROCESS_INSTANCE_ID = os.environ.get("NOVELOS_INSTANCE_ID") or uuid4().hex
+"""本服务进程的实例 id（模块导入时生成一次）。
+
+来源：``NOVELOS_INSTANCE_ID`` 环境变量（显式固定跨重启身份）；未设置时退回 uuid4 hex
+（每次进程启动重新生成）。
+
+用途：写 ``workflow_runs.instance_id`` + 限定 ``recover_interrupted_runs`` 的收尾范围。
+「实例」= 一个服务进程（引擎本身无状态，API 层每请求新建引擎）；同进程内所有引擎
+共享该 id，跨进程互不相同——这是「B 启动不误杀 A 在跑的 run」的判据。
+
+语义代价（V3.9 全量检修 F6-a 对抗审查裁决）：未设环境变量时，「上一次的自己」崩溃
+留下的带旧 instance_id 的 RUNNING run **不在**启动自愈范围（跨实例防护的必然结果）——
+用 ``python scripts/db_maintenance.py fix --apply`` 清理；需要重启自愈能力的部署
+（如常驻服务）应显式设置 ``NOVELOS_INSTANCE_ID`` 固定身份。
+"""
+
+
+def current_instance_id() -> str:
+    """返回本进程实例 id（``main.py`` lifespan 启动自愈 / 引擎写 run 行共用）。"""
+    return _PROCESS_INSTANCE_ID
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +239,25 @@ def _fetch_run_status(db_path: str | Path, run_id: str) -> str | None:
     return row["status"] if row else None
 
 
+def _resolve_checkpoint_exclude(db_path: str | Path, run_id: str) -> list[str]:
+    """按 run 反查 workflow 名 → 注册表取回 ``checkpoint_exclude``（M3）。
+
+    注册表是 core 侧 ``packages.core.workflow_registry``（业务流程包在自身 ``__init__``
+    写入 builder）——core 模块不反向 import 业务流程包，依赖方向不变。
+    反查不到 workflow / 未注册 / 未声明 → ``[]``。
+    """
+    from packages.core.workflow_registry import get_workflow
+    from packages.core.workflow_runtime.runs import get_workflow_name_for_run
+
+    name = get_workflow_name_for_run(db_path, run_id)
+    if not name:
+        return []
+    definition = get_workflow(name)
+    if not definition:
+        return []
+    return list(definition.get("checkpoint_exclude") or [])
+
+
 # ---------------------------------------------------------------------------
 # WorkflowNode + Engine
 # ---------------------------------------------------------------------------
@@ -224,10 +283,16 @@ class WorkflowNode:
 
 
 class WorkflowEngine:
-    """Workflow 执行器；构造接收 db_path，按工作流定义顺序执行节点。"""
+    """Workflow 执行器；构造接收 db_path，按工作流定义顺序执行节点。
 
-    def __init__(self, db_path: Path | str) -> None:
+    ``instance_id``（可选，F6）：写 run 行时落 ``workflow_runs.instance_id``。默认取
+    进程级 ``current_instance_id()``；显式传入用于多进程语义模拟 / 测试（同一进程内
+    构造「另一个实例」的引擎）。
+    """
+
+    def __init__(self, db_path: Path | str, *, instance_id: str | None = None) -> None:
         self.db_path = str(Path(db_path).resolve()) if not str(db_path).startswith(":memory:") else str(db_path)
+        self._instance_id = instance_id or _PROCESS_INSTANCE_ID
 
     # -------------------------------------------------------------- ensure
     def ensure_workflow(self, name: str) -> str:
@@ -346,6 +411,8 @@ class WorkflowEngine:
         ``agent_runtime/runner.py::_bump_run_retry_count`` 里
         ``retry_count = retry_count + 1``（V3.9 批次 5.11；引擎自身不写该列，
         各写入方只动各自列，互不覆盖）。
+
+        ``instance_id``：本引擎归属的进程实例 id（F6），启动自愈按此列过滤收尾范围。
         """
         conn = get_connection(self.db_path)
         try:
@@ -357,10 +424,10 @@ class WorkflowEngine:
                     """
                     INSERT INTO workflow_runs
                         (run_id, workflow_id, chapter_id, status, current_node,
-                         checkpoint_json, error, retry_count, started_at, ended_at)
-                    VALUES (?, ?, ?, 'RUNNING', NULL, '{}', NULL, 0, ?, NULL)
+                         checkpoint_json, error, retry_count, started_at, ended_at, instance_id)
+                    VALUES (?, ?, ?, 'RUNNING', NULL, '{}', NULL, 0, ?, NULL, ?)
                     """,
-                    (run_id, wf_id, chapter_id, now),
+                    (run_id, wf_id, chapter_id, now, self._instance_id),
                 )
                 conn.commit()
             except sqlite3.IntegrityError as exc:
@@ -425,6 +492,8 @@ class WorkflowEngine:
                 f"workflow run {run_id!r} status={run['status']!r}, must be PAUSED to resume"
             )
 
+        self._restore_checkpoint_exclude(run_id)
+
         ctx, start_index = self._prepare_resume_ctx(
             run=run,
             nodes=nodes,
@@ -468,6 +537,8 @@ class WorkflowEngine:
             raise ValueError(
                 f"workflow run {run_id!r} status={run['status']!r}, must be PAUSED to resume"
             )
+
+        self._restore_checkpoint_exclude(run_id)
 
         ctx, start_index = self._prepare_resume_ctx(
             run=run,
@@ -552,6 +623,19 @@ class WorkflowEngine:
             "status": "CANCELLED",
             "previous_status": "RUNNING",
         }
+
+    # -------------------------------------------------------------- internal: _restore_checkpoint_exclude
+    def _restore_checkpoint_exclude(self, run_id: str) -> None:
+        """resume 前从 workflow 定义取回 ``checkpoint_exclude``（M3）。
+
+        resume / resume_async 走的是新引擎实例（API 层 ``_engine(request)`` 每请求新建），
+        没有 start 阶段的 ``_checkpoint_exclude`` 赋值；不取回则 resume 后所有 checkpoint
+        落盘（``_update_run_checkpoint`` / ``_finalize_run``）的 scrub 全失效——被排除的
+        大 payload 会经节点镜像 ``ctx[node_id] = output`` 原样回流 checkpoint_json。
+
+        未注册 / 定义里没声明清单 → 空清单（不 scrub，与旧行为一致，不抛）。
+        """
+        self._checkpoint_exclude = _resolve_checkpoint_exclude(self.db_path, run_id)
 
     # -------------------------------------------------------------- internal: _prepare_resume_ctx
     def _prepare_resume_ctx(
@@ -720,6 +804,36 @@ class WorkflowEngine:
         # 全部节点完成 → COMPLETED（_finalize_run 不会覆盖 CANCELLED——status
         # 在终态集合里走 L665 同分支；防御性断言此时 run 必非终态）。
         self._finalize_run(run_id, status="COMPLETED", ctx=ctx, current_node=None)
+        # V3.9 检修：run 收官此前无任何 INFO 日志（PAUSED / FAILED / CANCELLED 都有），
+        # 排障只能翻 DB。耗时用现成字段——节点行 latency_ms 求和（resume 场景含
+        # 此前已完成的节点）。查询失败不影响收尾。
+        try:
+            conn = get_connection(self.db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT w.name AS workflow_name,
+                           COUNT(n.node_run_id) AS node_count,
+                           COALESCE(SUM(n.latency_ms), 0) AS total_ms
+                    FROM workflow_runs r
+                    LEFT JOIN workflows w ON w.workflow_id = r.workflow_id
+                    LEFT JOIN workflow_run_nodes n ON n.run_id = r.run_id
+                    WHERE r.run_id = ?
+                    GROUP BY r.run_id
+                    """,
+                    (run_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            log.info(
+                "workflow run %s COMPLETED: workflow=%s nodes=%s elapsed_ms=%s",
+                run_id,
+                row["workflow_name"] if row else None,
+                row["node_count"] if row else 0,
+                row["total_ms"] if row else 0,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 日志失败不得影响收尾
+            log.debug("completed-log query failed for run %s: %s", run_id, exc)
 
     # -------------------------------------------------------------- internal: DB helpers
     def _insert_node_row(
@@ -885,14 +999,71 @@ class WorkflowEngine:
                         run_id, status,
                     )
             else:  # PAUSED: 保留 ended_at = NULL（仍可 resume）
-                conn.execute(
+                # 守卫：WHERE status='RUNNING'（M1）。场景——用户 cancel_run（200
+                # CANCELLED）之后 Human 节点才抛 PauseRequested（节点 fn 执行窗口内
+                # 取消），若无守卫本 UPDATE 会把 CANCELLED 覆盖回 PAUSED 且 ended_at
+                # 保持 NULL：取消被静默回滚、可被 resume 续跑。
+                # rowcount=0 → 读当前状态：CANCELLED 时按 CANCELLED 语义收尾
+                # （字段口径与上面的 CANCELLED 分支一致，含 ended_at）；其它终态
+                # （FAILED / COMPLETED）不覆盖，静默跳过。
+                cur = conn.execute(
                     """
                     UPDATE workflow_runs
                     SET status = ?, checkpoint_json = ?, current_node = ?, error = ?
-                    WHERE run_id = ?
+                    WHERE run_id = ? AND status = 'RUNNING'
                     """,
                     (status, _dump_json(capped), current_node, error, run_id),
                 )
+                if cur.rowcount == 0:
+                    row = conn.execute(
+                        "SELECT status FROM workflow_runs WHERE run_id = ?", (run_id,)
+                    ).fetchone()
+                    current = row["status"] if row is not None else None
+                    if current == "CANCELLED":
+                        cancelled_capped, _ = _cap_checkpoint_payload(scrubbed)
+                        conn.execute(
+                            """
+                            UPDATE workflow_runs
+                            SET status = ?, ended_at = ?, checkpoint_json = ?, current_node = ?, error = ?
+                            WHERE run_id = ?
+                            """,
+                            (
+                                "CANCELLED",
+                                now_iso(),
+                                _dump_json(cancelled_capped),
+                                current_node,
+                                error,
+                                run_id,
+                            ),
+                        )
+                        log.info(
+                            "_finalize_run: run %s cancelled during pause window; "
+                            "finalized as CANCELLED (current_node=%s)",
+                            run_id, current_node,
+                        )
+                        # M1-a（对抗审查）：竞态兜底与正常 cancel 的节点行口径对齐——
+                        # Human 节点行已由 PauseRequested 处理落 PENDING（携带 pause
+                        # payload）；取消既然胜出，按 engine 正常取消路径同款口径标
+                        # FAILED + error='cancelled by user' + 丢弃 output，避免
+                        # CANCELLED run 永久挂 PENDING 节点的审计/UI 噪声。
+                        # 注意：必须复用本方法的事务连接——另开连接会与 conn#1 的
+                        # 未提交写形成 WAL 单写者 busy（实测 database is locked）。
+                        node_run_id = (ctx or {}).get("_current_node_run_id")
+                        if node_run_id:
+                            conn.execute(
+                                """
+                                UPDATE workflow_run_nodes
+                                SET status = 'FAILED', output_json = NULL,
+                                    error = 'cancelled by user', ended_at = ?
+                                WHERE node_run_id = ?
+                                """,
+                                (now_iso(), node_run_id),
+                            )
+                    else:
+                        log.debug(
+                            "_finalize_run skip: run %s status=%r (not RUNNING); pause not applied",
+                            run_id, current,
+                        )
             conn.commit()
         finally:
             conn.close()
@@ -926,8 +1097,16 @@ class WorkflowEngine:
 # ---------------------------------------------------------------------------
 
 
-def recover_interrupted_runs(db_path: Path | str) -> list[str]:
-    """启动时把 ``workflow_runs`` 中所有 ``status='RUNNING'`` 的 run 收尾为 FAILED。
+def recover_interrupted_runs(
+    db_path: Path | str, instance_id: str | None = None
+) -> list[str]:
+    """启动时把「本实例 + 0026 前旧行」残留的 ``status='RUNNING'`` run 收尾为 FAILED。
+
+    收尾范围（F6）：``instance_id = ? OR instance_id IS NULL``——只清本实例的 run 与
+    ``instance_id IS NULL`` 的历史行（0026 之前无归属标记，保持旧语义一次性收敛）。
+    他实例（别的服务进程）正在跑的 run 绝不动：旧实现无差别清剿全部 RUNNING，
+    实例 B 启动会把实例 A 在跑的 run 置 FAILED（m1_long_run 历史事故）。
+    ``instance_id=None``（不传参的旧调用形态）语义退化为「只收 NULL 旧行」。
 
     收尾口径：
     - run 行：``status='FAILED'``, ``error='interrupted: service restart killed worker thread'``,
@@ -935,10 +1114,10 @@ def recover_interrupted_runs(db_path: Path | str) -> list[str]:
     - 该 run 下仍处于 ``RUNNING`` / ``PENDING`` 的节点行：``status='FAILED'``,
       ``error='interrupted by restart'``, ``ended_at=<UTC now ISO>``（已
       ``COMPLETED`` / ``FAILED`` / ``SKIPPED`` 的节点行保留原状，便于审计）。
-    - 孤儿节点清扫：run 已处于 ``FAILED`` / ``CANCELLED`` 终态、但其下节点行
-      仍为 ``RUNNING`` / ``PENDING`` 的僵尸节点，一并收尾为 FAILED（口径同上）。
-      这类残留通常源于历史 bug：run 收尾逻辑漏掉节点行（例如本次启动前已
-      收尾为 FAILED 的 run）；不处理会一直阻塞唯一索引、产生永远推进的孤儿。
+    - 孤儿节点清扫：run 已处于 ``FAILED`` / ``CANCELLED`` 终态（同受 instance_id 归属
+      过滤）、但其下节点行仍为 ``RUNNING`` / ``PENDING`` 的僵尸节点，一并收尾为
+      FAILED（口径同上）。这类残留通常源于历史 bug：run 收尾逻辑漏掉节点行；不处理
+      会一直阻塞唯一索引、产生永远推进的孤儿。
       ``PAUSED`` run 的 ``PENDING`` 节点行是合法的人工审阅等待状态，绝不动；
       ``COMPLETED`` run 的 ``RUNNING`` 节点行视为矛盾数据，本次也不扫。
     - PAUSED / COMPLETED run 本身不动。
@@ -949,24 +1128,29 @@ def recover_interrupted_runs(db_path: Path | str) -> list[str]:
     db_path = str(Path(db_path).resolve()) if not str(db_path).startswith(":memory:") else str(db_path)
     conn = get_connection(db_path)
     try:
-        # 1) 找出当前所有 RUNNING run_id（用于更新节点行 + 返回）
+        # 归属范围：本实例的 run + 0026 前的 NULL 旧行（instance_id = NULL 在 SQL 中
+        # 恒为 UNKNOWN，故 NULL 入参只命中 IS NULL 分支）。
+        scope_sql = "(instance_id = ? OR instance_id IS NULL)"
+
+        # 1) 找出范围内所有 RUNNING run_id（用于更新节点行 + 返回）
         rows = conn.execute(
-            "SELECT run_id FROM workflow_runs WHERE status = 'RUNNING'"
+            f"SELECT run_id FROM workflow_runs WHERE status = 'RUNNING' AND {scope_sql}",
+            (instance_id,),
         ).fetchall()
         run_ids: list[str] = [row["run_id"] for row in rows]
         now = now_iso()
 
-        # 2) 收尾 RUNNING run 行（若有 RUNNING run）
+        # 2) 收尾 RUNNING run 行（若有范围内 RUNNING run）
         if run_ids:
             conn.execute(
-                """
+                f"""
                 UPDATE workflow_runs
                 SET status = 'FAILED',
                     error = 'interrupted: service restart killed worker thread',
                     ended_at = ?
-                WHERE status = 'RUNNING'
+                WHERE status = 'RUNNING' AND {scope_sql}
                 """,
-                (now,),
+                (now, instance_id),
             )
             # 3) 收尾这些 run 下仍处于 RUNNING/PENDING 的节点行
             placeholders = ",".join("?" for _ in run_ids)
@@ -985,11 +1169,12 @@ def recover_interrupted_runs(db_path: Path | str) -> list[str]:
         # 4) 孤儿节点清扫：run 已 FAILED/CANCELLED 终态、但节点行仍
         # RUNNING/PENDING 的僵尸节点一并收尾。典型产物是历史已 FAILED 但
         # 当时漏掉节点行的 run（生产库中那条 scene_planner 永远 RUNNING 的
-        # wfrn_fbc58dda2a70）。当前 RUNNING run 收尾后其下节点由步骤 3
+        # wfrn_fbc58dda2a70）。当前范围内 RUNNING run 收尾后其下节点由步骤 3
         # 处理，步骤 4 对那些行是幂等空操作；放在最末确保即使无 RUNNING
-        # run（启动时只有终态残留）也照样执行。PAUSED 不扫，COMPLETED 不扫。
+        # run（启动时只有终态残留）也照样执行。PAUSED 不扫，COMPLETED 不扫；
+        # 归属范围同上（他实例的终态 run 下的节点行同样不动）。
         cur = conn.execute(
-            """
+            f"""
             UPDATE workflow_run_nodes
             SET status = 'FAILED',
                 error = 'interrupted by restart',
@@ -998,9 +1183,10 @@ def recover_interrupted_runs(db_path: Path | str) -> list[str]:
               AND run_id IN (
                 SELECT run_id FROM workflow_runs
                 WHERE status IN ('FAILED', 'CANCELLED')
+                  AND {scope_sql}
               )
             """,
-            (now,),
+            (now, instance_id),
         )
         swept = cur.rowcount
         if swept:
@@ -1026,7 +1212,9 @@ __all__ = [
     "WorkflowNode",
     "PauseRequested",
     "recover_interrupted_runs",
+    "current_instance_id",
     "_fetch_run_status",
+    "_resolve_checkpoint_exclude",
     "_cap_checkpoint_payload",
     "_CHECKPOINT_MAX_BYTES",
     "_CHECKPOINT_TRUNCATED_KEY",

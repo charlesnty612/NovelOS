@@ -1,7 +1,9 @@
 # NovelOS 实现总计划 v0
 
+> **历史计划（2026-08-23 定稿）：Sprint 0~6 已全部结束，本文档仅作考古；现行架构与进度以 README 与 `docs/roadmap/` 为准。**
+>
 > 主会话设计定稿，2026-08-23。本文档是 PRD v1.2 → 代码实现的总指挥方案：所有 Sprint 派发以此为准。
-> 上游权威：`#NovelOS.md`（PRD v1.2）、`docs/` 下全部 v0 设计文档与 Schema。
+> 上游权威：`#NovelOS.md`（已迁内容仓 NovelOS-Content:#NovelOS.md）（PRD v1.2）、`docs/` 下全部 v0 设计文档与 Schema。
 
 ---
 
@@ -118,4 +120,4 @@ MVP 实现 `openai_compatible` 一个 Provider（覆盖 OpenAI / DeepSeek / 通�
 8. **deconstruct-book MVP defer 清单**（S11）：epub 不支持、T1 失败无 Human 补切分、多参照系加权（OV-2）、embedding 轨道、同步长任务无超时/异步队列。记录于 `packages/workflows/deconstruct_book/README.md`。
 9. **checkpoint_exclude 与 resume 的交互**（S11 修复遗留）：被剔除键（如拆书原文 text）在 resume 时不恢复；deconstruct 无 Human 节点暂不显现，未来加 Human 节点需注入机制。
 10. **Simulation 限制**（S10）：纯状态推演（无 LLM 叙事推演）；`_skip_approval` 仅 simulation 路径可用且有审计字段；chapter_id 必填。记录于 `packages/core/simulation/README.md`。
-11. **§6 Regression 基线判定为结构签名 MVP 子集**（quality-scoring-v0 §6 落地，2026-08-23）：PRD §85「不能直接上线」的分数级判定（overall 容差、关键子分 ≥ baseline-3、Guardrail hit_rate 恶化）依赖 LLM judge 分数，MVP 阶段映射为**结构签名比对**（state_version / delta_arrays / hooks 漂移 + guardrails_pass 由 pass 变 fail 即 BLOCK），见 `tests/evals/regression_baseline.py` 与 `tests/evals/README.md` §5；基线 `docs/evaluation/baseline/last_passing_run.json` 标注 `baseline_semantics: "structural-signature-mvp"`，LLM judge 接入后升级语义并重建基线。
+11. **§6 Regression 基线判定为结构签名 MVP 子集**（quality-scoring-v0 §6 落地，2026-08-23）：PRD §85「不能直接上线」的分数级判定（overall 容差、关键子分 ≥ baseline-3、Guardrail hit_rate 恶化）依赖 LLM judge 分数，MVP 阶段映射为**结构签名比对**（state_version / delta_arrays / hooks 漂移 + guardrails_pass 由 pass 变 fail 即 BLOCK），见 `tests/evals/regression_baseline.py` 与 `tests/evals/README.md` §5；基线 `docs/evaluation/baseline/last_passing_run.json`（baseline 目录已清空，历史运行数据见 NovelOS-Artifacts）标注 `baseline_semantics: "structural-signature-mvp"`，LLM judge 接入后升级语义并重建基线。

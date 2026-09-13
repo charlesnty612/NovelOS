@@ -49,4 +49,4 @@ Content-Type: application/json
 
 - Director 输出顶层必须含 `schema_version: "director-plan.v1"` 与 `prompt_version: "director:v1"`；契约校验在 `agent_runtime.structured_output._validate_director`。
 - chapters.status 由 chapter-write 推到 DRAFTED，不在本工作流改变。
-- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4、`docs/agents/agent-contracts-v0.md` §3、`docs/agents/prompts/director-v1.md`。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 4、`docs/agents/agent-contracts-v0.md` §3、`docs/agents/prompts/director-v1.md`。

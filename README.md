@@ -45,7 +45,7 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0025_genre_packs.sql，38 张物理业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0026_workflow_runs_instance_id.sql，38 张物理业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包 / 0026 run 实例归属）
 tests/                   pytest（unit / integration / workflow / api / evals）
 scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
 docs/                    设计文档、PRD、实现计划（docs/impl/IMPLEMENTATION-PLAN-v0.md）
@@ -102,7 +102,7 @@ python -m pytest -q
 ## 测试
 
 ```bash
-# 后端全量（当前基线 1693 passed，2 skipped；-n 4 并行，约 4 分钟）
+# 后端全量（当前基线 2059 passed，2 skipped；-n 4 并行，约 4 分钟）
 python -m pytest tests/ -q --ignore=tests/evals -n 4
 
 # Golden 回归 eval（当前 3/3）
@@ -114,7 +114,7 @@ python scripts/smoke_e2e.py
 # 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
 python scripts/real_llm_e2e.py
 
-# 前端单测（vitest；当前 416）
+# 前端单测（vitest；当前 422）
 cd apps/web && npm run test
 ```
 
@@ -133,15 +133,23 @@ cd apps/web && npm run test
 | `NOVELOS_QUALITY_Q8_STRICT` | 未设置 | 置 `1` 时 Q8 人工占比红线从默认 warning 升回 error（V3.9 批次 3.3 裁决：AI 写作工具默认不阻断） |
 | `NOVELOS_CRITIC_MODE` | `always` | critic 评审模式：`always`（每章必评）/ `sample`（抽样）等；未设置回落到 pipeline 内定 always（每章） |
 | `NOVELOS_SUMMARY_PARALLEL` | `on` | commit 三路并发：`on`（summarizer 并入 observer 双腿并发池）/ `off` |
+| `NOVELOS_OBSERVER_SPLIT` | `on` | observer 双腿拆分开关：`on` 分 entities / narrative 两条轻量腿；`off` 走旧单次大调用路径 |
+| `NOVELOS_OBSERVER_PARALLEL` | `on` | observer 双腿并发提交开关：`off` 回退串行（wall time ≈ 两腿之和） |
+| `NOVELOS_WRITER_CONTEXT_MODE` | `paged` | writer 上下文注入模式：`paged`（L0/L1/L2 分页）/ `full`（全量）；非法值回落 `paged`（不抛错） |
+| `NOVELOS_CONTEXT_RELEVANCE` | 启用（未设置=开） | 置 `off` 关闭相关性裁剪（按 plan / scene_plan 的 involved 实体裁剪角色 / 地点 / 势力摘要） |
 | `NOVELOS_AUTO_REVISE_MAX` | `2` | 自动改稿回路最大轮数：`0` 禁用，正整数生效 |
 | `NOVELOS_API_KEY_<PROVIDER>` | — | provider API Key（`<PROVIDER>` 大写，如 `NOVELOS_API_KEY_OPENAI`）；也可在 model_configs 的 `params_json.api_key` 配置 |
-| `NOVELOS_DISABLED_MODULES` | — | 禁用模块列表（V3.3 轻量方案），逗号分隔；模块名 = `packages/core/api/routers/` 下的文件名去 `.py`（如 `simulation,reference,arc`）。被禁模块的 HTTP 路由**不挂载**，对应端点返回 404；不影响 workflow 注册（边界见 `docs/roadmap/v3.3-v3.5-candidates-design.md` §四） |
+| `NOVELOS_DISABLED_MODULES` | — | 禁用模块列表（V3.3 轻量方案），逗号分隔；模块名 = `packages/core/api/routers/` 下的文件名去 `.py`（如 `simulation,reference,arc`）。被禁模块的 HTTP 路由**不挂载**，对应端点返回 404；不影响 workflow 注册（边界见内容仓 NovelOS-Content `docs/roadmap/v3.3-v3.5-candidates-design.md` §四） |
+| `NOVELOS_PROMPT_SYNC` | `on` | 启动时自动同步 `docs/agents/prompts` → agents/prompts 表（幂等，内容未变不刷 `updated_at`）；`off` 跳过（测试/调试场景） |
+| `NOVELOS_DEBUG_PROVIDER_DUMP_DIR` | 未设置 | 生产排障：设置目录后每次成功的 OpenAI 兼容调用把**模型回复全文**落盘（仅保留最新 10 个文件、单文件 ≤2MB）。**落盘内容即用户创作内容全文，慎用** |
+| `NOVELOS_SECRETS_FILE` | `<repo>/secrets.json` | 覆盖密钥文件路径（见「密钥管理」一节） |
 
 ## 版本与更新日志
 
-当前版本 **v3.8.0**（与 `pyproject.toml` 版本号单源一致；`apps/web/package.json` 为 3.5.0，属发版流程待对齐项）。自 V1.0 起，所有迭代必须在 `CHANGELOG.md`
-追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x 路线登记在同文件
-「Known Issues / 路线登记」一节。
+当前版本 **v3.9.0**（`pyproject.toml` 为版本单源；`apps/web/package.json`、`apps/web/package-lock.json`
+与 `uv.lock` 随发版对齐。当前基线：pytest **2059 passed / 2 skipped**，vitest **422**）。自 V1.0 起，
+所有迭代必须在 `CHANGELOG.md` 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x
+路线登记在同文件「Known Issues / 路线登记」一节。
 
 逐 Sprint 进度、关键 commit 与测试基线见 `docs/impl/IMPLEMENTATION-PLAN-v0.md` §4.1 台账
 （S0 ~ S11 已验收，S12 Tauri 壳经用户拍板关闭——Web 版即交付形态）；已知 deviation 见同文档 §4.2。

@@ -1,7 +1,7 @@
 # scripts（运维脚本）
 
-> 职责：NovelOS 后端的本地运维 CLI——迁移执行与开发服务器启动；Sprint 0 仅含两个最小可执行入口，可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
-> 状态：已实现 Sprint 0（migrate.py / serve.py）。
+> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 15 个脚本：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke 等），均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
+> 状态：现行入口 15 个（`ls scripts/*.py`）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
 
 ## 职责与边界
 
@@ -11,15 +11,27 @@
 - 统一从 `packages.core.config.get_settings()` 读取配置，保证 CLI 与 API 行为一致
 
 **不做**：
-- 不实现生产部署脚本（属于 Phase B Tauri 壳任务，Sprint 12）
-- 不实现数据库备份/恢复（属于 Sprint 7 Version 之后）
+- 不实现生产部署脚本（Phase B Tauri 壳已于 2026-08-23 由用户裁决关闭，Web 版交付即目标达成）
+- 不实现数据库备份 / 恢复（已实现于 `packages/core/backup/` + `/api/projects/{pid}/backup` 端点，不在 `scripts/` 重复）
 
 ## 对外接口
 
 | 脚本 | 来源 | 入口函数 | 用途 |
 |---|---|---|---|
 | `scripts/migrate.py` | `scripts/migrate.py:16` | `main() -> int` | 执行 SQLite 迁移并打印 `applied / skipped / tables / db` |
-| `scripts/serve.py` | `scripts/serve.py:15` | `main() -> int` | 启动 uvicorn，host/port 取自 `Settings` |
+| `scripts/serve.py` | `scripts/serve.py:31` | `main() -> int` | 启动 uvicorn，host/port 取自 `Settings` |
+
+### 脚本总览（现行 15 个）
+
+| 类别 | 脚本 |
+|---|---|
+| 迁移 / 服务 | `migrate.py`、`serve.py` |
+| 内容仓同步 | `content_sync.py`（见下文专节） |
+| 库维护 / 一次性迁移 | `db_maintenance.py`（workflow_runs 清理 / prune-logs / vacuum）、`migrate_m1_run_to_main.py` |
+| 评估 / 长跑探针 | `eval_regression.py`、`m1_long_run.py`、`m1_report.py`、`m2_judge.py`、`real_llm_e2e.py` |
+| Schema / 前端类型 | `export_openapi.py`、`gen_frontend_types.py` |
+| 端到端 / 冒烟 | `smoke_e2e.py`、`smoke_ch063_split.py` |
+| 一致性核查 | `check_state_sync.py` |
 
 ### `scripts/migrate.py` 输出格式
 
@@ -32,7 +44,7 @@ newly applied:
 ### `scripts/serve.py` 行为
 
 - 调用 `uvicorn.run("packages.core.api.main:app", host=settings.api_host, port=settings.api_port, reload=False, log_level=settings.log_level.lower())`
-- 默认绑定 `127.0.0.1:8000`，可通过 `NOVELOS_API_HOST` / `NOVELOS_API_PORT` 环境变量覆盖
+- 默认绑定 `127.0.0.1:18081`（`Settings.api_port` 默认值；优先级 `NOVELOS_PORT` > `NOVELOS_API_PORT` > 18081），host 可用 `NOVELOS_API_HOST` 覆盖
 
 ## 依赖
 
@@ -59,7 +71,7 @@ NOVELOS_API_PORT=9000 NOVELOS_LOG_LEVEL=DEBUG python scripts/serve.py
 - **配置单一来源**：CLI 一律走 `get_settings()`，避免硬编码路径 / 端口。
 - **`migrate.py` 退出码**：成功返回 0；不抛异常即视为成功（迁移幂等）。
 - **`serve.py` 不启用 reload**：避免 Sprint 0 阶段文件变更导致的双进程问题；如需 reload 用 `uvicorn --reload` 显式调用。
-- **权威文档**：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 0 DoD（`uvicorn` 启动 `/health` 200、迁移后 28 表）。
+- **权威文档**：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 0 DoD（`uvicorn` 启动 `/health` 200、迁移后 38 业务表）。
 
 ---
 

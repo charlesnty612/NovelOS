@@ -217,7 +217,7 @@ V1.5 起把 `model_configs` 表的 SQL 从 router 下沉到独立 service（`pac
   这层逻辑仍在 router（属于请求体语义），service 只看最终 dict。
 
 ## 维护注意点
-- 测试一律用 `MockProvider` 或 `httpx.MockTransport` 注入；不依赖外网（`docs/impl/IMPLEMENTATION-PLAN-v0.md` D-I4）。
+- 测试一律用 `MockProvider` 或 `httpx.MockTransport` 注入；不依赖外网（`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划） D-I4）。
 - OpenAI 兼容 Provider 必须有 `params_json.base_url`；缺则 `ValueError`（在 `get_provider` 时抛）。
 - `enabled=0` 行 Router 不返回；`/test` 端点对 enabled=0 直接返回 422（P2-5 业务规则）。
 - Provider 错误透传 status_code；上层 `agents.py` router 转 502。
@@ -295,5 +295,5 @@ V3.9.3 把 observer 从 reasoning 拆为独立 capability（迁移 0018 同步 b
 
 ## 权威文档
 - `docs/agents/agent-contracts-v0.md` §7（Agent 十问中的 capability）。
-- `docs/impl/IMPLEMENTATION-PLAN-v0.md` §1 D-I4、§2 Sprint 3/8。
+- `docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§1 D-I4、§2 Sprint 3/8。
 - PRD §51（Model Router）。

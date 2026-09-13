@@ -1181,6 +1181,12 @@ WORKFLOW = {
     # settings_digest / open_hooks / suggested_hashes）**不**进 exclude——critic 与 deep_review
     # 均消费它，resume 重建 ctx 后键仍可达（引擎 resume 从 PAUSED 节点后继续，不回跑 AI 节点）；
     # 体积以 draft_text 为主（≈正文 UTF-8 字节数），远低于引擎 512KB checkpoint 软上限。
+    #
+    # V3.9 全量检修 M2：节点镜像键补齐（引擎 ``ctx[node_id] = output`` 与
+    # workflow_run_nodes.output_json 逐字节重复；不排除则上面的数据键经镜像原样落盘）。
+    # 例外：``author_review`` 是 Human 节点，其镜像键承载 ``__pause_payload__``
+    # （review_report / critic_report 供前端 reviewer UI 渲染，apps/web/src/utils/pausePayload.ts
+    # 从 checkpoint_json[node_id] 取）——保留，不得排除。
     "checkpoint_exclude": [
         "review_report",
         "critic_report",
@@ -1191,6 +1197,11 @@ WORKFLOW = {
         "deep_review_status",
         "deep_review_error",
         "deep_review_skipped",
+        # ---- 节点镜像键（author_review 除外：pause payload 消费契约）----
+        "basic_checks",     # 镜像内含 review_report / review_inputs（draft_text 大）
+        "critic_review",    # 镜像内含 critic_report
+        "deep_review",      # 镜像内含 deep_review_report
+        "mark_reviewed",
     ],
 }
 

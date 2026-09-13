@@ -14,7 +14,7 @@
 - 查询辅助：`runs.list_runs(db_path, project_id)` / `runs.get_run(db_path, run_id)`。
 
 不做：
-- 不集成外部工作流引擎（DeterminFlow 评估后不集成，见 `docs/impl/IMPLEMENTATION-PLAN-v0.md` D-I3）。
+- 不集成外部工作流引擎（DeterminFlow 评估后不集成，见 `docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划） D-I3）。
 - 不做具体业务工作流（属 `packages/workflows/*`）。
 
 ## 对外接口
@@ -25,10 +25,16 @@
   - `start_with_nodes(workflow_name, nodes, chapter_id=None, initial_ctx=None, mock_providers=None) -> run_id`
   - `resume(run_id, nodes, human_input=None) -> run_id`
 - `PauseRequested(payload)` — Human 节点抛出用。
-- `recover_interrupted_runs(db_path) -> list[str]` — 启动自愈：把残留
-  `status='RUNNING'` 的 run 收尾为 FAILED（单进程部署，daemon 线程随进程死亡
-  → 启动瞬间 RUNNING 必为孤儿）；其下 RUNNING/PENDING 节点行同口径收尾。
-  PAUSED / 终态 run 不动。返回受影响 run_id 列表；任何异常 log warning 不抛。
+- `recover_interrupted_runs(db_path, instance_id=None) -> list[str]` — 启动自愈：
+  只收尾 **本实例（`instance_id = ?`）或 0026 前旧行（`instance_id IS NULL`）** 的
+  `status='RUNNING'` run（跨实例互杀防护，V3.9 全量检修 F6；run 行由
+  `WorkflowEngine(instance_id=...)` 启动时打标，`current_instance_id()` 为进程级 uuid）。
+  其下 RUNNING/PENDING 节点行同口径收尾；PAUSED / 终态 run 不动；孤儿节点清扫同受
+  归属过滤。返回受影响 run_id 列表；任何异常 log warning 不抛。
+  **注意**：带旧 instance_id 的崩溃 run 不再被启动收敛（语义代价，V3.9 裁决）——
+  用 `python scripts/db_maintenance.py fix --apply` 清理；需要跨重启自愈的常驻部署
+  **显式设置 `NOVELOS_INSTANCE_ID` 环境变量固定身份**（engine 已支持，缺省每次
+  启动生成新 uuid）。
   FastAPI lifespan startup（`packages/core/api/main.py`）在迁移执行后调用。
 - `runs.list_runs(db_path, project_id) -> list[dict]`
 - `runs.get_run(db_path, run_id) -> dict | None`（含 nodes 数组）
@@ -48,4 +54,4 @@
 - ctx 必须保持 JSON 可序列化（路径转 str、datetime 转 ISO 等）；非 JSON 字段会触发 checkpoint 写盘失败。
 - 重试逻辑在 `run_agent` 内部，Engine 不重试节点 fn 异常。
 - `additionalProperties: false` 的 schema 由 Service 层保证；Engine 只负责流程编排与持久化。
-- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4、PRD §55-65、§72、`docs/agents/agent-contracts-v0.md`。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 4、PRD §55-65、§72、`docs/agents/agent-contracts-v0.md`。

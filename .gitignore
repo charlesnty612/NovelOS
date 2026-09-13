@@ -16,11 +16,18 @@ data/
 .idea/
 .vscode/
 *.log
-.env
+# 环境变量文件（V3.9 扩为 `.env*` 族：覆盖 .env.local / .env.production 等变体）；
+# 模板放行——只含示例值、可提交
+.env*
+!.env.example
 packages/novelos.egg-info/
-# 集中存储 API key 的密钥文件（V3.8）；可被环境变量 NOVELOS_SECRETS_FILE 覆盖
-secrets.json
-secrets.*.json
+# 集中存储 API key 的密钥文件（V3.8）；可被环境变量 NOVELOS_SECRETS_FILE 覆盖。
+# V3.9 扩为 `secrets*.json*` 族：覆盖 secrets.json.bak / secrets_backup.json /
+# secrets copy.json / secrets.json.tmp 等备份与副本变体（R2 F8 实证旧规则漏网）；
+# 模板放行（示例结构不含真实 key）
+secrets*.json*
+!secrets.example.json
+!secrets.json.example
 
 # ==== 内容层 / 操作痕迹 分仓（2026-09-08 起）====
 # 软件、内容、操作痕迹三仓分离：以下内容层与痕迹层已迁出到

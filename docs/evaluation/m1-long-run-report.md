@@ -1,8 +1,10 @@
 # M1 一致性衰减观测报告
 
+> 历史运行报告（2026-08-25 定稿）：数据为当时版本基线（V2.x 时期，MiniMax-M3 全链），与现行 V3.9 行为不保证一致；原始现场已迁痕迹仓 NovelOS-Artifacts。
+
 - 运行窗口：2026-08-24 ~ 2026-08-25（含夜间休眠中断，纯运行时长约 6.4 小时）
 - 配置：MiniMax-M3（openai_compatible，base_url api.minimaxi.com/v1，timeout_s=1800）
-- 数据明细：`docs/evaluation/m1-data.md`（由 `scripts/m1_report.py` 生成）；原始现场 `data/m1_run/`
+- 数据明细：`docs/evaluation/m1-data.md`（由 `scripts/m1_report.py` 生成）；原始现场 `data/m1_run/`（已迁痕迹仓 NovelOS-Artifacts:archive/m1_run/）
 - 结论口径：所有分数均来自 `quality_reports` 实测落库，非估算。
 
 ## 1. 运行结果总览

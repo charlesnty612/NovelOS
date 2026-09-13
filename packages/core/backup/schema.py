@@ -44,14 +44,18 @@ REQUIRED_TOP_KEYS = {"format", "version", "exported_at", "project", "tables"}
 # 顺序即为重映射顺序（service.py 严格按此顺序执行）；
 # 修改顺序或表名都会破坏导入兼容性，请谨慎变更。
 #
-# 覆盖 22 张表（V1.4 MVP）：
+# 覆盖 23 张表（V1.4 MVP + V3.9 补 volumes）：
 # - 第一波（仅依赖 projects）：characters / locations / factions / world_rules /
-#   hooks / narrative_debts / chapters / branches / memories / reveal_policies /
-#   author_style_samples / chapter_summaries / story_states
+#   hooks / narrative_debts / volumes / chapters / branches / memories /
+#   reveal_policies / author_style_samples / chapter_summaries / story_states
 # - 第二波（依赖 character/chapter）：character_states / scenes / drafts
 # - 第三波（依赖 plot_events/locations）：plot_events / timeline_events
 # - 第四波（依赖 character/chapter/state）：relationships / state_deltas / commits /
 #   quality_reports
+#
+# volumes（迁移 0015）排在 chapters 之前：chapters.volume_id → volumes.volume_id，
+# 顺序与 FK 依赖方向一致（导入端 id 映射已在 INSERT 前全局预建，顺序不构成硬依赖，
+# 但仍按依赖方向排列便于人读）。
 EXPORTED_TABLES: tuple[str, ...] = (
     "characters",
     "locations",
@@ -59,6 +63,7 @@ EXPORTED_TABLES: tuple[str, ...] = (
     "world_rules",
     "hooks",
     "narrative_debts",
+    "volumes",
     "chapters",
     "branches",
     "memories",

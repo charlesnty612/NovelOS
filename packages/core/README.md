@@ -115,4 +115,4 @@ pytest tests/unit tests/integration -q
 - **路由前缀**：业务路由全部挂在 ``/api`` 前缀下，与 vite dev proxy 配合；``create_app`` 统一挂载，
   router 内不要再加 ``/api`` 前缀。
 - **ID 与时间戳**：所有 Service 必须用 ``new_id("<prefix>")`` 与 ``now_iso()``，禁止业务层直接构造主键或时间戳。
-- **权威文档**：``docs/impl/IMPLEMENTATION-PLAN-v0.md`` §1 决策 §2 Sprint 表；``docs/state-model/state-delta-v0.md``（后续 Sprint 参考）。
+- **权威文档**：``docs/impl/IMPLEMENTATION-PLAN-v0.md``（历史计划）§1 决策 §2 Sprint 表；``docs/state-model/state-delta-v0.md``（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md）（后续 Sprint 参考）。

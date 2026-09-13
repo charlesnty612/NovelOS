@@ -198,7 +198,7 @@
 > - 唯一可借用：参照系中的**结构模式短语**（如「主角类型 1 在某类型场景中完成类型行为」「`min=N-median=M-p75=P`」），其余皆视为越界。
 > - **主角人设子字段（v0.1.2 增）**：`protagonist` 是**可选**子键——若 canon_json 未生成该块、或仅生成部分子字段（`identity` / `core_drive` / `personality_tags[]` / `foil_techniques[]` 任一可缺），Director 按 `author_intent + story_state_snapshot + character_state_excerpts` 自行规划人设方向，**不报错**。当 `protagonist` 全部子字段都缺失时，`protagonist` 键不出现在 inject 字典里——视为无 protagonist 输入。
 
-> **层概念引用**：上述输入字段对应 `docs/architecture/context-engine-v0.md` 的分层（Project / Story State / Character State / Plot Context / Chapter Context / Memory / Agent Private Context）。本 Prompt 不复制层定义，只声明消费哪些字段。
+> **层概念引用**：上述输入字段对应 `docs/architecture/context-engine-v0.md`（已迁内容仓 NovelOS-Content:docs/architecture/context-engine-v0.md）的分层（Project / Story State / Character State / Plot Context / Chapter Context / Memory / Agent Private Context）。本 Prompt 不复制层定义，只声明消费哪些字段。
 
 ---
 

@@ -23,7 +23,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install fastapi 'uvicorn[standard]' pydantic jsonschema httpx pytest ruff
+          # 单一依赖源：pyproject.toml（[project].dependencies 含 json-repair /
+          # python-multipart，[dev] 含 pytest / ruff）。此前手写清单缺 json-repair
+          # 与 python-multipart，收集期 ModuleNotFoundError 导致 CI 必红（R3 实证）。
+          pip install -e ".[dev]"
       - name: Ruff check
         run: ruff check packages tests scripts
       - name: Pytest
@@ -31,7 +34,10 @@ jobs:
       - name: Dependency audit (pip-audit)
         run: |
           python -m pip install pip-audit
-          pip-audit --skip-editable fastapi uvicorn pydantic jsonschema httpx || true
+          # 显式接受告警不阻断：方法论 05「不可用 = 显式拒绝或签字跳过」——`|| true`
+          # 是签字跳过而非漏写；覆盖范围 fastapi / uvicorn / pydantic / jsonschema /
+          # httpx / starlette / python-multipart / json-repair。告警定期人工复核后收紧。
+          pip-audit --skip-editable fastapi uvicorn pydantic jsonschema httpx starlette python-multipart json-repair || true
 
   web:
     name: web (build + vitest)

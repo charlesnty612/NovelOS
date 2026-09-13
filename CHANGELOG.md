@@ -1,8 +1,28 @@
 # 更新日志（CHANGELOG）
 
 > **留痕规矩（自 V1.0 起强制）**：此后所有迭代——功能、修复、迁移、行为变更——合并前必须在本文件追加条目。
+> 发版惯例：发版时把 `## [Unreleased]` 改名为 `## [X.Y.Z] - 日期`，并重新加回空的 `## [Unreleased]` 承接下一轮。
 
 ## [Unreleased]
+
+### Fixed（2026-09-13 V3.9 全量检修必修 8 项 + 对抗审查打回 4 项：报告 docs/reviews/全量检修-2026-09-13.md）
+
+> 方法：五路只读检修并行（方法论 04 全量档）→ 主会话逐条亲验 → 必修 8 项四路文件互斥修复
+> → **独立对抗审查**（Fix-A engine 域）→ 打回 4 项修复 → 全量回归。R1+R3 双独立发现同一缺陷按规矩升级。
+
+- **迁移目录 CWD 锚定（双发现升级）**：`db.py` 默认迁移目录从 CWD 相对改为 `__file__` parents[2] 锚定；外部 CWD 启动曾静默 0 迁移且 health 报 ok（探针实证）；lifespan 对「0 迁移+空库」打 ERROR。
+- **cancel×pause 竞态守卫 + 节点行口径对齐（M1/M1-a）**：`_finalize_run` PAUSED 分支补 `WHERE status='RUNNING'` 守卫（取消不再被静默回滚）；竞态兜底按 CANCELLED 语义收尾且 Human 节点行同步 `FAILED/error='cancelled by user'`+丢弃 pause payload。排障实录：嵌套写另开连接触发 WAL 单写者 busy——已复用同一事务连接，坑区留痕。
+- **checkpoint_exclude 镜像键推广（M2）**：commit/review 的排除清单补节点镜像键（实测曾 59KB/89KB 泄漏）；**例外保留 quality_gate/author_review**（前端消费契约，对抗审查证据）。resume 路径 exclude 改从 workflow 注册表取回（M3，原实例属性随 resume 失效）。
+- **启动自愈跨实例互杀修复（F6）**：迁移 0026 `workflow_runs.instance_id` + 归属过滤（本实例+0026 前 NULL 旧行）。**知情语义代价**：未设 `NOVELOS_INSTANCE_ID` 时重启不自愈已打标 run（跨实例防护的必然），运营路径 `db_maintenance fix --apply`；docstring/README/坑区全口径一致（对抗审查阻断项）。
+- **备份恢复正确性一揽子（「能导出≠能恢复」）**：JSON 载荷 id 重映射 walker（精确匹配、dict 键值双替、25 列清单有 schema 覆盖测试）+ 预建全局映射（顺手修 story_states.commit_id 顺序悬挂）+ `volumes` 入白名单 + projects 后加列动态写 + `PRAGMA foreign_key_check` 基线差集校验（原事务内 `foreign_keys=ON` 是 no-op）。跨引用 roundtrip + check_state_sync SYNC OK 双验证。
+- **CI 修复**：backend job 改 `pip install -e ".[dev]"`（原缺 json_repair/python-multipart 收集期必红）；pip-audit 覆盖与注释对齐。
+- **exporter COMMITTED 口径裁决**：整书 txt/docx=作者 WIP 面（全量章节+非 COMMITTED 标题【未定稿】标注）；番茄投稿包=外发面（正文+大纲同源过滤 COMMITTED-only）——消除文档/实现/m2_judge 三方分裂。
+- **数据卫生 F-8 闭环**：dev 库 DRIFT:2 定性为两次留痕手工改库（八证据链，非代码缺陷）；v1 快照按 DB 重建 + 6 孤儿 character_states 清除，check_state_sync SYNC OK（修前全库备份）。
+- **文档面**：断链回填 ≥100 处（56 内容仓标注+10 痕迹仓+34 历史计划标注）、5 份历史横幅、6 份 Sprint-0 化石 README 重写、迁移口径 0001~0026 全点联动、logging 五项（fallback 字段入 message/[DEBUG] 降级/模块 logger/COMPLETED INFO/prompt sync diff-only）、gitignore 变体 5 探针、env 表 +7、vite proxy 真读环境变量。
+- **登记不修（理由见报告 §四）**：R-1（rollback_of 唯一索引 vs 0022 dup 后缀）、M5（prune-runs 保留策略→V4.x）、门面 68 零引用名/12 空包/7 死定义（→V4.0 模块化批次）、F-1（_assembly_meta 进 prompt 实测 <0.5% 预算）。
+- **过程资产**：坑区 +3（WAL 嵌套连接/F6 语义代价/R-1）；硬规则 +2（文档引用纪律/环境同步纪律）；模块化纪律（新增 ≤1500 行硬顶+存量挂账 4 热点→docs/roadmap/v4.0-模块化重构计划.md）。
+
+## [3.9.0] - 2026-09-13
 
 ### Changed（2026-09-13 V3.9 业务逻辑优化与治理：四批次 + 顺手债 + 题材库全落地）
 

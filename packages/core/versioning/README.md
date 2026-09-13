@@ -5,7 +5,7 @@
 
 ## 职责与边界
 做：在 `state_snapshots` 表之上提供 branch / diff / restore API；为 Simulation（Sprint 10）提供基础。
-不做：UI 视图（属 Sprint 9）；与外部 git 集成（`docs/impl/IMPLEMENTATION-PLAN-v0.md` 明确非 git）。
+不做：UI 视图（属 Sprint 9）；与外部 git 集成（`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划） 明确非 git）。
 
 ## 对外接口（规划中）
 - `Version.branch(state_version) -> Branch`
@@ -21,4 +21,4 @@
 ## 维护注意点
 - 严禁引入 git / pygit2 等外部 VCS 库；Snapshot 机制即版本真相。
 - 分支推演必须不污染主 State（Sprint 10 仿真场景）。
-- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 7/10。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 7/10。

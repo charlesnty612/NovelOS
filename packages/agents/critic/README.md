@@ -9,7 +9,7 @@
 
 ## 对外接口（规划中）
 - `run(inputs: CriticInputs) -> CriticVerdict`
-- 提示词：`docs/agents/prompts/critic.md`
+- 提示词：`docs/agents/prompts/critic-v1.md`
 
 ## 依赖
 - 上游：`packages/core/agent_runtime/`、`packages/core/evaluation/`（评分规则）
@@ -19,4 +19,4 @@
 
 ## 维护注意点
 - 五硬门槛（PRD §86）必须可机检；LLM 判断仅作辅助，不替代规则。
-- 权威文档：PRD §33、§82-86；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 6。
+- 权威文档：PRD §33、§82-86；`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 6。

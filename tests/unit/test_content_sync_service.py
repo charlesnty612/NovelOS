@@ -573,3 +573,51 @@ class TestManifestFromDictFaultTolerance:
             m = Manifest.from_dict(bad)  # type: ignore[arg-type]
             assert isinstance(m, Manifest)
             assert m.project_id == ""
+
+
+# ---------------------------------------------------------------------------
+# V3.9 检修：_write_json 原子写（tmp + os.replace）
+# ---------------------------------------------------------------------------
+
+
+class TestWriteJsonAtomic:
+    """内容仓 JSON 落盘必须原子：中断不留下半截文件。"""
+
+    def test_partial_write_failure_keeps_previous_content(self, tmp_path: Path, monkeypatch) -> None:
+        """写一半失败（磁盘满 / 进程被杀）时，目标文件保持旧内容。"""
+        from packages.core.content_sync import service as cs
+
+        target = tmp_path / "manifest.json"
+        target.write_text('{"old": true}', encoding="utf-8")
+
+        real_write_text = Path.write_text
+
+        def half_then_boom(self: Path, data: str, *args, **kwargs):
+            real_write_text(self, data[:8], *args, **kwargs)
+            raise OSError("simulated disk full")
+
+        monkeypatch.setattr(Path, "write_text", half_then_boom)
+        with pytest.raises(OSError, match="simulated disk full"):
+            cs._write_json(target, {"new": True})
+
+        # 目标文件未被半截内容覆盖
+        assert target.read_text(encoding="utf-8") == '{"old": true}'
+        # 临时文件已清理，不留垃圾
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_write_replaces_via_tmp_and_leaves_no_tmp(self, tmp_path: Path) -> None:
+        """成功路径：经由同目录临时文件 replace，落地内容正确且无 .tmp 残留。"""
+        from packages.core.content_sync import service as cs
+
+        target = tmp_path / "canon" / "characters.json"
+        cs._write_json(target, {"名称": "角色甲"})
+
+        assert json.loads(target.read_text(encoding="utf-8")) == {"名称": "角色甲"}
+        assert list(target.parent.glob("*.tmp")) == []
+
+    def test_push_book_leaves_no_tmp_files(self, tmp_path: Path, db_path: Path) -> None:
+        """push_book 全量同步后内容仓内不应有任何 .tmp 残留。"""
+        pid = _seed_minimal_project(db_path)
+        cd = _build_content_dir(tmp_path)
+        ContentSyncService(str(db_path), cd).push_book(pid)
+        assert list(cd.rglob("*.tmp")) == []

@@ -4,7 +4,7 @@
 > 核心入口 ``StoryStateService``。
 
 本目录是 NovelOS State Delta 引擎——Observer / Validator / State Committer 三步之间的
-完整数据契约与落库实现。对齐 ``docs/state-model/state-delta-v0.md`` 的全部语义。
+完整数据契约与落库实现。对齐 ``docs/state-model/state-delta-v0.md``（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md）的全部语义。
 
 ---
 
@@ -173,7 +173,7 @@ DDL 权威定义在 ``database/migrations/0001_init.sql``；本模块不修改 s
 
 ## 6. 关键约束与维护注意点
 
-1. **乐观锁语义**：每次 Commit 严格 ``state_version + 1``（``state-delta-v0.md §6.2``，
+1. **乐观锁语义**：每次 Commit 严格 ``state_version + 1``（``state-delta-v0.md §6.2``，已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md；
    2026-08-23 主会话拍板）。不允许按变更条目数累加。
 2. **HIGH 风险审批门**：任何 change ``risk_level == "HIGH"`` 必须有
    ``author_approval.approved == True`` 才能 commit。``service.commit_delta`` 第 3 步预检。
@@ -223,7 +223,7 @@ DDL 权威定义在 ``database/migrations/0001_init.sql``；本模块不修改 s
     ``validator._business_errors`` 时确保它对 schema 不报错的 delta 才执行。
 12. **JSON 列读写**：所有 JSON 列写入前 ``json.dumps(ensure_ascii=False)``；读出后
     ``json.loads``（空字符串兜底为 ``{}`` / ``None``）。
-13. **who_knows 三态语义**（修复后）：对齐 ``knowledge-permission-v0.md §6``——
+13. **who_knows 三态语义**（修复后）：对齐 ``knowledge-permission-v0.md §6``（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md）——
     - ``None``（缺失）→ DB 列置 ``NULL``（沿用实体现状，不参与合并）。
     - ``[]`` → DB 列置 ``'[]'``（显式清空）。
     - 非空 list → JSON 字符串（``ensure_ascii=False``）。
@@ -335,7 +335,7 @@ DDL DEFAULT 30）；列缺失 / NULL → fallback 常量 ``_FORESHADOW_OVERDUE_C
 
 ## 6.5 分支能力（Sprint 7）
 
-对齐 ``docs/state-model/state-delta-v0.md §6.3`` 与 PRD §48 的 Story Branch 语义。
+对齐 ``docs/state-model/state-delta-v0.md §6.3``（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md）与 PRD §48 的 Story Branch 语义。
 **核心原则**：
 
 1. **分支 commit 不写新快照**。分支的当前状态由读路径推导：
@@ -520,7 +520,7 @@ Sprint 7 审查复现该方案存在致命缺陷（见下方根因）后被否�
 
 ## 8. 相关文档指针
 
-- ``docs/state-model/state-delta-v0.md`` —— State Delta / Commit 字段语义权威定义。
+- ``docs/state-model/state-delta-v0.md``（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md） —— State Delta / Commit 字段语义权威定义。
 - ``docs/state-model/schemas/state-delta.schema.json`` —— Delta JSON Schema（Draft 2020-12）。
 - ``docs/state-model/schemas/state-commit.schema.json`` —— Commit JSON Schema。
 - ``database/migrations/0001_init.sql`` —— 数据库表结构（含 ``state_deltas`` /

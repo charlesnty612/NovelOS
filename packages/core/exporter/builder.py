@@ -21,9 +21,11 @@
   无 draft（仅 PLANNED 状态）则用空串；
 - 大纲：``chapters.plan_json``（chapter-plan 工作流写回），用 :func:`plan_to_outline` 渲染。
 
-口径：
-- COMMITTED 章节取正文；其它状态章节在 txt/docx 中保留标题但用空 body 占位（提示作者尚未定稿）；
-  本任务书未禁止保留结构——以「按 chapter_no 升序全量输出，作者自检用」为默认行为。
+口径（V3.9 批次 4.1 裁决落地：此前实现 / 文档 / m2_judge 三方分裂，此处为唯一裁决）：
+- txt / docx = **作者 WIP 面**：按 chapter_no ASC 输出项目全部章节（含 PLANNED / DRAFTED /
+  REVIEWED）；非 COMMITTED 章节标题加 ``【未定稿】`` 前缀标注，无 draft 时用空 body 占位。
+- 番茄投稿包 = **外发面**：正文与故事大纲都只取 ``status='COMMITTED'`` 的章节，
+  与 README / m2_judge 的 COMMITTED-only 口径一致。
 - 番茄投稿包正文：从 chapter_no=1 起累加章节正文到目标字数附近；超过则在最近章节边界截断；
   本函数目标字数固定 10000（README 注明口径）。
 """
@@ -77,9 +79,30 @@ def project_name(db_path: str, project_id: str) -> str:
     return row["name"] if row else ""
 
 
-def _committed_chapters(db_path: str, project_id: str) -> list[dict[str, Any]]:
-    """返回 project 全部 chapter（number ASC）。是否已定稿由调用方按 status 判断。"""
+UNCOMMITTED_MARKER = "【未定稿】"
+"""非 COMMITTED 章节在作者 WIP 面（txt / docx）的标题前缀（V3.9 批次 4.1 裁决）。"""
+
+
+def _project_chapters(db_path: str, project_id: str) -> list[dict[str, Any]]:
+    """返回 project 全部 chapter（number ASC）；是否定稿由调用方按 status 判断。
+
+    前身 ``_committed_chapters`` 名不副实——返回全部章节、不做任何 status 过滤，
+    与本模块文档 / ``m2_judge`` 的 COMMITTED-only 声称三方分裂（V3.9 批次 4.1）。
+    改名后口径外显：过滤与否是调用方（产物面）的决定——txt / docx 保留全部并标注
+    ``【未定稿】``，番茄投稿包过滤 COMMITTED。
+    """
     return ChapterService(db_path).list_by_project(project_id)
+
+
+def _is_committed(chapter: Mapping[str, Any]) -> bool:
+    """chapter 行是否已定稿（``status == 'COMMITTED'``）。"""
+    return (chapter.get("status") or "").strip().upper() == "COMMITTED"
+
+
+def _export_heading(chapter: Mapping[str, Any]) -> str:
+    """作者 WIP 面章节标题：非 COMMITTED 章节加 ``【未定稿】`` 前缀标注。"""
+    heading = _chapter_heading(chapter["number"], chapter.get("title"))
+    return heading if _is_committed(chapter) else UNCOMMITTED_MARKER + heading
 
 
 def latest_draft_content(db_path: str, chapter_id: str) -> str:
@@ -152,9 +175,12 @@ def plan_to_outline(plan_json: Mapping[str, Any] | None) -> str:
     return "\n".join(lines) if lines else "（暂无）"
 
 
-def _project_outline(db_path: str, project_id: str) -> str:
-    """整书大纲：每章一段 plan 渲染结果。"""
-    chapters = _committed_chapters(db_path, project_id)
+def _project_outline(chapters: list[dict[str, Any]]) -> str:
+    """整书大纲：每章一段 plan 渲染结果。
+
+    章节列表由调用方给出（V3.9 批次 4.1：番茄包只传 COMMITTED 章节——外发面口径），
+    本函数不做 status 过滤。
+    """
     if not chapters:
         return "（暂无）"
     parts: list[str] = []
@@ -173,11 +199,12 @@ def _project_outline(db_path: str, project_id: str) -> str:
 def build_txt(db_path: str, project_id: str, scope: ExportScope) -> bytes:
     """导出 txt：utf-8-sig 编码；每章标题 + 正文段落。
 
-    - scope.kind == "book"：按 chapter_no ASC 全量；
+    - scope.kind == "book"：按 chapter_no ASC 全量（作者 WIP 面，未定稿章节保留并标注）；
     - scope.kind == "chapter"：仅指定 chapter_no 的章节；
+    - 非 COMMITTED 章节标题加 ``【未定稿】`` 前缀；
     - 章节正文为空（无 draft）时，仍输出标题与空行占位。
     """
-    chapters = _committed_chapters(db_path, project_id)
+    chapters = _project_chapters(db_path, project_id)
     if scope.kind == "chapter":
         if scope.chapter_no is None:
             raise ValueError("chapter scope requires chapter_no")
@@ -192,7 +219,7 @@ def build_txt(db_path: str, project_id: str, scope: ExportScope) -> bytes:
         lines.append("=" * max(len(project_name), 8))
         lines.append("")
     for ch in chapters:
-        heading = _chapter_heading(ch["number"], ch.get("title"))
+        heading = _export_heading(ch)
         lines.append(heading)
         lines.append("-" * max(len(heading), 8))
         body = _latest_draft_content(db_path, ch["chapter_id"])
@@ -203,8 +230,12 @@ def build_txt(db_path: str, project_id: str, scope: ExportScope) -> bytes:
 
 
 def build_docx(db_path: str, project_id: str, scope: ExportScope) -> bytes:
-    """导出 docx：与 txt 同样的内容，组装成最小 OOXML docx。"""
-    chapters = _committed_chapters(db_path, project_id)
+    """导出 docx：与 txt 同样的内容，组装成最小 OOXML docx。
+
+    口径同 :func:`build_txt`：作者 WIP 面，全部章节；非 COMMITTED 章节标题加
+    ``【未定稿】`` 前缀。
+    """
+    chapters = _project_chapters(db_path, project_id)
     if scope.kind == "chapter":
         if scope.chapter_no is None:
             raise ValueError("chapter scope requires chapter_no")
@@ -219,7 +250,7 @@ def build_docx(db_path: str, project_id: str, scope: ExportScope) -> bytes:
     if project_name:
         paragraphs.append(("Heading1", project_name))
     for ch in chapters:
-        heading = _chapter_heading(ch["number"], ch.get("title"))
+        heading = _export_heading(ch)
         paragraphs.append(("Heading2", heading))
         body = _latest_draft_content(db_path, ch["chapter_id"])
         if not body:
@@ -239,15 +270,17 @@ FANQIE_DELIMITER = "\n\n========== 故事大纲 ==========\n\n"
 
 
 def build_fanqie_package(db_path: str, project_id: str) -> bytes:
-    """番茄投稿包：前 N 章拼满 ~1 万字正文 + 分隔线 + 全书大纲。
+    """番茄投稿包：前 N 章拼满 ~1 万字正文 + 分隔线 + 全书大纲（外发面）。
 
-    口径：
-    - 按 chapter_no ASC 取已 COMMITTED 的章节；
-    - 累加章节正文长度（按字符数）到 ``FANQIE_TARGET_CHARS`` 附近；
+    口径（V3.9 批次 4.1 裁决）：
+    - 只取 ``status='COMMITTED'`` 的章节——正文与故事大纲都过滤，与 README /
+      ``scripts/m2_judge.py`` 的 COMMITTED-only 口径一致；
+    - 非 COMMITTED 章节不出现（作者 WIP 标注 ``【未定稿】`` 只属于 txt/docx 面）；
+    - 按 chapter_no ASC 累加章节正文长度（按字符数）到 ``FANQIE_TARGET_CHARS`` 附近；
     - 一旦超阈值就在「最近章节边界」截断（不切到章中间），不再追加后续章节；
     - 若所有章节总字数仍 < 阈值，则全量输出。
     """
-    chapters = _committed_chapters(db_path, project_id)
+    chapters = [ch for ch in _project_chapters(db_path, project_id) if _is_committed(ch)]
     project_name = _project_name(db_path, project_id)
 
     head_lines: list[str] = []
@@ -262,7 +295,7 @@ def build_fanqie_package(db_path: str, project_id: str) -> bytes:
     included_chapters: list[dict[str, Any]] = []
     for ch in chapters:
         content = _latest_draft_content(db_path, ch["chapter_id"])
-        heading = _chapter_heading(ch["number"], ch.get("title"))
+        heading = _export_heading(ch)
         block = heading + "\n" + "-" * max(len(heading), 8) + "\n" + (content or "（本章尚无正文）")
         new_running = running + len(content or "")
         if not truncated and running >= FANQIE_TARGET_CHARS:
@@ -276,7 +309,7 @@ def build_fanqie_package(db_path: str, project_id: str) -> bytes:
             truncated = True
             break
 
-    outline_md = _project_outline(db_path, project_id)
+    outline_md = _project_outline(chapters)
 
     head = "\n".join(head_lines).rstrip()
     body = "\n\n".join(body_parts).rstrip()
@@ -307,6 +340,7 @@ def build_fanqie_package(db_path: str, project_id: str) -> bytes:
 
 __all__ = [
     "ExportScope",
+    "UNCOMMITTED_MARKER",
     "build_txt",
     "build_docx",
     "build_fanqie_package",

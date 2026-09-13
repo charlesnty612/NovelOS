@@ -20,4 +20,4 @@
 
 ## 维护注意点
 - delta 必须 schema-validated；违规由 `agent_runtime` 重试。
-- 权威文档：PRD §32；`docs/state-model/state-delta-v0.md`；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 3。
+- 权威文档：PRD §32；`docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md）；`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 3。

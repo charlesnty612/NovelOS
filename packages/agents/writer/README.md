@@ -9,7 +9,7 @@
 
 ## 对外接口（规划中）
 - `run(inputs: WriterInputs) -> ChapterDraft`
-- 提示词：`docs/agents/prompts/writer.md`
+- 提示词：`docs/agents/prompts/writer-v1.md`
 
 ## 依赖
 - 上游：`packages/agents/planner/`、`packages/core/context_engine/`、`packages/core/agent_runtime/`
@@ -20,4 +20,4 @@
 
 ## 维护注意点
 - Writer 输出必须遵守 `reveal_policies` 与角色 `visibility`；违规由 Guardrail 阻断（PRD §86）。
-- 权威文档：PRD §31；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4。
+- 权威文档：PRD §31；`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 4。

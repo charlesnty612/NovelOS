@@ -3,7 +3,7 @@
 > 版本：`observer:v1`
 > 对齐：PRD §33（Observer）、§35（State Committer）、§40（主 Workflow 中 Observer → State Delta 段）、§62（Prompt 九段结构）、§86（Guardrail）、§116（AI 输出结构化）
 > Schema 权威定义：`docs/state-model/schemas/state-delta.schema.json`。本 Prompt 中所有字段名、枚举、required/optional 状态均以该 Schema 为准；Schema 与本 Prompt 冲突时以 Schema 为准（修订本 Prompt，不得绕过 Schema）。
-> 关联契约文档：`docs/state-model/state-delta-v0.md`（§2.2 元信息、§2.3 通用字段、§2.4 evidence、§2.5.1-2.5.7 各领域字段、§2.6 权限字段）
+> 关联契约文档：`docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md；§2.2 元信息、§2.3 通用字段、§2.4 evidence、§2.5.1-2.5.7 各领域字段、§2.6 权限字段）
 > 状态：Canonical Prompt 文本。本文件是发给 LLM 的完整指令，不做元描述。
 
 ---
@@ -180,7 +180,7 @@
 13. **新事件 type 字段**：枚举 `{revelation, conflict, decision, encounter, transition, other}`（对齐 Schema `new_event.type` 与 PRD §19）。
 14. **character_changes.facet**：必填 `definition` 或 `state`（对齐 PRD §17 Character Definition 与 State 分离）。`facet=definition` 属 HIGH 风险（涉及核心性格 / 基本能力）。
 15. **world_changes.world_kind**：必填 `{location, faction, rule, politics, economy, event, time}`（对齐 PRD §18）。`world_kind=rule` 属 HIGH 风险。
-16. **权限字段**：可选 `visibility`（枚举 `{PUBLIC, VISIBLE, RESTRICTED, HIDDEN}`）与 `who_knows`（字符串数组）。**缺失 ≠ 空数组**：缺失 = 沿用实体现状；空数组 = 显式清空；非空数组 = 显式设置。仅当本 change 实际改变了实体可见性或谁知道列表时才填；否则**省略**这两个字段（不要为了凑字段而填 null）。具体 LEAK-01/03/05 模式见 `docs/state-model/knowledge-permission-v0.md` §5。
+16. **权限字段**：可选 `visibility`（枚举 `{PUBLIC, VISIBLE, RESTRICTED, HIDDEN}`）与 `who_knows`（字符串数组）。**缺失 ≠ 空数组**：缺失 = 沿用实体现状；空数组 = 显式清空；非空数组 = 显式设置。仅当本 change 实际改变了实体可见性或谁知道列表时才填；否则**省略**这两个字段（不要为了凑字段而填 null）。具体 LEAK-01/03/05 模式见 `docs/state-model/knowledge-permission-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md）§5。
 17. **update 必须 before/after**：除 `add`/`remove` 外，`update` 操作必须有 `before` 与 `after`；`before`/`after` 的内容必须与 `field` 路径对应。
 18. **未发生的变化**：若 `director_plan_summary` 声明要发生的变化在 Draft 中未出现，必须在 `deviations[]` 中记录（**Prompt 辅助字段**，仅用于自检，不写入最终 JSON）。最终 JSON 中不出现此字段。
 19. **保守原则**：拿不准的，宁可不写，也不在 Delta 中引入 false positive。

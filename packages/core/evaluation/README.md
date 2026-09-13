@@ -22,4 +22,4 @@
 ## 维护注意点
 - 五硬门槛（PRD §86）+ 爽感 H-1~H-5 必须在 Sprint 6 完成；阻断/警告行为须有测试覆盖。
 - 黄金数据集条目必须可追溯到具体章节与状态版本（state_version）。
-- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4/6/11、PRD §82-86。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 4/6/11、PRD §82-86。

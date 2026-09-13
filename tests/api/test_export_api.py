@@ -151,6 +151,12 @@ def test_export_fanqie_includes_outline_section(tmp_path: Path):
             # 给 chapter 1 写一个 plan
             conn = get_connection(app.state.settings.db_path)
             try:
+                # V3.9 批次 4.1：番茄投稿包为外发面，只含 COMMITTED 章节；
+                # API 新建章节默认 PLANNED，这里显式置为 COMMITTED。
+                conn.execute(
+                    "UPDATE chapters SET status = 'COMMITTED' WHERE project_id = ?",
+                    (pid,),
+                )
                 conn.execute(
                     "UPDATE chapters SET plan_json = ? WHERE chapter_id = ?",
                     (

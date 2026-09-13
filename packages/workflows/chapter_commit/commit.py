@@ -27,6 +27,10 @@ from .pipeline_common import (
     _inject_resolvable_ids_into_config,
 )
 
+# 模块 logger（V3.9 检修）：此前 :121/:214 用 ``logging.info`` 走 root logger，
+# 日志的 ``%(name)s`` 显示为 root，模块级过滤/归因失效。
+_log = logging.getLogger(__name__)
+
 
 def _build_delta(
     observer_payload: dict[str, Any],
@@ -118,7 +122,7 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
     delta, repairs = repair_delta(delta, snapshot=snapshot_for_validate, db_path=db_path)
     if repairs:
         ctx["delta_repairs"] = repairs
-        logging.info("observer delta repaired before first validation: %s", repairs)
+        _log.info("observer delta repaired before first validation: %s", repairs)
     errors = validate_delta(delta, snapshot=snapshot_for_validate)
 
     # 重试预算：每腿 1 次
@@ -211,7 +215,7 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
         delta, repairs = repair_delta(delta, snapshot=snapshot_for_validate, db_path=db_path)
         if repairs:
             ctx["delta_repairs"] = repairs
-            logging.info("observer delta repaired after retry: %s", repairs)
+            _log.info("observer delta repaired after retry: %s", repairs)
         errors = validate_delta(delta, snapshot=snapshot_for_validate)
         if errors:
             raise ValueError(

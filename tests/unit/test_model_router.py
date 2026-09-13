@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import httpx
@@ -1159,3 +1160,104 @@ def test_call_with_fallback_profile_id_none_preserves_existing_behavior(tmp_path
     )
     assert row["config_id"] == cid_reasoning
     assert row["capability"] == "reasoning"  # V3 P0-2 标记
+
+
+# ---------------------------------------------------------------------------
+# V3.9 检修：fallback 链 warning 的排障字段必须进 message 文本
+# （``extra=`` 不会被 Formatter 渲染，字段全丢——排障时只能看到事件名）
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_warnings_put_provider_error_and_unexpected_fields_in_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    """provider_error / unexpected 两条 warning 的 capability/config_id/error 进 message。
+
+    突变化验（撤修复必红）：改回 ``log.warning("event", extra={...})`` 形态后，
+    ``record.getMessage()`` 只剩事件名，下方字段断言全部失败。
+    """
+    from packages.core.model_router.exceptions import AggregateProviderError
+
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    _insert_config(
+        db_path,
+        "reasoning",
+        "openai",
+        "boom-model",
+        params_json=json.dumps({"base_url": "http://example.invalid", "timeout_s": 60}),
+        enabled=1,
+    )
+    router = ModelRouter(db_path)
+
+    class _FlakyProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages, params=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise ProviderError("openai_compatible", "server boom", status_code=503)
+            raise RuntimeError("socket blew up")
+
+    flaky = _FlakyProvider()
+    monkeypatch.setattr(router, "get_provider", lambda row, scripted=None: flaky)
+
+    with caplog.at_level(logging.WARNING, logger="novelos.model_router"):
+        with pytest.raises(AggregateProviderError):
+            router.call_with_fallback("reasoning", [{"role": "user", "content": "hi"}])
+        with pytest.raises(AggregateProviderError):
+            router.call_with_fallback("reasoning", [{"role": "user", "content": "hi"}])
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "model_router.fallback.provider_error" in m
+        and "capability=reasoning" in m
+        and "config_id=" in m
+        and "status_code=503" in m
+        for m in messages
+    ), messages
+    assert any(
+        "model_router.fallback.unexpected" in m
+        and "capability=reasoning" in m
+        and "config_id=" in m
+        and "error=unexpected error: socket blew up" in m
+        for m in messages
+    ), messages
+
+
+def test_fallback_construct_failed_warning_puts_diagnostic_fields_in_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    """construct_failed warning 同样把 capability/config_id/error 拼进 message。"""
+    from packages.core.model_router.exceptions import AggregateProviderError
+
+    apply_migrations(tmp_path / "test.db")
+    db_path = str(tmp_path / "test.db")
+    _insert_config(
+        db_path,
+        "reasoning",
+        "openai",
+        "boom-model",
+        params_json=json.dumps({"base_url": "http://example.invalid", "timeout_s": 60}),
+        enabled=1,
+    )
+    router = ModelRouter(db_path)
+
+    def _raise(row, scripted=None):
+        raise ValueError("params_json.base_url missing")
+
+    monkeypatch.setattr(router, "get_provider", _raise)
+
+    with caplog.at_level(logging.WARNING, logger="novelos.model_router"):
+        with pytest.raises(AggregateProviderError):
+            router.call_with_fallback("reasoning", [{"role": "user", "content": "hi"}])
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "model_router.fallback.construct_failed" in m
+        and "capability=reasoning" in m
+        and "config_id=" in m
+        and "error=construct failed: params_json.base_url missing" in m
+        for m in messages
+    ), messages

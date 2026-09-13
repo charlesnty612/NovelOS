@@ -89,7 +89,7 @@
 }
 ```
 
-> **层概念引用**：上述输入字段对应 `docs/architecture/context-engine-v0.md` 的分层；本 Prompt 不复制层定义，只声明消费哪些字段。
+> **层概念引用**：上述输入字段对应 `docs/architecture/context-engine-v0.md`（已迁内容仓 NovelOS-Content:docs/architecture/context-engine-v0.md）的分层；本 Prompt 不复制层定义，只声明消费哪些字段。
 
 ---
 

@@ -92,7 +92,7 @@ Content-Type: application/json
 - **critic 报告**是**advisory**信息：UI 必须容忍 `critic_report=null` / `critic_status='failed'` 状态；不得因 critic 缺失而禁用批准/驳回按钮。
 - critic 输入构造：当前节点直接查 `chapters.plan_json` + `drafts.content` + `hooks` 表（status ∈ OPEN/ACTIVE/ESCALATED，按 importance 降序截断 10 条）；不接 context_engine 完整产物。
 - Quality 评分管线属 Sprint 6；V1.3 critic 仅做建议性报告，**不**参与 quality_reports 评分。
-- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 4/6、`docs/agents/agent-contracts-v0.md` §7.4、`docs/agents/prompts/critic-v1.md`。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 4/6、`docs/agents/agent-contracts-v0.md` §7.4、`docs/agents/prompts/critic-v1.md`。
 
 ## revise 闭环（Sprint 5，关闭 deviation #1）
 

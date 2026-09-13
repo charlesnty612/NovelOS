@@ -6,7 +6,7 @@
 ## 职责与边界
 
 **做**：
-- 构造 FastAPI 应用并配置 CORS（允许 `http://127.0.0.1:5173` 与 `http://localhost:5173`）
+- 构造 FastAPI 应用并配置 CORS（允许 `settings.api_port` 来源（`127.0.0.1` / `localhost`）+ vite dev 端口 5173 / 5174）
 - lifespan 启动：确保 `data_dir` 存在、执行迁移、记录迁移结果到 `app.state.migration_result`
 - V1.5：**通过 `importlib.import_module` 触发 `packages.workflows` 顶层导入**，让业务流程包
   在各自 `__init__` 把 workflow builder 写入 `packages.core.workflow_registry` 注册中心
@@ -29,7 +29,7 @@
 |---|---|---|
 | `create_app(settings: Settings | None) -> FastAPI` | `packages/core/api/main.py` | 工厂函数，测试可注入 settings |
 | `app` | `packages/core/api/main.py` | 默认 FastAPI 实例（uvicorn 入口） |
-| `__version__ = "0.1.0"` | `packages/core/api/main.py` | API 版本号 |
+| `__version__` | `packages/core/api/main.py` | API 版本号（importlib 读取包版本，现行 3.9.0；与 pyproject / apps/web 对齐） |
 | `lifespan(app)` | `packages/core/api/main.py` | 异步上下文管理器，启动时执行迁移 |
 | `GET /api/health` | `packages/core/api/main.py` | 返回 `{status:"ok", version, tables:38}`（口径为总表数减 `_migrations`、排除 `chapter_fts%` 影子表） |
 | `GET /api/chapters/{chapter_id}/context-preview` | `packages/core/api/routers/workflows.py`（Sprint 13 下半新增） | dry-run，返回 context 装配预览（layers + token 估算 + items；只读、不调 LLM、不写库） |
@@ -46,7 +46,7 @@
 | `GET /api/projects/{pid}/genre-pack` | 同上 | 项目当前题材包绑定 `{project_id, pack_id, bound, pack}`；未绑定 → `pack=null`。 |
 | `POST /api/projects/{pid}/genre-pack/bind` | 同上 | 绑定（单 slot，覆盖式）；项目 / 题材包不存在 → 404。 |
 | `POST /api/projects/{pid}/genre-pack/unbind` | 同上 | 解绑（幂等 200）；项目不存在 → 404。 |
-| `GET /api/projects/{pid}/backup` | `packages/core/api/routers/backup.py`（V1.4 / Sprint 16 / MVP） | 下载项目备份 JSON 包（22 张业务表行 + metadata 自证字段，含 `api_keys_stripped=true` 等）；`Content-Type: application/json; charset=utf-8` + `Content-Disposition: attachment; filename="backup-<pid>.json"`。项目不存在 → 404。详见 `packages/core/backup/README.md`。 |
+| `GET /api/projects/{pid}/backup` | `packages/core/api/routers/backup.py`（V1.4 / Sprint 16 / MVP） | 下载项目备份 JSON 包（23 张业务表行——22 张业务表 + `volumes`，白名单见 `packages/core/backup/schema.py` + metadata 自证字段，含 `api_keys_stripped=true` 等）；`Content-Type: application/json; charset=utf-8` + `Content-Disposition: attachment; filename="backup-<pid>.json"`。项目不存在 → 404。详见 `packages/core/backup/README.md`。 |
 | `POST /api/projects/import-backup` | 同上 | 接收 JSON body（备份包），导入为**新项目**（不覆盖源项目）；返回 201 + 新 `projects` 行 dict。坏 `format / version / 表名 / 缺字段 / 事务失败` → 422。事务失败整体回滚，不残留半成品。 |
 | `GET /api/projects/{pid}/export?format={txt\|docx\|fanqie}[&chapter_no=...]` | `packages/core/api/routers/export.py`（V1.4 / Sprint 16） | 整书 / 单章 / 番茄投稿包导出。`fanqie` 忽略 `chapter_no`；`chapter_no` 缺省=整书。404=项目不存在；400=非法 format 或单章缺参。文件名走 RFC 5987（ASCII 兜底 + `filename*=UTF-8''…`）。详见 `packages/core/exporter/README.md`。 |
 | `GET /`（SPA 关闭时） | `packages/core/api/main.py` | 返回 `{service, version, docs}` |
@@ -64,7 +64,7 @@
 ## 使用 / 入口
 
 ```bash
-# 开发：vite proxy /api → 8000
+# 开发：vite proxy /api → 18081
 python scripts/serve.py
 
 # 直接 uvicorn
@@ -76,7 +76,7 @@ NOVELOS_PORT=19090 python -m packages.core.api.main
 
 # 浏览器
 curl http://127.0.0.1:18081/api/health
-# → {"status":"ok","version":"0.1.0","tables":38}
+# → {"status":"ok","version":"3.9.0","tables":38}
 
 # 测试（httpx ASGI transport）
 pytest tests/integration/test_health.py -q
@@ -94,17 +94,16 @@ pytest tests/integration/test_health.py -q
 - 未启用时（dist 缺失）：保留 `GET /` 返回服务信息 JSON（`{service, version, docs}`）。
 - 路由顺序注意：`/api/health` 与业务路由必须先注册；SPA fallback catch-all 最后注册，避免吃掉 API 请求。
 
-**端口配置**（`packages/core/api/main.py:__main__`）：
+**端口配置**（`packages/core/api/main.py:__main__` + `Settings`）：
 - `python -m packages.core.api.main` 默认端口 `18081`（8000 在开发者本机常被占用）。
-- 环境变量 `NOVELOS_PORT` 覆盖（最高优先级）；缺省回退 18081。
-- `scripts/serve.py` 仍由 `Settings.api_port`（`NOVELOS_API_PORT` 环境变量）控制，**未**改 Sprint 0 默认 8000（保基线 `test_defaults` 断言）。
+- 端口统一由 `Settings.api_port` 承载：优先级 `NOVELOS_PORT` > `NOVELOS_API_PORT` > 默认 18081；`scripts/serve.py` 与 `__main__` 同源（V2.0 Wave C 任务三收敛；基线测试 `test_config` 断言默认 18081）。
 
 ## 维护注意点
 
-- **CORS 白名单**：当前仅 `127.0.0.1:5173` 与 `localhost:5173`；后续若新增前端端口必须同步更新。
+- **CORS 白名单**：`settings.api_port` 来源（`127.0.0.1` / `localhost`）+ vite dev 默认端口 `5173` / `5174`（`apps/web/vite.config.ts` 现行 port=5174）；后续若再新增前端端口须同步更新 `main.py`。
 - **迁移触发**：lifespan 启动时无条件执行迁移；幂等由 `apply_migrations` 内部保证。
 - **`tables` 计算**：`count_tables` 包含 `_migrations` 表（runner 自建），端点输出 `max(tables-1, 0)`，业务表恒为 38。
 - **路由前缀**：业务路由应挂在 `/api` 前缀下，与 vite dev proxy 配合。
 - **SPA 路由注册顺序**：SPA fallback catch-all `/{full_path:path}` 必须最后注册；`/api/health` / 业务路由 / `root()` 必须先注册，否则 SPA 会吃掉 API 请求或吃掉 `GET /` 服务信息。
-- **NOVELOS_PORT vs NOVELOS_API_PORT**：两个端口变量语义不同——`NOVELOS_PORT` 只影响 `packages/core/api/main.py:__main__` 入口；`NOVELOS_API_PORT` 只影响 `Settings.api_port`（被 `scripts/serve.py` 消费）。不要混用。
-- **权威文档**：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §1 D-I1（本地 Web 形态）、§2 Sprint 0/5。
+- **NOVELOS_PORT vs NOVELOS_API_PORT**：两者都在 `Settings` 层归一为 `api_port`——优先级 `NOVELOS_PORT`（通用便捷变量）> `NOVELOS_API_PORT`（旧精细变量）> 默认 `18081`；不存在「只影响某个入口」的差异（V2.0 Wave C 任务三收敛后的现行语义）。
+- **权威文档**：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§1 D-I1（本地 Web 形态）、§2 Sprint 0/5。

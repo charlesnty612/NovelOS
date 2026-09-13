@@ -106,5 +106,5 @@ output = run_agent(
 ## 权威文档
 - `docs/agents/agent-contracts-v0.md` §2 总览、§3.2 / §4.2 / §5.2 契约、§6 重试原则、§7 Agent 十问。
 - `docs/state-model/schemas/state-delta.schema.json`（Observer 输出的字段权威）。
-- `docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 3。
+- `docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 3。
 - PRD §28-40（Agent 职责）、§93（AI 调用日志）、§94（Prompt Version）、§116（结构化输出）。

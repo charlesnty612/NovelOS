@@ -4,6 +4,12 @@
 - ``get_connection(db_path)``：开启外键的 sqlite3 连接。
 - ``apply_migrations(db_path, migrations_dir=None)``：按文件名升序执行
   ``migrations_dir`` 下所有 ``*.sql``；通过 ``_migrations`` 表幂等追踪。
+- ``default_migrations_dir()``：默认迁移目录（锚定仓库根，与进程 CWD 无关）。
+
+默认目录锚定（V3.9 全量检修 M4）：``migrations_dir=None`` 时用 ``default_migrations_dir()``
+= ``<repo>/database/migrations``，**不随 CWD 漂移**（CWD 相对的旧实现从仓库根以外启动会
+静默 0 迁移）；传参覆盖优先级不变。目录缺失 / 0 个 ``*.sql`` 时记 WARNING 但不抛——
+嵌入式 / 空目录用法合法，静默才是事故形态。
 
 幂等策略：执行前先查 ``_migrations``，跳过已记录的脚本。脚本执行成功
 后才写入记录。重复执行不会重复跑 DDL。
@@ -13,10 +19,18 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
-_DEFAULT_MIGRATIONS_DIR = Path("database") / "migrations"
+log = logging.getLogger("novelos.db")
+
+# 默认迁移目录锚定**仓库根**，而非进程 CWD（V3.9 全量检修 M4，R1/R3 双探针实证）：
+# 本文件位于 ``<repo>/packages/core/db.py`` → ``parents[2]`` 即仓库根。
+# 修正前是 ``Path("database")/"migrations"``（CWD 相对）——从仓库根以外的 CWD 启动时
+# 目录不存在 → 静默 0 迁移（``/api/health`` 仍报 ok、业务端点全 500）。
+# 显式传参仍可覆盖（嵌入式 / 测试用法零变化）。
+_DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "database" / "migrations"
 # V2.0 Wave C 任务一：FTS5 虚表（chapter_fts 及其内部表 chapter_fts_config/data/docsize/idx）
 # 在 sqlite_master 中均登记为 ``type='table'``；``count_tables`` / health.tables 的
 # "业务表"口径只关心真业务表，故排除 ``chapter_fts%`` 前缀的所有表。虚表本身（1 张）
@@ -37,6 +51,11 @@ def get_connection(db_path: Path | str) -> sqlite3.Connection:
     # 写锁竞争时等待 5s，避免并发写入触发 SQLITE_BUSY 报错
     conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+def default_migrations_dir() -> Path:
+    """默认迁移目录（仓库根锚定，与 CWD 无关）；供启动自检日志 / 外部探针引用。"""
+    return _DEFAULT_MIGRATIONS_DIR
 
 
 def _ensure_migrations_table(conn: sqlite3.Connection) -> None:
@@ -79,6 +98,16 @@ def apply_migrations(
         migrations_dir = _DEFAULT_MIGRATIONS_DIR
     migrations_dir = Path(migrations_dir)
 
+    sql_files = _list_sql_files(migrations_dir)
+    if not sql_files:
+        # 目录缺失 / 0 个 SQL：不抛（嵌入式与空目录用法合法），但必须留痕——
+        # 「静默 0 迁移」正是 M4 事故的形态（health 仍 ok、业务端点全 500）。
+        log.warning(
+            "apply_migrations: no *.sql under %s (dir_exists=%s); 0 migrations applied",
+            migrations_dir,
+            migrations_dir.exists(),
+        )
+
     conn = get_connection(db_path)
     try:
         _ensure_migrations_table(conn)
@@ -86,7 +115,7 @@ def apply_migrations(
 
         applied: list[str] = []
         skipped: list[str] = []
-        for sql_file in _list_sql_files(migrations_dir):
+        for sql_file in sql_files:
             name = sql_file.name
             if name in already:
                 skipped.append(name)

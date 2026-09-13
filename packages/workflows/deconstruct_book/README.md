@@ -4,7 +4,7 @@
 G-sim 校验阻断相似度 → 落库 `reference_canons` + `canon_extracts` + 渲染 Markdown 报告。
 
 权威参考：
-- `docs/reference-canon/reference-canon-v0.md`（§3 节点规范 + §6.1 metadata + §1.2 三条硬边界）
+- `docs/reference-canon/reference-canon-v0.md`（已迁内容仓 NovelOS-Content:docs/reference-canon/reference-canon-v0.md）（§3 节点规范 + §6.1 metadata + §1.2 三条硬边界）
 - `docs/reference-canon/schemas/reference-canon.schema.json`（schema 权威）
 - `docs/agents/prompts/deconstructor-chapter-v0.md`（T2 agent）
 - `docs/agents/prompts/deconstructor-aggregate-v0.md`（T3 agent）
@@ -80,5 +80,5 @@ G-sim 校验阻断相似度 → 落库 `reference_canons` + `canon_extracts` + �
 
 ## 消费侧
 
-参考 `docs/reference-canon/reference-canon-v0.md` §4（消费侧契约）。本 Sprint 不实现消费侧
+参考 `docs/reference-canon/reference-canon-v0.md`（已迁内容仓 NovelOS-Content:docs/reference-canon/reference-canon-v0.md） §4（消费侧契约）。本 Sprint 不实现消费侧
 （Director / Planner / Hook Ledger 接入），仅做 workflow 后端 + API 落库 + 列表/详情/删除端点。

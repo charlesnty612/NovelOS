@@ -49,8 +49,8 @@ _PROTAG_SQL: str = (
 )
 
 # 章节过滤：非 PLANNED 即视为「有正文的章节」。COMMITTED/RELEASED 必含，
-# DRAFTED/REVIEWED 含草稿也算（与 builder._committed_chapters 取全部章节对齐，
-# 因为 builder 不做 status 过滤——正文是否有效由 draft 内容决定）。
+# DRAFTED/REVIEWED 含草稿也算（与 builder 的作者 WIP 面口径对齐——txt/docx 取
+# 全部章节；番茄投稿包外发面过滤 COMMITTED，见 V3.9 批次 4.1 裁决）。
 _INCLUDED_STATUSES: frozenset[str] = frozenset({"DRAFTED", "REVIEWED", "COMMITTED", "RELEASED"})
 
 

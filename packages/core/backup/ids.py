@@ -49,6 +49,7 @@ TABLE_META: dict[str, dict[str, Any]] = {
     "world_rules":          {"pk_col": "world_rule_id",        "pk_prefix": "wrule"},
     "hooks":                {"pk_col": "hook_id",              "pk_prefix": "hook"},
     "narrative_debts":      {"pk_col": "debt_id",              "pk_prefix": "debt"},
+    "volumes":              {"pk_col": "volume_id",            "pk_prefix": "vol"},
     "chapters":             {"pk_col": "chapter_id",           "pk_prefix": "ch"},
     "branches":             {"pk_col": "branch_id",            "pk_prefix": "br"},
     "memories":             {"pk_col": "memory_id",            "pk_prefix": "mem"},

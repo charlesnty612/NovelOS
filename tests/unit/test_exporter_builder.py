@@ -23,6 +23,7 @@ from pathlib import Path
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 from packages.core.exporter import (
+    UNCOMMITTED_MARKER,
     ExportScope,
     build_docx,
     build_fanqie_package,
@@ -65,7 +66,13 @@ def _create_project(db_path: Path, name: str) -> str:
     return pid
 
 
-def _create_chapter(db_path: Path, project_id: str, number: int, title: str | None) -> str:
+def _create_chapter(
+    db_path: Path,
+    project_id: str,
+    number: int,
+    title: str | None,
+    status: str = "COMMITTED",
+) -> str:
     conn = get_connection(db_path)
     try:
         cid = new_id("ch")
@@ -76,7 +83,7 @@ def _create_chapter(db_path: Path, project_id: str, number: int, title: str | No
                  visibility, who_knows, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (cid, project_id, number, title, "{}", "COMMITTED", "VISIBLE", None, now_iso(), now_iso()),
+            (cid, project_id, number, title, "{}", status, "VISIBLE", None, now_iso(), now_iso()),
         )
         conn.commit()
     finally:
@@ -366,3 +373,119 @@ def test_chapter_heading_public_helper_and_underscore_alias_identity():
     assert _project_name is project_name
     assert _latest_draft_content is latest_draft_content
     assert _chapter_heading is chapter_heading
+
+
+# ---------------------------------------------------------------------------
+# V3.9 批次 4.1：COMMITTED 口径裁决落地——
+# txt / docx = 作者 WIP 面（全部章节；非 COMMITTED 标题加「【未定稿】」前缀）；
+# 番茄投稿包 = 外发面（正文与大纲都只含 COMMITTED）。三种状态各覆盖两路径。
+# ---------------------------------------------------------------------------
+
+
+def _docx_document_xml(data: bytes) -> str:
+    return zipfile.ZipFile(io.BytesIO(data)).read("word/document.xml").decode("utf-8")
+
+
+def _make_book_with_statuses(
+    db_path: Path,
+    project_id: str,
+    statuses: dict[int, str],
+) -> dict[int, str]:
+    """按 ``{章号: status}`` 建章并各插一条 draft，返回 ``{章号: chapter_id}``。"""
+    ids: dict[int, str] = {}
+    for n, status in statuses.items():
+        ids[n] = _create_chapter(db_path, project_id, n, f"章{n}", status=status)
+        _insert_draft(db_path, ids[n], 1, f"第{n}章正文")
+    return ids
+
+
+def test_export_pure_committed_no_marker_and_fanqie_keeps_all(tmp_path: Path):
+    """状态一（纯 COMMITTED）：txt/docx 无「未定稿」标注；番茄包正文+大纲全量。"""
+    s = _setup(tmp_path)
+    pid = _create_project(s.db_path, "纯定稿")
+    ids = _make_book_with_statuses(s.db_path, pid, {1: "COMMITTED", 2: "COMMITTED"})
+    _set_plan(s.db_path, ids[1], {"chapter_goal": "目标一"})
+    _set_plan(s.db_path, ids[2], {"chapter_goal": "目标二"})
+
+    txt = build_txt(str(s.db_path), pid, ExportScope(kind="book")).decode("utf-8-sig")
+    assert UNCOMMITTED_MARKER not in txt
+    assert "第1章 章1" in txt
+    assert "第2章 章2" in txt
+
+    doc = _docx_document_xml(build_docx(str(s.db_path), pid, ExportScope(kind="book")))
+    assert UNCOMMITTED_MARKER not in doc
+    assert "第1章 章1" in doc
+    assert "第2章 章2" in doc
+
+    fanqie = build_fanqie_package(str(s.db_path), pid).decode("utf-8-sig")
+    assert UNCOMMITTED_MARKER not in fanqie
+    assert "第1章 章1" in fanqie
+    assert "第2章 章2" in fanqie
+    assert "目标一" in fanqie
+    assert "目标二" in fanqie
+
+
+def test_export_all_drafted_marked_in_book_and_excluded_from_fanqie(tmp_path: Path):
+    """状态二（全部 DRAFTED）：txt/docx 每章带标注；番茄包正文/大纲都不含。"""
+    s = _setup(tmp_path)
+    pid = _create_project(s.db_path, "全草稿")
+    ids = _make_book_with_statuses(s.db_path, pid, {1: "DRAFTED", 2: "DRAFTED"})
+    _set_plan(s.db_path, ids[1], {"chapter_goal": "未定稿一"})
+
+    txt = build_txt(str(s.db_path), pid, ExportScope(kind="book")).decode("utf-8-sig")
+    assert f"{UNCOMMITTED_MARKER}第1章 章1" in txt
+    assert f"{UNCOMMITTED_MARKER}第2章 章2" in txt
+    assert txt.count(UNCOMMITTED_MARKER) == 2
+
+    doc = _docx_document_xml(build_docx(str(s.db_path), pid, ExportScope(kind="book")))
+    assert f"{UNCOMMITTED_MARKER}第1章 章1" in doc
+
+    fanqie = build_fanqie_package(str(s.db_path), pid).decode("utf-8-sig")
+    body, _, rest = fanqie.partition("========== 故事大纲 ==========")
+    outline, _, _summary = rest.partition("===== 签约体检摘要 =====")
+    # 外发面：正文与大纲都不含未定稿章节（末尾体检摘要段是作者自检信息，
+    # 走 signing_check 的章节口径，不在本次裁决范围内）
+    assert UNCOMMITTED_MARKER not in body + outline
+    assert "第1章" not in body
+    assert "第2章" not in body
+    # 大纲段：无 COMMITTED 章节 → 占位（外发面过滤与正文同源）
+    assert outline.strip().startswith("（暂无）")
+    assert "未定稿一" not in outline
+
+
+def test_export_mixed_statuses_marker_only_on_uncommitted_and_fanqie_committed_only(
+    tmp_path: Path,
+):
+    """状态三（混合）：标注只落未定稿章节；番茄包只含 COMMITTED 章节与大纲。"""
+    s = _setup(tmp_path)
+    pid = _create_project(s.db_path, "混合")
+    ids = _make_book_with_statuses(
+        s.db_path, pid, {1: "COMMITTED", 2: "DRAFTED", 3: "PLANNED"}
+    )
+    _set_plan(s.db_path, ids[1], {"chapter_goal": "已定稿目标"})
+    _set_plan(s.db_path, ids[2], {"chapter_goal": "草稿目标"})
+    _set_plan(s.db_path, ids[3], {"chapter_goal": "未写目标"})
+
+    txt = build_txt(str(s.db_path), pid, ExportScope(kind="book")).decode("utf-8-sig")
+    # 作者 WIP 面：全量、按号升序、仅未定稿章节带标注
+    assert txt.index("第1章 章1") < txt.index("第2章 章2") < txt.index("第3章 章3")
+    assert f"{UNCOMMITTED_MARKER}第1章" not in txt
+    assert f"{UNCOMMITTED_MARKER}第2章 章2" in txt
+    assert f"{UNCOMMITTED_MARKER}第3章 章3" in txt
+    assert "第2章正文" in txt and "第3章正文" in txt  # 有 draft 也不改标注口径
+
+    doc = _docx_document_xml(build_docx(str(s.db_path), pid, ExportScope(kind="book")))
+    assert f"{UNCOMMITTED_MARKER}第1章" not in doc
+    assert f"{UNCOMMITTED_MARKER}第2章 章2" in doc
+    assert f"{UNCOMMITTED_MARKER}第3章 章3" in doc
+
+    fanqie = build_fanqie_package(str(s.db_path), pid).decode("utf-8-sig")
+    body, _, rest = fanqie.partition("========== 故事大纲 ==========")
+    outline, _, _summary = rest.partition("===== 签约体检摘要 =====")
+    assert UNCOMMITTED_MARKER not in body + outline
+    assert "第1章 章1" in body
+    assert "第2章" not in body
+    assert "第3章" not in body
+    assert "已定稿目标" in outline
+    assert "草稿目标" not in outline
+    assert "未写目标" not in outline

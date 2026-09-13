@@ -116,8 +116,8 @@ token 预算与截断策略：
 ## 维护注意点
 
 - 字段缺失（无 character / 无 location）允许返回空列表 / None；调用方（Director / Writer / Observer Prompt）按空态处理。
-- 知识权限过滤（`knowledge-permission-v0.md`）MVP 简化：仅按 visibility 透传；后续 Sprint 加 per-layer 过滤。
-- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 3/4、`docs/agents/agent-contracts-v0.md` §3.1 / §4.1 / §5.1、`docs/architecture/context-engine-v0.md`。
+- 知识权限过滤（`knowledge-permission-v0.md`，已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md）MVP 简化：仅按 visibility 透传；后续 Sprint 加 per-layer 过滤。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 3/4、`docs/agents/agent-contracts-v0.md` §3.1 / §4.1 / §5.1、`docs/architecture/context-engine-v0.md`（已迁内容仓 NovelOS-Content:docs/architecture/context-engine-v0.md）。
 
 ## Sprint 11 下半扩展：Reference Canon 注入（Director）
 
@@ -126,7 +126,7 @@ token 预算与截断策略：
 | 键 | 注入位置 | 说明 |
 | --- | --- | --- |
 | `reference_canon` | director_input 顶层 | `{canon_id, logline, spine[:20], payoff_list[:30], rhythm}`；取该项目最新 active reference_canon（按 `created_at DESC` 取 1）。来源：`packages/core/api/routers/reference.py` GET 端点返回的 `canon_json`。 |
-| `_reference_canon_consumed` | director_input 顶层 | 溯源审计 `{canon_id, consumed_fields: [...]}`；由 chapter_plan pipeline 把 ctx dict 整体写入 `workflow_runs.checkpoint_json`，对齐 `docs/reference-canon/reference-canon-v0.md` §6.3 溯源要求。 |
+| `_reference_canon_consumed` | director_input 顶层 | 溯源审计 `{canon_id, consumed_fields: [...]}`；由 chapter_plan pipeline 把 ctx dict 整体写入 `workflow_runs.checkpoint_json`，对齐 `docs/reference-canon/reference-canon-v0.md`（已迁内容仓 NovelOS-Content:docs/reference-canon/reference-canon-v0.md） §6.3 溯源要求。 |
 
 约束：
 
@@ -273,7 +273,7 @@ never 模式另起独立条目 `kind=suppressed_character` / `suppressed_locatio
 
 - 字段缺失（无 character / 无 plan_json）允许返回空列表 / None；调用方（Director / Writer
   / Observer Prompt）按空态处理。
-- 知识权限过滤（`knowledge-permission-v0.md`）MVP 简化：仅按 visibility 透传；后续 Sprint
+- 知识权限过滤（`knowledge-permission-v0.md`，已迁内容仓 NovelOS-Content:docs/state-model/knowledge-permission-v0.md）MVP 简化：仅按 visibility 透传；后续 Sprint
   加 per-layer 过滤。
 - 测试：`tests/unit/test_v2_wave_b_trigger_keys.py`（35 用例；覆盖 3 态矩阵 / 别名命中 /
   回退 / 体积下降 / 预览标记 / Service 读写）。
@@ -372,7 +372,7 @@ writer:   (project_id, state_version, chapter_no, "writer", scene_fp,
 
 ## P2 Context Engine 补全（Context Engine 缺口关闭）
 
-对齐 `docs/impl/IMPLEMENTATION-PLAN-v0.md` §4.2 登记的 Context Engine MVP 缺口：
+对齐 `docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§4.2 登记的 Context Engine MVP 缺口：
 
 ### 1. `plot_graph_excerpt.unresolved_branches` 不再恒空
 

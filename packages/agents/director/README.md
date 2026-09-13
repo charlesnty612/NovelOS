@@ -9,8 +9,8 @@
 
 ## 对外接口（规划中）
 - `run(inputs: DirectorInputs) -> DirectorPlan`
-- 提示词：`docs/agents/prompts/director.md`
-- 输入/输出 schema：`docs/agents/schemas/director.{in,out}.json`
+- 提示词：`docs/agents/prompts/director-v1.md`
+- 输入/输出 schema：`docs/agents/prompts/director-v1.md` §7（I/O schema 权威；原规划的 `docs/agents/schemas/director.{in,out}.json` 未落地）
 
 ## 依赖
 - 上游：`packages/core/agent_runtime/`、`packages/core/context_engine/`
@@ -21,4 +21,4 @@
 
 ## 维护注意点
 - Director Plan 必须可被人工审批/驳回（Sprint 5 AI Panel Human Node）。
-- 权威文档：PRD §29；`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 3。
+- 权威文档：PRD §29；`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 3。

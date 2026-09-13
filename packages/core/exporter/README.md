@@ -1,15 +1,16 @@
 # exporter（导出发布链路）
 
 > 职责：把 chapter / plan 数据组装成作者可发布的纯文档产物——整书/单章 txt、整书/单章 docx、番茄投稿包（正文 + 大纲）。
-> 状态：V1.4（Sprint 16）实现。
+> 状态：V1.4（Sprint 16）实现；V3.9 批次 4.1 起落地「作者 WIP 面 / 外发面」两套 COMMITTED 口径（见下节）。
 
 ## 职责与边界
 
 **做**：
-- 整书 txt：项目下全部章节（`number` ASC）拼成 utf-8-sig txt，每章标题 + 正文；
-- 单章 txt：按 `chapter_no` 取单章；
+- 整书 txt（作者 WIP 面）：项目下全部章节（`number` ASC）拼成 utf-8-sig txt，每章标题 + 正文；
+  非 COMMITTED 章节标题加 `【未定稿】` 前缀标注；
+- 单章 txt：按 `chapter_no` 取单章（同样带未定稿标注）；
 - 整书/单章 docx：与 txt 同内容的最小 OOXML docx（手工打包，无需 `python-docx`）；
-- 番茄投稿包 txt：前 N 章拼满 ~1 万字正文 + 分隔线 + 全书大纲（章节计划）。
+- 番茄投稿包 txt（外发面）：只取 COMMITTED 章节，前 N 章拼满 ~1 万字正文 + 分隔线 + 全书大纲（章节计划）。
 - 只读：全程只 SELECT，不写库、不调 LLM、不引入新 Python 依赖。
 
 **不做**：
@@ -18,14 +19,29 @@
 - 不重排正文（保留作者原文中所有段落、空行）；
 - 不引入富文本样式（docx 仅段落 + 二级标题，无字体/字号/列表/表格）。
 
+## COMMITTED 口径（V3.9 批次 4.1 裁决）
+
+背景：原实现（`builder._committed_chapters` 名不副实，实际返回全部章节）、本 README 的
+「COMMITTED-only」声称、`scripts/m2_judge.py`（`load_committed_chapters` 真过滤）三方分裂。
+裁决按**产物面**拆分：
+
+| 产物 | 面向 | 章节范围 | 非 COMMITTED 章节处理 |
+|---|---|---|---|
+| 整书 / 单章 txt、docx | 作者 WIP 面（自检） | 全部章节（`number` ASC） | 标题加 `【未定稿】` 前缀；无 draft → `（本章尚无正文）` 占位 |
+| 番茄投稿包 | 外发面（投稿） | 仅 `status='COMMITTED'` | 正文与故事大纲都不出现 |
+
+`m2_judge` 的 COMMITTED-only 口径与上表外发面一致（本裁决不改脚本）；`content_sync` 复用
+`build_txt`，因此内容仓落盘同样走作者 WIP 面（含未定稿标注）。
+
 ## 对外接口
 
 | 名称 | 来源 | 说明 |
 |---|---|---|
-| `build_txt(db_path, project_id, scope)` | `packages/core/exporter/builder.py` | utf-8-sig 编码 txt；`scope.kind ∈ {"book","chapter"}` |
-| `build_docx(db_path, project_id, scope)` | 同上 | 最小合法 OOXML docx；同段结构 |
-| `build_fanqie_package(db_path, project_id)` | 同上 | 前 ~1 万字正文 + 全书大纲 |
+| `build_txt(db_path, project_id, scope)` | `packages/core/exporter/builder.py` | utf-8-sig 编码 txt；`scope.kind ∈ {"book","chapter"}`；全部章节 + 未定稿标注 |
+| `build_docx(db_path, project_id, scope)` | 同上 | 最小合法 OOXML docx；同段结构（同样带未定稿标注） |
+| `build_fanqie_package(db_path, project_id)` | 同上 | 仅 COMMITTED 章节：前 ~1 万字正文 + 全书大纲 |
 | `plan_to_outline(plan_json)` | 同上 | 把 chapter-plan 写回的 `plan_json` dict 渲染成可读大纲 |
+| `UNCOMMITTED_MARKER = "【未定稿】"` | 同上 | 作者 WIP 面非 COMMITTED 章节的标题前缀 |
 | `project_name(db_path, project_id)` | 同上 | 项目名（缺行 → 空串）；V3.9 批次 5.14 由 `_project_name` 提升 |
 | `latest_draft_content(db_path, chapter_id)` | 同上 | 该章最新 draft（`version DESC`）正文；无 draft → 空串；V3.9 批次 5.14 由 `_latest_draft_content` 提升 |
 | `chapter_heading(number, title)` | 同上 | 章节标题行（`第N章 标题`）；V3.9 批次 5.14 由 `_chapter_heading` 提升 |
@@ -36,11 +52,13 @@
 ## 取数口径（任务书给死）
 
 - 章节列表：`ChapterService.list_by_project(project_id)` —— `ORDER BY number ASC`；
+  txt / docx 全量取用并给非 COMMITTED 章节打 `【未定稿】` 标注；番茄包先过滤 `status='COMMITTED'`。
 - 单章正文：`SELECT content FROM drafts WHERE chapter_id = ? ORDER BY version DESC LIMIT 1`；
   无 draft（仅 PLANNED）→ 空串；导出器在 txt/docx 中保留章节标题与 `（本章尚无正文）` 占位。
 - 大纲：`chapters.plan_json`（`chapter-plan` 工作流在 Sprint 4-A 起写回）；
   渲染字段：`chapter_goal / core_conflict / turning_point / expected_role / key_beats[*].purpose`；
-  容错：缺字段或 plan_json 为空 → 输出 `（暂无）`，单章无 plan 不影响整书大纲生成。
+  容错：缺字段或 plan_json 为空 → 输出 `（暂无）`，单章无 plan 不影响整书大纲生成；
+  番茄包的大纲段与正文同源过滤（只含 COMMITTED 章节）。
 - 番茄投稿包字数：在最近章节边界截断（不切到章中间），目标 10000 字；超过则截断，无则全量。
 
 ## 不引入新依赖
@@ -78,4 +96,4 @@ data = build_txt(db_path, project_id, ExportScope(kind="chapter", chapter_no=3))
 - **docx 解析**：手工 OOXML 用 `xml.sax.saxutils.escape` 转义 `<>&`，避免正文中含特殊字符时 docx
   被 Word/Python 解析失败。
 - **section 限制**：docx `pgSz w=12240 h=15840`（US Letter），如需 A4 可改 `11906x16838`。
-- **不动 schema**：导出只读，与现有 33 张业务表无 schema 耦合。
+- **不动 schema**：导出只读，与现有 38 张业务表无 schema 耦合。

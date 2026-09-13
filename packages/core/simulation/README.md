@@ -2,7 +2,7 @@
 
 > 状态：**已实现并通过测试**（Sprint 10）。核心入口 ``SimulationService.simulate``。
 >
-> 关联：**PRD §90**（Plot Simulation 不修改主线）+ **state-delta-v0.md §6.3**（Branch 隔离，Simulation 即 Branch）。
+> 关联：**PRD §90**（Plot Simulation 不修改主线）+ **state-delta-v0.md §6.3**（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md）（Branch 隔离，Simulation 即 Branch）。
 
 本目录是 NovelOS 的 What-if 推演引擎。给定一组假设 delta，在临时分支上顺序应用，返回与 main 当前状态的结构化 diff，随后归档分支；**main 快照、领域表、commit 数全程零变化**。
 

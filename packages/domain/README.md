@@ -21,4 +21,4 @@
 ## 维护注意点
 - Service 层不持有 SQL 模板字面量散落；统一走 `get_connection`。
 - 文本主键（`prj_/char_/...`）由 Service 生成，业务层不直接构造 ID。
-- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md` §2 Sprint 1、PRD §15-22。
+- 权威文档：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§2 Sprint 1、PRD §15-22。
