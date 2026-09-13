@@ -7,8 +7,8 @@
 // - 删除走 DELETE /canons/{id}（204）→ 刷新列表。
 // - report_md 用本地轻量 Markdown 渲染（utils/format.ts parseReportMarkdown）：
 //   仅识别 `# / ## / ###` 标题与 `- ` 列表项，不引第三方 markdown 库（避免 XSS 与体积膨胀）。
-// - canon_json 仅展示关键字段（logline / spine 条数 / rhythm 中位数 / style_params 摘要），
-//   全量 JSON 走 <pre> 折叠块，避免主面板被超长 canon 撑爆。
+// - canon_json 摘要走关键字段（logline / spine 条数 / rhythm 中位数 / style_params 摘要），
+//   全文走 ReadableJson 人读视图 + 原始 JSON 折叠块，避免主面板被超长 canon 撑爆。
 
 import { useEffect, useRef, useState } from 'react';
 import { referenceApi } from '../../api/endpoints';
@@ -20,6 +20,7 @@ import type {
 } from '../../api/types';
 import { EmptyState } from '../../components/EmptyState';
 import { ErrorBanner } from '../../components/ErrorBanner';
+import { ReadableJson, RawJsonDetails } from '../../components/ReadableJson';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Loading } from '../../components/Loading';
 import { formatApiError } from '../../utils/formatApiError';
@@ -576,9 +577,14 @@ function CanonDetailView({ detail }: { detail: CanonDetail }) {
 
       <div className="detail-pane__section">
         <div className="detail-pane__section-title">canon_json 全文</div>
-        <pre className="json-block" data-testid="canon-json-block">
-          {JSON.stringify(cj, null, 2)}
-        </pre>
+        <div data-testid="canon-json-block">
+          <ReadableJson value={cj} />
+        </div>
+        <RawJsonDetails
+          value={cj}
+          testId="canon-json-raw"
+          summary="查看原始 JSON"
+        />
       </div>
     </div>
   );

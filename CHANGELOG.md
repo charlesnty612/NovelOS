@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### Changed（2026-09-13 抽屉/详情人读化补透：用户实测反馈驱动）
+
+> 用户实测：角色抽屉 relationships 等嵌套结构仍倒原始 JSON。根因校正：红框走的是 `renderObject`
+> 里嵌套容器 `formatJson` 路径（非顶层数组 fallback）。全库实测校准：46 JSON 列 / 4541 对象数组
+> 扫描，关系识别命中恰为 15 条真实路径零误判（`state_deltas.new_hooks` 在宽规则下会误判→已收紧）。
+
+- **ReadableJson 泛化**：对象数组→中文表头表格（列=键并集，labelMap>COMMON_LABELS>原键；>8 行折叠「展开其余 N 行」）；嵌套对象/数组递归渲染（depth≤2，更深收「原始 JSON」）；关系数组（to_name/to+relation_type/type+one_line/description 组合）→「对象 · 关系 — 一句话」列表；relation_type 值中文映射（ally→盟友/rival→对手/enemy→敌人/family→家人…）。
+- **CanonTab**：裸 `JSON.stringify(cj,null,2)` 换 ReadableJson + 保留原始 JSON 折叠兜底。
+- **COMMON_LABELS +28**：canon/题材包键全量中文（logline→一句话卖点/spine→主线节拍/style_params→文风参数/ratio_declarations→配比声明…）。
+- 验证：vitest 479（+11）/ tsc 0 / build 绿；3 项突变验证（含原缺陷路径专项用例）。
+
 ### Changed（2026-09-13 前端全面优化：消除「半成品残次感」——四批实施 + 代码体检驱动）
 
 > 来源：apps/web 全面体检（45 源文件盘点 + 五类问题清单 + 残次感 Top10）→ 四批文件互斥并行实施

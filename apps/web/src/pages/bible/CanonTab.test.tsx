@@ -109,8 +109,21 @@ describe('CanonTab (冒烟)', () => {
     expect(screen.getByText('第一卷')).toBeInTheDocument();
     expect(screen.getByText('开篇冲突')).toBeInTheDocument();
     expect(screen.getByText('章末留悬念')).toBeInTheDocument();
-    // canon_json 全文 JSON 块
-    expect(screen.getByTestId('canon-json-block')).toBeInTheDocument();
+    // canon_json 全文：人读视图（对象数组表格化 + 嵌套递归）
+    const jsonBlock = screen.getByTestId('canon-json-block');
+    expect(jsonBlock).toBeInTheDocument();
+    // spine 对象数组 → 表格（chapter_index 无中文映射，回退原键名）
+    expect(jsonBlock.querySelector('table')).not.toBeNull();
+    expect(jsonBlock.textContent).toContain('chapter_index');
+    // 嵌套数组（personality_tags）逐项渲染
+    expect(jsonBlock.textContent).toContain('隐忍');
+    // 不再倒原始 JSON：带引号的 JSON 键文本不出现
+    expect(jsonBlock.querySelector('pre.json-block')).toBeNull();
+    expect(jsonBlock.textContent).not.toContain('"logline"');
+    // 原始 JSON 仍折叠保留给高级用户
+    expect(
+      screen.getByTestId('canon-json-raw').querySelector('pre.json-block')?.textContent,
+    ).toContain('"logline"');
     // v0.1.2：主角人设区段（条件渲染）
     await waitFor(() => {
       expect(screen.getByTestId('canon-protagonist-block')).toBeInTheDocument();
