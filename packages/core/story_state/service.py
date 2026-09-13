@@ -61,15 +61,6 @@ class StoryStateService:
         return write_through(conn, project_id, delta, new_version,
                              skip_new_events_hooks=skip_new_events_hooks, skip_all=skip_all)
 
-    def _apply_inverse_cleanup_to_state(self, state, cleanup):
-        from .write_through import apply_inverse_cleanup_to_state
-        return apply_inverse_cleanup_to_state(state, cleanup)
-
-    def _build_inverse_delta(self, original, *, chapter_id, workflow_run_id, current_version):
-        from .deltas import build_inverse_delta
-        return build_inverse_delta(original, chapter_id=chapter_id,
-                                   workflow_run_id=workflow_run_id, current_version=current_version)
-
     # -------------------------------------------------------------- queries
     def get_current_state(self, project_id: str, *, branch_id: str | None = None) -> dict:
         return queries.get_current_state(self, project_id, branch_id=branch_id)

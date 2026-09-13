@@ -1,5 +1,6 @@
 # agents.writer（Writer）
 
+> **未实现骨架（Sprint 0 遗留）**——正文生成能力由 `packages/workflows/chapter_write/` 与 `packages/core/agent_runtime/` 承担。
 > 职责：按 Planner 大纲撰写章节正文（`chapters`），输出符合知识权限的 prose，受 Guardrail 实时约束。
 > 状态：空骨架（规划 Sprint 4）。
 

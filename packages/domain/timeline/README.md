@@ -1,5 +1,6 @@
 # domain.timeline（时间线领域）
 
+> **未实现骨架（Sprint 0 遗留）**——时间线能力由 `packages/domain/plot/service.py`（`timeline_events` CRUD）承担。
 > 职责：时间线事件（`timeline_events` 表）的 CRUD 与一致性校验，对应 PRD §20；为 Director Planner 提供「事件排序 / 时序冲突」基础。
 > 状态：空骨架（规划 Sprint 1）。
 

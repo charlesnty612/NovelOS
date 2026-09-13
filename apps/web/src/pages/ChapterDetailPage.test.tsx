@@ -80,6 +80,56 @@ function renderPage(initialEntries: string[] = ['/projects/prj_001/chapters/ch_0
   );
 }
 
+// 运行记录面板于 2026-09-13 下置为分段 tab（默认「草稿」，面板懒挂载）：
+// 依赖面板内容（run 列表 / 节点时间线 / 审批卡）的用例先切到「运行记录」tab。
+// 等待 tab 出现（chapter 加载完成）再点击，避免与首屏加载竞态。
+async function openRunsTab() {
+  fireEvent.click(await waitFor(() => screen.getByTestId('cdp-tab-runs')));
+  await waitFor(() => {
+    expect(screen.getByTestId('cdp-section-runs')).toBeVisible();
+  });
+}
+
+// PAUSED 的 chapter-review run（pause_payload 含 critic_report 建议，
+// 供运行记录 tab / 审批卡勾选态用例复用）。
+function buildPausedReviewRun(overrides: Partial<WorkflowRun> = {}): WorkflowRun {
+  return {
+    run_id: 'wfr_paused_001',
+    workflow_id: 'chapter-review',
+    chapter_id: 'ch_001',
+    status: 'PAUSED',
+    current_node: 'author_review',
+    checkpoint_json: {
+      author_review: {
+        __pause_payload__: {
+          stage: 'chapter-review',
+          message: '请人工决议',
+          critic_status: 'ok',
+          critic_report: {
+            overall_comment: '整体尚可',
+            strengths: [],
+            issues: [
+              {
+                category: 'logic',
+                severity: 'high',
+                quote: '主角突然同意',
+                suggestion: '补一个人物动机',
+              },
+            ],
+          },
+        },
+      },
+    },
+    error: null,
+    retry_count: 0,
+    started_at: '2026-08-24T10:00:00+00:00',
+    ended_at: null,
+    nodes: [],
+    workflow_name: 'chapter-review',
+    ...overrides,
+  } as unknown as WorkflowRun;
+}
+
 describe('ChapterDetailPage - 生成计划防呆', () => {
   beforeEach(() => {
     vi.mocked(chaptersApi.get).mockReset();
@@ -733,6 +783,8 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
     );
 
     renderPage();
+    // 运行记录面板已下置为分段 tab：先切到「运行记录」再断言审批卡
+    await openRunsTab();
 
     // 审批卡片出现（PAUSED review run）
     const approveBtn = await waitFor(() => screen.getByTestId('approval-reject'));
@@ -755,6 +807,7 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
     vi.mocked(workflowsApi.resume).mockResolvedValue({ status: 'COMPLETED' } as never);
 
     renderPage();
+    await openRunsTab();
 
     const approveBtn = await waitFor(() => screen.getByTestId('approval-approve'));
     fireEvent.click(approveBtn);
@@ -773,6 +826,7 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
     );
 
     renderPage();
+    await openRunsTab();
 
     // 点击 ApprovalCard 上的「驳回并改稿」按钮(独立 testid,带 revise=true),
     // → handleResume(false, { revise: true }) → 触发自动改稿回路。
@@ -1510,6 +1564,7 @@ describe('ChapterDetailPage - FAILED run 错误文案不误判为「已驳回」
     vi.mocked(workflowsApi.listByProject).mockResolvedValue([failedRun]);
 
     renderPage();
+    await openRunsTab();
 
     // 列表渲染后：徽标为「失败」，不应出现「已驳回」/「已驳回·改稿」
     await waitFor(() => {
@@ -1528,6 +1583,7 @@ describe('ChapterDetailPage - FAILED run 错误文案不误判为「已驳回」
     vi.mocked(workflowsApi.listByProject).mockResolvedValue([failedRun]);
 
     renderPage();
+    await openRunsTab();
 
     await waitFor(() => {
       expect(screen.getByText('失败')).toBeInTheDocument();
@@ -1541,6 +1597,7 @@ describe('ChapterDetailPage - FAILED run 错误文案不误判为「已驳回」
     vi.mocked(workflowsApi.listByProject).mockResolvedValue([failedRun]);
 
     renderPage();
+    await openRunsTab();
 
     await waitFor(() => {
       expect(screen.getByText('已驳回')).toBeInTheDocument();
@@ -1557,6 +1614,7 @@ describe('ChapterDetailPage - FAILED run 错误文案不误判为「已驳回」
     vi.mocked(workflowsApi.listByProject).mockResolvedValue([failedRun]);
 
     renderPage();
+    await openRunsTab();
 
     await waitFor(() => {
       expect(screen.getByText('已驳回·改稿')).toBeInTheDocument();
@@ -1677,6 +1735,7 @@ describe('ChapterDetailPage - 用户主动取消节点（非真失败）', () =>
     vi.mocked(workflowsApi.get).mockResolvedValue(cancelledRun);
 
     renderPage();
+    await openRunsTab();
 
     // CANCELLED 属终态，时间线默认折叠；展开 <details> 后再断言节点行徽标。
     await waitFor(() => {
@@ -1716,6 +1775,7 @@ describe('ChapterDetailPage - 用户主动取消节点（非真失败）', () =>
     vi.mocked(workflowsApi.get).mockResolvedValue(cancelledRun);
 
     renderPage();
+    await openRunsTab();
 
     // CANCELLED 终态默认折叠；展开 <details> 后再断言节点内 InfoBanner / ErrorBanner 文案。
     await waitFor(() => {
@@ -1854,6 +1914,7 @@ describe('ChapterDetailPage - 节点时间线默认折叠 / 展开', () => {
       vi.mocked(workflowsApi.get).mockResolvedValue(run);
 
       renderPage();
+      await openRunsTab();
 
       // summary 行出现（折叠状态下也应可见）
       await waitFor(() => {
@@ -1877,6 +1938,7 @@ describe('ChapterDetailPage - 节点时间线默认折叠 / 展开', () => {
       vi.mocked(workflowsApi.get).mockResolvedValue(run);
 
       renderPage();
+      await openRunsTab();
 
       await waitFor(() => {
         expect(screen.getByTestId('run-timeline-summary')).toBeInTheDocument();
@@ -2072,6 +2134,7 @@ describe('ChapterDetailPage - 深度二审 (deep_review)', () => {
     vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
 
     renderPage();
+    await openRunsTab();
 
     const section = await waitFor(() =>
       screen.getByTestId('deep-review-report'),
@@ -2128,6 +2191,7 @@ describe('ChapterDetailPage - 深度二审 (deep_review)', () => {
     vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
 
     renderPage();
+    await openRunsTab();
 
     const verdict = await waitFor(() =>
       screen.getByTestId('deep-review-verdict'),
@@ -2165,6 +2229,7 @@ describe('ChapterDetailPage - 深度二审 (deep_review)', () => {
     vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
 
     renderPage();
+    await openRunsTab();
 
     await waitFor(() => {
       expect(screen.getByTestId('approval-card')).toBeInTheDocument();
@@ -2201,6 +2266,7 @@ describe('ChapterDetailPage - 深度二审 (deep_review)', () => {
     vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
 
     renderPage();
+    await openRunsTab();
 
     const malformed = await waitFor(() =>
       screen.getByTestId('deep-review-report-malformed'),
@@ -2425,6 +2491,7 @@ describe('ChapterDetailPage - 停止当前工作流按钮', () => {
 // ---------------------------------------------------------------------------
 // 前端批次 C（2026-09-13）信息架构重构回归：
 // - 下部分区 tabs（默认「草稿」，懒挂载；切走即卸载）
+// - 运行记录下置为第二个分段 tab（懒挂载 / 状态徽标 / 待审批提示条 / ?section=runs 直开）
 // - 章节标题 inline 改名（chaptersApi.update 的 title 字段）
 // - 删除章节失败的就地反馈（此前 try/finally 无 catch，界面零反馈）
 // - 「停止工作流」二次确认取消路径（ConfirmDialog 复用）
@@ -2492,6 +2559,8 @@ describe('ChapterDetailPage - 信息架构（分区 tabs / 标题改名 / 删除
     // 未访问过的分区不挂载（懒加载：上下文面板不会在未打开时发请求）
     expect(screen.queryByTestId('plan-panel')).toBeNull();
     expect(screen.queryByTestId('chapter-danger-zone')).toBeNull();
+    // 运行记录（原顶部常驻面板）已下置为分段 tab：默认同样不挂载
+    expect(screen.queryByTestId('workflow-panel')).toBeNull();
 
     fireEvent.click(screen.getByTestId('cdp-tab-plan'));
 
@@ -2600,5 +2669,163 @@ describe('ChapterDetailPage - 信息架构（分区 tabs / 标题改名 / 删除
       expect(screen.queryByTestId('wf-cancel')).toBeNull();
     });
     expect(vi.mocked(workflowsApi.cancelRun)).not.toHaveBeenCalled();
+  });
+
+  // ---- 运行记录下置为分段 tab（2026-09-13 二次调整）----
+
+  it('运行记录为分段 tab：默认不挂载；切到该 tab 挂载；切走保留（审批卡勾选态不丢）', async () => {
+    const pausedRun = buildPausedReviewRun();
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([pausedRun]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
+
+    renderPage();
+
+    // 默认「草稿」：运行记录面板不在 DOM（与其它分区同语义的懒挂载）
+    await waitFor(() => {
+      expect(screen.getByTestId('drafts-panel')).toBeVisible();
+    });
+    expect(screen.queryByTestId('workflow-panel')).toBeNull();
+    expect(screen.queryByTestId('cdp-section-runs')).toBeNull();
+
+    // 切到「运行记录」：面板挂载（紧邻「草稿」的第二位）
+    await openRunsTab();
+    expect(screen.getByTestId('workflow-panel')).toBeVisible();
+
+    // 取消一条审校建议的勾选（ApprovalCard 内部状态）
+    const checkbox = screen.getAllByTestId(
+      'approval-suggestion-checkbox',
+    )[0] as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    fireEvent.click(checkbox);
+    expect(checkbox.checked).toBe(false);
+
+    // 切回「草稿」：面板保留挂载、仅 hidden（不重新挂载 → 状态不丢）
+    fireEvent.click(screen.getByTestId('cdp-tab-drafts'));
+    await waitFor(() => {
+      expect(screen.getByTestId('drafts-panel')).toBeVisible();
+    });
+    expect(screen.getByTestId('workflow-panel')).not.toBeVisible();
+
+    // 再切回「运行记录」：勾选态仍在
+    fireEvent.click(screen.getByTestId('cdp-tab-runs'));
+    await waitFor(() => {
+      expect(screen.getByTestId('workflow-panel')).toBeVisible();
+    });
+    const checkboxAgain = screen.getAllByTestId(
+      'approval-suggestion-checkbox',
+    )[0] as HTMLInputElement;
+    expect(checkboxAgain.checked).toBe(false);
+  });
+
+  it('运行记录 tab 徽标：PAUSED → warn「待审批」；不在该 tab 时提示条可一键切过去', async () => {
+    const pausedRun = buildPausedReviewRun();
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([pausedRun]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
+
+    renderPage();
+
+    // 徽标：warn 色「待审批」小徽标
+    const badge = await waitFor(() => screen.getByTestId('cdp-runs-badge'));
+    expect(badge).toHaveAttribute('data-state', 'paused');
+    expect(badge.textContent).toBe('待审批');
+    expect(badge.className).toMatch(/badge--warn/);
+
+    // 提示条：不在运行记录 tab 时出现（warn 语义），点击「查看」切到该 tab
+    const signal = screen.getByTestId('cdp-run-signal');
+    expect(signal).toHaveAttribute('data-kind', 'paused');
+    expect(signal.className).toMatch(/alert--warning/);
+    expect(signal.textContent).toMatch(/当前有待人工审批/);
+
+    fireEvent.click(screen.getByTestId('cdp-run-signal-action'));
+    await waitFor(() => {
+      expect(screen.getByTestId('cdp-tab-runs')).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+    });
+    // 切入后提示条消失；面板本体可见
+    expect(screen.queryByTestId('cdp-run-signal')).toBeNull();
+    expect(screen.getByTestId('workflow-panel')).toBeVisible();
+  });
+
+  it('运行记录 tab 徽标：RUNNING → 转圈点 + info「正在生成」提示条', async () => {
+    const running = buildRunningDetail({ run_id: 'wfr_running_tab' });
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([running]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(running);
+
+    renderPage();
+
+    const badge = await waitFor(() => screen.getByTestId('cdp-runs-badge'));
+    expect(badge).toHaveAttribute('data-state', 'running');
+    // 转圈小环：复用 .spinner（accent 色 + 旋转动画）
+    expect(badge.className).toMatch(/spinner/);
+
+    const signal = screen.getByTestId('cdp-run-signal');
+    expect(signal).toHaveAttribute('data-kind', 'running');
+    expect(signal.className).toMatch(/alert--info/);
+    expect(signal.textContent).toMatch(/正在生成/);
+
+    fireEvent.click(screen.getByTestId('cdp-run-signal-action'));
+    await waitFor(() => {
+      expect(screen.queryByTestId('cdp-run-signal')).toBeNull();
+    });
+  });
+
+  it('运行记录 tab 徽标：FAILED → 红点（tooltip「失败」），不显示提示条', async () => {
+    const failed = buildFailedRun('commit 校验失败', 'wfr_failed_tab');
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([failed]);
+
+    renderPage();
+
+    const badge = await waitFor(() => screen.getByTestId('cdp-runs-badge'));
+    expect(badge).toHaveAttribute('data-state', 'failed');
+    expect(badge.getAttribute('title')).toBe('失败');
+    // FAILED 不是「待审批 / 运行中」：不出提示条
+    expect(screen.queryByTestId('cdp-run-signal')).toBeNull();
+  });
+
+  it('运行记录 tab 徽标：终态（COMPLETED）不挂标记，提示条也不出现', async () => {
+    const done = buildRunningDetail({
+      run_id: 'wfr_done_tab',
+      status: 'COMPLETED',
+      ended_at: '2026-08-24T10:10:00+00:00',
+    });
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([done]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(done);
+
+    renderPage();
+    await openRunsTab();
+
+    // 面板挂载且 run 行已渲染后再断言「无徽标」，避免加载窗口内的空断言
+    await waitFor(() => {
+      expect(screen.getByTestId('run-row-wfr_done_tab')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('cdp-runs-badge')).toBeNull();
+    expect(screen.queryByTestId('cdp-run-signal')).toBeNull();
+  });
+
+  it('?section=runs 直开：运行记录 tab 直接挂载并选中，草稿区不挂载，提示条不重复', async () => {
+    const pausedRun = buildPausedReviewRun();
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([pausedRun]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(pausedRun);
+
+    renderPage(['/projects/prj_001/chapters/ch_001?section=runs']);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workflow-panel')).toBeVisible();
+    });
+    expect(screen.getByTestId('cdp-tab-runs')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    // 草稿区从未访问 → 不挂载（懒加载语义对直开同样成立）
+    expect(screen.queryByTestId('cdp-section-drafts')).toBeNull();
+    // 已在该 tab：不重复提示
+    expect(screen.queryByTestId('cdp-run-signal')).toBeNull();
+    // 徽标仍可见（待审批状态不会被 tab 选择掩盖）
+    expect(await waitFor(() => screen.getByTestId('cdp-runs-badge'))).toHaveAttribute(
+      'data-state',
+      'paused',
+    );
   });
 });

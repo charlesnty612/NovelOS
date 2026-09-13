@@ -330,12 +330,6 @@ def _contains_hook(text: str) -> bool:
     return any(m in (text or "") for m in HOOK_MARKERS)
 
 
-def _last_n_chars(s: str, n: int) -> str:
-    if not s:
-        return ""
-    return s[-n:]
-
-
 def score_pacing(draft: str) -> tuple[int, list[Issue]]:
     """§3.5 pacing 子分（MVP 代理实现）。
 

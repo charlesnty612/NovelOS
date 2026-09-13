@@ -872,40 +872,6 @@ def _upsert_volume(db_path: Any, project_id: str, payload: VolumeCreate) -> dict
     }
 
 
-def _delete_chapters_for_volume(db_path: Any, volume_id: str) -> int:
-    """删除指定 volume 下已挂的所有 chapters（精确到 volume，不误删其他卷）。
-
-    - ChapterService 没有 list_by_volume / delete_by_volume；走直接 SQL。
-    - 删除顺序：先删关联 drafts（FK 在 0001_init.sql 中是 ON DELETE CASCADE，
-      这里仍然显式写是为了兼容可能的旧库迁移顺序）；再删 chapters。
-    - 返回删除的章节数。
-    """
-    conn = get_connection(str(db_path))
-    try:
-        # 收集待删 chapter_id，避免 DELETE...IN 误读 SQL 兼容性问题
-        rows = conn.execute(
-            "SELECT chapter_id FROM chapters WHERE volume_id = ?",
-            (volume_id,),
-        ).fetchall()
-        chapter_ids = [r["chapter_id"] for r in rows]
-        if not chapter_ids:
-            return 0
-        # drafts 表对 chapter_id 有 FK；先清掉子记录再删 chapter 行
-        placeholders = ",".join("?" for _ in chapter_ids)
-        conn.execute(
-            f"DELETE FROM drafts WHERE chapter_id IN ({placeholders})",
-            chapter_ids,
-        )
-        cur = conn.execute(
-            f"DELETE FROM chapters WHERE chapter_id IN ({placeholders})",
-            chapter_ids,
-        )
-        conn.commit()
-        return int(cur.rowcount)
-    finally:
-        conn.close()
-
-
 def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
     """State：复用现有 domain service 落库。
 

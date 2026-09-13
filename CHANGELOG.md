@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+### Changed（2026-09-13 运行记录下置 + V4.0 模块化重构全量落地）
+
+> 运行记录下置：用户提出、主会话按授权拍板（信息层级：草稿是工作对象，运行记录是过程信息；
+> 防漏审批改由 tab 徽标+提示条兜底的更低成本方案）。
+> V4.0：docs/roadmap/v4.0-模块化重构计划当日完成——四路文件互斥并行，全部「测试数零增减」
+> 硬验收（AST 逐定义字节比对 / 机械化对账 / full-suite 数字逐字一致）。
+
+- **运行记录下置为分段 tab**：章节详情页「运行记录」从顶部常驻移入分段 tabs 第二位（草稿/运行记录/章节计划/质量/上下文/危险操作），默认仍草稿；tab 挂状态徽标（PAUSED=待审批 warn 徽标/RUNNING=转圈/FAILED=红点）；有待审批或运行中且不在该 tab 时 tabs 上方 slim 提示条「→ 查看」直达；审批卡编辑态切走保留语义不变。vitest 485（+6）。
+- **V1 builders_common.py 2104→四模块包**（excerpts/ledger/summaries/common+门面全量再导出）：AST 源码段比对 0 差异、层序无环、消费方 import 零改动；唯一新增为 `get_connection` 门面补丁点（8 行，测试探针兼容，突变验证 3 红）。
+- **V2 routers/workflows.py 1675→四域包**（control/runs/revise/common）：12 端点路径/方法/函数名/状态码/响应模型全不变；OpenAPI canonical 逐 path 相等（仅 workflows 块内 paths 键序按域分组）；discover_routers 兼容（25 routers 不变）；control↔revise 循环依赖以延迟 import 解（+2 行注释）；smoke 全链 PASS。
+- **V3 ProjectInitPanel.tsx 1858→227 主文件 + 12 子组件**（useProjectInitOrchestration 792 行 hook + 各步组件）：机械化对账（hook 清单/CJK 文案字面量集合/testid 集合逐项一致，52 行旧代码逐条可解释）；补验原未覆盖的降级分支。
+- **V4 结构性负债清理**：builders.py 门面 `__all__` 116→30（86 个零消费名保留 import 本体、F401 由 pyproject per-file-ignores 承接——不用文件级 noqa 以免掩盖未来真实未使用 import）；12 个 Sprint 0 空包加「未实现骨架」横幅指向实际承担者；7 个死定义全部删除（逐个附 grep 零引用证据，含一个被历史修复内联取代的旧 DELETE 接线口子）。
+- **文档核销**：AGENTS.md 挂账表清零；路径引用回填（routers/workflows.py→包路径 ×4）；过期 docstring（2200→3000 口径）订正；v4.0 计划标完成。
+
 ### Changed（2026-09-13 抽屉/详情人读化补透：用户实测反馈驱动）
 
 > 用户实测：角色抽屉 relationships 等嵌套结构仍倒原始 JSON。根因校正：红框走的是 `renderObject`

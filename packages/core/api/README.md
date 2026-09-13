@@ -32,7 +32,7 @@
 | `__version__` | `packages/core/api/main.py` | API 版本号（importlib 读取包版本，现行 3.9.0；与 pyproject / apps/web 对齐） |
 | `lifespan(app)` | `packages/core/api/main.py` | 异步上下文管理器，启动时执行迁移 |
 | `GET /api/health` | `packages/core/api/main.py` | 返回 `{status:"ok", version, tables:38}`（口径为总表数减 `_migrations`、排除 `chapter_fts%` 影子表） |
-| `GET /api/chapters/{chapter_id}/context-preview` | `packages/core/api/routers/workflows.py`（Sprint 13 下半新增） | dry-run，返回 context 装配预览（layers + token 估算 + items；只读、不调 LLM、不写库） |
+| `GET /api/chapters/{chapter_id}/context-preview` | `packages/core/api/routers/workflows/`（runs.py；Sprint 13 下半新增） | dry-run，返回 context 装配预览（layers + token 估算 + items；只读、不调 LLM、不写库） |
 | `GET /api/ai-call-logs` | `packages/core/api/routers/ai_call_logs.py`（Sprint 13 下半新增） | 分页列出 ai_call_logs 摘要（默认 limit=50，上限 200；支持 `?project_id=`（JOIN workflow_runs + chapters）、`?node=` 过滤）；不含 API key |
 | `GET /api/ai-call-logs/{log_id}` | 同上 | 单条详情（含 `input_context_ids` + `output` 解析后 JSON） |
 | `GET /api/projects/{pid}/style-samples` | `packages/core/api/routers/author_style_samples.py`（Sprint 15 / V1.3） | 列出项目级作者文风样例（按 `created_at DESC`）。注入 writer 上下文用，详见 `packages/core/context_engine/README.md`。 |

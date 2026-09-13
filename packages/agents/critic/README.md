@@ -1,5 +1,6 @@
 # agents.critic（Critic）
 
+> **未实现骨架（Sprint 0 遗留）**——Critic 能力由 `packages/core/quality/`（六子分 / Guardrail）与 `packages/workflows/chapter_review/` 承担。
 > 职责：对章节草稿做质量审计——quality-scoring-v0 六子分、Guardrail 五硬门槛（3 硬 + Q6/Q8）、爽感 H-1~H-5；为 chapter_review 工作流提供阻断/警告判定。
 > 状态：空骨架（规划 Sprint 6）。
 

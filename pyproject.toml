@@ -47,6 +47,10 @@ select = ["E", "F", "W", "I"]
 # 测试文件豁免 E501：断言消息 / 长 mock payload / 长 URL 属测试语料，折行损可读性。
 # 生产代码（packages / scripts）保持 120 严格约束（2026-09-06 审查批次一）。
 "tests/**" = ["E501"]
+# builders.py 门面全量再导出（V4.0 口径）：无消费方的名字保留 import 本体以保
+# 深路径 import 行为不变，其 F401 属设计内，按文件豁免（不用文件级 noqa，
+# 避免掩盖该文件未来真实的未使用 import）。
+"packages/core/context_engine/builders.py" = ["F401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

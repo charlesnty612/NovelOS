@@ -1,5 +1,6 @@
 # agents.director（Director）
 
+> **未实现骨架（Sprint 0 遗留）**——Director 能力由 `packages/workflows/chapter_plan/` 与 `packages/core/context_engine/`（`build_director_input`）承担。
 > 职责：章节规划决策——基于项目状态与上下文输出本章目标、约束、风险评估；为 `workflows/chapter_plan` 提供决策输入。
 > 状态：空骨架（规划 Sprint 3）。
 

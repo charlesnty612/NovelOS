@@ -1,5 +1,6 @@
 # domain.relationship（人物关系领域）
 
+> **未实现骨架（Sprint 0 遗留）**——关系能力由 `packages/domain/plot/service.py`（`relationships` CRUD，写入随 story_state delta 写透）承担。
 > 职责：人物关系（`relationships`）+ 关系变更事件（`relationship_events` 表）的 CRUD 与业务规则，对应 PRD §21。
 > 状态：空骨架（规划 Sprint 1）。
 

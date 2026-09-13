@@ -300,7 +300,7 @@ def test_cancel_run_value_error_404_via_mocked_engine(tmp_path: Path, monkeypatc
 
     from packages.core.api.routers import workflows as wf_mod
 
-    orig_engine = wf_mod._engine
+    orig_engine = wf_mod.control._engine
 
     class _FakeEngine:
         def cancel_run(self, rid):
@@ -309,7 +309,7 @@ def test_cancel_run_value_error_404_via_mocked_engine(tmp_path: Path, monkeypatc
     def _fake_engine(request):
         return _FakeEngine()
 
-    monkeypatch.setattr(wf_mod, "_engine", _fake_engine)
+    monkeypatch.setattr(wf_mod.control, "_engine", _fake_engine)
     try:
         async def _do():
             async with _make_client(app) as client:
@@ -317,7 +317,7 @@ def test_cancel_run_value_error_404_via_mocked_engine(tmp_path: Path, monkeypatc
 
         r = _run(_do())
     finally:
-        monkeypatch.setattr(wf_mod, "_engine", orig_engine)
+        monkeypatch.setattr(wf_mod.control, "_engine", orig_engine)
 
     assert r.status_code == 404, f"期望 404，实际 {r.status_code}: {r.text}"
     assert "not found" in r.json().get("detail", "").lower()
@@ -337,7 +337,7 @@ def test_cancel_run_value_error_409_via_mocked_engine(tmp_path: Path, monkeypatc
 
     from packages.core.api.routers import workflows as wf_mod
 
-    orig_engine = wf_mod._engine
+    orig_engine = wf_mod.control._engine
 
     class _FakeEngine:
         def cancel_run(self, rid):
@@ -349,7 +349,7 @@ def test_cancel_run_value_error_409_via_mocked_engine(tmp_path: Path, monkeypatc
     def _fake_engine(request):
         return _FakeEngine()
 
-    monkeypatch.setattr(wf_mod, "_engine", _fake_engine)
+    monkeypatch.setattr(wf_mod.control, "_engine", _fake_engine)
     try:
         async def _do():
             async with _make_client(app) as client:
@@ -357,7 +357,7 @@ def test_cancel_run_value_error_409_via_mocked_engine(tmp_path: Path, monkeypatc
 
         r = _run(_do())
     finally:
-        monkeypatch.setattr(wf_mod, "_engine", orig_engine)
+        monkeypatch.setattr(wf_mod.control, "_engine", orig_engine)
 
     assert r.status_code == 409, f"期望 409，实际 {r.status_code}: {r.text}"
     body = r.json()

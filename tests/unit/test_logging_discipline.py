@@ -5,9 +5,9 @@
 1. ``packages/workflows/chapter_commit/commit.py``：修复前用 ``logging.info(...)``
    走 root logger（日志 ``name`` 显示为 root，模块级过滤/归因失效）→ 必须用模块
    logger ``_log``；
-2. ``packages/core/api/routers/workflows.py``：两处 ``[DEBUG]`` 排障行原走
-   ``log.warning``（噪音混进告警通道）→ 降 debug 级，且不得再出现 ``[DEBUG]`` 前缀
-   （级别本身已表达该语义）。
+2. ``packages/core/api/routers/workflows/``（V4.0 拆包前为单文件 ``workflows.py``）：
+   两处 ``[DEBUG]`` 排障行原走 ``log.warning``（噪音混进告警通道）→ 降 debug 级，
+   且不得再出现 ``[DEBUG]`` 前缀（级别本身已表达该语义）。
 
 守卫是源码级检查而非行为断言：两条日志行都不改变业务输出，触发它们需要完整的
 PAUSED run / observer 重试场景，成本远高于收益。
@@ -30,7 +30,14 @@ def test_chapter_commit_repair_logs_use_module_logger():
 
 
 def test_workflows_router_debug_lines_are_debug_level():
-    src = inspect.getsource(workflows_router)
+    # V4.0 拆包后源码级守卫覆盖整包：两条排障行在 control，告警通道在 common / revise。
+    modules = (
+        workflows_router.common,
+        workflows_router.control,
+        workflows_router.revise,
+        workflows_router.runs,
+    )
+    src = "\n".join(inspect.getsource(m) for m in modules)
     # 排障行不得再以 warning 级 + [DEBUG] 前缀出现
     for line in src.splitlines():
         assert not ("log.warning(" in line and "[DEBUG]" in line), line
@@ -43,5 +50,5 @@ def test_workflows_router_debug_lines_are_debug_level():
         )
         assert m, message_prefix
         assert m.group(1) == "debug", (message_prefix, m.group(1))
-    # 守卫仅针对这两行排障日志；文件仍保留真实告警通道
+    # 守卫仅针对这两行排障日志；整包仍保留真实告警通道
     assert "log.warning(" in src

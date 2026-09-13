@@ -1,5 +1,6 @@
 # agents.planner（Planner）
 
+> **未实现骨架（Sprint 0 遗留）**——章节规划能力由 `packages/workflows/chapter_plan/` 工作流承担。
 > 职责：把 Director Plan 拆解为可执行的章节大纲（`chapter_outlines`）+ 时间线事件（`timeline_events`）+ 伏笔 / 债务更新提案。
 > 状态：空骨架未实现（章节规划职责现由 `packages/workflows/chapter_plan/` 承担）。
 

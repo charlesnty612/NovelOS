@@ -1,5 +1,6 @@
 # core.versioning（章节与 State 版本管理）
 
+> **未实现骨架（Sprint 0 遗留）**——版本能力由 `packages/core/story_state/`（snapshots / branches / commits）承担。
 > 职责：基于 `packages/core/story_state/` Snapshot 机制实现章节与 State 的分支、diff、回滚（**非 git**，自建轻量版本管理，PRD §75「迁移纪律」+ S7 任务）。
 > 状态：空骨架（规划 Sprint 7）。
 

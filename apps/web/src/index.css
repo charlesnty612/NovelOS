@@ -1191,10 +1191,49 @@ a:hover {
   border-bottom: 2px solid transparent;
   font: inherit;
   font-size: 14px;
+  display: inline-flex;
+  align-items: center;
 }
 .cdp-tab:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: -2px;
+}
+/* 运行记录 tab 的状态徽标：PAUSED=「待审批」徽标、RUNNING=转圈小环、FAILED=红点 */
+.cdp-tab__badge {
+  margin-left: 6px;
+}
+.cdp-run-spinner {
+  width: 12px;
+  height: 12px;
+}
+.cdp-run-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-danger);
+}
+/* tabs 上方的待审批 / 运行中信号条（slim；替代原运行记录常驻的防漏审批） */
+.cdp-run-signal {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px var(--space-3);
+  margin: 0 0 var(--space-3);
+  font-size: 13px;
+}
+.cdp-run-signal__action {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.cdp-run-signal__action:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
 }
 
 /* ---- 运行记录：run 行 / 节点时间线 / 深度二审 ---- */

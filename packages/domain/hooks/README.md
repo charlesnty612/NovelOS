@@ -1,5 +1,6 @@
 # domain.hooks（伏笔与叙事债务）
 
+> **未实现骨架（Sprint 0 遗留）**——`hooks` / `narrative_debts` 由 `packages/domain/ledger/`、`reveal_policies` 由 `packages/domain/knowledge/` 承担。
 > 职责：伏笔（`hooks`）+ 叙事债务（`narrative_debts` 表）+ 揭示策略（`reveal_policies`）的 CRUD 与一致性，对应 PRD §22；为 Hook Ledger / Narrative Debt 面板（Sprint 9）提供事实来源。
 > 状态：空骨架（规划 Sprint 1 服务层，Sprint 9 UI 深化）。
 

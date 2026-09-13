@@ -1,5 +1,6 @@
 # agents.observer（Observer）
 
+> **未实现骨架（Sprint 0 遗留）**——Observer 能力由 `packages/workflows/chapter_commit/observer.py` 与 `packages/core/context_engine/`（`build_observer_input`）承担。
 > 职责：阅读章节正文，提取事实变更（人物、关系、时间线、伏笔、债务），产出 State Delta 提案（不直接落库）。
 > 状态：空骨架（规划 Sprint 3 端到端；Sprint 4 串联到 Commit 工作流）。
 

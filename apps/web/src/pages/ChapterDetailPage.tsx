@@ -1,14 +1,17 @@
 // 章节详情页（章节生产闭环的主工作台）。
 //
-// 信息架构（2026-09-13 前端批次 C 重构）：
+// 信息架构（2026-09-13 前端批次 C 重构；同日二次调整：运行记录下置为分段 tab）：
 //   1. 顶部核心工作区：章节头 + 四步流水线控制（ChapterPipelineHeader）；
 //   2. 横幅区：质量门禁阻断 / 自动改稿回路 / 运行中横幅（含「停止工作流」）；
-//   3. 运行记录（ChapterRunPanel）：本章 run 列表 + 节点时间线 + 审批卡，常驻可见
-//      （PAUSED 审批不可被收进折叠区，作者必须能一眼看到）；
+//   3. 运行记录（ChapterRunPanel：run 列表 + 节点时间线 + 审批卡）下置为第二个分段 tab，
+//      tab 标签挂状态徽标（RUNNING 转圈点 / PAUSED「待审批」/ FAILED 红点）；
+//      不在该 tab 且存在待审批 / 运行中的 run 时，tabs 上方给一条 slim 提示条
+//      （替代原「常驻面板」的防漏审批功能——PAUSED 审批仍需作者能一眼看到）；
 //   4. 分区导航（分段 tabs，默认「草稿」，状态落 URL ?section=）：
-//      草稿 / 章节计划 / 质量 / 上下文 / 危险操作。
+//      草稿 / 运行记录 / 章节计划 / 质量 / 上下文 / 危险操作。
 //      ——此前是 8 个面板一路竖排到底，删除按钮悬在页底且无任何视觉降级。
-//      分区首次访问才挂载，访问过的分区保留挂载（仅 hidden），切走再回来不丢编辑态。
+//      分区首次访问才挂载，访问过的分区保留挂载（仅 hidden），切走再回来不丢编辑态
+//      （审批卡里的勾选 / 改稿意见同样保留）。
 //
 // 子组件在 pages/chapter/ 下：ChapterPipelineHeader / ChapterRunPanel / ChapterRunBanner /
 // ChapterDraftsSection / ChapterPlanSection / ChapterDangerZone。
@@ -45,9 +48,12 @@ import { useApiCall } from '../hooks/useApiCall';
 import { useChapterRunOrchestration } from '../hooks/useChapterRunOrchestration';
 import { ApiError } from '../api/client';
 
-// 分区导航（下部分区；顶部核心工作区不受影响）
+// 分区导航（下部分区；顶部核心工作区不受影响）。
+// 「运行记录」紧随「草稿」：它是本次下置的常驻面板本体（run 列表 + 审批卡），
+// 位置靠前保证待审批时一屏可达。
 const SECTIONS = [
   { key: 'drafts', label: '草稿' },
+  { key: 'runs', label: '运行记录' },
   { key: 'plan', label: '章节计划' },
   { key: 'quality', label: '质量' },
   { key: 'context', label: '上下文' },
@@ -143,6 +149,20 @@ export function ChapterDetailPage() {
     runsReload, detailReload,
   } = orch;
 
+  // ---- 运行记录 tab 的状态信号（tab 徽标 + tabs 上方提示条）----
+  // 数据源：chapterRuns（轮询 onResult 会 runsReload，PAUSED/RUNNING 自然刷新）。
+  // 优先级 PAUSED > RUNNING/PENDING > 当前选中/latest：待审批最需要人（防漏审批），
+  // 其次是正在跑；都无活跃 run 时看选中/最近一次结果（FAILED 出红点）。
+  const pausedRun = useMemo(
+    () => chapterRuns.find((r) => r.status === 'PAUSED') ?? null,
+    [chapterRuns],
+  );
+  const indicatorRun = pausedRun ?? activeRun ?? selectedRunSummary ?? chapterRuns[0] ?? null;
+  const isGenerating =
+    indicatorRun?.status === 'RUNNING' || indicatorRun?.status === 'PENDING';
+  // 提示条只在「不在运行记录 tab + 有可行动状态」时出现（已在该 tab 就没必要重复提示）
+  const signalKind: 'paused' | 'running' | null =
+    section === 'runs' ? null : pausedRun ? 'paused' : isGenerating ? 'running' : null;
   // ---- 草稿选中版本（受控，提升至父组件，供审校按钮读取 payload）----
   // drafts 是 version DESC 排序（drafts[0] 即最新一版）；选中版本变化时同步刷新
   // ——见下方 selectedDraftVersion 的 sync effect。默认 null = drafts 加载完成后
@@ -466,27 +486,34 @@ export function ChapterDetailPage() {
         </div>
       ) : null}
 
-      {/* 运行记录：run 列表 + 节点时间线 + 审批卡（PAUSED 审批必须常驻可见） */}
+      {/* 下部分区：分段导航 + 分区内容（首次访问才挂载；访问过的分区保留挂载、仅隐藏）。
+          运行记录（原顶部常驻面板）下置为「运行记录」tab：面板本体在对应 tabpanel 内，
+          这里只保留状态信号——待审批 / 运行中且不在该 tab 时给一条 slim 提示条。 */}
       {chapter ? (
         <div className="cdp-block">
-          <ChapterRunPanel
-            runs={chapterRuns}
-            selectedRunId={selectedRunId}
-            onSelect={(id) => setSelectedRunId(id)}
-            detailRun={detailRun}
-            detailLoading={detail.loading}
-            detailError={detail.error}
-            pollError={poll.error}
-            pausePayload={pausePayload}
-            submitting={submitting}
-            onApprove={handleResume}
-          />
-        </div>
-      ) : null}
-
-      {/* 下部分区：分段导航 + 分区内容（首次访问才挂载；访问过的分区保留挂载、仅隐藏） */}
-      {chapter ? (
-        <div className="cdp-block">
+          {signalKind ? (
+            <div
+              className={
+                'alert cdp-run-signal' +
+                (signalKind === 'paused' ? ' alert--warning' : ' alert--info')
+              }
+              data-testid="cdp-run-signal"
+              data-kind={signalKind}
+              role="status"
+            >
+              <span>
+                {signalKind === 'paused' ? '当前有待人工审批' : '正在生成'}
+              </span>
+              <button
+                type="button"
+                className="cdp-run-signal__action"
+                data-testid="cdp-run-signal-action"
+                onClick={() => selectSection('runs')}
+              >
+                查看
+              </button>
+            </div>
+          ) : null}
           <div className="tabs cdp-tabs" role="tablist" aria-label="章节详情分区">
             {SECTIONS.map((s) => (
               <button
@@ -501,6 +528,7 @@ export function ChapterDetailPage() {
                 onClick={() => selectSection(s.key)}
               >
                 {s.label}
+                {s.key === 'runs' ? <RunTabBadge run={indicatorRun} /> : null}
               </button>
             ))}
           </div>
@@ -530,6 +558,30 @@ export function ChapterDetailPage() {
               <div className="cdp-block">
                 <ContinuePanel projectId={projectId} chapterId={chapterId} />
               </div>
+            </div>
+          ) : null}
+
+          {/* 运行记录（原顶部常驻面板）：run 列表 + 节点时间线 + 审批卡（PAUSED 时的
+              人工决议）。与其它分区同语义：首次访问才挂载、访问过保留挂载仅 hidden——
+              审批卡里的勾选 / 改稿意见切走再回来不丢。 */}
+          {mountedSections.has('runs') ? (
+            <div
+              role="tabpanel"
+              hidden={section !== 'runs'}
+              data-testid="cdp-section-runs"
+            >
+              <ChapterRunPanel
+                runs={chapterRuns}
+                selectedRunId={selectedRunId}
+                onSelect={(id) => setSelectedRunId(id)}
+                detailRun={detailRun}
+                detailLoading={detail.loading}
+                detailError={detail.error}
+                pollError={poll.error}
+                pausePayload={pausePayload}
+                submitting={submitting}
+                onApprove={handleResume}
+              />
             </div>
           ) : null}
 
@@ -664,4 +716,48 @@ export function ChapterDetailPage() {
       ) : null}
     </div>
   );
+}
+
+// 「运行记录」tab 的状态徽标（由选中/最新的 run 状态驱动）：
+//   RUNNING/PENDING → accent 色转圈小环（复用 .spinner）；
+//   PAUSED          → warn 色「待审批」小徽标；
+//   FAILED          → error 色圆点（tooltip「失败」）；
+//   终态 / 无 run   → 不挂标记。
+// 轮询（useChapterRunOrchestration）刷新 chapterRuns，徽标随之自然更新。
+function RunTabBadge({ run }: { run: WorkflowRun | null }) {
+  switch (run?.status) {
+    case 'PAUSED':
+      return (
+        <span
+          className="badge badge--warn cdp-tab__badge"
+          data-testid="cdp-runs-badge"
+          data-state="paused"
+        >
+          待审批
+        </span>
+      );
+    case 'RUNNING':
+    case 'PENDING':
+      return (
+        <span
+          className="spinner cdp-run-spinner cdp-tab__badge"
+          data-testid="cdp-runs-badge"
+          data-state="running"
+          title="正在生成"
+          aria-label="正在生成"
+        />
+      );
+    case 'FAILED':
+      return (
+        <span
+          className="cdp-run-dot cdp-tab__badge"
+          data-testid="cdp-runs-badge"
+          data-state="failed"
+          title="失败"
+          aria-label="失败"
+        />
+      );
+    default:
+      return null;
+  }
 }

@@ -1,5 +1,6 @@
 # core.evaluation（评估 Harness）
 
+> **未实现骨架（Sprint 0 遗留）**——评估能力由 `packages/core/quality/`（六子分 / Guardrail）与 `tests/evals/` + `scripts/eval_regression.py`（黄金集回归）承担。
 > 职责：质量评估 Harness——黄金数据集（`eval_golden_datasets`）+ 回归 runner（`eval_regression_runs`）+ quality-scoring-v0 六子分；Sprint 4 起骨架，Sprint 6 评分管线完整化。
 > 状态：空骨架（规划 Sprint 4 骨架，Sprint 6 评分管线）。
 

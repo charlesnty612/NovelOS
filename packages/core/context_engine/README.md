@@ -63,7 +63,7 @@ preview_context(
 - **items** 数组：`[{kind, id, name, ...}]` —— kind 覆盖 character / location / faction / world_rule / plot_event / hook / debt / reference_canon / recent_prose / draft_text / author_intent / director_plan / style_constraints / previous_state 等。
 - **异常透传**：`ValueError("chapter ... not found")` / `ValueError("project ... not found")`，由 router 转 404。
 
-REST 端点：`GET /api/chapters/{chapter_id}/context-preview`（挂在 `routers/workflows.py`），用于 ChapterDetailPage "AI 上下文明细" 面板（Sprint 13 前端对应组件 `apps/web/src/components/ContextPreviewPanel.tsx`）。
+REST 端点：`GET /api/chapters/{chapter_id}/context-preview`（挂在 `routers/workflows/runs.py`），用于 ChapterDetailPage "AI 上下文明细" 面板（Sprint 13 前端对应组件 `apps/web/src/components/ContextPreviewPanel.tsx`）。
 
 ## 默认参数
 
@@ -525,3 +525,20 @@ build_writer_input(
 - 修订：`test_sprint14_summaries.py`（摘要链 cap 与真截断）、`test_v2_wave_c_retrieval.py`
   （state_version 改用真实 `story_states` 行推进，不再 mock `get_current_state`）、
   `test_observer_input_trim.py`（`_assembly_meta` 为派生度量，不参与 full/trimmed 逐字节相等）。
+
+## 模块结构：`builders_common` 包（2026-09-13 V4.0 拆分）
+
+单文件 `builders_common.py`（2104 行）按职责拆为包（纯搬家，正文逐字保留）：
+
+| 模块 | 职责 |
+| --- | --- |
+| `builders_common/__init__.py` | 门面：全量再导出（含全部私有名），`builders_common.X` 零改动可用 |
+| `builders_common/common.py` | 共享工具（`_parse_json` / `_estimate_tokens` / `_assembly_meta` / row helper）、题材包注入段、peek 预读 |
+| `builders_common/excerpts.py` | L1 实体摘要与触发注入策略（characters / locations / factions / sensory） |
+| `builders_common/ledger.py` | 台账与检索类数据收集（hooks / debts / plot events / branches / commit touch） |
+| `builders_common/summaries.py` | 摘要链 / 尾段 / 文风样例 / L2 计划与场景形态 helper |
+
+层序（AST 依赖分析，无环）：`common` + `ledger` → `excerpts` + `summaries` → 门面。
+`builders_common.get_connection` 仍是连接工厂补丁点（`packages.core.db.get_connection`）；
+子模块取数经 `common.get_connection` 延迟解析回门面，保住
+`tests/unit/test_context_peek_convergence.py` 的连接计数 / SQL trace 探针。

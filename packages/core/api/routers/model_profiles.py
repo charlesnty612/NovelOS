@@ -55,16 +55,6 @@ log = get_logger("novelos.routers.model_profiles")
 _FETCH_LIST_TIMEOUT_S = 10.0
 
 
-def _provider_default_base_url(provider: str) -> str | None:
-    """返回 provider 的官方 base_url。无 key 也能匿名调用 / 拉取列表的 provider
-    （Ollama、Anthropic）需要这个；其它（OpenAI 兼容）由调用方提供。"""
-    if provider == "anthropic":
-        return AnthropicProvider.DEFAULT_BASE_URL
-    if provider == "ollama":
-        return OllamaProvider.DEFAULT_BASE_URL
-    return None
-
-
 def _extract_ids_openai_compatible(data: object) -> list[str]:
     """OpenAI 兼容 /models 响应：``{"data": [{"id": "..."}, ...]}``。"""
     if not isinstance(data, dict):

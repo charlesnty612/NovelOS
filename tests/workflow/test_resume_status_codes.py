@@ -153,17 +153,17 @@ def test_resume_value_error_409_via_mocked_resume_async(tmp_path: Path, caplog, 
 
     from packages.core.api.routers import workflows as wf_mod
 
-    orig_get_wf_name = wf_mod.get_workflow_name_for_run
+    orig_get_wf_name = wf_mod.control.get_workflow_name_for_run
 
     def _stub_name(db, run_id):
         return "chapter-plan"
-    wf_mod.get_workflow_name_for_run = _stub_name
+    wf_mod.control.get_workflow_name_for_run = _stub_name
 
-    orig_get_wf = wf_mod.get_workflow
+    orig_get_wf = wf_mod.control.get_workflow
 
     def _stub_def(name):
         return {"name": name, "nodes": [], "checkpoint_exclude": []}
-    wf_mod.get_workflow = _stub_def
+    wf_mod.control.get_workflow = _stub_def
 
     class _FakeEngine:
         def resume_async(self, run_id, nodes, human_input=None, regenerate=False):
@@ -171,11 +171,11 @@ def test_resume_value_error_409_via_mocked_resume_async(tmp_path: Path, caplog, 
                 "workflow run 'run_paused_001' status='FAILED', must be PAUSED to resume"
             )
 
-    orig_engine = wf_mod._engine
+    orig_engine = wf_mod.control._engine
 
     def _fake_engine(request):
         return _FakeEngine()
-    wf_mod._engine = _fake_engine
+    wf_mod.control._engine = _fake_engine
 
     # caplog 在已有 configure_logging 的环境里对 novelos.* logger propagate 不可靠；
     # 改用 monkeypatch 替换 logger.debug 为可断言 spy。
@@ -191,9 +191,9 @@ def test_resume_value_error_409_via_mocked_resume_async(tmp_path: Path, caplog, 
 
         r = _run(_do())
     finally:
-        wf_mod.get_workflow_name_for_run = orig_get_wf_name
-        wf_mod.get_workflow = orig_get_wf
-        wf_mod._engine = orig_engine
+        wf_mod.control.get_workflow_name_for_run = orig_get_wf_name
+        wf_mod.control.get_workflow = orig_get_wf
+        wf_mod.control._engine = orig_engine
 
     assert r.status_code == 409, f"期望 409，实际 {r.status_code}: {r.text}"
     body = r.json()
@@ -239,27 +239,27 @@ def test_resume_value_error_404_via_mocked_resume_async(tmp_path: Path, caplog, 
 
     from packages.core.api.routers import workflows as wf_mod
 
-    orig_get_wf_name = wf_mod.get_workflow_name_for_run
+    orig_get_wf_name = wf_mod.control.get_workflow_name_for_run
 
     def _stub_name(db, run_id):
         return "chapter-plan"
-    wf_mod.get_workflow_name_for_run = _stub_name
+    wf_mod.control.get_workflow_name_for_run = _stub_name
 
-    orig_get_wf = wf_mod.get_workflow
+    orig_get_wf = wf_mod.control.get_workflow
 
     def _stub_def(name):
         return {"name": name, "nodes": [], "checkpoint_exclude": []}
-    wf_mod.get_workflow = _stub_def
+    wf_mod.control.get_workflow = _stub_def
 
     class _FakeEngine:
         def resume_async(self, run_id, nodes, human_input=None, regenerate=False):
             raise ValueError("workflow run 'run_paused_002' not found")
 
-    orig_engine = wf_mod._engine
+    orig_engine = wf_mod.control._engine
 
     def _fake_engine(request):
         return _FakeEngine()
-    wf_mod._engine = _fake_engine
+    wf_mod.control._engine = _fake_engine
 
     # caplog 在已有 configure_logging 的环境里对 novelos.* logger propagate 不可靠；
     # 改用 monkeypatch 替换 logger.debug 为可断言 spy。
@@ -275,9 +275,9 @@ def test_resume_value_error_404_via_mocked_resume_async(tmp_path: Path, caplog, 
 
         r = _run(_do())
     finally:
-        wf_mod.get_workflow_name_for_run = orig_get_wf_name
-        wf_mod.get_workflow = orig_get_wf
-        wf_mod._engine = orig_engine
+        wf_mod.control.get_workflow_name_for_run = orig_get_wf_name
+        wf_mod.control.get_workflow = orig_get_wf
+        wf_mod.control._engine = orig_engine
 
     assert r.status_code == 404, f"期望 404，实际 {r.status_code}: {r.text}"
     debug_msgs = debug_calls

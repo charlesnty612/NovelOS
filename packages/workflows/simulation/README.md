@@ -1,5 +1,6 @@
 # workflows.simulation（What-if 推演）
 
+> **未实现骨架（Sprint 0 遗留）**——推演能力由 `packages/core/simulation/`（`SimulationService`）与 `packages/core/api/routers/simulation.py` 承担。
 > 职责：在 State 快照副本上跑 What-if 分支推演（Plot Graph + 角色决策分支），不污染主 State；为黄金三章机检（Sprint 11）提供推演环境。
 > 状态：空骨架（规划 Sprint 10）。
 

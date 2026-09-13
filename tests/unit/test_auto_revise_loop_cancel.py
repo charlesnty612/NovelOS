@@ -209,7 +209,7 @@ def test_loop_marks_cancelled_via_registry_and_stops_before_next_round(
             wf._mark_auto_revise_loops_cancelled_for_run(out["run_id"])  # noqa: SLF001
         return out
 
-    monkeypatch.setattr(wf, "_run_workflow_return_payload", fake_with_cancel)
+    monkeypatch.setattr(wf.revise, "_run_workflow_return_payload", fake_with_cancel)
 
     payload = wf._auto_revise_loop(  # noqa: SLF001
         object(), db_path, "prj_1", "ch_1", None, 2, parent_run_id="wfr_parent",
@@ -243,7 +243,7 @@ def test_loop_stops_when_recorded_child_is_cancelled_in_db(tmp_path: Path, monke
                 conn.close()
         return out
 
-    monkeypatch.setattr(wf, "_run_workflow_return_payload", fake_with_db_cancel)
+    monkeypatch.setattr(wf.revise, "_run_workflow_return_payload", fake_with_db_cancel)
 
     payload = wf._auto_revise_loop(  # noqa: SLF001
         object(), db_path, "prj_1", "ch_1", None, 3, parent_run_id="wfr_parent",
@@ -258,7 +258,7 @@ def test_loop_without_cancel_still_runs_to_max_iter(tmp_path: Path, monkeypatch)
     db_path = _db(tmp_path)
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        wf, "_run_workflow_return_payload", _make_fake_runner(db_path, calls)
+        wf.revise, "_run_workflow_return_payload", _make_fake_runner(db_path, calls)
     )
 
     payload = wf._auto_revise_loop(  # noqa: SLF001
@@ -277,6 +277,6 @@ def test_cancel_of_unknown_run_does_not_touch_loops(tmp_path: Path, monkeypatch)
     db_path = _db(tmp_path)
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        wf, "_run_workflow_return_payload", _make_fake_runner(db_path, calls)
+        wf.revise, "_run_workflow_return_payload", _make_fake_runner(db_path, calls)
     )
     assert wf._mark_auto_revise_loops_cancelled_for_run("wfr_unrelated") == []  # noqa: SLF001

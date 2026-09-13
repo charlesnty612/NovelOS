@@ -1,5 +1,6 @@
 # agents.integrator（Integrator）
 
+> **未实现骨架（Sprint 0 遗留）**——Integrator 能力由 `packages/core/story_state/`（delta 校验 + commit）与 `packages/workflows/chapter_commit/` 承担。
 > 职责：把 Observer 的 delta 提案整合并落库——按 `state-delta.schema.json` 校验、调用 `packages/core/story_state/` 提交、写入 `state_deltas` 与 `commits`；处理冲突与去重。
 > 状态：空骨架（规划 Sprint 4）。
 

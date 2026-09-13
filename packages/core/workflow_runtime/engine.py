@@ -190,7 +190,7 @@ class WorkflowRunConflict(Exception):
     设计要点：
     - 抛 ``sqlite3.IntegrityError`` 在 SQL 层由 0017 部分唯一索引
       ``idx_workflow_runs_active`` 兜底触发（覆盖 TOCTOU 窗口）。
-    - engine 层捕获后转为业务异常，API 路由（``routers/workflows.py``）
+    - engine 层捕获后转为业务异常，API 路由（``routers/workflows/control.py``）
       映射为 HTTP 409，与既有 ``_check_active_run_for_chapter`` 的 409
       同语义（避免 500/422 误导客户端）。
     """

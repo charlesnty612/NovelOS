@@ -404,25 +404,6 @@ class VolumeService:
             conn.close()
         return volume
 
-    # ============================================================== helpers
-    @staticmethod
-    def parse_snapshot(raw: str | None) -> dict | None:
-        """对外暴露 terminal_snapshot_json 的解析 helper（便于 router 集成）。
-
-        ``raw`` 为 None 或非 JSON 字符串 → 返回 None；合法 JSON → 返回 dict。
-        与 :func:`packages.core.story_state.snapshots._parse_required_json`
-        对齐语义，但 fallback 行为不同（None vs default）。
-        """
-        if not raw:
-            return None
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-        if isinstance(parsed, dict):
-            return parsed
-        return None
-
 
 __all__ = [
     "VolumeService",

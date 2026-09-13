@@ -111,7 +111,7 @@ def test_auto_revise_loop_short_circuits_on_timeout(tmp_path: Path, monkeypatch,
 
     # monkeypatch 注入短超时到全局常量
     from packages.core.api.routers import workflows as wf_mod
-    monkeypatch.setattr(wf_mod, "_RUN_WAIT_DEADLINE_SECONDS", 0.5)
+    monkeypatch.setattr(wf_mod.common, "_RUN_WAIT_DEADLINE_SECONDS", 0.5)
 
     # 把 _run_workflow_return_payload 替换为：直接返回 timeout=True payload
     fake_payload = {
@@ -121,7 +121,7 @@ def test_auto_revise_loop_short_circuits_on_timeout(tmp_path: Path, monkeypatch,
         "timeout": True,
         "detail": "测试注入：模拟子 run 超时",
     }
-    monkeypatch.setattr(wf_mod, "_run_workflow_return_payload", lambda *a, **kw: fake_payload)
+    monkeypatch.setattr(wf_mod.revise, "_run_workflow_return_payload", lambda *a, **kw: fake_payload)
 
     engine = WorkflowEngine(settings.db_path)
 

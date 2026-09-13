@@ -296,16 +296,6 @@ def _hit(text: str, words: tuple[str, ...]) -> bool:
     return any(w in text for w in words)
 
 
-def _hits(text: str, words: tuple[str, ...]) -> list[str]:
-    """返回命中词列表（去重保持顺序）。"""
-
-    seen: list[str] = []
-    for w in words:
-        if w in text and w not in seen:
-            seen.append(w)
-    return seen
-
-
 def _count_chars(text: str) -> int:
     """统计正文字符数（剔除空白，贴近番茄字数口径）。
 

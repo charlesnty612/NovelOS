@@ -13,7 +13,7 @@ NovelOS 面向长篇小说作者：在本地运行完整的小说生产闭环。
 
 - **章节生产四工作流**：`chapter-plan`（director 计划）→ `chapter-write`（writer 草稿）→
   `chapter-review`（作者人工评审，Human 节点可暂停/恢复）→ `chapter-commit`（observer 提取
-  状态变化 → state delta 校验 → 质量门禁 → 提交）。端点见 `packages/core/api/routers/workflows.py`。
+  状态变化 → state delta 校验 → 质量门禁 → 提交）。端点见 `packages/core/api/routers/workflows/`（按域拆包：control/runs/revise）。
 - **状态版本与分支**：Story State 版本化（v1 快照 + delta 提交），支持分支（What-if 推演用
   临时分支，可归档）。见 `packages/core/story_state/` 与 `packages/core/api/routers/story_state.py`。
 - **质量引擎与爽感体检**：`QualityEngine` 按规则评分并产出 `quality_reports`；commit 流程内置
