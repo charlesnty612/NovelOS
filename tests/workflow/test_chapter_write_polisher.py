@@ -385,3 +385,111 @@ def test_chapter_write_polisher_length_drift_falls_back_to_original(tmp_path: Pa
             )
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# P0 提速：条件触发门（引擎全链）
+# ---------------------------------------------------------------------------
+
+
+def _node_output(db_path, run_id: str, node_id: str) -> dict:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT output_json FROM workflow_run_nodes WHERE run_id = ? AND node_id = ? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (run_id, node_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, f"run {run_id!r} 无 {node_id!r} 节点行"
+    return json.loads(row["output_json"] or "{}")
+
+
+def _checkpoint_json(db_path, run_id: str) -> str:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT checkpoint_json FROM workflow_runs WHERE run_id = ?", (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, f"run {run_id!r} 不存在"
+    return row["checkpoint_json"] or ""
+
+
+def test_chapter_write_polisher_skipped_clean_keeps_writer_prose(tmp_path: Path):
+    """预检零命中 → 跳过润色（即便配了 polisher mock），draft = writer prose。
+
+    探针设计：polisher mock 返回**长度守恒但不同**的润色版（同字数），因此
+    「门失效则走原润色路径」会被 drafts.content 直接抓到（而不是被长度守恒
+    兜底掩盖）。同时覆盖引擎侧完整性：``polish_skipped`` / ``polish_precheck``
+    进 ctx → checkpoint_json 落盘可序列化。
+    """
+    app = _create_app(tmp_path)
+    db_path = app.state.settings.db_path
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "静章")
+
+            clean_prose = "灯芯闪了一下。苏婉清没有出声，把玉佩收回袖中。"
+            # 与 clean_prose 同 visible_chars（23），长度守恒 Δ0 → 若被调用必落库
+            polished_alt = "烛火摇了一下。苏婉清没有出声，把玉佩收回袖中。"
+            mock_providers = {
+                "director": _director_script(),
+                "writer": _writer_script(clean_prose),
+                "polisher": _polisher_script(polished=polished_alt, summary="门失效探针"),
+                "observer": _observer_noop_script(),
+            }
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "静场过渡", "mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            write_run_id = r.json()["run_id"]
+            terminal = await _wait_run_terminal(
+                app, write_run_id, expected=("COMPLETED", "FAILED"),
+            )
+            assert terminal["status"] == "COMPLETED", terminal.get("error")
+
+            conn = get_connection(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT content FROM drafts WHERE chapter_id = ? ORDER BY version DESC",
+                    (cid,),
+                ).fetchall()
+            finally:
+                conn.close()
+            assert len(rows) == 1
+            assert rows[0]["content"] == clean_prose, (
+                "预检零命中应跳过润色并沿用 writer prose；"
+                f"got {rows[0]['content']!r}（若为探针文本则门失效）"
+            )
+            assert rows[0]["content"] != polished_alt
+
+            # run detail 可观测：polisher 节点产出带跳过标记与命中统计
+            out = _node_output(db_path, write_run_id, "polisher")
+            assert out["polisher_status"] == "skipped_clean"
+            assert out["polish_skipped"] is True
+            assert out["polish_precheck"]["ai_pattern_hit_count"] == 0
+            assert out["polish_precheck"]["forbidden_word_hit_count"] == 0
+            assert out["polish_precheck"]["q7_issue_count"] == 0
+
+            # checkpoint_json 落盘无序列化问题（含 skip 标记）
+            ckpt = _checkpoint_json(db_path, write_run_id)
+            assert "skipped_clean" in ckpt
+            assert "polish_skipped" in ckpt
+
+    asyncio.run(run())

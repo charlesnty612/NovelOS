@@ -12,7 +12,10 @@
   任何失败（prompt 缺失 / provider 异常 / 输出不合规 / 长度守恒失败）→ 兜底回退
   writer 原始 prose，**不**阻断 save_draft。
   mock 直通：若 ``ctx["mock_providers"]`` 含 'writer' 但不含 'polisher'，跳过润色
-  原样透传（既有 mock 测试不受影响；真实链路始终润色）。
+  原样透传（既有 mock 测试不受影响）。
+  P0 提速条件触发：确定性预检（``scan_ai_patterns`` + 题材禁词 + ``req_q7``）三源
+  全零命中 ⇒ ``polisher_status='skipped_clean'``，prose 原样透传不调 LLM；
+  任一命中 ⇒ 走上述原润色路径（行为零变化）。
 - ``length_check`` (Transform) —— 字数闭环实测节点（V3.7+ P1）：
   用 :func:`packages.core.quality.wordcount.classify_prose_length` 权威口径实测
   polished_prose（缺则 writer_output.prose）字数，读项目级 word_band_json 覆盖
@@ -21,10 +24,13 @@
   within_band}`` + ``target_word_count`` + ``word_band_cfg`` 三个独立 key
   （便于 condense 节点与 save_draft 复用），并把 ``length_check_passed`` 布尔
   写入 ctx 供 condense 路由判定。
-- ``condense`` (AI) —— 仅在 length_check 未通过且未超过 2 轮时执行。
+- ``condense`` (AI) —— 仅在 length_check 未通过、payload 超带上限且未超过 2 轮时执行。
   复用 polisher 的 capability 绑定（``capability_for('polisher')``），prompt
   携带实测字数、目标带上下限、需净减比例，遵循 writer-v1 规则 20 的压缩纪律
   （优先砍铺垫/重复意象/冗词，不砍节拍、不删场景、保持文风与既有设定用语）。
+  P0 提速压缩预算门：payload 未超 ``band_high``（``_CONDENSE_PAYLOAD_TRIGGER_RATIO``
+  × 带上限）⇒ ``condense_status='skipped_below_budget'`` + ``condense_skipped=True``，
+  不调 LLM（欠字 / 陈旧 report 形态：压缩无余量，且只会把正文压得更短）。
   「≤2 轮」压缩循环在节点内部兑现：调 LLM → ``visible_chars`` 实测 → 仍超
   ``band_high`` 且轮数未满 → 再调（每轮 payload 都用最新实测数字重建）。
   mock 守卫与 polisher（``_polish_node``）同款语义：``mock_providers`` 为空
@@ -63,9 +69,15 @@ from packages.core.context_engine.builders_common import (
     _genre_pack_excerpt,
 )
 from packages.core.db import get_connection
+from packages.core.genre.consumers import (
+    count_forbidden_word_hits,
+    forbidden_words,
+)
+from packages.core.genre.service import GenrePackService
 from packages.core.ids import new_id, now_iso
 from packages.core.model_router.router import capability_for
 from packages.core.quality.ai_patterns import scan_ai_patterns
+from packages.core.quality.guardrails import req_q7
 from packages.core.quality.wordcount import (
     DEFAULT_TARGET_WORD_COUNT,
     classify_prose_length,
@@ -75,6 +87,36 @@ from packages.core.quality.wordcount import (
 from packages.core.workflow_runtime.engine import WorkflowNode
 
 _log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# P0 提速：确定性门常量（集中维护）
+# ---------------------------------------------------------------------------
+#
+# 背景：单章 6 次 LLM 调用 ≈12 分钟，其中 polisher（去 AI 腔二遍）与 condense
+# （字数压缩）存在「没有可修项 / 没有压缩余量也要调 LLM」的浪费。两个门都只做
+# **跳过**判定（确定性、零 LLM）；判据全部复用既有检测器与既有阈值常量，
+# 不新造规则、不新造魔法数。
+
+# polisher 条件触发门（_polish_node）：预检三源全部零命中才跳过润色。
+# 1. scan_ai_patterns（quality.ai_patterns）：AI 腔模式级权威信号源；
+# 2. 题材禁词（genre.consumers.count_forbidden_word_hits × 题材包
+#    style_constraints.forbidden_words）：与 chapter_review._basic_checks 同源同口径；
+# 3. guardrails.req_q7：AI marker 密度 / 「然而|但是」段首占比 / 句长标准差——
+#    阈值常量 Q7_MARKER_PER_KCHARS / Q7_PARA_OPENER_THRESHOLD / Q7_FLAT_SENTENCE_STD
+#    全部来自 quality.guardrails（单一权威），本模块不覆写、不调参。
+# 说明：三源任一非零命中即走原润色路径（保守口径），因此无需在本模块新增数值常量。
+
+# condense 压缩预算门（_condense_node）：payload（待压缩正文，visible_chars 口径）
+# 必须**严格超过**「带上限 × 本系数」才调 LLM 压缩。
+# 取值依据：condense 的唯一用途 = 把超带上限（band_high）的正文压回带内
+# （writer-v1 §6.1 规则 20），band_high 即「已无压缩余量」的判据边界，故取 1.0
+# （不放大、不收紧）——低于该线时既无余量可压，内循环（status != 'over' 即收工）
+# 还会把欠字正文压得更短，属纯浪费 + 有害调用。
+# 任务书举例的「预算 50%」是本门的真子集：0.5×band_high 必然同时低于 band_low，
+# 已被本门覆盖（更强条件包含更弱条件），故不单列该门。
+# 调大本值 = 容忍「小幅超带」放走（字数闭环政策变更，按 V3.7/3.9 口径默认不启用）。
+_CONDENSE_PAYLOAD_TRIGGER_RATIO = 1.0
 
 
 def _load_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -729,19 +771,100 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _polish_precheck_forbidden_words(db_path: str, chapter_id: str) -> list[str]:
+    """项目绑定题材包的禁词表（题材库 P1b 读侧投影，与 chapter_review 同口径）。
+
+    路径：chapters.project_id → ``GenrePackService.get_project_binding`` →
+    ``forbidden_words(pack.payload)``（= ``payload.style_constraints.forbidden_words``，
+    genre.consumers 单点解析）。未绑定 / 读库失败 / 极老库 → ``[]``（预检退化为
+    「题材禁词零命中」，不阻断润色、不改变既有行为）。
+    """
+    try:
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT project_id FROM chapters WHERE chapter_id = ?", (chapter_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 —— 预检失败不阻断润色
+        _log.warning(
+            "chapter_write.polish_precheck chapter lookup failed: chapter_id=%s err=%s",
+            chapter_id, exc,
+        )
+        return []
+    project_id = row["project_id"] if row is not None else None
+    if not project_id:
+        return []
+    try:
+        binding = GenrePackService(db_path).get_project_binding(project_id)
+    except Exception as exc:  # noqa: BLE001 —— 题材包读失败不阻断润色
+        _log.warning(
+            "chapter_write.polish_precheck genre_pack read failed: project_id=%s err=%s",
+            project_id, exc,
+        )
+        return []
+    if not binding or not binding.get("bound"):
+        return []
+    return forbidden_words(((binding.get("pack") or {}).get("payload")) or {})
+
+
+def _polish_precheck(raw_prose: str, db_path: str, chapter_id: str) -> dict[str, Any]:
+    """polisher 条件触发的确定性预检（零 LLM、零新规则）。
+
+    三源全部复用既有检测器与既有阈值（见模块顶部常量区注释）：
+
+    1. ``scan_ai_patterns``：AI 腔模式级命中（权威信号源，含禁用词 / 三连句式 /
+       他她排比 / 章尾升华 / 标点滥用 / 解释腔，severity 与阈值内置）；
+    2. ``count_forbidden_word_hits`` × 题材包禁词表：题材禁词子串计数
+       （与 chapter_review._basic_checks 同源）；
+    3. ``req_q7``：AI marker 密度 / 「然而|但是」段首占比 / 句长标准差三子指标
+       （阈值常量在 quality.guardrails，单一权威）。
+
+    返回值全部为 JSON 原生类型（进 ctx → checkpoint_json 可序列化；``req_q7``
+    的 Issue（pydantic）在此投影为 dict）。
+    """
+    ai_hits = scan_ai_patterns(raw_prose)
+    forbidden = _polish_precheck_forbidden_words(db_path, chapter_id)
+    forbidden_hits = count_forbidden_word_hits(raw_prose, forbidden)
+    q7_issues = req_q7(raw_prose)
+    return {
+        "ai_pattern_hits": ai_hits,
+        "ai_pattern_hit_count": len(ai_hits),
+        "forbidden_words": forbidden,
+        "forbidden_word_hits": [
+            {"word": word, "count": count} for word, count in forbidden_hits
+        ],
+        "forbidden_word_hit_count": sum(count for _, count in forbidden_hits),
+        "q7_issues": [
+            {
+                "rule_id": issue.rule_id,
+                "severity": issue.severity,
+                "message": issue.message,
+            }
+            for issue in q7_issues
+        ],
+        "q7_issue_count": len(q7_issues),
+    }
+
+
 def _polish_node(ctx: dict[str, Any]) -> dict[str, Any]:
     """P1 Polisher AI 节点（去 AI 腔文风润色）。
 
     行为：
-    1. 取 ``writer_output.prose``，跑 ``scan_ai_patterns`` 拿确定性命中。
-    2. 组装 polisher payload（draft_text + ai_findings + style_constraints）。
-    3. mock 直通判定：若 ``ctx["mock_providers"]`` 含 'writer' 但不含 'polisher'，
-       跳过润色原样透传（既有用例零回归；真实链路始终润色）。
-    4. 调 ``run_agent(..., agent_name='polisher', expected='polisher', mock_script=...)``。
-    5. 长度守恒：``polished_text`` 与原文 ``visible_chars`` 差距 >10% → 兜底回退原文。
-    6. 任何异常（prompt 缺失 / provider 异常 / 契约校验失败）→ 兜底回退原文，
+    1. 取 ``writer_output.prose``，跑确定性预检 ``_polish_precheck``
+       （scan_ai_patterns + 题材禁词 + req_q7 三源）。
+    2. mock 直通判定：若 ``ctx["mock_providers"]`` 含 'writer' 但不含 'polisher'，
+       跳过润色原样透传（既有用例零回归；优先级高于下方的条件触发门）。
+    3. **P0 提速条件触发**：预检三源全零命中 → 跳过润色（``polisher_status=
+       'skipped_clean'`` + ``polish_skipped=True`` + ``polish_precheck`` 命中统计），
+       ``polished_prose`` 沿用 writer 产出；任一命中 → 走原润色路径（行为零变化）。
+    4. 组装 polisher payload（draft_text + ai_findings + style_constraints）。
+    5. 调 ``run_agent(..., agent_name='polisher', expected='polisher', mock_script=...)``。
+    6. 长度守恒：``polished_text`` 与原文 ``visible_chars`` 差距 >10% → 兜底回退原文。
+    7. 任何异常（prompt 缺失 / provider 异常 / 契约校验失败）→ 兜底回退原文，
        写 ``polisher_status='failed'``，**不**阻断 save_draft。
-    7. 输出 ``polished_prose`` 进 ctx，``save_draft_node`` 优先取。
+    8. 输出 ``polished_prose`` 进 ctx，``save_draft_node`` 优先取。
     """
     db_path = ctx["db_path"]
     run_id = ctx["run_id"]
@@ -752,7 +875,7 @@ def _polish_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     # mock 直通：既有 mock 流（仅含 writer、不含 polisher）原样透传，
     # 保证 test_chapter_write_revise_mode / test_chapter_write_scene_planner 等
-    # 既有测试零回归；真实链路（mock_providers 为 None 或包含 polisher）始终润色。
+    # 既有测试零回归；优先级高于下方条件触发门（mock 语义不抢）。
     if mock_providers and ("writer" in mock_providers) and ("polisher" not in mock_providers):
         return {
             "polished_prose": raw_prose,
@@ -761,7 +884,31 @@ def _polish_node(ctx: dict[str, Any]) -> dict[str, Any]:
             "ai_findings": [],
         }
 
-    ai_findings = scan_ai_patterns(raw_prose)
+    # P0 提速：条件触发预检（确定性检测器，零 LLM）。三源全零命中 ⇒ 无 AI 腔 /
+    # 无题材禁词 / 句长与 marker 密度均在既有阈值内 ⇒ 跳过润色省一次 LLM 往返，
+    # ``polished_prose`` 直接沿用 writer 产出（save_draft 的「polished_prose 优先、
+    # 缺失回落 writer_output.prose」逻辑已就位，数据形态与 mock 直通路径同形）。
+    # 任一命中 ⇒ 落回下方原润色路径，行为零变化。
+    precheck = _polish_precheck(raw_prose, db_path, chapter_id)
+    if (
+        precheck["ai_pattern_hit_count"] == 0
+        and precheck["forbidden_word_hit_count"] == 0
+        and precheck["q7_issue_count"] == 0
+    ):
+        return {
+            "polished_prose": raw_prose,
+            "polish_changes_summary": "确定性预检零命中：跳过润色（沿用 writer 产出）",
+            "polisher_status": "skipped_clean",
+            "polish_skipped": True,
+            "polish_skip_reason": (
+                "预检三源零命中：ai_pattern_hits=0 / forbidden_word_hits=0 / "
+                f"q7_issues=0（payload visible_chars={visible_chars(raw_prose)}）"
+            ),
+            "ai_findings": [],
+            "polish_precheck": precheck,
+        }
+
+    ai_findings = precheck["ai_pattern_hits"]
     payload: dict[str, Any] = {
         "agent": "polisher",
         "prompt_version": "polisher:v1",
@@ -1000,8 +1147,11 @@ def _length_check_node(ctx: dict[str, Any]) -> dict[str, Any]:
 def _condense_node(ctx: dict[str, Any]) -> dict[str, Any]:
     """字数闭环：超带时调 polisher capability 做压缩（节点内自循环，最多 2 轮）。
 
-    触发条件：``length_check_passed`` False 且 ``condense_rounds < _MAX_CONDENSE_ROUNDS (2)``。
-    不触发条件：带内 / 已达 2 轮 → 直接放行。
+    触发条件：``length_check_passed`` False 且 ``condense_rounds < _MAX_CONDENSE_ROUNDS (2)``
+    **且 payload 超带上限**（``visible_chars(payload) > _CONDENSE_PAYLOAD_TRIGGER_RATIO
+    × band_high``；P0 提速压缩预算门，见模块顶部常量区）。
+    不触发条件：带内 / 已达 2 轮 / payload 未超带上限（``skipped_below_budget``）
+    → 直接放行（均不调 LLM、不计轮）。
 
     mock 守卫（与 ``_polish_node`` 同款语义，V3.9 批次 1.1 修复生产不可达）：
     - ``mock_providers`` 为 None / {}（生产）⇒ ``mock_script=None`` 走真实 provider；
@@ -1017,8 +1167,8 @@ def _condense_node(ctx: dict[str, Any]) -> dict[str, Any]:
       save_draft / 偏差注记 全部读同一把 key）。
     - 计轮规则：每发起一次 LLM 调用（mock 或真实；异常 / 产出被拒收同样计）
       → ``condense_rounds + 1``；
-      skipped_in_band / skipped_empty / skipped_no_mock / over_band_after_2_rounds
-      **均不计轮**（不 +1；早返回路径 preserve rounds_used 不动）。
+      skipped_in_band / skipped_empty / skipped_no_mock / skipped_below_budget /
+      over_band_after_2_rounds **均不计轮**（不 +1；早返回路径 preserve rounds_used 不动）。
     - 返回值补 ``condense_status`` 供观测（早返回路径也带，便于 run detail 一眼看清）。
 
     输出确定性守卫（防 LLM 返回空 / 更长 / 非字符串把坏草灌进 drafts）：
@@ -1084,6 +1234,47 @@ def _condense_node(ctx: dict[str, Any]) -> dict[str, Any]:
             "polished_prose": current_prose,
             "condense_status": "skipped_no_mock",
             "condense_rounds": rounds_used,
+        }
+
+    # ---- P0 提速·压缩预算门：payload 未超带上限 ⇒ 无压缩余量 → 跳过 ----
+    # 判据 = ``_CONDENSE_PAYLOAD_TRIGGER_RATIO`` × band_high（模块顶部常量，取值依据
+    # 见常量区注释：band_high 是「已无压缩余量」的既有权威边界）。带上限优先取
+    # length_check 写回的 ``length_report.band_high``；直接调节点（单测 / 绕过
+    # length_check）时按同源口径回读项目字数带，与下方 prompt 装配逐字同口径。
+    # 位置：在 mock 守卫之后（mock 流的既有透传语义零变化）、真实 provider 路径之前。
+    band_high = int(report.get("band_high") or 0)
+    if band_high <= 0:
+        band_target = int(
+            report.get("target")
+            or ctx.get("target_word_count")
+            or DEFAULT_TARGET_WORD_COUNT
+        )
+        band_cfg_gate = ctx.get("word_band_cfg")
+        if not isinstance(band_cfg_gate, dict):
+            _, band_cfg_gate = _resolve_chapter_word_band(db_path, chapter_id)
+        band_high = int(
+            classify_prose_length(current_prose, band_target, **band_cfg_gate)[
+                "band_high"
+            ]
+        )
+    payload_chars = visible_chars(current_prose)
+    trigger_chars = int(band_high * _CONDENSE_PAYLOAD_TRIGGER_RATIO)
+    if payload_chars <= trigger_chars:
+        # 未超带（含 status='under' 欠字形态：压缩只会更短，内循环又以
+        # status != 'over' 为收工判据 ⇒ 白调一次 LLM 还把正文压坏）。不计轮：
+        # 没调 LLM，preserve rounds_used（与其余早返回路径同款）。
+        return {
+            "polished_prose": current_prose,
+            "condense_status": "skipped_below_budget",
+            "condense_rounds": rounds_used,
+            "condense_skipped": True,
+            "condense_skip_reason": (
+                f"payload {payload_chars} 字 ≤ 压缩预算阈值 {trigger_chars} 字"
+                f"（带上限 {band_high} × {_CONDENSE_PAYLOAD_TRIGGER_RATIO:.2f}）："
+                "未超带，无压缩余量"
+            ),
+            "condense_payload_chars": payload_chars,
+            "condense_budget_chars": trigger_chars,
         }
 
     if not run_id:
