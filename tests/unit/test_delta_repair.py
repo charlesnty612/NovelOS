@@ -1328,3 +1328,34 @@ def test_repair_change_id_uniquify_cross_array_isolated():
     assert repaired["character_changes"][0]["change_id"].startswith("cc:")
     assert repaired["world_changes"][0]["change_id"].startswith("wc:")
     assert repaired["new_events"][0]["change_id"].startswith("ev:")
+
+
+def test_fill_required_defaults_for_change_arrays():
+    """生产事故（2026-09-15）：observer 随机丢必填字段——confidence/risk_level/evidence
+    由修复层统一补安全缺省；id/facet 等不做兜底。"""
+    from packages.core.story_state.delta_repair import repair_delta
+
+    delta = {
+        "schema_version": "state-delta-v0",
+        "delta_id": "dlt_t", "delta_version": 1, "chapter_id": "ch_t",
+        "workflow_run_id": "w", "previous_state_version": 0,
+        "created_by": "test", "created_at": "2026-09-15T00:00:00",
+        "character_changes": [{
+            "change_id": "cc:t1", "op": "update", "target_id": "c1",
+            "character_id": "c1", "facet": "state", "field": "state.goal",
+            "before": "a", "after": "b",
+        }],
+        "relationship_changes": [], "world_changes": [],
+        "new_events": [], "new_hooks": [], "resolved_hooks": [], "debt_changes": [],
+    }
+    repaired, repairs = repair_delta(delta)
+    item = repaired["character_changes"][0]
+    assert item["confidence"] == 0.5
+    assert item["risk_level"] == "LOW"
+    assert item["evidence"]["chapter_id"] == "ch_t"
+    assert item["evidence"]["excerpt"]
+    fields = {r["field"] for r in repairs}
+    assert fields == {"confidence", "risk_level", "evidence"}
+    # 已填字段不重复补
+    _, repairs2 = repair_delta(repaired)
+    assert all(r["rule"] != "fill-required-default" for r in repairs2)

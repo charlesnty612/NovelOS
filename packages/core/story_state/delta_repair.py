@@ -1140,6 +1140,46 @@ def repair_delta(
     repaired["new_hooks"] = nh_items
     all_repairs.extend(nh_repairs)
 
+    # 通用必填缺省兜底（2026-09-15 生产事故驱动）：observer（LLM）在 token 压力下会
+    # 随机丢弃必填字段（已见 debt status_before、character confidence 两例，逐一加规则
+    # 是打地鼠）。对「有安全缺省值的必填字段」统一补全：confidence=0.5（中性）、
+    # risk_level="LOW"、evidence={chapter_id, 占位 excerpt}。id/facet/field/op 等
+    # 「猜了就有语义风险」的字段不做兜底，仍交 validator 硬错。
+    for arr_name in (
+        "character_changes",
+        "relationship_changes",
+        "world_changes",
+        "debt_changes",
+    ):
+        items = repaired.get(arr_name) or []
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            if "confidence" not in item:
+                item["confidence"] = 0.5
+                all_repairs.append({
+                    "array": arr_name, "index": idx,
+                    "rule": "fill-required-default", "target_id": item.get("target_id"),
+                    "field": "confidence",
+                })
+            if "risk_level" not in item:
+                item["risk_level"] = "LOW"
+                all_repairs.append({
+                    "array": arr_name, "index": idx,
+                    "rule": "fill-required-default", "target_id": item.get("target_id"),
+                    "field": "risk_level",
+                })
+            if "evidence" not in item:
+                item["evidence"] = {
+                    "chapter_id": chapter_id,
+                    "excerpt": "（observer 输出缺省，由修复层补全）",
+                }
+                all_repairs.append({
+                    "array": arr_name, "index": idx,
+                    "rule": "fill-required-default", "target_id": item.get("target_id"),
+                    "field": "evidence",
+                })
+
     # F4 修复：delta 内 change_id 唯一性 + 占位符检测（change_id_uniquify）。
     # 在所有 _repair_* 之后统一跑一次，按数组独立维护 seen 集合；其它 _repair_*
     # 可能因 drop-duplicate / insert-to-update 删 / 改 change，但不会影响本规则
