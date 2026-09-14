@@ -175,7 +175,7 @@
 8. **新事件固定 add**：`new_events[].op` Schema 固定 `const: "add"`，不要写 `update`。
 9. **resolved_hooks 固定 update**：`resolved_hooks[].op` Schema 固定 `const: "update"`，必须含 `to_status`（本数组语义下应为 `RESOLVED`，但 Schema 允许其他值以便 Observer 标注中途取消等场景）；可选 `from_status`。
 10. **new_hooks 固定 add**：`new_hooks[].op` Schema 固定 `const: "add"`，新 Hook `status` 取 `OPEN`（不需要在 change 中写 status 字段，新 Hook 进入 Hook Ledger 后由 Committer 设置初始 status）。
-11. **debt_changes.status_before/after**：debt 状态枚举为 `open` / `acknowledged` / `paid` / `forgiven`（state-delta-v0.md §2.5.7 + §10 Open Question #1 的本设计决策）。`status_before` 仅在 update 时可选填；`status_after` 必填。
+11. **debt_changes.status_before/after**：debt 状态枚举为 `open` / `acknowledged` / `paid` / `forgiven`（state-delta-v0.md §2.5.7 + §10 Open Question #1 的本设计决策）。`status_before` 仅在 update 时可选填；`status_after` 必填。**`debt_id` 必须引用已存在的债务（update）**：先在 `previous_state.debts` / `payload.config.resolvable_debt_ids` 中确认该 `debt_id` 确实存在；**记录新债务一律 `op='add'`**（且必须给出 `description`）。**不确定债务是否已存在时，优先 add**——对不存在的 `debt_id` 写 `op='update'` 会被 validator 直接拒绝（生产事故：书1 chapter-commit 连败于 `[schema] debt_changes/0/status_before: None is not one of [...]`）。
 12. **新事件 time 字段**：必填 `{ "timeline_day": int, "in_story_date": string|null }`；`timeline_day` 整数 ≥ 1。
 13. **新事件 type 字段**：枚举 `{revelation, conflict, decision, encounter, transition, other}`（对齐 Schema `new_event.type` 与 PRD §19）。
 14. **character_changes.facet**：必填 `definition` 或 `state`（对齐 PRD §17 Character Definition 与 State 分离）。`facet=definition` 属 HIGH 风险（涉及核心性格 / 基本能力）。

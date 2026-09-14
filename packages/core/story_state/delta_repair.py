@@ -11,14 +11,20 @@
      降级为 ``op='update'`` 并用现有行填 before（或对应状态字段）。
   3. **drop-duplicate**：insert-to-update 后 ``after`` 与当前值完全一致，
      直接丢弃该 change；``new_events`` / ``new_hooks`` 的 id 已存在时也直接丢弃。
-  4. **id-prefix-reconcile**（F3 修复）：``char_xxx`` / ``fac_xxx`` 前缀的 id
+  4. **update-to-add-downgrade**：``debt_changes`` 中 ``op='update'`` 但 ``debt_id``
+     不在 snapshot / DB 里（或为空）时，observer 的实际语义是「新增一笔债务」——
+     降级为 ``op='add'``，删掉 schema enum 不接受 null 的 ``status_before`` /
+     ``severity_before``，``status_after`` 作为初始状态保留；无 ``description``
+     则整条丢弃（add 必须有 description）。生产事故：书1 chapter-commit 连败于
+     ``[schema] debt_changes/0/status_before: None is not one of [...]``。
+  5. **id-prefix-reconcile**（F3 修复）：``char_xxx`` / ``fac_xxx`` 前缀的 id
      若在原前缀表里不存在，但**同一 hex 后缀**在对方表里唯一存在 → 改写为正确
      前缀。仅处理 char↔fac 双桶（location / hook / debt 等其它前缀不做）。
      覆盖位置：``character_changes.character_id`` / ``world_changes.world_id``
      （kind=faction 时）/ ``relationship_changes.from_character_id`` /
      ``to_id`` / ``new_events[*].participants[]``。
      零命中 / 多命中 → 不动（让 validator 报错，避免猜测）。
-  5. **change-id-uniquify**（F4 修复）：delta 内每条 change 的 ``change_id`` 必须
+  6. **change-id-uniquify**（F4 修复）：delta 内每条 change 的 ``change_id`` 必须
      在**同一数组内唯一**（七类数组：``character_changes`` / ``world_changes`` /
      ``relationship_changes`` / ``new_events`` / ``resolved_hooks`` / ``new_hooks``
      / ``debt_changes``）。生产事故 wfr_6765f6de4d76 现场：observer 照抄示例
@@ -865,7 +871,18 @@ def _repair_debt_changes(
     items: list[dict[str, Any]],
     index: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """debt_changes 无 ``before``/``after`` 字段，用 ``status_before`` / ``severity_before`` 语义兜底。"""
+    """debt_changes 无 ``before``/``after`` 字段，用 ``status_before`` / ``severity_before`` 语义兜底。
+
+    两条规则：
+    - **fill-before**：``op='update'`` 且债务已存在 → 用当前 ``status`` / ``severity``
+      补齐缺失（或为 null）的 ``status_before`` / ``severity_before``。
+    - **update-to-add-downgrade**：``op='update'`` 但目标债务不存在（或 ``debt_id`` 为空）
+      → observer 实际语义是「新增一笔债务」，降级为 ``op='add'`` 并删掉
+      ``status_before`` / ``severity_before`` 键（schema 的 enum 不接受 null）；
+      ``status_after`` 作为新债务初始状态保留。无 ``description`` 时该 add 不成立
+      （validator 要求 ``op='add'`` 的 description 非空）→ 整条丢弃并记
+      ``rule="dropped-no-description"``。
+    """
     repaired: list[dict[str, Any]] = []
     repairs: list[dict[str, Any]] = []
     for idx, item in enumerate(items):
@@ -877,7 +894,42 @@ def _repair_debt_changes(
         target_id = did
         entity = index["debts"].get(did) if isinstance(did, str) and did else None
 
-        if op == "update" and entity is not None:
+        if op == "update" and entity is None:
+            # 目标债务不存在（或 debt_id 为空）时 observer 仍写 op='update'——其实际语义是
+            # 「新增一笔债务」（生产事故：书1 chapter-commit 连续失败于
+            # ``[schema] debt_changes/0/status_before: None is not one of [...]``）。
+            # 降级为 op='add'：Schema 的 status_before / severity_before 即使 nullable 也不
+            # 接受 null（enum 不含 null），必须删键；status_after 作为新债务的初始状态保留
+            # （缺失则不动，交 validator 报错）。无 description 的 add 不成立
+            # （validator 要求 op='add' 的 description 非空）→ 整条丢弃。
+            desc = item.get("description")
+            if not isinstance(desc, str) or not desc.strip():
+                repairs.append(
+                    {
+                        "array": "debt_changes",
+                        "index": idx,
+                        "rule": "dropped-no-description",
+                        "target_id": target_id,
+                    }
+                )
+                continue
+            new_item = {
+                k: v
+                for k, v in item.items()
+                if k not in ("status_before", "severity_before")
+            }
+            new_item["op"] = "add"
+            repairs.append(
+                {
+                    "array": "debt_changes",
+                    "index": idx,
+                    "rule": "update-to-add-downgrade",
+                    "target_id": target_id,
+                    "field": "op",
+                }
+            )
+            item = new_item
+        elif op == "update":
             new_item = dict(item)
             filled = False
             if item.get("status_before") is None:

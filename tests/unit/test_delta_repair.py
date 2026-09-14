@@ -335,6 +335,203 @@ def test_repair_debt_change_fill_status_before():
     assert validate_delta(repaired) == []
 
 
+def test_repair_debt_update_known_id_unchanged():
+    """已知债务的 update 不受新规则影响：op 保持 update，不产生任何 repair。"""
+    delta = _minimal_delta(
+        debt_changes=[
+            {
+                "change_id": "dc_1",
+                "op": "update",
+                "target_id": "debt_1",
+                "debt_id": "debt_1",
+                "status_before": "open",
+                "status_after": "paid",
+                "severity_before": 0.5,
+                "confidence": 0.9,
+                "evidence": _evidence(),
+                "risk_level": "LOW",
+            }
+        ],
+    )
+    snapshot = {"debts": [{"debt_id": "debt_1", "status": "open", "severity": 0.5}]}
+    repaired, repairs = repair_delta(delta, snapshot=snapshot)
+    assert repairs == []
+    assert repaired["debt_changes"][0]["op"] == "update"
+    assert repaired["debt_changes"][0]["status_before"] == "open"
+    assert validate_delta(repaired) == []
+
+
+# ---------------------------------------------------------------------------
+# update-to-add-downgrade 规则（未知 debt_id 上的 op='update'）
+# 生产事故：书1 chapter-commit 连败于
+# ``[schema] debt_changes/0/status_before: None is not one of [...]``。
+# ---------------------------------------------------------------------------
+
+
+def test_repair_debt_update_unknown_id_downgrades_to_add():
+    delta = _minimal_delta(
+        debt_changes=[
+            {
+                "change_id": "dc_1",
+                "op": "update",
+                "target_id": "debt_new",
+                "debt_id": "debt_new",
+                "description": "沈砚欠典当行三百两",
+                "status_before": None,
+                "status_after": "open",
+                "severity_before": None,
+                "confidence": 0.9,
+                "evidence": _evidence(),
+                "risk_level": "MEDIUM",
+            }
+        ],
+    )
+    snapshot = {"debts": [{"debt_id": "debt_old", "status": "open", "severity": 0.5}]}
+    repaired, repairs = repair_delta(delta, snapshot=snapshot)
+
+    item = repaired["debt_changes"][0]
+    assert item["op"] == "add"
+    assert "status_before" not in item
+    assert "severity_before" not in item
+    assert item["status_after"] == "open"  # 保留为初始状态
+    assert item["description"] == "沈砚欠典当行三百两"
+    assert [r["rule"] for r in repairs] == ["update-to-add-downgrade"]
+    assert repairs[0] == {
+        "array": "debt_changes",
+        "index": 0,
+        "rule": "update-to-add-downgrade",
+        "target_id": "debt_new",
+        "field": "op",
+    }
+    assert validate_delta(repaired) == []
+
+
+def test_repair_debt_update_unknown_id_without_description_dropped():
+    delta = _minimal_delta(
+        debt_changes=[
+            {
+                "change_id": "dc_1",
+                "op": "update",
+                "target_id": "debt_new",
+                "debt_id": "debt_new",
+                "description": None,
+                "status_before": None,
+                "status_after": "open",
+                "confidence": 0.9,
+                "evidence": _evidence(),
+                "risk_level": "LOW",
+            }
+        ],
+    )
+    snapshot = {"debts": [{"debt_id": "debt_old", "status": "open", "severity": 0.5}]}
+    repaired, repairs = repair_delta(delta, snapshot=snapshot)
+
+    assert repaired["debt_changes"] == []
+    assert repairs == [
+        {
+            "array": "debt_changes",
+            "index": 0,
+            "rule": "dropped-no-description",
+            "target_id": "debt_new",
+        }
+    ]
+    assert validate_delta(repaired) == []
+
+
+def test_repair_debt_update_empty_debt_id_without_description_dropped():
+    """debt_id 为空同样按「目标不存在」处理；description 是空白串时按缺失处理。"""
+    delta = _minimal_delta(
+        debt_changes=[
+            {
+                "change_id": "dc_1",
+                "op": "update",
+                "target_id": "",
+                "debt_id": "",
+                "description": "   ",
+                "status_before": None,
+                "status_after": "open",
+                "confidence": 0.9,
+                "evidence": _evidence(),
+                "risk_level": "LOW",
+            }
+        ],
+    )
+    repaired, repairs = repair_delta(delta, snapshot={"debts": []})
+
+    assert repaired["debt_changes"] == []
+    assert [r["rule"] for r in repairs] == ["dropped-no-description"]
+
+
+def test_repair_debt_empty_debt_id_with_description_downgrades_to_add():
+    """debt_id 为空且有 description 时走同一降级路径（缺失的 debt_id 仍由 schema 拦截）。"""
+    delta = _minimal_delta(
+        debt_changes=[
+            {
+                "change_id": "dc_1",
+                "op": "update",
+                "target_id": "",
+                "debt_id": "",
+                "description": "沈砚欠典当行三百两",
+                "status_before": "open",
+                "status_after": "open",
+                "confidence": 0.9,
+                "evidence": _evidence(),
+                "risk_level": "LOW",
+            }
+        ],
+    )
+    repaired, repairs = repair_delta(delta, snapshot={"debts": []})
+
+    item = repaired["debt_changes"][0]
+    assert item["op"] == "add"
+    assert "status_before" not in item
+    assert [r["rule"] for r in repairs] == ["update-to-add-downgrade"]
+
+
+def test_repair_debt_mixed_known_and_unknown_updates():
+    """同一数组内已知债务走 fill-before、未知债务走降级，repairs 的 index 各自对齐。"""
+    delta = _minimal_delta(
+        debt_changes=[
+            {
+                "change_id": "dc_1",
+                "op": "update",
+                "target_id": "debt_1",
+                "debt_id": "debt_1",
+                "status_before": None,
+                "status_after": "paid",
+                "confidence": 0.9,
+                "evidence": _evidence(),
+                "risk_level": "LOW",
+            },
+            {
+                "change_id": "dc_2",
+                "op": "update",
+                "target_id": "debt_new",
+                "debt_id": "debt_new",
+                "description": "新欠条",
+                "status_before": None,
+                "status_after": "open",
+                "confidence": 0.8,
+                "evidence": _evidence(),
+                "risk_level": "LOW",
+            },
+        ],
+    )
+    snapshot = {"debts": [{"debt_id": "debt_1", "status": "open", "severity": 0.5}]}
+    repaired, repairs = repair_delta(delta, snapshot=snapshot)
+
+    fill = [r for r in repairs if r["rule"] == "fill-before"]
+    down = [r for r in repairs if r["rule"] == "update-to-add-downgrade"]
+    assert [r["index"] for r in fill] == [0, 0]  # status_before + severity_before
+    assert all(r["target_id"] == "debt_1" for r in fill)
+    assert [r["index"] for r in down] == [1]
+    assert down[0]["target_id"] == "debt_new"
+    assert repaired["debt_changes"][0]["op"] == "update"
+    assert repaired["debt_changes"][0]["status_before"] == "open"
+    assert repaired["debt_changes"][1]["op"] == "add"
+    assert validate_delta(repaired) == []
+
+
 def test_repair_resolved_hook_fill_from_status():
     delta = _minimal_delta(
         resolved_hooks=[
