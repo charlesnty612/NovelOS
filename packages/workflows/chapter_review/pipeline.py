@@ -7,7 +7,7 @@ V1.3 新增 critic 节点；P0 默认 always；V1.3 新增 deep_review 二审 AI
   ``resolve_band_config`` 生效带派生，见 V3.9 批次 5.2）、禁用词扫描（默认
   forbidden_words=[仿佛,如同,本章目标]）；V3.9 批次 5.7 起同时一次性取齐
   critic / deep_review 共享输入（ctx["review_inputs"]，见下）；题材库 P1b 起项目
-  绑定题材包时额外产出 ``review_report.genre_check``（核销层 v1：配比偏差 +
+  绑定题材包时额外产出 ``review_report.genre_check``（核销层 v2：配比偏差 +
   节奏红线，``GENRE-`` 前缀 issue 恒 warning，**report-only 不阻断**；未绑定 →
   该段整体缺席，零行为变化）。题材库 P2：绑定题材包时另做两件事——(a) payload
   ``style_constraints.forbidden_words`` 非空 → 确定性禁词扫描，命中以
@@ -58,12 +58,12 @@ from packages.core.genre.consumers import (
     forbidden_words,
 )
 from packages.core.genre.service import GenrePackService
+from packages.core.genre.target_words import resolve_target_word_count
 from packages.core.genre.verifier import verify_chapter
 from packages.core.ids import now_iso
 from packages.core.model_router.router import capability_for
 from packages.core.quality.ai_patterns import scan_ai_patterns
 from packages.core.quality.wordcount import (
-    DEFAULT_TARGET_WORD_COUNT,
     classify_prose_length,
     resolve_band_config,
 )
@@ -83,8 +83,10 @@ _WORLD_RULES_CAP = 20
 _WORLD_RULE_STATEMENT_MAX_CHARS = 500
 _WORLD_RULE_TRUNCATED_SUFFIX = "…（已截断）"
 _DEEP_REVIEWER_PROMPT_VERSION = "deep_reviewer:v1"
-# 单章目标字数默认（V3.9 批次 5.1）：全仓单源 = wordcount.DEFAULT_TARGET_WORD_COUNT(3000)，
-# 仅供「请求体与 plan_json 均未给出 expected_word_count」时兜底。
+# 单章目标字数（V3.9 批次 5.1；题材包驱动 2026-09-14）：解析单点 =
+# packages.core.genre.target_words.resolve_target_word_count ——
+# 请求体显式 > plan_json 显式 > 绑定题材包 pacing.chapter_words.target >
+# 全仓单源常量 wordcount.DEFAULT_TARGET_WORD_COUNT(3000)。
 # 注：context_engine 装配侧另有内部 fallback（builders_common._DEFAULT_TARGET_WORD_COUNT=2200），
 # 只在调用方完全未传 target_word_count 时生效，与本兜底不同层、不在本单源范围。
 
@@ -120,7 +122,7 @@ def _should_invoke_critic(mode: str, chapter_number: int | None) -> bool:
 
 
 def _collect_genre_check(db_path: str, chapter_id: str) -> dict[str, Any] | None:
-    """核销层 v1 挂点（题材库 P1b）：返回 ``genre_check`` 段，未绑定题材包 → None。
+    """核销层 v2 挂点（题材库 P1b）：返回 ``genre_check`` 段，未绑定题材包 → None。
 
     - report-only：核销结果只进 ``review_report.genre_check``（结构见
       :meth:`packages.core.genre.verifier.GenreCheckResult.to_dict`），issues 另以
@@ -202,8 +204,6 @@ def _fetch_chapter_number(db_path: str, chapter_id: str) -> int | None:
 def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
-    # 目标字数：请求体显式传入 > plan_json.expected_word_count > 默认（全仓单源 3000）
-    target = int(ctx.get("target_word_count") or 0)
     # V3.7：项目级字数带覆盖——先一次性从 chapters 行取 project_id + plan_json，
     # 再读 projects.word_band_json 折叠覆盖。无覆盖时输出与原逐字节一致。
     # V3.9 批次 5.7：plan_json 解析结果同时供 review_inputs（critic / deep_review 共享）复用。
@@ -222,8 +222,6 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
         if prow is not None:
             chapter_project_id = prow["project_id"]
             plan_dict = _parse_plan_json(prow["plan_json"])
-            if not target:
-                target = int(plan_dict.get("expected_word_count") or 0)
     except Exception:
         pass
     # 无论 target 是否显式传入，都尝试读项目覆盖（与 target 来源解耦——ctx 传
@@ -250,8 +248,16 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 parsed = None
             if isinstance(parsed, dict):
                 word_band_overrides = parsed
-    if not target:
-        target = DEFAULT_TARGET_WORD_COUNT
+    # 目标字数：请求体显式传入 > plan_json.expected_word_count > 绑定题材包
+    # pacing.chapter_words.target > 默认（全仓单源 3000）。解析单点：
+    # packages.core.genre.target_words.resolve_target_word_count。
+    target = resolve_target_word_count(
+        db_path,
+        chapter_id,
+        plan_dict,
+        explicit=ctx.get("target_word_count"),
+        project_id=chapter_project_id,
+    )
 
     conn = get_connection(db_path)
     try:
@@ -374,7 +380,7 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "warnings": warnings,
         "errors": errors,
     }
-    # 题材库 P1b：核销层 v1（配比偏差 + 节奏红线）挂点——report-only，不阻断。
+    # 题材库 P1b：核销层 v2（配比偏差 + 节奏红线）挂点——report-only，不阻断。
     # 未绑定题材包 → 整段跳过（report 无 genre_check 键，零行为变化）。
     genre_check = _collect_genre_check(db_path, chapter_id)
     if genre_check is not None:
@@ -758,7 +764,9 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "prompt_version": _CRITIC_PROMPT_VERSION,
         "chapter": {
             "title": None,
-            "target_word_count": int(ctx.get("target_word_count") or DEFAULT_TARGET_WORD_COUNT),
+            "target_word_count": resolve_target_word_count(
+                db_path, chapter_id, None, explicit=ctx.get("target_word_count"),
+            ),
             "expected_role": ctx.get("expected_role"),
             "chapter_id": chapter_id,
         },
@@ -924,7 +932,9 @@ def _deep_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "prompt_version": _DEEP_REVIEWER_PROMPT_VERSION,
         "chapter": {
             "title": None,
-            "target_word_count": int(ctx.get("target_word_count") or DEFAULT_TARGET_WORD_COUNT),
+            "target_word_count": resolve_target_word_count(
+                db_path, chapter_id, None, explicit=ctx.get("target_word_count"),
+            ),
             "expected_role": ctx.get("expected_role"),
             "chapter_id": chapter_id,
         },

@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Changed（2026-09-14 弧末批次：P1 规划合并 + target 题材包化 + 核销 v2——书1 全弧实战驱动）
+
+> 背景：书 1 首弧 21 章全自动量产（62,773 字，均章 10 分钟）完成，本批全部来自实战证据。
+
+- **P1 规划合并产品化**（a1b730c 已单列）：director_planner 单节点出 plan+scenes、scene_plan 落库（0027）、write 读落库、白名单防幻觉 ID、相邻 JSON 合并兜底。二次 A/B 硬门槛全过（解析 1/1、零幻觉、时空连续、提速 -55%~-84%）。
+- **target 题材包化**：章字数目标解析链 ctx/plan → 绑定题材包 pacing.chapter_words.target → 默认 3000（新模块 packages/core/genre/target_words.py）。实战依据：target=3000 压题材带 2000~3000 上沿致 9/21 章超上限；书 2 起包声明 2500，write/review/scene_planner 三处同链。
+- **核销层 v2**（弧级口径）：配比核销改弧级累计（卷内 typed scene ≥20 出结论，SE≤10% 推导；章级只留明细），修 other 残差桶双向计偏离；untyped scene 产 GENRE-SCENE-UNTYPED 不再静默；红线语料 140 字→整章正文 3.1k~4.4k 字；settlement 无数据通路诚实登记 pending。
+- **量产排障沉淀**（AGENTS.md 坑区 +3：孤儿 run 409、门禁改稿接力暂停、commit 风控门批量阻塞；W-LEN 双向意见防过压缩乒乓球 4272→1853）。
+- **prompt 口径对齐**：scene_planner/director_planner 的 E-SPL-10 落点描述改弧级累计口径（核销 v2 语义）；eval golden 三份 mock 清空幻觉 hook_handling（新白名单特性生效）。
+- **内容仓约定**：NovelOS-Content 不推 GitHub（用户裁决，AGENTS.md 硬规则 5 增补）；pack v2（chapter_words.target=2500）。
+
+
 ### Changed（2026-09-13 运行记录下置 + V4.0 模块化重构全量落地）
 
 > 运行记录下置：用户提出、主会话按授权拍板（信息层级：草稿是工作对象，运行记录是过程信息；

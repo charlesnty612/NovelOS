@@ -7,8 +7,8 @@
   与 canon / state-delta 校验器同款）；
 - :mod:`packages.core.genre.model` —— payload 消费子集模型 + schema 版本线常量；
 - :mod:`packages.core.genre.queries` —— SQL 与行投影（无连接、无事务）；
-- :func:`packages.core.genre.verifier.verify_chapter` —— 核销层 v1（配比偏差 +
-  节奏红线，report-only 不阻断；``GENRE-`` 前缀 issue 恒 warning）；
+- :func:`packages.core.genre.verifier.verify_chapter` —— 核销层 v2（弧级配比 +
+  节奏红线 + untyped 显式化，report-only 不阻断；``GENRE-`` 前缀 issue 恒 warning）；
 - :mod:`packages.core.genre.consumers` —— 读侧投影（P2）：``opening_rules``
   （signing_check）/ ``critic_rubric``（critic + deep_review 的 genre_rubric）/
   ``forbidden_words`` + ``count_forbidden_word_hits``（basic_checks 禁词扫描）。
@@ -38,6 +38,7 @@ from .model import (
     GenrePayoffType,
 )
 from .service import BindStatus, GenrePackService, validate_payload
+from .target_words import pack_chapter_words_target, resolve_target_word_count
 from .verifier import (
     RATIO_DEVIATION_THRESHOLD,
     GenreCheckResult,
@@ -65,6 +66,8 @@ __all__ = [
     "critic_rubric",
     "forbidden_words",
     "opening_rules",
+    "pack_chapter_words_target",
+    "resolve_target_word_count",
     "validate_payload",
     "verify_chapter",
 ]

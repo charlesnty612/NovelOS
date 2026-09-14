@@ -209,7 +209,7 @@
     - **可核验性**：scene 涉及原著角色 / 原著时间线要素时，对应 slot 的 `characters` / `location` 必须在 `available_characters` / `available_locations` 内可查；引用必须可追溯回 `director_plan.key_beats`，禁止 Scene Planner 自创原著要素引用。
 12. **`scene_type` 输出契约（题材库 P1b 核销口径；P2 显式化）**：输入 `genre_pack.ratio_declarations` 非空时，**每个 scene 必须输出 `scene_type`**；否则不输出该字段。契约三条：
     - **取值与配比维度一致**：`scene_type` 取值必须取自 `ratio_declarations` 的**键**（如声明 `{"action": 0.7, "transition": 0.3}` → 每个 scene 的 `scene_type ∈ {action, transition}`）；禁止声明外的自造取值（核销层按 `ratio_declarations` 归一化后对账，未知取值不计入任何维度）。
-    - **配比与 `target_words` 的关系**：`scene_type` 是**分摊维度标注**，`target_words` 是**预算落实**——同一 `scene_type` 的 scene 的 `target_words` 之和在本章 `target_word_count` 中的占比，应贴近该维度的声明份额（核销阈值 ±10%）；Rule 7 的总和约束（90%~110%）优先，两者冲突时先满足 Rule 7，再为每个 scene 标注最贴近的维度。
+    - **配比与 `target_words` 的关系**：`scene_type` 是**分摊维度标注**，`target_words` 是**预算落实**——同一 `scene_type` 的 scene 的 `target_words` 之和在本章 `target_word_count` 中的占比，应贴近该维度的声明份额（核销为弧级累计口径，单章 ±10% 仅作分配参考）；Rule 7 的总和约束（90%~110%）优先，两者冲突时先满足 Rule 7，再为每个 scene 标注最贴近的维度。
     - **缺席即放弃核销**：声明了配比却漏标 `scene_type` ⇒ 核销层按「该项跳过」处理（不报错，但配比偏差无从对账，等于放弃题材约束）；不得为凑配比把全部 scene 标成同一维度。
 
 ---
@@ -448,7 +448,7 @@
 7. **E-SPL-07 信息边界**：`information_boundary` 必须为数组，不得省略。
 8. **E-SPL-08 视角一致**：同一 scene 内 `pov` 不变；`pov` 为 `third_person_limited` 时 `pov_character_id` 非空。
 9. **E-SPL-09 失败降级**：Workflow 在 prompt 缺失 / provider 异常 / 1 次重试仍失败时，回退到原 stub 机械映射逻辑，**不**阻断 writer run。
-10. **E-SPL-10 `scene_type` 契约（题材库 P1b/P2）**：输入 `genre_pack.ratio_declarations` 非空时，每个 scene 必须含 `scene_type` 且取值 ∈ 声明键；同 `scene_type` 的 `target_words` 占比与该维度声明份额偏离 >10% = 不通过（由核销层 `GENRE-RATIO-DEVIATION` 对账）。输入无 `genre_pack` / 无配比声明时，`scene_type` 允许缺席。
+10. **E-SPL-10 `scene_type` 契约（题材库 P1b/P2）**：输入 `genre_pack.ratio_declarations` 非空时，每个 scene 必须含 `scene_type` 且取值 ∈ 声明键；同 `scene_type` 的 `target_words` 占比与该维度声明份额的核对为**弧级累计口径**（卷内 ≥20 个 typed scene 时由核销层 `GENRE-RATIO-DEVIATION` 出弧级结论；章级仅留明细，不做单章 ±10% 判定）。输入无 `genre_pack` / 无配比声明时，`scene_type` 允许缺席。
 
 ---
 

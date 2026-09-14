@@ -77,6 +77,7 @@ from packages.core.genre.consumers import (
     forbidden_words,
 )
 from packages.core.genre.service import GenrePackService
+from packages.core.genre.target_words import resolve_target_word_count
 from packages.core.ids import new_id, now_iso
 from packages.core.model_router.router import capability_for
 from packages.core.quality.ai_patterns import scan_ai_patterns
@@ -316,11 +317,10 @@ def _collect_scene_planner_inputs(
             "title": context["chapter_title"],
             "number": context["chapter_number"],
             # plan_json 存的是 expected_word_count；target_word_count 为兼容旧字段。
-            # 兜底取全仓单源常量 DEFAULT_TARGET_WORD_COUNT（3000）。
-            "target_word_count": int(
-                plan.get("expected_word_count")
-                or plan.get("target_word_count")
-                or DEFAULT_TARGET_WORD_COUNT
+            # 兜底走共享解析（题材包 pacing.chapter_words.target → 全仓默认），
+            # 与 writer / length_check / review 三处同链同值（target 题材包化）。
+            "target_word_count": resolve_target_word_count(
+                db_path, chapter_id, plan
             ),
             "expected_role": plan.get("expected_role"),
         },
@@ -618,11 +618,10 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         db_path,
         chapter_id,
         scene_plan,
-        # 目标字数优先取 plan 的 expected_word_count；ctx 覆盖其次；
-        # 兜底取全仓单源常量 DEFAULT_TARGET_WORD_COUNT（3000）。
-        target_word_count=ctx.get("target_word_count")
-        or int((ctx.get("loaded_plan") or {}).get("expected_word_count") or 0)
-        or DEFAULT_TARGET_WORD_COUNT,
+        # 目标字数优先级：ctx 覆盖 > plan 显式 > 绑定题材包 pacing.chapter_words.target
+        # > 全仓单源常量 DEFAULT_TARGET_WORD_COUNT（3000）；解析单点在
+        # packages.core.genre.target_words.resolve_target_word_count。
+        target_word_count=_resolve_target_word_count(ctx, ctx.get("loaded_plan") or {}),
         context_mode=context_mode,
     )
 
@@ -1021,30 +1020,19 @@ def _resolve_chapter_word_band(
 
 
 def _resolve_target_word_count(ctx: dict[str, Any], plan: dict[str, Any]) -> int:
-    """解析本章目标字数（与 _writer_node / review._basic_checks 同口径）。
+    """解析本章目标字数（与 _writer_node / review 两侧同口径）。
 
     优先级：ctx 显式传入 → plan_json.expected_word_count → plan_json.target_word_count
-    → 兜底 ``DEFAULT_TARGET_WORD_COUNT``（3000，全仓单源）。
+    → 绑定题材包的 ``pacing.chapter_words.target`` → 兜底 ``DEFAULT_TARGET_WORD_COUNT``
+    （3000，全仓单源）。后两级由 :func:`packages.core.genre.target_words.resolve_target_word_count`
+    单点实现（未绑定题材包时与改造前逐字节一致）。
     """
-    raw = ctx.get("target_word_count")
-    if raw:
-        try:
-            return max(1, int(raw))
-        except (TypeError, ValueError):
-            pass
-    expected = plan.get("expected_word_count") if isinstance(plan, dict) else None
-    if expected:
-        try:
-            return max(1, int(expected))
-        except (TypeError, ValueError):
-            pass
-    legacy = plan.get("target_word_count") if isinstance(plan, dict) else None
-    if legacy:
-        try:
-            return max(1, int(legacy))
-        except (TypeError, ValueError):
-            pass
-    return DEFAULT_TARGET_WORD_COUNT
+    return resolve_target_word_count(
+        ctx.get("db_path"),
+        ctx.get("chapter_id"),
+        plan,
+        explicit=ctx.get("target_word_count"),
+    )
 
 
 def _length_check_node(ctx: dict[str, Any]) -> dict[str, Any]:

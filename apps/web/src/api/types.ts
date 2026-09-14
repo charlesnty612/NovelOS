@@ -1347,6 +1347,8 @@ export interface GenreCheck {
   rule_ids?: string[];
   ratio_check?: Record<string, unknown> | null;
   redline_check?: Record<string, unknown> | null;
+  /** 核销 v2 弧级累计对账段（卷内 typed scene ≥20 时出弧级结论；缺席=样本未就绪）。 */
+  arc_check?: Record<string, unknown> | null;
   skipped?: string[];
   error?: string | null;
 }

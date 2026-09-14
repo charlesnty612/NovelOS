@@ -415,7 +415,7 @@
 11. **E-SPL-06 冲突与转折**：每 scene `conflict` 非空；转折 scene `turn` 非空。
 12. **E-SPL-07 信息边界**：`information_boundary` 为数组，不得省略。
 13. **E-SPL-08 视角一致**：同 scene `pov` 不变；`third_person_limited` 时 `pov_character_id` 非空。
-14. **E-SPL-10 `scene_type` 契约**：`ratio_declarations` 非空时每 scene 含 `scene_type` 且取值 ∈ 声明键；同型 `target_words` 占比偏离 > 10% 会被 `GENRE-RATIO-DEVIATION` 记账。
+14. **E-SPL-10 `scene_type` 契约**：`ratio_declarations` 非空时每 scene 含 `scene_type` 且取值 ∈ 声明键；同型 `target_words` 占比的核销为**弧级累计口径**（卷内 ≥20 个 typed scene 时由 `GENRE-RATIO-DEVIATION` 出弧级结论；章级只留明细不下账）。
 15. **E-MRG-15 字数闭环**：`scene_plan.scenes[].target_words` 总和落在 `chapter.target_word_count` 的 90%–110%；缺失时装配侧等分兜底。
 16. **E-MRG-16 hook / debt ID 白名单（v0.2）**：`hook_handling[].hook_id` ∈ 输入 `hook_ledger_excerpt` 的 ID 集合、`debt_handling[].debt_id` ∈ 输入 `narrative_debt_excerpt` 的 ID 集合；**输入为空（或键缺席）时两者必须为 `[]`**，否则判输出无效（走既有 output-invalid 重试），不做静默丢弃。
 17. **E-MRG-17 时空连续（v0.2）**：`time_in_story` 不得出现输入中不存在的年号 / 纪元；scene 的 `location` 必须与 `previous_chapter_tail` 的去向承诺连续（跨地点须有 `scene_plan.deviations[]` 说明）；位面任务进行中的角色不得出现在管理局设施（除非结算 / 回归章）。

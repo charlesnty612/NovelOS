@@ -21,7 +21,7 @@ _SCENE_PLANNER_MARKERS: tuple[str, ...] = (
     "target_words",
     # 三条细则各自的判别短语
     "取值必须取自 `ratio_declarations` 的**键**",
-    "核销阈值 ±10%",
+    "弧级累计口径",
     "声明了配比却漏标 `scene_type`",
     "E-SPL-10",
 )

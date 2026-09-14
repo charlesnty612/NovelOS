@@ -2,10 +2,11 @@
 
 > 职责：专项题材库（跨作品聚合的题材公约资产）的软件层——题材包 CRUD、payload
 > 校验（自有 schema 版本线 v1.1.0）、项目级绑定、director / scene_planner / writer
-> 三 consumer 的注入段、**核销层 v1**（配比偏差 + 节奏红线，report-only）、以及
-> **P2 读侧投影**（signing_check 题材开篇检查段 / critic + deep_review 的
-> genre_rubric / basic_checks 题材禁词扫描）。
-> 状态：题材库 **P1a + P1b + P2** 落地（2026-09-13）。
+> 三 consumer 的注入段、**核销层 v2**（弧级配比 + 节奏红线 + untyped 显式化，
+> report-only）、以及**P2 读侧投影**（signing_check 题材开篇检查段 / critic +
+> deep_review 的 genre_rubric / basic_checks 题材禁词扫描）。
+> 状态：题材库 **P1a + P1b + P2** 落地（2026-09-13）；核销层 **v2 口径修订**
+> （2026-09-14，实战证据驱动：章级配比核销必然误报 → 升格弧级）。
 > 上游裁决：`docs/roadmap/题材库-评估与落地计划-2026-09-13.md` §三/§四/§五。
 
 ## 职责与边界
@@ -19,10 +20,12 @@
 - 注入段的取数（director 结构模板摘要 + 爽点清单 + pacing；scene_planner 爽点摘要 +
   配比声明 + 配比指令；writer 题材体例）——取数函数
   `packages/core/context_engine/builders_common._genre_pack_excerpt`，本模块只提供行数据；
-- **核销层 v1**（P1b）：`packages/core/genre/verifier.py` 的
-  :func:`verify_chapter` —— 配比偏差 + 节奏红线两类规定性约束的写后核销，
+- **核销层 v2**（P1b / 2026-09-14 口径修订）：`packages/core/genre/verifier.py` 的
+  :func:`verify_chapter` —— 弧级配比 + 节奏红线两类规定性约束的写后核销，
   产出 `GENRE-` 前缀 issue（恒 `warning`，report-only **不阻断**）；
-  挂点：`chapter_review` 的 `basic_checks` → `review_report.genre_check`；
+  挂点：`chapter_review` 的 `basic_checks` → `review_report.genre_check`
+  （章级配比只记明细不产 issue，配比结论在 `arc_check`；untyped scene 产
+  `GENRE-SCENE-UNTYPED`；红线语料含整章正文）；
 - **读侧投影**（P2）：`packages/core/genre/consumers.py` —— 纯函数、无 IO：
   - `opening_rules` → signing_check 的 `genre_opening` 检查段（黄金三章特化规则，
     失败为 info 级提示）；
@@ -31,6 +34,11 @@
     `__genre_rubric_truncated__`）；
   - `forbidden_words` / `count_forbidden_word_hits` → basic_checks 的题材禁词确定性
     扫描（命中进 `review_report.warnings`：`[GENRE-FORBIDDEN-WORD] <词> ×N`，warning 级）。
+- **章目标字数解析**（2026-09-14）：`packages/core/genre/target_words.py` ——
+  `resolve_target_word_count` / `pack_chapter_words_target`：把绑定题材包声明的
+  `pacing.chapter_words.target` 插进章目标字数优先级链（显式 > 包 > 3000），
+  write（length_check / writer）与 review（basic_checks / critic / deep_review）
+  两侧共用单点解析（修复书1 21 章 target 全为 3000、正压题材包字数带上沿）。
 
 **不做**：
 - 不写题材正文/审核禁忌（**红线**：题材内容只进内容仓 `NovelOS-Content/genres/<题材>/`；
@@ -57,7 +65,7 @@
 | schema | `docs/reference-canon/schemas/reference-canon.schema.json` | `docs/state-model/schemas/genre-pack.schema.json`（v1.1.0） |
 | 消费 | director / scene_planner / writer 三 consumer 各吃自己的字段 | 三 consumer 均已落地：director（结构模板 / 爽点清单 / pacing）、scene_planner（爽点摘要 + 配比声明 + 配比指令）、writer（题材体例 → `style_constraints.genre_style`） |
 | 共存 | **并存**：canon 是叠加参照，题材包是项目常驻；两者互不覆盖、各自独立缺席 | 同左 |
-| 核销 | （无）canon 只作为参照注入 | **题材包有核销层**：`verify_chapter` 逐章对账配比 / 字数带 / 红线，产出 `GENRE-` issue（report-only） |
+| 核销 | （无）canon 只作为参照注入 | **题材包有核销层**：`verify_chapter` 逐章调用、弧级累计对账配比（章级只记明细）+ 字数带 + 红线，产出 `GENRE-` issue（report-only） |
 
 共享的只有「上下文注入管道」这一实现模式（consumer 裁剪 + 审计键），不共享表 / schema /
 校验器——这是刻意的：拆书链路与题材链路耦合会互相掣肘（schema 收紧、聚合器契约、G-sim 校验）。
@@ -72,6 +80,8 @@ from packages.core.genre import (
     # P2 读侧投影（纯函数；消费方各自读绑定）
     opening_rules, critic_rubric, forbidden_words, count_forbidden_word_hits,
     CRITIC_RUBRIC_MAX_CHARS, CRITIC_RUBRIC_TRUNCATED_KEY,
+    # 章目标字数解析（读绑定题材包；write / review 两侧共用）
+    resolve_target_word_count, pack_chapter_words_target,
 )
 
 svc = GenrePackService(db_path)
@@ -95,7 +105,7 @@ binding: dict | None = svc.get_project_binding(project_id)
 # → {project_id, pack_id, bound, pack: 题材包全文 | None}
 n: int = svc.count_bindings(pack_id)               # DELETE 409 判定口径
 
-# 4) 核销层 v1（report-only；未绑定 → bound=False 零 issue）
+# 4) 核销层 v2（report-only；未绑定 → bound=False 零 issue）
 from packages.core.genre import verify_chapter
 result: GenreCheckResult = verify_chapter(db_path, chapter_id)   # 读项目绑定 pack
 result = verify_chapter(db_path, chapter_id, pack_row_or_payload)  # 或显式传入
@@ -107,6 +117,12 @@ rules:  list[dict] = opening_rules(payload)        # signing_check 题材开篇�
 rubric: dict | None = critic_rubric(payload)       # critic / deep_review 的 genre_rubric
 words:  list[str]  = forbidden_words(payload)      # basic_checks 禁词词表
 hits:   list[tuple[str, int]] = count_forbidden_word_hits(prose, words)
+
+# 6) 章目标字数解析（读项目绑定题材包；write / review 两侧共用单点）
+n: int = resolve_target_word_count(db_path, chapter_id, plan, explicit=ctx_target)
+#   优先级：explicit（ctx）/ plan.expected_word_count / plan.target_word_count
+#         → 绑定题材包 pacing.chapter_words.target → DEFAULT_TARGET_WORD_COUNT(3000)
+t: int | None = pack_chapter_words_target(db_path, project_id)  # 未绑定 / 无该字段 → None
 ```
 
 REST 端点（`packages/core/api/routers/genre.py`，`discover_routers` 自动挂 `/api`）：
@@ -133,7 +149,7 @@ v1.1.0 相对 v1.0.0 只加 `opening_rules` / `critic_rubric` 两个可选段，
 | `schema_version` | ✅ | 版本锚点（`^genre-pack\.v1\.\d+\.\d+$`） |
 | `payoff_types[]` | ❌ | 爽点类型：`type_id` / `name` 必填；`strength`（S/M/s）/ `density_cap` / `min_interval_chapters` / `fatigue_risk` / `verify_hint` / `mapped_tropes` / `source` / `stale` 可选 |
 | `structure_templates` | ❌ | `structure_model` / `full_book_skeleton` / `arc_beat_template[]` / `mainline_suspense` / `volume_count_expectation` |
-| `pacing` | ❌ | `chapter_words` / `chapter_word_band` / `density_rules[]` / `arc_words` / `book_words` / `redlines[]` |
+| `pacing` | ❌ | `chapter_words` / `chapter_word_band` / `density_rules[]` / `arc_words` / `book_words` / `redlines[]`；其中 `chapter_words.target` 是章目标字数的解析来源（`packages/core/genre/target_words.py`） |
 | `ratio_declarations` | ❌ | 配比声明：键=维度，值 ∈ [0,1]（scene_planner 配比指令 + 核销层配比偏差检查的输入） |
 | `style_constraints` | ❌ | 题材体例（writer 消费：合并为 `style_constraints.genre_style`；`forbidden_words` 另供 basic_checks 禁词扫描） |
 | `opening_rules[]` | ❌ | **P2 新增**：黄金三章题材特化规则——`check_id` / `requirement` 必填；`description` / `chapter_no`（1~3，缺席=1~3 章整体窗口）可选 |
@@ -173,7 +189,7 @@ scene_planner payload 增加 `genre_pack` 段（`_collect_scene_planner_inputs`�
   一致），并为每个 scene 给出 target_words（整数，总和≈本章目标字数；各 scene 字数占比
   遵守上述配比）。」（声明份额之和 ≠ 1 时附「按份额相对比例理解」注记）
 
-scene 的 `scene_type` 是**可选字段**（不强制——缺席不报错；核销层缺席时跳过配比项）。
+scene 的 `scene_type` 是**可选字段**（不强制——缺席不报错；核销层按 untyped 记账：声明了配比时产 `GENRE-SCENE-UNTYPED` warning，配比样本少算一部分）。
 
 ### writer（P1b）
 
@@ -197,7 +213,7 @@ scene 的 `scene_type` 是**可选字段**（不强制——缺席不报错；�
 
 **scene_type 输出契约（P2 显式化）**：配比核销的前提是 scene_planner 逐 scene 标注
 `scene_type`（取值 = `ratio_declarations` 的键）——契约写在 `scene_planner-v1.md`
-§6 Rule 12 / §9 E-SPL-10（缺失则核销层按「跳过」处理，配比无从对账）。
+§6 Rule 12 / §9 E-SPL-10（缺失则核销层记 `GENRE-SCENE-UNTYPED` 并让配比无从对账）。
 
 ## 读侧投影（P2）
 
@@ -248,7 +264,26 @@ chapter_review 经同一接口单次读取后复用），本模块只做「paylo
 - **边界**：这是题材体例的确定性下限检查，与 `quality.ai_patterns` 的 AI 腔检测
   （`AI-FORBIDDEN-WORD`）通道独立、可同时命中（两套词表来源不同：题材包 vs 仓内建）。
 
-## 核销层 v1（P1b，report-only）
+## 章目标字数解析（题材包驱动，2026-09-14）
+
+`packages/core/genre/target_words.py`（薄 IO 模块，读项目绑定题材包）：
+
+```python
+resolve_target_word_count(db_path, chapter_id, plan=None, *, explicit=None, project_id=None) -> int
+pack_chapter_words_target(db_path, project_id) -> int | None
+```
+
+- **优先级链**：`explicit`（ctx 显式覆盖）→ `plan.expected_word_count` →
+  `plan.target_word_count`（兼容旧字段）→ 绑定题材包 `pacing.chapter_words.target`
+  → `DEFAULT_TARGET_WORD_COUNT`(3000)；
+- **消费点**：write 侧 `_resolve_target_word_count`（length_check / writer）与
+  review 侧 `basic_checks` / critic / deep_review 共五处共用本函数（单点解析，避免口径漂移）；
+- **fail-soft**：未绑定 / payload 无该字段 / 类型非法 / 读库异常 → 回退默认，
+  不阻断 write / review；未绑定时返回值与改造前逐字节一致；
+- **边界**：只读 `target` 一个整数；字数带（`pacing.chapter_word_band` / 项目
+  `projects.word_band_json`）仍由 `quality.wordcount.resolve_band_config` 负责，两者互不覆盖。
+
+## 核销层 v2（P1b 口径修订，report-only）
 
 `packages/core/genre/verifier.py`：
 
@@ -257,20 +292,46 @@ from packages.core.genre import verify_chapter, GenreCheckResult, GenreIssue
 
 result = verify_chapter(db_path, chapter_id)          # 读绑定题材包
 result = verify_chapter(db_path, chapter_id, pack)     # 显式 pack（行 dict / 裸 payload）
-result.to_dict()   # → review_report["genre_check"] 落点形态
+result.to_dict()   # → review_report["genre_check"] 落点形态（ratio_check / arc_check / redline_check）
 ```
 
-- 数据来源（全只读、全容错）：`chapters.plan_json`（deviations）、最新 draft、
-  最近一条 chapter-write run 的 `checkpoint_json`（`scene_plan` + `length_report`）、
-  项目绑定题材包；
-- 检查 a **配比偏差**：scene_plan 中带 `scene_type` + `target_words` 的 scene 按字数
-  分摊换算实际配比，与 `ratio_declarations`（按总和归一化）比对；
-  **总偏离 > 10%**（`RATIO_DEVIATION_THRESHOLD`）→ `GENRE-RATIO-DEVIATION`；
+> v2（2026-09-14）按实战证据（书1 全弧 21 章）修订四点：**配比核销升格为弧级**、
+> **声明/观测键不对称的残差桶归并**、**untyped scene 显式化**、**红线语料扩面**。
+> 全部保持 warning / report-only（`BLOCKING_RULES` 不动）。
+
+- 数据来源（全只读、全容错）：`chapters`（`plan_json` / `number` / **`volume_id`**）、
+  最新 draft、最近一条 chapter-write run 的 `checkpoint_json`（`scene_plan` +
+  `length_report`）、项目绑定题材包；
+- 检查 a **配比**（v2 分层）：
+  - **章级**（`ratio_check`）：scene_plan 中带 `scene_type` + `target_words` 的 scene
+    按字数分摊换算份额，与 `ratio_declarations`（按总和归一化）比对，保留
+    declared / observed / deviations / `total_deviation` / `deviation_exceeded` 明细，
+    但 **`degraded=true` / `issue_emitted=false`——不再产配比 issue**（声明 5 键 vs
+    每章 2~6 个 scene，单章总偏离均值 40% 是采样噪声）；
+  - **弧级**（`arc_check`，`GENRE-RATIO-DEVIATION` 的唯一产地）：同卷
+    （`chapters.volume_id`）**章号 ≤ 当前章**的 scene 累计池化成份额再比对；就绪判据 =
+    **弧内末章** 或 **累计 typed scene ≥ `ARC_MIN_TYPED_SCENES`（20）**（占比 p≈0.2 时
+    n=20 的抽样标准误 ≈8.9%，恰落到 10% 阈值之下）；未就绪 → `checked=false` +
+    `skipped=arc_ratio:arc_not_ready`，只记 `typed_scene_count` 等事实；样本偏薄但在
+    弧内末章 → 出结论并在 message 标注「样本偏薄」；
+  - **键不对称容错**（`_compare_shares`）：交集键直比；声明的 catch-all 键
+    （`other`）是残差桶，观测到的声明外 `scene_type` 字数并入该桶一起比对（v1 的
+    union 口径把「声明 other / 实测具体维度」算成双向偏离）；**声明了但观测缺席**
+    的键仍按 0 比对（份额缺口是真信号，不进残差桶）；声明无 catch-all → 全按 union 直比；
+  - `GENRE-SCENE-UNTYPED`（warning，逐章一条带计数）：声明了配比时 scene 缺
+    `scene_type` 不再静默跳过（实测书1 ch3/ch17 整章 untyped 在 v1 下无任何信号）；
 - 检查 b **红线**：
   - `pacing.chapter_word_band`（low/high）与实际字数（优先 `length_report.visible_chars`，
     否则最新草稿 `visible_chars`）比对，出带 → `GENRE-WORD-BAND-DEVIATION`；
-  - `pacing.redlines[]` 文本命中该章 `plan_json.deviations` / `length_report` →
-    `GENRE-REDLINE-HIT`（v1 保守口径：整条红线归一后子串匹配；语义判定留 P2）；
+  - `pacing.redlines[]` 文本命中 → `GENRE-REDLINE-HIT`。命中口径与 v1 相同（整条红线
+    归一后子串匹配、大小写不敏感，不做语义判定）；**语料扩面**：从 v1 的
+    `plan_json.deviations` + `length_report`（实测 ~140 字）扩到 **整章正文** +
+    计划关键段（`chapter_goal` / `core_conflict` / `turning_point` / `deviations` /
+    `key_beats[].purpose`）+ `length_report`，并回报 `corpus_chars` / `corpus_sources`
+    ——让「0 命中」从不可信变成可信；
+- **settlement 弧末核销待 scene 标注覆盖**：实战 redline 含「卷末无结算 = 结构位缺失」，
+  但 scene / chapter / draft 三层都无 settlement 标注字段（21 章零出现），判据对象无
+  数据通路——`arc_check.pending` 显式登记（`SETTLEMENT_PENDING_NOTE`），不做假核销；
 - issue 恒 `severity="warning"`、`rule_id` 前缀 `GENRE-`、`category ∈ {payoff, pacing}`
   （quality `Category` 合法值），`to_quality_issue()` 产出与 quality `Issue` 同形 dict；
 - **不阻断**：`BLOCKING_RULES` 不含任何 `GENRE-` 规则（白名单不许动），
@@ -289,7 +350,9 @@ result.to_dict()   # → review_report["genre_check"] 落点形态
 | 极老库缺 `genre_packs` 表 / `projects.genre_pack_id` 列（0025 未跑） | peek / 注入的 `sqlite3.OperationalError` 被吞掉 → 视为未绑定（与无题材包行为零差异）；缓存键维度取 `__none__`；核销 `bound=false` |
 | 删除被绑定的 pack | 409（`count_bindings > 0` 前置拦截）；DDL 侧外键 `ON DELETE SET NULL` 是旁路删除的兜底 |
 | pack_id 重复 | `sqlite3.IntegrityError` → 422 |
-| 核销时缺 scene_plan / 无 scene_type / 无 target_words | 该项跳过并在 `genre_check.skipped` 记录原因（`no_scene_plan` / `no_scene_type` / `no_scene_target_words` / `ratio_declarations_not_declared` …），零 issue |
+| 核销时缺 scene_plan / **整章或部分 scene 缺 scene_type** / 无 target_words | 章级该项跳过并在 `genre_check.skipped` 记原因（`no_scene_plan` / `no_scene_type` / `no_scene_target_words` / `ratio_declarations_not_declared` …）；**untyped 不再静默**——声明了配比时产 `GENRE-SCENE-UNTYPED`（warning） |
+| 弧级配比样本不足 / 未到弧内末章 | `arc_check.checked=false` + `skipped=arc_ratio:arc_not_ready`，只记 `typed_scene_count` 等事实，零 issue（章级明细仍完整） |
+| 章节未挂卷（`volume_id IS NULL`） | 弧作用域退化为「同项目无卷章节池」（`scope_key=project:<pid>`）；无项目 → 弧级整项跳过 |
 | 核销读路径整体失败 | `GenreCheckResult(error=...)`，不抛错；chapter_review 挂点再兜一层异常 → 无 `genre_check` 段，评审照常 |
 | P2 读侧投影遇 `opening_rules` / `critic_rubric` / `style_constraints` 脏数据 | `consumers` 逐条跳过非法项；三段全空 / 段缺席 → 消费点整段缺席（signing_check 无 `genre_opening` 键、critic payload 无 `genre_rubric` 键、warnings 无 `GENRE-FORBIDDEN-WORD` 行），不抛错 |
 | `critic_rubric` 超 1000 字符预算 | 截断（文本加 `…（已截断）` / 条目整条丢弃）并打 `__genre_rubric_truncated__ = true`；prompt 侧要求只按已给出条目审查 |

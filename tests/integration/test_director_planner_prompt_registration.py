@@ -12,7 +12,7 @@
    E-MRG-16 / E-MRG-17 / 配比分摊口径）——与 ``test_genre_prompt_contracts`` 同款口径。
 
 prompt 内容 provenance：逐字节取自 `_refs/p1_merged_prompt_v2.md` 的 ``PROMPT-BEGIN`` /
-``PROMPT-END`` 区间（v0.2，25545 字符 / sha256 前缀 ``28cdcb2150663075``——即二次 A/B
+``PROMPT-END`` 区间（v0.2 底稿，25545 字符 / sha256 前缀 ``28cdcb2150663075``；2026-09-14 核销 v2 弧级口径修订 E-SPL-10 落点描述后哈希已变——即二次 A/B
 回放实测通过的定稿文本）。prompt 正文内的 ``prompt_version`` 示例值仍是
 ``director_planner:v0.2-draft``（与 A/B 证据同源，不改文本以保证 hash 可核对）；
 注册侧版本标签 = 文件名版本 ``director_planner:v1``，二者映射关系由本测试钉住。
