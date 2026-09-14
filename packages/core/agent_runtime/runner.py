@@ -29,8 +29,11 @@
   （单次调用内的 0/1 标记）口径不同，详见 :func:`_bump_run_retry_count`。
 - ``input_context_ids_json``：从 input_payload 里挑 ``*_id`` 键值，去重、截断到 100 条。
 
-契约校验三档（agent-contracts §3.2 / §4.2 / §5.2）：
+契约校验（agent-contracts §3.2 / §4.2 / §5.2；分派在
+:func:`packages.core.agent_runtime.structured_output.validate_contract`）：
 - ``expected == "director"`` → 必须含 ``schema_version == "director-plan.v1"``。
+- ``expected == "director_planner"``（P1 合并调用）→ 顶层导演契约 + ``scene_plan`` 子对象
+  场景契约（在场时）+ 输入 ID 白名单核销（hook / debt / character / location）。
 - ``expected == "writer"`` → 必须含 ``schema_version == "writer-output.v1"`` + ``prose`` + ``self_report``。
 - ``expected == "observer"`` → 顶层必须恰为 7 个 change 数组键，不得含 10 个元信息字段。
 - ``expected is None`` → 仅要求合法 JSON。
@@ -60,6 +63,16 @@ log = get_logger("novelos.agent_runtime.runner")
 
 _ID_KEY_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*_id$")
 _RETRY_HINT = "\n\n[System note] 上次输出无法解析/不合规：{err}。请只输出合法 JSON，不要附加解释。"
+# P1 合并调用（director_planner）的补充提示：该 agent 一次调用承载双契约，实测失败形态
+# 集中在「输出两个相邻顶层对象」与「空输入仍编造 hook/debt id」——把可行动约束随重试
+# 提示一并下发（文案与 A/B 驱动 run_merged_ab_v2.py 的重试提示同源）。
+_RETRY_HINT_EXTRA: dict[str, str] = {
+    "director_planner": (
+        "严格注意：整段输出必须恰好是一个顶层 JSON 对象（scene_plan 是它的子键，"
+        "不要输出两个相邻对象）；输入 hook_ledger_excerpt / narrative_debt_excerpt "
+        "为空时，hook_handling / debt_handling 必须为 []。"
+    )
+}
 _MAX_CONTEXT_IDS = 100
 # 可观测性：成功落库时把「首次失败原因」以 warn 前缀写入 ai_call_logs.error，
 # 便于事后回溯首次失败类别（JSON 解析失败 / 缺字段 / schema_version 不符等）。
@@ -371,6 +384,10 @@ def run_agent(
         # 三级解析兜底（json_repair）触发累积：True 时在成功落库 error 列追加
         # ``warn: JSON auto-repaired``。修复未重试一次成功时 retry_count=0 也照常写 warn。
         repair_warn: str | None = None
+        # 相邻顶层对象合并（P1 合并调用）触发累积：命中时在成功落库 error 列追加
+        # ``warn: merged N adjacent JSON objects``——该形态本身是 prompt 违规信号，
+        # 虽然被兜底救回，也必须可观测（不静默）。
+        merge_warn: str | None = None
         # 空流重试标记：本次 attempt 内 provider 抛空流且已自动重试 1 次成功 → True，
         # 在成功落库 error 列追加 ``warn: empty stream retried``（与 output-invalid 的
         # retry_count 语义正交，retry_count 仍只计 output-invalid 重试，保持既有断言）。
@@ -380,7 +397,11 @@ def run_agent(
             if attempt > 0:
                 retry_count = 1
                 # 重试：在 user 末尾追加提示，再次调用
-                messages[1]["content"] = user_payload_text + _RETRY_HINT.format(err=last_error or "无法解析")
+                messages[1]["content"] = (
+                    user_payload_text
+                    + _RETRY_HINT.format(err=last_error or "无法解析")
+                    + _RETRY_HINT_EXTRA.get(expected or "", "")
+                )
                 # V3.9 批次 5.11：run 级重试计数（output-invalid 重试路径）
                 _bump_run_retry_count(db_path, run_id)
             # 空流重试小循环（最多 2 次 provider 调用）：吸收上游 provider 间歇性零 content
@@ -470,6 +491,11 @@ def run_agent(
                     # 三级兜底（json_repair）触发 → 标记 warn 落库，便于事后追溯
                     # 内容级静默损坏风险由该 warn + validate_contract 结构校验对冲
                     repair_warn = "warn: JSON auto-repaired"
+                elif parse_meta.get("merged_object_count"):
+                    # 相邻顶层对象合并兜底触发（P1 合并调用）→ 同样标记 warn 落库
+                    merge_warn = (
+                        f"warn: merged {parse_meta['merged_object_count']} adjacent JSON objects"
+                    )
             except AgentOutputError as exc:
                 last_error = str(exc)
                 continue  # 进入重试
@@ -480,7 +506,7 @@ def run_agent(
                     observer_warn = f"warn: stripped keys={stripped}"
                 parsed = cleaned
             try:
-                validate_contract(expected, parsed)
+                validate_contract(expected, parsed, input_payload=input_payload)
             except AgentOutputError as exc:
                 last_error = str(exc)
                 continue  # 进入重试
@@ -517,8 +543,9 @@ def run_agent(
         # 可观测性：重试成功时把首次失败原因以 warn 前缀写入 ai_call_logs.error。
         # 与 observer_warn 可同时存在（剥离 + 重试成功独立事件），用 " | " 拼接；
         # 都没有时保持现状 error=None，不污染正常成功路径。
-        # 新增 repair_warn（json_repair 三级兜底触发），拼接顺序：
-        # retry warn → repair warn → observer warn（根因 → 修复痕迹 → 剥离痕迹）。
+        # 新增 repair_warn（json_repair 三级兜底触发）/ merge_warn（相邻对象合并兜底触发），
+        # 拼接顺序：retry warn → repair warn → merge warn → observer warn
+        # （根因 → 修复痕迹 → 合并痕迹 → 剥离痕迹）。
         # 新增 empty_stream_warn（provider 空流重试 1 次成功），与 retry_warn 正交
         # （retry_count 仍只计 output-invalid 重试，避免破坏既有断言与指标）。
         retry_warn: str | None = None
@@ -527,7 +554,9 @@ def run_agent(
             retry_warn = f"{_RETRY_WARN_PREFIX} {truncated}"
         empty_stream_warn = _EMPTY_STREAM_WARN if empty_stream_retried else None
         warn_parts = [
-            w for w in (retry_warn, empty_stream_warn, repair_warn, observer_warn) if w
+            w
+            for w in (retry_warn, empty_stream_warn, repair_warn, merge_warn, observer_warn)
+            if w
         ]
         error_text = " | ".join(warn_parts) if warn_parts else None
         _record_call(

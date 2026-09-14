@@ -1,0 +1,339 @@
+{
+ "schema_version": "director-plan.v1",
+ "prompt_version": "director_planner:v0.2-draft",
+ "chapter_id": "ch_1015230a94d4",
+ "chapter_goal": "流言在侯府内宅蔓延，沈知微的名节受到公开威胁；林策在旧档房查得关键证据线索，同时发现流言背后有人推动",
+ "core_conflict": "沈知微面临「失德退婚」舆论压迫（外部新冲突）vs 林策的证据搜集行动（主动破局）",
+ "turning_point": "林策发现丁酉年九月那笔代管银的去向与裴元绍在多份档案中的决策习惯吻合——跨位面违约指纹的雏形线索首次出现",
+ "expected_role": "setup",
+ "expected_word_count": 3000,
+ "key_beats": [
+  {
+   "beat_id": "beat_001",
+   "purpose": "林策按计划进入旧档房，以账房身份调阅丁酉年九月账册，发现裴元绍经手的代管银异常流出记录，锁定第一笔违约痕迹",
+   "involved_characters": [
+    "char_f0be6a066e17"
+   ],
+   "involved_locations": [
+    "loc_20a0b72b6be1"
+   ],
+   "involved_hooks": [],
+   "involved_debts": [],
+   "risk_level": "LOW",
+   "narrative_question_served": "为主角提供可操作的具体证据，推进工单闭环的第一步；读者看到林策开始收账"
+  },
+  {
+   "beat_id": "beat_002",
+   "purpose": "沈知微在档房外等候，两人短暂接头——她告知林策裴元绍近日动向，林策告知查档进展，建立不言明的协作默契",
+   "involved_characters": [
+    "char_f0be6a066e17",
+    "char_49a2ad9ac576"
+   ],
+   "involved_locations": [
+    "loc_20a0b72b6be1"
+   ],
+   "involved_hooks": [],
+   "involved_debts": [],
+   "risk_level": "LOW",
+   "narrative_question_served": "巩固盟友关系，为后续联手设局铺垫；读者确认两人已成同盟"
+  },
+  {
+   "beat_id": "beat_003",
+   "purpose": "流言登场：侯府内宅开始流传沈知微「失德」的说法，内容与裴元绍退婚理由呼应——暗示有人在系统性地毁她名声",
+   "involved_characters": [
+    "char_49a2ad9ac576",
+    "char_5934ce186818"
+   ],
+   "involved_locations": [
+    "loc_20a0b72b6be1"
+   ],
+   "involved_hooks": [],
+   "involved_debts": [],
+   "risk_level": "MEDIUM",
+   "narrative_question_served": "引入新的压迫形式，打破「证据搜集是唯一战场」的单一节奏；读者担心沈知微的名节安危"
+  },
+  {
+   "beat_id": "beat_004",
+   "purpose": "[payoff][identity_reveal] 林策在账目比对中发现：裴元绍六年来每次侵吞沈家产业的手法都有一个共同特征——「先代管、后过户、再抹账」，与他在多份旧档中见过的违约指纹高度吻合；跨位面并案线索第一次浮出水面",
+   "involved_characters": [
+    "char_f0be6a066e17",
+    "char_5934ce186818"
+   ],
+   "involved_locations": [
+    "loc_20a0b72b6be1"
+   ],
+   "involved_hooks": [],
+   "involved_debts": [],
+   "risk_level": "HIGH",
+   "narrative_question_served": "跨位面主线的第一根线索落地，主线悬念首次被读者感知；读者意识到这不只是古宅翻盘，而是一个更大的局的冰山一角"
+  },
+  {
+   "beat_id": "beat_005",
+   "purpose": "林策得知名节流言后迅速调整计划：三日限期的核心矛盾从「阻止签字画押」升级为「阻止名声先毁」——名一毁，后续所有翻盘都将事倍功半",
+   "involved_characters": [
+    "char_f0be6a066e17",
+    "char_49a2ad9ac576"
+   ],
+   "involved_locations": [
+    "loc_20a0b72b6be1"
+   ],
+   "involved_hooks": [],
+   "involved_debts": [],
+   "risk_level": "MEDIUM",
+   "narrative_question_served": "主角目标/方法实质调整，满足「每章相对上一章包含至少一项新元素」的叙事推进纪律"
+  }
+ ],
+ "character_changes_planned": [
+  {
+   "character_id": "char_f0be6a066e17",
+   "field": "knowledge",
+   "from": "知道裴元绍侵吞嫁妆，但不清楚其决策规律",
+   "to": "发现裴元绍的违约指纹特征，初步建立跨位面并案意识",
+   "rationale": "本章 [payoff] 核心，必须让主角的认知产生实质跃升",
+   "risk_level": "HIGH"
+  },
+  {
+   "character_id": "char_49a2ad9ac576",
+   "field": "emotion",
+   "from": "冷静隐忍，在沉默中积攒证据",
+   "to": "流言冲击下表面强撑，内心开始不安（但尚未崩溃）",
+   "rationale": "为后续情绪爆发蓄力，setup 阶段不宜让她完全崩溃",
+   "risk_level": "MEDIUM"
+  },
+  {
+   "character_id": "char_f0be6a066e17",
+   "field": "goal",
+   "from": "以查账为主线，限期三日阻止画押",
+   "to": "双线并行：查账与反流言同步推进，优先保住沈知微名节",
+   "rationale": "新冲突介入导致策略调整，满足叙事推进纪律",
+   "risk_level": "LOW"
+  }
+ ],
+ "information_releases": [
+  {
+   "audience": "reader",
+   "target_id": "reader",
+   "content_summary": "裴元绍有一套固定的侵吞手法：先以「代管」名义接手，再办理过户，最后抹平账目——这一决策风格与跨位面违约指纹的特征首次产生关联",
+   "source_visibility": "DIRECTOR",
+   "knowledge_permission_compliant": true
+  },
+  {
+   "audience": "character",
+   "target_id": "char_49a2ad9ac576",
+   "content_summary": "沈知微得知林策在档房有所发现，两人建立更深的信任",
+   "source_visibility": "DIRECTOR",
+   "knowledge_permission_compliant": true
+  },
+  {
+   "audience": "reader",
+   "target_id": "reader",
+   "content_summary": "「失德」流言正在侯府蔓延，舆论战已经打响",
+   "source_visibility": "DIRECTOR",
+   "knowledge_permission_compliant": true
+  }
+ ],
+ "hook_handling": [],
+ "debt_handling": [],
+ "proposed_new_entities": [],
+ "deviations": [],
+ "knowledge_leakage_check": {
+  "uses_hidden_knowledge": false,
+  "leakage_details": null
+ },
+ "open_questions": [
+  "流言的源头是裴元绍本人还是其背后的侯府嫡系势力？目前信息不足以确定，留待后续章节揭示",
+  "跨位面违约指纹的完整证据需要多少章才能坐实？本章只给线索，不做定论"
+ ],
+ "notes_for_planner": "3000字分配：Scene 1（档房查账+沈知微接头）约1600字，Scene 2（流言登场+主角策略调整）约1400字。payoff 仅落 beat_004，identity_reveal 类型在本章体现为「主角发现对手的违约指纹规律」而非主角身份被揭。主角不得在本章向任何人透露局外人身份（HIDDEN 信息）。",
+ "scene_plan": {
+  "schema_version": "scene-plan.v1",
+  "prompt_version": "director_planner:v0.2-draft",
+  "chapter_id": "ch_1015230a94d4",
+  "scenes": [
+   {
+    "scene_id": "scene_001",
+    "purpose": "旧档房查账：林策按上一章承诺进入档房，调阅丁酉年九月账册，发现裴元绍的违约指纹雏形；沈知微在外等候，两人接头交换情报",
+    "characters": [
+     "char_f0be6a066e17",
+     "char_49a2ad9ac576"
+    ],
+    "location": "loc_20a0b72b6be1",
+    "conflict": "林策需要在有限时间内从旧档中找出可用的违约证据 vs 档房的规矩限制与时间的双重压力",
+    "turn": "林策发现裴元绍的「代管→过户→抹账」三步决策习惯，与他私账上记录的跨位面违约指纹特征吻合——第一条主线线索浮出水面",
+    "time_in_story": "次日上午（承接上一章结尾「明日一早去旧档房」的承诺）",
+    "pov": "third_person_limited",
+    "pov_character_id": "char_f0be6a066e17",
+    "information_boundary": [
+     "黑玉佩的来历（原书未提及本章无此信息）",
+     "林策的局外人身份（须遵守原身不干涉原则）",
+     "崔长缨对林策的监视进展（未到揭露时机）"
+    ],
+    "ending_hook": "林策正要将这一发现记入私账，沈知微匆匆赶来，神色有异——流言已经传到她耳中了",
+    "target_words": 1600,
+    "scene_type": "identity_reveal",
+    "slots": [
+     {
+      "slot_id": "scene_001_action_01",
+      "type": "action",
+      "purpose": "林策进入旧档房，以账房身份调阅丁酉年九月账册，开始查账",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "专注审慎",
+      "constraints": [
+       "不得透露任何管理局相关信息；用位面内合法的账房先生行为逻辑"
+      ]
+     },
+     {
+      "slot_id": "scene_001_description_01",
+      "type": "description",
+      "purpose": "档房环境描写：积灰的旧册、霉味、陈年墨迹，建立年代感与信息密度",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "沉郁压抑",
+      "constraints": [
+       "感官锚点用旧档房的实物：霉纸味、油灯、虫蛀账册"
+      ]
+     },
+     {
+      "slot_id": "scene_001_action_02",
+      "type": "action",
+      "purpose": "林策在账册中发现丁酉年九月那笔代管银的去向明细，锁定第一笔违约痕迹",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "冷静笃定",
+      "constraints": [
+       "证据必须具体可感：数字、画押、回钩——与上一章沈知微整理的纸页形成呼应"
+      ]
+     },
+     {
+      "slot_id": "scene_001_emotion_01",
+      "type": "emotion",
+      "purpose": "林策比对多份档案后发现决策规律：[payoff] 裴元绍六年来每次侵吞都走同一路径——代管、过户、抹账",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "暗流涌动",
+      "constraints": [
+       "仅限林策视角可感知；读者通过他的发现感受到跨位面主线的冰山一角"
+      ]
+     },
+     {
+      "slot_id": "scene_001_dialogue_01",
+      "type": "dialogue",
+      "purpose": "沈知微在档房外等候，两人接头——她告知裴元绍近日动向，林策告知查账进展",
+      "characters": [
+       "char_f0be6a066e17",
+       "char_49a2ad9ac576"
+      ],
+      "target_mood": "默契克制",
+      "constraints": [
+       "对话点到为止，体现两人不言明的同盟关系；沈知微先开口告知动向，林策后回应查账进展"
+      ]
+     },
+     {
+      "slot_id": "scene_001_suspense_01",
+      "type": "suspense",
+      "purpose": "沈知微得知林策有所发现后，神色变化——ending_hook 引出流言线",
+      "characters": [
+       "char_49a2ad9ac576"
+      ],
+      "target_mood": "不安暗涌",
+      "constraints": [
+       "沈知微的紧张不来源于查账本身，而来源于她知道的某个新情况"
+      ]
+     }
+    ]
+   },
+   {
+    "scene_id": "scene_002",
+    "purpose": "流言登场：侯府内宅开始流传沈知微「失德」说法，林策得知后迅速意识到名节危机，调整三日限期内的行动优先级",
+    "characters": [
+     "char_f0be6a066e17",
+     "char_49a2ad9ac576",
+     "char_5934ce186818"
+    ],
+    "location": "loc_20a0b72b6be1",
+    "conflict": "沈知微的名节面临公开舆论攻击 vs 林策必须在三日限期内同时应对查账与反流言两条线",
+    "turn": "林策从单线查账调整为双线并行——查账不能停，但流言若不遏制，沈知微一旦身败名裂，翻盘的舆论基础就不复存在",
+    "time_in_story": "当日午后（Scene 001 之后，流言开始发酵）",
+    "pov": "third_person_limited",
+    "pov_character_id": "char_f0be6a066e17",
+    "information_boundary": [
+     "流言的具体源头（裴元绍本人 vs 侯府嫡系势力的哪个层级）——本章不揭示，留悬念",
+     "林策私账中记录的跨位面违约指纹完整证据——需要后续章节逐步坐实",
+     "林策的局外人身份"
+    ],
+    "ending_hook": "林策在心中重新排定三日计划：第二日，反流言必须先于查账动手——但他手里还没有一张能打的牌。他需要找到一个切入点。",
+    "target_words": 1400,
+    "scene_type": "face_slap",
+    "slots": [
+     {
+      "slot_id": "scene_002_suspense_01",
+      "type": "suspense",
+      "purpose": "流言传入档房区域：侯府下人口中开始流传沈知微「失德」的具体说法，内容与裴元绍退婚理由呼应",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "暗流汹涌",
+      "constraints": [
+       "流言内容必须具体可感知，不能只是「有人在说她坏话」这类模糊表述"
+      ]
+     },
+     {
+      "slot_id": "scene_002_dialogue_01",
+      "type": "dialogue",
+      "purpose": "林策从下人口中侧面了解流言传播范围，意识到这是有组织的舆论攻势",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "冷静分析",
+      "constraints": [
+       "林策以局内人的账房身份自然地打听，不能暴露自己的真实目的"
+      ]
+     },
+     {
+      "slot_id": "scene_002_emotion_01",
+      "type": "emotion",
+      "purpose": "沈知微面对流言的反应：表面强撑，但细节透露出内心的不安",
+      "characters": [
+       "char_49a2ad9ac576"
+      ],
+      "target_mood": "压抑紧绷",
+      "constraints": [
+       "只写可感知的外部细节（语气、动作、微表情），不直接写内心独白；沈知微视角受限，由林策观察所得"
+      ]
+     },
+     {
+      "slot_id": "scene_002_action_01",
+      "type": "action",
+      "purpose": "林策当场决定调整三日计划：反流言优先级上升，但需要找到一个可操作的切入点",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "冷静笃定",
+      "constraints": [
+       "主角的决策必须基于账房先生的职场逻辑，体现「把位面当案子办」的特质"
+      ]
+     },
+     {
+      "slot_id": "scene_002_suspense_02",
+      "type": "suspense",
+      "purpose": "ending_hook：林策意识到自己没有一张能直接打的牌，流言已经开始发酵，时间比他预想的更紧迫",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "紧迫压抑",
+      "constraints": [
+       "不给出具体解法，保留悬念——让读者想知道他下一张牌是什么"
+      ]
+     }
+    ]
+   }
+  ],
+  "notes_for_writer": "对话占比不低于 35%（style_constraints.dialogue_ratio=0.4）；payoff 仅落 scene_001 的 slot emotion_01；主角身份不揭露（identity_reveal 在本章体现为「主角发现对手的违约指纹」而非主角马甲被揭）。",
+  "deviations": []
+ }
+}

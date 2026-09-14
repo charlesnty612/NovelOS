@@ -43,7 +43,9 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # 题材库 P1a：0025_genre_packs 加 genre_packs 业务表 → 业务表 38（37+1），总表 39。
     # V3.9 全量检修 F6：0026_workflow_runs_instance_id 仅给 workflow_runs 加
     #   instance_id 可空列（启动自愈归属标记）→ **不增表**，业务表仍 38，总表仍 39。
-    assert result["tables"] == 39, f"expected 39 (38+_migrations), got {result['tables']}"
+    # P1 规划合并：0027_chapter_scene_plans 加 chapter_scene_plans 业务表
+    #   → 业务表 39，总表 40。
+    assert result["tables"] == 40, f"expected 40 (39+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
     # Sprint 5 review F2：0002_drafts_unique.sql 也应被应用
@@ -113,6 +115,10 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # - 仅 ALTER TABLE workflow_runs 加 instance_id TEXT 可空列（归属标记）；
     # - 不增表（业务表 38，总表 39 不变），无回填。
     assert "0026_workflow_runs_instance_id.sql" in result["applied"]
+    # P1 规划合并（2026-09-14）：0027_chapter_scene_plans.sql
+    # - 新建 chapter_scene_plans 表（scene_plan 落库面，1 章 1 面 UNIQUE）；
+    # - 纯新增表、无回填；业务表 38 → 39，总表 39 → 40。
+    assert "0027_chapter_scene_plans.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
@@ -148,6 +154,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0024_quality_reports_draft_version.sql",
         "0025_genre_packs.sql",
         "0026_workflow_runs_instance_id.sql",
+        "0027_chapter_scene_plans.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -192,6 +199,9 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0025_genre_packs.sql" in second["skipped"]
     # V3.9 全量检修 F6：0026 也应被幂等跳过
     assert "0026_workflow_runs_instance_id.sql" in second["skipped"]
+    # P1 规划合并：0027_chapter_scene_plans.sql（CREATE TABLE IF NOT EXISTS 自幂等 +
+    # _migrations 文件粒度追踪）也应被幂等跳过
+    assert "0027_chapter_scene_plans.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -235,6 +245,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0024_quality_reports_draft_version.sql",
         "0025_genre_packs.sql",
         "0026_workflow_runs_instance_id.sql",
+        "0027_chapter_scene_plans.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -317,7 +328,8 @@ def test_business_table_count_is_34(tmp_path: Path):
     # V3.7 模型档案 + 环节绑定：0016 加 model_profiles + capability_bindings → 业务表 37
     # 题材库 P1a：0025_genre_packs 加 genre_packs → 业务表 38
     # V3.9 全量检修 F6：0026 仅给 workflow_runs 加 instance_id 列 → 业务表仍 38
-    assert len(names) == 38, f"expected 38 business tables, got {len(names)}"
+    # P1 规划合并：0027_chapter_scene_plans 加 chapter_scene_plans → 业务表 39
+    assert len(names) == 39, f"expected 39 business tables, got {len(names)}"
     # 抽检：PRD §67 关键表
     for expected in ("projects", "characters", "chapters", "commits", "state_deltas", "ai_call_logs"):
         assert expected in names, f"missing table {expected}"
@@ -500,7 +512,7 @@ def test_0025_genre_packs_migration_is_idempotent(tmp_path: Path):
     assert "0025_genre_packs.sql" not in second["applied"]
     assert "0025_genre_packs.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
-    assert first["tables"] == 39, f"expected 39 (38 business + _migrations), got {first['tables']}"
+    assert first["tables"] == 40, f"expected 40 (39 business + _migrations), got {first['tables']}"
 
 
 def test_0026_workflow_runs_instance_id_column(tmp_path: Path):
@@ -534,7 +546,96 @@ def test_0026_instance_id_migration_is_idempotent(tmp_path: Path):
     second = apply_migrations(db_path, MIGRATIONS_DIR)
     assert "0026_workflow_runs_instance_id.sql" not in second["applied"]
     assert "0026_workflow_runs_instance_id.sql" in second["skipped"]
-    assert second["tables"] == first["tables"] == 39, (first["tables"], second["tables"])
+    assert second["tables"] == first["tables"] == 40, (first["tables"], second["tables"])
+
+
+def test_0027_chapter_scene_plans_table(tmp_path: Path):
+    """P1 规划合并：0027 新建 chapter_scene_plans（scene_plan 落库面，1 章 1 面 UNIQUE）。
+
+    - 列齐全：scene_plan_id / chapter_id / project_id / run_id / source / prompt_version /
+      scene_count / payload_json / created_at / updated_at；
+    - ``chapter_id`` 唯一（重规划即覆盖，不累积历史行）；
+    - 外键：不存在的 chapter_id 被拒（get_connection 已开 ``PRAGMA foreign_keys``）；
+    - ``chapter_id`` 为 ON DELETE CASCADE（派生数据随章节删除清理，不新增删除阻断源）。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    dupe_blocked = False
+    fk_blocked = False
+    try:
+        cols = {c["name"]: c for c in conn.execute("PRAGMA table_info(chapter_scene_plans)").fetchall()}
+        conn.execute(
+            "INSERT INTO projects (project_id, name, created_at, updated_at) "
+            "VALUES ('prj_t', 'p', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO chapters (chapter_id, project_id, number, created_at, updated_at) "
+            "VALUES ('ch_t', 'prj_t', 1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO chapter_scene_plans (scene_plan_id, chapter_id, project_id, run_id, "
+            "source, prompt_version, scene_count, payload_json, created_at, updated_at) "
+            "VALUES ('csp_1', 'ch_t', 'prj_t', 'wfr_1', 'director_planner', "
+            "'director_planner:v1', 1, '{}', '2026-01-01T00:00:00+00:00', "
+            "'2026-01-01T00:00:00+00:00')"
+        )
+        try:
+            # 同 chapter 第二行（不同 scene_plan_id）→ 撞 chapter_id UNIQUE
+            conn.execute(
+                "INSERT INTO chapter_scene_plans (scene_plan_id, chapter_id, project_id, run_id, "
+                "source, prompt_version, scene_count, payload_json, created_at, updated_at) "
+                "VALUES ('csp_2', 'ch_t', 'prj_t', NULL, 'director_planner', NULL, 1, '{}', "
+                "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+            )
+        except sqlite3.IntegrityError:
+            dupe_blocked = True
+        try:
+            # 不存在的 chapter_id → 撞 chapters 外键
+            conn.execute(
+                "INSERT INTO chapter_scene_plans (scene_plan_id, chapter_id, project_id, run_id, "
+                "source, prompt_version, scene_count, payload_json, created_at, updated_at) "
+                "VALUES ('csp_3', 'ch_missing', 'prj_t', NULL, 'director_planner', NULL, 1, '{}', "
+                "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+            )
+        except sqlite3.IntegrityError:
+            fk_blocked = True
+    finally:
+        conn.close()
+    for name in (
+        "scene_plan_id", "chapter_id", "project_id", "run_id", "source",
+        "prompt_version", "scene_count", "payload_json", "created_at", "updated_at",
+    ):
+        assert name in cols, f"chapter_scene_plans missing column {name!r}; got={sorted(cols)}"
+    assert cols["payload_json"]["notnull"] == 1
+    assert cols["chapter_id"]["notnull"] == 1
+    assert cols["source"]["notnull"] == 1
+    assert dupe_blocked is True, "chapter_scene_plans.chapter_id 应为 UNIQUE（1 章 1 面）"
+    assert fk_blocked is True, "chapter_scene_plans.chapter_id 外键未被强制"
+
+    # ON DELETE CASCADE：删除章节后本行随删（派生数据不新增删除阻断源）
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DELETE FROM chapters WHERE chapter_id = 'ch_t'")
+        conn.commit()
+        left = conn.execute(
+            "SELECT COUNT(*) AS n FROM chapter_scene_plans WHERE chapter_id = 'ch_t'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert left["n"] == 0, "删除章节后 scene_plan 行应级联清理"
+
+
+def test_0027_chapter_scene_plans_migration_is_idempotent(tmp_path: Path):
+    """0027 跑两遍不炸（CREATE TABLE IF NOT EXISTS 自幂等 + _migrations 追踪）；表数不变。"""
+    db_path = _fresh_db(tmp_path)
+    first = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0027_chapter_scene_plans.sql" in first["applied"]
+
+    second = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0027_chapter_scene_plans.sql" not in second["applied"]
+    assert "0027_chapter_scene_plans.sql" in second["skipped"]
+    assert second["tables"] == first["tables"] == 40, (first["tables"], second["tables"])
 
 
 def test_0013_plot_events_has_description_column(tmp_path: Path):

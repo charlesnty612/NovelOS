@@ -60,6 +60,9 @@ AGENT_CAPABILITY: dict[str, str] = {
     "critic": "light",          # V3 P0-2：LLM 评审员走轻量模型
     "deep_reviewer": "reasoning",  # V1.3 二审 AI：三层清单核销（设定一致性→节拍核销→行为链连续性），推理型
     "scene_planner": "creative_writing",  # V3.9.2+：运行于 chapter-write 管线，归入正文写作（V3.9.2 前归 reasoning）
+    # P1 合并调用（2026-09-14）：chapter-plan 的单 AI 节点（一次产出导演计划 + 场景计划；
+    # scene_planner 保留为 chapter-write 的降级路径），与 writer 同属创作档。
+    "director_planner": "creative_writing",
     # V3.7 project-init 四个 agent 显式映射：避免 ``capability_for`` 默认回退
     # reasoning——把「题材定位 / 世界观 / 角色设计 / 卷纲」与正文写作分离，
     # 前端可独立分配更便宜的小模型。
@@ -109,7 +112,9 @@ CAPABILITY_LABELS: dict[str, dict[str, object]] = {
     "world_building":   {"label": "世界观",     "agents": ["world_builder"]},
     "character_design": {"label": "角色设计",   "agents": ["character_designer"]},
     "volume_outline":   {"label": "卷纲",       "agents": ["volume_outliner"]},
-    "creative_writing": {"label": "正文写作",   "agents": ["writer", "polisher", "scene_planner"]},
+    "creative_writing": {"label": "正文写作",   "agents": [
+        "writer", "polisher", "scene_planner", "director_planner",
+    ]},
     "reasoning":        {"label": "推理规划",   "agents": [
         "director", "arbiter",
         "deconstructor_chapter", "deconstructor_aggregate",

@@ -53,6 +53,9 @@ _AGENT_TO_CAPABILITY: dict[str, str] = {
     "critic": "light",          # V3 P0-2
     "deep_reviewer": "reasoning",  # V1.3 二审 AI：三层清单核销（设定一致性→节拍核销→行为链连续性），推理型
     "scene_planner": "creative_writing",  # V3.9.2+：运行于 chapter-write 管线，归入正文写作（V3.9.2 前归 reasoning）
+    # P1 合并调用（2026-09-14）：chapter-plan 的单 AI 节点，一次产出导演计划 + 场景计划，
+    # 与 writer / polisher / scene_planner 同属创作档（prompt 25.5KB、输出 11~14KB JSON）。
+    "director_planner": "creative_writing",
     "premise_designer": "premise_design",       # V3.7 project-init
     "world_builder": "world_building",          # V3.7 project-init
     "character_designer": "character_design",   # V3.7 project-init

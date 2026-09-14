@@ -8,11 +8,14 @@ r"""结构化输出提取（Sprint 3）。
   1. 去除 ```json / ``` 围栏（大小写不敏感）；保留围栏内文本。
   2. 在剩余文本中找首个 ``{`` 与末个 ``}``，截取子串（忽略控制字符之外的乱码）。
   3. ``json.loads``；失败抛 :class:`AgentOutputError`（由 runner 捕获并决定是否重试）。
-- 契约校验：三档 ``expected``（``"observer"`` / ``"director"`` / ``"writer"``）按
-  ``agent-contracts-v0.md`` §5.2 / §3.2 / §4.2 给出最小集断言。
+- 契约校验：多档 ``expected``（``"observer"`` / ``"director"`` / ``"writer"`` /
+  ``"director_planner"`` 等）按 ``agent-contracts-v0.md`` §5.2 / §3.2 / §4.2 给出最小集断言。
   - ``observer``：顶层必须恰为 7 个 change 数组键（结构错误仍抛 :class:`AgentOutputError`）；
     含 10 元信息字段或 3 辅助字段（**越权字段**）时**剥离后继续**，不抛错、不触发重试。
   - ``director``：必须含 ``schema_version == "director-plan.v1"``。
+  - ``director_planner``（P1 合并调用）：顶层走导演契约；``scene_plan`` 子对象在场时走场景契约
+    （``schema_version == "scene-plan.v1"``）；另按输入 payload 做 ID 白名单核销
+    （hook / debt / character / location）。
   - ``writer``：必须含 ``schema_version == "writer-output.v1"`` 与 ``prose`` / ``self_report``。
   - ``None``：只要求合法 JSON。
 - 校验失败抛 :class:`AgentOutputError`，由 runner 捕获并重试 1 次（按 agent-contracts §6 重试原则）。
@@ -111,9 +114,11 @@ def extract_json(
 
     ``return_meta``（默认 ``False``）：为兼容既有调用方（runner / 测试套件），
     默认仍直接返回 ``dict``；开启后返回 ``(payload, meta)``，其中 ``meta`` 是
-    ``dict``，至少包含 ``repaired: bool``（三级兜底是否触发）。runner 层据此
-    写入 ``warn: JSON auto-repaired`` 落库，使「修复」事件可观测——修复产物仍需
-    过 :func:`validate_contract` 结构校验，**内容级静默损坏风险由 warn 落库对冲**，
+    ``dict``，至少包含 ``repaired: bool``（三级兜底是否触发）与
+    ``merged_object_count: int | None``（相邻顶层对象合并兜底是否触发，见
+    :func:`_merge_adjacent_objects`）。runner 层据此写入 ``warn: JSON auto-repaired`` /
+    ``warn: merged N adjacent JSON objects`` 落库，使「修复 / 合并」事件可观测——两类产物
+    仍需过 :func:`validate_contract` 结构校验，**内容级静默损坏风险由 warn 落库对冲**，
     不静默吞错。
     """
     if not isinstance(text, str):
@@ -141,6 +146,7 @@ def extract_json(
         raise AgentOutputError(f"no JSON object braces found in output: {cleaned[:80]!r}")
     candidate = cleaned[first : last + 1]
     repaired = False
+    merged_count: int | None = None
     try:
         parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
@@ -148,26 +154,142 @@ def extract_json(
         try:
             parsed = json.loads(candidate, strict=False)
         except json.JSONDecodeError:
-            # 三级兜底：json_repair 处理常见 LLM 语法错误（缺逗号 / 未转义引号 / 截断）。
-            # 仅当 repair 后顶层是 dict 才接受（库对完全乱码可能返回空字符串等非 dict），
-            # 否则视为修复失败走抛错路径。
-            try:
-                repaired_obj = json_repair.loads(candidate)
-            except Exception as repair_exc:  # noqa: BLE001
-                raise AgentOutputError(
-                    _format_json_error(exc, candidate)
-                ) from repair_exc
-            if not isinstance(repaired_obj, dict):
-                raise AgentOutputError(
-                    _format_json_error(exc, candidate)
-                ) from exc
-            parsed = repaired_obj
-            repaired = True
+            # 二级半兜底（P1 合并调用）：相邻顶层 JSON 对象合并。
+            # 合并调用（director_planner）实测会出现「先一个导演计划对象、再一个
+            # scene_plan 对象」的相邻双对象输出——「首 { 到末 }」整段交给 json.loads
+            # 必然 "Extra data"。本兜底按括号配平切分出各顶层对象，逐段解析后**键无冲突**
+            # 才合并；**键冲突不猜**（可能是两次完整回答），判解析失败交给上层重试——
+            # 不回落到 json_repair（它会把这种形态悄悄截成半个答案）。
+            # 仅在 ≥2 个顶层对象时生效，单对象乱码（缺逗号 / 截断）行为零变化。
+            segs = _top_level_objects(cleaned)
+            if len(segs) >= 2:
+                merged, merge_meta = _merge_adjacent_objects(segs)
+                if merged is None:
+                    raise AgentOutputError(
+                        "multiple adjacent JSON objects cannot be merged "
+                        f"({merge_meta.get('merge_reason')}); raw={candidate[:200]!r}"
+                    ) from exc
+                parsed = merged
+                merged_count = int(merge_meta.get("merged_object_count") or 0)
+            else:
+                # 三级兜底：json_repair 处理常见 LLM 语法错误（缺逗号 / 未转义引号 / 截断）。
+                # 仅当 repair 后顶层是 dict 才接受（库对完全乱码可能返回空字符串等非 dict），
+                # 否则视为修复失败走抛错路径。
+                try:
+                    repaired_obj = json_repair.loads(candidate)
+                except Exception as repair_exc:  # noqa: BLE001
+                    raise AgentOutputError(
+                        _format_json_error(exc, candidate)
+                    ) from repair_exc
+                if not isinstance(repaired_obj, dict):
+                    raise AgentOutputError(
+                        _format_json_error(exc, candidate)
+                    ) from exc
+                parsed = repaired_obj
+                repaired = True
     if not isinstance(parsed, dict):
         raise AgentOutputError(f"JSON top-level is not an object: {type(parsed).__name__}")
     if return_meta:
-        return parsed, {"repaired": repaired}
+        return parsed, {
+            "repaired": repaired,
+            "merged_object_count": merged_count,
+        }
     return parsed
+
+
+def _top_level_objects(cleaned: str) -> list[str]:
+    """扫描出所有**顶层完整 JSON 对象**片段（字符串 / 转义内的括号不计）。
+
+    与 :func:`extract_json` 的「首 ``{`` 到末 ``}``」不同：后者把「相邻两个对象」整体
+    当成一个候选串交给 ``json.loads``，必然 ``Extra data``。本函数按 ``{}`` 配平切分，
+    供 :func:`_merge_adjacent_objects` 使用；未配平的尾部残片（截断输出）不产出片段。
+
+    额外约束（相对 A/B 驱动参考实现的收紧）：只有 **``[]`` 深度也为 0** 的对象才计入
+    ——数组包裹的形态（如 ``[{...}, {...}]``）是另一种语义（多元素列表，不是「相邻
+    顶层对象」），不参与合并，保持既有「非 dict 顶层 → 解析失败」行为。
+    """
+    segs: list[str] = []
+    depth = 0
+    list_depth = 0
+    start: int | None = None
+    in_str = False
+    esc = False
+    for i, ch in enumerate(cleaned):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "[":
+            list_depth += 1
+        elif ch == "]":
+            if list_depth > 0:
+                list_depth -= 1
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    if list_depth == 0:
+                        segs.append(cleaned[start : i + 1])
+                    start = None
+    return segs
+
+
+def _merge_adjacent_objects(segs: list[str]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """把「N≥2 个相邻顶层对象」合并为一个 dict；不可合并返回 ``(None, meta)``。
+
+    判据（与 A/B 驱动参考实现 ``p1_ab/run_merged_ab_v2.merge_adjacent_objects`` 同形，
+    差异仅在分段由调用方 :func:`_top_level_objects` 预扫后传入）：
+
+    1. 段数 < 2 → 不合并（单对象形态交回既有 repair 路径）；
+    2. 逐段解析（``json.loads`` → ``strict=False`` → ``json_repair``），任一段不可解析
+       或不是对象 → 不合并；
+    3. 逐键合并：**键冲突（同名键值不同）不猜**——可能是两次完整回答，判为语义不明，
+       返回 ``(None, {"merge_reason": ...})``，由调用方按解析失败处理（触发既有重试）。
+
+    合并成功时 meta 带 ``merged_object_count`` / ``merged_keys``（供 runner 落
+    ``warn: merged N adjacent JSON objects`` 观测）。
+    """
+    if len(segs) < 2:
+        return None, {"merge_reason": f"top_level_objects={len(segs)}"}
+    objs: list[dict[str, Any]] = []
+    for idx, seg in enumerate(segs):
+        try:
+            obj = json.loads(seg)
+        except json.JSONDecodeError:
+            try:
+                obj = json.loads(seg, strict=False)
+            except json.JSONDecodeError:
+                try:
+                    obj = json_repair.loads(seg)
+                except Exception:  # noqa: BLE001 —— 单段修复失败即放弃合并
+                    return None, {"merge_reason": f"segment[{idx}] unparsable"}
+        if not isinstance(obj, dict):
+            return None, {"merge_reason": f"segment[{idx}] not an object"}
+        objs.append(obj)
+    merged: dict[str, Any] = {}
+    conflicts: list[str] = []
+    for obj in objs:
+        for k, v in obj.items():
+            if k in merged and merged[k] != v:
+                conflicts.append(k)
+            else:
+                merged.setdefault(k, v)
+    if conflicts:
+        return None, {"merge_reason": f"key conflicts: {sorted(set(conflicts))}"}
+    return merged, {
+        "merged_object_count": len(objs),
+        "merged_keys": sorted(merged.keys()),
+    }
 
 
 def _format_json_error(exc: json.JSONDecodeError, candidate: str) -> str:
@@ -500,13 +622,190 @@ _VALIDATORS = {
 }
 
 
-def validate_contract(expected: str | None, payload: dict[str, Any]) -> None:
-    """按 ``expected`` 分派契约校验；``None`` 跳过。失败抛 :class:`AgentOutputError`。"""
+# ---------------------------------------------------------------------------
+# Director-Planner（P1 合并调用）：顶层导演契约 + scene_plan 子契约 + 输入 ID 白名单
+# ---------------------------------------------------------------------------
+
+# 白名单报错条数上限（超出部分折叠计数）——报错文本会拼进 runner 的重试提示，
+# 无上限会让「整段 JSON 全幻觉」的输出把重试提示撑爆。
+_WHITELIST_ERROR_CAP = 5
+
+
+def _input_id_sets(input_payload: dict[str, Any]) -> dict[str, Any]:
+    """从 agent 输入 payload 抽取 ID 白名单集合（hook / debt / character / location）。
+
+    ``*_empty`` 标记对应输入表是否为空数组 / 键缺席——空输入下**任何**条目都是幻觉
+    （prompt §7「输入为空数组或键缺席时，两者必须为 ``[]``」）。
+    """
+    hooks = input_payload.get("hook_ledger_excerpt") or []
+    debts = input_payload.get("narrative_debt_excerpt") or []
+    chars = input_payload.get("available_characters") or []
+    locs = input_payload.get("available_locations") or []
+    return {
+        "hooks": {
+            h.get("hook_id")
+            for h in hooks
+            if isinstance(h, dict) and h.get("hook_id")
+        },
+        "debts": {
+            d.get("debt_id")
+            for d in debts
+            if isinstance(d, dict) and d.get("debt_id")
+        },
+        "chars": {
+            c.get("character_id")
+            for c in chars
+            if isinstance(c, dict) and c.get("character_id")
+        },
+        "locs": {
+            loc.get("location_id")
+            for loc in locs
+            if isinstance(loc, dict) and loc.get("location_id")
+        },
+        "hooks_empty": not hooks,
+        "debts_empty": not debts,
+    }
+
+
+def _whitelist_errors(parsed: dict[str, Any], input_payload: dict[str, Any]) -> list[str]:
+    """输出引用的 ID 必须 ∈ 输入集合（E-MRG-16 / E-DIR-03；P1 合并调用核销）。
+
+    实现与 A/B 驱动参考实现 ``p1_ab/run_merged_ab_v2.whitelist_errors`` 逐条对齐：
+
+    - ``hook_handling[].hook_id`` ∈ 输入 ``hook_ledger_excerpt`` 的 ID 集合；
+      **输入为空 / 键缺席时该项必须为 ``[]``**；
+    - ``debt_handling[].debt_id`` ∈ 输入 ``narrative_debt_excerpt`` 的 ID 集合，同款空输入规则；
+    - ``key_beats[].involved_characters`` / ``involved_locations`` ∈ ``available_characters`` /
+      ``available_locations``；
+    - ``scene_plan.scenes[].characters`` / ``location`` / ``slots[].characters`` 同款校验
+      （location 允许 null）。
+
+    不做静默丢弃：命中即由调用方按输出无效处理（走既有 output-invalid 重试）。
+    """
+    ids = _input_id_sets(input_payload)
+    errs: list[str] = []
+
+    hook_handling = parsed.get("hook_handling")
+    if not isinstance(hook_handling, list):
+        errs.append(f"hook_handling must be a list, got {type(hook_handling).__name__}")
+    else:
+        for i, item in enumerate(hook_handling):
+            hid = item.get("hook_id") if isinstance(item, dict) else None
+            if ids["hooks_empty"]:
+                errs.append(
+                    f"hook_handling[{i}] must be [] (input hook_ledger_excerpt is empty), got {hid!r}"
+                )
+            elif hid not in ids["hooks"]:
+                errs.append(f"hook_handling[{i}].hook_id {hid!r} not in input hook set")
+
+    debt_handling = parsed.get("debt_handling")
+    if not isinstance(debt_handling, list):
+        errs.append(f"debt_handling must be a list, got {type(debt_handling).__name__}")
+    else:
+        for i, item in enumerate(debt_handling):
+            did = item.get("debt_id") if isinstance(item, dict) else None
+            if ids["debts_empty"]:
+                errs.append(
+                    f"debt_handling[{i}] must be [] (input narrative_debt_excerpt is empty), got {did!r}"
+                )
+            elif did not in ids["debts"]:
+                errs.append(f"debt_handling[{i}].debt_id {did!r} not in input debt set")
+
+    for i, beat in enumerate(parsed.get("key_beats") or []):
+        if not isinstance(beat, dict):
+            continue
+        for cid in beat.get("involved_characters") or []:
+            if cid not in ids["chars"]:
+                errs.append(f"key_beats[{i}].involved_characters {cid!r} not in available_characters")
+        for lid in beat.get("involved_locations") or []:
+            if lid not in ids["locs"]:
+                errs.append(f"key_beats[{i}].involved_locations {lid!r} not in available_locations")
+
+    scenes = (parsed.get("scene_plan") or {}).get("scenes") or []
+    if isinstance(scenes, list):
+        for i, scene in enumerate(scenes):
+            if not isinstance(scene, dict):
+                continue
+            for cid in scene.get("characters") or []:
+                if cid not in ids["chars"]:
+                    errs.append(f"scene[{i}].characters {cid!r} not in available_characters")
+            loc_id = scene.get("location")
+            if loc_id is not None and loc_id not in ids["locs"]:
+                errs.append(f"scene[{i}].location {loc_id!r} not in available_locations")
+            for j, slot in enumerate(scene.get("slots") or []):
+                if not isinstance(slot, dict):
+                    continue
+                for cid in slot.get("characters") or []:
+                    if cid not in ids["chars"]:
+                        errs.append(
+                            f"scene[{i}].slots[{j}].characters {cid!r} not in available_characters"
+                        )
+    return errs
+
+
+def _validate_director_planner(
+    payload: dict[str, Any], *, input_payload: dict[str, Any] | None = None
+) -> None:
+    """Director-Planner（P1 合并调用）契约：顶层导演契约 + ``scene_plan`` 子对象场景契约。
+
+    契约口径（见 ``docs/agents/prompts/director_planner-v1.md`` §7 / §9 E-MRG-01）：
+
+    - 顶层：同 :func:`_validate_director`（``schema_version == "director-plan.v1"``）。
+      下游（chapter-plan 的 ``save_plan``）按缺省值读各字段，故此处不额外收紧必填面。
+    - ``scene_plan``：**在场**时必须整份满足场景契约（:func:`_validate_scene_planner`，
+      含 ``schema_version == "scene-plan.v1"`` / scenes 非空 / pov 与 slot.type 枚举）；
+      **缺席**时按「计划-only 输出」放行——合并调用只丢了场景段，计划仍可用，
+      由 chapter-plan 记录 ``scene_plan_status`` 并由 chapter-write 走既有
+      scene_planner 降级路径，**不**把用户的一次「生成计划」整体判失败。
+    - ``input_payload`` 非 None 时追加 ID 白名单核销（:func:`_whitelist_errors`）：
+      命中即抛 :class:`AgentOutputError`，由 runner 走既有 output-invalid 重试。
+
+    **与 prompt §9 E-MRG-01 的显式分歧（留痕）**：E-MRG-01 是 A/B **验收规则**
+    （「scene_plan 任缺 = 不通过」，用于评判 prompt 产出质量）；本校验器是**产线闸门**，
+    按「降级不阻断」口径把「缺 scene_plan」判为可降级（章节计划仍可下单写作），
+    而把「scene_plan 在场但违规」判为硬失败（走重试）。两条口径的差异是刻意设计：
+    验收要严、产线要活；场景段的实际兜底由 chapter-write 的既有 scene_planner 路径承担。
+    """
+    _validate_director(payload)
+    scene_plan = payload.get("scene_plan")
+    if scene_plan is not None:
+        if not isinstance(scene_plan, dict):
+            raise AgentOutputError(
+                f"director_planner scene_plan must be an object, got {type(scene_plan).__name__}"
+            )
+        _validate_scene_planner(scene_plan)
+    if input_payload is not None:
+        errs = _whitelist_errors(payload, input_payload)
+        if errs:
+            shown = errs[:_WHITELIST_ERROR_CAP]
+            suffix = f"; (+{len(errs) - len(shown)} more)" if len(errs) > len(shown) else ""
+            raise AgentOutputError(
+                "director_planner output violates input ID whitelist: "
+                + "; ".join(shown)
+                + suffix
+            )
+
+
+def validate_contract(
+    expected: str | None,
+    payload: dict[str, Any],
+    *,
+    input_payload: dict[str, Any] | None = None,
+) -> None:
+    """按 ``expected`` 分派契约校验；``None`` 跳过。失败抛 :class:`AgentOutputError`。
+
+    ``input_payload``（可选）：本次调用的 agent 输入 payload。目前仅 ``director_planner``
+    消费它（ID 白名单核销需要输入集合）；其它 ``expected`` 忽略该参数，行为零变化。
+    """
     if expected is None:
+        return
+    if expected == "director_planner":
+        # 该契约需要输入侧集合（白名单），不入 _VALIDATORS（其它校验器签名是单参数）。
+        _validate_director_planner(payload, input_payload=input_payload)
         return
     validator = _VALIDATORS.get(expected)
     if validator is None:
-        # 未知 expected → 当成 None 处理；调用方应只传三档之一
+        # 未知 expected → 当成 None 处理；调用方应只传已登记档位之一
         return
     validator(payload)
 

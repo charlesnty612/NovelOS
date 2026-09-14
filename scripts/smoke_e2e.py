@@ -79,7 +79,7 @@ HTTP_TIMEOUT_S = 60.0
 # health.tables = 业务表数（业务表 38；含 _migrations 物理共 39，health 返回减 1 后的业务表数）
 # 真值核对：``count_tables()`` 排除 sqlite_% 与 chapter_fts% 影子表后返回 39（含 _migrations），
 # 与 README §健康检查、packages/core/db.py docstring、tests/integration/test_health.py 同口径。
-EXPECTED_BUSINESS_TABLES = 38
+EXPECTED_BUSINESS_TABLES = 39  # 0027 chapter_scene_plans（P1 规划合并落库面）后 38→39
 # V2.0 Wave B 任务一：0009_branch_snapshots.sql 加 branch_snapshots → 34 业务表
 # V2.0 Wave B 任务二：0010_trigger_keys.sql 仅 ALTER TABLE 加列，不增表 → 仍 34 业务表
 # V3.3：0014_knowledge_reveal.sql 重建 reveal_policies（表早已存在于基线，不增数）→ 仍 34 业务表

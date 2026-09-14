@@ -8,7 +8,7 @@
 | node_id | kind | 说明 |
 |---|---|---|
 | `load_plan` | Transform | 读 `chapters.plan_json` 准备 director_plan 输入；若 plan_json 为空 → 抛错 |
-| `scene_planner` | AI | P0 新增：调 `scene_planner` agent 把 `director_plan` 翻译为结构化 Scene Plan（含 `scenes[]` / slots / conflict / turn / information_boundary / ending_hook）。支持 `mock_providers['scene_planner']`；任何失败降级到原 stub 机械映射逻辑，**不**阻断 writer run |
+| `scene_planner` | AI | P0 新增；**P1 起优先读 chapter-plan 落库的 scene_plan**（`chapter_scene_plans`，迁移 0027）——命中即跳过 LLM 调用（`scene_planner_status='from_plan'`）；未命中（老章 / 合并调用只回了计划段 / 0027 未迁移的老库）调 `scene_planner` agent 把 `director_plan` 翻译为结构化 Scene Plan（含 `scenes[]` / slots / conflict / turn / information_boundary / ending_hook）。支持 `mock_providers['scene_planner']`；任何失败降级到原 stub 机械映射逻辑，**不**阻断 writer run |
 | `writer` | AI | 调 Writer agent（`run_agent(..., expected="writer", mock_script=...)`），输出 `writer-output.v1` JSON（prose + self_report） |
 | `save_draft` | State | 写 `drafts` 表（version 自增）+ `chapters.status` PLANNED→DRAFTED |
 
@@ -23,6 +23,8 @@
 
 - 缺 plan_json → 抛错（run FAILED）。
 - scene_planner 失败（prompt 缺失 / provider 异常 / 输出不合规）→ 降级到 stub，writer 继续执行；run 终态不受影响。
+- scene_planner 命中落库 scene_plan（P1）→ 不调 LLM；落库行 `scenes` 为空 / 结构不可用 →
+  记 warning 后回既有 LLM 路径（读侧防御，不静默）。
 - writer LLM 输出不合规 → run FAILED。
 - 字数 / 禁用词等 Guardrail 留给后续 Sprint（S6）；本 Sprint 仅做最小契约校验。
 

@@ -69,23 +69,7 @@
           "knowledge_permission_compliant": true
         }
       ],
-      "hook_handling": [
-        {
-          "hook_id": "hook_ancient_mirror",
-          "action": "advance",
-          "rationale": "本章金手指首次实战印证"
-        },
-        {
-          "hook_id": "hook_zhou_yuan_suspicion",
-          "action": "advance",
-          "rationale": "周元暗中调遣山贼，伏笔铺垫加深"
-        },
-        {
-          "hook_id": "hook_cave_anomaly",
-          "action": "advance",
-          "rationale": "禁地异象外溢：截杀事件引宗门高层注意"
-        }
-      ],
+      "hook_handling": [],
       "debt_handling": [],
       "proposed_new_entities": [],
       "deviations": [],

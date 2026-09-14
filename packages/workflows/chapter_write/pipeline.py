@@ -1,11 +1,14 @@
-"""chapter_write 工作流（Sprint 4-A + P0 ScenePlanner 真实化 + P1 Polisher）。
+"""chapter_write 工作流（Sprint 4-A + P0 ScenePlanner 真实化 + P1 Polisher + P1 规划合并消费）。
 
 节点列表：
 - ``load_plan`` (Transform) —— 读 chapters.plan_json 准备 director_plan 输入。
 - ``scene_planner`` (AI) —— P0 新增：调 scene_planner agent 把 director_plan 翻译为
   结构化 Scene Plan（含 slots / 冲突 / 信息边界 / 结尾钩子）。
-  任何失败（prompt 缺失 / provider 异常 / 输出不合规）→ 降级到原 stub 机械映射逻辑，
-  **不**阻断 writer run。
+  **P1（2026-09-14）起优先读 chapter-plan 落库的 scene_plan**
+  （``chapter_scene_plans``，迁移 0027）：命中即跳过 LLM 调用（``scene_planner_status=
+  'from_plan'``）；未命中（老章 / 合并调用只回了计划段 / 0027 未迁移的老库）保留本节点
+  的单次调用路径。任何失败（prompt 缺失 / provider 异常 / 输出不合规）→ 降级到原 stub
+  机械映射逻辑，**不**阻断 writer run（ch3 实证过该风险真实，降级路径必须保留）。
 - ``writer`` (AI) —— 调 writer agent 生成本章 prose。
 - ``polisher`` (AI) —— P1 新增：以 writer 产出的 prose + scan_ai_patterns(prose)
   确定性命中为输入，做去 AI 腔的文风级润色；不改情节 / 人物 / 事实。
@@ -85,6 +88,8 @@ from packages.core.quality.wordcount import (
     visible_chars,
 )
 from packages.core.workflow_runtime.engine import WorkflowNode
+from packages.workflows.chapter_plan.planner_input import collect_planner_context
+from packages.workflows.chapter_plan.scene_plan_store import load_scene_plan
 
 _log = logging.getLogger(__name__)
 
@@ -141,14 +146,6 @@ def _load_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 _SCENE_PLANNER_PROMPT_VERSION = "scene_planner:v1"
-
-# Scene Planner 失败降级：与原 stub 输出字段完全一致，保证 build_writer_input 零改动。
-_SCENE_PLANNER_DEFAULT_STYLE = {
-    "language": "zh-Hans",
-    "pov": "third_person_limited",
-    "dialogue_ratio": 0.4,
-    "forbidden_words": ["仿佛", "如同", "本章目标"],
-}
 
 
 def _scene_planner_fallback(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -227,39 +224,16 @@ def _collect_scene_planner_inputs(
     """组装 scene_planner agent 输入（最小可运行口径）。
 
     - chapter 元信息、director_plan 来自 load_plan。
-    - available_characters / available_locations 从 DB 取 id/name。
-    - style_constraints 取项目配置或本地默认。
-    - recent_prose 当前留空（Scene Planner 不依赖前章尾段亦可工作；非空为后续优化）。
+    - available_characters / available_locations / style_constraints / recent_prose 经
+      :func:`...chapter_plan.planner_input.collect_planner_context` 取（P1 规划合并后与
+      chapter-plan 的 director_planner 装配**同源同口径**——两条链的角色 / 地点 / 文风
+      清单不得漂移）。
     - 题材库 P1b：项目绑定题材包时注入 ``genre_pack`` 段（爽点类型摘要 + 配比声明 +
       配比指令，见 :func:`...builders_common._genre_pack_excerpt` 的 scene_planner
       consumer 口径）+ ``_genre_pack_consumed`` 溯源审计；未绑定 → 两键都不出现。
     """
-    conn = get_connection(db_path)
-    try:
-        chap_row = conn.execute(
-            "SELECT project_id, number, title FROM chapters WHERE chapter_id = ?",
-            (chapter_id,),
-        ).fetchone()
-        char_rows = conn.execute(
-            """
-            SELECT character_id, name FROM characters
-            WHERE project_id = (SELECT project_id FROM chapters WHERE chapter_id = ?)
-            ORDER BY name
-            """,
-            (chapter_id,),
-        ).fetchall()
-        loc_rows = conn.execute(
-            """
-            SELECT location_id, name FROM locations
-            WHERE project_id = (SELECT project_id FROM chapters WHERE chapter_id = ?)
-            ORDER BY name
-            """,
-            (chapter_id,),
-        ).fetchall()
-    finally:
-        conn.close()
-
-    project_id = chap_row["project_id"] if chap_row else None
+    context = collect_planner_context(db_path, chapter_id)
+    project_id = context["project_id"]
 
     # Reference Canon 注入：scene_planner 消费 emotion_curve（张力曲线）+ payoff_list
     # （Scene 级爽点排布）。与 director / writer 共用同一 excerpt 函数（consumer=planner
@@ -279,13 +253,6 @@ def _collect_scene_planner_inputs(
             reference_canon_audit = None
         finally:
             conn3.close()
-
-    # style_constraints：优先读项目级；暂无则本地默认。
-    style_constraints: dict[str, Any]
-    if project_id:
-        style_constraints = _load_project_style_constraints(db_path, project_id)
-    else:
-        style_constraints = dict(_SCENE_PLANNER_DEFAULT_STYLE)
 
     # 题材库 P1b：scene_planner 消费题材包（规划期硬约束）——
     # payoff_types（爽点类型摘要 + 密度约束文本化，≤1500 字符预算，
@@ -346,8 +313,8 @@ def _collect_scene_planner_inputs(
         "prompt_version": _SCENE_PLANNER_PROMPT_VERSION,
         "chapter": {
             "chapter_id": chapter_id,
-            "title": chap_row["title"] if chap_row else None,
-            "number": int(chap_row["number"]) if chap_row and chap_row["number"] is not None else 1,
+            "title": context["chapter_title"],
+            "number": context["chapter_number"],
             # plan_json 存的是 expected_word_count；target_word_count 为兼容旧字段。
             # 兜底取全仓单源常量 DEFAULT_TARGET_WORD_COUNT（3000）。
             "target_word_count": int(
@@ -365,15 +332,11 @@ def _collect_scene_planner_inputs(
             "notes_for_planner": plan.get("notes_for_planner"),
             "revision_note": plan.get("revision_note"),
         },
-        "available_characters": [
-            {"character_id": r["character_id"], "name": r["name"]} for r in char_rows
-        ],
-        "available_locations": [
-            {"location_id": r["location_id"], "name": r["name"]} for r in loc_rows
-        ],
+        "available_characters": context["available_characters"],
+        "available_locations": context["available_locations"],
         "world_state_excerpts": world_state_excerpts,
-        "style_constraints": style_constraints,
-        "recent_prose": {"last_chapter_excerpt": "", "last_scene_excerpt": ""},
+        "style_constraints": context["style_constraints"],
+        "recent_prose": context["recent_prose"],
     }
 
     # Reference Canon（emotion_curve + payoff_list）。无 canon 时不注入该键——
@@ -391,58 +354,21 @@ def _collect_scene_planner_inputs(
     return payload
 
 
-def _load_project_style_constraints(
-    db_path: str, project_id: str
-) -> dict[str, Any]:
-    """读 projects.style_constraints_id → style_constraints 配置；缺失则返回默认。
-
-    对老库（无 style_constraints 表 / 无列）做防御性捕获，避免 DDL 差异阻断 write。
-    """
-    try:
-        conn = get_connection(db_path)
-    except Exception:  # noqa: BLE001
-        return dict(_SCENE_PLANNER_DEFAULT_STYLE)
-    try:
-        row = conn.execute(
-            "SELECT style_constraints_id FROM projects WHERE project_id = ?",
-            (project_id,),
-        ).fetchone()
-    except sqlite3.OperationalError:
-        conn.close()
-        return dict(_SCENE_PLANNER_DEFAULT_STYLE)
-    style_id = row["style_constraints_id"] if row else None
-    if style_id:
-        try:
-            sc_row = conn.execute(
-                "SELECT config_json FROM style_constraints WHERE style_constraints_id = ?",
-                (style_id,),
-            ).fetchone()
-        except sqlite3.OperationalError:
-            conn.close()
-            return dict(_SCENE_PLANNER_DEFAULT_STYLE)
-        if sc_row and sc_row["config_json"]:
-            try:
-                cfg = json.loads(sc_row["config_json"])
-                if isinstance(cfg, dict):
-                    conn.close()
-                    return cfg
-            except (TypeError, ValueError):
-                pass
-    conn.close()
-    return dict(_SCENE_PLANNER_DEFAULT_STYLE)
-
-
 def _scene_planner_node(ctx: dict[str, Any]) -> dict[str, Any]:
-    """P0 Scene Planner AI 节点。
+    """Scene Planner AI 节点（P1 起兼任「读落库 scene_plan」入口）。
 
     行为：
-    1. 取 loaded_plan + chapter 元信息 + 项目角色/地点，组装 scene_planner payload。
-    2. 调 ``run_agent(..., agent_name='scene_planner', expected='scene_planner',
+    1. **P1 优先**：读 ``chapter_scene_plans``（迁移 0027，由 chapter-plan 的
+       director_planner 合并调用落库）。命中（有行且 ``scenes`` 非空）→ 直接透出
+       ``scene_plan``，``scene_planner_status='from_plan'``，**不调 LLM**。
+    2. 未命中（老章 / 合并调用只回了计划段 / 0027 未迁移的老库）→ 走原路径：
+       取 loaded_plan + chapter 元信息 + 项目角色/地点，组装 scene_planner payload。
+    3. 调 ``run_agent(..., agent_name='scene_planner', expected='scene_planner',
        mock_script=...)``；runner 内部走 parse_json → validate_contract("scene_planner")
        → 写 ai_call_logs。
-    3. 任何异常（prompt 缺失 / provider 异常 / 契约校验失败 / 输出字段缺失）→ 降级
+    4. 任何异常（prompt 缺失 / provider 异常 / 契约校验失败 / 输出字段缺失）→ 降级
        到 ``_scene_planner_fallback``，**不**抛错、**不**阻断 writer。
-    4. 输出顶层保留 ``scene_plan`` key（与 stub 兼容），同时把原始 AI 输出放入
+    5. 输出顶层保留 ``scene_plan`` key（与 stub 兼容），同时把原始 AI 输出放入
        ``scene_planner_output`` 供观测。
 
     支持 mock：``ctx["mock_providers"]["scene_planner"]`` 与 writer/critic 同机制。
@@ -452,6 +378,29 @@ def _scene_planner_node(ctx: dict[str, Any]) -> dict[str, Any]:
     chapter_id = ctx["chapter_id"]
     plan = ctx.get("loaded_plan") or {}
     mock_script = (ctx.get("mock_providers") or {}).get("scene_planner")
+
+    # P1：chapter-plan 已落库 scene_plan（迁移 0027）→ 命中即跳过本次 LLM 调用。
+    # 只透出 scenes（与既有 scene_planner 路径同形：下游 build_writer_input 只消费
+    # 该键），provenance 单独放 scene_planner_source 供 run 详情审计。
+    persisted = load_scene_plan(db_path, chapter_id)
+    if persisted is not None:
+        persisted_scenes = (persisted.get("scene_plan") or {}).get("scenes")
+        if isinstance(persisted_scenes, list) and persisted_scenes:
+            return {
+                "scene_plan": {"scenes": persisted_scenes},
+                "scene_planner_output": None,
+                "scene_planner_status": "from_plan",
+                "scene_planner_source": {
+                    "source": persisted.get("source"),
+                    "prompt_version": persisted.get("prompt_version"),
+                    "run_id": persisted.get("run_id"),
+                    "updated_at": persisted.get("updated_at"),
+                },
+            }
+        _log.warning(
+            "chapter_write.scene_planner persisted scene_plan unusable "
+            "(empty/invalid scenes) → fallback to LLM path: chapter_id=%s", chapter_id,
+        )
 
     payload = _collect_scene_planner_inputs(db_path, chapter_id, plan)
     # 题材库 P1b：本节点产出透出题材包消费审计键（供 run detail / 测试观测）；

@@ -392,7 +392,8 @@ def test_canon_json_garbage_does_not_raise(tmp_path: Path):
 def test_chapter_plan_pipeline_writes_consumed_audit_to_checkpoint(tmp_path: Path):
     """端到端：跑 chapter-plan 后，checkpoint_json 必须包含 _reference_canon_consumed。
 
-    这是 Sprint 11 下半 §6.3 溯源审计的最小闭环：director_input 顶层
+    这是 Sprint 11 下半 §6.3 溯源审计的最小闭环：director_planner_input（P1 前名
+    ``director_input``；合并调用后 payload 里多了规划期段，键名随之对齐）顶层
     ``_reference_canon_consumed`` 由 ``build_director_input`` 写入；chapter_plan
     pipeline 把整个 ctx dict 交给 WorkflowEngine，引擎按 ``_dump_json(ctx)``
     写入 workflow_runs.checkpoint_json（见 engine.py:411）。
@@ -412,10 +413,11 @@ def test_chapter_plan_pipeline_writes_consumed_audit_to_checkpoint(tmp_path: Pat
 
         wf = get_workflow("chapter-plan")
         assert wf is not None, "chapter-plan 未注册"
-        # 用一个返回极简 director-plan JSON 的 mock，避免任何 LLM 路由
+        # 用一个返回极简 director-plan JSON 的 mock（计划-only 形态：合并契约允许
+        # scene_plan 缺席，见 structured_output._validate_director_planner），避免任何 LLM 路由
         director_payload = {
             "schema_version": "director-plan.v1",
-            "prompt_version": "director:v1",
+            "prompt_version": "director_planner:v1",
             "chapter_id": cid,
             "chapter_goal": "测试",
             "core_conflict": "测试",
@@ -437,7 +439,7 @@ def test_chapter_plan_pipeline_writes_consumed_audit_to_checkpoint(tmp_path: Pat
                 "project_id": pid,
                 "chapter_id": cid,
                 "author_intent": "意图",
-                "mock_providers": {"director": [json.dumps(director_payload, ensure_ascii=False)]},
+                "mock_providers": {"director_planner": [json.dumps(director_payload, ensure_ascii=False)]},
             },
         )
         return run_id
@@ -454,15 +456,15 @@ def test_chapter_plan_pipeline_writes_consumed_audit_to_checkpoint(tmp_path: Pat
         conn.close()
     assert ckpt_row is not None
     ckpt = json.loads(ckpt_row["checkpoint_json"])
-    # checkpoint 顶层含 director_input dict；director_input 含 _reference_canon_consumed
-    di = ckpt.get("director_input") or {}
+    # checkpoint 顶层含 director_planner_input dict；其中含 _reference_canon_consumed
+    di = ckpt.get("director_planner_input") or {}
     assert "_reference_canon_consumed" in di, (
-        f"checkpoint.director_input 缺 _reference_canon_consumed；keys={list(di.keys())}"
+        f"checkpoint.director_planner_input 缺 _reference_canon_consumed；keys={list(di.keys())}"
     )
     audit = di["_reference_canon_consumed"]
     assert "canon_id" in audit
     assert "consumed_fields" in audit and "logline" in audit["consumed_fields"]
-    # 同时 director_input 顶层有 reference_canon 注入键
+    # 同时 director_planner_input 顶层有 reference_canon 注入键
     assert "reference_canon" in di
 
 

@@ -312,7 +312,7 @@ def test_extract_json_repairs_missing_comma_between_array_elements():
     """LLM 在数组元素之间漏掉逗号（生产事故典型形态）→ 三级兜底修复成功。"""
     payload, meta = extract_json('{"a":["x" "y"]}', return_meta=True)
     assert payload == {"a": ["x", "y"]}
-    assert meta == {"repaired": True}
+    assert meta == {"repaired": True, "merged_object_count": None}
 
 
 def test_extract_json_repairs_missing_comma_between_object_keys():
@@ -335,7 +335,7 @@ def test_extract_json_clean_json_no_repair_meta_false():
     """干净 JSON → repaired=False，不触发第三级（零开销覆盖）。"""
     payload, meta = extract_json('{"a": 1, "b": [2, 3]}', return_meta=True)
     assert payload == {"a": 1, "b": [2, 3]}
-    assert meta == {"repaired": False}
+    assert meta == {"repaired": False, "merged_object_count": None}
 
 
 def test_extract_json_return_meta_default_false_keeps_legacy_dict_contract():

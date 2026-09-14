@@ -63,7 +63,8 @@ def _valid_observer_output() -> dict:
 def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
     """sync 后 GET /agents 应含全部已注册 agent。P2-2 拆分后下划线名注册；
     V1.2.0 新增 summarizer；V1.3 新增 critic；P0 新增 scene_planner；
-    project-init 新增 premise_designer / world_builder / character_designer / volume_outliner。"""
+    P1 规划合并新增 director_planner；project-init 新增 premise_designer / world_builder /
+    character_designer / volume_outliner。"""
     app = _create_app(tmp_path)
 
     async def run():
@@ -81,7 +82,7 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
                 "deconstructor_chapter", "deconstructor_aggregate",
                 "summarizer", "critic", "scene_planner", "polisher",
                 "premise_designer", "world_builder", "character_designer", "volume_outliner",
-                "deep_reviewer",
+                "deep_reviewer", "director_planner",
             }
             assert expected == set(payload["agents"]), (
                 f"agents mismatch: got {payload['agents']}"

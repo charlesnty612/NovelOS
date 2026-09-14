@@ -41,8 +41,10 @@ def test_health_endpoint_returns_ok(tmp_path: Path):
     # V2.0 Wave B 任务二：0010_trigger_keys.sql 仅 ALTER TABLE 加列，不增表 → 仍 34 业务表
     # V3.4 多卷与规模（组织层）：0015_volumes.sql 加 volumes 业务表 → 35 业务表
     # V3.7 模型档案 + 环节绑定：0016_model_profiles.sql 加 model_profiles + capability_bindings → 37 业务表
-    # 题材库 P1a：0025_genre_packs.sql 加 genre_packs → 38 业务表（含 _migrations 物理共 39）
-    assert data["tables"] == 38
+    # 题材库 P1a：0025_genre_packs.sql 加 genre_packs → 38 业务表
+    # P1 规划合并：0027_chapter_scene_plans.sql 加 chapter_scene_plans → 39 业务表
+    # （含 _migrations 物理共 40）
+    assert data["tables"] == 39
 
 
 def test_root_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

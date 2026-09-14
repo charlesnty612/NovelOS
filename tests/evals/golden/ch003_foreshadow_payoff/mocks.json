@@ -69,23 +69,7 @@
           "knowledge_permission_compliant": true
         }
       ],
-      "hook_handling": [
-        {
-          "hook_id": "hook_ancient_mirror",
-          "action": "payoff",
-          "rationale": "本章兑现金手指伏笔，第一重残篇彻底觉醒"
-        },
-        {
-          "hook_id": "hook_zhou_yuan_suspicion",
-          "action": "advance",
-          "rationale": "周元阴谋首次被识破，伏笔推进但未完结"
-        },
-        {
-          "hook_id": "hook_sect_inquiry",
-          "action": "payoff",
-          "rationale": "本章兑现议事彻查伏笔"
-        }
-      ],
+      "hook_handling": [],
       "debt_handling": [],
       "proposed_new_entities": [],
       "deviations": [],

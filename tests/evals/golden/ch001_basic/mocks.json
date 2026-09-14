@@ -77,23 +77,7 @@
           "knowledge_permission_compliant": true
         }
       ],
-      "hook_handling": [
-        {
-          "hook_id": "hook_ancient_mirror",
-          "action": "introduce",
-          "rationale": "本章引入核心金手指"
-        },
-        {
-          "hook_id": "hook_zhou_yuan_suspicion",
-          "action": "introduce",
-          "rationale": "埋下周元反派人设"
-        },
-        {
-          "hook_id": "hook_cave_anomaly",
-          "action": "introduce",
-          "rationale": "章末异象钩子"
-        }
-      ],
+      "hook_handling": [],
       "debt_handling": [],
       "proposed_new_entities": [
         {

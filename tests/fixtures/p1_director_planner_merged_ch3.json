@@ -1,0 +1,357 @@
+{
+ "schema_version": "director-plan.v1",
+ "prompt_version": "director_planner:v0.2-draft",
+ "chapter_id": "ch_aebffa44f037",
+ "chapter_goal": "沈知微在内宅正院遭遇二房施压时，林策在门外以账房身份获取裴元绍财务漏洞的第一手证据，两人第一次形成不言明的默契。",
+ "core_conflict": "沈知微在侯府内宅孤立无援的生存困境 vs 林策必须在身份约束下寻找介入机会的职场理性",
+ "turning_point": "林策发现裴元绍侵吞沈家嫁妆的账目漏洞，借仆妇传话为沈知微解围——用一条财务证据换她一次喘息",
+ "expected_role": "setup",
+ "expected_word_count": 3000,
+ "key_beats": [
+  {
+   "beat_id": "beat_001",
+   "purpose": "林策在甬道灯笼下观察正院动静，展示他作为局中人的冷静分析视角，同时建立「账房先生」身份的空间感",
+   "involved_characters": [
+    "char_f0be6a066e17"
+   ],
+   "involved_locations": [
+    "loc_20a0b72b6be1"
+   ],
+   "involved_hooks": [],
+   "involved_debts": [],
+   "risk_level": "LOW",
+   "narrative_question_served": "确立主角职场型棋手人设，用分析代替冲动，给读者吃一颗定心丸"
+  },
+  {
+   "beat_id": "beat_002",
+   "purpose": "正院内二房代表施压沈知微的场景，以声音穿透或仆妇视角碎片化呈现，保持林策在门外的悬念",
+   "involved_characters": [
+    "char_49a2ad9ac576",
+    "char_5934ce186818"
+   ],
+   "involved_locations": [
+    "loc_20a0b72b6be1"
+   ],
+   "involved_hooks": [],
+   "involved_debts": [],
+   "risk_level": "MEDIUM",
+   "narrative_question_served": "让读者看到沈知微的处境有多难，同时让反派有一个初步的脸谱化压迫时刻"
+  },
+  {
+   "beat_id": "beat_003",
+   "purpose": "[payoff][power_display] 林策借送账本之名入正院，用一条裴元绍侵吞嫁妆田产的财务漏洞当场点破二房的要挟逻辑，二房被迫松口让沈知微离开——沈知微第一次见识到这位账房先生的用处",
+   "involved_characters": [
+    "char_f0be6a066e17",
+    "char_49a2ad9ac576",
+    "char_5934ce186818"
+   ],
+   "involved_locations": [
+    "loc_20a0b72b6be1"
+   ],
+   "involved_hooks": [],
+   "involved_debts": [],
+   "risk_level": "HIGH",
+   "narrative_question_served": "首个有效爽点兑现：林策以局中人身份完成一次精准干预，证明他的「账房」身份不只是伪装，而是真正的武器"
+  },
+  {
+   "beat_id": "beat_004",
+   "purpose": "沈知微离开正院，在甬道与林策擦肩而过时低声说一句「账房先生今日辛苦」——两人不言明的默契第一次建立",
+   "involved_characters": [
+    "char_f0be6a066e17",
+    "char_49a2ad9ac576"
+   ],
+   "involved_locations": [
+    "loc_20a0b72b6be1"
+   ],
+   "involved_hooks": [],
+   "involved_debts": [],
+   "risk_level": "LOW",
+   "narrative_question_served": "为后续联手设局埋下信任基础，同时给本章一个情绪余韵的收尾"
+  }
+ ],
+ "character_changes_planned": [
+  {
+   "character_id": "char_49a2ad9ac576",
+   "field": "belief",
+   "from": "新来的账房先生只是一个普通下人",
+   "to": "这个账房先生不只是记账的，他有能力也有意愿帮我",
+   "rationale": "林策的出手让沈知微第一次把他从「可用之人」升级为「可托之人」",
+   "risk_level": "MEDIUM"
+  },
+  {
+   "character_id": "char_f0be6a066e17",
+   "field": "knowledge",
+   "from": "只知道裴元绍侵吞嫁妆的表面事实",
+   "to": "掌握了一条可以当场反击二房要挟的具体账目漏洞",
+   "rationale": "本章进入正院的机会让他拿到了第一手证据",
+   "risk_level": "LOW"
+  }
+ ],
+ "information_releases": [
+  {
+   "audience": "reader",
+   "target_id": "reader",
+   "content_summary": "沈知微在侯府的处境比表面上更险恶：二房正在试图进一步侵吞她的嫁妆田产",
+   "source_visibility": "DIRECTOR",
+   "knowledge_permission_compliant": true
+  },
+  {
+   "audience": "character",
+   "target_id": "char_49a2ad9ac576",
+   "content_summary": "林策拥有账房身份可以调用，他的介入能够打破二房的要挟逻辑",
+   "source_visibility": "CHARACTER",
+   "knowledge_permission_compliant": true
+  }
+ ],
+ "hook_handling": [],
+ "debt_handling": [],
+ "proposed_new_entities": [],
+ "deviations": [],
+ "knowledge_leakage_check": {
+  "uses_hidden_knowledge": false,
+  "leakage_details": null
+ },
+ "open_questions": [
+  "二房背后是否还有更大势力在推动对沈知微的逼压？",
+  "裴元绍侵吞嫁妆的账目漏洞具体是哪一条？（留待下一章展开）"
+ ],
+ "notes_for_planner": "按3000字分配：beat_001甬道观察600字（scene_001），beat_002正院施压800字（scene_002），beat_003林策出手1200字（scene_003），beat_004甬道擦肩400字（scene_004）。对话占比40%。payoff落在beat_003。场景全在永昌侯府内，4个场景各自独立但连续。",
+ "scene_plan": {
+  "schema_version": "scene-plan.v1",
+  "prompt_version": "director_planner:v0.2-draft",
+  "chapter_id": "ch_aebffa44f037",
+  "scenes": [
+   {
+    "scene_id": "scene_001",
+    "purpose": "林策在甬道灯笼下观察正院动静，展示他的职场型分析视角和账房身份的空间存在感",
+    "characters": [
+     "char_f0be6a066e17"
+    ],
+    "location": "loc_20a0b72b6be1",
+    "conflict": "林策的冷静分析本能 vs 他必须等待时机不能贸然行动的职场理性",
+    "turn": null,
+    "time_in_story": "夜内，沈知微被召往正院后不久",
+    "pov": "third_person_limited",
+    "pov_character_id": "char_f0be6a066e17",
+    "information_boundary": [
+     "裴元绍侵吞嫁妆的具体账目漏洞",
+     "林策的局外人身份",
+     "跨位面违约者悬案的任何信息"
+    ],
+    "ending_hook": "正院方向传来一声女声尖叫，旋即被压下去——林策的手搭上了怀里那本私账",
+    "target_words": 600,
+    "scene_type": "other",
+    "slots": [
+     {
+      "slot_id": "scene_001_action_01",
+      "type": "action",
+      "purpose": "林策拨亮灯笼，观察甬道通往正院的路线，建立账房身份的空间感",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "冷静警觉",
+      "constraints": [
+       "用灯笼光和脚步声等感官细节替代直接描写心理"
+      ]
+     },
+     {
+      "slot_id": "scene_001_emotion_01",
+      "type": "emotion",
+      "purpose": "展示林策的职场型思维模式：把局面当案子拆解，而不是当战斗冲动",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "克制中的算计",
+      "constraints": [
+       "只用外在行为暗示内心活动，不写内心独白"
+      ]
+     }
+    ]
+   },
+   {
+    "scene_id": "scene_002",
+    "purpose": "正院内二房施压沈知微的场景，声音碎片化穿透到甬道，展示沈知微孤立无援的处境",
+    "characters": [
+     "char_49a2ad9ac576",
+     "char_5934ce186818"
+    ],
+    "location": "loc_20a0b72b6be1",
+    "conflict": "二房以族规和名节为要挟逼迫沈知微就范 vs 沈知微孤身在内宅无处可退",
+    "turn": "施压内容逐渐从「劝退」升级为「威胁」——二房提到了嫁妆田产的契书归属问题",
+    "time_in_story": "紧接scene_001",
+    "pov": "third_person_limited",
+    "pov_character_id": "char_f0be6a066e17",
+    "information_boundary": [
+     "林策在门外观察的具体细节",
+     "沈知微内心的完整想法",
+     "二房背后是否有人指使"
+    ],
+    "ending_hook": "林策听到二房代表说出「嫁妆田契」四个字——他的手指在私账封皮上轻轻敲了一下",
+    "target_words": 800,
+    "scene_type": "face_slap",
+    "slots": [
+     {
+      "slot_id": "scene_002_description_01",
+      "type": "description",
+      "purpose": "建立正院的空间感：灯火、门廊、隔着门传出的声音质感",
+      "characters": [],
+      "target_mood": "压迫感递增",
+      "constraints": [
+       "以声音为主、视觉为辅，营造隔着门的紧张感"
+      ]
+     },
+     {
+      "slot_id": "scene_002_dialogue_01",
+      "type": "dialogue",
+      "purpose": "二房施压的内容：从劝说到威胁，核心筹码是嫁妆田契和名节",
+      "characters": [
+       "char_5934ce186818",
+       "char_49a2ad9ac576"
+      ],
+      "target_mood": "步步紧逼",
+      "constraints": [
+       "二房代表说话要有具体的威胁内容，不是泛泛的恶意"
+      ]
+     },
+     {
+      "slot_id": "scene_002_emotion_01",
+      "type": "emotion",
+      "purpose": "沈知微的应对：外柔内韧的特质如何在压力下体现",
+      "characters": [
+       "char_49a2ad9ac576"
+      ],
+      "target_mood": "隐忍中的倔强",
+      "constraints": [
+       "沈知微的反应要克制但有力量，不要写成楚楚可怜"
+      ]
+     }
+    ]
+   },
+   {
+    "scene_id": "scene_003",
+    "purpose": "[payoff][power_display] 林策借送账本之名入正院，用一条账目漏洞当场反击二房要挟，为沈知微解围",
+    "characters": [
+     "char_f0be6a066e17",
+     "char_49a2ad9ac576",
+     "char_5934ce186818"
+    ],
+    "location": "loc_20a0b72b6be1",
+    "conflict": "林策必须用账房身份和证据说事 vs 二房猝不及防被戳穿要挟逻辑",
+    "turn": "林策当场念出一条账目漏洞，二房代表的脸色从志在必得到当场语塞——沈知微第一次见到这种局面",
+    "time_in_story": "紧接scene_002",
+    "pov": "third_person_limited",
+    "pov_character_id": "char_f0be6a066e17",
+    "information_boundary": [
+     "林策的局外人身份",
+     "他掌握的其他账目漏洞",
+     "跨位面主线任何信息"
+    ],
+    "ending_hook": "二房代表拂袖而去，临走甩下一句「账房也管起主子的家务事了」——林策没有回话，只是把账本放在案上，沈知微看着他，目光里多了一点什么",
+    "target_words": 1200,
+    "scene_type": "power_display",
+    "slots": [
+     {
+      "slot_id": "scene_003_action_01",
+      "type": "action",
+      "purpose": "林策以送账本为由进入正院，展示他如何用身份锚定规则合理入场",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "从容入场",
+      "constraints": [
+       "入场的理由要符合账房身份，不能突兀闯入"
+      ]
+     },
+     {
+      "slot_id": "scene_003_dialogue_01",
+      "type": "dialogue",
+      "purpose": "林策用账目漏洞反击二房的威胁——专业精准、当场见效",
+      "characters": [
+       "char_f0be6a066e17",
+       "char_5934ce186818"
+      ],
+      "target_mood": "以理服人的压制感",
+      "constraints": [
+       "对话要体现职场型棋手的说话风格：不说废话、只点要害"
+      ]
+     },
+     {
+      "slot_id": "scene_003_emotion_01",
+      "type": "emotion",
+      "purpose": "沈知微目睹林策出手后的内心变化：从意外到重新评估这个账房先生",
+      "characters": [
+       "char_49a2ad9ac576"
+      ],
+      "target_mood": "暗流涌起的信任萌芽",
+      "constraints": [
+       "沈知微的反应要克制，符合她外柔内韧的特质"
+      ]
+     },
+     {
+      "slot_id": "scene_003_suspense_01",
+      "type": "suspense",
+      "purpose": "二房离开时的威胁暗示后续还会有动作，为下一章埋钩",
+      "characters": [
+       "char_f0be6a066e17",
+       "char_5934ce186818"
+      ],
+      "target_mood": "表面平静下的隐患",
+      "constraints": [
+       "威胁要有具体内容，不能只是泛泛的报复暗示"
+      ]
+     }
+    ]
+   },
+   {
+    "scene_id": "scene_004",
+    "purpose": "沈知微离开正院，在甬道与林策擦肩而过时建立第一次不言明的默契——两人确认彼此是可用的盟友",
+    "characters": [
+     "char_f0be6a066e17",
+     "char_49a2ad9ac576"
+    ],
+    "location": "loc_20a0b72b6be1",
+    "conflict": "两人之间信任的试探性建立 vs 彼此都还有隐藏",
+    "turn": "沈知微低声说了一句「账房先生今日辛苦」，林策回了一句「分内之事」——两人都听懂了对方话里没说的那层意思",
+    "time_in_story": "紧接scene_003",
+    "pov": "third_person_limited",
+    "pov_character_id": "char_f0be6a066e17",
+    "information_boundary": [
+     "林策的局外人身份",
+     "沈知微知道多少关于林策的真实意图"
+    ],
+    "ending_hook": "林策回到账房，翻开私账，在「裴元绍」三个字后面添了一笔——「首次有效干预，账目漏洞已锁定」",
+    "target_words": 400,
+    "scene_type": "identity_reveal",
+    "slots": [
+     {
+      "slot_id": "scene_004_dialogue_01",
+      "type": "dialogue",
+      "purpose": "沈知微与林策的擦肩而过对话：简短、克制、意味深长",
+      "characters": [
+       "char_f0be6a066e17",
+       "char_49a2ad9ac576"
+      ],
+      "target_mood": "微妙的信任萌芽",
+      "constraints": [
+       "对话要少而精，每句话都有弦外之音"
+      ]
+     },
+     {
+      "slot_id": "scene_004_action_01",
+      "type": "action",
+      "purpose": "林策回到账房在私账上记录——展示他的职场型工作习惯和追查违约指纹的主线任务",
+      "characters": [
+       "char_f0be6a066e17"
+      ],
+      "target_mood": "冷静的职场节奏感",
+      "constraints": [
+       "私账的存在是本项目的辨识性特征之一，要在动作中自然带出"
+      ]
+     }
+    ]
+   }
+  ],
+  "notes_for_writer": "4个场景总字数3000，按scene_001=600、scene_002=800、scene_003=1200、scene_004=400分配。payoff落在scene_003（林策出手解围），是本章唯一的爽点兑现。场景全在永昌侯府内，时间线从夜内沈知微被召往正院起，到林策回到账房记录私账止，全程连贯。沈知微的辨识性特质是「外柔内韧」，无论施压还是被解围后都要体现这个特质。",
+  "deviations": []
+ }
+}

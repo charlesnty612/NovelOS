@@ -1,7 +1,7 @@
 # tests（测试套件）
 
 > 职责：NovelOS 后端的 pytest 套件，按 PRD §70 四级目录组织（unit / integration / workflow / evals），另有 `api/` 集成层与 `unit/` 子域（quality / simulation）。
-> 状态：现行规模——`python -m pytest -n 4 -q` 全量 **2059 passed / 2 skipped**（2026-09-13 V3.9.0 基线，52f639f 实测）；前端 vitest 422 用例（`apps/web`，`npm run test`）。
+> 状态：现行规模——`python -m pytest -n 4 -q` 全量 **2162 passed / 2 skipped**（2026-09-14 P1 规划合并后实测；V3.9.0 基线为 2059 / 2，52f639f）；前端 vitest 422 用例（`apps/web`，`npm run test`）。
 
 ## 职责与边界
 
@@ -22,9 +22,9 @@
 | 项 | 说明 |
 |---|---|
 | 全量命令 | `python -m pytest -n 4 -q`（xdist 并行，约 4 分钟；依赖 dev extra，裸 `uv sync` 会缺 ruff/pytest-xdist） |
-| 基线 | 2059 passed / 2 skipped（52f639f 实测） |
-| 迁移表数 | `test_apply_migrations_creates_34_business_tables`（迁移后总表 39 = 38 业务表 + `_migrations`）；`test_business_table_count_is_34`（业务表 38，排除 `chapter_fts%` 影子表） |
-| 健康检查 | `test_health_endpoint_returns_ok`：`GET /api/health` → `{status:"ok", version:<包版本>, tables:38}` |
+| 基线 | 2162 passed / 2 skipped（2026-09-14，P1 规划合并批次实测） |
+| 迁移表数 | `test_apply_migrations_creates_34_business_tables`（迁移后总表 40 = 39 业务表 + `_migrations`）；`test_business_table_count_is_34`（业务表 39，排除 `chapter_fts%` 影子表） |
+| 健康检查 | `test_health_endpoint_returns_ok`：`GET /api/health` → `{status:"ok", version:<包版本>, tables:39}` |
 | 端到端 | 工作流全链由 `scripts/smoke_e2e.py` 覆盖（独立临时库 + 独立端口，自动清理） |
 
 ### 子目录归属
@@ -34,6 +34,9 @@
 - `tests/api/`：API 契约与路由行为（OpenAPI 契约、SPA 托管、门禁 / 取消闭环等）
 - `tests/workflow/`：工作流无头跑（引擎、四工作流、checkpoint / resume / crash 恢复）
 - `tests/evals/`：评估 Harness（golden 数据集、回归基线读写与判定）
+- `tests/fixtures/`：跨用例共享的 golden fixture（如 P1 规划合并的 A/B 实跑产出
+  `p1_director_planner_merged_ch{3,4}.json`，供 `test_director_planner_contract.py`
+  做双契约 + 白名单回归）
 
 ## 依赖
 
