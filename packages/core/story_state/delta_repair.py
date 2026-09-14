@@ -1158,6 +1158,28 @@ def repair_delta(
         for idx, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
+            # 键卫生（2026-09-15 四连事故第四形态）：debt 的 status_before/severity_before
+            # 是 update 专属语义且 enum 不接受 null。observer 常在 op='add' 上也带
+            # `status_before: null` 出厂——此时既无 fill 也无 downgrade 分支覆盖，
+            # 直接漏到 validator。规则：非 update 的 debt 项剥掉这两个键；
+            # severity_before 为 null 时（可选字段）无论 op 一律删键。
+            if arr_name == "debt_changes":
+                if item.get("op") != "update" and (
+                    "status_before" in item or "severity_before" in item
+                ):
+                    item.pop("status_before", None)
+                    item.pop("severity_before", None)
+                    all_repairs.append({
+                        "array": arr_name, "index": idx,
+                        "rule": "drop-update-only-fields", "target_id": item.get("target_id"),
+                    })
+                if item.get("severity_before", "MISSING") is None:
+                    item.pop("severity_before", None)
+                    all_repairs.append({
+                        "array": arr_name, "index": idx,
+                        "rule": "drop-null-optional-field", "target_id": item.get("target_id"),
+                        "field": "severity_before",
+                    })
             if "confidence" not in item:
                 item["confidence"] = 0.5
                 all_repairs.append({
