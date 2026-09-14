@@ -933,19 +933,22 @@ def _repair_debt_changes(
             new_item = dict(item)
             filled = False
             if item.get("status_before") is None:
+                # 实体在库但 status 为 null 时（书1 ch1 三连事故第三形态），按
+                # 状态机默认态 'open' 兜底——open 是任何债务的合法起点，语义安全。
                 current_status = entity.get("status")
-                if current_status is not None:
-                    new_item["status_before"] = current_status
-                    repairs.append(
-                        {
-                            "array": "debt_changes",
-                            "index": idx,
-                            "rule": "fill-before",
-                            "target_id": target_id,
-                            "field": "status_before",
-                        }
-                    )
-                    filled = True
+                if current_status is None:
+                    current_status = "open"
+                new_item["status_before"] = current_status
+                repairs.append(
+                    {
+                        "array": "debt_changes",
+                        "index": idx,
+                        "rule": "fill-before",
+                        "target_id": target_id,
+                        "field": "status_before",
+                    }
+                )
+                filled = True
             if item.get("severity_before") is None:
                 current_severity = entity.get("severity")
                 if current_severity is not None:
