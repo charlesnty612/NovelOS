@@ -23,6 +23,10 @@ from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection
+from packages.core.genre.target_words import (
+    pack_chapter_words_target,
+    resolve_target_word_count,
+)
 from packages.core.model_router.router import capability_for
 from packages.core.quality.wordcount import DEFAULT_TARGET_WORD_COUNT
 from packages.core.workflow_runtime.engine import WorkflowNode
@@ -47,7 +51,12 @@ def _build_ctx_node(ctx: dict[str, Any]) -> dict[str, Any]:
         project_id,
         chapter_id,
         intent,
-        target_word_count=ctx.get("target_word_count") or DEFAULT_TARGET_WORD_COUNT,
+        # target 走共享解析（ctx 显式 → 题材包 pacing.chapter_words.target → 默认），
+        # 与 write/review/scene_planner 同链同值（target 题材包化补齐 plan 侧）。
+        target_word_count=resolve_target_word_count(
+            db_path, chapter_id, explicit=ctx.get("target_word_count") or None,
+            project_id=project_id,
+        ),
         expected_role=ctx.get("expected_role", "setup"),
     )
     return {"director_planner_input": payload}
@@ -141,9 +150,12 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
     elif inherit_expected is not None:
         expected_word_count = inherit_expected
     else:
-        # V3.9 批次 5.1：兜底与 build_director_input 传参默认同为全仓单源 3000
-        # （改造前此处为 2200，与同文件 docstring / writer / review 口径不一致）。
-        expected_word_count = DEFAULT_TARGET_WORD_COUNT
+        # 兜底链：绑定题材包的 pacing.chapter_words.target → 全仓单源 3000
+        # （target 题材包化补齐 plan 侧；inherit 保护人工已规划值，位置不变）。
+        expected_word_count = (
+            pack_chapter_words_target(db_path, project_id)
+            or DEFAULT_TARGET_WORD_COUNT
+        )
 
     plan_payload: dict[str, Any] = {
         # 白名单：director 新增字段须**人工登记本表**，否则静默丢弃（不落 plan_json）。
