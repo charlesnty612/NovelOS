@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+### Fixed（2026-09-15 台账注入的章号位置过滤——重产早期章被后文倒灌）
+
+- **缺陷**：`_hook_ledger_excerpt` / `_open_foreshadow_list` / `_narrative_debt_excerpt`
+  注入项目**全部**未闭环项，不看引入章号。顺行生成时无害（后面还没写），但**重产早期章**
+  时后文钩子会灌进 planner 输入。
+- **实证**：书1 重产 ch1 后，planner 把 ch21 才引入的 `hook_..._second_arc_identity`
+  写进了 ch1 的 `hook_handling`，并带出 ch17/ch20 的钩子名——正文因此出现
+  「三年之约已经兑现，破屋锚点再次确认」这类**弧末术语**，且结尾重复收束一次
+  （「你到底是谁」出现两遍、自相矛盾）。
+- **修法**：三处注入统一加 `current_chapter_no` 位置过滤（`introduced_chapter_id` /
+  `created_chapter_id` 为 NULL 的项目级项保留；传 None 维持原全量口径供 preview 用）。
+- **验证**：`tests/unit/test_ledger_chapter_filter.py` 2 例 + 突变验证（撤过滤必红）；
+  全量 **pytest 2200 passed / 2 skipped**。
+- **裁决留痕**：ch1 是否补写的判断从「少 37 字」改判为「内容有真缺陷、必须重产」
+  ——原判断依据（字数）不成立，实际问题是重复收束 + 计划术语泄漏。
+
+
 ### Fixed（2026-09-15 大纲槽：修「大纲从未进入 planner 输入」——书1 首弧跑偏的根因）
 
 > 事故：书 1 首弧 21 章（54k 字）跑完后核对，**章节标题是 v9 大纲的、正文却是另一套故事**

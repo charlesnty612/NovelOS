@@ -55,27 +55,37 @@ def _plot_graph_excerpt(conn: sqlite3.Connection, project_id: str) -> dict[str, 
     }
 
 
-def _hook_ledger_excerpt(conn: sqlite3.Connection, project_id: str) -> list[dict[str, Any]]:
-    """伏笔台账视图（V3.9 批次 2.2 加上限）：planted 状态全量清单，按 importance DESC + id 稳定序取 20。
+def _hook_ledger_excerpt(
+    conn: sqlite3.Connection, project_id: str, *, current_chapter_no: int | None = None,
+) -> list[dict[str, Any]]:
+    """伏笔台账视图（V3.9 批次 2.2 加上限）：planted 状态清单，按 importance DESC + id 稳定序取 20。
 
     与 :func:`_open_foreshadow_list` 的分工（两者并存，语义不同，不合并）：
     - 本函数 = **台账视图**：`hooks` 表原始状态机字段（status / importance /
-      expected_payoff_chapter / payoff_chapter_id），不 join 章节号、不算 overdue、
-      不判当前章——回答「项目里还有哪些伏笔挂着」。
+      expected_payoff_chapter / payoff_chapter_id），不算 overdue——回答「项目里还有
+      哪些伏笔挂着」。
     - `_open_foreshadow_list` = **待核销视图**：LEFT JOIN chapters 计算 introduced
       chapter_no 与 overdue，按 overdue 优先排序——回答「这一章该收哪些伏笔」。
     二者字段与排序口径都不同（台账按重要性，待核销按逾期），消费方（director prompt /
     preview）分别取用；合并会丢掉一方语义，故仅各自加 cap。
+
+    ``current_chapter_no``（2026-09-15 加）：只注入**本章或更早**引入的伏笔。
+    传 None 保持原口径（全量台账，preview 等场景用）。
     """
     rows = conn.execute(
         """
-        SELECT hook_id, name, status, importance, expected_payoff_chapter_id, payoff_chapter_id
-        FROM hooks
-        WHERE project_id = ? AND status IN ('OPEN', 'ACTIVE', 'ESCALATED')
-        ORDER BY importance DESC, hook_id ASC
+        SELECT h.hook_id, h.name, h.status, h.importance,
+               h.expected_payoff_chapter_id, h.payoff_chapter_id
+        FROM hooks h
+        LEFT JOIN chapters ch ON ch.chapter_id = h.introduced_chapter_id
+        WHERE h.project_id = ? AND h.status IN ('OPEN', 'ACTIVE', 'ESCALATED')
+          -- 位置过滤（2026-09-15）：只给**本章或更早**引入的伏笔（详见
+          -- _open_foreshadow_list 同款注释：无此条件时重产早期章会被后文倒灌）。
+          AND (? IS NULL OR ch.number IS NULL OR ch.number <= ?)
+        ORDER BY h.importance DESC, h.hook_id ASC
         LIMIT ?
         """,
-        (project_id, _HOOK_LEDGER_CAP),
+        (project_id, current_chapter_no, current_chapter_no, _HOOK_LEDGER_CAP),
     ).fetchall()
     return [
         {
@@ -90,17 +100,25 @@ def _hook_ledger_excerpt(conn: sqlite3.Connection, project_id: str) -> list[dict
     ]
 
 
-def _narrative_debt_excerpt(conn: sqlite3.Connection, project_id: str) -> list[dict[str, Any]]:
-    """叙事债务台账（V3.9 批次 2.2 加上限）：severity DESC + id 稳定序取 20。"""
+def _narrative_debt_excerpt(
+    conn: sqlite3.Connection, project_id: str, *, current_chapter_no: int | None = None,
+) -> list[dict[str, Any]]:
+    """叙事债务台账（V3.9 批次 2.2 加上限）：severity DESC + id 稳定序取 20。
+
+    ``current_chapter_no``（2026-09-15 加）：只注入**本章或更早**挂上的债务，
+    避免重产早期章时被后文债务倒灌（口径同 _hook_ledger_excerpt / _open_foreshadow_list）。
+    """
     rows = conn.execute(
         """
-        SELECT debt_id, description, severity, deadline_chapter_id, status
-        FROM narrative_debts
-        WHERE project_id = ? AND status IN ('open', 'acknowledged')
-        ORDER BY severity DESC, debt_id ASC
+        SELECT d.debt_id, d.description, d.severity, d.deadline_chapter_id, d.status
+        FROM narrative_debts d
+        LEFT JOIN chapters ch ON ch.chapter_id = d.created_chapter_id
+        WHERE d.project_id = ? AND d.status IN ('open', 'acknowledged')
+          AND (? IS NULL OR ch.number IS NULL OR ch.number <= ?)
+        ORDER BY d.severity DESC, d.debt_id ASC
         LIMIT ?
         """,
-        (project_id, _DEBT_LEDGER_CAP),
+        (project_id, current_chapter_no, current_chapter_no, _DEBT_LEDGER_CAP),
     ).fetchall()
     return [
         {
@@ -208,6 +226,12 @@ def _open_foreshadow_list(
         LEFT JOIN chapters ch ON ch.chapter_id = h.introduced_chapter_id
         WHERE h.project_id = ?
           AND h.status IN ({placeholders})
+          -- 位置过滤（2026-09-15）：只注入**本章或更早**引入的伏笔。
+          -- 改造前无此条件 → 重产早期章（如 ch1）时，后文（ch17/ch21）才引入的钩子
+          -- 会倒灌进 planner 输入，实证后果：ch1 的 plan 引用了 ch21 的第二世身份钩子，
+          -- 正文里出现「三年之约已经兑现，破屋锚点再次确认」这类弧末术语。
+          -- introduced_chapter_id 为 NULL（项目级伏笔）时无法判位，保留注入。
+          AND (? IS NULL OR ch.number IS NULL OR ch.number <= ?)
         ORDER BY overdue_flag DESC,
                  h.importance DESC,
                  CASE WHEN ch.number IS NULL THEN 1 ELSE 0 END ASC,
@@ -217,7 +241,8 @@ def _open_foreshadow_list(
     """
     params: list[Any] = [
         current_chapter_no, current_chapter_no, threshold,
-        project_id, *_PLANTED_HOOK_STATUSES, _OPEN_HOOKS_CAP,
+        project_id, *_PLANTED_HOOK_STATUSES,
+        current_chapter_no, current_chapter_no, _OPEN_HOOKS_CAP,
     ]
     rows = conn.execute(sql, params).fetchall()
 

@@ -215,8 +215,10 @@ def _build_director_input_uncached(
             conn, project_id, trigger_corpus=trigger_corpus,
         )
         plot_excerpt = _plot_graph_excerpt(conn, project_id)
-        hook_excerpt = _hook_ledger_excerpt(conn, project_id)
-        debt_excerpt = _narrative_debt_excerpt(conn, project_id)
+        hook_excerpt = _hook_ledger_excerpt(
+            conn, project_id, current_chapter_no=current_chapter_no or None)
+        debt_excerpt = _narrative_debt_excerpt(
+            conn, project_id, current_chapter_no=current_chapter_no or None)
         reference_canon_inject, reference_canon_audit = _reference_canon_excerpt(conn, project_id)
         # 题材库 P1a：项目绑定题材包时的 director 注入段（结构模板摘要 / 爽点类型
         # 清单 + 密度约束文本化 / pacing 摘要）；未绑定 → (None, None) 零注入。
