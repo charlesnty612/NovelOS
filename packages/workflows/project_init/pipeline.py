@@ -417,6 +417,32 @@ def _rebuild_stage_from_db(
     return {"_degraded": True}
 
 
+def _degraded_gate(ctx: dict[str, Any], stage: str, exc: Exception, index: int,
+                   empty: dict[str, Any]) -> None:
+    """降级产出时的关卡（2026-09-16 修「静默降级」）。
+
+    改造前：AI 节点失败 → 返回 `_degraded=True` 的空产出 → 流水线照常往下跑。
+    后果：**世界观/角色/卷纲为空却无人知晓**，后续每一环都被空输入污染，
+    直到写完才在成品里发现。（实证：2026-09-16 新建书，world_builder 网络超时
+    降级成空世界，节点状态仍是 COMPLETED，只有翻 checkpoint 才看得到。）
+
+    现在：`step_mode` 开着时**照样暂停**，把 `_degraded` 与错误原文交给人工——
+    可以重跑本关，也可以明知地用空产出继续。`step_mode` 关闭时保持原行为
+    （一次性跑完，不阻塞自动化）。
+    """
+    _log.warning("project_init.%s degraded, pause for review: %s", stage, exc)
+    if not _gate_should_pause(ctx, stage):
+        return
+    raise PauseRequested({
+        "stage": stage,
+        "stage_index": index,
+        "stages_total": 4,
+        "degraded": True,
+        "error": str(exc)[:500],
+        "draft": empty,
+    })
+
+
 def _regenerate_note(ctx: dict[str, Any]) -> str:
     """读取重生成意见（trim 后的字符串）。无意见返回 ``""``。
 
@@ -566,6 +592,7 @@ def _run_premise_designer(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
     except Exception as exc:  # noqa: BLE001 —— 降级模式
         _log.warning("project_init.premise_designer degraded: %s", exc)
+        _degraded_gate(ctx, "premise_designer", exc, 0, {"_degraded": True})
         brief = ctx.get("brief") or {}
         return {
             "premise_output": {
@@ -648,6 +675,7 @@ def _run_world_builder(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
     except Exception as exc:  # noqa: BLE001 —— 降级模式
         _log.warning("project_init.world_builder degraded: %s", exc)
+        _degraded_gate(ctx, "world_builder", exc, 1, {"_degraded": True})
         return {
             "world_output": {
                 "_degraded": True,
@@ -727,6 +755,7 @@ def _run_character_designer(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
     except Exception as exc:  # noqa: BLE001 —— 降级模式
         _log.warning("project_init.character_designer degraded: %s", exc)
+        _degraded_gate(ctx, "character_designer", exc, 2, {"_degraded": True})
         return {
             "character_output": {
                 "_degraded": True,
@@ -814,6 +843,7 @@ def _run_volume_outliner(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
     except Exception as exc:  # noqa: BLE001 —— 降级模式
         _log.warning("project_init.volume_outliner degraded: %s", exc)
+        _degraded_gate(ctx, "volume_outliner", exc, 3, {"_degraded": True})
         return {
             "outline_output": {
                 "_degraded": True,
