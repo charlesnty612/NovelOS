@@ -40,6 +40,14 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
 9. **「数据源存在 ≠ 已进装配」**（2026-09-15 书1 全弧跑偏事故的根因，新形状）：任何被当作**权威依据**的字段，必须有测试钉住它**真的进了消费方 payload**——仅「表里有值」不构成生效。本次实证：`chapters.plan_json` 的 `chapter_goal / key_beats` 从未进 `build_director_input` 的 `chapter` 段（只被当 FTS 召回语料 + 缓存指纹），于是五版大纲补丁（v5~v9）全部空转，只有 `title` 生效，正文由 planner 顺着 story state 惯性另写一套——**跑道上的大纲与产出的正文完全脱节，且全程无告警**。
    配套两条纪律：
    - **一列不得两用**：策展面（stable，人/脚本写）与生成面（generated，workflow 覆盖写）必须分列。`plan_json` 曾同时是「init 的大纲」与「planner 的输出」，planner 的白名单覆盖把大纲静默销毁；现拆为 `chapters.outline_json`（策展，chapter-plan 不写）与 `chapters.plan_json`（生成）。
+   - **检测算子的覆盖面必须与规则名相符**（2026-09-15 外部研究移植批次）：正则/统计算子匹配的是**字面形态**，
+     不解析语义——算子过宽会把正常写法计入，而频率数字本身不提示这个落差。来源研究
+     （lieflat-less-ai-tone，283 万字对照）公开的六次测量失误**全部是这一形状**，对策是硬性的：
+     **任何算子在采信频率结果前，先抽样检视 20 条命中实例**。本仓首轮即抓到三处：
+     「段首零回指评论」算子实际测的是「短句独立成段」（改名 AI-SHORT-PARA）、
+     「过长前置定语」97 条命中 95 条误报（整条废弃）、破折号阈值 6 落在实测分布之外（**死规则**，下调至 3.5）。
+     回调入口：`scripts/ai_tone_calibrate.py`（校准 + 抽样双功能）；基线数据见
+     `docs/analysis/ai-tone-calibration-2026-09-15.md`。
    - **改权威输入必须 miss 缓存**：`outline_json` 进 payload → 单列缓存键维度（`_fingerprint_outline_json`），否则改大纲后同 state_version 脏命中旧装配。判别：改该列后 `build_director_input` 必须返回新值（`tests/unit/test_chapter_outline.py` 看守）。
 
 ## 三、协作与审查工作流（AI 协作项目）
@@ -94,6 +102,8 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 | 改稿轮（auto-revise）把整段原文重出一遍 + 字数仍欠带 | `mode=revise` 被路由到 `light` 能力档（=审校档，原设计当「定向局部修改」省额度）；但门禁触发的改稿实际是**整章扩写**，审校档不做长文创作 | **先验推翻（2026-09-15）**：revise 改为与 write 同走 `creative_writing`；实证=书1 ch1 同一句 v1 出现 1 次 → v2 出现 2 次、CJK 1460→1815（带下限 2125）；判别：`test_chapter_write_writer_capability.py` 三用例 |
 
 | git push 报 `Failed to connect to github.com:443 over proxy 127.0.0.1` | 本机 `git config http.proxy/https.proxy` 指向的代理已死，git 仍走它 | 绕过：`env -u http_proxy -u https_proxy git -c http.proxy= -c https.proxy= push origin master`（2026-09-15 实测推通积压提交）；判别：直连能到 github.com:443 |
+
+| 检测规则存在但从不触发（或命中的全是误报） | 算子匹配字面形态却不解析语义：阈值落在实测分布之外=死规则；算子比规则名更宽=误报。频率数字本身不提示这两种落差 | 阈值取自**本仓实测分布**（p85/p90），不照搬外部研究数值；算子入册前抽 20 条命中人工过一遍，名实不符就改名、误报率高就废弃（先例：AI-SHORT-PARA 改名 /AI-TRANSLATIONESE 废弃 / 破折号阈值 6→3.5）；判别：`scripts/ai_tone_calibrate.py` |
 
 ## 六、一致性矩阵（当前核销）
 

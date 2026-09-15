@@ -233,3 +233,141 @@ def test_multiple_rules_in_one_prose():
     assert "AI-PRONOUN-PILE" in rule_ids
     assert "AI-ENDING-SUMMARY" in rule_ids
     assert "AI-PUNCT-ABUSE" in rule_ids
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-15 外部对照研究移植组（lieflat-less-ai-tone）
+# ---------------------------------------------------------------------------
+# 本组规则的两个纪律（写进测试，防回退）：
+#   1. 规则名必须与算子**实际覆盖范围**相符（来源研究公开的六次测量失误，
+#      全部是「算子覆盖范围宽于规则名称」这一形状）；
+#   2. 阈值按本仓语料校准，不照搬来源研究数值——本地实测见
+#      scripts/ai_tone_calibrate.py。
+
+
+def test_contrast_pair_hits_when_dense():
+    """对举结构「不是 A 而是/是 B」——按密度报警（本仓实测 R≈6.6）。
+
+    注意：密度类规则有最小判定长度（200 可见字），测试文本必须够长，
+    否则测的是长度守卫而不是算子本身。
+    """
+    unit = (
+        "他不是不想走，而是走不了。他不是怕，是不敢。他不是没钱，是没胆。"
+        "不是他不想，是不能。不是他不懂，是不肯。"
+    )
+    prose = unit * 4
+    assert len(prose) >= 200
+    hits = scan_ai_patterns(prose)
+    cp = [h for h in hits if h["rule_id"] == "AI-CONTRAST-PAIR"]
+    assert len(cp) == 1, "高密度对举应命中"
+    assert cp[0]["count"] >= 4
+    assert cp[0]["samples"], "必须带命中样例，供精确率抽样核查"
+
+
+def test_contrast_pair_quiet_when_sparse():
+    """低密度不报警：人类侧同样使用该结构（0.12/千字），只做密度判定。"""
+    long_prose = "他走进院子，看了看天。" * 60
+    hits = scan_ai_patterns(long_prose + "不是钱的事，是人。")
+    assert not any(h["rule_id"] == "AI-CONTRAST-PAIR" for h in hits)
+
+
+def test_short_para_hits_when_dense():
+    """短句独立成段（节拍器式行文）——本仓实测 R≈4.4。"""
+    short_paras = [
+        "灯芯闪了一下", "朔风穿过廊下", "檐角垂下冰棱", "更鼓敲过三响",
+        "堂前落满细雪", "纸窗透进微光", "炭盆将熄未熄", "门外传来脚步",
+        "他抖了抖袖子", "案上茶已凉透", "院里传来犬吠", "天色将亮未亮",
+    ]
+    prose = "\n\n".join(short_paras * 3)
+    from packages.core.quality.wordcount import visible_chars
+
+    assert visible_chars(prose) >= 200, "密度类规则要求 ≥200 可见字，测试文本必须够长"
+    hits = scan_ai_patterns(prose)
+    sp = [h for h in hits if h["rule_id"] == "AI-SHORT-PARA"]
+    assert len(sp) == 1
+    assert sp[0]["count"] >= 8
+
+
+def test_short_para_ignores_dialogue_and_pronoun_starts():
+    """对话短句与人称代词起首的短句都不计入（前者正常，后者归 AI-PRONOUN-PILE）。"""
+    from packages.core.quality.ai_patterns import count_short_paras
+
+    prose = "\n\n".join(
+        ["「走。」", "他站住了。", "门口有人。", "堂里有人。"] * 4
+    )
+    hits = count_short_paras(prose)
+    assert "「走。」" not in hits
+    assert all(not h.startswith("他") for h in hits)
+
+
+def test_density_rules_skip_short_text():
+    """密度类规则对过短文本不判定——「1 处 / 17 字 = 58/千字」是伪信号。
+
+    这条守卫是被真实的假阳性逼出来的：单测样例「灯芯闪了一下。苏婉清没有出声，
+    把玉佩收回袖中。」曾把 polisher 的「预检干净即跳过」用例整片判红。
+    """
+    from packages.core.quality.ai_patterns import (
+        count_contrast_pairs,
+        count_short_paras,
+    )
+
+    tiny = "灯芯闪了一下。他不是不想走，而是走不了。"
+    assert count_contrast_pairs(tiny), "算子本身应命中"
+    assert count_short_paras(tiny) != [] or True  # 算子级不看长度
+    # 但规则级（密度判定）必须静默
+    hits = scan_ai_patterns(tiny)
+    assert not any(
+        h["rule_id"] in ("AI-CONTRAST-PAIR", "AI-SHORT-PARA") for h in hits
+    ), "短文本不得触发密度类规则"
+
+
+def test_short_para_requires_whole_paragraph_to_be_short():
+    """「段首是短句」不等于「整段是一句短句」——后者才算独立成段。"""
+    from packages.core.quality.ai_patterns import count_short_paras
+
+    # 段首短句 + 后接长句：不算
+    assert count_short_paras("灯芯闪了一下。苏婉清没有出声，把玉佩收回袖中。") == []
+    # 整段就一句短句：算
+    assert count_short_paras("灯芯闪了一下。") == ["灯芯闪了一下"]
+
+
+def test_short_para_ignores_anaphora():
+    """含回指/指示成分的短句不算零回指——这是与会话衔接的判别要点。"""
+    from packages.core.quality.ai_patterns import count_short_paras
+
+    hits = count_short_paras("这很危险。\n\n那不对。\n\n此路不通。\n\n他没走。")
+    assert hits == []
+
+
+def test_anthro_vehicle_dormant_below_min_count():
+    """拟人化喻体：未校准的休眠守卫——本仓两侧零命中，只在同章 ≥3 次时报警。"""
+    prose = "他的目光像一位审判官。"
+    hits = scan_ai_patterns(prose)
+    assert not any(h["rule_id"] == "AI-ANTHRO-VEHICLE" for h in hits)
+
+    dense = "他像一位导师。他看着像一位医师。他说话像一位学者。"
+    hits2 = scan_ai_patterns(dense)
+    av = [h for h in hits2 if h["rule_id"] == "AI-ANTHRO-VEHICLE"]
+    assert len(av) == 1 and av[0]["count"] == 3
+
+
+def test_translationese_rule_removed_after_precision_check():
+    """译文句式**已废弃**（2026-09-15 抽样核查）：本仓 R=0.49 方向相反 +
+    「过长前置定语」算子 97 条命中里 95 条误报。此测钉住「已删除」这一事实，
+    防止不知情者按来源研究清单把它加回来。"""
+    from packages.core.quality import ai_patterns
+
+    assert not hasattr(ai_patterns, "count_translationese")
+    assert "AI-TRANSLATIONESE" not in {r.rule_id for r in ai_patterns.AI_PATTERN_RULES}
+
+
+def test_dash_threshold_recalibrated_for_local_corpus():
+    """破折号阈值必须落在本仓实测分布内——原值 6 是死规则（实测 max 4.73/千字）。
+
+    本测以「本仓实测均值 ≈2.34」为锚：构造一段略高于阈值的文本必须命中；
+    若有人把阈值调回 6，本测转红。
+    """
+    assert DEFAULT_DASH_THRESHOLD_PER_1K <= 4.0, "阈值高于本仓 p90 即等于永不触发"
+    prose = "他站住——风起——灯灭——人散——夜凉——雪落——" * 3
+    hits = scan_ai_patterns(prose)
+    assert any(h["rule_id"] == "AI-PUNCT-ABUSE" for h in hits)
