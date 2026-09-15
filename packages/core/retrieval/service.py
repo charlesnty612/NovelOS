@@ -301,6 +301,7 @@ def search(
     *,
     limit: int = _RECALL_TOP_N,
     current_chapter_id: str | None = None,
+    current_chapter_no: int | None = None,
     snippet_max_chars: int = _SNIPPET_MAX_CHARS,
 ) -> list[dict[str, Any]]:
     """按 query 字符串在 chapter_fts 上检索该项目下的相关历史片段。
@@ -309,6 +310,8 @@ def search(
     按 FTS5 bm25 升序排（值越小越相关）；空 list 表示无命中或无索引。
 
     - ``current_chapter_id`` 传值时自动排除当前章（避免自召自）。
+    - ``current_chapter_no`` 传值时只召回**章号更小**的正文（位置过滤，2026-09-15 加）。
+      理由同台账注入：重产早期章时，后文片段会顺着召回倒灌进 planner / writer。
     - snippet 直接从 ``drafts.content`` 取原文，截断到 ``snippet_max_chars`` 字符。
     """
     if not query or not query.strip():
@@ -330,6 +333,14 @@ def search(
         if current_chapter_id is not None:
             exclude_clause = "AND cf.chapter_id != ?"
             params.append(current_chapter_id)
+        # 位置过滤（2026-09-15）：只召回**本章之前**的正文。
+        # 同一缺陷形状的第二次（第一次在台账注入：hook/debt/foreshadow 不按章号过滤）——
+        # 顺行生成时无害（后面还没写），**重产早期章**时后文会顺着召回倒灌。
+        # 实证：重产书1 ch1 时召回把弧末时间线带了进来，正文出现「嘉靖三年殿试入京，
+        # 三年约满于嘉靖六年」这种与开篇设定相悖的句子。
+        if current_chapter_no is not None:
+            exclude_clause += " AND (ch.number IS NULL OR ch.number < ?)"
+            params.append(int(current_chapter_no))
         params.append(int(limit))
         try:
             rows = conn.execute(

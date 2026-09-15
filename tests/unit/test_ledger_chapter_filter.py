@@ -12,7 +12,6 @@ planner 引用了 ch21 才引入的 `hook_..._second_arc_identity`，正文里�
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 from packages.core.db import apply_migrations, get_connection
@@ -131,3 +130,58 @@ def test_director_payload_excludes_later_hooks(tmp_path: Path):
     ids = {h["hook_id"] for h in out["hook_ledger_excerpt"]}
     assert "hook_late" not in ids, "ch1 的装配里出现了 ch20 才引入的钩子（倒灌复发）"
     assert "hook_early" in ids
+
+
+# ---------------------------------------------------------------------------
+# 同一形状的第二个落点：FTS 召回（chapter_fts）
+# ---------------------------------------------------------------------------
+
+
+def _insert_draft(db_path: Path, chapter_id: str, content: str) -> None:
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO drafts (draft_id, chapter_id, version, content, created_by, "
+            "prompt_version, model_id, created_at) "
+            "VALUES (?,?,1,?,'test','v1','m',?)",
+            (new_id("dr"), chapter_id, content, now_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_fts_recall_excludes_later_chapters(tmp_path: Path):
+    """召回只给本章之前的正文——重产 ch1 时不得召回 ch20 的片段。"""
+    from packages.core.retrieval import rebuild_index, search
+
+    db_path = _fresh_db(tmp_path)
+    pid = _setup(db_path)
+    conn = get_connection(db_path)
+    try:
+        ch1 = conn.execute(
+            "SELECT chapter_id FROM chapters WHERE project_id=? AND number=1", (pid,)
+        ).fetchone()["chapter_id"]
+        ch20 = conn.execute(
+            "SELECT chapter_id FROM chapters WHERE project_id=? AND number=20", (pid,)
+        ).fetchone()["chapter_id"]
+        ch5 = conn.execute(
+            "SELECT chapter_id FROM chapters WHERE project_id=? AND number=5", (pid,)
+        ).fetchone()["chapter_id"]
+    finally:
+        conn.close()
+    _insert_draft(db_path, ch1, "开局他站在侯府正堂，红绸满堂。")
+    _insert_draft(db_path, ch5, "县试放榜那日，他从永宁坊 侯府出来，在榜下站着。")
+    _insert_draft(db_path, ch20, "三年约满，他辞相拂衣，回到永宁坊 侯府旧宅。")
+    rebuild_index(db_path, project_id=pid)
+
+    # 无位置限制：三章都可召回（旧行为）——先钉住「ch20 确实可召回」，
+    # 否则下面的断言会因为 query 不命中而假绿。
+    all_nos = {h["chapter_no"] for h in search(db_path, pid, "永宁坊 侯府", limit=10)}
+    assert {1, 5, 20} <= all_nos, f"前置条件不成立：三章都应可召回，实际 {all_nos}"
+
+    # 有位置限制（重新生成 ch5）：ch20 不得出现
+    hits = search(db_path, pid, "永宁坊 侯府", limit=10, current_chapter_no=5)
+    nos = {h["chapter_no"] for h in hits}
+    assert 20 not in nos, f"ch5 的召回里出现了 ch20（倒灌复发）：{nos}"
+    assert all(n is None or n < 5 for n in nos), f"只应召回章号更小的：{nos}"

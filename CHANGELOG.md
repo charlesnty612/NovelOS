@@ -16,8 +16,12 @@
   （「你到底是谁」出现两遍、自相矛盾）。
 - **修法**：三处注入统一加 `current_chapter_no` 位置过滤（`introduced_chapter_id` /
   `created_chapter_id` 为 NULL 的项目级项保留；传 None 维持原全量口径供 preview 用）。
-- **验证**：`tests/unit/test_ledger_chapter_filter.py` 2 例 + 突变验证（撤过滤必红）；
+- **验证**：`tests/unit/test_ledger_chapter_filter.py` 3 例 + 突变验证（撤过滤必红）；
   全量 **pytest 2200 passed / 2 skipped**。
+- **同一形状的第二个落点（升格）**：`packages/core/retrieval/service.py:search()` 的 FTS
+  召回原先只排除**当前章**、不排除**后文**——重产 ch1 时召回把弧末时间线带了进来，
+  正文出现「嘉靖三年殿试入京，三年约满于嘉靖六年」，与开篇设定相悖。已加
+  `current_chapter_no` 位置过滤（director 与 writer 两侧同口径）。
 - **裁决留痕**：ch1 是否补写的判断从「少 37 字」改判为「内容有真缺陷、必须重产」
   ——原判断依据（字数）不成立，实际问题是重复收束 + 计划术语泄漏。
 

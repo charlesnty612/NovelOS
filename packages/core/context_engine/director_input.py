@@ -105,6 +105,8 @@ def _recall_passages(
     project_id: str,
     chapter_id: str,
     plan_json: dict[str, Any],
+    *,
+    current_chapter_no: int | None = None,
 ) -> list[dict[str, Any]]:
     """按章节计划文本从 chapter_fts 召回 top-3 相关历史片段。
 
@@ -134,6 +136,7 @@ def _recall_passages(
             project_id,
             query,
             current_chapter_id=chapter_id,
+            current_chapter_no=current_chapter_no,
         )
     except Exception:  # noqa: BLE001 —— FTS 虚表不存在等降级
         return []
@@ -229,7 +232,10 @@ def _build_director_input_uncached(
     # V2.0 Wave C 任务一：召回混合层（FTS5）
     # 按当前章节 plan_json 关键词从 chapter_fts 召回 top-3 相关历史片段。
     plan_for_recall = plan_json_override if plan_json_override is not None else (chapter.get("plan_json") or {})
-    recalled_passages = _recall_passages(db_path, project_id, chapter_id, plan_for_recall)
+    recalled_passages = _recall_passages(
+        db_path, project_id, chapter_id, plan_for_recall,
+        current_chapter_no=current_chapter_no or None,
+    )
 
     payload: dict[str, Any] = {
         "agent": "director",

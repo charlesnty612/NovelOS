@@ -187,8 +187,11 @@ def _build_writer_input_uncached(
 
     # V2.0 Wave C 任务一：writer 也注入 recalled_passages（与 director 共享同一关键词
     # 召回——scene_plan 不参与提取，避免 scene 局部信号污染跨章呼应）。
+    # 位置过滤（2026-09-15）：只召回本章之前的正文——writer 与 director 同口径，
+    # 否则重产早期章时后文片段会经召回混进正文（同 director 侧同款实证）。
     recalled_passages = _recall_passages(
         db_path, project_id, chapter_id, director_plan,
+        current_chapter_no=int(chapter.get("number") or 0) or None,
     )
 
     # V3.7：writer payload 注入字数带——支持项目级覆盖（projects.word_band_json）。
