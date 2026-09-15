@@ -5,6 +5,40 @@
 
 ## [Unreleased]
 
+### Fixed（2026-09-15 大纲槽：修「大纲从未进入 planner 输入」——书1 首弧跑偏的根因）
+
+> 事故：书 1 首弧 21 章（54k 字）跑完后核对，**章节标题是 v9 大纲的、正文却是另一套故事**
+> ——ch17 标题「拜相·临危受命」正文是「府学聘临时记室」；ch21 标题「拂衣·首弧结算」正文停在
+> 「府试还有二十天」。全弧走完主角连乡试都没考，用户终裁的 v9（权线科举 → 拜相 → 新法再造
+> 天下）**一个字没落地**，且全程无告警。
+
+- **根因（架构缺陷）**：`chapters.plan_json` 一名两用——project-init 写大纲、chapter-plan 的白名单
+  整体覆盖成计划；而 `build_director_input` 的 `chapter` 段只有 title/target/role/id，
+  **`chapter_goal` / `key_beats` 从未进入 planner 输入**，plan_json 全文只被当 FTS 召回语料 +
+  缓存指纹。planner 遂只能顺着 story state 惯性自推计划 → v5~v9 五版大纲补丁全部空转，
+  只有 `title` 生效。附带：驱动脚本 `author_intent` 自带旧设定锚点；书1 项目未挂榜一文风锚点
+  与 reference_canon（挂在旧废案/书2 上）。
+- **修法**：0028 迁移新增 `chapters.outline_json`（策展稳定面，chapter-plan 只读不写）；
+  `build_director_input` 注入 `chapter.outline`（两级取值：新列非空用它，否则回落 plan_json
+  同名字段 → 存量零行为突变）；装配缓存键加 outline 指纹维度；peek 预读 `outline_json_raw`；
+  `ChapterUpdate`/`Chapter` 暴露该列；project-init 章节种子同时写该列；backup `JSON_ID_COLUMNS`
+  登记。`director_planner` prompt 升 **v2**：输入契约加 `chapter.outline` + 规则 0「大纲优先」
+  （非空即硬约束，冲突不得静默改向，须落 `open_questions` 并仍按大纲规划）。
+- **另一处先验被推翻**：writer `revise` 模式原路由到 `light`（审校档，按「定向局部修改」设计）；
+  实证它做的是整章扩写——书1 ch1 改稿轮把整段原文重出一遍（同一句 v1 一次 → v2 两次）且
+  CJK 仍欠带（1460→1815，带下限 2125）。改为与 write 同走 `creative_writing`。
+- **验证**：`tests/unit/test_chapter_outline.py` 8 例（取值口径/注入/缓存 miss/生命周期/领域层）
+  + 突变验证（撤注入恰好 3 例红）；全量 **pytest 2198 passed / 2 skipped**，ruff 干净。
+- **书1 内容层重置**（2026-09-15）：旧「管理局/委托账契/清算人/跨位面暗线」实体全套清空，
+  重建角色 7 / 地点 9 / 势力 4 / 世界规则 7（含新增「纪年」规则锁定年号）；21 章写入 v10 大纲
+  （ch1 冷开场新作、ch21 换掉仍带旧机制词的章末钩）；榜一文风锚点 + 榜一单弧参照系回挂。
+- **重建后全弧实测**：21/21 COMMITTED，**54,679 字 / 均 2604**；大纲首次真正驱动产出
+  （ch17 保和殿拜相、ch21 结算三糖 + 第二世冷开场）；旧设定词残留清零（无委托账契/七债/
+  清算人/指纹/私账）；年号统一为「嘉靖」，此前 ch20/21 的「永乐七年」自相矛盾已消除。
+  仍待改进：ch1 2088 字略低于带下限 2125；ch4/8/14 超带；GENRE-RATIO-DEVIATION 全弧为常驻
+  告警（弧级口径样本 <20 时不下结论，属预期）。
+
+
 ### Changed（2026-09-14 弧末批次：P1 规划合并 + target 题材包化 + 核销 v2——书1 全弧实战驱动）
 
 > 背景：书 1 首弧 21 章全自动量产（62,773 字，均章 10 分钟）完成，本批全部来自实战证据。
