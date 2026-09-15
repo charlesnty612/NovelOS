@@ -31,7 +31,7 @@
   （只看段首句会把「灯芯闪了一下。苏婉清没有出声…」误判）。
 - **工具**：`scripts/ai_tone_calibrate.py`——校准（R 表）+ 精确率抽样双功能；
   人类侧**只取 `author_style_samples`**（其它项目的 drafts 同样是生成侧产出，首版脚本踩过这个坑）。
-- **留痕**：`docs/analysis/ai-tone-calibration-2026-09-15.md`（校准数据 + 逐项裁决理由 + 局限）；
+- **留痕**：`NovelOS-Artifacts: docs/analysis/ai-tone-calibration-2026-09-15.md`（校准数据 + 逐项裁决理由 + 局限）；
   AGENTS.md 硬规则 9 增「检测算子的覆盖面必须与规则名相符」+ 坑区新行。
 - **登记待办**：`AI-FORBIDDEN-WORD` 在 67% 章节命中（词表混入「忽然/突然/似乎」等小说正常用词），
   属反向失衡——需按真套话/正常词分层 + 改密度阈值，牵动既有测试，留独立批次。

@@ -47,7 +47,7 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
      「段首零回指评论」算子实际测的是「短句独立成段」（改名 AI-SHORT-PARA）、
      「过长前置定语」97 条命中 95 条误报（整条废弃）、破折号阈值 6 落在实测分布之外（**死规则**，下调至 3.5）。
      回调入口：`scripts/ai_tone_calibrate.py`（校准 + 抽样双功能）；基线数据见
-     `docs/analysis/ai-tone-calibration-2026-09-15.md`。
+     `NovelOS-Artifacts: docs/analysis/ai-tone-calibration-2026-09-15.md`。
    - **改权威输入必须 miss 缓存**：`outline_json` 进 payload → 单列缓存键维度（`_fingerprint_outline_json`），否则改大纲后同 state_version 脏命中旧装配。判别：改该列后 `build_director_input` 必须返回新值（`tests/unit/test_chapter_outline.py` 看守）。
 
 ## 三、协作与审查工作流（AI 协作项目）
