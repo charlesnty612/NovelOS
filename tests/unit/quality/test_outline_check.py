@@ -70,7 +70,7 @@ def test_bad_hook_patterns_flagged():
 
 
 def test_passive_antagonist_run_flagged():
-    """连续 >3 章没有反派行动要报。"""
+    """连续 >3 章没有反派行动要报——**且全 setup（无高潮位）时不豁免**。"""
     chs = [_ch("他主动设局，代价是三百两", ["主动设局", "代价"], "setup", ["新线索出现"])
            for _ in range(5)]
     assert "OUTLINE-PASSIVE-ANTAGONIST" in _ids(
