@@ -20,21 +20,17 @@ from packages.core.quality.wordcount import visible_chars
 # 模块级规则数据（易扩展）
 # ---------------------------------------------------------------------------
 
-# 向后兼容：原 chapter_review.pipeline.DEFAULT_FORBIDDEN_WORDS 中的词必须包含在内
-AI_PATTERN_FORBIDDEN_WORDS: list[str] = [
-    # 原有默认禁用词
-    "仿佛",
-    "如同",
-    "本章目标",
-    # 新增 AI 高频套话/腔调词
-    "宛如",
-    "似乎",
-    "好像",
-    "不禁",
-    "骤然",
-    "猛然",
-    "忽然",
-    "突然",
+# ---------------------------------------------------------------------------
+# 禁用词两层制（2026-09-15 分层重构）
+# ---------------------------------------------------------------------------
+# 起因：改造前是**一张「命中即报」的表**，结果 67% 的章节被报——实测是
+# **忽然**（0.24 vs 人类 0.20 /千字，R=1.18 无区分力）与**突然**（0.19 vs 0）
+# 两个中文小说正常用词在撑起全部噪声，而 19 个词里有 15 个两侧都近乎零命中。
+# 同一形状（规则宣称的覆盖面 ≠ 实测覆盖面）的第三例，故按实测分层、分层给判定。
+
+# 第一层：硬套话——公文/说明文腔与计划泄漏，本题材内没有正当用法，**命中即报**。
+AI_PATTERN_HARD_CLICHES: list[str] = [
+    "本章目标",          # plan_json 文本泄漏进正文（硬错误，不属风格问题）
     "与此同时",
     "值得一提的是",
     "总而言之",
@@ -43,6 +39,32 @@ AI_PATTERN_FORBIDDEN_WORDS: list[str] = [
     "空气中弥漫着",
     "冥冥之中",
 ]
+
+# 第二层：常用叙述弱词——中文小说的正常用词，实测**无区分力或人类侧更高**
+# （忽然 R=1.18 · 好像 人类 0.20 对生成 0.01）。不做「命中即报」，
+# 只在**同章堆积**时报警：单词 ≥3 次，或本层合计 ≥6 次。
+AI_PATTERN_WEAK_WORDS: list[str] = [
+    "仿佛",
+    "宛如",
+    "如同",
+    "似乎",
+    "好像",
+    "不禁",
+    "骤然",
+    "猛然",
+    "忽然",
+    "突然",
+]
+
+# 向后兼容：并集。既有调用方（chapter_review 的 forbidden_word_hits、题材包禁词
+# 扫描、polisher 预检）按整表读，语义不变；变的是**触发条件**（weak 层需堆积）。
+AI_PATTERN_FORBIDDEN_WORDS: list[str] = (
+    AI_PATTERN_HARD_CLICHES + AI_PATTERN_WEAK_WORDS
+)
+
+# 弱词层堆积阈值（同章内）。
+_WEAK_WORD_PER_WORD_LIMIT = 3
+_WEAK_WORD_TOTAL_LIMIT = 6
 
 # 章尾总结/升华体套话（只在最后一段检测）
 _AI_ENDING_SUMMARY_PHRASES: list[str] = [
@@ -106,9 +128,12 @@ DEFAULT_CONTRAST_PAIR_RATE_PER_1K = 1.5
 # 命中逐条看**：命中是「林策开口了」「万卷阁开了」「三天」这类**叙述短句独立成段**，
 # 不是评价性评论；人类样章同样有该写法。故按算子**实际覆盖范围**改名登记，
 # 不冒用来源特征名（该研究公开的六次失误全是这个形状）。
-# 本仓实测：生成侧 5.06/千字 vs 人类 1.15/千字（R=4.28，方向与来源研究一致）。
-# 阈值取本仓 p90≈7.7 略降 → 只标出节拍器式行文最重的章。
-DEFAULT_SHORT_PARA_RATE_PER_1K = 7.5
+# 本仓实测（**算子修正后重测**）：生成侧 2.63/千字 vs 人类 0.81/千字（R=3.25，
+# 方向与来源研究一致）；逐章分布 均 2.65 / p75 3.26 / p90 5.47 / max 7.63。
+# 阈值取 p90 ≈ 5.5 → 只标出节拍器式行文最重的约一成章。
+# （初版算子只看段首句，把「灯芯闪了一下。苏婉清没有出声…」也算成短段，
+#   分布虚高到均 5.06；修正为「整段就是那一句短句」后按新分布重定阈。）
+DEFAULT_SHORT_PARA_RATE_PER_1K = 5.5
 
 # 拟人化喻体（以职业/角色名词作喻体）——研究 R=7.3。
 # **精确率警告**：正则分不出研究指出的真正差异——生成侧偏好「理想化的职业人格」
@@ -251,24 +276,39 @@ def _maybe_upgrade_severity(rule_id: str, count: int | float, base_severity: str
 
 
 def _scan_forbidden_words(prose: str) -> list[dict[str, Any]]:
-    """AI 高频套话/禁用词扫描。"""
-    words_found: list[str] = []
-    total_count = 0
-    for word in AI_PATTERN_FORBIDDEN_WORDS:
-        cnt = prose.count(word)
-        if cnt:
-            words_found.append(word)
-            total_count += cnt
+    """禁用词两层扫描（2026-09-15 分层）。
+
+    - **硬套话层**：命中即报（`AI_PATTERN_HARD_CLICHES`）。
+    - **常用弱词层**：仅同章**堆积**才报——单词 ≥ ``_WEAK_WORD_PER_WORD_LIMIT``
+      次，或本层合计 ≥ ``_WEAK_WORD_TOTAL_LIMIT`` 次。理由见模块内分层注释：
+      这些是中文小说正常用词，实测无区分力（忽然 R=1.18 / 好像人类更高），
+      「命中即报」会把 67% 的章节判成异常，噪声淹没信号。
+    """
+    hard_found = [(w, prose.count(w)) for w in AI_PATTERN_HARD_CLICHES]
+    hard_found = [(w, c) for w, c in hard_found if c]
+
+    weak_counts = {w: prose.count(w) for w in AI_PATTERN_WEAK_WORDS}
+    weak_counts = {w: c for w, c in weak_counts.items() if c}
+    weak_total = sum(weak_counts.values())
+    piled = sorted(w for w, c in weak_counts.items() if c >= _WEAK_WORD_PER_WORD_LIMIT)
+    weak_pile_up = bool(piled) or weak_total >= _WEAK_WORD_TOTAL_LIMIT
+
+    words_found = [w for w, _ in hard_found]
+    if weak_pile_up:
+        words_found += piled or sorted(weak_counts)
     if not words_found:
         return []
+    total_count = sum(c for _, c in hard_found) + (weak_total if weak_pile_up else 0)
     severity = _maybe_upgrade_severity("AI-FORBIDDEN-WORD", total_count, "warning")
+    suffix = "（弱词同章堆积）" if weak_pile_up else ""
     return [
         {
             "rule_id": "AI-FORBIDDEN-WORD",
             "severity": severity,
-            "message": f"AI 高频套话/禁用词命中：{','.join(words_found)}",
+            "message": f"AI 高频套话/禁用词命中{suffix}：{','.join(words_found)}",
             "count": total_count,
             "words": words_found,
+            "weak_pile_up": weak_pile_up,
             "excerpt": prose[:120],
         }
     ]
@@ -619,7 +659,9 @@ def scan_ai_patterns(
 
 __all__ = [
     "AI_PATTERN_FORBIDDEN_WORDS",
+    "AI_PATTERN_HARD_CLICHES",
     "AI_PATTERN_RULES",
+    "AI_PATTERN_WEAK_WORDS",
     "DEFAULT_ANTHRO_VEHICLE_MIN_COUNT",
     "DEFAULT_CONTRAST_PAIR_RATE_PER_1K",
     "DEFAULT_DASH_THRESHOLD_PER_1K",

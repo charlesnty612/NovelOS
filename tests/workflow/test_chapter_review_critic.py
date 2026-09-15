@@ -714,7 +714,7 @@ def test_review_report_includes_ai_pattern_hits(tmp_path: Path):
             await _make_character(app, pid)
             cid = await _make_chapter(app, pid, 1, "第一章")
             # 在 draft 中故意加入 AI 腔词
-            prose_with_ai_flavor = PROSE_FOR_CRITIC + "\n\n仿佛命运的齿轮已悄然转动。"
+            prose_with_ai_flavor = PROSE_FOR_CRITIC + "\n\n综上所述，命运的齿轮已悄然转动。"
             script = [
                 json.dumps(
                     {
@@ -769,7 +769,7 @@ def test_review_report_includes_ai_pattern_hits(tmp_path: Path):
             assert "ai_pattern_hits" in review_report
             rule_ids = {h["rule_id"] for h in review_report["ai_pattern_hits"]}
             assert "AI-FORBIDDEN-WORD" in rule_ids
-            assert "仿佛" in review_report["forbidden_word_hits"]
+            assert "综上所述" in review_report["forbidden_word_hits"]
 
     asyncio.run(run())
 

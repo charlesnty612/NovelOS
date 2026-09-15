@@ -52,15 +52,56 @@ def test_all_hits_have_required_fields():
 
 
 def test_forbidden_word_hit():
-    prose = "他仿佛看到了命运的齿轮。"
+    """硬套话层：命中即报（2026-09-15 分层后，弱词单次不再触发）。"""
+    prose = "综上所述，他看清了当前的处境。"
     hits = scan_ai_patterns(prose)
     fw_hits = [h for h in hits if h["rule_id"] == "AI-FORBIDDEN-WORD"]
     assert len(fw_hits) == 1
     hit = fw_hits[0]
     assert hit["severity"] == "warning"
-    assert "仿佛" in hit["message"]
-    assert "仿佛" in hit["words"]
+    assert "综上所述" in hit["message"]
+    assert "综上所述" in hit["words"]
+    assert hit["weak_pile_up"] is False
     assert hit["count"] >= 1
+
+
+def test_weak_word_single_occurrence_is_silent():
+    """常用弱词层：单次出现**不报**——它们是中文小说正常用词。
+
+    实测依据：忽然 0.24 vs 人类 0.20/千字（R=1.18 无区分力）、
+    好像人类侧更高。改造前这张表让 67% 的章节被误报。
+    """
+    for prose in ("院门外忽然传来脚步声。", "他似乎在想什么。", "她好像懂了。"):
+        hits = scan_ai_patterns(prose)
+        assert not any(h["rule_id"] == "AI-FORBIDDEN-WORD" for h in hits), prose
+
+
+def test_weak_word_pile_up_triggers():
+    """常用弱词层：同章堆积才报（单词 ≥3 次 或 本层合计 ≥6 次）。"""
+    piled = "他忽然站住。风忽然停了。灯忽然灭了。"
+    hits = scan_ai_patterns(piled)
+    fw = [h for h in hits if h["rule_id"] == "AI-FORBIDDEN-WORD"]
+    assert len(fw) == 1 and fw[0]["weak_pile_up"] is True
+    assert "忽然" in fw[0]["words"]
+
+    spread = "他突然站住。他忽然回头。他猛然皱眉。他似乎在想。他好像懂了。他不禁失笑。"
+    fw2 = [h for h in scan_ai_patterns(spread) if h["rule_id"] == "AI-FORBIDDEN-WORD"]
+    assert len(fw2) == 1 and fw2[0]["weak_pile_up"] is True
+    assert len(fw2[0]["words"]) >= 6
+
+
+def test_forbidden_word_layers_are_declared():
+    """两层制必须是显式数据（便于按实测定阈），而不是把词混在一张表里。"""
+    from packages.core.quality.ai_patterns import (
+        AI_PATTERN_HARD_CLICHES,
+        AI_PATTERN_WEAK_WORDS,
+    )
+
+    assert "本章目标" in AI_PATTERN_HARD_CLICHES
+    assert "综上所述" in AI_PATTERN_HARD_CLICHES
+    assert "忽然" in AI_PATTERN_WEAK_WORDS
+    assert "仿佛" in AI_PATTERN_WEAK_WORDS
+    assert not set(AI_PATTERN_HARD_CLICHES) & set(AI_PATTERN_WEAK_WORDS)
 
 
 def test_forbidden_word_backward_compatible_list():
@@ -71,11 +112,11 @@ def test_forbidden_word_backward_compatible_list():
 
 
 def test_forbidden_word_multiple_words_in_one_hit():
-    prose = "本章目标仿佛如同完成任务。"
+    prose = "综上所述，与此同时，本章目标已经达成。"
     hits = scan_ai_patterns(prose)
     fw_hits = [h for h in hits if h["rule_id"] == "AI-FORBIDDEN-WORD"]
     assert len(fw_hits) == 1
-    assert set(fw_hits[0]["words"]) == {"仿佛", "如同", "本章目标"}
+    assert set(fw_hits[0]["words"]) == {"综上所述", "与此同时", "本章目标"}
 
 
 def test_forbidden_word_severity_upgrade_on_many_hits():
@@ -224,7 +265,7 @@ def test_explain_tone_severity_upgrade():
 
 def test_multiple_rules_in_one_prose():
     prose = (
-        "仿佛命运之手。他走了。他停下脚步。他转过身。\n\n"
+        "综上所述，命运之手已经落下。他走了。他停下脚步。他转过身。\n\n"
         "这一刻，新的篇章开启了。——一切都结束了……"
     )
     hits = scan_ai_patterns(prose)

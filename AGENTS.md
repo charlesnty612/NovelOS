@@ -103,7 +103,7 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 
 | git push 报 `Failed to connect to github.com:443 over proxy 127.0.0.1` | 本机 `git config http.proxy/https.proxy` 指向的代理已死，git 仍走它 | 绕过：`env -u http_proxy -u https_proxy git -c http.proxy= -c https.proxy= push origin master`（2026-09-15 实测推通积压提交）；判别：直连能到 github.com:443 |
 
-| 检测规则存在但从不触发（或命中的全是误报） | 算子匹配字面形态却不解析语义：阈值落在实测分布之外=死规则；算子比规则名更宽=误报。频率数字本身不提示这两种落差 | 阈值取自**本仓实测分布**（p85/p90），不照搬外部研究数值；算子入册前抽 20 条命中人工过一遍，名实不符就改名、误报率高就废弃（先例：AI-SHORT-PARA 改名 /AI-TRANSLATIONESE 废弃 / 破折号阈值 6→3.5）；判别：`scripts/ai_tone_calibrate.py` |
+| 检测规则「从不触发」「全是误报」「刷屏噪声」三种病 | 算子匹配字面形态却不解析语义：① 阈值落在实测分布之外=死规则；② 算子比规则名更宽=误报；③ **把正常写法与真信号混在一张「命中即报」表里=噪声淹没信号**。频率/命中数本身都不提示这三者 | 阈值取自**本仓实测分布**（p85/p90），不照搬外部研究数值；算子入册前抽 20 条命中人工过一遍：名实不符就改名、误报率高就废弃、**正常词与真套话分层**（先例：AI-SHORT-PARA 改名 / AI-TRANSLATIONESE 废弃 / 破折号阈值 6→3.5 / 禁用词两层制——忽然等常用弱词改为「同章堆积才报」，章节命中率 67%→14%）；判别：`scripts/ai_tone_calibrate.py` |
 
 ## 六、一致性矩阵（当前核销）
 

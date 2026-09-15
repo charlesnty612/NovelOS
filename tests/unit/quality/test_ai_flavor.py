@@ -97,7 +97,7 @@ def test_connectives_are_subset_of_flavor_markers():
 def test_scan_ai_patterns_is_reexported_authoritative_source():
     """权威信号源 scan_ai_patterns 从 ai_flavor 单点可达，且与 ai_patterns 是同一函数。"""
     assert ai_flavor.scan_ai_patterns is scan_ai_patterns
-    hits = ai_flavor.scan_ai_patterns("首先，他嘴角勾起一抹冷笑。其次，仿佛一切都没发生。")
+    hits = ai_flavor.scan_ai_patterns("首先，他嘴角勾起一抹冷笑。其次，综上所述一切照旧。")
     assert any(h["rule_id"] == "AI-FORBIDDEN-WORD" for h in hits)
 
 

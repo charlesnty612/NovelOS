@@ -334,11 +334,15 @@ def test_polish_skips_when_precheck_clean(tmp_path: Path, monkeypatch):
 
 
 def test_polish_runs_when_ai_pattern_hit(tmp_path: Path, monkeypatch):
-    """AI 腔命中（忽然 ∈ AI_PATTERN_FORBIDDEN_WORDS）→ 门放行，走原润色路径。"""
+    """AI 腔命中（硬套话层，命中即报）→ 门放行，走原润色路径。
+
+    注：2026-09-15 分层后，弱词层（忽然/似乎/好像…）需同章堆积才报——本测改用
+    硬套话层，语义更稳。
+    """
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    prose = "院门外忽然传来脚步声。"
+    prose = "空气中弥漫着一股血腥味。"
 
     captured: list[dict] = []
     monkeypatch.setattr(cw_pipeline, "run_agent", _echo_runner(captured))
