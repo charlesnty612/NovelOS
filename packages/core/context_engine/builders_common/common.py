@@ -128,7 +128,43 @@ def _row_to_project(row: sqlite3.Row) -> dict[str, Any]:
 def _row_to_chapter(row: sqlite3.Row) -> dict[str, Any]:
     d = dict(row)
     d["plan_json"] = _parse_json(d.get("plan_json")) or {}
+    d["outline_json"] = _parse_json(d.get("outline_json")) or {}
     return d
+
+
+# 大纲槽（0028）回落到 plan_json 时取的同名字段——两列结构同源，故回落是逐字段直取。
+_OUTLINE_KEYS: tuple[str, ...] = (
+    "chapter_goal",
+    "core_conflict",
+    "turning_point",
+    "expected_role",
+    "key_beats",
+    "hook_handling",
+    "notes_for_planner",
+)
+
+
+def resolve_chapter_outline(chapter: dict[str, Any] | None) -> dict[str, Any]:
+    """取本章「策展大纲」（director_planner 输入 ``chapter.outline`` 段的唯一来源）。
+
+    两级口径（0028 迁移的兼容契约）：
+
+    1. ``chapters.outline_json`` 非空 dict → 原样返回（策展面，chapter-plan 不写）；
+    2. 为空（存量项目 / 未策展）→ 从 ``plan_json`` 抽 :data:`_OUTLINE_KEYS` 同名字段。
+
+    回落路径保证存量库零行为突变：迁移前 plan_json 本来就是「大纲槽被 planner
+    覆盖后的产物」，回落取到的正是改造前 planner 唯一能看到的那份信息量，
+    不新增也不减少。
+    """
+    if not isinstance(chapter, dict):
+        return {}
+    outline = chapter.get("outline_json")
+    if isinstance(outline, dict) and outline:
+        return outline
+    plan = chapter.get("plan_json")
+    if not isinstance(plan, dict):
+        return {}
+    return {k: plan[k] for k in _OUTLINE_KEYS if plan.get(k) not in (None, "", [], {})}
 
 
 def _latest_draft(conn: sqlite3.Connection, chapter_id: str) -> dict[str, Any] | None:
@@ -652,6 +688,7 @@ _PEEK_CHAPTER_SQL = """
     SELECT ch.number                           AS chapter_no,
            ch.project_id                       AS project_id,
            ch.plan_json                        AS plan_json,
+           ch.outline_json                     AS outline_json,
            (SELECT MAX(sv.state_version) FROM story_states sv
              WHERE sv.project_id = COALESCE(?, ch.project_id))       AS state_version,
            (SELECT rc.canon_id FROM reference_canons rc
@@ -692,6 +729,7 @@ def _empty_chapter_peek(chapter_id: str, project_id: str | None = None) -> dict[
         "chapter_no": 0,
         "state_version": 0,
         "plan_json_raw": None,
+        "outline_json_raw": None,
         "word_band_json": None,
         "active_canon_id": None,
         "genre_pack_ref": None,
@@ -797,6 +835,7 @@ def _peek_chapter_context_conn(
         "chapter_no": _as_int_or(row["chapter_no"]),
         "state_version": _as_int_or(row["state_version"]),
         "plan_json_raw": row["plan_json"],
+        "outline_json_raw": (row["outline_json"] if "outline_json" in row.keys() else None),
         "word_band_json": row["word_band_json"] or None,
         "active_canon_id": row["active_canon_id"] or None,
         "genre_pack_ref": row["genre_pack_ref"] or None,

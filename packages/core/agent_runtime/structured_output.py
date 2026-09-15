@@ -748,7 +748,7 @@ def _validate_director_planner(
 ) -> None:
     """Director-Planner（P1 合并调用）契约：顶层导演契约 + ``scene_plan`` 子对象场景契约。
 
-    契约口径（见 ``docs/agents/prompts/director_planner-v1.md`` §7 / §9 E-MRG-01）：
+    契约口径（见 ``docs/agents/prompts/director_planner-v2.md`` §7 / §9 E-MRG-01）：
 
     - 顶层：同 :func:`_validate_director`（``schema_version == "director-plan.v1"``）。
       下游（chapter-plan 的 ``save_plan``）按缺省值读各字段，故此处不额外收紧必填面。

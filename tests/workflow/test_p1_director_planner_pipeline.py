@@ -156,7 +156,7 @@ def _merged_payload(
     per_scene = 3000 // scenes
     return {
         "schema_version": "director-plan.v1",
-        "prompt_version": "director_planner:v1",
+        "prompt_version": "director_planner:v2",
         "chapter_id": chapter_id,
         "chapter_goal": chapter_goal,
         "core_conflict": "求真 vs 善意隐瞒",
@@ -187,7 +187,7 @@ def _merged_payload(
         "notes_for_planner": "按 3000 字分摊",
         "scene_plan": {
             "schema_version": "scene-plan.v1",
-            "prompt_version": "director_planner:v1",
+            "prompt_version": "director_planner:v2",
             "chapter_id": chapter_id,
             "scenes": [
                 _scene(chapter_id, i, character_id, location_id, per_scene)
@@ -337,7 +337,7 @@ def test_plan_merged_output_persists_plan_and_scene_plan(
     assert row is not None, "scene_plan 未落库"
     assert row["run_id"] == run_id
     assert row["source"] == "director_planner"
-    assert row["prompt_version"] == "director_planner:v1"
+    assert row["prompt_version"] == "director_planner:v2"
     assert row["scene_count"] == 2
     stored = json.loads(row["payload_json"])
     assert stored == payload["scene_plan"]
@@ -443,7 +443,7 @@ def test_plan_whitelist_violation_retries_then_succeeds(
     try:
         row = conn.execute(
             "SELECT retry_count, error FROM ai_call_logs "
-            "WHERE prompt_version = 'director_planner:v1'"
+            "WHERE prompt_version = 'director_planner:v2'"
         ).fetchone()
     finally:
         conn.close()

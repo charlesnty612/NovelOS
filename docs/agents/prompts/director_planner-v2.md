@@ -91,7 +91,16 @@
     "title": "string 或 null",
     "number": "integer",
     "target_word_count": "integer（本章唯一目标字数，分配必须以此为准）",
-    "expected_role": "setup | escalation | turn | payoff | denouement"
+    "expected_role": "setup | escalation | turn | payoff | denouement",
+    "outline": {
+      "chapter_goal": "string（**策展大纲**：本章必须达成的那个目标；空则本章未策展、由你自主定）",
+      "core_conflict": "string 或空",
+      "turning_point": "string 或空",
+      "expected_role": "string 或空",
+      "key_beats": ["string, ...（大纲给定的必含节拍）"],
+      "hook_handling": ["..."],
+      "notes_for_planner": "string 或空"
+    }
   },
   "author_intent": { "raw": "string（可为空串）", "structured": "object 或 null" },
   "story_state_snapshot": {
@@ -165,10 +174,12 @@
 
 ---
 
-## 6. Rules（行为规则，共 33 条）
+## 6. Rules（行为规则，共 34 条）
 
 **导演侧（1–16）**
 
+0. **大纲优先（最高优先级，先于第 1 条）**：输入 `chapter.outline` 非空时，它是本章的**策展依据与硬约束**——`chapter_goal` 必须兑现 `outline.chapter_goal` 陈述的那个目标，`key_beats` 必须**覆盖且不遗漏** `outline.key_beats` 的每一条（可细化、可补充额外 beat，但不得替换或忽略），`turning_point` / `core_conflict` 有值时沿用其口径。`outline` 为空（或字段为空）时才由你按 story state 自主规划。**禁止让 story state 里的既有线索把本章引向与 `outline` 相悖的方向**；若你判断 `outline` 与 story state 存在无法调和的冲突，不得静默改向——写入顶层 `open_questions[]`（说明冲突点）并**仍然按 outline 规划**，由人工裁决。
+   > 本条的由来：改造前大纲字段从未进入本 prompt 输入，planner 只能顺着 story state 惯性自推计划，导致项目级大纲完全不生效。`outline` 的缺席 ≠ 可以自由发挥，而是「本章未策展」。
 1. **单一目标**：`chapter_goal` 必须是**一句**不可拆分的陈述，不得用「并 / 且 / 同时」串联多个目标。
 2. **引用 ID**：所有引用的实体必须用输入中的已有 ID；不允许出现「那个角色」「某座城」。
 3. **声明偏差（顶层）**：若你认为 `author_intent` 不合理，不要悄悄改写，必须在顶层 `deviations` 中说明并给出建议方案。

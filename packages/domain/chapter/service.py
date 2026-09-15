@@ -123,6 +123,17 @@ class ChapterService:
         # plan_json 反序列化
         if "plan_json" in d and isinstance(d["plan_json"], str):
             d["plan_json"] = json.loads(d["plan_json"]) if d["plan_json"] else {}
+        # outline_json（0028 策展大纲槽）反序列化；NULL / 空串 → None（= 未策展，
+        # 装配侧回落到 plan_json 同名字段）
+        if "outline_json" in d:
+            raw_outline = d["outline_json"]
+            if isinstance(raw_outline, str) and raw_outline:
+                try:
+                    d["outline_json"] = json.loads(raw_outline)
+                except json.JSONDecodeError:
+                    d["outline_json"] = None
+            else:
+                d["outline_json"] = None
         # who_knows 是 JSON 字符串数组（NULL 或 '[]' 或 '["..."]')
         if "who_knows" in d and d["who_knows"]:
             try:
@@ -231,6 +242,12 @@ class ChapterService:
         # 处理 plan_json 序列化
         if "plan_json" in fields:
             fields["plan_json"] = self._dump_json(fields["plan_json"])
+        # outline_json：None（显式清空）→ 写 NULL；dict → JSON 串
+        if "outline_json" in fields:
+            fields["outline_json"] = (
+                None if fields["outline_json"] is None
+                else self._dump_json(fields["outline_json"])
+            )
 
         fields["updated_at"] = now_iso()
 

@@ -230,6 +230,8 @@ def test_merged_peek_matches_legacy_peek_wrappers(tmp_path: Path):
         "chapter_no": 4,
         "state_version": 9,
         "plan_json_raw": plan,
+        # 0028 大纲槽：peek 一并预读 outline_json 原文（director 装配注入 + 缓存键维度）
+        "outline_json_raw": None,
         "word_band_json": None,
         "active_canon_id": "can_a",
         # 题材库 P1a：绑定题材包指纹（未绑定 → None；director 缓存键维度）

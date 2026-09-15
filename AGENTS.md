@@ -37,6 +37,10 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
 6. **迁移**：只加不改；新列可空兼容存量；迁移清单测试（test_migrations）随新增同步。
 7. **文档引用纪律**（R5 检修根因：38ec703 三仓迁移未回填引用造成 ≥14 处断链——反引号路径引用 markdown checker 查不出，只能靠人工/代理抽查）：引用 NovelOS-Content / NovelOS-Artifacts 的文件必须写清仓库名；引 docs/ 内文件前先确认未被迁空（9 个空目录是迁移残留）；旧计划/旧报告类文档必须带「历史注记」横幅（日期+状态+被什么取代）。
 8. **环境同步纪律**：改 `pyproject.toml`（尤其 version）后必须 `uv sync --extra dev`（ruff/pytest/xdist 在 dev extra 里，裸 `uv sync` 会 pruning 掉 ruff）——editable 元数据不刷新时 `/api/health` 的 version 腿对外报旧值，且自洽断言抓不住（R5 实证）。
+9. **「数据源存在 ≠ 已进装配」**（2026-09-15 书1 全弧跑偏事故的根因，新形状）：任何被当作**权威依据**的字段，必须有测试钉住它**真的进了消费方 payload**——仅「表里有值」不构成生效。本次实证：`chapters.plan_json` 的 `chapter_goal / key_beats` 从未进 `build_director_input` 的 `chapter` 段（只被当 FTS 召回语料 + 缓存指纹），于是五版大纲补丁（v5~v9）全部空转，只有 `title` 生效，正文由 planner 顺着 story state 惯性另写一套——**跑道上的大纲与产出的正文完全脱节，且全程无告警**。
+   配套两条纪律：
+   - **一列不得两用**：策展面（stable，人/脚本写）与生成面（generated，workflow 覆盖写）必须分列。`plan_json` 曾同时是「init 的大纲」与「planner 的输出」，planner 的白名单覆盖把大纲静默销毁；现拆为 `chapters.outline_json`（策展，chapter-plan 不写）与 `chapters.plan_json`（生成）。
+   - **改权威输入必须 miss 缓存**：`outline_json` 进 payload → 单列缓存键维度（`_fingerprint_outline_json`），否则改大纲后同 state_version 脏命中旧装配。判别：改该列后 `build_director_input` 必须返回新值（`tests/unit/test_chapter_outline.py` 看守）。
 
 ## 三、协作与审查工作流（AI 协作项目）
 
@@ -51,7 +55,7 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
 ## 四、命令与流程
 
 ```bash
-python scripts/migrate.py            # 迁移（新库全链 0001~0026）
+python scripts/migrate.py            # 迁移（新库全链 0001~0028）
 python -m ruff check packages scripts tests   # lint（测试文件豁免 E501）
 python -m pytest -n 4 -q             # 全量（约 4 分钟；xdist 需在 venv）
 cd apps/web && npx tsc -b && npx vitest run && npm run build
@@ -84,6 +88,9 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 | 量产驱动撞 409「章节有活动 run」/停驱动的孤儿 run 卡死 | 客户端驱动被 TaskStop 后，服务端 run 继续跑；build_ctx 类节点失去调度方后可卡 RUNNING 数十分钟 | 续跑前先查 workflow_runs 该章 RUNNING/PAUSED 行：等其终态或 cancel；判别：POST 前 SELECT |
 | 门禁改稿（revise）傻等超时 | revise 驳回后 auto-revise 子 run 的 review **会重新 PAUSED 等人工**，章状态停在 DRAFTED 不翻转 | 驱动须接力：发现新 PAUSED run→读报告→无错即批/有错再改（≤2 轮）；W-LEN 意见必须**双向**（超限给下限、欠带给上限，防 4272→1853 乒乓球）；判别：轮询 PAUSED run 而非章状态 |
 | commit 风控门（high_risk_approval）批量阻塞 | observer 把角色目标推进等常规 delta 误报为 world_kind=rule change（宁可错杀设计） | 批量 commit 驱动带自动批准（读 pause_payload 记留痕，≤3 轮/章）；observer 偶发畸形 delta（update 但 before=None）重试即过 |
+| 大纲补丁「生效了但没生效」：章节标题换了，正文还是旧设定 | 大纲字段（plan_json.chapter_goal/key_beats）**从未进 planner 装配输入**，且 plan_json 被 planner 输出整体覆盖 | 0028 拆出 `chapters.outline_json` 策展槽 + `build_director_input` 注入 `chapter.outline` + planner prompt 规则 0「大纲优先」+ 缓存键 outline 维度；判别：`tests/unit/test_chapter_outline.py`（撤注入必红） |
+| 全项目重置脚本批量 DELETE 报 FOREIGN KEY constraint failed | 自引用 FK（workflow_run_nodes.parent_node_run_id / state_deltas.supersedes）在 SQLite 即时检查下逐行触发；且删序须按依赖子表先行 | 重置脚本 `PRAGMA foreign_keys=OFF` → 按依赖序删 → 开回 + `PRAGMA foreign_key_check` 校验；判别：脚本收尾的校验段必须无输出 |
+| 改稿轮（auto-revise）把整段原文重出一遍 + 字数仍欠带 | `mode=revise` 被路由到 `light` 能力档（=审校档，原设计当「定向局部修改」省额度）；但门禁触发的改稿实际是**整章扩写**，审校档不做长文创作 | **先验推翻（2026-09-15）**：revise 改为与 write 同走 `creative_writing`；实证=书1 ch1 同一句 v1 出现 1 次 → v2 出现 2 次、CJK 1460→1815（带下限 2125）；判别：`test_chapter_write_writer_capability.py` 三用例 |
 
 ## 六、一致性矩阵（当前核销）
 
@@ -94,7 +101,7 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 | 项 | 声明 | 实际 | 状态 |
 |---|------|------|------|
 | 版本 | pyproject 3.9.0 = package.json 3.9.0 = importlib 读取 = uv.lock 3.9.0 | 同左（**含 editable 元数据**——发版后必须 `uv sync --extra dev` 刷新 dist-info，否则 /api/health 对外报旧版；R5 检修实测抓到的错核销已修正） | ✅ 2026-09-13 二次核销（uv sync 后实测） |
-| 表数 | 业务表 39 / 含 _migrations 40 | test_health + smoke EXPECTED_BUSINESS_TABLES=39 | ✅ 2026-09-14（0027 chapter_scene_plans 后） |
-| 测试基线 | pytest 2183 passed / 2 skipped；vitest 485 | P1 产品化 +43 / 核销 v2 +10 / target 题材包化 +11 / 弧末批次后实测 | ✅ 2026-09-14 |
+| 表数 | 业务表 39 / 含 _migrations 40 | test_health + smoke EXPECTED_BUSINESS_TABLES=39 | ✅ 2026-09-15（0028 只加列不增表） |
+| 测试基线 | pytest 2198 passed / 2 skipped；vitest 485 | 大纲槽批次（0028 + outline 注入）后实测 | ✅ 2026-09-15 |
 | OpenAPI | 96 paths / 40 schemas | export_openapi 实测，契约测试 3 绿 | ✅ 2026-09-13 |
 | dev 库数据 | DRIFT:2（prj_8365f42af5a6） | **已修复**：v1 快照按 DB 重建 + 6 孤儿 state 清除，check_state_sync SYNC OK（2026-09-13，修前备份 /tmp/novelos_backup_pre_f8repair_20260913.db） | ✅ 已核销 |

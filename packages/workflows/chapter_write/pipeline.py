@@ -644,10 +644,14 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         payload["revision_note"] = revision_note
 
     mock_script = (ctx.get("mock_providers") or {}).get("writer")
-    # 能力路由：revise=定向局部修改，走 light（与 critic/summarizer 同源，省创作额度）；
-    # write / fresh_write 走默认 creative_writing。mock 路径不走 capability，
-    # capability_override 仅在真实链路下被 ModelRouter 使用，不影响 mock 行为。
-    writer_capability_override: str | None = "light" if mode == "revise" else None
+    # 能力路由：revise 与 write 同走 creative_writing（**2026-09-15 推翻原设计**）。
+    # 原设计把 revise 当「定向局部修改」走 light 档（=审校档，省创作额度）；
+    # 实证推翻（书1 ch1）：门禁触发的改稿实际是**整章扩写**，审校档不做长文创作，
+    # 结果是 re-write 时把整段原文重出一遍（同一句 v1 出现 1 次 → v2 出现 2 次）
+    # 且字数仍欠带（1460 → 1815 CJK，带下限 2125）。改稿是创作行为，不是审校行为。
+    # 留痕：AGENTS.md 坑区「改稿轮整段写重」；测试见
+    # tests/workflow/test_chapter_write_writer_capability.py::revise 用例。
+    writer_capability_override: str | None = None
     out = run_agent(
         db_path,
         "writer",

@@ -1,8 +1,12 @@
 """chapter_write writer 节点 capability_override 路由断言。
 
-需求：writer 节点 revise 模式（revision_note + 既有 draft）应给
-``run_agent`` 传 ``capability_override="light"``；write / fresh_write
-模式传 ``None``。
+需求：writer 节点 **revise 与 write 同档**——两者都给 ``run_agent`` 传
+``capability_override=None``（走默认 creative_writing）。
+
+2026-09-15 推翻原设计（原断言 revise → ``"light"``）：门禁触发的改稿实际是
+**整章扩写**，走审校级 light 档不做长文创作——书1 ch1 实证改稿轮把整段原文重出
+一遍（同一句 v1 出现 1 次 → v2 出现 2 次）且字数仍欠带。改稿是创作行为。
+详见 AGENTS.md 坑区「改稿轮整段写重」。
 
 策略：不走完整 HTTP/Workflow 引擎，直接构造最小 ctx 调
 ``_writer_node``，并 monkeypatch ``run_agent`` 抓 kwargs。
@@ -166,8 +170,11 @@ def _patched_run_agent(monkeypatch: pytest.MonkeyPatch, captured: list[dict]):
 # ---------------------------------------------------------------------------
 
 
-def test_writer_node_revise_mode_passes_capability_light(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """revise 模式（既有 draft + revision_note）→ capability_override='light'。"""
+def test_writer_node_revise_mode_passes_capability_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """revise 模式（既有 draft + revision_note）→ capability_override=None（同 write 档）。
+
+    2026-09-15 反转：原断言为 ``'light'``（见模块 docstring 实证留痕）。
+    """
     db_path = _create_db(tmp_path)
     chapter_id = "ch_cap_revise"
     _insert_chapter_with_draft(
@@ -194,9 +201,9 @@ def test_writer_node_revise_mode_passes_capability_light(monkeypatch: pytest.Mon
 
     assert len(captured) == 1, f"run_agent 应被调用 1 次，实际 {len(captured)} 次"
     kwargs = captured[0]["kwargs"]
-    # 主断言：revise 模式下必须把 capability_override 显式钉为 'light'
-    assert kwargs.get("capability_override") == "light", (
-        f"revise 模式应传 capability_override='light'，实际 {kwargs.get('capability_override')!r}"
+    # 主断言：revise 模式必须与 write 同档（不再降到 light 审校档）
+    assert kwargs.get("capability_override") is None, (
+        f"revise 模式应传 capability_override=None，实际 {kwargs.get('capability_override')!r}"
     )
     # 副断言：mode 走对路径
     assert out["writer_input"]["mode"] == "revise"

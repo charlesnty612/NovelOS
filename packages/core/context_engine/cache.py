@@ -63,6 +63,17 @@ def _fingerprint_plan_json(plan_json_raw: Any) -> str:
         return _FINGERPRINT_UNCACHED
 
 
+def _fingerprint_outline_json(outline_json_raw: Any) -> str:
+    """计算 chapters.outline_json 原文的稳定指纹（sha256 前 16 字符）。
+
+    outline_json（0028 策展大纲槽）进 director 装配 payload 的 ``chapter.outline``
+    段 → 按装配缓存键纪律（AGENTS.md 硬规则 2「凡进 payload 的装配参数必须入键」）
+    必须单列一个键维度；否则改大纲后同 state_version 下会脏命中旧装配。
+    口径与 :func:`_fingerprint_plan_json` 逐字一致（原文 str / 已解析对象同款处理）。
+    """
+    return _fingerprint_plan_json(outline_json_raw)
+
+
 def _fingerprint_scene_plan(scene_plan: Any) -> str:
     """计算 scene_plan 的稳定指纹（json.dumps sort_keys=True 的 sha256 前 16）。
 

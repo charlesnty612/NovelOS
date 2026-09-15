@@ -47,6 +47,7 @@ class ChapterUpdate(BaseModel):
 
     title: str | None = Field(default=None, max_length=200)
     plan_json: dict | None = None
+    outline_json: dict | None = None
     status: ChapterStatus | None = None
 
 
@@ -65,6 +66,7 @@ class Chapter(BaseModel):
     number: int
     title: str | None
     plan_json: dict
+    outline_json: dict | None = None
     status: ChapterStatus
     visibility: str
     who_knows: list[str] | None

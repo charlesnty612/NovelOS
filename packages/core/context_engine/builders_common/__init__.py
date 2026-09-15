@@ -115,6 +115,7 @@ from .common import (
     _try_active_canon_id,
     _try_project_genre_pack_ref,
     _try_project_word_band_json,
+    resolve_chapter_outline,
 )
 from .excerpts import (
     _INJECT_MODES,
@@ -241,6 +242,7 @@ __all__ = [
     "_safe_copy",
     "_summarize_entity",
     "_summarize_genre_structure_templates",
+    "resolve_chapter_outline",
     "_textualize_genre_payoff_types",
     "_textualize_genre_planner_payoffs",
     "_trim_genre_pacing",

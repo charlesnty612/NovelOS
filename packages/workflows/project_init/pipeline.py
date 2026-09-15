@@ -333,7 +333,8 @@ def _rebuild_outline_from_db(
             (project_id,),
         ).fetchone()
         chap_rows = conn.execute(
-            "SELECT number, title, plan_json FROM chapters WHERE project_id = ? ORDER BY number ASC",
+            "SELECT number, title, plan_json, outline_json FROM chapters "
+            "WHERE project_id = ? ORDER BY number ASC",
             (project_id,),
         ).fetchall()
     finally:
@@ -358,6 +359,17 @@ def _rebuild_outline_from_db(
                 plan = {}
         if not isinstance(plan, dict):
             plan = {}
+        # 0028 大纲槽优先：重建「卷纲与章节种子」stage 输出时，策展大纲
+        # （outline_json）才是这一 stage 的权威产物；chapter-plan 覆盖后的
+        # plan_json 只是执行面，取它会污染重建结果。
+        keys = row.keys()
+        if "outline_json" in keys and row["outline_json"]:
+            try:
+                outline = json.loads(row["outline_json"])
+            except (TypeError, ValueError):
+                outline = None
+            if isinstance(outline, dict) and outline:
+                plan = {**plan, **outline}
         seeds.append({
             "number": int(row["number"]),
             "title": row["title"] or "",
@@ -1118,6 +1130,21 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
             # 逐章 INSERT（同连接 → 同一事务；异常会冒泡到下方 except 触发 rollback）
             for seed in normalized_chapter_seeds:
+                # 0028 大纲槽（策展稳定面）：volume_outliner 的章节种子写在这里，
+                # chapter-plan 工作流**不写此列** → 「生成计划」重跑不会销毁大纲。
+                # 改造前这些字段只写 plan_json，第一次生成计划即被 planner 输出整体覆盖
+                # （白名单替换），大纲从此不可见——本列即为修复该缺陷的载体。
+                outline_payload = {
+                    "chapter_goal": seed.get("one_sentence", ""),
+                    "expected_role": seed.get("role", "setup"),
+                    "key_beats": seed.get("key_beats") or [],
+                    "core_conflict": "",
+                    "turning_point": "",
+                    "hook_handling": [],
+                    "notes_for_planner": "",
+                    "schema_version": "chapter-outline.v1",
+                    "prompt_version": "volume_outliner:v1",
+                }
                 plan_payload = {
                     "chapter_goal": seed.get("one_sentence", ""),
                     "expected_role": seed.get("role", "setup"),
@@ -1146,11 +1173,11 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 conn.execute(
                     """
                     INSERT INTO chapters
-                        (chapter_id, project_id, number, title, plan_json,
+                        (chapter_id, project_id, number, title, plan_json, outline_json,
                          status, visibility, who_knows,
                          created_at, updated_at, volume_id)
                     VALUES
-                        (:chapter_id, :project_id, :number, :title, :plan_json,
+                        (:chapter_id, :project_id, :number, :title, :plan_json, :outline_json,
                          :status, :visibility, :who_knows,
                          :created_at, :updated_at, :volume_id)
                     """,
@@ -1160,6 +1187,7 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
                         "number": int(seed["number"]),
                         "title": seed.get("title"),
                         "plan_json": json.dumps(plan_payload, ensure_ascii=False),
+                        "outline_json": json.dumps(outline_payload, ensure_ascii=False),
                         "status": "PLANNED",
                         "visibility": "VISIBLE",
                         "who_knows": None,

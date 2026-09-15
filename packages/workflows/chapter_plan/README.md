@@ -66,6 +66,6 @@ golden / smoke 脚本以 `director` 提供计划脚本，计划-only 形态走�
   `hook_ledger_excerpt` / `narrative_debt_excerpt`；**输入为空 ⇒ 输出必须 `[]`**（白名单
   命中即重试）。beats / scenes / slots 的 character / location ID 同理受 `available_*` 约束。
 - chapters.status 由 chapter-write 推到 DRAFTED，不在本工作流改变。
-- 权威文档：`docs/agents/prompts/director_planner-v1.md`（合并 prompt 定稿）、
+- 权威文档：`docs/agents/prompts/director_planner-v2.md`（合并 prompt 定稿）、
   `docs/agents/agent-contracts-v0.md` §3（导演契约）、`docs/impl/IMPLEMENTATION-PLAN-v0.md`
   §2 Sprint 4（历史计划）。

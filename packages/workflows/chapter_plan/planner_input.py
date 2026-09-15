@@ -24,10 +24,11 @@ from packages.core.context_engine.builders_common import (
 from packages.core.db import get_connection
 from packages.core.quality.wordcount import DEFAULT_TARGET_WORD_COUNT
 
-# PromptRegistry 的 ACTIVE 版本标签（docs/agents/prompts/director_planner-v1.md）。
+# PromptRegistry 的 ACTIVE 版本标签（docs/agents/prompts/director_planner-v2.md）。
 # payload.prompt_version 与 chapter_scene_plans.prompt_version 同源取本常量，
 # 与 ai_call_logs.prompt_version（runner 从 registry 读出）保持一致。
-DIRECTOR_PLANNER_PROMPT_VERSION = "director_planner:v1"
+# v2（2026-09-15）：输入契约新增 chapter.outline（策展大纲槽）+ 规则 0「大纲优先」。
+DIRECTOR_PLANNER_PROMPT_VERSION = "director_planner:v2"
 
 # scene_planner 输入契约的本地默认文风（项目未配置 style_constraints 时使用；
 # 原 chapter_write 局部常量，P1 上移到本模块供两条链共用，取值逐字不变）。

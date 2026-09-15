@@ -51,7 +51,7 @@ JSON_ID_COLUMNS: dict[str, tuple[str, ...]] = {
     "hooks":                ("who_knows",),
     "narrative_debts":      ("who_knows",),
     "volumes":              ("terminal_snapshot_json",),
-    "chapters":             ("plan_json", "who_knows"),
+    "chapters":             ("plan_json", "outline_json", "who_knows"),
     "memories":             ("source_ids_json",),
     "story_states":         ("snapshot_json",),
 

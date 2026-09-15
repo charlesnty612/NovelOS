@@ -119,6 +119,10 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # - 新建 chapter_scene_plans 表（scene_plan 落库面，1 章 1 面 UNIQUE）；
     # - 纯新增表、无回填；业务表 38 → 39，总表 39 → 40。
     assert "0027_chapter_scene_plans.sql" in result["applied"]
+    # 大纲槽（2026-09-15）：0028_chapter_outline_json.sql
+    # - 仅 ALTER TABLE chapters 加 outline_json TEXT 可空列（策展大纲稳定面）；
+    # - 不增表（业务表 39，总表 40 不变），无回填 → 存量库走 plan_json 回落路径。
+    assert "0028_chapter_outline_json.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
@@ -155,6 +159,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0025_genre_packs.sql",
         "0026_workflow_runs_instance_id.sql",
         "0027_chapter_scene_plans.sql",
+        "0028_chapter_outline_json.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -202,6 +207,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     # P1 规划合并：0027_chapter_scene_plans.sql（CREATE TABLE IF NOT EXISTS 自幂等 +
     # _migrations 文件粒度追踪）也应被幂等跳过
     assert "0027_chapter_scene_plans.sql" in second["skipped"]
+    # 大纲槽：0028 也应被幂等跳过
+    assert "0028_chapter_outline_json.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -246,6 +253,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0025_genre_packs.sql",
         "0026_workflow_runs_instance_id.sql",
         "0027_chapter_scene_plans.sql",
+        "0028_chapter_outline_json.sql",
     }
     for r in rows:
         assert r["applied_at"]

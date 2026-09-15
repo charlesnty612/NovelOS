@@ -1,0 +1,36 @@
+-- =============================================================================
+-- NovelOS Database Migration 0028: chapters.outline_json（章节大纲槽）
+--
+-- 背景（缺陷修复，2026-09-15）：
+--   改造前 `chapters.plan_json` 一名两用——
+--     (a) project-init 的 volume_outliner 章节种子写进去当**大纲**；
+--     (b) chapter-plan 工作流的 planner 输出写回去当**单章计划**（白名单整体覆盖）。
+--   而 director_planner 的装配输入（context_engine.build_director_input）**只**取
+--   chapter 段的 title / target_word_count / expected_role / chapter_id，从不注入
+--   `plan_json.chapter_goal / key_beats / turning_point`；plan_json 全文仅用于 FTS
+--   召回语料与缓存指纹。结果：**大纲从未抵达 planner**，planner 只能顺着 story state
+--   惯性现推计划，plan_json 里的大纲每次「生成计划」即被覆盖销毁。
+--   实证：书1 首弧五版大纲补丁（v5~v9）全部空转——章节 title 生效（前端可见），
+--   正文却由 planner 顺着项目里的旧设定续写，与大纲完全脱节。
+--
+-- 列语义：
+--   - `outline_json`：**策展/稳定面**——本章「应该是什么」（chapter_goal /
+--     core_conflict / turning_point / expected_role / key_beats / hook_handling /
+--     notes_for_planner）。由 project-init 的 volume_outliner 章节种子写入，
+--     或人工 / 题材策展脚本 PATCH 修改；**chapter-plan 工作流不写此列**。
+--   - `plan_json`：**生成面**——本章「怎么执行」（planner 逐拍 key_beats /
+--     character_changes_planned / hook_handling / debt_handling / deviations …），
+--     每次「生成计划」整体覆盖，语义不变。
+--   - 读取优先级（context_engine 装配）：`outline_json` 非空 → 用它；
+--     为空 → 回落到 `plan_json` 的同名字段（存量项目行为不变的兼容路径）。
+--
+-- 幂等策略：
+--   - 纯新增可空列（ALTER TABLE ADD COLUMN），不改既有列、不回填数据；
+--   - 存量库升级后 `outline_json` 全为 NULL → 装配走回落路径，**零行为突变**；
+--   - 回填由使用方按需执行（书1 的 v9 大纲回填见项目侧脚本，不属迁移职责）。
+--
+-- 与 0027 的关系：0027 落 scene_plan（plan_json 的结构翻译），本迁移落 outline
+-- （plan_json 的上游依据）——三者构成「大纲 → 计划 → 场景计划」的可审计链条。
+-- =============================================================================
+
+ALTER TABLE chapters ADD COLUMN outline_json TEXT;

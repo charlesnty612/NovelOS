@@ -28,6 +28,7 @@ from .builders_common import (
     _row_to_project,
     _truncate_summaries_to_token_budget,
     _world_state_excerpts,
+    resolve_chapter_outline,
 )
 from .cache import (
     _FINGERPRINT_UNCACHED,
@@ -35,6 +36,7 @@ from .cache import (
     _cache_namespace_tag,
     _cache_put,
     _fingerprint_author_intent,
+    _fingerprint_outline_json,
     _fingerprint_plan_json,
 )
 from .canon import (
@@ -250,6 +252,14 @@ def _build_director_input_uncached(
             "target_word_count": target_word_count,
             "expected_role": "setup",
             "chapter_id": chapter_id,
+            # 0028 大纲槽：策展大纲（chapter_goal / core_conflict / turning_point /
+            # key_beats / hook_handling / notes_for_planner）。改造前这段信息**从未
+            # 进入 planner 输入**，plan_json 只被当 FTS 召回语料 + 缓存指纹用——
+            # 于是 planner 只能顺着 story state 惯性自推计划，项目级大纲形同虚设。
+            # 两级取值见 resolve_chapter_outline（outline_json 非空 → 用它；否则回落
+            # plan_json 同名字段，存量项目零行为突变）。planner **必须以此为准**，
+            # 不得把 story state 里的旧线索引到与 outline 相悖的方向。
+            "outline": resolve_chapter_outline(chapter),
         },
         "author_intent": {
             "raw": author_intent,
@@ -346,6 +356,9 @@ def build_director_input(
     chapter_no = peek["chapter_no"]
     state_version = peek["state_version"]
     plan_fp = _fingerprint_plan_json(peek["plan_json_raw"])
+    # 0028 大纲槽：``chapter.outline`` 段进 payload → 单列键维度（硬规则 2）。
+    # 缺该维度会让「改大纲后同一 state_version」脏命中旧装配（正是本次缺陷的同类形状）。
+    outline_fp = _fingerprint_outline_json(peek.get("outline_json_raw"))
     # F5 修复：缓存键追加 active canon_id；拆书落新 canon 后旧 director 装配缓存自然失效。
     active_canon_id = peek["active_canon_id"] or "__none__"
     # 题材库 P1a：缓存键追加题材包指纹（``<pack_id>@<version>``，未绑定 → ``__none__``）。
@@ -354,8 +367,9 @@ def build_director_input(
     genre_pack_ref = peek["genre_pack_ref"] or "__none__"
     intent_fp = _fingerprint_author_intent(author_intent)
     cache_key = (
-        project_id, state_version, chapter_no, "director", plan_fp, active_canon_id,
-        intent_fp, target_word_count, genre_pack_ref, _cache_namespace_tag(namespace),
+        project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
+        active_canon_id, intent_fp, target_word_count, genre_pack_ref,
+        _cache_namespace_tag(namespace),
     )
     cacheable = (
         plan_fp != _FINGERPRINT_UNCACHED and intent_fp != _FINGERPRINT_UNCACHED
