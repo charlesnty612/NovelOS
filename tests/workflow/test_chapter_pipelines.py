@@ -1421,10 +1421,17 @@ def test_chapter_review_auto_revise_loop_without_overrides_inherits_from_review_
             assert new_write_run_id is not None
             assert new_review_run_id is not None
 
-            async def _ckpt_omits_overrides(run_id: str) -> None:
+            async def _ckpt_omits_loop_ctx_keys(run_id: str) -> None:
+                """未传的透传键（model_overrides / author_intent）不得出现在回路子 run 的 ctx 里。"""
                 rr = await _request(app, "GET", f"/api/runs/{run_id}")
                 assert rr.status_code == 200, rr.text
                 ckpt = rr.json().get("checkpoint_json") or {}
+                for key in ("model_overrides", "author_intent"):
+                    if key in ckpt:
+                        raise AssertionError(
+                            f"未传 {key}（父 ctx 也无）时回路子 run {run_id} 的 checkpoint "
+                            f"顶层不应携带该键；实际={ckpt.get(key)!r}"
+                        )
                 for node_id, node_ckpt in ckpt.items():
                     if not isinstance(node_ckpt, dict):
                         continue
@@ -1434,7 +1441,310 @@ def test_chapter_review_auto_revise_loop_without_overrides_inherits_from_review_
                             f"实际={node_ckpt!r}"
                         )
 
-            await _ckpt_omits_overrides(new_write_run_id)
-            await _ckpt_omits_overrides(new_review_run_id)
+            await _ckpt_omits_loop_ctx_keys(new_write_run_id)
+            await _ckpt_omits_loop_ctx_keys(new_review_run_id)
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# F-11（2026-09-16 实证）：auto_revise 回路的 author_intent 透传 / 继承
+# ---------------------------------------------------------------------------
+
+
+async def _setup_paused_first_review(
+    app, pid: str, cid: str, *, review_author_intent: str | None = None,
+) -> str:
+    """plan → write → review 跑到 PAUSED，返回首轮 review run_id。
+
+    ``review_author_intent`` 非 None 时给首轮 review run 的 ctx 一并塞该键
+    （验证回路「请求体没给 → 从父 review run ctx 继承」路径的前置条件）。
+    """
+    first_mock = {
+        "director": _director_script(),
+        "writer": _writer_script(),
+    }
+    r = await _request(
+        app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+        json={"author_intent": "计划意图", "mock_providers": first_mock},
+    )
+    assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    r = await _request(
+        app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+        json={"mock_providers": first_mock},
+    )
+    assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+    review_body: dict = {"mock_providers": first_mock}
+    if review_author_intent is not None:
+        review_body["author_intent"] = review_author_intent
+    r = await _request(
+        app, "POST", f"/api/projects/{pid}/chapters/{cid}/review", json=review_body,
+    )
+    assert r.status_code == 201, r.text
+    paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+    return paused["run_id"]
+
+
+async def _wait_auto_revise_child_runs(
+    app, pid: str, first_review_run_id: str, *, timeout: float = 120.0,
+) -> tuple[str, str]:
+    """轮询到回路产出的新 write run 与新 PAUSED review run；返回 ``(write_run_id, review_run_id)``。"""
+    import time as _list_t
+    deadline = _list_t.monotonic() + timeout
+    while _list_t.monotonic() < deadline:
+        rr = await _request(app, "GET", f"/api/projects/{pid}/runs")
+        assert rr.status_code == 200, rr.text
+        rows = rr.json()
+        review_rows = [
+            row for row in rows
+            if row.get("workflow_name") == "chapter-review"
+            and row["run_id"] != first_review_run_id
+        ]
+        write_rows = [
+            row for row in rows if row.get("workflow_name") == "chapter-write"
+        ]
+        paused_new = [row for row in review_rows if row["status"] == "PAUSED"]
+        if paused_new and write_rows:
+            new_write = max(write_rows, key=lambda r0: r0.get("started_at") or "")
+            new_review = max(paused_new, key=lambda r0: r0.get("started_at") or "")
+            return new_write["run_id"], new_review["run_id"]
+        await asyncio.sleep(0.3)
+    raise AssertionError("daemon 未在 120s 内产出新的 write / PAUSED review 子 run")
+
+
+async def _ckpt_ctx(app, run_id: str) -> dict:
+    """取 ``run.checkpoint_json`` 顶层（引擎落盘的 ctx 就是这一层，扁平键值）。"""
+    rr = await _request(app, "GET", f"/api/runs/{run_id}")
+    assert rr.status_code == 200, rr.text
+    return rr.json().get("checkpoint_json") or {}
+
+
+def test_chapter_review_auto_revise_loop_propagates_author_intent(tmp_path: Path):
+    """F-11：resume body 带 ``author_intent`` 时，回路重跑的 write / review 子 run 的 ctx
+    必须原样携带同一份 author_intent——改稿轮不再在「无任何作者约束」状态下重写正文。
+
+    实证背景（2026-09-16 新书 01 ch2）：回路只透传 model_overrides，v1 正文干净、
+    改稿轮 v2 把内部字段名 ``recalled_passages`` 写进正文。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            first_review_run_id = await _setup_paused_first_review(app, pid, cid)
+            # 前置条件：首轮 review run 的 ctx 里没有 author_intent（否则下面的断言可能靠继承蒙混过关）
+            assert "author_intent" not in await _ckpt_ctx(app, first_review_run_id)
+
+            intent = "本书铁律：无CP、字数 2200~2800、禁止内部标识入文"
+            revise_mock = {
+                "director": _director_script(),
+                "writer": _writer_revised_script(),
+            }
+            r = await _request(
+                app, "POST", f"/api/runs/{first_review_run_id}/resume",
+                json={
+                    "human_input": {"approved": False, "revise": True, "note": "改稿"},
+                    "auto_revise_max": 2,
+                    "mock_providers": revise_mock,
+                    "author_intent": intent,
+                },
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "RUNNING"
+            await _wait_run_terminal(app, first_review_run_id, expected=("FAILED",))
+
+            new_write_run_id, new_review_run_id = await _wait_auto_revise_child_runs(
+                app, pid, first_review_run_id
+            )
+            for run_id in (new_write_run_id, new_review_run_id):
+                ckpt = await _ckpt_ctx(app, run_id)
+                assert ckpt.get("author_intent") == intent, (
+                    f"回路子 run {run_id} 的 ctx.author_intent={ckpt.get('author_intent')!r}，"
+                    f"期望 {intent!r}（resume 请求体显式给出的值）"
+                )
+
+    asyncio.run(run())
+
+
+def test_chapter_review_auto_revise_loop_inherits_author_intent_from_review_run(tmp_path: Path):
+    """F-11 核心断言：resume body 不给 ``author_intent`` 时，回路从父 review run 的
+    checkpoint_json（即其 ctx）继承首轮那份——「改稿轮不再丢作者约束」的正解路径。
+
+    突变验证：撤掉 ``control.py`` 的继承分支（``effective_author_intent`` 恒 None）→ 本测试红。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            intent = "本书铁律：价签快照只给单一价格数字、对话引号统一 “”"
+            first_review_run_id = await _setup_paused_first_review(
+                app, pid, cid, review_author_intent=intent,
+            )
+            # 前置条件：父 review run 的 ctx 确实带这份 author_intent（继承的来源）
+            assert (await _ckpt_ctx(app, first_review_run_id)).get("author_intent") == intent
+
+            revise_mock = {
+                "director": _director_script(),
+                "writer": _writer_revised_script(),
+            }
+            r = await _request(
+                app, "POST", f"/api/runs/{first_review_run_id}/resume",
+                json={
+                    "human_input": {"approved": False, "revise": True, "note": "改稿"},
+                    "auto_revise_max": 2,
+                    "mock_providers": revise_mock,
+                    # 故意不传 author_intent → 期望从父 review run ctx 继承
+                },
+            )
+            assert r.status_code == 200, r.text
+            await _wait_run_terminal(app, first_review_run_id, expected=("FAILED",))
+
+            new_write_run_id, new_review_run_id = await _wait_auto_revise_child_runs(
+                app, pid, first_review_run_id
+            )
+            for run_id in (new_write_run_id, new_review_run_id):
+                ckpt = await _ckpt_ctx(app, run_id)
+                assert ckpt.get("author_intent") == intent, (
+                    f"回路子 run {run_id} 未从父 review run（{first_review_run_id}）继承 "
+                    f"author_intent；实际={ckpt.get('author_intent')!r}，期望 {intent!r}"
+                )
+
+    asyncio.run(run())
+
+
+def _writer_script_with_quotes_and_leak() -> list[str]:
+    """含「」对话与内部标识的 writer 输出：用于断言落库前的确定性规整。"""
+    prose = (
+        "戌时的更鼓从街尾传过来。\n\n"
+        "「你来晚了。」苏婉清把茶盏往他那边推了推，"
+        "「这盏茶温了三回。」\n\n"
+        "他忽然想起recalled_passages里自己的那句话，"
+        "喉头动了一下，终究没说出口。灯芯爆了个花，"
+        "啪地轻响，影子在青石地砖上晃了晃，又稳住了。"
+    )
+    return [
+        json.dumps(
+            {
+                "schema_version": "writer-output.v1",
+                "prompt_version": "writer:v1",
+                "chapter_id": "ch_xxx",
+                "prose": prose,
+                "self_report": {
+                    "slots_filled": ["slot_001"],
+                    "word_count": len(prose),
+                    "scene_count": 1,
+                    "deviations": [],
+                    "forbidden_word_hits": [],
+                    "self_check_notes": "",
+                },
+            },
+            ensure_ascii=False,
+        )
+    ]
+
+
+def test_write_threads_author_intent_into_writer_payload_and_normalizes_draft(
+    tmp_path: Path,
+) -> None:
+    """F-10 消费方闭环：端点收下的 author_intent 必须真进 writer payload。
+
+    2026-09-16 新书01 实证（AGENTS.md 硬规则 9 同一形状第二次）：write 端点收下
+    ``author_intent`` 写进 run ctx，但 ``build_writer_input`` 没有这个形参——
+    本书铁律（价签四锁 / 字数带 / 文风 / 无CP）在 ch1-6 一个模型都没看见。
+    本用例钉「端点参数必须有消费方」：撤掉 ``_writer_node`` 的
+    ``author_intent=ctx.get("author_intent")`` 传参，用例必须转红。
+
+    同时钉 F-10 ③ 确定性规整：writer 吐「」与内部标识 → 落库正文引号已归一为
+    弯双引号，内部标识**只检出不改写**（删了句子就断）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid, "苏婉清")
+            cid = await _make_chapter(app, pid, 1, "夜叩青石")
+
+            intent = "本书铁律：价签快照只给单一价格数字，绝不给状态与原因。"
+            mock_providers = {
+                "director": _director_script(),
+                "writer": _writer_script_with_quotes_and_leak(),
+                "observer": _observer_noop_script(),
+            }
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"author_intent": intent, "mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            write_run_id = r.json()["run_id"]
+            await _wait_run_terminal(app, write_run_id, expected=("COMPLETED",))
+
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                draft = conn.execute(
+                    "SELECT content FROM drafts WHERE chapter_id = ? ORDER BY version DESC LIMIT 1",
+                    (cid,),
+                ).fetchone()
+                node = conn.execute(
+                    "SELECT output_json FROM workflow_run_nodes "
+                    "WHERE run_id = ? AND node_id = 'writer'",
+                    (write_run_id,),
+                ).fetchone()
+                save_node = conn.execute(
+                    "SELECT output_json FROM workflow_run_nodes "
+                    "WHERE run_id = ? AND node_id = 'save_draft'",
+                    (write_run_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+
+            assert draft is not None, "write 未落 draft"
+            prose = draft["content"]
+
+            # ① 引号归一化：writer 吐的「」必须已变弯双引号，且不再有「」
+            assert "“你来晚了。”" in prose, f"引号未归一化：{prose[:80]!r}"
+            assert "「" not in prose and "」" not in prose, "落库正文仍含角引号"
+
+            # ② 内部标识只检出不改写（删了句子就断）
+            assert "recalled_passages" in prose, "检出型缺陷不应被静默删除"
+
+            assert node is not None, "writer 节点产出缺失"
+            out = node["output_json"]
+            payload = json.loads(out) if isinstance(out, str) else out
+
+            # ③ 端点参数真的进了 writer payload（本用例的核心断言）
+            got = (payload.get("writer_input") or {}).get("author_intent") or {}
+            assert got.get("raw") == intent, (
+                f"author_intent 没进 writer payload：实际={got!r}"
+            )
+            # ④ 规整与检出都进了节点产出（可观测）；二者挂在 save_draft 节点上
+            assert save_node is not None, "save_draft 节点产出缺失"
+            save_out = save_node["output_json"]
+            save_payload = json.loads(save_out) if isinstance(save_out, str) else save_out
+            changes = save_payload.get("normalize_changes") or []
+            assert any(c.get("rule") == "NORM-QUOTE" for c in changes), changes
+            assert save_payload.get("internal_identifiers") == ["recalled_passages"], (
+                save_payload.get("internal_identifiers")
+            )
 
     asyncio.run(run())

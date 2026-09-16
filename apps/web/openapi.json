@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "NovelOS API",
-    "version": "dev"
+    "version": "3.9.0"
   },
   "paths": {
     "/api/health": {
@@ -5737,51 +5737,6 @@
         }
       }
     },
-    "/api/projects/{project_id}/init-status": {
-      "get": {
-        "tags": [
-          "workflows"
-        ],
-        "summary": "Get Init Status",
-        "description": "返回 project-init 四环节各自的落库完成状态（数据推导，不建新表）。\n\n- 404：project 不存在。\n- 各环节 ``done`` 判定：\n  - premise：``projects.premise`` 非空。\n  - world：``locations``/``factions``/``world_rules`` 任一表该 project 有行。\n  - character：``characters`` 表该 project 有行。\n  - outline：``volumes`` 表有行 且 ``chapters`` 有行。",
-        "operationId": "get_init_status_api_projects__project_id__init_status_get",
-        "parameters": [
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Project Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Init Status Api Projects  Project Id  Init Status Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/projects/{project_id}/chapters/{chapter_id}/plan": {
       "post": {
         "tags": [
@@ -6034,114 +5989,6 @@
         }
       }
     },
-    "/api/projects/{project_id}/chapters/{chapter_id}/gate-revise": {
-      "post": {
-        "tags": [
-          "workflows"
-        ],
-        "summary": "Start Gate Revise",
-        "description": "按门禁建议改稿（V3.9 批次 4.1）：一键把 quality_gate 阻断变成改稿闭环。\n\n语义：\n- 前置：chapter 的 ``plan_json.gate_blocked`` 非空（quality_gate enforce 阻断时写入的\n  标记；改稿意见 ``plan_json.revision_note`` 同批写入）→ 无标记 → 409；\n- 启动 chapter-write：``revision_note`` 存在 ⇒ write 节点走 revise 模式（定向改稿）；\n- write COMPLETED 后 daemon 线程（``gate-revise-{run_id}``）接力 chapter-review，\n  审校停在 author_review 等作者决议；作者批准后章节回到 REVIEWED，可重新提交；\n- 复用 :func:`_start_workflow`（chapter 校验 / 活跃 run 并发防护 / 409 语义）与\n  :func:`_run_workflow_return_payload`（同 auto_revise 回路的子 run 口径），\n  不新建并行机制。\n\n返回：与其他 start 端点同形（``{run_id, status, current_node}``，201）。",
-        "operationId": "start_gate_revise_api_projects__project_id__chapters__chapter_id__gate_revise_post",
-        "parameters": [
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Project Id"
-            }
-          },
-          {
-            "name": "chapter_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Chapter Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GateReviseRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Start Gate Revise Api Projects  Project Id  Chapters  Chapter Id  Gate Revise Post"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/runs/{run_id}": {
-      "get": {
-        "tags": [
-          "workflows"
-        ],
-        "summary": "Get Run Endpoint",
-        "operationId": "get_run_endpoint_api_runs__run_id__get",
-        "parameters": [
-          {
-            "name": "run_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Run Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Run Endpoint Api Runs  Run Id  Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/runs/{run_id}/resume": {
       "post": {
         "tags": [
@@ -6241,6 +6088,95 @@
         }
       }
     },
+    "/api/projects/{project_id}/init-status": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Get Init Status",
+        "description": "返回 project-init 四环节各自的落库完成状态（数据推导，不建新表）。\n\n- 404：project 不存在。\n- 各环节 ``done`` 判定：\n  - premise：``projects.premise`` 非空。\n  - world：``locations``/``factions``/``world_rules`` 任一表该 project 有行。\n  - character：``characters`` 表该 project 有行。\n  - outline：``volumes`` 表有行 且 ``chapters`` 有行。",
+        "operationId": "get_init_status_api_projects__project_id__init_status_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Init Status Api Projects  Project Id  Init Status Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Get Run Endpoint",
+        "operationId": "get_run_endpoint_api_runs__run_id__get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Run Endpoint Api Runs  Run Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/projects/{project_id}/runs": {
       "get": {
         "tags": [
@@ -6316,6 +6252,70 @@
                   "type": "object",
                   "additionalProperties": true,
                   "title": "Response Get Chapter Context Preview Api Chapters  Chapter Id  Context Preview Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{project_id}/chapters/{chapter_id}/gate-revise": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Start Gate Revise",
+        "description": "按门禁建议改稿（V3.9 批次 4.1）：一键把 quality_gate 阻断变成改稿闭环。\n\n语义：\n- 前置：chapter 的 ``plan_json.gate_blocked`` 非空（quality_gate enforce 阻断时写入的\n  标记；改稿意见 ``plan_json.revision_note`` 同批写入）→ 无标记 → 409；\n- 启动 chapter-write：``revision_note`` 存在 ⇒ write 节点走 revise 模式（定向改稿）；\n- write COMPLETED 后 daemon 线程（``gate-revise-{run_id}``）接力 chapter-review，\n  审校停在 author_review 等作者决议；作者批准后章节回到 REVIEWED，可重新提交；\n- 复用 :func:`_start_workflow`（chapter 校验 / 活跃 run 并发防护 / 409 语义）与\n  :func:`_run_workflow_return_payload`（同 auto_revise 回路的子 run 口径），\n  不新建并行机制。\n\n返回：与其他 start 端点同形（``{run_id, status, current_node}``，201）。",
+        "operationId": "start_gate_revise_api_projects__project_id__chapters__chapter_id__gate_revise_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "chapter_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chapter Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GateReviseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Start Gate Revise Api Projects  Project Id  Chapters  Chapter Id  Gate Revise Post"
                 }
               }
             }
@@ -7129,6 +7129,18 @@
             "type": "object",
             "title": "Plan Json"
           },
+          "outline_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outline Json"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -7248,6 +7260,18 @@
               }
             ],
             "title": "Plan Json"
+          },
+          "outline_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outline Json"
           },
           "status": {
             "anyOf": [
@@ -9018,6 +9042,17 @@
               }
             ],
             "title": "Model Overrides"
+          },
+          "author_intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Intent"
           }
         },
         "type": "object",

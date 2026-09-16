@@ -41,6 +41,8 @@ export interface Chapter {
   /** 章节完整表示，对应数据库行。 */
   plan_json: Record<string, unknown>;
   /** 章节完整表示，对应数据库行。 */
+  outline_json?: Record<string, unknown> | null;
+  /** 章节完整表示，对应数据库行。 */
   status: "PLANNED" | "DRAFTED" | "REVIEWED" | "COMMITTED" | "RELEASED";
   /** 章节完整表示，对应数据库行。 */
   visibility: string;
@@ -66,6 +68,8 @@ export interface ChapterUpdate {
   title?: string | null;
   /** 部分更新请求体——所有字段均可选。 */
   plan_json?: Record<string, unknown> | null;
+  /** 部分更新请求体——所有字段均可选。 */
+  outline_json?: Record<string, unknown> | null;
   /** 部分更新请求体——所有字段均可选。 */
   status?: "PLANNED" | "DRAFTED" | "REVIEWED" | "COMMITTED" | "RELEASED" | null;
 }
@@ -443,6 +447,7 @@ export interface ResumeRequest {
   mock_providers?: Record<string, unknown> | null;
   regenerate?: boolean | null;
   model_overrides?: Record<string, unknown> | null;
+  author_intent?: string | null;
 }
 
 export interface RevisionNoteUpdate {

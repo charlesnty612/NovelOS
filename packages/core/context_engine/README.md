@@ -315,7 +315,7 @@ director: (project_id, state_version, chapter_no, "director", plan_fp,
            active_canon_id, intent_fp, target_word_count, ns)
 writer:   (project_id, state_version, chapter_no, "writer", scene_fp,
            context_mode, relevance_flag, wb_fp, active_canon_id,
-           target_word_count, ns)
+           target_word_count, intent_fp, ns)
 ```
 
 - 键必须含 `state_version` —— state 推进后自然失效；
@@ -331,6 +331,9 @@ writer:   (project_id, state_version, chapter_no, "writer", scene_fp,
   同前：拆书落新 canon、paged/full 切换、word_band_json 变更均自然失效。
 - **V3.9 批次 1.4 补齐**：进 payload 的装配参数必须进键——
   - `intent_fp` = `sha256(author_intent)[:16]`（`None → 'none'`，空串按原文计算）；
+    writer 键自 2026-09-16 F-10 修复起同样含该维度——writer payload 新增
+    `author_intent` 段（非空时 `{"raw": ...}`，空 / None 不出现该键）后，改意图
+    必须 miss，否则脏命中旧装配（与 director 同形的硬规则 2 教训）。
   - `target_word_count` 原文（int，与 state_version 同款直接入键）——它决定
     `chapter.target_word_count` / `chapter.word_band` / 每 scene `target_words`；
   - `ns` = 命名空间标记（`cache._cache_namespace_tag`）：生产 `"ns:"`，
@@ -362,8 +365,9 @@ writer:   (project_id, state_version, chapter_no, "writer", scene_fp,
   `test_chapter_commit_node_invalidates_cache_in_pipeline`（commit 后显式失效）。
 
 测试（`tests/unit/test_context_engine_cache_dimensions.py`，V3.9 批次 1.4）：
-- 换 `author_intent` / `target_word_count`（director）与 `target_word_count`
-  （writer）必 miss，回到原值仍命中自己的条目；
+- 换 `author_intent` / `target_word_count`（director）与 `target_word_count` /
+  `author_intent`（writer，2026-09-16 F-10 起）必 miss，回到原值仍命中自己的条目；
+- 有 / 无 `author_intent` 各自成键（不得互命中——否则无意图装配会读到带意图的旧条目）；
 - preview 与生产**同参数**也各建一次（命名空间隔离），缓存中两条键、预览那条带
   `"preview"` 标记；
 - preview 默认口径（空意图 / 默认字数 3000，V3.9 5.1 起与生产一致）不覆盖生产条目；

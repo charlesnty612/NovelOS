@@ -158,11 +158,18 @@ def test_registry_db_fallback_detects_cancelled_child(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def _make_fake_runner(db_path: str, calls: list[tuple[str, str]]):
+def _make_fake_runner(
+    db_path: str,
+    calls: list[tuple[str, str]],
+    ctx_extras: list[dict | None] | None = None,
+):
     """脚本化 ``_run_workflow_return_payload``：write COMPLETED / review rejected。
 
     每轮 review 落一行 error='rejected-for-revision' 的 FAILED run，让回路能进入下一轮；
     on_run_started 回调按真实实现语义调用（注册表登记子 run）。
+
+    ``ctx_extras`` 非 None 时，按启动顺序记录每次调用收到的 ``initial_ctx_extra``
+    （子 run ctx 透传断言用：write / review 各一条）。
     """
 
     def fake(
@@ -177,6 +184,8 @@ def _make_fake_runner(db_path: str, calls: list[tuple[str, str]]):
         wait_deadline_seconds=None,
         on_run_started=None,
     ):
+        if ctx_extras is not None:
+            ctx_extras.append(initial_ctx_extra)
         if workflow_name == "chapter-write":
             rid = _insert_run(db_path, status="COMPLETED")
             if on_run_started is not None:
@@ -280,3 +289,79 @@ def test_cancel_of_unknown_run_does_not_touch_loops(tmp_path: Path, monkeypatch)
         wf.revise, "_run_workflow_return_payload", _make_fake_runner(db_path, calls)
     )
     assert wf._mark_auto_revise_loops_cancelled_for_run("wfr_unrelated") == []  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# _auto_revise_loop：子 run ctx 透传（author_intent 补齐 / model_overrides 不回归）
+# ---------------------------------------------------------------------------
+
+
+def test_loop_ctx_extra_carries_author_intent_and_model_overrides(
+    tmp_path: Path, monkeypatch
+):
+    """F-11（2026-09-16 实证）：回路每轮 write / review 子 run 的 ctx 必须**同时**带
+    ``author_intent`` 与 ``model_overrides``——两个键并列存在，互不覆盖。
+
+    突变验证：撤掉 ``revise.py`` 里 author_intent 并入 ``initial_ctx_extra`` 的两行 → 本测试红。
+    """
+    db_path = _db(tmp_path)
+    calls: list[tuple[str, str]] = []
+    ctx_extras: list[dict | None] = []
+    monkeypatch.setattr(
+        wf.revise,
+        "_run_workflow_return_payload",
+        _make_fake_runner(db_path, calls, ctx_extras),
+    )
+
+    overrides = {"creative_writing": "mprof_loop_ctx_test"}
+    intent = "本书铁律：无CP、字数 2200~2800、禁止内部标识入文"
+    wf._auto_revise_loop(  # noqa: SLF001
+        object(), db_path, "prj_1", "ch_1", None, 1, overrides, intent,
+        parent_run_id="wfr_parent",
+    )
+
+    assert [c[0] for c in calls] == ["write", "review"], calls
+    assert ctx_extras == [
+        {"model_overrides": overrides, "author_intent": intent},
+        {"model_overrides": overrides, "author_intent": intent},
+    ], ctx_extras
+
+
+def test_loop_ctx_extra_author_intent_only_omits_model_overrides(
+    tmp_path: Path, monkeypatch
+):
+    """只给 author_intent（resume 未传 overrides）→ 子 run ctx 只出现 author_intent 键。"""
+    db_path = _db(tmp_path)
+    calls: list[tuple[str, str]] = []
+    ctx_extras: list[dict | None] = []
+    monkeypatch.setattr(
+        wf.revise,
+        "_run_workflow_return_payload",
+        _make_fake_runner(db_path, calls, ctx_extras),
+    )
+
+    wf._auto_revise_loop(  # noqa: SLF001
+        object(), db_path, "prj_1", "ch_1", None, 1, None, "本书铁律",
+        parent_run_id="wfr_parent",
+    )
+
+    assert ctx_extras == [{"author_intent": "本书铁律"}, {"author_intent": "本书铁律"}]
+    assert all("model_overrides" not in (e or {}) for e in ctx_extras)
+
+
+def test_loop_ctx_extra_is_none_when_both_absent(tmp_path: Path, monkeypatch):
+    """两个键都为空 → ``initial_ctx_extra`` 保持 None，不得退化成空 dict（缺省零行为变更）。"""
+    db_path = _db(tmp_path)
+    calls: list[tuple[str, str]] = []
+    ctx_extras: list[dict | None] = []
+    monkeypatch.setattr(
+        wf.revise,
+        "_run_workflow_return_payload",
+        _make_fake_runner(db_path, calls, ctx_extras),
+    )
+
+    wf._auto_revise_loop(  # noqa: SLF001
+        object(), db_path, "prj_1", "ch_1", None, 1, parent_run_id="wfr_parent",
+    )
+
+    assert ctx_extras == [None, None], ctx_extras

@@ -632,9 +632,30 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                     else:
                         effective_model_overrides = None
 
+                # 解析「回路用 author_intent」：与 mock_providers / model_overrides 同样的
+                # 「请求体 > 原 run ctx」语义。请求体显式给出（去空白后非空）→ 一律以请求体
+                # 为准（不再继承）；请求体 None 时才从原 review run 的 checkpoint_json
+                # （即其 ctx）继承，且只有非空字符串才认——None / 空串 / 非 str → 回路不写该键
+                # （保持既有「缺省不出现键」行为）。
+                # 2026-09-16 实证（新书 01 ch2）：回路子 run 只透传 model_overrides，
+                # author_intent 丢失 → 改稿轮在无作者约束状态下重写正文，v2 出现内部字段名
+                # ``recalled_passages``（v1 干净）。
+                effective_author_intent: str | None
+                if body.author_intent is not None:
+                    effective_author_intent = (
+                        body.author_intent if body.author_intent.strip() else None
+                    )
+                else:
+                    _ckpt_for_ai = run.get("checkpoint_json") or {}
+                    _ai_legacy = _ckpt_for_ai.get("author_intent")
+                    if isinstance(_ai_legacy, str) and _ai_legacy.strip():
+                        effective_author_intent = _ai_legacy
+                    else:
+                        effective_author_intent = None
+
                 # 防御快照：daemon 线程不能持有 Request / Body 引用，避免 GC 后访问异常；
-                # db_path / workflow 元数据 / mock_providers / model_overrides 都重新解出
-                # 原始值再传入线程。
+                # db_path / workflow 元数据 / mock_providers / model_overrides / author_intent
+                # 都重新解出原始值再传入线程。
                 _thread_db_path = str(db_path)
                 _thread_engine = engine
                 _thread_run_id = run_id
@@ -643,6 +664,7 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                 _thread_mp = mp
                 _thread_auto_revise_max = auto_revise_max
                 _thread_model_overrides = effective_model_overrides
+                _thread_author_intent = effective_author_intent
 
                 def _auto_revise_runner() -> None:
                     """daemon 线程体：等当前 resume run 终态 → 判 rejected → 调 _auto_revise_loop。
@@ -683,6 +705,7 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                                 _thread_mp,
                                 _thread_auto_revise_max,
                                 _thread_model_overrides,
+                                _thread_author_intent,
                                 parent_run_id=_thread_run_id,
                             )
                     except Exception as exc:  # noqa: BLE001

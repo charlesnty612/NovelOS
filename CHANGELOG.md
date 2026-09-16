@@ -5,6 +5,47 @@
 
 ## [Unreleased]
 
+### Fixed（2026-09-16 `author_intent` 死参数：端点的参数必须有消费方）
+
+> 形状与「plan_json 的大纲从未进 `build_director_input`」（硬规则 9）完全同形，**第二次抓到**——
+> 本次实证：新书 01 全弧 ch1-6 的「本书铁律」（价签四锁 / 字数带 / 榜一体文风 / 无CP）
+> **一个模型都没看见**。
+
+- **writer 侧接线**（`context_engine/writer_input.py` + `workflows/chapter_write/pipeline.py`）：
+  `build_writer_input()` 加 `author_intent` 形参与 payload 顶层 `{"raw": ...}` 段；
+  `_writer_node` 从 `ctx["author_intent"]` 传入；装配缓存键追加 `intent_fp` 维度（漏键＝脏命中）。
+- **writer 契约版本线**：新建 `docs/agents/prompts/writer-v2.md`（v1 逐字节 + §5 输入契约
+  `author_intent` 段 + §6 规则 21「禁止上下文标签 / 字段名 / payload 键名入文」），
+  启动 sync 后为最高 ACTIVE。连带修正 `test_p1_director_planner_pipeline.py` 里
+  钉死 `writer:v1` 的调用计数（改按 `writer:` 前缀计数）。
+- **改稿轮继承**（`routers/workflows/{common,control,revise}.py`）：`ResumeRequest` 加
+  `author_intent`，resume 端点按「请求体 > 原 run ctx」解析并快照进 daemon 线程，
+  `_auto_revise_loop` 并入 `initial_ctx_extra`——此前改稿轮在**无任何作者约束**下重写正文，
+  实证后果：ch2 v2 把内部字段名 `recalled_passages` 写进了正文。
+- **确定性算子**（不靠提示词）：新增 `packages/core/quality/normalize.py`
+  （`normalize_prose` 引号归一 + `find_internal_identifiers` 标识检出，纯函数、幂等、
+  严格成对才改）；`_save_draft_node` 落库前调用，变更与检出进节点产出（可观测）。
+  消费方闭环测试：`test_write_threads_author_intent_into_writer_payload_and_normalizes_draft`
+  （撤传参 / 撤规整各自转红）。
+- **AI 腔阈值按人类基线收紧**（F-12）：破折号 3.5→**1.0**、短段 5.5→**1.0**。
+  依据：文风锚点书（榜一侯府弧 19 章 / 37806 字）破折号 **0.19/千**、短段 **0.00/千**；
+  我们 63625 字侧 1.73 / 2.62——旧值落在两者之外（连自己的均值都够不到）＝死规则。
+  内容层同步（`NovelOS-Content: genres/male-quicktransmigration/pack.json` +
+  `男主快穿/style/samples.md` v0.6.4，本地 commit 8d8e06c）。
+- **已提交章正文返修工具**：新增 `scripts/normalize_chapters.py`（默认 dry-run，
+  `--apply` 才写；只动每章最新 draft）。新书 01 实修 24 章 / 605 对引号 + ch2 标识句改写，
+  复跑幂等（0 变更 / 0 残留）。
+- 验证：全量 pytest 绿（含新增 31 例 normalize 单测、4 例 writer 契约/缓存单测、
+  3 例 writer-v2 注册、3 例榜一基线看守、3+2 例改稿轮透传）；五处改动均做过突变验证。
+
+### 新书 01 第一弧验收（2026-09-16，`prj_bcb9d1930bd4`）
+
+- 24 章全 COMMITTED / 63625 可见字；运行期修掉两处工程事故：驱动 `POST /commit` 409 竞态
+  静默猝死（`no_active_run` + `start_stage` 退避重试 + `excepthook` + 监督重启）、
+  ch24 commit 一次 FK 抖动（自动重试兜住）。
+- 三把锁验收：价签快照合规率 **铁律接通前 1/6 → 接通后 4/4**；记忆代价逐处具体；
+  文风四算子对榜一：破折号 1.73 vs 0.19、短段 2.62 vs 0.00、对举 0.90 vs 0.00。
+
 ### Changed（2026-09-15 禁用词两层制 + 题材包 v6：把「AI 腔量化上限」推进运行面）
 
 - **禁用词分层**（同形状的第四处修正）：`AI_PATTERN_FORBIDDEN_WORDS` 原是一张

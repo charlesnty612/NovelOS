@@ -37,6 +37,7 @@ from .cache import (
     _cache_get,
     _cache_namespace_tag,
     _cache_put,
+    _fingerprint_author_intent,
     _fingerprint_scene_plan,
 )
 from .canon import (
@@ -100,12 +101,18 @@ def _build_writer_input_uncached(
     target_word_count: int,
     *,
     relevance_trim: bool = True,
+    author_intent: str | None = None,
     peek: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """无缓存版 writer 装配。
 
     ``peek``（V3.9 批次 2.3）：调用方 :func:`_peek_chapter_context` 的单连接预读结果。
     传了就直接复用其 ``word_band_json`` 原文（省掉一次 projects 查询），不再二次读库。
+
+    ``author_intent``（2026-09-16 F-10 修复）：作者对本章的硬性要求原文。非空时以
+    ``{"raw": ...}`` 段进 payload 顶层（与 :func:`build_director_input` 的
+    ``author_intent`` 段同形，便于下游统一消费）；空 / ``None`` → **不出现该键**
+    （保持既有「缺省不出现键」纪律，避免下游误读为空覆盖）。
     """
     conn = get_connection(db_path)
     try:
@@ -241,6 +248,12 @@ def _build_writer_input_uncached(
         "retrieved_memory": [],
     }
 
+    # 2026-09-16 F-10 修复：author_intent 槽位。此前 writer 装配无此参数——write
+    # 端点收下的作者硬性要求（本书铁律 / 本章约束）全链无人读（新书01 ch1-6 实证）。
+    # 非空时与 director 段同形写 ``{"raw": ...}``；空 / None → 不出现该键。
+    if author_intent:
+        payload["author_intent"] = {"raw": author_intent}
+
     # Reference Canon 注入：writer 消费 style_params（文风参数）。
     # 与 director 一致——无 canon 时不出现 reference_canon / _reference_canon_consumed。
     if reference_canon_inject is not None:
@@ -281,6 +294,7 @@ def build_writer_input(
     target_word_count: int = _DEFAULT_TARGET_WORD_COUNT,
     context_mode: str = "full",
     relevance_trim: bool | None = None,
+    author_intent: str | None = None,
     namespace: str = "",
 ) -> dict[str, Any]:
     """组装 Writer 输入（agent-contracts §4.1 + Sprint 15/V1.3 author_style_samples
@@ -338,6 +352,14 @@ def build_writer_input(
     snapshot_json）收敛为单连接单条 JOIN 的 :func:`_peek_chapter_context`；peek 结果
     透传给 uncached 装配复用（word_band_json 原文 / project_id），命中路径 DB 连接
     5 → 1。
+
+    2026-09-16 F-10 修复（author_intent 死参数）：新增 ``author_intent`` 关键词
+    参数（默认 ``None``）。write 端点收下的作者硬性要求此前全链无人读——writer
+    payload 无该段、prompt 无该字段（新书01 ch1-6 实证：本书铁律一个模型都没看见）。
+    现非空时以 ``author_intent.raw`` 进 payload 顶层（与 director 段同形）；空 /
+    ``None`` → 不出现该键。键尾（命名空间前）追加 ``intent_fp`` 维度——否则改意图后
+    同 state_version 会脏命中旧装配（硬规则 2「凡进 payload 的装配参数必须入键」，
+    与 director 键的 V3.9 批次 1.4 教训同形）。
     """
     if context_mode not in ("full", "paged"):
         raise ValueError(
@@ -363,12 +385,23 @@ def build_writer_input(
     # （PUT 改 payload → version 自增）/ 绑定 / 解绑都要 miss，否则旧装配脏命中
     # （与 director 键同形的单点口径，见 ``_peek_chapter_context``）。
     genre_pack_ref = peek["genre_pack_ref"] or "__none__"
+    # 2026-09-16 F-10 修复：缓存键追加 author_intent 指纹（``_fingerprint_author_intent``，
+    # None → 'none' / 空串按原文）。作者硬性要求进 payload（author_intent 段）⇒ 必须
+    # 进键：改意图必须 miss，否则新意图读到旧意图的装配（硬规则 2；与 director 键同形）。
+    # 该指纹由函数形参直接算出（不依赖 peek）——主 JOIN 与降级路径的键形态逐字同形。
+    intent_fp = _fingerprint_author_intent(author_intent)
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
         scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id,
-        target_word_count, genre_pack_ref, _cache_namespace_tag(namespace),
+        target_word_count, genre_pack_ref, intent_fp,
+        _cache_namespace_tag(namespace),
     )
-    if scene_fp != _FINGERPRINT_UNCACHED:
+    # 不可序列化（scene_fp / intent_fp == 'uncached'）→ 跳过缓存，避免不同原文
+    # 落在同一占位键上互相脏命中（与 director 的 cacheable 判定同款）。
+    cacheable = (
+        scene_fp != _FINGERPRINT_UNCACHED and intent_fp != _FINGERPRINT_UNCACHED
+    )
+    if cacheable:
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
@@ -376,15 +409,17 @@ def build_writer_input(
         payload = _build_writer_input_paged(
             db_path, chapter_id, scene_plan, target_word_count,
             relevance_trim=relevance_trim_final,
+            author_intent=author_intent,
             peek=peek,
         )
     else:
         payload = _build_writer_input_uncached(
             db_path, chapter_id, scene_plan, target_word_count,
             relevance_trim=relevance_trim_final,
+            author_intent=author_intent,
             peek=peek,
         )
-    if scene_fp != _FINGERPRINT_UNCACHED:
+    if cacheable:
         _cache_put(cache_key, payload)
     return payload
 
@@ -622,6 +657,7 @@ def _build_writer_input_paged(
     keep_recent_commits: int = _WRITER_KEEP_RECENT_COMMITS,
     resolved_history_keep: int = _WRITER_RESOLVED_HOOKS_KEEP,
     relevance_trim: bool = True,
+    author_intent: str | None = None,
     peek: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """writer 分页模式装配（L0/L1/L2 裁剪）。
@@ -636,10 +672,14 @@ def _build_writer_input_paged(
 
     V3.9 批次 2.3：``peek``（调用方已做的单连接预读）透传给 uncached 并供本函数取
     ``project_id``，省掉一次 ``_peek_project_id_from_chapter`` 连接。
+
+    2026-09-16 F-10 修复：``author_intent`` 透传给 uncached 装配（生产 writer 默认
+    走 ``paged``——不透传则作者硬性要求在默认模式下静默丢失）。
     """
     full_payload = _build_writer_input_uncached(
         db_path, chapter_id, scene_plan, target_word_count,
         relevance_trim=relevance_trim,
+        author_intent=author_intent,
         peek=peek,
     )
     # 裁剪前快照：仅保留被裁剪的 3 个键，便于 stats 体积量化

@@ -18,6 +18,9 @@ _CACHE_MAX_SIZE = 256
 # 指纹与 target_word_count（两者都进 payload），writer 加 target_word_count（决定
 # chapter.target_word_count / word_band / 每 scene target_words）；键尾加命名空间标记
 # 拆开 preview dry-run 与生产的键空间（见 ``_cache_namespace_tag``）。
+# 2026-09-16 F-10 修复：writer 键同步补 ``author_intent`` 指纹（``intent_fp``，键尾
+# 命名空间前）——writer payload 新增 ``author_intent`` 段（作者硬性要求）后，改意图
+# 必须 miss（硬规则 2「凡进 payload 的装配参数必须入键」；与 director 键同形）。
 # 失效仍以 state_version + chapter_no 为主线；commit 完成后调
 # ``_invalidate_cache_for_chapter`` 显式兜底（state_version 推进也会带走它）。
 _assembly_cache: dict[tuple, dict[str, Any]] = {}
@@ -91,6 +94,9 @@ def _fingerprint_scene_plan(scene_plan: Any) -> str:
 
 def _fingerprint_author_intent(author_intent: Any) -> str:
     """计算 author_intent 的稳定指纹（sha256 前 16 字符，与 plan_fp 同款风格）。
+
+    director 与 writer 两个装配键共用（2026-09-16 F-10 修复后 writer 也消费
+    author_intent——它进 payload ``author_intent`` 段 ⇒ 必须进键）。
 
     - ``None`` → ``_FINGERPRINT_NONE``；空串按原文（``""``）计算，与 None 区分；
     - 非 str → ``json.dumps(sort_keys=True, ensure_ascii=False)`` 后计算；

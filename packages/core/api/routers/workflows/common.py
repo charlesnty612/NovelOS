@@ -114,6 +114,14 @@ class ResumeRequest(BaseModel):
     # model_overrides 透传到各自 ctx，避免首轮指定的档案在改稿回路里丢失。
     # None → 不覆盖（保持现状）；缺省从原 review run 的 ctx 中继承（如能取到）。
     model_overrides: dict[str, str] | None = None
+    # 作者对本书的硬性要求：与 StartWorkflowRequest.author_intent 同语义。
+    # 自动改稿回路（auto_revise）触发时，回路内重跑的 write 子 run 必须带上同一份
+    # author_intent——丢掉它等于改稿轮在「无任何作者约束」状态下重写正文。
+    # 2026-09-16 实证（新书 01 ch2）：v1 正文干净、改稿轮 v2 把内部字段名
+    # ``recalled_passages`` 写进正文，根因就是回路子 run 只透传了 model_overrides。
+    # 语义：请求体显式给出（非空字符串）→ 用它；None → 从原 review run 的 ctx 中继承
+    # （如能取到非空字符串）；都取不到 → 回路不写该键（保持既有「缺省不出现键」行为）。
+    author_intent: str | None = None
 
 
 class GateReviseRequest(BaseModel):

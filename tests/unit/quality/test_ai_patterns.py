@@ -17,6 +17,7 @@ from __future__ import annotations
 from packages.core.quality.ai_patterns import (
     AI_PATTERN_FORBIDDEN_WORDS,
     DEFAULT_DASH_THRESHOLD_PER_1K,
+    DEFAULT_SHORT_PARA_RATE_PER_1K,
     scan_ai_patterns,
 )
 
@@ -214,7 +215,7 @@ def test_punct_abuse_hit():
 def test_punct_abuse_custom_threshold():
     # 正文 100 字，3 处省略号 → 每千字 30 处
     prose = "他" * 94 + "……" * 3
-    # 默认阈值 6：命中
+    # 默认阈值 1.0（2026-09-16 按榜一人类基线收紧）：命中
     hits_default = scan_ai_patterns(prose)
     assert any(h["rule_id"] == "AI-PUNCT-ABUSE" for h in hits_default)
     # 阈值 50：不命中
@@ -226,6 +227,55 @@ def test_punct_abuse_no_hit():
     prose = "他走了，脚步很轻。她停在门口。"
     hits = scan_ai_patterns(prose)
     assert not any(h["rule_id"] == "AI-PUNCT-ABUSE" for h in hits)
+
+
+# ---------------------------------------------------------------------------
+# 阈值边界（2026-09-16 按人类基线收紧后重算）
+# ---------------------------------------------------------------------------
+# 旧阈值 3.5 / 5.5 下这两条边界样例**都不触发**——规则恒静默即死规则
+# （旧值落在实测分布之外，见 AGENTS.md 坑区与 ai_patterns 常量注释）。
+# 新阈值 1.0 的边界是「每千字 1 处不报、2 处报」，按可见字重算钉死。
+
+_LONG_SENTENCES = (
+    "田里的庄稼长势很好，今年的收成应该不会差。",
+    "村口的老人坐在树下，慢慢说着从前的旧事。",
+    "河水绕过石滩，声音压过了远处的风声。",
+    "他把手里的活计放下，抬头看了看天色。",
+)
+
+
+def _long_paragraph() -> str:
+    """约 1000 可见字的单段正文（句首轮换，自身不触发任何模式级规则）。"""
+    return "".join(_LONG_SENTENCES[i % 4] for i in range(56))
+
+
+def test_punct_abuse_boundary_at_new_default_threshold():
+    """破折号：约 1000 可见字内 1 处不报（0.998/千字 ≤ 1.0）、2 处报（1.99/千字）。"""
+    quiet = "他" * 1000 + "——"
+    hits_quiet = scan_ai_patterns(quiet)
+    assert not any(h["rule_id"] == "AI-PUNCT-ABUSE" for h in hits_quiet), (
+        "每千字 1 处不应触发——阈值 1.0 是闭区间上界"
+    )
+    pa = [h for h in scan_ai_patterns("他" * 1000 + "——" * 2) if h["rule_id"] == "AI-PUNCT-ABUSE"]
+    assert len(pa) == 1
+    assert pa[0]["rate"] > DEFAULT_DASH_THRESHOLD_PER_1K
+
+
+def test_short_para_boundary_at_new_default_threshold():
+    """短段：约 1000 可见字内 1 个短段不报（0.92/千字 ≤ 1.0）、2 个报（1.84/千字）。"""
+    from packages.core.quality.wordcount import visible_chars
+
+    long_para = _long_paragraph()
+    quiet = "\n\n".join(["风吹过了", long_para])
+    hit = "\n\n".join(["风吹过了", "风吹过了", long_para])
+    assert visible_chars(quiet) >= 200, "密度类规则有 200 字最小判定长度，样例必须够长"
+
+    assert not any(
+        h["rule_id"] == "AI-SHORT-PARA" for h in scan_ai_patterns(quiet)
+    ), "每千字 1 个短段不应触发——阈值 1.0 是闭区间上界"
+    sp = [h for h in scan_ai_patterns(hit) if h["rule_id"] == "AI-SHORT-PARA"]
+    assert len(sp) == 1
+    assert sp[0]["rate"] > DEFAULT_SHORT_PARA_RATE_PER_1K
 
 
 # ---------------------------------------------------------------------------
@@ -403,12 +453,30 @@ def test_translationese_rule_removed_after_precision_check():
 
 
 def test_dash_threshold_recalibrated_for_local_corpus():
-    """破折号阈值必须落在本仓实测分布内——原值 6 是死规则（实测 max 4.73/千字）。
+    """破折号阈值必须落在实测分布内——旧值 6（本仓实测 max 4.73/千字）与随后按
+    本仓 p85 定的 3.5 都是死规则：生成侧自己的均值 1.73/千字都够不到 3.5。
 
-    本测以「本仓实测均值 ≈2.34」为锚：构造一段略高于阈值的文本必须命中；
-    若有人把阈值调回 6，本测转红。
+    2026-09-16 起以**人类基线书**为锚（榜一侯府弧 0.19/千字）：阈值 ≤1.0 才算
+    「贴着人侧量级」，同时必须低于生成侧实测均值 1.73，否则等于永不触发。
+    构造一段略高于 1.0 的文本必须命中；把阈值调回 3.5 本测转红。
     """
-    assert DEFAULT_DASH_THRESHOLD_PER_1K <= 4.0, "阈值高于本仓 p90 即等于永不触发"
+    assert DEFAULT_DASH_THRESHOLD_PER_1K <= 1.0, "阈值高于人类基线量级即等于永不触发"
+    assert DEFAULT_DASH_THRESHOLD_PER_1K < 1.73, "阈值高于生成侧实测均值 1.73 即死规则"
     prose = "他站住——风起——灯灭——人散——夜凉——雪落——" * 3
     hits = scan_ai_patterns(prose)
     assert any(h["rule_id"] == "AI-PUNCT-ABUSE" for h in hits)
+
+
+def test_short_para_threshold_recalibrated_for_local_corpus():
+    """短段阈值同理按人类基线收紧：榜一侯府弧全弧 0.00/千字（零出现），
+    生成侧 2.62/千字——阈值必须落在两者之间，否则等于不判。"""
+    assert DEFAULT_SHORT_PARA_RATE_PER_1K <= 1.0, "阈值高于人类基线量级即等于永不触发"
+    assert DEFAULT_SHORT_PARA_RATE_PER_1K < 2.62, "阈值高于生成侧实测均值 2.62 即死规则"
+    from packages.core.quality.wordcount import visible_chars
+
+    prose = "\n\n".join(
+        ["灯芯闪了一下", "朔风穿过廊下", "檐角垂下冰棱", "更鼓敲过三响"] * 12
+    )
+    assert visible_chars(prose) >= 200, "密度类规则有 200 字最小判定长度"
+    hits = scan_ai_patterns(prose)
+    assert any(h["rule_id"] == "AI-SHORT-PARA" for h in hits)

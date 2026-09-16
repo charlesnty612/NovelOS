@@ -82,6 +82,10 @@ from packages.core.ids import new_id, now_iso
 from packages.core.model_router.router import capability_for
 from packages.core.quality.ai_patterns import scan_ai_patterns
 from packages.core.quality.guardrails import req_q7
+from packages.core.quality.normalize import (
+    find_internal_identifiers,
+    normalize_prose,
+)
 from packages.core.quality.wordcount import (
     DEFAULT_TARGET_WORD_COUNT,
     classify_prose_length,
@@ -623,6 +627,10 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         # packages.core.genre.target_words.resolve_target_word_count。
         target_word_count=_resolve_target_word_count(ctx, ctx.get("loaded_plan") or {}),
         context_mode=context_mode,
+        # 2026-09-16 F-10 ②：作者硬性要求进 writer payload。此前这条链是断的——
+        # write 端点收下 author_intent 写进 ctx，但装配层没有这个形参，铁律一个
+        # 模型都没看见（新书01 ch1-6 实证：价签快照越界 5/6、字数靠题材包 target 蒙）。
+        author_intent=ctx.get("author_intent") or None,
     )
 
     # 修订模式（基于现有 draft 局部修改）注入：读最新 draft content +
@@ -1375,6 +1383,13 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
     prose = strip_think_blocks(
         ctx.get("polished_prose") or writer_output.get("prose") or ""
     )
+    # 2026-09-16 F-10 ③（确定性算子，不靠提示词）：落库前规整正文。
+    # 实证：新书01 全弧引号三种混用（ch1/ch4「」、ch2/ch3 英文直引号、ch9 弯引号），
+    # 规整目标 = 文风锚点（榜一侯府弧）的弯双引号，全弧 109/119 份 draft 有变更。
+    # 内部标识（改稿轮把 recalled_passages 写进 ch2 v2）只检出、不静默删——删了
+    # 句子就断；检出项进节点产出，供评审与人工返修定位。
+    prose, _normalize_changes = normalize_prose(prose)
+    _internal_ids = find_internal_identifiers(prose)
     # V3.9 批次 1.2 字数断链修复：word_count 直接对最终 prose 取权威实测
     # （visible_chars，去空白口径）。既不读 condense 之前的 length_report.visible_chars
     # （length_check 在 condense 上游、压缩后不再重跑，旧值会污染落库字数），
@@ -1506,6 +1521,9 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "prompt_version": prompt_version,
         "chapter_id": chapter_id,
         "workflow_run_id": run_id,
+        # F-10 ③ 可观测钩子：规整改了什么、正文里还剩什么内部标识（只报不修）。
+        "normalize_changes": _normalize_changes,
+        "internal_identifiers": _internal_ids,
     }
 
 

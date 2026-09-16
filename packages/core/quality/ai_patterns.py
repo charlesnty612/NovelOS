@@ -95,11 +95,17 @@ _AI_EXPLAIN_PATTERNS: list[tuple[str, str | None]] = [
     (r"众所周知", None),
 ]
 
-# 破折号阈值（2026-09-15 校准备注）：原值 6 是**死规则**——本仓实测逐章
-# 2.33/千字（p75 3.32 / p90 3.89 / max 4.73），永远够不到 6；对人类样章
-# 0.58/千字更是 10 倍余量。按本仓 p85 下调至 3.5（≈ 每 2500 字 9 处），
-# 只标出真正跑偏的章。同一「名称宣称的覆盖面 > 实测覆盖面」形状，已升格。
-DEFAULT_DASH_THRESHOLD_PER_1K = 3.5
+# 破折号阈值。沿革（每次收紧都留痕）：6（初版）→ 3.5（2026-09-15 按本仓旧语料
+# p85；原值 6 是死规则——本仓实测 max 4.73 都够不到）→ **1.0（2026-09-16 按人类
+# 基线书收紧）**。
+# 依据（2026-09-16 实测，复算入口 scripts/ai_tone_calibrate.py）：文风锚点书榜一
+# 《快穿之人渣洗白手册》侯府弧 19 章 / 37806 可见字 **0.19/千字**，而我们新书 01
+# 全弧 63625 字 **1.73/千字**（R=9.34）。3.5 落在两者**之外**——连我们自己的均值
+# 都够不到，即 AGENTS.md 点名的「阈值落在实测分布之外 = 死规则」形状；而真正的
+# 达标线接近零。取 1.0：对榜一基线留约 5 倍宽容（0.19×5≈0.95），对 1.73 立即报警。
+# 判别：tests/unit/quality/test_human_baseline_ai_thresholds.py（改回 3.5 必红）。
+# 语义为 float（本常量旧注解误写 int，2026-09-16 一并订正，与短段常量同款）。
+DEFAULT_DASH_THRESHOLD_PER_1K = 1.0
 
 # ---------------------------------------------------------------------------
 # 2026-09-15：外部对照研究移植的四条算子
@@ -128,12 +134,17 @@ DEFAULT_CONTRAST_PAIR_RATE_PER_1K = 1.5
 # 命中逐条看**：命中是「林策开口了」「万卷阁开了」「三天」这类**叙述短句独立成段**，
 # 不是评价性评论；人类样章同样有该写法。故按算子**实际覆盖范围**改名登记，
 # 不冒用来源特征名（该研究公开的六次失误全是这个形状）。
-# 本仓实测（**算子修正后重测**）：生成侧 2.63/千字 vs 人类 0.81/千字（R=3.25，
+# 本仓实测（**算子修正后重测**）：生成侧 2.63/千字 vs 人类样章 0.81/千字（R=3.25，
 # 方向与来源研究一致）；逐章分布 均 2.65 / p75 3.26 / p90 5.47 / max 7.63。
-# 阈值取 p90 ≈ 5.5 → 只标出节拍器式行文最重的约一成章。
+# 阈值沿革：5.5（2026-09-15，取本仓**旧语料**逐章 p90）→ **1.0（2026-09-16 按人类
+# 基线书收紧）**。依据（2026-09-16 实测）：文风锚点书榜一侯府弧 19 章 / 37806 可见字
+# **0.00/千字**（全弧一次都没出现），我们新书 01 全弧 63625 字 **2.62/千字**——5.5
+# 落在两者之外（生成侧 p90 5.47 都够不到），即「阈值落在实测分布之外 = 死规则」。
+# 取 1.0：对「人类基线为 0」留有限宽容（约每千字 1 处），对生成侧 2.62 立即报警。
+# 判别：tests/unit/quality/test_human_baseline_ai_thresholds.py（改回 5.5 必红）。
 # （初版算子只看段首句，把「灯芯闪了一下。苏婉清没有出声…」也算成短段，
 #   分布虚高到均 5.06；修正为「整段就是那一句短句」后按新分布重定阈。）
-DEFAULT_SHORT_PARA_RATE_PER_1K = 5.5
+DEFAULT_SHORT_PARA_RATE_PER_1K = 1.0
 
 # 拟人化喻体（以职业/角色名词作喻体）——研究 R=7.3。
 # **精确率警告**：正则分不出研究指出的真正差异——生成侧偏好「理想化的职业人格」
@@ -196,7 +207,10 @@ AI_PATTERN_RULES: list[AiPatternRule] = [
         rule_id="AI-PUNCT-ABUSE",
         severity="warning",
         message="破折号/省略号滥用：每千字 {rate:.1f} 处（阈值 {threshold}）",
-        description="每千字「——」或「……」超过阈值（默认 6）。",
+        description=(
+            "每千字「——」或「……」超过阈值（默认 1.0）。2026-09-16 按人类基线书"
+            "（榜一侯府弧 0.19/千字，我们 1.73/千字）由 3.5 收紧——见常量注释。"
+        ),
     ),
     AiPatternRule(
         rule_id="AI-EXPLAIN-TONE",
@@ -216,7 +230,8 @@ AI_PATTERN_RULES: list[AiPatternRule] = [
         message="短句独立成段密度偏高：每千字 {rate:.1f} 处（阈值 {threshold}）",
         description=(
             "段落由一个 ≤12 字短句构成（无回指词、非对话、非人称起首），即「节拍器式」"
-            "短段行文——本仓实测生成侧 5.06/千字 vs 人类 1.15（R=4.28）。"
+            "短段行文——人类基线书榜一侯府弧 0.00/千字（全弧零出现），我们新书 01 全弧"
+            "2.62/千字；2026-09-16 阈值由 5.5 收紧至 1.0，见常量注释。"
             "取自来源研究「段首零回指评论」的可正则化近似，抽样核实后按实际覆盖范围改名。"
         ),
     ),
@@ -414,7 +429,7 @@ _DASH_OR_ELLIPSIS_RE = re.compile(r"——|…{2,}")
 
 
 def _scan_punct_abuse(
-    prose: str, *, threshold_per_1k: int = DEFAULT_DASH_THRESHOLD_PER_1K
+    prose: str, *, threshold_per_1k: float = DEFAULT_DASH_THRESHOLD_PER_1K
 ) -> list[dict[str, Any]]:
     """破折号/省略号滥用：按 visible_chars 计算每千字出现次数。"""
     matches = list(_DASH_OR_ELLIPSIS_RE.finditer(prose))
@@ -622,7 +637,7 @@ def _scan_anthro_vehicle(
 def scan_ai_patterns(
     prose: str,
     *,
-    dash_threshold_per_1k: int = DEFAULT_DASH_THRESHOLD_PER_1K,
+    dash_threshold_per_1k: float = DEFAULT_DASH_THRESHOLD_PER_1K,
     contrast_pair_threshold_per_1k: float = DEFAULT_CONTRAST_PAIR_RATE_PER_1K,
     short_para_threshold_per_1k: float = DEFAULT_SHORT_PARA_RATE_PER_1K,
     anthro_vehicle_min_count: int = DEFAULT_ANTHRO_VEHICLE_MIN_COUNT,

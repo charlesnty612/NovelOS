@@ -134,6 +134,7 @@ def _auto_revise_loop(
     mock_providers: dict[str, list[str]] | None,
     max_iter: int,
     model_overrides: dict[str, str] | None = None,
+    author_intent: str | None = None,
     *,
     parent_run_id: str | None = None,
 ) -> dict[str, Any]:
@@ -155,14 +156,25 @@ def _auto_revise_loop(
     ctx，保持与首轮 run 一致的模型档案覆盖；None 时不写入 ctx（与既有「缺省不出现键」
     行为一致，避免下游误读为「空覆盖」）。
 
+    ``author_intent``：触发回路的 resume 请求的 author_intent（同样按「请求体 > 原 review
+    run ctx」优先级解析）。非 None 时透传到回路内每轮 write / review 子 run 的 ctx，与
+    model_overrides 并列存在、互不覆盖；None 时不写入 ctx。
+    2026-09-16 补（F-11 实证）：回路原先只透传 model_overrides，作者侧硬性要求（本书铁律
+    等）在改稿轮全部丢失——新书 01 的 ch2 经一轮改稿后正文冒出内部字段名
+    ``recalled_passages``（v1 干净、v2 带毒），因为改稿轮是在无任何作者约束的状态下重写的。
+    两个键都为空时 ``initial_ctx_extra`` 保持 None，不得退化成空 dict。
+
     ``parent_run_id``：触发本回路的父 review run（仅用于注册表可读性与日志）。
     """
     final_payload: dict[str, Any] | None = None
-    # 仅当非 None 时构造 initial_ctx_extra，避免 None 覆盖行为（缺省不出现键）。
-    # 与 _start_workflow 的处理口径保持一致。
-    initial_ctx_extra: dict[str, Any] | None = (
-        {"model_overrides": model_overrides} if model_overrides is not None else None
-    )
+    # 仅当至少一个键非 None 时才构造 initial_ctx_extra，避免 None 覆盖行为（缺省不出现键）。
+    # 与 _start_workflow 的处理口径保持一致；两个键可同时存在（互不覆盖）。
+    _ctx_extra: dict[str, Any] = {}
+    if model_overrides is not None:
+        _ctx_extra["model_overrides"] = model_overrides
+    if author_intent is not None:
+        _ctx_extra["author_intent"] = author_intent
+    initial_ctx_extra: dict[str, Any] | None = _ctx_extra or None
     loop_id = new_id("arloop")
     _register_auto_revise_loop(
         loop_id=loop_id,

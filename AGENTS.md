@@ -49,6 +49,7 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
      回调入口：`scripts/ai_tone_calibrate.py`（校准 + 抽样双功能）；基线数据见
      `NovelOS-Artifacts: docs/analysis/ai-tone-calibration-2026-09-15.md`。
    - **改权威输入必须 miss 缓存**：`outline_json` 进 payload → 单列缓存键维度（`_fingerprint_outline_json`），否则改大纲后同 state_version 脏命中旧装配。判别：改该列后 `build_director_input` 必须返回新值（`tests/unit/test_chapter_outline.py` 看守）。
+   - **第二次实证（2026-09-16 新书01，同形状）**：`author_intent` 是**死参数**——`POST /write` 收下并写进 run ctx，但 `build_writer_input()` 无此形参、writer 的 prompt 模板里没有该字段；消费它的只有 `director`/`director_planner`。结果：本书铁律在 ch1-6 一个模型都没看见（驱动发给 write，唯一认它的 plan 端点收到空 `{}`）。配套纪律两条：**① 端点收下的参数必须有消费方测试**（「收下即忘」与「表里有值」同级——静默丢弃要么实现要么 400）；**② 排查固定查两处**：`build_*_input` 的形参表 + 该 agent 的 prompt 模板（DB `prompts` 表按 `agent_id` 查）。
 
 ## 三、协作与审查工作流（AI 协作项目）
 

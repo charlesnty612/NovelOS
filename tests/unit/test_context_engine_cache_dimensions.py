@@ -128,6 +128,44 @@ def test_director_cache_miss_on_different_author_intent(tmp_path: Path, monkeypa
 
 
 # ---------------------------------------------------------------------------
+# 1b. writer：author_intent 维度（F-10 修复，2026-09-16）
+# ---------------------------------------------------------------------------
+
+
+def test_writer_cache_miss_on_different_author_intent(tmp_path: Path, monkeypatch):
+    """writer 键含 author_intent 指纹 → 换意图必 miss（不得返回旧 payload）。
+
+    旧缺陷形状（与 director V3.9 批次 1.4 同形）：author_intent 进 payload 但不进键
+    ⇒ 改意图后同 state_version 脏命中旧装配，作者新要求被静默丢弃。
+    """
+    from packages.core.context_engine import writer_input as wi_mod
+
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid, 1, plan_json='{"chapter_goal": "x"}')
+    _cache_reset()
+
+    calls = _spy_uncached(monkeypatch, wi_mod, "_build_writer_input_uncached")
+    scene = {"purpose": "开场", "scenes": [{"purpose": "s1"}]}
+
+    a1 = build_writer_input(db_path, cid, scene, author_intent="意图 A")
+    b1 = build_writer_input(db_path, cid, scene, author_intent="意图 B")
+    assert a1["author_intent"]["raw"] == "意图 A"
+    assert b1["author_intent"]["raw"] == "意图 B"
+    assert calls["n"] == 2, "不同 author_intent 必须 miss（各自装配一次）"
+
+    a2 = build_writer_input(db_path, cid, scene, author_intent="意图 A")
+    assert a2["author_intent"]["raw"] == "意图 A"
+    assert calls["n"] == 2, "回到原意图应命中自己的条目，不再重装"
+
+    # 有 / 无意图各自成键：不得互命中（否则无意图装配会读到带意图的旧条目，反之
+    # 亦然——「缺省不出现键」纪律只在键维度正确时才成立）
+    plain = build_writer_input(db_path, cid, scene)
+    assert "author_intent" not in plain
+    assert calls["n"] == 3, "有 / 无意图必须各自 miss"
+
+
+# ---------------------------------------------------------------------------
 # 2/3. target_word_count 维度（director + writer）
 # ---------------------------------------------------------------------------
 

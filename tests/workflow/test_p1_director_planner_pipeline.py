@@ -307,6 +307,24 @@ def _ai_call_count(db_path: Path, prompt_version: str) -> int:
     return int(row["n"])
 
 
+def _ai_call_count_prefix(db_path: Path, prefix: str) -> int:
+    """按 prompt_version 前缀计数。
+
+    writer prompt 版本随 ``docs/agents/prompts/writer-v<N>.md`` 注册自动升版（2026-09-16
+    起 writer:v2 为最高 ACTIVE，writer run 的 ai_call_logs.prompt_version 随之变为
+    ``writer:v2``）——写死版本号会在升版时报「0 次调用」假红，与实际调用行为无关。
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ai_call_logs WHERE prompt_version LIKE ? || '%'",
+            (prefix,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row["n"])
+
+
 # ---------------------------------------------------------------------------
 # 1/2/3. chapter-plan：合并输出落库 + 降级 + 覆盖/失效
 # ---------------------------------------------------------------------------
@@ -505,7 +523,9 @@ def test_write_uses_persisted_scene_plan_and_skips_llm(engine: WorkflowEngine, d
     assert scene_node["scene_planner_source"]["source"] == "director_planner"
 
     assert _ai_call_count(db_path, "scene_planner:v1") == 0, "命中落库场景不应再调 scene_planner"
-    assert _ai_call_count(db_path, "writer:v1") == 1
+    assert _ai_call_count_prefix(db_path, "writer:") == 1, (
+        "writer 节点应恰好调 1 次 LLM（版本按 docs 注册自动升版，勿写死版本号）"
+    )
 
     conn = get_connection(db_path)
     try:

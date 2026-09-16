@@ -536,6 +536,46 @@ def test_writer_input_no_canon_does_not_inject_any_canon_key(tmp_path: Path):
     assert "_reference_canon_consumed" not in out
 
 
+def test_writer_input_injects_author_intent_when_non_empty(tmp_path: Path):
+    """F-10（2026-09-16）：非空 author_intent → payload 顶层含 ``{"raw": ...}``。
+
+    与 director_input 的 ``author_intent`` 段同形；paged（生产 writer 默认模式，
+    见 ``_resolve_writer_context_mode``）与 full 两条装配路径都必须带上——
+    透传断在 paged 上 = 生产永远看不到作者硬性要求。
+    """
+    from packages.core.context_engine.builders import build_writer_input
+
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+
+    out = build_writer_input(
+        db_path, cid, {}, author_intent="本章价签只给价格数字",
+    )
+    assert out["author_intent"] == {"raw": "本章价签只给价格数字"}
+
+    paged = build_writer_input(
+        db_path, cid, {}, context_mode="paged", author_intent="对话引号统一",
+    )
+    assert paged["author_intent"] == {"raw": "对话引号统一"}
+
+
+def test_writer_input_omits_author_intent_key_when_empty(tmp_path: Path):
+    """F-10：空 / None → payload **不出现** author_intent 键（缺省不出现键纪律，
+    避免下游误读为空覆盖）。"""
+    from packages.core.context_engine.builders import build_writer_input
+
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+
+    out_none = build_writer_input(db_path, cid, {})
+    assert "author_intent" not in out_none
+
+    out_empty = build_writer_input(db_path, cid, {}, author_intent="")
+    assert "author_intent" not in out_empty
+
+
 def test_canon_change_invalidates_director_and_writer_cache(tmp_path: Path):
     """F5 修复：director / writer 装配缓存键混入 active canon_id；
     拆书落新 canon 后旧装配缓存自然失效。
