@@ -183,8 +183,8 @@ def _apply_injection_policy(
     payload:
     - ``full``: 完整 excerpt（叠加 ``_injection: 'full'`` 字段便于 preview 标记）。
     - ``summary``: 摘要 dict（来自 ``summary_overrides`` 或 :func:`_summarize_entity`）。
-    - ``suppressed``: ``{id_field: entity_id, name, injection: 'suppressed'}``
-      供 preview 用；不入 ctx 顶层。
+    - ``suppressed``: ``{id_field: entity_id, injection: 'suppressed'}``
+      供 preview 用（**只发 id，不发 name**，2026-09-16 快穿位面隔离）；不入 ctx 顶层。
 
     回退策略：trigger_corpus_empty=True（无章节计划文本）→ auto 全部按 full 注入（保兼容）；
     always / never 严格按配置执行。
@@ -199,7 +199,11 @@ def _apply_injection_policy(
             "location": "location_id",
             "faction": "faction_id",
         }.get(kind, "id")
-        return "suppressed", {id_field: entity_id, "name": name, "injection": "suppressed"}
+        # 元标记只带 id（2026-09-16 快穿位面隔离）：整个 payload 被 agent_runtime.runner
+        # 序列化进 user message，带 name 的 suppressed 块 = 把「上一世实体名」随归档一起
+        # 送进模型，与 ``inject_mode='never'`` 的目的相反。preview 区分「已剔除 / 未命中
+        # 降级」靠的是块归属 + ``injection`` 字段，name 非其所需（前端同时渲染 id）。
+        return "suppressed", {id_field: entity_id, "injection": "suppressed"}
     # inject_mode == "auto"
     if trigger_corpus_empty:
         # 无章节计划文本：保兼容，全注入（README 注明回退策略）
@@ -373,7 +377,8 @@ def _world_state_excerpts(
     - locations / factions 应用触发策略（0010 加了 aliases + inject_mode）；
     - world_rules 保持常驻不变（PRD 视世界规则为硬设定）；
     - 不传 ``trigger_corpus`` → 全部 full 注入（向后兼容）。
-    - 每条目带 ``_injection`` 字段；suppressed 项统一汇集到顶层 ``_suppressed_{kind}`` 列表。
+    - 每条目带 ``_injection`` 字段；suppressed 项统一汇集到顶层 ``_suppressed_{kind}`` 列表
+      （**只带 id，不带 name**——见 :func:`_apply_injection_policy`）。
 
     P2 Context Engine：
     - ``sensory_anchors`` 从 locations.data_json 解析（零 DDL 方案）。

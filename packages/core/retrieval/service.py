@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sqlite3
 from typing import Any
 
 from packages.core.db import get_connection
@@ -294,6 +295,44 @@ def upsert_chapter(db_path: str, chapter_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _current_volume_id(
+    conn: sqlite3.Connection,
+    project_id: str,
+    current_chapter_id: str | None,
+    current_chapter_no: int | None,
+) -> str | None:
+    """当前章所属卷 ``volume_id``（召回的同卷过滤判据）；解析不出 → ``None``。
+
+    ``None`` 的全部来源都表示「无从判断当前章属哪一卷」，此时**不做同卷过滤**
+    （保持旧行为）：既没给 chapter_id 也没给 chapter_no / 章节不存在 / 章节未挂卷
+    （``volume_id IS NULL``）/ 旧库缺 ``chapters.volume_id`` 列（迁移 0015 之前）。
+
+    口径与 ``context_engine.builders_common.summaries._volume_id_of_chapter*`` 逐条一致；
+    本模块是低层检索服务，不反向依赖 context_engine（该包才依赖本模块），故各持一份
+    实现——两处都只读一列、无第二套语义。
+    """
+    try:
+        if current_chapter_id:
+            row = conn.execute(
+                "SELECT volume_id FROM chapters WHERE chapter_id = ?",
+                (current_chapter_id,),
+            ).fetchone()
+        elif current_chapter_no is not None:
+            row = conn.execute(
+                "SELECT volume_id FROM chapters "
+                "WHERE project_id = ? AND number = ? "
+                "ORDER BY chapter_id ASC LIMIT 1",
+                (project_id, int(current_chapter_no)),
+            ).fetchone()
+        else:
+            return None
+    except sqlite3.OperationalError:  # 旧库缺列 → 保持旧行为（不过滤）
+        return None
+    if row is None:
+        return None
+    return row["volume_id"] or None
+
+
 def search(
     db_path: str,
     project_id: str,
@@ -312,6 +351,9 @@ def search(
     - ``current_chapter_id`` 传值时自动排除当前章（避免自召自）。
     - ``current_chapter_no`` 传值时只召回**章号更小**的正文（位置过滤，2026-09-15 加）。
       理由同台账注入：重产早期章时，后文片段会顺着召回倒灌进 planner / writer。
+    - **同卷过滤**（快穿位面隔离，2026-09-16）：当前章已挂卷时只召回同 ``volume_id``
+      的正文——换卷后新卷第一章要冷开场，上一世的片段不该以「相关历史」姿态被召回。
+      当前章未挂卷 / 旧库缺 ``chapters.volume_id`` 列 → 只做位置过滤（旧行为逐字保留）。
     - snippet 直接从 ``drafts.content`` 取原文，截断到 ``snippet_max_chars`` 字符。
     """
     if not query or not query.strip():
@@ -341,6 +383,14 @@ def search(
         if current_chapter_no is not None:
             exclude_clause += " AND (ch.number IS NULL OR ch.number < ?)"
             params.append(int(current_chapter_no))
+        # 同卷过滤（2026-09-16 快穿位面隔离）：当前章未挂卷 / 旧库缺列 → None → 不加
+        # 该谓词（保持旧行为）；值一律走占位符，无字符串拼接。
+        current_volume_id = _current_volume_id(
+            conn, project_id, current_chapter_id, current_chapter_no,
+        )
+        if current_volume_id is not None:
+            exclude_clause += " AND ch.volume_id = ?"
+            params.append(current_volume_id)
         params.append(int(limit))
         try:
             rows = conn.execute(

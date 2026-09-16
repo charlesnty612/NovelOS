@@ -5,6 +5,14 @@
 - 原文尾段：``_recent_prose_tail``（上一章末尾 500 字）/ ``_previous_chapter_tail``（300 字）；
 - 作者文风样例：``_author_style_samples``（Sprint 15 / V1.3）；
 - observer 用 ``_director_plan_summary``；writer 用 ``_inject_scene_word_budget``。
+
+**同卷过滤口径（快穿位面隔离，2026-09-16）**：近窗三类取数——摘要链
+``_recent_chapter_summaries``、director 前章尾段 ``_previous_chapter_tail``、writer 上一章
+正文尾段 ``_recent_prose_tail``——都**按「与当前章同卷」过滤**（判据 ``chapters.volume_id``）。
+理由是快穿换位面后，新卷第一章要的是**冷开场**：上一世只经结算单 / 作者意图一笔带过，
+不该以「近窗 / 上一章」的姿态出现在正文上下文里（同形回灌面还有
+``retrieval.service.search`` 召回）。当前章未挂卷（``volume_id IS NULL``）或旧库缺该列 →
+不过滤 = 旧行为逐字保留（卷内各章同卷，卷 1 与存量项目零行为变化）。
 """
 
 from __future__ import annotations
@@ -17,8 +25,59 @@ from typing import Any
 from .common import _TOKEN_DIVISOR, get_connection
 
 
+def _volume_id_of_chapter(conn: sqlite3.Connection, chapter_id: str) -> str | None:
+    """按 ``chapter_id`` 定位当前章，返回其所属卷 ``volume_id``；解析不出 → ``None``。
+
+    ``None`` 的全部来源都表示「无从判断当前章属哪一卷」，此时调用方**不做同卷过滤**
+    （保持 2026-09-16 之前的旧行为）：章节不存在 / 章节未挂卷（``volume_id IS NULL``，
+    迁移 0015 允许）/ 旧库缺 ``chapters.volume_id`` 列（迁移 0015 之前，读列直接
+    ``OperationalError`` → 就地降级，不让装配崩）。
+    """
+    try:
+        row = conn.execute(
+            "SELECT volume_id FROM chapters WHERE chapter_id = ?",
+            (chapter_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:  # 旧库缺列 → 保持旧行为（不过滤）
+        return None
+    if row is None:
+        return None
+    return row["volume_id"] or None
+
+
+def _volume_id_of_chapter_no(
+    conn: sqlite3.Connection, project_id: str, chapter_no: int | None,
+) -> str | None:
+    """按 ``(project_id, number)`` 定位当前章，返回其所属卷；解析不出 → ``None``。
+
+    口径与 :func:`_volume_id_of_chapter` 逐条一致（含未挂卷 / 旧库缺列 → ``None``），
+    两者只差定位键：本函数服务于只拿到章号的调用方（摘要链 / 前章尾段）。
+    ``chapters`` 只有 ``(project_id, number)`` 普通索引、无唯一约束，重号时按
+    ``chapter_id`` 升序取首行（确定性强，与既有 ``number < ?`` 取数口径同宽松度）。
+    """
+    if chapter_no is None:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT volume_id FROM chapters "
+            "WHERE project_id = ? AND number = ? "
+            "ORDER BY chapter_id ASC LIMIT 1",
+            (project_id, int(chapter_no)),
+        ).fetchone()
+    except sqlite3.OperationalError:  # 旧库缺列 → 保持旧行为（不过滤）
+        return None
+    if row is None:
+        return None
+    return row["volume_id"] or None
+
+
 def _recent_prose_tail(db_path: str | Path, chapter_id: str, length: int = 500) -> str:
-    """取上一章（chapter number 小一号的）最新 draft 末尾 length 字符；无则返回 ""。"""
+    """取上一章（**同卷内** chapter number 小一号的）最新 draft 末尾 length 字符；无则返回 ""。
+
+    同卷过滤（快穿位面隔离，2026-09-16）：候选章必须与当前章同 ``volume_id``——
+    换卷后新卷第一章不该把上一世的正文尾段当「上一章」注入（快穿冷开场口径）。
+    当前章未挂卷 / 旧库缺 ``chapters.volume_id`` 列 → 不过滤（旧行为逐字保留）。
+    """
     conn = get_connection(db_path)
     try:
         cur = conn.execute(
@@ -27,13 +86,21 @@ def _recent_prose_tail(db_path: str | Path, chapter_id: str, length: int = 500) 
         ).fetchone()
         if cur is None:
             return ""
+        # 同卷谓词只在解析出卷时才进 SQL 文本：旧库缺列时读列已失败（volume_id=None），
+        # 若照常引用该列，SQLite 在 prepare 阶段就会报 no such column。
+        volume_id = _volume_id_of_chapter(conn, chapter_id)
+        volume_predicate = "AND volume_id = ?" if volume_id is not None else ""
+        prev_params: list[Any] = [cur["project_id"], cur["number"]]
+        if volume_id is not None:
+            prev_params.append(volume_id)
         prev_row = conn.execute(
             """
             SELECT chapter_id FROM chapters
             WHERE project_id = ? AND number < ?
+              {volume_predicate}
             ORDER BY number DESC LIMIT 1
-            """,
-            (cur["project_id"], cur["number"]),
+            """.format(volume_predicate=volume_predicate),
+            prev_params,
         ).fetchone()
         if prev_row is None:
             return ""
@@ -91,18 +158,41 @@ def _recent_chapter_summaries(
     返回 ``[{"chapter_no": int, "summary": str, "chapter_id": str}]``。
     ``current_chapter_no`` 用于排除当前章自身（避免「自己摘要自己」）；传 None 时不过滤。
     超预算截断在调用方（按总 token 配额）执行，本函数只负责取数。
+
+    同卷过滤（快穿位面隔离，2026-09-16）：只取与当前章同 ``volume_id`` 的章摘要。
+    此前只看 ``chapter_no < ?``，于是换卷后新卷第一章会把上一世全部摘要当「近窗」
+    吃进来——这是五处章号取数泄漏里**体量最大**的一处（实测 23 条摘要全是上一世）。
+    当前章未挂卷 / 旧库缺 ``chapters.volume_id`` 列 → 不过滤（旧行为逐字保留，
+    卷内各章同卷故卷 1 行为不变）。
     """
+    volume_id = (
+        _volume_id_of_chapter_no(conn, project_id, current_chapter_no)
+        if current_chapter_no is not None else None
+    )
+    # 同卷谓词只在解析出卷时才进 SQL 文本（值仍一律走占位符）：旧库缺
+    # ``chapters.volume_id`` 列时读列已失败（volume_id=None），若照常引用该列，
+    # SQLite 在 prepare 阶段就会报 no such column——降级路径必须连文本都不提它。
+    volume_predicate = (
+        "AND chapter_id IN (SELECT chapter_id FROM chapters WHERE volume_id = ?)"
+        if volume_id is not None else ""
+    )
     sql = """
         SELECT chapter_id, chapter_no, summary
         FROM chapter_summaries
         WHERE project_id = ?
           AND {extra}
+          {volume_predicate}
         ORDER BY chapter_no DESC
         LIMIT ?
-    """.format(extra=("(chapter_no < ?)" if current_chapter_no is not None else "1=1"))
+    """.format(
+        extra=("(chapter_no < ?)" if current_chapter_no is not None else "1=1"),
+        volume_predicate=volume_predicate,
+    )
     params: list[Any] = [project_id]
     if current_chapter_no is not None:
         params.append(int(current_chapter_no))
+    if volume_id is not None:
+        params.append(volume_id)
     params.append(_RECENT_SUMMARY_CAP)
     rows = conn.execute(sql, params).fetchall()
     out: list[dict[str, Any]] = []
@@ -155,18 +245,27 @@ def _previous_chapter_tail(
     current_chapter_no: int,
     length: int = 300,
 ) -> dict[str, Any]:
-    """取前一章（chapter_no 小一号）的最新 draft 末尾 length 字（用于 L1 "前章尾段原文"）。
+    """取前一章（**同卷内** chapter_no 小一号）的最新 draft 末尾 length 字（用于 L1 "前章尾段原文"）。
 
     返回 ``{"chapter_no": int, "chapter_id": str, "tail_text": str}``；
     无前章 → 空 dict（与 _recent_prose_tail 行为对齐，避免上游判空复杂度）。
+
+    同卷过滤（快穿位面隔离，2026-09-16）：与 ``_recent_prose_tail`` / 摘要链同口径——
+    换卷后新卷第一章取不到上一世末章尾段。当前章未挂卷 / 旧库缺列 → 不过滤。
     """
+    volume_id = _volume_id_of_chapter_no(conn, project_id, current_chapter_no)
+    volume_predicate = "AND volume_id = ?" if volume_id is not None else ""
+    prev_params: list[Any] = [project_id, current_chapter_no]
+    if volume_id is not None:
+        prev_params.append(volume_id)
     prev = conn.execute(
         """
         SELECT chapter_id, number FROM chapters
         WHERE project_id = ? AND number < ?
+          {volume_predicate}
         ORDER BY number DESC LIMIT 1
-        """,
-        (project_id, current_chapter_no),
+        """.format(volume_predicate=volume_predicate),
+        prev_params,
     ).fetchone()
     if prev is None:
         return {}

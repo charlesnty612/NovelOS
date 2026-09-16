@@ -546,3 +546,71 @@ build_writer_input(
 `builders_common.get_connection` 仍是连接工厂补丁点（`packages.core.db.get_connection`）；
 子模块取数经 `common.get_connection` 延迟解析回门面，保住
 `tests/unit/test_context_peek_convergence.py` 的连接计数 / SQL trace 探针。
+
+## 世界切换（快穿位面）的作用域归档口径
+
+快穿换位面时，"上一世的世界态"必须在装配层退出注入面，否则第二世界开篇会把上一世
+的位面实体当现世事实写进正文。归档机制**只借用本引擎已有的两处开关**，不引入新机制：
+
+| 注入面 | 归档手段 | 依据 |
+| --- | --- | --- |
+| `character_state_excerpts` / `world_state_excerpts.locations` / `.active_factions` | 上一世实体 `inject_mode='never'` | 三态中唯一"完全不注入"档：`auto` 未命中仍会以 `summary_line` 漏出名字，命中则全量 excerpt |
+| `world_state_excerpts.sensory_anchors` | 随之自动干净 | 锚点由**已注入** location 的 `data_json` 派生，location 被剔除即无锚点 |
+| `hook_ledger_excerpt` / `open_foreshadow_list` | 未结线（`OPEN/ACTIVE/ESCALATED`）→ `ABANDONED` | 两处查询的 `status IN (_HOOK_OPEN_STATUSES)`，转终态后自然不再进 payload |
+| `narrative_debt_excerpt` | `open/acknowledged` → `forgiven` | 同形：查询条件 `status IN (_DEBT_OPEN_STATUSES)` |
+| `world_rules_relevant` | **不动** | 世界规则是跨位面的框架级设定（价签视价 / 接锅继承 / 位面锚点 / 记忆账本），按设计常驻 L0；换位面恰恰要它继续成立 |
+| 主角（跨位面主账本角色） | **豁免**，保持原 `inject_mode` | canon「记忆账本」：跨位面角色每世都在场，不能被归档。豁免名单由调用方给（`scripts/world_switch.py --keep / --keep-name`），引擎侧不内置任何人名 |
+
+执行入口：`python scripts/world_switch.py --project prj_xxxx --from-volume 1 --to-volume 2
+--settlement <结算单.json> [--keep-name <主角>] [--apply]`（默认 dry-run；结算单落
+`volumes.terminal_snapshot_json` + `arc_summary`，全程 UPDATE 无 DELETE）。归档态取值
+与"还进注入面"的状态集合都取自本包的同一份常量（`_HOOK_OPEN_STATUSES` /
+`_DEBT_OPEN_STATUSES`），不另立第二套口径。看守测试：`tests/unit/test_world_switch.py`。
+
+### 已知未闭环（回灌面仍在，属本包消费逻辑）
+
+归档后仍有三处按**章号**（而非按卷）取数，会把上一世正文/摘要倒灌进新位面开篇——
+它们不是 canon 台账，`inject_mode` 与 hook 终态**管不到**：
+
+1. `recent_prose_tail`（writer `recent_prose.last_chapter_excerpt`）/ `previous_chapter_tail`
+   （director）：取 `number = 当前章 - 1` 的正文尾段。
+2. `recent_chapter_summaries`（director）：最近 ≤40 章摘要，不分卷。
+3. `recalled_passages`（FTS 召回，writer + director）：只过滤 `chapter_no < 当前章`。
+
+对策方向（供裁决）：三处取数加"章的 `volume_id` 与当前章同卷"过滤，或对跨卷的摘要 /
+尾段打「上一世（已结算）」标记（章→卷判据可由 `chapters.volume_id` JOIN `volumes` 得到）。
+
+另两处残留（现状记录，非本引擎问题）：
+
+- `never` 的实体在 payload 里仍留一份**元标记**（`_suppressed_characters` /
+  `_suppressed_locations` / `_suppressed_factions`），其中带 `name`——供预览面板区分
+  "已剔除 / 未命中降级"用，但同时会随 user message 进模型。要彻底干净需要消费侧决定
+  "生产 payload 不发 suppressed 标记（或只发 id 不发 name）"。
+- 被豁免的主角，其 `character_states` 最新一行仍是上一世的物理状态
+  （`current_state.location` / `inventory` / `resources`），随其 excerpt 一并注入。
+
+## 快穿位面隔离：同卷过滤口径（2026-09-16 闭环，两条索引）
+
+- **同卷过滤（近窗 3 + 召回 1）**：`builders_common/summaries.py` 的
+  `_recent_chapter_summaries` / `_previous_chapter_tail` / `_recent_prose_tail` 与
+  `retrieval/service.py` 的 `search`，取数一律加「与当前章同 `chapters.volume_id`」谓词——
+  换卷后新卷第一章拿不到上一世的摘要 / 尾段 / 召回（**冷开场**：上一世只经结算单 / 作者
+  意图一笔带过）。判据取当前章 `volume_id`：为空（未挂卷）或旧库缺该列 → **不过滤**
+  （= 旧行为逐字保留；卷内各章同卷，卷 1 与存量项目零行为变化）。本节目上方的「已知未
+  闭环」三处章号取数即由本次改动闭环（该节按批次留痕不改写）；看守测试
+  `tests/unit/test_volume_scope_context.py`。**残留（缓存键，未在本批实施）**：该过滤依赖
+  当前章 `chapters.volume_id`，而装配缓存键（`cache.py` / `director_input.py` /
+  `writer_input.py`）无此维度，`state_version` / `chapter_no` / `plan_fp` / `outline_fp`
+  也推不出它——`VolumeService.assign_chapter` 只改 `chapters.volume_id`（+`updated_at`），
+  不推 `state_version`、不动 plan/outline，故「先装配、后改挂卷」会在同键上脏命中旧卷
+  窗口。补齐方案：director / writer 两键各加一位 `volume_id`（与 `target_word_count` 同
+  款直接入键），取值复用 `_peek_chapter_context`——`_PEEK_CHAPTER_SQL` 多读一列即可，
+  命中路径仍是 1 连接 1 条 SQL（`test_context_peek_convergence.py` 口径不变）。键构造
+  文件不在本批独占范围，故登记不修。
+- **`_suppressed_*` 元标记只发 id、不发 name**（`builders_common/excerpts.py`）：块本身
+  保留（preview 仍能区分「已剔除 / 未命中降级」，前端同时渲染 id），但 `name` 不再进
+  payload——整个 payload 被 `agent_runtime.runner` 序列化进 user message，带 name 的
+  归档标记等于把上一世实体名随 `inject_mode='never'` 一起送给模型。未选「整块不发」：
+  那会连带抹掉 preview 的「已剔除」可观测性，且 F-1（`_assembly_meta` 不剥离）的顾虑
+  是**在 runner 层剥下划线键会改 prompt 结构 / 前缀缓存键序**——本次是在**生产侧**去掉
+  块内一个值字段，键集与块形状不变，无该副作用。
