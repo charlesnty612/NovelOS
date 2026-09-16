@@ -35,8 +35,18 @@
 - **已提交章正文返修工具**：新增 `scripts/normalize_chapters.py`（默认 dry-run，
   `--apply` 才写；只动每章最新 draft）。新书 01 实修 24 章 / 605 对引号 + ch2 标识句改写，
   复跑幂等（0 变更 / 0 残留）。
+- **版本口径统一（writer 链，F-14）**：`prompt_version` 此前是硬编码字面量，
+  升版即分叉且无告警——writer v1→v2 当天 payload 声明 v1、模型照抄回声、
+  `drafts.prompt_version` 落 v1、`drafts.created_by` 硬编码 v1，而
+  `ai_call_logs.prompt_version` 记 v2。现新增共享工具
+  `agent_runtime.prompts.active_prompt_label()`（权威＝prompts 表最高 ACTIVE 行），
+  writer 链三处改取真值：payload 声明（+ 缓存键 `prompt_label` 维度 + paged 透传）、
+  `_writer_node` 从 ai_call_logs 取本 run 实载版本进 ctx、`_save_draft_node` 的
+  `created_by` / `prompt_version`（不再采信模型自报）；`writer-v2.md` 内 5 处自指版本号
+  同步并补「原样回填输入 prompt_version」纪律。其余 13 处同形状硬编码登记为 F-14 遗留。
 - 验证：全量 pytest 绿（含新增 31 例 normalize 单测、4 例 writer 契约/缓存单测、
-  3 例 writer-v2 注册、3 例榜一基线看守、3+2 例改稿轮透传）；五处改动均做过突变验证。
+  3 例 writer-v2 注册、3 例榜一基线看守、3+2 例改稿轮透传、3 例版本口径）；
+  五处改动均做过突变验证。
 
 ### 新书 01 第一弧验收（2026-09-16，`prj_bcb9d1930bd4`）
 

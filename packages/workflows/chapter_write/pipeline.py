@@ -60,6 +60,7 @@ import os
 import sqlite3
 from typing import Any
 
+from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.agent_runtime.structured_output import strip_think_blocks
 from packages.core.context_engine import build_writer_input
@@ -703,11 +704,14 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     # V3.1.1 V-P0：writer 本节点真实落库模型 id（mock 路径无 ai_call_logs 行 → None）。
     # 用于 drafts.model_id 记录真实 provider/model，避免列表页无法区分模型。
+    # 2026-09-16 版本口径统一：同一次查询顺带取 prompt_version——它是**本 run 实际加载
+    # 的提示词版本**（权威值，run_agent 落库时写入），供 save_draft 写 drafts 用。
     writer_model_id: str | None = None
+    writer_prompt_version: str | None = None
     conn = get_connection(db_path)
     try:
         row = conn.execute(
-            "SELECT model_id FROM ai_call_logs "
+            "SELECT model_id, prompt_version FROM ai_call_logs "
             "WHERE run_id = ? AND node_run_id = ? "
             "ORDER BY rowid DESC LIMIT 1",
             (run_id, ctx.get("_current_node_run_id")),
@@ -718,6 +722,7 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         conn.close()
     if row is not None:
         writer_model_id = row["model_id"]
+        writer_prompt_version = row["prompt_version"]
     # writer_input 透出到 ctx（→ checkpoint_json）供测试断言；生产仅作为可观测钩子。
     # revision_checklist：仅 revise 模式且尾块解析成功时为 list；其余情况为 None
     # （write 模式 / revise 但尾块缺失或 JSON 坏）。进 ctx → checkpoint_json / run
@@ -727,6 +732,7 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "_writer_context_mode": context_mode,
         "writer_input": payload,
         "writer_model_id": writer_model_id,
+        "writer_prompt_version": writer_prompt_version,
         "revision_checklist": revision_checklist,
     }
 
@@ -1399,7 +1405,15 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
     # 偏差注记的实测口径：condense 节点已把压缩后的 length_report merge 回 ctx
     # （批次 1.1 回写），此处读到的是压缩后真相，不是 length_check 的旧值。
     length_report = ctx.get("length_report") or {}
-    prompt_version = writer_output.get("prompt_version") or "writer:v1"
+    # 版本口径统一（2026-09-16）：**不再采信模型自报**（writer_output.prompt_version
+    # 是输入示例的回声，writer 升 v2 后仍报 v1）。权威优先级：
+    # ① 本 run 的 ai_call_logs.prompt_version（run_agent 实载提示词版本，
+    #    _writer_node 已取并放进 ctx）；
+    # ② 当前 ACTIVE 提示词标签（mock 路径无调用日志时的兜底）；
+    # ③ 常量兜底（空库 / 未 sync 的测试库）。
+    prompt_version = ctx.get("writer_prompt_version") or active_prompt_label(
+        db_path, "writer", fallback="writer:v1"
+    )
 
     draft_id = new_id("dr")
     now = now_iso()
@@ -1473,13 +1487,17 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
             """
             INSERT INTO drafts (draft_id, chapter_id, version, content, created_by,
                                 prompt_version, model_id, created_at)
-            VALUES (?, ?, ?, ?, 'writer:v1', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 draft_id,
                 chapter_id,
                 next_v,
                 prose,
+                # created_by 与 prompt_version 同值（历史形态即如此，质量模块按
+                # 「writer:」前缀判定 AI 侧，见 quality/service.py::classify_created_by）；
+                # 两列现在都取真值，不再硬编码 writer:v1。
+                prompt_version,
                 prompt_version,
                 ctx.get("writer_model_id") or "mock/mock",
                 now,

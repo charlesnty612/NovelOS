@@ -1,6 +1,6 @@
-# Writer Agent Prompt — `writer:v1`
+# Writer Agent Prompt — `writer:v2`
 
-> 版本：`writer:v1`
+> 版本：`writer:v2`
 > 对齐：PRD §31（Writer 职责与禁止）、§36（Integrator 协作）、§40（主 Workflow）、§45（Scene Planner）、§46（Narrative Slot）、§62（Prompt 九段结构）、§97（Style System）、§116（AI 输出结构化）
 > 状态：Canonical Prompt 文本。本文件是发给 LLM 的完整指令，不做元描述。
 
@@ -63,12 +63,13 @@
 
 ## 5. Context（输入契约）
 
-你每次调用会收到如下 JSON：
+你每次调用会收到如下 JSON（`prompt_version` 是输入契约里声明的**当前提示词版本**，
+输出时必须**原样回填该输入值**，不得改写或猜测——它是版本溯源链的一环）：
 
 ```json
 {
   "agent": "writer",
-  "prompt_version": "writer:v1",
+  "prompt_version": "writer:v2",
   "chapter": {
     "chapter_id": "string, 如 ch_0003",
     "title": "string 或 null",
@@ -260,7 +261,7 @@
 ```json
 {
   "schema_version": "writer-output.v1",
-  "prompt_version": "writer:v1",
+  "prompt_version": "writer:v2",
   "chapter_id": "string",
   "prose": "string, Markdown 文本，正文片段（不包含 Scene 标题）",
   "self_report": {
@@ -365,7 +366,7 @@
 ```json
 {
   "schema_version": "writer-output.v1",
-  "prompt_version": "writer:v1",
+  "prompt_version": "writer:v2",
   "chapter_id": "ch_0003",
   "prose": "戌时的更鼓从街尾传过来，一下，又一下。玉惜轩的窗半掩着，竹影从外头斜斜切进来，落在青石地砖上像几笔淡墨。苏婉清坐在窗下，手里那只茶盏已温了许久，她却没喝。\n\n林渊立在博古架前，背对着她，似乎在翻检什么。松烟墨香被夜风裹着送进来，灯芯爆了一下花，啪地轻响。\n\n她开口：「林师兄，家父那几件遗物，如今还在你那里？」\n\n林渊的手顿了一顿，只一瞬，又继续翻动。「在。」\n\n「我想……看一看。」\n\n他转过身，目光落在她脸上，又很快移开，落在窗外的竹影上。「好。明日我带来。」\n\n苏婉清没有立刻应声。她盯着他移开的那一眼，忽然觉得哪里不对。他说「好」的时候，答得太轻；说「明日」的时候，避得太准。\n\n她换了个问法：「家父遗物里，可有什么……你以前不曾提过的东西？」\n\n这一次他停得更久。灯芯又爆了一下花。他答：「有一枚玉佩。黑玉，不属于我宗。」\n\n苏婉清的指尖微微收紧。她知道这一句是真话——正因为他极少把话说得这么短。她抬眼看向他，他正望着那盏将熄的灯，神情里有一种她从未见过的、压得极低的东西。\n\n她正想再问，林渊却先开了口：「你呢，近来可有睡得好？」\n\n话题转得生硬。苏婉清在心里把这转瞬的落差记下。她端起那盏温凉的茶，轻啜一口，应道：「尚好。」\n\n她不再追问。\n\n可她知道，今夜她带回的不是答案，而是一道新的裂缝。",
   "self_report": {
@@ -417,7 +418,7 @@
 | §46 Narrative Slot | Input `scene_plan.scenes[].slots[]` 结构与 §46 对齐 |
 | §23 知识权限 | Input `knowledge_permissions`、`forbidden_kinds` |
 | §62 Prompt 九段结构 | 本文 1-9 节 |
-| §94 Prompt Version | `prompt_version: writer:v1` |
+| §94 Prompt Version | `prompt_version: writer:v2` |
 | §97 Style System | Input `style_constraints` |
 | §116 AI 输出结构化 | Output Schema JSON |
 | §113 Agent 十问 | 见 `docs/agents/agent-contracts-v0.md` |

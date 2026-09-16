@@ -1702,7 +1702,8 @@ def test_write_threads_author_intent_into_writer_payload_and_normalizes_draft(
             conn = get_connection(app.state.settings.db_path)
             try:
                 draft = conn.execute(
-                    "SELECT content FROM drafts WHERE chapter_id = ? ORDER BY version DESC LIMIT 1",
+                    "SELECT content, created_by, prompt_version FROM drafts "
+                    "WHERE chapter_id = ? ORDER BY version DESC LIMIT 1",
                     (cid,),
                 ).fetchone()
                 node = conn.execute(
@@ -1745,6 +1746,22 @@ def test_write_threads_author_intent_into_writer_payload_and_normalizes_draft(
             assert any(c.get("rule") == "NORM-QUOTE" for c in changes), changes
             assert save_payload.get("internal_identifiers") == ["recalled_passages"], (
                 save_payload.get("internal_identifiers")
+            )
+
+            # ⑤ 版本口径统一：drafts.created_by / prompt_version 必须是**ACTIVE 提示词
+            # 的真值**，不是硬编码 writer:v1（mock 路径无 ai_call_logs 行 → 回落
+            # ACTIVE 标签；生产路径取本 run 实载版本）。期望值现取现算，本用例因此
+            # 对 writer 未来升版免疫，但撤掉「取真值」的逻辑必红。
+            from packages.core.agent_runtime.prompts import active_prompt_label
+
+            expected = active_prompt_label(
+                app.state.settings.db_path, "writer", fallback="writer:v1"
+            )
+            assert draft["created_by"] == expected, (
+                f"created_by 未取真值：{draft['created_by']!r} != {expected!r}"
+            )
+            assert draft["prompt_version"] == expected, (
+                f"prompt_version 未取真值：{draft['prompt_version']!r} != {expected!r}"
             )
 
     asyncio.run(run())

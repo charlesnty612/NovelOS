@@ -306,3 +306,27 @@ def normalize_agent_name(raw: str) -> str:
 
 AGENT_TO_CAPABILITY: dict[str, str] = dict(_AGENT_TO_CAPABILITY)
 """Agent 名 → capability 名（与 :data:`packages.core.model_router.AGENT_CAPABILITY` 必须相等）。"""
+
+
+def active_prompt_label(db_path: Any, agent_name: str, *, fallback: str) -> str:
+    """取该 agent 当前 ACTIVE 提示词的版本标签（如 ``"writer:v2"``）。
+
+    为什么需要它（2026-09-16 实证，缺陷形状＝「硬编码标签漂移」）：payload 里声明的
+    ``prompt_version`` 与 ``drafts.created_by`` 此前都是**硬编码字面量**，提示词一升版
+    就漂移。writer v1→v2 当天的四处口径——
+
+    - payload 仍声明 ``writer:v1``（模型据此照抄回声）；
+    - ``drafts.prompt_version`` 采信模型回声 ⇒ ``writer:v1``；
+    - ``drafts.created_by`` 硬编码 ⇒ ``writer:v1``；
+    - ``ai_call_logs.prompt_version`` 记真值 ⇒ ``writer:v2``。
+
+    同一条链上两个值，**没有任何一处报错**。权威口径只有一处：prompts 表里该 agent
+    最高 ACTIVE 行的 ``version`` 列（与 run_agent 落 ``ai_call_logs.prompt_version`` 同源）。
+
+    表空 / 无 ACTIVE / 库不可读 → 返回 ``fallback``（调用方给自身的历史默认值，
+    保证测试临时库与未 sync 的场景仍可装配）。
+    """
+    try:
+        return PromptRegistry(db_path).get_active_prompt(agent_name)[1]
+    except (PromptNotFoundError, sqlite3.Error, OSError):
+        return fallback

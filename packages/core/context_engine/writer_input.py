@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.db import get_connection
 from packages.core.quality.wordcount import resolve_band_config, word_band
 
@@ -102,9 +103,16 @@ def _build_writer_input_uncached(
     *,
     relevance_trim: bool = True,
     author_intent: str | None = None,
+    prompt_label: str = "writer:v1",
     peek: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """无缓存版 writer 装配。
+
+    ``prompt_label``（2026-09-16 版本口径统一）：payload ``prompt_version`` 字段的值。
+    由 :func:`build_writer_input` 解析一次后透传——payload 与缓存键必须**同源同值**，
+    否则又会出现「装配声明 v1、运行实为 v2」的漂移（见
+    :func:`packages.core.agent_runtime.prompts.active_prompt_label`）。缺省值是历史
+    默认（未 sync 的测试库 / 直接调用 uncached 的场景）。
 
     ``peek``（V3.9 批次 2.3）：调用方 :func:`_peek_chapter_context` 的单连接预读结果。
     传了就直接复用其 ``word_band_json`` 原文（省掉一次 projects 查询），不再二次读库。
@@ -207,7 +215,7 @@ def _build_writer_input_uncached(
     _wb_low, _wb_high = word_band(target_word_count, **resolve_band_config(word_band_overrides))
     payload: dict[str, Any] = {
         "agent": "writer",
-        "prompt_version": "writer:v1",
+        "prompt_version": prompt_label,
         "knowledge_permissions": {
             "your_visibility": ["WRITER", "PUBLIC", "VISIBLE"],
             "forbidden_kinds": ["HIDDEN"],
@@ -385,6 +393,11 @@ def build_writer_input(
     # （PUT 改 payload → version 自增）/ 绑定 / 解绑都要 miss，否则旧装配脏命中
     # （与 director 键同形的单点口径，见 ``_peek_chapter_context``）。
     genre_pack_ref = peek["genre_pack_ref"] or "__none__"
+    # 版本口径统一（2026-09-16）：payload 声明的 prompt_version 取 ACTIVE 提示词行
+    # 的真值（本模块此前硬编码 "writer:v1"，writer 升 v2 后 payload 仍声明 v1 →
+    # 模型照抄回声 → save_draft 采信回声 → drafts 落 v1，而 ai_call_logs 记 v2）。
+    # 解析一次、同时喂 payload 与缓存键（进了 payload 就必须进键，硬规则 2）。
+    prompt_label = active_prompt_label(db_path, "writer", fallback="writer:v1")
     # 2026-09-16 F-10 修复：缓存键追加 author_intent 指纹（``_fingerprint_author_intent``，
     # None → 'none' / 空串按原文）。作者硬性要求进 payload（author_intent 段）⇒ 必须
     # 进键：改意图必须 miss，否则新意图读到旧意图的装配（硬规则 2；与 director 键同形）。
@@ -393,7 +406,7 @@ def build_writer_input(
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
         scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id,
-        target_word_count, genre_pack_ref, intent_fp,
+        target_word_count, genre_pack_ref, intent_fp, prompt_label,
         _cache_namespace_tag(namespace),
     )
     # 不可序列化（scene_fp / intent_fp == 'uncached'）→ 跳过缓存，避免不同原文
@@ -410,6 +423,7 @@ def build_writer_input(
             db_path, chapter_id, scene_plan, target_word_count,
             relevance_trim=relevance_trim_final,
             author_intent=author_intent,
+            prompt_label=prompt_label,
             peek=peek,
         )
     else:
@@ -417,6 +431,7 @@ def build_writer_input(
             db_path, chapter_id, scene_plan, target_word_count,
             relevance_trim=relevance_trim_final,
             author_intent=author_intent,
+            prompt_label=prompt_label,
             peek=peek,
         )
     if cacheable:
@@ -658,6 +673,7 @@ def _build_writer_input_paged(
     resolved_history_keep: int = _WRITER_RESOLVED_HOOKS_KEEP,
     relevance_trim: bool = True,
     author_intent: str | None = None,
+    prompt_label: str = "writer:v1",
     peek: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """writer 分页模式装配（L0/L1/L2 裁剪）。
@@ -675,11 +691,15 @@ def _build_writer_input_paged(
 
     2026-09-16 F-10 修复：``author_intent`` 透传给 uncached 装配（生产 writer 默认
     走 ``paged``——不透传则作者硬性要求在默认模式下静默丢失）。
+
+    2026-09-16 版本口径统一：``prompt_label`` 同样透传（生产默认走本路径，
+    不透传则 payload 又退回硬编码默认值，版本口径再度漂移）。
     """
     full_payload = _build_writer_input_uncached(
         db_path, chapter_id, scene_plan, target_word_count,
         relevance_trim=relevance_trim,
         author_intent=author_intent,
+        prompt_label=prompt_label,
         peek=peek,
     )
     # 裁剪前快照：仅保留被裁剪的 3 个键，便于 stats 体积量化

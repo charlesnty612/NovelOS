@@ -779,3 +779,49 @@ def test_scene_planner_payload_no_style_params(tmp_path: Path):
     assert "spine" not in canon
     assert "logline" not in canon
     assert "rhythm" not in canon
+
+
+def _sync_writer_prompt_version(db_path: Path, tmp_path: Path, version: int) -> None:
+    """往 ``db_path`` 注册一版 ACTIVE 的 writer 提示词（走真实 sync 路径）。
+
+    版本口径测试专用：label 由文件名决定（``writer-v2.md`` → ``writer:v2``），
+    与生产链路（服务启动 sync ``docs/agents/prompts/``）同源。
+    """
+    from packages.core.agent_runtime.prompts import PromptRegistry
+
+    docs = tmp_path / f"prompts_v{version}"
+    docs.mkdir(exist_ok=True)
+    (docs / f"writer-v{version}.md").write_text(
+        f"# Writer Agent Prompt — `writer:v{version}`\n", encoding="utf-8"
+    )
+    PromptRegistry(db_path).sync_from_docs(docs)
+
+
+def test_writer_input_declares_active_prompt_version(tmp_path: Path):
+    """版本口径统一（2026-09-16）：payload ``prompt_version`` 随 ACTIVE 提示词行走。
+
+    此前该字段硬编码 ``"writer:v1"``——writer 升 v2 后 payload 仍声明 v1，模型照抄
+    回声、save_draft 采信回声、``drafts`` 落 v1，而 ``ai_call_logs`` 记 v2：**同一条
+    链两个值且无一处报错**。本用例钉「声明值即真值」，且 full / paged 两条装配路径
+    一致（生产 writer 默认走 paged）。
+    """
+    from packages.core.context_engine.builders import build_writer_input
+
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+
+    # ① 无 ACTIVE 行（未 sync / 空库）→ 回落历史默认，装配不炸
+    assert build_writer_input(db_path, cid, {})["prompt_version"] == "writer:v1"
+
+    # ② 有 ACTIVE 行 → 声明真值；paged 与 full 一致
+    _sync_writer_prompt_version(db_path, tmp_path, 2)
+    assert build_writer_input(db_path, cid, {})["prompt_version"] == "writer:v2"
+    assert (
+        build_writer_input(db_path, cid, {}, context_mode="paged")["prompt_version"]
+        == "writer:v2"
+    )
+
+    # ③ 再升一版 → 跟着走（不是把 v2 又写死）
+    _sync_writer_prompt_version(db_path, tmp_path, 10)
+    assert build_writer_input(db_path, cid, {})["prompt_version"] == "writer:v10"

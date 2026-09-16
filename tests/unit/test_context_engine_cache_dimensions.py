@@ -334,3 +334,41 @@ def test_cached_payload_is_isolated_from_caller_mutation(tmp_path: Path):
     d2 = build_director_input(db_path, pid, cid, "意图")
     assert d2["author_intent"]["raw"] == "意图"
     assert d2["chapter"]["expected_role"] == "setup"
+
+
+def test_writer_cache_miss_when_prompt_version_changes(tmp_path: Path, monkeypatch):
+    """writer 键含 prompt_label 维度 → 提示词升版必 miss。
+
+    payload 声明的 ``prompt_version`` 是版本溯源链的一环（进 payload 就必须进键，
+    硬规则 2）。旧缺陷形状（2026-09-16 writer v1→v2 实证）：声明值硬编码且不进键 ⇒
+    升版后同 state_version 脏命中旧装配，正文与声明版本对不上。
+    """
+    from packages.core.agent_runtime.prompts import PromptRegistry
+    from packages.core.context_engine import writer_input as wi_mod
+
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid, 1, plan_json='{"chapter_goal": "x"}')
+    docs = tmp_path / "prompts_v2"
+    docs.mkdir()
+    (docs / "writer-v2.md").write_text("# writer v2\n", encoding="utf-8")
+    PromptRegistry(db_path).sync_from_docs(docs)
+    _cache_reset()
+
+    calls = _spy_uncached(monkeypatch, wi_mod, "_build_writer_input_uncached")
+    scene = {"purpose": "开场", "scenes": [{"purpose": "s1"}]}
+
+    a1 = build_writer_input(db_path, cid, scene)
+    assert a1["prompt_version"] == "writer:v2"
+    a2 = build_writer_input(db_path, cid, scene)
+    assert a2["prompt_version"] == "writer:v2"
+    assert calls["n"] == 1, "同版本应命中缓存"
+
+    # 升版：声明值变化 ⇒ 必须重装（否则读到声明 v2 的旧条目）
+    docs_v3 = tmp_path / "prompts_v3"
+    docs_v3.mkdir()
+    (docs_v3 / "writer-v3.md").write_text("# writer v3\n", encoding="utf-8")
+    PromptRegistry(db_path).sync_from_docs(docs_v3)
+    a3 = build_writer_input(db_path, cid, scene)
+    assert a3["prompt_version"] == "writer:v3"
+    assert calls["n"] == 2, "提示词升版必须 miss 旧装配（版本声明随 ACTIVE 行）"

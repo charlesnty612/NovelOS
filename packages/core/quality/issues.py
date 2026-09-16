@@ -159,7 +159,8 @@ def mvp_max_severity(category: str) -> Severity:
 # 仅覆盖需要偏离 category 矩阵的规则；未列出的规则用 mvp_max_severity(category)。
 MVP_RULE_OVERRIDES: dict[str, str] = {
     # V3.9 批次 3.3 裁决：Q8 默认降为 warning。
-    # 本工具是 AI 写作工具，生产 drafts.created_by='writer:v1'（统计修正后）⇒ 纯 AI 章
+    # 本工具是 AI 写作工具，生产 drafts.created_by 形如 ``writer:<prompt 版本>``
+    # （2026-09-16 起取真值，见 quality/service.py 顶部口径注释；统计修正后）⇒ 纯 AI 章
     # human_ratio=0；若维持 error，enforce 默认会把所有纯 AI 章全拦。作者显式设置
     # NOVELOS_QUALITY_Q8_STRICT=1（见 guardrails.q8_error_severity）才升级回 error 阻断。
     "RULE_Q8_HUMAN_RATIO_LOW": "warning",

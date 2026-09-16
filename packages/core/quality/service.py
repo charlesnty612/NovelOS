@@ -339,7 +339,9 @@ def _diff_added_chars(prev: str, curr: str) -> int:
 # ---------------------------------------------------------------------------
 #
 # 生产端 drafts.created_by 实际取值（grep 生产代码 + data/novelos.db 实测）：
-# - ``writer:v1``：``chapter_write/pipeline.py`` save_draft 硬编码（生产写作全部走这里）；
+# - ``writer:<版本>``：``chapter_write/pipeline.py`` save_draft 写入（生产写作全部走这里）。
+#   2026-09-16 起取**真值**（AI 调用日志里的实载提示词版本，如 ``writer:v2``），此前是
+#   硬编码 ``writer:v1``——提示词升版后该列不再漂移；前缀判定不受影响；
 # - ``human``：``domain/chapter/service.py`` 人工改稿；
 # - ``agent:*``：部分测试 / 早期调用方的显式前缀写法。
 #
