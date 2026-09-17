@@ -401,7 +401,7 @@
         ]
       }
     ],
-    "notes_for_writer": "对话占比不低于 35%；补写为完整章节时按 beats 顺序推进。",
+    "notes_for_writer": "补写为完整章节时按 beats 顺序推进；对白只用在对白不可替代处（不设占比指标）。",
     "deviations": []
   }
 }

@@ -428,7 +428,7 @@
       ]
     }
   ],
-  "notes_for_writer": "本 chapter 按一个连续夜访场景处理；对话占比不低于 35%。",
+  "notes_for_writer": "本 chapter 按一个连续夜访场景处理；对白只用在对白不可替代处（不设占比指标）。",
   "deviations": []
 }
 ```

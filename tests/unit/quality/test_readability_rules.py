@@ -16,12 +16,15 @@
 本文件钉**长度口径与档位**：段按 ``\\n+`` 切、字数走 ``visible_chars``、
 对话＝成对“…”内的可见字；两条规则都有 600 可见字最小判定长度。
 人类基线的看守在 ``test_readability_baseline.py``。
+
+**2026-09-17 撤回 ``AI-DIALOGUE-LOW`` 的 error 档**（<8%）：逼模型凑对话指标产出
+灌水对白，且人类锚点书写得出整章无对话。本文件相应改为「只有 warning 一档」的
+断言；症状探针 ``AI-DIALOGUE-ECHO`` 的用例见 ``test_dialogue_echo.py``。
 """
 
 from __future__ import annotations
 
 from packages.core.quality.ai_patterns import (
-    DEFAULT_DIALOGUE_LOW_ERROR_RATIO,
     DEFAULT_DIALOGUE_LOW_WARN_RATIO,
     DEFAULT_LONG_PARA_ERROR_CHARS,
     DEFAULT_LONG_PARA_MIN_COUNT,
@@ -185,10 +188,17 @@ def test_dialogue_chars_counts_pairs_only():
 
 
 def test_dialogue_ratio_thresholds_are_registered():
-    """阈值与依据一起登记：<12% warning、<8% error；榜一 16.5%、我们 11.4%。"""
+    """阈值与依据一起登记：<12% warning（**只有这一档**）；榜一 16.5%、我们 11.4%。
+
+    error 档（<8%）2026-09-17 撤回——本测试同时钉住「常量已删除」，防止有人
+    悄悄把第二档加回来（判别：``test_dialogue_low_warning_only.py`` 另做行为断言）。
+    """
     assert DEFAULT_DIALOGUE_LOW_WARN_RATIO == 0.12
-    assert DEFAULT_DIALOGUE_LOW_ERROR_RATIO == 0.08
-    assert DEFAULT_DIALOGUE_LOW_ERROR_RATIO < DEFAULT_DIALOGUE_LOW_WARN_RATIO
+    from packages.core.quality import ai_patterns as module
+
+    assert not hasattr(module, "DEFAULT_DIALOGUE_LOW_ERROR_RATIO"), (
+        "对话占比的 error 档已撤回（2026-09-17）：常量不该再存在"
+    )
 
 
 def _prose_with_dialogue(dialogue_chars: int, total_chars: int = 1000) -> str:
@@ -216,20 +226,25 @@ def test_dialogue_triggers_just_below_warn_ratio():
     assert hit["dialogue_ratio"] == 0.119
 
 
-def test_dialogue_warning_tier_at_exactly_error_ratio():
-    """80/1000 = 8.0% 仍是 warning 档（error 判据是严格小于 8%）。"""
+def test_dialogue_at_old_error_ratio_is_still_warning():
+    """80/1000 = 8.0% 落在**已撤回的旧 error 界**上 → 现在仍是 warning。"""
     prose = _prose_with_dialogue(80)
-    assert dialogue_ratio(prose) == DEFAULT_DIALOGUE_LOW_ERROR_RATIO
+    assert dialogue_ratio(prose) == 0.08
     hit = _readability_hits(prose).get("AI-DIALOGUE-LOW")
     assert hit is not None and hit["severity"] == "warning"
 
 
-def test_dialogue_error_tier_below_error_ratio():
-    """跨到 error 档：79/1000 = 7.9% → error。"""
+def test_dialogue_below_old_error_ratio_is_only_warning():
+    """79/1000 = 7.9% 原判 error → 现在**只有 warning**（error 档已撤回）。
+
+    行为断言在 ``test_dialogue_low_warning_only.py`` 里覆盖 0% 章的极端情形。
+    """
     prose = _prose_with_dialogue(79)
     hit = _readability_hits(prose).get("AI-DIALOGUE-LOW")
-    assert hit is not None and hit["severity"] == "error"
+    assert hit is not None, "低于 12% 仍须提示"
+    assert hit["severity"] == "warning", "error 档已撤回（2026-09-17）"
     assert hit["dialogue_ratio"] == 0.079
+    assert "error_ratio" not in hit, "error 档相关字段随档位一起删除"
 
 
 def test_dialogue_quiet_above_warn_ratio():
@@ -243,7 +258,7 @@ def test_dialogue_skips_short_fragments():
     """最小判定长度：<600 可见字不判对话占比（小样例「4/17 = 24%」之类是伪信号）。"""
     tiny = "“走吧。”" + _exact(300)  # 约 305 可见字，对话占比约 1%
     assert visible_chars(tiny) < 600
-    assert dialogue_ratio(tiny) < DEFAULT_DIALOGUE_LOW_ERROR_RATIO
+    assert dialogue_ratio(tiny) < DEFAULT_DIALOGUE_LOW_WARN_RATIO
     assert "AI-DIALOGUE-LOW" not in _readability_hits(tiny)
 
 
@@ -267,8 +282,8 @@ def test_scan_ai_patterns_exposes_both_rules_with_thresholds():
 
 
 def test_both_rules_registered_in_rule_metadata():
-    """规则元数据表必须收录两条新规则（供评审 UI / 文档索引读取）。"""
+    """规则元数据表必须收录可读性三条规则（供评审 UI / 文档索引读取）。"""
     from packages.core.quality.ai_patterns import AI_PATTERN_RULES
 
     ids = {r.rule_id for r in AI_PATTERN_RULES}
-    assert {"AI-LONG-PARA", "AI-DIALOGUE-LOW"} <= ids
+    assert {"AI-LONG-PARA", "AI-DIALOGUE-LOW", "AI-DIALOGUE-ECHO"} <= ids

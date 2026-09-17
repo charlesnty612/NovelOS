@@ -63,8 +63,12 @@ def test_sync_from_docs_registers_writer_v2(tmp_path: Path):
 
     prompt_id, version_label, content = registry.get_active_prompt("writer")
     assert prompt_id.startswith("prm_")
-    assert version_label == "writer:v2", "writer 的最高 ACTIVE 版本必须是 v2"
-    assert content == PROMPT_FILE.read_text(encoding="utf-8")
+    # 最高 ACTIVE 版本随文件版本线走（2026-09-17 起为 v3：规则 16 由「对话不少于 30%」
+    # 改为对白纪律）。此处不钉死具体编号，只钉「与最新版本文件同源」——否则每升一版
+    # 都要改这条断言，而断言的意图是「库里的 ACTIVE 就是仓库文件」。
+    latest = max(int(f.name.split("-v")[1].split(".")[0]) for f in PROMPTS_DIR.glob("writer-v*.md"))
+    assert version_label == f"writer:v{latest}", version_label
+    assert content == (PROMPTS_DIR / f"writer-v{latest}.md").read_text(encoding="utf-8")
 
     agents = {a["name"]: a for a in registry.list_agents()}
     assert agents["writer"]["role"] == "creative_writing"
@@ -95,3 +99,25 @@ def test_writer_v2_keeps_author_intent_and_no_internal_identifier_markers():
     # 外科式追加未破坏 v1 主体：§6.1 核销表机读契约仍在（管线按分隔行切分）
     assert "## 6.1 修订模式（mode='revise'）" in text
     assert "---REVISION-CHECKLIST---" in text
+
+
+def test_active_writer_prompt_carries_dialogue_discipline(tmp_path: Path):
+    """2026-09-17 回归看守：ACTIVE writer 提示词不得再出现「对话不少于 30%」这类
+    **可优化指标**，必须承载定性的对白纪律。
+
+    为什么单列一条：该指标是「为凑比例编对白」的源头（实证：重产版让主角主动交代
+    底牌、六句接龙局面毫无变化），且它藏在提示词里、不随题材包口径改动而失效——
+    只有本测试能防它回流。
+    """
+    db_path = _fresh_db(tmp_path)
+    registry = PromptRegistry(db_path)
+    registry.sync_from_docs(PROMPTS_DIR)
+    _, version_label, content = registry.get_active_prompt("writer")
+
+    # 钉「旧规则行」而不是短语——版本说明与规则 16 的留痕里**允许**出现旧文（那是审计迹）
+    assert "**对话占比**：全章对话不少于 30%" not in content, (
+        f"{version_label} 仍带旧的对话占比规则行"
+    )
+    assert "对话占比不低于" not in content
+    for marker in ("禁止接词回声", "每句对白必须有后果", "低对话章", "只有对白能做到的事才用对白"):
+        assert marker in content, f"{version_label} 缺对白纪律标记：{marker}"

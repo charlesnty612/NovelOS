@@ -10,8 +10,13 @@
 ==================== ================== ==================== ==========
 单段 >100 可见字      7 段（每章至多 1）  133 段（最长 212 字） >100 warning
 单段 >140 可见字      0 段                16 段                 >140 error
-对话占比（全弧）      16.5%               11.4%                 <12% / <8%
+对话占比（全弧）      16.5%               11.4%                 <12% warning（唯一档）
 ==================== ================== ==================== ==========
+
+**2026-09-17 撤回对话占比的 error 档**（原 <8%）：逼模型凑指标产出灌水对白，
+且人类锚点书写得出整章无对话（首章 0.0%）——本文件相应把「error 章数上限」
+改为「error 章数恒为 0」（该规则已无第二档）。症状探针 ``AI-DIALOGUE-ECHO``
+的人类侧看守见 ``test_dialogue_echo_baseline.py``。
 
 **两种判定粒度是实测逼出来的，不是随手选的**：
 
@@ -38,7 +43,6 @@ from pathlib import Path
 import pytest
 
 from packages.core.quality.ai_patterns import (
-    DEFAULT_DIALOGUE_LOW_ERROR_RATIO,
     DEFAULT_DIALOGUE_LOW_WARN_RATIO,
     DEFAULT_LONG_PARA_ERROR_CHARS,
     DEFAULT_LONG_PARA_MIN_COUNT,
@@ -66,10 +70,10 @@ GENERATED_PARAS_OVER_100 = 133
 GENERATED_PARAS_OVER_140 = 16
 GENERATED_DIALOGUE_RATIO = 0.114
 
-# 对话规则在锚点书上的**逐章噪声上限**（实测 8/19 章低于 12%、5 章低于 8%）。
+# 对话规则在锚点书上的**逐章噪声上限**（实测 8/19 章低于 12%）。
 # 这是把已知假阳性显式登记为回归红线：变差即要重新评估该规则的章级可行性。
+# error 档已于 2026-09-17 撤回 ⇒ error 章数**恒为 0**（不再是上限，是不变量）。
 HUMAN_DIALOGUE_LOW_CHAPTERS_CEILING = 10
-HUMAN_DIALOGUE_LOW_ERROR_CHAPTERS_CEILING = 6
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _REFERENCE_SUBPATH = Path("reference-books/榜一-快穿之人渣洗白手册/侯府凤凰男")
@@ -166,14 +170,18 @@ def test_human_baseline_dialogue_clean_at_arc_level():
         f"（生成侧 {GENERATED_DIALOGUE_RATIO}）——阈值已高于人类基线量级"
     )
     assert "AI-DIALOGUE-LOW" not in _rule_ids(arc), (
-        f"榜一全弧被对话占比规则误判：{ratio:.3f}（阈值"
-        f" {DEFAULT_DIALOGUE_LOW_WARN_RATIO}/{DEFAULT_DIALOGUE_LOW_ERROR_RATIO}）"
+        f"榜一全弧被对话占比规则误判：{ratio:.3f}"
+        f"（阈值 {DEFAULT_DIALOGUE_LOW_WARN_RATIO}）"
     )
     assert abs(ratio - HUMAN_DIALOGUE_RATIO) < 0.01, (
         f"榜一全弧对话占比实测 {ratio:.3f} 与登记基线 {HUMAN_DIALOGUE_RATIO} 不符——"
         f"基线数字需重算（复算入口 scripts/readability_audit.py）"
     )
-    assert DEFAULT_DIALOGUE_LOW_ERROR_RATIO < HUMAN_DIALOGUE_RATIO, "error 档必须在基线之下"
+    from packages.core.quality import ai_patterns as module
+
+    assert not hasattr(module, "DEFAULT_DIALOGUE_LOW_ERROR_RATIO"), (
+        "error 档（原 <8%）已于 2026-09-17 撤回：常量不该再存在"
+    )
 
 
 def test_human_dialogue_chapter_noise_stays_within_registered_ceiling():
@@ -181,6 +189,8 @@ def test_human_dialogue_chapter_noise_stays_within_registered_ceiling():
 
     这条不是「允许误报」，而是把已知的**粒度落差**钉成数字：若哪天变成 15/19，
     说明规则已退化为噪声源（AGENTS.md 三种病之「刷屏噪声」），必须重新设计。
+    同时钉住「error 档恒为 0」——该档已于 2026-09-17 撤回（含首章 0.0% 对话的
+    人类正文曾被判 error，这是撤回的直接证据之一）。
     """
     chapters = _arc_chapters()
     warn = 0
@@ -198,9 +208,8 @@ def test_human_dialogue_chapter_noise_stays_within_registered_ceiling():
         f"榜一逐章命中 {warn}/{len(chapters)} 已超登记上限"
         f" {HUMAN_DIALOGUE_LOW_CHAPTERS_CEILING}——规则章级噪声已恶化"
     )
-    assert error <= HUMAN_DIALOGUE_LOW_ERROR_CHAPTERS_CEILING, (
-        f"榜一逐章 error 档 {error}/{len(chapters)} 已超登记上限"
-        f" {HUMAN_DIALOGUE_LOW_ERROR_CHAPTERS_CEILING}"
+    assert error == 0, (
+        f"榜一逐章出现 {error} 章 error 档——该档已撤回，本规则任何情况只能是 warning"
     )
 
 

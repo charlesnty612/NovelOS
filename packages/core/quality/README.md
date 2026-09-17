@@ -287,7 +287,7 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 
 | 通道 | 职责 | 词表 / 工具 |
 |---|---|---|
-| `ai_patterns.scan_ai_patterns` | **权威信号源**：禁用词 / 三连句式 / 他她排比 / 章尾升华 / 标点滥用 / 解释腔 / 长段 / 对话占比的模式级命中清单（chapter_review 的 basic_hints 消费，不进子分；可读性两条见 §5.6） | `AI_PATTERN_FORBIDDEN_WORDS` 等（ai_patterns 内） |
+| `ai_patterns.scan_ai_patterns` | **权威信号源**：禁用词 / 三连句式 / 他她排比 / 章尾升华 / 标点滥用 / 解释腔 / 长段 / 对话占比 / 接词回声的模式级命中清单（chapter_review 的 basic_hints 消费，不进子分；可读性三条见 §5.6） | `AI_PATTERN_FORBIDDEN_WORDS` 等（ai_patterns 内） |
 | `scoring.score_style` | **密度阈值**：`AI_FLAVOR_MARKERS` 每千字 ≥ 5 ⇒ -15 | 共享 `AI_FLAVOR_MARKERS` + `marker_hits_per_kchars` |
 | `ai_trace.cliche_density` | **跨章重复 + 套话阶梯**：`AI_CLICHES` 每千字命中阶梯扣分；跨章用 13 字 shingle | 共享 `AI_CLICHES`（= descriptors + connectives）+ `marker_hits_per_kchars` |
 | critic LLM `ai_flavor` 维度 | LLM 主观评分 | 本轮不接入评分（R9 留档，见 §6.1） |
@@ -296,7 +296,7 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 5 个 fixture 的 style / ai_trace 旧值（`100/100`、`70/73`、`75/80`、`60/73`、`85/80`），
 以及 `AI_CLICHES` 与改造前原文的多重集相等；词表任何增删都会让测试变红。
 
-### 5.6 可读性算子（2026-09-17 新增）
+### 5.6 可读性算子（2026-09-17 新增；同日撤回其中一条的 error 档 + 补症状算子）
 
 起因：`prj_bcb9d1930bd4` 全弧 48 章 / 122350 可见字 的读者反馈「可读性差」。
 与文风锚点书榜一《快穿之人渣洗白手册》侯府弧（19 章 / 37806 可见字）对照，
@@ -305,20 +305,44 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 | 指标 | 榜一（人类基线） | 生成侧 | 算子 | 阈值 |
 |---|---|---|---|---|
 | 单段可见字 | >100 字 7 段（每章至多 1 段，最长 135）· >140 字 0 段 | >100 字 133 段 · >140 字 16 段（最长 212） | `AI-LONG-PARA` | >100 → warning（单章 ≥2 段）· >140 → error（单段即报） |
-| 对话占比（成对“…”内可见字 ÷ 全章可见字） | 16.5% | 11.4% | `AI-DIALOGUE-LOW` | <12% → warning · <8% → error |
+| 对话占比（成对“…”内可见字 ÷ 全章可见字） | 16.5% | 11.4% | `AI-DIALOGUE-LOW` | **<12% → warning（唯一档）**——<8% error 档 2026-09-17 撤回 |
+| 相邻对白接词回声 | 1 对 / 1 章（19 章） | 26 对 / 20 章（48 章） | `AI-DIALOGUE-ECHO` | 复述型 ≥0.70 **或** 接词型 ≥0.66 且开口 ≥2 字 → warning（恒 warning） |
 
-- 两条规则都在 `packages/core/quality/ai_patterns.py`（`scan_ai_patterns` 内注册，
-  severity 自带两档，`chapter_review._basic_checks_node` 按 severity 自动分流
+- 三条规则都在 `packages/core/quality/ai_patterns.py`（`scan_ai_patterns` 内注册，
+  severity 自带档位，`chapter_review._basic_checks_node` 按 severity 自动分流
   warnings/errors —— 该文件未改动）。
 - 段切分口径 `\n+`（外部锚点书一行一段；生产 draft 以空行分段，两口径在本仓语料上
-  仅差 5 段 / 3061）；字数口径 `wordcount.visible_chars`；**可见字 <600 的片段两条
-  规则都不判**。
+  仅差 5 段 / 3061）；字数口径 `wordcount.visible_chars`；**可见字 <600 的片段不判
+  长段/对话占比**（回声规则照 `_MIN_PROSE_CHARS_FOR_DENSITY` 先例取 200）。
 - 「长段」逐章判定、「对话占比」以全弧为有效粒度（单章方差极大：榜一第 1 章 0.0%、
   第 19 章 40.6%）——人类侧看守与登记数字见
   `tests/unit/quality/test_readability_baseline.py`，复算入口
   `scripts/readability_audit.py`（只读）。
-- **遗留**：对话阈值仍需按更多人类语料复校；榜一逐章仍有 8/19 章低于 12%
-  （动作戏章天然无对话），该噪声已登记为回归上限（≤10 章）。
+
+**2026-09-17 撤回对话占比的 error 档（留痕）**：该档（<8%）连同题材包/生成驱动里的
+「对话占比 ≥20%」硬指标，把书改坏了——用户实测反馈「全是重复性的对话灌水，上一句
+说了啥，下一句接着重复一遍」；实证为 ch3 为凑指标**编造对白并破人设**（主角主动交代
+「七成发霉率」「三天后什么价」＝交出唯一底牌）、ch33 六句接龙零推进。对话占比是
+**可优化指标而非质量判据**：逼模型凑数必然灌水，且人类锚点书 19 章里 8 章低于 12%
+（首章 0.0%，人类写得出整章无对话）。故：
+
+1. `AI-DIALOGUE-LOW` **只作提示不作闸门**——`_scan_dialogue_low` 已无任何返回 error
+   的路径，`DEFAULT_DIALOGUE_LOW_ERROR_RATIO` 常量与 `dialogue_low_error_ratio`
+   形参一并删除（判别：`tests/unit/quality/test_dialogue_low_warning_only.py`、
+   `test_readability_baseline.py` 的「error 章数恒 0」断言、接线用例的降级断言）；
+2. 把该副作用**留下的症状**做成算子 `AI-DIALOGUE-ECHO`（相邻对白接词回声）：复述型
+   = 后句实义字 ≥70% 出现在前句；接词型 = 后句开口连续重合 ≥2 字且两侧重叠系数
+   ≥0.66（0.66 而非 0.70 的实测依据：必命中样例「够七天。→ 七天之后呢？」为 2/3，
+   人侧两阈值同为 0 对——见常量注释）。实义字 = 汉字与数字；单侧 <2 字不判；同一对
+   只报一次；samples 取前 5 对（`前句→后句`）供人工过目；
+3. 人类侧看守：`tests/unit/quality/test_dialogue_echo_baseline.py`（榜一全弧命中
+   **≤1 对 / ≤1 章**、语料锚点 61 对相邻对白、低对话命中全为 warning、长段零命中）。
+
+- **遗留**：① 回声阈值仍需更多人类语料复校（本次只有 19 章人侧 + 48 章生成侧）；
+  ② 「对白是否有后果」无法正则化——回声算子只看字面重合，信息递增但用词撞车的正常
+  对白会被计入（人侧那 1 对即此类），判定权在人工/LLM 评审；
+  ③ 对话占比阈值仍需按更多人类语料复校，榜一逐章仍有 8/19 章低于 12%（动作戏章
+  天然无对话），该噪声已登记为回归上限（≤10 章）。
 
 ---
 

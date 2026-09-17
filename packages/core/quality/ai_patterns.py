@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -160,7 +161,7 @@ DEFAULT_ANTHRO_VEHICLE_MIN_COUNT = 3
 # 这条同时是「来源研究的结论不能整体照搬」的实证：体裁差异真实存在。
 
 # ---------------------------------------------------------------------------
-# 2026-09-17：可读性算子（长段 / 对话占比过低）
+# 2026-09-17：可读性算子（长段 / 对话占比过低）+ 撤回其指标化产物（接词回声）
 # ---------------------------------------------------------------------------
 # 来源：书 prj_bcb9d1930bd4 全弧 48 章 / 122350 可见字 的读者反馈「可读性差」，
 # 与文风锚点书榜一《快穿之人渣洗白手册》侯府弧 19 章 / 37806 可见字 逐指标对照
@@ -184,9 +185,9 @@ DEFAULT_LONG_PARA_WARN_CHARS = 100
 DEFAULT_LONG_PARA_ERROR_CHARS = 140
 DEFAULT_LONG_PARA_MIN_COUNT = 2
 
-# 对话占比阈值：<12% → warning 档；<8% → error 档。
-# 依据：榜一 16.5%（人类基线）· 番茄男频主流 25~40% · 本仓题材包 style_constraints
-# 对话区间 10~32%（我们 11.4%，贴着题材区间地板）。
+# 对话占比阈值：**只有 <12% → warning 这一档**（<8% → error 档已于 2026-09-17 撤回，
+# 见下）。依据：榜一 16.5%（人类基线）· 番茄男频主流 25~40% · 本仓题材包
+# style_constraints 对话区间 10~32%（我们 11.4%，贴着题材区间地板）。
 # **口径**：对话＝成对 “…”（U+201C/U+201D）内的**可见字**；分母＝全章可见字
 # （与 wordcount.visible_chars 同式）。落库前经 quality.normalize 统一引号形态，
 # 故“” 是权威形态（「」/英式直引号在落库时已规整；归一化前调用会低估）。
@@ -194,8 +195,55 @@ DEFAULT_LONG_PARA_MIN_COUNT = 2
 # ——两处口径不同源，本规则不做「对话占比过低」以外的判定，也不改那处。
 # **章级提示而非违规判定**：单章方差极大（榜一 ch1 0.0% / ch19 40.6%），
 # 弧级看守见 tests/unit/quality/test_readability_baseline.py。
+#
+# **撤回 error 档（2026-09-17，用户实测反馈）**：对话占比是**可优化指标**，不是
+# 质量判据——逼模型凑指标必然产出灌水。原 <8% → error 档连同题材包/生成驱动里的
+# 「对话占比 ≥20%」硬指标一起施行后，用户实测反馈「你现在的改法书一点就不好读了，
+# 全是重复性的对话灌水，上一句说了啥，下一句接着重复一遍」，实证：
+#   - ch3 验仓戏**为凑对话编造对白并破人设**：让主角主动交代「七成发霉率」、主动
+#     透露「三天后什么价」（价签是他唯一底牌）；
+#   - ch33 六句对白全是**接词回声**（「三百人，够不够守城？」→「三百。」→「三百人，
+#     吃什么？」→「够七天。」→「七天之后呢？」→「七天之后，看你守不守得住。」），
+#     每句复述上一句的词，六句下来局面毫无变化。
+# 章级口径本身也会误报：人类锚点书 19 章里 8 章低于 12%、**首章 0.0%**——人类作者
+# 写得出整章无对话的动作戏。故本规则**只作提示不作闸门**：任何情况只返回 warning，
+# 绝不进 errors 桶（判别：tests/unit/quality/test_dialogue_low_warning_only.py）。
+# 由此暴露的真实缺陷形状（指标化写作目标的副作用）见 F-18 与下面的 AI-DIALOGUE-ECHO。
 DEFAULT_DIALOGUE_LOW_WARN_RATIO = 0.12
-DEFAULT_DIALOGUE_LOW_ERROR_RATIO = 0.08
+
+# ---------------------------------------------------------------------------
+# 2026-09-17：接词回声（AI-DIALOGUE-ECHO）——把上面那个副作用的**症状**本身
+# 做成算子：对话不该是「接龙复述」，而该是**信息递增**（每句带来新东西）。
+# ---------------------------------------------------------------------------
+# 为什么是「相邻对白」而不是「对话占比」：占比逼出来的病有具体形状可正则化，
+# 而占比本身没有（人类 0.0% 的章合法）。两条一正一反：撤掉错误的闸门，留下症状的探针。
+#
+# 实测（复算入口 scripts/readability_audit.py，两侧语料同口径；摘要在该脚本汇总行）：
+#   默认口径：书 prj_bcb9d1930bd4 48 章 → 26 对 / 20 章命中；榜一侯府弧 19 章 → 1 对 / 1 章。
+#   形态拆解（生成侧 48 章 / 人侧 19 章）：只留复述型 15 对 / 1 对；只留接词型 20 对 / 0 对；
+#   接词型阈值抬到 0.70 → 15 对 / 0 对；开口守卫放开（min_opening=0）→ 46 对 / 28 章（人侧 1 对不变）。
+# 两种形态分开定阈（实测两种都真实存在；只留其一都会漏掉用户实证里的对白）：
+#   ① **复述型** ``ratio >= 0.70``：后句实义字中 ≥70% 出现在前句（把对方的话基本
+#      复述一遍）。例：「三百人，够不够守城？」→「三百。」（1.00）、「见周账房了」
+#      →「见了」（1.00）、「你守后队」→「后队有人殿后你在那儿」（0.75）。
+#   ② **接词型** ``overlap >= 0.66`` 且**开口连续重合 ≥2 字**：后句开口就接对方的词。
+#      例：「够七天。」→「七天之后呢？」（0.67、开口 2）、「七天之后呢？」→
+#      「七天之后，看你守不守得住。」（0.80、开口 4）。
+#      - 0.66 而非 0.70：上述必命中样例实测 2/3 = 0.67，0.70 会漏掉它（阈值落在
+#        样例分布之外，本仓实测该形态生成侧 20 对 → 15 对）；人侧 19 章在该形态上
+#        0.66 与 0.70 **同为 0 对**——即 0.70 只减召回、不加精确率。
+#      - 开口 ≥2 字是**精确率守卫**（实测逼出来的）：放开到 0，人侧仍 1 对不变，而
+#        生成侧 26 对 → 46 对（命中章 20 → 28），多出来的全是「短促称呼/术语 + 长回答」
+#        型误报（「林昭。」→「林昭你跟我走……」＝称呼；「北山驿路」→「你怎么知道北山
+#        驿路的事」＝长回答里夹带），与接词无关。
+# 精度口径：算子只看字面重合，**不判断对白是否有后果**——信息递增但用词撞车的正常
+# 对白会被计入（人侧那 1 对即此类：「…我们明天一早就在城门口等吧」→「好啊，明儿个
+# 我们就在城门口等他们。」），故 severity 恒 warning、附 samples 供人工过目。
+DEFAULT_DIALOGUE_ECHO_MIN_RATIO = 0.70
+DEFAULT_DIALOGUE_ECHO_MIN_OVERLAP = 0.66
+DEFAULT_DIALOGUE_ECHO_MIN_OPENING = 2
+# 单侧实义字下限：单字应答（「嗯。」「好。」）不含信息、判它没有意义，不参与成对比较。
+_MIN_DIALOGUE_ECHO_CHARS = 2
 
 # 两条可读性规则的**最小判定长度**（照 _MIN_PROSE_CHARS_FOR_DENSITY 先例）：
 # 短片段（单测样例、引文、题记）没有排版/配比的统计意义，一律不判。
@@ -304,9 +352,24 @@ AI_PATTERN_RULES: list[AiPatternRule] = [
         severity="warning",
         message="对话占比过低：{dialogue_ratio:.1%}（{dialogue_chars}/{total_visible_chars} 可见字）",
         description=(
-            "对话（成对“…”内的可见字）占全章可见字比例 <12% 报警、<8% error；"
+            "对话（成对“…”内的可见字）占全章可见字比例 <12% → **warning（唯一档位）**；"
             "人类基线书 16.5%、番茄男频主流 25~40%、本仓题材包区间 10~32%。"
-            "可见字 <600 的片段不判（统计无意义）。阈值与依据见模块内常量注释。"
+            "可见字 <600 的片段不判（统计无意义）。**2026-09-17 撤回 <8% error 档**："
+            "对话占比是可优化指标，逼模型凑数会产出灌水对白；低对话章合法（人类锚点"
+            "首章 0.0% 整章无对话）。本规则只作提示、不作闸门，绝不进 errors 桶——"
+            "症状探针见 AI-DIALOGUE-ECHO。阈值与依据见模块内常量注释。"
+        ),
+    ),
+    AiPatternRule(
+        rule_id="AI-DIALOGUE-ECHO",
+        severity="warning",
+        message="相邻对白接词回声 {count} 对（例：{sample}）",
+        description=(
+            "相邻两句对白之间「后句接前句的词」——复述型（后句实义字 ≥70% 出现在前句）"
+            "或接词型（开口连续重合 ≥2 字且重叠系数 ≥0.66）。实测：本仓 48 章 26 对 / "
+            "20 章命中，人类锚点书 19 章 1 对（信息递增但用词撞车，合法写法）。"
+            "算子只看字面重合，**不判断对白是否有后果**，故 severity 恒 warning、附 "
+            "samples 供人工过目。阈值与依据见模块内常量注释。"
         ),
     ),
 ]
@@ -778,9 +841,13 @@ def _scan_dialogue_low(
     prose: str,
     *,
     warn_ratio: float = DEFAULT_DIALOGUE_LOW_WARN_RATIO,
-    error_ratio: float = DEFAULT_DIALOGUE_LOW_ERROR_RATIO,
 ) -> list[dict[str, Any]]:
-    """对话占比过低：<warn_ratio ⇒ warning；<error_ratio ⇒ error。"""
+    """对话占比过低：<warn_ratio ⇒ **warning（唯一档位）**。
+
+    error 档（<8%）已于 2026-09-17 撤回——理由与实证见模块内常量注释（逼模型凑
+    对话指标会产出灌水对白，且人类锚点书写得出整章无对话）。本函数**不含任何
+    返回 error 的路径**，severity 恒为 ``"warning"``。
+    """
     total = visible_chars(prose)
     if total < _MIN_PROSE_CHARS_FOR_READABILITY:
         return []
@@ -791,7 +858,7 @@ def _scan_dialogue_low(
     return [
         {
             "rule_id": "AI-DIALOGUE-LOW",
-            "severity": "error" if ratio < error_ratio else "warning",
+            "severity": "warning",
             "message": (
                 f"对话占比过低：{ratio:.1%}"
                 f"（{dialogue_chars}/{total} 可见字，阈值 {warn_ratio:.0%}）"
@@ -801,8 +868,170 @@ def _scan_dialogue_low(
             "dialogue_chars": dialogue_chars,
             "total_visible_chars": total,
             "warn_ratio": warn_ratio,
-            "error_ratio": error_ratio,
             "excerpt": prose[:120],
+        }
+    ]
+
+
+# --- 可读性：相邻对白接词回声 -------------------------------------------------
+
+# 实义字：汉字与数字（数字是接词回声的关键信号——「七天」「三百」「十四五两」这类
+# 数字被后句复述，是本规则最能分辨「复述」与「真回答」的特征；标点/空白/字母不计）。
+_SUBSTANTIVE_CHAR_RE = re.compile(r"[\u4e00-\u9fff0-9]")
+# 抽样展示时的单侧截断长度（samples 只供人工过目，不参与判定）。
+_ECHO_SAMPLE_MAX_CHARS = 40
+
+
+@dataclass(frozen=True)
+class DialogueEchoPair:
+    """一对相邻对白及其回声指标（供抽样核对：算子只看字面，判定权在人和 LLM）。"""
+
+    front: str  # 前句对白原文（引号内，已截断）
+    back: str  # 后句对白原文（引号内，已截断）
+    front_chars: str  # 前句实义字
+    back_chars: str  # 后句实义字
+    recall_ratio: float  # 复述型指标：后句实义字中出现在前句的比例
+    overlap_ratio: float  # 接词型指标：共同实义字 ÷ 较短一侧实义字
+    opening_repeat: int  # 后句开口起、连续出现在前句中的实义字数
+
+    @property
+    def sample(self) -> str:
+        """``前句→后句`` 形式（命中样例的展示形态）。"""
+        return f"{self.front}→{self.back}"
+
+
+def _substantive_chars(text: str) -> str:
+    """实义字序列：去标点/空白，保留汉字与数字。"""
+    return "".join(_SUBSTANTIVE_CHAR_RE.findall(text))
+
+
+def _dialogue_lines(prose: str) -> list[str]:
+    """全章的**对白句**序列：以 “ 起首的段，取其引号内的对白文本。
+
+    - 段切分与可读性两条规则同口径（:func:`_readability_paragraphs`，``\\n+``）——
+      外部锚点书一行一段、生产 draft 空行分段；
+    - 段内夹带的叙述（``“三百。”曹淳说`` 的 ``曹淳说``）不计入比较：本规则量的是
+      **对白之间**的接词，叙述是独立信息；
+    - 只认“”（U+201C/U+201D）：落库前经 ``quality.normalize`` 统一引号形态。
+    """
+    lines: list[str] = []
+    for para in _readability_paragraphs(prose):
+        if not para.startswith("\u201c"):
+            continue
+        quoted = "".join(m.group(1) for m in _DIALOGUE_PAIR_RE.finditer(para))
+        if quoted:
+            lines.append(quoted)
+    return lines
+
+
+def _opening_repeat_len(back: str, front: str) -> int:
+    """后句开口起、在前句中**连续出现**的最长实义字序列长度。
+
+    前缀是嵌套的（后句前 i 字出现 ⇒ 前 i-1 字也出现），故一旦失配即可停。
+    「开口接词」是本规则的第二形态：例「够七天」→「**七天**之后呢」（2）。
+    """
+    length = 0
+    while length < len(back) and back[: length + 1] in front:
+        length += 1
+    return length
+
+
+def _echo_ratios(front: str, back: str) -> tuple[float, float]:
+    """返回 ``(复述型比例, 重叠系数)``（均按实义字**多重集**取小计共同字）。
+
+    - 复述型 = 共同字 ÷ **后句**字数（后句有多少比例是复述前句的）；
+    - 重叠系数 = 共同字 ÷ **较短一侧**字数（两句的用词是不是同一批）。
+    """
+    front_count, back_count = Counter(front), Counter(back)
+    front_total, back_total = sum(front_count.values()), sum(back_count.values())
+    shared = sum(min(count, front_count[ch]) for ch, count in back_count.items())
+    recall = shared / back_total if back_total else 0.0
+    overlap = shared / min(front_total, back_total) if front_total and back_total else 0.0
+    return recall, overlap
+
+
+def dialogue_echo_pairs(prose: str) -> list[DialogueEchoPair]:
+    """全部**相邻对白对**及其指标（未过滤；供抽样与阈值校准）。
+
+    相邻 = 对白句序列里前后两项（中间夹叙述段不影响相邻性——夹在两句对白之间的一段
+    动作描写不改变「后句接了前句的词」这一事实）。单侧实义字 <
+    ``_MIN_DIALOGUE_ECHO_CHARS``（单字应答）不参与成对比较。
+    """
+    lines = _dialogue_lines(prose)
+    pairs: list[DialogueEchoPair] = []
+    for front_raw, back_raw in zip(lines, lines[1:]):
+        front, back = _substantive_chars(front_raw), _substantive_chars(back_raw)
+        if len(front) < _MIN_DIALOGUE_ECHO_CHARS or len(back) < _MIN_DIALOGUE_ECHO_CHARS:
+            continue
+        recall, overlap = _echo_ratios(front, back)
+        pairs.append(
+            DialogueEchoPair(
+                front=front_raw[:_ECHO_SAMPLE_MAX_CHARS],
+                back=back_raw[:_ECHO_SAMPLE_MAX_CHARS],
+                front_chars=front,
+                back_chars=back,
+                recall_ratio=recall,
+                overlap_ratio=overlap,
+                opening_repeat=_opening_repeat_len(back, front),
+            )
+        )
+    return pairs
+
+
+def count_dialogue_echoes(
+    prose: str,
+    *,
+    min_ratio: float = DEFAULT_DIALOGUE_ECHO_MIN_RATIO,
+    min_overlap: float = DEFAULT_DIALOGUE_ECHO_MIN_OVERLAP,
+    min_opening: int = DEFAULT_DIALOGUE_ECHO_MIN_OPENING,
+) -> list[DialogueEchoPair]:
+    """命中的接词回声对（同一对相邻对白最多计一次，两种形态是「或」关系）。
+
+    - **复述型**：``recall_ratio >= min_ratio``——后句基本是前句的复述；
+    - **接词型**：``overlap_ratio >= min_overlap`` 且 ``opening_repeat >= min_opening``
+      ——后句开口就接对方的词。
+
+    两者都命中时仍只记一对。**不判对白是否有后果**（那既无法正则化，也不该由
+    字面算子决定）——本规则是提示，不是闸门。
+    """
+    hits: list[DialogueEchoPair] = []
+    for pair in dialogue_echo_pairs(prose):
+        repeated = pair.recall_ratio >= min_ratio
+        picking_up = pair.overlap_ratio >= min_overlap and pair.opening_repeat >= min_opening
+        if repeated or picking_up:
+            hits.append(pair)
+    return hits
+
+
+def _scan_dialogue_echo(
+    prose: str,
+    *,
+    min_ratio: float = DEFAULT_DIALOGUE_ECHO_MIN_RATIO,
+    min_overlap: float = DEFAULT_DIALOGUE_ECHO_MIN_OVERLAP,
+    min_opening: int = DEFAULT_DIALOGUE_ECHO_MIN_OPENING,
+) -> list[dict[str, Any]]:
+    """接词回声章级命中：``count`` = 对数、``samples`` = 前 5 对（``前句→后句``）。
+
+    - 最小判定长度照 ``_MIN_PROSE_CHARS_FOR_DENSITY`` 先例：短片段（单测样例、引文）
+      的配比没有统计意义，不判；
+    - severity 恒 ``warning``（提示非闸门）——误报的判别权在人工/LLM 评审。
+    """
+    if visible_chars(prose) < _MIN_PROSE_CHARS_FOR_DENSITY:
+        return []
+    hits = count_dialogue_echoes(
+        prose, min_ratio=min_ratio, min_overlap=min_overlap, min_opening=min_opening
+    )
+    if not hits:
+        return []
+    samples = [p.sample for p in hits[:5]]
+    return [
+        {
+            "rule_id": "AI-DIALOGUE-ECHO",
+            "severity": "warning",
+            "message": f"相邻对白接词回声 {len(hits)} 对（例：{samples[0]}）",
+            "count": len(hits),
+            "samples": samples,
+            "excerpt": samples[0][:120],
         }
     ]
 
@@ -823,7 +1052,9 @@ def scan_ai_patterns(
     long_para_error_chars: int = DEFAULT_LONG_PARA_ERROR_CHARS,
     long_para_min_count: int = DEFAULT_LONG_PARA_MIN_COUNT,
     dialogue_low_warn_ratio: float = DEFAULT_DIALOGUE_LOW_WARN_RATIO,
-    dialogue_low_error_ratio: float = DEFAULT_DIALOGUE_LOW_ERROR_RATIO,
+    dialogue_echo_min_ratio: float = DEFAULT_DIALOGUE_ECHO_MIN_RATIO,
+    dialogue_echo_min_overlap: float = DEFAULT_DIALOGUE_ECHO_MIN_OVERLAP,
+    dialogue_echo_min_opening: int = DEFAULT_DIALOGUE_ECHO_MIN_OPENING,
 ) -> list[dict[str, Any]]:
     """扫描正文中的 AI 味/AI 腔模式。
 
@@ -861,8 +1092,14 @@ def scan_ai_patterns(
         )
     )
     hits.extend(
-        _scan_dialogue_low(
-            prose, warn_ratio=dialogue_low_warn_ratio, error_ratio=dialogue_low_error_ratio
+        _scan_dialogue_low(prose, warn_ratio=dialogue_low_warn_ratio)
+    )
+    hits.extend(
+        _scan_dialogue_echo(
+            prose,
+            min_ratio=dialogue_echo_min_ratio,
+            min_overlap=dialogue_echo_min_overlap,
+            min_opening=dialogue_echo_min_opening,
         )
     )
     return hits
@@ -876,17 +1113,22 @@ __all__ = [
     "DEFAULT_ANTHRO_VEHICLE_MIN_COUNT",
     "DEFAULT_CONTRAST_PAIR_RATE_PER_1K",
     "DEFAULT_DASH_THRESHOLD_PER_1K",
-    "DEFAULT_DIALOGUE_LOW_ERROR_RATIO",
+    "DEFAULT_DIALOGUE_ECHO_MIN_OPENING",
+    "DEFAULT_DIALOGUE_ECHO_MIN_OVERLAP",
+    "DEFAULT_DIALOGUE_ECHO_MIN_RATIO",
     "DEFAULT_DIALOGUE_LOW_WARN_RATIO",
     "DEFAULT_LONG_PARA_ERROR_CHARS",
     "DEFAULT_LONG_PARA_MIN_COUNT",
     "DEFAULT_LONG_PARA_WARN_CHARS",
     "DEFAULT_SHORT_PARA_RATE_PER_1K",
+    "DialogueEchoPair",
     "count_anthro_vehicles",
     "count_contrast_pairs",
+    "count_dialogue_echoes",
     "count_dialogue_visible_chars",
     "count_long_paragraphs",
     "count_short_paras",
+    "dialogue_echo_pairs",
     "dialogue_ratio",
     "scan_ai_patterns",
 ]
