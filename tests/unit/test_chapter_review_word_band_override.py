@@ -18,6 +18,7 @@ from pathlib import Path
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
 from packages.workflows.chapter_review.pipeline import _basic_checks_node
+from tests.unit.neutral_prose import neutral_prose
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
@@ -93,7 +94,7 @@ def test_no_override_default_behavior_unchanged(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)  # word_band_json=None
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 2000)
+    _insert_draft(db_path, cid, neutral_prose(2000))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["word_band"] == {"low": 1700, "high": 2300}
@@ -124,7 +125,7 @@ def test_override_tight_ratios_1720_becomes_over_band(tmp_path: Path):
         word_band_json=json.dumps({"low_ratio": 0.9, "high_ratio": 1.1, "floor": 1200}),
     )
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1720)
+    _insert_draft(db_path, cid, neutral_prose(1720))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["word_band"] == {"low": 1800, "high": 2200}
@@ -149,7 +150,7 @@ def test_override_loose_ratios_1200_no_error(tmp_path: Path):
         word_band_json=json.dumps({"low_ratio": 0.7, "high_ratio": 1.3, "floor": 1200}),
     )
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1200)
+    _insert_draft(db_path, cid, neutral_prose(1200))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["word_band"] == {"low": 1400, "high": 2600}
@@ -171,7 +172,7 @@ def test_override_tight_band_raises_error_when_beyond_edge_distance(tmp_path: Pa
         word_band_json=json.dumps({"low_ratio": 0.9, "high_ratio": 1.1, "floor": 1200}),
     )
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1500)
+    _insert_draft(db_path, cid, neutral_prose(1500))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["within_range"] is False
@@ -195,7 +196,7 @@ def test_override_floor_lifts_low_but_high_unaffected(tmp_path: Path):
         word_band_json=json.dumps({"low_ratio": 0.85, "high_ratio": 1.15, "floor": 1000}),
     )
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 900)
+    _insert_draft(db_path, cid, neutral_prose(900))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 1000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["word_band"] == {"low": 1000, "high": 1150}
@@ -215,7 +216,7 @@ def test_invalid_json_word_band_falls_back_to_default(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path, word_band_json="not-a-json-string")
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 2000)
+    _insert_draft(db_path, cid, neutral_prose(2000))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     # 默认 0.85/1.15/1200
@@ -227,7 +228,7 @@ def test_array_json_word_band_falls_back_to_default(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path, word_band_json=json.dumps([1, 2, 3]))
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 2000)
+    _insert_draft(db_path, cid, neutral_prose(2000))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["word_band"] == {"low": 1700, "high": 2300}

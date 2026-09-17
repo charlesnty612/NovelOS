@@ -190,13 +190,28 @@ def _polish_ctx(db_path: Path, chapter_id: str, prose: str, **overrides: Any) ->
 def _flat_sentence_prose() -> str:
     """句长完全均一（std=0 < Q7_FLAT_SENTENCE_STD=3）且 ≥1000 字。
 
-    交替两种 8 字句：避开「三连同一开头」（AI-TRIPLET-OPENING）与「他/她」排比
-    （AI-PRONOUN-PILE），也不含禁用词 / 解释腔 / marker —— 保证预检只有 req_q7
-    的句长腿命中（另两腿在用例内自证为零）。
+    四种 8 字句循环（前两种叙述、后两种对话，句长逐个相等故 std 仍为 0）：
+
+    - 段首两字互不相同 → 避开「三连同一开头」（AI-TRIPLET-OPENING）；
+    - 无「他/她」连续三句起首 → 避开 AI-PRONOUN-PILE；
+    - 每 6 句分段（段长 48 字）→ 避开 AI-SHORT-PARA / AI-LONG-PARA
+      （2026-09-17：旧版是一整段 1008 字，会被长段规则正确判为 error）；
+    - 对话占比约 44% → 避开 AI-DIALOGUE-LOW；
+    - 不含禁用词 / 解释腔 / marker / 破折号省略号 —— 保证预检只有 req_q7
+      的句长腿命中（另两腿在用例内自证为零）。
     """
-    a = "院子里没有声响。"
-    b = "苏婉清抬眼看钟。"
-    return "".join(a if i % 2 == 0 else b for i in range(126))
+    sentences = (
+        "院子里没有声响。",
+        "“不要走出去。”",
+        "苏婉清抬眼看钟。",
+        "“别去开门吧。”",
+    )
+    n = 126
+    paragraphs = [
+        "".join(sentences[i % 4] for i in range(start, min(start + 6, n)))
+        for start in range(0, n, 6)
+    ]
+    return "\n\n".join(paragraphs)
 
 
 # ---------------------------------------------------------------------------

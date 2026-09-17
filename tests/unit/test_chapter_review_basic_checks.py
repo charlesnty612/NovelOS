@@ -22,6 +22,7 @@ from pathlib import Path
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
 from packages.workflows.chapter_review.pipeline import _basic_checks_node
+from tests.unit.neutral_prose import neutral_prose
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
@@ -86,6 +87,17 @@ def _insert_draft(db_path: Path, chapter_id: str, content: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 中性填充正文（2026-09-17 改：可读性算子上线后改用共享 helper）
+# ---------------------------------------------------------------------------
+# 旧填充是单段 ``"中" * N``——那一整段就是「手机上一段 N 行实心字」的病理样本，
+# 新增的 AI-LONG-PARA（单段 >140 可见字 → error）与 AI-DIALOGUE-LOW（通篇零
+# 对话 → error）会**正确**命中它，把这些只测字数带的用例判红。
+# ``neutral_prose`` 保持**可见字数逐字不变**（用例断言的是 ±15% / ±30% 的精确
+# 百分比），只把填充改为多段 + 含约 20% 对话的真实句子——这些用例的目的从来
+# 不是测排版或对话配比（见 tests/unit/neutral_prose.py）。
+
+
+# ---------------------------------------------------------------------------
 # 1) 在 band 内 → 无 warning / 无 error
 # ---------------------------------------------------------------------------
 
@@ -95,7 +107,7 @@ def test_in_band_no_warning_no_error(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 2000)
+    _insert_draft(db_path, cid, neutral_prose(2000))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     out = _basic_checks_node(ctx)
     rep = out["review_report"]
@@ -117,7 +129,7 @@ def test_warning_band_deviation_above_15pct(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1720)
+    _insert_draft(db_path, cid, neutral_prose(1720))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["within_range"] is True
@@ -130,7 +142,7 @@ def test_warning_band_deviation_just_over_15pct(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1690)
+    _insert_draft(db_path, cid, neutral_prose(1690))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["within_range"] is False
@@ -149,7 +161,7 @@ def test_warning_just_under_30pct_no_error(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1420)
+    _insert_draft(db_path, cid, neutral_prose(1420))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["within_range"] is False
@@ -167,7 +179,7 @@ def test_error_under_30pct_boundary(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1390)
+    _insert_draft(db_path, cid, neutral_prose(1390))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["within_range"] is False
@@ -188,7 +200,7 @@ def test_error_over_30pct_boundary(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 2610)
+    _insert_draft(db_path, cid, neutral_prose(2610))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["within_range"] is False
@@ -227,7 +239,7 @@ def test_visible_chars_folds_whitespace(tmp_path: Path):
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
     # 2000 中文字符 + 大量空白
-    content = ("中" * 2000) + ("   \n\t\r\n" * 100)
+    content = (neutral_prose(2000)) + ("   \n\t\r\n" * 100)
     _insert_draft(db_path, cid, content)
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
@@ -246,7 +258,7 @@ def test_default_target_fallback(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 3000)
+    _insert_draft(db_path, cid, neutral_prose(3000))
     ctx = {"db_path": db_path, "chapter_id": cid}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["target_word_count"] == 3000
@@ -267,7 +279,7 @@ def test_forbidden_word_hit_adds_warning(tmp_path: Path):
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
     # 在 band 内（target=2000, visible≈1900）→ 不产生 W-LEN-DEVIATION
-    filler = "正文" * 950  # 1900 字符
+    filler = neutral_prose(1900)
     _insert_draft(db_path, cid, ("仿佛" * 5) + filler)
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
@@ -286,7 +298,7 @@ def test_boundary_15pct_just_inside_no_warning(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1530)
+    _insert_draft(db_path, cid, neutral_prose(1530))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 1800}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["deviation_pct"] == -15.0
@@ -300,7 +312,7 @@ def test_boundary_15pct_just_outside_has_warning(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1529)
+    _insert_draft(db_path, cid, neutral_prose(1529))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 1800}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["deviation_pct"] == -15.1  # round((1529-1800)/1800*100, 1) = -15.06 → -15.1
@@ -315,7 +327,7 @@ def test_boundary_30pct_just_inside_no_error(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1260)
+    _insert_draft(db_path, cid, neutral_prose(1260))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 1800}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["deviation_pct"] == -30.0
@@ -329,7 +341,7 @@ def test_boundary_30pct_just_outside_has_error(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1259)
+    _insert_draft(db_path, cid, neutral_prose(1259))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 1800}
     rep = _basic_checks_node(ctx)["review_report"]
     # round((1259-1800)/1800*100, 1) = -30.055... → -30.1
@@ -346,7 +358,7 @@ def test_boundary_in_band_center_visible_1700(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 1700)
+    _insert_draft(db_path, cid, neutral_prose(1700))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 1800}
     rep = _basic_checks_node(ctx)["review_report"]
     assert rep["deviation_pct"] == -5.6
@@ -364,7 +376,7 @@ def test_ai_pattern_hits_field_always_present(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 2000)
+    _insert_draft(db_path, cid, neutral_prose(2000))
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]
     assert "ai_pattern_hits" in rep
@@ -377,7 +389,7 @@ def test_ai_pattern_forbidden_word_merged_into_report(tmp_path: Path):
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
     # 在 band 内，避免字数 warning 干扰
-    filler = "正文" * 950  # 1900 字符
+    filler = neutral_prose(1900)
     _insert_draft(db_path, cid, ("仿佛" * 3) + filler)
     ctx = {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
     rep = _basic_checks_node(ctx)["review_report"]

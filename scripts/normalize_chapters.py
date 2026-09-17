@@ -31,6 +31,7 @@ from packages.core.quality.normalize import (  # noqa: E402
     find_internal_identifiers,
     normalize_prose,
 )
+from packages.core.quality.wordcount import visible_chars  # noqa: E402
 
 
 def _latest_drafts(conn: sqlite3.Connection, project_id: str) -> list[tuple[int, str, str]]:
@@ -51,11 +52,75 @@ def _latest_drafts(conn: sqlite3.Connection, project_id: str) -> list[tuple[int,
     return [(r["number"], r["draft_id"], r["content"] or "") for r in rows]
 
 
+_SENT_END = "。！？…"
+
+
+def split_long_paragraph(para: str, limit: int) -> list[str]:
+    """按句把超长段落切开——**只插换行，一个字不改**。
+
+    为什么只能切不能改：段落过长是手机端可读性第一杀手（2026-09-17 实测：本仓
+    48 章 >120 字段 46 个，人类锚点书只有 2 个），而切段是**语义零变更**的机械操作
+    ——与引号归一化同类的安全修法。
+
+    安全边界：引号未闭合的位置不切（对白可能跨段续写，切错了会改变说话人归属）。
+    判定：候选切点＝句末字符（。！？…）之后、且此刻弯引号层深为 0 的位置。
+    """
+    if visible_chars(para) <= limit:
+        return [para]
+    # 候选切点：句末字符之后且引号闭合处
+    cands: list[int] = []
+    depth = 0
+    for i, ch in enumerate(para):
+        if ch == "\u201c":
+            depth += 1
+        elif ch == "\u201d":
+            depth = max(0, depth - 1)
+        elif ch in _SENT_END and depth == 0:
+            cands.append(i + 1)
+    if not cands:
+        return [para]
+    out: list[str] = []
+    start = 0
+    for idx, pos in enumerate(cands):
+        seg = para[start:pos]
+        nxt = para[start : (cands[idx + 1] if idx + 1 < len(cands) else len(para))]
+        # 切入条件：再加下一句就超限，且当前段已经有内容
+        if visible_chars(seg) > 0 and visible_chars(nxt) > limit:
+            out.append(seg.strip())
+            start = pos
+    tail = para[start:].strip()
+    if tail:
+        out.append(tail)
+    return out or [para]
+
+
+def rescale_paragraphs(text: str, limit: int) -> tuple[str, int]:
+    """返回 (新文本, 被切开的段数)。段落之外的换行结构原样保留。"""
+    out_lines: list[str] = []
+    cut = 0
+    for para in text.split("\n"):
+        if not para.strip():
+            out_lines.append(para)
+            continue
+        segs = split_long_paragraph(para, limit)
+        if len(segs) > 1:
+            cut += 1
+        out_lines.append("\n\n".join(segs) if len(segs) > 1 else para)
+    return "\n".join(out_lines), cut
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="data/novelos.db")
     ap.add_argument("--project", required=True)
     ap.add_argument("--apply", action="store_true", help="写入（缺省 dry-run）")
+    ap.add_argument(
+        "--split-paras",
+        type=int,
+        default=0,
+        metavar="N",
+        help="顺带把超过 N 可见字的段落按句切开（只插换行，语义零变更）",
+    )
     args = ap.parse_args()
 
     conn = sqlite3.connect(args.db)
@@ -68,17 +133,25 @@ def main() -> int:
         total_q = 0
         touched: list[int] = []
         leaks: list[tuple[int, list[str]]] = []
+        total_cut = 0
+        cut_chapters: list[int] = []
         for number, draft_id, content in drafts:
             fixed, changes = normalize_prose(content)
+            if args.split_paras > 0:
+                fixed, cut = rescale_paragraphs(fixed, args.split_paras)
+                if cut:
+                    total_cut += cut
+                    cut_chapters.append(number)
             ids = find_internal_identifiers(fixed)
             if ids:
                 leaks.append((number, ids))
             q = sum(int(c.get("count") or 0) for c in changes)
-            if not q:
+            if not q and fixed == content:
                 continue
-            total_q += q
-            touched.append(number)
-            print(f"ch{number:2d}  引号 {q} 对  →  “”")
+            if q:
+                total_q += q
+                touched.append(number)
+                print(f"ch{number:2d}  引号 {q} 对  →  “”")
             if args.apply and fixed != content:
                 conn.execute(
                     "UPDATE drafts SET content = ? WHERE draft_id = ?",
@@ -87,6 +160,11 @@ def main() -> int:
         if args.apply:
             conn.commit()
         print()
+        if args.split_paras > 0:
+            head = ",".join(f"ch{n}" for n in cut_chapters[:12])
+            more = "…" if len(cut_chapters) > 12 else ""
+            print(f"长段切分：{len(cut_chapters)}/{len(drafts)} 章共切开 {total_cut} 段"
+                  f"（阈值 {args.split_paras} 可见字；{head}{more}）")
         print(f"{len(touched)}/{len(drafts)} 章有引号变更，合计 {total_q} 对"
               f"（{'已写入' if args.apply else 'dry-run，未写入'}）")
         if leaks:

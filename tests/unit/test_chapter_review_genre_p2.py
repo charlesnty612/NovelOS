@@ -24,6 +24,7 @@ from packages.workflows.chapter_review.pipeline import (
     _critic_review_node,
     _deep_review_node,
 )
+from tests.unit.neutral_prose import neutral_prose
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
@@ -252,7 +253,7 @@ def test_deep_review_payload_includes_genre_rubric(tmp_path: Path):
 def test_genre_forbidden_word_hits_go_to_warnings(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid, _PROSE + "，屋外的雨声一直没有停。" * 200)
+    cid = _insert_chapter(db_path, pid, _PROSE + "\n\n" + neutral_prose(2200))
     _bind_pack(db_path, pid, _PACK_PAYLOAD)
 
     report = _basic_checks_node(_ctx(db_path, cid))["review_report"]

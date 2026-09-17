@@ -287,7 +287,7 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 
 | 通道 | 职责 | 词表 / 工具 |
 |---|---|---|
-| `ai_patterns.scan_ai_patterns` | **权威信号源**：禁用词 / 三连句式 / 他她排比 / 章尾升华 / 标点滥用 / 解释腔的模式级命中清单（chapter_review 的 basic_hints 消费，不进子分） | `AI_PATTERN_FORBIDDEN_WORDS` 等（ai_patterns 内） |
+| `ai_patterns.scan_ai_patterns` | **权威信号源**：禁用词 / 三连句式 / 他她排比 / 章尾升华 / 标点滥用 / 解释腔 / 长段 / 对话占比的模式级命中清单（chapter_review 的 basic_hints 消费，不进子分；可读性两条见 §5.6） | `AI_PATTERN_FORBIDDEN_WORDS` 等（ai_patterns 内） |
 | `scoring.score_style` | **密度阈值**：`AI_FLAVOR_MARKERS` 每千字 ≥ 5 ⇒ -15 | 共享 `AI_FLAVOR_MARKERS` + `marker_hits_per_kchars` |
 | `ai_trace.cliche_density` | **跨章重复 + 套话阶梯**：`AI_CLICHES` 每千字命中阶梯扣分；跨章用 13 字 shingle | 共享 `AI_CLICHES`（= descriptors + connectives）+ `marker_hits_per_kchars` |
 | critic LLM `ai_flavor` 维度 | LLM 主观评分 | 本轮不接入评分（R9 留档，见 §6.1） |
@@ -295,6 +295,30 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 行为约束：本次统一**只换来源不改阈值**——`tests/unit/quality/test_ai_flavor.py` 锁定了
 5 个 fixture 的 style / ai_trace 旧值（`100/100`、`70/73`、`75/80`、`60/73`、`85/80`），
 以及 `AI_CLICHES` 与改造前原文的多重集相等；词表任何增删都会让测试变红。
+
+### 5.6 可读性算子（2026-09-17 新增）
+
+起因：`prj_bcb9d1930bd4` 全弧 48 章 / 122350 可见字 的读者反馈「可读性差」。
+与文风锚点书榜一《快穿之人渣洗白手册》侯府弧（19 章 / 37806 可见字）对照，
+两项指标**此前无任何算子看守**：
+
+| 指标 | 榜一（人类基线） | 生成侧 | 算子 | 阈值 |
+|---|---|---|---|---|
+| 单段可见字 | >100 字 7 段（每章至多 1 段，最长 135）· >140 字 0 段 | >100 字 133 段 · >140 字 16 段（最长 212） | `AI-LONG-PARA` | >100 → warning（单章 ≥2 段）· >140 → error（单段即报） |
+| 对话占比（成对“…”内可见字 ÷ 全章可见字） | 16.5% | 11.4% | `AI-DIALOGUE-LOW` | <12% → warning · <8% → error |
+
+- 两条规则都在 `packages/core/quality/ai_patterns.py`（`scan_ai_patterns` 内注册，
+  severity 自带两档，`chapter_review._basic_checks_node` 按 severity 自动分流
+  warnings/errors —— 该文件未改动）。
+- 段切分口径 `\n+`（外部锚点书一行一段；生产 draft 以空行分段，两口径在本仓语料上
+  仅差 5 段 / 3061）；字数口径 `wordcount.visible_chars`；**可见字 <600 的片段两条
+  规则都不判**。
+- 「长段」逐章判定、「对话占比」以全弧为有效粒度（单章方差极大：榜一第 1 章 0.0%、
+  第 19 章 40.6%）——人类侧看守与登记数字见
+  `tests/unit/quality/test_readability_baseline.py`，复算入口
+  `scripts/readability_audit.py`（只读）。
+- **遗留**：对话阈值仍需按更多人类语料复校；榜一逐章仍有 8/19 章低于 12%
+  （动作戏章天然无对话），该噪声已登记为回归上限（≤10 章）。
 
 ---
 

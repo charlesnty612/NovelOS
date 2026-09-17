@@ -16,6 +16,7 @@ from pathlib import Path
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
 from packages.workflows.chapter_review.pipeline import _basic_checks_node
+from tests.unit.neutral_prose import neutral_prose
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
@@ -124,7 +125,7 @@ def test_unbound_project_has_no_genre_check_segment(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 2000)
+    _insert_draft(db_path, cid, neutral_prose(2000))
 
     rep = _basic_checks_node(
         {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
@@ -149,7 +150,7 @@ def test_bound_with_deviation_emits_genre_check_and_warning(tmp_path: Path):
             ]
         },
     )
-    _insert_draft(db_path, cid, "中" * 3000)
+    _insert_draft(db_path, cid, neutral_prose(3000))
 
     rep = _basic_checks_node(
         {"db_path": db_path, "chapter_id": cid, "target_word_count": 3000}
@@ -183,7 +184,7 @@ def test_bound_without_issues_still_reports_segment(tmp_path: Path):
             ]
         },
     )
-    _insert_draft(db_path, cid, "中" * 3000)
+    _insert_draft(db_path, cid, neutral_prose(3000))
 
     rep = _basic_checks_node(
         {"db_path": db_path, "chapter_id": cid, "target_word_count": 3000}
@@ -200,7 +201,7 @@ def test_genre_check_word_band_issue_is_warning_only(tmp_path: Path):
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
     _bind_pack(db_path, pid)
-    _insert_draft(db_path, cid, "中" * 2000)
+    _insert_draft(db_path, cid, neutral_prose(2000))
 
     rep = _basic_checks_node(
         {"db_path": db_path, "chapter_id": cid, "target_word_count": 2000}
