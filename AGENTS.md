@@ -118,6 +118,6 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 |---|------|------|------|
 | 版本 | pyproject 3.9.0 = package.json 3.9.0 = importlib 读取 = uv.lock 3.9.0 | 同左（**含 editable 元数据**——发版后必须 `uv sync --extra dev` 刷新 dist-info，否则 /api/health 对外报旧版；R5 检修实测抓到的错核销已修正） | ✅ 2026-09-13 二次核销（uv sync 后实测） |
 | 表数 | 业务表 39 / 含 _migrations 40 | test_health + smoke EXPECTED_BUSINESS_TABLES=39 | ✅ 2026-09-15（0028 只加列不增表） |
-| 测试基线 | pytest 2198 passed / 2 skipped；vitest 485 | 大纲槽批次（0028 + outline 注入）后实测 | ✅ 2026-09-15 |
+| 测试基线 | pytest 2370 passed / 2 skipped；vitest 485 | 可读性算子批次（F-16/F-17/F-18：AI-LONG-PARA / AI-DIALOGUE-LOW 降 warning / AI-DIALOGUE-ECHO）后实测（`pytest -n 4 -q`，264s） | ✅ 2026-09-17 |
 | OpenAPI | 96 paths / 40 schemas | export_openapi 实测，契约测试 3 绿 | ✅ 2026-09-13 |
 | dev 库数据 | DRIFT:2（prj_8365f42af5a6） | **已修复**：v1 快照按 DB 重建 + 6 孤儿 state 清除，check_state_sync SYNC OK（2026-09-13，修前备份 /tmp/novelos_backup_pre_f8repair_20260913.db） | ✅ 已核销 |
