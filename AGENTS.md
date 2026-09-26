@@ -23,7 +23,7 @@ packages/core/     机制层：api(routers) / agent_runtime / context_engine / g
 packages/domain/   领域服务：project / chapter / character / world / plot / hooks …
 packages/workflows/ 工作流组装：chapter_plan/write/review/commit + deconstruct_book 等
                    （只有这里能 import 上层；core 不得 import workflows——有专门测试看守）
-database/migrations/ 唯一 DDL 来源（0001~0029；表数口径：业务表 39 / 含 _migrations 40）
+database/migrations/ 唯一 DDL 来源（0001~0030；表数口径：业务表 39 / 含 _migrations 40）
 docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / state-delta 等）
 ```
 
@@ -64,7 +64,7 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
 ## 四、命令与流程
 
 ```bash
-python scripts/migrate.py            # 迁移（新库全链 0001~0029）
+python scripts/migrate.py            # 迁移（新库全链 0001~0030）
 python -m ruff check packages scripts tests   # lint（测试文件豁免 E501）
 python -m pytest -n 4 -q             # 全量（约 4 分钟；xdist 需在 venv）
 cd apps/web && npx tsc -b && npx vitest run && npm run build
@@ -91,7 +91,7 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 | Windows 临时库删不掉 | python.exe 是启动器 stub，terminate 留孤儿进程 | taskkill /F /T 连树杀（F-6 已修） |
 | 事务内另开连接写库 → `database is locked` | WAL 单写者：外层连接的未提交写持有锁，内层新连接写等待 5s 后 OperationalError（daemon 线程吞掉更难查） | 嵌套写复用同一事务连接（M1-a 排障实录，2026-09-13）；判别：调用点是否已有 open conn |
 | 崩溃 run 重启不自愈（0026 后） | 启动自愈按 instance_id 归属过滤，新进程 id 不同 | 显式 `NOVELOS_INSTANCE_ID` 固定身份；或 `db_maintenance fix --apply`（F6 语义代价，知情裁决） |
-| 备份同库重导入含 `#dup` 后缀项目撞唯一索引 | commits.rollback_of 全库级唯一索引 vs 0022 去重后缀（pre-existing） | 登记不修（R-1，触发面窄+修法带 FK 风险）；恢复路径：导入新库 |
+| 备份同库重导入含 `#dup` 后缀项目撞唯一索引 | commits.rollback_of 全库级唯一索引 vs 0022 去重后缀（pre-existing）；含后缀的 rollback_of 不是导入 id 映射键 → 原样透传 → 同库重导入第二次撞索引 | **✅ 已修**（2026-09-26 挂账批次，双防线）：导入侧 rollback_of 纳入自引用处理（原值查映射→含 `#` 剥后缀再查→仍无置 None+warning）；schema 侧 0030 迁移改 `(project_id, rollback_of)` 唯一（项目内「至多回滚一次」约束力不变，跨项目共存放行）；判别：`tests/unit/test_backup_rollback_of_reimport.py`（修前撞 IntegrityError 红留证） |
 | dev 库快照与集合漂移 | 两次留痕手工改库发生在最后 commit 后（F-8 已定性非代码缺陷） | **✅ 已修复**：v1 快照按 DB 重建+清孤儿 state，SYNC OK；再犯路径=系统外手工改库，用 check_state_sync 核查 |
 | 拆书 canon 书名乱码（Git Bash curl 中文 argv 被转 GBK） | starlette 对 multipart 字段/文件名的解码策略是 utf-8 失败回退 latin-1（`_user_safe_decode`），原始字节不丢失 | 端侧 `_repair_mojibake` 逆变换（latin-1 编码回字节 → gb18030 解码，CJK 守卫防误修）已修（2026-09-13）；判别：纯 ASCII/含 >U+00FF 字符不动 |
 | 量产驱动撞 409「章节有活动 run」/停驱动的孤儿 run 卡死 | 客户端驱动被 TaskStop 后，服务端 run 继续跑；build_ctx 类节点失去调度方后可卡 RUNNING 数十分钟 | 续跑前先查 workflow_runs 该章 RUNNING/PAUSED 行：等其终态或 cancel；判别：POST 前 SELECT |
@@ -116,7 +116,9 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 | 整本书的铁律每次都得重新粘贴，漏一次即静默丢失 | `author_intent` 只在 `StartWorkflowRequest`（per-run），**没有项目级落点** | 0029 加 `projects.writing_bible`：圣经=基线、运行期=**增量**，**拼接**（单点 `builders_common.resolve_author_intent`，文本内声明冲突以增量为准）；writer/director 键各加 `bible_fp` 维度；判别：`tests/unit/test_project_writing_bible.py`（撤 `bible_fp` 必红：`assert 1 == 2`） |
 | 规则登记了却不生效（惰性声明）：`AI-BEAT-REPEAT` 进了 `CONFIRM_RULES` 但门禁永远看不到它 | `scan_ai_patterns` 的命中只进 `chapter_review`，`QualityEngine.evaluate` 从不消费 ⇒ 门禁从 `report.issues` 判，而报告里永远没有该 rule_id——**「登记」不等于「在消费路径上」** | 接线经 `quality/engine.py::ai_pattern_issues`（通用转换，rule_id 原样透传、不硬编码）；新规则入册时**必须核实生产端到消费端的完整链路**，而不是只看规则表里有它；判别：`tests/unit/quality/test_ai_pattern_wiring.py`（撤接线 6 例红） |
 | director 计划的 key_beats 落库成碎片数组（字符串/裸数组混进元素位），全程无告警 | LLM 非法 JSON 被 `extract_json` 三级兜底 `json_repair` 「修」成顶层可解析、内部腐烂的 dict；旧 `_validate_director` 只查顶层 schema_version ⇒ 腐烂结构静默过闸落库 `chapters.plan_json`（正文靠 chapter_goal 兜底不跑飞，故零告警） | **✅ 已修**（2026-09-21 批次）：`_DIRECTOR_PLAN_ARRAYS` 形状核销（元素必须 dict、key_beats 另须 str beat_id/purpose；键缺席放行不收紧必填面），违规抛 `AgentOutputError` 走 runner 重试；observer 7 数组同款守卫抽共用单点 `_array_shape_errors()`。注意定性：observer 侧碎片**本就会被 delta jsonschema 拦**（非静默落库），真危害是诊断退化+多烧一轮重试+风控门把碎片端给人工；判别：`tests/unit/test_director_planner_contract.py` 事故复现用例 + 拿真实事故 payload 喂 `validate_contract` 必拦 |
-| 改稿轮悄悄重写未提及段落，人工只能全文 diff 才发现 | revise 契约的 `---REVISION-CHECKLIST---` 核销表经 write 流水线 polisher 段后落库为 **null**；`deviations[]` 越界申报无机器强约束（2026-09-21 实证：指示「禁止改动打脸段落」，writer 仍整段重写且零申报） | 登记不修：① 核销表在 polisher 段的丢失要修（机读审计断链）② writer §6.1「越界必申报」需要违约成本（如未申报的超注改动比例进 self_report 硬校验）；过渡对策：人工审改版对与 v1 做相似度 diff，相似度异常低即超注重写嫌疑 |
+| 改稿轮悄悄重写未提及段落，人工只能全文 diff 才发现 | revise 契约的 `---REVISION-CHECKLIST---` 核销表落库为 null（**定性勘误 2026-09-26：真因是欠带翻模**——`_build_length_retry_payload` 强制 mode='write' 后采纳翻模稿，checklist 分支不命中；非 polisher 所致）；`deviations[]` 越界申报无机器强约束（2026-09-21 实证：指示「禁止改动打脸段落」，writer 仍整段重写且零申报） | **✅ 已修**（2026-09-26 挂账批次）：① 契约闸门 `revision_fidelity.preserved_ratio`（阈值 0.50 实测定锚）——revise 低保留比+零申报 → AgentOutputError 重试；② 节点 `revision_audit` 审计面（五态 checklist_status，翻模 `superseded_by_under_band_rewrite` 不再无痕）；判别：`tests/unit/test_structured_output.py` 保真 5 例 + `tests/workflow/test_chapter_write_revision_checklist.py` F/G 用例 |
+| 突变验证做完忘了恢复：接手者发现 2 用例红、R-1 修复整体失效 | 前任在 `_SELF_REF_COLS` 撤掉 rollback_of 项做突变验证后被中断，突变态残留工作区（`# MUTATION-3` 注释未清）——第一轮 INSERT 不收集重写项，修复成死代码 | 突变验证的「恢复后跑绿」与「全量终态绿」是同一闸门：**交接半成品前必须清点突变残留**（搜 `# MUTATION` 类标记 + 全量跑一遍）；接手者以测试红为线索回溯而非盲目重做；判别：接手汇报必须含「突变残留清点结果」 |
+| 全量复跑 1 例确定性失败：既有 e2e 夹具被新契约闸门拒（25 字上游 mock 整段改写零申报，ratio 0.0833 三次复现） | 新保真闸门按契约**正确拒绝**——夹具的 mock writer 本身是契约违规形态；「修闸门放水」与「修夹具合规」之间必须选后者 | mock writer 按申报路径②补 `self_report.deviations`（局部脚本化，不共享污染其它用例）；**闸门判别用例与夹具修复必须同批全绿**——夹具绿而判别用例红 = 闸门被削 |
 | 阻断信息「只说一半」：blocking 与 confirm 同时命中时，confirm 的 rule_id / override_error / evidence 全被吞 | `should_block` 分支 `if blocking_issues:` 优先后直接 return，`gate_blocked.rule_ids` 与 ValueError 消息只含 blocking 侧——作者修掉硬伤后再提交才第一次撞上 confirm，且不知道要准备什么 `gate_override` | **✅ 已修**（2026-09-21 检修）：`gate_kind="block+confirm"`——blocking 优先不可协商不变，rule_ids 取两组并集、note 合成两类建议、error 串在 `| guidance=` 之前追加 confirm 段（前端按 `| guidance=` 切分零影响）；判别：`test_gate_blocking.py::test_block_still_wins_over_confirm` + `test_block_only_still_uses_plain_block_message`（仅 blocking 时不加字段） |
 | 规则名说自己是连续性，报告里归成文风 | `engine._AI_PATTERN_CATEGORY` 未登记 `CONT-*`，落入默认回退 `style`——与 `continuity_taxonomy.DETERMINISTIC_CONTINUITY_RULE_IDS` 的命名空间声明矛盾（名实不符），按 category 分桶时连续性命中跑进「文风」桶 | **✅ 已修**（2026-09-21 检修）：映射从 taxonomy 名册**派生**（`{rid: "continuity" for rid in DETERMINISTIC_CONTINUITY_RULE_IDS}`），新连续性规则只需改 taxonomy 一处；判别：`test_ai_pattern_wiring.py::test_deterministic_continuity_rules_are_categorized_as_continuity` + `test_continuity_category_mapping_is_derived_from_taxonomy`（撤映射必红） |
 | prompt 纪律当强制用：write 模式吐出 stray 核销表尾块 → 原样落进 `drafts.content` 并抬高 word_count | 尾块剥离条件写的是 `mode == "revise"`，而 writer-v3.md「write 模式不输出尾块」只是 prompt 约定不是机器强制；模型一旦在 write / length-retry 轮违约，字数带按含尾块数字判定 | **✅ 已修**（2026-09-21 检修）：改为**看内容剥离**（分隔行出现就剥，坏 JSON 也剥——此前原样落稿）；write 模式剥掉的尾块**不进** `revision_checklist` 审计面（只登记 revise 的定向核销承诺）；判别：`test_chapter_write_revision_checklist.py::test_write_mode_stray_marker_is_stripped`（撤剥离必红） |
@@ -133,6 +135,6 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 |---|------|------|------|
 | 版本 | pyproject 3.9.0 = package.json 3.9.0 = importlib 读取 = uv.lock 3.9.0 | 同左（**含 editable 元数据**——发版后必须 `uv sync --extra dev` 刷新 dist-info，否则 /api/health 对外报旧版；R5 检修实测抓到的错核销已修正） | ✅ 2026-09-13 二次核销（uv sync 后实测） |
 | 表数 | 业务表 39 / 含 _migrations 40 | test_health + smoke EXPECTED_BUSINESS_TABLES=39 | ✅ 2026-09-15（0028 只加列不增表） |
-| 测试基线 | pytest 2807 passed / 2 skipped；vitest 485 | 全量检修复核批次（M1 confirm 并存吞信息 / M2 CONT-* 错类 / m3 dialogue-low evidence / m5 stray 尾块防呆 / m6 gate-revise 透传 target+intent / m7 docstring / m8 巡检无快照不计漂移）后实测（`pytest -n 4 -q`，301s）；2026-09-26 落库前独立复核再实测 **2807 / 2 / 0 failed**（341s，与 CHANGELOG 误记的 2817 订正同批） | ✅ 2026-09-26 复核 |
-| OpenAPI | 97 paths / 50 schemas | export_openapi 实测（m6 给 GateReviseRequest 加 target_word_count / author_intent），契约测试 3 绿；2026-09-26 复核 regen：types.generated.ts 逐字节一致、openapi.json 仅 version 字段环境元数据差异、内容零漂移 | ✅ 2026-09-26 复核 |
+| 测试基线 | pytest 2893 passed / 2 skipped；vitest 489 | 全量检修复核批次后 2807（09-21/09-26 晨复核）；2026-09-26 挂账清偿批次（审计断链/口径单点/词表两档/重开返修/源锚定/R-1 + 审查收尾 6 项）后实测 **2893 / 2 / 0 failed**（342s，含夹具按契约申报修复——闸门零改动） | ✅ 2026-09-26 复核 |
+| OpenAPI | 98 paths / 51 schemas | export_openapi 实测（挂账批次 reopen 端点入约 97→98 / 50→51）；regen 前后逐字节一致（09-26 verifier 双环境复核，`info.version=="3.9.0"` 以项目 .venv 产物为准） | ✅ 2026-09-26 复核 |
 | dev 库数据 | DRIFT:2（prj_8365f42af5a6） | **已修复**：v1 快照按 DB 重建 + 6 孤儿 state 清除，check_state_sync SYNC OK（2026-09-13，修前备份 /tmp/novelos_backup_pre_f8repair_20260913.db） | ✅ 已核销 |

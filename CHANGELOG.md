@@ -5,6 +5,68 @@
 
 ## [Unreleased]
 
+### 2026-09-26 挂账清偿批次：审计断链 / 口径单点 / 词表误报 / 重开返修 / 源锚定 / R-1（6 项 + 审查收尾 6 项）
+
+> **来源**：用户指令「近期不写作，全给修了它」（不动内容侧——无写作、内容仓零接触）。主会话三路
+> 定向侦察 + 亲验承重结论后定稿方案，四组并行开发（文件互斥分组）→ verifier 全量复跑 → 静态审查
+> （2 major + 4 minor，无突变残留）→ 收尾修复（含 1 个确定性夹具失败）。每项带「撤修复必红」。
+> **测试基线 2807 → 2893 passed / 2 skipped / 0 failed**（342s）；ruff / tsc 全绿、vitest 489；
+> OpenAPI 97→98 paths / 50→51 schemas（reopen 端点入约）；迁移链 0001~0030；check_state_sync SYNC OK。
+
+**1. 改稿审计断链（两半）** — ① `agent_runtime/revision_fidelity.py`（新）：`preserved_ratio`
+（quick_ratio 上界归零精确短路）+ `REVISE_MIN_PRESERVED_RATIO=0.50`（dev 库实测定锚：闸门管辖人群
+n=18 min 0.6463 / 静默重写簇 bulk ≤0.16）；`validate_contract` writer 分支——revise 模式低保留比
+且 `self_report.deviations` 零申报 → AgentOutputError（runner 自动重试 1 次，报错带实测比值与两条
+合规路径）；体量前置守卫（prose < 上游 10% 不进闸门，该形状归字数带闭环管辖）。②
+`chapter_write/pipeline.py` 节点产出新增 `revision_audit`（requested/final mode、五态
+checklist_status、preserved_ratio、deviations_count）——翻模 `superseded_by_under_band_rewrite`
+不再无痕。**事故链勘误**：核销表落 null 的真因是**欠带翻模**（`_build_length_retry_payload` 强制
+mode='write' 后采纳翻模稿）而非 polisher，修订 09-21 批次定性。
+
+**2. 章字数口径单点 + 开篇词表两档** — `genre/consumers.py::resolve_chapter_word_band`（绑定包
+`pacing.chapter_word_band` 三键齐全+次序合法才返回，source 指纹 `<pack_id>@<version>`；脏带整体
+拒绝回退默认）→ signing_check 字数检查三档（pass=带内 / warn=带缘 / fail=<floor），无包路径逐字
+不变；开篇规则支持自带 `keywords`（schema OpeningRule 可选字段声明）——curated 零命中=真 fail
+（detail 列词表），仅文本抽词零命中降级 **unverifiable**（创新词汇书整批误报根除）；service 恒报
+`word_band_source` + 脏带时 `word_band_rejected: true`；`genre/verifier.py` 带解析同点收敛
+（`chapter_word_band_invalid` reason），双模块对脏带不再打架。
+
+**3. COMMITTED 章重开返修** — 状态机 `ALLOWED_NEXT["COMMITTED"] += REVIEWED`（commits 历史
+append-only 不撤销，重开走既有评审/提交链产生新 commit）；`POST /api/chapters/{chapter_id}/reopen`
+（活动 run 守卫 409；reason 写 `plan_json.revision_note` 前缀 `reopen: `，换行拼接不覆盖历史）；
+前端章详情页 COMMITTED 态「重开返修」按钮 + 内联确认。**审查抓到旁路并封死**：通用 PATCH update
+显式拦截该边（update() 守卫，ChapterTransitionError→409），reopen 改直写 UPDATE（照 create_draft
+绕白名单先例）——「仅 reopen 可用」从注释升格为代码闭环。
+
+**4. observer 源锚定检测（恒 warning，绝不阻断）** — `story_state/delta_anchoring.py`（新）：
+① excerpt 归一化核验（引号/标点/空白归一化后须为源文本子串，OBS-EXCERPT-NOT-VERBATIM）；② after
+文本 CJK bigram 覆盖率 < 0.08 报 OBS-UNSOURCED-PHRASE（阈值 dev 库实测：n=398 p10=0.0986，触发率
+8.0% / 27 delta）。接线三处（commit 节点 output `source_anchoring` / HIGH 暂停 payload 摘要 /
+summary 计数），不进 BLOCKING_RULES、不碰 severity 矩阵与公式哈希。**判别力如实入档**：after 为
+概括性转写，bigram 信号弱（低覆盖样本 20 条人工检视零实捏造），定位「人工抽检入口」；excerpt 背景
+「违规」率 59.8% 系模型复述型摘录而非捏造（「第一代老镖头」事故条目属任意归一化版本都不命中的真
+捏造形态，dlt_2cefe69cd672 实证）。
+
+**5. R-1 双防线** — ① 导入侧：`backup/service.py` rollback_of 纳入自引用处理（原值查映射 → 含
+`#` 后缀剥后缀再查 → 仍无则置 None 并记 import warning）；② schema 侧：0030 迁移把全库级
+`idx_commits_rollback_of` 改为 `(project_id, rollback_of)` 唯一（不变式：rollback_of 指向的
+commit 只属一个 project，项目内「至多回滚一次」约束力不变，跨项目/重导入共存放行）。修前红留证：
+同库重导入撞 IntegrityError 复现测试。
+
+**6. 审查收尾（6 项）** — ① `_DELTA_ARRAYS`↔`_OBSERVER_ALL_ARRAYS` 一致性看守测试（core 不 import
+workflows 的双声明名册，docstring 声称落空补实）；② PATCH 借道封堵（见 3）；③ 审计状态改名
+`superseded_by_under_band_rewrite`（防与 `fresh_write` 重写开关撞词）；④ verifier 脏带口径收敛
+（见 2）；⑤ `word_band_rejected` 标注（见 2）；⑥ 既有 e2e 夹具
+`test_chapter_review_revise_loop_end_to_end` 被 1 的闸门正确拒绝（25 字上游 mock 整段改写零申报 →
+ratio 0.0833，三次复现）——**修夹具不修闸门**：mock writer 按契约路径②申报（局部
+`_writer_declared_rewrite_script`，闸门零改动）。**裁决留痕**：审查建议「体量守卫分支改为强制
+申报」不采纳——该分支服务「没干活」形状（字数带闭环管辖），强制申报会与节点内字数重试回路打架，
+且缺口需上游 ≥10× 带下限（万字级章）远超真实工作域；缺口已在 revision_fidelity docstring 记录。
+
+**09-21 契约批次「未修登记」5 项全部清偿**（① 审计断链 / ② 字数口径 / ③ keyword 误报 / ④
+COMMITTED 返修路径 / ⑤ observer 转写失真检测层）。新增挂账：无（excerpt 聚合面与
+OBS-UNSOURCED-PHRASE 判别力降级评估列为观察项，非缺陷）。
+
 ### 2026-09-26 进度同步复核（无代码改动，纯核销 + 文档订正）
 
 > 工作区三批次（09-18 / 09-21×2）滞留 5 天后统一落库前，由独立验证代理全量复核实测：
