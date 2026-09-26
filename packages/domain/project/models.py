@@ -10,6 +10,23 @@ V3.7 通过 ``0023_project_word_band.sql`` 新增可空列 ``word_band_json TEXT
 ``wordcount.word_band`` / ``classify_prose_length`` 的 ``low_ratio / high_ratio /
 floor`` 三个可选键。无覆盖（NULL）= 模块默认（0.85 / 1.15 / 1200）。
 
+2026-09-18 通过 ``0029_project_writing_bible.sql`` 新增可空列 ``writing_bible TEXT``
+——**项目级写作圣经**：跨章节长期有效的作者硬性约束（题材铁律 / 位面与世界观底线 /
+禁写项 / 称谓与视角约定 / 文风硬要求）。它补上了原本缺失的权威落点：``author_intent``
+只是 ``StartWorkflowRequest`` 上的**单次运行**字段，作者此前必须在每次
+``plan`` / ``write`` / ``revise`` 调用里重新粘贴整份铁律，漏一次即静默丢失。
+
+**优先级（``writing_bible`` vs 运行期 ``author_intent``）**：
+``writing_bible`` 是**项目级基线**，运行期 ``author_intent`` 是**本次运行的增量**。
+两者同时非空时**按「基线 + 增量」拼接**进装配 payload 的 ``author_intent.raw``
+（圣经在前、运行期要求在后，并显式声明「与上文冲突处以本节为准」）；只有一方非空
+时**逐字**用该方；两者都空 → payload 不出现 ``author_intent`` 段。
+选「拼接」而不选「运行期值整体覆盖」的理由：作者为某一章写一行小要求
+（如「本章价签只给价格数字」）时，整体替换会把全书铁律静默丢掉——正是本条要修的
+缺陷形状（静默丢失长期约束）；增量叠加让两条来源都保持效力，并在文本内显式给出
+冲突裁决方向（后置、更具体的指令对 LLM 优先级更高）。
+解析单点在 :func:`packages.core.context_engine.builders_common.resolve_author_intent`。
+
 - ``project_id`` 形如 ``prj_<12hex>``，由 Service 层 ``new_id("prj")`` 生成。
 - ``status`` 受 CHECK 约束，仅允许 ``ACTIVE / PAUSED / ARCHIVED``。
 - ``foreshadow_overdue_chapters``：Context Engine 装配开放伏笔清单时
@@ -60,6 +77,14 @@ class ProjectCreate(BaseModel):
             "省略/None=无覆盖。校验在 router 层走 resolve_band_config。"
         ),
     )
+    writing_bible: str | None = Field(
+        default=None,
+        description=(
+            "项目写作圣经：跨章节长期有效的作者硬性约束（题材铁律 / 禁写项 / "
+            "称谓与视角约定等）。省略/None=无圣经；空白串按无圣经处理（落 NULL）。"
+            "装配时与运行期 author_intent 按「基线 + 增量」拼接，见模型模块 docstring。"
+        ),
+    )
 
 
 class ProjectUpdate(BaseModel):
@@ -84,6 +109,13 @@ class ProjectUpdate(BaseModel):
             "None=清除覆盖；省略=保留原值。校验在 router 层走 resolve_band_config。"
         ),
     )
+    writing_bible: str | None = Field(
+        default=None,
+        description=(
+            "项目写作圣经。显式 null / 空白串 → 清除（落 NULL）；省略 → 保留原值。"
+            "装配优先级见模型模块 docstring（基线 + 增量拼接）。"
+        ),
+    )
 
 
 class Project(BaseModel):
@@ -96,6 +128,10 @@ class Project(BaseModel):
     ``projects.genre_pack_id`` 可空列，迁移 0025）；未绑定 / 极老库缺列 → None。
     绑定写路径在 ``packages/core/api/routers/genre.py``（bind / unbind 端点），本模型
     只做**读侧暴露**（GET /projects 列表与详情同步）。
+
+    ``writing_bible``（迁移 0029）：项目写作圣经原文；空白串读侧归一为 None
+    （写侧同样归一，故 DB 中只可能是 NULL 或非空文本）。装配侧优先级见模块
+    docstring；本模型只做读写搬运，不做拼接（拼接单点在 context_engine）。
     """
 
     project_id: str
@@ -121,6 +157,13 @@ class Project(BaseModel):
         description=(
             "绑定的题材包 id（题材库单 slot）；None = 未绑定 / 极老库缺列。"
             "绑定与解绑走 POST /projects/{pid}/genre-pack/bind|unbind。"
+        ),
+    )
+    writing_bible: str | None = Field(
+        default=None,
+        description=(
+            "项目写作圣经（迁移 0029 的可空列）；None = 无圣经 / 极老库缺列。"
+            "写入走 POST /projects 与 PATCH /projects/{pid}；不被任何工作流覆盖。"
         ),
     )
 

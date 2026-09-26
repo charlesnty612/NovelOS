@@ -457,6 +457,16 @@ def _regenerate_note(ctx: dict[str, Any]) -> str:
     return raw.strip()
 
 
+def _author_notes_field(brief: dict[str, Any]) -> dict[str, Any]:
+    """brief.author_notes 的 payload 片段：仅在非空时带上该键。
+
+    空串 / 缺失一律视为「作者未提供」——prompt 已声明它是最高优先级创作约束
+    （见各 prompt §2 的「作者备注」段），把空值传下去等于凭空造一条空约束。
+    """
+    notes = str(brief.get("author_notes") or "").strip()
+    return {"author_notes": notes} if notes else {}
+
+
 # ---------------------------------------------------------------------------
 # Transform: load_brief
 # ---------------------------------------------------------------------------
@@ -617,14 +627,17 @@ def _world_payload(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = ctx.get("brief") or {}
     premise = _resolve_stage_input(ctx, "premise")
     protagonist = premise.get("protagonist") or {}
+    brief_payload: dict[str, Any] = {
+        "genre": brief.get("genre"),
+        "logline": brief.get("logline"),
+        "target_words": brief.get("target_words"),
+    }
+    brief_payload.update(_author_notes_field(brief))
+
     payload: dict[str, Any] = {
         "agent": "world_builder",
         "prompt_version": "world_builder:v1",
-        "brief": {
-            "genre": brief.get("genre"),
-            "logline": brief.get("logline"),
-            "target_words": brief.get("target_words"),
-        },
+        "brief": brief_payload,
         "premise": {
             "title": premise.get("title"),
             "positioning": premise.get("positioning"),
@@ -697,13 +710,16 @@ def _character_payload(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = ctx.get("brief") or {}
     premise = _resolve_stage_input(ctx, "premise")
     world = _resolve_stage_input(ctx, "world")
+    brief_payload: dict[str, Any] = {
+        "genre": brief.get("genre"),
+        "logline": brief.get("logline"),
+    }
+    brief_payload.update(_author_notes_field(brief))
+
     payload: dict[str, Any] = {
         "agent": "character_designer",
         "prompt_version": "character_designer:v1",
-        "brief": {
-            "genre": brief.get("genre"),
-            "logline": brief.get("logline"),
-        },
+        "brief": brief_payload,
         "premise": {
             "title": premise.get("title"),
             "protagonist": premise.get("protagonist") or {},
@@ -884,7 +900,8 @@ def _fallback_chapter_seeds(
 def _upsert_volume(db_path: Any, project_id: str, payload: VolumeCreate) -> dict:
     """按 (project_id, number) upsert 卷。
 
-    - 已存在 → 更新 title（保持 volume_id 不变，避免下游引用断裂）。
+    - 已存在 → 按字段差异更新 title / arc_summary（保持 volume_id 不变，
+      避免下游引用断裂）——重跑 init 必须把新卷纲摘要落到同一卷上。
     - 不存在 → 走 VolumeService.create 路径。
 
     修复「只重跑卷纲」时新生成的 outline 撞 UNIQUE(project_id, number) 唯一约束。
@@ -893,7 +910,8 @@ def _upsert_volume(db_path: Any, project_id: str, payload: VolumeCreate) -> dict
     conn = get_connection(str(db_path))
     try:
         row = conn.execute(
-            "SELECT volume_id, title, status FROM volumes WHERE project_id = ? AND number = ?",
+            "SELECT volume_id, title, arc_summary, status FROM volumes "
+            "WHERE project_id = ? AND number = ?",
             (project_id, payload.number),
         ).fetchone()
     finally:
@@ -902,14 +920,20 @@ def _upsert_volume(db_path: Any, project_id: str, payload: VolumeCreate) -> dict
         created = svc.create(project_id, payload)
         return created
     volume_id = row["volume_id"]
-    # title 变化才更新，避免无谓写盘
+    # 仅变化字段才更新，避免无谓写盘
+    updates: dict[str, Any] = {}
     if row["title"] != payload.title:
-        svc.update(volume_id, VolumeUpdate(title=payload.title))
+        updates["title"] = payload.title
+    if (row["arc_summary"] or "") != (payload.arc_summary or ""):
+        updates["arc_summary"] = payload.arc_summary
+    if updates:
+        svc.update(volume_id, VolumeUpdate(**updates))
     return svc.get(volume_id) or {
         "volume_id": volume_id,
         "project_id": project_id,
         "number": payload.number,
         "title": payload.title,
+        "arc_summary": payload.arc_summary,
         "status": row["status"],
     }
 
@@ -920,7 +944,7 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
     - project：存在 project_id 则更新；否则创建。
     - characters：写入 characters 表（含 state v1）。
     - world：写入 locations / factions / world_rules。
-    - volume：创建第一卷。
+    - volume：创建 / 更新第一卷（title + arc_summary 落 volumes.arc_summary）。
     - chapters：按 chapter_seeds 创建章节（PLANNED）。
     - plot_events（可选）：把 volume 的 arc_summary 写成一条 type=other 的 plot_event。
 
@@ -1102,8 +1126,8 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
         existing_rules_by_name[name] = ent
         rule_ids.append(ent.id)
 
-    # 4) volume —— upsert：同 (project, number) 已存在则更新 title，否则新建。
-    #    解决「只重跑卷纲」时旧空壳卷造成 UNIQUE 冲突的问题。
+    # 4) volume —— upsert：同 (project, number) 已存在则更新 title / arc_summary，
+    #    否则新建。解决「只重跑卷纲」时旧空壳卷造成 UNIQUE 冲突的问题。
     #    outline 降级（未选该环节且 DB 无重建内容）时跳过整个卷 / 章 / plot_event
     #    链路，绝不落占位空卷。
     volume_id: str | None = None
@@ -1114,12 +1138,14 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
         outline_skipped = True
     else:
         volume_raw = outline.get("volume") or {"number": 1, "title": None, "arc_summary": ""}
+        volume_arc_summary = (volume_raw.get("arc_summary") or "").strip() or None
         volume = _upsert_volume(
             db_path,
             project_id,
             VolumeCreate(
                 number=int(volume_raw.get("number") or 1),
                 title=volume_raw.get("title"),
+                arc_summary=volume_arc_summary,
             ),
         )
         volume_id = volume["volume_id"]
@@ -1235,8 +1261,11 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
         finally:
             conn.close()
 
-        # 6) 把卷纲摘要记录为 plot_event（类型 other），便于 timeline / 大纲视图
-        arc_summary = (volume_raw.get("arc_summary") or "").strip()
+        # 6) 把卷纲摘要记录为 plot_event（类型 other），便于 timeline / 大纲视图。
+        #    与第 4 步的 volumes.arc_summary 是**两个消费方**：前者供时间线/大纲
+        #    视图读 planned 事件，后者是卷纲摘要的编辑面（前端 ProjectInitEditors
+        #    「卷纲摘要」）。两处同源写入，均来自 outliner 的 volume.arc_summary。
+        arc_summary = volume_arc_summary or ""
         if arc_summary:
             try:
                 plot_svc = PlotService(db_path)

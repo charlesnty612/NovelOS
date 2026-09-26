@@ -9,6 +9,8 @@
   ``seal()`` 方法显式控制（PATCH 不允许 sealed → active 反向跳变）。
 - ``terminal_snapshot_json`` 仅在 ``status='sealed'`` 时由 Service 写入
   story_states 最新快照 JSON；active 时保持 NULL。
+- ``arc_summary`` 由迁移 0020 加入（卷纲摘要，自由文本、可空）；创建 / 更新
+  均走本模块模型，project-init 的 ``volume_outliner`` 产出即写此列。
 - ``created_at / updated_at`` 为 ISO-8601 字符串，Service 层写入时使用
   ``now_iso()``。
 
@@ -30,12 +32,17 @@ VolumeStatus = Literal["active", "sealed"]
 class VolumeCreate(BaseModel):
     """创建卷请求体。
 
-    ``number`` 必填且 ≥1；``title`` 可选。状态在创建时固定为 ``active``，
-    不暴露给客户端指定（封存走显式 ``POST /seal`` 端点）。
+    ``number`` 必填且 ≥1；``title`` / ``arc_summary`` 可选。状态在创建时固定为
+    ``active``，不暴露给客户端指定（封存走显式 ``POST /seal`` 端点）。
+
+    ``arc_summary`` 是卷纲摘要（前端「卷纲摘要」编辑面），自由文本、不设
+    长度上限——与 ``plot_events.description`` 同口径（模型产出可能较长，
+    设硬上限会把合法内容变成 422/落库失败）。
     """
 
     number: int = Field(..., ge=1)
     title: str | None = Field(default=None, max_length=200)
+    arc_summary: str | None = None
 
 
 class VolumeUpdate(BaseModel):
@@ -47,6 +54,7 @@ class VolumeUpdate(BaseModel):
 
     title: str | None = Field(default=None, max_length=200)
     status: VolumeStatus | None = None
+    arc_summary: str | None = None
 
 
 class VolumeAssignRequest(BaseModel):
@@ -66,6 +74,7 @@ class Volume(BaseModel):
     project_id: str
     number: int
     title: str | None
+    arc_summary: str | None
     status: VolumeStatus
     terminal_snapshot_json: dict | None
     created_at: str
@@ -79,6 +88,7 @@ class VolumeListItem(BaseModel):
     project_id: str
     number: int
     title: str | None
+    arc_summary: str | None
     status: VolumeStatus
     terminal_snapshot_json: dict | None
     chapter_count: int

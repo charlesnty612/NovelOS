@@ -76,6 +76,7 @@ from .builders_common import (
     _summarize_entity,
     _truncate_summaries_to_token_budget,
     _world_state_excerpts,
+    resolve_author_intent,
 )
 from .cache import (
     _CACHE_MAX_SIZE,
@@ -188,4 +189,5 @@ __all__ = [
     "build_director_input",
     "build_observer_input",
     "build_writer_input",
+    "resolve_author_intent",
 ]

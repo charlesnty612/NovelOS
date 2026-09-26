@@ -9,7 +9,7 @@
 |---|---|---|
 | `load_plan` | Transform | 读 `chapters.plan_json` 准备 director_plan 输入；若 plan_json 为空 → 抛错 |
 | `scene_planner` | AI | P0 新增；**P1 起优先读 chapter-plan 落库的 scene_plan**（`chapter_scene_plans`，迁移 0027）——命中即跳过 LLM 调用（`scene_planner_status='from_plan'`）；未命中（老章 / 合并调用只回了计划段 / 0027 未迁移的老库）调 `scene_planner` agent 把 `director_plan` 翻译为结构化 Scene Plan（含 `scenes[]` / slots / conflict / turn / information_boundary / ending_hook）。支持 `mock_providers['scene_planner']`；任何失败降级到原 stub 机械映射逻辑，**不**阻断 writer run |
-| `writer` | AI | 调 Writer agent（`run_agent(..., expected="writer", mock_script=...)`），输出 `writer-output.v1` JSON（prose + self_report） |
+| `writer` | AI | 调 Writer agent（`run_agent(..., expected="writer", mock_script=...)`），输出 `writer-output.v1` JSON（prose + self_report）。**P0-2 生成期字数闭环（2026-09-18）**：产出低于字数带下限时在同一节点内以 `mode='write'` 整章重写（携带 `length_directive` 扩写指令），最多 `NOVELOS_WRITER_LENGTH_RETRIES`（默认 2）次额外尝试，取「离带最近」的一次；首次即带内 ⇒ 恰好 1 次调用 |
 | `save_draft` | State | 写 `drafts` 表（version 自增）+ `chapters.status` PLANNED→DRAFTED |
 
 注册名：`chapter-write`
@@ -62,11 +62,11 @@ Content-Type: application/json
 
 | 节点 | 默认 capability | 说明 |
 |---|---|---|
-| `writer`（revise 模式：revision_note + 既有 draft） | `light` | 与 critic / summarizer 共用轻量模型，省创作额度；适用于定向局部修改 |
-| `writer`（write / fresh_write 模式） | `creative_writing`（默认） | 全章重写走创作型模型，保持文风上限 |
+| `writer`（revise 模式：revision_note + 既有 draft） | `creative_writing`（默认） | **2026-09-15 推翻原设计**：改稿曾是 `light`（省创作额度），但门禁触发的改稿实际是整章扩写，审校档不做长文创作（书1 ch1 实证：revert 后同一句出现 2 次且仍欠带）。revise 与 write 同档 |
+| `writer`（write / fresh_write / 欠带重写模式） | `creative_writing`（默认） | 全章重写走创作型模型，保持文风上限 |
 | `polisher` | `creative_writing`（默认） | 不做能力覆盖，保持原行为 |
 | `scene_planner` | `creative_writing`（默认） | 不做能力覆盖，保持原行为 |
 
-`writer` 节点的 `revise` / `write` 由 `_writer_node` 在算出 `mode` 后决定是否传 `capability_override="light"`——`None` 时维持原 `capability_for("writer")` 链路，行为对其他节点零影响。
+`writer` 节点的 `revise` / `write` / 欠带重写（P0-2）一律走 `capability_override=None`——`None` 时维持 `capability_for("writer")` 链路，行为对其他节点零影响。
 
 注意：run 级 `model_overrides`（profile_id）始终优先于 capability 绑定；profile_id 传的是单档案钉死，优先级最高（见 `packages/core/agent_runtime/runner.py` `run_agent(..., profile_id=...)`）。`mock_script` 路径不消费 `capability_override`，mock 测试链路不受影响。

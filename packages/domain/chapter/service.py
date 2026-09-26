@@ -25,6 +25,10 @@ Sprint 5 起的 chapter drafts 人工改稿能力（list / create）。
   - ``version`` 计算：``COALESCE(MAX(version), 0) + 1``，在 INSERT 同事务内执行，
     避免并发竞态下产生重复 version。
   - ``created_by`` 固定 ``"human"``；``prompt_version`` / ``model_id`` 写 NULL。
+  - 「哪一版是被审 / 待核的那一版」不在本类解析：共享单点是
+    :func:`packages.domain.chapter.draft_resolver.resolve_draft`
+    （``(db_path, chapter_id, draft_version | None)``，``None`` = 最新一版）。
+    ``list_drafts`` 只负责「列出全部版本」，不做取舍。
 """
 
 from __future__ import annotations

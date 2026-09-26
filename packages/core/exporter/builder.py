@@ -106,7 +106,13 @@ def _export_heading(chapter: Mapping[str, Any]) -> str:
 
 
 def latest_draft_content(db_path: str, chapter_id: str) -> str:
-    """该章最新 draft（``version DESC``）正文；无 draft → 空串。公开 API（V3.9 批次 5.14）。"""
+    """该章最新 draft（``version DESC``）正文；无 draft → 空串。公开 API（V3.9 批次 5.14）。
+
+    有意取最新（P1-1）：本函数服务 txt / docx / 番茄投稿包等**产物面**——导出的是
+    「这一章现在的正文」，不存在「被审版本」这一说。需要「被审 / 被核那一版」的
+    读者不要复用本函数，走
+    :func:`packages.domain.chapter.draft_resolver.resolve_draft` 并按版本取。
+    """
     conn = get_connection(db_path)
     try:
         row = conn.execute(

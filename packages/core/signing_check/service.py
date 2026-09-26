@@ -64,6 +64,11 @@ def _fetch_latest_draft_content(db_path: str, chapter_id: str) -> str:
 
     SQL 来自 :mod:`packages.core.exporter.builder._latest_draft_content`（line 78-92）。
     复制而不 import 私有函数，按任务书要求做「跨包照搬」。
+
+    有意取最新（P1-1）：签约体检是**项目级**报告（逐章取「该章现在的正文」做
+    字数 / 开篇规则核销），不挂在任何一次评审 run 上、没有「被审版本」，
+    故按最新一版结算；需要指定版本的读者见
+    :func:`packages.domain.chapter.draft_resolver.resolve_draft`。
     """
 
     conn = get_connection(db_path)

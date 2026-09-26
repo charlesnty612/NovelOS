@@ -97,7 +97,7 @@
         "time_in_story": "string",
         "pov": "first_person | third_person_limited | third_person_omniscient",
         "pov_character_id": "character_id 或 null",
-        "target_words": "integer ≥ 0, V3.7+ 字数闭环：每 scene 字数预算（context_engine.builders._inject_scene_word_budget 注入；总和 = chapter.target_word_count 的 90~110%；超出 110% / 低于 90% 走等分兜底，余数补首场景）",
+        "target_words": "integer ≥ 0, V3.7+ 字数闭环：每 scene 字数预算（context_engine.builders_common._inject_scene_word_budget 注入；per-scene 总和 = chapter.target_word_count 的 ±10%；越界时按已声明值比例归一化，全缺省走等分+余数补首场景）",
         "slots": [
           {
             "slot_id": "DIALOGUE_01",
@@ -146,6 +146,7 @@
   "mode": "write | revise",
   "draft_text": "string, 仅 revise 模式下非空：上一版 draft 的全文内容（Markdown 正文，不含 Scene 标题）。write 模式下为空串。",
   "revision_note": "string 或 null, 仅 revise 模式下非空：审校者针对上一版的修改建议清单。write 模式下为 null。",
+  "length_directive": "object 或 null, P0-2（2026-09-18）：仅『上一版欠带、本轮整章重写』时出现——{kind:'expand_under_band', previous_attempt, previous_attempt_mode, previous_visible_chars, shortfall_chars, target_word_count, band_low, band_high, instruction}。出现即代表本轮 mode='write'、draft_text 为空，净字数以 band_low~band_high 为准（见 §6 规则 22）；缺席时按常规 write/revise 纪律落笔，不得索要该字段。",
   "style_constraints": {
     "language": "zh-Hans",
     "pov": "third_person_limited",
@@ -217,6 +218,12 @@
 19. **称谓与名讳禁忌（礼制约束）**：若角色卡 `relationships` / 设定或 `style_constraints` 明确声明了名讳、避讳、称谓等级与适用场景，必须严格遵守，且不得写出与该设定矛盾的称谓或自称；本名 / 真名 / 避讳词只允许出现在声明所许可的载体（如礼书、玉牌、诏令、全知叙述等）与场合中。**未声明时本条不适用**——禁止凭空为角色增设名讳、避讳或称谓等级。
 20. **字数硬约束（带宽中段，跨项目通用）**：正文净字数控制在 `expected_word_count ± 7%` 以内（expected_word_count 缺省 3000 时即 2800–3200 字）；**严禁越过带宽上下限**（`expected_word_count × [0.85, 1.15]`）。revise 修订模式下净增字数不得超过修订前的 +5%；收到明确压缩指令时按指令幅度净减，禁止以增补新场景的方式"改写"压缩指令。写作全程以下限优先于细节丰盈——若篇幅将超，优先砍铺垫与重复意象，不砍节拍。
 21. **禁止上下文标签入文**：正文里不得出现任何上下文标签、字段名或英文标识（例如 `recalled_passages`、`story_state`、`chapter_goal`），也不得出现 payload 的键名（`author_intent` / `scene_plan` / `style_constraints` 等）；`author_intent` 规定的要求只写它的**文学结果**，不写指令原文。一旦把这类内部标识写进正文即为废稿。
+22. **欠带整章重写（`length_directive`，P0-2 生成期字数闭环）**：输入含 `length_directive`（`kind='expand_under_band'`）时，它表示**你上一版正文低于本章字数带下限**，本轮是同一节点的**整章重写**——不是局部修改、不是上一版的续写。此轮必须：
+    - 忽略 `draft_text`（本轮恒为空）与上一版正文，按 §6 规则 1-21 从头完整写一遍本章；
+    - 净字数目标改取 `length_directive.band_low` ~ `band_high`（**不**以上一版长度为锚，也**不**按规则 20 的 ±7% 收窄——本轮下限优先）；
+    - 扩写靠**内容**：补齐 `scene_plan` 中尚未展开的 slot、补足场景环境与人物动作细节、把概述式叙述展开为可感知的场面；
+    - **禁止**复述 / 复制上一版已写过的段落（逐字重复的段落一律作废），禁止靠注水、重复意象、重复句式凑字数（规则 13 / 14 / 16 仍然适用）；
+    - 不要输出 `---REVISION-CHECKLIST---` 尾块（该尾块只属于 revise 模式）。
 
 ---
 

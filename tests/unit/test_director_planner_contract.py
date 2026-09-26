@@ -6,7 +6,10 @@
 2. ``validate_contract("director_planner")`` 合同三态——双契约齐备 / scene_plan 缺席
    （计划-only 降级）/ scene_plan 在场但结构违规；
 3. 输入 ID 白名单（E-MRG-16 / E-DIR-03）——hook / debt / character / location，含
-   「输入为空 ⇒ 输出必须 ``[]``」与「命中即 output-invalid」两条硬口径。
+   「输入为空 ⇒ 输出必须 ``[]``」与「命中即 output-invalid」两条硬口径；
+4. 计划数组**形状**守卫（2026-09-21 破损计划静默落库事故）——``key_beats`` /
+   ``character_changes_planned`` / ``information_releases`` 在场时的 list + object 形状，
+   含「``json_repair`` 修出来的腐烂 key_beats 被契约拦下」的端到端复现与 5-beat 防误杀回归。
 
 golden fixture：``tests/fixtures/p1_director_planner_merged_ch{3,4}.json`` 为二次 A/B 回放
 （v0.2，2026-09-14）两章的真实产出，逐字节取自 `_refs/p1_ab/merged_v2_ch{3,4}.json`
@@ -380,3 +383,203 @@ def test_golden_fixture_mutation_is_caught_by_whitelist():
         validate_contract(
             "director_planner", payload, input_payload=_A_B_WHITELIST_INPUT
         )
+
+
+# ---------------------------------------------------------------------------
+# 4. 计划数组形状守卫（2026-09-21 破损计划静默落库事故）
+# ---------------------------------------------------------------------------
+
+# 事故原始形态（chapter-plan / director_planner 节点，2026-09-21）：LLM 输出非法 JSON，
+# ``extract_json`` 三级兜底（json_repair）把它「修」成顶层可解析、内部结构腐烂的 dict——
+# 本应属于 beat_002/beat_003 内部的字段值（``["payoff"]`` / ``["power_display"]`` /
+# 裸句子）以裸数组 / 裸字符串形态混进 ``key_beats`` 数组。旧契约只查顶层 schema_version，
+# 该结构静默通过校验并落 ``chapters.plan_json``。
+_CORRUPT_MIXED_KEY_BEATS: list = [
+    {
+        "beat_id": "beat_001",
+        "purpose": "夜袭设置",
+        "involved_characters": [],
+        "involved_locations": [],
+        "involved_hooks": [],
+        "involved_debts": [],
+        "risk_level": "LOW",
+        "narrative_question_served": "建立危机",
+    },
+    "{",
+    'beat_id":"beat_002',
+    ["payoff"],
+    ["power_display"],
+    "谢无咎反用镖规逼退追兵",
+]
+
+# 端到端复现用原文：beat_001 完整、其后花括号/引号断裂（与事故同形）。
+_CORRUPT_RAW = """{
+  "schema_version": "director-plan.v1",
+  "prompt_version": "director_planner:v0.2",
+  "chapter_id": "ch_0003",
+  "chapter_goal": "谢无咎识破镖局内应",
+  "core_conflict": "追兵 vs 内应",
+  "turning_point": "反用镖规",
+  "expected_role": "turn",
+  "key_beats": [
+    { "beat_id": "beat_001", "purpose": "夜袭设置", "risk_level": "LOW" }
+    "
+    "beat_id": "beat_002", "purpose": "发现内应", "narrative_question_served": ["payoff"]
+    ["power_display"]
+    "谢无咎反用镖规逼退追兵"
+  ],
+  "notes_for_planner": "1500 字写夜袭"
+}"""
+
+
+def _five_beat_plan() -> dict:
+    """正常 5-beat 计划（含白名单输入侧合法 ID）：防误杀回归用。"""
+    return _payload_with(
+        key_beats=[
+            {
+                "beat_id": f"beat_{i:03d}",
+                "purpose": f"第 {i} 拍：推进冲突",
+                "involved_characters": ["char_edbb745cca44"],
+                "involved_locations": ["loc_d28b9affa14b"],
+                "involved_hooks": [],
+                "involved_debts": [],
+                "risk_level": "LOW",
+                "narrative_question_served": "主线推进",
+            }
+            for i in range(1, 6)
+        ],
+        character_changes_planned=[
+            {
+                "character_id": "char_edbb745cca44",
+                "field": "belief",
+                "from": "相信内应不存在",
+                "to": "确认内应存在",
+                "rationale": "本章张力需要信念位移",
+                "risk_level": "HIGH",
+            }
+        ],
+        information_releases=[
+            {
+                "audience": "reader",
+                "target_id": "reader",
+                "content_summary": "内应身份揭晓",
+                "source_visibility": "DIRECTOR",
+                "knowledge_permission_compliant": True,
+            }
+        ],
+    )
+
+
+def test_key_beats_mixed_fragments_rejected():
+    """事故形态：key_beats 混裸字符串碎片与值碎片数组 → 契约必红（不得静默落库）。"""
+    payload = _payload_with(key_beats=_CORRUPT_MIXED_KEY_BEATS)
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director_planner", payload)
+    msg = str(exc.value)
+    assert "key_beats[1] must be an object, got str" in msg
+    assert "key_beats[3] must be an object, got list" in msg
+
+
+def test_corrupt_plan_repaired_by_json_repair_is_rejected():
+    """端到端复现根因链：json_repair 修成「可解析」的腐烂结构，契约在下一跳拦下。"""
+    payload, meta = extract_json(_CORRUPT_RAW, return_meta=True)
+    assert meta["repaired"] is True  # 前提：三级兜底接手（旧口径下此处静默通过）
+    assert payload["schema_version"] == "director-plan.v1"
+    assert not all(isinstance(b, dict) for b in payload["key_beats"])
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director_planner", payload)
+    assert "key_beats[1] must be an object" in str(exc.value)
+
+
+def test_key_beats_non_list_rejected():
+    payload = _payload_with(key_beats={"beat_id": "beat_001", "purpose": "x"})
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director_planner", payload)
+    assert "key_beats must be a list, got dict" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("beat", "expected_fragment"),
+    [
+        ({"purpose": "缺 beat_id"}, "key_beats[0] missing required field: 'beat_id'"),
+        ({"beat_id": "beat_001"}, "key_beats[0] missing required field: 'purpose'"),
+        (
+            {"beat_id": 1, "purpose": "beat_id 非字符串"},
+            "key_beats[0].beat_id must be a string, got int",
+        ),
+        (
+            {"beat_id": "beat_001", "purpose": ["payoff"]},
+            "key_beats[0].purpose must be a string, got list",
+        ),
+    ],
+)
+def test_key_beats_element_field_shape_rejected(beat: dict, expected_fragment: str):
+    """元素是 object 但缺 / 错填 beat_id、purpose（值碎片数组即此形）→ 拒绝。"""
+    payload = _payload_with(key_beats=[beat])
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director_planner", payload)
+    assert expected_fragment in str(exc.value)
+
+
+def test_character_changes_planned_non_dict_element_rejected():
+    """``character_changes_planned`` 元素必须是 object（同款形状守卫；不收紧字段必填面）。"""
+    payload = _payload_with(character_changes_planned=[{"character_id": "char_x"}, "碎片"])
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director_planner", payload)
+    assert "character_changes_planned[1] must be an object, got str" in str(exc.value)
+    # 元素为 object 时字段全空也放行（保守口径：产线闸门只拦形状）
+    validate_contract(
+        "director_planner", _payload_with(character_changes_planned=[{}, {}])
+    )
+
+
+def test_information_releases_non_dict_element_rejected():
+    payload = _payload_with(information_releases=[["payoff"], "碎片"])
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director_planner", payload)
+    assert "information_releases[0] must be an object, got list" in str(exc.value)
+
+
+def test_missing_plan_arrays_still_pass():
+    """保守口径：键**缺席**放行（下游按缺省值读，quality 对「无 key_beats」有中性分）；
+    只有「在场但形状腐烂」才拦。director 档位同样放行。"""
+    payload = {
+        "schema_version": "director-plan.v1",
+        "chapter_id": "ch_x",
+        "chapter_goal": "目标",
+    }
+    validate_contract("director_planner", payload)
+    validate_contract("director", payload)
+
+
+def test_director_expected_also_guarded():
+    """``director`` 档与 ``director_planner`` 档共用同一守卫（单点实现）。"""
+    payload = _payload_with(key_beats=_CORRUPT_MIXED_KEY_BEATS)
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director", payload)
+    assert "key_beats[1] must be an object" in str(exc.value)
+
+
+def test_valid_five_beat_plan_passes():
+    """防误杀回归：完整 5-beat 计划（含白名单输入侧合法 ID）照常通过。"""
+    validate_contract("director_planner", _five_beat_plan())
+    validate_contract(
+        "director_planner", _five_beat_plan(), input_payload=_A_B_WHITELIST_INPUT
+    )
+
+
+def test_golden_fixture_mutation_is_caught_by_key_beats_shape():
+    """突变验证用途：往 golden 产出的 key_beats 里塞一个裸碎片 → 形状守卫必红。"""
+    payload = _load_golden(GOLDEN_FILES[0])
+    payload["key_beats"].insert(1, "beat_id\":\"beat_002")
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director_planner", payload)
+    assert "key_beats[1] must be an object, got str" in str(exc.value)
+
+
+def test_plan_array_shape_errors_capped():
+    """形状报错条数封顶（防重试提示被超长腐烂清单撑爆）。"""
+    payload = _payload_with(key_beats=["碎片"] * 12)
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director_planner", payload)
+    assert "(+7 more)" in str(exc.value)

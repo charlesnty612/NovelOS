@@ -40,6 +40,7 @@ from typing import Any
 from packages.core.db import get_connection
 from packages.core.ids import now_iso
 from packages.core.quality.models import QualityContext, QualityReport
+from packages.domain.chapter.draft_resolver import resolve_draft
 
 __all__ = [
     "QualityService",
@@ -122,6 +123,10 @@ class QualityService:
         - V3.9 批次 4.3：``report.draft_version`` 为 None 时，落库前取当前最新 draft
           的 version 补全（并回写 report 对象，调用方 dump 出去即带该版本）；
           该章尚无 draft 时保持 None（列可空，兼容存量行）。
+        - P1-1：上面的补全是**兜底**，只服务直接构造 ``QualityReport`` 的调用方。
+          经 ``build_quality_context`` → ``QualityEngine.evaluate`` 的正规路径已由
+          ctx 带上「与正文同源的那一版」，不会走到这里——落库这一刻再查「最新版本」
+          会在作者两次读取之间改稿时把标签指到另一份正文上。
         """
         if report.draft_version is None:
             report.draft_version = _read_latest_draft_version(self.db_path, chapter_id)
@@ -622,41 +627,20 @@ def compute_payoff_history(db_path: str | Path, project_id: str, limit: int = 5)
     return history
 
 
-def _read_latest_draft(db_path: str | Path, chapter_id: str) -> str:
-    """读该 chapter 最新一份 draft 的 content（按 version DESC）。无 draft → 空串。"""
-    conn = get_connection(db_path)
-    try:
-        row = conn.execute(
-            """
-            SELECT content FROM drafts
-            WHERE chapter_id = ?
-            ORDER BY version DESC LIMIT 1
-            """,
-            (chapter_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    return (row["content"] if row else "") or ""
-
-
 def _read_latest_draft_version(db_path: str | Path, chapter_id: str) -> int | None:
     """读该 chapter 最新一份 draft 的 version（按 version DESC）。无 draft → None。
 
     V3.9 批次 4.3：QualityService.save_report 用它把报告的 ``draft_version``
     钉到「本次评估所对应的草稿版本」；无草稿（如 API 侧对空章节评估）时为 None。
+
+    P1-1（2026-09-18）：解析走共享单点
+    :func:`packages.domain.chapter.draft_resolver.resolve_draft`，本函数只作
+    「取最新一版」的薄包装。**注意它是一次独立读**——只有在调用方没有解析过正文
+    （直接构造 ``QualityReport`` 的路径）时才允许用它补全版本；由
+    ``build_quality_context`` 组装过的报告已在 ``QualityContext.draft_version``
+    里带上与正文同源的版本，落库不再二次查询（两次读之间作者改稿会让标签与正文分叉）。
     """
-    conn = get_connection(db_path)
-    try:
-        row = conn.execute(
-            """
-            SELECT version FROM drafts
-            WHERE chapter_id = ?
-            ORDER BY version DESC LIMIT 1
-            """,
-            (chapter_id,),
-        ).fetchone()
-    finally:
-        conn.close()
+    row = resolve_draft(db_path, chapter_id)
     return int(row["version"]) if row is not None else None
 
 
@@ -758,6 +742,7 @@ def build_quality_context(
     delta: dict[str, Any] | None,
     snapshot_pre: dict[str, Any] | None,
     run_id: str | None = None,
+    draft_version: int | None = None,
 ) -> QualityContext:
     """为 chapter + project 现场组装 :class:`QualityContext`。
 
@@ -766,8 +751,19 @@ def build_quality_context(
     - ``snapshot_pre`` —— :class:`StoryStateService.get_current_state` 输出；
       缺省由调用方提供（pipeline 内已有；evaluate 端点需当场拉）。
     - ``run_id`` —— workflow_run_id（仅回显）。
+    - ``draft_version`` —— **本次评估量的是哪一版草稿**；
+      ``None``（默认）→ 取当前最新一版。评审 / 提交门禁等「手里有一版被审对象」的
+      调用方应把它传进来（与 ``quality_reports.draft_version`` 同一口径），否则在
+      作者手改出新版本后，评估会量新版、而作者以为在评旧版——同一份报告里
+      「测量对象 ≠ 被审对象」（P1-1 事故形状）。
 
     该函数为 chapter_commit pipeline 与 API evaluate 端点共用，避免重复实现。
+
+    版本口径（P1-1，2026-09-18）：正文与它所属的版本**一次解析**
+    （:func:`packages.domain.chapter.draft_resolver.resolve_draft`），版本随
+    ``QualityContext.draft_version`` 交给 engine → ``QualityReport.draft_version``
+    落库。此前正文与版本是两次独立查询（正文一次、落库时再查一次「最新版本」），
+    两次读之间作者改稿就会让报告标签指到另一份正文上。
 
     V3.9 批次 3.3：Q8 字符数走 :func:`compute_char_stats_detail`，把「按 prompt_version
     推断为 AI / 未知 created_by」的口径 note 一并放进 :class:`QualityContext`，
@@ -775,7 +771,9 @@ def build_quality_context(
     """
     stats = compute_char_stats_detail(db_path, chapter_id)
     plan = _read_chapter_plan(db_path, chapter_id)
-    draft = _read_latest_draft(db_path, chapter_id)
+    resolved = resolve_draft(db_path, chapter_id, draft_version)
+    draft = (resolved or {}).get("content") or ""
+    reviewed_version = int(resolved["version"]) if resolved is not None else None
     reference_texts = load_reference_texts(db_path, project_id)
     payoff_history = compute_payoff_history(db_path, project_id, limit=5)
     chapter_number = _read_chapter_number(db_path, chapter_id)
@@ -785,6 +783,7 @@ def build_quality_context(
         chapter_id=chapter_id,
         chapter_number=chapter_number,
         draft=draft,
+        draft_version=reviewed_version,
         plan=plan,
         snapshot_pre=snapshot_pre or {},
         delta=delta or {},

@@ -68,6 +68,7 @@ from packages.core.quality.wordcount import (
     resolve_band_config,
 )
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
+from packages.domain.chapter.draft_resolver import resolve_draft
 
 DEFAULT_FORBIDDEN_WORDS = ["仿佛", "如同", "本章目标"]
 _CRITIC_PROMPT_VERSION = "critic:v1"
@@ -121,7 +122,9 @@ def _should_invoke_critic(mode: str, chapter_number: int | None) -> bool:
     return chapter_number % 5 == 0
 
 
-def _collect_genre_check(db_path: str, chapter_id: str) -> dict[str, Any] | None:
+def _collect_genre_check(
+    db_path: str, chapter_id: str, *, draft_version: int | None = None
+) -> dict[str, Any] | None:
     """核销层 v2 挂点（题材库 P1b）：返回 ``genre_check`` 段，未绑定题材包 → None。
 
     - report-only：核销结果只进 ``review_report.genre_check``（结构见
@@ -130,11 +133,14 @@ def _collect_genre_check(db_path: str, chapter_id: str) -> dict[str, Any] | None
     - **不阻断**：issue 恒 ``severity='warning'`` 且 ``rule_id`` 以 ``GENRE-`` 开头，
       不在 quality 阻断白名单（``packages.core.quality.issues.BLOCKING_RULES``）内，
       不产生 error、不触发质量门禁；
+    - ``draft_version``：本次评审实际审的那一版（``review_report.draft_version``）——
+      核销对象必须与被审对象同一版（否则字数带会拿写稿 run 的旧 ``length_report``
+      去量另一份正文，2026-09-18 实证缺陷）；
     - 无绑定题材包 → ``None``（调用方整段跳过，零行为变化）；
     - verifier 内部已全容错，这里再兜一层异常（核销失败绝不阻断评审）。
     """
     try:
-        result = verify_chapter(db_path, chapter_id)
+        result = verify_chapter(db_path, chapter_id, draft_version=draft_version)
     except Exception as exc:  # noqa: BLE001 —— 核销失败不阻断评审
         _log.warning(
             "chapter_review.genre_check failed: chapter_id=%s err=%s", chapter_id, exc,
@@ -259,34 +265,25 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
         project_id=chapter_project_id,
     )
 
-    conn = get_connection(db_path)
-    try:
-        # 用户指定 draft_version（ctx["draft_version"]）时按版本精确读取；
-        # 否则保持原"取最新"语义，便于跨模型文风对比时复审指定稿。
-        version = ctx.get("draft_version")
-        if version:
-            draft_row = conn.execute(
-                "SELECT content, version FROM drafts WHERE chapter_id = ? AND version = ?",
-                (chapter_id, int(version)),
-            ).fetchone()
-        else:
-            draft_row = conn.execute(
-                """
-                SELECT content, version FROM drafts WHERE chapter_id = ?
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                (chapter_id,),
-            ).fetchone()
-    finally:
-        conn.close()
+    # 用户指定 draft_version（ctx["draft_version"]）时按版本精确读取；
+    # 否则保持原"取最新"语义，便于跨模型文风对比时复审指定稿。
+    version = ctx.get("draft_version")
 
-    if draft_row is None:
+    # 被审草稿的**唯一**解析单点（P1-1 / 本批次第 4 项）：``resolve_draft`` ——
+    # 显式版本优先，否则取 ``ORDER BY version DESC`` 的最新一版。
+    # 改造前本节点自带一份「最新」定义（``ORDER BY created_at DESC``），与
+    # ``draft_resolver`` / 题材核销层 / 质量报告按 ``version`` 的口径分叉：同一份
+    # 评审报告里因此存在两个可能的「最新」稿（version 是发布序，created_at 是墙钟戳，
+    # 同秒并列与手工改库都会让二者不一致）。
+    resolved = resolve_draft(db_path, chapter_id, version)
+
+    if resolved is None:
         if version:
             raise ValueError(f"chapter {chapter_id!r} has no draft version {version}")
         raise ValueError(f"chapter {chapter_id!r} has no draft; run chapter-write first")
 
-    prose = draft_row["content"] or ""
-    reviewed_version = int(draft_row["version"])
+    prose = resolved.get("content") or ""
+    reviewed_version = int(resolved["version"])
     # V3.7 字数带硬约束；V3.9 批次 5.2：warning / error 两级阈值**全部由生效字数带派生**
     # ——``resolve_band_config`` 是唯一阈值源，项目覆盖 band 后两级判定同步跟随，
     # 不再与写死的 ±15% / ±30% 互相矛盾：
@@ -382,7 +379,7 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
     }
     # 题材库 P1b：核销层 v2（配比偏差 + 节奏红线）挂点——report-only，不阻断。
     # 未绑定题材包 → 整段跳过（report 无 genre_check 键，零行为变化）。
-    genre_check = _collect_genre_check(db_path, chapter_id)
+    genre_check = _collect_genre_check(db_path, chapter_id, draft_version=reviewed_version)
     if genre_check is not None:
         report["genre_check"] = genre_check
         # issues 的 informational 通道：结构化条目已在 genre_check.issues

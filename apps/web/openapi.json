@@ -1512,6 +1512,49 @@
         }
       }
     },
+    "/api/projects/{project_id}/delivery-verdict": {
+      "get": {
+        "tags": [
+          "delivery"
+        ],
+        "summary": "Get Delivery Verdict",
+        "description": "返回该项目的交付判定报告（逐章 rows + 项目 roll-up）。\n\n- project 不存在 → 404 ``{\"detail\": \"project '...' not found\"}``；\n- 成功 → 200 + ``build_delivery_report`` 的 dict（含 ``project_verdict`` /\n  ``roll_up`` / ``evidence_sources`` / ``chapters``）。",
+        "operationId": "get_delivery_verdict_api_projects__project_id__delivery_verdict_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryVerdictResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/projects/{project_id}/export": {
       "get": {
         "tags": [
@@ -5420,7 +5463,7 @@
           "volumes"
         ],
         "summary": "Create Volume",
-        "description": "创建卷（默认 status='active'）。\n\n- 404 — project 不存在；\n- 409 — 同 project 下 number 已存在 / 已存在 active 卷；\n- 422 — DB CHECK 违反（一般不会触发，DDL CHECK 与 pydantic 字段对齐）。",
+        "description": "创建卷（默认 status='active'）。\n\n``arc_summary``（卷纲摘要）随 body 一并落 ``volumes.arc_summary``；缺省 NULL。\n- 404 — project 不存在；\n- 409 — 同 project 下 number 已存在 / 已存在 active 卷；\n- 422 — DB CHECK 违反（一般不会触发，DDL CHECK 与 pydantic 字段对齐）。",
         "operationId": "create_volume_api_projects__project_id__volumes_post",
         "parameters": [
           {
@@ -5523,7 +5566,7 @@
           "volumes"
         ],
         "summary": "Update Volume",
-        "description": "部分更新（title / status）。\n\n- 404 — volume 不存在或跨 project；\n- 409 — sealed → active 反向跳变（VolumeSealedError）；\n- 422 — DB IntegrityError 兜底。",
+        "description": "部分更新（title / status / arc_summary）。\n\n- 404 — volume 不存在或跨 project；\n- 409 — sealed → active 反向跳变（VolumeSealedError）；\n- 422 — DB IntegrityError 兜底。",
         "operationId": "update_volume_api_projects__project_id__volumes__volume_id__patch",
         "parameters": [
           {
@@ -6275,7 +6318,7 @@
           "workflows"
         ],
         "summary": "Start Gate Revise",
-        "description": "按门禁建议改稿（V3.9 批次 4.1）：一键把 quality_gate 阻断变成改稿闭环。\n\n语义：\n- 前置：chapter 的 ``plan_json.gate_blocked`` 非空（quality_gate enforce 阻断时写入的\n  标记；改稿意见 ``plan_json.revision_note`` 同批写入）→ 无标记 → 409；\n- 启动 chapter-write：``revision_note`` 存在 ⇒ write 节点走 revise 模式（定向改稿）；\n- write COMPLETED 后 daemon 线程（``gate-revise-{run_id}``）接力 chapter-review，\n  审校停在 author_review 等作者决议；作者批准后章节回到 REVIEWED，可重新提交；\n- 复用 :func:`_start_workflow`（chapter 校验 / 活跃 run 并发防护 / 409 语义）与\n  :func:`_run_workflow_return_payload`（同 auto_revise 回路的子 run 口径），\n  不新建并行机制。\n\n返回：与其他 start 端点同形（``{run_id, status, current_node}``，201）。",
+        "description": "按门禁建议改稿（V3.9 批次 4.1）：一键把 quality_gate 阻断变成改稿闭环。\n\n语义：\n- 前置：chapter 的 ``plan_json.gate_blocked`` 非空（quality_gate enforce 阻断时写入的\n  标记；改稿意见 ``plan_json.revision_note`` 同批写入）→ 无标记 → 409；\n- 启动 chapter-write：``revision_note`` 存在 ⇒ write 节点走 revise 模式（定向改稿）；\n- write COMPLETED 后 daemon 线程（``gate-revise-{run_id}``）接力 chapter-review，\n  审校停在 author_review 等作者决议；作者批准后章节回到 REVIEWED，可重新提交；\n- 复用 :func:`_start_workflow`（chapter 校验 / 活跃 run 并发防护 / 409 语义）与\n  :func:`_run_workflow_return_payload`（同 auto_revise 回路的子 run 口径），\n  不新建并行机制。\n\nm6（2026-09-21 检修）：``target_word_count`` / ``author_intent`` 随改稿链透传\n（请求体显式给出 > 该章最近一次 run 的 ctx 继承）。此前这两个键在此链上整体缺失，\n作者按非默认字数起稿后被门禁拦下，一键改稿会退回服务端默认 3000 去判字数带。\n\n返回：与其他 start 端点同形（``{run_id, status, current_node}``，201）。",
         "operationId": "start_gate_revise_api_projects__project_id__chapters__chapter_id__gate_revise_post",
         "parameters": [
           {
@@ -7965,6 +8008,551 @@
         "title": "DebtUpdate",
         "description": "部分更新 Debt 请求体——所有字段均可选。"
       },
+      "DeliveryChapter": {
+        "properties": {
+          "chapter_id": {
+            "type": "string",
+            "title": "Chapter Id"
+          },
+          "number": {
+            "type": "integer",
+            "title": "Number"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "章节状态（流程位置，非交付判定）"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "deliverable",
+              "needs_work",
+              "not_deliverable",
+              "not_a_candidate"
+            ],
+            "title": "Verdict"
+          },
+          "blocking_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocking Reason",
+            "description": "首个降级理由的中文说明；可交付时为 null"
+          },
+          "draft_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Version"
+          },
+          "length": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryLength"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "quality": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryQuality"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "signing": {
+            "$ref": "#/components/schemas/DeliverySigning"
+          },
+          "reasons": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryReason"
+            },
+            "type": "array",
+            "title": "Reasons"
+          }
+        },
+        "type": "object",
+        "required": [
+          "chapter_id",
+          "number",
+          "title",
+          "status",
+          "verdict",
+          "signing"
+        ],
+        "title": "DeliveryChapter",
+        "description": "一章的交付判定行。"
+      },
+      "DeliveryEvidenceSource": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "reachable": {
+            "type": "boolean",
+            "title": "Reachable"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "reachable",
+          "detail"
+        ],
+        "title": "DeliveryEvidenceSource",
+        "description": "证据源可达性（诚实面：看不到的要说出来）。"
+      },
+      "DeliveryIssue": {
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "title": "Rule Id"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity"
+          },
+          "gate": {
+            "type": "string",
+            "title": "Gate",
+            "description": "后果档 auto / confirm / block"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rule_id",
+          "severity",
+          "gate",
+          "message"
+        ],
+        "title": "DeliveryIssue",
+        "description": "质量报告里的一条 issue（gate 由 ``issue_gate`` 权威重推，不读落库字段值）。"
+      },
+      "DeliveryLength": {
+        "properties": {
+          "visible_chars": {
+            "type": "integer",
+            "title": "Visible Chars"
+          },
+          "target_word_count": {
+            "type": "integer",
+            "title": "Target Word Count"
+          },
+          "band_low": {
+            "type": "integer",
+            "title": "Band Low"
+          },
+          "band_high": {
+            "type": "integer",
+            "title": "Band High"
+          },
+          "deviation_pct": {
+            "type": "number",
+            "title": "Deviation Pct"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "in_band / under / over"
+          },
+          "tier": {
+            "type": "string",
+            "title": "Tier",
+            "description": "in_band / warn / error（两级阈值同 review 侧）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "visible_chars",
+          "target_word_count",
+          "band_low",
+          "band_high",
+          "deviation_pct",
+          "status",
+          "tier"
+        ],
+        "title": "DeliveryLength",
+        "description": "字数测量（``quality.wordcount`` 口径）。"
+      },
+      "DeliveryQuality": {
+        "properties": {
+          "report_id": {
+            "type": "string",
+            "title": "Report Id"
+          },
+          "overall": {
+            "type": "integer",
+            "title": "Overall"
+          },
+          "evaluated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evaluated At"
+          },
+          "draft_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Version",
+            "description": "本报告评估的草稿版本"
+          },
+          "gate_summary": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gate Summary",
+            "description": "报告 _meta.gate_summary（block / confirm 聚合摘要）"
+          },
+          "accepted_override": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted Override",
+            "description": "报告 _meta.gate_accepted_override（confirm 档接受留痕）"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryIssue"
+            },
+            "type": "array",
+            "title": "Issues"
+          }
+        },
+        "type": "object",
+        "required": [
+          "report_id",
+          "overall"
+        ],
+        "title": "DeliveryQuality",
+        "description": "该章最新质量报告的证据面。"
+      },
+      "DeliveryReason": {
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "title": "Rule Id",
+            "description": "规则 / 证据来源标识（前端按此分支）"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "quality_issue",
+              "length",
+              "signing_check",
+              "chapter_status",
+              "evidence"
+            ],
+            "title": "Source",
+            "description": "证据出处"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity",
+            "description": "该证据自身的严重度（error / warning / info）"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "block",
+              "confirm",
+              "accepted",
+              "warn",
+              "length_out_of_band",
+              "length_beyond_band_edge",
+              "signing_fail",
+              "not_committed",
+              "not_evaluated",
+              "out_of_scope",
+              "not_a_candidate",
+              "project_not_deliverable",
+              "project_needs_work"
+            ],
+            "title": "Status",
+            "description": "后果档（决定判定是否降级）"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "面向作者的中文说明"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence",
+            "description": "证据摘录（引文片段或数字）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rule_id",
+          "source",
+          "severity",
+          "status",
+          "message"
+        ],
+        "title": "DeliveryReason",
+        "description": "一条判定理由。"
+      },
+      "DeliveryRollUp": {
+        "properties": {
+          "chapter_count": {
+            "type": "integer",
+            "title": "Chapter Count"
+          },
+          "written_chapter_count": {
+            "type": "integer",
+            "title": "Written Chapter Count",
+            "description": "非 PLANNED 的章节数"
+          },
+          "deliverable_count": {
+            "type": "integer",
+            "title": "Deliverable Count"
+          },
+          "needs_work_count": {
+            "type": "integer",
+            "title": "Needs Work Count"
+          },
+          "not_deliverable_count": {
+            "type": "integer",
+            "title": "Not Deliverable Count"
+          },
+          "not_a_candidate_count": {
+            "type": "integer",
+            "title": "Not A Candidate Count"
+          },
+          "deliverable_chapter_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Deliverable Chapter Ids"
+          },
+          "needs_work_chapter_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Needs Work Chapter Ids"
+          },
+          "not_deliverable_chapter_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Not Deliverable Chapter Ids"
+          },
+          "not_a_candidate_chapter_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Not A Candidate Chapter Ids"
+          },
+          "blocking_reason_by_chapter": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Blocking Reason By Chapter",
+            "description": "每章 id → 首个降级理由（可交付章不出现）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "chapter_count",
+          "written_chapter_count",
+          "deliverable_count",
+          "needs_work_count",
+          "not_deliverable_count",
+          "not_a_candidate_count",
+          "deliverable_chapter_ids",
+          "needs_work_chapter_ids",
+          "not_deliverable_chapter_ids",
+          "not_a_candidate_chapter_ids"
+        ],
+        "title": "DeliveryRollUp",
+        "description": "项目级汇总（作者的问题是「这本书能不能交」）。"
+      },
+      "DeliverySigning": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "title": "Scope",
+            "description": "in_scope / out_of_scope / unavailable"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note",
+            "default": ""
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DeliverySigningItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope"
+        ],
+        "title": "DeliverySigning",
+        "description": "签约体检在本章的适用面。"
+      },
+      "DeliverySigningItem": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "level": {
+            "type": "string",
+            "title": "Level",
+            "description": "pass / warn / fail / info"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "advice": {
+            "type": "string",
+            "title": "Advice",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "level",
+          "detail"
+        ],
+        "title": "DeliverySigningItem",
+        "description": "签约体检的单项（仅第 1~3 章）。"
+      },
+      "DeliveryVerdictResponse": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "project_name": {
+            "type": "string",
+            "title": "Project Name"
+          },
+          "generated_at": {
+            "type": "string",
+            "title": "Generated At"
+          },
+          "project_verdict": {
+            "type": "string",
+            "enum": [
+              "deliverable",
+              "needs_work",
+              "not_deliverable",
+              "not_a_candidate"
+            ],
+            "title": "Project Verdict"
+          },
+          "project_reasons": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryReason"
+            },
+            "type": "array",
+            "title": "Project Reasons"
+          },
+          "roll_up": {
+            "$ref": "#/components/schemas/DeliveryRollUp"
+          },
+          "evidence_sources": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryEvidenceSource"
+            },
+            "type": "array",
+            "title": "Evidence Sources"
+          },
+          "signing_check_scope": {
+            "type": "string",
+            "title": "Signing Check Scope",
+            "default": ""
+          },
+          "chapters": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryChapter"
+            },
+            "type": "array",
+            "title": "Chapters"
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_id",
+          "project_name",
+          "generated_at",
+          "project_verdict",
+          "roll_up"
+        ],
+        "title": "DeliveryVerdictResponse",
+        "description": "``GET /api/projects/{project_id}/delivery-verdict`` 的响应体。"
+      },
       "Draft": {
         "properties": {
           "draft_id": {
@@ -8099,11 +8687,35 @@
               }
             ],
             "title": "Deep Review"
+          },
+          "target_word_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 100000.0,
+                "minimum": 100.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Word Count"
+          },
+          "author_intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Intent"
           }
         },
         "type": "object",
         "title": "GateReviseRequest",
-        "description": "「按门禁建议改稿」请求体（V3.9 批次 4.1）。\n\n只收「本次改稿 + 接力审校」用得到的透传字段：\n- ``mock_providers``：mock 脚本（write 与接力 review 共用同一份）；\n- ``model_overrides``：与其它 start 端点同语义的单次 run 级模型档案覆盖；\n- ``critic_mode`` / ``deep_review``：接力审校时会读取的开关。\n改稿意见本身不在这里传——它在 quality_gate 阻断时已写入 ``plan_json.revision_note``。"
+        "description": "「按门禁建议改稿」请求体（V3.9 批次 4.1）。\n\n只收「本次改稿 + 接力审校」用得到的透传字段：\n- ``mock_providers``：mock 脚本（write 与接力 review 共用同一份）；\n- ``model_overrides``：与其它 start 端点同语义的单次 run 级模型档案覆盖；\n- ``critic_mode`` / ``deep_review``：接力审校时会读取的开关；\n- ``target_word_count`` / ``author_intent``（2026-09-21 检修 m6 补）：与\n  ``StartWorkflowRequest`` 同语义、同约束。此前方缺这两个键——作者按\n  ``--target-word-count 300`` 起稿后被门禁拦下，点「按门禁建议改稿」时 target\n  退回服务端默认 3000，改稿在错误口径上进行（与 auto_revise 回路 2026-09-18\n  修过的同形缺陷，见 ``revise.py`` 的 ``target_word_count`` 段）。\n改稿意见本身不在这里传——它在 quality_gate 阻断时已写入 ``plan_json.revision_note``。"
       },
       "GenreBindRequest": {
         "properties": {
@@ -8693,6 +9305,18 @@
             ],
             "title": "Genre Pack Id",
             "description": "绑定的题材包 id（题材库单 slot）；None = 未绑定 / 极老库缺列。绑定与解绑走 POST /projects/{pid}/genre-pack/bind|unbind。"
+          },
+          "writing_bible": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Writing Bible",
+            "description": "项目写作圣经（迁移 0029 的可空列）；None = 无圣经 / 极老库缺列。写入走 POST /projects 与 PATCH /projects/{pid}；不被任何工作流覆盖。"
           }
         },
         "type": "object",
@@ -8707,7 +9331,7 @@
           "updated_at"
         ],
         "title": "Project",
-        "description": "项目完整表示，对应数据库行。\n\n``word_band`` 字段：读路径把 ``projects.word_band_json`` 解析成 dict\n（非法 JSON 视为 None，不炸）；写路径由 ProjectUpdate 入口，service 序列化。\n\n``genre_pack_id``（题材库 P1b）：项目绑定的题材包 id（单 slot，\n``projects.genre_pack_id`` 可空列，迁移 0025）；未绑定 / 极老库缺列 → None。\n绑定写路径在 ``packages/core/api/routers/genre.py``（bind / unbind 端点），本模型\n只做**读侧暴露**（GET /projects 列表与详情同步）。"
+        "description": "项目完整表示，对应数据库行。\n\n``word_band`` 字段：读路径把 ``projects.word_band_json`` 解析成 dict\n（非法 JSON 视为 None，不炸）；写路径由 ProjectUpdate 入口，service 序列化。\n\n``genre_pack_id``（题材库 P1b）：项目绑定的题材包 id（单 slot，\n``projects.genre_pack_id`` 可空列，迁移 0025）；未绑定 / 极老库缺列 → None。\n绑定写路径在 ``packages/core/api/routers/genre.py``（bind / unbind 端点），本模型\n只做**读侧暴露**（GET /projects 列表与详情同步）。\n\n``writing_bible``（迁移 0029）：项目写作圣经原文；空白串读侧归一为 None\n（写侧同样归一，故 DB 中只可能是 NULL 或非空文本）。装配侧优先级见模块\ndocstring；本模型只做读写搬运，不做拼接（拼接单点在 context_engine）。"
       },
       "ProjectCreate": {
         "properties": {
@@ -8777,6 +9401,18 @@
             ],
             "title": "Word Band",
             "description": "字数带覆盖（low_ratio / high_ratio / floor 三键可任选）；省略/None=无覆盖。校验在 router 层走 resolve_band_config。"
+          },
+          "writing_bible": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Writing Bible",
+            "description": "项目写作圣经：跨章节长期有效的作者硬性约束（题材铁律 / 禁写项 / 称谓与视角约定等）。省略/None=无圣经；空白串按无圣经处理（落 NULL）。装配时与运行期 author_intent 按「基线 + 增量」拼接，见模型模块 docstring。"
           }
         },
         "type": "object",
@@ -8968,6 +9604,18 @@
             ],
             "title": "Word Band",
             "description": "字数带覆盖（low_ratio / high_ratio / floor 三键可任选）；None=清除覆盖；省略=保留原值。校验在 router 层走 resolve_band_config。"
+          },
+          "writing_bible": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Writing Bible",
+            "description": "项目写作圣经。显式 null / 空白串 → 清除（落 NULL）；省略 → 保留原值。装配优先级见模型模块 docstring（基线 + 增量拼接）。"
           }
         },
         "type": "object",
@@ -9053,6 +9701,19 @@
               }
             ],
             "title": "Author Intent"
+          },
+          "target_word_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 100000.0,
+                "minimum": 100.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Word Count"
           }
         },
         "type": "object",
@@ -9197,6 +9858,18 @@
               }
             ],
             "title": "Deep Review"
+          },
+          "gate_override": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gate Override"
           }
         },
         "type": "object",
@@ -9289,6 +9962,17 @@
             ],
             "title": "Title"
           },
+          "arc_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arc Summary"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -9324,6 +10008,7 @@
           "project_id",
           "number",
           "title",
+          "arc_summary",
           "status",
           "terminal_snapshot_json",
           "created_at",
@@ -9365,6 +10050,17 @@
               }
             ],
             "title": "Title"
+          },
+          "arc_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arc Summary"
           }
         },
         "type": "object",
@@ -9372,7 +10068,7 @@
           "number"
         ],
         "title": "VolumeCreate",
-        "description": "创建卷请求体。\n\n``number`` 必填且 ≥1；``title`` 可选。状态在创建时固定为 ``active``，\n不暴露给客户端指定（封存走显式 ``POST /seal`` 端点）。"
+        "description": "创建卷请求体。\n\n``number`` 必填且 ≥1；``title`` / ``arc_summary`` 可选。状态在创建时固定为\n``active``，不暴露给客户端指定（封存走显式 ``POST /seal`` 端点）。\n\n``arc_summary`` 是卷纲摘要（前端「卷纲摘要」编辑面），自由文本、不设\n长度上限——与 ``plot_events.description`` 同口径（模型产出可能较长，\n设硬上限会把合法内容变成 422/落库失败）。"
       },
       "VolumeListItem": {
         "properties": {
@@ -9398,6 +10094,17 @@
               }
             ],
             "title": "Title"
+          },
+          "arc_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arc Summary"
           },
           "status": {
             "type": "string",
@@ -9438,6 +10145,7 @@
           "project_id",
           "number",
           "title",
+          "arc_summary",
           "status",
           "terminal_snapshot_json",
           "chapter_count",
@@ -9475,6 +10183,17 @@
               }
             ],
             "title": "Status"
+          },
+          "arc_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arc Summary"
           }
         },
         "type": "object",

@@ -28,6 +28,7 @@ from .builders_common import (
     _row_to_project,
     _truncate_summaries_to_token_budget,
     _world_state_excerpts,
+    resolve_author_intent,
     resolve_chapter_outline,
 )
 from .cache import (
@@ -38,6 +39,7 @@ from .cache import (
     _fingerprint_author_intent,
     _fingerprint_outline_json,
     _fingerprint_plan_json,
+    _fingerprint_writing_bible,
 )
 from .canon import (
     _reference_canon_excerpt,
@@ -157,6 +159,11 @@ def _build_director_input_uncached(
     ``peek``（V3.9 批次 2.3）：调用方已用 :func:`_peek_chapter_context` 预读的上下文
     （单连接 JOIN 结果）。传了就直接复用其 ``state_version``（省掉一次取快照连接），
     不传则退回同连接轻查询 :func:`_project_max_state_version`。
+
+    ``author_intent``（2026-09-18，0029）：调用方 :func:`build_director_input` 已用
+    :func:`resolve_author_intent` 把「项目写作圣经基线 + 运行期增量」解析成**单一
+    原文**后传入；本函数只把它写进 payload 的 ``author_intent.raw``（``structured``
+    恒 None——结构化意图解析尚未实现），不重复解析、不读 projects。
     """
     conn = get_connection(db_path)
     try:
@@ -328,10 +335,10 @@ def build_director_input(
     """组装 Director 输入（agent-contracts §3.1 + V2.0 Wave C 任务一 召回 + 任务二 缓存）。
 
     缓存（V2.0 Wave C 任务二）：L0/L1 装配结果按
-    ``(project_id, state_version, chapter_no, "director", plan_fp, active_canon_id,
-    intent_fp, target_word_count, genre_pack_ref, ns)`` 键做进程内缓存；
-    同一 (project, state_version, chapter, plan_json 内容, canon, 作者意图, 目标字数,
-    题材包, 命名空间) 第二次调用直接返回缓存条目。
+    ``(project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
+    active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref, ns)``
+    键做进程内缓存；同一 (project, state_version, chapter, plan_json 内容, 大纲内容,
+    canon, 作者意图, 项目写作圣经, 目标字数, 题材包, 命名空间) 第二次调用直接返回缓存条目。
 
     V2.0 Wave C P1-1 修复：键追加 ``plan_fp``（chapters.plan_json 原文 sha256[:16]），
     解决 plan_json UPDATE 后 state_version 不变时的脏命中。``plan_fp == 'uncached'``
@@ -345,6 +352,14 @@ def build_director_input(
     题材库 P1a：键再追加 ``genre_pack_ref``（项目绑定题材包的 ``<pack_id>@<version>``
     指纹；未绑定 → ``'__none__'``）。题材包内容进 payload（``genre_pack`` 段），
     换包 / 换版本（PUT 改 payload 时 version 自增）必须各自 miss，否则旧装配脏命中。
+
+    2026-09-18（0029 项目写作圣经）：``author_intent`` 不再是 payload 的直接来源，
+    而是与 ``projects.writing_bible`` 一起经 :func:`resolve_author_intent` 解析成
+    **单一原文**（无圣经 → 逐字等于 ``author_intent``，存量行为零变化）后再进
+    payload。解析在此处发生一次，结果同时喂 payload 与键维度：``intent_fp`` =
+    运行期原文指纹、``bible_fp`` = 圣经原文指纹——两个来源各自独立入键，任一变化都
+    miss。**缺 ``bible_fp`` 会让「改圣经后同 state_version」脏命中旧装配**
+    （与 0028 大纲槽同形的硬规则 2 教训）。
 
     ``namespace``（关键词参数，默认 ``""``）：键尾命名空间标记。``preview_context``
     传 ``"preview"`` 拆开 dry-run 与生产的键空间，避免预览的空意图 / 默认 2200 字
@@ -374,13 +389,22 @@ def build_director_input(
     # 进 payload 的装配输入必须有对应键维度）。
     genre_pack_ref = peek["genre_pack_ref"] or "__none__"
     intent_fp = _fingerprint_author_intent(author_intent)
+    # 2026-09-18（0029）：项目写作圣经与运行期意图一起决定 payload 的 author_intent
+    # 原文 ⇒ 圣经单列一个键维度（``bible_fp``，None → 'none'）。解析单点在此：
+    # 解析结果既进 payload（透传给 uncached）又决定两个键维度，
+    # 「payload 与键同源同值」由同一处代码保证（硬规则 2）。
+    writing_bible = peek.get("writing_bible")
+    bible_fp = _fingerprint_writing_bible(writing_bible)
+    effective_intent = resolve_author_intent(writing_bible, author_intent)
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
-        active_canon_id, intent_fp, target_word_count, genre_pack_ref,
+        active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
         _cache_namespace_tag(namespace),
     )
     cacheable = (
-        plan_fp != _FINGERPRINT_UNCACHED and intent_fp != _FINGERPRINT_UNCACHED
+        plan_fp != _FINGERPRINT_UNCACHED
+        and intent_fp != _FINGERPRINT_UNCACHED
+        and bible_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)
@@ -388,7 +412,7 @@ def build_director_input(
             return cached
 
     payload = _build_director_input_uncached(
-        db_path, project_id, chapter_id, author_intent, target_word_count,
+        db_path, project_id, chapter_id, effective_intent, target_word_count,
         peek=peek,
     )
     if cacheable:

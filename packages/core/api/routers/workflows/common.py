@@ -63,6 +63,17 @@ class StartWorkflowRequest(BaseModel):
     # verdict=revise 不驳回 run（advisory），与 critic 默认 always 形成差异化——critic 写法层
     # 每章评，deep_reviewer 事实层按需启用。
     deep_review: bool | None = None
+    # P0-1（2026-09-18）：confirm 档规则的**显式接受声明**，仅 chapter-commit 的
+    # quality_gate 节点读取（其他 workflow 忽略）。形如::
+    #
+    #     {"rule_ids": ["RULE_STYLE_REPETITION_TRIGRAM"], "reason": "刻意的复沓"}
+    #
+    # 语义：``enforce`` 模式下，``quality.issues.issue_gate`` 判为 ``confirm`` 的 issue
+    # （``rule_id ∈ quality.issues.CONFIRM_RULES``，或产出侧按量级单条上修的，如
+    # scoring 的 trigram > 0.25 档）不许静默通过；只有 ``rule_ids`` 覆盖本次命中的**全部** confirm rule id 且
+    # ``reason`` 非空才放行。缺失 / 部分覆盖 → 照样阻断（落 ``plan_json.gate_blocked``），
+    # 错误信息里带 rule_id 清单与证据摘录。``block`` 档不受此字段影响（硬停不可覆盖）。
+    gate_override: dict[str, Any] | None = None
 
 
 class ProjectInitRequest(BaseModel):
@@ -122,6 +133,15 @@ class ResumeRequest(BaseModel):
     # 语义：请求体显式给出（非空字符串）→ 用它；None → 从原 review run 的 ctx 中继承
     # （如能取到非空字符串）；都取不到 → 回路不写该键（保持既有「缺省不出现键」行为）。
     author_intent: str | None = None
+    # 本章目标字数：与 StartWorkflowRequest.target_word_count 同语义（同样约束区间）。
+    # 自动改稿回路（auto_revise）触发时，回路内重跑的 write / review 子 run 必须带上
+    # 与父 run **同一个**目标字数——否则子 run 的 review 会退回服务端默认 3000 去判
+    # 字数带，回路据此在错误口径上判定成败、修错东西。
+    # 2026-09-18 实证（另一路端到端）：作者按 ``--target-word-count 300`` 起稿，
+    # 首轮 review 报「288/300 字」，改稿回路的 review 子 run 报「288/3000 字」。
+    # 语义：请求体显式给出 → 用它；None → 从原 review run 的 ctx 中继承（如能取到）；
+    # 都取不到 → 回路不写该键（保持既有「缺省不出现键」行为，下游回退既有解析链）。
+    target_word_count: int | None = Field(default=None, ge=100, le=100_000)
 
 
 class GateReviseRequest(BaseModel):
@@ -130,7 +150,12 @@ class GateReviseRequest(BaseModel):
     只收「本次改稿 + 接力审校」用得到的透传字段：
     - ``mock_providers``：mock 脚本（write 与接力 review 共用同一份）；
     - ``model_overrides``：与其它 start 端点同语义的单次 run 级模型档案覆盖；
-    - ``critic_mode`` / ``deep_review``：接力审校时会读取的开关。
+    - ``critic_mode`` / ``deep_review``：接力审校时会读取的开关；
+    - ``target_word_count`` / ``author_intent``（2026-09-21 检修 m6 补）：与
+      ``StartWorkflowRequest`` 同语义、同约束。此前方缺这两个键——作者按
+      ``--target-word-count 300`` 起稿后被门禁拦下，点「按门禁建议改稿」时 target
+      退回服务端默认 3000，改稿在错误口径上进行（与 auto_revise 回路 2026-09-18
+      修过的同形缺陷，见 ``revise.py`` 的 ``target_word_count`` 段）。
     改稿意见本身不在这里传——它在 quality_gate 阻断时已写入 ``plan_json.revision_note``。
     """
 
@@ -138,6 +163,8 @@ class GateReviseRequest(BaseModel):
     model_overrides: dict[str, str] | None = None
     critic_mode: str | None = Field(default=None, pattern="^(off|sample|always)$")
     deep_review: bool | None = None
+    target_word_count: int | None = Field(default=None, ge=100, le=100_000)
+    author_intent: str | None = None
 
 
 # ---------------------------------------------------------------------------

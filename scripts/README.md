@@ -1,7 +1,7 @@
 # scripts（运维脚本）
 
-> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 19 个脚本：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke、卷纲体检与开卷等），均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
-> 状态：现行入口 19 个（`ls scripts/*.py`）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
+> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 22 个脚本：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke、卷纲体检与开卷、章节量产等），均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
+> 状态：现行入口 22 个（`ls scripts/*.py`）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
 
 ## 职责与边界
 
@@ -21,7 +21,7 @@
 | `scripts/migrate.py` | `scripts/migrate.py:16` | `main() -> int` | 执行 SQLite 迁移并打印 `applied / skipped / tables / db` |
 | `scripts/serve.py` | `scripts/serve.py:31` | `main() -> int` | 启动 uvicorn，host/port 取自 `Settings` |
 
-### 脚本总览（现行 19 个）
+### 脚本总览（现行 22 个）
 
 | 类别 | 脚本 |
 |---|---|
@@ -32,8 +32,9 @@
 | Schema / 前端类型 | `export_openapi.py`、`gen_frontend_types.py` |
 | 端到端 / 冒烟 | `smoke_e2e.py`、`smoke_ch063_split.py` |
 | 一致性核查 | `check_state_sync.py` |
-| 卷纲 / 开卷 | `outline_check.py`（卷纲体检，见其模块 docstring）、`open_volume.py`（见下文专节） |
-| 正文规整 / 算子校准 | `normalize_chapters.py`（引号漂移 + 内部标识体检，默认 dry-run）、`ai_tone_calibrate.py`（AI 味算子校准 + 精确率抽样） |
+| 卷纲 / 开卷 / 世界切换 | `outline_check.py`（卷纲体检，见其模块 docstring）、`open_volume.py`（见下文专节）、`world_switch.py`（快穿换位面时按既有机制封存上一世作用域，默认 dry-run） |
+| 正文规整 / 算子校准 / 可读性回放 | `normalize_chapters.py`（引号漂移 + 内部标识体检，默认 dry-run）、`ai_tone_calibrate.py`（AI 味算子校准 + 精确率抽样）、`readability_audit.py`（长段 / 对话占比 / 接词回声三指标只读回放 + 锚点书人类基线对照） |
+| 章节量产 | `produce_chapters.py`（见下文专节） |
 
 ### `scripts/migrate.py` 输出格式
 
@@ -257,3 +258,117 @@ python scripts/open_volume.py --db data/novelos.db --project prj_xxxx \
   `packages.core.quality.outline_check.check_outline`、`packages.core.db.get_connection`；
 - 外部库：无新增；标准库：`argparse` / `json` / `sqlite3` / `pathlib`；
 - 测试：`tests/unit/test_open_volume.py`（校验拒写 / 落库逐字段 / 幂等 / 体检不阻断）。
+
+---
+
+## `scripts/produce_chapters.py` —— 章节量产入口（plan → write → review → commit）
+
+把一批章节推到 `COMMITTED` 的一等入口，取代此前每本书手写的一次性 HTTP 驱动
+（软件仓外的 `_refs/arc1_driver.py` … `_refs/arc6_driver.py` 那批）。
+**只走 HTTP，不直连 SQLite**（事实源在服务端库；客户端另开连接只会制造第二写者），
+因此没有 `--db` 参数。
+
+### 用法
+
+```bash
+# 体检（默认模式，不发起任何 run）
+python scripts/produce_chapters.py --project prj_xxxx --chapters 1-3,7
+
+# 生产（已 COMMITTED 的章自动跳过）
+python scripts/produce_chapters.py --project prj_xxxx --chapters 1-3,7 --apply
+
+# 机器可读摘要（stdout 仅 JSON，人类可读日志走 stderr）
+python scripts/produce_chapters.py --project prj_xxxx --apply --json
+
+# 显式给作者意图 / 目标字数 / 门禁模式
+python scripts/produce_chapters.py --project prj_xxxx --apply \
+    --author-intent "单章可见字数 2200~2800" --target-word-count 2500 \
+    --quality-gate-mode enforce
+```
+
+选项：`--project`（必填）、`--chapters 1-3,7`（`--only` 为同语法旧名，二者同给报错）、
+`--base-url`（缺省由 `get_settings()` 的 `api_host`/`api_port` 拼出）、`--dry-run`（默认）/
+`--apply`、`--json`、`--author-intent`、`--target-word-count`、`--max-revise-rounds`（默认 2）、
+`--max-auto-approve`（默认 3）、`--repetition-threshold`（默认 0.08）、`--stage-timeout`、
+`--start-timeout`、`--poll-interval`、`--http-timeout`、`--quality-gate-mode`、
+`--mock-providers`（离线 / 测试用）。
+
+### 逐章流程与按状态续跑
+
+| 章节当前状态 | 本次执行 |
+|---|---|
+| `PLANNED` | plan → write → review → commit |
+| `DRAFTED` | review → commit（已有草稿，不重复烧 token 重写） |
+| `REVIEWED` | commit |
+| `COMMITTED` / `RELEASED` | 跳过（`skipped` 字段留痕） |
+
+### 四道守卫（每条都有实机事故来源）
+
+1. **409 容忍启动**：章节行在 workflow 内部先翻状态、run 行后落终态，窗口期内 start 会被
+   `already has an active workflow run` 拒收 → 有界退避重试；**只有这条已知竞态**可重试，
+   其它 409（如「最新草稿晚于最近一次审校完成时间」的时序守卫）与 4xx 硬错**立即硬停**。
+2. **commit 前清场**：commit 之前先轮询到该章没有 `RUNNING`/`PENDING` run（`--start-timeout` 上限），
+   超时即失败——不带着竞态发 commit。
+3. **报告驱动决议**（`decide_review`）：无 error ⇒ 批准；errors 全部落在可定向改稿规则集合
+   （`REVISABLE_RULE_IDS`：字数带 + 确定性算子）⇒ 驳回并附**定向**改稿意见（字数意见双向）；
+   未知 rule_id / 缺 rule_id / 不可定向改的规则 ⇒ **硬停报告**，不猜、不盲目重写。
+   **占比 / 频率类指标（如 `AI-DIALOGUE-LOW`）一律不在集合内**（F-19：可优化指标不作处方）。
+4. **有界风控门自动批准**：commit 阶段 PAUSE 在 `chapter-commit.high_risk_approval` 时，
+   最多自动批准 `--max-auto-approve` 轮，每轮把 pause_payload 摘要（stage / delta_id /
+   changes 计数 / HTTP 码）记进摘要的 `auto_approvals`（可审计）；轮次用尽交回人工。
+   **未知人工节点与作者决议节点（`chapter-review`）绝不自动批准**。
+
+### 不静默批准坏章（本脚本存在的理由）
+
+批准之前，脚本直接从**最新草稿正文**算章内重复率（13 字 shingle，重复 shingle 数 / 总数，
+去空白归一化——与 `packages/core/quality/ai_trace.py:intra_chapter_repetition` 同口径，
+但**本地实现**，不被该包的并发改动牵着走），超过 `--repetition-threshold`（默认 8%）
+**拒绝批准**并把比值写进失败报告（`failure.reason = "repetition_exceeds_threshold"`）。
+
+### 改稿回路（子 run 的发现方式）
+
+驳回改稿后，服务端 daemon 回路自己跑 write → review，**子 run 不在 resume 响应里**：
+驱动轮询 `GET /projects/{pid}/runs`，找**更新的、PAUSED 的 chapter-review run**（不看
+chapter.status——改稿轮里章状态停在 `DRAFTED` 不翻转，盯它只会傻等超时），读它的报告续判。
+轮次上限 `--max-revise-rounds`。
+
+### confirm 档门禁（前向兼容）
+
+质量门禁的 `confirm` 档（`quality.issues.CONFIRM_RULES` 的 `AI-BEAT-REPEAT`，以及
+`scoring` 按量级单条上修的 `RULE_STYLE_REPETITION_TRIGRAM` > 0.25 一档——「不许静默通过、
+必须显式接受并写明理由」）命中时，commit 会
+以 `quality gate blocked: [...] | gate=confirm | ...` 失败。驱动按硬停处理
+（`is_confirm_tier_failure`）：**不重试、不代填 `gate_override`**，把 rule_id 与证据原样
+报回摘要（`failure.reason = "gate_confirm_tier"`、`needs_gate_override = true`）。
+「接受」是作者的判断，不是驱动的判断。
+
+### `--json` 摘要（每章）
+
+`status`（initial/final）、`stages_run`、`word_count` / `target_word_count`、
+`review_error_count` / `review_errors` / `review_error_rule_ids` / `review_warning_count`、
+`repetition_ratio`、`draft_version`、`revise_rounds`、`auto_approve_rounds` / `auto_approvals`、
+`commit_retries`、`elapsed_s`、`failure{reason, stage, run_id, detail, rule_ids}`；
+顶层含 `mode` / `base_url` / `project_id` / `counts{selected,produced,skipped,failed,not_attempted}`
+与 `elapsed_s`。
+
+### 退出码
+
+- `0`：全部完成（含已 `COMMITTED` 被跳过）；
+- `1`：参数 / 配置错误（选择表达式非法、`--chapters` 与 `--only` 同给、阈值越界、
+  mock 文件读不出、API 不可达、project 不存在、选中的章号不在项目里）；
+- `2`：某章失败、整轮停止（失败章之后的章**不再尝试**，`counts.not_attempted` 记账）。
+
+### 已知边界（不做的部分）
+
+- 不自动填 `gate_override`（见上）；不重产已 `COMMITTED` 的章（需先回退章状态，另属一件事）；
+- 不建章、不写策展大纲、不改标题（分别走 `open_volume.py` / `PATCH /api/chapters/{id}`）；
+- 不清理孤儿 run（停驱动留下的 `RUNNING` 行会让本脚本在「等清场」处超时失败并如实报出）。
+
+### 依赖
+
+- 上游：`packages.core.config.get_settings`（端口 / host 单一来源）；
+- 外部库：httpx（仓库既有依赖）；标准库：`argparse` / `json` / `re` / `time` / `dataclasses` / `pathlib`；
+- 测试：`tests/unit/test_produce_chapters.py`（选择解析 / 重复率口径 / 评审决议 / confirm 前向兼容 /
+  落定循环的假 API）+ `tests/integration/test_produce_chapters_e2e.py`（临时库 + 独立端口 + mock
+  providers 三场景：干净章推到 `COMMITTED`；重复文本章被拒绝批准 exit 2；窄带章触发驳回改稿 →
+  轮询发现改稿子 run → 轮次耗尽即停 exit 2）。

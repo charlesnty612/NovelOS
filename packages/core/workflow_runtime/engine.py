@@ -239,6 +239,67 @@ def _fetch_run_status(db_path: str | Path, run_id: str) -> str | None:
     return row["status"] if row else None
 
 
+def _find_active_run_for_chapter(
+    conn: sqlite3.Connection,
+    *,
+    chapter_id: str,
+    exclude_run_id: str | None = None,
+) -> dict[str, Any] | None:
+    """同 chapter 下是否存在其他 RUNNING/PENDING 的活跃 run（0017 部分唯一索引的业务侧镜像）。
+
+    语义词源 = ``idx_workflow_runs_active``：
+    ``WHERE status IN ('RUNNING','PENDING') AND chapter_id IS NOT NULL``；
+    ``exclude_run_id`` 供 resume 排除自身（自身此时必为 PAUSED，不受 WHERE 命中）。
+
+    **只用于给出冲突来源的可读消息**——本函数是读操作，与紧随其后的
+    :meth:`WorkflowEngine._mark_run_running` UPDATE 之间存在窗口，权威约束始终在索引。
+    """
+    if exclude_run_id:
+        row = conn.execute(
+            """
+            SELECT run_id, status FROM workflow_runs
+            WHERE chapter_id = ? AND run_id != ? AND status IN ('RUNNING', 'PENDING')
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (chapter_id, exclude_run_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT run_id, status FROM workflow_runs
+            WHERE chapter_id = ? AND status IN ('RUNNING', 'PENDING')
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (chapter_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"run_id": row["run_id"], "status": row["status"]}
+
+
+def _active_run_conflict_message(
+    chapter_id: str | None,
+    active: dict[str, Any] | None,
+    *,
+    verb: str,
+) -> str:
+    """活跃 run 冲突的统一文案（``WorkflowRunConflict`` → HTTP 409 detail）。
+
+    ``verb`` 是动作短语（``"starting a new one"`` / ``"resuming this run"``），
+    与 API 层既有 409 detail 同形，客户端可用同一口径识别；``active`` 为空
+    （异常路径下查不到冲突行）时退化为无细节的短句。
+    """
+    if active is None:
+        return f"chapter {chapter_id!r} already has an active workflow run"
+    return (
+        f"chapter {chapter_id!r} already has an active workflow run "
+        f"(run_id={active['run_id']!r}, status={active['status']!r}); "
+        f"wait for it to reach a terminal state before {verb}"
+    )
+
+
 def _resolve_checkpoint_exclude(db_path: str | Path, run_id: str) -> list[str]:
     """按 run 反查 workflow 名 → 注册表取回 ``checkpoint_exclude``（M3）。
 
@@ -483,6 +544,8 @@ class WorkflowEngine:
         保留两次执行（首次+重生成）。
 
         返回 run_id（同入参）。如无 PAUSED run 或 run 已结束 → 抛 ValueError。
+        同 chapter 已被别的 RUNNING/PENDING run 占用 → 抛
+        :class:`WorkflowRunConflict`（409 语义，见 :meth:`_ensure_chapter_free_for_resume`）。
         """
         run = _get_run(self.db_path, run_id)
         if run is None:
@@ -491,6 +554,7 @@ class WorkflowEngine:
             raise ValueError(
                 f"workflow run {run_id!r} status={run['status']!r}, must be PAUSED to resume"
             )
+        self._ensure_chapter_free_for_resume(run)
 
         self._restore_checkpoint_exclude(run_id)
 
@@ -502,7 +566,7 @@ class WorkflowEngine:
         )
 
         # 与 resume_async 同口径：恢复执行期 run 行为 RUNNING（见 _mark_run_running 注释）
-        self._mark_run_running(run_id)
+        self._mark_run_running(run_id, chapter_id=run.get("chapter_id"))
 
         self._run_nodes(
             run_id=run_id,
@@ -537,6 +601,7 @@ class WorkflowEngine:
             raise ValueError(
                 f"workflow run {run_id!r} status={run['status']!r}, must be PAUSED to resume"
             )
+        self._ensure_chapter_free_for_resume(run)
 
         self._restore_checkpoint_exclude(run_id)
 
@@ -551,7 +616,7 @@ class WorkflowEngine:
         # 轮询方（前端 2s 轮询 / auto_revise 等待环）据此继续跟踪直到终态。
         # 同步时代无此翻转——执行期行一直标 PAUSED，端点阻塞到终态无人察觉；
         # 异步化后 PAUSED 会让轮询方误停，必须在调用线程同步翻转。
-        self._mark_run_running(run_id)
+        self._mark_run_running(run_id, chapter_id=run.get("chapter_id"))
 
         thread = threading.Thread(
             target=self._run_nodes_safe,
@@ -926,19 +991,76 @@ class WorkflowEngine:
         finally:
             conn.close()
 
-    def _mark_run_running(self, run_id: str) -> None:
+    def _ensure_chapter_free_for_resume(self, run: dict[str, Any]) -> None:
+        """resume 前置：同 chapter 是否已被别的 RUNNING/PENDING run 占用；占用 → 抛
+        :class:`WorkflowRunConflict`（API 映射 409）。
+
+        为什么在引擎里也守一道（API 层 ``resume_run`` 已有同语义守卫）：
+        1. 不经 HTTP 的调用方（auto_revise 回路 / 脚本 / 测试直接 ``engine.resume``）
+           没有 API 层守卫，出错时只能拿到 ``sqlite3.IntegrityError``；
+        2. 放在 :meth:`_prepare_resume_ctx` **之前**，让「预检就能判定的冲突」不留副作用
+           （该函数会把上一次的 PENDING 节点行收尾为 SKIPPED）。
+        本函数是读操作，**不构成互斥保证**——真正的权威判定是
+        :meth:`_mark_run_running` 里 0017 部分唯一索引的那次 UPDATE。
+        """
+        chapter_id = run.get("chapter_id")
+        if not chapter_id:
+            return
+        conn = get_connection(self.db_path)
+        try:
+            active = _find_active_run_for_chapter(
+                conn, chapter_id=chapter_id, exclude_run_id=run.get("run_id")
+            )
+        finally:
+            conn.close()
+        if active is not None:
+            raise WorkflowRunConflict(
+                _active_run_conflict_message(chapter_id, active, verb="resuming this run")
+            )
+
+    def _mark_run_running(self, run_id: str, chapter_id: str | None = None) -> None:
         """resume 接受后把 run 行置回 RUNNING（清 ended_at；error 留待终态覆盖）。
 
         同步时代 resume 执行期间行一直标 PAUSED（端点阻塞无人察觉）；异步化后
         轮询方依赖 status 区分「已暂停待审批」与「恢复执行中」，必须翻转。
+
+        本 UPDATE 是 0017 部分唯一索引 ``idx_workflow_runs_active`` 的唯一落点，因此
+        **是「同 chapter 至多一条 RUNNING/PENDING」的权威判定**；预检
+        （:meth:`_ensure_chapter_free_for_resume`）与本次 UPDATE 之间存在窗口，调用方在
+        预检后要拼 ctx / 读 checkpoint（毫秒~秒级），期间别的 run 可能已在同 chapter 落库
+        （实机 2026-09-18：auto_revise 回路 daemon 线程启动 write 子 run 落在该窗口内，
+        UPDATE 被索引拒绝，``sqlite3.IntegrityError`` 外溢成 HTTP 500）。故此处把索引拒绝
+        转为 :class:`WorkflowRunConflict`（409 语义），与 ``start_with_nodes`` 的 INSERT
+        路径同口径；非该索引的 IntegrityError 原样抛出（不掩盖别的约束缺陷）。
         """
         conn = get_connection(self.db_path)
         try:
-            conn.execute(
-                "UPDATE workflow_runs SET status = 'RUNNING', ended_at = NULL WHERE run_id = ?",
-                (run_id,),
-            )
-            conn.commit()
+            try:
+                conn.execute(
+                    "UPDATE workflow_runs SET status = 'RUNNING', ended_at = NULL WHERE run_id = ?",
+                    (run_id,),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:  # pragma: no cover —— 连接已坏时仍要给出业务异常
+                    pass
+                msg = str(exc)
+                if "workflow_runs.chapter_id" not in msg and "UNIQUE" not in msg.upper():
+                    raise
+                # 冲突来源：rollback 后同一连接上重查（不再新开连接，避免嵌套写路径）。
+                # 查不到（对方已收尾）时消息退化为无细节短句。
+                active = (
+                    _find_active_run_for_chapter(
+                        conn, chapter_id=chapter_id, exclude_run_id=run_id
+                    )
+                    if chapter_id
+                    else None
+                )
+                raise WorkflowRunConflict(
+                    _active_run_conflict_message(chapter_id, active, verb="resuming this run")
+                ) from exc
         finally:
             conn.close()
 

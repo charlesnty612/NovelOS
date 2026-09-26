@@ -32,6 +32,7 @@ from .builders_common import (
     _row_to_chapter,
     _safe_copy,
     _world_state_excerpts,
+    resolve_author_intent,
 )
 from .cache import (
     _FINGERPRINT_UNCACHED,
@@ -40,6 +41,7 @@ from .cache import (
     _cache_put,
     _fingerprint_author_intent,
     _fingerprint_scene_plan,
+    _fingerprint_writing_bible,
 )
 from .canon import (
     _REFERENCE_CANON_CONSUMER_WRITER,
@@ -121,6 +123,12 @@ def _build_writer_input_uncached(
     ``{"raw": ...}`` 段进 payload 顶层（与 :func:`build_director_input` 的
     ``author_intent`` 段同形，便于下游统一消费）；空 / ``None`` → **不出现该键**
     （保持既有「缺省不出现键」纪律，避免下游误读为空覆盖）。
+
+    2026-09-18（0029）：本函数收到的是**已解析**的作者意图——调用方
+    :func:`build_writer_input` 已用 :func:`resolve_author_intent` 把「项目写作圣经
+    基线 + 运行期增量」拼成单一原文。本函数只负责写进 payload，不做解析（缓存键与
+    payload 的**同源同值**由调用方保证）。直接调用本函数的场景（测试 / 无缓存路径）
+    传什么进什么，行为与改造前逐字一致。
     """
     conn = get_connection(db_path)
     try:
@@ -368,6 +376,14 @@ def build_writer_input(
     ``None`` → 不出现该键。键尾（命名空间前）追加 ``intent_fp`` 维度——否则改意图后
     同 state_version 会脏命中旧装配（硬规则 2「凡进 payload 的装配参数必须入键」，
     与 director 键的 V3.9 批次 1.4 教训同形）。
+
+    2026-09-18（0029 项目写作圣经）：``author_intent`` 不再是 payload 的直接来源，
+    而是与 ``projects.writing_bible`` 一起经 :func:`resolve_author_intent` 解析成
+    **单一原文**（无圣经 → 逐字等于 ``author_intent``，存量行为零变化）后再进
+    payload。解析在此处发生一次，结果同时喂 payload 与键维度：
+    ``intent_fp`` = 运行期原文指纹、``bible_fp`` = 圣经原文指纹——两个来源各自
+    独立入键，任一变化都 miss。**缺 ``bible_fp`` 会让「改圣经后同 state_version」
+    脏命中旧装配**（正是本次要修的同类形状，硬规则 2）。
     """
     if context_mode not in ("full", "paged"):
         raise ValueError(
@@ -403,16 +419,25 @@ def build_writer_input(
     # 进键：改意图必须 miss，否则新意图读到旧意图的装配（硬规则 2；与 director 键同形）。
     # 该指纹由函数形参直接算出（不依赖 peek）——主 JOIN 与降级路径的键形态逐字同形。
     intent_fp = _fingerprint_author_intent(author_intent)
+    # 2026-09-18（0029）：项目写作圣经与运行期意图一起决定 payload 的 author_intent
+    # 原文 ⇒ 圣经也要有自己的键维度（`bible_fp`，None → 'none'）。解析单点在此：
+    # 解析结果既进 payload（经 uncached / paged 透传）又决定 intent_fp/bible_fp，
+    # 「payload 与键同源同值」由同一处代码保证。
+    writing_bible = peek.get("writing_bible")
+    bible_fp = _fingerprint_writing_bible(writing_bible)
+    effective_intent = resolve_author_intent(writing_bible, author_intent)
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
         scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id,
-        target_word_count, genre_pack_ref, intent_fp, prompt_label,
+        target_word_count, genre_pack_ref, intent_fp, bible_fp, prompt_label,
         _cache_namespace_tag(namespace),
     )
-    # 不可序列化（scene_fp / intent_fp == 'uncached'）→ 跳过缓存，避免不同原文
-    # 落在同一占位键上互相脏命中（与 director 的 cacheable 判定同款）。
+    # 不可序列化（scene_fp / intent_fp / bible_fp == 'uncached'）→ 跳过缓存，避免不同
+    # 原文落在同一占位键上互相脏命中（与 director 的 cacheable 判定同款）。
     cacheable = (
-        scene_fp != _FINGERPRINT_UNCACHED and intent_fp != _FINGERPRINT_UNCACHED
+        scene_fp != _FINGERPRINT_UNCACHED
+        and intent_fp != _FINGERPRINT_UNCACHED
+        and bible_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)
@@ -422,7 +447,7 @@ def build_writer_input(
         payload = _build_writer_input_paged(
             db_path, chapter_id, scene_plan, target_word_count,
             relevance_trim=relevance_trim_final,
-            author_intent=author_intent,
+            author_intent=effective_intent,
             prompt_label=prompt_label,
             peek=peek,
         )
@@ -430,7 +455,7 @@ def build_writer_input(
         payload = _build_writer_input_uncached(
             db_path, chapter_id, scene_plan, target_word_count,
             relevance_trim=relevance_trim_final,
-            author_intent=author_intent,
+            author_intent=effective_intent,
             prompt_label=prompt_label,
             peek=peek,
         )
@@ -690,7 +715,9 @@ def _build_writer_input_paged(
     ``project_id``，省掉一次 ``_peek_project_id_from_chapter`` 连接。
 
     2026-09-16 F-10 修复：``author_intent`` 透传给 uncached 装配（生产 writer 默认
-    走 ``paged``——不透传则作者硬性要求在默认模式下静默丢失）。
+    走 ``paged``——不透传则作者硬性要求在默认模式下静默丢失）。2026-09-18（0029）
+    起传入的是调用方已解析的**单一原文**（圣经基线 + 运行期增量），本函数同样只做
+    透传、不解析。
 
     2026-09-16 版本口径统一：``prompt_label`` 同样透传（生产默认走本路径，
     不透传则 payload 又退回硬编码默认值，版本口径再度漂移）。

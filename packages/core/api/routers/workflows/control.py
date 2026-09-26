@@ -239,6 +239,11 @@ def _start_workflow(
     # 仅当显式 True 才塞 ctx（None/False 一律不塞，避免下游误读为「未指定」）。
     if body.deep_review is True:
         initial_ctx["deep_review"] = True
+    # P0-1（2026-09-18）：confirm 档规则的放行声明。仅 chapter-commit 的 quality_gate
+    # 节点读取（须覆盖本次全部 confirm rule_id 且 reason 非空，否则照样阻断）；
+    # 其他 workflow 收到此字段会被忽略。缺省 → 不塞 ctx（= 不声明）。
+    if body.gate_override is not None:
+        initial_ctx["gate_override"] = body.gate_override
 
     engine = _engine(request)
     try:
@@ -546,9 +551,14 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
     if workflow is None:
         raise HTTPException(status_code=500, detail=f"workflow {workflow_name!r} not registered")
 
-    # 并发防护：同 chapter 下有其他 RUNNING/PENDING run 时拒绝 resume。
+    # 并发防护（第一道，非原子）：同 chapter 下有其他 RUNNING/PENDING run 时拒绝 resume。
     # 原因：避免 resume 与既有活跃 run 并发改 chapter / plan_json / story_state。
     # 注意：自身 run 已是 PAUSED，不会被自身判定命中；用 exclude_run_id 显式排除。
+    # 本守卫是 check-then-act：从这次查询到引擎真正落 RUNNING（_mark_run_running）之间
+    # 还要拼 workflow 定义 + 读 checkpoint_json，期间别的 run 可能已在同 chapter 落库
+    # （实机 2026-09-18：auto_revise 回路 daemon 线程启动 write 子 run 落在该窗口内）
+    # → 权威判定在引擎侧的 0017 部分唯一索引，冲突经 WorkflowRunConflict 由下方
+    # except 映射为同一个 409（不再以 IntegrityError 外溢成 500）。
     chapter_id = run.get("chapter_id")
     if chapter_id:
         active = _check_active_run_for_chapter(
@@ -572,6 +582,10 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
             human_input=body.human_input,
             regenerate=bool(body.regenerate),
         )
+    except WorkflowRunConflict as exc:
+        # 引擎侧兜底（resume 预检 / _mark_run_running 的索引拒绝）：与 _start_workflow
+        # 同一形态映射 409——resume 的竞态与 start 的双 start 是同一缺陷形状。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         # 缺陷 2（P0 低）修复：resume_async 抛 ValueError 时按语义分桶映射状态码。
         # - 「not found」：run 在前置校验后被删除（或并发删除）→ 404
@@ -653,9 +667,28 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                     else:
                         effective_author_intent = None
 
+                # 解析「回路用 target_word_count」：与 mock_providers / model_overrides /
+                # author_intent 同样的「请求体 > 原 run ctx」语义。请求体显式给出 → 一律以
+                # 请求体为准；请求体 None 时从原 review run 的 checkpoint_json（即其 ctx）
+                # 继承，且只有正整数才认——None / 非 int / ≤0 → 回路不写该键（保持既有
+                # 「缺省不出现键」行为，子 run 回退既有 target 解析链）。
+                # 2026-09-18 实证：作者 --target-word-count 300 起稿，首轮 review 判
+                # 「288/300 字」，回路的 review 子 run 却判「288/3000 字」——子 run 拿不到
+                # target 就退回服务端默认 3000，回路在错误口径上判定成败。
+                effective_target_word_count: int | None
+                if body.target_word_count is not None:
+                    effective_target_word_count = int(body.target_word_count)
+                else:
+                    _ckpt_for_tw = run.get("checkpoint_json") or {}
+                    _tw_legacy = _ckpt_for_tw.get("target_word_count")
+                    if isinstance(_tw_legacy, int) and not isinstance(_tw_legacy, bool):
+                        effective_target_word_count = _tw_legacy if _tw_legacy > 0 else None
+                    else:
+                        effective_target_word_count = None
+
                 # 防御快照：daemon 线程不能持有 Request / Body 引用，避免 GC 后访问异常；
                 # db_path / workflow 元数据 / mock_providers / model_overrides / author_intent
-                # 都重新解出原始值再传入线程。
+                # / target_word_count 都重新解出原始值再传入线程。
                 _thread_db_path = str(db_path)
                 _thread_engine = engine
                 _thread_run_id = run_id
@@ -665,6 +698,7 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                 _thread_auto_revise_max = auto_revise_max
                 _thread_model_overrides = effective_model_overrides
                 _thread_author_intent = effective_author_intent
+                _thread_target_word_count = effective_target_word_count
 
                 def _auto_revise_runner() -> None:
                     """daemon 线程体：等当前 resume run 终态 → 判 rejected → 调 _auto_revise_loop。
@@ -706,6 +740,7 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
                                 _thread_auto_revise_max,
                                 _thread_model_overrides,
                                 _thread_author_intent,
+                                _thread_target_word_count,
                                 parent_run_id=_thread_run_id,
                             )
                     except Exception as exc:  # noqa: BLE001

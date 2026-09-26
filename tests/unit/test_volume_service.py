@@ -499,3 +499,61 @@ def test_assign_chapter_overwrites_previous_volume(tmp_path: Path):
     finally:
         conn.close()
     assert row["volume_id"] == v2["volume_id"]
+
+
+# ---------------------------------------------------------------------------
+# arc_summary（迁移 0020 的列）：service 层必须有写入口
+# ---------------------------------------------------------------------------
+#
+# 缺陷形状：volumes.arc_summary 由 project-init 的 outliner 产出，但 VolumeCreate
+# 没有该字段、service 也不写该列 —— 只有脚本直写 SQL 能落值，等于「收下即忘」。
+
+
+def test_create_volume_arc_summary_round_trip(tmp_path: Path):
+    """create 携带 arc_summary → 返回值 / get / list 三处都要读得到。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _make_project(db_path)
+    svc = VolumeService(db_path)
+    from packages.domain.volume.models import VolumeCreate
+
+    created = svc.create(
+        pid,
+        VolumeCreate(number=1, title="第一卷", arc_summary="叶尘从废脉少年踏上星辰之路"),
+    )
+    assert created["arc_summary"] == "叶尘从废脉少年踏上星辰之路"
+
+    got = svc.get(created["volume_id"])
+    assert got["arc_summary"] == "叶尘从废脉少年踏上星辰之路"
+
+    listed = svc.list(pid)
+    assert listed[0]["arc_summary"] == "叶尘从废脉少年踏上星辰之路"
+
+
+def test_create_volume_arc_summary_defaults_to_none(tmp_path: Path):
+    """未提供 arc_summary → NULL（不落空串占位）。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _make_project(db_path)
+    svc = VolumeService(db_path)
+    from packages.domain.volume.models import VolumeCreate
+
+    created = svc.create(pid, VolumeCreate(number=1, title="第一卷"))
+    assert created["arc_summary"] is None
+
+
+def test_update_volume_arc_summary(tmp_path: Path):
+    """update 可改写 arc_summary；未提供的字段不受影响（部分更新语义）。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _make_project(db_path)
+    svc = VolumeService(db_path)
+    from packages.domain.volume.models import VolumeCreate, VolumeUpdate
+
+    v1 = svc.create(pid, VolumeCreate(number=1, title="原始标题", arc_summary="旧摘要"))
+
+    updated = svc.update(v1["volume_id"], VolumeUpdate(arc_summary="新摘要"))
+    assert updated["arc_summary"] == "新摘要"
+    assert updated["title"] == "原始标题", "未提供的 title 不应被覆盖"
+
+    # 空摘要清空既有值（与 title 同口径：重跑 init 的产出即权威值）
+    cleared = svc.update(v1["volume_id"], VolumeUpdate(arc_summary=None))
+    assert cleared["arc_summary"] is None
+    assert svc.get(v1["volume_id"])["arc_summary"] is None

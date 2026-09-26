@@ -215,6 +215,166 @@ export interface DebtUpdate {
   who_knows?: Array<string> | null;
 }
 
+export interface DeliveryChapter {
+  /** 一章的交付判定行。 */
+  chapter_id: string;
+  /** 一章的交付判定行。 */
+  number: number;
+  /** 一章的交付判定行。 */
+  title: string;
+  /** 章节状态（流程位置，非交付判定） */
+  status: string;
+  /** 一章的交付判定行。 */
+  verdict: "deliverable" | "needs_work" | "not_deliverable" | "not_a_candidate";
+  /** 首个降级理由的中文说明；可交付时为 null */
+  blocking_reason?: string | null;
+  /** 一章的交付判定行。 */
+  draft_version?: number | null;
+  /** 一章的交付判定行。 */
+  length?: DeliveryLength | null;
+  /** 一章的交付判定行。 */
+  quality?: DeliveryQuality | null;
+  /** 一章的交付判定行。 */
+  signing: DeliverySigning;
+  /** 一章的交付判定行。 */
+  reasons?: Array<DeliveryReason>;
+}
+
+export interface DeliveryEvidenceSource {
+  /** 证据源可达性（诚实面：看不到的要说出来）。 */
+  key: string;
+  /** 证据源可达性（诚实面：看不到的要说出来）。 */
+  reachable: boolean;
+  /** 证据源可达性（诚实面：看不到的要说出来）。 */
+  detail: string;
+}
+
+export interface DeliveryIssue {
+  /** 质量报告里的一条 issue（gate 由 ``issue_gate`` 权威重推，不读落库字段值）。 */
+  rule_id: string;
+  /** 质量报告里的一条 issue（gate 由 ``issue_gate`` 权威重推，不读落库字段值）。 */
+  severity: string;
+  /** 后果档 auto / confirm / block */
+  gate: string;
+  /** 质量报告里的一条 issue（gate 由 ``issue_gate`` 权威重推，不读落库字段值）。 */
+  message: string;
+}
+
+export interface DeliveryLength {
+  /** 字数测量（``quality.wordcount`` 口径）。 */
+  visible_chars: number;
+  /** 字数测量（``quality.wordcount`` 口径）。 */
+  target_word_count: number;
+  /** 字数测量（``quality.wordcount`` 口径）。 */
+  band_low: number;
+  /** 字数测量（``quality.wordcount`` 口径）。 */
+  band_high: number;
+  /** 字数测量（``quality.wordcount`` 口径）。 */
+  deviation_pct: number;
+  /** in_band / under / over */
+  status: string;
+  /** in_band / warn / error（两级阈值同 review 侧） */
+  tier: string;
+}
+
+export interface DeliveryQuality {
+  /** 该章最新质量报告的证据面。 */
+  report_id: string;
+  /** 该章最新质量报告的证据面。 */
+  overall: number;
+  /** 该章最新质量报告的证据面。 */
+  evaluated_at?: string | null;
+  /** 本报告评估的草稿版本 */
+  draft_version?: number | null;
+  /** 报告 _meta.gate_summary（block / confirm 聚合摘要） */
+  gate_summary?: Record<string, unknown> | null;
+  /** 报告 _meta.gate_accepted_override（confirm 档接受留痕） */
+  accepted_override?: Record<string, unknown> | null;
+  /** 该章最新质量报告的证据面。 */
+  issues?: Array<DeliveryIssue>;
+}
+
+export interface DeliveryReason {
+  /** 规则 / 证据来源标识（前端按此分支） */
+  rule_id: string;
+  /** 证据出处 */
+  source: "quality_issue" | "length" | "signing_check" | "chapter_status" | "evidence";
+  /** 该证据自身的严重度（error / warning / info） */
+  severity: string;
+  /** 后果档（决定判定是否降级） */
+  status: "block" | "confirm" | "accepted" | "warn" | "length_out_of_band" | "length_beyond_band_edge" | "signing_fail" | "not_committed" | "not_evaluated" | "out_of_scope" | "not_a_candidate" | "project_not_deliverable" | "project_needs_work";
+  /** 面向作者的中文说明 */
+  message: string;
+  /** 证据摘录（引文片段或数字） */
+  evidence?: string | null;
+}
+
+export interface DeliveryRollUp {
+  /** 项目级汇总（作者的问题是「这本书能不能交」）。 */
+  chapter_count: number;
+  /** 非 PLANNED 的章节数 */
+  written_chapter_count: number;
+  /** 项目级汇总（作者的问题是「这本书能不能交」）。 */
+  deliverable_count: number;
+  /** 项目级汇总（作者的问题是「这本书能不能交」）。 */
+  needs_work_count: number;
+  /** 项目级汇总（作者的问题是「这本书能不能交」）。 */
+  not_deliverable_count: number;
+  /** 项目级汇总（作者的问题是「这本书能不能交」）。 */
+  not_a_candidate_count: number;
+  /** 项目级汇总（作者的问题是「这本书能不能交」）。 */
+  deliverable_chapter_ids: Array<string>;
+  /** 项目级汇总（作者的问题是「这本书能不能交」）。 */
+  needs_work_chapter_ids: Array<string>;
+  /** 项目级汇总（作者的问题是「这本书能不能交」）。 */
+  not_deliverable_chapter_ids: Array<string>;
+  /** 项目级汇总（作者的问题是「这本书能不能交」）。 */
+  not_a_candidate_chapter_ids: Array<string>;
+  /** 每章 id → 首个降级理由（可交付章不出现） */
+  blocking_reason_by_chapter?: Record<string, unknown>;
+}
+
+export interface DeliverySigning {
+  /** in_scope / out_of_scope / unavailable */
+  scope: string;
+  /** 签约体检在本章的适用面。 */
+  note?: string;
+  /** 签约体检在本章的适用面。 */
+  items?: Array<DeliverySigningItem>;
+}
+
+export interface DeliverySigningItem {
+  /** 签约体检的单项（仅第 1~3 章）。 */
+  key: string;
+  /** pass / warn / fail / info */
+  level: string;
+  /** 签约体检的单项（仅第 1~3 章）。 */
+  detail: string;
+  /** 签约体检的单项（仅第 1~3 章）。 */
+  advice?: string;
+}
+
+export interface DeliveryVerdictResponse {
+  /** ``GET /api/projects/{project_id}/delivery-verdict`` 的响应体。 */
+  project_id: string;
+  /** ``GET /api/projects/{project_id}/delivery-verdict`` 的响应体。 */
+  project_name: string;
+  /** ``GET /api/projects/{project_id}/delivery-verdict`` 的响应体。 */
+  generated_at: string;
+  /** ``GET /api/projects/{project_id}/delivery-verdict`` 的响应体。 */
+  project_verdict: "deliverable" | "needs_work" | "not_deliverable" | "not_a_candidate";
+  /** ``GET /api/projects/{project_id}/delivery-verdict`` 的响应体。 */
+  project_reasons?: Array<DeliveryReason>;
+  /** ``GET /api/projects/{project_id}/delivery-verdict`` 的响应体。 */
+  roll_up: DeliveryRollUp;
+  /** ``GET /api/projects/{project_id}/delivery-verdict`` 的响应体。 */
+  evidence_sources?: Array<DeliveryEvidenceSource>;
+  /** ``GET /api/projects/{project_id}/delivery-verdict`` 的响应体。 */
+  signing_check_scope?: string;
+  /** ``GET /api/projects/{project_id}/delivery-verdict`` 的响应体。 */
+  chapters?: Array<DeliveryChapter>;
+}
+
 export interface Draft {
   /** 草稿完整表示，对应 ``drafts`` 表行。 */
   draft_id: string;
@@ -248,6 +408,10 @@ export interface GateReviseRequest {
   critic_mode?: string | null;
   /** 「按门禁建议改稿」请求体（V3.9 批次 4.1）。 */
   deep_review?: boolean | null;
+  /** 「按门禁建议改稿」请求体（V3.9 批次 4.1）。 */
+  target_word_count?: number | null;
+  /** 「按门禁建议改稿」请求体（V3.9 批次 4.1）。 */
+  author_intent?: string | null;
 }
 
 export interface GenreBindRequest {
@@ -390,6 +554,8 @@ export interface Project {
   word_band?: Record<string, unknown> | null;
   /** 绑定的题材包 id（题材库单 slot）；None = 未绑定 / 极老库缺列。绑定与解绑走 POST /projects/{pid}/genre-pack/bind|unbind。 */
   genre_pack_id?: string | null;
+  /** 项目写作圣经（迁移 0029 的可空列）；None = 无圣经 / 极老库缺列。写入走 POST /projects 与 PATCH /projects/{pid}；不被任何工作流覆盖。 */
+  writing_bible?: string | null;
 }
 
 export interface ProjectCreate {
@@ -405,6 +571,8 @@ export interface ProjectCreate {
   foreshadow_overdue_chapters?: number | null;
   /** 字数带覆盖（low_ratio / high_ratio / floor 三键可任选）；省略/None=无覆盖。校验在 router 层走 resolve_band_config。 */
   word_band?: Record<string, unknown> | null;
+  /** 项目写作圣经：跨章节长期有效的作者硬性约束（题材铁律 / 禁写项 / 称谓与视角约定等）。省略/None=无圣经；空白串按无圣经处理（落 NULL）。装配时与运行期 author_intent 按「基线 + 增量」拼接，见模型模块 docstring。 */
+  writing_bible?: string | null;
 }
 
 export interface ProjectInitRequest {
@@ -439,6 +607,8 @@ export interface ProjectUpdate {
   foreshadow_overdue_chapters?: number | null;
   /** 字数带覆盖（low_ratio / high_ratio / floor 三键可任选）；None=清除覆盖；省略=保留原值。校验在 router 层走 resolve_band_config。 */
   word_band?: Record<string, unknown> | null;
+  /** 项目写作圣经。显式 null / 空白串 → 清除（落 NULL）；省略 → 保留原值。装配优先级见模型模块 docstring（基线 + 增量拼接）。 */
+  writing_bible?: string | null;
 }
 
 export interface ResumeRequest {
@@ -448,6 +618,7 @@ export interface ResumeRequest {
   regenerate?: boolean | null;
   model_overrides?: Record<string, unknown> | null;
   author_intent?: string | null;
+  target_word_count?: number | null;
 }
 
 export interface RevisionNoteUpdate {
@@ -466,6 +637,7 @@ export interface StartWorkflowRequest {
   fresh_write?: boolean | null;
   draft_version?: number | null;
   deep_review?: boolean | null;
+  gate_override?: Record<string, unknown> | null;
 }
 
 export interface StyleSampleCreate {
@@ -493,6 +665,8 @@ export interface Volume {
   /** 卷完整表示，对应数据库行。 */
   title: string | null;
   /** 卷完整表示，对应数据库行。 */
+  arc_summary: string | null;
+  /** 卷完整表示，对应数据库行。 */
   status: "active" | "sealed";
   /** 卷完整表示，对应数据库行。 */
   terminal_snapshot_json: Record<string, unknown> | null;
@@ -512,6 +686,8 @@ export interface VolumeCreate {
   number: number;
   /** 创建卷请求体。 */
   title?: string | null;
+  /** 创建卷请求体。 */
+  arc_summary?: string | null;
 }
 
 export interface VolumeListItem {
@@ -523,6 +699,8 @@ export interface VolumeListItem {
   number: number;
   /** 卷列表项——在 ``Volume`` 基础上加 ``chapter_count`` 聚合字段。 */
   title: string | null;
+  /** 卷列表项——在 ``Volume`` 基础上加 ``chapter_count`` 聚合字段。 */
+  arc_summary: string | null;
   /** 卷列表项——在 ``Volume`` 基础上加 ``chapter_count`` 聚合字段。 */
   status: "active" | "sealed";
   /** 卷列表项——在 ``Volume`` 基础上加 ``chapter_count`` 聚合字段。 */
@@ -540,4 +718,6 @@ export interface VolumeUpdate {
   title?: string | null;
   /** 部分更新请求体——所有字段均可选，未提供则不修改。 */
   status?: "active" | "sealed" | null;
+  /** 部分更新请求体——所有字段均可选，未提供则不修改。 */
+  arc_summary?: string | null;
 }

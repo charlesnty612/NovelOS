@@ -1,0 +1,40 @@
+-- =============================================================================
+-- NovelOS Database Migration 0029: projects.writing_bible（项目写作圣经）
+--
+-- 背景（缺陷修复，2026-09-18）：
+--   作者的写作铁律（「无 CP」「第一位面＝现代都市」「系统只做资源方，禁规则方」…）
+--   此前没有任何项目级落点——`author_intent` 是 StartWorkflowRequest 上的**单次
+--   运行**字段，不落 projects 表。结果：作者必须在每次 plan / write / revise 调用里
+--   重新粘贴整份铁律，漏一次即静默丢失（同类实证：驱动只发给 write，而当时唯一
+--   认该字段的 plan 端点收到空 `{}`，铁律在 ch1-6 一个模型都没看见）。
+--   其反面缺陷（brief.author_notes 只喂到 4 个 project-init 阶段中的 2 个）同属
+--   「约束没有权威落点」形状。
+--
+-- 列语义：
+--   - `writing_bible`：**项目级写作圣经**——跨章节长期有效的作者硬性约束
+--     （题材铁律 / 位面与世界观底线 / 禁写项 / 称谓与视角约定 / 文风硬要求）。
+--     由项目创建（POST /projects）或更新（PATCH /projects/{pid}）写入，
+--     **不被任何工作流覆盖**（与 chapters.outline_json 同属策展/稳定面）。
+--   - 读取优先级（context_engine 装配，见 `builders_common.resolve_author_intent`）：
+--       ① 运行期 `author_intent` 与项目 `writing_bible` 同时非空 →
+--          **基线 + 增量**拼接：圣经在前（长期基线），运行期要求在后（本次增量），
+--          拼接文本内显式声明「与上文冲突处以本节为准」（后置且更具体的指令对
+--          LLM 优先级更高）；
+--       ② 只有一方非空 → 用非空的那一方，**逐字**进 payload（无包装、无改写）；
+--       ③ 两者都空 → payload 不出现 author_intent 段（既有缺席语义不变）。
+--   - 为什么不是「运行期值整体覆盖圣经」：作者为某一章写一行小要求
+--     （如「本章价签只给价格数字」）时，整体替换会把全书铁律静默丢掉——正是本
+--     迁移要修的缺陷形状（静默丢失长期约束）。增量叠加让两条来源都保持在效力内。
+--
+-- 幂等策略：
+--   - 纯新增可空列（ALTER TABLE ADD COLUMN），不改既有列、不回填数据；
+--   - 存量库升级后 `writing_bible` 全为 NULL → 装配只取运行期 author_intent，
+--     与改造前逐字同值，**零行为突变**；
+--   - 回填由作者按需 PATCH（不属迁移职责）。
+--
+-- 与 0023 / 0025 的关系：0023 落 `word_band_json`、0025 落 `genre_pack_id`，本迁移
+-- 落第三类「项目级装配输入」——三者都进 context_engine 装配 payload，因此都必须
+-- 在装配缓存键里有**各自的指纹维度**（见 packages/core/context_engine/cache.py）。
+-- =============================================================================
+
+ALTER TABLE projects ADD COLUMN writing_bible TEXT;

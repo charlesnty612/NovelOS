@@ -21,6 +21,11 @@ _CACHE_MAX_SIZE = 256
 # 2026-09-16 F-10 修复：writer 键同步补 ``author_intent`` 指纹（``intent_fp``，键尾
 # 命名空间前）——writer payload 新增 ``author_intent`` 段（作者硬性要求）后，改意图
 # 必须 miss（硬规则 2「凡进 payload 的装配参数必须入键」；与 director 键同形）。
+# 2026-09-18（0029 项目写作圣经）：director / writer 键再各补一个 ``bible_fp``
+# 维度（``projects.writing_bible`` 原文指纹）——圣经与运行期意图一起决定 payload 的
+# ``author_intent.raw``（基线 + 增量拼接），两个来源各自独立，故各占一个键维度
+# （与「项目级 wb_fp / 运行级 target_word_count 分列」同款）；缺该维度则改圣经后
+# 同 state_version 脏命中旧装配。
 # 失效仍以 state_version + chapter_no 为主线；commit 完成后调
 # ``_invalidate_cache_for_chapter`` 显式兜底（state_version 推进也会带走它）。
 _assembly_cache: dict[tuple, dict[str, Any]] = {}
@@ -113,6 +118,22 @@ def _fingerprint_author_intent(author_intent: Any) -> str:
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:_FINGERPRINT_LEN]
     except Exception:  # noqa: BLE001 —— 不可序列化时跳过缓存
         return _FINGERPRINT_UNCACHED
+
+
+def _fingerprint_writing_bible(writing_bible: Any) -> str:
+    """计算 ``projects.writing_bible``（项目写作圣经）的稳定指纹（sha256 前 16 字符）。
+
+    圣经（0029）与运行期 ``author_intent`` 一起决定装配 payload 的
+    ``author_intent.raw`` 段 ⇒ 按装配缓存键纪律（AGENTS.md 硬规则 2「凡进 payload
+    的装配参数必须入键」）必须**单列一个键维度**；否则改圣经后同
+    ``state_version`` 下会脏命中旧装配（正是本条要修的「改了权威输入却复用旧装配」
+    缺陷形状，与 outline_json 的 0028 同款）。
+
+    与 :func:`_fingerprint_author_intent` 同款风格：``None`` → ``_FINGERPRINT_NONE``；
+    非 str → ``json.dumps(sort_keys=True, ensure_ascii=False)`` 后计算；
+    不可序列化 → ``_FINGERPRINT_UNCACHED``，调用方据此跳过缓存。
+    """
+    return _fingerprint_author_intent(writing_bible)
 
 
 def _cache_reset() -> None:

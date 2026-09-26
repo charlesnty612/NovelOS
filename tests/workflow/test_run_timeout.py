@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 
@@ -101,6 +102,69 @@ def test_timeout_payload_marks_running_with_timeout_flag(tmp_path: Path, monkeyp
     assert payload.get("run_id"), "应返回 run_id"
 
 
+def _insert_review_parent_run(db_path: str) -> str:
+    """落一行父 review run（FAILED rejected-for-revision + 可读的 review_report）。
+
+    2026-09-18 起回路的动作由 ``repair_policy.decide_repair`` 按 pending review 的
+    ``review_report`` 判定；这里给的是「报告无 error、作者主观驳回」形状（映射到 revise），
+    让回路按既有节奏去启动 write 子 run——本测试要验的是那条路上的超时短路。
+    """
+    from packages.core.db import get_connection
+    from packages.core.ids import new_id, now_iso
+
+    report = {
+        "word_count": 2500,
+        "target_word_count": 2500,
+        "within_range": True,
+        "word_band": {"low": 2125, "high": 2875},
+        "warnings": [],
+        "errors": [],
+        "ai_pattern_hits": [],
+    }
+    conn = get_connection(db_path)
+    try:
+        wf_row = conn.execute(
+            "SELECT workflow_id FROM workflows WHERE name = 'chapter-review'"
+        ).fetchone()
+        wf_id = wf_row["workflow_id"] if wf_row is not None else new_id("wf")
+        if wf_row is None:
+            now = now_iso()
+            conn.execute(
+                "INSERT INTO workflows "
+                "(workflow_id, name, version, definition_json, created_at, updated_at) "
+                "VALUES (?, 'chapter-review', 'v1', '{}', ?, ?)",
+                (wf_id, now, now),
+            )
+        run_id = new_id("wfr")
+        now = now_iso()
+        conn.execute(
+            """
+            INSERT INTO workflow_runs
+                (run_id, workflow_id, chapter_id, status, current_node,
+                 checkpoint_json, error, retry_count, started_at, ended_at)
+            VALUES (?, ?, NULL, 'FAILED', NULL, ?, 'rejected-for-revision', 0, ?, ?)
+            """,
+            (
+                run_id,
+                wf_id,
+                json.dumps(
+                    {
+                        "author_review": {
+                            "__pause_payload__": {"review_report": report}
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return run_id
+    finally:
+        conn.close()
+
+
 def test_auto_revise_loop_short_circuits_on_timeout(tmp_path: Path, monkeypatch, caplog) -> None:
     """_auto_revise_loop 收到 timeout 标记的 payload 时直接返回，不继续下一轮。
 
@@ -128,6 +192,7 @@ def test_auto_revise_loop_short_circuits_on_timeout(tmp_path: Path, monkeypatch,
     # 监听 logging.warning
     caplog.set_level(logging.WARNING, logger="novelos.routers.workflows")
 
+    parent = _insert_review_parent_run(str(settings.db_path))
     payload = wf_mod._auto_revise_loop(
         engine,
         settings.db_path,
@@ -135,6 +200,7 @@ def test_auto_revise_loop_short_circuits_on_timeout(tmp_path: Path, monkeypatch,
         chapter_id="ch_x",
         mock_providers=None,
         max_iter=3,
+        parent_run_id=parent,
     )
 
     assert payload.get("status") == "RUNNING"

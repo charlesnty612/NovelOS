@@ -39,8 +39,12 @@ Sprint 6 的 Quality 子模块，按 ``docs/evaluation/quality-scoring-v0.md`` �
   ``QualityReport.meta``。
 - 修改 §2.1 公式必须同步更新 ``aggregate.formula_text``（hash 自动重算）。
 - 修改 Guardrail severity 时同步更新 :data:`.issues.MVP_SEVERITY_MATRIX`（含规则级
-  ``MVP_RULE_OVERRIDES`` 与阻断白名单 ``BLOCKING_RULES``）；三者内容已纳入
+  ``MVP_RULE_OVERRIDES`` 与阻断白名单 ``BLOCKING_RULES``）；四者内容已纳入
   ``scoring_formula_hash``，变更时同时更新 README §4 与 spec §3.7/§4（V3.9 批次 3.1/3.5）。
+- **后果轴**（2026-09-18 P0-1）：``Gate`` / ``CONFIRM_RULES`` / ``issue_gate`` 是 severity
+  之外独立的一维——「多严重」与「必须怎么处理」分开表达。往 ``CONFIRM_RULES`` 加规则
+  同样属于评分口径变更（进 ``severity_config_fingerprint``），按 README §4.4 流程走；
+  入表前先问「命中实例是否可复算、作者是否无从辩驳」，不可复算的算子不上表。
 - 与 Story State service 集成时通过复用 ``packages.core.story_state.validator.validate_delta``
   （已在 :mod:`.guardrails` 内调用）；不要在 engine 内直接读 DB。
 """
@@ -52,20 +56,26 @@ from . import ai_flavor, guardrails, scoring
 from .aggregate import (
     SUBSCORE_NAMES,
     WEIGHTS,
+    GateSummary,
     compute_overall,
+    compute_overall_with_gates,
     formula_hash,
     formula_text,
     severity_config_text,
+    summarize_gates,
 )
 from .engine import QualityEngine
 from .issues import (
     BLOCKING_RULES,
+    CONFIRM_RULES,
     MVP_RULE_OVERRIDES,
     MVP_SEVERITY_MATRIX,
     Category,
+    Gate,
     Issue,
     Severity,
     is_blocking_issue,
+    issue_gate,
     loc,
     make_issue,
     mvp_max_severity,
@@ -94,9 +104,13 @@ __all__ = [
     "mvp_max_severity",
     "rule_default_severity",
     "is_blocking_issue",
+    "issue_gate",
     "severity_config_fingerprint",
     # 聚合
     "compute_overall",
+    "compute_overall_with_gates",
+    "summarize_gates",
+    "GateSummary",
     "WEIGHTS",
     "SUBSCORE_NAMES",
     "formula_hash",
@@ -117,8 +131,10 @@ __all__ = [
     "MVP_SEVERITY_MATRIX",
     "MVP_RULE_OVERRIDES",
     "BLOCKING_RULES",
+    "CONFIRM_RULES",
     "Severity",
     "Category",
+    "Gate",
     # V3.7 字数度量（wordcount）
     "visible_chars",
     "word_band",

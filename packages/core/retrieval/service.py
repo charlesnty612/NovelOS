@@ -195,7 +195,11 @@ def _index_text(text: str) -> str:
 
 
 def _chapter_content(conn, chapter_id: str) -> str | None:
-    """取章节正文（取该章最新 draft 的 content）；无 draft → None。"""
+    """取章节正文（取该章最新 draft 的 content）；无 draft → None。
+
+    有意取最新（P1-1）：FTS 索引是检索面——索引「该章现在的正文」，
+    snippet 也按最新一版取原文；不服务任何一次评审的「被审版本」。
+    """
     row = conn.execute(
         """
         SELECT content FROM drafts
@@ -393,6 +397,8 @@ def search(
             params.append(current_volume_id)
         params.append(int(limit))
         try:
+            # snippet 按最新 draft 取原文——有意取最新（P1-1）：召回给的是「该章现在的
+            # 正文」片段，不是某次评审的被审版本。
             rows = conn.execute(
                 f"""
                 SELECT cf.chapter_id, ch.number AS chapter_no, rank,

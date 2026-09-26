@@ -7,7 +7,13 @@
    自动接力 chapter-review（PAUSED 等作者决议）→ 批准后 REVIEWED → 再次提交
    （report 模式）成功，且门禁通过时清除 gate_blocked 标记；
 3. report 模式（不阻断）：不写 revision_note / gate_blocked；
-4. 无 gate_blocked 标记时 POST /gate-revise → 409（不启动任何 run）。
+4. 无 gate_blocked 标记时 POST /gate-revise → 409（不启动任何 run）；
+5. auto_revise 回路（2026-09-18 策略表批次，端到端）：review 驳回后回路的 write 子 run
+   在字数带下限缺口大到 capped revise（writer 规则 20：净增 ≤ +5%）追不回时，必须走
+   ``fresh_write``（writer 收 mode='write'、无 draft_text / revision_note），而不是继续
+   把旧稿按 revise 局部改。该分支现由 ``workflows/repair_policy.decide_repair`` 的
+   ``length_shortfall_beyond_revise_cap`` 一行产出（策略表逐行覆盖见
+   ``tests/unit/test_repair_policy.py``，四条端到端路径见 ``tests/api/test_repair_paths.py``）。
 
 测试模式与 ``tests/api/test_quality.py`` 一致（httpx.ASGITransport + tmp_path +
 mock_providers），helper 为独立副本，避免跨测试文件耦合。
@@ -265,6 +271,42 @@ async def _find_chained_review_run(app, pid: str, *, exclude_run_id: str) -> dic
     raise AssertionError("gate-revise 未在 120s 内接力出新的 PAUSED review run")
 
 
+async def _find_new_chapter_write_run(app, pid: str, *, known: set[str]) -> dict:
+    """等 auto_revise 回路启动的 chapter-write 子 run（run_id 不在 known 内）。"""
+    import time
+
+    deadline = time.monotonic() + 120.0
+    while time.monotonic() < deadline:
+        r = await _request(app, "GET", f"/api/projects/{pid}/runs")
+        assert r.status_code == 200, r.text
+        candidates = [
+            row for row in r.json()
+            if row.get("workflow_name") == "chapter-write"
+            and row["run_id"] not in known
+        ]
+        if candidates:
+            candidates.sort(key=lambda x: x.get("started_at") or "", reverse=True)
+            return candidates[0]
+        await asyncio.sleep(0.3)
+    raise AssertionError("auto_revise 未在 120s 内启动新的 chapter-write 子 run")
+
+
+def _read_writer_input(db_path: str, run_id: str) -> dict | None:
+    """从 writer 节点的 ``output_json`` 读 writer_input（该节点产出的权威副本）。"""
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT output_json FROM workflow_run_nodes "
+            "WHERE run_id = ? AND node_id = 'writer' ORDER BY rowid DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or not row["output_json"]:
+        return None
+    return json.loads(row["output_json"]).get("writer_input")
+
+
 # ---------------------------------------------------------------------------
 # 1. enforce 阻断落点 + gate-revise 闭环
 # ---------------------------------------------------------------------------
@@ -407,5 +449,166 @@ def test_gate_revise_409_without_pending_block(tmp_path: Path):
                 json={},
             )
             assert r.status_code == 404, r.text
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 3b. gate-revise 透传 target_word_count / author_intent（2026-09-21 检修 m6）
+# ---------------------------------------------------------------------------
+
+
+def test_gate_revise_passes_target_word_count_and_author_intent(tmp_path: Path):
+    """gate-revise 的 write 子 run 必须收到调用方给的 target / author_intent。
+
+    缺陷形状（m6 亲验复现）：``GateReviseRequest`` 此前没有这两个字段，构造
+    ``StartWorkflowRequest`` 时也不填 ⇒ 作者按非默认字数起稿后被门禁拦下，一键改稿
+    时 target 退回服务端默认 3000、作者铁律整段丢失（改稿在错误口径 + 无约束下进行）。
+    突变验证：撤掉 revise.py 的两处透传 → 本测试红。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app, name="gate-revise 透传项目")
+            cid = await _make_chapter(app, pid)
+            dead_char_id = await _make_dead_character(app, pid)
+
+            mock = {
+                "director": _director_script(cid),
+                "writer": _writer_script(cid),
+                "observer": _observer_dead_character_script(cid, dead_char_id),
+            }
+            await _drive_plan_write_review(app, pid, cid, mock)
+            blocked = await _commit(app, pid, cid, mock, "enforce")
+            assert blocked["status"] == "FAILED", blocked
+
+            revise_mock = {
+                "director": _director_script(cid),
+                "writer": _writer_script(cid, prose_suffix="【改稿】"),
+                "critic": _critic_script(cid),
+                "observer": _observer_dead_character_script(cid, dead_char_id),
+            }
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/gate-revise",
+                json={
+                    "mock_providers": revise_mock,
+                    "target_word_count": 300,
+                    "author_intent": "本书铁律：不许出现价签数字",
+                },
+            )
+            assert r.status_code == 201, r.text
+            write_run_id = r.json()["run_id"]
+            await _wait_run_terminal(app, write_run_id, expected=("COMPLETED",))
+
+            writer_input = _read_writer_input(str(app.state.settings.db_path), write_run_id)
+            assert writer_input is not None, "writer 节点应落 writer_input"
+            chapter_sec = writer_input.get("chapter") or {}
+            assert chapter_sec.get("target_word_count") == 300, chapter_sec.get("target_word_count")
+            assert writer_input.get("author_intent", {}).get("raw") == "本书铁律：不许出现价签数字", (
+                writer_input.get("author_intent")
+            )
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 4. auto_revise 回路：字数大缺口 → 本轮 write 走 fresh_write（端到端）
+# ---------------------------------------------------------------------------
+
+def test_auto_revise_loop_fresh_writes_when_shortfall_outruns_the_revise_cap(
+    tmp_path: Path,
+):
+    """review 驳回（改稿意见落 plan_json.revision_note）后，回路的 write 子 run 必须全新重写。
+
+    事实链（与线上 ch_92bac068ff0d 同形，只是把缺口放大到极端）：mock 正文约 40 字，
+    目标 3000（带 2550~3450）⇒ review 报 ``W-LEN-DEVIATION`` 且缺口 ≈ +6275%，
+    远超回路 1 轮在 +5%（writer-v3.md 规则 20）下可达的 5% ⇒ 本轮必须带 ``fresh_write``。
+    writer 收到 mode='write'、无 draft_text / revision_note 只可能来自该逃逸：不带逃逸时
+    plan_json.revision_note + 既有 draft 会把它钉在 revise 模式（本地既有回归用例
+    ``test_chapter_write_without_fresh_write_remains_revise`` 同口径）。
+
+    突变验证：撤 ``revise.py`` 里按 ``decide_repair`` 的动作分派（把 regenerate 分支去掉）
+    → writer_input['mode'] 实得 ``'revise'``（带 draft_text + revision_note）→ 本测试红。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app, name="auto-revise 逃逸项目")
+            cid = await _make_chapter(app, pid)
+            dead_char_id = await _make_dead_character(app, pid)
+
+            mock = {
+                "director": _director_script(cid),
+                "writer": _writer_script(cid),
+                "critic": _critic_script(cid),
+                "observer": _observer_dead_character_script(cid, dead_char_id),
+            }
+
+            # 1) plan → write v1（草稿落库）→ review（PAUSED 等作者决议）
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "auto-revise 逃逸", "mock_providers": mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
+                json={"mock_providers": mock},
+            )
+            assert r.status_code == 201, r.text
+            review = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
+            # 前置事实：这份 review 真的按长度出带报了 W-LEN-DEVIATION（error 档）
+            report = review["pause_payload"]["review_report"]
+            assert report["within_range"] is False, report
+            assert [e["rule_id"] for e in report["errors"]] == ["W-LEN-DEVIATION"], report
+
+            known = {
+                row["run_id"]
+                for row in (await _request(app, "GET", f"/api/projects/{pid}/runs")).json()
+            }
+
+            # 2) 驳回并改稿 + auto_revise_max=1 → 回路在 daemon 线程跑 write → review
+            r = await _request(
+                app, "POST", f"/api/runs/{review['run_id']}/resume",
+                json={
+                    "human_input": {
+                        "approved": False,
+                        "revise": True,
+                        "note": "正文严重欠带，请补足到带宽下限以上。",
+                    },
+                    "auto_revise_max": 1,
+                    "mock_providers": mock,
+                },
+            )
+            assert r.status_code == 200, r.text
+
+            # 3) 回路的 write 子 run：writer 必须收 mode='write'（全新重写）
+            child = await _find_new_chapter_write_run(app, pid, known=known)
+            child_run = await _wait_run_terminal(app, child["run_id"], expected=("COMPLETED",))
+            assert child_run["status"] == "COMPLETED", child_run
+            writer_input = _read_writer_input(str(app.state.settings.db_path), child["run_id"])
+            assert writer_input is not None, "writer 节点应落 writer_input"
+            assert writer_input.get("mode") == "write", (
+                f"大缺口改稿轮必须走 fresh_write ⇒ mode='write'，"
+                f"实际 mode={writer_input.get('mode')!r}（draft_text="
+                f"{bool(writer_input.get('draft_text'))!r}）"
+            )
+            assert not writer_input.get("draft_text"), writer_input
+            assert "revision_note" not in writer_input, writer_input
+            # 旧稿仍在（fresh_write 只是不喂给 writer，不删草稿）
+            r = await _request(app, "GET", f"/api/chapters/{cid}/drafts")
+            assert sorted(d["version"] for d in r.json()) == [1, 2], r.json()
 
     asyncio.run(run())

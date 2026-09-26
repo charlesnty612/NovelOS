@@ -316,13 +316,17 @@ export const workflowsApi = {
   // V3.9 批次 4.1：quality_gate enforce 阻断后的「按门禁建议改稿」。
   // 后端语义：复用 plan_json.revision_note（门禁阻断时写入）启动 write（revise 模式），
   // write 完成后自动接力 chapter-review；无 gate_blocked 标记 → 409。
-  // 仅需 mock_providers / model_overrides（其它智能字段由章节自身状态决定）。
+  // mock_providers / model_overrides 为该入口的既有透传；target_word_count /
+  // author_intent 于 2026-09-21（m6）补上——不传时后端从该章最近一次 run 的 ctx 继承，
+  // 否则改稿轮会退回服务端默认字数/丢掉作者铁律。
   gateRevise: (
     pid: string,
     cid: string,
     payload: {
       mock_providers?: Record<string, string[]> | null;
       model_overrides?: Record<string, string> | null;
+      target_word_count?: number | null;
+      author_intent?: string | null;
     } = {},
   ) =>
     api.post<WorkflowStartResponse>(

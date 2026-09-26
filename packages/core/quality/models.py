@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from .issues import Category, Severity
+from .issues import Category, Gate, Severity
 
 # ----------------------------------------------------------------------------- Issue
 
@@ -35,6 +35,12 @@ class Issue(BaseModel):
         rule_id: ``RULE_<NAME>`` 形式（错误/缺失/特殊规则允许其他前缀，如
             ``SCHEMA_VALIDATION_FAILED`` / ``scoring_missing_subscore``）。
         message: 人类可读的一句话。
+        gate: 后果档 ``auto`` / ``confirm`` / ``block``（2026-09-18 P0-1，与 severity 正交）。
+            材料化回显：``make_issue`` 与 ``QualityEngine.evaluate`` 按
+            :func:`packages.core.quality.issues.issue_gate` 写入，落库后前端 / API 可直接读；
+            **权威仍是 ``issue_gate``**——字段只能把表外规则单条上修为 ``confirm``，
+            不能把表内规则降级。默认 ``"auto"`` 仅为 pydantic 缺省值（直接 ``Issue(...)``
+            构造时不材料化）。
         suggestion / evidence_refs / judge_trace: 可选。
     """
 
@@ -43,6 +49,7 @@ class Issue(BaseModel):
     location: str = "<unknown>"
     rule_id: str
     message: str
+    gate: Gate = "auto"
     suggestion: Optional[str] = None
     evidence_refs: Optional[list[str]] = None
     judge_trace: Optional[dict[str, Any]] = None
@@ -65,6 +72,7 @@ class QualityContext(BaseModel):
         reference_texts / whitelist: REQ-Q6 参照书与白名单。
         ai_chars / human_chars: REQ-Q8 字符数。
         char_stats_note: REQ-Q8 统计口径 note（V3.9 批次 3.3；可空）。
+        draft_version: 本 ctx 的正文取自哪一版草稿（P1-1，可空）。
         commit_id / run_id: 仅做报告回显。
     """
 
@@ -85,6 +93,11 @@ class QualityContext(BaseModel):
     # ai_trace 跨章子信号：同项目最近 N 章正文（章节号降序）。
     # service / pipeline 现场拉取后传入；engine 不直接读 DB。
     previous_drafts: list[str] = Field(default_factory=list)
+    # P1-1（2026-09-18）：``draft`` 取自哪一版草稿（``drafts.version`` 真值）。
+    # 由 ``build_quality_context`` 经共享解析单点（``resolve_draft``）与正文**同一次**
+    # 读出——engine 原样回显进 ``QualityReport.draft_version``，让报告标签与被量的
+    # 那份正文同源；``None`` = 该章尚无草稿 / 调用方自行构造 ctx 未指定。
+    draft_version: Optional[int] = None
     # M2-C 趋势监测：最近若干章 style 子分序列（章节号升序）。
     # 默认 None：不传则跳过 style 趋势监测（``engine`` 走兼容路径），
     # 旧调用方零影响。仅当长度 >= :data:`style_trend.WINDOW` 时启用监测。

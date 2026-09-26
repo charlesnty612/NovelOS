@@ -138,7 +138,12 @@ def _make_writer_ctx(
 
 
 def _patched_run_agent(monkeypatch: pytest.MonkeyPatch, captured: list[dict]):
-    """把 packages.core.agent_runtime.runner.run_agent 替换为捕获器。"""
+    """把 packages.core.agent_runtime.runner.run_agent 替换为捕获器。
+
+    产出正文必须**落在字数带内**（target 3000 ⇒ 带 2550~3449）：否则 P0-2 的生成期
+    欠带重写会在同一节点内再调 1~2 次 writer，把「本节点只调一次」的断言打散
+    （而本文件的主题是 capability 路由，不是字数闭环）。
+    """
 
     def fake_run_agent(*args, **kwargs):
         captured.append({"args": args, "kwargs": kwargs})
@@ -147,10 +152,10 @@ def _patched_run_agent(monkeypatch: pytest.MonkeyPatch, captured: list[dict]):
             "schema_version": "writer-output.v1",
             "prompt_version": "writer:v1",
             "chapter_id": "ch_cap_test",
-            "prose": "captured prose",
+            "prose": "中" * 3000,  # 3000 字 ∈ 带内（2550~3449）⇒ 不再触发欠带重写
             "self_report": {
                 "slots_filled": [],
-                "word_count": 6,
+                "word_count": 3000,
                 "scene_count": 1,
                 "deviations": [],
                 "forbidden_word_hits": [],

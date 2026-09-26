@@ -167,8 +167,74 @@ def resolve_chapter_outline(chapter: dict[str, Any] | None) -> dict[str, Any]:
     return {k: plan[k] for k in _OUTLINE_KEYS if plan.get(k) not in (None, "", [], {})}
 
 
+# ---------------------------------------------------------------------------
+# 作者意图（0029 项目写作圣经 + 运行期 author_intent）——装配的唯一解析点
+# ---------------------------------------------------------------------------
+# 拼接格式：圣经在前（长期基线），运行期要求在后（本次增量），并在增量段前显式声明
+# 冲突裁决方向。为什么声明方向而不只做拼接：两者语义层级不同（全书铁律 vs 本章小
+# 要求），LLM 对「后置且更具体」的指令天然给更高优先级，但那是**隐含**约定；把它写成
+# 一行明文可被 prompt 之外的消费方（人工预览 / 审计）直接读到，也让「改写顺序」不再是
+# 唯一生效机制。
+_AUTHOR_INTENT_BIBLE_HEADER = "【项目写作圣经】（全书长期硬性约束）"
+_AUTHOR_INTENT_DELTA_HEADER = (
+    "【本次运行补充要求】以下要求与上文冲突时，以本节为准"
+)
+
+
+def _split_author_intent(text: object) -> str:
+    """把一侧来源（圣经 / 运行期意图）归一为待拼接文本；非 str 或空白 → 空串。"""
+    if isinstance(text, str):
+        return text.strip()
+    return ""
+
+
+def resolve_author_intent(writing_bible: object, author_intent: object) -> str:
+    """把「项目写作圣经」与「运行期 author_intent」解析成进 payload 的**单一原文**。
+
+    优先级契约（迁移 0029 的列语义，两端必须逐字一致）：
+
+    1. 两者都非空 → **基线 + 增量**拼接：
+
+       .. code-block:: text
+
+          【项目写作圣经】（全书长期硬性约束）
+          <writing_bible>
+
+          【本次运行补充要求】以下要求与上文冲突时，以本节为准
+          <author_intent>
+
+    2. 只有一方非空 → **逐字**返回该方（无包装、无 header、无改写）——保证
+       「存量项目（无圣经）」与「仅传运行期意图」的 payload 与改造前**逐字同值**
+       （零行为突变的回归契约）；
+    3. 两者都空 → 空串（调用方据此**不写** payload 的 ``author_intent`` 键，
+       沿既有「缺省不出现该键」纪律）。
+
+    为什么是拼接而不是「运行期值整体覆盖圣经」：作者为某一章写一行小要求
+    （如「本章价签只给价格数字」）时，整体替换会把全书铁律静默丢掉——正是本条要修的
+    缺陷形状（静默丢失长期约束）。增量叠加让两条来源都保持效力，冲突方向由增量段
+    header 明文指定。
+
+    拼接结果**确定性**（同一 ``(writing_bible, author_intent)`` 恒得同一文本）——
+    这是缓存键稳定性的前提：调用方对同一原文算指纹（``intent_fp`` / ``bible_fp``），
+    文本若随调用变化就会让「同输入不同键」变成脏命中温床。
+    """
+    bible_text = _split_author_intent(writing_bible)
+    intent_text = _split_author_intent(author_intent)
+    if bible_text and intent_text:
+        return (
+            f"{_AUTHOR_INTENT_BIBLE_HEADER}\n{bible_text}\n\n"
+            f"{_AUTHOR_INTENT_DELTA_HEADER}\n{intent_text}"
+        )
+    return bible_text or intent_text
+
+
 def _latest_draft(conn: sqlite3.Connection, chapter_id: str) -> dict[str, Any] | None:
-    """取该章最新 draft 行（按 created_at DESC）。"""
+    """取该章最新 draft 行（按 created_at DESC）。
+
+    有意取最新（P1-1）：本模块为**下一次写作**装配上下文（上一章正文 /
+    场景衔接），要的就是「该章现在的正文」；没有「被审版本」可言。需要指定版本
+    见 ``packages.domain.chapter.draft_resolver.resolve_draft``。
+    """
     row = conn.execute(
         """
         SELECT * FROM drafts
@@ -699,7 +765,8 @@ _PEEK_CHAPTER_SQL = """
               FROM projects pj2
               LEFT JOIN genre_packs gp ON gp.pack_id = pj2.genre_pack_id
              WHERE pj2.project_id = COALESCE(?, ch.project_id))      AS genre_pack_ref,
-           pj.word_band_json                   AS word_band_json
+           pj.word_band_json                   AS word_band_json,
+           pj.writing_bible                    AS writing_bible
     FROM chapters ch
     LEFT JOIN projects pj ON pj.project_id = COALESCE(?, ch.project_id)
     WHERE ch.chapter_id = ?
@@ -731,6 +798,7 @@ def _empty_chapter_peek(chapter_id: str, project_id: str | None = None) -> dict[
         "plan_json_raw": None,
         "outline_json_raw": None,
         "word_band_json": None,
+        "writing_bible": None,
         "active_canon_id": None,
         "genre_pack_ref": None,
     }
@@ -769,6 +837,28 @@ def _try_project_word_band_json(conn: sqlite3.Connection, project_id: str) -> st
     if row is None:
         return None
     val = row["word_band_json"]
+    return val if val else None
+
+
+def _try_project_writing_bible(conn: sqlite3.Connection, project_id: str) -> str | None:
+    """单连接读 ``projects.writing_bible`` 原文；列缺失 / 无项目 / 空白 → None。
+
+    口径与主 SQL（``_PEEK_CHAPTER_SQL`` 的 ``pj.writing_bible``）逐字同形：圣经是
+    **原文**（不进解析、不裁剪），因为它要同时喂给「装配 payload」与「缓存键指纹」
+    两个消费点——两处必须同源同值（硬规则 2）。降级路径与主路径同形，
+    否则极老库会算出另一种键形态导致脏命中。
+    """
+    try:
+        row = conn.execute(
+            "SELECT writing_bible FROM projects WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # 0029 未跑过的极老库 → 列不存在 → 视为无圣经（与无圣经行为零差异）。
+        return None
+    if row is None:
+        return None
+    val = row["writing_bible"]
     return val if val else None
 
 
@@ -837,6 +927,7 @@ def _peek_chapter_context_conn(
         "plan_json_raw": row["plan_json"],
         "outline_json_raw": (row["outline_json"] if "outline_json" in row.keys() else None),
         "word_band_json": row["word_band_json"] or None,
+        "writing_bible": (row["writing_bible"] if "writing_bible" in row.keys() else None) or None,
         "active_canon_id": row["active_canon_id"] or None,
         "genre_pack_ref": row["genre_pack_ref"] or None,
     }
@@ -862,6 +953,7 @@ def _peek_chapter_context_degraded(
     if pid:
         info["state_version"] = _project_max_state_version(conn, pid)
         info["word_band_json"] = _try_project_word_band_json(conn, pid)
+        info["writing_bible"] = _try_project_writing_bible(conn, pid)
         info["active_canon_id"] = _try_active_canon_id(conn, pid)
         info["genre_pack_ref"] = _try_project_genre_pack_ref(conn, pid)
     return info
@@ -873,11 +965,13 @@ def _peek_chapter_context(
     """单连接轻量预读（缓存键预判 + uncached 装配复用；V3.9 批次 2.3）。
 
     返回 ``{found, chapter_id, project_id, chapter_no, state_version, plan_json_raw,
-    word_band_json, active_canon_id, genre_pack_ref}``：
+    word_band_json, writing_bible, active_canon_id, genre_pack_ref}``：
 
     - ``state_version`` = ``MAX(story_states.state_version)``（无快照 → 0），口径见
       :func:`_project_max_state_version`；
-    - ``plan_json_raw`` / ``word_band_json`` 为 DB 原文（不做解析，避免破坏键稳定性）；
+    - ``plan_json_raw`` / ``word_band_json`` / ``writing_bible`` 为 DB 原文（不做解析，
+      避免破坏键稳定性）；``writing_bible`` 同时喂「装配 payload」与「缓存键指纹」
+      （0029，见 :func:`resolve_author_intent`），两处同源同值；
     - ``genre_pack_ref`` = 绑定题材包指纹 ``<pack_id>@<version>``（未绑定 / 极老库 → None），
       供 director 缓存键的题材包维度使用（题材库 P1a）；
     - 任一字段缺失 / 异常 → 该字段安全 fallback，不抛错（连接打不开 → 全空态）；

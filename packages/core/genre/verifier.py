@@ -50,6 +50,14 @@ v1 逐章核两类（配比偏差 + 节奏红线）；v2 按实战证据（书1 
   逐章取最近一条 write run；
 - ``projects.genre_pack_id`` → ``genre_packs``：未显式传 ``pack`` 时的绑定题材包。
 
+**字数带实测的归属口径**（2026-09-18 修复，缺陷形状同「测量对象 ≠ 被审对象」）：
+``length_report`` 是章节写 run 落笔那一刻的自测值，只对该 run 落库的那一版草稿成立。
+故字数带核销（``GENRE-WORD-BAND-DEVIATION``）**按待核草稿版本取正文**，且仅在
+``length_report`` 的归属版本（checkpoint ``draft_version``）与待核版本一致时采信
+``length_report``；版本不符（作者手改草稿 / 指定旧版本复审）或归属未知（老
+checkpoint）→ 用草稿正文的 ``visible_chars`` 实测。口径细节与实证见
+:func:`_resolve_word_band_count`。severity 不变（恒 warning，review-class）。
+
 边界（与 P1a README 一致的「读侧全容错」）：
 - 无绑定题材包 → ``GenreCheckResult(bound=False, checked=False)``，零 issue
   （调用方据此整段跳过，零行为变化）；
@@ -238,8 +246,20 @@ def _parse_json(raw: Any) -> Any:
         return None
 
 
-def _load_chapter_sources(db_path: str | Path, chapter_id: str) -> dict[str, Any]:
-    """一次性读核销所需来源（章节行 / 最新草稿 / 最近 chapter-write run）。
+def _load_chapter_sources(
+    db_path: str | Path,
+    chapter_id: str,
+    *,
+    draft_version: int | None = None,
+) -> dict[str, Any]:
+    """一次性读核销所需来源（章节行 / 待核草稿 / 最近 chapter-write run）。
+
+    ``draft_version``：待核草稿的版本；``None`` → 取最新一版（默认口径）。
+    评审侧传入 ``review_report.draft_version``，保证「核销对象 = 被审对象」。
+
+    ``length_report_origin_version``：最近一条 chapter-write run 的 checkpoint 里
+    ``draft_version``——即该 ``length_report`` 的归属版本（写它的那个 run 落库的
+    草稿版本）。该 run 未落草稿 / 老 checkpoint 无此键 → ``None``（归属未知）。
 
     任一查询失败 → 该来源缺席（``None``），不抛错（与 P1a 读侧全容错同款）。
     """
@@ -253,6 +273,7 @@ def _load_chapter_sources(db_path: str | Path, chapter_id: str) -> dict[str, Any
         "draft_version": None,
         "scene_plan": None,
         "length_report": None,
+        "length_report_origin_version": None,
         "write_run_id": None,
     }
     try:
@@ -277,12 +298,19 @@ def _load_chapter_sources(db_path: str | Path, chapter_id: str) -> dict[str, Any
             sources["plan_json"] = plan if isinstance(plan, dict) else {}
 
         try:
-            draft = conn.execute(
-                "SELECT content, version FROM drafts WHERE chapter_id = ? "
-                "ORDER BY version DESC LIMIT 1",
-                (chapter_id,),
-            ).fetchone()
-        except sqlite3.Error:
+            if draft_version is None:
+                draft = conn.execute(
+                    "SELECT content, version FROM drafts WHERE chapter_id = ? "
+                    "ORDER BY version DESC LIMIT 1",
+                    (chapter_id,),
+                ).fetchone()
+            else:
+                draft = conn.execute(
+                    "SELECT content, version FROM drafts WHERE chapter_id = ? "
+                    "AND version = ?",
+                    (chapter_id, int(draft_version)),
+                ).fetchone()
+        except (sqlite3.Error, TypeError, ValueError):
             draft = None
         if draft is not None:
             sources["draft_content"] = draft["content"] or ""
@@ -312,6 +340,11 @@ def _load_chapter_sources(db_path: str | Path, chapter_id: str) -> dict[str, Any
                 sources["length_report"] = (
                     length_report if isinstance(length_report, dict) else None
                 )
+                # length_report 的归属版本（写它的那一次 write run 落库的草稿版本）：
+                # 非整数 / 老 checkpoint 无此键 → None（归属未知）。
+                origin = checkpoint.get("draft_version")
+                if isinstance(origin, int) and not isinstance(origin, bool):
+                    sources["length_report_origin_version"] = origin
     finally:
         conn.close()
     return sources
@@ -897,6 +930,50 @@ def _match_redlines(redlines: Any, corpus: str) -> list[str]:
     return hits
 
 
+def _resolve_word_band_count(sources: dict[str, Any]) -> tuple[int | None, str | None]:
+    """字数带实测口径 → ``(word_count, source)``。
+
+    **归属规则**（2026-09-18 修复实证缺陷）：``length_report`` 是 chapter-write run
+    *落笔那一刻*对它自己写下的那版草稿的实测值，归属由 checkpoint 的 ``draft_version``
+    标定。只有当它等于**本次核销的草稿版本**时，它才是「同一份正文」的权威数字；
+    版本不符（作者手改新增了草稿版本、复审指定旧版本）或归属未知（老 checkpoint 无
+    ``draft_version``）时它是陈旧数据——此时改用草稿正文的权威口径实测
+    （:func:`visible_chars`，与 ``basic_checks`` 的 ``report.word_count`` 同源函数）。
+
+    草稿正文缺席（孤儿章 / 该 run 未落草稿）而 ``length_report`` 在场 → 仍用
+    ``length_report``（唯一可用证据，v1 兜底口径不变）。
+
+    实证（review run ``wfr_adf71afbb7d9`` / 章 ``ch_92bac068ff0d``）：同一份报告里
+    ``word_count=2248, draft_version=13``，而 ``genre_check`` 报「实际字数 713
+    （length_report）」——713 是 **v11** 的可见字数，length_report 出自写 v11 的
+    write run（checkpoint ``draft_version=11``）；v12 / v13 是作者手改
+    （``POST /api/chapters/{id}/drafts``），不经过 chapter-write，故 length_report
+    一直停在 v11。
+    """
+    length_report = sources.get("length_report")
+    report_chars: int | None = None
+    if isinstance(length_report, dict):
+        raw_chars = length_report.get("visible_chars")
+        if isinstance(raw_chars, int) and not isinstance(raw_chars, bool):
+            report_chars = raw_chars
+    reviewed_version = sources.get("draft_version")
+    origin_version = sources.get("length_report_origin_version")
+    draft_content = sources.get("draft_content")
+
+    attributed = (
+        report_chars is not None
+        and origin_version is not None
+        and origin_version == reviewed_version
+    )
+    if attributed:
+        return report_chars, "length_report"
+    if isinstance(draft_content, str):
+        return visible_chars(draft_content), "draft"
+    if report_chars is not None:
+        return report_chars, "length_report"
+    return None, None
+
+
 def _check_redlines(
     payload: dict[str, Any],
     sources: dict[str, Any],
@@ -923,17 +1000,16 @@ def _check_redlines(
             value = band.get(key)
             if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                 declared_band[key] = value
-    length_report = sources.get("length_report")
-    if length_report is not None and isinstance(length_report.get("visible_chars"), int):
-        word_count = int(length_report["visible_chars"])
-        source = "length_report"
-    elif isinstance(sources.get("draft_content"), str):
-        word_count = visible_chars(sources["draft_content"])
-        source = "draft"
-    else:
-        word_count = None
-        source = None
-    band_detail.update({"declared": declared_band, "word_count": word_count, "source": source})
+    word_count, source = _resolve_word_band_count(sources)
+    band_detail.update(
+        {
+            "declared": declared_band,
+            "word_count": word_count,
+            "source": source,
+            "reviewed_draft_version": sources.get("draft_version"),
+            "length_report_origin_version": sources.get("length_report_origin_version"),
+        }
+    )
     if not {"low", "high"} <= set(declared_band):
         band_detail["reason"] = "chapter_word_band_not_declared"
     elif word_count is None:
@@ -1008,6 +1084,8 @@ def verify_chapter(
     db_path: str | Path,
     chapter_id: str,
     pack: Any = None,
+    *,
+    draft_version: int | None = None,
 ) -> GenreCheckResult:
     """核销单章（report-only）。
 
@@ -1015,6 +1093,11 @@ def verify_chapter(
         db_path / chapter_id：目标章。
         pack：题材包行 dict（含 ``payload``）/ 裸 payload dict；省略（``None``）时
             读 ``projects.genre_pack_id`` 的绑定题材包。
+        draft_version：待核草稿版本（评审侧传 ``review_report.draft_version``）；
+            省略（``None``）→ 取最新一版。字数带核销按此版本取正文，且只在该版本
+            与 ``length_report`` 的归属版本（写它的那个 write run 落库的
+            ``draft_version``）一致时才采信 ``length_report``——见
+            :func:`_resolve_word_band_count`。
 
     返回 :class:`GenreCheckResult`；**任何读路径异常都不抛错**（``error`` 字段
     记录原因，``checked=False``），调用方据此整段跳过或只做展示。
@@ -1028,7 +1111,7 @@ def verify_chapter(
     result = GenreCheckResult()
     location = str(chapter_id)
     try:
-        sources = _load_chapter_sources(db_path, chapter_id)
+        sources = _load_chapter_sources(db_path, chapter_id, draft_version=draft_version)
     except Exception as exc:  # noqa: BLE001 —— 读路径整体失败（不阻断评审）
         result.error = f"read_failed: {exc}"
         result.skipped.append("chapter_sources_unavailable")

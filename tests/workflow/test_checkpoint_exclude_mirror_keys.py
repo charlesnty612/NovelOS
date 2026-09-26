@@ -384,9 +384,17 @@ def test_review_and_commit_checkpoints_exclude_mirrors(tmp_path: Path):
             assert ch.json()["status"] == "REVIEWED", ch.json()
 
             # ---- commit：mock observer（LOW + 30KB notes）→ COMPLETED ----
+            # 注：本用例的主题是 checkpoint 镜像键排除，与质量口径无关；而 `_PROSE` 是
+            # 「同一句填充重复 300 次」的合成正文，会命中 P0-1（2026-09-18）新增的
+            # confirm 档 RULE_STYLE_REPETITION_TRIGRAM 而被 enforce 拦下。
+            # 故这里显式走 report 模式——门禁仍跑（checkpoint / 报告 / 节点输出照旧），
+            # 只是不阻断，避免合成脚手架把无关测试带红。
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/commit",
-                json={"mock_providers": {"observer": _observer_low_big_script(char_id, cid)}},
+                json={
+                    "mock_providers": {"observer": _observer_low_big_script(char_id, cid)},
+                    "quality_gate_mode": "report",
+                },
             )
             assert r.status_code == 201, r.text
             commit_run = await _wait_run_status(

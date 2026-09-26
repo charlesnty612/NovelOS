@@ -18,11 +18,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 from .common import _TOKEN_DIVISOR, get_connection
+
+_log = logging.getLogger(__name__)
 
 
 def _volume_id_of_chapter(conn: sqlite3.Connection, chapter_id: str) -> str | None:
@@ -330,19 +333,70 @@ def _director_plan_summary(plan_json: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# scene 字数预算：容差与「薄计划」判据（P0-2，2026-09-18）
+# ---------------------------------------------------------------------------
+# per-scene 预算总和必须落在 chapter target 的 ±10% 内；越界即按比例归一化，
+# 并把结果写进 ``_scene_word_budget`` + warning 日志（不静默）。
+_SCENE_BUDGET_TOLERANCE = 0.10
+# 「薄计划」判据：目标 ≥ 该值却只规划出 1 个 scene ⇒ 计划粒度不足。
+# 实证（prj_2567bb8de642 / ch_92bac068ff0d，2026-09-18）：target 2500 的计划只产出
+# 1 个 scene（target_words=2500），writer 拿到单个场景预算后写出 ~900 字仍"未越该
+# scene 的预算"，计划侧毫无信号。只发 warning 级信号（进 ``_scene_word_budget`` +
+# 日志 + writer 节点 ctx），不阻断、不升 error。
+_THIN_PLAN_MIN_TARGET = 2000
+
+
+def _scale_budget_proportionally(budget: list[int], target: int) -> list[int]:
+    """把 per-scene 预算按比例缩放到总和 == ``target``（最大余数法，确定性）。
+
+    - 无比例可依（总和 ≤ 0 / 空表 / ``target <= 0``）→ 各场景 ``max(1, target//n)``；
+    - 先取比例份额的整数下界，差额（恒 < n）按「小数部分降序、同分取小序号」逐个 +1
+      —— 确定性强，不依赖浮点比较的偶然性；
+    - 每场景至少 1 字（writer 需要非零预算；该抬升最多 +n 字，远在 ±10% 容差内）。
+    """
+    n = len(budget)
+    if n == 0:
+        return []
+    total = sum(budget)
+    if total <= 0 or target <= 0:
+        return [max(1, target // n)] * n
+    shares = [b * target / total for b in budget]
+    out = [int(s) for s in shares]
+    rest = target - sum(out)
+    if rest > 0:
+        order = sorted(range(n), key=lambda i: (-(shares[i] - out[i]), i))
+        for i in order[:rest]:
+            out[i] += 1
+    return [max(1, v) for v in out]
+
+
 def _inject_scene_word_budget(
     scene_plan: dict[str, Any] | None, target_word_count: int,
 ) -> dict[str, Any]:
-    """为每个 scene 注入 ``target_words`` 预算，透传给 writer。
+    """为每个 scene 注入 ``target_words`` 预算，透传给 writer（P0-2 修订）。
 
-    来源：scene_planner-v1 §6 Rule 7 要求每个 scene 必填 ``target_words``（整数，
-    总和 = target_word_count 的 90~100%）。但降级 stub / 旧版 prompt 可能不填，
-    这里做兜底：缺值场景按等分补齐（首场景补余数），已填则按"总数 90~110% 内
-    归一化"重算——避免模型被自己瞎填的总和误导。
+    来源：scene_planner-v1 §6 Rule 7 要求每个 scene 必填 ``target_words``（整数）。
+    降级 stub / 旧版 prompt 可能不填，这里做兜底；但**无论填与不填，per-scene 预算
+    总和都必须落在 chapter target 的 ±10% 内**（``_SCENE_BUDGET_TOLERANCE``）——
+    越界即按比例归一化（:func:`_scale_budget_proportionally`），不再静默漂移。
 
-    输出 scene_plan 永远带 ``scenes[*].target_words`` 字段（恒为 int）；
-    target_word_count<=0 时不补（无预算可言）。不影响 ``scene_id / purpose /
-    characters`` 等既有字段；只做浅拷贝，不破坏原 scene_plan。
+    与 2026-09-18 之前的行为差异（三处，目的都是「让计划自洽」）：
+
+    1. 已声明总和越界（<90% / >110%）时**不再推倒等分**，改为按已声明值比例缩放
+       —— 保留 scene_planner 的相对结构（哪场重、哪场轻）；
+    2. 已声明子集吃满预算（剩余 ≤ 0）时，缺失 scene 不再拿 ``T/n`` 保底值把总和顶到
+       1.1T 以上（实证：``declared=[2000,1000] + 1 个缺失`` / T=3000 曾得 4000 = 1.33T），
+       改为按已声明均值占位后整体归一化；
+    3. 全缺省（无任何声明）仍是「等分 + 余数补首场景」——该形态总和恰好 = T，属
+       **刻意保留**（确定性最强、改动零收益）。
+
+    所有归一化动作都写进顶层 ``_scene_word_budget`` 元字段 + warning 日志（不静默）。
+    输出 scene_plan 永远带 ``scenes[*].target_words``（恒为 int）与
+    ``_scene_word_budget = {target, scene_count, declared_sum, budget_sum, tolerance,
+    source, rebalanced, thin_plan, warning}``；``target_word_count <= 0`` 时不补
+    （无预算可言）。不影响 ``scene_id / purpose / characters`` 等既有字段；
+    只做浅拷贝，不破坏原 scene_plan。
     """
     if not isinstance(scene_plan, dict):
         return {"scenes": []} if not isinstance(scene_plan, dict) else scene_plan  # type: ignore[return-value]
@@ -366,33 +420,86 @@ def _inject_scene_word_budget(
         else:
             declared.append(None)
 
-    # 预算分摊（三条分支，保证 budget 恒为全 int，不出现 None）：
-    # 1) 已声明子集和 ∈ [0.9T, 1.1T] → 已声明值原样保留（相对权重可信），
-    #    未声明 scene 按「剩余预算（T − 已声明之和）均分」补齐；剩余 ≤ 0
-    #    （子集已吃满 / 吃超预算）时给 T/n 的保底值（≥1 字）。
-    #    scene_planner 契约不强制 per-scene target_words，部分声明的混合形态生产可达。
-    # 2) 其余（全缺省 / 总和越界）→ 全场景等分，余数补首场景。
     valid = [d for d in declared if d is not None]
-    if valid and 0.9 * target_word_count <= sum(valid) <= 1.1 * target_word_count:
-        missing = n - len(valid)
-        if missing:
-            remaining = target_word_count - sum(valid)
-            if remaining <= 0:
-                fill = [max(1, target_word_count // n)] * missing
-            else:
-                base, rem = divmod(remaining, missing)
-                fill = [base] * missing
+    declared_sum = sum(valid)
+    missing_idx = [i for i, d in enumerate(declared) if d is None]
+    n_missing = len(missing_idx)
+    # 缺失场景的占位权重 = 已声明均值（无声明时为 0，走下面的等分分支）。
+    mean_declared = max(1, round(declared_sum / len(valid))) if valid else 0
+    tolerance = target_word_count * _SCENE_BUDGET_TOLERANCE
+    rebalanced = False
+
+    # 候选预算（三条分支，保证 budget 恒为全 int，不出现 None）：
+    # 1) 已声明子集和 ∈ [0.9T, 1.1T] → 已声明值原样保留（相对权重可信）；
+    #    未声明 scene 先按「剩余预算（T − 已声明之和）均分」补齐（余数补首个缺失
+    #    场景）；剩余 ≤ 0（子集已吃满 / 吃超预算）时按已声明均值占位，交给下面的
+    #    容差归一化收口。scene_planner 契约不强制 per-scene target_words，部分声明
+    #    的混合形态生产可达。
+    # 2) 已声明但总和越界 → 以声明值为相对权重按比例重算（保留相对结构）。
+    # 3) 全缺省 → 全场景等分，余数补首场景（确定性最强；总和恒 = T）。
+    if valid and 0.9 * target_word_count <= declared_sum <= 1.1 * target_word_count:
+        if n_missing:
+            remaining = target_word_count - declared_sum
+            if remaining > 0:
+                base, rem = divmod(remaining, n_missing)
+                fill = [base] * n_missing
                 fill[0] += rem  # 余数补首个未声明场景（确定性强）
+                source = "declared_plus_remainder_split"
+            else:
+                fill = [mean_declared] * n_missing
+                source = "declared_full_plus_mean_fill"
             fill_iter = iter(fill)
             budget = [d if d is not None else next(fill_iter) for d in declared]
         else:
             budget = list(declared)  # type: ignore[assignment]
+            source = "declared_kept"
+    elif valid:
+        budget = _scale_budget_proportionally(
+            [d if d is not None else mean_declared for d in declared],
+            target_word_count,
+        )
+        source = "declared_proportional"
+        rebalanced = True
     else:
         base, rem = divmod(target_word_count, n)
         budget = [base] * n
         # 余数补到首场景（确定性强）
         if rem and n > 0:
             budget[0] = budget[0] + rem
+        source = "equal_split"
+
+    # 容差收口：候选总和越界（含上一分支的「均值占位」形态）→ 按比例归一化。
+    budget_sum = sum(budget)
+    if abs(budget_sum - target_word_count) > tolerance:
+        budget = _scale_budget_proportionally(budget, target_word_count)
+        budget_sum = sum(budget)
+        if not rebalanced:
+            rebalanced = True
+            source = f"{source}+rebalanced_to_target"
+
+    # 归一化动作一律留痕（不静默）：declared_proportional 分支已在构造时就归过，
+    # 这里统一出口，保证两条归一化路径都有 warning 可观测。
+    if rebalanced:
+        _log.warning(
+            "context_engine.scene_word_budget rebalanced: scenes=%d target=%d "
+            "declared_sum=%d budget_sum=%d source=%s",
+            n, target_word_count, declared_sum, budget_sum, source,
+        )
+
+    # 薄计划信号（warning 级，不阻断）：目标够大却只 1 个 scene。
+    thin_plan = n == 1 and target_word_count >= _THIN_PLAN_MIN_TARGET
+    warning: str | None = None
+    if thin_plan:
+        warning = (
+            f"thin_plan: 本章目标 {target_word_count} 字（≥{_THIN_PLAN_MIN_TARGET}）"
+            f"却只规划出 {n} 个 scene；逐场预算无层次可依，建议重跑 chapter-plan "
+            "拆出更多 scene"
+        )
+        _log.warning(
+            "context_engine.scene_word_budget thin plan: scenes=%d target=%d "
+            "(threshold=%d) — 建议重跑 chapter-plan 拆细场景",
+            n, target_word_count, _THIN_PLAN_MIN_TARGET,
+        )
 
     out_scenes: list[dict[str, Any]] = []
     for idx, src in enumerate(scenes):
@@ -401,4 +508,15 @@ def _inject_scene_word_budget(
         out_scenes.append(new_scene)
     out_plan = dict(scene_plan)
     out_plan["scenes"] = out_scenes
+    out_plan["_scene_word_budget"] = {
+        "target": int(target_word_count),
+        "scene_count": n,
+        "declared_sum": int(declared_sum),
+        "budget_sum": int(budget_sum),
+        "tolerance": _SCENE_BUDGET_TOLERANCE,
+        "source": source,
+        "rebalanced": bool(rebalanced),
+        "thin_plan": bool(thin_plan),
+        "warning": warning,
+    }
     return out_plan

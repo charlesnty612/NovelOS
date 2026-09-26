@@ -1191,10 +1191,17 @@ def test_project_init_reinit_updates_existing_entities(tmp_path: Path, monkeypat
                     "WHERE project_id = ? ORDER BY number",
                     (project_id,),
                 ).fetchall()
+                vol_before = conn.execute(
+                    "SELECT volume_id, title, arc_summary FROM volumes "
+                    "WHERE project_id = ? AND number = 1",
+                    (project_id,),
+                ).fetchone()
             finally:
                 conn.close()
             assert len(chap_before) == 5
             old_chap_ids = {r["chapter_id"] for r in chap_before}
+            assert vol_before is not None, "首次 init 应落第一卷"
+            assert vol_before["title"] == "星落青石"
 
             # 2) 第二次 init：相同 project_id，mock 内容全改；章节数改 6
             r = await _request(
@@ -1272,6 +1279,23 @@ def test_project_init_reinit_updates_existing_entities(tmp_path: Path, monkeypat
             )
             # 新章标题来自 _outline_script_v2
             assert chap_after[0]["title"] == "改后第1章"
+
+            # 5) 卷在同一行上被更新：volume_id 不变，title / arc_summary 取新卷纲
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                vol_after = conn.execute(
+                    "SELECT volume_id, title, arc_summary FROM volumes "
+                    "WHERE project_id = ? AND number = 1",
+                    (project_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            assert vol_after["volume_id"] == vol_before["volume_id"], "重跑不应换卷"
+            assert vol_after["title"] == "改后卷名"
+            assert vol_after["arc_summary"] == "改后卷摘要", (
+                f"volumes.arc_summary 应被第二次 init 的卷纲覆盖；"
+                f"实得 {vol_after['arc_summary']!r}"
+            )
 
     asyncio.run(run())
 
@@ -1789,6 +1813,16 @@ def test_project_init_persist_all_records_arc_summary_as_description(tmp_path: P
                 assert te_row["description"] == "叶尘从废脉少年踏上星辰之路", (
                     f"timeline_events.description 应等于 arc_summary；"
                     f"实得 {te_row['description']!r}"
+                )
+                # volumes.arc_summary 同样被写（迁移 0020 落列 → init 写入口）
+                v_row = conn.execute(
+                    "SELECT arc_summary FROM volumes WHERE project_id = ? AND number = 1",
+                    (pid,),
+                ).fetchone()
+                assert v_row is not None
+                assert v_row["arc_summary"] == "叶尘从废脉少年踏上星辰之路", (
+                    f"volumes.arc_summary 应等于 outliner 的卷纲摘要；"
+                    f"实得 {v_row['arc_summary']!r}"
                 )
             finally:
                 conn.close()
@@ -2313,3 +2347,216 @@ def test_build_premise_text_strips_redundant_positioning_prefix():
     assert out_clean == "定位：传统玄幻升级流\n卖点：s1 / s2\n一句话：少年叶尘偶得星辰古卷", (
         f"干净输入应保持既有契约；实得 {out_clean!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-18 修复批次 A：brief.author_notes 必须进 world / character 装配 payload
+# ---------------------------------------------------------------------------
+#
+# 缺陷形状 = AGENTS.md 硬规则 9「收下即忘」：brief.author_notes 被
+# POST /projects/init 收下、被 premise_designer / volume_outliner 消费，
+# 但 _world_payload / _character_payload 从未把它放进 brief 段——
+# 作者写的「无 CP」「第一位面＝现代都市」对世界观与角色设计**完全不可见**
+# （实证：生成出 love_interest 角色 + 古代宗族纪年，与都市酒驾/开庭前提冲突）。
+
+_AUTHOR_NOTES_CTX_BASE: dict = {
+    "db_path": "/tmp/nonex.db",
+    "brief": {
+        "genre": "都市",
+        "logline": "酒驾肇事后的认罪与开庭",
+        "target_words": 1000000,
+    },
+    "premise_output": {"title": "T", "protagonist": {"name": "沈默"}},
+    "world_output": {"core_premise": "", "rules": [], "locations": [], "factions": []},
+}
+
+
+def test_project_init_world_and_character_payloads_carry_author_notes():
+    """brief.author_notes 非空 → world_builder / character_designer 的
+    payload.brief 必须带上它（撤掉注入即转红）。"""
+    from packages.workflows.project_init import pipeline as pipeline_mod
+
+    ctx = json.loads(json.dumps(_AUTHOR_NOTES_CTX_BASE))
+    ctx["brief"]["author_notes"] = "无 CP；第一位面＝现代都市"
+
+    world_payload = pipeline_mod._world_payload(ctx)
+    character_payload = pipeline_mod._character_payload(ctx)
+
+    assert world_payload["brief"]["author_notes"] == "无 CP；第一位面＝现代都市", (
+        f"world_builder 的 brief 段应带 author_notes；实得 {world_payload['brief']!r}"
+    )
+    assert character_payload["brief"]["author_notes"] == "无 CP；第一位面＝现代都市", (
+        f"character_designer 的 brief 段应带 author_notes；"
+        f"实得 {character_payload['brief']!r}"
+    )
+    # premise / outline 两条既有链路的契约不变（同源口径，防回归）
+    assert (
+        pipeline_mod._premise_payload(ctx)["brief"]["author_notes"]
+        == "无 CP；第一位面＝现代都市"
+    )
+    assert (
+        pipeline_mod._outline_payload(ctx)["brief"]["author_notes"]
+        == "无 CP；第一位面＝现代都市"
+    )
+
+
+def test_project_init_world_and_character_payloads_omit_blank_author_notes():
+    """brief 未提供 / 纯空白 author_notes → 两个 payload 都不带该键
+    （prompt 声明它是最高优先级约束，传空值等于凭空造一条空约束）。"""
+    from packages.workflows.project_init import pipeline as pipeline_mod
+
+    for notes in (None, "", "   \n "):
+        ctx = json.loads(json.dumps(_AUTHOR_NOTES_CTX_BASE))
+        if notes is None:
+            ctx["brief"].pop("author_notes", None)
+        else:
+            ctx["brief"]["author_notes"] = notes
+        world_brief = pipeline_mod._world_payload(ctx)["brief"]
+        character_brief = pipeline_mod._character_payload(ctx)["brief"]
+        assert "author_notes" not in world_brief, (
+            f"author_notes={notes!r} 时不应带该键；实得 {world_brief!r}"
+        )
+        assert "author_notes" not in character_brief, (
+            f"author_notes={notes!r} 时不应带该键；实得 {character_brief!r}"
+        )
+
+
+def test_project_init_author_notes_reach_world_and_character_agent_calls(monkeypatch):
+    """消费方闭环：author_notes 必须出现在 world_builder / character_designer
+    两次 run_agent 调用的 payload 里（不只是 _*_payload 的返回值）。"""
+    from packages.workflows.project_init import pipeline as pipeline_mod
+
+    captured: list[dict] = []
+
+    def fake_run_agent(*args, **kwargs):
+        agent_name = args[1]
+        captured.append({"agent": agent_name, "payload": args[2]})
+        return {
+            "world_builder": {
+                "core_premise": "",
+                "rules": [],
+                "locations": [],
+                "factions": [],
+            },
+            "character_designer": {"characters": []},
+        }[agent_name]
+
+    monkeypatch.setattr(pipeline_mod, "run_agent", fake_run_agent)
+
+    ctx = json.loads(json.dumps(_AUTHOR_NOTES_CTX_BASE))
+    ctx["brief"]["author_notes"] = "无 CP；第一位面＝现代都市"
+    pipeline_mod._run_world_builder(ctx)
+    pipeline_mod._run_character_designer(ctx)
+
+    by_agent = {c["agent"]: c["payload"] for c in captured}
+    assert set(by_agent) == {"world_builder", "character_designer"}, (
+        f"应各调用一次；实得 {sorted(by_agent)}"
+    )
+    for agent_name, payload in by_agent.items():
+        assert payload["brief"]["author_notes"] == "无 CP；第一位面＝现代都市", (
+            f"{agent_name} 实收 payload 的 brief 段应含 author_notes；"
+            f"实得 {payload['brief']!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-18 修复批次 B：卷纲摘要必须落 volumes.arc_summary
+# ---------------------------------------------------------------------------
+#
+# 缺陷形状：volume_outliner 的 volume.arc_summary 只被写成 plot_event，
+# VolumeCreate 没有 arc_summary 字段 ⇒ volumes.arc_summary 永远 NULL，
+# 只有 scripts/open_volume.py 直写 SQL 能落值（该列此前无 service 入口）。
+
+
+def test_project_init_persist_all_writes_volume_arc_summary(tmp_path: Path):
+    """全量 init 后 volumes.arc_summary 应等于 outliner 产出（撤掉 VolumeCreate
+    的 arc_summary 传参即转红：列保持 NULL）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 3,
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id = r.json()["run_id"]
+            run_data = await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            pid = (run_data.get("checkpoint_json") or {}).get("project_id")
+            assert pid and pid.startswith("prj_")
+
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT number, title, arc_summary FROM volumes "
+                    "WHERE project_id = ?",
+                    (pid,),
+                ).fetchone()
+            finally:
+                conn.close()
+            assert row is not None, "init 应落一卷"
+            assert row["title"] == "星落青石"
+            assert row["arc_summary"] == "叶尘从废脉少年踏上星辰之路", (
+                f"volumes.arc_summary 应等于 outliner 的 volume.arc_summary；"
+                f"实得 {row['arc_summary']!r}"
+            )
+
+    asyncio.run(run())
+
+
+def test_upsert_volume_updates_existing_arc_summary_on_reinit(tmp_path: Path):
+    """重跑 init（同 project / 同 number）时，已存在卷的 arc_summary 应被新卷纲
+    改写，volume_id 保持不变（与 title 同口径）。空摘要 → 清空为 NULL。"""
+    from packages.domain.volume.models import VolumeCreate
+    from packages.workflows.project_init import pipeline as pipeline_mod
+
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            db_path = app.state.settings.db_path
+
+            first = pipeline_mod._upsert_volume(
+                db_path, pid,
+                VolumeCreate(number=1, title="卷一", arc_summary="旧摘要"),
+            )
+            assert first["arc_summary"] == "旧摘要"
+
+            second = pipeline_mod._upsert_volume(
+                db_path, pid,
+                VolumeCreate(number=1, title="卷一", arc_summary="新摘要"),
+            )
+            assert second["volume_id"] == first["volume_id"], "重跑不应换卷 id"
+            assert second["arc_summary"] == "新摘要", (
+                f"已存在卷的 arc_summary 应被新卷纲覆盖；实得 {second['arc_summary']!r}"
+            )
+
+            # 新产出未带摘要 → 清空（与 title=None 同口径，不留陈旧值）
+            third = pipeline_mod._upsert_volume(
+                db_path, pid,
+                VolumeCreate(number=1, title="卷一"),
+            )
+            assert third["arc_summary"] is None
+
+            conn = get_connection(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT arc_summary, volume_id FROM volumes "
+                    "WHERE project_id = ? AND number = 1",
+                    (pid,),
+                ).fetchone()
+            finally:
+                conn.close()
+            assert row["arc_summary"] is None
+            assert row["volume_id"] == first["volume_id"]
+
+    asyncio.run(run())

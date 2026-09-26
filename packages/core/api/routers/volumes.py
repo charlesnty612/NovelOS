@@ -5,7 +5,7 @@
 - ``GET    /projects/{pid}/volumes``              列表（含 chapter_count）
 - ``POST   /projects/{pid}/volumes``              创建（默认 status='active'）
 - ``GET    /projects/{pid}/volumes/{vid}``        详情
-- ``PATCH  /projects/{pid}/volumes/{vid}``        部分更新 title / status
+- ``PATCH  /projects/{pid}/volumes/{vid}``        部分更新 title / status / arc_summary
 - ``POST   /projects/{pid}/volumes/{vid}/seal``   封存（冻结终态快照）
 - ``POST   /projects/{pid}/volumes/{vid}/assign`` 挂章节（body {chapter_id}）
 
@@ -83,6 +83,7 @@ def create_volume(
 ) -> dict:
     """创建卷（默认 status='active'）。
 
+    ``arc_summary``（卷纲摘要）随 body 一并落 ``volumes.arc_summary``；缺省 NULL。
     - 404 — project 不存在；
     - 409 — 同 project 下 number 已存在 / 已存在 active 卷；
     - 422 — DB CHECK 违反（一般不会触发，DDL CHECK 与 pydantic 字段对齐）。
@@ -131,7 +132,7 @@ def update_volume(
     payload: VolumeUpdate,
     request: Request,
 ) -> dict:
-    """部分更新（title / status）。
+    """部分更新（title / status / arc_summary）。
 
     - 404 — volume 不存在或跨 project；
     - 409 — sealed → active 反向跳变（VolumeSealedError）；

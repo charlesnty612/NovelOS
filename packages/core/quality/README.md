@@ -13,8 +13,8 @@ packages/core/quality/
 ├── __init__.py          # 公共 API 导出
 ├── README.md            # 本文件
 ├── models.py            # pydantic：Issue / QualityContext / QualityReport
-├── issues.py            # Issue 构造器 / severity 矩阵 / 阻断白名单 BLOCKING_RULES
-├── aggregate.py         # 七维平均 compute_overall + scoring_formula_hash（覆盖 severity 矩阵）
+├── issues.py            # Issue 构造器 / severity 矩阵 / 阻断白名单 BLOCKING_RULES / 确认白名单 CONFIRM_RULES
+├── aggregate.py         # 七维平均 compute_overall + scoring_formula_hash（覆盖 severity 矩阵）+ GateSummary
 ├── ai_flavor.py         # AI 味共享词表（scan_ai_patterns 权威源 + 密度工具）
 ├── ai_trace.py          # AI 痕迹子分（章内/跨章重复 + 套话命中）
 ├── scoring.py           # 六子分 rule-based
@@ -37,6 +37,9 @@ from packages.core.quality import (
     MVP_SEVERITY_MATRIX,    # severity 矩阵常量（自检/文档用）
     BLOCKING_RULES,         # 阻断白名单（V3.9 批次 3.1）
     is_blocking_issue,      # blocking / informational 判定
+    CONFIRM_RULES,          # 确认白名单（P0-1：不许静默通过的重复类算子）
+    issue_gate,             # 后果档解析（auto / confirm / block，权威入口）
+    GateSummary,            # 聚合侧的 block / confirm 摘要（engine 落 _meta.gate_summary）
     guardrails, scoring,    # 子模块（内部 helper）
 )
 
@@ -73,9 +76,12 @@ from packages.core.quality.ai_flavor import AI_FLAVOR_MARKERS, AI_CLICHES, scan_
 | `ai_chars` / `human_chars` | int | 否 | REQ-Q8 字符数。 |
 | `char_stats_note` | str \| None | 否 | REQ-Q8 统计口径 note（V3.9 3.3 新增）：`build_quality_context` 按 `drafts.created_by` 推断出 AI 侧字符 / 遇到未知 created_by 时写入；engine 透传给 `req_q8` 作为 info issue（`RULE_Q8_STATS_NOTE`）留痕。 |
 | `previous_drafts` | list[str] | 否 | ai_trace 跨章子信号：同项目最近 N 章正文（章节号降序），由 `build_quality_context` 现场拉取；缺失则跨章子信号降级满分。 |
+| `draft_version` | int \| None | 否 | `draft` 取自哪一版草稿（P1-1 新增）：由 `build_quality_context` 经共享解析单点 `packages.domain.chapter.draft_resolver.resolve_draft` 与正文**同一次**读出，engine 原样回显进 `QualityReport.draft_version`；`None` = 该章尚无草稿 / 调用方自行构造 ctx。 |
 | `commit_id` / `run_id` | str \| None | 否 | 仅做回显。 |
 
-**输出 `QualityReport`**（pydantic）：九字段（七子分 + overall + issues） + `_meta` + 回显字段；`_meta` 使用 JSON 别名 `_meta`（Python 属性名 `meta`）。回显字段含 `draft_version`（V3.9 4.3 新增，可空）：落库时由 `QualityService.save_report` 取当前最新 `drafts.version` 补全，无草稿时为 `None`，用于改稿重评后把历史报告对应回草稿版本。
+**输出 `QualityReport`**（pydantic）：九字段（七子分 + overall + issues） + `_meta` + 回显字段；`_meta` 使用 JSON 别名 `_meta`（Python 属性名 `meta`）。回显字段含 `draft_version`（V3.9 4.3 新增，可空）：经 `build_quality_context` → `QualityEngine.evaluate` 的正规路径由 ctx 带上（与正文同源，P1-1）；仅在调用方直接构造 `QualityReport` 时才由 `QualityService.save_report` 取当前最新 `drafts.version` 兜底补全。无草稿时为 `None`，用于改稿重评后把历史报告对应回草稿版本。
+
+`build_quality_context(..., draft_version=None)`（P1-1）：`None` = 取当前最新一版；评审 / 提交门禁等「手里有一版被审对象」的调用方应显式传入（与 `quality_reports.draft_version` 同一口径）。
 
 ---
 
@@ -90,12 +96,19 @@ class Issue(BaseModel):
     location: str            # "<chapter_id>" 或 "<chapter_id>:<scene_id>"，缺则 "<unknown>"
     rule_id: str             # "RULE_<NAME>" 或特殊：SCHEMA_VALIDATION_FAILED / scoring_missing_subscore
     message: str             # 人类可读一句话
+    gate: Literal["auto","confirm","block"]  # 后果档（2026-09-18 P0-1）；见 §4.3
     suggestion: Optional[str]
     evidence_refs: Optional[list[str]]
     judge_trace: Optional[dict]
 ```
 
 13 个 `category`：`schema_validity / timeline_consistency / character_contradiction / world_rule_contradiction / knowledge_leakage / plot / character / continuity / style / pacing / foreshadowing / payoff / compliance`。
+
+`gate` 是 **severity 之外的第二根轴**（「多严重」vs「必须怎么处理」）。
+``make_issue`` 与 ``QualityEngine.evaluate`` 会材料化该字段落库（前端 / API 可直接读），
+但**权威是 ``issues.issue_gate(issue)``**：字段只能把表外规则单条**上修**为 ``confirm``，
+不能把表内规则降级，``block`` 更不接受字段指定（一律实时由 ``severity + BLOCKING_RULES`` 推出）。
+详见 §4.3。
 
 ### 4.2 MVP severity 矩阵（主会话拍板口径；V3.9 批次 3.1/3.3/3.5 校正）
 
@@ -118,19 +131,32 @@ class Issue(BaseModel):
 因此 H-3 连续 ≥3 章命中不会阻断。**改 payoff severity 的正确方式是改矩阵那一行**，
 不要在规则里硬编码 error（历史文档曾写「H-3 可升 error」，已按代码现状校正，见 §5.3）。
 
-### 4.3 blocking / informational 分组（V3.9 批次 3.1 悬崖聚合改造）
+### 4.3 后果档：blocking / informational / confirm（V3.9 批次 3.1 + 2026-09-18 P0-1）
 
 `severity == "error"` 不再一律把 overall 归零。判定入口是
-`issues.is_blocking_issue(issue)`：
+`issues.is_blocking_issue(issue)`；P0-1 起 overall 之外的**后果**由
+`issues.issue_gate(issue)` 给出三档：
 
 ```
-blocking ⟺ severity == "error" 且 rule_id ∈ BLOCKING_RULES
+block     ⟺ severity == "error" 且 rule_id ∈ BLOCKING_RULES
+confirm   ⟺ rule_id ∈ CONFIRM_RULES（与 severity 无关）或该条被显式上修
+auto      ⟺ 其余
 ```
 
-| 分组 | 含义 | overall | quality_gate（enforce） |
+「显式上修」是**量级依赖**后果的唯一载体（2026-09-18 起）：产出侧算出量级超限时给
+**那一条**打 `gate="confirm"`，其余同 rule_id 的条目照旧 `auto`（先例见下节 trigram 两档）。
+
+| 后果档 | 含义 | overall | quality_gate（enforce） |
 |---|---|---|---|
-| **blocking** | 提交物本身坏了 / 合规红线 / 评不出来 | `0` | 抛 ValueError 阻断 run |
-| **informational** | severity 是 error（例如未来某个新规则/显式 strict 前的 Q8），但错误不破坏提交物可用性 | 保留七维平均部分分 | 只落库，不阻断 |
+| **block** | 提交物本身坏了 / 合规红线 / 评不出来 | `0` | 抛 ValueError 阻断 run，**不可覆盖** |
+| **confirm** | 确定性、可复算的重复类算子命中**且量级落在实测尾带**（作者无从辩驳，但「我认了」是合理回应） | **不变**（非结构性损坏，不靠分数表达） | 无有效 `gate_override` ⇒ 同样阻断；有 ⇒ 放行并留痕 |
+| **auto** | warning / info / informational error | 保留七维平均部分分 | 只落库，不阻断 |
+
+**为什么要第三档（P0-1 事故）**：2026-09-18 某章 9 段逐字重复（章内重复 20.3% /
+trigram 重复 30.37%）照常提交，review 报 `errors: []`、quality `overall: 90`。
+根因不是「重复不严重」——style/pacing/payoff 等 category 被 MVP 矩阵封顶 warning，
+重复类问题在构造上永远进不了 blocking 白名单 ⇒ severity 三档之下后果只有「过」一档，
+**没有任何一处有权限说「不许静默通过」**。对策不是调阈值，而是要求「看见并显式接受」。
 
 `BLOCKING_RULES` 白名单（`packages/core/quality/issues.py`，6 条）：
 
@@ -143,19 +169,64 @@ blocking ⟺ severity == "error" 且 rule_id ∈ BLOCKING_RULES
 | `RULE_Q8_HUMAN_RATIO_LOW` | 人工占比红线；**默认 warning**（见 §4.5），仅 `NOVELOS_QUALITY_Q8_STRICT=1` 时产 error 并阻断 |
 | `scoring_missing_subscore` | 子分缺失：无法给出有效评分（系统级） |
 
+`CONFIRM_RULES` 白名单（`packages/core/quality/issues.py`，**1 条**）：
+
+| rule_id | 入表理由 |
+|---|---|
+| `AI-BEAT-REPEAT` | 节拍 / 段落级逐字复现（`packages/core/quality/beat_repeat.py` 产出）。入表依据 = 实测分离：生成侧 307 处 / 1.17 处每千字、64/92 章达标；人类侧 2 处 / 0.05 处每千字、**0/19 章**达标——章级门（≥2 处且 >1.0/千字）在人类语料上零误报 |
+
+**2026-09-18 撤出 `RULE_STYLE_REPETITION_TRIGRAM`（先验判断被推翻，留痕）**：
+该规则曾因**一个**观测样本（事故章 30.37%）按阈值 0.08 入表。次日实测推翻：0.08 落在
+**正常分布内部**——人类锚点书（榜一侯府弧 19 章）mean 0.0754 / max 0.0949（9/19 章超 0.08），
+生成侧 92 章 p50 0.1333 / p90 0.1749 / max 0.2097（仅 2/92 章低于 0.08）。按 0.08 要求
+签字 ⇒ 人写的稿子也要签字，门禁退化为橡皮图章（AGENTS.md「命中即报表把正常写法与真信号
+混在一起」的形状）。
+
+**替代方案：同一 rule_id 的两档 + 单条上修。** 静态 rule_id 表表达不了「同一条规则、
+两种量级、两种后果」，故该规则改由产出侧按**实测分位**判定档位：
+
+| 档 | 阈值（`scoring.py`） | 取法 | 后果 |
+|---|---|---|---|
+| warn | `STYLE_TRIGRAM_WARN_THRESHOLD = 0.16` | 生成侧 p85 = 0.1621 | 出 warning，`gate=auto`（无后果） |
+| confirm | `STYLE_TRIGRAM_CONFIRM_THRESHOLD = 0.25` | 生成侧 max 0.2097 与事故 0.3037 的几何中点 | 该条打 `gate="confirm"` ⇒ 不许静默通过 |
+
+**入表标准（严格）**：确定性、可复算、作者无从辩驳的**重复类**算子；且必须**自带分布无关的
+强分离**（如 `AI-BEAT-REPEAT` 人类侧 0/19 章）。量级依赖分布的算子不得靠 rule_id 入表——
+由产出侧按实测分位判定、只在异常量级给该条打 `gate="confirm"`（`issue_gate` 第 3 条路径），
+先例即本节的 trigram 两档。明确**不收**任何
+比值 / 占比类算子（对白占比、段落长度、可读性频率 …）——AGENTS.md 记录的 F-19 实证：
+这类指标一旦成为硬指标，模型会为凑指标灌对白 / 拆短句，越改越坏。同时**不把任何既有
+category 升 error**：gate 与 severity 正交，正是为了不靠改 severity 来造后果。
+
+**放行契约（唯一出路）**：`ctx["gate_override"] = {"rule_ids": [...], "reason": "..."}`
+（API：`StartWorkflowRequest.gate_override`，仅 chapter-commit 的 quality_gate 节点读取）。
+`rule_ids` 必须**覆盖本次命中的全部** confirm rule id，`reason` 非空。缺失 / 部分覆盖 /
+reason 为空 ⇒ 阻断，且 `runs.error` 与 `plan_json.revision_note` 同时给出
+**规则清单 + 证据摘录**（调用方不可能在不知道自己在批准什么的情况下批准）。
+放行后声明写进 `quality_reports._meta.gate_accepted_override` 与 run checkpoint（留痕）。
+落点复用既有阻断路径（`plan_json.revision_note` + `gate_blocked`，其中
+`gate_blocked.gate` 标 `confirm` 或 `block` 供前端区分「坏了」与「要你点头」）。
+
 **Q8 裁决（3.3）**：见 §4.5。
 
-### 4.4 severity 矩阵变更流程（V3.9 批次 3.5，必读）
+### 4.4 severity / 后果矩阵变更流程（V3.9 批次 3.5 + 2026-09-18 P0-1，必读）
 
-矩阵 / 规则级覆盖 / 阻断白名单是**评分口径的一部分**，任一变更必须：
+矩阵 / 规则级覆盖 / 阻断白名单 / 确认白名单是**评分口径的一部分**，任一变更必须：
 
-1. 改 `packages/core/quality/issues.py`（`MVP_SEVERITY_MATRIX` / `MVP_RULE_OVERRIDES` / `BLOCKING_RULES`）；
+1. 改 `packages/core/quality/issues.py`（`MVP_SEVERITY_MATRIX` / `MVP_RULE_OVERRIDES` /
+   `BLOCKING_RULES` / `CONFIRM_RULES`；后果档解析在 `issue_gate`）；
 2. 同步本 README §4（本表 + 白名单表）与 `docs/evaluation/quality-scoring-v0.md` §3.7 / §4
    （`payoff.py` docstring 若描述 severity 也一并改）——**三处必须同口径**；
 3. `aggregate.formula_hash()` 会自动变（输入含 `severity_config_fingerprint()`：矩阵 + 规则覆盖 +
-   白名单），历史报告 `_meta.scoring_formula_hash` 可区分新旧口径；不要手写 hash；
+   阻断白名单 + 确认白名单），历史报告 `_meta.scoring_formula_hash` 可区分新旧口径；不要手写 hash；
 4. 跑 `python -m pytest tests/unit/quality -q`（`test_severity_matrix.py` / `test_aggregate.py`
-   对矩阵内容、白名单、hash 敏感度做了快照与突变验证）。
+   对矩阵内容、白名单、hash 敏感度做了快照与突变验证；P0-1 的后果档另有
+   `test_issue_gate.py` + `test_gate_blocking.py`，端到端在 `tests/api/test_gate_confirm_e2e.py`）。
+
+**同规则的产出侧档位（如 §4.3 的 trigram 两档）算不算口径变更？** 算。它虽然不进
+`severity_config_fingerprint()`（该指纹只覆盖 `issues.py` 的四张表，不含 `scoring.py` 的阈值——
+与 `STYLE_SENTENCE_LEN_RANGE` 等既有阈值同待遇），但后果矩阵变了，故 §4.3 / §3.4 / 本 README §5.2 / §7
+四处数字必须同批更新，并跑 `tests/unit/quality/test_trigram_tiers.py`（四带判别 + 阈值不变式）。
 
 ### 4.5 Q8 口径裁决（V3.9 批次 3.3，留痕）
 
@@ -207,7 +278,7 @@ blocking ⟺ severity == "error" 且 rule_id ∈ BLOCKING_RULES
 | plot | 100 起；key_beats 未命中 -5/条；`len(new_events) > key_beats + 2` ⇒ 每超额 -10；plan 缺 key_beats ⇒ 85 + info。 | 0 |
 | character | 一致率 × 100；mismatch 与 `RULE_CHAR_BEFORE_MISMATCH` 共用判定（guardrail 已写 issue，子分不重复 push）。 | 0 |
 | continuity | 100 起；按 `_CONTINUITY_DEDUCTIONS` 表扣分；同 rule_id 一章只扣一次；warning × 0.5 / error 全额；累计扣至 0 下限。 | 0 |
-| style | 100 起；句均字长出 [12, 28] -10；trigram 重复率 > 8% -15 + warning；AI markers 每千字 ≥ 5 -15（词表/密度与 ai_trace 共享，见 §5.5）；对话占比出 [0.15, 0.65] -5。 | 0 |
+| style | 100 起；句均字长出 [12, 28] -10；trigram 重复率 > 0.16（warn 档）-15 + warning，> 0.25（confirm 档）另把该条上修 `gate="confirm"`（见 §4.3；两档都带「重复次数最高的 trigram」证据摘录）；AI markers 每千字 ≥ 5 -15（词表/密度与 ai_trace 共享，见 §5.5）；对话占比出 [0.15, 0.65] -5。 | 0 |
 | pacing | 100 起；5 段对话密度极差 < 0.05 -20；末段无钩子 -15；段落 < 1 不扣分。MVP 代理实现。 | 0 |
 | foreshadowing | **埋设/兑现双通道**（V3.9 批次 3.2）：`score = round(100 × (resolved + 0.9 × new) / (resolved + new))`；涉及 0 ⇒ 85 + info。 | 0 |
 
@@ -383,6 +454,10 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 
 - §2.1 overall：七维平均（`plot + character + continuity + style + pacing + foreshadowing + ai_trace) / 7`）
 - blocking error：`rule_id ∈ BLOCKING_RULES` ⇒ overall = 0；其余 error 为 informational（§4.3）
+- confirm 命中：`rule_id ∈ CONFIRM_RULES` **或**该条被产出侧上修 `gate="confirm"` ⇒ overall **不变**
+  （不归零），后果由 quality_gate 承担（§4.3）
+- §3.4 trigram 重复率（2026-09-18 重定，两档）：warn 0.16（生成侧 p85）/ confirm 0.25
+  （生成侧 max 0.2097 与事故 0.3037 的几何中点）；人类锚点书 max 0.0949 ⇒ 人稿零命中（§4.3）
 - Q6：13 字 shingles / 2% 重叠率
 - Q7：每千字 5 marker / 20% 段落首词 / 3.0 标准差 / 1000 字阈值
 - Q8：30% 红线 / 40% 缓冲；< 红线默认 warning（`NOVELOS_QUALITY_Q8_STRICT=1` 升 error，§4.5）
@@ -409,14 +484,18 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 3. **Issue dataclass 已合并为唯一 pydantic 类**：`packages.core.quality.issues.Issue` 与 `models.Issue` 是同一类。
    不要在代码里出现 `dataclass`-based Issue 占位——会让 QualityReport 序列化报错。
 4. **`_meta` 用 pydantic alias**：Python 端属性名是 `meta`；JSON / dump 时通过 `model_dump(by_alias=True)` 输出 `_meta`。
-5. **issue 严重性升级路径明确（V3.9 批次 3.1/3.5 更正）**：
+5. **issue 严重性 / 后果升级路径明确（V3.9 批次 3.1/3.5 + P0-1 更正）**：
    - **category 上限**改 `issues.MVP_SEVERITY_MATRIX`；**规则级偏离**改
-     `issues.MVP_RULE_OVERRIDES`（如 Q8）；**阻断资格**改 `issues.BLOCKING_RULES`。
+     `issues.MVP_RULE_OVERRIDES`（如 Q8）；**阻断资格**改 `issues.BLOCKING_RULES`；
+     **「不许静默通过」资格**改 `issues.CONFIRM_RULES`（P0-1）。
    - 具体规则产出处也可以直接决定 severity（如 `req_q8` 走 `q8_error_severity()` 读规则默认值 +
      `NOVELOS_QUALITY_Q8_STRICT` 开关；`payoff._payoff_severity()` 读矩阵）——**规则内不得写死 error**。
    - 阻断语义：`severity=="error"` **且** `rule_id ∈ BLOCKING_RULES` ⇒ overall=0 且 gate 阻断；
      其余 error 为 informational（只进 issues）。因此"改 matrix 不改引擎"的说法在 V3.9.1 前后都不对：
      矩阵/白名单既影响规则读值，也影响 `scoring_formula_hash`（见 §4.4 变更流程）。
+   - **后果轴（P0-1）**：severity 只管「多严重」，`issue_gate()` 才是后果权威。要「必须显式接受」
+     就把 rule_id 加进 `CONFIRM_RULES`（要求确定性可复算，见 §4.3 入表标准）——
+     不要为了让重复类问题变严重去改 `MVP_SEVERITY_MATRIX`（那会顺带污染子分口径与分数线）。
    - 扩大 error 产出类别（如子分规则也产出 error）会改变阻断范围：若该 rule_id 不在白名单，
      只会保留部分分；若要阻断必须显式入表并走 §4.4 流程。
 6. **本包零数据库迁移**：所有评估均为纯函数，State Delta 字段以 dict 形态传入。
@@ -478,15 +557,20 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
 - 跑 :class:`QualityEngine.evaluate`；
 - 落库到 ``quality_reports``（独立事务，与 :meth:`StoryStateService.commit_delta`
   的事务互不污染）；
-- ``NOVELOS_QUALITY_GATE`` = ``"enforce"``（**默认**）时任一 **blocking** error
-  （``issues.is_blocking_issue``，见 §4.3）⇒ 抛
-  ``ValueError('quality gate blocked: [...]')`` 让 run FAILED、chapter 保持 REVIEWED；
-  informational error（severity=error 但不在白名单）只落库不阻断（与 ``compute_overall`` 同口径，
-  V3.9 批次 3.1）。
+- ``NOVELOS_QUALITY_GATE`` = ``"enforce"``（**默认**）时：
+  - 任一 **blocking** error（``issues.is_blocking_issue``，见 §4.3）⇒ 抛
+    ``ValueError('quality gate blocked: [...]')`` 让 run FAILED、chapter 保持 REVIEWED；
+  - 任一 **confirm** 命中（``issues.issue_gate == "confirm"``，见 §4.3）且无有效
+    ``ctx["gate_override"]``（``/api/.../commit`` 请求体同名字段）⇒ 同样阻断，
+    错误信息含 ``gate=confirm`` + rule_id 清单 + 证据摘录；有有效声明 ⇒ 放行并写
+    ``plan_json`` 无标记 + ``quality_reports._meta.gate_accepted_override``（P0-1）；
+  - informational error（severity=error 但不在白名单）只落库不阻断（与 ``compute_overall`` 同口径，
+    V3.9 批次 3.1）。
 - ``"report"`` 模式：error 仅落库不阻断，方便评审 / REQ-Q8 等 MVP 阻断观察。
 - 模式优先级：``ctx["quality_gate_mode"]``（``/api/.../commit`` 请求体字段）→
   ``NOVELOS_QUALITY_GATE`` 环境变量 → 默认 ``"enforce"``。
-- 节点返回 ``quality_error_count``（全部 error）与 ``quality_blocking_count``（白名单内）两个计数。
+- 节点返回 ``quality_error_count``（全部 error）、``quality_blocking_count``（白名单内）、
+  ``quality_gate_summary``（block/confirm 摘要）与 ``quality_gate_accepted_override``（放行留痕）。
 
 ### 11.4 报告查询 API：``packages.core.api.routers.quality``
 
@@ -521,7 +605,18 @@ Quality Engine 在 Sprint 6 下半完成了从「纯函数核心」到「可观�
 - ``tests/unit/quality/test_aggregate.py``（V3.9 3.1）—— blocking 归零 / informational
   保留部分分 / formula_hash 覆盖矩阵、白名单、规则覆盖（突变验证）。
 - ``tests/unit/quality/test_gate_blocking.py``（V3.9 3.1）—— quality_gate 节点对
-  informational error 不阻断、blocking error 阻断并落 ``gate_blocked``。
+  informational error 不阻断、blocking error 阻断并落 ``gate_blocked``；
+  P0-1 增量：confirm 无声明 / 部分覆盖 / reason 为空 ⇒ 阻断（消息含规则 id + 证据摘录），
+  全量声明 + reason ⇒ 放行且声明在节点输出与报告 ``_meta`` 双留痕；block 仍优先。
+- ``tests/unit/quality/test_issue_gate.py``（P0-1）—— ``issue_gate`` 解析顺序与不可降级性、
+  ``CONFIRM_RULES`` 快照 + 占比类算子守卫（F-19）、confirm 不归零 overall 但进 ``GateSummary``、
+  ``formula_hash`` 覆盖确认白名单。
+- ``tests/api/test_gate_confirm_e2e.py``（P0-1）—— 真实 app + mock LLM 全链路：
+  高重复散文提交 ⇒ enforce 阻断（``gate=confirm``）；带全量 ``gate_override`` 重新提交 ⇒
+  不再因 confirm 被拦且声明写进 ``quality_reports._meta``。
+- ``tests/unit/quality/test_trigram_tiers.py``（2026-09-18）—— trigram 两档阈值的判别测试：
+  四带（人类 0.094 / 生成中位 0.138 / 生成上沿 0.163~0.200 / 事故 0.335）各自的后果，
+  以及阈值不变式「人类上沿 < warn < 生成上沿 < confirm < 事故值」（拿出与数据矛盾的数字即红）。
 - ``tests/unit/quality/test_q8_stats.py``（V3.9 3.3）—— ``writer:v1`` → AI 侧、口径 note、
   真实 DB 接线（build_quality_context + engine）、strict 开关。
 - ``tests/unit/quality/test_ai_flavor.py``（V3.9 3.4）—— 词表单一来源、与改造前套话表逐条相等、

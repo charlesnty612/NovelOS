@@ -10,6 +10,8 @@
 4. V3.9 批次 3.1：维护 ``BLOCKING_RULES``（阻断白名单）与 ``is_blocking_issue``——
    error 级 issue 分 **blocking / informational** 两组，只有 blocking 组把 overall 归零
    （见 :mod:`.aggregate`）；矩阵与白名单内容一并参与 ``scoring_formula_hash``。
+5. 2026-09-18（P0-1）：在 severity 之外引入**正交的后果轴** :data:`Gate`，配 :data:`CONFIRM_RULES`
+   与 :func:`issue_gate`，表达「多严重」之外的「必须怎么处理」（见下方注释块）。
 
 设计要点：
 
@@ -27,6 +29,21 @@ from typing import Any, Iterable, Literal, Optional
 
 Severity = Literal["error", "warning", "info"]
 """Issue severity 三档，对齐 §1.3 与 PRD §89 风险等级。"""
+
+Gate = Literal["auto", "confirm", "block"]
+"""Issue **后果**三档（2026-09-18 P0-1；与 severity 正交，不互相推导）。
+
+- ``auto``：不产生后果，静默通过（warning / info / informational error 的既有行为）。
+- ``confirm``：**不允许静默通过**——调用方必须给出显式、留痕的接受声明
+  （``quality_gate`` 的 ``ctx["gate_override"]``，须覆盖本次全部 confirm rule_id 且附非空
+  ``reason``）才放行；否则 ``enforce`` 模式阻断。
+- ``block``：硬停，不可覆盖（既有 ``BLOCKING_RULES`` 行为）。
+
+为什么与 severity 正交：severity 回答「哪里出问题、多严重」，gate 回答「谁能说通过」。
+P0-1 事故（2026-09-18）——某章 9 段逐字重复仍提交成功、``overall: 90``——根因不是
+重复算不上严重，而是**没有任何一处有权限说「不许静默通过」**：style/pacing/payoff 等
+category 被矩阵封顶 ``warning``，于是重复类问题在构造上永远进不了阻断白名单。
+"""
 
 Category = Literal[
     "schema_validity",
@@ -87,6 +104,7 @@ def make_issue(
     suggestion: Optional[str] = None,
     evidence_refs: Optional[Iterable[str]] = None,
     judge_trace: Optional[dict[str, Any]] = None,
+    gate: Optional[Gate] = None,
 ) -> Issue:
     """构造 Issue 对象的便捷助手。
 
@@ -94,12 +112,15 @@ def make_issue(
         severity / category / rule_id / message：必填。
         chapter_id / scene_id / location：三选一/组合；``location`` 显式给出时优先级最高。
         evidence_refs：允许直接传可迭代对象，内部统一转 list。
+        gate：显式后果档；None ⇒ 按 :data:`CONFIRM_RULES` / 阻断白名单材料化。
+            只允许**上修**（把规则表未覆盖的单条 issue 显式升为 ``confirm``）——
+            构造末尾统一过 :func:`issue_gate`，因此显式 ``gate="auto"`` 无法把表内规则降级。
     """
     resolved_loc = location if location is not None else loc(chapter_id, scene_id)
     ev_list: Optional[list[str]] = None
     if evidence_refs is not None:
         ev_list = list(evidence_refs)
-    return Issue(
+    obj = Issue(
         severity=severity,
         category=category,
         rule_id=rule_id,
@@ -108,7 +129,11 @@ def make_issue(
         suggestion=suggestion,
         evidence_refs=ev_list,
         judge_trace=judge_trace,
+        gate=gate or "auto",
     )
+    # 材料化：让落库 / 序列化出来的 ``gate`` 字段与解析器同口径（见 :func:`issue_gate`）。
+    obj.gate = issue_gate(obj)
+    return obj
 
 
 # ----------------------------------------------------------------------------- severity matrix
@@ -186,6 +211,48 @@ BLOCKING_RULES: frozenset[str] = frozenset(
 """error 级 issue 中真正阻断的 rule_id 白名单（V3.9 批次 3.1）。"""
 
 
+# 确认白名单（2026-09-18 P0-1）：命中即 ``gate == "confirm"``——不允许静默通过，
+# 必须由调用方给出显式、留痕的接受声明（见 :func:`issue_gate` 与
+# ``packages/workflows/chapter_commit/gate.py`` 的 ``gate_override``）。
+#
+# 入表标准（严格）：**确定性、可复算、作者无从辩驳**的重复类算子。
+#   - 命中可由原文重新算一遍复现（不需要 LLM judge、不依赖主观判断）；
+#   - 「我认了这个结果」是唯一合理回应，因此正确的处理是要求显式接受，而不是调参。
+#   - **表内条目必须要么「命中即错」，要么自带分布无关的强分离**；量级依赖分布的
+#     算子不得靠 rule_id 入表——静态 rule_id 只能表达「这条规则命中就要签字」，
+#     表达不了「同一条规则、两种量级、两种后果」（见下条留痕）。
+#
+# 明确**不收**的：任何比值 / 占比类算子（对白占比、段落长度、可读性频率 …）。
+# AGENTS.md 记录的 F-19 实证：「占比/频率」一旦进驱动或硬指标，模型为凑指标会灌对白 /
+# 拆短句，越改越坏；可测算子只作体检、不作处方。同理**不把任何既有 category 升 error**——
+# gate 与 severity 正交，正是为了不靠改 severity 来造后果（见 :data:`Gate`）。
+#
+# ---------------------------------------------------------------------------
+# 2026-09-18 撤销记录（先验判断被推翻，留痕）：
+# ``RULE_STYLE_REPETITION_TRIGRAM`` 曾按「一次观测到的 30.37% 事故章」入表。次日实测
+# 推翻该判断——章内 trigram 重复率 0.08 落在**正常分布内部**：人类锚点书（榜一侯府弧
+# 19 章）mean 0.0754 / max 0.0949（9/19 章超 0.08），生成侧 92 章 p50 0.1333 / p90 0.1749
+# （仅 2/92 章低于 0.08）。按 0.08 做 confirm ⇒ 人写的稿子也要签字，门禁退化为橡皮图章。
+# 现改为：该规则两档（warn 0.16 / confirm 0.25，均为实测分位，见
+# ``scoring.STYLE_TRIGRAM_*``），**只有超过 confirm 阈值的那一条**在
+# ``scoring.score_style`` 里显式上修为 ``gate="confirm"``（:func:`issue_gate` 第 3 条
+# 路径），不再依赖本表。规律：**量级依赖的后果不要写进 rule_id 静态表**。
+# ---------------------------------------------------------------------------
+CONFIRM_RULES: frozenset[str] = frozenset(
+    {
+        # 节拍/段落级逐字复现（``packages/core/quality/beat_repeat.py`` 产出）。
+        # 入表依据（2026-09-18 实测，非单章先验）：生成侧 307 处 / 1.17 处每千字、
+        # 64/92 章达标；人类侧 2 处 / 0.05 处每千字、**0/19 章**达标——章级门
+        # 「≥2 处且 >1.0/千字」在人类语料上零误报，分离度与分布无关。
+        "AI-BEAT-REPEAT",
+    }
+)
+"""必须显式接受才放行的 rule_id 白名单（``gate == "confirm"``，2026-09-18 P0-1）。
+
+共 1 条（2026-09-18：``RULE_STYLE_REPETITION_TRIGRAM`` 因阈值未被分布支撑而撤出，
+改走 ``score_style`` 的单条上修路径——见上方撤销记录）。"""
+
+
 def rule_default_severity(rule_id: str, category: str) -> Severity:
     """规则级默认 severity：先查 ``MVP_RULE_OVERRIDES``，未命中回退 category 矩阵。"""
     override = MVP_RULE_OVERRIDES.get(rule_id)
@@ -208,30 +275,63 @@ def is_blocking_issue(issue: Any) -> bool:
     )
 
 
+def issue_gate(issue: Any) -> Gate:
+    """解析一条 issue 的**后果档**（2026-09-18 P0-1）——本函数是唯一权威。
+
+    判定顺序（先到先得；不可由 issue 自身字段降级）：
+
+    1. :func:`is_blocking_issue` ⇒ ``"block"``（硬停，不可覆盖）；
+    2. ``rule_id ∈ CONFIRM_RULES`` ⇒ ``"confirm"``（与 severity 无关——warning 级同样
+       可以是 "不许静默通过"；表内规则见 :data:`CONFIRM_RULES` 入表标准）；
+    3. issue 自带 ``gate == "confirm"`` ⇒ ``"confirm"``（单条显式上修）——**量级依赖的
+       规则走这条**：同一 rule_id 在正常量级只出 warning、在异常量级才要求签字，
+       静态表表达不了这种两档（先例：``scoring.score_style`` 的 trigram 两档）；
+    4. 其余 ⇒ ``"auto"``。
+
+    与 ``Issue.gate`` 字段的关系：字段是**材料化回显**（``make_issue`` / ``QualityEngine``
+    写入，落 ``quality_reports`` 供前端与 API 直接读），本函数是**权威**。字段只能上修
+    （单条升 ``confirm``），不能把表内规则降回 ``auto``；``"block"`` 一律实时由
+    ``severity + BLOCKING_RULES`` 推出，不接受字段指定。
+    """
+    if issue is None:
+        return "auto"
+    if is_blocking_issue(issue):
+        return "block"
+    if getattr(issue, "rule_id", None) in CONFIRM_RULES:
+        return "confirm"
+    if getattr(issue, "gate", None) == "confirm":
+        return "confirm"
+    return "auto"
+
+
 def severity_config_fingerprint() -> str:
     """severity 配置的规范化文本指纹（供 ``scoring_formula_hash`` 覆盖矩阵内容）。
 
-    覆盖三块：逐 category 的 ``mvp_max``、规则级覆盖 ``MVP_RULE_OVERRIDES``、
-    阻断白名单 ``BLOCKING_RULES``。三者任一变更 ⇒ 指纹变 ⇒ formula_hash 变，
-    历史报告可按 hash 区分评分口径。
+    覆盖四块：逐 category 的 ``mvp_max``、规则级覆盖 ``MVP_RULE_OVERRIDES``、
+    阻断白名单 ``BLOCKING_RULES``、确认白名单 ``CONFIRM_RULES``。任一项变更 ⇒ 指纹变
+    ⇒ formula_hash 变，历史报告可按 hash 区分评分口径。
     """
     parts = [f"{cat}={row.get('mvp_max', '')}" for cat, row in sorted(MVP_SEVERITY_MATRIX.items())]
     parts.extend(f"rule:{rid}={val}" for rid, val in sorted(MVP_RULE_OVERRIDES.items()))
     parts.append("blocking:" + ",".join(sorted(BLOCKING_RULES)))
+    parts.append("confirm:" + ",".join(sorted(CONFIRM_RULES)))
     return "|".join(parts)
 
 
 __all__ = [
     "Severity",
     "Category",
+    "Gate",
     "Issue",
     "loc",
     "make_issue",
     "MVP_SEVERITY_MATRIX",
     "MVP_RULE_OVERRIDES",
     "BLOCKING_RULES",
+    "CONFIRM_RULES",
     "mvp_max_severity",
     "rule_default_severity",
     "is_blocking_issue",
+    "issue_gate",
     "severity_config_fingerprint",
 ]

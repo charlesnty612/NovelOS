@@ -25,6 +25,13 @@ V3.7 字数带覆盖（word_band_json）：
   ``packages/core/api/routers/genre.py``）；本服务只保证所有返回行都带
   ``genre_pack_id`` 键（极老库缺列 → None），供 Project 响应模型直接消费。
   绑定 / 解绑**不**经本服务（单一属主：genre 路由 + GenrePackService）。
+
+项目写作圣经（writing_bible，迁移 0029）：
+- 读写都归一为 ``str | None``：空白串与显式 null 同义（落 NULL），非空文本去首尾
+  空白后原样存。DB 中只存在 NULL / 非空文本两种形态——避免 "" 与 NULL 在装配缓存
+  键指纹里分裂成两种「都无圣经」的键形态。
+- 本服务只做搬运与归一，**不做**与运行期 ``author_intent`` 的拼接（拼接单点在
+  ``packages.core.context_engine.builders_common.resolve_author_intent``）。
 """
 
 from __future__ import annotations
@@ -75,6 +82,22 @@ def _coerce_genre_pack_id(raw: object) -> str | None:
     return None
 
 
+def _coerce_writing_bible(raw: object) -> str | None:
+    """把 ``projects.writing_bible`` 列值归一为 str | None（迁移 0029）。
+
+    - None / 空白串 → None（「无圣经」在 DB 与读侧只有一个表示：NULL）；
+    - 字符串 → 去首尾空白后返回（内部换行 / 段落原样保留）；
+    - 其它类型（脏数据）→ None（防御性，不炸 Project 响应）。
+
+    写侧同口径（见 :meth:`ProjectService.update` / ``create``）：空白串落 NULL，
+    避免 ""（无圣经）与 None 在装配缓存键指纹里分裂成两种「都无圣经」的形态。
+    """
+    if isinstance(raw, str):
+        text = raw.strip()
+        return text or None
+    return None
+
+
 class ProjectService:
     """项目领域服务（projects 表 CRUD）。"""
 
@@ -110,6 +133,10 @@ class ProjectService:
             "word_band": getattr(payload, "word_band", None),
             # 题材库 P1b：新建项目恒未绑定（绑定走 genre 路由）；显式置键供响应模型消费。
             "genre_pack_id": None,
+            # 项目写作圣经（0029）：空白串归一为 None（DB 里只有 NULL / 非空文本两种形态）。
+            "writing_bible": _coerce_writing_bible(
+                getattr(payload, "writing_bible", None)
+            ),
             "created_at": now,
             "updated_at": now,
         }
@@ -119,11 +146,11 @@ class ProjectService:
                 """
                 INSERT INTO projects
                     (project_id, name, premise, genre, target_words, status,
-                     foreshadow_overdue_chapters, word_band_json,
+                     foreshadow_overdue_chapters, word_band_json, writing_bible,
                      created_at, updated_at)
                 VALUES
                     (:project_id, :name, :premise, :genre, :target_words, :status,
-                     :foreshadow_overdue_chapters, :word_band_json,
+                     :foreshadow_overdue_chapters, :word_band_json, :writing_bible,
                      :created_at, :updated_at)
                 """,
                 row,
@@ -149,6 +176,8 @@ class ProjectService:
         d["word_band"] = _coerce_word_band(d.get("word_band_json"))
         # 题材库 P1b：genre_pack_id 归一（极老库缺列 → None）
         d["genre_pack_id"] = _coerce_genre_pack_id(d.get("genre_pack_id"))
+        # 项目写作圣经（0029）：空白串 / 缺列 → None
+        d["writing_bible"] = _coerce_writing_bible(d.get("writing_bible"))
         return d
 
     # -------------------------------------------------------------------- list
@@ -178,6 +207,7 @@ class ProjectService:
             d = dict(r)
             d["word_band"] = _coerce_word_band(d.get("word_band_json"))
             d["genre_pack_id"] = _coerce_genre_pack_id(d.get("genre_pack_id"))
+            d["writing_bible"] = _coerce_writing_bible(d.get("writing_bible"))
             out.append(d)
         return out
 
@@ -189,6 +219,11 @@ class ProjectService:
         - 字段未在 ``model_fields_set`` → 不动 DB
         - ``word_band=None``（显式 null）→ 置 NULL 清除覆盖
         - ``word_band=dict``（显式对象）→ json.dumps 后存 ``word_band_json``
+
+        2026-09-18（0029）：``writing_bible`` 字段语义——
+        - 字段未在 ``model_fields_set`` → 不动 DB
+        - ``writing_bible=None``（显式 null）或空白串 → 置 NULL 清除圣经
+        - 含内容字符串 → 去首尾空白后原样存 ``writing_bible``
 
         返回更新后的完整行；不存在返回 None。
         """
@@ -208,6 +243,11 @@ class ProjectService:
                         # router 层 model 已守住 dict|None，service 二次防御
                         raise ValueError("word_band must be dict or None")
                     fields["word_band_json"] = json.dumps(wb, ensure_ascii=False)
+            elif fname == "writing_bible":
+                # 归一：空白串与显式 null 同义（清除）；非空文本去首尾空白后原样存。
+                fields["writing_bible"] = _coerce_writing_bible(
+                    getattr(payload, "writing_bible")
+                )
             else:
                 fields[fname] = getattr(payload, fname)
 
@@ -241,6 +281,7 @@ class ProjectService:
         d = dict(row)
         d["word_band"] = _coerce_word_band(d.get("word_band_json"))
         d["genre_pack_id"] = _coerce_genre_pack_id(d.get("genre_pack_id"))
+        d["writing_bible"] = _coerce_writing_bible(d.get("writing_bible"))
         return d
 
     # ------------------------------------------------------------------- delete
@@ -283,4 +324,9 @@ class ProjectService:
         return bool(row["cnt"] > 0)
 
 
-__all__ = ["ProjectService", "_coerce_word_band", "_coerce_genre_pack_id"]
+__all__ = [
+    "ProjectService",
+    "_coerce_word_band",
+    "_coerce_genre_pack_id",
+    "_coerce_writing_bible",
+]

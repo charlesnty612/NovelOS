@@ -70,8 +70,52 @@ _CONTINUITY_CATEGORIES = frozenset(
 # ---- style (§3.4) -----
 STYLE_SENTENCE_LEN_RANGE: tuple[int, int] = (12, 28)
 STYLE_SENTENCE_LEN_DEDUCTION: int = 10
-STYLE_TRIGRAM_REPETITION_THRESHOLD: float = 0.08
+
+# trigram 重复率两档阈值（2026-09-18 重定；旧值 0.08 单档已废弃，理由见下）。
+#
+# 实测分布（2026-09-18 复算；口径 = 对每章最新草稿调 :func:`_trigram_repetition_rate`，
+# 人类侧读内容仓 ``NovelOS-Content/reference-books/.../*.txt``；语料与 ``beat_repeat`` 同一批）：
+#
+# - 人类锚点书（内容仓 ``NovelOS-Content/reference-books/榜一-快穿之人渣洗白手册``
+#   侯府弧 19 章，只读）：mean 0.0754 / median 0.0787 / min 0.0535 / **max 0.0949**；
+# - 生成侧（``data/novelos.db`` 全项目最新草稿 92 章）：min 0.0619 / p25 0.1100 /
+#   p50 0.1333 / p75 0.1494 / **p85 0.1621** / p90 0.1749 / p95 0.1850 /
+#   p99 0.2022 / **max 0.2097**；仅 2/92 章低于 0.08。
+# - 真实事故章（P0-1）：**0.3037**（``ch_92bac068ff0d`` v6 / 2374 字，该值存于
+#   ``quality_reports.issues_json`` 的历史报文；同章其余 12 版为 0.085~0.130，
+#   即事故是**单版异常**、不是整章问题——这正是「单章先验不足以为阈值定锚」的实证）。
+#
+# 旧值 0.08 落在**分布内部**（人类锚点书 9/19 章、生成侧 90/92 章都超）⇒ confirm 档
+# 变成「人人必点」的橡皮图章，比不设门更坏。
+#
+# 三档预期判定（改常量前先照此表核对）：
+#
+# | 文本 | 实测率 | 预期后果 |
+# |---|---|---|
+# | 人类锚点书（7.4% 均带，max 9.49%） | ≤0.0949 | **无任何 issue**（连 warn 都不出） |
+# | 生成侧普通章（p50 13.3%） | 0.13 | **无任何 issue** |
+# | 生成侧偏上章（p85 16.2% / max 21.0%） | 0.16~0.21 | 至多 **warn**（gate=auto，无后果） |
+# | 真实事故章 | 0.3037 | **confirm**（须显式接受才放行） |
+STYLE_TRIGRAM_WARN_THRESHOLD: float = 0.16
+"""trigram warn 档阈值：出 warning issue，``gate=auto``（无后果，只提示）。
+
+取生成侧 **p85 = 0.1621** 圆整 —— 「比自家 85% 的章更重复」才提示；人类锚点书
+最大值 0.0949 只有该值的 0.59 倍 ⇒ 正常人稿一条都不报。往下取（如 0.10）会让
+65% 的生成章亮灯，属于「命中即报把正常写法与真信号混在一起」的噪声形状。
+"""
+
+STYLE_TRIGRAM_CONFIRM_THRESHOLD: float = 0.25
+"""trigram confirm 档阈值：超此值才把该条 issue **单条上修**为 ``gate="confirm"``
+（不许静默通过，须 ``gate_override`` 显式接受；见 ``issues.issue_gate`` 第 3 条路径）。
+
+取「生成侧最大值 0.2097」与「真实事故章 0.3037」的**几何中点**（√(0.2097×0.3037)
+= 0.252）圆整：即「比迄今测到的最差生成章还要重复 19% 以上」才要求作者签字。
+判别：92 章生成侧 0 章达标（现有语料里 confirm 只对事故级文本生效），
+人类锚点书 max 0.0949 仅为该值的 38%。
+"""
+
 STYLE_TRIGRAM_DEDUCTION: int = 15
+"""任一档命中都扣此分（severity 恒 warning；后果差异只体现在 gate 轴，不体现在分数）。"""
 STYLE_AI_MARKER_PER_KCHARS: float = 5.0
 STYLE_AI_MARKER_DEDUCTION: int = 15
 STYLE_DIALOGUE_RATIO_RANGE: tuple[float, float] = (0.15, 0.65)
@@ -251,22 +295,40 @@ def score_continuity(issues_in: list[Issue]) -> tuple[int, list[Issue]]:
 # ============================================================================
 
 
-def _trigram_repetition_rate(text: str) -> float:
-    """返回 trigram 重复率 = ``(sum max(0, count-1)) / total_trigrams``。"""
+def _trigram_counts(text: str) -> dict[str, int]:
+    """返回规范化文本的 trigram → 出现次数。"""
     t = _norm(text)
     n = 3
     if len(t) < n:
-        return 0.0
+        return {}
     counts: dict[str, int] = {}
-    total = 0
     for i in range(len(t) - n + 1):
         s = t[i : i + n]
         counts[s] = counts.get(s, 0) + 1
-        total += 1
-    if total == 0:
+    return counts
+
+
+def _trigram_repetition_rate(text: str) -> float:
+    """返回 trigram 重复率 = ``(sum max(0, count-1)) / total_trigrams``。"""
+    counts = _trigram_counts(text)
+    if not counts:
         return 0.0
+    total = sum(counts.values())
     extras = sum(c - 1 for c in counts.values() if c > 1)
-    return extras / total
+    return extras / total if total else 0.0
+
+
+def _top_repeated_trigrams(text: str, top: int = 3) -> list[str]:
+    """返回重复次数最高的若干 trigram，形如 ``"「破屋的」×12"``（供证据摘录）。
+
+    P0-1（2026-09-18）：``RULE_STYLE_REPETITION_TRIGRAM`` 超过 confirm 阈值时要求
+    作者显式接受，因此 issue 必须带上**可核对的证据**，不能只给一个比率数字。
+    **两档都带**（warn 档也带）：档位可能随改稿变化，证据不该时有时无。
+    """
+    counts = _trigram_counts(text)
+    repeated = [(n, c) for n, c in counts.items() if c > 1]
+    repeated.sort(key=lambda kv: (-kv[1], kv[0]))
+    return [f"{s}×{c}" for s, c in repeated[:top]]
 
 
 def _dialogue_ratio(draft: str) -> float:
@@ -284,7 +346,12 @@ def _avg_sentence_length(draft: str) -> float:
 
 
 def score_style(draft: str) -> tuple[int, list[Issue]]:
-    """§3.4 style 子分（rule-based 部分）。"""
+    """§3.4 style 子分（rule-based 部分）。
+
+    trigram 重复率是**两档**算子：> :data:`STYLE_TRIGRAM_WARN_THRESHOLD` 出 warning
+    （``gate=auto``），> :data:`STYLE_TRIGRAM_CONFIRM_THRESHOLD` 才把该条上修为
+    ``gate="confirm"``；两档扣分相同，severity 恒 warning（后果在 gate 轴，不在 severity）。
+    """
     issues: list[Issue] = []
     score = 100
 
@@ -295,14 +362,28 @@ def score_style(draft: str) -> tuple[int, list[Issue]]:
         score -= STYLE_SENTENCE_LEN_DEDUCTION
 
     trigram_rate = _trigram_repetition_rate(draft or "")
-    if trigram_rate > STYLE_TRIGRAM_REPETITION_THRESHOLD:
+    if trigram_rate > STYLE_TRIGRAM_WARN_THRESHOLD:
         score -= STYLE_TRIGRAM_DEDUCTION
+        # 两档（2026-09-18）：warn 档只出条目（gate=auto，无后果）；超 confirm 阈值才
+        # 把**这一条**上修为 gate="confirm"——规则 id 不变，后果随量级变，走
+        # ``issues.issue_gate`` 的单条显式上修路径（静态 rule_id 表表达不了「同一条规则
+        # 两种量级」，见 issues.CONFIRM_RULES 注释）。
+        needs_confirm = trigram_rate > STYLE_TRIGRAM_CONFIRM_THRESHOLD
         issues.append(
             make_issue(
                 severity="warning",
                 category="style",
                 rule_id="RULE_STYLE_REPETITION_TRIGRAM",
-                message=f"trigram 重复率 {trigram_rate:.2%} > {STYLE_TRIGRAM_REPETITION_THRESHOLD:.0%}",
+                message=(
+                    f"trigram 重复率 {trigram_rate:.2%} > 确认阈值 "
+                    f"{STYLE_TRIGRAM_CONFIRM_THRESHOLD:.0%}（须显式接受才放行）"
+                    if needs_confirm
+                    else f"trigram 重复率 {trigram_rate:.2%} > 警告阈值 "
+                    f"{STYLE_TRIGRAM_WARN_THRESHOLD:.0%}"
+                ),
+                # P0-1：要求显式接受的档位必须带可核对证据（作者要看见自己在接受什么）。
+                evidence_refs=_top_repeated_trigrams(draft or ""),
+                gate="confirm" if needs_confirm else None,
             )
         )
 

@@ -10,9 +10,14 @@ r"""结构化输出提取（Sprint 3）。
   3. ``json.loads``；失败抛 :class:`AgentOutputError`（由 runner 捕获并决定是否重试）。
 - 契约校验：多档 ``expected``（``"observer"`` / ``"director"`` / ``"writer"`` /
   ``"director_planner"`` 等）按 ``agent-contracts-v0.md`` §5.2 / §3.2 / §4.2 给出最小集断言。
-  - ``observer``：顶层必须恰为 7 个 change 数组键（结构错误仍抛 :class:`AgentOutputError`）；
+  - ``observer``：顶层必须恰为 7 个 change 数组键（结构错误仍抛 :class:`AgentOutputError`），
+    且每个数组的**元素必须是 object**（``json_repair`` 兜底会把裸字符串 / 裸数组碎片塞进
+    数组元素位——2026-09-21 第二起同形状缺陷的契约层守卫）；
     含 10 元信息字段或 3 辅助字段（**越权字段**）时**剥离后继续**，不抛错、不触发重试。
-  - ``director``：必须含 ``schema_version == "director-plan.v1"``。
+  - ``director``：必须含 ``schema_version == "director-plan.v1"``，且计划数组
+    （``key_beats`` / ``character_changes_planned`` / ``information_releases``）**在场**时
+    形状合法——必须是 list、元素必须是 object，``key_beats`` 元素另须含字符串
+    ``beat_id`` / ``purpose``（2026-09-21 破损计划静默落库事故的结构修复）。
   - ``director_planner``（P1 合并调用）：顶层走导演契约；``scene_plan`` 子对象在场时走场景契约
     （``schema_version == "scene-plan.v1"``）；另按输入 payload 做 ID 白名单核销
     （hook / debt / character / location）。
@@ -309,11 +314,71 @@ def _format_json_error(exc: json.JSONDecodeError, candidate: str) -> str:
     return f"invalid JSON: {exc}; raw={candidate[:200]!r}"
 
 
+# 数组字段形状守卫（observer 7 change 数组 + director 家族计划数组共用）。
+#
+# 口径：**键缺席放行**（下游按缺省值读），在场则必须是 list 且元素必须是 object；
+# 调用方可通过 ``required_str_fields`` 追加元素内必填字符串字段。
+# 根因背景见 :func:`_validate_observer` / :func:`_validate_director` docstring
+# （同一个 ``json_repair`` 三级兜底把 LLM 非法 JSON「修」成顶层可解析、内部腐烂的
+# dict，裸字符串 / 裸数组碎片混进数组元素位）。
+_ARRAY_SHAPE_ERROR_CAP = 5
+"""形状报错条数上限：报错文本会拼进 runner 的重试提示（防超长腐烂清单撑爆提示）。"""
+
+
+def _array_shape_errors(
+    payload: dict[str, Any], key: str, required_str_fields: tuple[str, ...] = ()
+) -> list[str]:
+    """数组字段形状核销：在场时必须是 list、元素必须是 object（可附元素内必填字符串字段）。"""
+    if key not in payload:
+        return []
+    value = payload[key]
+    if not isinstance(value, list):
+        return [f"{key} must be a list, got {type(value).__name__}"]
+    errs: list[str] = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, dict):
+            errs.append(f"{key}[{idx}] must be an object, got {type(item).__name__}")
+            continue
+        for field in required_str_fields:
+            if field not in item:
+                errs.append(f"{key}[{idx}] missing required field: {field!r}")
+            elif not isinstance(item[field], str):
+                errs.append(
+                    f"{key}[{idx}].{field} must be a string, got {type(item[field]).__name__}"
+                )
+    return errs
+
+
+def _raise_array_shape_errors(errors: list[str], *, context: str) -> None:
+    """形状错误非空即抛 :class:`AgentOutputError`（条数封顶 + ``(+N more)`` 折叠）。"""
+    if not errors:
+        return
+    shown = errors[:_ARRAY_SHAPE_ERROR_CAP]
+    suffix = f"; (+{len(errors) - len(shown)} more)" if len(errors) > len(shown) else ""
+    raise AgentOutputError(f"{context}: " + "; ".join(shown) + suffix)
+
+
 def _validate_observer(payload: dict[str, Any]) -> None:
-    """Observer 契约：仅校验**结构**（缺数组键 / 非 list）；越权字段不在此抛错。
+    """Observer 契约：结构（缺数组键 / 非 list / 元素非 object）校验；越权字段不在此抛错。
 
     越权字段（10 元信息 + 3 辅助）由 :func:`strip_observer_violations` 剥离——本函数
-    职责收缩为「结构合法即视为合规」，剥离与重试决策统一在 runner 层完成。
+    职责收缩为「结构合法即视为合规」，剥离与重试决策统一在 runner 层完成
+    （runner 顺序是**先剥离后校验**，故此处看到的是剥离后的 7 数组，缺席数组已被补 ``[]``）。
+
+    元素形状守卫（2026-09-21，与 director 家族同形状的第二起）：7 个 change 数组的每个
+    元素必须是 object。``json_repair`` 兜底会把裸字符串 / 裸数组碎片塞进
+    ``character_changes`` / ``new_events`` 等数组（本机复现：``["{", 'beat_id":"beat_002']``
+    形态），旧契约只查「数组是 list」即放行，这类碎片会带着「合法」标记流进 delta 层。
+    实测（2026-09-21 探针）该碎片确实会在下一层被 ``story_state.validator.validate_delta``
+    的 jsonschema 拦下（``character_changes/0: '{' is not of type 'object'``），**不是**
+    静默落库路径；但形状是**契约自身**声明的东西（observer-v1.md §7.1 七数组元素均为
+    对象），在契约层拒绝有三点收益：① 报错在契约边界，重试提示直接说清「元素必须是
+    对象」而不是笼统的「observer delta failed validation」；② 契约层校验失败不会下探
+    到 commit 级的 delta 重试（多一轮 observer 调用）；③ 非 validator 消费方不必各自
+    兜底——已核实的两处是 ``_has_high_risk_change``（带 isinstance 守卫，碎片被静默跳过，
+    风险判定可能漏判）与 ``gate._high_risk_approval_node`` 的 pause 载荷（把数组原样交给
+    人工审批面，碎片会直接显示给用户）。违规抛 :class:`AgentOutputError`，由 runner 走
+    既有 output-invalid 重试。
     """
     keys = set(payload.keys())
     missing = OBSERVER_ALLOWED_KEYS - keys
@@ -324,6 +389,11 @@ def _validate_observer(payload: dict[str, Any]) -> None:
     for k in OBSERVER_ALLOWED_KEYS:
         if not isinstance(payload[k], list):
             raise AgentOutputError(f"observer array {k!r} must be a list, got {type(payload[k]).__name__}")
+    # 元素必须是 object（只 guard 这 7 个数组键，不扩大面；其它顶层键按越权字段处理）
+    errs: list[str] = []
+    for k in sorted(OBSERVER_ALLOWED_KEYS):
+        errs.extend(_array_shape_errors(payload, k))
+    _raise_array_shape_errors(errs, context="observer array element shape invalid")
 
 
 def strip_observer_violations(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -359,11 +429,41 @@ def strip_observer_violations(payload: dict[str, Any]) -> tuple[dict[str, Any], 
     return cleaned, sorted(stripped)
 
 
+# Director 家族计划数组的**形状**守卫（字段名 → 元素内必填字符串字段）。
+# 口径：**键缺席放行**（下游按缺省值读；quality 对「无 key_beats」另有中性分口径
+# ``scoring.PLOT_NO_PLAN_NEUTRAL``），在场则必须是 list 且元素必须是 object；
+# ``key_beats`` 元素另须含字符串 ``beat_id`` / ``purpose``（其余字段必填面不收紧，
+# 见 :func:`_validate_director_planner` docstring「验收要严、产线要活」）。
+# 形状核销本身复用 :func:`_array_shape_errors`（observer / director 家族单点实现）。
+_DIRECTOR_PLAN_ARRAYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("key_beats", ("beat_id", "purpose")),
+    ("character_changes_planned", ()),
+    ("information_releases", ()),
+)
+
+
 def _validate_director(payload: dict[str, Any]) -> None:
+    """导演家族（``director`` / ``director_planner`` 顶层）契约：schema_version + 计划数组形状。
+
+    根因（2026-09-21 实跑事故，chapter-plan 的 director_planner 节点落库损坏计划）：
+    LLM 输出非法 JSON 时 :func:`extract_json` 的三级兜底（``json_repair``）会把它「修」成
+    顶层可解析、内部结构腐烂的 dict——本应属于 ``beat_003`` 内部的字段值片段
+    （如 ``["payoff"]`` / ``"谢无咎反用镖规…"``）以裸数组 / 裸字符串形态混进
+    ``key_beats`` 数组。旧契约只查顶层 ``schema_version``，腐烂结构静默通过校验并被
+    ``chapter_plan`` 写进 ``chapters.plan_json``，任何按 ``key_beats[].beat_id`` 严格消费
+    的下游都读到垃圾（当次正文靠 ``chapter_goal`` 兜底未跑飞，故全程无告警）。
+
+    现按 :data:`_DIRECTOR_PLAN_ARRAYS` 做元素形状核销，违规抛 :class:`AgentOutputError`，
+    由 runner 走既有 output-invalid 重试路径（**不静默放行**）。
+    """
     if payload.get("schema_version") != "director-plan.v1":
         raise AgentOutputError(
             f"director schema_version must be 'director-plan.v1', got {payload.get('schema_version')!r}"
         )
+    errs: list[str] = []
+    for key, required_str_fields in _DIRECTOR_PLAN_ARRAYS:
+        errs.extend(_array_shape_errors(payload, key, required_str_fields))
+    _raise_array_shape_errors(errs, context="director plan array shape invalid")
 
 
 def _validate_writer(payload: dict[str, Any]) -> None:
@@ -750,8 +850,13 @@ def _validate_director_planner(
 
     契约口径（见 ``docs/agents/prompts/director_planner-v2.md`` §7 / §9 E-MRG-01）：
 
-    - 顶层：同 :func:`_validate_director`（``schema_version == "director-plan.v1"``）。
-      下游（chapter-plan 的 ``save_plan``）按缺省值读各字段，故此处不额外收紧必填面。
+    - 顶层：同 :func:`_validate_director`（``schema_version == "director-plan.v1"``）
+      **外加计划数组形状核销**——``key_beats`` / ``character_changes_planned`` /
+      ``information_releases`` 在场时必须是 list 且元素必须是 object（``key_beats`` 元素
+      另须含字符串 ``beat_id`` / ``purpose``）；该守卫在 :func:`_validate_director` 内
+      单点实现，本档位经其继承（2026-09-21 破损计划静默落库事故的对称修复）。
+      下游（chapter-plan 的 ``save_plan``）按缺省值读各字段，故此处不额外收紧**必填**面
+      （键缺席仍放行）。
     - ``scene_plan``：**在场**时必须整份满足场景契约（:func:`_validate_scene_planner`，
       含 ``schema_version == "scene-plan.v1"`` / scenes 非空 / pov 与 slot.type 枚举）；
       **缺席**时按「计划-only 输出」放行——合并调用只丢了场景段，计划仍可用，

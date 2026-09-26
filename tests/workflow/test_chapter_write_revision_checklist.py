@@ -11,7 +11,8 @@
 - A：revise + 合规尾块 → 草稿正文不含尾块、revision_checklist 解析正确进 ctx。
 - B：revise + 尾块缺失 → checklist=None、正常落稿、不炸。
 - C：revise + 尾块坏 JSON → 同上降级。
-- D：write 模式正文含标记行 → 不解析不剥离（原样落稿）。
+- D：write 模式正文含标记行 → 按内容剥离但不进审计面（2026-09-21 m5 改写；
+  旧契约「原样落稿」会让 prompt 违约的尾块进 drafts.content 并抬高 word_count）。
 - E：word_count 只统计剥离后正文。
 """
 
@@ -22,10 +23,25 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
+
+
+@pytest.fixture(autouse=True)
+def _disable_generation_length_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """关掉 P0-2 生成期欠带重写（通道：官方开关 ``NOVELOS_WRITER_LENGTH_RETRIES=0``）。
+
+    理由：本文件专注**核销表**解析 / 剥离 / write 模式契约，样板正文只有 ~60~180 字
+    而目标字数 3000（带下限 2550），必然触发节点内整章重写——多出来的 writer 调用会
+    用 mock 脚本的后续产出抢走断言目标（例如 v2 revise 的 176 字 write 轮取代 61 字
+    revise 轮）。生成期字数闭环本身的断言在
+    ``tests/workflow/test_chapter_write_length_retry.py``，两边互不遮挡。
+    """
+    monkeypatch.setenv("NOVELOS_WRITER_LENGTH_RETRIES", "0")
+
 
 # ---------------------------------------------------------------------------
 # 异步化适配（与既有 chapter_write 测试一致）
@@ -582,8 +598,15 @@ def test_revise_mode_bad_json_checklist_degrades_to_none(tmp_path: Path):
     asyncio.run(run())
 
 
-def test_write_mode_does_not_strip_marker(tmp_path: Path):
-    """用例 D：write 模式正文含标记行 → 不解析不剥离（原样落稿）。"""
+def test_write_mode_stray_marker_is_stripped(tmp_path: Path):
+    """用例 D（2026-09-21 检修 m5 改写）：write 模式正文含标记行 → **按内容剥离**。
+
+    旧契约「write 模式不解析不剥离」依赖 prompt 纪律（writer-v3.md 明令 write 模式
+    不要输出尾块），但那是约定不是强制。模型一旦在 write / length-retry 轮吐出尾块，
+    旧行为会让它原样落进 ``drafts.content`` 并抬高 word_count，而字数带按含尾块的
+    数字判定。新契约：尾块**在内容里出现就剥**（与 mode 无关），但 write 模式下
+    ``revision_checklist`` 仍为 None——不进审计面（审计面只登记 revise 的定向核销）。
+    """
     app = _create_app(tmp_path)
     db_path = app.state.settings.db_path
     marker = "---REVISION-CHECKLIST---"
@@ -616,16 +639,16 @@ def test_write_mode_does_not_strip_marker(tmp_path: Path):
             await _wait_run_terminal(app, r.json()["run_id"])
             run_id = r.json()["run_id"]
 
-            # write 模式下：ctx["revision_checklist"] 应为 None；prose / drafts.content
-            # 原样保留 marker（不切不剥）。
+            # write 模式下：尾块被剥（不进正文），但不进审计面
             ckpt = _read_writer_node_output(db_path, run_id)
             assert ckpt is not None
             assert ckpt.get("revision_checklist") is None, (
-                f"write 模式 → revision_checklist 应为 None，got {ckpt.get('revision_checklist')!r}"
+                f"write 模式 → revision_checklist 应为 None（不进审计面），"
+                f"got {ckpt.get('revision_checklist')!r}"
             )
             wo = ckpt.get("writer_output") or {}
-            assert marker in (wo.get("prose") or ""), (
-                "write 模式不应剥离 marker，writer_output.prose 应保留 marker"
+            assert marker not in (wo.get("prose") or ""), (
+                "write 模式下 stray 尾块应被剥离（m5：防 prompt 违约落库）"
             )
 
             conn = get_connection(db_path)
@@ -636,8 +659,8 @@ def test_write_mode_does_not_strip_marker(tmp_path: Path):
             finally:
                 conn.close()
             assert len(rows) == 1
-            assert marker in rows[0]["content"], (
-                "write 模式 → drafts.content 原样保留 marker（不切不剥）"
+            assert marker not in rows[0]["content"], (
+                "write 模式 → drafts.content 不含 stray 尾块"
             )
 
     asyncio.run(run())

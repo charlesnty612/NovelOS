@@ -123,6 +123,10 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # - 仅 ALTER TABLE chapters 加 outline_json TEXT 可空列（策展大纲稳定面）；
     # - 不增表（业务表 39，总表 40 不变），无回填 → 存量库走 plan_json 回落路径。
     assert "0028_chapter_outline_json.sql" in result["applied"]
+    # 项目写作圣经（2026-09-18）：0029_project_writing_bible.sql
+    # - 仅 ALTER TABLE projects 加 writing_bible TEXT 可空列（项目级长期作者约束）；
+    # - 不增表（业务表 39，总表 40 不变），无回填 → 存量库 NULL，装配逐字不变。
+    assert "0029_project_writing_bible.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
@@ -130,7 +134,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     first = apply_migrations(db_path, MIGRATIONS_DIR)
     # V3.7 模型档案 + 环节绑定：0016 加入；V3.9.3 observer 独立 capability 绑定
     # 0018 也要首次应用；V3.1 P1-1.1 B3 修复 0019 回填 timeline_events 也要首次应用。
-    # 迁移目录下一共 19 个脚本都应被首次应用。
+    # 迁移目录下一共 29 个脚本都应被首次应用。
     assert first["applied"] == [
         "0001_init.sql",
         "0002_drafts_unique.sql",
@@ -160,6 +164,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0026_workflow_runs_instance_id.sql",
         "0027_chapter_scene_plans.sql",
         "0028_chapter_outline_json.sql",
+        "0029_project_writing_bible.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -209,6 +214,9 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0027_chapter_scene_plans.sql" in second["skipped"]
     # 大纲槽：0028 也应被幂等跳过
     assert "0028_chapter_outline_json.sql" in second["skipped"]
+    # 项目写作圣经：0029 也应被幂等跳过（ALTER TABLE ADD COLUMN 无 IF NOT EXISTS，
+    # 幂等靠 _migrations 文件粒度追踪）
+    assert "0029_project_writing_bible.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -254,6 +262,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0026_workflow_runs_instance_id.sql",
         "0027_chapter_scene_plans.sql",
         "0028_chapter_outline_json.sql",
+        "0029_project_writing_bible.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -293,6 +302,82 @@ def test_0023_word_band_column_exists_and_nullable(tmp_path: Path):
     assert col["type"].upper() == "TEXT", f"expected TEXT, got {col['type']!r}"
     assert col["notnull"] == 0, "word_band_json must be nullable"
     assert col["dflt_value"] is None, "word_band_json has no DEFAULT (NULL=无覆盖)"
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-18：0029_project_writing_bible.sql 专项回归
+# ---------------------------------------------------------------------------
+
+
+def test_0029_writing_bible_column_exists_and_nullable(tmp_path: Path):
+    """0029 给 projects 加 writing_bible TEXT 可空列（NULL=项目无写作圣经）。
+
+    与 0023（word_band_json）同款：不带 DEFAULT，全靠 NULL 表达「无此约束」——
+    存量库升级后逐列为 NULL，装配侧只取运行期 author_intent，行为逐字不变。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        cols = conn.execute("PRAGMA table_info(projects)").fetchall()
+    finally:
+        conn.close()
+    col_map = {c["name"]: c for c in cols}
+    assert "writing_bible" in col_map, "writing_bible column missing after 0029"
+    col = col_map["writing_bible"]
+    assert col["type"].upper() == "TEXT", f"expected TEXT, got {col['type']!r}"
+    assert col["notnull"] == 0, "writing_bible must be nullable"
+    assert col["dflt_value"] is None, "writing_bible has no DEFAULT (NULL=无圣经)"
+
+
+def test_0029_writing_bible_migration_is_idempotent(tmp_path: Path):
+    """0029 跑两遍不炸（ALTER ADD COLUMN 不带 IF NOT EXISTS，靠 _migrations 追踪），
+    且不增表（业务表 39 不变）。"""
+    db_path = _fresh_db(tmp_path)
+    first = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0029_project_writing_bible.sql" in first["applied"]
+
+    second = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0029_project_writing_bible.sql" not in second["applied"]
+    assert "0029_project_writing_bible.sql" in second["skipped"]
+    assert second["tables"] == first["tables"]
+
+
+def test_0029_writing_bible_does_not_touch_existing_rows(tmp_path: Path):
+    """add-only：升级前建好的行回读 writing_bible 为 NULL（无回填、零行为突变）。"""
+    db_path = _fresh_db(tmp_path)
+    # 先只跑 0028 之前的部分（模拟存量库），再补跑 0029。
+    migrations_dir = tmp_path / "mig_pre"
+    migrations_dir.mkdir()
+    for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if sql_file.name.startswith("0029"):
+            continue
+        (migrations_dir / sql_file.name).write_text(
+            sql_file.read_text(encoding="utf-8"), encoding="utf-8",
+        )
+    apply_migrations(db_path, migrations_dir)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO projects (project_id, name, premise, genre, target_words, "
+            "status, created_at, updated_at) VALUES "
+            "('prj_pre0029', '存量项目', NULL, NULL, NULL, 'ACTIVE', 't', 't')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    apply_migrations(db_path, MIGRATIONS_DIR)
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT writing_bible FROM projects WHERE project_id = 'prj_pre0029'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["writing_bible"] is None
 
 
 def test_0023_word_band_migration_is_idempotent(tmp_path: Path):

@@ -20,6 +20,8 @@
 3. **关键地点**（locations）：3-5 个，每个有 name、statement、data。
 4. **关键势力/组织**（factions）：2-4 个，每个有 name、statement、data。
 
+> **作者备注（brief.author_notes）**：若提供，它是作者对本书的**最高优先级创作约束**，必须严格遵循并落实到世界观核心设定、规则、地点与势力中（如时代/位面、题材边界、基调、禁忌等），不得与其冲突。
+
 ## 3. Output Schema
 
 只输出一个合法 JSON 对象，不要 Markdown 围栏、不要解释。

@@ -15,6 +15,16 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
+from packages.core.quality.beat_repeat import (
+    DEFAULT_BEAT_MIN_COUNT,
+    DEFAULT_BEAT_RATE_PER_1K,
+    scan_beat_repeats,
+)
+from packages.core.quality.continuity_time import (
+    DEFAULT_MAX_GAP_CHARS,
+    DEFAULT_MIN_BACKSTEP_HOURS,
+    scan_time_conflicts,
+)
 from packages.core.quality.wordcount import visible_chars
 
 # ---------------------------------------------------------------------------
@@ -370,6 +380,64 @@ AI_PATTERN_RULES: list[AiPatternRule] = [
             "20 章命中，人类锚点书 19 章 1 对（信息递增但用词撞车，合法写法）。"
             "算子只看字面重合，**不判断对白是否有后果**，故 severity 恒 warning、附 "
             "samples 供人工过目。阈值与依据见模块内常量注释。"
+        ),
+    ),
+    AiPatternRule(
+        rule_id="AI-BEAT-REPEAT",
+        severity="warning",
+        message="同章远距小句复现 {count} 处（例：「{sample}」）",
+        description=(
+            "**字面代理**算子（名字里的「节拍重播」是它代理的对象，不是它测量的东西）："
+            "句读片段之间**最长公共子串** ≥6 字、同时覆盖两段片段各自 ≥60% 字面、两处"
+            "相距 ≥200 字——即同一段文字素材在章内被搬用了两次以上。补的缺口是"
+            "**shingle / trigram 只抓复制粘贴、抓不到「同一节拍换一套词重播」**"
+            "（ch2 章尾收据画面写了三遍，shingle 比 0.0030 判为干净）。"
+            "实测：本库 92 章 307 处（1.17/千字）；人类锚点书 19 章 2 处（0.05/千字），"
+            "**没有一章**达到堆积门 ≥2 处。系统抽样 52 条人工过目：43 真 / 9 误，"
+            "误报为「专名/术语复指」与「共用骨架 + 不同宾语」两类。"
+            "**不覆盖**：语义改写型重复（字面零重合）、数字/计量串复现（数字守卫显式"
+            "排除）、跨章复现、宏观结构重复。severity 恒 warning（提示非闸门）。"
+            "阈值与依据见 beat_repeat 模块 docstring 与常量注释。"
+        ),
+    ),
+    # -----------------------------------------------------------------------
+    # 2026-09-19：章内时点矛盾（continuity_time 模块；本组**不是 AI 味**，是连续性）
+    # -----------------------------------------------------------------------
+    # 由来：``guardrails.timeline_consistency`` 只校验 state delta（时间线状态机），
+    # 全仓没有任何算子读**正文里的时间标记**——真实成书里「凌晨两点十七分」开场、
+    # 同场景不隔断地写到「天际线已经有一层淡淡的亮了」，一条规则都没报。
+    # 两条规则都走本表是为了复用**既有接线**（basic_checks → review_report.warnings
+    # 与 deterministic_hints → critic payload），rule_id 用独立命名空间 ``CONT-``
+    # 标明它不是 AI 味算子。severity 恒 warning、不含 error 路径。
+    # 校准证据（92 章 / 人类基线 19 章逐条抽样表）见 continuity_time 模块 docstring。
+    AiPatternRule(
+        rule_id="CONT-CLOCK-DAYBREAK",
+        severity="warning",
+        message="深夜时钟与天亮标记矛盾：{count} 处（例：{sample}）",
+        description=(
+            "**字面**算子：深夜档钟点（前缀 凌晨/半夜/深夜/夜半 + 钟点，如「凌晨两点"
+            "十七分」）与其后**同章**的天亮类标记（天亮/破晓/黎明/晨光/晨曦/天色泛白/"
+            "清晨/早上…）配对，间距 ≤3000 字且中间**无时间推进标记**即报。"
+            "它量的不是「叙事时间是否合理」，而是**两个字面标记之间的直接冲突**。"
+            "**不覆盖**：时长合理性、倒叙/回忆（只靠黑名单近似排除，故回述型会漏）、"
+            "无字面标记的场景、裸钟点（本仓实证「三点二十六分」= 下午 15:26，故不判早晚）。"
+            "实测：生成侧 1 处 / 92 章（真命中 ch_2d2b57090ecd）；人类基线书 19 章"
+            "**零个钟点标记**，机会数为 0，故人类侧数字不含信息、不可作零误报证据。"
+        ),
+    ),
+    AiPatternRule(
+        rule_id="CONT-TIME-BACKSTEP",
+        severity="warning",
+        message="同章相邻时点回退：{count} 处（例：{sample}）",
+        description=(
+            "**字面**算子：同章**相邻**两个可排序时点（钟点按前缀折算为一天内小时；"
+            "时辰按起始小时折算：午时 11:00 / 亥时 21:00），后者比前者早 ≥2 小时即报。"
+            "三条守卫：跨午夜顺行不算（23:47 → 次日 03:42）、左邻计划语不算"
+            "（「明天辰时」）、右邻期限语不算（「子时之前」「子时将近」）。"
+            "**不覆盖**：无字面标记的场景、裸钟点（歧义）、跨章时间线、时长合理性。"
+            "实测：原始 6 条候选中 5 条是误报（上列三类守卫正是抽样抓出来的），"
+            "加守卫后生成侧 1 处（真命中 prj_5be9256febad ch6：亥时 → 午时无交代回退）；"
+            "人类侧 0 处且机会数为 0（基线书仅 2 处「时辰」，都不是时点）。"
         ),
     ),
 ]
@@ -855,19 +923,24 @@ def _scan_dialogue_low(
     ratio = dialogue_chars / total
     if ratio >= warn_ratio:
         return []
+    summary = (
+        f"对话占比 {ratio:.1%}"
+        f"（{dialogue_chars}/{total} 可见字，阈值 {warn_ratio:.0%}）"
+    )
     return [
         {
             "rule_id": "AI-DIALOGUE-LOW",
             "severity": "warning",
-            "message": (
-                f"对话占比过低：{ratio:.1%}"
-                f"（{dialogue_chars}/{total} 可见字，阈值 {warn_ratio:.0%}）"
-            ),
+            "message": f"对话占比过低：{summary}",
             "count": 1,
             "dialogue_ratio": round(ratio, 4),
             "dialogue_chars": dialogue_chars,
             "total_visible_chars": total,
             "warn_ratio": warn_ratio,
+            # 2026-09-21 检修 m3：本规则的「证据」就是占比数字本身。此前没有任何
+            # samples / words 键，``_ai_pattern_evidence`` 只能退回 ``excerpt``
+            # （正文前 120 字）——读者看到一段与占比无关的原文，看不出在接受什么。
+            "samples": [summary],
             "excerpt": prose[:120],
         }
     ]
@@ -1036,6 +1109,39 @@ def _scan_dialogue_echo(
     ]
 
 
+def _scan_beat_repeat(
+    prose: str,
+    *,
+    min_count: int = DEFAULT_BEAT_MIN_COUNT,
+    rate_per_1k: float = DEFAULT_BEAT_RATE_PER_1K,
+) -> list[dict[str, Any]]:
+    """同章远距小句字面复现（``AI-BEAT-REPEAT``）。
+
+    机制、校准证据、**不覆盖范围**全部在 :mod:`packages.core.quality.beat_repeat`
+    模块 docstring 里（本函数只是把该模块的章级判定接进统一扫描入口）。
+    severity 恒 warning——它是提示不是闸门，不含 error 路径。
+    """
+    return scan_beat_repeats(prose, min_count=min_count, rate_per_1k=rate_per_1k)
+
+
+def _scan_time_conflicts(
+    prose: str,
+    *,
+    max_gap_chars: int = DEFAULT_MAX_GAP_CHARS,
+    min_backstep_hours: float = DEFAULT_MIN_BACKSTEP_HOURS,
+) -> list[dict[str, Any]]:
+    """章内时点矛盾（``CONT-CLOCK-DAYBREAK`` / ``CONT-TIME-BACKSTEP``）。
+
+    机制、校准证据、**不覆盖范围**全部在
+    :mod:`packages.core.quality.continuity_time` 模块 docstring 里（本函数只是把该
+    模块的章级判定接进统一扫描入口——**不是 AI 味规则**，rule_id 用 ``CONT-`` 前缀
+    与 AI 味算子区分）。severity 恒 warning，不含 error 路径。
+    """
+    return scan_time_conflicts(
+        prose, max_gap_chars=max_gap_chars, min_backstep_hours=min_backstep_hours
+    )
+
+
 # ---------------------------------------------------------------------------
 # 公开入口
 # ---------------------------------------------------------------------------
@@ -1055,6 +1161,10 @@ def scan_ai_patterns(
     dialogue_echo_min_ratio: float = DEFAULT_DIALOGUE_ECHO_MIN_RATIO,
     dialogue_echo_min_overlap: float = DEFAULT_DIALOGUE_ECHO_MIN_OVERLAP,
     dialogue_echo_min_opening: int = DEFAULT_DIALOGUE_ECHO_MIN_OPENING,
+    beat_min_count: int = DEFAULT_BEAT_MIN_COUNT,
+    beat_rate_per_1k: float = DEFAULT_BEAT_RATE_PER_1K,
+    max_gap_chars: int = DEFAULT_MAX_GAP_CHARS,
+    min_backstep_hours: float = DEFAULT_MIN_BACKSTEP_HOURS,
 ) -> list[dict[str, Any]]:
     """扫描正文中的 AI 味/AI 腔模式。
 
@@ -1102,6 +1212,12 @@ def scan_ai_patterns(
             min_opening=dialogue_echo_min_opening,
         )
     )
+    hits.extend(_scan_beat_repeat(prose, min_count=beat_min_count, rate_per_1k=beat_rate_per_1k))
+    hits.extend(
+        _scan_time_conflicts(
+            prose, max_gap_chars=max_gap_chars, min_backstep_hours=min_backstep_hours
+        )
+    )
     return hits
 
 
@@ -1120,6 +1236,8 @@ __all__ = [
     "DEFAULT_LONG_PARA_ERROR_CHARS",
     "DEFAULT_LONG_PARA_MIN_COUNT",
     "DEFAULT_LONG_PARA_WARN_CHARS",
+    "DEFAULT_MAX_GAP_CHARS",
+    "DEFAULT_MIN_BACKSTEP_HOURS",
     "DEFAULT_SHORT_PARA_RATE_PER_1K",
     "DialogueEchoPair",
     "count_anthro_vehicles",

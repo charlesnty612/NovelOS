@@ -29,6 +29,14 @@ characters / locations / factions / world_rules / plot_events / hooks / narrativ
 * ``1`` —— 至少一处漂移，``DRIFT: N 处``；亦覆盖"快照 JSON 解析失败"等结构性异常；
 * ``2`` —— 参数错误 / DB 文件不存在 / DB 不是合法 SQLite / 脚本内部未预期异常。
 
+无快照项目（2026-09-21 检修 m8）
+--------------------------------
+
+从未 commit 过的项目（``story_states`` 无行）**不计入** DRIFT——它没有 state
+版本化基线，「DB 有实体而快照没有」是「未开始提交」而非数据不一致。这类项目在
+Markdown 报告里单列「无快照项目」小节，JSON 输出里进 ``projects_without_snapshot``
+字段；改造前它们会把每个实体都报成「仅在 DB」，把真正的双向漂移埋进假阳性里。
+
 设计要点
 --------
 
@@ -145,6 +153,11 @@ class ProjectReport:
     state_version: int | None
     results: list[CollectionResult] = field(default_factory=list)
     parse_error: str | None = None  # 非空 = 快照 JSON 解析失败
+    # True = 该项目从未提交过（story_states 无行）⇒ DB 里的实体尚未进入 state
+    # 版本化，属「未开始」而非「漂移」。2026-09-21 检修 m8：这类项目不再计入
+    # DRIFT，否则每个没提交过的项目都会把一批实体报成「仅在 DB」，DRIFT 计数
+    # 失去信号价值（真正的双向漂移被埋在一堆假阳性里）。
+    no_snapshot: bool = False
 
 
 # ----------------------------------------------------------------------------
@@ -303,6 +316,7 @@ def inspect_project(conn: sqlite3.Connection, project_id: str) -> ProjectReport:
         return report
     if snap is None:
         # 无快照：所有集合视为 DB 多 / 快照 0
+        report.no_snapshot = True
         for cfg in COLLECTIONS:
             try:
                 db_ids = (
@@ -427,7 +441,10 @@ def render_markdown(reports: list[ProjectReport]) -> str:
     lines.append("")
 
     # 漂移明细
-    drifts = [r for rep in reports for r in rep.results if r.only_in_db or r.only_in_snapshot]
+    drifts = [
+        r for rep in reports if not rep.no_snapshot for r in rep.results
+        if r.only_in_db or r.only_in_snapshot
+    ]
     lines.append("## 漂移明细")
     lines.append("")
     if not drifts:
@@ -443,6 +460,16 @@ def render_markdown(reports: list[ProjectReport]) -> str:
                 f"{_format_id_list(r.only_in_snapshot)}"
             )
             lines.append("")
+
+    # 无快照项目（2026-09-21 m8）：单列，不计入 DRIFT——它们没有 state 版本化基线，
+    # 「DB 有实体而快照没有」属「未开始提交」而非数据不一致。
+    no_snap = [rep for rep in reports if rep.no_snapshot]
+    if no_snap:
+        lines.append("## 无快照项目（不计漂移）")
+        lines.append("")
+        for rep in no_snap:
+            lines.append(f"- {rep.project_id}：从未 commit，story_states 无快照行")
+        lines.append("")
 
     # 结论
     drift_count = _count_drifts(reports)
@@ -473,7 +500,8 @@ def render_json(reports: list[ProjectReport]) -> str:
                     "skipped": r.skipped,
                 }
             )
-            if r.only_in_db or r.only_in_snapshot:
+            # m8：无快照项目不进 drifts（见 _count_drifts 同款口径：未开始 ≠ 漂移）
+            if not rep.no_snapshot and (r.only_in_db or r.only_in_snapshot):
                 drifts.append(
                     {
                         "project_id": rep.project_id,
@@ -487,6 +515,7 @@ def render_json(reports: list[ProjectReport]) -> str:
     payload = {
         "summary": summary,
         "drifts": drifts,
+        "projects_without_snapshot": [rep.project_id for rep in reports if rep.no_snapshot],
         "conclusion": conclusion,
         "exit_code": 0 if drift_count == 0 else 1,
     }
@@ -496,9 +525,16 @@ def render_json(reports: list[ProjectReport]) -> str:
 def _count_drifts(reports: list[ProjectReport]) -> int:
     """统计漂移总数：仅算存在非空 only_in_db 或 only_in_snapshot 的集合。
     快照解析失败的项目算 1 处（已在 inspect_project 中用占位记录表达，
-    仅当 results 全部为 skipped 且无 only_in_db 时不计入；以 only_in_db/snapshot 非空为准）。"""
+    仅当 results 全部为 skipped 且无 only_in_db 时不计入；以 only_in_db/snapshot 非空为准）。
+
+    2026-09-21 检修 m8：**无快照项目整项不计**。它没有 state 版本化基线，
+    「DB 有实体而快照没有」是未开始而非不一致——把它计入会让每个没提交过的
+    项目都产出假阳性（dev 库实测：单项目 29 个实体全列进漂移明细）。
+    """
     total = 0
     for rep in reports:
+        if rep.no_snapshot:
+            continue
         if rep.parse_error is not None:
             # 解析失败视为整项目 1 处漂移
             total += 1

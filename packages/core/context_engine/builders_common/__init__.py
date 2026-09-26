@@ -115,6 +115,8 @@ from .common import (
     _try_active_canon_id,
     _try_project_genre_pack_ref,
     _try_project_word_band_json,
+    _try_project_writing_bible,
+    resolve_author_intent,
     resolve_chapter_outline,
 )
 from .excerpts import (
@@ -242,6 +244,7 @@ __all__ = [
     "_safe_copy",
     "_summarize_entity",
     "_summarize_genre_structure_templates",
+    "resolve_author_intent",
     "resolve_chapter_outline",
     "_textualize_genre_payoff_types",
     "_textualize_genre_planner_payoffs",
@@ -252,6 +255,7 @@ __all__ = [
     "_try_active_canon_id",
     "_try_project_genre_pack_ref",
     "_try_project_word_band_json",
+    "_try_project_writing_bible",
     "_world_state_excerpts",
     "get_connection",
 ]

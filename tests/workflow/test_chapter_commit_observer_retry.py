@@ -531,6 +531,109 @@ def test_chapter_commit_observer_retry_fails_after_two_invalid_attempts(tmp_path
     asyncio.run(run())
 
 
+def _observer_bare_fragment_script() -> list[str]:
+    """腐烂 observer 输出：``character_changes`` 混入裸字符串碎片。
+
+    形态取自 ``json_repair`` 三级兜底的真实产物（2026-09-21 第二起同形状缺陷：
+    LLM 非法 JSON 被「修」成顶层可解析、数组元素腐烂的 dict）。旧契约只查「数组是
+    list」即放行，碎片带「合法」标记流进 delta 层；本文件用例把它钉在契约层。
+    """
+    return [
+        json.dumps(
+            {
+                "character_changes": [
+                    {"change_id": "cc:000000000001", "op": "add", "target_id": "char_x"},
+                    "{",
+                    'beat_id":"beat_002',
+                    ["payoff"],
+                ],
+                "world_changes": [],
+                "relationship_changes": [],
+                "new_events": [],
+                "resolved_hooks": [],
+                "new_hooks": [],
+                "debt_changes": [],
+            },
+            ensure_ascii=False,
+        )
+    ]
+
+
+def test_chapter_commit_observer_rotten_array_elements_fail_at_contract(
+    tmp_path: Path, monkeypatch
+):
+    """observer 数组元素是裸碎片 → **契约层**拦下 → run FAILED、delta 不落库。
+
+    撤掉 ``_validate_observer`` 的元素形状守卫时本用例必红（突变验证）：契约放行后
+    碎片流进 delta 层，由 ``validator.validate_delta`` 的 jsonschema 事后拦下，
+    报错文案退化为 "observer delta failed validation" —— 断言不到形状错误即暴露。
+    """
+    monkeypatch.setenv("NOVELOS_OBSERVER_SPLIT", "off")
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid, "林夕")
+            cid = await _make_chapter(app, pid, 1, "第一章")
+
+            base_mocks = {"director": _director_script(), "writer": _writer_script()}
+            await _push_chapter_to_reviewed(app, pid, cid, base_mocks)
+
+            # 两次都返回腐烂载荷（runner 内 1 次重试 + 原始尝试 = 2 条 ai_call_logs）
+            mock_providers = dict(base_mocks)
+            mock_providers["observer"] = _observer_bare_fragment_script() * 2
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/commit",
+                json={"mock_providers": mock_providers},
+            )
+            assert r.status_code == 201, r.text
+            commit_resp = await _wait_run_terminal(
+                app, r.json()["run_id"], expected=("FAILED",)
+            )
+            run_id = commit_resp["run_id"]
+
+            r = await _request(app, "GET", f"/api/runs/{run_id}")
+            assert r.status_code == 200, r.text
+            err = r.json().get("error") or ""
+            assert "observer array element shape invalid" in err, err
+            assert "character_changes[1] must be an object, got str" in err, err
+
+            # 章状态未推进（commit 未生效）
+            r = await _request(app, "GET", f"/api/chapters/{cid}")
+            assert r.status_code == 200
+            assert r.json()["status"] == "REVIEWED", r.json()["status"]
+
+            db_path = app.state.settings.db_path
+            conn = get_connection(db_path)
+            try:
+                # 契约层在 run_agent 内部用掉 1 次重试（retry_count=1，单条 call log），
+                # 没有下探到 delta 层的 commit 级重试——后者会多一条 call log
+                rows = conn.execute(
+                    "SELECT retry_count, error FROM ai_call_logs WHERE agent_id IN "
+                    "(SELECT agent_id FROM agents WHERE name='observer') "
+                    "ORDER BY rowid",
+                ).fetchall()
+                assert len(rows) == 1, [r["error"] for r in rows]
+                assert rows[0]["retry_count"] == 1, rows[0]["retry_count"]
+                call_err = rows[0]["error"] or ""
+                assert call_err.startswith("output invalid after retry:"), call_err
+                assert "character_changes[1] must be an object, got str" in call_err
+
+                observer_delta_rows = conn.execute(
+                    "SELECT COUNT(*) AS n FROM state_deltas "
+                    "WHERE chapter_id = ? AND created_by = 'observer:v1'",
+                    (cid,),
+                ).fetchone()
+                assert observer_delta_rows["n"] == 0, observer_delta_rows["n"]
+            finally:
+                conn.close()
+
+    asyncio.run(run())
+
+
 def test_build_observer_ctx_node_uses_trimmed_snapshot(tmp_path: Path):
     """端到端断言（任务书 DoD #3）：_build_observer_ctx_node 调用后 observer_input
     必须带 trimmed 标记——``previous_state.snapshot_mode == 'trimmed'`` +

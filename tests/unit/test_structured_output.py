@@ -181,6 +181,127 @@ def test_validate_contract_observer_non_list_value():
 
 
 # ---------------------------------------------------------------------------
+# observer 元素形状守卫（2026-09-21：与 key_beats 事故同形状的第二起——
+# json_repair 三级兜底把裸字符串 / 裸数组碎片塞进 7 个 change 数组的元素位）
+# ---------------------------------------------------------------------------
+
+
+def _full_observer_payload() -> dict:
+    """7 数组各含一个合规对象的 observer 载荷（元素形状守卫的防误杀基准）。"""
+    return {
+        "character_changes": [
+            {"change_id": "cc:000000000001", "op": "add", "target_id": "char_a"}
+        ],
+        "world_changes": [
+            {"change_id": "wc:000000000001", "op": "add", "target_id": "loc_a"}
+        ],
+        "relationship_changes": [
+            {"change_id": "rc:000000000001", "op": "update", "target_id": "char_a:char_b"}
+        ],
+        "new_events": [
+            {"change_id": "ev:000000000001", "op": "add", "target_id": "evt_a"}
+        ],
+        "resolved_hooks": [
+            {"change_id": "rh:000000000001", "op": "update", "hook_id": "hook_a"}
+        ],
+        "new_hooks": [
+            {"change_id": "nh:000000000001", "op": "add", "hook_id": "hook_b"}
+        ],
+        "debt_changes": [
+            {"change_id": "dt:000000000001", "op": "update", "debt_id": "debt_a"}
+        ],
+    }
+
+
+def test_validate_contract_observer_full_object_payload_ok():
+    """防误杀：7 数组各含合规对象 → 通过（元素守卫只拦形状，不查字段必填面）。"""
+    validate_contract("observer", _full_observer_payload())
+
+
+@pytest.mark.parametrize("array_name", sorted(OBSERVER_ALLOWED_KEYS))
+def test_validate_contract_observer_rejects_non_object_element(array_name: str):
+    """任一 change 数组混入裸字符串碎片（json_repair 兜底形态）→ 契约必红。"""
+    payload = _full_observer_payload()
+    payload[array_name].append('beat_id":"beat_002')
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("observer", payload)
+    msg = str(exc.value)
+    assert "observer array element shape invalid" in msg
+    assert f"{array_name}[1] must be an object, got str" in msg
+
+
+def test_validate_contract_observer_rejects_value_fragment_array_element():
+    """值碎片数组（``["payoff"]`` 这类 beat 内部字段值）同样是非法元素。"""
+    payload = _full_observer_payload()
+    payload["character_changes"].insert(1, ["payoff"])
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("observer", payload)
+    assert "character_changes[1] must be an object, got list" in str(exc.value)
+
+
+def test_validate_contract_observer_guards_only_the_seven_arrays():
+    """只 guard 7 个 change 数组键，不扩大面：其它顶层键（越权字段 / 普通字段）不看形状。
+
+    越权字段的处置仍在 :func:`strip_observer_violations`（剥离，不抛错）——本断言防止
+    元素守卫误把「非 7 数组」也纳入检查。
+    """
+    payload = _full_observer_payload()
+    payload["delta_id"] = "dlt_x"
+    payload["deviations"] = ["碎片", {"from": "a", "to": "b"}]
+    payload["open_questions"] = ["随便的字符串数组"]
+    validate_contract("observer", payload)  # 不抛错
+
+
+def test_validate_contract_observer_shape_errors_capped():
+    """形状报错条数封顶（防重试提示被腐烂清单撑爆）。"""
+    payload = _full_observer_payload()
+    for name in OBSERVER_ALLOWED_KEYS:
+        payload[name] = payload[name] + ["碎片"]
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("observer", payload)
+    assert "(+2 more)" in str(exc.value)
+
+
+def test_observer_corrupt_fragments_repaired_by_json_repair_are_rejected():
+    """端到端复现第二起缺陷的根因链：json_repair 修出「可解析但元素腐烂」的 observer
+    载荷 → 契约在下一跳拦下（修复前此处静默放行，碎片带「合法」标记流进 delta 层）。
+    """
+    raw = """{
+  "character_changes": [],
+  "world_changes": [],
+  "relationship_changes": [],
+  "new_events": [],
+  "resolved_hooks": [],
+  "new_hooks": [],
+  "debt_changes": [
+    { "change_id": "dt:000000000001", "op": "update", "target_id": "debt_a" }
+    ["payoff"]
+    "debt_a 已在上一章结清"
+  ]
+}"""
+    payload, meta = extract_json(raw, return_meta=True)
+    assert meta["repaired"] is True  # 前提：三级兜底接手（旧口径下此处静默通过）
+    assert not all(isinstance(x, dict) for x in payload["debt_changes"])
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("observer", payload)
+    msg = str(exc.value)
+    assert "debt_changes[1] must be an object, got list" in msg
+    assert "debt_changes[2] must be an object, got str" in msg
+
+
+def test_observer_strip_then_validate_still_rejects_rotten_elements():
+    """runner 语义顺序（先剥离后校验）不改变结论：剥离越权字段不豁免元素形状。"""
+    payload = _full_observer_payload()
+    payload["character_changes"].append("{")
+    payload["delta_id"] = "dlt_x"
+    cleaned, stripped = strip_observer_violations(payload)
+    assert "delta_id" in stripped
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("observer", cleaned)
+    assert "character_changes[1] must be an object, got str" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
 # strip_observer_violations 剥离策略
 # ---------------------------------------------------------------------------
 

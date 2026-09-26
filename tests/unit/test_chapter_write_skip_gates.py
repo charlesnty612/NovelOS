@@ -187,29 +187,46 @@ def _polish_ctx(db_path: Path, chapter_id: str, prose: str, **overrides: Any) ->
     return ctx
 
 
+# 句长均一（std=2.42 < Q7_FLAT_SENTENCE_STD=3）且 ≥1000 字的生成式填充。
+# 每个句子 = 主语(3) + 动作(2) + 宾语(2) + 句号 = 8 字，主语/动作/宾语三段独立轮换
+# ⇒ **全篇没有一句重复**（组合步长 167 与 640 互质，126 句各取一个不同组合）。
+#
+# 为什么必须是「不重复」而不是那句「四种 8 字句循环」：循环填充会让同一句每隔 32 字
+# 重现一次，2026-09-18 上线的「同章远距小句复现」（AI-BEAT-REPEAT）会**正确**命中它
+# ——那样本用例的「预检只有句长腿非零」自证就不成立了（AI 腿也非零）。生成式填充
+# 同时满足：任意两句的最长公共子串 ≤ 主语(3)+动作(2) = 5 字 < 该算子的 6 字下限。
+#
+# 其它口径：段首两字互不相同（主语首二字两两不同）→ 避开 AI-TRIPLET-OPENING；
+# 无「他/她」起首 → 避开 AI-PRONOUN-PILE；每 6 句一段（48 字）→ 避开 AI-SHORT-PARA /
+# AI-LONG-PARA；偶数句为对白（约半数）且相邻两句主语必不同 → 避开 AI-DIALOGUE-LOW /
+# AI-DIALOGUE-ECHO；不含禁用词 / 解释腔 / marker / 破折号省略号。
+_FLAT_SUBJECTS = (
+    "苏婉清", "周账房", "老执事", "沈知遥", "阿苗娘", "柳先生", "吴掌柜", "陈书办",
+)
+_FLAT_ACTIONS = (
+    "抬眼", "按住", "收起", "推回", "搁下", "抚平", "掩上", "翻开", "点数", "擦拭",
+)
+_FLAT_OBJECTS = ("账册", "玉佩", "灯芯", "门闩", "雨伞", "铜钱", "算盘", "袖口")
+# 与组合总数 8×10×8=640 互质的步长 ⇒ 前 126 句各取一个**互不相同**的组合。
+_FLAT_STRIDE = 167
+
+
 def _flat_sentence_prose() -> str:
-    """句长完全均一（std=0 < Q7_FLAT_SENTENCE_STD=3）且 ≥1000 字。
-
-    四种 8 字句循环（前两种叙述、后两种对话，句长逐个相等故 std 仍为 0）：
-
-    - 段首两字互不相同 → 避开「三连同一开头」（AI-TRIPLET-OPENING）；
-    - 无「他/她」连续三句起首 → 避开 AI-PRONOUN-PILE；
-    - 每 6 句分段（段长 48 字）→ 避开 AI-SHORT-PARA / AI-LONG-PARA
-      （2026-09-17：旧版是一整段 1008 字，会被长段规则正确判为 error）；
-    - 对话占比约 44% → 避开 AI-DIALOGUE-LOW；
-    - 不含禁用词 / 解释腔 / marker / 破折号省略号 —— 保证预检只有 req_q7
-      的句长腿命中（另两腿在用例内自证为零）。
-    """
-    sentences = (
-        "院子里没有声响。",
-        "“不要走出去。”",
-        "苏婉清抬眼看钟。",
-        "“别去开门吧。”",
-    )
+    """句长均一（std < 3）且 ≥1000 字，且**逐句互不重复**（见上方常量区注释）。"""
+    combos = [
+        (subject, action, obj)
+        for subject in _FLAT_SUBJECTS
+        for action in _FLAT_ACTIONS
+        for obj in _FLAT_OBJECTS
+    ]
     n = 126
+    sentences: list[str] = []
+    for i in range(n):
+        subject, action, obj = combos[i * _FLAT_STRIDE % len(combos)]
+        body = f"{subject}{action}{obj}。"
+        sentences.append(f"“{body}”" if i % 2 else body)
     paragraphs = [
-        "".join(sentences[i % 4] for i in range(start, min(start + 6, n)))
-        for start in range(0, n, 6)
+        "".join(sentences[i : i + 6]) for i in range(0, n, 6)
     ]
     return "\n\n".join(paragraphs)
 

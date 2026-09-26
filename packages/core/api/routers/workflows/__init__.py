@@ -14,7 +14,9 @@
 
 请求体：
 - ``{author_intent?: str, mock_providers?: {agent_name: [str, ...]}}`` — start
-- ``{human_input?: dict, auto_revise_max?: int, mock_providers?: {...}}`` — resume
+- ``{human_input?: dict, auto_revise_max?: int, mock_providers?: {...},
+  model_overrides?: {...}, author_intent?: str, target_word_count?: int}`` — resume
+  （后三个键按「请求体 > 原 run ctx」解析后透传给 auto_revise 回路的子 run）
 
 返回：
 - 201（start）→ ``{run_id, status, ...}``；若 PAUSED 则附加 ``pause_payload``
@@ -33,6 +35,17 @@ P0 自动改稿回路：
   auto_revise 改稿回路在 daemon 线程（``auto-revise-{run_id}``）内执行，HTTP 不再阻塞
   等回路结束（最长可能几十分钟）。前端通过 ``GET /runs/{id}`` 或 list 端点轮询拿
   回路产生的子 run 状态。
+- **失败形状 → 修复动作（2026-09-18）**：回路不再对每种失败都施加同一个动作。每轮启动
+  子 run 前读 pending review 的 ``review_report``，交给 ``repair_policy.decide_repair``
+  （纯函数 + 规则表）判 ``regenerate``（write 带 ``fresh_write`` 全新重写：章内重复、
+  字数带下限大缺口）/ ``revise``（定向改稿：局部形态类规则、压缩、小缺口长度、作者驳回）/
+  ``stop``（不启动子 run、交人工：未知或缺失 rule_id、连续性 / 逻辑 / 设定类、读不到报告）。
+  决策依据进日志与 payload；轮次耗尽时 ``detail`` 点名修不动的形状。详见
+  ``repair_policy.py`` 顶部注释块与 ``revise.py:_auto_revise_loop``。
+- **子 run 参数继承（2026-09-18）**：``model_overrides`` / ``author_intent`` /
+  ``target_word_count`` 三个键按「请求体 > 原 review run ctx」解析后透传给每轮
+  write / review 子 run——缺 target 会让子 run 按服务端默认 3000 判字数带，
+  回路在错误口径上判定成败。
 
 V3.9 批次 4.1（失败闭环）：
 - ``gate-revise`` 端点复用既有 write（revise 模式，消费 ``plan_json.revision_note``）

@@ -9,7 +9,14 @@
   'from_plan'``）；未命中（老章 / 合并调用只回了计划段 / 0027 未迁移的老库）保留本节点
   的单次调用路径。任何失败（prompt 缺失 / provider 异常 / 输出不合规）→ 降级到原 stub
   机械映射逻辑，**不**阻断 writer run（ch3 实证过该风险真实，降级路径必须保留）。
-- ``writer`` (AI) —— 调 writer agent 生成本章 prose。
+- ``writer`` (AI) —— 调 writer agent 生成本章 prose。**P0-2 生成期字数闭环**
+  （2026-09-18）：首次产出低于字数带下限（``status='under'``）时，在同一节点内
+  **以 ``mode='write'`` 整章重写**（携带 ``length_directive`` 显式扩写指令），最多
+  ``NOVELOS_WRITER_LENGTH_RETRIES``（默认 2）次额外尝试，任一次落入带内即停；最终取
+  「离带最近」的一次（带内优先，同距保留更早的一次）。首次即带内 ⇒ 恰好 1 次调用。
+  之所以必须 write 而非 revise：revise 由 writer-v3.md 规则 20 + §6.1 钉死为「逐字
+  保留未提及部分 / 净增 ≤ +5%」，追不回大缺口且会产出成段重复（实证 ch_92bac068ff0d）。
+  重写失败 / 输出非 dict → fail-soft 中止重写循环，保留已有产出（不阻断）。
 - ``polisher`` (AI) —— P1 新增：以 writer 产出的 prose + scan_ai_patterns(prose)
   确定性命中为输入，做去 AI 腔的文风级润色；不改情节 / 人物 / 事实。
   任何失败（prompt 缺失 / provider 异常 / 输出不合规 / 长度守恒失败）→ 兜底回退
@@ -605,6 +612,9 @@ def _parse_revision_checklist(prose: str) -> tuple[str, list[dict[str, Any]] | N
     try:
         parsed = json.loads(checklist_text)
     except (TypeError, ValueError):
+        # 坏 JSON：分隔行仍要剥掉（它不属正文，留着会污染 drafts.content / word_count），
+        # 但 checklist 为 None —— 调用方据此判「revise 契约违约」（2026-09-21 m5 前
+        # 这里原样返回整段 prose，导致坏 JSON 的尾块连同行落稿）。
         return (head.rstrip(), None)
     if not isinstance(parsed, list):
         return (head.rstrip(), None)
@@ -613,20 +623,160 @@ def _parse_revision_checklist(prose: str) -> tuple[str, list[dict[str, Any]] | N
     return (head.rstrip(), items)
 
 
+# ---------------------------------------------------------------------------
+# 生成期内字数闭环常量（P0-2，2026-09-18）
+# ---------------------------------------------------------------------------
+#
+# 背景（实证 prj_2567bb8de642 / ch_92bac068ff0d，target 2500 / 带 2125~2875）：
+# writer 首次产出 932 字（多次抽样 713 / 854 / 1096 / 1199 / 1434，普遍只有目标的
+# 30~50%），节点照常完成，欠带一路滚到 review 才被 W-LEN 抓出；唯一能把字数推进
+# 带内的路径是**审校触发的 revise 回路**，而那条路径同时产出了伤害（终稿章内重复
+# 段落 9 处、重复率 20.3%，writer 自陈「draft_text 为上游既成稿…不做破坏性扩写」）。
+# 结论：长度必须在**生成期**闭环，不得推给 review/revise。
+#
+# 为什么重写必须走 mode='write'：revise 被 writer-v3.md 规则 20 + §6.1 钉死为
+# 「逐字保留未提及部分 / 净增 ≤ +5%」的局部修改——用它追 -65% 的缺口在数学上追不回，
+# 且「逐字保留 + 小幅增补」正是成段重复的来源。
+#
+# 环境变量命名沿用 README 环境表风格（NOVELOS_<域>_<量>），解析优先级与
+# control.py::_resolve_auto_revise_max / _resolve_writer_context_mode 同款：
+# ctx 显式 > 环境变量 > 默认。
+_LENGTH_RETRY_ENV = "NOVELOS_WRITER_LENGTH_RETRIES"
+# 默认额外尝试上限：2（即最坏 3 次 writer 调用）。取值依据：实证首写普遍欠带
+# 30~50%，一次整章重写通常足以落带；第二次为兜底。再往上加是纯成本（单次 writer
+# 调用 ~1-2 分钟）而边际收益递减。
+_LENGTH_RETRY_DEFAULT = 2
+
+
+def _resolve_writer_length_retries(ctx: dict[str, Any]) -> int:
+    """解析「writer 欠带时节点内整章重写」的最大额外尝试次数。
+
+    优先级：``ctx["writer_length_retries"]`` > 环境变量
+    ``NOVELOS_WRITER_LENGTH_RETRIES`` > 默认 ``2``。``0`` = 关闭（只写一次）。
+    非法值（非整数）→ 默认 2 + 告警；负数 → 0。
+    """
+    raw = ctx.get("writer_length_retries")
+    if raw is None:
+        raw = os.environ.get(_LENGTH_RETRY_ENV)
+    if raw is None:
+        return _LENGTH_RETRY_DEFAULT
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        _log.warning(
+            "writer_length_retries=%r is invalid; falling back to %d",
+            raw, _LENGTH_RETRY_DEFAULT,
+        )
+        return _LENGTH_RETRY_DEFAULT
+    return max(0, n)
+
+
+def _measure_writer_attempt(
+    *,
+    attempt: int,
+    mode: str,
+    out: Any,
+    target: int,
+    band_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    """把一次 writer 产出折算为「离字数带多远」的尝试记录（确定性、零 LLM）。
+
+    - ``status`` / ``visible_chars`` 走权威口径 :func:`classify_prose_length`
+      （与 length_check 同源）；revise 模式先剥离 ``---REVISION-CHECKLIST---`` 尾块
+      再量——该尾块不落库、不属正文，计入会把欠带误判为在带。
+    - ``distance``：带内 = 0；欠带 = 距下限缺口；超带 = 距上限超出量。用于选优。
+    - 返回值全部为 JSON 原生类型（进 ctx → checkpoint_json / run 节点产出）。
+    """
+    prose = out.get("prose") if isinstance(out, dict) else None
+    prose = strip_think_blocks(prose) if isinstance(prose, str) else ""
+    if mode == "revise" and prose:
+        prose, _ = _parse_revision_checklist(prose)
+    report = classify_prose_length(prose, target, **band_cfg)
+    status = report["status"]
+    if status == "under":
+        distance = report["band_low"] - report["visible_chars"]
+    elif status == "over":
+        distance = report["visible_chars"] - report["band_high"]
+    else:
+        distance = 0
+    return {
+        "attempt": attempt,
+        "mode": mode,
+        "visible_chars": report["visible_chars"],
+        "target": target,
+        "band_low": report["band_low"],
+        "band_high": report["band_high"],
+        "status": status,
+        "distance": distance,
+        "in_band": status == "in_band",
+    }
+
+
+def _best_writer_attempt(attempts: list[dict[str, Any]]) -> int:
+    """选「离带最近」的尝试下标；带内优先，同距取更早的一次（确定性）。
+
+    ``min`` 返回首个最小值 ⇒ 等距时保留先写的版本——不让一次等长的重写顶掉
+    已通过审校约束（revise 语义 / 核销表）的产出。
+    """
+    return min(range(len(attempts)), key=lambda i: attempts[i]["distance"])
+
+
+def _build_length_retry_payload(
+    base_payload: dict[str, Any], previous: dict[str, Any],
+) -> dict[str, Any]:
+    """构造「欠带整章重写」轮的 writer 输入：``mode='write'`` + 显式扩写指令。
+
+    - ``mode='write'`` + 清空 ``draft_text`` + 移除 ``revision_note``：绕开 revise 的
+      「逐字保留未提及部分 / 净增 ≤ +5%」契约（见本模块常量区注释）；
+    - 顶层注入 ``length_directive``（writer-v3.md §6 规则 22 消费）：携带上一版实测
+      字数、带上下限、缺口字数与扩写纪律——只给正向量，不要求模型自报目标；
+    - 只做浅拷贝 + 覆盖顶层键，不改 base_payload（后者可能是装配缓存返回的深拷贝，
+      同一 run 内后续节点/断言仍读它）。
+    """
+    payload = dict(base_payload)
+    payload["mode"] = "write"
+    payload["draft_text"] = ""
+    payload.pop("revision_note", None)
+    shortfall = max(0, int(previous["band_low"]) - int(previous["visible_chars"]))
+    payload["length_directive"] = {
+        "kind": "expand_under_band",
+        "previous_attempt": int(previous["attempt"]),
+        "previous_attempt_mode": previous["mode"],
+        "previous_visible_chars": int(previous["visible_chars"]),
+        "shortfall_chars": shortfall,
+        "target_word_count": int(previous["target"]),
+        "band_low": int(previous["band_low"]),
+        "band_high": int(previous["band_high"]),
+        "instruction": (
+            f"上一版正文实测 {int(previous['visible_chars'])} 字，低于本章字数带下限 "
+            f"{int(previous['band_low'])} 字（差 {shortfall} 字）。本轮按 write 模式"
+            "**整章重写**（不是局部修改、不是上一版的续写、不复述上一版任何段落）："
+            f"输出完整本章正文，净字数落在 {int(previous['band_low'])}~"
+            f"{int(previous['band_high'])} 字之间。扩写靠内容——补齐 scene_plan 中"
+            "尚未展开的 slot、补足场景的环境与人物动作细节、把概述式叙述展开为可感知的"
+            "场面；禁止靠注水、重复意象或重复句式凑字数。"
+        ),
+    }
+    return payload
+
+
 def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     run_id = ctx["run_id"]
     chapter_id = ctx["chapter_id"]
     scene_plan = ctx["scene_plan"]
     context_mode = _resolve_writer_context_mode(ctx)
+    loaded_plan = ctx.get("loaded_plan") or {}
+    # 目标字数优先级：ctx 覆盖 > plan 显式 > 绑定题材包 pacing.chapter_words.target
+    # > 全仓单源常量 DEFAULT_TARGET_WORD_COUNT（3000）；解析单点在
+    # packages.core.genre.target_words.resolve_target_word_count。
+    # 解析一次：既喂装配，也喂节点内欠带判定与重写指令（**同一把数字**，不得两处各算）。
+    target_word_count = _resolve_target_word_count(ctx, loaded_plan)
     payload = build_writer_input(
         db_path,
         chapter_id,
         scene_plan,
-        # 目标字数优先级：ctx 覆盖 > plan 显式 > 绑定题材包 pacing.chapter_words.target
-        # > 全仓单源常量 DEFAULT_TARGET_WORD_COUNT（3000）；解析单点在
-        # packages.core.genre.target_words.resolve_target_word_count。
-        target_word_count=_resolve_target_word_count(ctx, ctx.get("loaded_plan") or {}),
+        target_word_count=target_word_count,
         context_mode=context_mode,
         # 2026-09-16 F-10 ②：作者硬性要求进 writer payload。此前这条链是断的——
         # write 端点收下 author_intent 写进 ctx，但装配层没有这个形参，铁律一个
@@ -642,7 +792,7 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         revision_note = ""
     else:
         draft_text = _latest_draft_text(db_path, chapter_id)
-        revision_note = (ctx.get("loaded_plan") or {}).get("revision_note") or ""
+        revision_note = loaded_plan.get("revision_note") or ""
     mode = "revise" if (revision_note and draft_text) else "write"
     payload["mode"] = mode
     payload["draft_text"] = draft_text
@@ -661,18 +811,78 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     # 留痕：AGENTS.md 坑区「改稿轮整段写重」；测试见
     # tests/workflow/test_chapter_write_writer_capability.py::revise 用例。
     writer_capability_override: str | None = None
-    out = run_agent(
-        db_path,
-        "writer",
-        payload,
-        run_id,
-        node_run_id=ctx.get("_current_node_run_id"),
-        expected="writer",
-        mock_script=mock_script,
-        capability_override=writer_capability_override,
-        profile_id=(ctx.get("model_overrides") or {}).get(
-            capability_for("writer")
-        ),
+
+    def _call_writer(input_payload: dict[str, Any]) -> Any:
+        """调 writer agent（首次与欠带重写共用同一调用路径 / capability / mock）。"""
+        return run_agent(
+            db_path,
+            "writer",
+            input_payload,
+            run_id,
+            node_run_id=ctx.get("_current_node_run_id"),
+            expected="writer",
+            mock_script=mock_script,
+            capability_override=writer_capability_override,
+            profile_id=(ctx.get("model_overrides") or {}).get(
+                capability_for("writer")
+            ),
+        )
+
+    _, band_cfg = _resolve_chapter_word_band(db_path, chapter_id)
+    max_length_retries = _resolve_writer_length_retries(ctx)
+
+
+    out = _call_writer(payload)
+    outputs: list[Any] = [out]
+    payloads: list[dict[str, Any]] = [payload]
+    attempts: list[dict[str, Any]] = [
+        _measure_writer_attempt(
+            attempt=1, mode=mode, out=out,
+            target=target_word_count, band_cfg=band_cfg,
+        )
+    ]
+
+    # ---- 生成期内字数闭环（P0-2）：欠带即在同一节点内整章重写 ----
+    # 触发条件严格为「低于带下限」（status='under'）；在带内 / 超带都不重写
+    # （超带由下游 condense 负责压缩）。首次即在带 ⇒ 恰好 1 次 writer 调用。
+    while len(attempts) - 1 < max_length_retries and attempts[-1]["status"] == "under":
+        retry_payload = _build_length_retry_payload(payload, attempts[-1])
+        retry_no = len(attempts) + 1
+        _log.warning(
+            "chapter_write.writer under band → rewriting in write mode: "
+            "chapter_id=%s attempt=%d/%d visible=%d band_low=%d",
+            chapter_id, retry_no, max_length_retries + 1,
+            attempts[-1]["visible_chars"], attempts[-1]["band_low"],
+        )
+        try:
+            retry_out = _call_writer(retry_payload)
+        except Exception as exc:  # noqa: BLE001 —— 重写失败不阻断（保留已有产出）
+            _log.warning(
+                "chapter_write.writer length retry degraded: chapter_id=%s attempt=%d err=%s",
+                chapter_id, retry_no, exc,
+            )
+            break
+        if not isinstance(retry_out, dict):
+            break
+        payloads.append(retry_payload)
+        outputs.append(retry_out)
+        attempts.append(
+            _measure_writer_attempt(
+                attempt=retry_no, mode="write", out=retry_out,
+                target=target_word_count, band_cfg=band_cfg,
+            )
+        )
+
+    # 取「离带最近」的一次（带内优先，同距保留更早的一次）作为本节点的产出：
+    # 下游 polisher / length_check / save_draft 一律按这一次的正文继续。
+    accepted = _best_writer_attempt(attempts)
+    payload = payloads[accepted]
+    out = outputs[accepted]
+    mode = attempts[accepted]["mode"]
+    scene_plan_injected = payload.get("scene_plan")
+    scene_word_budget = (
+        scene_plan_injected.get("_scene_word_budget")
+        if isinstance(scene_plan_injected, dict) else None
     )
 
     # 修订模式机读核销表（writer-v1.md §6.1 第 11 条）：从 prose 末尾剥离
@@ -680,27 +890,49 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     # 后半 = 核销表（落 run 节点 revision_checklist 产出，便于审查改稿意见是否
     # 被真正执行）。fail-soft：尾块缺失/JSON 坏 → checklist=None + log warning，
     # 正文保持原样不阻断。
+    #
+    # 2026-09-21 检修 m5：剥离条件从「mode == 'revise'」改为「**内容里真的有尾块**」。
+    # 原条件依赖 prompt 纪律（writer-v3.md 明令 write 模式不要输出尾块），但那是契约
+    # 不是强制：模型一旦在 write / length-retry（mode='write'）里吐了尾块，尾块就会
+    # 原样落进 ``drafts.content`` 并抬高 word_count，而 length_check / 字数带都按含
+    # 尾块的数字判定。看内容剥离后：revise 语义不变（缺失仍 warning），write 模式下
+    # 的偶发尾块被静默清掉、revision_checklist 仍为 None（不进审计面）。
     revision_checklist: list[dict[str, Any]] | None = None
-    if mode == "revise" and isinstance(out, dict):
+    if isinstance(out, dict):
         raw_prose = out.get("prose") or ""
-        clean_prose, revision_checklist = _parse_revision_checklist(raw_prose)
-        if revision_checklist is None:
+        had_marker = _REVISION_CHECKLIST_MARKER in raw_prose
+        clean_prose, parsed_checklist = _parse_revision_checklist(raw_prose)
+        if parsed_checklist is not None:
+            if mode == "revise":
+                # revise：核销表是机读契约 → 进 ctx 审计面
+                revision_checklist = parsed_checklist
+            else:
+                # write / length-retry：尾块属 prompt 违约（writer-v3.md 明令只 revise
+                # 输出）。剥掉防落库，但**不进审计面**——审计面只登记「定向改稿的
+                # 核销承诺」，写模式的偶发尾块不是作者可见的承诺。
+                _log.info(
+                    "chapter_write.writer stray revision_checklist stripped: "
+                    "chapter_id=%s mode=%s (prompt 约定该尾块只属 revise，已按内容剥离、不进审计面)",
+                    chapter_id, mode,
+                )
+        elif mode == "revise" and had_marker:
             _log.warning(
                 "chapter_write.writer revision_checklist parse failed: "
                 "chapter_id=%s mode=revise (missing marker or bad JSON)",
                 chapter_id,
             )
-        # 无论剥离成功与否，都用 clean_prose 覆盖 out["prose"]——保证下游
-        # polisher / save_draft 不会把核销表尾块混进草稿正文 / word_count 统计。
-        out["prose"] = clean_prose
-        # word_count 只统计剥离后正文：模型在 self_report.word_count 里通常按
-        # 全文长度（含核销表 JSON 行）统计，会拉高 word_count 字段；此处覆写为
-        # clean_prose 的字符数，确保 save_draft 落库的 word_count 与
-        # drafts.content 实际长度一致。
-        sr = out.get("self_report")
-        if isinstance(sr, dict):
-            sr["word_count"] = len(clean_prose)
-            out["self_report"] = sr
+        if had_marker:
+            # 分隔行出现过（无论 JSON 好坏）就用 clean_prose 覆盖——保证下游
+            # polisher / save_draft 不会把核销表尾块混进草稿正文 / word_count 统计。
+            out["prose"] = clean_prose
+            # word_count 只统计剥离后正文：模型在 self_report.word_count 里通常按
+            # 全文长度（含核销表 JSON 行）统计，会拉高 word_count 字段；此处覆写为
+            # clean_prose 的字符数，确保 save_draft 落库的 word_count 与
+            # drafts.content 实际长度一致。
+            sr = out.get("self_report")
+            if isinstance(sr, dict):
+                sr["word_count"] = len(clean_prose)
+                out["self_report"] = sr
 
     # V3.1.1 V-P0：writer 本节点真实落库模型 id（mock 路径无 ai_call_logs 行 → None）。
     # 用于 drafts.model_id 记录真实 provider/model，避免列表页无法区分模型。
@@ -724,9 +956,20 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         writer_model_id = row["model_id"]
         writer_prompt_version = row["prompt_version"]
     # writer_input 透出到 ctx（→ checkpoint_json）供测试断言；生产仅作为可观测钩子。
-    # revision_checklist：仅 revise 模式且尾块解析成功时为 list；其余情况为 None
-    # （write 模式 / revise 但尾块缺失或 JSON 坏）。进 ctx → checkpoint_json / run
-    # 节点产出，run detail 可见，便于审查改稿意见是否被真正执行。
+    # revision_checklist：尾块解析成功时为 list（revise 的审计面；2026-09-21 m5 起
+    # write 模式下的偶发尾块也解析但不进此键——见上方剥离段注释），其余情况为 None
+    # （尾块缺失或 JSON 坏）。进 ctx → checkpoint_json / run 节点产出，run detail
+    # 可见，便于审查改稿意见是否被真正执行。
+    #
+    # P0-2 生成期字数闭环的可观测键（均进 run 节点产出 / run detail）：
+    # - ``writer_length_attempts``：每次 writer 调用的实测（attempt / mode /
+    #   visible_chars / status / distance / in_band）——首次欠带后的整章重写轮次
+    #   与结果一目了然（此前欠带是「静默完成」，只在 review 才暴露）；
+    # - ``writer_length_accepted_attempt``：被采纳的尝试序号（1-based）；
+    # - ``scene_word_budget``：writer payload 里 scene 预算装配的元字段
+    #   （``_inject_scene_word_budget`` 产出：declared_sum / budget_sum / rebalanced /
+    #   thin_plan / warning）——薄计划（目标 ≥2000 却只 1 个 scene）在 run 层可见，
+    #   不必下钻到体积较大的 writer_input。
     return {
         "writer_output": out,
         "_writer_context_mode": context_mode,
@@ -734,6 +977,9 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "writer_model_id": writer_model_id,
         "writer_prompt_version": writer_prompt_version,
         "revision_checklist": revision_checklist,
+        "writer_length_attempts": attempts,
+        "writer_length_accepted_attempt": accepted + 1,
+        "scene_word_budget": scene_word_budget,
     }
 
 

@@ -9,10 +9,13 @@
 - ``quality_gate`` (State) —— **Sprint 6 新增**：现场组装 :class:`QualityContext`，
   调 :class:`QualityEngine` 评估并落 ``quality_reports``；
   **模式**由环境变量 ``NOVELOS_QUALITY_GATE``（或 ``ctx["quality_gate_mode"]``）控制：
-  - ``"enforce"``（默认）—— 任一 ``severity == 'error'`` ⇒ 抛
-    ``ValueError("quality gate blocked: ...")`；run 收尾 FAILED，chapter 保持 REVIEWED。
+  - ``"enforce"``（默认）—— **blocking error**（``issues.BLOCKING_RULES``）或
+    **confirm 档命中且未带有效 ``ctx["gate_override"]``**（``issues.CONFIRM_RULES``，
+    P0-1/2026-09-18）⇒ 抛 ``ValueError("quality gate blocked: ...")`；
+    run 收尾 FAILED，chapter 保持 REVIEWED。
   - ``"report"`` —— error 只落库不阻断；run 收尾 COMPLETED（评审展示用，便于 ``evals/runner`` 通过）。
-  eval golden / 测试需显式传入 ``quality_gate_mode="report"`` 避免 REQ-Q8 / H-3 等 MVP 阻断规则误伤。
+  eval golden / 测试需显式传入 ``quality_gate_mode="report"`` 避免阻断规则误伤
+  （REQ-Q8 / H-3 等 informational error，以及 trigram 重复等 confirm 命中）。
 - ``high_risk_approval`` (Human) —— **仅当 payload 含 HIGH/definition/rule change 时暂停**，
   payload=change 清单；human_input={"approved": true}。
 - ``commit`` (State) —— 调 :meth:`StoryStateService.commit_delta`；

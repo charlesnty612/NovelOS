@@ -81,6 +81,8 @@ _RESOLVED_HOOK_STATUSES: frozenset[str] = frozenset({"RESOLVED"})
 _PAID_DEBT_STATUSES: frozenset[str] = frozenset({"paid", "forgiven"})
 
 # 章节最新 draft SQL（与 signing_check 同款；按 version DESC LIMIT 1）。
+# 有意取最新（P1-1）：弧光视图是仪表盘——每章展示「该章现在的正文长度」，不服务
+# 任何一次评审的「被审版本」；需要指定版本见 packages.domain.chapter.draft_resolver。
 _LATEST_DRAFT_SQL: str = (
     "SELECT content FROM drafts "
     "WHERE chapter_id = ? "

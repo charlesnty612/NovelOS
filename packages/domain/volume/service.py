@@ -169,6 +169,7 @@ class VolumeService:
                 "project_id": project_id,
                 "number": payload.number,
                 "title": payload.title,
+                "arc_summary": payload.arc_summary,
                 "status": "active",
                 "terminal_snapshot_json": None,
                 "created_at": now,
@@ -178,10 +179,10 @@ class VolumeService:
                 conn.execute(
                     """
                     INSERT INTO volumes
-                        (volume_id, project_id, number, title, status,
+                        (volume_id, project_id, number, title, arc_summary, status,
                          terminal_snapshot_json, created_at, updated_at)
                     VALUES
-                        (:volume_id, :project_id, :number, :title, :status,
+                        (:volume_id, :project_id, :number, :title, :arc_summary, :status,
                          :terminal_snapshot_json, :created_at, :updated_at)
                     """,
                     row,
@@ -210,7 +211,7 @@ class VolumeService:
             rows = conn.execute(
                 """
                 SELECT
-                    v.volume_id, v.project_id, v.number, v.title, v.status,
+                    v.volume_id, v.project_id, v.number, v.title, v.arc_summary, v.status,
                     v.terminal_snapshot_json, v.created_at, v.updated_at,
                     COALESCE(COUNT(c.chapter_id), 0) AS chapter_count
                 FROM volumes v
@@ -244,7 +245,7 @@ class VolumeService:
 
     # ------------------------------------------------------------------- update
     def update(self, volume_id: str, payload: VolumeUpdate) -> dict | None:
-        """部分更新（title / status）。
+        """部分更新（title / status / arc_summary）。
 
         - volume 不存在 → None（router 转 404）。
         - status='sealed' 走显式 seal() 路径（也允许 PATCH 设置 sealed，但

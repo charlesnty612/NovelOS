@@ -10,6 +10,10 @@
 - `build_writer_input(db_path, chapter_id, scene_plan, target_word_count=3000)` — 组装 Writer 输入（按 §4.1）。
 - `build_observer_input(db_path, chapter_id, min_excerpt_chars_low_confidence=80, max_changes_per_array=50)` — 组装 Observer 输入（按 §5.1）。
 - 读取 chapters.plan_json 作为 `director_plan` / `director_plan_summary`。
+- 读取 `chapters.outline_json`（0028 策展大纲）作为 director 的 `chapter.outline` 段。
+- 读取 `projects.writing_bible`（0029 项目写作圣经）并与运行期 `author_intent` 一起经
+  `builders_common.resolve_author_intent` 解析成 payload 的 `author_intent.raw`
+  （**基线 + 增量**：圣经在前、运行期要求在后并在文本内声明冲突裁决方向）。
 - 读取 characters + character_states（最新 state_version）+ locations / factions / world_rules + hooks（OPEN/ACTIVE/ESCALATED）+ narrative_debts（open/acknowledged）。
 - `recent_prose` 取上一章最新 draft 末尾 500 字。
 - `draft_text` 取该章最新 draft 的 content 列。
@@ -311,11 +315,13 @@ never 模式另起独立条目 `kind=suppressed_character` / `suppressed_locatio
 键（V3.9 批次 1.4 后的完整形态）：
 
 ```text
-director: (project_id, state_version, chapter_no, "director", plan_fp,
-           active_canon_id, intent_fp, target_word_count, ns)
+director: (project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
+           active_canon_id, intent_fp, bible_fp, target_word_count,
+           genre_pack_ref, ns)
 writer:   (project_id, state_version, chapter_no, "writer", scene_fp,
            context_mode, relevance_flag, wb_fp, active_canon_id,
-           target_word_count, intent_fp, ns)
+           target_word_count, genre_pack_ref, intent_fp, bible_fp,
+           prompt_label, ns)
 ```
 
 - 键必须含 `state_version` —— state 推进后自然失效；
@@ -329,6 +335,15 @@ writer:   (project_id, state_version, chapter_no, "writer", scene_fp,
     writer 传不同 scene_plan 时，键也自然失效。
 - `active_canon_id`（F5）/ `context_mode`、`relevance_flag`、`wb_fp`（V3.2/V3.7）
   同前：拆书落新 canon、paged/full 切换、word_band_json 变更均自然失效。
+- **0028 大纲槽**：`outline_fp` = `sha256(chapters.outline_json 原文)[:16]`
+  （`NULL → 'none'`）——大纲进 `chapter.outline` 段 ⇒ 必须单列维度，否则改大纲后
+  同 state_version 脏命中旧装配（改大纲不生效的实证缺陷即出在此形状）。
+- **0029 项目写作圣经**：`bible_fp` = `sha256(projects.writing_bible 原文)[:16]`
+  （`NULL → 'none'`）。圣经与运行期 `author_intent` 一起决定 payload 的
+  `author_intent.raw`（**基线 + 增量**拼接，解析单点
+  `builders_common.resolve_author_intent`），两个来源各自独立 ⇒ 各占一个键维度：
+  `intent_fp` 记运行期原文、`bible_fp` 记圣经原文，任一变化都 miss。
+  无圣经的项目 `bible_fp` 恒 `'none'`，键行为与改造前等价。
 - **V3.9 批次 1.4 补齐**：进 payload 的装配参数必须进键——
   - `intent_fp` = `sha256(author_intent)[:16]`（`None → 'none'`，空串按原文计算）；
     writer 键自 2026-09-16 F-10 修复起同样含该维度——writer payload 新增
@@ -373,6 +388,15 @@ writer:   (project_id, state_version, chapter_no, "writer", scene_fp,
 - preview 默认口径（空意图 / 默认字数 3000，V3.9 5.1 起与生产一致）不覆盖生产条目；
 - 就地改写命中返回的 payload（`mode` / `draft_text` / `chapter.expected_role` /
   `scene.target_words`）不影响缓存内对象。
+
+测试（`tests/unit/test_project_writing_bible.py`，2026-09-18 迁移 0029 起）：
+- 改 `projects.writing_bible`（章节与 state_version 都不动）后 `build_writer_input` /
+  `build_director_input` **必须重新装配**并返回新 payload（spy 计 uncached 调用次数，
+  命中返回深拷贝 ⇒ 不能用对象身份判定）；回到原值仍命中自己的条目；
+- 无圣经 → 有圣经 → 换圣经 → 清空：四种形态各自成键，清空后读到的是「无作者意图」
+  的装配而非残留旧圣经；
+- 降级 peek（`reference_canons` 缺表走逐项读）照样带出 `writing_bible`；
+- 无圣经项目行为与改造前逐字一致（无运行意图 → payload 不出现 `author_intent` 键）。
 
 ## P2 Context Engine 补全（Context Engine 缺口关闭）
 

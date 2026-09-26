@@ -10,7 +10,7 @@
 | `build_observer_ctx` | Transform | 调 `context_engine.build_observer_input` 组装 Observer 输入（含 previous_state / draft_text / director_plan_summary） |
 | `observer` | AI | 调 Observer agent（`run_agent(..., expected="observer", mock_script=...)`），输出 7 个 change 数组（无元信息） |
 | `inject_validate` | Transform | 注入 10 元信息字段（delta_id / schema_version / workflow_run_id / previous_state_version / created_by="observer:v1" / created_at 等）；先用纯函数 `validate_delta` 校验，**失败时把错误以 `_retry_hint` 注入 observer_input 重试 observer 一次（共 2 次尝试，真实 LLM 常见 op=update 缺 before 等业务校验错误）**，仍失败 → run FAILED；`submit_delta` 仅在最终通过的 delta 上调用一次（避免落 rejected 行）。同时把组装后的完整 ``delta`` + 最终 ``observer_payload`` + ``snapshot_pre`` + ``project_id`` 写到 ctx，供 ``quality_gate`` / ``high_risk_approval`` 使用 |
-| `quality_gate` | State | **Sprint 6 下半新增**：现场组装 :class:`QualityContext`（chapter_id / chapter_number / draft / plan / snapshot_pre / delta / payoff_history(近5章) / reference_texts(``<db 父目录>/references/<project_id>/*.txt``，目录不存在则空) / ai_chars/human_chars(由 :func:`packages.core.quality.service.compute_char_stats` 算) / run_id / whitelist=[]），调 :class:`QualityEngine` 评估，**落库**至 ``quality_reports``（独立事务，与 commit 路径互不污染）。**模式**由 ``ctx["quality_gate_mode"]`` 或环境变量 ``NOVELOS_QUALITY_GATE`` 控制：``"enforce"`` 模式任一 ``severity=='error'`` ⇒ 抛 :class:`ValueError("quality gate blocked: [rule_ids...]"`) 阻断 → run FAILED，chapter 保持 REVIEWED；``"report"`` 模式 error 只落库不阻断。默认 ``enforce``（P0 对齐 docstring）；eval / 测试需显式传 ``quality_gate_mode="report"`` 避免 MVP 阻断误伤 |
+| `quality_gate` | State | **Sprint 6 下半新增**：现场组装 :class:`QualityContext`（chapter_id / chapter_number / draft / plan / snapshot_pre / delta / payoff_history(近5章) / reference_texts(``<db 父目录>/references/<project_id>/*.txt``，目录不存在则空) / ai_chars/human_chars(由 :func:`packages.core.quality.service.compute_char_stats` 算) / run_id / whitelist=[]），调 :class:`QualityEngine` 评估，**落库**至 ``quality_reports``（独立事务，与 commit 路径互不污染）。**模式**由 ``ctx["quality_gate_mode"]`` 或环境变量 ``NOVELOS_QUALITY_GATE`` 控制：``"enforce"`` 模式下 **blocking error**（`issues.BLOCKING_RULES`）抛 :class:`ValueError("quality gate blocked: [rule_ids...]"`) 阻断 → run FAILED，chapter 保持 REVIEWED；**confirm 档**（`issues.CONFIRM_RULES`，P0-1）无有效 ``ctx["gate_override"]`` 时同样阻断（错误串带 ``gate=confirm`` + 证据摘录），带声明则放行并留痕；``"report"`` 模式只落库不阻断。默认 ``enforce``（P0 对齐 docstring）；eval / 测试需显式传 ``quality_gate_mode="report"`` 避免 MVP 阻断误伤 |
 | `high_risk_approval` | Human | **仅当 observer_payload 含 HIGH / character facet=definition / world_kind=rule 任一时暂停**；payload 含 change 清单；`human_input={"approved": true}` 通过 |
 | `commit` | State | 调 `StoryStateService.commit_delta`；chapters.status REVIEWED→COMMITTED；当前 DRAFTED（未过 review）→ run FAILED。**V2.0 Wave C 任务一**：commit 成功后调 `packages.core.retrieval.upsert_chapter` 把章节正文 upsert 进 `chapter_fts`（FTS5 全文索引）；**降级语义同 summarize 节点**：FTS 写入异常 → log warning + ``fts_upsert_ok=False``，不抛错、不阻断 commit（commit 状态保持 COMPLETED）。 |
 | `summarize` | State | **Sprint 14-A 新增**：commit 成功后追加；调 summarizer agent 生成 ≤ 200 字本章摘要，**落库**至 ``chapter_summaries``（迁移 `0007_chapter_summaries.sql`）；同时把已提交正文末尾 300 字作为 `tail_text` 落库（不调 LLM）。**任何失败（LLM 异常 / 解析失败 / DB 写入失败）均降级不抛错**：warning 日志 + ``summary_status='failed'`` + 不写库；chapter 仍保持 COMMITTED（与 commit 成功状态独立）。摘要 > 200 字由 builder 截断 + 标记 ``degraded=True``。Mock provider 可走通。summarizer ACTIVE prompt 已注册（`docs/agents/prompts/summarizer-v1.md`，capability=reasoning；首次启动服务时由 `POST /api/agents/sync` 写入 `agents` / `prompts` 表）；注册机制已用隔离 tmp DB 验证（见 `docs/agents/scripts/verify_summarizer_sync.py`）。 |
@@ -26,18 +26,30 @@
 
 - chapters.status 非 REVIEWED → run FAILED。
 - Observer 输出 7 数组缺一或 schema 校验失败（重试一次后仍失败）→ run FAILED。
-- **Sprint 6 下半** —— quality_gate 节点在 ``enforce`` 模式下触发 error 级 issue（H-3
-  连续 ≥3 章水章 / REQ-Q6 重叠率超阈值 / REQ-Q8 人工占比 <30% 也会阻断）→ 抛
+- **Sprint 6 下半** —— quality_gate 节点在 ``enforce`` 模式下触发 **blocking error**
+  （`issues.BLOCKING_RULES` 白名单内，见 ``packages/core/quality/README.md`` §4.3）→ 抛
   ``ValueError("quality gate blocked: [...]")`` → run FAILED，chapter **保持 REVIEWED**
   （block 在 commit 之前，已写透的 snapshot 不变，已落库 report 仍可在 UI 展示）。
+- **P0-1（2026-09-18）** —— ``confirm`` 后果档（``issues.issue_gate`` 判为 confirm：
+  节拍逐字复现 ``AI-BEAT-REPEAT``，以及章内 trigram 重复超确认阈值 0.25 那一档——
+  2026-09-18 起由产出侧按实测分位单条上修，不再靠静态规则表）
+  **同样阻断**，除非调用方带有效 ``gate_override``
+  （``{"rule_ids": [...], "reason": "..."}``，须覆盖本次全部 confirm rule id 且 reason 非空）。
+  错误信息形如
+  ``"quality gate blocked: [...] | gate=confirm | override_error=<原因> | evidence=<规则:证据摘录> | guidance=<json>"``，
+  ``plan_json.gate_blocked.gate`` 标为 ``"confirm"``（区分「坏了」与「要你点头」）。
+  放行后声明写进 ``quality_reports._meta.gate_accepted_override`` 与 run checkpoint。
 - HIGH 风险变更未通过 author_approval → run FAILED。
 - 乐观锁冲突 → run FAILED。
-- 默认 ``enforce`` 模式（``NOVELOS_QUALITY_GATE`` 未设）：任一 error 级 issue 会阻断 commit，
-  chapter 保持 REVIEWED；生产环境接入真实模型前建议先用 ``report`` 跑一轮校准。
+- 默认 ``enforce`` 模式（``NOVELOS_QUALITY_GATE`` 未设）：任一 **blocking error** 或（未带
+  有效 ``gate_override`` 的）**confirm 命中**会阻断 commit，chapter 保持 REVIEWED；
+  生产环境接入真实模型前建议先用 ``report`` 跑一轮校准。
 - 模式切换：
   - ``ctx["quality_gate_mode"] = "enforce"|"report"``（workflow API 请求体字段）：
     调用方/测试显式覆盖，按 call 控制。
   - ``NOVELOS_QUALITY_GATE`` 环境变量：``"enforce"`` 或 ``"report"``，默认 ``"enforce"``。
+- confirm 放行：``{"gate_override": {"rule_ids": [...], "reason": "..."}}`` 随
+  ``POST /api/projects/{pid}/chapters/{cid}/commit`` 提交即可（仅本节点读取）。
 
 ## Sprint V1.4 增强
 
@@ -101,6 +113,9 @@
 - ``workflow_runs.checkpoint_json["quality_gate"].revision_guidance``
 - ``runs.error``（enforce 阻断时）：``"quality gate blocked: <rule_ids> | guidance=<json>"``
   —— 前端 / 测试按 ``| guidance=`` 分隔即可拿到 JSON。
+  P0-1 起 confirm 档阻断会在 ``<rule_ids>`` 之后、``| guidance=`` 之前多出
+  ``| gate=confirm | override_error=<原因> | evidence=<证据摘录>`` 段
+  （既有按 ``| guidance=`` 切分的解析方零影响）。
 
 前端 QualityPanel 在 ``revision_guidance.length > 0`` 时渲染「改稿引导」区块：
 ``dimension='guardrails'`` 展示「当前阻断 rule」+ rule_hint；

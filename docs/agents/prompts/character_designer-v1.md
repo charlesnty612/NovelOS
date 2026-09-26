@@ -15,6 +15,8 @@
 根据输入的 brief、premise、world，输出一份 JSON 对象，包含：
 - **characters**：3-5 个角色，每个含 name、role、core_json（性格/动机/目标/冲突/关系）。
 
+> **作者备注（brief.author_notes）**：若提供，它是作者对本书的**最高优先级创作约束**，必须严格遵循并落实到角色设计中（如是否设置情感线、主角身份与主角群构成等），不得与其冲突。
+
 ## 3. Output Schema
 
 只输出一个合法 JSON 对象，不要 Markdown 围栏、不要解释。

@@ -11,6 +11,10 @@ V3.7：PATCH /projects/{project_id} 支持 ``word_band`` 字段——dict 落 ``
 ``Project`` 模型同步暴露 ``genre_pack_id``（绑定题材包 id；未绑定 / 极老库缺列 →
 null）。绑定写路径在 :mod:`packages.core.api.routers.genre`（bind / unbind），
 本路由只读。
+
+2026-09-18（0029）：``writing_bible``（项目写作圣经）随既有 create / update / 读模型
+一并暴露——自由文本，无需 router 层校验（与 ``premise`` 同口径，空白串由 Service
+归一为 NULL）。装配侧优先级见 :mod:`packages.domain.project.models` 的模块 docstring。
 """
 
 from __future__ import annotations

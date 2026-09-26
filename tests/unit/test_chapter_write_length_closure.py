@@ -21,6 +21,11 @@
     LLM 异常 fail-soft 保留原文 + 计 1 轮。
 17. V3.9 批次 1.2：save_draft 落库 word_count = 压缩后 prose 实测。
 18. V3.9 批次 1.3：scene 预算部分声明（子集和落 90~110% 区间）不崩溃且分摊合理。
+19. P0-2（2026-09-18）：scene 预算总和越界 → 按比例归一化到 target（±10% 容差、
+    留痕 meta ``_scene_word_budget`` + warning 日志）；±10% 内则逐字保留；
+    全缺省仍走「等分 + 余数补首场景」（刻意保留）。
+20. P0-2：薄计划信号——目标 ≥2000 却只 1 个 scene ⇒ warning 级 ``thin_plan``
+    （带 scene 数与 target），不阻断；<2000 或多场景不报。
 
 mock 策略：_condense_node 只在「有 mock_providers 但没配 condense 脚本」时透传
 skipped_no_mock；生产形态（mock_providers=None / {}）会真调 run_agent，因此超带
@@ -1267,10 +1272,15 @@ def test_condense_then_save_draft_records_compressed_truth(
 
 
 def test_inject_scene_word_budget_partial_declaration_no_crash():
-    """已声明子集和落 90~110% 区间 + 存在未声明 scene → 未声明 scene 吃剩余预算。
+    """已声明子集和落 90~110% 区间 + 存在未声明 scene → 全 scene 预算归一化到 target。
 
     复现用例（旧代码 TypeError: int() argument must be ... not 'NoneType'）：
     scenes=[{target_words:2000},{target_words:1000},{}]，target=3000。
+
+    **P0-2（2026-09-18）行为变更**：旧实现给未声明 scene 发 ``T/n`` 保底值，总和被
+    顶到 4000（= 1.33×target，超容差 33%）却仍是「已声明值逐字保留」；现按已声明
+    均值占位 → 比例归一化，总和 = target，且保留已声明场景的相对轻重（2000:1000 →
+    1333:667）。
     """
     scene_plan = {
         "scenes": [
@@ -1282,12 +1292,16 @@ def test_inject_scene_word_budget_partial_declaration_no_crash():
     out = _inject_scene_word_budget(scene_plan, 3000)
     tws = [s["target_words"] for s in out["scenes"]]
     assert all(isinstance(v, int) for v in tws), f"全 int 不出现 None；got {tws!r}"
-    assert tws[:2] == [2000, 1000]  # 已声明值不动
-    assert tws[2] == 1000  # 剩余 = 3000-3000 = 0 ≤ 0 → T/n = 1000 保底值
+    assert sum(tws) == 3000, f"总和必须 = target；got {tws!r}"
+    assert tws == [1333, 667, 1000]
+    meta = out["_scene_word_budget"]
+    assert meta["rebalanced"] is True
+    assert meta["budget_sum"] == 3000
+    assert meta["declared_sum"] == 3000
     # 不就地改写输入
     assert "target_words" not in scene_plan["scenes"][2]
 
-    # 剩余 > 0：已声明子集吃掉大部分预算 → 未声明场景均分剩余
+    # 剩余 > 0：已声明子集吃掉大部分预算 → 未声明场景均分剩余（总和仍 = target）
     scene_plan2 = {
         "scenes": [
             {"scene_id": "scene_001", "target_words": 3800},
@@ -1301,4 +1315,100 @@ def test_inject_scene_word_budget_partial_declaration_no_crash():
     assert tws2[0] == 3800
     assert tws2[1:] == [100, 100]  # 剩余 4000-3800=200 → 均分
     assert sum(tws2) == 4000
+
+
+# ---------------------------------------------------------------------------
+# P0-2（2026-09-18）scene 预算自洽：±10% 容差 + 比例归一化 + 薄计划信号
+# ---------------------------------------------------------------------------
+
+
+def _scene_plan_of(*declared: int | None) -> dict:
+    scenes = []
+    for i, tw in enumerate(declared, start=1):
+        s: dict = {"scene_id": f"scene_{i:03d}"}
+        if tw is not None:
+            s["target_words"] = tw
+        scenes.append(s)
+    return {"scenes": scenes}
+
+
+def test_scene_word_budget_rebalances_declared_out_of_tolerance(caplog):
+    """已声明总和越界（<90%）→ 按声明值比例缩放（保留相对结构，不推倒等分）。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="packages.core.context_engine.builders_common.summaries"):
+        out = _inject_scene_word_budget(_scene_plan_of(500, 1000, 1500), 4000)
+
+    tws = [s["target_words"] for s in out["scenes"]]
+    assert tws == [667, 1333, 2000]
+    assert sum(tws) == 4000
+    meta = out["_scene_word_budget"]
+    assert meta["declared_sum"] == 3000
+    assert meta["budget_sum"] == 4000
+    assert meta["tolerance"] == 0.10
+    assert meta["rebalanced"] is True
+    assert meta["source"].startswith("declared_proportional")
+    # 归一化必须留痕（不静默）
+    assert any("scene_word_budget rebalanced" in r.message for r in caplog.records)
+
+
+def test_scene_word_budget_keeps_declared_when_within_tolerance():
+    """已声明总和落 ±10% 内（2700 ≤ 3000 ≤ 3300）→ 逐字保留，不重算、不告警。"""
+    out = _inject_scene_word_budget(_scene_plan_of(1200, 900, 900), 3000)
+    tws = [s["target_words"] for s in out["scenes"]]
+    assert tws == [1200, 900, 900]
+    meta = out["_scene_word_budget"]
+    assert meta["rebalanced"] is False
+    assert meta["source"] == "declared_kept"
+    assert meta["budget_sum"] == 3000
+
+
+def test_scene_word_budget_equal_split_when_no_declaration():
+    """全缺省 → 等分 + 余数补首场景（刻意保留的旧行为：总和恒 = target）。"""
+    out = _inject_scene_word_budget(_scene_plan_of(None, None, None), 2000)
+    assert [s["target_words"] for s in out["scenes"]] == [668, 666, 666]  # divmod(2000,3)=(666,2)
+    meta = out["_scene_word_budget"]
+    assert meta["declared_sum"] == 0
+    assert meta["source"] == "equal_split"
+    assert meta["rebalanced"] is False
+
+
+def test_scene_word_budget_thin_plan_signal_single_scene_above_threshold(caplog):
+    """目标 ≥2000 却只 1 个 scene ⇒ warning 级信号（带 scene 数与 target），不阻断。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="packages.core.context_engine.builders_common.summaries"):
+        out = _inject_scene_word_budget(_scene_plan_of(2500), 2500)
+
+    meta = out["_scene_word_budget"]
+    assert meta["thin_plan"] is True
+    assert meta["scene_count"] == 1
+    assert meta["target"] == 2500
+    assert "2500" in meta["warning"] and "1 个 scene" in meta["warning"]
+    assert any("thin plan" in r.message for r in caplog.records)
+    # 非阻断：预算照常算出，无异常
+    assert out["scenes"][0]["target_words"] == 2500
+
+
+def test_scene_word_budget_no_thin_plan_signal_below_threshold():
+    """目标 <2000 的单场景计划不报薄计划（短章 1 场景是正常形态）。"""
+    out = _inject_scene_word_budget(_scene_plan_of(1500), 1500)
+    meta = out["_scene_word_budget"]
+    assert meta["thin_plan"] is False
+    assert meta["warning"] is None
+
+
+def test_scene_word_budget_no_thin_plan_signal_for_multi_scene():
+    """多场景计划即便目标很大也不报（信号只在「目标够大 + 只 1 场」时成立）。"""
+    out = _inject_scene_word_budget(_scene_plan_of(None, None), 3000)
+    meta = out["_scene_word_budget"]
+    assert meta["scene_count"] == 2
+    assert meta["thin_plan"] is False
+    assert meta["warning"] is None
+
+
+def test_scene_word_budget_meta_not_injected_when_no_target():
+    """target<=0（无预算）→ 原样返回：不注入 target_words、不注入元字段。"""
+    sp = _scene_plan_of(None, None)
+    assert _inject_scene_word_budget(sp, 0) is sp
 

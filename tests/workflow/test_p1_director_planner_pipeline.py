@@ -33,6 +33,18 @@ from packages.core.workflow_runtime.runs import get_run
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "docs" / "agents" / "prompts"
 
 
+@pytest.fixture(autouse=True)
+def _disable_generation_length_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """关掉 P0-2 生成期欠带重写（通道：官方开关 ``NOVELOS_WRITER_LENGTH_RETRIES=0``）。
+
+    理由：本文件主题是「落库 scene_plan 命中 / 降级 + 规划合并」，mock writer 正文只有
+    ~60 字而目标 3000 字（带下限 2550），必然触发节点内整章重写——多出来的 writer
+    调用会把「writer 恰好调 1 次」的断言打散。生成期字数闭环本身的断言在
+    ``tests/workflow/test_chapter_write_length_retry.py``，两边互不遮挡。
+    """
+    monkeypatch.setenv("NOVELOS_WRITER_LENGTH_RETRIES", "0")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -489,6 +501,69 @@ def test_plan_whitelist_violation_twice_fails_run(engine: WorkflowEngine, db_pat
     run = get_run(db_path, run_id)
     assert run is not None and run["status"] == "FAILED", run
     assert run["current_node"] == "director_planner"
+    assert _plan_json(db_path, cid) == {}
+    assert _scene_plan_row(db_path, cid) is None
+
+
+def _corrupt_key_beats(payload: dict) -> dict:
+    """注入 2026-09-21 事故的破损形态：key_beats 混入裸字符串 / 值碎片数组。"""
+    payload["key_beats"][1:1] = ["{", 'beat_id":"beat_002', ["payoff"], ["power_display"]]
+    return payload
+
+
+def test_plan_corrupt_key_beats_retries_then_succeeds(
+    engine: WorkflowEngine, db_path: Path
+):
+    """key_beats 结构腐烂 → 走既有 output-invalid 重试；第二次合规 → COMPLETED 且落库计划干净。
+
+    撤掉 :func:`_validate_director` 的形状守卫时本用例必红：第一版腐烂计划会被静默写进
+    ``chapters.plan_json``（2026-09-21 实跑事故的落库路径）。
+    """
+    pid = _make_project(db_path)
+    char_id = _make_character(db_path, pid)
+    cid = _make_chapter(db_path, pid)
+
+    bad = _corrupt_key_beats(_merged_payload(cid, character_id=char_id))
+    good = _merged_payload(cid, character_id=char_id)
+    run_id = _run_plan(
+        engine,
+        db_path,
+        pid,
+        cid,
+        [json.dumps(bad, ensure_ascii=False), json.dumps(good, ensure_ascii=False)],
+    )
+    run = get_run(db_path, run_id)
+    assert run is not None and run["status"] == "COMPLETED", run
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT retry_count, error FROM ai_call_logs "
+            "WHERE prompt_version = 'director_planner:v2'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["retry_count"] == 1, "形状腐烂应走既有 output-invalid 重试"
+    assert "key_beats[1] must be an object" in (row["error"] or "")
+
+    beats = _plan_json(db_path, cid)["key_beats"]
+    assert beats and all(isinstance(b, dict) and b.get("beat_id") for b in beats)
+    assert _scene_plan_row(db_path, cid) is not None
+
+
+def test_plan_corrupt_key_beats_twice_fails_run(engine: WorkflowEngine, db_path: Path):
+    """两次都腐烂 → run FAILED、plan_json 保持未写（破损计划不得静默落库）。"""
+    pid = _make_project(db_path)
+    char_id = _make_character(db_path, pid)
+    cid = _make_chapter(db_path, pid)
+
+    raw = json.dumps(_corrupt_key_beats(_merged_payload(cid, character_id=char_id)),
+                     ensure_ascii=False)
+    run_id = _run_plan(engine, db_path, pid, cid, [raw, raw])
+    run = get_run(db_path, run_id)
+    assert run is not None and run["status"] == "FAILED", run
+    assert run["current_node"] == "director_planner"
+    assert "key_beats[1] must be an object" in (run.get("error") or "")
     assert _plan_json(db_path, cid) == {}
     assert _scene_plan_row(db_path, cid) is None
 

@@ -70,6 +70,13 @@
   "severity": "error" | "warning" | "info",
   // 对应 PRD §86 / §89 风险等级；error 语义 V3.9 起分 blocking（必阻断 Commit）/
   // informational（只进 issues，不归零、不阻断），判定见 packages/core/quality/README.md §4.3
+  "gate": "auto" | "confirm" | "block",
+  // 2026-09-18 P0-1：**后果档**，与 severity 正交——severity 说「多严重」，gate 说
+  // 「必须怎么处理」。auto = 不产生后果；confirm = 不许静默通过（`quality_gate` enforce 下
+  // 需带 gate_override 显式接受；来源二选一：rule_id 在 issues.CONFIRM_RULES 内，
+  // 或产出侧按量级把该条上修——如 §3.4 trigram > 0.25）；block = 硬停不可覆盖
+  // （rule_id 在 issues.BLOCKING_RULES 内且 severity=error）。字段是材料化回显，
+  // 权威解析器为 issues.issue_gate()，判定与放行契约见 packages/core/quality/README.md §4.3
   "category": "schema_validity | timeline_consistency | character_contradiction | world_rule_contradiction | knowledge_leakage | plot | character | continuity | style | pacing | foreshadowing | ai_trace | payoff | compliance",
   // 前 5 类与 Guardrail 一一对应；中 7 类与子分一一对应（ai_trace 为 V3.1 AI 痕迹维度）；payoff 对应 §3.7 爽感体检 H-1~H-5；compliance 对应 §4.6/§4.7/§4.8 合规 Guardrail（REQ-Q6/Q7/Q8）
   "location": "<chapter_id>:<scene_id>:<span_id?>",
@@ -87,6 +94,9 @@
 约束：
 
 - `severity` 三档与 PRD §89 风险等级对齐：`error` 等价 HIGH、`warning` 等价 MEDIUM、`info` 等价 LOW。
+- `gate` 三档与 severity 正交（P0-1）：`block`（硬停，不可覆盖）/ `confirm`（必须显式接受）/
+  `auto`（不产生后果）。`confirm` 档的放行声明是 `gate_override`（API 字段同名），
+  详见 `packages/core/quality/README.md` §4.3。
 - `category` 前缀与 Guardrail / 子分对齐，方便路由到对应规则引擎或 LLM judge。
 - `suggestion` 可省略；其余均为必填项。
 
@@ -142,6 +152,14 @@ overall = round(
    入表清单与变更流程见 `packages/core/quality/README.md` §4.3/§4.4。
 2. 仅 `warning` 级命中 → `overall` 不变，但写入 `issues[]`，由人类 Author 决定是否放弃提交。
 3. `info` 级命中 → 仅记录，不扣分、不阻断。
+4. **V3.9 / P0-1（2026-09-18）修订：后果档与 severity 解耦。** `issues.CONFIRM_RULES`
+   内的重复类规则（`AI-BEAT-REPEAT`）命中，**或**某条 issue 被产出侧按量级上修为
+   `gate="confirm"`（§3.4 的 trigram confirm 档）⇒ `overall` **不变**（非结构性损坏，
+   不靠分数表达），但 `quality_gate` 在 enforce 模式下要求显式 `gate_override` 才放行
+   ——「不许静默通过」。背景：2026-09-18 某章 9 段逐字重复（trigram 30.37%）照常提交，
+   `overall: 90`、review `errors: []`；根因是矩阵把 style 封顶 warning ⇒
+   重复类问题在构造上永远进不了阻断白名单。
+   详见 `packages/core/quality/README.md` §4.3。
 
 ### 2.2 公式的版本化
 
@@ -240,7 +258,14 @@ overall = round(
 - **计算流程**：
   1. Rule-based 辅佐（权重 0.2）：自动检测以下硬指标——
      - 句子平均长度（目标区间：用户 StyleGuide 设定；缺省 12-28 字）；
-     - 高频 n-gram（trigram）重复率 > 8% 触发 `style_repetition` warning；
+     - 高频 n-gram（trigram）重复率**两档**（2026-09-18 重定；旧值 0.08 单档已废）：
+       > **0.16**（生成侧 p85 = 0.1621）触发 `RULE_STYLE_REPETITION_TRIGRAM`（severity
+       warning，后果档 auto = 只提示）；> **0.25**（生成侧 max 0.2097 与事故 0.3037 的
+       几何中点）时该条另上修为 **confirm 档**——`quality_gate` enforce 下必须显式
+       `gate_override` 才算接受。实测：人类锚点书（榜一侯府弧 19 章）mean 0.0754 /
+       max 0.0949 ⇒ **人稿零命中**；生成侧 92 章 p50 0.1333 / max 0.2097 ⇒ 0 章达 confirm。
+       详见 `packages/core/quality/README.md` §4.3 与
+       `tests/unit/quality/test_trigram_tiers.py`；
      - AI 味硬指标：过量排比、连续三个独立段落都以"然而/但是"开头等，明显模式触发 warning；
      - 对话占比（PRD 未规定，作者预设）。
   2. LLM judge 主体（权重 0.8）：rubric = 重复 / AI味 / 句式 / 对白 / 节奏（Sprint PRD §37 Style 五项）；每维 0-10，平均 × 10；**双评取低**。
@@ -435,6 +460,9 @@ overall = round(
 
 - 任意 **blocking** Guardrail `error`（`rule_id ∈ BLOCKING_RULES`）⇒ `overall = 0` ⇒ 强制阻断 Commit（绕过 §2 加权）；
   informational error（severity=error 但不在白名单）⇒ 保留七维平均部分分（V3.9 批次 3.1）；
+- **confirm** 命中（`rule_id ∈ CONFIRM_RULES`，或该条被产出侧按量级上修 `gate="confirm"`——
+  如 §3.4 的 trigram confirm 档，P0-1 / 2026-09-18）⇒ `overall` 不变，但 Commit 门禁要求
+  显式 `gate_override` 才放行（见 §2.1 修订第 4 条与 `packages/core/quality/README.md` §4.3）；
 - 仅 Guardrail `warning` ⇒ 子分（plot / character / continuity）按 §3.3 流程扣半，并写入 `issues[]`；不阻断；
 - Guardrail `info` ⇒ 无分；只写 issues。
 
@@ -714,4 +742,5 @@ function decide_release(baseline, aggregate):
 |---|---|---|
 | v0 | 2026-08-23 | 首版；与 PRD §37/§38/§82/§83/§84/§85/§86/§110 + 评估报告 R7/R9 对齐；MVP 收窄决策固化 |
 | v0.1 | 2026-08-23 | 增补 §3.7 男频爽感维度（H-1~H-5 五项指标：章末钩子检出率/爽点密度/连续水章预警/黄金三章专项/战力境界递进一致性）；§4.6/§4.7/§4.8 新增 REQ-Q6 参照书相似度 / REQ-Q7 AI 痕迹自检 / REQ-Q8 人工加工占比三条 Guardrail（对齐 `docs/v1.2-调研综合与设计决策-2026-08-23.md`（历史文档：软件仓与内容仓均未保留该文件，此引用为当时记录） D2 G-sim / G-ai / G-human）；§4.x 编号顺延。原 §4.6 Guardrail 与 Scoring 的衔接 → §4.9。本版所有阈值均为"建议值，待校准"。 |
+| v0.3 | 2026-09-18 | trigram 重复率阈值重定（先验判断被推翻，留痕）：§3.4 高频 n-gram 重复率由「> 8% 即 confirm」改为**两档**——warn 0.16（生成侧 p85）/ confirm 0.25（生成侧 max 0.2097 与事故章 0.3037 的几何中点）；理由是 0.08 落在实测分布内部（人类锚点书 19 章 mean 0.0754 / max 0.0949，9/19 章超 0.08；生成侧 92 章 p50 0.1333，仅 2/92 章低于 0.08）⇒ confirm 退化为橡皮图章。§2.1 修订第 4 条 / §4.9 同步：confirm 档除 `rule_id ∈ CONFIRM_RULES` 外，新增「单条上修」路径（量级依赖的后果不进静态规则表）。 |
 | v0.2 | 2026-09-13 | V3.9 批次 3 修订（R14/R7/3.1/3.2/3.3/3.5）：§2 overall 统一为七维均权（旧加权表标删除线留演化史）；error 分 blocking/informational 两组（§2.1 规则 1、§4.9）；`scoring_formula_hash` 覆盖 severity 矩阵（§2.2）；§3.6 foreshadowing 改埋设/兑现双通道（resolved + 0.9×new）；§3.7 H-3 标 warning（矩阵封顶）、H-5 越级碾压标未实现；§4.8 Q8 默认降为 warning（显式 `NOVELOS_QUALITY_Q8_STRICT=1` 才 error，含 created_by 推断口径）；§6.3 条件 4「baseline −3」标删除线并给出 R7 裁决理由；§1.1/§1.3 补 ai_trace 维度与 error 语义说明。 |

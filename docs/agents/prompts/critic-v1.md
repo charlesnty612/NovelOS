@@ -6,6 +6,7 @@
 > 注册：`docs/agents/prompts/critic-v1.md` → `PromptRegistry.sync_from_docs` → `agents` / `prompts` 表（capability=reasoning，agent_name=critic，version=v1）。
 > 触发节点：`packages/workflows/chapter_review/pipeline.py` 的 `_critic_review_node`（人工审批之前插入；**仅建议、不拦截**，失败降级不影响 run 终态）。
 > 题材库 P2（2026-09-13）：新增**可选输入** `genre_rubric`（题材审查要点）——见 §3.10 职责、§5 输入契约、§6.13 证据要求、§9 E-CRT-10 验收；输入缺席时题材维度整体跳过。
+> 连续性分类法（2026-09-19）：每条 issue 新增必填 `rule_id`（**闭集**，见 §3.11 / §7）与 `reason`（一行依据）。规则 id 名册的代码侧单源是 `packages/core/quality/continuity_taxonomy.py`（`CRITIC_TAXONOMY`），本文件与它必须一致。
 
 ---
 
@@ -31,9 +32,11 @@
 1. **总评**（一句话，给作者看的整体观感）。
 2. **亮点**（做得好的地方，0–5 条；可有可无）。
 3. **问题清单**（0–10 条），每条含：
-   - `category` ∈ `pacing | character | logic | foreshadowing | ai_flavor | other`。
+   - `rule_id`：**闭集**取值，见 §3.11 的分类法（连续性类以 `CONT-` 开头）。
+   - `category` ∈ `pacing | character | logic | foreshadowing | ai_flavor | other`（必须与 `rule_id` 在 §3.11 表里配套）。
    - `severity` ∈ `high | medium | low`。
-   - `quote`：正文中的连续引用片段（≤60 字，便于作者定位）。
+   - `quote`：正文中的连续引用片段（≤60 字，便于作者定位）。**逐字引用**，不得改写、不得拼接。
+   - `reason`：一句话说明「这条引用为什么是问题」（≤40 字，只陈述依据，不写改法）。
    - `suggestion`：具体可执行的修改建议（≤80 字，不要写成「请考虑……」「或可……」之类的空话）。
 
 你的输出是 **JSON**（见 §7 Output Schema）。
@@ -74,6 +77,27 @@
     - **禁忌一票关注点（`taboo_notes`）**：正文一旦命中 `taboo_notes` 列出的禁忌 → 报 `other`，`severity=high`（题材红线一票优先；`suggestion` 指明触发的禁忌项与改法）。该项不受 §3.8 追读力「同章 ≤3 条」配额限制。
     - **文风要点（`style_notes`）**：作为 `ai_flavor` / `pacing` 判定的叠加参考；按 §6.12 写法类封顶 `medium`，**不**单独构成 `high`。
     - `__genre_rubric_truncated__ == true` 表示要点被字符预算截断：**只**按已给出的条目审查，不得脑补被截断的内容。
+11. **分类法（`rule_id`，必填；连续性维度）**：`category` 太粗——「时间矛盾」「引用了一件没发生过的事」「刑诉里出现原告席」都必须报 `logic` / `other`，作者与下游分不出差别。故每条 issue 还要按下列**闭集**填 `rule_id`（与 `category` 必须配套）：
+
+    | `rule_id` | 必须同时填的 `category` | 它测量的东西 |
+    |---|---|---|
+    | `CONT-TIMELINE` | `logic` | **章内时间/时点矛盾**：同一场景里时点与天色冲突（如「凌晨两点十七分」开场、同一场景不隔断地写到「天际线…亮了」）、同章时点回退且无时间推进交代 |
+    | `CONT-UNANCHORED-REF` | `logic` | **无源引用**：正文指称一件**全书从未发生**的事（「今天下午那个号码」而该事件不存在）、或指称计划/前章中不存在的关键信息 |
+    | `CONT-REGISTER` | `other` | **设定语域不符**：称谓 / 官职 / 器物 / 名物 / 制度与 `settings_digest` 声明的时代与地域不符（如古代背景里出现现代纸币名） |
+    | `CONT-PROCEDURE` | `other` | **现实流程错误**：真实世界程序写错（如 PRC 刑事诉讼里出现「原告席」、民事诉讼里出现「认罪书」） |
+    | `CONT-BEAT-DEVIATION` | `other` | **节拍未兑现 / 偏离**：`plan_summary.key_beats` 里某条未在正文落地或落地形态明显偏离（§3.7 的正式形式） |
+    | `AI-FLAVOR` | `ai_flavor` | 模板腔、套话、句式套路（§6.8） |
+    | `PACE` | `pacing` | 节奏 / 追读力（§3.8） |
+    | `CHARACTER` | `character` | 人物行为、称谓、动机（§3.6 OOC 的人物侧） |
+    | `LOGIC` | `logic` | 其它逻辑矛盾（不属于上面 `CONT-TIMELINE` / `CONT-UNANCHORED-REF` 的时间与事实矛盾） |
+    | `FORESHADOW` | `foreshadowing` | 伏笔推进（`open_hooks` 相关） |
+    | `OTHER` | `other` | 上面都装不下的 |
+
+    **纪律**：
+    - 前四条 `CONT-*`（`CONT-TIMELINE` / `CONT-UNANCHORED-REF` / `CONT-REGISTER` / `CONT-PROCEDURE`）只描述**正文自身前后不一致**，不是文学评价——「这一段写得平淡」不属于其中任何一条；`CONT-BEAT-DEVIATION` 则是 §3.7 节拍核销的**正式形式**（`[beat N 缺失/偏离]` 前缀与它并存，二者说的是一件事）；
+    - `rule_id` 与 `category` **必须配套**（上表同行的组合）；不要自创 id、不要用本表之外的写法（大小写、连字符必须逐字一致）；
+    - 判 `CONT-*` 时 `quote` **必须逐字取自正文**（下游会做子串机检，不可溯源即丢弃该条）——这是分类法能被下游看见的前提；
+    - **`CONT-*` 一律只是提示**：它们的后果档恒为 `auto`（可见、不阻断），**不得**被当作自动改稿 / 自动驳回的触发器，也不得因为你报了 `high` 就期待 Workflow 有什么动作；
 
 ---
 
@@ -86,10 +110,11 @@
 3. 在 `suggestion` 中直接**改写**正文（不要替作者写句子）；只描述「建议如何改」。
 4. 使用 `pacing / character / logic / foreshadowing / ai_flavor / other` 之外的 category 字符串。
 5. 使用 `high / medium / low` 之外的 severity 字符串。
-6. 把缺失的章节计划内容当作正文问题来指证（计划与正文是两类不同来源）。
-7. 输出超过 10 条 `issues`；超出会让作者失去重点。
-8. 输出空 `overall_comment` 或仅由标点 / 模板语（如「本章不错。」）组成的总评。
-9. 在输出 JSON 中包含任何字段名变体（如 `comments` / `note` / `score` / `summary`）——只允许 §7 中的字段。
+6. 使用 §3.11 闭集之外的 `rule_id`，或让 `rule_id` 与 `category` 不配套；省略 `rule_id` 或 `reason`。
+7. 把缺失的章节计划内容当作正文问题来指证（计划与正文是两类不同来源）。
+8. 输出超过 10 条 `issues`；超出会让作者失去重点。
+9. 输出空 `overall_comment` 或仅由标点 / 模板语（如「本章不错。」）组成的总评。
+10. 在输出 JSON 中包含任何字段名变体（如 `comments` / `note` / `score` / `summary`）——只允许 §7 中的字段。
 
 ---
 
@@ -144,6 +169,7 @@
 > - `plan_summary` 可能缺字段（部分项目未启用 chapter-plan）；缺字段视为 null，**不要**据此指责正文。
 > - `settings_digest` 是项目级设定（world_rules 全量规则 + 主要角色档案）的轻量摘要切片，专供**设定一致性（OOC）**审查使用；项目尚无角色/规则时该数组为空，**不**代表「设定无要求」——空时跳过 OOC 维度即可，**不**据此指责正文。
 > - `deterministic_hints` 是工作流前置确定性规则（去 AI 味 / AI 腔检测）的摘要，**仅供参考**；你可引用其中命中项辅助判断 `ai_flavor` 类别，但每条 `issue` 仍必须有 `draft_text` 中的真实引用，不能仅因摘要命中就列问题。
+> - `deterministic_hints` 里可能出现**连续性类**的确定性算子 id（`CONT-CLOCK-DAYBREAK` 深夜时钟↔天亮标记、`CONT-TIME-BACKSTEP` 同章段首时点回退）。它们与 §3.11 的 `CONT-*` 是两个命名空间：**确定性算子 id 由规则产出，你不要把它们当作自己的 `rule_id`**——核对原文后，若确认存在矛盾，报 `rule_id=CONT-TIMELINE`（`quote` 逐字取自正文）；若核对后认为不矛盾（如区间内有时间推进交代），**不报**。摘要命中不构成「必须报一条」的义务。
 > - **可选输入：`genre_rubric`（题材审查要点）**——项目绑定题材包且该包声明 `critic_rubric` 时才出现；完整字段为 `payoff_focus[]` / `taboo_notes` / `style_notes`（可选 `__genre_rubric_truncated__`）。含义与用法见 §3.10；字段整体缺席 ⇒ 未绑定题材包（或题材包未声明审查要点）→ **跳过**题材维度，**不**报错、不得索要、不得据此指责正文。
 
 ---
@@ -167,6 +193,7 @@
 11. **设定一致性（OOC）证据要求**（V3.9 新增）：OOC 类 issue 的 `quote` 仍必须是 `draft_text` 中的真实子串；`suggestion` 必须**显式引用**违反的 `settings_digest` 条目（标注 kind + name，例如「违反 world_rule『青云宗不收外徒』」），便于作者定位设定来源。
 12. **severity 标尺（硬缺陷优先）**：`high` 仅允许用于硬缺陷——(a) 无源信息：正文出现计划/设定/前章中无任何来源的关键信息；(b) 行为链断裂或章内互斥（见 §3.9）；(c) 藏点/对象错位：关键物件或信息的持有者/位置与设定矛盾；(d) 台词矛盾：同一人物对同一事实的说法前后冲突；(e) 节拍完全缺失：§3.7（缺失型至少 medium）与 §3.8（爽点 beat 完全缺失升 high）合称。写法/节奏/视角/措辞类优化建议**封顶 medium**——「情绪不够强」「视角轻微跳」「节奏偏散」等不得标 high。既有追读力条款的 severity 指引（§3.8）维持不变。
 13. **题材 rubric 证据要求（题材库 P2）**：题材 rubric 类 issue 的 `quote` 仍必须是 `draft_text` 的真实子串；`taboo_notes` 命中型 issue 的 `suggestion` 必须**显式引用**触发的禁忌项文本（≤20 字），`payoff_focus` 未兑现型 issue 必须在 `suggestion` 中引用对应 `type_id`（可附 `核销提示` 的关键特征），便于作者对照题材包核对。
+14. **分类法与依据（必填字段）**：每条 issue **必须**填 §3.11 闭集里的 `rule_id`（与 `category` 配套）与一行 `reason`（≤40 字，只写依据）。`quote` 必须**逐字**取自 `draft_text`（不得改写、不得用「……」拼接两处）——下游对 `quote` 做子串机检，不可溯源的条目会被**静默丢弃**，等于没报。连续性类（`CONT-*`）问题一律只作提示：后果档恒 `auto`，**绝不**触发自动改稿或自动驳回；`reason` 要写清「与哪一处冲突」（引另一处的短片段 ≤15 字即可，不要整段复述）。
 
 ---
 
@@ -183,9 +210,11 @@
   "strengths": ["string, 单条亮点，≤60 字", "..."],
   "issues": [
     {
+      "rule_id": "CONT-TIMELINE | CONT-UNANCHORED-REF | CONT-REGISTER | CONT-PROCEDURE | CONT-BEAT-DEVIATION | AI-FLAVOR | PACE | CHARACTER | LOGIC | FORESHADOW | OTHER",
       "category": "pacing | character | logic | foreshadowing | ai_flavor | other",
       "severity": "high | medium | low",
       "quote": "string, draft_text 中的连续子串，≤60 字",
+      "reason": "string, 一行依据，≤40 字",
       "suggestion": "string, 修改建议，≤80 字"
     }
   ]
@@ -194,8 +223,11 @@
 
 `required` 字段：`schema_version`, `prompt_version`, `chapter_id`, `overall_comment`, `strengths[]`, `issues[]`。
 `strengths` 与 `issues` 必须是数组（即便为空也输出 `[]`，不省略）。
+每个 `issues[]` 元素 required 字段：`rule_id`, `category`, `severity`, `quote`, `reason`, `suggestion`（六个都要，一个都不能省）。
 
-> **关于 OOC 维度的输出**：本版本**不**新增 category 枚举；OOC 类问题按其性质映射到现有枚举——人物档案行为/称谓违反 → `character`；事件逻辑/时间线/势力关系违反 → `logic`；其它设定不一致 → `other`。`severity` 遵守 §3.6 的「至少 medium」硬性下限。
+> **`rule_id` 与 `category` 必须配套**（组合表见 §3.11）：`CONT-TIMELINE` / `CONT-UNANCHORED-REF` / `LOGIC` → `logic`；`CONT-REGISTER` / `CONT-PROCEDURE` / `CONT-BEAT-DEVIATION` / `OTHER` → `other`；`AI-FLAVOR` → `ai_flavor`；`PACE` → `pacing`；`CHARACTER` → `character`；`FORESHADOW` → `foreshadowing`。
+
+> **关于 OOC 维度的输出**：本版本**不**新增 category 枚举；OOC 类问题按其性质映射到现有枚举——人物档案行为/称谓违反 → `character`；事件逻辑/时间线/势力关系违反 → `logic`；其它设定不一致 → `other`。`severity` 遵守 §3.6 的「至少 medium」硬性下限。`rule_id` 同理映射：人物档案违反 → `CHARACTER`；时间/事实矛盾 → `CONT-TIMELINE` / `CONT-UNANCHORED-REF`；时代与语域不符 → `CONT-REGISTER`；现实流程写错 → `CONT-PROCEDURE`；计划节拍未兑现 → `CONT-BEAT-DEVIATION`；其余 → `OTHER`。
 
 ---
 
@@ -238,26 +270,45 @@
   ],
   "issues": [
     {
+      "rule_id": "AI-FLAVOR",
       "category": "ai_flavor",
       "severity": "low",
       "quote": "竹影斜斜地落在青石地砖上",
+      "reason": "「斜斜地」是高频模板状语，属句式套路",
       "suggestion": "「斜斜地」属高频模板连接词，删去或换成具体动作（如『竹影在窗下画出条条细纹』）。"
     },
     {
+      "rule_id": "PACE",
       "category": "pacing",
       "severity": "medium",
       "quote": "她不再追问。可她知道，今夜她带回的不是答案，而是一道新的裂缝。",
+      "reason": "章末双句收束偏散，情绪落在比喻上而非画面",
       "suggestion": "末段双句收束偏散，建议把『新的裂缝』具象化（一个动作或一物），把情绪收在画面而非比喻上。"
     },
     {
+      "rule_id": "FORESHADOW",
       "category": "foreshadowing",
       "severity": "high",
       "quote": "她说『好』的时候，答得太轻；说『明日』的时候，避得太准。",
+      "reason": "本章关键伏笔（黑玉佩）未显式出现",
       "suggestion": "本章关键伏笔（黑玉佩）未在此处显式出现，建议让林渊至少提一句『父亲遗物中有件东西，我还没决定说与不说』。"
     }
   ]
 }
 ```
+
+> **连续性类示例**（`rule_id` 用 `CONT-*`，`quote` 逐字取自正文）：
+>
+> ```json
+> {
+>   "rule_id": "CONT-TIMELINE",
+>   "category": "logic",
+>   "severity": "high",
+>   "quote": "窗外的天际线已经有一层淡淡的亮了",
+>   "reason": "同场景开场是「凌晨两点十七分」，中间无时间推进交代",
+>   "suggestion": "在门铃场景与章末之间补一句时间跨度的交代（如『他在窗边站到五点』），或把开场时刻改到接近天亮。"
+> }
+> ```
 
 ---
 
@@ -275,6 +326,7 @@
 8. **E-CRT-08 severity 硬缺陷映射**：评审输出中 high 级 issue 必须能映射到 §6.12 硬缺陷五类之一，否则视为 severity 失准。
 9. **E-CRT-09 章内自洽必检**：章内自洽维度（§3.9）未被跳过——当正文存在同一事实多处表述时，评审应体现比对结果（无冲突则不报，有冲突必报 high）。
 10. **E-CRT-10 题材 rubric 必检（题材库 P2）**：`genre_rubric` 非空时，评审须体现题材维度——`payoff_focus` 中的类型逐个核过 `verify_hint`（未兑现 / 兑现弱必须出 issue），`taboo_notes` 命中必须出 `high`；`genre_rubric` 缺席时不得出现「题材要求」类问题。
+11. **E-CRT-11 分类法必填（连续性，2026-09-19）**：每条 `issues[]` 元素必须带 `rule_id` 与 `reason`，且 `rule_id` ∈ §3.11 闭集、与 `category` 配套（组合表见 §3.11 / §7）。`quote` 必须逐字可溯源（沿用 E-CRT-03 的子串机检），`reason` ≤40 字。**验收口径的边界**：`rule_id` / `reason` 由**提示词层**约束，`critic` 契约校验器（`packages/core/agent_runtime/structured_output._validate_critic`）只校验 `category` / `severity` 两个枚举与六个必备字段——缺 `rule_id` / `reason` 的报告仍会被 `critic_status='ok'` 收下，由人工审查兜底。下游若要把连续性条目提成报告顶层结构（`continuity_findings`），调用 `packages/core/quality/continuity_taxonomy.continuity_findings(issues)`；该接线尚未接入 `chapter_review/pipeline.py`（见该函数 docstring 写明的一行改动）。
 
 ---
 
@@ -289,6 +341,7 @@
 | §94 Prompt Version | `prompt_version: critic:v1` |
 | §113 Agent 十问 | 见 `docs/agents/agent-contracts-v0.md` |
 | V1.3 评审员落地 | Workflow `chapter-review` 的 `_critic_review_node` 插入 basic_checks 与 author_review 之间 |
+| 连续性分类法（2026-09-19） | §2 问题清单字段 / §3.11 分类法闭集 / §4.6 越界禁令 / §6.14 依据要求 / §7 schema 的 `rule_id`·`reason` / §9 E-CRT-11；代码侧单源 `packages/core/quality/continuity_taxonomy.py` |
 
 ---
 

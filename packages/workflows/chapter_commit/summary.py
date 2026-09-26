@@ -43,6 +43,8 @@ def _prepare_summarizer_call(ctx: dict[str, Any]) -> dict[str, Any] | None:
             return None
         project_id = chap_row["project_id"]
         chapter_no = int(chap_row["number"] or 0)
+        # 有意取最新（P1-1）：本节点在 commit 成功之后跑，要摘要的就是「刚定稿的
+        # 正文」；提交门禁已保证「最新草稿 = 被审草稿」，不存在被审旧版的情形。
         draft_row = conn.execute(
             """
             SELECT content FROM drafts

@@ -138,8 +138,14 @@ def _insert_write_run(
     *,
     scene_plan: dict | None = None,
     length_report: dict | None = None,
+    draft_version: int | None = None,
 ) -> str:
-    """插一条 chapter-write run（checkpoint_json 带 scene_plan / length_report）。"""
+    """插一条 chapter-write run（checkpoint_json 带 scene_plan / length_report）。
+
+    ``draft_version`` = 该 run 落库的草稿版本（真实 chapter-write 的 save_draft 节点会
+    写这个键，见 ``packages/workflows/chapter_write/pipeline.py`` 的返回）——它标定
+    ``length_report`` 的归属版本；省略 → checkpoint 无此键（归属未知，老库形态）。
+    """
     run_id = new_id("wfr")
     workflow_id = new_id("wf")
     now = now_iso()
@@ -148,6 +154,8 @@ def _insert_write_run(
         checkpoint["scene_plan"] = scene_plan
     if length_report is not None:
         checkpoint["length_report"] = length_report
+    if draft_version is not None:
+        checkpoint["draft_version"] = draft_version
     conn = get_connection(db_path)
     try:
         conn.execute(
@@ -327,13 +335,15 @@ def test_ratio_declaration_normalized(tmp_path: Path):
 
 
 def test_word_band_deviation_issue(tmp_path: Path):
-    """实际 2000 字 < 声明带下限 2400 → GENRE-WORD-BAND-DEVIATION。"""
+    """实际 2000 字 < 声明带下限 2400 → GENRE-WORD-BAND-DEVIATION（source=length_report）。"""
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid)
     _create_and_bind_pack(db_path, pid)
-    _insert_write_run(db_path, cid, length_report={"visible_chars": 2000})
-    _insert_draft(db_path, cid, "字" * 2000)
+    _insert_write_run(
+        db_path, cid, length_report={"visible_chars": 2000}, draft_version=1,
+    )
+    _insert_draft(db_path, cid, "字" * 2000, version=1)
 
     result = verify_chapter(db_path, cid)
     issues = [i for i in result.issues if i.rule_id == RULE_WORD_BAND_DEVIATION]
@@ -343,6 +353,8 @@ def test_word_band_deviation_issue(tmp_path: Path):
     wb = result.redline_check["word_band"]
     assert wb["checked"] is True and wb["within_band"] is False
     assert wb["source"] == "length_report"
+    assert wb["reviewed_draft_version"] == 1
+    assert wb["length_report_origin_version"] == 1
 
 
 def test_word_band_in_band_no_issue(tmp_path: Path):
@@ -369,6 +381,78 @@ def test_word_band_falls_back_to_draft_when_no_length_report(tmp_path: Path):
     wb = result.redline_check["word_band"]
     assert wb["source"] == "draft"
     assert wb["word_count"] == 3000
+    assert wb["within_band"] is True
+
+
+def test_word_band_measures_reviewed_draft_not_stale_length_report(tmp_path: Path):
+    """复现事故：写稿 run 记的是旧版长度，被审的是作者手改的新版 → 量新版。
+
+    实证形状（ch_92bac068ff0d / review run wfr_adf71afbb7d9）：同一份报告里
+    ``word_count=2248, draft_version=13``，而 ``genre_check`` 报「实际字数 713
+    （length_report）」——713 是 v11 的长度；v12 / v13 是作者手改草稿
+    （``POST /api/chapters/{id}/drafts``），不经过 chapter-write，length_report
+    停在 v11（写稿 run 的 checkpoint ``draft_version=11``）。
+    """
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    _create_and_bind_pack(db_path, pid)
+    # 写 v11 的那次 write run：length_report 713，归属版本 11。
+    _insert_write_run(
+        db_path, cid, length_report={"visible_chars": 713}, draft_version=11,
+    )
+    _insert_draft(db_path, cid, "字" * 713, version=11)
+    _insert_draft(db_path, cid, "字" * 2020, version=12)  # 手改：v12
+    _insert_draft(db_path, cid, "字" * 2248, version=13)  # 手改：v13（被审版本）
+
+    result = verify_chapter(db_path, cid)  # 默认取最新草稿 = v13
+    wb = result.redline_check["word_band"]
+    assert wb["reviewed_draft_version"] == 13
+    assert wb["word_count"] == 2248
+    assert wb["source"] == "draft"  # 陈旧 length_report 不被采信
+    assert wb["within_band"] is False  # 带 2400~3600：2248 低于下限
+    wb_issue = [i for i in result.issues if i.rule_id == RULE_WORD_BAND_DEVIATION]
+    # 出 issue 时数字必须是被审的 2248（不是陈旧 length_report 的 713）
+    assert len(wb_issue) == 1
+    assert "2248" in wb_issue[0].message
+    assert "713" not in wb_issue[0].message
+
+
+def test_word_band_honours_explicit_reviewed_version(tmp_path: Path):
+    """复审指定旧版本（ctx['draft_version']）→ 按那一版核销，且采信同版 length_report。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    _create_and_bind_pack(db_path, pid)
+    _insert_write_run(
+        db_path, cid, length_report={"visible_chars": 713}, draft_version=11,
+    )
+    _insert_draft(db_path, cid, "字" * 713, version=11)
+    _insert_draft(db_path, cid, "字" * 2248, version=13)
+
+    result = verify_chapter(db_path, cid, draft_version=11)
+    wb = result.redline_check["word_band"]
+    assert wb["reviewed_draft_version"] == 11
+    assert wb["word_count"] == 713
+    assert wb["source"] == "length_report"  # 归属版本与待核版本一致 → 权威值
+    issues = [i for i in result.issues if i.rule_id == RULE_WORD_BAND_DEVIATION]
+    assert len(issues) == 1 and "713" in issues[0].message
+
+
+def test_word_band_unknown_length_report_origin_falls_back_to_draft(tmp_path: Path):
+    """老 checkpoint 无 draft_version（归属未知）+ 有草稿 → 量草稿，不采信无归属的数。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    _create_and_bind_pack(db_path, pid)
+    _insert_write_run(db_path, cid, length_report={"visible_chars": 2000})
+    _insert_draft(db_path, cid, "字" * 3000, version=1)
+
+    result = verify_chapter(db_path, cid)
+    wb = result.redline_check["word_band"]
+    assert wb["source"] == "draft"
+    assert wb["word_count"] == 3000
+    assert wb["length_report_origin_version"] is None
     assert wb["within_band"] is True
 
 

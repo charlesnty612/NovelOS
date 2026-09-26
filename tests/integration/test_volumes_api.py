@@ -393,3 +393,69 @@ def test_double_seal_returns_409(tmp_path: Path):
             assert "already sealed" in r.json()["detail"].lower()
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# arc_summary（迁移 0020 的列）：路由往返
+# ---------------------------------------------------------------------------
+
+
+def test_volume_arc_summary_round_trip(tmp_path: Path):
+    """POST / GET(list+detail) / PATCH 三处都要带上 arc_summary。
+
+    修复前：VolumeCreate/VolumeUpdate/Volume 三处模型都没有该字段，
+    路由层把 arc_summary 静默丢弃——只有脚本直写 SQL 能落值，
+    ``scripts/open_volume.py`` 的模块注释即为此打补丁的旁证。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+
+            # POST 创建带 arc_summary
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/volumes",
+                json={"number": 1, "title": "第一卷", "arc_summary": "从废脉少年到星辰之主"},
+            )
+            assert r.status_code == 201, r.text
+            vid = r.json()["volume_id"]
+            assert r.json()["arc_summary"] == "从废脉少年到星辰之主"
+
+            # GET 详情
+            r = await _request(app, "GET", f"/api/projects/{pid}/volumes/{vid}")
+            assert r.status_code == 200, r.text
+            assert r.json()["arc_summary"] == "从废脉少年到星辰之主"
+
+            # GET 列表
+            r = await _request(app, "GET", f"/api/projects/{pid}/volumes")
+            assert r.status_code == 200, r.text
+            assert r.json()[0]["arc_summary"] == "从废脉少年到星辰之主"
+
+            # PATCH 改写
+            r = await _request(
+                app, "PATCH", f"/api/projects/{pid}/volumes/{vid}",
+                json={"arc_summary": "改后摘要"},
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["arc_summary"] == "改后摘要"
+            assert r.json()["title"] == "第一卷", "PATCH 未提供的字段不应被覆盖"
+
+    asyncio.run(run())
+
+
+def test_volume_arc_summary_absent_defaults_to_null(tmp_path: Path):
+    """不提供 arc_summary → 列 NULL、响应里为 null（不落空串占位）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/volumes",
+                json={"number": 1, "title": "第一卷"},
+            )
+            assert r.status_code == 201, r.text
+            assert r.json()["arc_summary"] is None
+
+    asyncio.run(run())
