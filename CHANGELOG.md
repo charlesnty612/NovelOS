@@ -5,6 +5,458 @@
 
 ## [Unreleased]
 
+### 2026-09-26 进度同步复核（无代码改动，纯核销 + 文档订正）
+
+> 工作区三批次（09-18 / 09-21×2）滞留 5 天后统一落库前，由独立验证代理全量复核实测：
+> **pytest 2807 passed / 2 skipped / 0 failed**（`pytest -n 4 -q`，341s）、ruff 全绿、tsc 干净、
+> vitest 485、openapi regen 前后仅 version 字段环境元数据差异（97 paths / 50 schemas 零漂移）、
+> `check_state_sync` SYNC OK、迁移链 0001~0029。文档订正两条：① 本文件 09-21 批次基线
+> 2817→2807（见下）；② AGENTS.md 架构约定迁移链口径 0001~0026/38 表 → 0001~0029/40 表
+> （0027 加 chapter_scene_plans 表、0029 加 writing_bible 列）。三仓进度核查：内容仓自 09-17
+> 无新写作（F-20 指针 6/48 章重写 + 5 章欠带不 stale）；09-21 作者体验会话导出物已归档
+> NovelOS-Artifacts（`eae2234`，无敏感串核验后入库）。
+
+### 2026-09-21 全量检修复核批次：confirm 并存吞信息 / CONT-* 错类 / 尾块防呆 / 巡检假阳性（8 项）
+
+> **来源**：主会话对全仓做一次体检（3 个并行审查代理分头查 quality 门禁 / context_engine 装配 /
+> workflows+API，主会话逐条亲验后执行）。基线动作先跑一遍：`pytest -n 4 -q` 2798 passed / 2 skipped、
+> ruff 全绿、表数 39 一致、版本三处一致。**无 critical**；2 个 major + 6 个 minor，每个修复都带
+> 「撤修复必红」的突变验证。
+
+**1.（major）confirm 与 blocking 同发时 confirm 信息被整体吞掉** — `chapter_commit/gate.py`：
+此前 `should_block` 分支里 `if blocking_issues:` 优先，`gate_blocked.rule_ids` / ValueError 消息 /
+revision_note 全只含 blocking 侧。作者修掉硬伤后再提交才第一次撞上 confirm，且不知道要准备什么
+`gate_override`（违背 P0-1「不许在不知道批准什么的情况下批准」）。修法：`gate_kind` 新增
+`"block+confirm"`——blocking 优先不可协商不变，但 rule_ids 取两组并集、note 合成两类建议、
+error 串在既有 `| guidance=` 之前追加 `| gate=block+confirm | confirm_rule_ids=[...] |
+override_error=... | evidence=...`（前端按 `"| guidance="` 切分，零影响）。仅 blocking 时保持旧消息形态。
+
+**2.（major）`CONT-*` 连续性规则在质量报告里被归为 `style` 类** — `quality/engine.py` 的
+`_AI_PATTERN_CATEGORY` 未登记 `CONT-CLOCK-DAYBREAK` / `CONT-TIME-BACKSTEP`，落入默认回退
+`style`，与 `continuity_taxonomy.DETERMINISTIC_CONTINUITY_RULE_IDS` 的命名空间声明矛盾
+（「名实不符」——报告/前端按 category 分桶时连续性命中跑进「文风」桶）。修法：映射从 taxonomy
+名册**派生**（`{rid: "continuity" for rid in DETERMINISTIC_CONTINUITY_RULE_IDS}`），将来 taxonomy
+加新连续性规则时只需改一处，名册与映射的一致性由测试钉住。
+
+**3.（minor）`AI-DIALOGUE-LOW` 的证据是正文前 120 字** — 该命中的 dict 没有 `samples` / `words` 键，
+`_ai_pattern_evidence` 只能退回 `excerpt`，读者看到一段与「对话占比 8%」无关的原文。修法：命中补
+`samples: [占比摘要]`，既有 evidence 通道直接取到。
+
+**4.（minor）write 模式的 length retry 不剥离 stray `---REVISION-CHECKLIST---` 尾块** —
+`chapter_write/pipeline.py` 此前只按 `mode == "revise"` 剥离。writer-v3.md 明令 write 模式不输出尾块，
+但那是 prompt 纪律不是强制：模型一旦在 write / retry 轮吐了尾块，它会原样落进 `drafts.content`
+并抬高 word_count（字数带按含尾块数字判定）。修法：改为**看内容剥离**（分隔行出现就剥），
+坏 JSON 也剥（此前原样落稿）；revise 语义不变（缺失仍 warning），write 模式剥掉的尾块**不进**
+`revision_checklist` 审计面（审计面只登记定向改稿的核销承诺）。
+
+**5.（minor）`gate-revise` 端点不透传 `target_word_count` / `author_intent`** — `GateReviseRequest`
+此前没有这两个字段，改稿链上整体缺失：作者按 `--target-word-count 300` 起稿后被门禁拦下，一键改稿
+时 target 退回服务端默认 3000、作者铁律整段丢失（与 auto_revise 回路 2026-09-18 修过的同形）。
+修法：两个字段入请求体（同 `StartWorkflowRequest` 约束），值按「请求体 > 该章最近一次 run 的 ctx
+继承」解析，write 与接力 review 两段都用同一份。openapi / types 已 regen，前端 `gateRevise` 签名同步。
+
+**6~8.（minor，docstring / 巡检口径）** — ① `_normalize_gate_override` docstring 声称「非法形态 → None」
+而实现返回空 list 归一（行为安全、文档失真，已改为实情）；② `repair_policy.length_band_shortfall`
+补明「两源口径不一致时取缺口最大者」的理由；③ `check_state_sync` 把「无快照项目」的实体全部计成
+漂移（dev 库实测单项目 29 个实体全列进明细、结论 `DRIFT: 5 处`，而它们只是从未 commit）——
+改为单列「无快照项目（不计漂移）」小节 + JSON `projects_without_snapshot` 字段，dev 库复测 `SYNC OK`。
+
+测试基线 2798 → **2807 passed / 2 skipped**（新增 7 个判别用例 + 4 个 state_sync 口径用例；
+前端 vitest 485 不变）。全部修复配突变验证（撤修复必红，逐个实测）。
+〔2026-09-26 同步复核订正：本行原记 2817 与 AGENTS.md 一致性矩阵的 2807 矛盾；全量复跑实测
+**2807 passed / 2 skipped / 0 failed**（341s），按实测改定，账面加法与实测的 2 例出入不再追溯。〕
+
+### 2026-09-21 契约形状守卫批次：json_repair 腐烂产物不再静默过闸（2 项，16 新增用例）
+
+> **来源**：实战抓样——当天以作者身份用真实新书（`prj_8df1b427a688`《快穿镖人：开局护送灭世帝女》）
+> 跑 chapter-plan 时，director_planner 输出的 `key_beats` 被三级兜底 `json_repair` 修成
+> 「顶层可解析、元素腐烂」的结构（裸字符串/裸数组碎片混进数组）并**静默落库** `chapters.plan_json`
+> （`workflow_run_nodes` 里即烂，正文靠 `chapter_goal` 兜底未跑飞，全程无告警）。由同事代理修复、
+> 主会话逐条亲验（含拿库里真实事故计划喂新校验必拦）。测试基线 2768 → **2798 passed / 2 skipped**。
+
+**1. director 家族计划数组形状守卫** — `_validate_director` 新增 `_DIRECTOR_PLAN_ARRAYS` 核销：
+`key_beats` 在场必须是 list、元素必须 dict 且含 str `beat_id`/`purpose`；`character_changes_planned` /
+`information_releases` 元素必须 dict。**键缺席放行**（不收紧必填面；quality 对「无 key_beats」另有中性
+口径）——「验收要严、产线要活」的产线闸门口径不变。违规抛 `AgentOutputError` 走 runner 既有
+output-invalid 重试，**不静默放行**。用真实事故 payload 验证：拦截信息
+`key_beats[1] must be an object, got str` 精确指位。
+
+**2. observer 契约 7 数组元素形状守卫（同族洞，定性被实测修正）** — 形状核销抽成共用单点
+`_array_shape_errors()`，observer / director 两族共用；`_validate_observer` 从「只查数组是 list」
+收紧到「元素必须 object」。**必须说清的定性修正（同事代理实测推翻我先验）**：这条链**不是**
+静默落库路径——碎片会被下游 `story_state.validator.validate_delta` 的 jsonschema 拦下；真实危害是
+① 报错退化成笼统 validator 错误串（诊断质量）② 契约层放行让失败下探到 commit 级 delta 重试
+（多烧 observer 调用）③ 非 validator 消费方各自兜底（`_has_high_risk_change` 曾静默跳过非 dict
+元素；风控门 pause 载荷会把碎片原样端给人工）。修后重试提示可行动（`character_changes[1] must be
+an object`），HTTP 级端到端钉住「run FAILED / 章状态不动 / delta 不落库 / 契约层单次重试」。
+
+**未修登记（后续批次）**：① revise 模式的 `revision_checklist` 经 write 流水线 polisher 段后落库为
+null、`deviations[]` 越界申报无机器强约束——人工审改版只能靠全文 diff 发现超注改动；② signing-check
+「最佳 1500-2200 字」与题材包校准带「2000-3000（floor 1300）」口径打架（后者取自 10 本拆书实测）；
+③ 题材开篇 5 条 keyword 检查对创新词汇书整批误报（本书镖单/劫点/墨级词汇表与规则关键词零交集，
+5 条全「fail」但均为误判）；④ COMMITTED 章无局部返修路径（drafts 仅收 DRAFTED/REVIEWED）；⑤ observer
+转写失真一例（「第一镖头」压成「第一代老镖头」混入 knowledge delta，靠人工风控门肉眼拦截）。
+
+### 2026-09-18 全量优化批次：以「能交付成稿」为目标（12 项）
+
+> **来源**：当天用一本真实新书（`prj_2567bb8de642`《快穿：收账人》）以作者身份走完整条流水线，
+> 交付前三章后按实测缺陷排的修复批次。**所有阈值均取自本仓实测分布，不照搬外部数值**；
+> 每条修复都带突变验证（撤修复必红）。测试基线 2370 → **2768 passed / 2 skipped**。
+> 批次内**有一处先验判断被自己的度量推翻**，见 §1.3，按项目铁律留痕。
+
+#### 1. 后果闭合：算出来的问题必须有人能说「不」
+
+**1.1 severity 与后果解耦（P0-1）** — 此前 severity 有三档（info/warning/error）而**后果只有一档**
+（过）：`issues.py` 里只有「severity==error **且** rule_id ∈ `BLOCKING_RULES`」会归零总分并触发
+`enforce` 阻断，其余 error 一律「informational」；而 `MVP_SEVERITY_MATRIX` 把 style / pacing /
+payoff / ai_trace 四类**上限封在 warning** ⇒ 重复类问题在构造上永远进不了阻断白名单。
+实证：一份 9 段逐字重复（章内重复 20.3%／trigram 30.37%）的稿子 `errors: []`、`overall: 90`、
+`ai_trace: 92`，全流程绿灯提交。
+新增与 severity 正交的后果轴 `Gate = Literal["auto","confirm","block"]`
+（`issues.py::issue_gate`，唯一权威）：`block` 仍 ⟺ `severity=="error" ∧ rule_id ∈ BLOCKING_RULES`
+（`is_blocking_issue` 一字未动）；`confirm` ⟺ 规则入表**或**该条 issue 自身带 `gate="confirm"`；
+其余 `auto`。`enforce` 下 confirm 命中须带 `gate_override = {"rule_ids":[…],"reason":"…"}` 才放行
+（集合包含 + reason 非空），否则复用既有阻断落点（`plan_json.revision_note` + `gate_blocked.gate`），
+消息同时给出 **rule_id 清单 + 证据摘录**——调用方无法在不知道自己在批准什么的情况下批准。
+`StartWorkflowRequest.gate_override` 已暴露；openapi/types 已 regen。9 处突变验证。
+
+**1.2 AI 模式级规则接进质量路径** — 接线核实为**真缺陷**：`scan_ai_patterns` 的命中此前只进
+`chapter_review`，`QualityEngine.evaluate` 从不消费 ⇒ `CONFIRM_RULES` 里的 `AI-BEAT-REPEAT`
+在提交链路上是**惰性声明**（门禁从 `report.issues` 判，报告里永远没有这条 rule_id）。
+新增 `quality/engine.py::ai_pattern_issues`（通用转换，rule_id 原样透传、不硬编码）⇒ 现在真的进
+`quality_reports` 与提交门禁。severity 按 category 矩阵封顶，白名单规则不被削；与既有子分是两轴、
+不参与任何 `score_*`。撤接线 6 例红。
+
+**1.3 ⚠️ 先验判断被推翻：trigram 阈值 0.08 落在正常分布内部** — 我把
+`RULE_STYLE_REPETITION_TRIGRAM` 入 `CONFIRM_RULES` 的依据是**一个**观测样本（事故章 30.37%）。
+度量后证伪：人类锚点书（`NovelOS-Content/reference-books/榜一…侯府弧`）19 章
+**mean 7.54% / median 7.87% / max 9.49%，9/19 章超 0.08**；生成侧 92 章
+**min 6.19% / p50 13.33% / p90 17.49% / max 20.97%，仅 2/92 章低于 0.08**。即该阈值下几乎每一章
+——包括人写的——都要显式签字，门禁退化成橡皮图章，比不设门更坏（AGENTS.md「命中即报表把正常
+写法与真信号混在一起」的形状）。**事故章自身其余 12 版也只有 8.5%~13.0%，事故是单版异常。**
+替代方案：两档均取本仓分位——`STYLE_TRIGRAM_WARN_THRESHOLD = 0.16`（生成侧 p85 = 0.1621）、
+`STYLE_TRIGRAM_CONFIRM_THRESHOLD = 0.25`（生成侧 max 0.2097 与事故 0.3037 的几何中点 0.252）；
+severity 恒 warning，两档只差 `gate`。该规则**撤出静态 `CONFIRM_RULES`**，改由 `scoring.score_style`
+只对超 confirm 阈值的那一条上修 `gate="confirm"`——静态 rule_id 表表达不了「同一规则两种量级」。
+改后实测：人类侧 **0 warn / 0 confirm**，生成侧 78 无 issue / 14 warn / **0 confirm**，
+真实事故那版 confirm 并带片段证据；全库 110 条历史 trigram 命中复算 92 静默 / 17 warn / 1 confirm。
+`scoring_formula_hash` `7613897ead30e445` → **`988518dca9e00c53`**。
+
+#### 2. 生成期替代评审期：长度不再靠「事后改稿」
+
+**2.1 计划预算自洽** — `_inject_scene_word_budget` 现要求 per-scene 预算总和落在 chapter target 的
+±10%，越界按已声明值**比例归一化**（最大余数法，确定性），不再「越界即推倒等分」；已声明子集吃满
+预算时缺失 scene 不再拿 `T/n` 保底值把总和顶到 1.33×target。归一化不静默（warning + 结构元字段）。
+薄计划信号：target ≥ 2000 却只 1 个 scene ⇒ warning 级 `thin_plan`（实证：target 2500 只规划 1 个
+scene 仍被当正常，writer 交 900 字）。
+
+**2.2 write 节点内长度闭环** — writer 返回后实测 `visible_chars`，欠带即**同一节点内以
+`mode="write"` 整章重写**（清 draft_text / 去 revision_note / 注入 `length_directive`），最多
+`NOVELOS_WRITER_LENGTH_RETRIES`（默认 2）次，落带即停，取离带最近的一次；首次在带 ⇒ 恰好 1 次
+writer 调用；超带不走此路径（仍归 condense）。**为什么必须 `mode="write"`**：revise 在 writer 侧被
+规则 20（净增 ≤ +5%）与 §6.1（未提及部分逐字保留）钉死，既是「追不上字数」的原因，也是「造出
+重复」的原因。7 处突变验证；`smoke_e2e` PASS。
+
+#### 3. 修复动作策略表：失败形状 → 修复动作（取代「一律 revise」）
+
+根因：**修复动作只有一个**。无论评审报的是长度、标点还是连续性，回路都 `revise: true`。
+新增 `routers/workflows/repair_policy.py`（纯函数 + 规则表）：`decide_repair` 给出闭集三选一 ——
+`regenerate`（`fresh_write`，writer 回 write 模式）/ `revise`（定向局部改稿）/ `stop`（不启动子 run，
+交人工）。判定顺序：读不到报告 → 缺 rule_id → **表外 rule_id（含连续性 / 逻辑 / 设定类与全部占比
+指标）** → 章内重复 → 字数下限缺口超出 `(1.05**n)-1` → 超带 → 作者主观驳回 → 局部形态类规则。
+原 `fresh_write` 逃逸不再是特例，成为策略表里的一行。停止 / 轮次耗尽会把
+` | auto_revise: stopped at iteration i/n: <reason> — <detail>` 追加进该 run 的 `error`，作者在 run
+列表里读得到原因；耗尽消息点名未能修复的**形状**。F-19 守卫：`RATIO_METRIC_RULE_IDS`
+（`AI-DIALOGUE-LOW` / `AI-DIALOGUE-ECHO` / `RULE_Q6_OVERLAP_RATE` / `RULE_Q8_HUMAN_RATIO_LOW`）
+双向禁入两个自动动作集合，命中即 stop。10 处突变验证（其中一处首次复测为绿，暴露了用浮点不可比较值
+测边界 = 等于没测，已改用精确可表示值）。
+
+**附带修复**：改稿子 run 丢失目标字数。实证：作者按 `--target-word-count 300` 起稿，首轮评审判
+「288/300 字」，改稿子 run 判「288/3000 字」——回路在**错误口径**上判定成败。
+`ResumeRequest.target_word_count` 新增，`resume_run` 按「请求体 > 原 run ctx」解析后并入
+`initial_ctx_extra`，write / review 两个子 run 共用父 run 的同一个目标。撤透传 ⇒ `assert 3000 == 1000`
+（与线上同形）。
+
+#### 4. 检测面补齐（两处，均**先抽样后定阈**）
+
+**4.1 `AI-BEAT-REPEAT`（同章远距小句复现）** — 既有两条章内重复算子只抓**复制粘贴**：
+ch2 章尾把同一收束画面写三遍（shingle 0.0030 判干净）、ch3 v1 同一拍出现 3 次（0.0006 判干净），
+人眼一眼看出、现有算子零告警。新算子为**纯字面确定性**机制（句读片段间最长公共子串 ≥6 字、
+双侧覆盖率 ≥60%、相距 ≥200 字；数字/计量串由数字守卫排除；章级 ≥2 处且 >1.0/千字）。
+**抽样先于采信**：候选池系统抽样 **52 条**逐条人工过目 —— **43 真 / 9 误（82.7%）**；
+误报两类（专名/术语复指、共用骨架+不同宾语）已在 docstring 与用例里登记为**已知行为**，
+不假装算子能分辨。首轮无数字守卫时开局 24 条只有 13 真（账目数字串撑起噪声）⇒ 补守卫。
+实测生成侧 1.17/千字 vs 人类侧 0.05/千字、**人类侧 0/19 章**达标。14 处突变验证。
+
+**4.2 章内时点矛盾（`CONT-CLOCK-DAYBREAK` / `CONT-TIME-BACKSTEP`）** — 正文级连贯性此前**无人核销**
+（`timeline_consistency` / `knowledge_leakage` 吃的是 `(snapshot, delta)`，核的是状态机不是文字）。
+新算子：① 深夜档钟点与其后同章的天亮类标记配对（间距 ≤3000 字且中间无时间推进标记）；
+② 同章相邻段首时点戳回退 ≥2 小时（时辰按起始小时折算，跨午夜正确判为顺行）。
+**候选空间仅 27 条，逐条过目**：「白天标记→夜晚标记」检查 **14/14 误报 ⇒ 整条废弃未进代码**；
+「时点回退」原始 8 条 1 真 7 误（precision 12.5%，与仓内曾废弃的 97/95 同形），加四道守卫后
+只剩那一条真命中。**诚实交代**：守卫是在同一批候选上逐层定出的、**无留出验证集**；
+人类基线零命中**且零机会**（全弧无钟点标记）⇒ 该基线**不构成**「对人类正文零误报」的证据。
+20 处突变验证（首轮有 3 条守卫用例是**空转**的，已重建 fixture 使每个守卫成为唯一排除者）。
+
+**4.3 critic 连续性分类法** — `CRITIC_TAXONOMY` 闭集（`CONT-TIMELINE` / `CONT-UNANCHORED-REF` /
+`CONT-REGISTER` / `CONT-PROCEDURE` / `CONT-BEAT-DEVIATION` + 既有五类），全部映射到**现有**
+category 枚举、不改契约校验器；每条 issue 新增必填 `rule_id` + `reason`，`quote` 必须**逐字**
+（下游子串机检）。**红线**：连续性类 findings 恒 `gate=auto`（可见、不阻断），
+**不得**进 `CONFIRM_RULES`/`BLOCKING_RULES`、**不得**作自动改稿触发器。
+
+#### 5. 测量对象一致性：「读草稿的必须是被审那一版」
+
+**先审计后动手**：全 `packages/` 扫「读草稿正文 / 草稿派生测量」站点 **18 处**并逐处定性
+（correct / latent / out-of-scope）。**latent 3 处**已修 2 处：① `quality/service.py`
+（正文与落库版本是两次独立读，且评估路径无法指定被评版本）；② `chapter_commit/gate.py:quality_gate`
+量「最新」而作者可指定旧版审校 ⇒ **可对没审过的正文放行**（接缝：`ctx["draft_version"]` >
+最近一次 chapter-review 的 `report.draft_version` > 最新）；③ `chapter_review` 的 `basic_checks`
+自带 `ORDER BY created_at DESC`，同一份报告里存在两个「最新」⇒ 收敛到共享单点。
+新增共享解析单点 `packages/domain/chapter/draft_resolver.py::resolve_draft`（显式版本 → 该版本；
+`None` → 最新，排序口径 **`version DESC`**，发布序与作者看到的「v13」同口径）。
+**形状级回归测试**：递归遍历报告里所有「字数」与「版本」字段，事故三版形状 v11/v12/v13
+（713 / 1674 / 2500）——默认必须全取 v13，指定 `draft_version=12` 必须全取 v12；
+将来新增的测量点若又漏传被审版本会直接在此现形。
+
+#### 6. 作者面
+
+**6.1 项目写作圣经（迁移 0029）** — `author_intent` 此前是 `StartWorkflowRequest` 上的**单次运行**
+字段、不落库：作者的整本书铁律（「无 CP」「第一位面＝现代都市」…）必须每次 plan / write / revise
+重新粘贴，漏一次即**静默丢失**。新增可空列 `projects.writing_bible TEXT`
+（0029 纯 `ALTER TABLE ADD COLUMN`，无回填、存量逐字不变），经 `ProjectCreate/Update/Project` 与
+projects 路由暴露。**优先级：圣经＝基线，运行期＝增量，按「基线 + 增量」拼接**（文本内声明冲突以
+增量为准）——不选「整体替换」的理由：作者为单章写一行小要求时会静默丢掉全书铁律，正是本条要修的
+形状。解析单点 `builders_common.resolve_author_intent`；writer / director 装配注入（含 paged 路径
+与 preview）；**缓存键新增维度 `bible_fp`**（硬规则 2：撤该维度 ⇒ `assert 1 == 2` 读到旧装配）。
+14 处突变验证。
+> 同日另修：`brief.author_notes` 此前只传给 project-init 四段中的两段，world_builder /
+character_designer 拿不到作者约束（实证：brief 里写了「无 CP / 现代都市」，角色表仍返回
+`love_interest` 与古风宗族世界观）——与 AGENTS.md 硬规则 9「收下即忘」同形。已补两段 payload
++ 两处 prompt 段。
+
+**6.2 章节量产一等入口** — 此前每本书都要在仓外手写一次性驱动（`_refs/arc1..arc6_driver.py`
+一路演化），409 竞态、PAUSED 人工节点、风控门全靠脚本自己扛，日志里那些「进程静默死亡 30 分钟」
+就是这么来的。新增 `scripts/produce_chapters.py`（dry-run 默认 / `--apply` / `--json`；
+端口取自 `get_settings()`）：四道守卫 —— 409 容忍的有界退避启动、commit 前等清场、报告驱动的
+评审决议、风控门有界自动批准（载荷进 `auto_approvals` 可审计）；改稿子 run 靠轮询「更新的 PAUSED
+chapter-review run」发现（不盯 chapter.status）。**不静默批准坏章**：批准前用本地 13 字 shingle
+口径直算章内重复率，超 8% 拒绝批准（实测重复段落成文 0.4492；撤该分支后驱动**确实把重复章推到了
+COMMITTED**）。
+
+#### 7. 交付判定：为「done」补上唯一出口（P4）
+
+根因：提交门的硬停只有一份很窄的结构性白名单，可交付性散在 `quality_reports` / 字数带 /
+`signing_check` / 章状态四处，**没有任何一处回答「这一章 / 这本书能不能交」**。
+新增 `packages/core/delivery/`（纯规则聚合，无 LLM / 无新依赖 / 无迁移）+ 端点
+`GET /api/projects/{project_id}/delivery-verdict`（逐章 rows + 项目 roll-up）。
+四档判定 `deliverable` / `needs_work` / `not_deliverable` / `not_a_candidate`
+（PLANNED 明确为「还不是交付对象」，与「写了但不能交」分开）。**证据缺失 ≠ 通过**：
+无质量报告 / 报告评的草稿版本 ≠ 当前最新正文 / 量不出字数 → 一律落 `not_evaluated` 并降级
+（撤该分支会使「无质量报告」的章变成 `deliverable`，静默通过形态实测复现）。
+gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960 条 issue 带 `gate` 字段）。
+`signing_check` 只对第 1~3 章计入判定，第 4 章起显式标 `out_of_scope`。
+实测本书：`project_verdict: needs_work`（3 已写 / 0 可交付 / 27 未写），第 1 章 blocking 理由为
+「trigram 重复率 …（confirm 档：须显式接受才放行，本章报告内无接受留痕）」+`ch1_conflict_300` fail
+——**那个「响了但没人消费」的黄金三章规则现在被消费了**。12 处突变验证。
+
+#### 8. 其它修复与测试基线
+
+- `resume` 竞态撞 0017 部分唯一索引 → HTTP 500（应为 409）：见下条独立条目。
+- 共享 filler `tests/unit/neutral_prose.py` **自身** shingle 重复率 0.71(300字)/0.94(1300字)——
+  「中性」填充自己就是重复文本，新算子命中它不是误报。重写为组合式生成（实测 0.0000 全档、
+  `scan_ai_patterns` 零命中），随之删除 4 个用例文件里的 `without_repeat_hits` 过滤豁免。
+- 基线：**2768 passed / 2 skipped**（本轮起点 2370）；`ruff check packages scripts tests` 全绿。
+
+### Fixed（2026-09-18 题材核销字数带量的是旧稿：作者手改后的草稿从未被 genre 判据看见）
+
+> 实机证据（只读复算，章 `ch_92bac068ff0d` / 项目 `prj_2567bb8de642` / review run
+> `wfr_adf71afbb7d9`）：该 review 自身报告 `word_count: 2248, draft_version: 13`，而**同一份
+> 报告**里 `genre_check` 写
+> `GENRE-WORD-BAND-DEVIATION … "实际字数 713（length_report）低于下限题材包字数带 2000~3000"`。
+> 713 是 **v11** 的可见字数（`drafts` 复算：v11=713 / v13=2248），v13 在带内。
+> **真因**：`packages/core/genre/verifier.py` 从**最近一条 chapter-write run 的 checkpoint**
+> 取 `length_report`，并按 `length_report["visible_chars"]` 定字数——但 `length_report` 是
+> 那次写稿 run **落笔那一刻**的自测值，其归属版本写在 checkpoint 的 `draft_version`（该 run
+> 为 11）。凡不经过 chapter-write 的正文变更（**作者手改**：`POST /api/chapters/{id}/drafts`；
+> 复审指定旧版）genre 一律看不见，判据与「被审的那份正文」脱钩——**测量对象 ≠ 被审对象**。
+>
+> - **修复落点（选定接缝：核销入口按版本取正文 + length_report 需可归属）**：
+>   ① `verifier.py::_load_chapter_sources` 增 `draft_version` 形参（显式版本 → 按版本取草稿；
+>   省略 → 最新一版，默认口径不变），并读出 checkpoint 的 `draft_version` 作为
+>   `length_report_origin_version`（该 length_report 的归属版本）；
+>   ② 新增 `verifier.py::_resolve_word_band_count`：**仅当** `length_report` 有归属且归属版本
+>   == 本次核销的草稿版本时采信 `length_report`（source 不变、老口径对「没改过稿」零变化），
+>   否则改用待核草稿正文的权威口径 `visible_chars`（source=`draft`，与 `basic_checks` 的
+>   `report.word_count` **同一函数**——两处口径不可能再分叉）；归属未知（老 checkpoint 无
+>   `draft_version`）且草稿正文在场 → 同样量草稿；草稿正文缺席（该 run 未落草稿 / 孤儿章）而
+>   `length_report` 在场 → 仍用 `length_report`（v1 兜底不变）；
+>   ③ `_check_redlines` 的 `word_band` 明细增 `reviewed_draft_version` /
+>   `length_report_origin_version`，让「量的哪一版」在报告里可读；
+>   ④ `chapter_review/pipeline.py::_collect_genre_check` 增 `draft_version` 形参，
+>   `_basic_checks_node` 传本次评审实际审的 `reviewed_version`（含 `ctx['draft_version']`
+>   指定旧版复审的路径）——**核销对象 = 被审对象**。
+> - **severity 不变**：`GENRE-WORD-BAND-DEVIATION` 仍 `warning`（hard rule 4：评审类约束不进
+>   `BLOCKING_RULES`）；`scoring_formula_hash` / severity 矩阵 / 公式不变 ⇒ 无需三文档同步。
+> - **测试**：`tests/unit/test_genre_verifier.py` 新增 3 例（事故形状复现；指定版本复审；
+>   归属未知 → 量草稿）+ 1 例既有断言随 fixture 补齐（`_insert_write_run` 现写真实形态的
+>   `draft_version`）；`tests/unit/test_chapter_review_genre_check.py` 新增 2 例端到端
+>   （事故形状走 `_basic_checks_node`，断言 `genre_check.word_band.word_count ==
+>   report.word_count` 恒等 + warnings 里是 2248 而非 713；指定 `ctx['draft_version']` 复审旧版）。
+> - **突变验证（撤 → 红 → 复，两次）**：① 撤归属判定（`attributed` 退回「有 visible_chars 即
+>   采信」= 原实现）→ 3 例红，实测 `assert 713 == 2248`（`test_genre_verifier.py:411`）、
+>   `assert 'length_report' == 'draft'`（:453）、
+>   `AssertionError: assert 713 == 2248`（`test_chapter_review_genre_check.py:272`）；
+>   ② 只撤「传被审版本」（`_collect_genre_check(db, cid)`）→ 1 例红
+>   `assert 13 == 11`（`test_chapter_review_genre_check.py:293`）⇒ 两半修复各自被钉住。
+>   两次复测 36 passed。
+> - **验证命令**：`ruff check packages scripts tests` → All checks passed；
+>   `pytest tests/unit/test_genre_verifier.py tests/unit/test_chapter_review_genre_check.py -q`
+>   → 36 passed；关联面 `tests/unit -k "genre or word_band or review"` 与
+>   `tests/workflow -k "review or pipeline"` 全绿。未跑全量（按任务边界：dev 服务正在 18081
+>   跑量产）。
+> - **未做（留痕）**：① 红线语料的 `length_report`（JSON 串）成分未动——它只是文本语料、
+>   不参与「测量」，陈旧值只多几个数字；② `length_report` 的其它跨 run 消费方全仓复查为无
+>   （仅 chapter_write 链内消费 + 本核销层），故本次只改这一处接缝。
+
+### Fixed（2026-09-18 resume 竞态撞 0017 部分唯一索引 → HTTP 500，应为 409）
+
+> 实机证据（`data/serve.out.log` 只读，run `wfr_dcbfa4324d4c`，14:39:53）：
+> `POST /api/runs/wfr_dcbfa4324d4c/resume → 500 Internal Server Error`，
+> `sqlite3.IntegrityError: UNIQUE constraint failed: workflow_runs.chapter_id`，
+> 抛出点 `control.py resume_run → engine.resume_async → engine._mark_run_running` 的
+> UPDATE，违反 `idx_workflow_runs_active`（`chapter_id WHERE status IN
+> ('RUNNING','PENDING') AND chapter_id IS NOT NULL`）。**该不变量是正确的，本轮未动**。
+> **真因（缺口在守卫的形状，不在值）**：resume 的章节互斥守卫
+> （`resume_run` 里的 `_check_active_run_for_chapter`）是 check-then-act——查过一次之后
+> 还要 JOIN 反查 workflow 名、取定义、读整份 `checkpoint_json` 拼 ctx（毫秒~秒级）才落到
+> `_mark_run_running`；同刻 auto_revise 回路的 daemon 线程正为**同一个 chapter** 启动
+> write 子 run（`revise.py → common._run_workflow_return_payload →
+> engine.start_with_nodes_async`，日志同一秒的 `auto_revise loop iteration 1/2`），落在
+> 该窗口内 → 预检看不到它，UPDATE 被索引拒绝 → 原始 sqlite3 异常外溢成 500。
+> **start 路径早有此兜底**（`start_with_nodes` 捕获 IntegrityError → `WorkflowRunConflict`
+> → 409，V3.9「0017 兜底 TOCTOU」），resume 路径缺这一层——两个端点是同一竞态形状，
+> 只有一个做了转换。
+
+- **修复落点（三层，权威判定仍在索引；不新建错误类型、不放宽索引）**：
+  ① `packages/core/workflow_runtime/engine.py::_mark_run_running`：UPDATE 撞
+  `workflow_runs.chapter_id`/UNIQUE 时 rollback 并转 `WorkflowRunConflict`（其余
+  IntegrityError 原样抛出，不掩盖别的约束缺陷）——**该 UPDATE 是索引的唯一落点，
+  因此是唯一原子判定点**；② 同文件新增 `_ensure_chapter_free_for_resume`（引擎侧预检，
+  刻意非原子：只为「早于 `_prepare_resume_ctx` 的 `_skip_pending_node_rows` 副作用给出
+  可读冲突源」，并让不经 HTTP 的调用方 `engine.resume/resume_async` 拿到域异常而非
+  sqlite3 异常）+ 模块级 `_find_active_run_for_chapter` / `_active_run_conflict_message`
+  （与 API 守卫同语义、同一 409 文案形态）；③
+  `packages/core/api/routers/workflows/control.py::resume_run` 增
+  `except WorkflowRunConflict → 409`，与 `_start_workflow` **同一机制**。API 层预检保留
+  （第一道，消息最完整）。
+- **测试**：`tests/workflow/test_resume_status_codes.py` 新增 4 例（既有 4 例不动）——
+  ① 端点预检 409 回归看守；② **实机场景逐条复现**：预检通过后、置 RUNNING 前经
+  `_prepare_resume_ctx` 注入同 chapter 的 RUNNING run（`raise_app_exceptions=False` 把 ASGI
+  异常落成状态码，与 uvicorn 同行为）→ 断言 409 + detail 含冲突 run_id + resume 目标仍
+  PAUSED + 同 chapter 活跃行恒 1 + **再插一条 RUNNING 行仍被索引拒绝**（不变量未放松）；
+  ③ 引擎预检抛 `WorkflowRunConflict`；④ 引擎竞态窗口内的索引拒绝转 `WorkflowRunConflict`
+  （不经 HTTP）。
+- **突变验证（撤 → 红 → 复，两次）**：① 整体撤修复（两文件 `git checkout`）→ 3 例红，
+  实测 `AssertionError: 期望 409（干净冲突），实际 500: Internal Server Error` /
+  `assert 500 == 409`，traceback 落到 `engine.py:937 … sqlite3.IntegrityError: UNIQUE
+  constraint failed: workflow_runs.chapter_id`（与实机逐字同形）；② 只撤
+  `_mark_run_running` 的异常转换、保留引擎预检 + 端点映射 → **仍 2 例红**（500 /
+  IntegrityError）⇒ 预检单独不足以覆盖竞态，索引转换是承重点。两次均复测 8 passed。
+- **验证命令**：`ruff check packages scripts tests` → All checks passed；
+  `pytest tests/workflow/test_resume_status_codes.py -q` → 8 passed；关联 6 文件
+  （0017 唯一约束 / engine_async / engine_pause_cancel_race / resume_after_crash /
+  resume_checkpoint_exclude / auto_revise_loop_cancel）41 passed；cancel + gate-revise +
+  human_node_pause_resume + checkpoint_exclude_promotion + v1_4_reference 5 文件 24 passed。
+  未跑全量（按任务边界：dev 服务正在 18081 跑量产，全量会占资源）。
+- **未做（留痕）**：`common._run_workflow_return_payload` 直接调
+  `engine.start_with_nodes_async` 且不捕获 `WorkflowRunConflict`——竞态里若「回路方落败」，
+  域异常会在 daemon 线程内抛出、无捕获，线程带 traceback 死掉（既有行为，非本次修复面；
+  触发面窄：需外部 resume 与回路同刻抢同 chapter）。登记为后续评估项，本轮不改
+  （`revise.py`/`common.py` 正被另一路改动占用）。
+
+### Fixed（2026-09-18 改稿回路 W-LEN 死循环：大字数缺口逃逸出 revise 的 +5% cap）
+
+> 线上实测（`ch_92bac068ff0d`，target=2500 / 带 2125~2875）：writer 首稿 932 字，改稿回路
+> 四轮 revise 产出 1044 → 1242 → 1300 字（**最后一轮只比输入涨 +4.7%**——被 cap clamp，
+> 不是模型不肯写），每轮 review 报同一条 `W-LEN-DEVIATION … deviation=-65.8% beyond band`，
+> 回路每轮烧满、必然以「轮次耗尽」收尾。**两层机制相抵，回路结构上不可能收口**：
+> ① `docs/agents/prompts/writer-v3.md` 规则 20「revise 修订模式下净增字数不得超过修订前的
+> +5%」+ §6.1 规则 1/6「未提及的部分逐字保留 / 不整章重写」（writer 的
+> `self_report.deviations[]` 原话：「draft_text 为上游既成稿 … writer 不做破坏性扩写」）；
+> ② `_auto_revise_loop` 把每一轮修复都按 revise 模式驱动（`plan_json.revision_note` 存在
+> ⇒ mode=revise）。2 轮 ×+5% ≈ +10% 的总爬升 vs -65.8% 的缺口（≈ 需 +178%）。
+
+- **修复落点**（`packages/core/api/routers/workflows/revise.py`）：新增
+  `_read_pending_review_report`（复用既有 `_extract_pause_payload`，读父 review run
+  checkpoint 里 `author_review.__pause_payload__.review_report`，不新开查询）+
+  `_length_band_shortfall`（取 report 顶层 `within_range=False/word_count/word_band` 与
+  `errors[]` 中 `W-LEN-DEVIATION`/`GENRE-WORD-BAND-DEVIATION` 条目的结构化带数据，
+  取缺口最大者）+ `_round_needs_fresh_write`（缺口比例 > 剩余轮次可达幅度
+  `(1.05 ** remaining_rounds) - 1` ⇒ 本轮 write 带 `fresh_write=True`）。
+  回路每轮 write 前判定一次，报告源随轮刷新（第 1 轮=父 run，之后=上一轮 review 子 run）。
+- **边界（刻意不做的事）**：只认长度类**下限**缺口——压缩方向不触发（规则 20 的 +5% cap
+  只管增侧，「收到明确压缩指令时按指令幅度净减」⇒「capped revise 追不回」在压缩方向不
+  成立）；非长度 rule_id、带内 / 小缺口、无 review_report 可读 → 行为逐字不变
+  （`initial_ctx_extra` 仍是 None，不得退化成空 dict）。**未改 writer prompt**：把 cap 改成
+  「按 revision_note 的幅度」会与 §6.1「逐字保留 / 不整章重写」直接冲突——同一轮既要
+  逐字保留又要净增 +178% 正是本轮死循环的成因；mode='write' 是既有的正确逃逸口。
+- **验证**：`fresh_write` 的落点先读码确认（`packages/workflows/chapter_write/pipeline.py:639`
+  `ctx["fresh_write"]` ⇒ 丢弃 `draft_text`/`revision_note` ⇒ `mode='write'`），并由既有用例
+  `test_chapter_write_revise_mode.py::test_chapter_write_fresh_write_overrides_revise_to_write`
+  看守；修复用**真实 run 数据只读回放**核对（`wfr_8f623af4556d` 854 字 / -65.8% 与
+  `wfr_c2ef5b11e286` 1197 字 / -52.1% 两份 review_report → `_round_needs_fresh_write` 均 True，
+  无需写 dev 库）。
+- **测试**：单元 6 例（`tests/unit/test_auto_revise_loop_cancel.py`，「字数大缺口逃逸」节；
+  `_insert_run` 加 `checkpoint` 参数以支持落 review_report）+ **端到端 1 例**
+  （`tests/api/test_gate_revise_closure.py::test_auto_revise_loop_fresh_writes_when_shortfall_outruns_the_revise_cap`：
+  plan → write → review(PAUSED) → resume 驳回改稿 + `auto_revise_max=1` → 真实 daemon 回路 →
+  断言回路 write 子 run 的 `writer_input['mode'] == 'write'` 且无 `draft_text`/`revision_note`）。
+  四项突变验证（撤改后重测、实得文本如下）：
+  ① 撤逃逸分支 → 单元 3 例红 `assert None == {'fresh_write': True}`；
+  ② 去掉「缺口 > 可达幅度」判据 → 小缺口例红 `assert [{'fresh_write': True}, None] == [None, None]`；
+  ③ 撤 `pending_review_run_id` 每轮刷新 → 3 例红 `assert [{'fresh_write': True}, {'fresh_write': True}]`；
+  ④ 撤逃逸分支 → 端到端例红 `assert 'revise' == 'write'`（附
+  `AssertionError: 大缺口改稿轮必须走 fresh_write ⇒ mode='write'，实际 mode='revise'（draft_text=True）`
+  与 pipeline 日志 `chapter_write.writer … mode=revise`）。
+  `ruff check packages scripts tests` → All checks passed；定向 pytest 42 passed（回路单元 16 +
+  封门/取消/超时/日志/写模式/能力档 26）；`tests/api/test_gate_revise_closure.py` 4 passed。
+
+### Fixed（2026-09-18 project-init 两处「收下即忘」：author_notes 与 volumes.arc_summary）
+
+> 作者实测：brief 写「无 CP」「第一位面＝现代都市」，生成的 story bible 却回来一个
+> `love_interest` 角色（柳蘅）+ 古代宗族纪年（功名/遗孤/账房先生/家主奉茶），与
+> 酒驾/认罪书/开庭 的前提冲突。两处同属 AGENTS.md 硬规则 9 的形状：
+> **参数被收下（甚至已落库），但没有进消费方**。
+
+- **`brief.author_notes` 对 world / character 两段不可见**（`packages/workflows/project_init/pipeline.py`）：
+  `_world_payload` / `_character_payload` 的 brief 段只有 genre / logline（world 多一个
+  target_words），而 `_premise_payload` / `_outline_payload` 都带 author_notes；
+  `docs/agents/prompts/volume_outliner-v1.md` §2 明写它是「最高优先级创作约束」。
+  修复：新增 `_author_notes_field(brief)`（**非空才带键**），两个 payload 各注入一次；
+  `docs/agents/prompts/{world_builder,character_designer}-v1.md` §2 补同款「作者备注」段。
+  **不升 prompt 版本**：库内 precedent 是 142bae8 就地给 `volume_outliner-v1.md` 补该段
+  （仍是 v1 文件、payload 仍声明 `volume_outliner:v1`）；project-init 四 agent 的
+  `prompt_version` 是硬编码字面量（F-14 已登记的遗留），建 v2 文件只会让声明标签与实载
+  版本分叉且无告警，故按同一惯例就地改 v1。
+- **`volumes.arc_summary` 没有 service 写入口**（`packages/domain/volume/{models,service}.py`、
+  `packages/core/api/routers/volumes.py`、`packages/workflows/project_init/pipeline.py`）：
+  迁移 0020 落列时注释写「persist_all 后续会把 arc_summary 写入该列」，但 `VolumeCreate`
+  从无该字段 ⇒ init 只把它写成 plot_event（type=other/planned），列恒为 NULL；
+  `scripts/open_volume.py` 的定点直写 SQL 即为此打的补丁（该脚本本次不动）。
+  修复：`VolumeCreate` / `VolumeUpdate` / `Volume` / `VolumeListItem` 加 `arc_summary`
+  （自由文本、不设长度上限，与 `plot_events.description` 同口径——设硬上限会把模型的长产出
+  变成 422/落库失败），service 的 INSERT 与 list SELECT 同步；`_upsert_volume` 命中已存在卷时
+  按字段差异更新 arc_summary（title 原逻辑不变）；init 把 outliner 的 `volume.arc_summary`
+  传进 `VolumeCreate`。**plot_event 写入保留**：两个消费方不同（timeline 读 planned 事件 /
+  卷纲摘要编辑面读列），本次只把列补齐。
+- **契约产物 regen**：`apps/web/openapi.json`（96 paths / 40 schemas）+
+  `apps/web/src/api/types.generated.ts`（40 interfaces）。
+- 验证：新增 10 例（payload 3 / persist 与 upsert 2 / service 3 / API 2）+ 2 例既有用例补断言
+  （reinit 卷更新、plot_event 用例补其 docstring 早已声称却从未断言的 volumes.arc_summary）；
+  四项逐一突变验证（撤注入 → `KeyError: 'author_notes'`；撤 VolumeCreate 传参 → 列实得 `None`；
+  撤模型字段 → `KeyError: 'arc_summary'`；撤 `_upsert_volume` 更新分支 → 实得 `'旧摘要'`）；
+  `ruff check packages tests` → All checks passed；定向 pytest 74 passed。
+
 ### Changed（2026-09-17 F-19：撤回「指标当处方」——可测算子只作体检）
 
 > 用户对**作者手写样张**的实测判定：「注水太严重了，这种完全没法看，全是重复句，太傻B了」。

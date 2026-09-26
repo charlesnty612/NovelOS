@@ -30,6 +30,7 @@ NovelOS 面向长篇小说作者：在本地运行完整的小说生产闭环。
   docx 用最小 OOXML 手工打包（无 `python-docx` 依赖）；只读、不调 LLM、不改 schema。
   见 `packages/core/exporter/README.md` 与 `packages/core/api/routers/export.py`。
 - **番茄签约体检（V2.1）**：纯规则体检（无 LLM / 无新依赖 / 无 schema 变更），覆盖黄金三章（开篇 300 字冲突 / 主角 500 字出场 / 金手指前两章前 1000 字亮相 / 第三章小高潮）、逐章章末钩子、单章字数区间、高频副词堆叠、签约窗口 2万/5万/8万共 3 次机会提示；REST 端点 `GET /api/projects/{project_id}/signing-check`，番茄投稿包导出末尾自动追加摘要段。见 `packages/core/signing_check/`。
+- **交付判定（delivery）**：「这一章 / 这本书能不能交」的单一出口——把质量报告（含 confirm / block 后果档）、字数带、签约体检（黄金三章口径）、章状态聚合成闭合四档判定（`deliverable` / `needs_work` / `not_deliverable` / `not_a_candidate`）+ 机器可读理由；证据不可得一律落 `not_evaluated` 并降级（绝不静默当通过）。REST 端点 `GET /api/projects/{project_id}/delivery-verdict`。见 `packages/core/delivery/README.md`。
 - **项目备份 / 恢复（V1.4 Sprint 16 / MVP）**：整项目导出为单 JSON 包（22 张业务表 + metadata 自证字段，不含 API key），支持导入为新项目（不覆盖源项目），单事务整体回环。
   见 `packages/core/backup/` 与 `packages/core/api/routers/backup.py`。
 - **续写助手（V2.2）**：章节详情页一键生成多候选续写并排对比、采纳即追加草稿新版本。见 packages/core/api/routers/continuation.py。
@@ -138,6 +139,7 @@ cd apps/web && npm run test
 | `NOVELOS_WRITER_CONTEXT_MODE` | `paged` | writer 上下文注入模式：`paged`（L0/L1/L2 分页）/ `full`（全量）；非法值回落 `paged`（不抛错） |
 | `NOVELOS_CONTEXT_RELEVANCE` | 启用（未设置=开） | 置 `off` 关闭相关性裁剪（按 plan / scene_plan 的 involved 实体裁剪角色 / 地点 / 势力摘要） |
 | `NOVELOS_AUTO_REVISE_MAX` | `2` | 自动改稿回路最大轮数：`0` 禁用，正整数生效 |
+| `NOVELOS_WRITER_LENGTH_RETRIES` | `2` | chapter-write 生成期字数闭环：writer 产出低于字数带下限时**节点内**以 `mode='write'` 整章重写的最大额外尝试次数；`0` 关闭（只写一次）；非法值回落默认 |
 | `NOVELOS_API_KEY_<PROVIDER>` | — | provider API Key（`<PROVIDER>` 大写，如 `NOVELOS_API_KEY_OPENAI`）；也可在 model_configs 的 `params_json.api_key` 配置 |
 | `NOVELOS_DISABLED_MODULES` | — | 禁用模块列表（V3.3 轻量方案），逗号分隔；模块名 = `packages/core/api/routers/` 下的文件名去 `.py`（如 `simulation,reference,arc`）。被禁模块的 HTTP 路由**不挂载**，对应端点返回 404；不影响 workflow 注册（边界见内容仓 NovelOS-Content `docs/roadmap/v3.3-v3.5-candidates-design.md` §四） |
 | `NOVELOS_PROMPT_SYNC` | `on` | 启动时自动同步 `docs/agents/prompts` → agents/prompts 表（幂等，内容未变不刷 `updated_at`）；`off` 跳过（测试/调试场景） |
