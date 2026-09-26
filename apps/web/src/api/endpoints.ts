@@ -270,6 +270,13 @@ export const chaptersApi = {
   listDrafts: (cid: string) => api.get<Draft[]>(`/chapters/${cid}/drafts`),
   createDraft: (cid: string, payload: DraftCreatePayload) =>
     api.post<Draft>(`/chapters/${cid}/drafts`, payload),
+
+  // 重开返修（2026-09-26 批次）：仅 COMMITTED 章可调（后端 409 拦截其余状态）。
+  // 语义：commits 历史不撤销（append-only），重开为 REVIEWED 后走既有评审/提交链
+  // 产生新 commit。reason 可选，非空时后端附加写入 plan_json.revision_note。
+  // 同章有 RUNNING/PENDING run 时后端 409（活动 run 守卫，与 workflow start 同款）。
+  reopenChapter: (cid: string, payload: { reason?: string | null } = {}) =>
+    api.post<Chapter>(`/chapters/${cid}/reopen`, payload).then(normalizeChapter),
 };
 
 // -------------------------------------------------------------- workflows

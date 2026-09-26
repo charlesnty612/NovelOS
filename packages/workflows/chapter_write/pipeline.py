@@ -68,6 +68,10 @@ import sqlite3
 from typing import Any
 
 from packages.core.agent_runtime.prompts import active_prompt_label
+from packages.core.agent_runtime.revision_fidelity import (
+    REVISION_CHECKLIST_MARKER,
+    preserved_ratio,
+)
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.agent_runtime.structured_output import strip_think_blocks
 from packages.core.context_engine import build_writer_input
@@ -582,7 +586,9 @@ def _latest_draft_text(db_path: str, chapter_id: str) -> str:
 # 约定：writer revise 模式输出 prose 末尾追加独占一行的
 # "---REVISION-CHECKLIST---" 分隔行 + 一行 JSON 数组。管线按此分隔行切分，
 # 前半 = 真正正文（落 drafts.content），后半 = 核销表（落 run 节点产出）。
-_REVISION_CHECKLIST_MARKER = "---REVISION-CHECKLIST---"
+# canonical 常量在 core（revision_fidelity，契约层剥尾块比对保真度也要用同一行），
+# 此处别名引用防两份字面量漂移。
+_REVISION_CHECKLIST_MARKER = REVISION_CHECKLIST_MARKER
 
 
 def _parse_revision_checklist(prose: str) -> tuple[str, list[dict[str, Any]] | None]:
@@ -934,6 +940,52 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 sr["word_count"] = len(clean_prose)
                 out["self_report"] = sr
 
+    # ---- 改稿审计面 revision_audit（2026-09-21「改稿审计断链」检修）----
+    # 问题 1a：revise 首稿欠带触发翻模（``_build_length_retry_payload`` 强制
+    # mode='write'）时，被采纳的终稿是 write 轮 → checklist 分支不命中，
+    # ``revision_checklist`` 为 None 且**无任何痕迹**——核销承诺随首稿静默蒸发。
+    # revision_audit 把「请求的 mode → 终稿 mode」的翻模与核销表状态显式落进节点
+    # 产出（ctx → checkpoint_json / run detail），翻模不再是无痕事件；
+    # ``revision_checklist`` 语义保持现状（终稿 revise 且解析成功才非 None）。
+    # checklist_status 枚举：
+    # - recorded：终稿 revise 且核销表解析成功（进审计面）；
+    # - missing：终稿 revise 但尾块缺失；
+    # - bad_json：终稿 revise 且尾块存在但 JSON 坏（已剥、未进审计面）；
+    # - superseded_by_under_band_rewrite：请求 revise、终稿被欠带重写翻成 write（本次检修
+    #   补上的盲区——审计面至少能看到「翻模发生过」）；
+    # - not_applicable_write：终稿本来就是 write（首写 / fresh_write / 请求即 write）。
+    requested_mode = payloads[0].get("mode")
+    audit_ratio: float | None = None
+    deviations_count = 0
+    if requested_mode == "revise" and mode != requested_mode:
+        checklist_status = "superseded_by_under_band_rewrite"
+    elif mode != "revise":
+        checklist_status = "not_applicable_write"
+    elif isinstance(out, dict) and parsed_checklist is not None:
+        checklist_status = "recorded"
+    elif isinstance(out, dict) and had_marker:
+        checklist_status = "bad_json"
+    else:
+        checklist_status = "missing"
+    if mode == "revise" and isinstance(out, dict):
+        # 终稿是 revise 时才可算保真比（翻模/写模式的比值没有「保真」语义）；
+        # out["prose"] 此时已是剥尾块后的正文，与校准口径一致。
+        upstream_text = payload.get("draft_text")
+        final_prose = out.get("prose") or ""
+        if isinstance(upstream_text, str) and upstream_text and final_prose:
+            audit_ratio = preserved_ratio(upstream_text, final_prose)
+        audit_sr = out.get("self_report")
+        audit_devs = audit_sr.get("deviations") if isinstance(audit_sr, dict) else None
+        if isinstance(audit_devs, list):
+            deviations_count = len(audit_devs)
+    revision_audit = {
+        "requested_mode": requested_mode,
+        "final_mode": mode,
+        "checklist_status": checklist_status,
+        "preserved_ratio": round(audit_ratio, 4) if audit_ratio is not None else None,
+        "deviations_count": deviations_count,
+    }
+
     # V3.1.1 V-P0：writer 本节点真实落库模型 id（mock 路径无 ai_call_logs 行 → None）。
     # 用于 drafts.model_id 记录真实 provider/model，避免列表页无法区分模型。
     # 2026-09-16 版本口径统一：同一次查询顺带取 prompt_version——它是**本 run 实际加载
@@ -977,6 +1029,7 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "writer_model_id": writer_model_id,
         "writer_prompt_version": writer_prompt_version,
         "revision_checklist": revision_checklist,
+        "revision_audit": revision_audit,
         "writer_length_attempts": attempts,
         "writer_length_accepted_attempt": accepted + 1,
         "scene_word_budget": scene_word_budget,

@@ -15,6 +15,7 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from packages.core.api.routers.workflows.control import _check_active_run_for_chapter
 from packages.core.logging_config import get_logger
 from packages.domain.chapter.models import (
     Chapter,
@@ -207,4 +208,61 @@ def update_chapter_revision_note(
         ) from exc
     if row is None:
         raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
+    return row
+
+
+# =============================================================================
+# 重开返修（2026-09-26 批次）：COMMITTED → REVIEWED 专用端点。
+# 语义见 packages/domain/chapter/service.py::reopen_for_repair：
+# commits 历史不撤销（append-only），重开后走既有评审/提交链产生新 commit。
+# 该边不经 PATCH /chapters/{id} 的通用 update 承诺——前端只从这里重开。
+# =============================================================================
+
+
+class ChapterReopenRequest(BaseModel):
+    """重开返修请求体（全部可选，可省略整个 body）。
+
+    - ``reason``：返修原因（人工输入）；非空白时附加写入
+      ``plan_json.revision_note``（前缀 ``reopen: ``），供下一轮评审/改稿参考。
+    - ``max_length`` 防超大 body（与 DraftCreate 同思路）。
+    """
+
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+@router.post("/chapters/{chapter_id}/reopen", response_model=Chapter)
+def reopen_chapter(
+    chapter_id: str,
+    request: Request,
+    payload: ChapterReopenRequest | None = None,
+) -> dict:
+    db_path = str(request.app.state.settings.db_path)
+    # 活动 run 守卫（与 workflows start 同款）：同章有 RUNNING/PENDING run → 409，
+    # 避免重开与在跑的生成/评审/提交并行修改章状态。
+    active = _check_active_run_for_chapter(db_path, chapter_id=chapter_id)
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"chapter {chapter_id!r} has an active workflow run "
+                f"{active['run_id']!r} (status={active['status']!r}); "
+                f"wait or cancel it before reopening"
+            ),
+        )
+    try:
+        row = _service(request).reopen_for_repair(
+            chapter_id, payload.reason if payload is not None else None
+        )
+    except ChapterTransitionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"chapter {chapter_id!r} status is {exc.current!r}; "
+                f"reopen only allowed when status is 'COMMITTED' "
+                f"(target {exc.target!r})"
+            ),
+        ) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
+    log.info("chapter %s reopened for repair (status -> REVIEWED)", chapter_id)
     return row

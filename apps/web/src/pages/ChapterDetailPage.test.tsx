@@ -21,6 +21,7 @@ vi.mock('../api/endpoints', () => ({
     delete: vi.fn(),
     update: vi.fn(),
     createDraft: vi.fn(),
+    reopenChapter: vi.fn(),
   },
   qualityApi: {
     latest: vi.fn(),
@@ -2827,5 +2828,121 @@ describe('ChapterDetailPage - 信息架构（分区 tabs / 标题改名 / 删除
       'data-state',
       'paused',
     );
+  });
+});
+
+// =============================================================================
+// 重开返修（2026-09-26 批次）：仅 COMMITTED 章渲染入口 → 内联确认 → 调 API → reload
+// =============================================================================
+
+describe('ChapterDetailPage - 重开返修', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(chaptersApi.reopenChapter).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    // ChapterPipelineHeader mount 即拉档案列表：不 mock 会在 useApiCall 内 undefined.then
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([] as ModelProfile[]);
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun);
+  });
+
+  it('COMMITTED 章渲染「重开返修」按钮；PLANNED 章不渲染', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(
+      baseChapter({ status: 'COMMITTED' }),
+    );
+    const { unmount } = renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId('reopen-section')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('reopen-btn')).toBeInTheDocument();
+    unmount();
+
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'PLANNED' }));
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-header')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('reopen-section')).toBeNull();
+  });
+
+  it('点击按钮进入内联确认；取消不调 API', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(
+      baseChapter({ status: 'COMMITTED' }),
+    );
+    renderPage();
+    fireEvent.click(await waitFor(() => screen.getByTestId('reopen-btn')));
+
+    expect(await waitFor(() => screen.getByTestId('reopen-reason-input'))).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('reopen-cancel-btn'));
+    await waitFor(() => {
+      expect(screen.queryByTestId('reopen-reason-input')).toBeNull();
+    });
+    expect(vi.mocked(chaptersApi.reopenChapter)).not.toHaveBeenCalled();
+  });
+
+  it('输入原因后确认 → 调 reopenChapter(带 reason) → 成功后 reload 章数据', async () => {
+    const committed = baseChapter({ status: 'COMMITTED' });
+    vi.mocked(chaptersApi.get).mockResolvedValue(committed);
+    vi.mocked(chaptersApi.reopenChapter).mockResolvedValue(
+      baseChapter({ status: 'REVIEWED' }),
+    );
+
+    renderPage();
+    fireEvent.click(await waitFor(() => screen.getByTestId('reopen-btn')));
+    const input = await waitFor(() => screen.getByTestId('reopen-reason-input'));
+    fireEvent.change(input, { target: { value: '打脸段落矛盾' } });
+    fireEvent.click(screen.getByTestId('reopen-confirm-btn'));
+
+    await waitFor(() => {
+      expect(vi.mocked(chaptersApi.reopenChapter)).toHaveBeenCalledWith('ch_001', {
+        reason: '打脸段落矛盾',
+      });
+    });
+    // 成功后刷新链路：chaptersApi.get 被再次调用（至少 mount 1 次 + reload 1 次）
+    await waitFor(() => {
+      expect(vi.mocked(chaptersApi.get).mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+    // 确认态收起（章 reload 后仍 COMMITTED（mock 未变）→ 区块还在，但回到按钮态）
+    await waitFor(() => {
+      expect(screen.queryByTestId('reopen-reason-input')).toBeNull();
+      expect(screen.getByTestId('reopen-btn')).toBeInTheDocument();
+    });
+  });
+
+  it('API 失败 → 错误就地展示在重开区块内', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(
+      baseChapter({ status: 'COMMITTED' }),
+    );
+    vi.mocked(chaptersApi.reopenChapter).mockRejectedValue(
+      Object.assign(new Error('has an active workflow run'), { status: 409 }),
+    );
+
+    renderPage();
+    fireEvent.click(await waitFor(() => screen.getByTestId('reopen-btn')));
+    await waitFor(() => screen.getByTestId('reopen-reason-input'));
+    fireEvent.click(screen.getByTestId('reopen-confirm-btn'));
+
+    await waitFor(() => {
+      const section = screen.getByTestId('reopen-section');
+      expect(within(section).getByText(/active workflow run/)).toBeInTheDocument();
+    });
   });
 });

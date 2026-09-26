@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from packages.core.db import apply_migrations, get_connection
 from packages.core.genre import RATIO_DEVIATION_THRESHOLD, verify_chapter
 from packages.core.genre.verifier import (
@@ -45,7 +47,10 @@ _PACK_PAYLOAD: dict = {
     "schema_version": "genre-pack.v1.0.0",
     "ratio_declarations": {"action": 0.7, "transition": 0.3},
     "pacing": {
-        "chapter_word_band": {"low": 2400, "high": 3600},
+        # 2026-09-26 收尾批次：verifier 字数带解析收敛到 normalize_word_band 单点
+        # （三键齐全且 floor<=low<=high 才算合法带，与 signing_check 同口径）——
+        # 夹具补 floor 使其保持「合法带」身份。
+        "chapter_word_band": {"low": 2400, "high": 3600, "floor": 1800},
         "redlines": ["压抑段≤2章"],
     },
 }
@@ -367,6 +372,42 @@ def test_word_band_in_band_no_issue(tmp_path: Path):
     result = verify_chapter(db_path, cid)
     assert [i for i in result.issues if i.rule_id == RULE_WORD_BAND_DEVIATION] == []
     assert result.redline_check["word_band"]["within_band"] is True
+
+
+@pytest.mark.parametrize(
+    "dirty_band",
+    [
+        {"low": 2400, "high": 3600},                 # 缺 floor（三键不齐）
+        {"low": 2400, "high": 3600, "floor": 3000},  # floor > low（次序颠倒）
+    ],
+)
+def test_word_band_dirty_band_not_checked(tmp_path: Path, dirty_band: dict):
+    """脏带（缺 floor / floor>low）→ 不产 WORD-BAND-DEVIATION 命中，reason=invalid。
+
+    2026-09-26 收尾批次：verifier 字数带解析收敛到 normalize_word_band 单点——
+    旧宽松口径（有 low/high 即判）下脏带照常比对（次序颠倒带必然全部「越界」，
+    纯误报），与 signing_check 的回退默认口径对同一章打架。突变验证：撤掉
+    verifier 的 normalize_word_band 收敛（恢复旧解析）→ 本用例必红。
+    """
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid)
+    _create_and_bind_pack(
+        db_path, pid,
+        payload={
+            "schema_version": "genre-pack.v1.0.0",
+            "ratio_declarations": {"action": 0.7, "transition": 0.3},
+            "pacing": {"chapter_word_band": dirty_band, "redlines": ["压抑段≤2章"]},
+        },
+    )
+    _insert_write_run(db_path, cid, length_report={"visible_chars": 100}, draft_version=1)
+    _insert_draft(db_path, cid, "字" * 100, version=1)
+
+    result = verify_chapter(db_path, cid)
+    assert [i for i in result.issues if i.rule_id == RULE_WORD_BAND_DEVIATION] == []
+    wb = result.redline_check["word_band"]
+    assert wb["checked"] is False
+    assert wb["reason"] == "chapter_word_band_invalid"
 
 
 def test_word_band_falls_back_to_draft_when_no_length_report(tmp_path: Path):

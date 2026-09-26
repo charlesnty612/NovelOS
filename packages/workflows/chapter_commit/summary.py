@@ -166,7 +166,23 @@ def _insert_chapter_summary_row(
 
 
 def _summarize_node(ctx: dict[str, Any]) -> dict[str, Any]:
-    """summarize 节点（Sprint 14；V3.7：可选短路消费 ``summary_early``）—— commit 成功后追加。
+    """summarize 节点薄壳（2026-09-26 批次）：在 impl 输出上附加源锚定 findings 计数。
+
+    ``source_anchoring_count`` = ctx['source_anchoring']（inject_validate 节点产出的
+    恒 warning findings）长度；键缺失 / 非 list 一律计 0。impl 的全部分支（ok /
+    failed / skipped）输出形态不变，仅多这一个键。
+    """
+    out = _summarize_node_impl(ctx)
+    if isinstance(out, dict):
+        findings = ctx.get("source_anchoring")
+        out["source_anchoring_count"] = (
+            len(findings) if isinstance(findings, list) else 0
+        )
+    return out
+
+
+def _summarize_node_impl(ctx: dict[str, Any]) -> dict[str, Any]:
+    """summarize 节点实现（Sprint 14；V3.7：可选短路消费 ``summary_early``）—— commit 成功后追加。
 
     行为：
     1. 若 ``ctx['summary_early']`` 存在且 ``not early.get('skipped')``：跳过 ``run_agent``，

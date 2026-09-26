@@ -21,7 +21,10 @@ r"""结构化输出提取（Sprint 3）。
   - ``director_planner``（P1 合并调用）：顶层走导演契约；``scene_plan`` 子对象在场时走场景契约
     （``schema_version == "scene-plan.v1"``）；另按输入 payload 做 ID 白名单核销
     （hook / debt / character / location）。
-  - ``writer``：必须含 ``schema_version == "writer-output.v1"`` 与 ``prose`` / ``self_report``。
+  - ``writer``：必须含 ``schema_version == "writer-output.v1"`` 与 ``prose`` / ``self_report``；
+    输入 ``mode == "revise"`` 时追加保真闸门（剥离 REVISION-CHECKLIST 尾块后实测
+    ``preserved_ratio`` 低于阈值且 ``self_report.deviations`` 零申报 → 拒绝，
+    见 :mod:`packages.core.agent_runtime.revision_fidelity`）。
   - ``None``：只要求合法 JSON。
 - 校验失败抛 :class:`AgentOutputError`，由 runner 捕获并重试 1 次（按 agent-contracts §6 重试原则）。
   **剥离策略** 是 observer 的特殊路径（不重试，仅剥离）；见 :func:`strip_observer_violations`。
@@ -36,6 +39,12 @@ from typing import Any
 import json_repair
 
 from .exceptions import AgentOutputError
+from .revision_fidelity import (
+    REVISE_FIDELITY_MIN_LENGTH_FRACTION,
+    REVISE_MIN_PRESERVED_RATIO,
+    preserved_ratio,
+    strip_revision_checklist_tail,
+)
 
 # Observer 顶层白名单（7 数组）；其余视为越权
 OBSERVER_ALLOWED_KEYS: frozenset[str] = frozenset(
@@ -477,6 +486,61 @@ def _validate_writer(payload: dict[str, Any]) -> None:
         raise AgentOutputError("writer output missing required field 'self_report'")
 
 
+def _validate_writer_revision_fidelity(
+    payload: dict[str, Any], *, input_payload: dict[str, Any] | None = None
+) -> None:
+    """Revise 保真闸门（2026-09-21「改稿审计断链」检修）：低保留比 + 零申报 → 拒。
+
+    根因：writer 的 §6.1「未提及部分逐字保留 / 越界必申报」此前只有 prompt 纪律，
+    ``_validate_writer`` 只查字段存在性——2026-09-21 实证 writer 整段重写且
+    ``self_report.deviations`` 零申报，人工只能全文 diff 才发现。
+
+    触发条件（全部满足才比对）：
+    - 本次调用输入 ``mode == "revise"``（write / fresh_write / 欠带翻模轮不归本闸门）；
+    - 上游稿 ``draft_text`` 非空、输出 ``prose`` 非空；
+    - 体量成比例（prose ≥ 上游 10%——过短输出由字数带闭环接管，见
+      :data:`packages.core.agent_runtime.revision_fidelity.REVISE_FIDELITY_MIN_LENGTH_FRACTION`）。
+
+    拒绝条件：剥离 REVISION-CHECKLIST 尾块后实测
+    ``preserved_ratio < REVISE_MIN_PRESERVED_RATIO``（阈值定锚见该模块 docstring）
+    且 ``self_report.deviations`` 为空/缺失。报错文案必须携带实测比值、阈值与两条
+    合规路径——它们会经 runner 的 ``_RETRY_HINT`` 拼进重试提示。申报非空 → 放行。
+    """
+    if input_payload is None:
+        return
+    if input_payload.get("mode") != "revise":
+        return
+    upstream = input_payload.get("draft_text")
+    if not isinstance(upstream, str) or not upstream:
+        return
+    prose = payload.get("prose")
+    if not isinstance(prose, str) or not prose:
+        return
+    if len(prose) < REVISE_FIDELITY_MIN_LENGTH_FRACTION * len(upstream):
+        # 体量不成比例：不是「静默重写」形状，交字数带闭环（见常量 docstring）
+        return
+    revised = strip_revision_checklist_tail(prose)
+    if not revised:
+        return
+    ratio = preserved_ratio(upstream, revised)
+    if ratio >= REVISE_MIN_PRESERVED_RATIO:
+        return
+    self_report = payload.get("self_report")
+    deviations = (
+        self_report.get("deviations") if isinstance(self_report, dict) else None
+    )
+    if deviations:
+        # 已申报 → 放行（申报本身进 self_report 审计面；越界追责由人工相似度 diff 承担）
+        return
+    raise AgentOutputError(
+        f"writer revise fidelity check failed: preserved_ratio={ratio:.4f} < "
+        f"REVISE_MIN_PRESERVED_RATIO={REVISE_MIN_PRESERVED_RATIO} "
+        f"(upstream={len(upstream)} chars, revised={len(revised)} chars)。"
+        "合规路径二选一：① 真做定向局部修改（revision_note 未提及的部分逐字保留）；"
+        "② 在 self_report.deviations 逐条申报实际改动（越界重写必须申报，不得零申报）。"
+    )
+
+
 _VALIDATOR_ALLOWED_CATEGORIES = frozenset(
     {"pacing", "character", "logic", "foreshadowing", "ai_flavor", "other"}
 )
@@ -899,14 +963,21 @@ def validate_contract(
 ) -> None:
     """按 ``expected`` 分派契约校验；``None`` 跳过。失败抛 :class:`AgentOutputError`。
 
-    ``input_payload``（可选）：本次调用的 agent 输入 payload。目前仅 ``director_planner``
-    消费它（ID 白名单核销需要输入集合）；其它 ``expected`` 忽略该参数，行为零变化。
+    ``input_payload``（可选）：本次调用的 agent 输入 payload。目前 ``director_planner``
+    （ID 白名单核销）与 ``writer``（revise 保真闸门）消费它；其它 ``expected`` 忽略
+    该参数，行为零变化。
     """
     if expected is None:
         return
     if expected == "director_planner":
         # 该契约需要输入侧集合（白名单），不入 _VALIDATORS（其它校验器签名是单参数）。
         _validate_director_planner(payload, input_payload=input_payload)
+        return
+    if expected == "writer":
+        # 结构校验走既有单参数校验器；revise 保真闸门需要输入侧 mode/draft_text，
+        # 与 director_planner 同款走 input_payload 分支（不入 _VALIDATORS）。
+        _validate_writer(payload)
+        _validate_writer_revision_fidelity(payload, input_payload=input_payload)
         return
     validator = _VALIDATORS.get(expected)
     if validator is None:

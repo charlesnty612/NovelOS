@@ -253,7 +253,7 @@
       "type": "object",
       "additionalProperties": true,
       "required": ["check_id", "requirement"],
-      "description": "题材开篇规则的一条（P2）：signing_check 按 chapter_no 定位章节、以 requirement 中的可机检关键词做子串判定（无 LLM；无可提取关键词时该条报 info「无法机检」）。",
+      "description": "题材开篇规则的一条（P2）：signing_check 按 chapter_no 定位章节、以关键词做子串判定（无 LLM）。声明 keywords 硬词表时按词表硬核销（零命中即 fail）；缺省时从 requirement 文本自动抽词，零命中降级 unverifiable（不作合格判定）；文本抽不出关键词时该条报 info「无法机检」。",
       "properties": {
         "check_id": {
           "type": "string",
@@ -270,6 +270,12 @@
           "minimum": 1,
           "maximum": 3,
           "description": "规则适用章号（黄金三章窗口 1~3）；缺席=在 1~3 章整体窗口上判定。"
+        },
+        "keywords": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "description": "规则自带硬词表（可选）：非空时 signing_check 按本词表做子串硬核销（命中任一词即 pass，零命中即 fail 并在 detail 列出词表）；缺省时由 requirement 文本自动抽词，零命中降级 unverifiable（不作合格判定）。"
         },
         "requirement": {
           "type": "string",

@@ -14,6 +14,11 @@
 - D：write 模式正文含标记行 → 按内容剥离但不进审计面（2026-09-21 m5 改写；
   旧契约「原样落稿」会让 prompt 违约的尾块进 drafts.content 并抬高 word_count）。
 - E：word_count 只统计剥离后正文。
+- F（2026-09-21「改稿审计断链」检修）：revise 欠带触发翻模（重写轮 mode='write'）
+  → 节点产出 revision_audit.checklist_status == 'superseded_by_under_band_rewrite' 且
+  revision_checklist 为 None——翻模不再是无痕事件（1a）。
+- G：正常 revise → revision_audit.checklist_status == 'recorded'，preserved_ratio
+  有值（保真比进审计面）。
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from packages.core.agent_runtime.revision_fidelity import REVISE_MIN_PRESERVED_RATIO
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
@@ -747,5 +753,221 @@ def test_revise_mode_word_count_excludes_checklist(tmp_path: Path):
                 f"save_draft 节点 word_count 应等于剥离后正文长度 {expected}，"
                 f"got {ckpt.get('word_count')!r}"
             )
+
+    asyncio.run(run())
+
+
+def test_revise_under_band_flip_records_audit_superseded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """用例 F（改稿审计断链 1a）：revise 首稿欠带触发翻模 → 审计面留痕。
+
+    翻模路径：_build_length_retry_payload 把重写轮强制 mode='write'，被采纳终稿是
+    write 轮 → 旧代码 revision_checklist 为 None 且无任何痕迹（核销承诺随首稿蒸发）。
+    新契约：节点产出 revision_audit.checklist_status == 'superseded_by_under_band_rewrite'，
+    requested_mode=revise / final_mode=write 可读，preserved_ratio 为 None（终稿非
+    revise，保真比无语义）。
+    """
+    app = _create_app(tmp_path)
+    db_path = app.state.settings.db_path
+
+    async def run():
+        # 覆盖 autouse 夹具的 0：本用例必须让「欠带 → 节点内翻模重写」真实发生一轮
+        # （autouse 与本用例共用同一 function 级 monkeypatch 实例，后设的生效）
+        monkeypatch.setenv("NOVELOS_WRITER_LENGTH_RETRIES", "1")
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "夜叩青石")
+
+            # v1 write（retries=1：欠带 → 重写轮消费 mock 重复项，仍欠带，采纳首次）
+            mock_providers_v1 = {
+                "director": _director_script(),
+                "writer": _writer_script_with_checklist(_BODY_NO_TAIL, None),
+                "observer": _observer_noop_script(),
+            }
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "意图", "mock_providers": mock_providers_v1},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"])
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers_v1},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"])
+
+            # 写 revision_note 触发 revise 请求
+            conn = get_connection(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT plan_json FROM chapters WHERE chapter_id = ?", (cid,)
+                ).fetchone()
+                plan = json.loads(row["plan_json"]) if row["plan_json"] else {}
+                plan["revision_note"] = "节奏压缩"
+                conn.execute(
+                    "UPDATE chapters SET plan_json = ? WHERE chapter_id = ?",
+                    (json.dumps(plan, ensure_ascii=False), cid),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            # v2：第 1 次调用走 revise（合规尾块），欠带 → 第 2 次翻模 write 落带
+            checklist_payload = [
+                {"item": "节奏压缩", "status": "done", "note": "已收紧"},
+            ]
+            mock_providers_v2 = {
+                "director": _director_script(),
+                "writer": [
+                    json.dumps(
+                        {
+                            "schema_version": "writer-output.v1",
+                            "prompt_version": "writer:v1",
+                            "chapter_id": "ch_xxx",
+                            "prose": _BODY_V2
+                            + "\n\n---REVISION-CHECKLIST---\n"
+                            + json.dumps(checklist_payload, ensure_ascii=False),
+                            "self_report": {
+                                "slots_filled": ["slot_001"],
+                                "word_count": len(_BODY_V2),
+                                "scene_count": 1,
+                                "deviations": [],
+                                "forbidden_word_hits": [],
+                                "self_check_notes": "",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(
+                        {
+                            "schema_version": "writer-output.v1",
+                            "prompt_version": "writer:v1",
+                            "chapter_id": "ch_xxx",
+                            "prose": "长" * 2600,
+                            "self_report": {
+                                "slots_filled": ["slot_001"],
+                                "word_count": 2600,
+                                "scene_count": 1,
+                                "deviations": [],
+                                "forbidden_word_hits": [],
+                                "self_check_notes": "",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                ],
+                "observer": _observer_noop_script(),
+            }
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers_v2},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"])
+            v2_run_id = r.json()["run_id"]
+
+            ckpt = _read_writer_node_output(db_path, v2_run_id)
+            assert ckpt is not None
+            # 翻模确实发生（采纳的是第 2 次 write 轮）
+            assert ckpt.get("writer_length_accepted_attempt") == 2, ckpt.get(
+                "writer_length_attempts"
+            )
+            # 主断言 1：终稿是 write → revision_checklist 保持 None（语义不变）
+            assert ckpt.get("revision_checklist") is None, (
+                f"翻模终稿 write → revision_checklist 应为 None，"
+                f"got {ckpt.get('revision_checklist')!r}"
+            )
+            # 主断言 2：revision_audit 留痕——翻模可见，不再静默蒸发
+            audit = ckpt.get("revision_audit")
+            assert isinstance(audit, dict), (
+                f"writer 节点应产出 revision_audit，got {audit!r}"
+            )
+            assert audit["requested_mode"] == "revise", audit
+            assert audit["final_mode"] == "write", audit
+            assert audit["checklist_status"] == "superseded_by_under_band_rewrite", audit
+            assert audit["preserved_ratio"] is None, audit
+            assert audit["deviations_count"] == 0, audit
+
+    asyncio.run(run())
+
+
+def test_revise_normal_records_revision_audit(tmp_path: Path):
+    """用例 G：正常 revise（终稿仍 revise）→ status='recorded' + 保真比进审计面。"""
+    app = _create_app(tmp_path)
+    db_path = app.state.settings.db_path
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+            pid = await _make_project(app)
+            await _make_character(app, pid)
+            cid = await _make_chapter(app, pid, 1, "夜叩青石")
+
+            mock_providers_v1 = {
+                "director": _director_script(),
+                "writer": _writer_script_with_checklist(_BODY_NO_TAIL, None),
+                "observer": _observer_noop_script(),
+            }
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+                json={"author_intent": "意图", "mock_providers": mock_providers_v1},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"])
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers_v1},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"])
+
+            conn = get_connection(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT plan_json FROM chapters WHERE chapter_id = ?", (cid,)
+                ).fetchone()
+                plan = json.loads(row["plan_json"]) if row["plan_json"] else {}
+                plan["revision_note"] = "节奏压缩\n对话加快"
+                conn.execute(
+                    "UPDATE chapters SET plan_json = ? WHERE chapter_id = ?",
+                    (json.dumps(plan, ensure_ascii=False), cid),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            checklist_payload = [
+                {"item": "节奏压缩", "status": "done", "note": "已收紧第2段"},
+            ]
+            mock_providers_v2 = {
+                "director": _director_script(),
+                "writer": _writer_script_with_checklist(_BODY_V2, checklist_payload),
+                "observer": _observer_noop_script(),
+            }
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+                json={"mock_providers": mock_providers_v2},
+            )
+            assert r.status_code == 201, r.text
+            await _wait_run_terminal(app, r.json()["run_id"])
+            v2_run_id = r.json()["run_id"]
+
+            ckpt = _read_writer_node_output(db_path, v2_run_id)
+            assert ckpt is not None
+            audit = ckpt.get("revision_audit")
+            assert isinstance(audit, dict), f"应产出 revision_audit，got {audit!r}"
+            assert audit["requested_mode"] == "revise", audit
+            assert audit["final_mode"] == "revise", audit
+            assert audit["checklist_status"] == "recorded", audit
+            # 保真比：v1 全文 → v2 定向压缩，实测 0.845（高于阈值，放行）
+            ratio = audit.get("preserved_ratio")
+            assert isinstance(ratio, (int, float)) and ratio > REVISE_MIN_PRESERVED_RATIO, audit
+            assert audit["deviations_count"] == 0, audit
+            # revision_checklist 语义不变：recorded 时非 None
+            assert isinstance(ckpt.get("revision_checklist"), list)
 
     asyncio.run(run())

@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections import Counter
 from typing import Any
 
 from packages.core.db import get_connection
@@ -641,9 +642,27 @@ def _high_risk_approval_node(ctx: dict[str, Any]) -> dict[str, Any]:
     if approved:
         return {"high_risk_required": True, "human_input": hi}
 
+    message = (
+        "Observer 检测到 HIGH 风险 / definition / world_kind=rule change，请人工审批"
+    )
+    # 源锚定告警摘要（2026-09-26 批次，恒 warning——只附摘要供人工审批参考，
+    # **不改变**本节点判定与审批语义；findings 产自 inject_validate 节点）。
+    _findings = ctx.get("source_anchoring")
+    if isinstance(_findings, list) and _findings:
+        _dict_findings = [f for f in _findings if isinstance(f, dict)]
+        if _dict_findings:
+            counts = Counter(str(f.get("rule_id", "?")) for f in _dict_findings)
+            digest = "，".join(f"{rid}×{n}" for rid, n in counts.most_common())
+            samples = " | ".join(
+                str(f.get("sample", ""))[:60] for f in _dict_findings[:3]
+            )
+            message += (
+                f"【源锚定告警 {len(_dict_findings)} 条：{digest}】"
+                f"示例：{samples}"
+            )
     payload = {
         "stage": "chapter-commit.high_risk_approval",
-        "message": "Observer 检测到 HIGH 风险 / definition / world_kind=rule change，请人工审批",
+        "message": message,
         "delta_id": ctx.get("delta_id"),
         "changes": {
             "character_changes": ctx.get("observer_payload", {}).get("character_changes", []),

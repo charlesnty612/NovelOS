@@ -1121,6 +1121,65 @@
         }
       }
     },
+    "/api/chapters/{chapter_id}/reopen": {
+      "post": {
+        "tags": [
+          "chapters"
+        ],
+        "summary": "Reopen Chapter",
+        "operationId": "reopen_chapter_api_chapters__chapter_id__reopen_post",
+        "parameters": [
+          {
+            "name": "chapter_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chapter Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ChapterReopenRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Chapter"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/projects/{project_id}/characters": {
       "post": {
         "tags": [
@@ -7277,6 +7336,25 @@
         ],
         "title": "ChapterCreate",
         "description": "创建章节请求体。"
+      },
+      "ChapterReopenRequest": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "title": "ChapterReopenRequest",
+        "description": "重开返修请求体（全部可选，可省略整个 body）。\n\n- ``reason``：返修原因（人工输入）；非空白时附加写入\n  ``plan_json.revision_note``（前缀 ``reopen: ``），供下一轮评审/改稿参考。\n- ``max_length`` 防超大 body（与 DraftCreate 同思路）。"
       },
       "ChapterUpdate": {
         "properties": {

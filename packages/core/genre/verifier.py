@@ -78,6 +78,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.core.db import get_connection
+from packages.core.genre.consumers import normalize_word_band
 from packages.core.quality.wordcount import visible_chars
 
 __all__ = [
@@ -992,14 +993,17 @@ def _check_redlines(
     detail: dict[str, Any] = {}
 
     # b1) 字数带一致性（pacing.chapter_word_band）
+    # 2026-09-26 收尾批次：解析单点收敛到 genre.consumers.normalize_word_band
+    # （三键齐全且 floor<=low<=high 才算合法带，与 signing_check 同口径）——
+    # 此前这里自造「有 low/high 即判」的宽松口径，脏带（缺 floor / 次序颠倒）下
+    # verifier 与 signing_check（回退默认）对同一章打架。非法带不产命中、
+    # reason=chapter_word_band_invalid（warning 档），合法带行为零变化。
     band = pacing.get("chapter_word_band")
     band_detail: dict[str, Any] = {"checked": False, "reason": None}
     declared_band: dict[str, int] = {}
-    if isinstance(band, dict):
-        for key in ("low", "high"):
-            value = band.get(key)
-            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                declared_band[key] = value
+    normalized_band = normalize_word_band(band)
+    if normalized_band is not None:
+        declared_band = {"low": normalized_band["low"], "high": normalized_band["high"]}
     word_count, source = _resolve_word_band_count(sources)
     band_detail.update(
         {
@@ -1011,7 +1015,11 @@ def _check_redlines(
         }
     )
     if not {"low", "high"} <= set(declared_band):
-        band_detail["reason"] = "chapter_word_band_not_declared"
+        band_detail["reason"] = (
+            "chapter_word_band_invalid"
+            if band is not None  # 键在场（值非 None）但被 normalize 拒绝 → 脏带
+            else "chapter_word_band_not_declared"
+        )
     elif word_count is None:
         band_detail["reason"] = "no_draft"
     else:

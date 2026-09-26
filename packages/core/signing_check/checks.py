@@ -9,9 +9,13 @@
 - 平台依据：番茄男频公开规则（黄金三章、单章 1500-2200 字、签约窗口 2/5/8 万共 3 次机会）。
   词典词条来源为番茄编辑指南与公开网文写作共识；后续可按平台口径微调。
 - 题材库 P2：``run_checks(..., opening_rules=...)`` 追加**题材开篇检查段**——
-  题材包 payload.opening_rules（黄金三章特化规则）的逐条机检。失败 / 无法机检一律
-  ``info`` 级（report-only 提示，**不**阻断），判定为纯子串启发式（见
+  题材包 payload.opening_rules（黄金三章特化规则）的逐条机检。自带 ``keywords``
+  词表零命中为 ``fail``；无法机检 / 仅文本抽词零命中一律 ``info`` 级
+  （report-only 提示，**不**阻断），判定为纯子串启发式（见
   :func:`evaluate_genre_opening`）。
+- 题材库 P2：``run_checks(..., word_band=...)`` 提供题材包校准章字数带
+  （单点来源 :func:`packages.core.genre.consumers.resolve_chapter_word_band`）时，
+  单章字数按校准带三档判定；缺省时保持平台默认口径（1200-2600 / 最佳 1500-2200）。
 """
 
 from __future__ import annotations
@@ -150,6 +154,28 @@ def _rule_label(rule: dict[str, Any]) -> str:
     return label[:40] + ("…" if len(label) > 40 else "")
 
 
+def _curated_keywords(value: Any) -> list[str]:
+    """规则自带 keywords 候选 → 清洗后的非空 str 词表（保序去重）；否则 ``[]``。
+
+    防御性清洗（与 ``genre.consumers.opening_rules`` 的投影同口径）：
+    :func:`evaluate_genre_opening` 是公开纯函数，调用方可能直接传原始规则 dict
+    （未经投影），此处不信任入参形态；非 str / 空白元素逐个跳过，全空 → ``[]``
+    （回退文本抽词路径）。
+    """
+
+    if not isinstance(value, list):
+        return []
+    seen: set[str] = set()
+    words: list[str] = []
+    for item in value:
+        word = item.strip() if isinstance(item, str) else ""
+        if not word or word in seen:
+            continue
+        seen.add(word)
+        words.append(word)
+    return words
+
+
 def evaluate_genre_opening(
     chapters: list[dict], opening_rules: list[dict] | None,
 ) -> list[dict[str, Any]]:
@@ -158,18 +184,27 @@ def evaluate_genre_opening(
     参数：
         chapters: ``[{"number": int, "text": str}, ...]``（与 :func:`run_checks` 同形）。
         opening_rules: 题材包 payload.opening_rules 的规范化条目（见
-            ``packages.core.genre.consumers.opening_rules``）；``None`` / 空 → ``[]``。
+            ``packages.core.genre.consumers.opening_rules``，含可选 ``keywords``
+            硬词表）；``None`` / 空 → ``[]``。
 
-    返回：``[{"check_id", "chapter_no", "requirement", "status", "detail"}]``，
-    ``status ∈ {pass, fail, unverifiable, not_written}``：
+    返回：``[{"check_id", "chapter_no", "requirement", "keywords_source", "status",
+    "detail"}]``，``status ∈ {pass, fail, unverifiable, not_written}``：
 
     - ``pass``：目标章（``chapter_no`` 或 1~3 章整体窗口）命中至少一个关键词；
-    - ``fail``：目标章已存在，但未命中任何关键词；
-    - ``unverifiable``：规则文本抽不出可机检关键词（语义型要求，交人工核对）；
+    - ``fail``：目标章已存在，但未命中规则**自带词表**（``keywords``）中的任何词
+      ——自带词表是策展人的硬承诺，零命中如实报 fail（detail 列出所查词表）；
+    - ``unverifiable``：两档——① 规则文本抽不出可机检关键词（语义型要求，交人工
+      核对）；② 仅从规则文本自动抽词且零命中（通用套路词对创新词汇书必然零命中，
+      **不作合格判定**，detail 附抽出的词与「加 keywords 可获得硬核销」的指引）；
     - ``not_written``：目标章尚未写正文。
 
+    ``keywords_source``：``"curated"``（使用规则自带词表）/ ``"auto"``（文本抽词，
+    仅在抽出非空词表时置值）/ 缺省（未走到抽词，如 not_written）。
+
     **口径声明（启发式非保证）**：关键词为子串匹配，命中即视为满足——宽松判定
-    （宁可漏报不误报）；失败与无法机检只为作者自检提示，不构成平台结论。
+    （宁可漏报不误报）；自动抽词零命中不构成失败证据（2026-09 误报修正：规则文本
+    描述通用套路词，创新词汇书零命中全为误判）；失败与无法机检只为作者自检提示，
+    不构成平台结论。
     """
 
     if not opening_rules:
@@ -195,11 +230,21 @@ def evaluate_genre_opening(
             "status": "not_written",
             "detail": "",
         }
+        # 词表来源两档：自带 keywords（策展硬承诺）优先；缺省/非法/清洗后为空 →
+        # 从 requirement + description 文本自动抽词。
+        curated = _curated_keywords(rule.get("keywords"))
+        if curated:
+            keywords: list[str] = curated
+            keywords_source = "curated"
+        else:
+            keywords = _rule_keywords(requirement, str(rule.get("description") or ""))
+            keywords_source = "auto" if keywords else ""
+        if keywords_source:
+            result["keywords_source"] = keywords_source
         if not scope:
             result["detail"] = f"尚未写到{scope_desc}，题材开篇规则暂不体检"
             results.append(result)
             continue
-        keywords = _rule_keywords(requirement, str(rule.get("description") or ""))
         if not keywords:
             result["status"] = "unverifiable"
             result["detail"] = "规则无可机检关键词（语义型要求），请人工核对"
@@ -210,9 +255,15 @@ def evaluate_genre_opening(
         if hits:
             result["status"] = "pass"
             result["detail"] = f"{scope_desc}命中 {','.join(hits)}"
-        else:
+        elif keywords_source == "curated":
             result["status"] = "fail"
-            result["detail"] = f"{scope_desc}未命中 {','.join(keywords)}"
+            result["detail"] = f"{scope_desc}未命中词表 {','.join(keywords)}"
+        else:
+            result["status"] = "unverifiable"
+            result["detail"] = (
+                f"{scope_desc}从规则文本自动抽词零命中（{','.join(keywords)}），"
+                "不作合格判定；在题材包该规则加 keywords 字段可获得硬核销"
+            )
         results.append(result)
     return results
 
@@ -243,6 +294,17 @@ def _opening_rule_item(verdict: dict[str, Any]) -> CheckItem:
             advice="保持：题材开篇规则已落实",
         )
     if status == "unverifiable":
+        if verdict.get("keywords_source") == "auto":
+            # 自动抽词零命中：不作合格判定（与语义型「无法机检」区分，靠 detail/advice）。
+            return CheckItem(
+                key=f"genre_opening_{check_id}",
+                level="info",
+                detail=f"题材开篇规则「{label}」零命中不作判定：{detail}",
+                advice=(
+                    "自动抽词零命中不构成失败证据；在题材包该规则加 keywords 字段"
+                    "可获得硬核销（info 级提示，不阻断签约流程）"
+                ),
+            )
         return CheckItem(
             key=f"genre_opening_{check_id}",
             level="info",
@@ -454,14 +516,88 @@ def _check_chapter_hooks(chapters_by_n: dict[int, str]) -> list[CheckItem]:
     return items
 
 
-def _check_chapter_lengths(chapters_by_n: dict[int, str]) -> list[CheckItem]:
-    """每章一条；超区间则 warn。"""
+def _band_fields(word_band: Any) -> tuple[int, int, int, str] | None:
+    """章字数带 dict → ``(low, high, floor, source)``；形态非法 → ``None``。
 
+    防御性再校验（与 ``genre.consumers.normalize_word_band`` 同口径）：
+    :func:`run_checks` 是公开纯函数，调用方可能手工构造 word_band，此处不信任
+    入参形态；非法一律回退平台默认口径（无 band 行为），不抛错。
+    """
+
+    if not isinstance(word_band, dict):
+        return None
+    low = word_band.get("low")
+    high = word_band.get("high")
+    floor = word_band.get("floor")
+    for candidate in (low, high, floor):
+        if not isinstance(candidate, int) or isinstance(candidate, bool):
+            return None
+    if low < 1 or high < 1 or floor < 0 or not (floor <= low <= high):
+        return None
+    source = word_band.get("source")
+    return low, high, floor, source if isinstance(source, str) else ""
+
+
+def _check_chapter_lengths(
+    chapters_by_n: dict[int, str], word_band: dict[str, Any] | None = None,
+) -> list[CheckItem]:
+    """每章一条；平台默认口径超区间 warn，题材包校准带口径下低于 floor 为 fail。
+
+    - ``word_band`` 为 ``None`` / 形态非法 → 平台默认口径（与历史行为逐字一致）；
+    - 有 band：pass = ``low ≤ chars ≤ high``；warn = ``floor ≤ chars < low`` 或
+      ``chars > high``；fail = ``chars < floor``（题材包校准带单点来源见
+      :func:`packages.core.genre.consumers.resolve_chapter_word_band`）。
+    """
+
+    band = _band_fields(word_band)
     items: list[CheckItem] = []
     for n in sorted(chapters_by_n.keys()):
         text = chapters_by_n[n]
         chars = _count_chars(text)
-        if _CH_LEN_MIN <= chars <= _CH_LEN_MAX:
+        if band is not None:
+            low, high, floor, source = band
+            # source 缺省（手工构造 band）时省略来源标注，避免产出「，）」空尾巴。
+            src = f"，{source}" if source else ""
+            if low <= chars <= high:
+                items.append(
+                    CheckItem(
+                        key=f"chapter_length_ch{n}",
+                        level="pass",
+                        detail=f"第{n}章字数 {chars}（题材包校准带 {low}-{high}{src}）",
+                        advice="保持：当前字数落点在题材包校准带内",
+                    )
+                )
+            elif chars < floor:
+                items.append(
+                    CheckItem(
+                        key=f"chapter_length_ch{n}",
+                        level="fail",
+                        detail=f"第{n}章字数 {chars}（低于题材包校准带保护下限 {floor}{src}）",
+                        advice=(
+                            f"题材包校准带 {low}-{high}（floor 保护 {floor}{src}）："
+                            "字数低于保护下限，请扩写至带内"
+                        ),
+                    )
+                )
+            elif chars < low:
+                items.append(
+                    CheckItem(
+                        key=f"chapter_length_ch{n}",
+                        level="warn",
+                        detail=f"第{n}章字数 {chars}（低于题材包校准带下限 {low}{src}）",
+                        advice=f"题材包校准带 {low}-{high}{src}：当前低于带下限，请补足至带内",
+                    )
+                )
+            else:
+                items.append(
+                    CheckItem(
+                        key=f"chapter_length_ch{n}",
+                        level="warn",
+                        detail=f"第{n}章字数 {chars}（超题材包校准带上限 {high}{src}）",
+                        advice=f"题材包校准带 {low}-{high}{src}：当前超带上限，请精简至带内",
+                    )
+                )
+        elif _CH_LEN_MIN <= chars <= _CH_LEN_MAX:
             items.append(
                 CheckItem(
                     key=f"chapter_length_ch{n}",
@@ -557,6 +693,7 @@ def run_checks(
     chapters: list[dict],
     protagonist_names: list[str],
     opening_rules: list[dict] | None = None,
+    word_band: dict[str, Any] | None = None,
 ) -> list[CheckItem]:
     """对一组章节执行全部签约体检检查。
 
@@ -565,7 +702,12 @@ def run_checks(
         protagonist_names: 主角名列表（来自 ``characters.role='protagonist'``）。
         opening_rules: 题材包 payload.opening_rules 的规范化条目（题材库 P2；可选）。
             非空 → 报告末尾追加题材开篇检查段（每条约一条 CheckItem：满足 → ``pass``，
-            未满足 / 无法机检 / 章未写 → ``info``，**不**阻断）。
+            自带词表未满足 / 无法机检 / 章未写 → ``info``，**不**阻断）。
+        word_band: 题材包校准章字数带（可选；来自
+            :func:`packages.core.genre.consumers.resolve_chapter_word_band`，
+            ``{"low", "high", "floor", "source"}``）。提供且形态合法 → 单章字数按
+            校准带三档判定（pass / warn / fail）；``None`` / 形态非法 → 平台默认
+            口径（1200-2600 pass、区间外 warn，行为与文案逐字不变）。
 
     返回：``list[CheckItem]``，按平台规则顺序排列（开篇 → 黄金三章 → 节奏 → 签约窗口
     → 题材开篇）。
@@ -595,7 +737,7 @@ def run_checks(
 
     # 章末钩子 + 单章字数（每章一条）
     items.extend(_check_chapter_hooks(chapters_by_n))
-    items.extend(_check_chapter_lengths(chapters_by_n))
+    items.extend(_check_chapter_lengths(chapters_by_n, word_band))
 
     # 词汇密度 + 签约窗口（全文统计，单条）
     items.append(_check_echo_words(chapters_by_n))

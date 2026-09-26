@@ -22,11 +22,14 @@ ChapterStatus = Literal["PLANNED", "DRAFTED", "REVIEWED", "COMMITTED", "RELEASED
 # 状态机迁移白名单：合法后继集合（任务书给死：顺序推进 + 回退到 PLANNED）。
 # REVIEWED→DRAFTED：批准后改稿（新草稿使旧批准失效，强制重审）——
 # 与 chapter_write save_draft 守卫口径一致。
+# COMMITTED→REVIEWED：重开返修（2026-09-26 批次）——仅由专用 reopen 端点使用
+# （``ChapterService.reopen_for_repair``，PATCH /chapters/{id} 的通用 update 不承诺
+# 该语义）；commits 历史不撤销（append-only），重开后走既有评审/提交链产生新 commit。
 ALLOWED_NEXT: dict[str, set[str]] = {
     "PLANNED": {"PLANNED", "DRAFTED"},
     "DRAFTED": {"PLANNED", "DRAFTED", "REVIEWED"},
     "REVIEWED": {"PLANNED", "DRAFTED", "REVIEWED", "COMMITTED"},
-    "COMMITTED": {"PLANNED", "COMMITTED", "RELEASED"},
+    "COMMITTED": {"PLANNED", "COMMITTED", "RELEASED", "REVIEWED"},
     "RELEASED": {"PLANNED", "RELEASED"},
 }
 

@@ -28,7 +28,9 @@ MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 _PACK_PAYLOAD: dict = {
     "schema_version": "genre-pack.v1.0.0",
     "ratio_declarations": {"action": 0.7, "transition": 0.3},
-    "pacing": {"chapter_word_band": {"low": 2400, "high": 3600}},
+    # 2026-09-26 收尾批次：verifier 字数带解析收敛到 normalize_word_band 单点
+    # （三键齐全且 floor<=low<=high 才算合法带）——夹具补 floor 保持「合法带」身份。
+    "pacing": {"chapter_word_band": {"low": 2400, "high": 3600, "floor": 1800}},
 }
 
 

@@ -22,7 +22,13 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from packages.core.db import get_connection
-from packages.core.genre.consumers import opening_rules as project_opening_rules
+from packages.core.genre.consumers import (
+    opening_rules as project_opening_rules,
+)
+from packages.core.genre.consumers import (
+    resolve_chapter_word_band,
+    resolve_chapter_word_band_rejected,
+)
 from packages.core.genre.service import GenrePackService
 from packages.core.ids import now_iso
 from packages.core.quality.wordcount import visible_chars
@@ -143,12 +149,15 @@ def _load_project_opening_rules(db_path: str, project_id: str) -> dict[str, Any]
 def _genre_opening_section(
     genre: dict[str, Any], chapters_payload: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """题材开篇检查段（结构化）：逐条规则的 pass / fail 判定 + 汇总计数。"""
+    """题材开篇检查段（结构化）：逐条规则的 pass / fail / unverifiable 判定 + 汇总计数。"""
 
     verdicts = evaluate_genre_opening(chapters_payload, genre.get("rules") or [])
     counts = {
         "pass_count": sum(1 for v in verdicts if v.get("status") == "pass"),
         "fail_count": sum(1 for v in verdicts if v.get("status") == "fail"),
+        "unverifiable_count": sum(
+            1 for v in verdicts if v.get("status") == "unverifiable"
+        ),
         "info_count": sum(
             1 for v in verdicts if v.get("status") in ("unverifiable", "not_written")
         ),
@@ -160,6 +169,7 @@ def _genre_opening_section(
         "rules": verdicts,
         "pass_count": counts["pass_count"],
         "fail_count": counts["fail_count"],
+        "unverifiable_count": counts["unverifiable_count"],
         "info_count": counts["info_count"],
     }
 
@@ -183,12 +193,22 @@ def run_signing_check(db_path: str | "Path", project_id: str) -> dict[str, Any]:
                 "pass_count": int, "warn_count": int,
                 "fail_count": int, "info_count": int,
             },
+            "word_band_source": str,   # 章字数带来源："<pack_id>@<version>" 或 "default"
         }``
 
     绑定题材包且 payload 声明 ``opening_rules`` 时额外含 ``genre_opening`` 段
-    （``{pack_id, pack_name, rule_count, rules[], pass_count, fail_count, info_count}``；
-    每条规则 ``status ∈ pass / fail / unverifiable / not_written``）。未绑定 / 无声明 →
-    该键缺席（零行为变化）。
+    （``{pack_id, pack_name, rule_count, rules[], pass_count, fail_count,
+    unverifiable_count, info_count}``；每条规则 ``status ∈ pass / fail /
+    unverifiable / not_written``）。未绑定 / 无声明 → 该键缺席（零行为变化）。
+
+    章字数带：项目绑定题材包声明 ``pacing.chapter_word_band``（三键齐全）时，单章
+    字数按校准带判定，``word_band_source`` 为 ``"<pack_id>@<version>"``；否则按
+    平台默认口径，``word_band_source = "default"``。
+
+    2026-09-26 收尾批次：绑定包声明了 ``chapter_word_band`` 键但被
+    :func:`normalize_word_band` 拒绝（三键不齐 / 形态非法 / 次序颠倒）时，报告保持
+    ``word_band_source="default"`` 并额外置 ``word_band_rejected: True``——让
+    「包声明了却按不了」对策展人显性化（合法带或未声明时该键缺席）。
 
     异常：
         ``ValueError`` — project 不存在（router 转 404）。
@@ -218,10 +238,20 @@ def run_signing_check(db_path: str | "Path", project_id: str) -> dict[str, Any]:
     # 题材库 P2：题材开篇规则（未绑定 / 未声明 → None，行为与题材库前一致）。
     genre_opening = _load_project_opening_rules(db_path, project_id)
 
+    # 章字数带单点来源（修法 A）：有包声明三键齐全 → 校准带口径；否则 None → 平台默认。
+    # 声明了但被 normalize 拒绝（脏带）→ word_band_rejected 置位（策展人显性化）。
+    word_band = resolve_chapter_word_band(db_path, project_id)
+    word_band_rejected = (
+        resolve_chapter_word_band_rejected(db_path, project_id)
+        if word_band is None
+        else False
+    )
+
     items: list[CheckItem] = run_checks(
         chapters_payload,
         protagonist_names,
         opening_rules=(genre_opening or {}).get("rules"),
+        word_band=word_band,
     )
 
     summary = {
@@ -241,7 +271,10 @@ def run_signing_check(db_path: str | "Path", project_id: str) -> dict[str, Any]:
             for it in items
         ],
         "summary": summary,
+        "word_band_source": word_band["source"] if word_band else "default",
     }
+    if word_band_rejected:
+        result["word_band_rejected"] = True
     if genre_opening is not None:
         result["genre_opening"] = _genre_opening_section(genre_opening, chapters_payload)
     return result

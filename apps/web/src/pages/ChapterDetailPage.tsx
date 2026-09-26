@@ -200,6 +200,14 @@ export function ChapterDetailPage() {
   const [cancelConfirm, setCancelConfirm] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
+  // 重开返修（2026-09-26 批次）：仅 COMMITTED 章渲染入口。
+  // 内联确认态（点击后展开原因输入，不放 ConfirmDialog——需要可选文本输入，
+  // ConfirmDialog 无输入位）；成功后 reload 使 status 变 REVIEWED，区块自动撤下。
+  const [reopenConfirmOpen, setReopenConfirmOpen] = useState(false);
+  const [reopenReason, setReopenReason] = useState('');
+  const [reopening, setReopening] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
+
   // 「审校」动作专属：深度二审开关（Kimi 三层清单：设定/节拍/行为链）。
   // 默认不勾；勾选时 review 请求体带 deep_review:true，pause_payload 会
   // 多一个 deep_review_report 分栏。开启后审校约 +1 分钟。
@@ -404,6 +412,26 @@ export function ChapterDetailPage() {
     }
   }, [projectId, chapterId, chapterCall, draftsCall, runsReload, setSelectedRunId]);
 
+  // 重开返修：POST /chapters/{id}/reopen（后端先查活动 run 409，再做 COMMITTED→REVIEWED
+  // 迁移；commits 历史保留，重开后走既有审校 → 提交链产生新 commit）。
+  // 成功后 reload 章/草稿/run 列表——status 翻为 REVIEWED 后本区块按条件渲染自动撤下。
+  const handleReopen = useCallback(async () => {
+    setReopenError(null);
+    setReopening(true);
+    try {
+      await chaptersApi.reopenChapter(chapterId, {
+        reason: reopenReason.trim() ? reopenReason.trim() : null,
+      });
+      setReopenConfirmOpen(false);
+      setReopenReason('');
+      await Promise.all([chapterCall.reload(), draftsCall.reload(), runsReload()]);
+    } catch (e: unknown) {
+      setReopenError(e instanceof Error ? e.message : '重开失败');
+    } finally {
+      setReopening(false);
+    }
+  }, [chapterId, reopenReason, chapterCall, draftsCall, runsReload]);
+
   // 渲染
   return (
     <div>
@@ -460,6 +488,70 @@ export function ChapterDetailPage() {
               {gateRevising ? '提交中…' : '按门禁建议改稿'}
             </button>
           </div>
+        </div>
+      ) : null}
+
+      {/* 重开返修入口（2026-09-26 批次）：仅 COMMITTED 章渲染。commits 历史保留
+          （append-only），重开为 REVIEWED 后走既有审校 → 提交链产生新 commit。 */}
+      {chapter && chapter.status === 'COMMITTED' ? (
+        <div className="alert alert--info cdp-banner-gap" data-testid="reopen-section">
+          <div className="cdp-banner__title">本章已提交定稿</div>
+          <div className="muted small cdp-banner__line">
+            返修会把本章重开为「已审」状态：提交历史保留，重开后走既有审校 → 提交链产生新版本。
+          </div>
+          <ErrorBanner>{reopenError}</ErrorBanner>
+          {reopenConfirmOpen ? (
+            <div className="cdp-gate-banner__actions">
+              <input
+                type="text"
+                data-testid="reopen-reason-input"
+                value={reopenReason}
+                placeholder="返修原因（可选，供下一轮审校参考）"
+                maxLength={2000}
+                disabled={reopening}
+                style={{ flex: 1, minWidth: 200, padding: 6 }}
+                onChange={(e) => setReopenReason(e.target.value)}
+              />
+              <button
+                className="btn btn--primary"
+                data-testid="reopen-confirm-btn"
+                disabled={reopening}
+                onClick={() => void handleReopen()}
+              >
+                {reopening ? '重开中…' : '确认重开'}
+              </button>
+              <button
+                className="btn"
+                data-testid="reopen-cancel-btn"
+                disabled={reopening}
+                onClick={() => {
+                  setReopenConfirmOpen(false);
+                  setReopenError(null);
+                }}
+              >
+                取消
+              </button>
+            </div>
+          ) : (
+            <div className="cdp-gate-banner__actions">
+              <button
+                className="btn btn--primary"
+                data-testid="reopen-btn"
+                disabled={submitting || !!activeRun}
+                title={
+                  activeRun
+                    ? '已有工作流在运行，请等待结束'
+                    : '重开本章进行返修（提交历史保留）'
+                }
+                onClick={() => {
+                  setReopenError(null);
+                  setReopenConfirmOpen(true);
+                }}
+              >
+                重开返修
+              </button>
+            </div>
+          )}
         </div>
       ) : null}
 

@@ -246,6 +246,12 @@ def test_signing_check_endpoint_includes_genre_opening_section(tmp_path: Path):
                             "chapter_no": 1,
                             "requirement": "第 1 章必须出现倒计时",
                         },
+                        {
+                            "check_id": "curated_miss",
+                            "chapter_no": 1,
+                            "requirement": "第 1 章必须出现镖单",
+                            "keywords": ["镖单", "劫点"],
+                        },
                     ],
                 },
             }
@@ -268,7 +274,13 @@ def test_signing_check_endpoint_includes_genre_opening_section(tmp_path: Path):
             assert section["pack_id"] == "gp_api_p2"
             by_id = {rule["check_id"]: rule for rule in section["rules"]}
             assert by_id["sys_bind_ch1"]["status"] == "pass"
-            assert by_id["hook_tail_ch1"]["status"] == "fail"
+            # 仅文本抽词零命中 → unverifiable（不作合格判定，两档诚实化）
+            assert by_id["hook_tail_ch1"]["status"] == "unverifiable"
+            assert by_id["hook_tail_ch1"]["keywords_source"] == "auto"
+            # 自带词表零命中 → 硬核销 fail（detail 列出词表）
+            assert by_id["curated_miss"]["status"] == "fail"
+            assert "镖单" in by_id["curated_miss"]["detail"]
+            assert section["unverifiable_count"] == 1
             # 失败为 info 级（fail_count 只有平台规则贡献）
             assert body["summary"]["fail_count"] == sum(
                 1 for it in body["items"] if it["level"] == "fail"

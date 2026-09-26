@@ -127,6 +127,10 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     # - 仅 ALTER TABLE projects 加 writing_bible TEXT 可空列（项目级长期作者约束）；
     # - 不增表（业务表 39，总表 40 不变），无回填 → 存量库 NULL，装配逐字不变。
     assert "0029_project_writing_bible.sql" in result["applied"]
+    # R-1 备份重导入修复（2026-09-26）：0030_commits_rollback_of_project_scope.sql
+    # - 仅替换 idx_commits_rollback_of 索引定义为项目域 (project_id, rollback_of)；
+    # - 不增表（业务表 39，总表 40 不变），无回填。
+    assert "0030_commits_rollback_of_project_scope.sql" in result["applied"]
 
 
 def test_apply_migrations_is_idempotent(tmp_path: Path):
@@ -165,6 +169,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0027_chapter_scene_plans.sql",
         "0028_chapter_outline_json.sql",
         "0029_project_writing_bible.sql",
+        "0030_commits_rollback_of_project_scope.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -217,6 +222,9 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     # 项目写作圣经：0029 也应被幂等跳过（ALTER TABLE ADD COLUMN 无 IF NOT EXISTS，
     # 幂等靠 _migrations 文件粒度追踪）
     assert "0029_project_writing_bible.sql" in second["skipped"]
+    # R-1 修复：0030 也应被幂等跳过（DROP INDEX IF EXISTS + CREATE UNIQUE INDEX
+    # IF NOT EXISTS 自幂等 + _migrations 文件粒度追踪）
+    assert "0030_commits_rollback_of_project_scope.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -263,6 +271,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0027_chapter_scene_plans.sql",
         "0028_chapter_outline_json.sql",
         "0029_project_writing_bible.sql",
+        "0030_commits_rollback_of_project_scope.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -1620,3 +1629,121 @@ def test_0020_idempotent_rerun_no_changes(tmp_path: Path):
     assert after_v == before_v == arc
     assert after_pe == before_pe == arc
     assert after_te == before_te == arc
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-26：0030_commits_rollback_of_project_scope.sql 专项回归（R-1）
+# ---------------------------------------------------------------------------
+
+
+def test_0030_rollback_of_index_is_project_scoped(tmp_path: Path):
+    """0030 把 idx_commits_rollback_of 改为项目域 (project_id, rollback_of)。
+
+    - 索引存在、UNIQUE、列序 (project_id, rollback_of)、部分索引（WHERE rollback_of
+      IS NOT NULL）；
+    - 「同一 commit 至多被回滚一次」约束力在**项目内**保持：同 project 两行同
+      rollback_of → IntegrityError；
+    - 跨项目同 rollback_of 放行（R-1 场景：各项目对各自 commit 的回滚记录共存）。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    now = "2026-09-26T00:00:00+00:00"
+    conn = get_connection(db_path)
+    try:
+        # 索引形态
+        idx = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='idx_commits_rollback_of'"
+        ).fetchone()
+        assert idx is not None, "0030 后 idx_commits_rollback_of 应存在"
+        sql = idx["sql"] or ""
+        assert "project_id" in sql and "rollback_of" in sql, sql
+        assert "unique" in sql.lower(), sql
+
+        # 两项目 + 各自 commits（同 rollback_of 值）
+        for pid_suffix in ("p1", "p2"):
+            conn.execute(
+                "INSERT INTO projects (project_id, name, status, created_at, "
+                "updated_at) VALUES (?, ?, 'ACTIVE', ?, ?)",
+                (f"prj_{pid_suffix}", pid_suffix, now, now),
+            )
+            conn.execute(
+                "INSERT INTO branches (branch_id, project_id, name, "
+                "base_state_version, status, created_at) VALUES "
+                "(?, ?, 'main', 0, 'ACTIVE', ?)",
+                (f"br_{pid_suffix}", f"prj_{pid_suffix}", now),
+            )
+            conn.execute(
+                "INSERT INTO chapters (chapter_id, project_id, number, title, "
+                "plan_json, status, created_at, updated_at) VALUES "
+                "(?, ?, 1, 'ch', '{}', 'COMMITTED', ?, ?)",
+                (f"ch_{pid_suffix}", f"prj_{pid_suffix}", now, now),
+            )
+            conn.execute(
+                "INSERT INTO state_deltas (delta_id, chapter_id, workflow_run_id, "
+                "previous_state_version, delta_version, schema_version, payload_json, "
+                "status, supersedes, created_by, created_at) VALUES "
+                "(?, ?, 'wfr', 0, 1, 'state-delta-v0', '[]', 'applied', NULL, "
+                "'tester', ?)",
+                (f"dlt_{pid_suffix}", f"ch_{pid_suffix}", now),
+            )
+            conn.execute(
+                "INSERT INTO commits (commit_id, project_id, branch_id, chapter_id, "
+                "previous_state_version, resulting_state_version, delta_id, "
+                "validation_json, author_approval_json, timestamp, workflow_run_id) "
+                "VALUES (?, ?, ?, ?, 0, 1, ?, '{}', '{}', ?, 'wfr')",
+                (
+                    f"cmt_target_{pid_suffix}", f"prj_{pid_suffix}",
+                    f"br_{pid_suffix}", f"ch_{pid_suffix}",
+                    f"dlt_{pid_suffix}", now,
+                ),
+            )
+        conn.commit()
+
+        # 项目 1 内正常回滚一行（rollback_of=cmt_target_p1）→ 成功
+        conn.execute(
+            "INSERT INTO commits (commit_id, project_id, branch_id, chapter_id, "
+            "previous_state_version, resulting_state_version, delta_id, "
+            "validation_json, author_approval_json, timestamp, workflow_run_id, "
+            "rollback_of) VALUES "
+            "('cmt_rb_p1', 'prj_p1', 'br_p1', 'ch_p1', 1, 2, 'dlt_p1', '{}', '{}', "
+            "?, 'wfr', 'cmt_target_p1')",
+            (now,),
+        )
+        # 跨项目同值 rollback_of（prj_p2 行 rollback_of 也叫 cmt_target_p1…… 形态
+        # 上用同一字符串演示跨项目共存）→ 放行
+        conn.execute(
+            "INSERT INTO commits (commit_id, project_id, branch_id, chapter_id, "
+            "previous_state_version, resulting_state_version, delta_id, "
+            "validation_json, author_approval_json, timestamp, workflow_run_id, "
+            "rollback_of) VALUES "
+            "('cmt_rb_p2', 'prj_p2', 'br_p2', 'ch_p2', 1, 2, 'dlt_p2', '{}', '{}', "
+            "?, 'wfr', 'cmt_target_p1')",
+            (now,),
+        )
+        conn.commit()
+        # 项目内第二次回滚同一 commit（同 project 同 rollback_of）→ 拦（约束力保持）
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO commits (commit_id, project_id, branch_id, chapter_id, "
+                "previous_state_version, resulting_state_version, delta_id, "
+                "validation_json, author_approval_json, timestamp, workflow_run_id, "
+                "rollback_of) VALUES "
+                "('cmt_rb_p1b', 'prj_p1', 'br_p1', 'ch_p1', 2, 3, 'dlt_p1', '{}', "
+                "'{}', ?, 'wfr', 'cmt_target_p1')",
+                (now,),
+            )
+    finally:
+        conn.close()
+
+
+def test_0030_rollback_of_migration_is_idempotent(tmp_path: Path):
+    """0030 跑两遍不炸（DROP INDEX IF EXISTS + CREATE UNIQUE INDEX IF NOT EXISTS）。"""
+    db_path = _fresh_db(tmp_path)
+    first = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0030_commits_rollback_of_project_scope.sql" in first["applied"]
+
+    second = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0030_commits_rollback_of_project_scope.sql" not in second["applied"]
+    assert "0030_commits_rollback_of_project_scope.sql" in second["skipped"]
+    assert second["tables"] == first["tables"] == 40, (first["tables"], second["tables"])

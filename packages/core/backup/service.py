@@ -163,9 +163,13 @@ class BackupService:
 
     # 自引用外键列清单：第二轮 ``_rewrite_self_references`` 需要按 (table, col)
     # UPDATE；不在此清单内的自引用列不会参与第二轮改写。
+    # R-1（2026-09-26）：commits.rollback_of 纳入——0022 给重复 rollback_of 的历史行
+    # 加过 '#dup<rowid>' 后缀，该值不是 id 映射的键，透传会在同库重导入时撞唯一索引
+    # （第二轮对 rollback_of 额外做 #dup 剥除归一化，见 _rewrite_self_references）。
     _SELF_REF_COLS: tuple[tuple[str, str], ...] = (
         ("branches", "parent_branch_id"),
         ("state_deltas", "supersedes"),
+        ("commits", "rollback_of"),
     )
 
     def __init__(self, db_path: Path | str) -> None:
@@ -326,11 +330,14 @@ class BackupService:
         # → volumes）与 JSON 列内嵌 id 在写入时就能命中映射。
         self._build_id_map(data, project_id_map)
         # 自引用外键待改写清单：每项 = (table, pk_col, new_pk_value, old_target_value)
-        # 第一轮 INSERT 时，遇到 branches.parent_branch_id / state_deltas.supersedes
-        # 这两列会把 (新主键, 旧目标值) append 进来；第二轮按本清单 UPDATE 新行
-        # 的自引用列为映射后的新 id（不依赖库内 WHERE col IS NOT NULL 扫描，因为
-        # 第一轮已统一置 NULL）。
+        # 第一轮 INSERT 时，遇到 branches.parent_branch_id / state_deltas.supersedes /
+        # commits.rollback_of 会把 (新主键, 旧目标值) append 进来；第二轮按本清单
+        # UPDATE 新行的自引用列为映射后的新 id（不依赖库内 WHERE col IS NOT NULL
+        # 扫描，因为第一轮已统一置 NULL）。
         self._self_ref_rewrites: list[tuple[str, str, str, str | None]] = []
+        # R-1（2026-09-26）：rollback_of 归一化失败的留痕（路径 + 原值）；非空时
+        # 挂在返回的 projects 行 dict 的 ``import_warnings`` 键上（API 响应透出）。
+        self._import_warnings: list[str] = []
 
         # 3. 单连接 + 单事务
         conn = get_connection(self.db_path)
@@ -379,6 +386,9 @@ class BackupService:
                 )
 
             conn.commit()
+            # R-1：归一化 warning 非空时挂到返回行上（空则不加键，保持既有响应形态）。
+            if self._import_warnings:
+                new_project_row["import_warnings"] = list(self._import_warnings)
             return new_project_row
         except Exception:
             conn.rollback()
@@ -624,13 +634,40 @@ class BackupService:
 
         - ``branches.parent_branch_id``
         - ``state_deltas.supersedes``
+        - ``commits.rollback_of``（R-1，2026-09-26：含 ``#dup<rowid>`` 后缀的历史
+          审计值先剥后缀再查映射——后缀值不是映射键，透传会在同库重导入时撞
+          idx_commits_rollback_of 唯一索引；0030 已把该索引改项目域，本归一化
+          是第一道防线，负责把 rollback_of 语义正确地接到本次导入的 commit 上）
+
+        ``commits.rollback_of`` 的项目域唯一约束组合语义（0022 真实形态）：同一
+        commit 被回滚两次的源库数据 = 同项目内「一行裸值（0022 保留行）+ 一行
+        #dup 审计行」。剥后缀归一化后两行指向同一新 commit，0030 项目域唯一索引
+        （正确地）只放行其一——处理顺序对 commits 裸值行优先（对齐 0022「保留
+        最早一行」的语义），冲突的 #dup 行置 NULL 并记 ``import_warnings``
+        （0022 注释原文：后缀值永不被查询，业务无意义；置 NULL 的审计行保留全部
+        其它字段）。查不到映射的 rollback_of 同样置 NULL + warning。
 
         数据来源：第一轮 INSERT 时收集到 ``self._self_ref_rewrites`` 的
         ``(table, pk_col, new_pk_value, old_target_value)`` 清单。第一轮已
-        把这两列置 NULL 落库，这里按清单 + 全局 ``project_id_map`` 直接 UPDATE
-        新行；旧目标值若不在 ``project_id_map``（指向非本次导入行），保持 NULL。
+        把这些列置 NULL 落库，这里按清单 + 全局 ``project_id_map`` 直接 UPDATE
+        新行；branches/state_deltas 维持既有静默 NULL 语义不变。
         """
-        for table, pk_col, new_pk_value, old_target in self._self_ref_rewrites:
+        # 稳定排序：commits 裸值行（无 '#'）优先占位；其余清单相对序不变
+        # （branches/state_deltas 的 key 恒同 → 完全不受影响）。
+        ordered_rewrites = sorted(
+            self._self_ref_rewrites,
+            key=lambda item: (
+                0 if (
+                    item[0] == "commits"
+                    and isinstance(item[3], str)
+                    and "#" not in item[3]
+                ) else 1
+            ),
+        )
+        # 本批次已被占用的 rollback_of 目标（导入单项目 → (project_id, rollback_of)
+        # 唯一性退化为 target 唯一性）。
+        occupied_rollback_targets: set[str] = set()
+        for table, pk_col, new_pk_value, old_target in ordered_rewrites:
             if old_target is None:
                 continue
             # 找该 (table, col) 的列名
@@ -638,10 +675,34 @@ class BackupService:
                 c for t, c in self._SELF_REF_COLS if t == table
             )
             new_target = project_id_map.get(old_target)
+            if new_target is None and table == "commits":
+                # R-1 归一化：0022 的去重后缀形态 '...#dup<rowid>'——剥后缀重查映射。
+                if isinstance(old_target, str) and "#" in old_target:
+                    base_id = old_target.split("#", 1)[0]
+                    new_target = project_id_map.get(base_id)
             if new_target is None:
                 # 旧目标不在本次导入批次内（如 NULL 或指向无关项目），保持 NULL
+                if table == "commits":
+                    self._import_warnings.append(
+                        f"commits.rollback_of (commit {new_pk_value}): "
+                        f"原值 {old_target!r} 不在本次导入映射中，已置 NULL"
+                    )
+                continue
+            if (
+                table == "commits"
+                and new_target in occupied_rollback_targets
+            ):
+                # 0030 不变式「同一 commit 至多被回滚一次」：同项目内已有更早的
+                # 保留行指向该 commit，本行（#dup 审计行）置 NULL 让位。
+                self._import_warnings.append(
+                    f"commits.rollback_of (commit {new_pk_value}): "
+                    f"原值 {old_target!r} 归一化后与本项目内既有回滚记录冲突"
+                    "（同一 commit 至多被回滚一次），已置 NULL"
+                )
                 continue
             conn.execute(
                 f"UPDATE {table} SET {col_name} = ? WHERE {pk_col} = ?",
                 (new_target, new_pk_value),
             )
+            if table == "commits":
+                occupied_rollback_targets.add(new_target)

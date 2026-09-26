@@ -8,6 +8,7 @@ from typing import Any
 
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
+from packages.core.story_state.delta_anchoring import check_delta_source_anchoring
 from packages.core.story_state.delta_repair import repair_delta
 from packages.core.story_state.service import StoryStateService
 from packages.core.story_state.validator import validate_delta
@@ -222,6 +223,27 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 f"observer delta failed validation: errors={errors}"
             )
 
+    # 源锚定检测（2026-09-26 批次）：delta 文本 vs 源文本内容比对，恒 warning 绝不
+    # 阻断——findings 只随节点输出透出（high_risk pause payload 摘要 / summarize
+    # 计数），不进 gate 判定、不进 BLOCKING_RULES。source_texts = observer 输入
+    # payload 自带的本章最新草稿（ctx['observer_input']['chapter']['draft_text']，
+    # build_observer_input 装配、未走 leg trim 的原始形态）。缺源（无草稿）时
+    # check 函数自身返回 []（无源可校不报）。
+    _oi = ctx.get("observer_input")
+    _oi = _oi if isinstance(_oi, dict) else {}
+    _chap_seg = _oi.get("chapter")
+    _chap_seg = _chap_seg if isinstance(_chap_seg, dict) else {}
+    _draft_text = _chap_seg.get("draft_text")
+    _source_texts = (
+        [_draft_text] if isinstance(_draft_text, str) and _draft_text.strip() else []
+    )
+    source_anchoring = check_delta_source_anchoring(delta, _source_texts)
+    if source_anchoring:
+        _log.warning(
+            "observer delta source anchoring findings (warning only): chapter_id=%s %s",
+            chapter_id, source_anchoring,
+        )
+
     # ------------------------------------------------------------------ 三层校验的分工
     # V3.9 批次 5.4 结论（证据：validator.validate_delta 的 snapshot 参数语义 +
     # 本文件三处调用点 + commits.submit_delta 的公共边界，见报告）：
@@ -258,6 +280,9 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "project_id": project_id,
         "needs_high_risk_approval": needs_high_risk_approval,
         "submit_result": submit_result,
+        # 源锚定 findings（恒 warning；消费方：high_risk pause payload 摘要 /
+        # summarize 计数 / 测试与排障）。
+        "source_anchoring": source_anchoring,
     }
 
 

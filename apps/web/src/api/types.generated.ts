@@ -63,6 +63,11 @@ export interface ChapterCreate {
   plan_json?: Record<string, unknown> | null;
 }
 
+export interface ChapterReopenRequest {
+  /** 重开返修请求体（全部可选，可省略整个 body）。 */
+  reason?: string | null;
+}
+
 export interface ChapterUpdate {
   /** 部分更新请求体——所有字段均可选。 */
   title?: string | null;

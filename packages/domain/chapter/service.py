@@ -242,6 +242,12 @@ class ChapterService:
             target = fields["status"]
             if target not in ALLOWED_NEXT.get(current["status"], set()):
                 raise ChapterTransitionError(current["status"], target)
+            # COMMITTED→REVIEWED 虽在 ALLOWED_NEXT 白名单内，但保留给
+            # ``reopen_for_repair`` 专用（返修入口，router 侧另有活动 run 守卫）。
+            # 通用 PATCH update 不承诺该语义——放行就是绕开守卫的旁路（先例：
+            # create_draft 对白名单边也做绕白名单直写/拦截，见本文件降级写法注释）。
+            if target == "REVIEWED" and current["status"] == "COMMITTED":
+                raise ChapterTransitionError(current["status"], target)
 
         # 处理 plan_json 序列化
         if "plan_json" in fields:
@@ -548,6 +554,70 @@ class ChapterService:
         finally:
             conn.close()
         return self._row_to_dict(updated_row) if updated_row else None
+
+    # ============================================================== 重开返修
+    # COMMITTED → REVIEWED（2026-09-26 批次）：定稿章局部返修入口。
+    # 语义：commits 历史不撤销（append-only），重开后走既有评审/提交链产生新 commit；
+    # 该边只由本方法使用（ALLOWED_NEXT 内有注释说明），通用 PATCH update 不承诺该语义。
+    # ------------------------------------------------------------------ reopen
+
+    def reopen_for_repair(self, chapter_id: str, reason: str | None = None) -> dict | None:
+        """把 COMMITTED 章重开为 REVIEWED（返修入口）。
+
+        - chapter 不存在 → ``None``（router 转 404，与 ``get`` / ``create_draft`` 一致）。
+        - chapter.status != COMMITTED → ``ChapterTransitionError``（router 转 409）。
+          显式拦截是必要的：其余状态到 REVIEWED 可能本身是合法推进边
+          （如 DRAFTED→REVIEWED），若放行会让 reopen 被当成普通推进混用。
+        - 迁移走绕白名单直写（同 ``create_draft`` 的降级写法先例）：2026-09-26 收尾
+          批次起 ``update()`` 显式拦截 COMMITTED→REVIEWED 借道（该边保留给本方法），
+          reopen 不能再借 ``update()``，改为预检后直写 UPDATE（``updated_at`` 同步
+          刷新，与 ``update()`` 落库口径一致）。
+        - ``reason`` 非空白时附加写入 ``plan_json.revision_note``（前缀 ``reopen: ``；
+          已有 note 则换行拼接，不覆盖历史意见）。reopen 完成后 status 已是 REVIEWED，
+          满足 ``_REVISION_NOTE_ALLOWED_STATUS``，故复用 ``update_revision_note``。
+        - 返回更新后的 chapter dict（走 ``_row_to_dict`` 保证序列化一致）。
+        """
+        current = self.get(chapter_id)
+        if current is None:
+            return None
+        if current["status"] != "COMMITTED":
+            raise ChapterTransitionError(current["status"], "REVIEWED")
+
+        conn = get_connection(self.db_path)
+        try:
+            cur = conn.execute(
+                """
+                UPDATE chapters
+                SET status = 'REVIEWED', updated_at = :updated_at
+                WHERE chapter_id = :chapter_id
+                """,
+                {"updated_at": now_iso(), "chapter_id": chapter_id},
+            )
+            if cur.rowcount == 0:
+                conn.rollback()
+                conn.close()
+                # 预检后、更新前被并发删除：按 404 语义返回 None
+                return None
+            conn.commit()
+            cur = conn.execute(
+                "SELECT * FROM chapters WHERE chapter_id = ?", (chapter_id,)
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+        updated = self._row_to_dict(row) if row else None
+        if updated is None:
+            return None
+
+        if reason and reason.strip():
+            existing_note = (updated.get("plan_json") or {}).get("revision_note")
+            text = f"reopen: {reason.strip()}"
+            merged = f"{existing_note}\n{text}" if existing_note else text
+            merged_result = self.update_revision_note(chapter_id, merged)
+            if merged_result is not None:
+                updated = merged_result
+
+        return updated
 
 
 __all__ = [

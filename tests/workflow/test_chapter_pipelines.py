@@ -177,6 +177,28 @@ def _writer_script() -> list[str]:
     ]
 
 
+def _writer_declared_rewrite_script() -> list[str]:
+    """_writer_script 的局部变体：self_report.deviations 申报整章改写（契约合规路径②）。
+
+    仅 test_chapter_review_revise_loop_end_to_end 使用：其第 5 步在 DRAFTED 章
+    重跑 write（revision_note + draft_text 皆非空 → mode='revise'），上游稿是 25 字
+    人工改稿、本 mock 固定回 ~119 字稿，preserved_ratio=0.0833 < 0.5——零申报会被
+    保真闸门正确拒绝（闸门语义是对的，夹具不合规）；按 writer-v3.md §6.1「越界
+    必申报」申报该次改写即放行。不改其它测试共享的 _writer_script（保持零申报
+    期望）。
+    """
+    payload = json.loads(_writer_script()[0])
+    payload["self_report"]["deviations"] = [
+        {
+            "kind": "other",
+            "from": "修订后的草稿内容：林渊闻言沉默良久，终是轻轻点头。",
+            "to": "整章按 mock 固定稿重写（与 25 字上游稿零逐字重合）",
+            "reason": "mock 输出与上游稿零逐字重合：整章改写，超出定向局部修改范围",
+        }
+    ]
+    return [json.dumps(payload, ensure_ascii=False)]
+
+
 def _writer_revised_script() -> list[str]:
     """改稿后的 writer-output.v1 输出（用于 auto-revise 回路第二轮 write）。"""
     prose = (
@@ -433,7 +455,10 @@ def test_chapter_review_revise_loop_end_to_end(tmp_path: Path):
 
             mock_providers = {
                 "director": _director_script(),
-                "writer": _writer_script(),
+                # 第 5 步重跑 write 走 mode='revise'（25 字上游稿 vs 固定 mock 输出，
+                # preserved_ratio<0.5）：writer 需申报改写（契约合规路径②），否则被
+                # 保真闸门正确拒绝——闸门不动，夹具合规化。
+                "writer": _writer_declared_rewrite_script(),
             }
 
             # 1) plan + write

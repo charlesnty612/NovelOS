@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from packages.core.agent_runtime.exceptions import AgentOutputError
+from packages.core.agent_runtime.revision_fidelity import REVISE_MIN_PRESERVED_RATIO
 from packages.core.agent_runtime.structured_output import (
     OBSERVER_ALLOWED_KEYS,
     OBSERVER_FORBIDDEN_KEYS,
@@ -491,3 +492,87 @@ def test_extract_json_truncated_json_repaired():
     assert payload["a"] == 1
     assert payload["b"] == [1, 2, 3]
     assert meta["repaired"] is True
+
+
+# ---------------------------------------------------------------------------
+# writer revise 保真闸门（2026-09-21「改稿审计断链」检修）：
+# mode=revise 且实测 preserved_ratio 低于阈值且 self_report.deviations 零申报 → 拒；
+# 申报非空 / 高比值 / mode=write / 无 draft_text → 放行。阈值见
+# packages.core.agent_runtime.revision_fidelity.REVISE_MIN_PRESERVED_RATIO。
+# ---------------------------------------------------------------------------
+
+_REVISE_UPSTREAM = "".join(
+    f"第{i}句，春风又绿江南岸，岸上人家灯火渐次亮起。" for i in range(30)
+)
+_REWRITE_PROSE = "月光如水，流泻在青石板上，夜里没有风。" * 30
+
+
+def _revise_writer_payload(prose: str, deviations: list | None = None) -> dict:
+    return {
+        "schema_version": "writer-output.v1",
+        "prose": prose,
+        "self_report": {
+            "word_count": len(prose),
+            "deviations": deviations if deviations is not None else [],
+        },
+    }
+
+
+def test_validate_contract_writer_revise_low_ratio_zero_deviations_rejected():
+    """低比值 + 零申报 → AgentOutputError；文案含实测比值、阈值与两条合规路径。"""
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract(
+            "writer",
+            _revise_writer_payload(_REWRITE_PROSE),
+            input_payload={"mode": "revise", "draft_text": _REVISE_UPSTREAM},
+        )
+    msg = str(exc.value)
+    assert "preserved_ratio=" in msg  # 实测比值
+    assert f"REVISE_MIN_PRESERVED_RATIO={REVISE_MIN_PRESERVED_RATIO}" in msg  # 阈值
+    assert "定向局部修改" in msg  # 合规路径 ①
+    assert "self_report.deviations" in msg  # 合规路径 ②
+
+
+def test_validate_contract_writer_revise_low_ratio_with_deviations_passes():
+    """低比值 + 有申报 → 放行（申报本身进审计面，越界追责由人工承担）。"""
+    validate_contract(
+        "writer",
+        _revise_writer_payload(_REWRITE_PROSE, deviations=[
+            {"item": "整段重写第二幕", "status": "done", "note": "门禁要求"},
+        ]),
+        input_payload={"mode": "revise", "draft_text": _REVISE_UPSTREAM},
+    )
+
+
+def test_validate_contract_writer_revise_high_ratio_zero_deviations_passes():
+    """高比值（真定向改稿）+ 零申报 → 放行。"""
+    unit = "第15句，春风又绿江南岸，岸上人家灯火渐次亮起。"
+    prose = _REVISE_UPSTREAM.replace(unit, unit + "这一句添了半行。")
+    validate_contract(
+        "writer",
+        _revise_writer_payload(prose),
+        input_payload={"mode": "revise", "draft_text": _REVISE_UPSTREAM},
+    )
+
+
+def test_validate_contract_writer_write_mode_low_ratio_passes():
+    """mode=write（首写 / fresh_write / 欠带翻模）低比值 → 放行（不归本闸门管）。"""
+    validate_contract(
+        "writer",
+        _revise_writer_payload(_REWRITE_PROSE),
+        input_payload={"mode": "write", "draft_text": _REVISE_UPSTREAM},
+    )
+
+
+def test_validate_contract_writer_revise_without_draft_text_passes():
+    """mode=revise 但无上游稿（draft_text 缺失/空）→ 无从比较不拦。"""
+    validate_contract(
+        "writer",
+        _revise_writer_payload(_REWRITE_PROSE),
+        input_payload={"mode": "revise", "draft_text": ""},
+    )
+    validate_contract(
+        "writer",
+        _revise_writer_payload(_REWRITE_PROSE),
+        input_payload={"mode": "revise"},
+    )
