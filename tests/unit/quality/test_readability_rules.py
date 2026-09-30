@@ -24,6 +24,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from packages.core.quality.ai_patterns import (
     DEFAULT_DIALOGUE_LOW_WARN_RATIO,
     DEFAULT_LONG_PARA_ERROR_CHARS,
@@ -31,6 +33,7 @@ from packages.core.quality.ai_patterns import (
     DEFAULT_LONG_PARA_WARN_CHARS,
     count_dialogue_visible_chars,
     count_long_paragraphs,
+    count_short_paras,
     dialogue_ratio,
     scan_ai_patterns,
 )
@@ -88,6 +91,127 @@ def test_paragraph_split_is_newline_based():
     assert len(count_long_paragraphs("")) == 0
     prose = "短句。\n\n" + _exact(101) + "\n单换行也算新段。"
     assert count_long_paragraphs(prose) == [_exact(101)]
+
+
+def test_short_para_shares_the_same_split_entry():
+    """**段切分只有一处实现**：短段 / 长段 / 相邻对白三条算子走同一个函数。
+
+    背景（2026-09-27 事故）：``count_short_paras`` 曾独自用 ``\\n\\n``，而同文件
+    的 ``count_long_paragraphs`` / ``_dialogue_lines`` 用 ``\\n+``。人类锚点书是
+    **一行一段**（19 章 ``\\n\\n`` 总数 = 0），于是短段算子在人类语料上被读成
+    19 个整章大段、**构造上不可能命中**——它的「人类基线 0.00/千字」是量具假象。
+    口径分叉过一次就出过事，不给第三次机会：本条把「唯一入口」钉成断言。
+    """
+    from packages.core.quality import ai_patterns as module
+
+    # 同一批段落，单换行 vs 空行：\\n+ 口径下两者等价，\\n\\n 口径下**不等价**
+    parts = [_exact(90)] * 8
+    only_single_newlines = "林昭跟上去。\n林昭抬起头。\n林昭的背脊僵了一息。"
+    assert len(count_short_paras(only_single_newlines)) == 3, (
+        "全文只有单换行时，三段短句必须各算一段——\\n\\n 口径会把它们读成一段、"
+        "长度超 12 而零命中（这正是人类锚点书上的量具假象形状）"
+    )
+    assert count_short_paras(only_single_newlines.replace("\n", "\n\n")) == [
+        "林昭跟上去",
+        "林昭抬起头",
+        "林昭的背脊僵了一息",
+    ], "两种换行形态切出的短段集合必须逐字相同（样例串是去句末标点的首句）"
+
+    # 同上，对长段算子亦然（两者的段集合必须逐字同源）
+    long_single = "\n".join(parts) + "\n" + _exact(101)
+    long_double = "\n\n".join(parts) + "\n\n" + _exact(101)
+    assert count_long_paragraphs(long_single) == count_long_paragraphs(long_double)
+    assert count_long_paragraphs(only_single_newlines + "\n" + _exact(101)) == [_exact(101)]
+
+    # 模块内不得再出现第二份段切分实现——**形状级**断言，不按名字猜。
+    # 首轮交付只断言两个旧名不存在，抓不到内联实现；这里改成扫源码里的切分调用点
+    # （跳过注释行：文档里会引用这个字面形态）。
+    #
+    # **覆盖边界（2026-09-27 B-2 如实登记，勿夸大）**：下面的匹配串同时绑定三个条件
+    # ——① 变量名必须是 `prose`、② 必须是 `.split(` 方法、③ 字面量必须是 `\n\n`。
+    # 三者任一变化即**漏抓**：写成 `text.split("\n\n")`（换变量名）、
+    # `prose.split(chr(10) * 2)`（动态构造）、`re.split(r"\n\n+", prose)`
+    # （换 re API）都能新增第二份实现而本测试仍绿。
+    # 即本测试**不是**「任何第三份段切分必被抓到」的保证，只覆盖上述字面形态。
+    # 放宽办法（另一次改动，勿在无抽样的情况下顺手做）：把匹配换成对
+    # `\n\n` 的正则扫描（`\.split\(\s*["']\\n\\n` 与 `re\.split\(\s*r?["']\\n\\n`），
+    # 并把排除范围从「以 # 开头的行」扩到 docstring 内部。
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    code_lines = [
+        (i, ln) for i, ln in enumerate(source.splitlines()) if not ln.lstrip().startswith("#")
+    ]
+    inline_splits = [
+        (i + 1, ln.strip()) for i, ln in code_lines if 'prose.split("\\n\\n")' in ln
+    ]
+    assert len(inline_splits) == 1, (
+        "段切分内联实现应只剩 _last_paragraph 一处（已登记为待修），"
+        f"实测 {len(inline_splits)} 处：{inline_splits}"
+    )
+    lines = source.splitlines()
+    # 向上找该行所属的函数定义（不假设 docstring 占几行）
+    owner = next(
+        ln.strip()
+        for ln in reversed(lines[: inline_splits[0][0]])
+        if ln.startswith("def ")
+    )
+    assert owner.startswith("def _last_paragraph"), (
+        f"唯一那处内联实现属于 {owner}，应属于 _last_paragraph（第 {inline_splits[0][0]} 行）"
+    )
+    assert not hasattr(module, "_paragraphs"), (
+        "旧的 \\n\\n 切分已删除（唯一消费方 count_short_paras 已改口径）；"
+        "它若复活，口径分叉就会回来"
+    )
+    assert not hasattr(module, "_readability_paragraphs"), (
+        "已并入 _split_paragraphs（该名字只覆盖三条算子里的一条，会误导）"
+    )
+
+
+def test_short_para_speaker_line_detection_is_tight():
+    """``名字：`` 说话人行算对白；**正文里的普通冒号不算**（2026-09-27）。
+
+    人类锚点书是 ``名字：“……”`` / ``名字：`` 形态的说话人行（实测 7 段），而
+    ``_DIALOGUE_START_RE`` 只认「以引号起首」⇒ 人类语料的排版件被算成叙述短段，
+    替生成侧的节拍器式 tic 交了税。补守卫时最容易被「写成宽规则」坑到：正文里的
+    普通冒号（``源头：省府常平仓调拨`` 字段行、``现在他只记得：有人笑过`` 正常句子）
+    与说话人行**字面同构**。
+
+    **分支① 的宽度按实测校准为 {1,3}**（对抗审查打回项）：人类锚点走完前置过滤后
+    带冒号的 ≤12 字段落**只有 2 条**，走①的仅 ``陆明河：“……”``（3 字），宽度证据
+    只支持到 3。放到 {1,6} 会误豁免生成侧 2 段**叙述节拍行**——那是本规则要抓的 tic。
+    """
+    filler = _FILLER + "\n\n"
+    # 分支①：冒号后紧跟引号，≤3 字人名（人类锚点实测形态）
+    assert count_short_paras(filler + "陆明河：“……”") == []
+    assert count_short_paras(filler + "林昭：“知道了。”") == []
+    # 分支① 宽度收窄的判别：≥4 字前缀的「主语+动作+冒号+引语」是**叙述节拍行**，
+    # 必须仍判命中（宽度回到 {1,6} 即红——实测生成侧 ch14/ch35 各一条）
+    assert count_short_paras(filler + "林昭点点头：“知道了") == ["林昭点点头：“知道了"]
+    assert count_short_paras(filler + "霍铁没懂：“给谁") == ["霍铁没懂：“给谁"]
+    # 分支②：冒号即段末（人类书里的 `宋沛年：？我精明？` 被句读截断后的形态）
+    assert count_short_paras(filler + "宋沛年：") == []
+    # 正文冒号：字段行 / 正常句子 —— 不得被误当成对白豁免掉
+    assert count_short_paras(filler + "源头：省府常平仓调拨") == ["源头：省府常平仓调拨"]
+    assert count_short_paras(filler + "现在他只记得：有人笑过") == ["现在他只记得：有人笑过"]
+    assert count_short_paras(filler + "跟着浮出第二行：十倍") == ["跟着浮出第二行：十倍"]
+    # **已知的过宽边界（如实登记，不假装是「人名」）**：「冒号即段末」这一支分不清
+    # 人名行与常见名词标签行——`宋沛年：`（人类锚点书实测 1 例）与 `价签：` 字面同构。
+    # 两侧语料实测生成侧 0 例，故按现状保留；但这是能力边界，不是已验证的精确率。
+    assert count_short_paras(filler + "价签：") == []
+
+
+def test_short_para_reports_first_clause_of_a_short_paragraph():
+    """短段判定作用在**整段**上，但报出的样例是**首个句读片段**（已知瑕疵）。
+
+    ≤12 字判定看整段，``samples`` 里的字符串取 ``re.split([。！？；\\n])[0]``——
+    于是 ``兴，百姓苦；亡，百姓苦。``（整段 10 字）报出 ``兴，百姓苦``。
+    本条把该行为钉住：判定位（整段 vs 首句）不因样例字符串被截断而改变。
+    """
+    filler = _FILLER + "\n\n"
+    assert count_short_paras(filler + "兴，百姓苦；亡，百姓苦。") == ["兴，百姓苦"]
+    # 整段超过 12 字时，段首的短句不算「独立成段」（这才是判定位所在）
+    assert count_short_paras(filler + "好。知道了。今天该把账对一遍。") == []
+    long_tail = "林昭跟上去。他没有回头，一直走到巷口才停下脚步。"
+    assert count_short_paras(filler + long_tail) == []
 
 
 def test_long_para_thresholds_are_registered():

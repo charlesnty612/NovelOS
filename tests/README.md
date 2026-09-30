@@ -1,7 +1,7 @@
 # tests（测试套件）
 
 > 职责：NovelOS 后端的 pytest 套件，按 PRD §70 四级目录组织（unit / integration / workflow / evals），另有 `api/` 集成层与 `unit/` 子域（quality / simulation）。
-> 状态：现行规模——`python -m pytest -n 4 -q` 全量 **2162 passed / 2 skipped**（2026-09-14 P1 规划合并后实测；V3.9.0 基线为 2059 / 2，52f639f）；前端 vitest 422 用例（`apps/web`，`npm run test`）。
+> 状态：现行规模——`python -m pytest -n 4 -q --ignore=tests/unit/test_m1_lock.py` 全量 **2956 passed / 1 skipped**（2026-09-27 批次实测；该 `--ignore` 必带，否则 `test_m1_lock.py` 会硬杀整个进程树、跑不出可比总数。V3.9.0 基线为 2059 / 2，52f639f）；前端 vitest **489** 用例（`apps/web`，`npm run test`；vitest 侧本轮未独立复现）。
 
 ## 职责与边界
 
@@ -17,15 +17,17 @@
 
 ## 对外接口
 
-### 现行规模与关键用例（2026-09-13 口径，替代 Sprint 0 的 12 用例清单）
+### 现行规模与关键用例（2026-09-27 口径，替代 Sprint 0 的 12 用例清单）
 
 | 项 | 说明 |
 |---|---|
-| 全量命令 | `python -m pytest -n 4 -q`（xdist 并行，约 4 分钟；依赖 dev extra，裸 `uv sync` 会缺 ruff/pytest-xdist） |
-| 基线 | 2162 passed / 2 skipped（2026-09-14，P1 规划合并批次实测） |
+| 全量命令 | `python -m pytest -n 4 -q --ignore=tests/unit/test_m1_lock.py`（xdist 并行，约 6 分钟；`--ignore` 必带，否则跑不出可比总数。依赖 dev extra，裸 `uv sync` 会缺 ruff/pytest-xdist） |
+| 基线 | 2956 passed / 1 skipped（2026-09-27 批次实测；须带 `--ignore=tests/unit/test_m1_lock.py`） |
 | 迁移表数 | `test_apply_migrations_creates_34_business_tables`（迁移后总表 40 = 39 业务表 + `_migrations`）；`test_business_table_count_is_34`（业务表 39，排除 `chapter_fts%` 影子表） |
 | 健康检查 | `test_health_endpoint_returns_ok`：`GET /api/health` → `{status:"ok", version:<包版本>, tables:39}` |
 | 端到端 | 工作流全链由 `scripts/smoke_e2e.py` 覆盖（独立临时库 + 独立端口，自动清理） |
+
+> ⚠️ 两条**测试名**仍含历史数字 `34`（名未跟断言走：`:48` 断言 40、`:434` 断言 39），已登记待 Lead 裁决，本次不改测试名。
 
 ### 子目录归属
 

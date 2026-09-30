@@ -1,7 +1,7 @@
 # scripts（运维脚本）
 
-> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 22 个脚本：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke、卷纲体检与开卷、章节量产等），均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
-> 状态：现行入口 22 个（`ls scripts/*.py`）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
+> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 25 个脚本：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke、卷纲体检与开卷、章节量产等），均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
+> 状态：现行入口 25 个（`ls scripts/*.py`）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
 
 ## 职责与边界
 
@@ -21,7 +21,7 @@
 | `scripts/migrate.py` | `scripts/migrate.py:16` | `main() -> int` | 执行 SQLite 迁移并打印 `applied / skipped / tables / db` |
 | `scripts/serve.py` | `scripts/serve.py:31` | `main() -> int` | 启动 uvicorn，host/port 取自 `Settings` |
 
-### 脚本总览（现行 22 个）
+### 脚本总览（现行 25 个）
 
 | 类别 | 脚本 |
 |---|---|
@@ -32,8 +32,11 @@
 | Schema / 前端类型 | `export_openapi.py`、`gen_frontend_types.py` |
 | 端到端 / 冒烟 | `smoke_e2e.py`、`smoke_ch063_split.py` |
 | 一致性核查 | `check_state_sync.py` |
+| 卡死 run 巡检 | `inspect_stalled_runs.py`（PAUSED/RUNNING/PENDING 逐条 + 审批实质内容摘要，只读；`--apply` 故意不实现，见下文专节） |
 | 卷纲 / 开卷 / 世界切换 | `outline_check.py`（卷纲体检，见其模块 docstring）、`open_volume.py`（见下文专节）、`world_switch.py`（快穿换位面时按既有机制封存上一世作用域，默认 dry-run） |
 | 正文规整 / 算子校准 / 可读性回放 | `normalize_chapters.py`（引号漂移 + 内部标识体检，默认 dry-run）、`ai_tone_calibrate.py`（AI 味算子校准 + 精确率抽样）、`readability_audit.py`（长段 / 对话占比 / 接词回声三指标只读回放 + 锚点书人类基线对照） |
+| delta 源锚定阈值校准 | `delta_anchoring_calibrate.py`（只读 `mode=ro` 打开；实测 `DELTA_BIGRAM_COVERAGE_MIN` 的 bigram 覆盖率分布 + ≤20 条低覆盖样本供人工判别「真捏造」还是「正常概括」；不写库） |
+| revise 保真阈值校准 | `revise_fidelity_calibrate.py`（只读 `mode=ro` 打开；从 `workflow_runs.checkpoint_json` 还原历史 revise 轮次实测 `REVISE_MIN_PRESERVED_RATIO` 的 `preserved_ratio` 分布，另出相邻 drafts 版本对照与 ≤20 条低比值抽样；不写库） |
 | 章节量产 | `produce_chapters.py`（见下文专节） |
 
 ### `scripts/migrate.py` 输出格式
@@ -372,3 +375,62 @@ chapter.status——改稿轮里章状态停在 `DRAFTED` 不翻转，盯它只�
   落定循环的假 API）+ `tests/integration/test_produce_chapters_e2e.py`（临时库 + 独立端口 + mock
   providers 三场景：干净章推到 `COMMITTED`；重复文本章被拒绝批准 exit 2；窄带章触发驳回改稿 →
   轮询发现改稿子 run → 轮次耗尽即停 exit 2）。
+
+---
+
+## `scripts/inspect_stalled_runs.py` —— 卡死 run 只读巡检
+
+列全部 `PAUSED` / `RUNNING` / `PENDING` 的 workflow run，并对每个 run 解析
+`checkpoint_json`，报告它在人工审批节点上**压着什么实质内容**——这是主会话判断
+「能不能安全清理」的唯一依据。**默认只读，不实现任何取消 / 删除。**
+
+### 用法
+
+```bash
+# Markdown 报告（默认库 data/novelos.db）
+python scripts/inspect_stalled_runs.py
+
+# 指定库 / 机器可读
+python scripts/inspect_stalled_runs.py --db data/novelos.db --json
+
+# 完整留档（含完整 checkpoint_json）——落盘位置由调用方定
+python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
+```
+
+### 三个容易搞错的结论（工具按代码核对，不按口头说法）
+
+| 说法 | 实测真相 | 依据 |
+|---|---|---|
+| 「同章有活动 run ⇒ 重新发起写章 409」 | **不成立**。守卫只判 `RUNNING`/`PENDING`，**PAUSED 不拦新 start** | `routers/workflows/control.py:52` `_check_active_run_for_chapter`（SQL 谓词见 line 78 / 89）；DB 侧同谓词部分唯一索引 `database/migrations/0017_unique_constraints.sql:46-48`（其 line 42-45 注释写明「不覆盖 PAUSED」是刻意设计） |
+| 「PAUSED run 可以直接 cancel 掉」 | **不成立**。cancel 端点只接受 `RUNNING`，PAUSED 返 **409** | `routers/workflows/control.py:780-781`；`workflow_runtime/engine.py:644-646` 抛 `ValueError(... "must be RUNNING to cancel")` |
+| 「PAUSED run 就是空的」 | **不成立**。dev 库 16 条 PAUSED **全部**带实质内容（review_report 非空 + critic issues） | 工具第 2 节「逐 run 待审批实质内容」逐条给出字数 / error rule_id / 评审意见摘录 |
+
+### 报告三节
+
+1. **概览**——run_id / 章 / 状态 / 节点 / **停留时长** / retry / error / 有无实质内容 / 是否阻止新 start；
+2. **逐 run 待审批实质内容**——`__pause_payload__` 解析结果：被审字数 vs 目标与字数带、
+   error / warning 的 rule_id 清单、AI 模式命中、题材核销、critic issues 条数、
+   **评审意见摘录原文**；空报告与未识别 payload 分别显式标出（不静默归成「无内容」）；
+3. **对「重新发起写章 409」的影响**——按上面第 1 行那条真实谓词算，逐章给出是否真的会被拦。
+
+### 已知边界
+
+- `workflow_runs` **无 `project_id` / `created_at` 列**；`chapter_id IS NULL` 的
+  project-init run JOIN 不出项目名，工具回落到 `checkpoint_json.brief.title` 还原，
+  并在报告里打 `*` 标记（该依据未经 `projects` 表核对，与 JOIN 出来的不是一回事）；
+- 停留时长以 `started_at` 为准，`ended_at IS NULL` 是活动 run 的常态；
+- **`--apply` 故意不实现**：`apply_cleanup()` 显式抛 `NotImplementedError`、CLI 返 **3**。
+  取消是终态操作，由主会话依据本报告另行决策并留痕——留一个空实现或 `pass` 只会让
+  将来加的 `UPDATE` 静默生效。
+
+### 退出码
+
+- `0`：巡检完成（无论是否发现活动 run）；`2`：参数错误 / DB 不存在 / 非法 SQLite；
+- `3`：带了 `--apply`（显式拒绝，stderr 打 `REFUSED:`）。
+
+### 依赖
+
+- 上游：无（纯标准库，不 import `packages.*`，故不随业务代码漂移）；
+- 标准库：`argparse` / `json` / `sqlite3` / `pathlib` / `dataclasses` / `datetime`；
+- 测试：`tests/unit/test_inspect_stalled_runs.py`（59 例：只读拒写 / 审批内容三形态 /
+  守卫口径形状 / 导出留档 / apply 闸；全部夹具在 `tmp_path`，不碰 `data/novelos.db`）。

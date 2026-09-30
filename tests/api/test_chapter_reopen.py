@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -331,10 +332,21 @@ def test_reopen_keeps_state_sync_ok(tmp_path: Path):
 
     asyncio.run(run())
 
+    # 编码必须**两侧同时钉死**：子进程 stdout 编码跟随继承的环境变量
+    # （PYTHONIOENCODING / PYTHONUTF8 / locale），而 `text=True` 的解码器跟随
+    # **locale**（本机 Windows 是 cp936）。两者可以静默错位——2026-09-27 实测：
+    # 父进程带 PYTHONIOENCODING=utf-8 时，子进程吐 UTF-8、此处按 cp936 解码，
+    # 直接 `UnicodeDecodeError: 'gbk' codec can't decode byte 0xa0`。
+    # 只给 `encoding=` 不够（子进程仍可能吐 GBK），只给 env 也不够（父仍按 locale 解）——
+    # 必须两边都钉。已验证的同款正确写法见 test_produce_chapters_e2e.py / test_db_maintenance.py。
+    child_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--db", str(db_path), "--json"],
+        env=child_env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
     assert proc.returncode == 0, (

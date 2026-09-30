@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.db import get_connection
 
 from .builders_common import (
@@ -731,7 +732,7 @@ def build_observer_input(
 
     payload: dict[str, Any] = {
         "agent": "observer",
-        "prompt_version": "observer:v1",
+        "prompt_version": active_prompt_label(db_path, "observer", fallback="observer:v1"),
         "knowledge_permissions": {
             "your_visibility": ["AUTHOR", "DIRECTOR"],
             "forbidden_kinds": ["HIDDEN"],

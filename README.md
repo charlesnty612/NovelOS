@@ -46,7 +46,7 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0026_workflow_runs_instance_id.sql，38 张物理业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包 / 0026 run 实例归属）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0030_commits_rollback_of_project_scope.sql，共 30 个迁移，39 张业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包 / 0026 run 实例归属 / 0027 场景计划 / 0028 大纲槽 / 0029 写作圣经 / 0030 回滚索引项目内收窄）
 tests/                   pytest（unit / integration / workflow / api / evals）
 scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
 docs/                    设计文档、PRD、实现计划（docs/impl/IMPLEMENTATION-PLAN-v0.md）
@@ -64,7 +64,7 @@ jsonschema / httpx；测试另需 pytest / ruff）。
 # 1) 安装依赖
 pip install -e ".[dev]"
 
-# 2) 执行数据库迁移（生成 data/novelos.db；38 张业务表 + _migrations）
+# 2) 执行数据库迁移（生成 data/novelos.db；39 张业务表 + _migrations 物理共 40 张）
 python scripts/migrate.py
 
 # 3) 前端构建（构建产物 apps/web/dist，后端会自动托管）
@@ -98,13 +98,15 @@ python -m pytest -q
 - 前端 dev 代理从 `NOVELOS_PORT` / `NOVELOS_API_PORT` 读后端端口（见 `apps/web/vite.config.ts`）；
   改端口后需重启 vite dev 才生效。
 
-健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=38`，业务表数；含 `_migrations` 物理共 39 张）。
+健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=39`，业务表数；含 `_migrations` 物理共 40 张）。
 
 ## 测试
 
 ```bash
-# 后端全量（当前基线 2059 passed，2 skipped；-n 4 并行，约 4 分钟）
-python -m pytest tests/ -q --ignore=tests/evals -n 4
+# 后端全量（当前基线 2956 passed，1 skipped；-n 4 并行，约 6 分钟）
+# 须带 --ignore=tests/unit/test_m1_lock.py：该文件单跑会硬杀整个进程树（真因未定位），
+# 不带则跑不出与本基线可比的总数
+python -m pytest tests/ -q --ignore=tests/evals --ignore=tests/unit/test_m1_lock.py -n 4
 
 # Golden 回归 eval（当前 3/3）
 python scripts/eval_regression.py
@@ -115,7 +117,7 @@ python scripts/smoke_e2e.py
 # 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
 python scripts/real_llm_e2e.py
 
-# 前端单测（vitest；当前 422）
+# 前端单测（vitest；当前 489——vitest 侧本轮未独立复现）
 cd apps/web && npm run test
 ```
 
@@ -149,7 +151,7 @@ cd apps/web && npm run test
 ## 版本与更新日志
 
 当前版本 **v3.9.0**（`pyproject.toml` 为版本单源；`apps/web/package.json`、`apps/web/package-lock.json`
-与 `uv.lock` 随发版对齐。当前基线：pytest **2059 passed / 2 skipped**，vitest **422**）。自 V1.0 起，
+与 `uv.lock` 随发版对齐。当前基线：pytest **2956 passed / 1 skipped**（须带 `--ignore=tests/unit/test_m1_lock.py`），vitest **489**（vitest 侧本轮未独立复现））。自 V1.0 起，
 所有迭代必须在 `CHANGELOG.md` 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x
 路线登记在同文件「Known Issues / 路线登记」一节。
 

@@ -78,11 +78,12 @@ def _list_sql_files(migrations_dir: Path) -> list[Path]:
 
 
 def _already_applied(conn: sqlite3.Connection) -> set[str]:
-    try:
-        rows = conn.execute("SELECT filename FROM _migrations").fetchall()
-        return {r["filename"] for r in rows}
-    except sqlite3.OperationalError:
-        return set()
+    # 唯一调用方 apply_migrations 必定先跑 _ensure_migrations_table(conn)，
+    # 故本 SELECT 不会因「表不存在」抛 OperationalError——原 try/except 正是为
+    # 该情形设的防御（真出错时会被读成「0 条已应用」⇒ 全部迁移重跑），
+    # 2026-09-27 A-003 删除。出错就让它抛。
+    rows = conn.execute("SELECT filename FROM _migrations").fetchall()
+    return {r["filename"] for r in rows}
 
 
 def apply_migrations(
@@ -143,7 +144,11 @@ def apply_migrations(
 def count_tables(db_path: Path | str) -> int:
     """查询总表数量（不含 sqlite_* 与 chapter_fts% 影子表，含 _migrations）。
 
-    业务表随迁移增长（当前为 38 张，0025 genre_packs 等迁移后）；含 _migrations 时总数为 39，调用方按需减一。
+    业务表数随迁移链增长，调用方按需减一得不含 ``_migrations`` 的业务表数。
+    **本 docstring 不写死具体张数**（2026-09-27 A-009）：表数在每次迁移后即漂移，
+    写死的数字必然过期，且与 AGENTS.md §六一致性矩阵的记载分属两处、更难同步。
+    权威口径以 ``database/migrations/`` 实际迁移链为准，测试断言见
+    ``tests/unit/test_migrations.py`` 与 ``tests/integration/test_health.py``。
     """
     conn = get_connection(db_path)
     try:

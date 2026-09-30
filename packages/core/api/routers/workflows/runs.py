@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from packages.core.db import get_connection
+from packages.core.logging_config import get_logger
 from packages.core.workflow_runtime.runs import (
     get_run,
     get_workflow_name_for_run,
@@ -26,6 +27,8 @@ from packages.domain.project.service import ProjectService
 from packages.domain.volume.service import VolumeService
 
 from .common import _extract_pause_payload
+
+log = get_logger("novelos.routers.workflows")
 
 router = APIRouter(tags=["workflows"])
 
@@ -219,6 +222,16 @@ def _compute_run_label(
             v = row["v"] if row else None
             return f"{zh} → 草稿 v{v}" if v is not None else zh
         except Exception:
+            # 降级语义（2026-09-27 A-007）：label 是**装饰性派生字段**（run 列表展示），
+            # 草稿版本号取不到不影响 run 的任何判定，故回落成不带版本号的 `zh` 是安全的。
+            # 但必须显式留痕——静默回落会让「取号失败」与「该 run 真没有草稿」读数相同，
+            # 而两者排障方向完全相反。
+            log.warning(
+                "runs.label: 草稿版本取号失败，label 降级为不带版本号（run_id=%s chapter_id=%s）",
+                run.get("run_id"),
+                chapter_id,
+                exc_info=True,
+            )
             return zh
     if workflow_name == "chapter-review":
         # 优先从 checkpoint_json（已解析为 ctx dict，顶层即变量键）取用户显式指定的
@@ -243,6 +256,15 @@ def _compute_run_label(
             v = row["v"] if row else None
             return f"{zh}（审 v{v}）" if v is not None else zh
         except Exception:
+            # 降级语义同上（A-007，chapter-review 分支）：被评审的草稿版本号取不到时
+            # 回落成不带版本号的 `zh`。这只影响展示，**不改变评审实际审的版本**
+            # ——后者由 basic_checks 从 checkpoint_json 的 draft_version 决定。
+            log.warning(
+                "runs.label: 被评审草稿版本取号失败，label 降级为不带版本号（run_id=%s chapter_id=%s）",
+                run.get("run_id"),
+                chapter_id,
+                exc_info=True,
+            )
             return zh
     return zh
 

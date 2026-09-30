@@ -4,11 +4,18 @@
 三仓分离：正文不进软件仓）；不在本机时 ``pytest.skip``。
 
 **N 是怎么定出来的（不是拍脑袋）**：跑 ``count_dialogue_echoes`` 逐章量出来的——
-实测全弧命中 **1 对 / 1 章**，故登记上限就是 1（本文件用 ``<=`` 断言；生成侧同口径
-实测 26 对 / 20 章，见 ``packages/core/quality/ai_patterns.py`` 常量注释）。那 1 对
+实测全弧命中 **1 对 / 1 章**，故登记上限就是 1（本文件用 ``<=`` 断言）。那 1 对
 是「…我们明天一早就在城门口等吧」→「好啊，明儿个我们就在城门口等他们。」：信息
 递增但用词撞车，属**合法写法**——这正是本规则只判字面、severity 恒 warning 的原因，
 也是「对白是否有后果」无法正则化的实证。
+
+**2026-09-27 复核：人侧仍是 1 对 / 1 章**（重叠系数可比性守卫生效前后都是 1 对——
+那唯一一对的 min = 15 ≥ 3 且后句 15 < 2×40，两条守卫都碰不到它）。生成侧同口径由
+**34 对 / 24 章**（守卫生效前）降为 **23 对 / 18 章**（生效后），见
+``packages/core/quality/ai_patterns.py`` 常量注释。
+
+⚠️ **1/19 章这个数字本身是薄样本**：人类侧全弧只有 61 对相邻对白、命中 1 对，
+不足以支撑任何回声阈值结论；本文件守的是「人侧不恶化」，不是「人侧零容忍」。
 
 另外两条同语料上的复核（撤回批次的一部分）：
 
@@ -32,8 +39,8 @@ from packages.core.quality.ai_patterns import (
 )
 from packages.core.quality.wordcount import visible_chars
 
-# --- 2026-09-17 实测基线（改阈值前先重算：python scripts/readability_audit.py）---
-HUMAN_ECHO_PAIRS = 1  # 全弧命中对数（19 章）
+# --- 实测基线（2026-09-27 重算；改阈值前先重跑 count_dialogue_echoes） -------
+HUMAN_ECHO_PAIRS = 1  # 全弧命中对数（19 章）；守卫生效前后均为 1 对
 HUMAN_ECHO_CHAPTERS = 1  # 其中有命中的章数
 HUMAN_ECHO_CANDIDATE_PAIRS = 61  # 相邻对白对总数（与阈值无关的语料锚点）
 HUMAN_ECHO_VISIBLE_CHARS = 37806  # 与 test_readability_baseline 同源
@@ -107,6 +114,25 @@ def test_human_echo_pairs_stay_within_registered_ceiling():
         f"相邻对白对总数实测 {candidates} ≠ 登记 {HUMAN_ECHO_CANDIDATE_PAIRS}"
         "——语料或对白段提取口径已变，基线需重算"
     )
+
+
+def test_human_echo_hit_has_interpretable_overlap():
+    """人侧那唯一一对的 ``overlap`` 读数是**可解释**的（2026-09-27 新增）。
+
+    可比性守卫（后句 ≥2×前句、任一侧 <3 字）若哪天被放宽，人侧本可能开始吸收
+    退化读数；本条先证明「当前这一对不是靠退化读数命中的」，即：它的命中来自
+    **复述型**（recall 0.73），重叠系数也落在可解释区间内，两条守卫都碰不到它。
+    """
+    hits = [(label, p) for label, prose in _arc_chapters() for p in count_dialogue_echoes(prose)]
+    assert len(hits) == HUMAN_ECHO_PAIRS, f"登记 1 对，实测 {len(hits)}"
+    label, pair = hits[0]
+    assert pair.overlap_comparable is True, (
+        f"{label} 人侧命中靠退化读数（min={min(len(pair.front_chars), len(pair.back_chars))}，"
+        f"后句/前句={len(pair.back_chars) / len(pair.front_chars):.2f}×）——"
+        "守卫口径已变，基线数字需重算"
+    )
+    assert pair.recall_ratio == pytest.approx(11 / 15)
+    assert pair.recall_ratio >= 0.70, "该对由复述型命中（信息递增但用词撞车）"
 
 
 def test_human_dialogue_low_hits_are_never_error():

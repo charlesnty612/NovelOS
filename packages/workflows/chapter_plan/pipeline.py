@@ -21,6 +21,7 @@ import json
 import logging
 from typing import Any
 
+from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection
 from packages.core.genre.target_words import (
@@ -127,6 +128,18 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
     project_id = ctx.get("project_id")
     director_output = ctx.get("director_planner_output") or {}
 
+    # 落库 prompt 标签在**开启事务前**重算（两个落库面 plan_json / scene_plan 共用，
+    # 故须早于二者的构造）：active_prompt_label 内部自建短连接只读 prompts 表并在
+    # finally 关闭（prompts.py:141,156），放事务外不触碰「事务内另开连接」纪律
+    # （AGENTS.md 坑区那条针对的是**写**库，此处是只读）。
+    # 与 payload["prompt_version"]（planner_input.build_director_planner_input）是
+    # **逐字同调用同回退**，故同一 run 的「装配声明」与两处落库记录全同源。
+    # 禁采 director_output["prompt_version"]：那是模型照抄 payload 的**回声**
+    # （可被改写 / 省略），与 ACTIVE 真值分叉即复现 2026-09-16 writer 事故形状。
+    planner_prompt_label = active_prompt_label(
+        db_path, "director_planner", fallback=DIRECTOR_PLANNER_PROMPT_VERSION,
+    )
+
     # 读取原 plan_json.expected_word_count（如有）——保字数用
     inherit_expected: int | None = None
     conn = get_connection(db_path)
@@ -176,7 +189,7 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "open_questions": director_output.get("open_questions", []),
         "notes_for_planner": director_output.get("notes_for_planner"),
         "schema_version": director_output.get("schema_version"),
-        "prompt_version": director_output.get("prompt_version"),
+        "prompt_version": planner_prompt_label,
     }
 
     scene_plan = director_output.get("scene_plan")
@@ -197,7 +210,7 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 scene_plan=scene_plan,
                 run_id=ctx.get("run_id"),
                 source="director_planner",
-                prompt_version=DIRECTOR_PLANNER_PROMPT_VERSION,
+                prompt_version=planner_prompt_label,
             )
         else:
             scene_plan_id = None

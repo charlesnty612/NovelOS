@@ -397,8 +397,11 @@ class ChapterService:
         - ``created_by`` 固定 ``"human"``；``prompt_version`` / ``model_id`` 为 ``None``。
         - ``draft_id`` 用 ``new_id("dr")``；``created_at`` 用 ``now_iso()``。
         - 若原 status 为 REVIEWED，INSERT 同事务内将 chapters.status 降级为 DRAFTED
-          （与 ``continuation`` adopt 同款降级，绕过 ALLOWED_NEXT 白名单），确保
-          未重新审校的改稿无法直接 commit 定稿。
+          （与 ``continuation`` adopt 同款降级），确保未重新审校的改稿无法直接
+          commit 定稿。**该迁移本就在 ``ALLOWED_NEXT`` 内**（``models.py:31``
+          的 ``REVIEWED: {..., "DRAFTED", ...}``）——此处直写 UPDATE 而非走
+          ``update()`` 的守卫，理由是**原子性**（降级必须与新 draft 落库同事务），
+          不是「白名单漏了这条边」。
         """
         if not content:
             # 防御性二次校验：router 层已用 pydantic ``min_length=1`` 拦截；此处兜底
@@ -428,8 +431,11 @@ class ChapterService:
 
             # 3) INSERT + 同事务降级（REVIEWED → DRAFTED）
             # 降级必须与新 draft 落库原子化：避免 draft 已落库但 status 未降
-            # 留下「未重新审校的改稿可直接 commit」的口子。降级 UPDATE 走
-            # 绕过 ALLOWED_NEXT 白名单的直写（同 continuation adopt 原写法）。
+            # 留下「未重新审校的改稿可直接 commit」的口子。
+            # REVIEWED→DRAFTED **在** ALLOWED_NEXT 内（models.py:31）；此处直写
+            # UPDATE（同 continuation adopt 原写法）是为与 INSERT 共处一个事务，
+            # 不走 update() 的守卫是为了原子性，不是为了绕开白名单
+            # （2026-09-27 B-5 措辞订正）。
             draft_id = new_id("dr")
             try:
                 conn.execute(

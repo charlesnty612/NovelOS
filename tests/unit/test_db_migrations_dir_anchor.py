@@ -56,12 +56,19 @@ def test_default_migrations_dir_anchored_when_cwd_is_elsewhere(tmp_path: Path) -
     )
     env = dict(os.environ)
     env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    # 编码两侧钉死：子进程 stdout 跟随继承的 env，`text=True` 的解码器跟随 locale，
+    # 二者会静默错位（本机 locale=cp936，env 带 PYTHONUTF8/PYTHONIOENCODING 时
+    # 子进程转 UTF-8 → 父进程按 cp936 解 → UnicodeDecodeError）。
+    # 只给 `encoding=` 不够（子进程仍可能吐 GBK），必须 env + encoding 一起给。
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run(
         [sys.executable, "-c", code],
         cwd=str(tmp_path),
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
     )
     assert proc.returncode == 0, f"子进程失败: {proc.stderr}"

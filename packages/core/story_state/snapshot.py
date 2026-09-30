@@ -53,6 +53,8 @@ import logging
 import sqlite3
 from typing import Any
 
+from packages.core.db import get_connection
+
 from .snapshots import _parse_required_json
 
 logger = logging.getLogger("novelos.story_state.snapshot")
@@ -641,8 +643,11 @@ def repair_current_snapshot_world(
     故「最新快照与上一 commit 不完全同构」是修复的预期副作用，
     不破坏任何一致性检查，无需在调用方做额外补偿。
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    # 2026-09-27 A-008：原为裸 ``sqlite3.connect``（无 foreign_keys / busy_timeout /
+    # WAL，且 row_factory 需手工设），改为走 ``get_connection`` 与 story_state 其余
+    # 模块（commits.py / delta_repair.py / queries.py）同源。本函数的读写集合不变，
+    # 业务行为不变；row_factory=Row 由 get_connection 设置。
+    conn = get_connection(db_path)
     try:
         # 取该项目最新 story_states 行
         row = conn.execute(

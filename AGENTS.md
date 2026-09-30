@@ -13,10 +13,23 @@
 首例已执行 `70ee277`）——由主会话自主拍板，按「先验判断被推翻必须留痕」规矩记录即可，不逐项等用户。
 边界：**产品定位级**（转公开发布、LICENSE、题材方向选择、内容创作决策）仍须用户拍板。
 
+**软件工作边界（2026-09-27 用户裁决，两条硬约束）**
+
+1. **只动软件层，内容层零接触**。现存全部书籍项目（火影/死当/快穿之价签等 18 条 PAUSED run（2026-09-30 实测；其中 3 条属 project-init 阶段）、48 章书等）
+   **都是测试书籍**，不再有修改与续写的意义 ⇒ 禁止把它们当生产数据对待：不得改内容仓
+   （NovelOS-Content）、不得改/重生成既有章节正文、不得续写、不得为「让老数据好看」而做数据迁移或
+   清洗。**判别**：任何读某本书正文/人物/设定的验证需求，一律改用**临时库 + 合成夹具**，
+   不得指向 dev 库既有项目。§二 硬规则 5 的三仓分离照旧，但本条收紧的是「内容侧**不作为**工作对象」。
+2. **改软件过程中不做真实 LLM 调用**。禁止用 NovelOS 自身发起真实模型调用来验证软件行为
+   （不跑真实 write/revise/审稿、不做真实量产批、不烧 API 额度）。**判别**：行为验证一律走
+   mock provider、单元/契约测试、临时库 e2e（见 `scripts/smoke_e2e.py`：临时库 + 独立端口 + mock
+   providers）。**唯一例外**是显式实测需要真实模型响应才能证伪的命题——须 Lead 逐次裁决并留痕，
+   不得由成员自行发起。
+
 ## 二、架构约定（分层与依赖方向）
 
 ```
-apps/web/          前端（React18+TS+Vite；types.ts 手写为权威，types.generated.ts 是 drift 对照面）
+apps/web/          前端（React18+TS+Vite；src/api/types.ts 手写为权威，types.generated.ts 是 drift 对照面）
 packages/core/     机制层：api(routers) / agent_runtime / context_engine / genre / quality /
                    story_state / workflow_runtime(engine) / model_router / simulation /
                    exporter / content_sync / signing_check / backup …
@@ -29,7 +42,7 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
 
 硬规则（每条都有测试或事故证据）：
 
-1. **巨型文件拆门面**：新增模块不得超 1500 行；>1500 行的既有文件拆「多模块 + 门面再导出」（builders 3678→7 先例）——**存量挂账已于 2026-09-13 V4.0 批次全部清零**：builders_common.py 2104→四模块包（excerpts/ledger/summaries/common+门面）、ProjectInitPanel.tsx 1858→227 主文件+12 子组件、routers/workflows.py 1675→四域包（control/runs/revise/common）；门面 `__all__` 收缩至 30 个有消费方名（深路径 import 全保留，F401 由 pyproject per-file-ignores 承接）；门面 `__all__` 不得含自指元素；缓存模块改原地 `clear()` 不得 `global` 重绑定（dict 旧引用失联事故）。
+1. **巨型文件拆门面**：新增模块不得超 1500 行；>1500 行的既有文件拆「多模块 + 门面再导出」（builders 3678→7 先例）——**存量挂账已于 2026-09-13 V4.0 批次全部清零**：builders_common.py 2104→四模块包（excerpts/ledger/summaries/common+门面）、ProjectInitPanel.tsx 1858→227 主文件+12 子组件、routers/workflows.py 1675→四域包（control/runs/revise/common）；门面 `__all__` 收缩至 30 个有消费方名（深路径 import 全保留，F401 由 pyproject per-file-ignores 承接）；门面 `__all__` 不得含自指元素；缓存模块改原地 `clear()` 不得 `global` 重绑定（dict 旧引用失联事故）；**拆前先 grep `monkeypatch.setattr(<模块>`——被测试打点的名字所在模块不能迁走**（2026-09-27 B-1 实证：13 处 patch 打在门面 `run_agent` 上，4 个调它的节点被迫留门面；宁可少拆，不可破坏 patch 契约；彻底拆需改测试打点目标或依赖注入，另立项裁决）。
 2. **装配缓存键纪律**：凡进 payload 的装配参数必须入键（author_intent/target_word_count/genre_pack_ref 教训——漏键=脏命中）；命中返回深拷贝、写入存拷贝；preview 与生产拆命名空间；主 JOIN 与降级路径的键形态必须逐字同形；失效以 state_version 为主线 + commit 后显式兜底。
 3. **新资源类型范式**（genre_pack 先例）：自有表 + 自有 schema 版本线（`^<name>.v1.\d+\.\d+$`，minor 兼容）+ `additionalProperties:false` 守「软件层只承载消费子集」+ CRUD router + 项目绑定 + builder 注入 + 缓存键指纹；内容资产正文一律不进软件仓（三仓分离）。
 4. **质量口径**：error 分 blocking/informational（白名单 `quality/issues.py:BLOCKING_RULES`）；**severity 矩阵变更必须同步三处文档 + formula_hash 变 + 回归测试**；评审类约束（题材核销/GENRE-*）恒 warning 不进白名单。
@@ -60,6 +73,26 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
 3. **缺陷形状升格**：同一形状抓到第二次 → 沉淀为清单/硬规则/本文件条目（F-1~F-8 先例在 v3.9 计划文档 §六）。
 4. **并行开发按文件路径互斥分组**；子代理任务书写死专属文件/铁律/测试命令/汇报格式；子代理禁做任何版本控制写操作。
 5. **先验判断被推翻必须留痕**（项目铁律：roadmap 评估表 + 「两处主会话先验判断被推翻」先例）。
+6. **子代理之间也会数字互斥，主会话裁决不偏向审查员**（2026-09-27 先例）：对抗审查打回 7 项后，
+   开发成员反驳审查员 3 处数字（阈值 2.0 参数扫描的区间描述、ch35 回归点、`{1,6}` 豁免实例数），
+   **主会话独立复算后确认三处均为开发正确**。反面先例同轮：运维成员「纠正」主会话
+   「8 章是 9 章」实为它自己算错（把 `chapter_id IS NULL` 当章节）——**照单全收就会把假事实刻进
+   CHANGELOG**。⇒ 裁决依据只有一条：**自己复算**，不看是谁说的。
+
+### 固定子代理团队（2026-09-27 用户指令建立，跨会话复用）
+
+`C:/Users/aistation/.agents/agents/` 下四个常驻成员，角色与文件边界已写进各自 `agent.md`：
+
+| 成员 | 角色 | 边界 |
+|---|---|---|
+| `novelos-corpus-analyst` | 调研·**只读** | 出证据表（抽样/判档/字面特征），不做实现决策，不碰代码 |
+| `novelos-quality-dev` | 开发 | 独占 `packages/core/quality/ai_patterns.py` + 4 个 quality 测试 |
+| `novelos-ops-dev` | 开发 | 独占 `scripts/` + 自建测试；**不可逆操作（删/取消）须主会话确认才执行** |
+| `novelos-reviewer` | 对抗审查·**只读** | 以驳倒为目标；须交「我没能攻破的地方」段 |
+
+**并行按文件路径互斥**（铁律 4）：`ai_patterns.py` 只有一名开发能碰——两个算子同文件时
+必须串行或换人，这是本批的实际约束。典型链路：调研（全量逐条，非抽样）→ 主会话复算 →
+开发 → 主会话复算 → 对抗审查 → 修复 → 全量回归。
 
 ## 四、命令与流程
 
@@ -68,12 +101,12 @@ python scripts/migrate.py            # 迁移（新库全链 0001~0030）
 python -m ruff check packages scripts tests   # lint（测试文件豁免 E501）
 python -m pytest -n 4 -q             # 全量（约 4 分钟；xdist 需在 venv）
 cd apps/web && npx tsc -b && npx vitest run && npm run build
-python scripts/export_openapi.py && python scripts/gen_frontend_types.py   # schema 漂移后 regen
+python scripts/export_openapi.py && python scripts/gen_frontend_types.py   # schema 漂移后 regen（必须用项目 .venv 解释器跑；系统 python 因 editable 元数据缺失会把 version 读成 `dev`，误判为 schema 漂移——2026-09-27 dev-b 实证）
 python scripts/smoke_e2e.py          # 端到端（临时库+独立端口，自动清理）
 python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂移核查（只读）
 ```
 
-版本纪律（方法论 05）：pyproject 为单源，`main.py` 经 importlib 读取；`apps/web/package.json` 随发版对齐；uv.lock 升版后 `uv lock`；发版前「版本三处一致」核对。
+版本纪律（方法论 05）：pyproject 为单源，`main.py` 经 importlib 读取；`apps/web/package.json` 随发版对齐；`apps/web/package-lock.json` 一并对齐（2026-09-30 补登记，此前未入纪律）；uv.lock 升版后 `uv lock`；发版前「版本四处一致」核对。
 
 ## 五、坑区（症状 → 真因 → 对策）
 
@@ -125,6 +158,15 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 | 「一键改稿」把作者的字数目标与铁律丢掉 | `GateReviseRequest` 没有 `target_word_count` / `author_intent` 字段，构造 `StartWorkflowRequest` 时也不填 ⇒ 作者按 `--target-word-count 300` 起稿后被门禁拦下一键改稿，target 退回服务端默认 3000、铁律整段丢失 | **✅ 已修**（2026-09-21 检修）：两字段入请求体（同 `StartWorkflowRequest` 约束），值按「请求体 > 该章最近一次 run 的 ctx 继承」解析，write 与接力 review 共用同一份；判别：`test_gate_revise_closure.py::test_gate_revise_passes_target_word_count_and_author_intent` |
 | 巡检工具假阳性把真信号埋掉：`check_state_sync` 把「从未 commit 的项目」全报成漂移 | 无 `story_states` 行的项目没有 state 版本化基线，「DB 有实体而快照没有」是**未开始**而非不一致，却按 only_in_db 计入 DRIFT（dev 库实测单项目 29 实体全列进明细、结论 DRIFT: 5 处） | **✅ 已修**（2026-09-21 检修）：无快照项目单列「无快照项目（不计漂移）」小节 + JSON `projects_without_snapshot` 字段；dev 库复测 SYNC OK；判别：`tests/unit/test_state_sync_drift_count.py` 四用例（撤掉 `if rep.no_snapshot: continue` 必红） |
 
+| 子进程输出编码：父进程 `text=True` 缺 `encoding=` → 父子两侧静默错位 | 子进程 stdout 编码**跟随继承的环境变量**（`PYTHONIOENCODING`/`PYTHONUTF8`/locale），而 `subprocess.run(text=True)` 的解码器**跟随 locale**（本机 Windows = `cp936`）。两者可以不一致：跑测试时随手设 `$env:PYTHONIOENCODING='utf-8'` 就会传导进子进程 | **✅ 已修**（2026-09-27，两处：`test_chapter_reopen.py` / `test_db_migrations_dir_anchor.py`）：**必须 env + encoding 两侧同时钉**，只给 `encoding=` 不够（子进程仍可能吐 GBK），只给 env 也不够（父仍按 locale 解）。**配套教训：单跑绿 ≠ 没问题**——这条测试单跑绿、全量红，逼我把机理查到底才发现是自己制造的。**环境敏感的测试，单跑结论不作数**，判别要跑全量。⚠️ 同款第 3 处 `test_m1_lock.py:215-220` **故意不修**（改完无法验证——该文件会硬杀进程树），留待与树杀真因一并处理 |
+| 「一堆 PAUSED run 卡着」——按并发占用处理，整批清掉 | **两层都不是它们以为的那样**：① 停 Human 审批门的 PAUSED **不阻止新 start**——守卫 `_check_active_run_for_chapter` 两条分支谓词都只判 `RUNNING`/`PENDING`（`control.py:78/89`），DB 侧兜底同谓词（迁移 `0017_unique_constraints.sql:46-48`，其注释明写「不覆盖 PAUSED」是刻意设计，为 resume 留出生效空间）；② **PAUSED 根本 cancel 不掉**——`engine.py:644-646` 写明 status ∈ {COMPLETED,FAILED,CANCELLED,PAUSED} → 409「must be RUNNING to cancel」，取消走 resume 后的 reject/approve 决议路径 | **判别**：见到 `PAUSED` 别当锁。要清先问「谁挡谁」——三层证据（API 谓词 / 0017 索引谓词 / cancel 端点状态机）都只认 RUNNING·PENDING。**硬清只能绕过引擎直改 DB = 同「PATCH 借道」形状**。工具：`scripts/inspect_stalled_runs.py`（只读巡检 + `--export` 留档）；本仓 18 条实测**全部有实质评审内容、零空报告**（2026-09-30 实测，替代 16 条记录），处置见 CHANGELOG 2026-09-27；补记：`mode=ro` 巡检会触碰 `novelos.db-shm` 的 mtime（读 WAL 索引正常行为，主库未动，不作写入认定） |
+| 阈值依据写着「人类基线 0.00/千字，全弧零出现」 | **那个 0.00 是量具口径造成的假象**：`count_short_paras` 独自用 `_paragraphs`（`\n\n`）切段，而人类锚点书**一行一段**（19 章 `\n\n` 总数 = **0**）⇒ 被读成 19 个整章大段 ⇒ 规则**构造上不可能命中**。同文件长段/对白算子早就在用 `\n+` 口径 | **✅ 已修**（2026-09-27）：段切分口径收敛为唯一入口 `_split_paragraphs`（`\n+`），人类侧 0 → **8 命中 / 0.212**，生成侧 2.064，分离度 9.7×，**阈值 1.0 不动**。**通用纪律：论证阈值前先确认量具在该语料上「动得了」——零命中要先分清「真没有」与「测不到」；同一模块内切段口径必须唯一，分叉即假象**。判别：切分改回 `\n\n` 人类侧命中数必掉到 0（`tests/unit/quality/test_human_baseline_ai_thresholds.py`） |
+| 对称度量的分母取 `min`/薄侧 → 读数被机械拉到 1.00，却以为它在测自己声称的东西 | `overlap = 共同实义字 ÷ min(前,后)` 问「两句用词是不是同一批」（对称），但分母落在薄侧时只要长句包含短句的字就得 1.00——量的其实是「长句含短句的字」。实测 ch17 `林昭！`→`林昭，你跟我走…`：前 2/后 13 字，recall 0.15 与 overlap 1.00 **互相证伪** | **✅ 已修**（2026-09-27）：新增 `DialogueEchoPair.overlap_comparable`（任一侧 ≥3 实义字 **且** `back_len < 2.0 × front_len`，严格小于），**只挡接词型，recall 复述型不受影响**（真信号靠 recall 兜住）。**通用纪律：对称指标要求两侧质量可比才可解释；不可解释时须显式声明由谁判定，不许让调用方默认它在测声称的东西**。⚠️ 2.0 是 11 对薄样本的实测锚定**非分布结论**（注释已标注）。判别：6 条 `overlap_comparable` 用例 + 4 项突变验证 |
+| 同族第二条算子还留着旧口径（`AI-ENDING-SUMMARY` 的 `_last_paragraph` 仍 `\n\n`） | 口径统一只做了一部分：`_last_paragraph` 未随 `_split_paragraphs` 收敛，单换行正文下会扫全章 | **本批登记不修**（2026-09-27）：该规则判「末段是不是总结句」，全章扫描的误报面与短段族不同，改动需独立实测。**留档待排期——同缺陷家族的不同规则，登记比遗忘强** |
+| `tests/unit/test_m1_lock.py` 单跑**硬杀整个进程树**（0 字节输出 / exit 1 / 无 traceback） | 真因**未定位**（`m1_long_run.py` 内无 `Popen`/`uvicorn`/`taskkill`，只有 `os.kill(pid,0)` 探针）。已排除：`os.kill(pid,0)` 在 Windows/Python 3.11 **不杀进程**（实测子进程心跳持续推进）；已用 deselect 对照证明与 2026-09-27 改动无关 | **⚠️ 规避而非修复**：全量回归须 `python -m pytest -n 4 -q --ignore=tests/unit/test_m1_lock.py`，否则跑不出可比总数。**待单独立项定位真因**。判别：单跑该文件即复现，连父 PowerShell 进程一起带走 |
+| **缓存键缺 prompt 维度（同形状第二次抓到）** | 2026-09-16 writer 侧已修（`writer_input.py:416` 查 DB ACTIVE + 键[13] `prompt_label`），但 **director / observer / director_planner 三处未同步**：`director_input.py:249` 硬编码 `"director:v1"`、键 12 元无 prompt；`observer_input.py:734` 同款硬编码（无缓存故无脏命中）；`planner_input.py:31` 常量 `DIRECTOR_PLANNER_PROMPT_VERSION`。装配全程不读 prompts 表 ⇒ 硬编码与缓存键脱节，**与 writer 事故同形**（同一条链两个值、无任何一处报错）。2026-09-27 全量审查 dev-a A-001 / dev-b B-6 发现，reviewer 复核确认 | **✅ 已修**（2026-09-27 Phase B task-6，三处已单点化 + director 键 12→13；新测试 `tests/unit/test_prompt_label_key.py` 5 例 + 双突变自检红过，reviewer phase2 复核通过；待 task-10 全量确认）。判别（2026-09-30 更新：行号已漂移，改以 grep 为准）：`build_director_input` 键 13 元（`DIRECTOR_KEY_LEN` 钉住）；`grep '"director:v1"' packages/core/context_engine/director_input.py` 只命中形参默认与 fallback（payload 经形参传入）；`grep DIRECTOR_PLANNER_PROMPT_VERSION packages/workflows/chapter_plan/pipeline.py` 只命中 import（值须经 `active_prompt_label` 重算）；落库看守见 `test_prompt_label_key.py` 落库断言。**后续（2026-09-30 Wave2，本团队实测）**：task-6“三处单点化”漏了落库 save 点——`pipeline.py:200` 仍传硬编码常量，payload（ACTIVE）／plan_json（模型回声）／落库（常量）三源分叉，且 5 例测试全只断言 payload（撤落库修复仍全绿）。已修：开事务前重算 `active_prompt_label`（其无 conn 入参，字面 conn 复用不可实现）；`:179` 对齐 ACTIVE，三面同源；注释精确化（回声口径外）；落库断言＋三向突变全红恢复绿；全量 2961 独立复现。 |
+| **行数量具：`Get-Content` 默认编码静默少算中文行** | PowerShell `Get-Content` 不带 `-Encoding UTF8` 时按 cp936 解码，含中文行被静默吞掉（`inspect_stalled_runs.py`：read/`ReadAllLines` 报 863，`Get-Content` 默认报 805，差 58；该文件 CR=0/LF=863 纯 LF，排除换行口径问题）。scout 曾把该偏差归因成「非标准换行序列」（错因已留痕，未污染任何行数结论——11 文件对照仅 09-27 新建 2 文件有偏差，B-1 的 1932 等逐条复测无误）。2026-09-27 reviewer phase2 P2-1 实证 | **通用纪律：凡用行数作判据（1500 红线、巨型清单），PowerShell 侧一律用 `(Get-Content -Encoding UTF8).Count` 或 `ReadAllLines`，并与 read 工具交叉核对；偏差只记结论不记成因，成因须实测证伪后再写** |
+
 ## 六、一致性矩阵（当前核销）
 
 > 全量检修（2026-09-13，方法论 04 全量档）报告：docs/reviews/全量检修-2026-09-13.md；
@@ -133,8 +175,8 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 
 | 项 | 声明 | 实际 | 状态 |
 |---|------|------|------|
-| 版本 | pyproject 3.9.0 = package.json 3.9.0 = importlib 读取 = uv.lock 3.9.0 | 同左（**含 editable 元数据**——发版后必须 `uv sync --extra dev` 刷新 dist-info，否则 /api/health 对外报旧版；R5 检修实测抓到的错核销已修正） | ✅ 2026-09-13 二次核销（uv sync 后实测） |
+| 版本 | pyproject 3.9.0 = package.json 3.9.0 = importlib 读取 = uv.lock 3.9.0 = package-lock.json 3.9.0 | 同左（**含 editable 元数据**——发版后必须 `uv sync --extra dev` 刷新 dist-info，否则 /api/health 对外报旧版；R5 检修实测抓到的错核销已修正） | ✅ 2026-09-13 二次核销（uv sync 后实测） |
 | 表数 | 业务表 39 / 含 _migrations 40 | test_health + smoke EXPECTED_BUSINESS_TABLES=39 | ✅ 2026-09-15（0028 只加列不增表） |
-| 测试基线 | pytest 2893 passed / 2 skipped；vitest 489 | 全量检修复核批次后 2807（09-21/09-26 晨复核）；2026-09-26 挂账清偿批次（审计断链/口径单点/词表两档/重开返修/源锚定/R-1 + 审查收尾 6 项）后实测 **2893 / 2 / 0 failed**（342s，含夹具按契约申报修复——闸门零改动） | ✅ 2026-09-26 复核 |
+| 测试基线 | pytest 2961 passed / 1 skipped（须带 `--ignore=tests/unit/test_m1_lock.py`）；ruff 0（本轮未跑）；vitest 489（本轮未跑） | 2026-09-27 Phase B 整改后本团队独立实测 **2956 / 1 / 0 failed**（343.69s，项目 .venv 解释器；差值 +5 完全闭合于新增 `tests/unit/test_prompt_label_key.py` 5 例，2951+5=2956 无其他增减；dev 库零接触已实证 `data/novelos.db` mtime 未动）。⚠️ **全量必须显式忽略 `test_m1_lock.py`**（单跑硬杀进程树，见坑区），否则跑不出可比总数 | ✅ 2026-09-30 复核（本团队独立实测 **2961 / 1 / 0 failed**，306.97s，项目 .venv 解释器；2956＋5 完全闭合：dev-a 落库断言＋2、dev-b drift 自检＋3；dev 库零接触 mtime 未动；ruff/vitest 本轮未跑仍记未独立复现） |
 | OpenAPI | 98 paths / 51 schemas | export_openapi 实测（挂账批次 reopen 端点入约 97→98 / 50→51）；regen 前后逐字节一致（09-26 verifier 双环境复核，`info.version=="3.9.0"` 以项目 .venv 产物为准） | ✅ 2026-09-26 复核 |
 | dev 库数据 | DRIFT:2（prj_8365f42af5a6） | **已修复**：v1 快照按 DB 重建 + 6 孤儿 state 清除，check_state_sync SYNC OK（2026-09-13，修前备份 /tmp/novelos_backup_pre_f8repair_20260913.db） | ✅ 已核销 |

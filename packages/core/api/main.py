@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import importlib
+import mimetypes
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -56,6 +57,14 @@ def _ensure_provider_key() -> None:
 
 # 模块导入即执行：覆盖 ``python -m`` / ``uvicorn ...:app`` / TestClient 全入口。
 _ensure_provider_key()
+
+# Windows 注册表常把 ``.js`` 映射为 ``text/plain``（本机实测
+# ``mimetypes.guess_type('x.js') == ('text/plain', None)``），StaticFiles 照此吐
+# ``Content-Type: text/plain``，浏览器对 ``<script type="module">`` 做严格 MIME
+# 校验直接拒载 → 全站白屏（2026-09-30 实证）。进程级钉死正确映射，
+# strict True/False 双表都盖（注册表项可能落在任一表）。
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".js", strict=False)
 
 
 # ---------------------------------------------------------------------------

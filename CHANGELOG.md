@@ -5,6 +5,218 @@
 
 ## [Unreleased]
 
+### 2026-09-30 Wave2~4 收敛：CRITICAL-1 落库补修＋drift 闸门＋文档对齐＋基线独立复现
+
+> 来源：用户四项全批（修 CRITICAL-1／快照＋补留痕＋提交／三件打包／放行一次只读巡检）＋ task-5 reviewer 的 CRITICAL-1（prompt 单点化落库侧半实现）。
+> 执行链：Wave1 快照＋巡检（ops）→ Wave2 三路并行（dev-a／dev-b／scout，RW 互斥）→ Wave3 双轴审查＋两补丁（reviewer）→ 全量独立复现（ops，2961）→ Wave4 留痕＋提交（Lead）。
+
+1. **CRITICAL-1 落库侧闭环**：`chapter_plan/pipeline.py:200` 传硬编码常量 vs payload 取 ACTIVE vs plan_json 取模型回声——同一 run 三源分叉，且 5 例测试全只断言 payload（撤落库修复仍全绿）。修复：开事务前重算 `active_prompt_label`（其无 conn 入参，字面 conn 复用不可实现）；`:179` 对齐 ACTIVE，三面同源；注释精确化（回声口径外）；落库断言＋三向突变（撤修复／采回声／撤 plan_json 侧）全红恢复绿；scoped 34 绿。
+2. **drift 闸门 5/51→51/51**：`_schema` 死变量消除；集合相等双向比对；`KEY_TS_INTERFACES` 扩全量；常驻自检×3（缺失红 `:106`／多出红 `:112`／辅助函数）；MUT-C 实证旧 Key-only 对“多出”方向盲。
+3. **文档对齐**：5 文件 21 处数字＋2 注记（Ordinal 逐字一致）；AGENTS 8 处小修正（PAUSED 18／`src/api/types.ts` 路径／package-lock 入纪律＋四处一致／判别式转 grep 口径／CRITICAL-1 后续／基线行 2961／shm 注记）。
+4. **基线首次独立复现**：`2961 passed / 1 skipped / 0 failed`（306.97s，项目 .venv，须带 `--ignore=tests/unit/test_m1_lock.py`）；2956＋5 完全闭合（dev-a＋2、dev-b＋3）；dev 库 mtime 未动；skipped 系 `NOVELOS_REAL_DB` 门控；ruff/vitest 本轮未跑。
+5. **运行时现状更新**：18 PAUSED／0 RUNNING／0 PENDING（替代“16 条”记录；全有实质内容；3 条属 project-init；1 条 provider 400 `unknown model 'minimax m3.1-flash-preview'` 挂账另立项）。`mode=ro` 巡检触碰 `-shm` mtime 属读侧正常行为，不作写入认定。
+6. **MAJOR-4 闭环**：09-28~30 两批（`main.py` mimetypes 修复、`chapter_write` 拆分 -969 行）此前零留痕，现补记。
+7. **量具教训三条**：带 pathspec 的 `git status` 不得论证某路径不存在；量具选择先于结论（59 例：`def` 计数 48 vs collect-only 59）；开工前存 status 快照入派发模板；`edit` 写 UTF-8 规避 PowerShell 中文落 U+FFFD。
+
+### 2026-09-27 工作边界裁决：只动软件层 + 禁真实 LLM 调用
+
+> **来源**：用户指令「1、只动软件层，内容层不管，目前这些书籍项目全都是测试书籍，没有继续改它们和续写它们的意义；2、修改软件过程中不使用软件进行真实的 LLM 调用写作等」。
+> **性质**：**项目定位级裁决**（用户直裁，非主会话自主拍板范畴）。已落 `AGENTS.md` §一「软件工作边界（2026-09-27 用户裁决，两条硬约束）」，后续一切派发以此为准。
+
+1. **只动软件层，内容层零接触**——现存全部书籍项目（火影 / 死当 / 快穿之价签等，含 16 条 PAUSED run、那本 48 章的书）**都是测试书籍**，不再有修改与续写的意义。禁止把它们当生产数据对待：不得改内容仓（NovelOS-Content）、不得改或重生成既有章节正文、不得续写、不得为「让老数据好看」做数据迁移或清洗。**判别**：任何需要真实正文 / 人物 / 设定作语料的验证，一律改用**临时库 + 合成夹具**；测试禁止写 `data/novelos.db`；脚本不得默认打 dev 库。
+   **与 §二 硬规则 5（三仓分离）的关系**：硬规则 5 管的是**存哪**，本条管的是**动不动**——内容侧从此不作为工作对象。
+2. **改软件过程中不做真实 LLM 调用**——禁止用 NovelOS 自身发起真实模型调用来验证软件行为（不跑真实 write / revise / 审稿、不做真实量产批、不烧 API 额度）。**判别**：行为验证一律走 mock provider、单元 / 契约测试、临时库 e2e（`scripts/smoke_e2e.py` = 临时库 + 独立端口 + mock providers）。**唯一例外**：确需真实模型响应才能证伪的命题，须主会话逐次裁决并留痕，**不得由成员自行发起**。
+
+**已广播**：本团队 4 名常驻成员（`scout` / `dev-a` / `dev-b` / `reviewer`）均已收到并确认；派发时两条禁令逐条写进任务描述的边界段。
+
+**核销更新**：§六 测试基线已由另一团队推进为 **2951 passed / 1 skipped / ✅ 2026-09-27 复核**（368s，须带 `--ignore=tests/unit/test_m1_lock.py`）。本轮 reviewer 未独立复跑全量（Lead 禁令），故该数字的独立复核仍待一次带 `--ignore` 的全量实测；另注意坑区「单跑绿、全量红」形状——单文件绿灯不构成核销。
+
+### 2026-09-27 软件层全量审查（本团队 4 成员：scout / dev-a / dev-b / reviewer）
+
+> **来源**：用户指令「做一次软件层的全量审查」。范围=软件层（`packages/` + `apps/web/src/` + 只读参考 `scripts/`/`tests/`/`database/`/schemas），内容层零接触、禁真实 LLM 调用。
+> 执行链：scout 证据索引 → dev-a（core 除 quality + web）与 dev-b（domain + workflows + quality）并发缺陷清单 → reviewer 对抗复核 → 打回修正（dev-a rev.3 / dev-b rev.1）→ reviewer 复审 → Lead 逐条亲验承重结论后收口。
+> 交付物（4 份，落 `docs/reviews/2026-09-27-full-audit/`；**注意该目录被 `.gitignore:42` 忽略，不进版本控制**，归档见下）：`scout_index.md`（361 行）/ `dev_a_report.json`（9 条）/ `dev_b_report.json`（8 条）/ `reviewer_report.md`（317 行）。
+
+**结论：0 critical / 2 major / 14 minor + 1 口径观察项**（A-003 二次改写后收敛；B-3 撤回改写。）
+
+- **A-001（major，维持，论证已换）**：`director_input.py:249` 硬编码 `"director:v1"`、12 元键无 prompt 维度；writer 侧 09-16 已修（`writer_input.py:416` 查 DB ACTIVE + 键[13]），director / observer（`:734`）/ director_planner（`planner_input.py:31` 常量）三处未同步。dev-a 初版「脏命中」论证被 reviewer 推翻（装配不读 prompts 表，字面量命中/未命中逐字相同）；重写为「硬编码标签漂移 + 三源分叉」（`chapter_plan/pipeline.py:179` 模型回声 vs `:200` 常量 vs `runner.py:569` 真值），与 writer 09-16 事故同形。**同形状第二次抓到 → 已升格进 §五 坑区**（对策：三处 `active_prompt_label` 单点化 + 键同步，合并为一个整改单，三处同碰 `cache.py` 分开做必冲突）。
+- **B-1（major，维持，不作本批验收阻塞）**：`workflows/chapter_write/pipeline.py` **1932 行**单文件巨型（scout / dev-b / reviewer 三方独立实测一致；任务书写的 1786 有误，dev-b 拒绝采信任务书数字自行重测是对的）。§二 硬规则 1「存量挂账已清零」对它不成立——准确表述是「红线仍被违反且未登记在任何挂账里」（文档缺口，非虚假声明）。该文件不在 09-27 改动面内，属既存问题。
+- **其余 minor（抽样）**：B-2 形状级测试逐字重复断言（dead code）+ 覆盖边界三绑定（变量名/方法名/字面量，任改一维即漏抓）；A-003 `db.py:84` 无注释死防御代码（四条路径逐一不可达，详见下）；A-007 `runs.py:221,245` 吞全异常回落错标签；A-008 `snapshot.py:644` 裸连接绕过 `get_connection`；A-004/A-005 前端手写面缺 `outline_json` / `writing_bible` 等字段（降 minor，登记「本期不做 UI」——generated 面本就是 drift 对照面，无自动校验，不破 build/测试）；A-009 `count_tables` docstring 表数漂移；B-5 「绕过 ALLOWED_NEXT」是措辞问题（行为正确且原子）；B-7 `_last_paragraph` 第二份切分维持挂账；B-8 `ai_patterns.py` 1457 行逼近红线。
+- **B-3（撤回→口径观察项）**：dev-b 初版称 `reference/service.py:63-64` 空 except「无注释、无 noqa、无 docstring」——三项均不成立（`:8-9` 模块 docstring + `:32` 函数 docstring + `README.md:53` 均已登记），且与同报告 B-4 的免罪标准双标。已改写为「降级 0 与真实 0 不可区分」口径观察项，附 `withdrawn_claim` 留痕。
+
+**本轮三次「修正不等于正确」与一次审查员自误（全部留痕，未隐去）**：
+
+1. dev-a A-001 初版「脏命中」论证错 → rev.2 重写为三源分叉（reviewer 独立复算三段证据全成立，接受）。
+2. dev-a A-003 repro 连错两次：rev.1 锁机理错（WAL 下读不阻塞）→ rev.2 换成「`DatabaseError` 被吞」又错（`DatabaseError` 是 `OperationalError` **父类**，`except` 抓不到；Lead 用 `python -c` 独立验证 MRO）→ rev.3 落定为「四条路径逐一不可达的死防御代码」，建议**直接删 try/except**（零行为变化，可用测试数零增减验收）。
+3. scout 的「`expected_role` 不在键 ⇒ 脏命中」担忧被 dev-b 驳倒（`cache.py:170-196` 双向深拷贝 + `planner_input.py:219-222` 新建 dict 整体替换，就地改写不可能回写缓存），reviewer 三段证据拼齐裁决 dev-b 正确。
+4. **reviewer 本人造出一条假指控又亲手勘误**：rev.0 把「自己臆造路径 `pages/ProjectInitPanel.test.tsx` 跑不通」写成「dev-a 路径写错」并列入打回；复审时回查 rev.1 全文证实该串从未出现，dev-a 的 `file` 字段原本正确。已在报告三处就地勘误并撤回指控；**任何下游条目不得包含「dev-a 路径写错」这一事实**。与 §三.6 两种翻车同形状、方向相反（这次是审查员本人）。
+
+**reviewer 新发现 N-1（major，覆盖面缺口）**：dev-a 与 dev-b 的 scope 并集**未覆盖 `scripts/`**——`scripts/inspect_stalled_runs.py`（863 行，09-27 批次新交付物，已被写进 §五 坑区作判别工具）无人审计。**补派 scripts/ 专项审查或 Lead 裁决豁免并留痕，不得默认为已覆盖。**
+
+**归档**：7 份交付物已复制到 **NovelOS-Artifacts: `docs/full-audit-2026-09-27/`**（软件仓 `docs/reviews/` 被 gitignore，工作区副本仅作过程文件）。
+
+### 2026-09-27 Phase B 整改执行（用户指令「按建议来」）
+
+> 执行链：task-6（dev-a：A-001/A-002/B-6 合并单点化）+ task-7（dev-b：杂项 6 项）+ task-5（scout：N-1 scripts 专项）三路并发 → reviewer phase2 对抗复核全过 → task-8（dev-b：B-1 拆门面）→ reviewer split 复核（门面取舍接受，注释 5 处事实错误打回修正）→ task-11/13/14 注释收尾 → task-10 全量核销。
+
+- **Fix-1**：director/observer/planner 三处 `active_prompt_label` 单点化 + director 键 12→13；新测试 5 例 + 双突变自检红过（突变 1 实证「只改 payload 不改键 ⇒ 脏命中」）。
+- **Fix-3**：db.py 删死 except + 去表数硬编码、runs.py 加日志显式降级、snapshot.py 走 `get_connection`、B-5 注释改原子性表述、B-2 删重复断言、regen 双产物零 diff（踩出「必须用 `.venv` 解释器」陷阱，已入 §四）。
+- **B-1 拆分**：1932 → 门面约 1100 + 5 子模块（全 ≤1500）；4 节点留门面（18 处 monkeypatch 打点契约，硬规则 1 已补条款）；`tests/` 零改动；门面注释乱码/数字错误已清零（U+FFFD 全仓复验为 0）。
+- **N-1**：`inspect_stalled_runs.py` 零 critical（4 机制逐项 file:line）；但揪出 scripts/ 存量 **3 处真实 LLM 默认档 + 8 处 dev 库默认读面**（本轮前即存在，**未动手**，待单独立项裁决是否改造）。
+- **基线**：task-10 全量 **2956 passed / 1 skipped / 0 failed**（343.69s，.venv；+5 完全闭合于新测试 5 例；dev 库 mtime 未动实证零接触）。§六 已更新为 2956（本团队独立确认）。
+- **行数量具附带**：P2-1（`Get-Content` 默认 cp936 静默少算中文行）+ 写侧同形（PowerShell 写中文落 U+FFFD）已入 §五 坑区与 §二硬规则 1。
+
+### 2026-09-27 算子量具修正批次 + 卡死 run 巡检工具（先验判断两次被推翻并留痕）
+
+> **来源**：用户指令「不继续写小说；其它的按建议处理掉；用 agent 团队（固定 4 成员：2 开发 / 1 调研 / 1 审查）」。
+> 固定成员建在 `C:/Users/aistation/.agents/agents/novelos-{quality-dev,ops-dev,corpus-analyst,reviewer}/`。
+> 执行链：调研（全量逐条抽样，非抽样）→ 主会话亲验 → 开发 → 主会话复算 → 对抗审查。
+> 证据表留痕在 **NovelOS-Artifacts: `docs/sampling-audit-2026-09-27.md`**（37KB，35 对全量判档）。
+
+**⚠️ 两处主会话先验判断被推翻（留痕）**
+
+1. **「16 个 PAUSED run 会让 8 章撞 409、要清掉」——错。** 实测 `_check_active_run_for_chapter`
+   的两条分支 SQL 谓词都是 `status IN ('RUNNING','PENDING')`（`control.py:78/89`），
+   DB 侧兜底同谓词（迁移 `0017_unique_constraints.sql:46-48`，其 line 42-45 注释明写
+   「**不覆盖 PAUSED**」是刻意设计，为 resume 留出生效空间）。**PAUSED 不阻止新 start。**
+   且 PAUSED **不可 cancel**——`engine.py:644-646` 写明 status ∈ {COMPLETED, FAILED, CANCELLED, PAUSED}
+   → 409「must be RUNNING to cancel」，**PAUSED run 的取消走 resume 后再 reject/approve 决议路径**。
+   结论：既不挡路也无受支持的清理路径，硬清只能绕过引擎直改 DB（同 09-26 刚封掉的「PATCH 借道」形状）。
+   **裁决：不清，改为导出留档。**
+2. **「给两个算子加豁免」——错，要修的是量具不是阈值。** 调研实测推翻，见下。
+
+**1. `AI-SHORT-PARA` 段切分口径对齐（修论证链，不动阈值）**
+- 根因：`count_short_paras` 独自用 `_paragraphs`（`\n\n`）切段，而同文件 `count_long_paragraphs` /
+  对白算子早就在用 `\n+`。榜一人类锚点 19 章的 **`\n\n` 总数 = 0**（一行一段），
+  按 `\n\n` 切把 19 章读成 **19 个整章大段** ⇒ 规则在该语料上**构造上不可能命中**
+  ⇒ 此前登记的「人类基线 0.00/千字」**不是测出来的，是量具口径造成的假象**。
+- 改法：删 `_paragraphs`，把 `_readability_paragraphs` 改名 `_split_paragraphs` 上移，
+  成为短段/长段/对白三条段级算子的**唯一**切分入口（不另写第三份）。
+- 实测（两侧同口径复算，主会话独立复验）：人类 19 章 **0 命中 → 8 命中 / 0.212 每千字 / 779 段 /
+  1 章超阈**；生成 48 章 **257 → 260 → 258 命中 / 2.064 每千字 / 3484 段 / 34 章超阈**
+  （口径变更仅 ch33 一章计数 2→5）。分离度 **9.7~9.8×**。
+- **阈值 `DEFAULT_SHORT_PARA_RATE_PER_1K = 1.0` 未动**——修的是论证链。
+  注释里明写「人类零容忍」的说法**已不成立（它从来是假象）**。
+- 附带：`名字：` 说话人行守卫（人类侧说话人行原被当非对白短段计入）。
+  守卫刻意收窄——`宋沛年：`（人名）与 `价签：`（名词标签）字面同构，会一并豁免，
+  已在注释与测试中登记为**能力边界**而非已验证精确率。
+
+**2. `AI-DIALOGUE-ECHO` 重叠系数度量修正（不是调阈值）**
+- 根因：`overlap = 共同字 ÷ min(前,后)` 是**对称**度量，但分母落在薄侧时被机械拉到 1.00。
+  实测 ch17 `“林昭！”`→`“林昭，你跟我走，茶馆比县仓安全。”`：前 2 字 / 后 13 字 /
+  recall 0.15 / **overlap 1.00**——recall 说「后句 85% 是新内容」，overlap 说「完全重合」，
+  后者被前者证伪。该读数量的是「长句含短句的字」，不是「用词是同一批」。
+- 改法：新增 `DialogueEchoPair.overlap_comparable`（property，不改构造签名）
+  = 任一侧 ≥3 实义字 **且** `back_len < 2.0 × front_len`（**严格小于**），
+  **只挡接词型；recall 复述型不受影响**（不可比的对仍可凭 recall 命中）。
+- 实测：生成侧 **34 对 / 24 章 → 23 对 / 18 章**；人类侧 1 对 / 1 章不变。
+  3 条真信号（`不退。`→`不退！`、`不退！`→`不退！`、`他们退了。`→`他们退了。`）**全部保留**。
+- **诚实标注（写进代码注释）**：11 对是**薄样本**，实测锚定**非分布结论**；2.0 取自该组比值
+  分布（2.0~11.4）的下界。`已否决更「正统」的 `min`→`max` 分母方案（实测更严，
+  需把 `MIN_OVERLAP` 降到 ~0.36 = 拿 2 个样本重定阈，正踩「阈值落在样例分布外」的坑）——
+  数字在注释里，供后续裁决。
+
+**3. 订正 3 处与实测不符的注释（声称与实测分离）**
+- `:232` 「26 对 / 20 章」→ 实测 **34 对 / 24 章**（旧口径），修正后 23 对 / 18 章。
+- `:237-238` 把 `你守后队。`→`后队有人殿后，你在那儿。`（实测 recall **0.30**）列为复述型样例
+  → **举错例了**，它是接词型。换成三条实测复述型样例。
+- `:245-248` 称 `min_opening=2` 能挡「短促称呼 + 长回答」→ **实测没挡住**：
+  `林昭！`→`林昭，你跟我走…` 开口连续重合确为 2，照样命中。它挡的是「称呼落在后句中段」那一种。
+
+**4. `scripts/inspect_stalled_runs.py`（新建 863 行）+ 59 例测试**
+- 只读卡死 run 巡检。`file:<path>?mode=ro` URI（误加写操作会在第一次写时直接抛异常）、
+  `--apply` 显式 `NotImplementedError`（退出码 3）、认不出的 payload 走 `unknown` 分支
+  **列键名而不是静默归成「空报告」**、`--export` 落盘含正文草稿时打 WARNING 提醒不入库。
+- 每条 run 给**可读的审批实质内容摘要**（字数/字数带/偏离、error 与 warning 的 rule_id、
+  critic issues 条数、评审原文摘录），不是 true/false——因为空报告与带 3 条 blocking 的报告
+  处置决策完全相反。
+- 实机结论：**16 条全部有实质内容，零条空报告**。
+
+**5. 16 条 PAUSED run 的处置与留档（不取消）**
+- 逐条解析 checkpoint：12 条是已 COMMITTED 章的陈旧评审、3 条是 DRAFTED 章的未批评审
+  （火影 ch1 ×2 欠带 -33.4%/-38.2%、死当 ch7 +26.5%）、1 条是 **《快穿之价签》立项草稿**
+  （`premise_designer` 的 title/logline/positioning/selling_points/主角卡——
+  这本 48 章书的「DNA」只存在于这个卡死的 run 里）。
+- 处置：**不动 DB**。导出留档到 **NovelOS-Artifacts: `archive/stalled-runs-20260927/`**
+  （`stalled_runs_export.json` 326KB 含完整 checkpoint + `评审摘要.md` 15KB 人可读判档）。
+
+**6. 对抗审查打回 7 项 + 开发/审查数字互斥 2 处由主会话裁决**
+
+审查判定**打回**（4 major + 4 minor）。主会话逐条复算审查员证据后**全部采纳**并派回修复；
+其中 **只有 major-1 是行为改动，其余是注释/表述与测试口径**。
+
+- **major-1（唯一的代码行为改动）**：`_SPEAKER_LINE_RE` 拆两分支、**宽度分别校准**——
+  分支①（冒号+引号）`{1,3}`、分支②（冒号即段末）`{1,6}`。依据：人类锚点走完前置过滤后
+  带冒号的 ≤12 字段落**只有 2 条**（`陆明河：“……”` 3 字 / `宋沛年：`），**宽度证据只支持 3**。
+  原 `{1,6}` 在生成侧多豁免 **2 段**（`林昭点点头：“知道了` ch14 / `霍铁没懂：“给谁` ch35），
+  正是本规则要抓的叙述节拍行。收窄后人类侧**逐字不变**（8 / 0.212 / 6 章 / 1 章超阈），
+  生成侧 258 → **260**。
+- **major-2**：删掉「人类零容忍不成立」这句结论，改为**「散文口径下成立」**——
+  人类 8 命中分类为**散文 5 / 分隔线 2 / 平台标记 1**；剔非散文后 **5 / 0.132 / 0 章超阈**
+  （唯一超阈的 ch19 靠 3 条非散文行撑起，该章散文仅 1 条 = 0.76）。
+  同时登记「非散文排除规则**未实现**」（属新形态豁免，需自己的 20 条抽样，超本轮范围）。
+- **major-3**：删掉两句**事实错误**的辩护——原注释称「降到 1.5 会再剔掉 g32」
+  （实测 1.5 与 2.0 输出逐字相同，g32 比值恰 2.00，在 2.0 时**已**被剔）；
+  称「放宽到 2.2 会把 ch13 放回」（ch13 比值 11.43，2.0→2.2 区间内一对都没动）。
+  改写为实测事实 + 显式承认**「取被剔集合最小值是恒真式不是证据」**。
+  参数扫描（严格小于语义）：`1.5/1.88/1.95/2.0 → 23对/18章`｜`2.05/2.2/2.5 → 24对/19章`｜
+  `2.83 → 25对/20章`｜`3.5 → 28对/21章`；人类侧 [1.5, 5.0] **全程 1 对/1 章**（零区分力）。
+  **阈值 2.0 不动**——审查员攻不倒「后句是超集 ⇒ overlap 读数机械失效」这一定义性依据。
+- **major-4**：「11 对全部合法、0 条真信号」降级为带判档（**合法 6 / 存疑 3 / 真信号 1**），
+  并写入 **E-33 vs E-34 同尺反判档**这一已知代价：
+  `他们敢。`→`他们敢。他们正愁没理由。` 字面复述 3/3（ratio 3.33）被判合法，
+  而 `他们退了。`→`他们退了。`（recall 1.00）被判真信号——同一把尺子两个结论。
+  **已知代价登记**：守卫在「复述关键词后补理由」家族内**与回声度反相关**，
+  它只剔除判档较确定的那批（审计标的 3 条「存疑」recall 0.83/1.00/0.75 全被 recall 分支保住）。
+  守卫与阈值均不动——审查员实测替代方案（`common/back≥0.25`）人类侧从 1 对涨到 4 对/3 章，**更差**。
+- **minor-5/6/7**：三处自相矛盾注释订正。其中 minor-6 揭示
+  **`:754` 「不给第三次机会」那句当时是假的**——`_last_paragraph`（`AI-ENDING-SUMMARY`）
+  就是第二份独立实现（内联 `prose.split("\n\n")`）。已改为如实登记 + 触发条件
+  （生产 draft 出现 CRLF 或单换行形态；实测 dev 库 196 份 draft 含 CR 的 0 份 → **当前不可达**），
+  并把「唯一入口」测试从**按名字断言**升级为**形状级**（扫模块源码里的 `prose.split("\n\n")`
+  调用点、跳注释行、向上定位所属 `def`），使「第三份实现」将来必被抓到（突变验证 M6 已证）。
+
+**⚠️ 开发与审查的数字互斥 2 处，主会话独立复算后裁定开发正确**（这也是「主会话不采信子代理结论」
+的正面案例——不是每次都是审查员赢）：
+
+| 争议点 | 审查员称 | 开发称 | 主会话实测 |
+|---|---|---|---|
+| 2.0→2.2 区间 | 无任何对、实测无变化 | 2.05 起变，**24 对/19 章** | ✅ **开发对** |
+| ch35 `你守后队` 何时回到判定 | 2.0→2.5 之间 | 要到 **2.83** | ✅ **开发对** |
+| `{1,6}` 多豁免几个生成侧实例 | 6 条 | **2 条** | ✅ **开发对**（且 258→260 正好差这 2） |
+
+**突变验证 6 项全部被杀**（含审查员指认的判别点 M5「分支① 宽度回退 {1,3}→{1,6} 必红」
+与 M6「引入第三份段切分实现必红」）；恢复后自检 426 passed、无残留标记。
+
+**7. 子进程输出编码：父子两侧会静默错位（实测坐实 + 已修）**
+- 全量回归跑出 **1 failed**：`tests/api/test_chapter_reopen.py::test_reopen_keeps_state_sync_ok`
+  → `UnicodeDecodeError: 'gbk' codec can't decode byte 0xa0 in position 334`。
+- **机理（实测对照，非推测）**：子进程 stdout 编码**跟随继承的环境变量**
+  （`PYTHONIOENCODING` / `PYTHONUTF8` / locale），而父进程 `subprocess.run(text=True)`
+  的解码器**跟随 locale**（本机 Windows = `cp936`）。两者可以静默错位：
+
+  | 环境 | 子进程输出 | 父进程解码 | 结果 |
+  |---|---|---|---|
+  | 无相关 env | cp936 | cp936 | 通过 |
+  | `PYTHONIOENCODING=utf-8` | utf-8 | cp936 | **UnicodeDecodeError** |
+  | `PYTHONUTF8=1` | utf-8 | utf-8 | 通过 |
+
+- **只给 `encoding=` 不够**（子进程仍可能吐 GBK），**只给 env 也不够**（父进程仍按 locale 解）——
+  必须两侧同时钉。已按仓内已验证的正确写法（`test_produce_chapters_e2e.py:315-316`、
+  `test_db_maintenance.py:260`）修 2 处：`test_chapter_reopen.py`、`test_db_migrations_dir_anchor.py`，
+  补 `env["PYTHONIOENCODING"]="utf-8"` + `encoding="utf-8", errors="replace"`。
+- **判别（RED→GREEN 实测）**：修前 B 场景失败；修后**三种环境各 14 例全绿**。
+- **同款形状第 3 处未修**：`tests/unit/test_m1_lock.py:215-220` 同样缺 `encoding=`。
+  **不是因为不重要，是因为改完无法验证**——该文件单跑会硬杀进程树。
+  留待与树杀真因一并处理，登记在案不遗忘。
+
+**环境发现（其余为既有缺陷，非本轮引入，留待单独立项）**
+- `tests/unit/test_m1_lock.py` 单跑**硬杀整个进程树**（0 字节输出、exit 1、无 traceback），
+  会让全量 `pytest -n 4 -q` 反复中断。已用 deselect 对照证明与本轮改动无关；**真因未定位**。
+  ⇒ **全量回归须显式 `--ignore=tests/unit/test_m1_lock.py`**，否则拿不到可比的总数。
+- 澄清一条曾被怀疑的机制：`os.kill(pid, 0)` 在 Windows/Python 3.11 **不杀进程**
+  （实测子进程心跳持续推进、进程存活），`_pid_alive` 安全——它**不是** `test_m1_lock.py` 自杀的原因。
+
 ### 2026-09-26 挂账清偿批次：审计断链 / 口径单点 / 词表误报 / 重开返修 / 源锚定 / R-1（6 项 + 审查收尾 6 项）
 
 > **来源**：用户指令「近期不写作，全给修了它」（不动内容侧——无写作、内容仓零接触）。主会话三路

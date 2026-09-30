@@ -1,7 +1,7 @@
 # core（核心层）
 
 > 职责：NovelOS 后端的核心基础能力——配置、日志、数据库迁移、ID/时间戳工具、FastAPI 应用工厂与路由自动发现；为后续 Sprint 提供 Story State、Context Engine、Agent Runtime、Workflow Runtime、Model Router、Evaluation、Versioning 子模块的命名空间。
-> 状态：已实现 Sprint 0 基础设施 + Sprint 1（``ids.py`` + 路由自动发现）。
+> 状态：已实现全部 19 个子模块（`api` / `agent_runtime` / `arc` / `backup` / `content_sync` / `context_engine` / `delivery` / `evaluation` / `exporter` / `genre` / `model_router` / `quality` / `retrieval` / `signing_check` / `simulation` / `story_state` / `versioning` / `workflow_registry` / `workflow_runtime`；基础设施 `ids.py` + 路由自动发现属 Sprint 0/1）。
 
 ## 职责与边界
 

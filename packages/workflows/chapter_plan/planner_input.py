@@ -16,6 +16,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.context_engine import build_director_input
 from packages.core.context_engine.builders_common import (
     _GENRE_PACK_CONSUMER_PLANNER,
@@ -25,8 +26,13 @@ from packages.core.db import get_connection
 from packages.core.quality.wordcount import DEFAULT_TARGET_WORD_COUNT
 
 # PromptRegistry 的 ACTIVE 版本标签（docs/agents/prompts/director_planner-v2.md）。
-# payload.prompt_version 与 chapter_scene_plans.prompt_version 同源取本常量，
-# 与 ai_call_logs.prompt_version（runner 从 registry 读出）保持一致。
+# 2026-09-27 起本常量**降级为 fallback**（2026-09-30 落库侧补齐，三面全同源）：
+# payload["prompt_version"]（本文件 build_director_planner_input）、
+# chapters.plan_json.prompt_version 与 chapter_scene_plans.prompt_version
+# （后两者同在 chapter_plan/pipeline.py 的 _save_plan_node，开事务前算出一个
+# planner_prompt_label 复用）均取 ACTIVE 真值，与 ai_call_logs.prompt_version
+# （runner 从 registry 读出）同源；表空 / 未 sync / 库不可读时回落到本常量，
+# 装配行为与旧实现零差异。
 # v2（2026-09-15）：输入契约新增 chapter.outline（策展大纲槽）+ 规则 0「大纲优先」。
 DIRECTOR_PLANNER_PROMPT_VERSION = "director_planner:v2"
 
@@ -215,7 +221,9 @@ def build_director_planner_input(
     )
     context = collect_planner_context(str(db_path), chapter_id)
     payload["agent"] = "director_planner"
-    payload["prompt_version"] = DIRECTOR_PLANNER_PROMPT_VERSION
+    payload["prompt_version"] = active_prompt_label(
+        db_path, "director_planner", fallback=DIRECTOR_PLANNER_PROMPT_VERSION,
+    )
     chapter_section = dict(payload.get("chapter") or {})
     chapter_section["expected_role"] = expected_role
     chapter_section["number"] = context["chapter_number"]

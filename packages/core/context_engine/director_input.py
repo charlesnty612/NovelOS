@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.db import get_connection
 
 from .builders_common import (
@@ -153,6 +154,7 @@ def _build_director_input_uncached(
     *,
     plan_json_override: dict[str, Any] | None = None,
     peek: dict[str, Any] | None = None,
+    prompt_label: str = "director:v1",
 ) -> dict[str, Any]:
     """无缓存版 director 装配；build_director_input 用本函数 + 缓存包装。
 
@@ -246,7 +248,7 @@ def _build_director_input_uncached(
 
     payload: dict[str, Any] = {
         "agent": "director",
-        "prompt_version": "director:v1",
+        "prompt_version": prompt_label,
         "project": {
             "project_id": project["project_id"],
             "name": project["name"],
@@ -396,9 +398,17 @@ def build_director_input(
     writing_bible = peek.get("writing_bible")
     bible_fp = _fingerprint_writing_bible(writing_bible)
     effective_intent = resolve_author_intent(writing_bible, author_intent)
+    # 版本口径统一（2026-09-27，与 writer 同款单点化）：payload 声明的 prompt_version 取
+    # ACTIVE 提示词行的真值——此前硬编码 "director:v1"，director 升版后 payload 仍声明 v1
+    # → 模型照抄回声 → chapter_plan/pipeline.py:179 采信回声写 plan_json，而
+    # ai_call_logs 记真值，同一条链两个值且无任何报错。
+    # 解析一次、同时喂 payload 与缓存键：进了 payload 就必须进键（硬规则 2）。**两者必须
+    # 同批改**——只改 payload 不改键会让 v1/v2 两次装配落到同一键，制造真正的脏命中。
+    prompt_label = active_prompt_label(db_path, "director", fallback="director:v1")
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
         active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
+        prompt_label,
         _cache_namespace_tag(namespace),
     )
     cacheable = (
@@ -414,6 +424,7 @@ def build_director_input(
     payload = _build_director_input_uncached(
         db_path, project_id, chapter_id, effective_intent, target_word_count,
         peek=peek,
+        prompt_label=prompt_label,
     )
     if cacheable:
         _cache_put(cache_key, payload)
