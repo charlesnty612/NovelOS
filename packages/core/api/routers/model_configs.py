@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from packages.core.api.routers.model_profiles import _clean_model_field
 from packages.core.logging_config import get_logger
 from packages.core.model_router import ModelConfigService, ModelRouter, ProviderError
 from packages.core.model_router.security import (
@@ -63,8 +64,9 @@ def create_model_config(payload: dict, request: Request) -> dict:
         raise HTTPException(status_code=422, detail="capability required")
     if not (isinstance(provider, str) and provider):
         raise HTTPException(status_code=422, detail="provider required")
-    if not (isinstance(model, str) and model):
-        raise HTTPException(status_code=422, detail="model required")
+    # 与 /model-profiles 同一形状校验（strip + 拒纯空白）：两个写入口曾同形漏校验，
+    # 修一边会造成口径分叉，故此处复用同一函数而非各写一份。
+    model = _clean_model_field(model, field="model", logger=log)
     try:
         raw_params = _normalize_params(payload.get("params_json"))
     except ValueError as exc:
@@ -144,10 +146,7 @@ def patch_model_config(config_id: str, payload: dict, request: Request) -> dict:
             raise HTTPException(status_code=422, detail="provider must be non-empty string")
         fields["provider"] = v
     if "model" in payload:
-        v = payload["model"]
-        if not (isinstance(v, str) and v):
-            raise HTTPException(status_code=422, detail="model must be non-empty string")
-        fields["model"] = v
+        fields["model"] = _clean_model_field(payload["model"], field="model", logger=log)
     if "params_json" in payload:
         # 合并入参与 DB 原值，按 api_key 特殊语义处理
         existing = svc.get(config_id)

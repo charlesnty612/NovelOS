@@ -57,6 +57,7 @@ python -c "from packages.core.db import apply_migrations; print(apply_migrations
 - **TEXT 主键**：人类可读前缀（`prj_/char_/event_/hook_/debt_/commit_`...），便于日志追踪。
 - **时间戳**：所有时间字段为 ISO-8601 TEXT，与 `state-delta.schema.json` / `state-commit.schema.json` 对齐。
 - **可见性枚举**：`visibility` 四级 `PUBLIC / VISIBLE / RESTRICTED / HIDDEN`（PRD §4 原则 7）。
-- **业务表数校验**：`tests/unit/test_migrations.py` 的 `test_apply_migrations_creates_34_business_tables`（迁移后总表 40 = 39 业务表 + `_migrations`）与 `test_business_table_count_is_34`（业务表 39，排除 `chapter_fts%`）；新增 / 删除表必须同步更新该测试。
-> ⚠️ 两条**测试名**仍含历史数字 `34`（名未跟断言走：`:48` 断言 40、`:434` 断言 39），已登记待 Lead 裁决，本次不改测试名。
+- **业务表数校验**：`tests/unit/test_migrations.py` 的 `test_apply_migrations_creates_40_tables_total`（迁移后总表 40 = 39 业务表 + `_migrations`）与 `test_business_table_count_is_39`（业务表 39，排除 `chapter_fts%`）；新增 / 删除表必须同步更新该测试。
+
+> ⚠️ 名实不符已了结（2026-09-30）：上面这两条**测试名**过去含历史数字 `34`，而断言实为迁移后**总表** 40 与**业务表** 39。现已按断言语义改名（旧名见 `git log -p tests/unit/test_migrations.py`，全仓零残留）。
 - **权威文档**：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§1 D-I5（Schema 权威）、§2 Sprint 0/1/2；`docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md）；`docs/state-model/schemas/state-delta.schema.json` / `state-commit.schema.json`。

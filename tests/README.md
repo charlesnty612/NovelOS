@@ -23,11 +23,11 @@
 |---|---|
 | 全量命令 | `python -m pytest -n 4 -q --ignore=tests/unit/test_m1_lock.py`（xdist 并行，约 6 分钟；`--ignore` 必带，否则跑不出可比总数。依赖 dev extra，裸 `uv sync` 会缺 ruff/pytest-xdist） |
 | 基线 | 2956 passed / 1 skipped（2026-09-27 批次实测；须带 `--ignore=tests/unit/test_m1_lock.py`） |
-| 迁移表数 | `test_apply_migrations_creates_34_business_tables`（迁移后总表 40 = 39 业务表 + `_migrations`）；`test_business_table_count_is_34`（业务表 39，排除 `chapter_fts%` 影子表） |
+| 迁移表数 | `test_apply_migrations_creates_40_tables_total`（迁移后总表 40 = 39 业务表 + `_migrations`）；`test_business_table_count_is_39`（业务表 39，排除 `chapter_fts%` 影子表） |
 | 健康检查 | `test_health_endpoint_returns_ok`：`GET /api/health` → `{status:"ok", version:<包版本>, tables:39}` |
 | 端到端 | 工作流全链由 `scripts/smoke_e2e.py` 覆盖（独立临时库 + 独立端口，自动清理） |
 
-> ⚠️ 两条**测试名**仍含历史数字 `34`（名未跟断言走：`:48` 断言 40、`:434` 断言 39），已登记待 Lead 裁决，本次不改测试名。
+> ⚠️ 名实不符已了结（2026-09-30）：上表这两条**测试名**过去含历史数字 `34`，而断言实为迁移后**总表** 40 与**业务表** 39。现已按断言语义改名（旧名见 `git log -p tests/unit/test_migrations.py`，全仓零残留）。
 
 ### 子目录归属
 

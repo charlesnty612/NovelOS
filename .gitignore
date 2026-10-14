@@ -56,4 +56,7 @@ secrets*.json*
 # 内容仓自身（若被放到本仓同层，避免递归纳管）
 /NovelOS-Content/
 /NovelOS-Artifacts/
+# 会话级临时暂存区：探针脚本 / 时序对比 / 临时 payload 响应 / 手工日志。
+# 一次性排障产物，非交付物；证据要留的先摘进 NovelOS-Artifacts 再删（2026-10-14 登记）
+/tmp/
 

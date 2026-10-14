@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -36,6 +37,7 @@ from packages.core.config import Settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GENERATED_TS = REPO_ROOT / "apps/web/src/api/types.generated.ts"
+OPENAPI_JSON = REPO_ROOT / "apps/web/openapi.json"
 
 # 关键模型 → 必须持续存在的字段快照（宽松口径：只查「存在」，不锁全集）
 KEY_SCHEMA_FIELDS: dict[str, set[str]] = {
@@ -66,13 +68,18 @@ def _schema_names(schema: dict) -> set[str]:
     return set(schema.get("components", {}).get("schemas", {}))
 
 
+def _set_diff(left: set[str], right: set[str], left_label: str, right_label: str) -> str:
+    """两侧集合差异的可读诊断；完全一致时返回空串。"""
+    only_left = sorted(left - right)
+    only_right = sorted(right - left)
+    if not only_left and not only_right:
+        return ""
+    return f"仅 {left_label} 有: {only_left}；仅 {right_label} 有: {only_right}"
+
+
 def _drift_diff(schema_names: set[str], generated_names: set[str]) -> str:
     """两侧集合差异的可读诊断；完全一致时返回空串。"""
-    only_schema = sorted(schema_names - generated_names)
-    only_generated = sorted(generated_names - schema_names)
-    if not only_schema and not only_generated:
-        return ""
-    return f"仅 schema 有: {only_schema}；仅生成文件有: {only_generated}"
+    return _set_diff(schema_names, generated_names, "schema", "生成文件")
 
 
 def _make_app(tmp_path: Path):
@@ -265,3 +272,101 @@ def test_main_assertion_rejects_surplus_generated_interface(
     assert "集合不一致" in message, (
         f"报红来自 :112 集合相等断言之外的分支，多出方向覆盖无效: {message}"
     )
+
+
+def test_openapi_json_file_matches_live_schema(tmp_path: Path) -> None:
+    """``apps/web/openapi.json``（生成文件的数据源）与活 ``app.openapi()`` 一致。
+
+    为什么需要这条（task-8 风险④）：此前的断言面只有「活 schema ×
+    ``types.generated.ts``」两方，而 ``openapi.json`` 恰好是
+    ``gen_frontend_types.py`` 的**输入**——它单独陈旧时无人看守，却能在下次
+    regen 时把陈旧 schema 重新喂回生成面。本用例补上第三方：
+
+    - ``info.version``：两端都是导出时的包版本，陈旧会直接体现为 `dev`（系统
+      python 缺 editable 元数据时的已知症状）；
+    - ``paths`` 集合：漏一个端点即红；
+    - ``components.schemas`` 集合：漏一个模型即红。
+    """
+    app = _make_app(tmp_path)
+    live = app.openapi()
+    document = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+
+    file_version = document.get("info", {}).get("version")
+    live_version = live.get("info", {}).get("version")
+    assert file_version == live_version, (
+        f"openapi.json 的 info.version 与当前包版本不一致："
+        f"文件 {file_version} vs 活 schema {live_version}——"
+        f"请用项目 .venv 解释器重跑 export_openapi.py"
+    )
+
+    file_paths = set(document.get("paths", {}))
+    live_paths = set(live.get("paths", {}))
+    assert file_paths == live_paths, (
+        f"openapi.json 的 paths 与当前路由表不一致——"
+        f"{_set_diff(file_paths, live_paths, 'openapi.json', '活 schema')}——"
+        f"请重跑 export_openapi.py"
+    )
+
+    file_schemas = _schema_names(document)
+    live_schemas = _schema_names(live)
+    assert file_schemas == live_schemas, (
+        f"openapi.json 的 components.schemas 与当前 schema 不一致——"
+        f"{_set_diff(file_schemas, live_schemas, 'openapi.json', '活 schema')}——"
+        f"请重跑 export_openapi.py"
+    )
+
+
+def test_openapi_json_check_rejects_stale_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """突变自检：openapi.json 副本的 version / paths / schemas 任一陈旧都必须打红。
+
+    逐维度独立突变，避免「一个用例红三次却都是同一维在起作用」的假覆盖。
+    全部只改 tmp 副本 + monkeypatch 模块常量，不触碰 apps/web 任何文件。
+    """
+    # 阶段①：真实文件下上面那条断言通过（不抛即绿）
+    test_openapi_json_file_matches_live_schema(tmp_path)
+
+    document = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    victim_path = sorted(document["paths"])[0]
+    victim_schema = sorted(_schema_names(document))[0]
+
+    mutants: dict[str, dict] = {
+        "version": {**document, "info": {**document["info"], "version": "0.0.0-mutated"}},
+        "paths": {
+            **document,
+            "paths": {k: v for k, v in document["paths"].items() if k != victim_path},
+        },
+        "schemas": {
+            **document,
+            "components": {
+                **document.get("components", {}),
+                "schemas": {
+                    k: v
+                    for k, v in document["components"]["schemas"].items()
+                    if k != victim_schema
+                },
+            },
+        },
+    }
+    # 每个突变必须点名它自己动过的那个东西
+    expected_named = {
+        "version": "0.0.0-mutated",
+        "paths": victim_path,
+        "schemas": victim_schema,
+    }
+
+    for label, mutant in mutants.items():
+        mutant_path = tmp_path / f"openapi.{label}.mutant.json"
+        mutant_path.write_text(
+            json.dumps(mutant, ensure_ascii=False), encoding="utf-8"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "OPENAPI_JSON", mutant_path)
+        with pytest.raises(AssertionError) as excinfo:
+            test_openapi_json_file_matches_live_schema(tmp_path)
+        message = str(excinfo.value)
+        assert expected_named[label] in message, (
+            f"{label} 维度突变已报红但未点名被改动的对象 "
+            f"{expected_named[label]}: {message}"
+        )
+        monkeypatch.undo()

@@ -127,7 +127,7 @@ def test_short_para_shares_the_same_split_entry():
     # 首轮交付只断言两个旧名不存在，抓不到内联实现；这里改成扫源码里的切分调用点
     # （跳过注释行：文档里会引用这个字面形态）。
     #
-    # **覆盖边界（2026-09-27 B-2 如实登记，勿夸大）**：下面的匹配串同时绑定三个条件
+    # **词法边界（2026-09-27 B-2 如实登记，勿夸大）**：下面的匹配串同时绑定三个条件
     # ——① 变量名必须是 `prose`、② 必须是 `.split(` 方法、③ 字面量必须是 `\n\n`。
     # 三者任一变化即**漏抓**：写成 `text.split("\n\n")`（换变量名）、
     # `prose.split(chr(10) * 2)`（动态构造）、`re.split(r"\n\n+", prose)`
@@ -136,26 +136,62 @@ def test_short_para_shares_the_same_split_entry():
     # 放宽办法（另一次改动，勿在无抽样的情况下顺手做）：把匹配换成对
     # `\n\n` 的正则扫描（`\.split\(\s*["']\\n\\n` 与 `re\.split\(\s*r?["']\\n\\n`），
     # 并把排除范围从「以 # 开头的行」扩到 docstring 内部。
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    code_lines = [
-        (i, ln) for i, ln in enumerate(source.splitlines()) if not ln.lstrip().startswith("#")
-    ]
-    inline_splits = [
-        (i + 1, ln.strip()) for i, ln in code_lines if 'prose.split("\\n\\n")' in ln
-    ]
+    #
+    # **文件域边界（2026-10-13 扩域，此前是真缺陷 MINOR-1）**：拆分前「模块内」=
+    # 单文件；V4.0 拆成 5 个文件后，若只读 `module.__file__`，4 个族子模块**全部
+    # 落在看守之外**——注入实证：往 `ai_patterns_paragraph.py` 塞一段真实的内联
+    # 切分，用本断言的原样谓词跑，门面计数仍是 1、**断言仍绿**。性质同
+    # 2026-09-27 那道「人类基线 0.00 是量具假象」：**看守被拆分悄悄缩小了执行
+    # 域**，而它守的正是那条口径。故本条改为扫同目录 `ai_patterns*.py` 全集。
+    # 扩域**不得假红**：该谓词只跳过 `#` 开头的行、**不跳过 docstring 内部**——
+    # 扩域前已逐文件实测，4 个子模块的非注释行里都没有那个字面（`ai_patterns_text`
+    # 的注释确实讨论过该形态，但那段在 `#` 注释块内，本来就被跳过）。
+    # ⚠️ **仍存的文件域边界（如实登记，不夸大）**：扫描面 = 同目录
+    # `ai_patterns*.py`；把切段实现搬进一个不叫 `ai_patterns*` 的模块即可绕过，
+    # 而口径分叉照样会发生。将来新增族自动纳入，无需改本测试；重命名/合并掉某个
+    # 既有子模块则由上面的名册断言拦下（防的正是「域静默缩小」这个危险方向）。
+    pkg_dir = Path(module.__file__).parent
+    sources = {
+        p.name: p.read_text(encoding="utf-8")
+        for p in sorted(pkg_dir.glob("ai_patterns*.py"))
+    }
+    # 名册钉住：域不得静默缩小（新增族自动纳入，此处只拦「减 / 改名」）。
+    assert {
+        "ai_patterns.py",
+        "ai_patterns_text.py",
+        "ai_patterns_sentence.py",
+        "ai_patterns_paragraph.py",
+        "ai_patterns_dialogue.py",
+    } <= set(sources), f"段切分看守的扫描域被缩小了，实测只扫到 {sorted(sources)}"
+
+    inline_splits: list[tuple[str, int, str]] = []
+    for name, source in sources.items():
+        code_lines = [
+            (i, ln) for i, ln in enumerate(source.splitlines()) if not ln.lstrip().startswith("#")
+        ]
+        inline_splits += [
+            (name, i + 1, ln.strip())
+            for i, ln in code_lines
+            if 'prose.split("\\n\\n")' in ln
+        ]
     assert len(inline_splits) == 1, (
         "段切分内联实现应只剩 _last_paragraph 一处（已登记为待修），"
         f"实测 {len(inline_splits)} 处：{inline_splits}"
     )
-    lines = source.splitlines()
+    only_file, only_line, _only_text = inline_splits[0]
+    assert only_file == Path(module.__file__).name, (
+        f"唯一那处内联实现落在 {only_file}，应留在门面 {Path(module.__file__).name}——"
+        "_last_paragraph 被本形状断言钉在门面源码内"
+    )
+    lines = sources[only_file].splitlines()
     # 向上找该行所属的函数定义（不假设 docstring 占几行）
     owner = next(
         ln.strip()
-        for ln in reversed(lines[: inline_splits[0][0]])
+        for ln in reversed(lines[:only_line])
         if ln.startswith("def ")
     )
     assert owner.startswith("def _last_paragraph"), (
-        f"唯一那处内联实现属于 {owner}，应属于 _last_paragraph（第 {inline_splits[0][0]} 行）"
+        f"唯一那处内联实现在 {only_file}:{only_line}，属于 {owner}，应属于 _last_paragraph"
     )
     assert not hasattr(module, "_paragraphs"), (
         "旧的 \\n\\n 切分已删除（唯一消费方 count_short_paras 已改口径）；"

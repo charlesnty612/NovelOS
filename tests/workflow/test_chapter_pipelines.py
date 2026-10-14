@@ -18,6 +18,10 @@ from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
+# ---------------------------------------------------------------------------
+# 公共 helper：run 终态轮询 / app 与 client 构造 / 项目·角色·章节创建
+# + 各 agent 的脚本化 mock 响应（director / writer 三版 / observer）
+# ---------------------------------------------------------------------------
 
 # 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
 async def _get_run_via_http(app, run_id: str) -> dict | None:
@@ -244,6 +248,11 @@ def _observer_noop_script() -> list[str]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# 端到端主链路：plan → write → review(approve) → commit → COMMITTED
+# ---------------------------------------------------------------------------
+
+
 def test_chapter_pipelines_end_to_end(tmp_path: Path):
     """端到端：plan → write → review(approve) → commit(无 HIGH) → COMMITTED。"""
     app = _create_app(tmp_path)
@@ -369,6 +378,11 @@ def test_chapter_pipelines_end_to_end(tmp_path: Path):
     asyncio.run(run())
 
 
+# ---------------------------------------------------------------------------
+# 人工评审门禁：review 驳回应把 run 打成 FAILED
+# ---------------------------------------------------------------------------
+
+
 def test_chapter_review_rejected_results_in_failed(tmp_path: Path):
     """review 时 author 拒绝 → resume 后 run FAILED（因 mark_reviewed 抛错）。"""
     app = _create_app(tmp_path)
@@ -435,6 +449,12 @@ def test_chapter_review_rejected_results_in_failed(tmp_path: Path):
             assert r.json()["error"] == "rejected", r.json().get("error")
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 改稿回路（revise loop）：review 驳回 → 改稿 → 复审闭环
+# + 无修订意见时应清空 revision_note
+# ---------------------------------------------------------------------------
 
 
 def test_chapter_review_revise_loop_end_to_end(tmp_path: Path):
@@ -627,6 +647,11 @@ def test_chapter_review_revise_without_note_clears_revision_note(tmp_path: Path)
     asyncio.run(run())
 
 
+# ---------------------------------------------------------------------------
+# 前置状态守卫：未跑 review 就 commit 应 FAILED；对已 COMMITTED 章再 write 应 FAILED
+# ---------------------------------------------------------------------------
+
+
 def test_chapter_commit_without_review_fails(tmp_path: Path):
     """commit 在 chapter 仍为 DRAFTED 时（未跑 review）应 FAILED。"""
     app = _create_app(tmp_path)
@@ -733,6 +758,11 @@ def test_chapter_write_on_committed_chapter_fails(tmp_path: Path):
     asyncio.run(run())
 
 
+# ---------------------------------------------------------------------------
+# run 列表端点：GET /runs
+# ---------------------------------------------------------------------------
+
+
 def test_list_runs_endpoint(tmp_path: Path):
     """GET /projects/{pid}/runs 列出该项目下的所有 workflow runs。"""
     app = _create_app(tmp_path)
@@ -764,6 +794,11 @@ def test_list_runs_endpoint(tmp_path: Path):
             assert any(r["workflow_name"] == "chapter-plan" and r["label"] == "生成计划" for r in runs)
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# auto_revise 回路：跑一轮后批准 / 开关关闭保持 FAILED / resume 后 2s 内返回
+# ---------------------------------------------------------------------------
 
 
 def test_chapter_review_auto_revise_loop_once_then_approve(tmp_path: Path):
@@ -1079,6 +1114,11 @@ def test_chapter_review_resume_with_auto_revise_returns_within_2s(tmp_path: Path
     asyncio.run(run())
 
 
+# ---------------------------------------------------------------------------
+# 草稿版本选择：review 显式带 draft_version 时评该版；指向不存在版本应失败
+# ---------------------------------------------------------------------------
+
+
 def test_chapter_review_with_draft_version_selects_specific_version(tmp_path: Path):
     """指定 draft_version=1 审 v1；不指定时审最新稿（v2）。
 
@@ -1207,6 +1247,23 @@ def test_chapter_review_with_nonexistent_draft_version_fails(tmp_path: Path):
             assert "no draft version 99" in (failed.get("error") or ""), failed.get("error")
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# auto_revise 回路 · 模型档案覆盖：显式 model_overrides 透传 / 缺省时从 review run 继承
+#
+# 【主题簇登记 · 2026-10-13 Lead 裁决 = (b) 下一批待办，本轮不拆】
+#   事实：auto_revise 主题在本文件被「草稿版本选择」簇劈成两段——「auto_revise 回路」
+#   簇在上一节，本节实为「auto_revise · 模型档案覆盖」簇，中间夹着两个 draft_version
+#   测试。拆分时须二选一：① 两节并入同一模块（跨节搬运）；② 保持两节各自独立、
+#   把本簇改记为「模型档案覆盖」而非 auto_revise。
+#   裁决归属：**batch4 拆分方案**（不在本轮收尾范围——本轮对该文件的改动已实证为
+#   纯注释增量、断言零改动，见下）。
+#   触发条件：本文件已达 1854 行（>1500 红线），或本轮结束后本文件继续增长、或任一
+#   簇迁出本文件时——三者任一发生即必须先落裁决，不许再以无主 TODO 形态留在工作区
+#   （AGENTS 坑区「登记比遗忘强」的前提是**登记写清状态与归属**，不是留半截 TODO）。
+#   本轮实证：HEAD 17 / 工作区 17（`--collect-only -q` 实测），用例数零增减。
+# ---------------------------------------------------------------------------
 
 
 def test_chapter_review_auto_revise_loop_propagates_model_overrides(tmp_path: Path):
@@ -1646,6 +1703,11 @@ def test_chapter_review_auto_revise_loop_inherits_author_intent_from_review_run(
                 )
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# writer 落库前确定性规整：「」对话标点归一 + 内部标识（recalled_passages 等）清除
+# ---------------------------------------------------------------------------
 
 
 def _writer_script_with_quotes_and_leak() -> list[str]:

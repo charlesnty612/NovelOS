@@ -950,6 +950,11 @@ def _cmd_run_locked(
 ) -> int:
     """cmd_run 拿到锁后的实际执行体；抽出函数便于嵌套 try/finally 不嵌套缩进。"""
     _ = args  # 当前 unused（保留接口以备将来加参数透传）
+    # 预绑定 + finally 里的 None 守卫：纯预防性加固，当前**行为等价**。
+    # 两条早退分支（缺 progress.json / chapter_ids 为空）位于下方 ``try:`` 之前，
+    # 走不到 finally，故今天并非缺陷修复；守卫只为「早退分支日后被移入 try 内」
+    # 这一形状兜底。改此块时勿据旧注释认定存在 NameError（2026-10-14 复算留痕）。
+    client: httpx.Client | None = None
     prog = _load_progress(data_dir)
     if not prog or not prog.get("project_id"):
         print(f"[m1] FAIL：未发现 progress.json，请先 init（{_progress_path(data_dir)}）", flush=True)
@@ -1208,10 +1213,13 @@ def _cmd_run_locked(
         print(f"[m1] run DONE. 累计 token={cumulative_total_tokens}", flush=True)
         return 0
     finally:
-        try:
-            client.close()
-        except Exception:  # noqa: BLE001
-            pass
+        # 早退路径（缺 progress.json / chapter_ids 为空）时 client 仍为 None，
+        # 直接 close 会 NameError；这里显式守卫，不靠 except 静默吞异常。
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 —— close 失败不阻断已定的返回码
+                pass
 
 
 def _build_payloads(  # noqa: PLR0913 — 长跑脚本统一构造入口

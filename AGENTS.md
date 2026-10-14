@@ -90,6 +90,24 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
 | `novelos-ops-dev` | 开发 | 独占 `scripts/` + 自建测试；**不可逆操作（删/取消）须主会话确认才执行** |
 | `novelos-reviewer` | 对抗审查·**只读** | 以驳倒为目标；须交「我没能攻破的地方」段 |
 
+### 作者成员 `novelos-author`（2026-10-13 用户指令建立，会话内成员）
+
+**不是文件型常驻成员**（不在 `C:/Users/aistation/.agents/agents/` 下），由 Lead 用
+`spawn_teammate` 按会话建立。角色 = **用 NovelOS 本身写小说**，产出是内容不是代码。
+
+| 项 | 边界 |
+|---|---|
+| 禁止改代码 | `packages/` / `tests/` / `scripts/` / `database/` 一律不碰（属上表开发成员领域）；**禁止任何 git 操作** |
+| 内容红线 | **只新建项目**；18 条 PAUSED run 与 48 章书等**既有测试书籍一律不碰**（不续写 / 不重生成 / 不删改 / 不为好看做迁移） |
+| 额度授权 | **按次给**：未派活不得起跑任何 workflow。真实 LLM 调用会烧额度（与 §一 硬约束 2「改软件时禁真实调用」不冲突——那是**验证**禁令，写小说是产品正常用途） |
+| 写作要素 | 题材 / 题材包 / 设定 / 人物 / 大纲 / 每章字数 / 铁律（author_intent）/ 开几章，**逐次由 Lead 给**；不足则先问，不自行编设定 |
+| 决策归属 | 题材走向、人物结局等**内容创作决策属用户/作者**（§一 裁决授权边界，工程类拍板权不含此类） |
+
+**⚠️ 这条成员的存在修订了 §一 硬约束 1 的适用范围**：2026-09-27 用户裁决「只动软件层，
+内容层零接触」针对的是**改软件这件事**；2026-10-13 用户另建作者成员用本软件写小说，
+故内容层由「**零接触**」转为「**受控接触**」——**可新建项目写新书**，但既有测试书籍
+仍严格禁止。两者不冲突，改的只是边界位置。
+
 **并行按文件路径互斥**（铁律 4）：`ai_patterns.py` 只有一名开发能碰——两个算子同文件时
 必须串行或换人，这是本批的实际约束。典型链路：调研（全量逐条，非抽样）→ 主会话复算 →
 开发 → 主会话复算 → 对抗审查 → 修复 → 全量回归。
@@ -165,7 +183,15 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 | 同族第二条算子还留着旧口径（`AI-ENDING-SUMMARY` 的 `_last_paragraph` 仍 `\n\n`） | 口径统一只做了一部分：`_last_paragraph` 未随 `_split_paragraphs` 收敛，单换行正文下会扫全章 | **本批登记不修**（2026-09-27）：该规则判「末段是不是总结句」，全章扫描的误报面与短段族不同，改动需独立实测。**留档待排期——同缺陷家族的不同规则，登记比遗忘强** |
 | `tests/unit/test_m1_lock.py` 单跑**硬杀整个进程树**（0 字节输出 / exit 1 / 无 traceback） | 真因**未定位**（`m1_long_run.py` 内无 `Popen`/`uvicorn`/`taskkill`，只有 `os.kill(pid,0)` 探针）。已排除：`os.kill(pid,0)` 在 Windows/Python 3.11 **不杀进程**（实测子进程心跳持续推进）；已用 deselect 对照证明与 2026-09-27 改动无关 | **⚠️ 规避而非修复**：全量回归须 `python -m pytest -n 4 -q --ignore=tests/unit/test_m1_lock.py`，否则跑不出可比总数。**待单独立项定位真因**。判别：单跑该文件即复现，连父 PowerShell 进程一起带走 |
 | **缓存键缺 prompt 维度（同形状第二次抓到）** | 2026-09-16 writer 侧已修（`writer_input.py:416` 查 DB ACTIVE + 键[13] `prompt_label`），但 **director / observer / director_planner 三处未同步**：`director_input.py:249` 硬编码 `"director:v1"`、键 12 元无 prompt；`observer_input.py:734` 同款硬编码（无缓存故无脏命中）；`planner_input.py:31` 常量 `DIRECTOR_PLANNER_PROMPT_VERSION`。装配全程不读 prompts 表 ⇒ 硬编码与缓存键脱节，**与 writer 事故同形**（同一条链两个值、无任何一处报错）。2026-09-27 全量审查 dev-a A-001 / dev-b B-6 发现，reviewer 复核确认 | **✅ 已修**（2026-09-27 Phase B task-6，三处已单点化 + director 键 12→13；新测试 `tests/unit/test_prompt_label_key.py` 5 例 + 双突变自检红过，reviewer phase2 复核通过；待 task-10 全量确认）。判别（2026-09-30 更新：行号已漂移，改以 grep 为准）：`build_director_input` 键 13 元（`DIRECTOR_KEY_LEN` 钉住）；`grep '"director:v1"' packages/core/context_engine/director_input.py` 只命中形参默认与 fallback（payload 经形参传入）；`grep DIRECTOR_PLANNER_PROMPT_VERSION packages/workflows/chapter_plan/pipeline.py` 只命中 import（值须经 `active_prompt_label` 重算）；落库看守见 `test_prompt_label_key.py` 落库断言。**后续（2026-09-30 Wave2，本团队实测）**：task-6“三处单点化”漏了落库 save 点——`pipeline.py:200` 仍传硬编码常量，payload（ACTIVE）／plan_json（模型回声）／落库（常量）三源分叉，且 5 例测试全只断言 payload（撤落库修复仍全绿）。已修：开事务前重算 `active_prompt_label`（其无 conn 入参，字面 conn 复用不可实现）；`:179` 对齐 ACTIVE，三面同源；注释精确化（回声口径外）；落库断言＋三向突变全红恢复绿；全量 2961 独立复现。 |
-| **行数量具：`Get-Content` 默认编码静默少算中文行** | PowerShell `Get-Content` 不带 `-Encoding UTF8` 时按 cp936 解码，含中文行被静默吞掉（`inspect_stalled_runs.py`：read/`ReadAllLines` 报 863，`Get-Content` 默认报 805，差 58；该文件 CR=0/LF=863 纯 LF，排除换行口径问题）。scout 曾把该偏差归因成「非标准换行序列」（错因已留痕，未污染任何行数结论——11 文件对照仅 09-27 新建 2 文件有偏差，B-1 的 1932 等逐条复测无误）。2026-09-27 reviewer phase2 P2-1 实证 | **通用纪律：凡用行数作判据（1500 红线、巨型清单），PowerShell 侧一律用 `(Get-Content -Encoding UTF8).Count` 或 `ReadAllLines`，并与 read 工具交叉核对；偏差只记结论不记成因，成因须实测证伪后再写** |
+| **PowerShell 5.1 按 GBK 解码 `.ps1` 脚本 → 脚本里的中文字面量当场损坏**（同形状第 3 次：pytest 子进程输出 → `Get-Content` 默认编码 → 脚本文件解码） | PS 5.1 读 `.ps1` 文件用 cp936，而文件是 UTF-8 ⇒ **中文常量被解成乱码再当代码解析**。两种表现：① 正则报错（乱码串匹配不上）；② 直接语法崩。同一次调研里连踩两轮，第二次把脚本改到跑不起来 | **凡 `.ps1` 脚本含中文字面量，一律用码点构造**（`[char]0xFF1A` 之类）或把脚本写成 UTF-8 **带 BOM**（PS 5.1 靠 BOM 判 UTF-8，无 BOM 一律按 cp936）；或干脆改用 Python 跑抓取脚本。**判别：脚本报错信息里出现乱码，就是这条，不是逻辑错**。⚠️ 另注：本机 `Get-Content` 不带 `-Encoding UTF8` 同样中招（见上方「行数量具」条），两条是同一个「Windows 默认 cp936 吞中文」的家族 |
+| **闸门绿了，但结论不成立**：全量跑完 2976 passed，却描述的是一棵已经改过的树 | pytest 在**启动时**完成 collect + import，跑一半的编辑不会被已收集的用例读到；审查员的 17:59:08→18:04:56 全量窗口里，`ai_patterns.py`/`ai_patterns_dialogue.py` 在 18:02:44 被改、`ai_patterns_paragraph.py` 在 18:11:02 被改 ⇒ 那次绿测跑的是 18:02:44 **之前**的字节，改动后的代码从未被任何测试跑过 | **闸门前取树指纹**：对 `packages/ tests/ scripts/ database/` 的 `.py/.sql` 取 `路径\|长度\|mtime` 的 SHA256，跑完再取一次，**逐位一致才算数**。2026-10-13 实测两次作废（审查员与 ops-dev 各自主动声明不作废），改用指纹后 Lead 亲跑两次均逐位一致。**判别：闸门结果与「谁在什么时候写的」是两件事，必须分别取证** |
+| **看守自己被悄悄缩小了执行域**：口径断言还绿，但 4/5 的代码根本不在它眼里 | 拆分前「模块内不得有第二份段切分」= 全模块（单文件）；拆成 5 个文件后，断言仍读 `Path(module.__file__)`（门面）⇒ 4 个族子模块全在看守之外。注入实证：往子模块塞真实的 `prose.split("\n\n")`，**原样谓词跑仍绿**（门面计数=1）。性质同坑区「人类基线 0.00 是量具假象」——**量具换了语料形态却没跟着换读法** | 读取面改 `Path(module.__file__).parent.glob("ai_patterns*.py")` ＋ 名册断言（域不得静默缩小）＋ 唯一命中必须落门面的断言；docstring **如实登记残余边界**（改模块名仍可绕过）。判别：注入真分叉 → 必红且报点名文件（`test_readability_rules.py`，撤扩域必红） |
+| **断言了结果 ≠ 判别了机制**：用例绿着，但它守的那个闸门拆掉它照样绿 | `test_non_400_errors_get_no_hint` 的 detail 是 `HTTP 401: invalid api key`，**不含任何模型名 marker** ⇒ `_unknown_model_hint` 在进 `status_code == 400` 判断**之前**就提前返回 `None`。于是把闸门整个拆成 `if True:`（hint 挂到所有状态码，正是该用例声称要防的误诊），**13 条全绿、突变存活** | ① 补可判别用例（detail 改成「非 400 且确实含 marker」，闸门一拆必红——突变复测：新用例红、其余 13 条仍绿）；② **通用纪律：新测试必须做突变验证，「突变存活」= 该测试在断言一件它测不到的事**，不是「修复无效」（AGENTS 方法论 §三.2 同源，但这条的失效方向相反） |
+| **量具侧两条：`Select-String` 默认大小写不敏感；`shutil.copy2` 保留 mtime** | ① 扫突变残留时把 `test_engine_pure_no_mutation` 等 3 个**正常测试函数名**误报成残留（grep 工具默认大小写敏感故报 0，两侧结论相反）——差点把假缺陷记到成员头上；② 突变恢复用 `copy2`，三个文件 mtime 显示旧日期而字节确被写过又恢复 ⇒ **mtime 不能当「没被碰过」的证据** | ① 残留扫描一律显式 `-CaseSensitive`，或按「标记形态」（`MUTATION-PROBE-` / `# MUTATION-N`）而非裸词搜；② 内容等价须由**残留扫描 + 全量绿 + diff 未变**三项另证，mtime 只作参考。**通用纪律：两侧工具结论冲突时不要投票，回到量具本身问「它默认是什么」** |
+| **分层统计的分组键本身不可靠 → 分层结论整体作废，且每一层的数字都「看着正常」** | 2026-10-13 番茄调研实证：书库 API 的 `gender` 参数**不可靠**——同一本书会同时出现在 `gender=0` 与 `gender=1` 的结果里（分类 ID 是男女共用的，URL 形如 `{gender}_{type}_{category}`，第 1 段才是性别）。调研成员的记录方式是「后写覆盖先写」，于是**所有分层表的性别列整体标错，而每个数字（书名/在读/字数）都仍是正确的**——**错的是归属，不是读数**，所以没有任何一层的数字会自己报警 | **凡按 API 参数分层出表，先验证参数本身可靠**：取 2~3 本你确信归属的书，查它们在 `gender=0` 与 `gender=1` 的结果里是否**同时出现**。出现即该参数不可靠 ⇒ **整份分层表作废，不得只改性别列**（同族的还有：对称度量分母取 `min` 把读数机械拉到 1.00，见上方条目——那次是**读数被拉伸**，这次是**归属被整体搬错**，后者更隐蔽，因为数字看着完全正常，只有交叉比对才暴露） |
+| **「扫过 N 本未见」不是「不存在」；而且检测器自己的漏检是当场可证伪的** | 同一轮调研：成员扫 6283 本后报「《快穿：知道什么叫背景通天吗》不存在」，但**它要找的那本《快穿：我的词条是背景通天》自己就不在它扫出的结果里**——扫描器漏检已被当场证实。这个反例比任何统计都硬 | ① **负向结论的强度只配到扫描覆盖面**：「扫过 6283 本未见」≠「站内不存在」；② **被找对象本身必须做阳性对照**——它若本应在射程内却没出现，立即判定检测器失效、结论作废，**不许用「样本可能不在热门池」解释掉**；③ 与研究阶段做的**阳性对照**（同一扫描器扫已知含目标词的分类，命中 63/90）配套：阳性对照只证明「能检出」，**证明不了「没有漏检」**，后者只能靠被找对象自证 |
+
+| **注释断言的触发路径不可达，而它正是「这段改动在修什么」的唯一说明书** | 守卫 `if client is not None:` 的注释写「早退分支（缺 progress.json / chapter_ids 为空）会在 `finally` 里抛 NameError」——复算：外层 `try:` 在 **977** 行，两条早退 `return 2` 在 **960/967** 行，**位于 `try` 之前**，压根进不了 finally，HEAD 版在那些路径上不抛 NameError | 差的是**触发路径的可达性**，代码行为等价（预防性加固 ≠ 缺陷修复），故无任何测试/lint/运行时信号会报警；更坏的是它与「真缺陷修复」在 diff 表面**长得一模一样**（预绑定 + None 守卫），连 diff 作者自己都被骗过（2026-10-14 Lead 先验被推翻并当面向用户更正）。判别不在 diff 里，在**行号相对 try 边界的大小关系**上 | **裁决任何「修 X」类改动前，把注释里的因果主张独立复算一遍**；**注释与代码冲突时以代码为准并当场改掉注释**——失准的注释比没有注释更贵（它会持续把后来者导向错误前提）。同族：坑区「断言了结果 ≠ 判别了机制」是测试层的同款形状（失效方向相反：那边是断言测不到机制，这边是注释陈述不到机制） |
 
 ## 六、一致性矩阵（当前核销）
 
@@ -177,6 +203,6 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 |---|------|------|------|
 | 版本 | pyproject 3.9.0 = package.json 3.9.0 = importlib 读取 = uv.lock 3.9.0 = package-lock.json 3.9.0 | 同左（**含 editable 元数据**——发版后必须 `uv sync --extra dev` 刷新 dist-info，否则 /api/health 对外报旧版；R5 检修实测抓到的错核销已修正） | ✅ 2026-09-13 二次核销（uv sync 后实测） |
 | 表数 | 业务表 39 / 含 _migrations 40 | test_health + smoke EXPECTED_BUSINESS_TABLES=39 | ✅ 2026-09-15（0028 只加列不增表） |
-| 测试基线 | pytest 2961 passed / 1 skipped（须带 `--ignore=tests/unit/test_m1_lock.py`）；ruff 0（本轮未跑）；vitest 489（本轮未跑） | 2026-09-27 Phase B 整改后本团队独立实测 **2956 / 1 / 0 failed**（343.69s，项目 .venv 解释器；差值 +5 完全闭合于新增 `tests/unit/test_prompt_label_key.py` 5 例，2951+5=2956 无其他增减；dev 库零接触已实证 `data/novelos.db` mtime 未动）。⚠️ **全量必须显式忽略 `test_m1_lock.py`**（单跑硬杀进程树，见坑区），否则跑不出可比总数 | ✅ 2026-09-30 复核（本团队独立实测 **2961 / 1 / 0 failed**，306.97s，项目 .venv 解释器；2956＋5 完全闭合：dev-a 落库断言＋2、dev-b drift 自检＋3；dev 库零接触 mtime 未动；ruff/vitest 本轮未跑仍记未独立复现） |
+| 测试基线 | pytest **2978 collected**（= 2977 passed / 1 skipped，须带 `--ignore=tests/unit/test_m1_lock.py`）；ruff `All checks passed!`；vitest 489（未跑，仍为声称） | 2026-10-14 Lead 亲跑全量 **2977 / 1 / 0 failed**（294.15s，项目 .venv），**指纹前后逐位一致**（`4ced8254…`，519 文件）。⚠️ **闸门前须取树指纹**：对 `packages/ tests/ scripts/ database/` 的 519 个 `.py/.sql` 取 `路径\|长度\|mtime` 的 SHA256，跑完再取一次比对，**逐位一致才算数**——pytest 起跑即完成 collect+import，跑一半的编辑不会被已收集的用例读到 ⇒「全量绿但结论不成立」。**这套纪律当天就抓到一次自我违反**（10-14：首次跑 2977 绿，但运行中改了 `m1_long_run.py` 注释致指纹变动 → 该次作废，复跑取权威数）。2961→2978 的 +17 闭合于：profile 校验 13 ＋ openapi 契约 2 ＋ Lead 新增判别用例 1 ＋ 快照/备份拆分净 0 ＋ 改名 0 | ✅ 2026-10-14 复核（2977+1 skipped=2978 collected 闭合；指纹逐位一致；`ruff check packages scripts tests` clean；突变残留 0（**须 `-CaseSensitive`**）；vitest / export_openapi regen 本轮未复现，仍记声称未验） |
 | OpenAPI | 98 paths / 51 schemas | export_openapi 实测（挂账批次 reopen 端点入约 97→98 / 50→51）；regen 前后逐字节一致（09-26 verifier 双环境复核，`info.version=="3.9.0"` 以项目 .venv 产物为准） | ✅ 2026-09-26 复核 |
 | dev 库数据 | DRIFT:2（prj_8365f42af5a6） | **已修复**：v1 快照按 DB 重建 + 6 孤儿 state 清除，check_state_sync SYNC OK（2026-09-13，修前备份 /tmp/novelos_backup_pre_f8repair_20260913.db） | ✅ 已核销 |

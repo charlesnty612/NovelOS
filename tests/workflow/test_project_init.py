@@ -18,6 +18,10 @@ from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
+# ---------------------------------------------------------------------------
+# 公共 helper：run 终态轮询 / app 与 client 构造 / 项目创建
+# + 各 agent 的脚本化 mock 响应（premise / world / character / outline / providers）
+# ---------------------------------------------------------------------------
 
 # 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
 async def _get_run_via_http(app, run_id: str) -> dict | None:
@@ -223,6 +227,11 @@ def _mock_providers(seed_count: int = 10) -> dict[str, list[str]]:
         "character_designer": _character_script(),
         "volume_outliner": _outline_script(seed_count),
     }
+
+
+# ---------------------------------------------------------------------------
+# project_init 基础四用例：新建项目 / 挂载既有项目 / agent 失败降级 / 持久化失败抛错
+# ---------------------------------------------------------------------------
 
 
 def test_project_init_creates_new_project(tmp_path: Path):

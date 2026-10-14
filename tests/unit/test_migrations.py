@@ -17,7 +17,13 @@ def _fresh_db(tmp_path: Path) -> Path:
     return tmp_path / "test.db"
 
 
-def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
+# ---------------------------------------------------------------------------
+# 1. 迁移主链：空库顺序应用 0001~0030
+#    （迁移后总表 40 = 39 业务表 + `_migrations`）
+# ---------------------------------------------------------------------------
+
+
+def test_apply_migrations_creates_40_tables_total(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     result = apply_migrations(db_path, MIGRATIONS_DIR)
     # 业务表 = 总表 - _migrations
@@ -133,6 +139,11 @@ def test_apply_migrations_creates_34_business_tables(tmp_path: Path):
     assert "0030_commits_rollback_of_project_scope.sql" in result["applied"]
 
 
+# ---------------------------------------------------------------------------
+# 2. 幂等：重复执行不重跑已应用脚本，表数不变
+# ---------------------------------------------------------------------------
+
+
 def test_apply_migrations_is_idempotent(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     first = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -228,6 +239,11 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert second["tables"] == first["tables"]
 
 
+# ---------------------------------------------------------------------------
+# 3. 迁移登记表：`_migrations` 落 filename / applied_at
+# ---------------------------------------------------------------------------
+
+
 def test_migrations_table_records_filename(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     apply_migrations(db_path, MIGRATIONS_DIR)
@@ -275,6 +291,11 @@ def test_migrations_table_records_filename(tmp_path: Path):
     }
     for r in rows:
         assert r["applied_at"]
+
+
+# ---------------------------------------------------------------------------
+# 4. 连接开关：`get_connection` 开启 foreign_keys
+# ---------------------------------------------------------------------------
 
 
 def test_get_connection_enables_foreign_keys(tmp_path: Path):
@@ -407,7 +428,7 @@ def test_0023_word_band_migration_is_idempotent(tmp_path: Path):
     assert third["tables"] == first["tables"]
 
 
-def test_business_table_count_is_34(tmp_path: Path):
+def test_business_table_count_is_39(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     apply_migrations(db_path, MIGRATIONS_DIR)
     conn = get_connection(db_path)

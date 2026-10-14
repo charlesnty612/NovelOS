@@ -358,7 +358,7 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 
 | 通道 | 职责 | 词表 / 工具 |
 |---|---|---|
-| `ai_patterns.scan_ai_patterns` | **权威信号源**：禁用词 / 三连句式 / 他她排比 / 章尾升华 / 标点滥用 / 解释腔 / 长段 / 对话占比 / 接词回声的模式级命中清单（chapter_review 的 basic_hints 消费，不进子分；可读性三条见 §5.6） | `AI_PATTERN_FORBIDDEN_WORDS` 等（ai_patterns 内） |
+| `ai_patterns.scan_ai_patterns` | **权威信号源**：禁用词 / 三连句式 / 他她排比 / 章尾升华 / 标点滥用 / 解释腔 / 长段 / 对话占比 / 接词回声的模式级命中清单（chapter_review 的 basic_hints 消费，不进子分；可读性三条见 §5.6） | `AI_PATTERN_FORBIDDEN_WORDS` 等（定义在 `ai_patterns_sentence.py`，门面 `ai_patterns` 再导出） |
 | `scoring.score_style` | **密度阈值**：`AI_FLAVOR_MARKERS` 每千字 ≥ 5 ⇒ -15 | 共享 `AI_FLAVOR_MARKERS` + `marker_hits_per_kchars` |
 | `ai_trace.cliche_density` | **跨章重复 + 套话阶梯**：`AI_CLICHES` 每千字命中阶梯扣分；跨章用 13 字 shingle | 共享 `AI_CLICHES`（= descriptors + connectives）+ `marker_hits_per_kchars` |
 | critic LLM `ai_flavor` 维度 | LLM 主观评分 | 本轮不接入评分（R9 留档，见 §6.1） |
@@ -379,9 +379,14 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 | 对话占比（成对“…”内可见字 ÷ 全章可见字） | 16.5% | 11.4% | `AI-DIALOGUE-LOW` | **<12% → warning（唯一档）**——<8% error 档 2026-09-17 撤回 |
 | 相邻对白接词回声 | 1 对 / 1 章（19 章） | 26 对 / 20 章（48 章） | `AI-DIALOGUE-ECHO` | 复述型 ≥0.70 **或** 接词型 ≥0.66 且开口 ≥2 字 → warning（恒 warning） |
 
-- 三条规则都在 `packages/core/quality/ai_patterns.py`（`scan_ai_patterns` 内注册，
-  severity 自带档位，`chapter_review._basic_checks_node` 按 severity 自动分流
-  warnings/errors —— 该文件未改动）。
+- 三条规则的**元数据与注册**在 `packages/core/quality/ai_patterns.py`（`AI_PATTERN_RULES`
+  与 `scan_ai_patterns`，后者仍是唯一对外入口），**算子实现**按族拆到了子模块：
+  长段 `count_long_paragraphs` 在 `ai_patterns_paragraph.py`、对话占比与相邻对白回声在
+  `ai_patterns_dialogue.py`；severity 自带档位，`chapter_review._basic_checks_node`
+  按 severity 自动分流 warnings/errors。
+  （2026-10-13 订正：V4.0 把 `ai_patterns.py` 按 text/sentence/paragraph/dialogue 拆成
+  5 个文件后，「三条规则都在 ai_patterns.py」已不再准确——门面是唯一公共面，但不再
+  是实现所在地。段切分口径 `_split_paragraphs` 的唯一实现在 `ai_patterns_text.py`。）
 - 段切分口径 `\n+`（外部锚点书一行一段；生产 draft 以空行分段，两口径在本仓语料上
   仅差 5 段 / 3061）；字数口径 `wordcount.visible_chars`；**可见字 <600 的片段不判
   长段/对话占比**（回声规则照 `_MIN_PROSE_CHARS_FOR_DENSITY` 先例取 200）。

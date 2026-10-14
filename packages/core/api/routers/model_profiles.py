@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
@@ -100,6 +101,74 @@ def _dedup_sorted(ids: list[str]) -> list[str]:
 router = APIRouter(tags=["model_profiles"])
 
 
+# ---------------------------------------------------------------------------
+# 写入侧形状校验 + unknown-model 提示（task-28）
+# ---------------------------------------------------------------------------
+
+
+def _clean_model_field(raw: Any, *, field: str, logger: Any = None) -> str:
+    """``model`` 字段：strip 后非空校验，**拒绝纯空白**。
+
+    原判断是 ``isinstance(model, str) and model``——纯空白（``"   "``）是 truthy
+    字符串，会被直接放行落库，到调用时远端才以 unknown model 400 收场，而那个
+    400 在本文件被泛化成了「provider_error」。写入侧先把形状问题拦下。
+
+    形状校验**只管「非空且非纯空白」**：不校验该模型名是否真实存在——可用模型随
+    部署 / 账号 / 上下线状态变化，本地没有权威名表，硬编码白名单必然过期
+    （AGENTS.md「可调项不得硬编码」）。名字对错由 ``/test`` 的远端响应判定。
+
+    含前后空白 → 归一化落库并 ``log.warning`` 留痕：原值被静默改写，排查时需要
+    能看出是谁写了带空格的模型名。
+
+    ``logger``：``/model-configs`` 复用本函数但有自己的 logger（两个 router 各带
+    自己的 ``novelos.routers.*`` 命名空间），由调用方传入以免 warning 打到邻居。
+    共享 helper 的最终归属应是 :mod:`packages.core.model_router.security`（两个
+    router 已共用其中的 ``_normalize_params`` 等），本批未扩白名单故先跨 router 引用。
+    """
+    warn = logger if logger is not None else log
+    if not isinstance(raw, str):
+        raise HTTPException(status_code=422, detail=f"{field} must be a non-empty string")
+    stripped = raw.strip()
+    if not stripped:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field} 不能为纯空白（strip 后为空）；请填写真实的模型名",
+        )
+    if stripped != raw:
+        warn.warning("%s 含前后空白，已 strip 归一化：%r -> %r", field, raw, stripped)
+    return stripped
+
+
+# 远端 400 错误文本里「模型名问题」的公共形态（各 provider 措辞不同，取交集式关键词）。
+# 这是**错误语义**匹配，不是模型名清单——可用模型随部署变化，本地不建名表。
+_UNKNOWN_MODEL_MARKERS = (
+    "unknown model",
+    "model_not_found",
+    "model not found",
+    "invalid model",
+    "no such model",
+    "unsupported model",
+    "model_not_supported",
+    "does not exist",
+)
+
+
+def _unknown_model_hint(detail: str) -> str | None:
+    """远端 400 命中「模型名问题」时给中文提示；不命中返回 ``None``（正常透传）。
+
+    仅在 400 上生效：400 是参数类错误，401/403/5xx 各自含义不同（鉴权 / 限流 /
+    服务端故障），把它们一并归到「模型名」是误诊——那才是真正的提示噪声。
+    """
+    low = (detail or "").lower()
+    if not any(marker in low for marker in _UNKNOWN_MODEL_MARKERS):
+        return None
+    return (
+        "模型名问题：provider 不认识这个模型名（拼写错误 / 已下线 / 当前 API key "
+        "无权访问）。请核对 model 字段，或先用 available-models 拉取该 key "
+        "实际可用的模型列表。"
+    )
+
+
 @router.post("/model-profiles", status_code=status.HTTP_201_CREATED)
 def create_model_profile(payload: dict, request: Request) -> dict:
     """创建一条档案。必填字段：``name / provider / model``。
@@ -115,8 +184,7 @@ def create_model_profile(payload: dict, request: Request) -> dict:
         raise HTTPException(status_code=422, detail="name required")
     if not (isinstance(provider, str) and provider):
         raise HTTPException(status_code=422, detail="provider required")
-    if not (isinstance(model, str) and model):
-        raise HTTPException(status_code=422, detail="model required")
+    model = _clean_model_field(model, field="model")
     try:
         # 契约兼容：params_json（旧）优先；缺失则读 params（新契约，前端按约定发）。
         # 两者都无 → None → _normalize_params 返回空 dict（保留原行为）。
@@ -196,10 +264,7 @@ def patch_model_profile(profile_id: str, payload: dict, request: Request) -> dic
             raise HTTPException(status_code=422, detail="provider must be non-empty string")
         fields["provider"] = v
     if "model" in payload:
-        v = payload["model"]
-        if not (isinstance(v, str) and v):
-            raise HTTPException(status_code=422, detail="model must be non-empty string")
-        fields["model"] = v
+        fields["model"] = _clean_model_field(payload["model"], field="model")
     if "params_json" in payload or "params" in payload:
         if "params_json" in payload and "params" in payload:
             raise HTTPException(
@@ -296,13 +361,22 @@ def test_model_profile(profile_id: str, request: Request) -> dict:
             status_code=502,
             detail={"error": "provider_error", "message": str(exc), "status_code": exc.status_code},
         ) from exc
-    return {
+    status_code = result.get("status_code")
+    detail = result.get("detail") or ""
+    payload = {
         "profile_id": profile_id,
         "ok": bool(result.get("ok")),
         "latency_ms": int(result.get("latency_ms") or 0),
-        "detail": result.get("detail") or "",
-        "status_code": result.get("status_code"),
+        "detail": detail,
+        "status_code": status_code,
     }
+    # 400 且错误文本指向模型名 → 追加中文提示。这是**新增可选字段**：既有 5 个字段
+    # 逐字不变，不命中时响应体与本批之前完全一致（正常错误继续原样透传）。
+    if status_code == 400:
+        hint = _unknown_model_hint(detail)
+        if hint is not None:
+            payload["hint"] = hint
+    return payload
 
 
 # ---------------------------------------------------------------------------
