@@ -5,6 +5,58 @@
 
 ## [Unreleased]
 
+### Added（2026-10-15 业务逻辑评估：对标 GitHub 同类高星项目）
+
+> **来源**：用户指令「对软件的业务逻辑做一次评估，参考 GitHub 上的同类高星项目」。
+> **本轮零代码改动**——纯评估，结论与取证链落 `NovelOS-Artifacts`。
+> **文档**：`NovelOS-Artifacts: docs/analysis/business-logic-assessment-2026-10-15.md`
+> **方法**：2 名只读调研员分维度扫外部（GitHub 测绘 / 商业产品工作流对比）→
+> 主会话按 §三.1 逐条复算。外部星数由主会话经 `api.github.com/repos/...` **独立复核**，
+> 不采信转述；内部数字直接查 `data/novelos.db`（只读，SELECT）。
+
+**1. 外部坐标（2026-10-15 观测）**：inkos 10,301★ / oh-story-claudecode 7,575★ /
+webnovel-writer 7,490★ / AI_NovelGenerator 6,218★ / AI-Novel-Writing-Assistant 3,189★。
+主流路线是「story bible + 角色/世界显式状态 + 章后一致性审计」——**NovelOS 在这条主干上**，
+但多走了一步：**把状态变更版本化**（`story_states` + `state_deltas` + 带审批审计的 `commits`）。
+
+**2. 强项**（三条经实测/读码确认）：① `hooks` + `narrative_debts` + `reveal_policies`
+合起来是**信息状态追踪**（谁知道什么、何时可揭示、哪笔债到期）——长篇最难的部分，
+同类多数只做到「角色卡 + 摘要」；② **全样本中唯一把质量做成阻断式**的
+（商业产品全是提示式：给建议、能忽略、不断流）；③ `delivery/verdict.py` 的四档判定，
+尤其把 `not_a_candidate`（还没东西可交）与 `not_deliverable`（交了会出事）**刻意分开**——
+「混为一谈会让 27 章未写的项目看起来像 27 章写坏了」。
+
+**3. 缺口一（本轮最重要的实测发现）**：1,530 条真实调用的 token 分布——
+**chapter-commit 占 38.2%，其中 observer 一个节点占 7.82M（全系统 33%）**，比 writer 还多；
+单章 token 中位 **178k**、最大 854k（改稿回路失控）。
+**对照 2026-10-14 快通道：它砍掉的是 9.7% 的那一档。**
+墙钟上这个选择是对的（`chapter-review` 的 LLM 中位仅 0.9 分钟，但均值 29.8 / 最大 1326 分钟，
+差额全是等人），故快通道是**注意力**优化而非成本优化。
+两个具体洞：**`ai_call_logs.cost` 列 1,530 行中非零的 0 行**（有 token 没金额）；
+**回滚能力后端完整实现、前端零封装**（`rollback` / `state/diff` / `state/versions` /
+`chapters/{id}/deltas` 四项，后端引用数 4/2/2/2，前端 `endpoints.ts` 全部 **0**）。
+⇒ **自动维护状态占了最大成本，而这个状态既无成本可见性、也无作者的干预入口。**
+
+**4. 缺口二**：`RELEASED` 是声明的终态但**全仓无任何写入方**（不可达）；
+叠加上述 4 项后端能力未接前端 ⇒ 状态模型的能力面远宽于 UI 面，
+**最强的资产恰好是作者够不着的那部分**。
+
+**5. 复核 2026-09-11 遗留的两条自查项**：① 全局 token 硬顶**仍未强制**——
+`_TOKEN_BUDGET` 已重命名为 `_ASSEMBLY_TOKEN_BUDGET` 并在装配 meta 上报，
+但 docstring 明写「只告警，不阻断也不改写已装配内容」，全仓无生产消费方；
+② 内容配比**声明面已有**（题材包 `ratio_declarations` → `_ratio_instruction` 进 planner 上下文），
+核销面无——但**不算缺口**，坑区「可测算子只作体检、不作处方」正是踩过
+「对话占比写成硬指标→模型为凑指标灌对水」之后的刻意裁决。
+
+**6. 一条未能确认、但会改变结论的**：调研员报 `webnovel-writer` 有「三档模式、minimal 档跳过
+reviewer」；主会话复核其 README / `agents/reviewer.md` / `docs/guides/commands.md`
+**均无此记载**，疑为未发布的 v7 草案。**若属实则「跳过人工确认」在头部开源已有先例，
+快通道不是首创而是补齐已知设计点**——已在文档 §六 单独登记。
+
+**7. 建议（按数据排序，本轮未实施）**：① 给 observer 一个成本档位（复用 `fast_mode` 的
+项目级开关 + 三态 + 单点解析范式，同时压住改稿回路的方差）；
+② 把 `rollback` 接到 UI（后端已写好）；③ 让 `cost` 列落库。
+
 ### ⚠️ 文档断链登记（2026-10-15 审查批次）
 
 AGENTS 硬规则 7 的立规根因：38ec703 三仓迁移未回填引用，造成 ≥14 处断链——
@@ -1340,6 +1392,16 @@ gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960
 
 - **`docs/roadmap/竞品对标-inkos-2026-09-11.md`（新增）**——完整对标结论留档，含 InkOS 画像（结构 / 三层存储 / 44 provider endpoint / 单章流水线 / 原子写与写锁实现）、232 条 open issue 的六类痛点归纳（逐条带 issue 编号）、五条假设的验证判定、NovelOS 对位优势表、补强建议、未能确认项与复现方法。目的是免去日后重复调研。
 - **核心结论**：InkOS 的传播杠杆是 `skills/SKILL.md` + 33 个 CLI 命令使其可被外部 Coding Agent 调用（进 ClawHub / SkillsLLM 技能市场），非「AI 写小说」概念；但 **9.7k stars 与工程质量不匹配**——232 条 open issue 中大量 2026-05 起的老 bug 未关，`pushed_at` 停在 2026-08-25。
+
+  ⚠️ **2026-10-15 复核算更正——上条「`pushed_at` 停在 2026-08-25」是错的**：
+  经 GitHub REST API 复核，`pushed_at` 实为 **2026-10-10**，当时观察有误。
+  星数亦已由 9.7k 涨至 **10,301**（≈+600/34 天，属正常增长，记录不算错但已过期）。
+  **本条的核心判断反而更成立**：master 最后提交停在 2026-09-26、9 月仅合并 1 个 PR、
+  10 月合并 0 个、issue 累计 272 条仅关闭 78 条（**28.7%**）。
+  **教训（跨项目可复用）**：`pushed_at` 只反映**任一分支**的推送，不等于主线开发吞吐——
+  单看该字段会把「已停更」误读成「已恢复」，**两个方向都会误判**。判断维护健康度须同时看
+  `pushed_at` + master 最后提交 + PR 合并数 + issue 关闭率。
+  详见 `NovelOS-Artifacts: docs/analysis/business-logic-assessment-2026-10-15.md` §五。
 - **用户痛点高度同源且集中在 NovelOS 已规避的领域**：① 数据完整性（#387 三本书写不到三章即文件缺失、#275 导入章节覆盖重建真相文件）；② 上下文膨胀（#80 五十章后单章修复 40 分钟、#84 摘要 50 章后不可用）；③ 模型配置（#300 硬编码白名单只认 72 个模型、#379 强制要求上游实现可选端点 `/models` 否则拒绝保存）。
 - **两处主会话先验判断被推翻（留痕以免重蹈）**：① 「InkOS 以 JSON/MD 为唯一真相源、无事务保证」——**错**，实际有 `commitAtomicFileSet` 原子提交（`utils/atomic-file-set.ts:46-115`）、跨进程写锁（心跳 30s + 租约 3min）、索引自愈（`state/manager.ts:480-548` 的 `rebuildChapterIndexFromFiles`）；准确差异是「原子性 ≠ 可回溯性」与「原子写仅覆盖特殊路径」。② 「NovelOS 完全没有 token 预算机制」——**不准**，`_truncate_summaries_to_token_budget`（`context_engine/builders_common.py:953-972`）在跑，但只作用于 director 摘要链、预算固定 800 token（`director_input.py:174-175`）。
 - **实测确认的真实缺口（1 条）**：`_TOKEN_BUDGET = 8000` 定义于 `context_engine/preview.py:37`，全仓仅 3 处引用（定义 + `preview.py:525-526` 两个返回字段），**无任何代码读它做裁剪或失败**，`within_budget` 仅展示用。即 NovelOS 的上下文裁剪是「按字段降级」，缺全局 token 硬顶兜底——与 InkOS #80/#84 同源风险，建议把既有 `_truncate_summaries_to_token_budget` 从「仅 director 摘要链」推广到全局装配。
