@@ -22,6 +22,7 @@ import { chaptersApi, projectsApi, qualityApi, workflowsApi } from '../api/endpo
 import type {
   Chapter,
   Draft,
+  GateBlocked,
   Project,
   QualityReport,
   WorkflowRun,
@@ -416,13 +417,27 @@ export function ChapterDetailPage() {
   // 阻断标记由 chapter_commit 的 quality_gate 节点写入 plan_json.gate_blocked
   // （改稿建议同批写入 plan_json.revision_note）；有标记即渲染入口。门禁通过后
   // 后端清除标记，入口自动消失。触发后复用 write（revise）→ review 链路。
-  const gateBlock = useMemo<{ ruleIds: string[] } | null>(() => {
+  //
+  // 2026-10-15 补 `gate` 维度（此前只读 rule_ids，等于把 confirm 与 block 混成一类）：
+  // 后端 `_persist_gate_block` 写的三态直接决定 UI 该给哪条出路——
+  //   block         → 只能改稿
+  //   confirm       → 无硬伤，可「接受并提交」（唯一出路在此，缺了作者无路可走）
+  //   block+confirm → 先修硬伤；此时给「接受」是**假出路**（硬停不可覆盖）
+  const gateBlock = useMemo<GateBlocked | null>(() => {
     const plan = chapter?.plan_json;
     if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return null;
     const raw = (plan as Record<string, unknown>)['gate_blocked'];
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-    const ids = (raw as Record<string, unknown>)['rule_ids'];
-    return { ruleIds: Array.isArray(ids) ? ids.map((v) => String(v)) : [] };
+    const o = raw as Record<string, unknown>;
+    const ids = o['rule_ids'];
+    return {
+      mode: typeof o['mode'] === 'string' ? o['mode'] : '',
+      // 缺 gate 的历史标记按 block 处置（fail-closed）：后端 2026-09-18 之前写下的
+      // 标记没有该键，那时**只有** blocking 存在，confirm 是 P0-1 同批加的。
+      gate: typeof o['gate'] === 'string' ? o['gate'] : 'block',
+      rule_ids: Array.isArray(ids) ? ids.map((v) => String(v)) : [],
+      blocked_at: typeof o['blocked_at'] === 'string' ? o['blocked_at'] : '',
+    };
   }, [chapter?.plan_json]);
 
   const [gateRevising, setGateRevising] = useState(false);
@@ -441,6 +456,48 @@ export function ChapterDetailPage() {
       setSubmitting(false);
     }
   }, [projectId, chapterId, chapterCall, draftsCall, runsReload, setSelectedRunId]);
+
+  // ---- confirm 档的显式接受（2026-10-15 补 UI 入口）----
+  // 后端 P0-1：enforce 模式下 confirm 档 issue（如 trigram 重复）不许静默通过，
+  // `gate_override` 是**唯一**放行口，且要求 rule_ids 覆盖本次全部 confirm rule id
+  // + reason 非空。前端此前零入口 ⇒ 作者被拦即无路可走（只能改配置/改代码）。
+  //
+  // 刻意做成**内联确认态**而非 ConfirmDialog：与「重开返修」同款——这里需要一个
+  // 必填的自由文本输入，ConfirmDialog 只有 body 文案没有输入位。
+  // reason 在后端是**留痕**，不是可选项，故前端同样不许空提交。
+  const [gateAcceptOpen, setGateAcceptOpen] = useState(false);
+  const [gateAcceptReason, setGateAcceptReason] = useState('');
+  const [gateAcceptErr, setGateAcceptErr] = useState<string | null>(null);
+  const [gateAccepting, setGateAccepting] = useState(false);
+
+  const handleGateAccept = useCallback(async () => {
+    const reason = gateAcceptReason.trim();
+    if (reason === '') {
+      setGateAcceptErr('必须写明为何接受这些命中——该文字会随提交记录留痕。');
+      return;
+    }
+    if (!gateBlock) return;
+    setGateAcceptErr(null);
+    setGateAccepting(true);
+    try {
+      // rule_ids 原样透传后端写的列表：后端按**集合包含**校验，漏一个照样阻断，
+      // 所以这里不做任何「补全 / 裁剪」——裁剪会让作者以为覆盖成功却仍被拦。
+      await handleStartWorkflow('commit', {
+        gate_override: { rule_ids: gateBlock.rule_ids, reason },
+      });
+      setGateAcceptOpen(false);
+      setGateAcceptReason('');
+    } catch (e: unknown) {
+      setGateAcceptErr(e instanceof Error ? e.message : '接受并提交失败');
+    } finally {
+      setGateAccepting(false);
+    }
+  }, [gateBlock, gateAcceptReason, handleStartWorkflow]);
+
+  // accept 出入口：仅「纯 confirm」可接受。
+  // block / block+confirm 一律不给按钮——硬停不可覆盖，给了就是**假出路**
+  // （作者填完理由点确认，仍被同一批硬伤拦下，且这次多了一条误导性的操作痕迹）。
+  const gateAcceptable = gateBlock?.gate === 'confirm';
 
   // 重开返修：POST /chapters/{id}/reopen（后端先查活动 run 409，再做 COMMITTED→REVIEWED
   // 迁移；commits 历史保留，重开后走既有审校 → 提交链产生新 commit）。
@@ -500,27 +557,102 @@ export function ChapterDetailPage() {
           className="alert cdp-gate-banner"
           data-testid="gate-block-banner"
         >
-          <div className="cdp-gate-banner__title">质量门禁阻断：本稿未通过提交校验</div>
+          <div className="cdp-gate-banner__title">
+            {gateAcceptable
+              ? '质量门禁待确认：本稿无硬伤，但有需你点头的命中'
+              : '质量门禁阻断：本稿未通过提交校验'}
+          </div>
           <div className="muted small cdp-gate-banner__line">
             命中规则：
-            {gateBlock.ruleIds.length > 0 ? gateBlock.ruleIds.join('、') : '（见门禁报告）'}
-            。门禁已把可执行改稿建议写入章节计划；点击右侧按钮将按建议改稿
-            （写正文 revise → 自动重新审校），审校通过后再提交。
+            {gateBlock.rule_ids.length > 0 ? gateBlock.rule_ids.join('、') : '（见门禁报告）'}
+            {gateAcceptable
+              ? '。这些是「确认档」命中（如刻意的复沓）——改稿或显式接受，二选一。'
+              : '。门禁已把可执行改稿建议写入章节计划；点击右侧按钮将按建议改稿' +
+                '（写正文 revise → 自动重新审校），审校通过后再提交。'}
           </div>
+          {!gateAcceptable && gateBlock.gate === 'block+confirm' ? (
+            // 说明「为什么现在没有接受按钮」——不给按钮而不说理由，
+            // 作者会以为 UI 又漏了功能（这正是本次补的三个缺口的共同形状）。
+            <div className="muted small cdp-gate-banner__line" data-testid="gate-accept-blocked-note">
+              本次同时命中了硬伤与待确认项。硬伤不可豁免，须先改稿；改完重新提交后，
+              若仍有待确认项，届时可在此显式接受。
+            </div>
+          ) : null}
+          <ErrorBanner>{gateAcceptErr}</ErrorBanner>
           <div className="cdp-gate-banner__actions">
-            <button
-              className="btn btn--primary"
-              data-testid="gate-revise-btn"
-              disabled={submitting || !!activeRun}
-              title={
-                activeRun
-                  ? '已有工作流在运行，请等待结束'
-                  : '按门禁建议改稿并自动重审'
-              }
-              onClick={() => void handleGateRevise()}
-            >
-              {gateRevising ? '提交中…' : '按门禁建议改稿'}
-            </button>
+            {gateAcceptable ? (
+              gateAcceptOpen ? (
+                <>
+                  <input
+                    type="text"
+                    data-testid="gate-accept-reason-input"
+                    value={gateAcceptReason}
+                    placeholder="接受理由（必填，随提交记录留痕）"
+                    maxLength={2000}
+                    disabled={gateAccepting}
+                    style={{ flex: 1, minWidth: 200, padding: 6 }}
+                    onChange={(e) => setGateAcceptReason(e.target.value)}
+                  />
+                  <button
+                    className="btn btn--primary"
+                    data-testid="gate-accept-confirm-btn"
+                    disabled={gateAccepting}
+                    onClick={() => void handleGateAccept()}
+                  >
+                    {gateAccepting ? '提交中…' : '确认接受并提交'}
+                  </button>
+                  <button
+                    className="btn"
+                    data-testid="gate-accept-cancel-btn"
+                    disabled={gateAccepting}
+                    onClick={() => {
+                      setGateAcceptOpen(false);
+                      setGateAcceptErr(null);
+                    }}
+                  >
+                    取消
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className="btn btn--primary"
+                    data-testid="gate-accept-btn"
+                    disabled={submitting || !!activeRun}
+                    title={activeRun ? '已有工作流在运行，请等待结束' : '显式接受这些命中并提交'}
+                    onClick={() => {
+                      setGateAcceptErr(null);
+                      setGateAcceptOpen(true);
+                    }}
+                  >
+                    显式接受并提交
+                  </button>
+                  <button
+                    className="btn"
+                    data-testid="gate-revise-btn"
+                    disabled={submitting || !!activeRun}
+                    title={activeRun ? '已有工作流在运行，请等待结束' : '按门禁建议改稿并自动重审'}
+                    onClick={() => void handleGateRevise()}
+                  >
+                    {gateRevising ? '提交中…' : '改稿（推荐）'}
+                  </button>
+                </>
+              )
+            ) : (
+              <button
+                className="btn btn--primary"
+                data-testid="gate-revise-btn"
+                disabled={submitting || !!activeRun}
+                title={
+                  activeRun
+                    ? '已有工作流在运行，请等待结束'
+                    : '按门禁建议改稿并自动重审'
+                }
+                onClick={() => void handleGateRevise()}
+              >
+                {gateRevising ? '提交中…' : '按门禁建议改稿'}
+              </button>
+            )}
           </div>
         </div>
       ) : null}

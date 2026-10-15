@@ -28,6 +28,12 @@ export interface WorkflowStartArgs {
    * 仅当项目快通道已开启时后端才会真的衔接（否则被忽略）。
    */
   auto_commit?: boolean;
+  /**
+   * confirm 档规则的显式接受声明（仅 commit 生效）：`{rule_ids, reason}`。
+   * 后端按**集合包含**校验——必须覆盖本次命中的全部 confirm rule id，
+   * 且 `reason` 非空；block 档不受影响（硬停不可覆盖）。
+   */
+  gate_override?: { rule_ids: string[]; reason: string };
 }
 
 export type StartWorkflowFn = (

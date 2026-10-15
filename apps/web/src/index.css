@@ -1180,6 +1180,24 @@ a:hover {
   margin-top: var(--space-2);
 }
 
+/* ---- run 级失败原因（2026-10-15）：排在节点时间线 <details> 之外 ----
+   终态 run 的时间线默认收起，失败原因放进 <details> 等于把它藏起来。
+   错误文本**不截断**：门禁阻断的 error 带 rule_id 清单与证据摘录，
+   截掉正是「在不知道批准什么的情况下批准」。靠换行 + 可断词处理长文本。 */
+.cdp-run-error {
+  margin-top: var(--space-2);
+  display: flex;
+  gap: 4px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.cdp-run-error__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85em;
+}
+
 /* ---- 分区导航（分段 tabs；按钮元素 + 键盘可达）---- */
 .cdp-tabs {
   flex-wrap: wrap;

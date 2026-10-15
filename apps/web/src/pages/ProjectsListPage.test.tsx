@@ -345,3 +345,138 @@ describe('ProjectsListPage · 失败反馈与弹窗键盘（V3.10）', () => {
     expect('fast_mode' in payload).toBe(false); // 原样保留，不擅自改语义
   });
 });
+
+// ===========================================================================
+// G1 — 项目写作圣经（迁移 0029 writing_bible）的编辑入口。
+//
+// 缺口形状：后端 ProjectCreate/ProjectUpdate 收 writing_bible、服务层落列、
+// builders_common.resolve_author_intent 与 writer/director 缓存键的 bible_fp
+// 维度全部在用，**前端一个入口都没有**——与 2026-09-16 author_intent 死参数
+// 事故同款（后端有、装配在用、作者够不着）。
+//
+// 三条不变量，各自对应一种真实写坏方式：
+//   1. 有内容 ⇒ 去首尾空白后下发（非空原样落列）
+//   2. 清空 ⇒ 下发 null。**省略键会让清空静默失效**（PATCH 键缺失=保留原值），
+//      这正是 fast_mode 那条「只在变化时下发」规则**不能**照搬过来的原因。
+//   3. 只改别的字段 ⇒ 圣经原值原样带回（不得因「没动它」而丢掉整条铁律）
+// ===========================================================================
+
+describe('ProjectsListPage - 写作圣经（writing_bible）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(projectsApi.list).mockResolvedValue([]);
+    vi.mocked(projectsApi.create).mockResolvedValue(baseProject({ project_id: 'prj_new' }));
+    vi.mocked(projectsApi.update).mockResolvedValue(baseProject());
+  });
+
+  // 打开「新建项目」弹窗（沿用既有测试的入口 testid）
+  async function openCreateModal(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByTestId('new-project-btn'));
+    return (await screen.findByTestId('project-name')) as HTMLInputElement;
+  }
+
+  // 圣经字段在折叠的 <details> 里：先点 summary 再填，忠实模拟作者路径
+  async function openBibleEditor(user: ReturnType<typeof userEvent.setup>) {
+    const summary = screen.getByTestId('writing-bible-details').querySelector('summary');
+    await user.click(summary as HTMLElement);
+    return (await screen.findByTestId('project-writing-bible')) as HTMLTextAreaElement;
+  }
+
+  it('创建：填了圣经 ⇒ 下发去首尾空白后的文本', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    fireEvent.change(await openCreateModal(user), { target: { value: '新书' } });
+    const bible = await openBibleEditor(user);
+    fireEvent.change(bible, { target: { value: '  第一人称有限视角\n禁写系统面板  ' } });
+    await user.click(screen.getByTestId('project-save'));
+
+    await waitFor(() => expect(projectsApi.create).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(projectsApi.create).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.writing_bible).toBe('第一人称有限视角\n禁写系统面板');
+  });
+
+  it('创建：只填空白 ⇒ 下发 null（不是空串，也不是省略）', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    fireEvent.change(await openCreateModal(user), { target: { value: '新书' } });
+    const bible = await openBibleEditor(user);
+    fireEvent.change(bible, { target: { value: '   \n  ' } });
+    await user.click(screen.getByTestId('project-save'));
+
+    await waitFor(() => expect(projectsApi.create).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(projectsApi.create).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.writing_bible).toBeNull();
+  });
+
+  it('创建：完全不碰圣经 ⇒ 下发 null（新建项目本就没有圣经）', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    fireEvent.change(await openCreateModal(user), { target: { value: '新书' } });
+    await user.click(screen.getByTestId('project-save'));
+
+    await waitFor(() => expect(projectsApi.create).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(projectsApi.create).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.writing_bible).toBeNull();
+  });
+
+  it('编辑：原样带回既有圣经（改名字不该弄丢整条铁律）', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      baseProject({ project_id: 'prj_001', name: '旧名', writing_bible: '禁写番外' }),
+    ]);
+
+    const user = userEvent.setup();
+    renderPage();
+    const card = await waitFor(() => screen.getByTestId('project-card-prj_001'));
+    await user.click(card.querySelector('button.btn--sm') as HTMLButtonElement);
+
+    const name = (await screen.findByTestId('project-name')) as HTMLInputElement;
+    expect(name.value).toBe('旧名');
+    fireEvent.change(name, { target: { value: '新名' } });
+    await user.click(screen.getByTestId('project-save'));
+
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect(payload.writing_bible).toBe('禁写番外');
+    expect(payload.name).toBe('新名');
+  });
+
+  it('编辑：清空圣经 ⇒ 下发 null（键缺失会让清空静默失效）', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      baseProject({ project_id: 'prj_001', name: '有圣经', writing_bible: '禁写番外' }),
+    ]);
+
+    const user = userEvent.setup();
+    renderPage();
+    const card = await waitFor(() => screen.getByTestId('project-card-prj_001'));
+    await user.click(card.querySelector('button.btn--sm') as HTMLButtonElement);
+
+    const bible = await openBibleEditor(user);
+    expect(bible.value).toBe('禁写番外');
+    fireEvent.change(bible, { target: { value: '' } });
+    await user.click(screen.getByTestId('project-save'));
+
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect(payload.writing_bible).toBeNull();
+    expect('writing_bible' in payload).toBe(true); // 键必须在，省略=保留原值=清不掉
+  });
+
+  it('编辑：无圣经的项目不会被凭空造出内容', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      baseProject({ project_id: 'prj_001', name: '无圣经', writing_bible: null }),
+    ]);
+
+    const user = userEvent.setup();
+    renderPage();
+    const card = await waitFor(() => screen.getByTestId('project-card-prj_001'));
+    await user.click(card.querySelector('button.btn--sm') as HTMLButtonElement);
+    await user.click(screen.getByTestId('project-save'));
+
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect(payload.writing_bible).toBeNull();
+  });
+});

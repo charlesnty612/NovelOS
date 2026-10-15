@@ -5,6 +5,55 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-15 批次：UI 侧三条「后端有能力、作者够不着」的缺口）
+
+> **来源**：用户指令「开工」——按 `NovelOS-Artifacts: docs/analysis/ui-business-logic-assessment-2026-10-15.md`
+> 的 G1/G2/G3 三条落地。**零后端改动**（树指纹 `ab46b608…`/525 文件前后逐位一致）。
+> 三条的共同形状与 2026-09-16 `author_intent` 死参数事故**同款**：
+> 后端写了、装配在用、UI 没有入口 ⇒ 作者以为设了其实没设。
+
+**1. G1 `writing_bible` 全站无编辑入口**（迁移 0029 的项目级写作圣经）。
+后端 `ProjectCreate`/`ProjectUpdate` 收该列、`service._coerce_writing_bible` 落库、
+`builders_common.common.resolve_author_intent` 按「基线 + 增量」拼接、
+writer/director 缓存键各带 `bible_fp` 维度——**唯独前端一个入口都没有**
+（改动前全前端仅 `types.generated.ts` 命中该字段）。
+补：`types.ts` 三处补字段（`Project` / `ProjectCreatePayload` / `ProjectUpdatePayload`）+
+`ProjectFormModal` 折叠式 textarea。
+**下发规则刻意不照搬 fast_mode 的「只在变化时下发」**：文本字段未改动时下发同值是幂等的，
+而省略键会让「作者清空了圣经」这一显式操作**静默失效**（PATCH 键缺失 = 保留原值 = 清不掉）。
+判别：`ProjectsListPage.test.tsx` 6 例（填入去空白 / 纯空白 ⇒ null / 清空 ⇒ 键必须存在 /
+只改名字 ⇒ 原值原样带回 / 无圣经不凭空造内容）。
+
+**2. G2 `gate_override` 无入口 ⇒ enforce 模式下作者无逃生舱**。
+后端 P0-1（2026-09-18）写明该字段是 confirm 档规则的**唯一**放行口，
+前端至今零入口——被 confirm 命中（如 trigram 重复）即只能改配置或改代码。
+补：门禁横幅读 `plan_json.gate_blocked.gate` 三态并据此分流
+（`confirm` ⇒ 「显式接受并提交」+ 必填理由；`block` / `block+confirm` ⇒ **只给改稿**）。
+`block+confirm` 刻意不给接受按钮并附说明：硬停不可覆盖，给了就是**假出路**
+（作者填完理由点确认仍被同一批硬伤拦下，还多一条误导性操作痕迹）。
+历史标记缺 `gate` 字段按 `block` 处置（fail-closed）。
+判别：`ChapterDetailPage.test.tsx` 7 例（含 `it.each` 正反一对）。
+
+**3. G3 run 级 `error` 从不渲染**——作者看到红色「失败」徽标却**永远读不到原因**。
+`ChapterStatusBadge` 只把它当分类依据（判 rejected 两态），文本不进任何 DOM。
+后端其实铺好了路：`chapter_commit/gate.py` 明写「把整段结构化 payload 追加进 ValueError，
+run FAILED 时 `runs.error` 已包含它，前端 QualityPanel 可直接从错误字符串里解析」——
+而解析方此前不存在。补：run 级错误条渲染在节点时间线 `<details>` **之外**
+（终态时间线默认收起，放里面等于把唯一原因藏起来）+ run 行徽标 title 回落到 `r.error`。
+**不截断**（门禁阻断的 error 带 rule_id 清单与证据摘录，截掉正是「在不知道批准什么的情况下批准」）。
+判别：`ChapterDetailPage.test.tsx` 6 例（真实失败渲染且不受收起影响 / 徽标 title /
+`rejected`·`rejected-for-revision`·`cancelled by user` 三种非真失败反向用例 / COMPLETED 不渲染）。
+
+**突变验证（AGENTS §三.2 硬要求）**：6 次变异**全部被捕获**，逐个 SHA256 复核已还原——
+M1 清空圣经时省略键（红 1）／M2 完全不提交 `writing_bible`（红 6）／
+M3 接受按钮不看 `gate` 档位（红 2）／M4 去掉理由必填守卫（红 1）／
+M5 徽标 title 不回落 `r.error`（红 1）／M6 不排除三种非真失败（红 3）。
+M5 首轮**被 SKIP**（锚点缩进写错，命中 0 次）——「跳过」不等于「存活」，
+按坑区「突变存活 = 该测试在断言一件它测不到的事」的口径单独复核后重跑，才拿到那份证据。
+
+**本批无迁移、无后端改动**：树指纹 `ab46b608…`/525 文件前后逐位一致；
+前端 `npx tsc -b` 零错、`npx vitest run` **519 passed**（500 + 本批 19）、`npm run build` 通过。
+
 ### Added（2026-10-15 业务逻辑评估：对标 GitHub 同类高星项目）
 
 > **来源**：用户指令「对软件的业务逻辑做一次评估，参考 GitHub 上的同类高星项目」。

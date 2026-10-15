@@ -32,6 +32,20 @@ export interface Project {
    * （后端 projects.fast_mode 语义，前端不得自行解释成「跳过状态更新」）。
    */
   fast_mode?: boolean | null;
+  /**
+   * 项目写作圣经（后端迁移 0029 projects.writing_bible）：**跨章节长期有效的作者硬性约束**
+   * （题材铁律 / 禁写项 / 称谓与视角约定…）。
+   *
+   * 与运行期 `author_intent` 是**基线 + 增量拼接**关系，不是覆盖
+   * （后端 `context_engine.builders_common.common.resolve_author_intent`）：
+   * 本列是基线，单次运行时补的要求是增量，冲突时**以增量段为准**（拼接模板的 header 明写）。
+   * writer / director 的装配缓存键各带 `bible_fp` 维度 ⇒ 改本列后下一次运行必取新装配，
+   * 不存在脏命中。
+   *
+   * 前端曾**完全没有编辑入口**（仅 types.generated.ts 有该字段）——与 2026-09-16
+   * `author_intent` 死参数事故同款形状：后端有、装配在用、作者够不着。
+   */
+  writing_bible?: string | null;
 }
 
 export interface ProjectCreatePayload {
@@ -48,6 +62,13 @@ export interface ProjectCreatePayload {
   word_band?: ProjectWordBand | null;
   /** 快通道：undefined = 不写入；显式 true/false = 作者显式选择 */
   fast_mode?: boolean | null;
+  /**
+   * 项目写作圣经（迁移 0029）：
+   * - 字段未提供（undefined） → 后端保留原值
+   * - 显式 null 或空白串 → 清除圣经（落 DB NULL）
+   * - 非空串 → 去首尾空白后原样存
+   */
+  writing_bible?: string | null;
 }
 
 export interface ProjectUpdatePayload {
@@ -70,6 +91,11 @@ export interface ProjectUpdatePayload {
    * - 显式 true/false → 作者显式开/关
    */
   fast_mode?: boolean | null;
+  /**
+   * 项目写作圣经（迁移 0029）：见 `Project.writing_bible`。
+   * 字段未提供（undefined）→ 后端保留原值；显式 null / 空白串 → 清除。
+   */
+  writing_bible?: string | null;
 }
 
 // --- V1.4 Sprint 16 / MVP：项目备份 / 恢复 -----------------------------------
@@ -413,6 +439,34 @@ export interface WorkflowStartPayload {
    * 前端一般不传（走项目级开关）；留出是为了「这一章想守门」的一次性例外。
    */
   fast_mode?: boolean | null;
+  /**
+   * confirm 档规则的**显式接受声明**（后端 P0-1，仅 chapter-commit 的 quality_gate
+   * 节点读取）：`{"rule_ids": [...], "reason": "..."}`。
+   *
+   * 语义：`enforce` 模式下判为 `confirm` 的 issue（如 RULE_STYLE_REPETITION_TRIGRAM）
+   * 不许静默通过；**只有 `rule_ids` 覆盖本次命中的全部 confirm rule_id 且 `reason`
+   * 非空**才放行。`block` 档不受此字段影响——硬停不可覆盖，带了也照样阻断。
+   *
+   * 覆盖判定是**集合包含**（后端 `gate._resolve_gate_override`）；部分覆盖照样阻断。
+   * 本字段后端从 2026-09-18 就存在，前端直到 2026-10-15 才有入口——此前作者在
+   * enforce 模式下被 confirm 命中即无路可走，只能改配置或改代码。
+   */
+  gate_override?: { rule_ids: string[]; reason: string } | null;
+}
+
+/**
+ * `plan_json.gate_blocked` 标记的形状（后端 `chapter_commit/gate._persist_gate_block`）。
+ * 三态，**决定 UI 该给哪条出路**：
+ * - `block`        —— 有硬伤，只能改稿，**不接受**
+ * - `confirm`      —— 无硬伤，只是要作者点头 ⇒ 提供「接受并提交」
+ * - `block+confirm`—— 硬伤与待确认项同时命中 ⇒ 先修硬伤；此时给「接受」是假出路
+ *   （硬停不可覆盖，作者点了仍会被拦），故 UI 只展示改稿按钮。
+ */
+export interface GateBlocked {
+  mode: string;
+  gate: 'block' | 'confirm' | 'block+confirm' | string;
+  rule_ids: string[];
+  blocked_at: string;
 }
 
 export interface WorkflowStartResponse {

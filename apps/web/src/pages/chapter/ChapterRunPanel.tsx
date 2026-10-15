@@ -79,6 +79,11 @@ export function ChapterRunPanel({
                       ? '该轮审校被「按建议修改/驳回并改稿」主动驳回，系统已自动重跑写正文→审校；非失败。'
                       : isRejectedRun(r.error)
                       ? '作者已驳回本轮审校，章节保持 DRAFTED；非失败。'
+                      : // 2026-10-15：真失败此前 title 是 undefined——悬停红色「失败」徽标
+                        // 什么都看不到。兜底展示后端原文；完整渲染见下方 RunTimeline
+                        // 的 run 级错误条（选中该 run 后可见，无需悬停）。
+                        r.status === 'FAILED' && r.error
+                      ? r.error
                       : undefined
                   }
                 >
@@ -278,6 +283,20 @@ const DEEP_REVIEW_SEVERITY_LABEL: Record<string, string> = {
 };
 
 function RunTimeline({ run }: { run: WorkflowRun }) {
+  // run 级 error（2026-10-15 补渲染）。此前它只被 ChapterStatusBadge 当作**分类依据**
+  // （判 rejected 两态），文本一个字符都没进 DOM——作者看到红色「失败」徽标却
+  // 永远读不到原因。后端其实铺好了路：`chapter_commit/gate.py` 明写「把整段结构化
+  // payload 追加进 ValueError，run FAILED 时 runs.error 已包含它，前端 QualityPanel
+  // 可直接从错误字符串里解析」，而解析方此前不存在。
+  //
+  // 渲染在 <details> **之外**：终态 run 的时间线默认收起（见下方 defaultOpen），
+  // 放里面等于把唯一的失败原因藏进需要点一下才可见的地方。
+  //
+  // ⚠️ 不做截断。门禁阻断的 error 里带 rule_id 清单与证据摘录，截掉正是本仓
+  // 明令禁止的「在不知道批准什么的情况下批准」。长文本交给 CSS 换行。
+  const runErrorIsBenign =
+    isRejectedForRevisionRun(run.error) || isRejectedRun(run.error) || isCancelledByUserNode(run.error);
+  const showRunError = run.status === 'FAILED' && !!run.error && !runErrorIsBenign;
   if (!run.nodes || run.nodes.length === 0) {
     return (
       <div className="muted small">
@@ -299,43 +318,50 @@ function RunTimeline({ run }: { run: WorkflowRun }) {
     setOpen(defaultOpen);
   }, [run.run_id, defaultOpen]);
   return (
-    <details
-      open={open}
-      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
-      data-testid="run-timeline-details"
-    >
-      <summary className="muted small cdp-timeline__summary" data-testid="run-timeline-summary">
-        共 {run.nodes.length} 个节点 · 最新：{lastNode.node_id}
-      </summary>
-      <ol className="cdp-timeline">
-        {run.nodes.map((n) => (
-          <li key={n.node_run_id} className="cdp-timeline__node">
-            <div className="cdp-timeline__head">
-              <strong>{n.node_id}</strong>
-              <NodeStatusBadge status={n.status} error={n.error} />
-              <span className="muted small">
-                {formatDateTime(n.started_at)}
-                {n.ended_at ? ` → ${formatDateTime(n.ended_at)}` : ''}
-                {n.latency_ms != null ? ` · ${n.latency_ms}ms` : ''}
-              </span>
-            </div>
-            {n.error ? (
-              isCancelledByUserNode(n.error) ? (
-                // 用户协作式取消：当前节点被取消探针标 FAILED(error='cancelled by user')。
-                // 非真失败——用户主动停手；用中性 InfoBanner 避免红色 ErrorBanner 误导为出错。
+    <>
+      {showRunError ? (
+        <div className="alert alert--error cdp-run-error" data-testid="run-level-error">
+          <strong>本轮运行失败：</strong>
+          <span className="cdp-run-error__text">{run.error}</span>
+        </div>
+      ) : null}
+      <details
+        open={open}
+        onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+        data-testid="run-timeline-details"
+      >
+        <summary className="muted small cdp-timeline__summary" data-testid="run-timeline-summary">
+          共 {run.nodes.length} 个节点 · 最新：{lastNode.node_id}
+        </summary>
+        <ol className="cdp-timeline">
+          {run.nodes.map((n) => (
+            <li key={n.node_run_id} className="cdp-timeline__node">
+              <div className="cdp-timeline__head">
+                <strong>{n.node_id}</strong>
+                <NodeStatusBadge status={n.status} error={n.error} />
+                <span className="muted small">
+                  {formatDateTime(n.started_at)}
+                  {n.ended_at ? ` → ${formatDateTime(n.ended_at)}` : ''}
+                  {n.latency_ms != null ? ` · ${n.latency_ms}ms` : ''}
+                </span>
+              </div>
+              {n.error ? (
+                isCancelledByUserNode(n.error) ? (
+                  // 用户协作式取消：当前节点被取消探针标 FAILED(error='cancelled by user')。
+                  // 非真失败——用户主动停手；用中性 InfoBanner 避免红色 ErrorBanner 误导为出错。
                 <InfoBanner>
                   本节点已被用户主动取消（cancelled by user），非失败。
                 </InfoBanner>
               ) : isRejectedForRevisionRun(n.error) ? (
-                // 「按建议修改/驳回并改稿」主动驳回：改稿回路会自动重跑 write→review，
-                // 非真失败，用中性 InfoBanner 而非红色 ErrorBanner。
+                  // 「按建议修改/驳回并改稿」主动驳回：改稿回路会自动重跑 write→review，
+                  // 非真失败，用中性 InfoBanner 而非红色 ErrorBanner。
                 <InfoBanner>
                   已按审校建议驳回本轮（rejected-for-revision）：系统正在自动改稿重跑
                   写正文 → 审校，非失败。
                 </InfoBanner>
               ) : isRejectedRun(n.error) ? (
-                // 纯驳回：作者主动驳回本轮审校，后端以 FAILED(error='rejected') 收尾。
-                // 章节保持 DRAFTED,可改稿后重新发起写正文/审校;非失败,用中性 InfoBanner。
+                  // 纯驳回：作者主动驳回本轮审校，后端以 FAILED(error='rejected') 收尾。
+                  // 章节保持 DRAFTED,可改稿后重新发起写正文/审校;非失败,用中性 InfoBanner。
                 <InfoBanner>
                   作者已驳回本轮审校，章节保持 DRAFTED，可改稿后重新发起写正文/审校；非失败。
                 </InfoBanner>
@@ -352,7 +378,8 @@ function RunTimeline({ run }: { run: WorkflowRun }) {
           </li>
         ))}
       </ol>
-    </details>
+      </details>
+    </>
   );
 }
 

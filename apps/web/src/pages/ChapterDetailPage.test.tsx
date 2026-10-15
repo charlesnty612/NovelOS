@@ -2964,3 +2964,245 @@ describe('ChapterDetailPage - 重开返修', () => {
     });
   });
 });
+
+// ===========================================================================
+// 2026-10-15 批次：G2 / G3 —— 两条「后端有能力、作者够不着」的 UI 缺口。
+//
+// 两条的共同形状（与 2026-09-16 author_intent 死参数事故同源）：
+//   后端写了 / 装配在用 / UI 没有任何入口 ⇒ 作者以为设了其实没设。
+// 每条配**反向用例**（AGENTS 坑区：「闸门断言必须配一个反向用例，
+// 否则可能被『闸门被整体摘掉』蒙过去」）。
+// ===========================================================================
+
+describe('G2 — quality_gate confirm 档的显式接受出口', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(workflowsApi.startCommit).mockReset();
+
+    // 页面首屏并发拉三处数据（useApiCall 直接 .then）：任一未设实现即 TypeError。
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'REVIEWED' }));
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([] as ModelProfile[]);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    // workflowsApi.get 也会在挂载时被拉（URL 里的 selectedRunId）：
+    // 只 mockReset 不给实现 ⇒ useApiCall 的 `fn().then` 直接 TypeError。
+    vi.mocked(workflowsApi.get).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(workflowsApi.startCommit).mockResolvedValue(planResponse('wfr_commit_accept'));
+  });
+
+  // 后端 gate._persist_gate_block 的三种 gate 取值之一（gate=undefined 模拟历史标记）。
+  const chapterWithGate = (gate: string | undefined, ruleIds: string[]) =>
+    baseChapter({
+      status: 'REVIEWED',
+      plan_json: {
+        gate_blocked: {
+          mode: 'enforce',
+          ...(gate === undefined ? {} : { gate }),
+          rule_ids: ruleIds,
+          blocked_at: '2026-10-15T10:00:00+00:00',
+        },
+      } as unknown as Chapter['plan_json'],
+    });
+
+  it('gate=confirm ⇒ 给出「显式接受并提交」，且接受请求带 gate_override', async () => {
+    const ids = ['RULE_STYLE_REPETITION_TRIGRAM'];
+    vi.mocked(chaptersApi.get).mockResolvedValue(chapterWithGate('confirm', ids));
+
+    renderPage();
+    const accept = await waitFor(() => screen.getByTestId('gate-accept-btn'));
+    // confirm 档的出路是「二选一」，改稿按钮必须还在
+    expect(screen.getByTestId('gate-revise-btn')).toBeInTheDocument();
+
+    fireEvent.click(accept);
+    await waitFor(() => screen.getByTestId('gate-accept-reason-input'));
+    fireEvent.change(screen.getByTestId('gate-accept-reason-input'), {
+      target: { value: '刻意复沓，是本卷的修辞' },
+    });
+    fireEvent.click(screen.getByTestId('gate-accept-confirm-btn'));
+
+    await waitFor(() => expect(workflowsApi.startCommit).toHaveBeenCalled());
+    // rule_ids 必须**原样**带上：后端按集合包含校验，前端做「补全/裁剪」
+    // 会让作者以为覆盖成功却仍被拦。
+    const call = vi.mocked(workflowsApi.startCommit).mock.calls[0];
+    const payload = call[2];
+    expect(payload?.gate_override).toEqual({
+      rule_ids: ids,
+      reason: '刻意复沓，是本卷的修辞',
+    });
+  });
+
+  it('接受理由为空 ⇒ 不发请求，并在区块内说明为何必填', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(chapterWithGate('confirm', ['R_A']));
+
+    renderPage();
+    fireEvent.click(await waitFor(() => screen.getByTestId('gate-accept-btn')));
+    await waitFor(() => screen.getByTestId('gate-accept-confirm-btn'));
+    fireEvent.change(screen.getByTestId('gate-accept-reason-input'), {
+      target: { value: '   ' },
+    });
+    fireEvent.click(screen.getByTestId('gate-accept-confirm-btn'));
+
+    await waitFor(() =>
+      expect(screen.getByText(/必须写明为何接受这些命中/)).toBeInTheDocument(),
+    );
+    expect(workflowsApi.startCommit).not.toHaveBeenCalled();
+  });
+
+  // ---- 反向用例：硬停不可覆盖，给「接受」按钮就是假出路 ----
+  it.each([['block'], ['block+confirm']])(
+    'gate=%s ⇒ 不提供接受按钮（反向：闸门被整体摘掉时本用例必红）',
+    async (gate) => {
+      vi.mocked(chaptersApi.get).mockResolvedValue(chapterWithGate(gate, ['R_A']));
+
+      renderPage();
+      await waitFor(() => screen.getByTestId('gate-revise-btn'));
+      expect(screen.queryByTestId('gate-accept-btn')).toBeNull();
+      expect(workflowsApi.startCommit).not.toHaveBeenCalled();
+    },
+  );
+
+  it('gate=block+confirm ⇒ 说明「为什么现在不能接受」，而不是让作者以为 UI 又漏了', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(chapterWithGate('block+confirm', ['R_A']));
+
+    renderPage();
+    await waitFor(() => screen.getByTestId('gate-accept-blocked-note'));
+    expect(screen.queryByTestId('gate-accept-btn')).toBeNull();
+  });
+
+  it('历史标记缺 gate 字段 ⇒ 按 block 处置（fail-closed，不擅自给逃生舱）', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(chapterWithGate(undefined, ['R_A']));
+
+    renderPage();
+    await waitFor(() => screen.getByTestId('gate-revise-btn'));
+    expect(screen.queryByTestId('gate-accept-btn')).toBeNull();
+  });
+
+  it('接受失败 ⇒ 错误就地展示在门禁区块内，不静默', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(chapterWithGate('confirm', ['R_A']));
+    vi.mocked(workflowsApi.startCommit).mockRejectedValue(
+      Object.assign(new Error('gate_override.rule_ids 未覆盖：R_B'), { status: 400 }),
+    );
+
+    renderPage();
+    fireEvent.click(await waitFor(() => screen.getByTestId('gate-accept-btn')));
+    await waitFor(() => screen.getByTestId('gate-accept-confirm-btn'));
+    fireEvent.change(screen.getByTestId('gate-accept-reason-input'), {
+      target: { value: '有意为之' },
+    });
+    fireEvent.click(screen.getByTestId('gate-accept-confirm-btn'));
+
+    await waitFor(() =>
+      expect(screen.getByText(/gate_override\.rule_ids 未覆盖/)).toBeInTheDocument(),
+    );
+  });
+});
+
+describe('G3 — run 级 error 必须在 DOM 里可见', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'REVIEWED' }));
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([] as ModelProfile[]);
+    vi.mocked(workflowsApi.get).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+  });
+
+  // 门禁阻断的真实 error 形状：带 rule_id 清单与证据摘录（后端 gate.py 追加）。
+  const GATE_ERROR =
+    '质量门禁阻断：RULE_STYLE_REPETITION_TRIGRAM 连续 9 段逐字重复（占比 0.31）| ' +
+    'evidence="他推开门，往城门去。"… | guidance=[{"dimension":"style"}]';
+
+  const failedRun = (error: string | null, runId = 'wfr_failed_reason'): WorkflowRun =>
+    buildRunningDetail({
+      run_id: runId,
+      status: 'FAILED',
+      ended_at: '2026-08-24T10:10:00+00:00',
+      error,
+      nodes: [buildNodeRun('quality_gate', 'FAILED')],
+    });
+
+  it('真 FAILED ⇒ 渲染后端原文，且不受时间线默认收起影响', async () => {
+    const run = failedRun(GATE_ERROR);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([run]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(run);
+
+    renderPage();
+    await openRunsTab();
+    fireEvent.click(await waitFor(() => screen.getByTestId('run-row-' + run.run_id)));
+
+    const banner = await waitFor(() => screen.getByTestId('run-level-error'));
+    // 不截断：作者必须看见完整 rule_id 清单与证据摘录
+    expect(banner).toHaveTextContent('RULE_STYLE_REPETITION_TRIGRAM');
+    expect(banner).toHaveTextContent('evidence=');
+    // 关键不变量：终态时间线默认收起，错误条必须在 details 之外
+    expect(screen.getByTestId('run-timeline-details')).not.toHaveAttribute('open');
+    expect(banner.closest('details')).toBeNull();
+  });
+
+  it('真 FAILED ⇒ run 行徽标悬停也给出原因（此前 title 是 undefined）', async () => {
+    const run = failedRun(GATE_ERROR);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([run]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(run);
+
+    renderPage();
+    await openRunsTab();
+    const row = await waitFor(() => screen.getByTestId('run-row-' + run.run_id));
+    // title 落在包着徽标的**外层** span 上（内层是徽标本体，title 在它父节点）
+    const badge = within(row).getByText('失败');
+    expect(badge.parentElement?.getAttribute('title')).toContain('RULE_STYLE_REPETITION_TRIGRAM');
+  });
+
+  // ---- 反向用例：非真失败的 error 一律不得渲染成红色失败条 ----
+  it.each([
+    ['rejected（作者主动驳回，非失败）', 'rejected', 'wfr_benign_r'],
+    ['rejected-for-revision（按建议改稿，非失败）', 'rejected-for-revision', 'wfr_benign_rfr'],
+    ['cancelled by user（用户停手，非失败）', 'cancelled by user', 'wfr_benign_cancel'],
+  ])('%s ⇒ 不渲染失败原因条', async (_label, err, runId) => {
+    const run = failedRun(err, runId);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([run]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(run);
+
+    renderPage();
+    await openRunsTab();
+    fireEvent.click(await waitFor(() => screen.getByTestId('run-row-' + run.run_id)));
+    await waitFor(() => screen.getByTestId('run-timeline-details'));
+    expect(screen.queryByTestId('run-level-error')).toBeNull();
+  });
+
+  it('COMPLETED run 即使带 error 也不渲染失败条（判据是 status 而非 error 字段非空）', async () => {
+    const run = buildRunningDetail({
+      run_id: 'wfr_completed_with_error',
+      status: 'COMPLETED',
+      ended_at: '2026-08-24T10:10:00+00:00',
+      error: '一段陈旧的警告文本',
+    });
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([run]);
+    vi.mocked(workflowsApi.get).mockResolvedValue(run);
+
+    renderPage();
+    await openRunsTab();
+    fireEvent.click(await waitFor(() => screen.getByTestId('run-row-' + run.run_id)));
+    await waitFor(() => screen.getByTestId('run-timeline-details'));
+    expect(screen.queryByTestId('run-level-error')).toBeNull();
+  });
+});

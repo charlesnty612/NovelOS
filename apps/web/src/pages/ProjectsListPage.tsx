@@ -381,6 +381,9 @@ function ProjectFormModal({
   const initBand = initial?.word_band ?? undefined;
   // 快通道（2026-10-14）：初值取项目 fast_mode；null/undefined = 未设置 = 关。
   const [fastMode, setFastMode] = useState(initial?.fast_mode === true);
+  // 写作圣经（迁移 0029，2026-10-15 补 UI 入口）：初值取项目 writing_bible；
+  // null/undefined 归一为空串（空白 ≡ 无圣经，后端两侧都落 NULL，口径一致）。
+  const [writingBible, setWritingBible] = useState(initial?.writing_bible ?? '');
   const [bandLowRatio, setBandLowRatio] = useState<string>(
     initBand?.low_ratio != null ? String(initBand.low_ratio) : '',
   );
@@ -437,6 +440,12 @@ function ProjectFormModal({
       genre: genre.trim() === '' ? null : genre.trim(),
       target_words: tw,
       status,
+      // 写作圣经（2026-10-15 补 UI 入口）。空白 ⇒ null ⇒ 后端落 DB NULL，
+      // 与 `_coerce_writing_bible`「空白串归一为 None」的读侧口径逐字对齐。
+      // 这里**不做** fast_mode 那套「只在变化时下发」：文本字段的当前值就在
+      // state 里，未改动时下发同值是幂等的，而省略反而会让「作者清空了圣经」
+      // 这一显式操作静默失效（键缺失 ⇒ 保留原值 ⇒ 清不掉）。
+      writing_bible: writingBible.trim() === '' ? null : writingBible.trim(),
     };
     if (!allEmpty) {
       const band: ProjectWordBand = {};
@@ -473,6 +482,10 @@ function ProjectFormModal({
 
   // V3.7：编辑模式下「清除覆盖」——把三个输入清空并显式提交 null（落 DB NULL）。
   // 仅在 initial?.word_band 非空（即项目当前有覆盖）时显示该按钮。
+  //
+  // ⚠️ 这个 payload **刻意不带** `writing_bible`：PATCH 是部分更新，键缺失即
+  // 保留原值。此处只该动字数带；若顺手把当时 state 里的圣经值带上（哪怕同值），
+  // 就把「清除字数带」变成了「顺带覆写圣经」的耦合操作——与作者点击的意图不符。
   const handleClearBand = async () => {
     setErr(null);
     setBandLowRatio('');
@@ -529,6 +542,27 @@ function ProjectFormModal({
             placeholder="一句话描述这个故事的前提（premise）"
           />
         </div>
+        {/* 写作圣经（迁移 0029，2026-10-15 补 UI 入口）。此前**全站无编辑入口**，
+            与 2026-09-16 `author_intent` 死参数事故同款形状（后端有、装配在用、
+            作者够不着）。折叠放置：它是低频长文本字段，平铺会把「新建项目」表单
+            拉长到作者要滚屏——与 premise/genre 的高频短字段不同量级。 */}
+        <details className="form-row" data-testid="writing-bible-details">
+          <summary className="muted small" style={{ cursor: 'pointer' }}>
+            写作圣经（可选）{writingBible.trim() !== '' ? ' · 已设置' : ''}
+          </summary>
+          <p className="muted small" style={{ margin: '6px 0' }}>
+            跨全书长期有效的硬性约束：题材铁律、禁写项、称谓与视角约定等。
+            每章写作时都会拼进模型的输入；<strong>单次运行时补的要求与本节冲突时以运行时为准</strong>
+            （后端按「基线 + 增量」拼接，不是覆盖）。改这里会在下一次写作生效。
+          </p>
+          <textarea
+            rows={5}
+            value={writingBible}
+            onChange={(e) => setWritingBible(e.target.value)}
+            placeholder={'例：\n· 第一人称有限视角，禁止全知叙述\n· 不写番外、不写系统面板\n· 称「他」不写姓名'}
+            data-testid="project-writing-bible"
+          />
+        </details>
         <div className="form-grid">
           <div className="form-row">
             <label>类型</label>
