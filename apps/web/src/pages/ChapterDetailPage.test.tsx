@@ -3,7 +3,13 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ChapterDetailPage } from './ChapterDetailPage';
-import { chaptersApi, modelProfilesApi, qualityApi, workflowsApi } from '../api/endpoints';
+import {
+  chaptersApi,
+  modelProfilesApi,
+  projectsApi,
+  qualityApi,
+  workflowsApi,
+} from '../api/endpoints';
 import { ApiError } from '../api/client';
 import type {
   Chapter,
@@ -3204,5 +3210,134 @@ describe('G3 — run 级 error 必须在 DOM 里可见', () => {
     fireEvent.click(await waitFor(() => screen.getByTestId('run-row-' + run.run_id)));
     await waitFor(() => screen.getByTestId('run-timeline-details'));
     expect(screen.queryByTestId('run-level-error')).toBeNull();
+  });
+});
+
+// ===========================================================================
+// G5 接线用例（2026-10-15）：纯函数对了不等于页面接上了。
+// `chapterState.test.ts` 验的是 findUnreviewedDraft / getButtonAvailability 的判定；
+// 这里验的是**页面真的用了它**——把 findUnreviewedDraft 整体摘掉，本组必红。
+// ===========================================================================
+
+describe('G5 接线：页面把「审完又改稿」算进提交按钮', () => {
+  const T1 = '2026-10-15T10:00:00+00:00'; // 审校完成
+  const T2 = '2026-10-15T11:00:00+00:00'; // 审校之后的新草稿
+
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'REVIEWED' }));
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([] as ModelProfile[]);
+    vi.mocked(workflowsApi.get).mockImplementation(async () => {
+      throw Object.assign(new Error('not found'), { status: 404 });
+    });
+    vi.mocked(workflowsApi.startCommit).mockReset();
+    vi.mocked(workflowsApi.startCommit).mockResolvedValue(planResponse('wfr_commit'));
+    vi.mocked(projectsApi.get).mockReset();
+    vi.mocked(projectsApi.get).mockResolvedValue({
+      project_id: 'prj_test',
+      name: 'test',
+      premise: null,
+      genre: null,
+      target_words: null,
+      status: 'ACTIVE',
+      created_at: '',
+      updated_at: '',
+      fast_mode: null,
+    });
+  });
+
+  // review run 必须带 workflow_name —— 后端 list_runs_endpoint（runs.py:282）附加；
+  // workflow_id 是不透明的 wf_<hex>，前端不能拿它当名字用。
+  const reviewRun = (over: Partial<WorkflowRun> = {}): WorkflowRun =>
+    buildRunningDetail({
+      run_id: 'wfr_review_done',
+      workflow_name: 'chapter-review',
+      status: 'COMPLETED',
+      ended_at: T1,
+      started_at: T1,
+      error: null,
+      ...over,
+    });
+
+  const draftAt = (version: number, created_at: string): Draft => ({
+    draft_id: `dr_${version}`,
+    chapter_id: 'ch_001',
+    version,
+    content: 'x',
+    created_by: 'test',
+    prompt_version: null,
+    model_id: null,
+    created_at,
+  });
+
+  it('审校后又产生草稿 ⇒ 提交按钮禁用，标题给出「先重新审校」', async () => {
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([reviewRun()]);
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([
+      draftAt(6, T2),
+      draftAt(5, T1),
+    ]);
+
+    renderPage();
+
+    const btn = await waitFor(() => screen.getByTestId('wf-btn-commit'));
+    await waitFor(() => expect(btn).toBeDisabled());
+    expect(btn.getAttribute('title')).toContain('未审改动');
+    expect(btn.getAttribute('title')).toContain('v6');
+    expect(btn.getAttribute('title')).toContain('重新审校');
+  });
+
+  it('反向用例：草稿都早于审校完成 ⇒ 提交按钮照常可点', async () => {
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([reviewRun()]);
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([draftAt(5, T1)]);
+
+    renderPage();
+
+    const btn = await waitFor(() => screen.getByTestId('wf-btn-commit'));
+    await waitFor(() => expect(btn).not.toBeDisabled());
+  });
+
+  it('反向用例：run 缺 workflow_name ⇒ 不拦（判不出就放行，不得误禁）', async () => {
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([
+      reviewRun({ workflow_name: undefined }),
+    ]);
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([draftAt(6, T2)]);
+
+    renderPage();
+
+    const btn = await waitFor(() => screen.getByTestId('wf-btn-commit'));
+    await waitFor(() => expect(btn).not.toBeDisabled());
+  });
+
+  it('反向用例：快通道开着也拦得住（守卫次序的端到端证据）', async () => {
+    // 项目级 fast_mode = true + 章节 DRAFTED：没有未审改动时后端与 UI 都放行，
+    // 有了未审改动则必须拦（后端守卫在 router 层、早于快通道解析）。
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    vi.mocked(projectsApi.get).mockResolvedValue({
+      project_id: 'prj_test',
+      name: 'test',
+      premise: null,
+      genre: null,
+      target_words: null,
+      status: 'ACTIVE',
+      created_at: '',
+      updated_at: '',
+      fast_mode: true,
+    });
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([reviewRun()]);
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([draftAt(6, T2)]);
+
+    renderPage();
+
+    const btn = await waitFor(() => screen.getByTestId('wf-btn-commit'));
+    await waitFor(() => expect(btn).toBeDisabled());
+    expect(btn.getAttribute('title')).toContain('未审改动');
   });
 });

@@ -79,6 +79,84 @@ export interface ActiveRunInfo {
   status: WorkflowRunStatus;
 }
 
+/** 提交前的时序检查所需的最小 run 形状（只取用得上的四个字段）。 */
+export type ReviewRunLike = {
+  chapter_id: string | null;
+  status: WorkflowRunStatus;
+  ended_at: string | null;
+  /**
+   * router 层 `list_runs_endpoint` 附加（`runs.py:282`）。
+   * ⚠️ **不可用 `workflow_id` 代替**：那是不透明的 `wf_<hex>`（dev 库实证：
+   * chapter-review = `wf_0a10d0d159c9`），前端无从反查名字。
+   * 缺该字段的列表行一律**判不出是 review** ⇒ 退化成不拦（见下方函数说明）。
+   */
+  workflow_name?: string | null;
+};
+
+/** 提交前的时序检查所需的最小 draft 形状。 */
+export type DraftLike = { version: number; created_at: string };
+
+export interface UnreviewedDraft {
+  /** 那份「审完之后又冒出来」的草稿版本号 */
+  version: number;
+  createdAt: string;
+  reviewEndedAt: string;
+}
+
+/**
+ * 找出「审完又改稿」的未审草稿；无则 null。
+ *
+ * **逐字对齐后端时序守卫**（`api/routers/workflows/control.py::_guard_commit_draft_freshness`
+ * 与 `workflows/chapter_commit/commit.py` 内同款）：
+ *   1. 取该 chapter 最近一次 COMPLETED 的 chapter-review run 的 `ended_at`
+ *      （无 → 不拦，由既有 REVIEWED 状态机校验兜底）；
+ *   2. 若存在 `created_at` 严格更晚的 draft → 拒收（防「审过 v5、改出 v6、commit 定稿 v6」）。
+ *
+ * **为什么前端要重算一遍**：守卫在后端，作者点「提交」只会拿到一句 409；
+ * UI 不建模这条就等于让作者靠撞墙来发现规则。
+ *
+ * **时间比较用 `Date.parse` 而非字符串字典序**：后端 SQL 对同一批 `now_iso()`
+ * 产物做文本比较（格式统一 ⇒ 字典序即时间序）。前端解析成毫秒，结论一致，
+ * 且万一将来两侧格式分叉（带不带毫秒/偏移）也**不会误判为「有未审改动」**——
+ * 那会把合法的提交按钮错误地禁用掉。解析失败（NaN）同样按「无未审改动」处理：
+ * **方向性选择**——误报（多拦）会挡住本该能做的操作，漏报只是退回今天的
+ * 行为（点提交吃一个 409），后者代价小得多。
+ */
+export function findUnreviewedDraft(input: {
+  chapterId: string;
+  runs: readonly ReviewRunLike[];
+  drafts: readonly DraftLike[];
+}): UnreviewedDraft | null {
+  let reviewEnd: string | null = null;
+  let reviewEndMs = Number.NEGATIVE_INFINITY;
+  for (const run of input.runs) {
+    if (run.chapter_id !== input.chapterId) continue;
+    if (run.workflow_name !== 'chapter-review') continue;
+    if (run.status !== 'COMPLETED') continue;
+    if (!run.ended_at) continue;
+    const ms = Date.parse(run.ended_at);
+    if (Number.isNaN(ms)) continue;
+    if (ms > reviewEndMs) {
+      reviewEndMs = ms;
+      reviewEnd = run.ended_at;
+    }
+  }
+  if (reviewEnd === null) return null;
+
+  let stale: DraftLike | null = null;
+  let staleMs = Number.NEGATIVE_INFINITY;
+  for (const draft of input.drafts) {
+    const ms = Date.parse(draft.created_at);
+    if (Number.isNaN(ms) || ms <= reviewEndMs) continue;
+    if (ms > staleMs) {
+      staleMs = ms;
+      stale = draft;
+    }
+  }
+  if (stale === null) return null;
+  return { version: stale.version, createdAt: stale.created_at, reviewEndedAt: reviewEnd };
+}
+
 export interface ButtonAvailabilityInput {
   chapterStatus: ChapterStatus;
   activeRun: ActiveRunInfo | null;
@@ -92,6 +170,16 @@ export interface ButtonAvailabilityInput {
    * 面，与快通道无关；快通道是「旁路」，不是状态机的合法后继。
    */
   fastMode?: boolean;
+  /**
+   * 「审完又改稿」的未审草稿（由 :func:`findUnreviewedDraft` 算出）。
+   * 非 null ⇒ 提交被禁，理由给出该去做什么。
+   *
+   * **必须排在快通道旁路之前**（见 :func:`getButtonAvailability`）：后端那道守卫
+   * 在 router 层 `start_commit` 里、`_start_workflow`（快通道解析）**之前**执行，
+   * 所以快通道同样会被它拦下。若 UI 把旁路放在前面，就会在一个必然吃 409 的
+   * 组合上把按钮点亮——又是一次「UI 放行而 backend 400/409」。
+   */
+  unreviewedDraft?: UnreviewedDraft | null;
 }
 
 export interface ButtonAvailability {
@@ -107,6 +195,36 @@ const ACTION_LABEL: Record<WorkflowAction, string> = {
   review: '审校',
   commit: '提交',
 };
+
+/**
+ * 四步流水线的固定次序（G4：禁用理由要说「怎么办」，就得知道「上一步是谁」）。
+ * 与 `getPipelineStepStates` 的 order 同源，两处必须一致。
+ */
+const PIPELINE_ORDER: WorkflowAction[] = ['plan', 'write', 'review', 'commit'];
+
+/**
+ * 给被禁用的按钮指出**下一步该点哪个**（G4）。
+ *
+ * 做法：从目标 action 往前找第一个「其 EXPECTED_STATUS 覆盖当前状态」的上游步骤——
+ * 那就是作者此刻该点的按钮。找不到就返回 null（**不编造**）。
+ *
+ * 为什么不能一句话说「先做上一步」：状态机不是单向的，几种组合根本没有上游可做
+ * （例：`review` 在 REVIEWED 时，`write` 要 DRAFTED/PLANNED、`plan` 要 PLANNED，
+ * 两者都不覆盖 REVIEWED ⇒ 无路可走，UI 就不该假装有）。
+ *
+ * 措辞刻意是「请先完成『X』」而非「点 X 即可提交」——前者是事实，后者可能撒谎
+ * （有的组合做完 X 仍不到目标状态）。
+ */
+function upstreamHint(action: WorkflowAction, chapterStatus: ChapterStatus): string | null {
+  const idx = PIPELINE_ORDER.indexOf(action);
+  for (let j = idx - 1; j >= 0; j--) {
+    const upstream = PIPELINE_ORDER[j];
+    if (EXPECTED_STATUS[upstream].includes(chapterStatus)) {
+      return `请先完成「${ACTION_LABEL[upstream]}」`;
+    }
+  }
+  return null;
+}
 
 /**
  * 给定章节状态 + 是否有活跃 run，判断指定 workflow 按钮是否可点击。
@@ -127,6 +245,17 @@ export function getButtonAvailability(
       reason: '当前有进行中的工作流 run，请等待其完成',
     };
   }
+  // G5 时序守卫：**排在快通道旁路之前**。后端 `_guard_commit_draft_freshness` 在
+  // router 层 start_commit 里、早于快通道解析执行，所以「审过又改稿 + 快通道开着」
+  // 这个组合照样 409。若把旁路放前面，就会在必然失败的组合上把按钮点亮。
+  if (action === 'commit' && input.unreviewedDraft) {
+    return {
+      enabled: false,
+      reason:
+        `审校完成后又产生了草稿 v${input.unreviewedDraft.version}（未审改动），` +
+        '需先重新审校再提交',
+    };
+  }
   // 快通道旁路：commit 在 DRAFTED 也可直达（对应后端 commit 节点的 fast 放行）。
   // 只放宽 commit，不放宽其它 action——旁路范围必须最小。
   if (action === 'commit' && input.fastMode === true && chapterStatus === 'DRAFTED') {
@@ -134,9 +263,12 @@ export function getButtonAvailability(
   }
   const expected = EXPECTED_STATUS[action];
   if (!expected.includes(chapterStatus)) {
+    const hint = upstreamHint(action, chapterStatus);
     return {
       enabled: false,
-      reason: `${ACTION_LABEL[action]} 仅在状态为 ${expected.join(' / ')} 时可用；当前状态 ${chapterStatus}`,
+      reason:
+        `${ACTION_LABEL[action]} 仅在状态为 ${expected.join(' / ')} 时可用；当前状态 ${chapterStatus}` +
+        (hint ? `。${hint}。` : ''),
     };
   }
   return { enabled: true, reason: null };

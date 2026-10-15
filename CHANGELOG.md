@@ -54,6 +54,59 @@ M5 首轮**被 SKIP**（锚点缩进写错，命中 0 次）——「跳过」�
 **本批无迁移、无后端改动**：树指纹 `ab46b608…`/525 文件前后逐位一致；
 前端 `npx tsc -b` 零错、`npx vitest run` **519 passed**（500 + 本批 19）、`npm run build` 通过。
 
+### Fixed（2026-10-15 批次（二）：G4 禁用理由不给出路、G5 提交按钮不认「审完又改稿」）
+
+> **来源**：用户指令「继续」——按 `NovelOS-Artifacts: docs/analysis/ui-business-logic-assessment-2026-10-15.md`
+> 的 G4/G5 两条落地（自主排的优先级：G5 作者一定会撞且 UI 零提示，先于 G4）。
+> **零后端改动**：树指纹 `ab46b60837e48687…`/525 文件，与 2026-10-15 全量复核记录**逐位一致**。
+
+**4. G4 禁用理由只说「不许做」，不说「先做什么」**。
+`getButtonAvailability` 的 reason 原先是纯状态机复述
+（「提交 仅在状态为 REVIEWED 时可用；当前状态 DRAFTED」）——作者读完仍得自己回流水线上找。
+补 `upstreamHint()`：从目标 action 往前找第一个「其 `EXPECTED_STATUS` 覆盖当前状态」的上游步骤，
+给出「请先完成「审校」」。**找不到就返回 null，不编造**——状态机不是单向的，
+`review` 在 REVIEWED 时上游两个步骤都不覆盖 REVIEWED，无路可走，UI 就不该假装有。
+措辞用「请先完成 X」而非「点 X 即可提交」：后者可能是撒谎（有的组合做完 X 仍不到目标状态）。
+判别：`chapterState.test.ts` 4 例（含「review@PLANNED 指向写正文」与「无路可走时不给 hint」）。
+
+**5. G5 提交按钮不认「审完又改稿」⇒ 作者靠撞墙发现规则**。
+后端 router 层 `control.py::_guard_commit_draft_freshness` 在 `start_commit` 里、
+**早于** `_start_workflow`（快通道解析）执行：审校 COMPLETED 之后又冒出来的草稿，
+**即使快通道开着也一律 409**。前端零建模 ⇒ 按钮点亮 → 作者点了吃一句 409。
+补 `findUnreviewedDraft()`（纯函数）：取该 chapter 最近一次 COMPLETED 的 `chapter-review` run 的
+`ended_at`，找 `created_at` **严格更晚**的 draft ⇒ 提交禁用并说明是 v几、需先重新审校。
+
+三个判别要点，逐条都是「复算出来的、不是想出来的」：
+
+- **必须排在快通道旁路之前**。UI 若把旁路放前面，就会在一个**必然吃 409** 的组合上把按钮点亮
+  ——又是一次「UI 放行而 backend 409」，与 G1/G2/G3 同款。
+  判别：`快通道开着 + DRAFTED + 有未审改动 ⇒ 仍然禁用` + 其反向用例（无未审改动 ⇒ 仍放行）成对，
+  少任何一条都可能被「旁路被整体摘掉」蒙过去。
+- **`workflow_name` 是 router 层加的，不是下层 SQL 的**。先验曾据
+  `workflow_runtime/runs.py` 断言「前端认不出 chapter-review」（`workflow_id` 是不透明 `wf_<hex>`），
+  **被推翻**：router 层 `runs.py` 的 `list_runs_endpoint` 逐行附加该字段。
+  据此**零后端改动**落地；同时订正 `api/types.ts` 里写反的注释（「后端暂未提供」），并留痕这次被推翻。
+- **失败方向刻意选「漏报」**：缺 `workflow_name`、时间戳解析失败 ⇒ 返回 null 不拦。
+  误报（多拦）会挡掉本该能做的操作，漏报只是退回今天的行为（点提交吃一个 409），后者代价小得多。
+
+判别：`chapterState.test.ts` 15 例（`findUnreviewedDraft` 7 + 次序 4 + G4 4）+
+`ChapterDetailPage.test.tsx` 4 例页面接线（纯函数对了不等于页面接上了）。
+其中「无未审改动时其余三个按钮的可用性**逐字不变**」是形状级断言，不是点值断言。
+
+**突变验证**：6 次变异**全部被捕获**，逐个 SHA256 复核已还原——
+N1 把未审判定挪到快通道旁路之后（红 1）／N2 缺 `workflow_name` 也认成 review（红 2）／
+N3「严格大于」改「大于等于」（红 1）／N4 取最早而非最近一次审校（红 1）／
+N5 禁用理由不给上游出路（红 2）／N6 页面不再把 `unreviewedDraft` 传给 header（红 4）。
+
+⚠️ **本批头一轮报了「N1/N3/N5 三个存活突变」，实为量具缺陷**：三条突变的 `-t` 过滤器**一条用例都没命中**
+（`vitest -t` 匹配不到时报的是「全 skipped、无 failed」，与「跑过了、全绿」在 failed 判据上**完全同形**），
+其中一条过滤器还是我把「次序」打成「次度」的错别字，另两条只在用例**正文/注释**里出现而不在**名字**里。
+差点照着「存活」结论去改本来正确的测试。**探针已加硬断言**：`ran >= 1` 否则抛异常中止，
+与上一批的「锚点未命中即中止」并列为同一纪律的两面。
+
+**本批无迁移、无后端改动**：树指纹 `ab46b608…`/525 文件前后逐位一致；
+前端 `npx tsc -b` 零错、`npx vitest run` **539 passed**（519 + 本批 20）、`npm run build` 通过。
+
 ### Added（2026-10-15 业务逻辑评估：对标 GitHub 同类高星项目）
 
 > **来源**：用户指令「对软件的业务逻辑做一次评估，参考 GitHub 上的同类高星项目」。

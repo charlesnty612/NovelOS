@@ -10,7 +10,11 @@ import type { Chapter, ModelProfile } from '../../api/types';
 import { ChapterStatusBadge } from '../../components/ChapterStatusBadge';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { useApiCall } from '../../hooks/useApiCall';
-import { getButtonAvailability, getPipelineStepStates } from '../../utils/chapterState';
+import {
+  getButtonAvailability,
+  getPipelineStepStates,
+  type UnreviewedDraft,
+} from '../../utils/chapterState';
 
 export type WorkflowAction = 'plan' | 'write' | 'review' | 'commit';
 
@@ -54,6 +58,7 @@ export function ChapterPipelineHeader({
   onFastModeChange,
   autoCommit,
   onAutoCommitChange,
+  unreviewedDraft,
 }: {
   chapter: Chapter;
   activeRunStatus: 'PENDING' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | null;
@@ -75,6 +80,12 @@ export function ChapterPipelineHeader({
   /** 「写正文」专属：写完自动衔接提交（需快通道已开启） */
   autoCommit: boolean;
   onAutoCommitChange: (v: boolean) => void;
+  /**
+   * G5：「审完又改稿」的未审草稿（页面用 findUnreviewedDraft 从 runs+drafts 算出）。
+   * 非 null ⇒ 提交按钮禁用并给出「先重新审校」的出路——对应后端 router 层的
+   * `_guard_commit_draft_freshness`（start_commit 里、早于快通道解析执行）。
+   */
+  unreviewedDraft: UnreviewedDraft | null;
 }) {
   const activeRunInfo =
     activeRunStatus === 'RUNNING' || activeRunStatus === 'PENDING'
@@ -268,6 +279,7 @@ export function ChapterPipelineHeader({
               chapterStatus: chapter.status,
               activeRun: activeRunInfo,
               fastMode,
+              unreviewedDraft,
             });
             const showSelect =
               !profilesCall.error && enabledProfiles.length > 0;

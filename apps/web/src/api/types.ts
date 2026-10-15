@@ -385,9 +385,19 @@ export interface WorkflowRun {
    * UI 用 useApiCall 单独拉详情时填充。
    */
   nodes: WorkflowNodeRun[];
-  // workflow_name 由 router 端通过 join 写入；后端 list_runs/get_run 暂未提供该字段，
-  // 前端 UI 退化为显示 workflow_id；详见 workflow_runtime.runs.list_runs / get_run。
-  workflow_name?: string;
+  /**
+   * 工作流**名**（`chapter-review` / `chapter-write` / …），**不是** `workflow_id`。
+   *
+   * 由 router 层 `list_runs_endpoint` 逐行附加（`api/routers/workflows/runs.py`），
+   * **不是** `workflow_runtime.runs.list_runs` 的 SQL 产出——下层只给不透明的
+   * `wf_<hex>`，前端无从反查名字。⚠️ 本行注释此前写的是「后端暂未提供」，
+   * 与事实相反，且据此先验被推翻过一次（误判「前端认不出 chapter-review run」，
+   * 一度以为要改后端）；**判据以 router 层为准**。
+   *
+   * 缺席时按「判不出」处理，别默认当成非 review：G5 的 `findUnreviewedDraft`
+   * 拿不到它就不拦（方向性安全，见该函数注释）。
+   */
+  workflow_name?: string | null;
   // P1.1 恢复挂起的初始化：单 run GET 在 PAUSED 时携带的 pause_payload；
   // 非 PAUSED / list 行可能缺省。前端 ProjectInitPanel 用其直接恢复 review 视图。
   pause_payload?: ProjectInitPausePayload | null;

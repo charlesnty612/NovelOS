@@ -42,6 +42,7 @@ import type {
   WorkflowStartArgs,
 } from './chapter/ChapterPipelineHeader';
 import { ChapterRunPanel } from './chapter/ChapterRunPanel';
+import { findUnreviewedDraft } from '../utils/chapterState';
 import { ChapterRunBanner } from './chapter/ChapterRunBanner';
 import { ChapterDraftsSection } from './chapter/ChapterDraftsSection';
 import { ChapterPlanSection } from './chapter/ChapterPlanSection';
@@ -171,6 +172,23 @@ export function ChapterDetailPage() {
   // 自动落到 drafts[0]（最新版），保持原视觉与行为。
   const [selectedDraftVersion, setSelectedDraftVersion] = useState<number | null>(null);
   const drafts = draftsCall.data ?? [];
+
+  // G5：提交前时序检查（后端 `_guard_commit_draft_freshness` 的前端投影）。
+  // 「审校通过 → 手工改一句（状态仍 REVIEWED）→ 点提交」此前必然吃 409，
+  // 而 UI 零提示；这里把那条规则前置到按钮上，并给出「先重新审校」的出路。
+  //
+  // ⚠️ workflow_name 必须来自 router 层 `list_runs_endpoint`（runs.py:282 附加）——
+  // workflow_id 是不透明的 wf_<hex>，不能拿它当名字用。缺该字段的 run 一律
+  // 判不出是 chapter-review，结果是**不拦**（退回今天的行为），方向性安全。
+  const unreviewedDraft = useMemo(
+    () =>
+      findUnreviewedDraft({
+        chapterId,
+        runs: chapterRuns,
+        drafts,
+      }),
+    [chapterId, chapterRuns, drafts],
+  );
   useEffect(() => {
     if (drafts.length === 0) {
       setSelectedDraftVersion(null);
@@ -544,6 +562,7 @@ export function ChapterDetailPage() {
           onFastModeChange={handleFastModeChange}
           autoCommit={autoCommit}
           onAutoCommitChange={setAutoCommit}
+          unreviewedDraft={unreviewedDraft}
         />
       ) : chapterCall.loading ? (
         <Loading text="加载章节中…" />

@@ -11,6 +11,8 @@ import {
   isRunForChapter,
   pickActiveRun,
   pickLatestRun,
+  findUnreviewedDraft,
+  type ReviewRunLike,
 } from './chapterState';
 import type { WorkflowRunStatus } from '../api/types';
 
@@ -519,5 +521,228 @@ describe('isRejectedRun / isRejectedForRevisionRun (后端两态严格匹配)', 
     // 反向顺序会得到错误结论（'rejected' 也是 false 的原因）—— 验证裸 rejected 严格匹配
     expect(isRejectedRun('rejected')).toBe(true);
     expect(isRejectedRun('rejected-for-revision')).toBe(false);
+  });
+});
+
+// ===========================================================================
+// G5 + G4（2026-10-15 批次）：提交前时序守卫的前端建模 + 禁用理由的出路。
+// ===========================================================================
+
+describe('findUnreviewedDraft（后端 _guard_commit_draft_freshness 的前端投影）', () => {
+  const T1 = '2026-10-15T10:00:00+00:00'; // 最近一次审校完成
+  const T2 = '2026-10-15T11:00:00+00:00'; // 审校之后的新草稿
+  const CID = 'ch_001';
+
+  const review = (over: Partial<ReviewRunLike> = {}): ReviewRunLike => ({
+    chapter_id: CID,
+    status: 'COMPLETED',
+    ended_at: T1,
+    workflow_name: 'chapter-review',
+    ...over,
+  });
+  const draft = (version: number, created_at: string) => ({ version, created_at });
+
+  it('审校完成后又出现新草稿 ⇒ 命中，且给出那一版的版本号', () => {
+    const hit = findUnreviewedDraft({
+      chapterId: CID,
+      runs: [review()],
+      drafts: [draft(5, T1), draft(6, T2)],
+    });
+    expect(hit).toEqual({ version: 6, createdAt: T2, reviewEndedAt: T1 });
+  });
+
+  it('草稿都早于/等于审校完成时间 ⇒ 不命中（正常「审过即交」路径）', () => {
+    // ⚠️ 边界：后端是 `created_at > review_end` **严格大于**，等于不拦。
+    // 前端用 ms 比较，`<=` 一律放行——两侧必须逐字同口径。
+    expect(
+      findUnreviewedDraft({ chapterId: CID, runs: [review()], drafts: [draft(5, T1)] }),
+    ).toBeNull();
+    expect(
+      findUnreviewedDraft({
+        chapterId: CID,
+        runs: [review()],
+        drafts: [draft(5, '2026-10-15T09:00:00+00:00')],
+      }),
+    ).toBeNull();
+  });
+
+  it('无 COMPLETED 的 chapter-review run ⇒ 不命中（由 REVIEWED 状态机兜底）', () => {
+    // 覆盖三种「认不出/不是审校」的情形，缺任一条都会把首次提交误拦
+    expect(findUnreviewedDraft({ chapterId: CID, runs: [], drafts: [draft(6, T2)] })).toBeNull();
+    expect(
+      findUnreviewedDraft({ chapterId: CID, runs: [review({ status: 'FAILED' })], drafts: [draft(6, T2)] }),
+    ).toBeNull();
+    expect(
+      findUnreviewedDraft({ chapterId: CID, runs: [review({ chapter_id: 'ch_other' })], drafts: [draft(6, T2)] }),
+    ).toBeNull();
+  });
+
+  it('run 缺 workflow_name ⇒ 不命中（**方向性安全**：判不出就放行）', () => {
+    // workflow_id 是不透明的 wf_<hex>（dev 库实证 chapter-review=wf_0a10d0d159c9），
+    // 前端无法反查。宁可漏报（退回今天「点提交吃 409」）也不误报——
+    // 误报会把**本该能提交**的按钮错误地禁用掉。
+    const hit = findUnreviewedDraft({
+      chapterId: CID,
+      runs: [review({ workflow_name: null })],
+      drafts: [draft(6, T2)],
+    });
+    expect(hit).toBeNull();
+  });
+
+  it('时间戳不可解析 ⇒ 按「无未审改动」处理（同上，宁漏勿误）', () => {
+    expect(
+      findUnreviewedDraft({
+        chapterId: CID,
+        runs: [review({ ended_at: 'not-a-date' })],
+        drafts: [draft(6, T2)],
+      }),
+    ).toBeNull();
+    expect(
+      findUnreviewedDraft({
+        chapterId: CID,
+        runs: [review()],
+        drafts: [draft(6, 'not-a-date')],
+      }),
+    ).toBeNull();
+  });
+
+  it('多次审校 ⇒ 取**最近一次** COMPLETED 的 ended_at 作阈值', () => {
+    // 反例：拿最早那次当阈值，会把「第二次审校之后没再改」的稿子误判成未审。
+    const T0 = '2026-10-15T08:00:00+00:00';
+    const hit = findUnreviewedDraft({
+      chapterId: CID,
+      runs: [review({ ended_at: T0 }), review({ ended_at: T1 })],
+      drafts: [draft(6, T2)],
+    });
+    expect(hit).not.toBeNull();
+    // 若误取最早那次（T0），T1 的草稿也会被判未审——用一条只晚于 T0 的草稿分开
+    const none = findUnreviewedDraft({
+      chapterId: CID,
+      runs: [review({ ended_at: T0 }), review({ ended_at: T1 })],
+      drafts: [draft(4, T0.replace('08:00:00', '08:30:00'))],
+    });
+    expect(none).toBeNull();
+  });
+});
+
+describe('G5 时序守卫 vs 快通道旁路的**次序**（本批最吃重的一条）', () => {
+  const stale = { version: 6, createdAt: 'x', reviewEndedAt: 'y' };
+
+  it('快通道开着 + DRAFTED + 有未审改动 ⇒ 仍然禁用（后端守卫在 router 层先跑）', () => {
+    const avail = getButtonAvailability('commit', {
+      chapterStatus: 'DRAFTED',
+      activeRun: null,
+      fastMode: true,
+      unreviewedDraft: stale,
+    });
+    expect(avail.enabled).toBe(false);
+    expect(avail.reason).toContain('v6');
+    expect(avail.reason).toContain('重新审校');
+  });
+
+  it('快通道开着 + DRAFTED + 无未审改动 ⇒ 仍放行（旁路本身没被改坏）', () => {
+    // 反向用例：没有这条，上一条可以被「把快通道旁路整体删掉」蒙过去
+    const avail = getButtonAvailability('commit', {
+      chapterStatus: 'DRAFTED',
+      activeRun: null,
+      fastMode: true,
+      unreviewedDraft: null,
+    });
+    expect(avail.enabled).toBe(true);
+    expect(avail.reason).toBeNull();
+  });
+
+  it('快通道关 + REVIEWED + 有未审改动 ⇒ 禁用，且理由与状态机无关', () => {
+    const avail = getButtonAvailability('commit', {
+      chapterStatus: 'REVIEWED',
+      activeRun: null,
+      unreviewedDraft: stale,
+    });
+    expect(avail.enabled).toBe(false);
+    expect(avail.reason).toContain('未审改动');
+  });
+
+  it('未审改动只影响 commit：其余三个按钮的判定**逐字不变**', () => {
+    // 不写成「其余按钮都 enabled」——plan 在 DRAFTED 是被**状态机**禁的
+    // （EXPECTED_STATUS.plan = ['PLANNED']），那是另一条规则，混在一起测就
+    // 是在断言一个错误命题（首版就是这么写错的）。不变式是：给不给
+    // unreviewedDraft，非 commit 的判定结果必须完全相同。
+    const statuses = ['PLANNED', 'DRAFTED', 'REVIEWED', 'COMMITTED'] as const;
+    for (const action of ['plan', 'write', 'review'] as const) {
+      for (const chapterStatus of statuses) {
+        const withStale = getButtonAvailability(action, {
+          chapterStatus,
+          activeRun: null,
+          unreviewedDraft: stale,
+        });
+        const without = getButtonAvailability(action, { chapterStatus, activeRun: null });
+        expect(withStale, `${action}@${chapterStatus}：时序守卫不该改变判定`).toEqual(without);
+      }
+    }
+  });
+
+  it('review@DRAFTED 有未审改动时仍可点（它是出路本身）', () => {
+    const avail = getButtonAvailability('review', {
+      chapterStatus: 'DRAFTED',
+      activeRun: null,
+      unreviewedDraft: stale,
+    });
+    expect(avail.enabled).toBe(true);
+    expect(avail.reason).toBeNull();
+  });
+
+  it('「有活动 run」优先级最高：早于未审改动判定', () => {
+    // 顺序：activeRun → 未审改动 → 快通道旁路 → 状态机。
+    // 若把未审改动提到 activeRun 之前，作者看到的就不是「先等它跑完」。
+    const avail = getButtonAvailability('commit', {
+      chapterStatus: 'REVIEWED',
+      activeRun: { status: 'RUNNING' },
+      unreviewedDraft: stale,
+    });
+    expect(avail.reason).toContain('进行中的工作流 run');
+  });
+});
+
+describe('G4 禁用理由要说「怎么办」', () => {
+  it('commit@DRAFTED ⇒ 指出先做「审校」', () => {
+    const { reason } = getButtonAvailability('commit', {
+      chapterStatus: 'DRAFTED',
+      activeRun: null,
+    });
+    expect(reason).toContain('请先完成「审校」');
+  });
+
+  it('review@PLANNED ⇒ 指出先做「写正文」', () => {
+    const { reason } = getButtonAvailability('review', {
+      chapterStatus: 'PLANNED',
+      activeRun: null,
+    });
+    expect(reason).toContain('请先完成「写正文」');
+  });
+
+  it('无可走上游时**不给**出路（不编造）', () => {
+    // review 要 DRAFTED，write 要 PLANNED/DRAFTED，plan 要 PLANNED；
+    // 三者都不覆盖 REVIEWED ⇒ 从 REVIEWED 出发没有上游可做，UI 不该假装有。
+    const { reason } = getButtonAvailability('review', {
+      chapterStatus: 'REVIEWED',
+      activeRun: null,
+    });
+    expect(reason).not.toContain('请先完成');
+    expect(reason).toContain('当前状态 REVIEWED'); // 原有信息不得丢
+  });
+
+  it('可用按钮的 reason 恒为 null（出路提示不许污染 enabled 路径）', () => {
+    const cases = [
+      ['plan', 'PLANNED'],
+      ['write', 'PLANNED'],
+      ['write', 'DRAFTED'],
+      ['review', 'DRAFTED'],
+      ['commit', 'REVIEWED'],
+    ] as const;
+    for (const [action, status] of cases) {
+      const avail = getButtonAvailability(action, { chapterStatus: status, activeRun: null });
+      expect(avail.enabled, `${action}@${status} 应可用`).toBe(true);
+      expect(avail.reason, `${action}@${status} 不该有理由`).toBeNull();
+    }
   });
 });
