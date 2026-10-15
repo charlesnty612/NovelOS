@@ -146,6 +146,55 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         'model_config: ConfigDict = ConfigDict(extra="ignore")',
         "tests/api/test_volume_membership_contract.py",
     ),
+    # ---- 2026-10-15 批次（四）：M8~M13 全部是**接线突变**。
+    # 组件自身测得再好，页面不挂载就等于没有 UI——而「把挂载整行删掉」
+    # 不会让组件的任何一个用例变红（同坑区「断言了结果 ≠ 判别了机制」：
+    # 测试测不到它该守的那个东西）。这 6 条把「页面确实挂了它」钉成可执行判别。
+    (
+        "M8",
+        "apps/web/src/pages/ProjectOverviewPage.tsx",
+        "      <SimulationPanel projectId={projectId} />",
+        "      {null}",
+        "src/pages/ProjectOverviewPage.test.tsx",
+    ),
+    (
+        "M9",
+        "apps/web/src/pages/ChapterDetailPage.tsx",
+        "      {chapter ? <ChapterJudgeSection chapterId={chapter.chapter_id} /> : null}",
+        "      {null}",
+        "src/pages/ChapterDetailPage.test.tsx",
+    ),
+    (
+        "M10",
+        "apps/web/src/pages/ChapterDetailPage.tsx",
+        "        <ChapterRevisionNoteSection\n          chapter={chapter}\n"
+        "          onSaved={() => chapterCall.reload()}\n        />",
+        "        {null}",
+        "src/pages/ChapterDetailPage.test.tsx",
+    ),
+    (
+        "M11",
+        "apps/web/src/pages/StoryBiblePage.tsx",
+        "        {activeTab === 'arc' ? <ArcTab projectId={projectId} /> : null}",
+        "        {null}",
+        "src/pages/StoryBiblePage.test.tsx",
+    ),
+    (
+        "M12",
+        "apps/web/src/pages/StoryBiblePage.tsx",
+        "        {activeTab === 'reveal' ? <RevealTab projectId={projectId} /> : null}",
+        "        {null}",
+        "src/pages/StoryBiblePage.test.tsx",
+    ),
+    # M13 撤掉 URL 契约登记：tab 标签还在（isBibleTab 白名单漏了它 ⇒ 会被重定向
+    # 回默认页），断言 aria-selected 的用例必红。
+    (
+        "M13",
+        "apps/web/src/pages/StoryBiblePage.tsx",
+        "  { key: 'arc', label: '弧光' },",
+        "",
+        "src/pages/StoryBiblePage.test.tsx",
+    ),
 ]
 
 

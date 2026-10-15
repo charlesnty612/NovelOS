@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ProjectOverviewPage } from './ProjectOverviewPage';
 import {
@@ -10,6 +10,7 @@ import {
   healthApi,
   projectsApi,
   signingCheckApi,
+  simulationApi,
   storyStateApi,
   styleSamplesApi,
 } from '../api/endpoints';
@@ -28,7 +29,7 @@ vi.mock('../api/endpoints', async () => {
     ...actual,
     projectsApi: { list: vi.fn(), create: vi.fn(), get: vi.fn(), update: vi.fn(), delete: vi.fn() },
     healthApi: { get: vi.fn() },
-    storyStateApi: { getCurrent: vi.fn() },
+    storyStateApi: { getCurrent: vi.fn(), listDeltas: vi.fn() },
     commitsApi: { list: vi.fn() },
     styleSamplesApi: { list: vi.fn() },
     branchesApi: { list: vi.fn() },
@@ -38,6 +39,9 @@ vi.mock('../api/endpoints', async () => {
     // 那就是「量具没量到目标，却报告成量过了」。
     deliveryApi: { verdict: vi.fn() },
     signingCheckApi: { run: vi.fn() },
+    // G6 挂账批次（四）：SimulationPanel 同理——漏 mock 会落到真实 api.get，
+    // 面板停在错误态而总览页用例照样全绿（同上那条注释的形状）。
+    simulationApi: { run: vi.fn(), list: vi.fn(), get: vi.fn() },
   };
 });
 
@@ -94,6 +98,9 @@ describe('ProjectOverviewPage 加载态与人话化文案', () => {
     vi.mocked(chaptersApi.listByProject).mockReset();
     vi.mocked(deliveryApi.verdict).mockReset();
     vi.mocked(signingCheckApi.run).mockReset();
+    vi.mocked(simulationApi.list).mockReset();
+    vi.mocked(simulationApi.run).mockReset();
+    vi.mocked(simulationApi.get).mockReset();
 
     vi.mocked(healthApi.get).mockResolvedValue(baseHealth);
     vi.mocked(storyStateApi.getCurrent).mockResolvedValue(baseSnapshot);
@@ -130,6 +137,9 @@ describe('ProjectOverviewPage 加载态与人话化文案', () => {
       summary: { pass_count: 0, warn_count: 0, fail_count: 0, info_count: 0 },
       word_band_source: 'default',
     });
+    vi.mocked(simulationApi.list).mockResolvedValue([]);
+    // SimulationPanel 选章节后要读该章 delta 作基底；默认空数组（选章节前不会调）。
+    vi.mocked(storyStateApi.listDeltas).mockResolvedValue([]);
   });
 
   it('项目未返回时渲染骨架占位，而不是整页空白', () => {
@@ -138,6 +148,26 @@ describe('ProjectOverviewPage 加载态与人话化文案', () => {
 
     expect(screen.getByTestId('overview-loading')).toBeInTheDocument();
     expect(screen.getByText('正在加载项目总览…')).toBeInTheDocument();
+  });
+
+  // G6 挂账批次（四）：**页面接线**判别。
+  //
+  // ⚠️ 判别点必须是**面板专属**的。首版这里断言 `chaptersApi.listByProject`
+  // 被调用——而总览页自己（G9 的「写到第 N 章」）也调它 ⇒ 把挂载整行删掉，
+  // 本用例照样全绿。突变验证 M8 实测存活，当场抓到。
+  // 现在断言面板自己的 testid + 只有面板才会调的 `storyStateApi.listDeltas`
+  // （概览页其余部分不碰它）。
+  it('推演面板挂上了：渲染面板并按选中章拉 delta', async () => {
+    // 本文件的 projectsApi.get 是**逐用例**设置的（beforeEach 只 reset），
+    // 漏设会让 useApiCall 的 `fn().then` 撞 undefined——症状是空 DOM 加
+    // 「Cannot read properties of undefined (reading 'then')」，与被测机制无关。
+    vi.mocked(projectsApi.get).mockResolvedValue(baseProject);
+    renderPage();
+    expect(await screen.findByTestId('simulation-panel')).toBeInTheDocument();
+    // 面板挂上 ⇒ 选中首章 ⇒ 去读该章 delta 作基底
+    await waitFor(() => {
+      expect(vi.mocked(storyStateApi.listDeltas)).toHaveBeenCalled();
+    });
   });
 
   it('数据库卡片按人话展示表数（后端 tables 为数量，不再渲染空表行数列表）', async () => {

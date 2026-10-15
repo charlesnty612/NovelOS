@@ -39,6 +39,8 @@ import { Loading } from '../components/Loading';
 import { ChapterPipelineHeader } from './chapter/ChapterPipelineHeader';
 import { ChapterDeliveryActions } from './chapter/ChapterDeliveryActions';
 import { ChapterDeltasSection } from './chapter/ChapterDeltasSection';
+import { ChapterJudgeSection } from './chapter/ChapterJudgeSection';
+import { ChapterRevisionNoteSection } from './chapter/ChapterRevisionNoteSection';
 import type {
   WorkflowAction,
   WorkflowStartArgs,
@@ -756,6 +758,17 @@ export function ChapterDetailPage() {
           onChanged={() => chapterCall.reload()}
         />
       ) : null}
+
+      {/* G6 挂账批次（四）：改稿指令（单独写，不经 resume 也能先把指令写好）
+          + 人工评分（旁路探针，**不进门禁**）。两者都挂在章节生命周期里，
+          与 delta 历史同级——都是「这一章的作者侧输入/记录」。 */}
+      {chapter ? (
+        <ChapterRevisionNoteSection
+          chapter={chapter}
+          onSaved={() => chapterCall.reload()}
+        />
+      ) : null}
+      {chapter ? <ChapterJudgeSection chapterId={chapter.chapter_id} /> : null}
 
       {/* V1.5：运行中横幅。RUNNING/PENDING 时显示节点进度 + 已运行时长；
           终态自动消失（FAILED 由 ErrorBanner 承载）。submitting 过渡期也显示，避免「按下无反馈」。 */}

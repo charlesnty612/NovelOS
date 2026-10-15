@@ -5,6 +5,97 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-15 批次（四）：G6 挂账 5 条 —— 剧透策略 / 弧光 / 人工评分 / 改稿指令 / what-if 推演）
+
+> **来源**：用户指令「继续做那 5 条挂账」——清偿批次（三）登记的 G6 剩余 5 条。
+> **纯前端批次，零后端改动**（这 5 条的端点本就存在，缺的是 UI 入口）。
+> **无迁移**。
+> **两条产品裁决由用户拍板**：① 剧情推演做「基于已有 delta 推演」而非 JSON 大文本框
+> （后端入参是「10 元字段 + 7 变更数组」的完整 Delta，作者手写不出来——给原始 JSON
+> 编辑器等于「有入口但作者用不了」，与 G1/G2/G3 同款）；② 弧光做独立 bible 页签
+> （它与 G9 概览聚合数据重叠，但 charge/payoff 节奏与 alerts 是 G9 没有的）。
+
+**11. 剧透策略** → 新 bible 页签「剧透策略」（`RevealTab`，19 例）。
+「这个秘密何时对谁揭开」：CRUD + 状态筛选。
+
+**12. 弧光** → 新 bible 页签「弧光」（`ArcTab`，18 例）。`GET /arc` 的只读看板。
+
+**13. 人工评分** → 章节页（`ChapterJudgeSection`，14 例）。四维 0-100 + 结论 + 最多 3 条问题。
+
+**14. 改稿指令** → 章节页（`ChapterRevisionNoteSection`，14 例）。给作者一个**在触发改稿之前**
+先写下指令的地方。
+
+**15. what-if 推演** → 概览页（`SimulationPanel`，32 例）。选章 → 读该章 delta → 挑一条作基底
+→ 白名单重建（换 `delta_id`）→ 结构化编辑四组业务字段 → 跑 → 看 diff。
+
+### ⚠️ 调研中复算出的后端真相（**全部经主会话亲自读码复算**，非转述）
+
+> 这一节是本批最有价值的留痕：**五条能力里有四条的真相比评估报告写的更危险**。
+> 评估报告只说「后端有、UI 零入口」，读码才发现「接上去之前必须先知道这些」。
+
+1. **推演继承 `supersedes` 会污染真实历史**。`commits.py:312-320` 的 `submit_delta` 会
+   `UPDATE state_deltas SET status='superseded' WHERE delta_id = ?` 指向被取代者
+   ⇒ 派生件若照抄 `supersedes`，跑一次推演就把**真实 delta 标成已废弃**。
+   `core/simulation/README.md` 那句「main 快照、领域表、commit 数全程零变化」**没有提这一条**。
+   对策：`deriveDelta` 用白名单重建并强制 `supersedes` 置空。
+2. **delta 端点返回的行比 schema 多一个 `status`**（`queries.py:155` 显式补的），
+   而 schema 是 `additionalProperties:false` ⇒ 原样回传 `/simulate` 必 422。
+   对策：白名单而非黑名单。
+3. **人工评分的越界分不返 422，是静默夹取**。`quality/service.py:243`：
+   `v = max(0, min(100, int(v)))`，只有非整数才 `ValueError`。
+   且 `verdict ≤50` / `top_issues ≤3×≤30` **后端零校验**（service 层原样保留）
+   ⇒ 只靠后端的话作者能存进一条超标记录。对策：前端夹取后**写回输入框**（否则作者填 150
+   看到的是 100 却不知情），长度校验在前端兜住。
+4. **`revision_note` 的写入方是 4 个不是 3 个**：本端点（`domain/chapter/service.py:539`）、
+   resume 驳回（`chapter_review/pipeline.py:1117`）、**质量门禁阻断**
+   （`chapter_commit/gate.py:288`）、reopen（`service.py:618`）。其中**只有 reopen 是追加**
+   （`existing + "\n" + "reopen: …"`），是全仓唯一保留历史的写入方。
+   ⇒ UI 绝不可呈现成「意见箱 / 笔记历史」。
+5. **`reveal_policies` 的两处反直觉**：列表查询参数叫 **`status_filter`**（router docstring
+   写的是 `?status=`，**以代码为准**）；`PATCH`/`DELETE` **完全忽略 URL 里的 `pid`**
+   （只按 `policy_id` 单查 ⇒ A 项目的策略能经 B 项目的 URL 被改掉）。
+   另：`create` 确实校验 target 存在，但 `SELECT 1 FROM <表> WHERE pk = ?` **不带 project 条件**
+   ⇒ 别的项目的实体 id 也能建策略（`service.py:352`）。
+6. **`GET /arc` 无 `response_model`**，且 `chapters[]` 里**没有 `chapter_id`**（后端显式 pop 掉）
+   ⇒ 拿它当行键或做跳转都会落空。
+
+### 手写契约类型（G10 的延续）
+
+这 5 条对应的 4 个 router body/response 全是**裸 `dict`** ⇒ 不进 OpenAPI ⇒
+`types.generated.ts` 永远不会生成。故在 `types.ts` 手写，并**逐组登记派生来源**
+（RevealPolicy ← `domain/knowledge/models.py:45`；ArcView ← `core/arc/service.py::build_arc_view`；
+SimulationResult ← `core/simulation/service.py:125`；StateDiff ← `story_state/snapshots.py:121`）。
+**刻意不用 `[key: string]: unknown` 索引签名**（G10 的病根），顶层字段一律必填。
+顺带补上 `QualityReport.judge`——**该字段此前根本不在类型里，而 `GET .../quality` 一直在返回它**，
+又一例「消费方有数据源但类型没跟上」。
+
+**挂账**：这 4 个 router 应补 Pydantic 模型并声明 `response_model`（`SnapshotResponse` 是先例）。
+⚠️ 但 `response_model` 会**过滤**未声明字段——补之前必须先核对实际返回的键集，
+否则静默丢字段（`tests/api/test_volume_membership_contract.py` 就是这个坑的看守）。
+
+### 页面接线判别（5 例）+ 突变验证 13/13
+
+组件自身测得再好，**页面不挂载就等于没有 UI**，而「把挂载整行删掉」不会让组件的任何一个
+用例变红。故补 5 例**接线判别**（概览 1 / 章节 2 / 设定页 2），判别点是面板**专属**的
+testid 与专属 API 调用。
+
+**`scripts/mutation_harness.py` 扩到 13 条**（新增 M8~M13 全部是接线突变：删 5 处挂载 +
+撤 1 处 URL 契约登记）。**13/13 全捕获**，逐条 SHA256 校验还原。
+
+⚠️ **M8 首轮存活，当场抓到一条不合格的判别用例**：首版接线用例断言
+`chaptersApi.listByProject` 被调用，而**总览页自己**（G9 的「写到第 N 章」）也调它
+⇒ 把 `<SimulationPanel>` 挂载整行删掉，该用例照样全绿。已改断言面板专属的
+`simulation-panel` testid + 只有面板才调的 `storyStateApi.listDeltas`，复跑转红。
+**这就是「断言了结果 ≠ 判别了机制」的原样复现**——判别点选错时，测试绿着而不测任何东西。
+⚠️ 同轮 **M9 被 `[ABORT]`**（锚点写的是 8 空格缩进、实际是 6 空格且带 `chapter ?` 包装），
+脚本的「锚点未命中即判自身缺陷、强制中止」按设计生效——若它记成「跳过」，这轮就会报成 12/13。
+
+**闸门**：vitest **734 passed**（632 → +102 = 5 个新测试文件 97 例 + 5 例接线）；
+`npx tsc -b` 零错；`npm run build` 通过（bundle 427.90 → 466.94 kB，gzip +12 kB）；
+`ruff` clean；pytest **3009 passed / 1 skipped / 0 failed**（347.72s，项目 .venv）——
+与批次（三）同数（本批零后端改动，指纹口径内只多了 `scripts/mutation_harness.py`）；
+**树指纹 529 文件跑测前后逐位一致**（`0ecb30d6…`）；突变残留 0（无 `.mutbak`、无突变标记）。
+
 ### Fixed（2026-10-15 批次（三）：G6~G10 —— 能力面接入 / 债逾期 / 概览页双口径 / 状态聚合 / 快照契约）
 
 > **来源**：用户指令「开工」——按 `NovelOS-Artifacts: docs/analysis/ui-business-logic-assessment-2026-10-15.md`

@@ -28,6 +28,7 @@ vi.mock('../api/endpoints', () => ({
     update: vi.fn(),
     createDraft: vi.fn(),
     reopenChapter: vi.fn(),
+    setRevisionNote: vi.fn(),
   },
   // 快通道（2026-10-14）：章节页要读项目级 fast_mode 并在开关变更时 PATCH。
   // 默认实现直接给「项目未开快通道」：本文件有 11 个 describe 各带一份 beforeEach，
@@ -49,6 +50,7 @@ vi.mock('../api/endpoints', () => ({
   },
   qualityApi: {
     latest: vi.fn(),
+    judge: vi.fn(),
   },
   workflowsApi: {
     listByProject: vi.fn(),
@@ -62,7 +64,10 @@ vi.mock('../api/endpoints', () => ({
     cancelRun: vi.fn(),
   },
   modelProfilesApi: {
-    list: vi.fn(),
+    // 默认给可 await 的空列表：章节页 mount 即调 list，未给默认值的 describe
+    // 会撞 `undefined.then`（本文件第 34 行那条注释记的就是这个坑）。
+    // 既有 describe 都各自 mockReset 过，不受此默认值影响。
+    list: vi.fn(async () => []),
     create: vi.fn(),
     update: vi.fn(),
     remove: vi.fn(),
@@ -3339,5 +3344,75 @@ describe('G5 接线：页面把「审完又改稿」算进提交按钮', () => {
     const btn = await waitFor(() => screen.getByTestId('wf-btn-commit'));
     await waitFor(() => expect(btn).toBeDisabled());
     expect(btn.getAttribute('title')).toContain('未审改动');
+  });
+});
+
+/**
+ * G6 挂账批次（四）：**页面接线**判别。
+ *
+ * ⚠️ 为什么单独一个 describe 而不改那 11 个既有 beforeEach：本文件每个 describe
+ * 各带一份完整 mock（历史原因），加两处要改 11 个地方、极易漏；独立块自带
+ * mock，判别力等价而改动面小得多。
+ *
+ * 判别点是「组件真的挂上了并发了请求」——**只断言 testid 存在是不够的**：
+ * 把页面里的挂载整行删掉，面板消失、其余 80 条用例仍全绿
+ * （同 AGENTS 坑区「断言了结果 ≠ 判别了机制」）。
+ */
+describe('ChapterDetailPage - G6 挂账批次（四）接线', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(chaptersApi.setRevisionNote).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter());
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    // 人工评分组件自带 qualityApi.latest 预读；给它 404 走「还没评审」分支。
+    // ⚠️ 必须抛**真** `ApiError`：组件判的是 `e instanceof ApiError && e.status === 404`，
+    // 抛普通 Error 带 status 字段会落到「加载失败」分支，于是 no-report 提示不渲染——
+    // 症状是「testid 找不到」，根因却在 mock 的类型上。
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw new ApiError(404, 'no quality report for chapter ch_001; run evaluate first');
+    });
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun);
+  });
+
+  it('改稿指令面板挂上了：渲染并回显 plan_json.revision_note', async () => {
+    vi.mocked(chaptersApi.get).mockResolvedValue(
+      baseChapter({ plan_json: { revision_note: '把打脸段写短一点' } }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-header')).toBeInTheDocument();
+    });
+    // 回显 ⇒ 读的是 chapter.plan_json，不是自己另存一份
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('把打脸段写短一点')).toBeInTheDocument();
+    });
+  });
+
+  it('人工评分面板挂上了：挂载即向 qualityApi.latest 取报告', async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(vi.mocked(qualityApi.latest)).toHaveBeenCalledWith('ch_001');
+    });
+    // 无报告 ⇒ 表单必须**真的 disabled**（不是藏起来、也不是能提交的空表单）：
+    // 「打不了分」这件事要在 DOM 上看得见，否则作者只会以为这里坏了。
+    // 用 testid 而非文案匹配：文案改字不该让接线判别用例红。
+    expect(await screen.findByTestId('judge-no-report')).toBeInTheDocument();
+    const pace = await screen.findByLabelText(/节奏/);
+    expect(pace).toBeDisabled();
   });
 });

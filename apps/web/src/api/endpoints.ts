@@ -53,6 +53,7 @@ import type {
   ModelProfileCreatePayload,
   ModelProfileTestResult,
   ModelProfileUpdatePayload,
+  ArcView,
   PlotEvent,
   PlotEventCreatePayload,
   Project,
@@ -63,10 +64,18 @@ import type {
   ProjectUpdatePayload,
   PromptVersion,
   QualityReport,
+  QualityJudgePayload,
+  QualityJudgeResponse,
   ReaderProfile,
   Relationship,
   ResumeRequestPayload,
+  RevealPolicy,
+  RevealPolicyCreate,
+  RevealPolicyStatus,
+  RevealPolicyUpdate,
   SigningCheckResult,
+  SimulationResult,
+  SimulationSummary,
   SnapshotResponse,
   StyleSample,
   StyleSampleCreatePayload,
@@ -371,6 +380,24 @@ export const chaptersApi = {
   // 同章有 RUNNING/PENDING run 时后端 409（活动 run 守卫，与 workflow start 同款）。
   reopenChapter: (cid: string, payload: { reason?: string | null } = {}) =>
     api.post<Chapter>(`/chapters/${cid}/reopen`, payload).then(normalizeChapter),
+
+  /**
+   * 单独写改稿意见（`PATCH /chapters/{cid}/revision-note`，body `{note}`）。
+   *
+   * ⚠️⚠️ **它与 resume 的 `human_input.note` 写的是同一个槽**：
+   *   `chapters.plan_json["revision_note"]`——`ChapterService.update_revision_note`
+   *   与 `workflows/chapter_review/pipeline.py:1117` 都往这里写，
+   *   **后写覆盖先写、无历史、无版本**。全仓有三个写入方（本端点 / resume / reopen）。
+   *
+   * ⇒ UI **不得**把它呈现成「作者笔记 / 意见箱」这类可累积的东西。
+   *   正确呈现是「改稿指令」：给作者一个在**触发改稿之前**先写下指令的地方，
+   *   并显示当前槽里已有的内容 + 标明它可能是上一次 resume 写进去的。
+   *
+   * ⚠️ 章节状态 ∉ {PLANNED, DRAFTED, REVIEWED} 时后端 409（已定稿章节锁死）。
+   * ⚠️ 纯空白 note = **删键**（不是存空串）。
+   */
+  setRevisionNote: (cid: string, note: string) =>
+    api.patch<Chapter>(`/chapters/${cid}/revision-note`, { note }).then(normalizeChapter),
 };
 
 // -------------------------------------------------------------- workflows
@@ -565,6 +592,19 @@ export const qualityApi = {
     api.post<QualityReport>(`/chapters/${cid}/quality/evaluate`, {}),
   listByProject: (pid: string) =>
     api.get<QualityReport[]>(`/projects/${pid}/quality`),
+
+  /**
+   * 人工评分（`POST /chapters/{cid}/quality/judge`，body 是裸 dict，无 schema）。
+   *
+   * ⚠️ **它只写 `quality_reports.judge_json` 一列，不写新行、不进任何门禁**：
+   *   `workflows/chapter_commit/gate.py` 与 `core/quality/engine.py` 零引用 judge，
+   *   它**不影响** `overall` / `scores_json` / `scoring_formula_hash`。
+   *   ⇒ UI 必须如实写明「这是你的记录，不会解除门禁」，否则作者会以为打完分就能提交。
+   * ⚠️ **必须先跑过 evaluate**：judge 只能挂在**已存在的最新报告行**上，
+   *   没有报告行时后端 422（「先跑 evaluate 再落 judge」）。
+   */
+  judge: (cid: string, payload: QualityJudgePayload) =>
+    api.post<QualityJudgeResponse>(`/chapters/${cid}/quality/judge`, payload),
 };
 
 // -------------------------------------------------------------- hooks / debts
@@ -877,4 +917,60 @@ export const deliveryApi = {
 
 export const signingCheckApi = {
   run: (pid: string) => api.get<SigningCheckResult>(`/projects/${pid}/signing-check`),
+};
+
+// ============================================================================
+// 2026-10-15 批次（四）：G6 挂账 5 条的端点封装
+// ============================================================================
+
+// ------------------------------------------------------------ 剧透策略
+// 对应 `packages/core/api/routers/reveal_policies.py`（body 是裸 dict，无 schema）。
+//
+// ⚠️ **后端两处反直觉行为，UI 必须按它写，不能按「应该是」写**：
+//   1. 列表的查询参数叫 **`status_filter`**，不是 `status`（router docstring 写的是
+//      `?status=`，代码用的是 `status_filter`——**以代码为准**）。
+//   2. `PATCH` / `DELETE` **完全忽略路径里的 `pid`**，只按 `policy_id` 单查
+//      ⇒ A 项目的策略能经 B 项目的 URL 被改掉/删掉。本仓 UI 只在项目内操作，
+//      但**不要在 UI 里写「已确认策略属于本项目」这类断言**——后端没这层保证。
+//   3. 项目不存在时是 **422**（不是 404），router docstring 与实现不符。
+export const revealPoliciesApi = {
+  list: (pid: string, statusFilter?: RevealPolicyStatus) =>
+    api.get<RevealPolicy[]>(
+      `/projects/${pid}/reveal-policies`,
+      statusFilter ? { status_filter: statusFilter } : undefined,
+    ),
+  create: (pid: string, payload: RevealPolicyCreate) =>
+    api.post<RevealPolicy>(`/projects/${pid}/reveal-policies`, payload),
+  update: (pid: string, policyId: string, payload: RevealPolicyUpdate) =>
+    api.patch<RevealPolicy>(`/projects/${pid}/reveal-policies/${policyId}`, payload),
+  remove: (pid: string, policyId: string) =>
+    api.delete<void>(`/projects/${pid}/reveal-policies/${policyId}`),
+};
+
+// ---------------------------------------------------------------- 弧光
+// 对应 `packages/core/api/routers/arc.py` 单个 GET。
+// ⚠️ 无 `response_model` ⇒ 不在 OpenAPI 里，类型是手写的（派生来源见 types.ts 注释）。
+// ⚠️ `chapters[]` 里**没有 chapter_id**（后端显式 pop 掉）——不要拿它当行键。
+export const arcApi = {
+  get: (pid: string) => api.get<ArcView>(`/projects/${pid}/arc`),
+};
+
+// ---------------------------------------------------------------- 推演
+// 对应 `packages/core/api/routers/simulation.py`。
+//
+// ⚠️ **不是只读**：每次 simulate 会留一条 `branches` 归档行 + 每 delta 一条
+// `state_deltas` + 每 delta 一条 `commits`（供重放）。main 快照与领域表全程不动
+// （`skip_all=True`，见 core/simulation/README.md）。
+// ⚠️ 失败也留残骸（已应用的部分 + 归档分支），**同名重跑会 409**。
+// ⚠️ HIGH 风险变更**绕过审批门**（`_skip_approval=True`），留痕标记
+//    `author_approval.status='simulation_bypassed'`。UI 必须如实告知作者。
+export const simulationApi = {
+  run: (pid: string, deltas: unknown[], name?: string) =>
+    api.post<SimulationResult>(`/projects/${pid}/simulate`, {
+      deltas,
+      ...(name ? { name } : {}),
+    }),
+  list: (pid: string) => api.get<SimulationSummary[]>(`/projects/${pid}/simulations`),
+  get: (pid: string, simulationId: string) =>
+    api.get<SimulationResult>(`/projects/${pid}/simulations/${simulationId}`),
 };

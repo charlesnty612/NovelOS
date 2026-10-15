@@ -865,6 +865,13 @@ export interface QualityReport {
   scores_json: QualityScores;
   issues_json: QualityIssue[];
   created_at: string;
+  /**
+   * 人工评分（后端 `_attach_judge` 从 `quality_reports.judge_json` 提到顶层）。
+   * ⚠️ 该字段此前**不在本类型里**，而 `GET .../quality` 一直在返回它——
+   *   又一处「消费方有数据源但类型没跟上」的欠定义。null = 尚未人工打分。
+   * ⚠️ 打分**不进任何门禁**（`chapter_commit/gate.py` 零引用），见 `qualityApi.judge`。
+   */
+  judge?: QualityJudgeRecord | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1680,4 +1687,219 @@ export interface DeliveryVerdictResponse {
   evidence_sources?: DeliveryEvidenceSource[];
   signing_check_scope?: string;
   chapters?: DeliveryChapter[];
+}
+
+// ============================================================================
+// 2026-10-15 批次（四）：G6 挂账 5 条的契约类型
+// ============================================================================
+//
+// ⚠️ **以下 5 组类型全部手写**，因为对应 router 的 body/response 都是裸 `dict`
+// （`reveal_policies.py` / `arc.py` / `simulation.py` / `quality.py` 的 judge 段），
+// OpenAPI 里**没有** schema ⇒ `types.generated.ts` 永远不会生成它们。
+//
+// 派生来源逐组登记（按 G10 纪律：手写契约必须写明它是从哪儿读出来的，
+// 否则就成了「不知道后端返回什么」的兜底）：
+//   - RevealPolicy      ← `packages/domain/knowledge/models.py:45` 的 `RevealPolicy.to_dict()`
+//   - ArcView           ← `packages/core/arc/service.py::build_arc_view` 返回 dict
+//   - SimulationResult  ← `packages/core/simulation/service.py:125` 的 `SimulationResult.to_dict()`
+//   - StateDiff         ← `packages/core/story_state/snapshots.py:121` 的 `diff_snapshots`
+//   - QualityJudge*     ← `packages/core/quality/service.py:198` 的 `save_judge_score`
+//
+// **刻意不用 `[key: string]: unknown` 索引签名**（G10 的病根）：快照内的元素是
+// 不透明 blob（按 character_id/hook_id 键），用 `Record<string, unknown>` 精确表达，
+// 而顶层字段一律必填——后端确实每次都返回它们。
+//
+// 挂账：这 4 个 router 应补 Pydantic 模型并声明 `response_model`
+// （`SnapshotResponse` 已是先例）。⚠️ 但 `response_model` 会**过滤**未声明字段——
+// 补模型前必须先核对实际返回的键集，否则会静默丢字段
+// （`tests/api/test_volume_membership_contract.py` 就是这个坑的看守）。
+
+/** 剧透策略的状态（对齐 DDL CHECK，迁移 0014_knowledge_reveal.sql）。 */
+export type RevealPolicyStatus = 'planned' | 'revealed' | 'cancelled';
+
+/** 被策略指向的实体种类。 */
+export type RevealTargetKind =
+  | 'character'
+  | 'location'
+  | 'faction'
+  | 'world_rule'
+  | 'event'
+  | 'hook'
+  | 'debt'
+  | 'relationship';
+
+/**
+ * 一条剧透策略：「这个秘密什么时候、对谁揭开」。
+ *
+ * ⚠️ 与「伏笔 hooks」**不是同一个东西**：hooks 是实体（可 CRUD，本仓有完整 UI），
+ * 一条 `target_kind='hook'` 的策略只是**指向**某个 hook_id、约定何时/对谁揭露它。
+ */
+export interface RevealPolicy {
+  policy_id: string;
+  project_id: string;
+  target_kind: RevealTargetKind;
+  target_id: string;
+  /** 计划在第几章前揭开；null = 未定。 */
+  reveal_by_chapter: number | null;
+  /** `reader`（读者）/ `character:<id>` / 逗号混写。 */
+  audience: string;
+  status: RevealPolicyStatus;
+  revealed_chapter: number | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RevealPolicyCreate {
+  target_kind: RevealTargetKind;
+  target_id: string;
+  reveal_by_chapter?: number | null;
+  audience?: string;
+  status?: RevealPolicyStatus;
+  revealed_chapter?: number | null;
+  notes?: string | null;
+}
+
+/** ⚠️ 后端只认这三个键，其余字段静默忽略。 */
+export interface RevealPolicyUpdate {
+  status?: RevealPolicyStatus;
+  revealed_chapter?: number | null;
+  notes?: string | null;
+}
+
+// ---------------------------------------------------------------- 弧光 / arc
+
+export interface ArcChapterRow {
+  number: number;
+  title: string;
+  has_payoff_beat: boolean;
+  charge_beat: boolean;
+  overall: number | null;
+  pacing: number | null;
+  prose_chars: number | null;
+  volume_id: string | null;
+  volume_number: number | null;
+  // ⚠️ 后端 `build_arc_view` 显式 pop 掉 chapter_id，故此处**没有**该字段——
+  // 不要在 UI 里拿它当行键或跳转目标。
+}
+
+export interface ArcVolumeRow {
+  volume_id: string;
+  number: number;
+  title: string | null;
+  status: string;
+  chapter_count: number;
+}
+
+export interface ArcOverdueReveal {
+  policy_id: string;
+  target_kind: string;
+  target_id: string;
+  reveal_by_chapter: number | null;
+  audience: string;
+}
+
+/** 节奏/伏笔告警。`level=fail` 的两条是硬信号，`warn` 是体检项。 */
+export interface ArcAlert {
+  level: 'warn' | 'fail';
+  code: string;
+  message: string;
+}
+
+export interface ArcView {
+  project_id: string;
+  generated_at: string;
+  chapters: ArcChapterRow[];
+  payoff: {
+    total: number;
+    charge_streak: number;
+    max_charge_streak: number;
+    last_payoff_chapter: number | null;
+  };
+  hooks: { open: number; resolved: number; overdue: number };
+  debts: { open: number; paid: number };
+  reveal_policies: {
+    planned: number;
+    revealed: number;
+    cancelled: number;
+    overdue: ArcOverdueReveal[];
+  };
+  volumes: ArcVolumeRow[];
+  alerts: ArcAlert[];
+}
+
+// ------------------------------------------------------------------ 推演
+
+/** 列表 diff 的元素是不透明快照 blob（按各自 id 键）。 */
+export interface SnapshotListDiff {
+  added?: Record<string, unknown>[];
+  removed?: Record<string, unknown>[];
+  changed?: Array<{ id: string; changes?: Record<string, { before: unknown; after: unknown }> }>;
+}
+
+/** ⚠️ 所有键都可能在为空时**整个省略**（`diff_snapshots` 用「空则不写」）。
+ * 读法必须是 `diff.hooks?.added?.length ?? 0`，不能假设存在。 */
+export interface StateDiff {
+  version_a?: number;
+  version_b?: number;
+  branch_id?: string | null;
+  characters?: SnapshotListDiff;
+  world?: Record<string, { before: unknown; after: unknown }>;
+  hooks?: SnapshotListDiff;
+  debts?: SnapshotListDiff;
+  events_changed?: Record<string, unknown>;
+  recent_events?: SnapshotListDiff;
+}
+
+export interface SimulationResult {
+  simulation_id: string;
+  branch_id: string;
+  name: string;
+  base_version: number;
+  /** 已成功应用的 delta 条数（失败时 = 部分应用数）。 */
+  applied: number;
+  diff: StateDiff;
+  issues: Array<{ index: number; errors: string[] }>;
+  branch_status: string;
+  created_at: string;
+}
+
+export interface SimulationSummary {
+  simulation_id: string;
+  branch_id: string;
+  name: string;
+  base_version: number;
+  status: string;
+  created_at: string;
+}
+
+// ------------------------------------------------------- 人工评分 / judge
+
+/** ⚠️ 四个维度后端**必填**且必须是 0-100 的整数，否则 422。 */
+export interface QualityJudgePayload {
+  pacing: number;
+  style: number;
+  logic: number;
+  dialogue: number;
+  /** 单条决议 ≤50 字。 */
+  verdict?: string;
+  /** 最多 3 条，每条 ≤30 字。 */
+  top_issues?: string[];
+}
+
+export interface QualityJudgeRecord {
+  pacing: number;
+  style: number;
+  logic: number;
+  dialogue: number;
+  verdict?: string | null;
+  top_issues?: string[] | null;
+  [k: string]: unknown;
+}
+
+export interface QualityJudgeResponse {
+  report_id: string;
+  chapter_id: string;
+  /** null = 该报告尚未被打分。 */
+  judge: QualityJudgeRecord | null;
 }

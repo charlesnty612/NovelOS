@@ -29,6 +29,14 @@ vi.mock('../api/endpoints', () => ({
     assign: vi.fn(),
   },
   relationshipsApi: { list: vi.fn() },
+  // G6 挂账批次（四）：弧光 / 剧透策略两个页签。同样漏 mock 会一挂载就崩。
+  arcApi: { get: vi.fn() },
+  revealPoliciesApi: {
+    list: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+    remove: vi.fn(),
+  },
   hooksApi: {
     listByProject: vi.fn(),
     create: vi.fn(),
@@ -59,6 +67,7 @@ vi.mock('../api/endpoints', () => ({
 }));
 
 import {
+  arcApi,
   chaptersApi,
   charactersApi,
   eventsApi,
@@ -67,11 +76,32 @@ import {
   locationsApi,
   referenceApi,
   relationshipsApi,
+  revealPoliciesApi,
   timelineApi,
   volumesApi,
   workflowsApi,
 } from '../api/endpoints';
 import { StoryBiblePage } from './StoryBiblePage';
+
+/**
+ * 弧光页签的最小可用载荷。
+ *
+ * ⚠️ 形状**照抄后端 `build_arc_view` 的返回**，不是照抄 UI 需要什么就造什么——
+ * 见 AGENTS 坑区「夹具从被测代码的实际输出里抄形状 ⇒ 缺陷被写进断言」：
+ * 少给一个键，组件里 `x.y.length` 就会在真实数据以外的路径上崩。
+ * 这里给的是**全空**形态（最容易被写成「忘了给」的样子），故每个键都显式写出。
+ */
+const EMPTY_ARC_VIEW = {
+  project_id: 'prj_1',
+  generated_at: '2026-10-15T00:00:00Z',
+  chapters: [],
+  payoff: { total: 0, charge_streak: 0, max_charge_streak: 0, last_payoff_chapter: null },
+  hooks: { open: 0, resolved: 0, overdue: 0 },
+  debts: { open: 0, paid: 0 },
+  reveal_policies: { planned: 0, revealed: 0, cancelled: 0, overdue: [] },
+  volumes: [],
+  alerts: [],
+};
 
 function LocationProbe() {
   const loc = useLocation();
@@ -113,6 +143,8 @@ describe('StoryBiblePage 页签 URL 化', () => {
     asMock(workflowsApi.listByProject).mockResolvedValue([]);
     asMock(volumesApi.list).mockResolvedValue([]);
     asMock(relationshipsApi.list).mockResolvedValue([]);
+    asMock(arcApi.get).mockResolvedValue(EMPTY_ARC_VIEW);
+    asMock(revealPoliciesApi.list).mockResolvedValue([]);
   });
 
   // G6：卷 / 人物关系页签进入 URL 契约。
@@ -132,6 +164,24 @@ describe('StoryBiblePage 页签 URL 化', () => {
       expect(relationshipsApi.list).toHaveBeenCalledWith('prj_1');
     });
     expect(screen.getByTestId('tab-relationships')).toHaveAttribute('aria-selected', 'true');
+  });
+
+  // G6 挂账批次（四）。判别点同上：页签真的挂载并发了请求，
+  // 只断言 testid 存在的话，把渲染分支整段删掉照样绿。
+  it('?tab=arc 直接渲染弧光页签', async () => {
+    renderAt('/projects/prj_1/bible?tab=arc');
+    await waitFor(() => {
+      expect(arcApi.get).toHaveBeenCalledWith('prj_1');
+    });
+    expect(screen.getByTestId('tab-arc')).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('?tab=reveal 直接渲染剧透策略页签', async () => {
+    renderAt('/projects/prj_1/bible?tab=reveal');
+    await waitFor(() => {
+      expect(revealPoliciesApi.list).toHaveBeenCalled();
+    });
+    expect(screen.getByTestId('tab-reveal')).toHaveAttribute('aria-selected', 'true');
   });
 
   it('?tab=world 直接渲染世界页签（刷新 / 分享场景）', async () => {

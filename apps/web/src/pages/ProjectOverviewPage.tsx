@@ -10,6 +10,7 @@ import { StyleSamplesPanel } from '../components/StyleSamplesPanel';
 import { BranchesPanel } from '../components/BranchesPanel';
 import { StateHistoryPanel } from './StateHistoryPanel';
 import { DeliveryPanel } from './DeliveryPanel';
+import { SimulationPanel } from './SimulationPanel';
 import { useApiCall } from '../hooks/useApiCall';
 import {
   backupApi,
@@ -188,6 +189,11 @@ export function ProjectOverviewPage() {
 
       {/* G6：交付判定 + 签约自检（schema 早已生成，UI 此前不接）。 */}
       <DeliveryPanel projectId={projectId} />
+
+      {/* G6 挂账批次（四）：what-if 推演。⚠️ 它**不是只读**——每次跑留一条归档
+          分支 + deltas + commits（供重放），且 HIGH 风险绕过审批门。
+          放在交付判定之后：两者都是「这本书现在什么状态」的外部视角。 */}
+      <SimulationPanel projectId={projectId} />
 
       {/* V1.4 / Sprint 16：导出（整书 / 单章 / 番茄投稿包） */}
       <ExportPanel projectId={projectId} />

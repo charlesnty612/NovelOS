@@ -7,10 +7,12 @@ import { PlotTab } from './bible/PlotTab';
 import { LedgerTab } from './bible/LedgerTab';
 import { RelationshipsTab } from './bible/RelationshipsTab';
 import { VolumesTab } from './bible/VolumesTab';
+import { ArcTab } from './bible/ArcTab';
+import { RevealTab } from './bible/RevealTab';
 import { GenreTab } from './bible/GenreTab';
 
 // tab 清单即 URL 契约：?tab=<key>（characters / world / plot / ledger / canon / genre
-// / relationships / volumes）。
+// / relationships / volumes / arc / reveal）。
 //
 // ⚠️ 新增 key 即新增一条 URL 契约：`isBibleTab` 是白名单校验，漏登记会让该 tab
 // 直接被重定向回默认页（表现为「点标签跳回角色页」而不是报错）。
@@ -24,6 +26,10 @@ const BIBLE_TABS = [
   // 评估 G6：卷与人物关系此前零 UI 入口。
   { key: 'volumes', label: '卷' },
   { key: 'relationships', label: '人物关系' },
+  // G6 挂账批次（四）：弧光是 5 表现场汇总的只读看板（**不是实体**），
+  // 剧透策略维护「这个秘密何时对谁揭开」。两者都是纯读/轻写，挂在设定页下。
+  { key: 'arc', label: '弧光' },
+  { key: 'reveal', label: '剧透策略' },
 ] as const;
 
 type BibleTab = (typeof BIBLE_TABS)[number]['key'];
@@ -125,6 +131,8 @@ export function StoryBiblePage() {
         {activeTab === 'genre' ? <GenreTab projectId={projectId} /> : null}
         {activeTab === 'volumes' ? <VolumesTab projectId={projectId} /> : null}
         {activeTab === 'relationships' ? <RelationshipsTab projectId={projectId} /> : null}
+        {activeTab === 'arc' ? <ArcTab projectId={projectId} /> : null}
+        {activeTab === 'reveal' ? <RevealTab projectId={projectId} /> : null}
       </div>
     </div>
   );
