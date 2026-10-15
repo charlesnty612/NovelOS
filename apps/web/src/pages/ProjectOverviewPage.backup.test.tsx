@@ -45,12 +45,16 @@ const baseProject: Project = {
 
 const baseHealth: HealthResponse = { status: 'ok', version: '0.1.0', tables: { chapters: 1 } };
 const baseSnapshot = {
-  characters: {},
-  world: {},
-  hooks: [],
-  debts: [],
-  events: [],
-  recent_events: [],
+  state_version: 12,
+  // ⚠️ 形状必须照抄后端 `core/story_state/models.py::SnapshotResponse`，
+  // 不得照抄旧归一化层的输出——后者把 characters（list）拍成 {}、把 events（dict）
+  // 拍成 []，**夹具照抄它就等于把 bug 钉成期望值**，恒零的两个统计永远抓不到。
+  characters: [{ character_id: 'chr_1', name: '林昭' }],
+  world: { locations: {}, factions: {}, world_rules: [] },
+  hooks: [{ hook_id: 'hk_1', name: '三年之约', status: 'ACTIVE' }],
+  debts: [{ debt_id: 'db_1', description: '欠下的人情', status: 'open' }],
+  events: { evt_1: { event_id: 'evt_1' }, evt_2: { event_id: 'evt_2' } },
+  recent_events: [{ event_id: 'evt_2' }],
 };
 const baseCommits: Commit[] = [];
 const baseStyles: StyleSample[] = [];

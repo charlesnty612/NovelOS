@@ -5,9 +5,15 @@ import { CharacterTab } from './bible/CharacterTab';
 import { WorldTab } from './bible/WorldTab';
 import { PlotTab } from './bible/PlotTab';
 import { LedgerTab } from './bible/LedgerTab';
+import { RelationshipsTab } from './bible/RelationshipsTab';
+import { VolumesTab } from './bible/VolumesTab';
 import { GenreTab } from './bible/GenreTab';
 
-// tab 清单即 URL 契约：?tab=<key>（characters / world / plot / ledger / canon / genre）。
+// tab 清单即 URL 契约：?tab=<key>（characters / world / plot / ledger / canon / genre
+// / relationships / volumes）。
+//
+// ⚠️ 新增 key 即新增一条 URL 契约：`isBibleTab` 是白名单校验，漏登记会让该 tab
+// 直接被重定向回默认页（表现为「点标签跳回角色页」而不是报错）。
 const BIBLE_TABS = [
   { key: 'characters', label: '角色' },
   { key: 'world', label: '世界' },
@@ -15,6 +21,9 @@ const BIBLE_TABS = [
   { key: 'ledger', label: '伏笔与债务' },
   { key: 'canon', label: '参照系' },
   { key: 'genre', label: '题材' },
+  // 评估 G6：卷与人物关系此前零 UI 入口。
+  { key: 'volumes', label: '卷' },
+  { key: 'relationships', label: '人物关系' },
 ] as const;
 
 type BibleTab = (typeof BIBLE_TABS)[number]['key'];
@@ -114,6 +123,8 @@ export function StoryBiblePage() {
         {activeTab === 'ledger' ? <LedgerTab projectId={projectId} /> : null}
         {activeTab === 'canon' ? <CanonTab projectId={projectId} /> : null}
         {activeTab === 'genre' ? <GenreTab projectId={projectId} /> : null}
+        {activeTab === 'volumes' ? <VolumesTab projectId={projectId} /> : null}
+        {activeTab === 'relationships' ? <RelationshipsTab projectId={projectId} /> : null}
       </div>
     </div>
   );

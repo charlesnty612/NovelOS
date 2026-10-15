@@ -26,6 +26,11 @@
 
 设计要点：
 - 复用 ``discover_routers`` 自动发现机制：模块顶层定义 ``router`` 即可被 main.py 挂载到 ``/api`` 前缀。
+- 2026-10-15 起 ``GET .../state`` 与 ``GET .../state/versions/{n}`` 声明
+  ``response_model=SnapshotResponse``（``core/story_state/models.py``）——此前是裸 ``dict``，
+  OpenAPI 里没有 schema，前端只能手写欠定义类型并配一层手写归一化，那层归一化把
+  ``characters``（list）与 ``events``（dict）的形状拍反，导致概览页两个统计项恒为 0。
+  契约补上后，前端归一化层可整层删除（见该模型 docstring）。
 - 路由内部不开连接：所有 DB 操作委派 ``StoryStateService``（与 S1 services 一致）。
 - 路径参数 ``pid`` / ``cid`` 仅作路由层校验：项目不存在时由 service 阶段抛 StateNotFoundError
   转 404；端点 /projects/{pid}/state/init 与 /projects/{pid}/state 在 project 缺失时返回 404，
@@ -49,6 +54,7 @@ from packages.core.story_state.exceptions import (
     StateConflictError,
     StateNotFoundError,
 )
+from packages.core.story_state.models import SnapshotResponse
 
 log = get_logger("novelos.routers.story_state")
 
@@ -82,7 +88,7 @@ def init_state(project_id: str, payload: dict, request: Request) -> dict:
     return _service(request).init_genesis(project_id, chapter_id)
 
 
-@router.get("/projects/{project_id}/state")
+@router.get("/projects/{project_id}/state", response_model=SnapshotResponse)
 def get_state(project_id: str, request: Request, branch_id: str | None = None) -> dict:
     _ensure_project(request, project_id)
     try:
@@ -91,7 +97,10 @@ def get_state(project_id: str, request: Request, branch_id: str | None = None) -
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.get("/projects/{project_id}/state/versions/{version}")
+@router.get(
+    "/projects/{project_id}/state/versions/{version}",
+    response_model=SnapshotResponse,
+)
 def get_state_version(project_id: str, version: int, request: Request) -> dict:
     _ensure_project(request, project_id)
     snap = _service(request).get_snapshot(project_id, version)

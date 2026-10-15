@@ -17,8 +17,18 @@ vi.mock('../api/endpoints', () => ({
   factionsApi: { list: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
   worldRulesApi: { list: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
   eventsApi: { list: vi.fn(), create: vi.fn(), delete: vi.fn() },
-  timelineApi: { list: vi.fn() },
+  timelineApi: { list: vi.fn(), remove: vi.fn() },
   chaptersApi: { listByProject: vi.fn() },
+  // G6 新增两个页签；漏 mock 会落到模块未定义 → 组件一挂载就崩。
+  volumesApi: {
+    list: vi.fn(),
+    create: vi.fn(),
+    get: vi.fn(),
+    update: vi.fn(),
+    seal: vi.fn(),
+    assign: vi.fn(),
+  },
+  relationshipsApi: { list: vi.fn() },
   hooksApi: {
     listByProject: vi.fn(),
     create: vi.fn(),
@@ -56,7 +66,9 @@ import {
   hooksApi,
   locationsApi,
   referenceApi,
+  relationshipsApi,
   timelineApi,
+  volumesApi,
   workflowsApi,
 } from '../api/endpoints';
 import { StoryBiblePage } from './StoryBiblePage';
@@ -99,6 +111,27 @@ describe('StoryBiblePage 页签 URL 化', () => {
     asMock(genreApi.getBinding).mockResolvedValue(null);
     asMock(genreApi.listPacks).mockResolvedValue([]);
     asMock(workflowsApi.listByProject).mockResolvedValue([]);
+    asMock(volumesApi.list).mockResolvedValue([]);
+    asMock(relationshipsApi.list).mockResolvedValue([]);
+  });
+
+  // G6：卷 / 人物关系页签进入 URL 契约。
+  // 判别点是**页签真的挂载并发了请求**——只断言 testid 存在的话，
+  // 把渲染分支整段删掉也照样绿（标签在，面板不在）。
+  it('?tab=volumes 直接渲染卷页签（刷新 / 分享场景）', async () => {
+    renderAt('/projects/prj_1/bible?tab=volumes');
+    await waitFor(() => {
+      expect(volumesApi.list).toHaveBeenCalledWith('prj_1');
+    });
+    expect(screen.getByTestId('tab-volumes')).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('?tab=relationships 直接渲染人物关系页签', async () => {
+    renderAt('/projects/prj_1/bible?tab=relationships');
+    await waitFor(() => {
+      expect(relationshipsApi.list).toHaveBeenCalledWith('prj_1');
+    });
+    expect(screen.getByTestId('tab-relationships')).toHaveAttribute('aria-selected', 'true');
   });
 
   it('?tab=world 直接渲染世界页签（刷新 / 分享场景）', async () => {

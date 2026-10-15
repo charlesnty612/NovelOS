@@ -30,6 +30,7 @@ import type {
   Debt,
   DebtCreatePayload,
   DebtUpdatePayload,
+  DeliveryVerdictResponse,
   DeconstructPayload,
   DeconstructStartResponse,
   Draft,
@@ -63,12 +64,18 @@ import type {
   PromptVersion,
   QualityReport,
   ReaderProfile,
+  Relationship,
   ResumeRequestPayload,
+  SigningCheckResult,
   SnapshotResponse,
   StyleSample,
   StyleSampleCreatePayload,
   SyncPromptsResult,
   TimelineEvent,
+  Volume,
+  VolumeCreatePayload,
+  VolumeListItem,
+  VolumeUpdatePayload,
   WorldEntity,
   WorldEntityPayload,
   WorkflowRun,
@@ -178,64 +185,151 @@ function normalizeEvent(row: PlotEvent): PlotEvent {
 
 export const timelineApi = {
   list: (pid: string) => api.get<TimelineEvent[]>(`/projects/${pid}/timeline`),
+  /**
+   * 删时间线条目（`DELETE /timeline/{id}`）。
+   *
+   * 评估 G6：此前 PlotTab 的时间线**只读**——作者误建（重复日、临时占位）之后
+   * 没有别的清理路径，只能改库。后端已有该端点，且返回 204。
+   * 不可撤销：UI 侧不给「撤销」，改用二次确认（见 PlotTab）。
+   */
+  remove: (timelineId: string) => api.delete<void>(`/timeline/${timelineId}`),
+};
+
+// -------------------------------------------------------------- 人物关系表（只读）
+/**
+ * `relationships` **表**的有向成对关系（`GET /projects/{pid}/relationships`）。
+ *
+ * ⚠️ 与 `Character.relationships`（角色 core JSON 的自由字段，CharacterTab 可编辑）
+ * 同名不同物：本表由 State Delta 的 `relationship_changes` 驱动写入，只读端点
+ * 来自 Sprint 1。dev 库实测 54 行而后端此前零 UI 入口（评估 G6）。
+ */
+export const relationshipsApi = {
+  list: (pid: string) => api.get<Relationship[]>(`/projects/${pid}/relationships`),
+};
+
+// -------------------------------------------------------------- 卷（G6）
+/**
+ * 卷（`volumes` 表）。**卷与章节的隶属关系此前在 UI 上完全不存在**——
+ * 作者能建卷能封卷（后端 6 个端点全在），但看不到任何一章属于哪一卷。
+ *
+ * ⚠️ `seal` 是**不可逆**的终态动作：封存会把当时的故事状态快照冻结进
+ * `terminal_snapshot_json`，且此后该卷拒绝挂章、`sealed → active` 反向跳变被后端
+ * 拒（409）。UI 必须二次确认，且**不提供**「解封」按钮（后端也不支持）。
+ */
+export const volumesApi = {
+  list: (pid: string) => api.get<VolumeListItem[]>(`/projects/${pid}/volumes`),
+  create: (pid: string, payload: VolumeCreatePayload) =>
+    api.post<Volume>(`/projects/${pid}/volumes`, payload),
+  get: (pid: string, volumeId: string) =>
+    api.get<Volume>(`/projects/${pid}/volumes/${volumeId}`),
+  update: (pid: string, volumeId: string, payload: VolumeUpdatePayload) =>
+    api.patch<Volume>(`/projects/${pid}/volumes/${volumeId}`, payload),
+  seal: (pid: string, volumeId: string) =>
+    api.post<Volume>(`/projects/${pid}/volumes/${volumeId}/seal`, {}),
+  assign: (pid: string, volumeId: string, chapterId: string) =>
+    api.post<Volume>(`/projects/${pid}/volumes/${volumeId}/assign`, { chapter_id: chapterId }),
 };
 
 // -------------------------------------------------------------- state / commits / health
 export const storyStateApi = {
-  getCurrent: (pid: string) =>
-    api.get<SnapshotResponse>(`/projects/${pid}/state`).then((snap) => {
-      const normArr = (v: unknown): unknown[] => {
-        const x = coerceJson(v);
-        return Array.isArray(x) ? x : [];
-      };
-      const normObj = (v: unknown): Record<string, unknown> => {
-        const x = coerceJson(v);
-        if (x && typeof x === 'object' && !Array.isArray(x)) {
-          return x as Record<string, unknown>;
-        }
-        return {};
-      };
-      return {
-        ...snap,
-        characters: normObj(snap.characters),
-        world: normObj(snap.world),
-        hooks: normArr(snap.hooks),
-        debts: normArr(snap.debts),
-        events: normArr(snap.events),
-        recent_events: normArr(snap.recent_events),
-      };
+  /**
+   * 取当前 Canonical State（main；传 branch_id 时取分支视角）。
+   *
+   * ⚠️ **不要在这里加归一化层**（2026-10-15 移除，理由是被它咬过）：
+   * 这条端点**此前**有一层 `normArr` / `normObj` 手写归一化，把六个字段按猜测的
+   * 形状拍一遍——而后端 `snapshots.latest_snapshot_version` 早已用
+   * `_parse_required_json` 把 `story_states.snapshot_json`（TEXT 列）解析成
+   * dict 再返回，**归一化是纯损失**。它真正的伤害是两个**恒为 0** 的统计项：
+   *   - `characters` 后端是 **list**，被 `normObj` 拍成 `{}`
+   *   - `events` 后端是 **dict**（按 event_id 键），被 `normArr` 拍成 `[]`
+   * 概览页「角色」与「事件·累计」因此常年 0，且无任何告警。
+   *
+   * 归一化之所以存在，是因为 `types.ts` 的 `SnapshotResponse` 是欠定义类型（全
+   * optional + `[key: string]: unknown` + 并列着后端从不返回的 `version`）。
+   * 该类型已按后端 `core/story_state/models.py::SnapshotResponse` 契约重写，
+   * **`response_model` 保证形状**，前端不需要再猜。
+   */
+  getCurrent: (pid: string, branchId?: string) =>
+    api.get<SnapshotResponse>(`/projects/${pid}/state`, {
+      branch_id: branchId,
     }),
-  // V1.5 / Sprint 17：分支视角 state。复用了与 main 完全一致的 normalize 流程；
-  // 形态与 getCurrent 同构；404 时 BranchNotFound 抛 ApiError。
+  // V1.5 / Sprint 17：分支视角 state。形态与 getCurrent 同构（同一端点、同一
+   // response_model）；404 时 BranchNotFound 抛 ApiError。
   getBranchState: (pid: string, branchId: string) =>
-    api
-      .get<SnapshotResponse>(`/projects/${pid}/state`, { branch_id: branchId })
-      .then((snap) => {
-        const normArr = (v: unknown): unknown[] => {
-          const x = coerceJson(v);
-          return Array.isArray(x) ? x : [];
-        };
-        const normObj = (v: unknown): Record<string, unknown> => {
-          const x = coerceJson(v);
-          if (x && typeof x === 'object' && !Array.isArray(x)) {
-            return x as Record<string, unknown>;
-          }
-          return {};
-        };
-        return {
-          ...snap,
-          characters: normObj(snap.characters),
-          world: normObj(snap.world),
-          hooks: normArr(snap.hooks),
-          debts: normArr(snap.debts),
-          events: normArr(snap.events),
-          recent_events: normArr(snap.recent_events),
-        };
-      }),
+    api.get<SnapshotResponse>(`/projects/${pid}/state`, { branch_id: branchId }),
+
+  /** 该章 observer 抽出的全部状态变更（append-only 历史，按 created_at ASC）。 */
+  listDeltas: (pid: string, chapterId: string) =>
+    api.get<StateDeltaRow[]>(`/projects/${pid}/chapters/${chapterId}/deltas`),
+
+  /** 指定快照（与 getCurrent 同构，有 response_model）。 */
+  getVersion: (pid: string, version: number) =>
+    api.get<SnapshotResponse>(`/projects/${pid}/state/versions/${version}`),
+
+  /** 两个 state_version 之间的结构化 diff（main 路径；分支视角不支持）。 */
+  diff: (pid: string, a: number, b: number) =>
+    api.get<StateDiffResponse>(`/projects/${pid}/state/diff`, { a, b }),
 };
+
+/**
+ * `GET /projects/{pid}/chapters/{cid}/deltas` 的行形状。
+ *
+ * ⚠️ 该端点**没有 response_model**（2026-10-15 时），返回裸 dict；这里只声明
+ * 章节侧面板真正读到的键，其余键由 `[k: string]: unknown` 兜住。与 SnapshotResponse
+ * 不同——那份的形状是硬契约（写进了 `state_delta.schema.json` 并由后端 model 固定），
+ * 这份的 17 个顶层键全部来自 schema，形状稳定，但**类型尚未由后端强制**，
+ * 故保持宽松而不是假装严格。
+ */
+export interface StateDeltaRow {
+  delta_id?: string;
+  chapter_id?: string;
+  workflow_run_id?: string | null;
+  previous_state_version?: number;
+  created_by?: string | null;
+  created_at?: string;
+  status?: string;
+  notes?: string | null;
+  character_changes?: unknown[];
+  world_changes?: unknown[];
+  relationship_changes?: unknown[];
+  new_events?: unknown[];
+  new_hooks?: unknown[];
+  resolved_hooks?: unknown[];
+  debt_changes?: unknown[];
+  [k: string]: unknown;
+}
+
+/**
+ * `GET /projects/{pid}/state/diff` 的返回结构（见
+ * `packages/core/story_state/queries.py::diff_versions` docstring）。
+ * 同样无 response_model，故声明为已知的形状 + 兜底索引签名。
+ */
+export interface StateDiffResponse {
+  version_a?: number;
+  version_b?: number;
+  branch_id?: string | null;
+  characters?: { changed?: unknown[]; added?: unknown[]; removed?: unknown[] };
+  hooks?: { changed?: unknown[]; added?: unknown[]; removed?: unknown[] };
+  debts?: { changed?: unknown[]; added?: unknown[]; removed?: unknown[] };
+  events_changed?: Record<string, unknown>;
+  [k: string]: unknown;
+}
 
 export const commitsApi = {
   list: (pid: string) => api.get<Commit[]>(`/projects/${pid}/commits`),
+  /**
+   * 回滚某个 commit（`POST /commits/{cid}/rollback`）。
+   *
+   * ⚠️ **高风险 delta 需要显式批准**：后端对 HIGH 风险的 observer 变更抛
+   * `ApprovalRequiredError` → 409 `{"error": "approval_required",
+   * "high_risk_change_ids": [...]}`。UI 必须在把 change id 摆给作者看之后才发
+   * `author_approval`——「不许在不知道批准什么的情况下批准」（与质量门禁
+   * `gate_override` 同一原则）。
+   */
+  rollback: (commitId: string, authorApproval?: Record<string, unknown>) =>
+    api.post<Record<string, unknown>>(`/commits/${commitId}/rollback`, {
+      author_approval: authorApproval ?? {},
+    }),
 };
 
 export const healthApi = {
@@ -764,4 +858,23 @@ export const continuationApi = {
       `/projects/${pid}/chapters/${cid}/continue/adopt`,
       payload,
     ),
+};
+
+// -------------------------------------------------------------- 交付判定 + 签约自检
+/**
+ * 交付判定与签约自检（评估 G6：schema 早已生成、UI 不接）。
+ *
+ * 两者**都是纯只读 GET**，且 signing-check 是 delivery-verdict 的证据源之一
+ * （`roll_up` 与逐章 `signing` 都引它），因此放在一起、共用一次说明文案。
+ *
+ * ⚠️ 判定是**派生视图**：每次 GET 现算，不落库。UI 不得把它当成可编辑状态，
+ * 也**不得**在本地缓存跨会话复用（重复测量会给出不同数字）。
+ */
+export const deliveryApi = {
+  verdict: (pid: string) =>
+    api.get<DeliveryVerdictResponse>(`/projects/${pid}/delivery-verdict`),
+};
+
+export const signingCheckApi = {
+  run: (pid: string) => api.get<SigningCheckResult>(`/projects/${pid}/signing-check`),
 };

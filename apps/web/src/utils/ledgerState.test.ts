@@ -9,6 +9,7 @@ import {
   getNextDebtStatuses,
   getNextHookStatuses,
   isDebtTransitionAllowed,
+  isDebtOverdue,
   isHookOverdue,
   isHookTransitionAllowed,
   safeGetNextDebtStatuses,
@@ -239,5 +240,72 @@ describe('isHookOverdue', () => {
         [],
       ),
     ).toBe(false);
+  });
+});
+
+// G7（2026-10-15）：债的逾期判定，与 isHookOverdue 逐条对称。
+// 改动前台账页只给伏笔判逾期，债的 deadline_chapter_id 只渲染成「第 N 章」文本。
+// 本组用例与上方 isHookOverdue 组**逐条同形**，便于对照判别口径是否漂移。
+describe('isDebtOverdue', () => {
+  // 比 isHookOverdue 组多一章 c30：没有「已排但尚未写到」的章时，
+  // 「还没到期」这一档在本仓无法被构造（我第一版就误把 c10 当成未来章）。
+  const chapters = [
+    { chapter_id: 'c1', number: 1 },
+    { chapter_id: 'c5', number: 5 },
+    { chapter_id: 'c10', number: 10 },
+    { chapter_id: 'c20', number: 20 },
+    { chapter_id: 'c30', number: 30 },
+  ];
+  // 当前最大章号 = 30；逾期判据是「截止章号 < 30」。
+
+  it('paid 不算逾期（终态）', () => {
+    expect(isDebtOverdue({ status: 'paid', deadline_chapter_id: 'c5' }, chapters)).toBe(false);
+  });
+  it('forgiven 不算逾期（终态）', () => {
+    expect(isDebtOverdue({ status: 'forgiven', deadline_chapter_id: 'c5' }, chapters)).toBe(false);
+  });
+  it('open 且截止章 < 最大章号 → 逾期', () => {
+    expect(isDebtOverdue({ status: 'open', deadline_chapter_id: 'c5' }, chapters)).toBe(true);
+  });
+  it('「截止于已写到的最后一章」本身不判逾期——判据是严格小于', () => {
+    // 边界守卫：< 与 <= 分岔就在这一条上（与 G5 的时间比较同款边界）。
+    expect(isDebtOverdue({ status: 'open', deadline_chapter_id: 'c20' }, chapters)).toBe(true);
+  });
+  it('acknowledged 且截止章 < 最大章号 → 同样逾期（认领了不等于还了）', () => {
+    expect(
+      isDebtOverdue({ status: 'acknowledged', deadline_chapter_id: 'c5' }, chapters),
+    ).toBe(true);
+  });
+  it('截止章 == 最大章号 → 不逾期（严格小于，与伏笔同口径）', () => {
+    expect(isDebtOverdue({ status: 'open', deadline_chapter_id: 'c30' }, chapters)).toBe(false);
+  });
+  it('截止章 > 最大章号 → 不逾期（还没到期）', () => {
+    expect(isDebtOverdue({ status: 'open', deadline_chapter_id: 'c30' }, chapters)).toBe(false);
+  });
+  it('deadline 为 null → 不逾期（未约定）', () => {
+    expect(isDebtOverdue({ status: 'open', deadline_chapter_id: null }, chapters)).toBe(false);
+  });
+  it('deadline 指向不存在的章 → 不逾期', () => {
+    expect(isDebtOverdue({ status: 'open', deadline_chapter_id: 'nope' }, chapters)).toBe(false);
+  });
+  it('chapters 为空 → 不逾期', () => {
+    expect(isDebtOverdue({ status: 'open', deadline_chapter_id: 'c1' }, [])).toBe(false);
+  });
+
+  // 判别用例：与 isHookOverdue 的同一条边界对照，防止两条判据悄悄分叉。
+  it('与 isHookOverdue 在同一条边界上给出一致答案', () => {
+    for (const target of ['c1', 'c5', 'c10', 'c20']) {
+      expect(isDebtOverdue({ status: 'open', deadline_chapter_id: target }, chapters)).toBe(
+        isHookOverdue({ status: 'OPEN', expected_payoff_chapter_id: target }, chapters),
+      );
+    }
+  });
+
+  // 未知 status 按「非终态」处理（fail-open）。快照行是 Record<string, unknown>，
+  // 后端将来加新状态时不应让待办整列消失。
+  it('未知 status 当作未偿清（fail-open：宁可多提醒一次）', () => {
+    expect(isDebtOverdue({ status: 'weird_new_status', deadline_chapter_id: 'c1' }, chapters)).toBe(
+      true,
+    );
   });
 });

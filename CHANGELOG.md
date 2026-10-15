@@ -5,6 +5,108 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-15 批次（三）：G6~G10 —— 能力面接入 / 债逾期 / 概览页双口径 / 状态聚合 / 快照契约）
+
+> **来源**：用户指令「开工」——按 `NovelOS-Artifacts: docs/analysis/ui-business-logic-assessment-2026-10-15.md`
+> 的 G6~G10 五条落地（接续批次一 G1~G3、批次二 G4~G5）。
+> **本批是三批里第一个带后端改动的**：G1~G5 全是纯前端（树指纹 `ab46b608…` 前后逐位一致），
+> 本批因 G10 要补 `response_model` 才动后端，改动面 = 新增 1 个 schema 模型 + 2 处端点声明。
+> **无迁移**（业务表数仍 39）。
+
+**6. G6 状态机能力面远宽于 UI 面**——评估列出 13 条「后端有实现、前端零入口」的能力，
+本批接了 **8 条**（`endpoints.ts` 新增 **16 处端点绑定 / 13 个唯一 URL**）：
+
+| 能力 | 端点 | 落点 |
+|---|---|---|
+| 回滚 | `POST /commits/{}/rollback` | `StateHistoryPanel` |
+| 版本回溯 | `GET /state/versions/{v}`、`GET /state/diff` | `StateHistoryPanel` |
+| 单章 delta | `GET /chapters/{}/deltas` | `ChapterDeltasSection` |
+| 卷 | 6 端点（列表/建/详情/改/seal/assign） | `VolumesTab` |
+| 人物关系图 | `GET /relationships` | `RelationshipsTab` |
+| 交付判定 + 签约自检 | `GET /delivery-verdict`、`GET /signing-check` | `DeliveryPanel` |
+| 时间线删除 | `DELETE /timeline/{id}` | `PlotTab`（timeline 此前只读） |
+
+外加 `ChapterDeliveryActions`（章节 `COMMITTED ⇄ RELEASED` 标记）——**这条不算 G6 接线**：
+它用的 `PATCH /chapters/{cid}` 与 `ChapterUpdatePayload.status` 经查都是**既有面**
+（`git show HEAD:apps/web/src/api/endpoints.ts` 命中），本批只是补了 UI 入口，
+故不计入上面 8 条，也不进挂账。
+
+⚠️ **挂账 5 条**（本批不做，留档待排期）：剧透策略 `reveal_policies` 4 端点 /
+剧情推演 `simulation` 3 端点 / 弧光结构 `GET /arc` / 人工评分 `POST /chapters/{}/quality/judge` /
+改稿意见单独写 `PATCH /chapters/{}/revision-note`。
+判别：`grep -c` 五个路径关键词于 `apps/web/src/api/endpoints.ts` 均返回 0（`arc` 有 `format` 误报，
+实际同样未接）。
+
+**7. G7 债没有逾期判定，而伏笔有**。
+`deadline_chapter_id` 此前只当普通列渲染成文本「第 N 章」，无判定、无高亮——
+而伏笔侧的 `isHookOverdue` 早就让行染红 + 挂「逾期」徽标。**同一件业务事（「到期未偿」）
+两个 UI 只有一个做对了，且不对称的理由未确认**。补 `utils/ledgerState.ts::isDebtOverdue`
+（与 `isHookOverdue` 同构：判据 = `deadline_chapter_id` < 当前最大章号），
+`LedgerTab` 债行接入同一套染红/徽标。判别：`ledgerState.test.ts` 逾期对称用例。
+
+**8. G8 概览页并排放着两个口径不同的数据源**。
+概览页四计数读**状态快照**（commit 时 observer 自动推进），台账页读**人工台账**
+（`LedgerTab.tsx` 自认「管理面，不与 state 快照自动同步」）——同一本书两个「伏笔数」并排摆着，
+零说明。补显式说明条：点明两者来源、**不自动同步**、数值不同是正常的（快照反映已提交章节的
+观察结果，台账反映此刻的意图）。**刻意不合并成单一数字**——那要选一个口径，另一个就成错的。
+判别：`ProjectOverviewPage.test.tsx` 说明条存在性与文案要点。
+
+**9. G9 「这本书现在什么状态」没有聚合视图**。
+作者问「写到第几章」要去章节页、「哪些伏笔没回收」要去台账页自行筛选、「债逾期」根本没人答
+（G7）、「角色状态变化」完全没有 delta 视角——四个问题散在三个页面，其中两个不答。
+概览页该卡从「故事状态快照」改名「这本书现在什么状态」：加「写到第 N 章（已定稿 M 章）」
+（此前只有「共 N 次提交」）、加「待办」区（未回收伏笔 / 未偿清债务，各带逾期数），
+逾期判定**复用 `ledgerState` 判据单点**而非另写一份。判别：`snapshotCounts.test.ts` 10 例。
+
+**10. G10 `SnapshotResponse` 是欠定义类型 ⇒ 概览页两个统计项恒为 0**（本批唯一的**真缺陷**）。
+
+- **形状**：`types.ts` 里手写 `version?` 与 `state_version?` **两个互斥命名**（后端只写后者）、
+  六个全 `optional`、外加 `[key: string]: unknown` 索引签名——这不是契约，是「不知道后端返回什么」的兜底。
+  兜底逼出 `endpoints.ts` 两层手写归一化（各一份 `normArr`/`normObj`），而那层归一化**把形状拍反**：
+  `characters`（后端 list）被 `normObj` 拍成 `{}`、`events`（后端 dict，按 `event_id` 键）被 `normArr` 拍成 `[]`
+  ⇒ 概览页「角色」与「事件·累计」**两个统计项恒为 0**，且全程无任何告警。
+- **修法**：后端新增 `packages/core/story_state/models.py::SnapshotResponse`，
+  两个端点声明 `response_model`（契约进 OpenAPI，52 schemas ← 51，paths 仍 98）；
+  前端删掉臆造的 `version` 别名与索引签名，类型改用 regen 产物 `types.generated.ts`，
+  `endpoints.ts` 两层归一化**整层删除**（后端 `snapshots.latest_snapshot_version` 已 `_parse_required_json` 解析过，
+  归一化是纯损失）。计数口径收进 `utils/snapshotCounts.ts` 的 `listLen`/`dictLen`（显式区分 list 与 dict）。
+- **`extra="allow"` 是刻意的**：故事状态是开放 JSON 文档，契约描述**已知的六个**集合键、
+  不宣称封闭——封闭的话每加一个集合都要改契约 + regen 前端类型。
+- **严不严的判据不是拍脑袋**：字段形状由 `snapshot.build_initial_state` / `materialize_snapshot` 保证，
+  并由 `commits.rebuild_snapshot_collections_from_db` 从领域表重放；**实测 133 条存量快照形状零违例**
+  （2026-10-15，只读查询）才敢用严格类型而不是 `Any`——宽松类型只会把同一个坑重新挖一遍。
+- ⚠️ **这个缺陷之所以能活到现在，是因为夹具抄了它的形状**：旧夹具照抄归一化后的
+  `characters: {}` / `events: []`，于是「测试通过」与「实现错误」是**同一个来源**，
+  任何针对实现的变异都抓不到它。已登记进坑区（新增形状）。
+  判别：`tests/api/test_snapshot_response_contract.py` 5 例（schema 存在性 + 端点引用 + `extra="allow"` 不丢字段）。
+
+**突变验证**：新建 `scripts/mutation_harness.py`（7 条硬编码变异，6 条 vitest + 1 条 pytest，
+退出码 0 = 全捕获 / 1 = 有存活或中止；**会临时改源码 ⇒ 禁与 pytest 并发**）。
+**7/7 全捕获**，每条均按 SHA256 校验还原、逐条报「还原校验 OK」；
+事后突变残留清点 0（无 `.mutbak`、无 `MUTATION-PROBE-` / `# MUTATION-N` 标记，按坑区要求显式 `-CaseSensitive`）。
+主会话按 §三.1 亲验了 M3（不采信脚本汇总）：手工施加变异 → 3 failed / 10 passed，
+红的是 `volume-seal-confirm` 二次确认对话框没出现 ⇒ 确系预期机制，非收集失败。
+**复核中发现并修掉脚本自身的一处缺陷**：`run_web` / `run_py` 返回的是 `out[-2500:]` 截断窗，
+而 M3 有 3 条失败时 vitest 打出整段 DOM 调试输出，把顶部的 `❯ file (13 tests | 3 failed)`
+顶出了窗口 ⇒ 摘要**退化成空串**（M5 同样受害）。**空摘要不是无害的**：
+坑区那条纪律要求复核者「确认红的是预期那条而非收集失败」，摘要为空时这一步**无法执行**——
+量具恰在最需要被复核的场合（失败输出长）交白卷。已修：`run_*` 返回完整输出，
+新增 `summary_line()` 去 ANSI 提取、pytest 优先取带用例 id 的 `FAILED <test_id>` 行、
+兜底取最后一条非空行。修后 7 条全部给出可复核摘要。
+
+**闸门**：`ruff` clean；`npx tsc -b` 零错；`npx vitest run` **632 passed**（539 ← 7 个新测试文件 66 例
++ 6 个既有测试文件扩充 27 例）；`npm run build` 通过；
+pytest **3009 passed / 1 skipped / 0 failed**（319s，项目 .venv）——基线 3002 **+7**
+＝`test_snapshot_response_contract.py` 5 + `test_volume_membership_contract.py` 2，账对得上。
+**两次树指纹逐位一致**（`61d0a442…`，529 文件）⇒ 中途那次跑测未污染树。
+⚠️ **首轮全量跑出了 2 例假红**（`test_openapi_contract` 两条）：`python` 在本机指向
+`AppData/Local/hermes/hermes-agent/venv`，**不是项目 `.venv`** ⇒ live schema 的
+`info.version` 读成 `dev`、与 openapi.json 的 `3.9.0` 不等，与 §四登记的 export_openapi 同款坑。
+**判别方法**：假红的报错里两边的值一个像「本该如此」一个是 `dev` 这类**占位/回退值**，
+而 `assert '3.9.0' == 'dev'` 的形状本身就指向「读版本的路径不对」而不是「文件过期」——
+真漂移时 openapi.json 侧会是旧版号（如 `3.8.x`）。用 `.venv/Scripts/python.exe` 复跑才是权威数
+（项目 .venv 实测读出 3.9.0）。
+
 ### Fixed（2026-10-15 批次：UI 侧三条「后端有能力、作者够不着」的缺口）
 
 > **来源**：用户指令「开工」——按 `NovelOS-Artifacts: docs/analysis/ui-business-logic-assessment-2026-10-15.md`

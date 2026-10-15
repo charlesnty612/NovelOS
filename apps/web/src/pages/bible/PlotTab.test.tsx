@@ -21,6 +21,9 @@ vi.mock('../../api/endpoints', () => {
     },
     timelineApi: {
       list: vi.fn(),
+      // G6：时间线删除入口。mock 里少这一条，组件一调就 TypeError，
+      // 而「测试全绿」与「真能删」是两件事。
+      remove: vi.fn(),
     },
     charactersApi: {
       listByProject: vi.fn(),
@@ -512,5 +515,92 @@ describe('PlotTab 人读视图', () => {
       expect(eventsApi.delete).toHaveBeenCalledTimes(1);
     });
     expect(eventsApi.delete).toHaveBeenCalledWith('evt_001');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G6：时间线删除（此前 PlotTab 的时间线只读，误建条目只能改库清理）
+// ---------------------------------------------------------------------------
+//
+// 判别重点：① 点「删」**先弹确认、不直接删**；② 确认后才发 `timelineApi.remove`，
+// 且带的是**条目自己的 id**（不是 event_id——后端按 timeline_event_id 删，
+// 传错列会 404 而看起来像「删不掉」）；③ 取消则一次都不发。
+
+describe('PlotTab 时间线删除（G6）', () => {
+  const remove = timelineApi.remove as unknown as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setupEmpty();
+    remove.mockResolvedValue(undefined);
+    (eventsApi.list as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (timelineApi.list as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: 'tl_1',
+        project_id: 'p1',
+        event_id: 'evt_001',
+        day_index: 1,
+        time_ref: null,
+        description: '第二日·秘信',
+        created_at: '2026-08-20T10:00:00',
+      },
+    ]);
+    (charactersApi.listByProject as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (locationsApi.list as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (chaptersApi.listByProject as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+  });
+
+  it('点「删」⇒ 先弹确认，此时尚未发任何删除请求', async () => {
+    const user = userEvent.setup();
+    render(<PlotTab projectId="p1" />);
+    await screen.findByTestId('timeline-delete-tl_1');
+
+    await user.click(screen.getByTestId('timeline-delete-tl_1'));
+
+    const dialog = await screen.findByTestId('timeline-delete-confirm');
+    expect(dialog).toBeInTheDocument();
+    // 关键判别：确认弹窗出现时**一次都没发**——直接删就是没有反悔机会。
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('确认 ⇒ 按条目 id 调 DELETE /timeline/{id}', async () => {
+    const user = userEvent.setup();
+    render(<PlotTab projectId="p1" />);
+    await screen.findByTestId('timeline-delete-tl_1');
+    await user.click(screen.getByTestId('timeline-delete-tl_1'));
+
+    const dialog = await screen.findByTestId('timeline-delete-confirm');
+    await user.click(within(dialog).getByTestId('timeline-delete-confirm-confirm'));
+
+    await waitFor(() => expect(remove).toHaveBeenCalledTimes(1));
+    // 传 event_id 会 404；必须传 timeline id。
+    expect(remove).toHaveBeenCalledWith('tl_1');
+  });
+
+  it('取消 ⇒ 一次都不发', async () => {
+    const user = userEvent.setup();
+    render(<PlotTab projectId="p1" />);
+    await screen.findByTestId('timeline-delete-tl_1');
+    await user.click(screen.getByTestId('timeline-delete-tl_1'));
+
+    const dialog = await screen.findByTestId('timeline-delete-confirm');
+    await user.click(within(dialog).getByTestId('timeline-delete-confirm-cancel'));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('timeline-delete-confirm')).not.toBeInTheDocument(),
+    );
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('删除失败 ⇒ 错误可见，不静默', async () => {
+    const user = userEvent.setup();
+    remove.mockRejectedValue(new Error('删除时间线失败'));
+    render(<PlotTab projectId="p1" />);
+    await screen.findByTestId('timeline-delete-tl_1');
+    await user.click(screen.getByTestId('timeline-delete-tl_1'));
+    const dialog = await screen.findByTestId('timeline-delete-confirm');
+    await user.click(within(dialog).getByTestId('timeline-delete-confirm-confirm'));
+
+    expect(await screen.findByText(/删除时间线失败/)).toBeInTheDocument();
   });
 });

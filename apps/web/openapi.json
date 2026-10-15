@@ -4882,9 +4882,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get State Api Projects  Project Id  State Get"
+                  "$ref": "#/components/schemas/SnapshotResponse"
                 }
               }
             }
@@ -4935,9 +4933,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get State Version Api Projects  Project Id  State Versions  Version  Get"
+                  "$ref": "#/components/schemas/SnapshotResponse"
                 }
               }
             }
@@ -9847,6 +9843,67 @@
         ],
         "title": "RevisionNoteUpdate",
         "description": "写入或清除改稿意见的请求体。\n\n- ``note`` 必填字符串；非空白字符串写入 ``plan_json.revision_note``；\n  空串 / 全空白 → 删除该键（语义=清除改稿意见）。\n- 不设 ``max_length``：note 是人工意见，无明确字节上限；底层走 plan_json TEXT。"
+      },
+      "SnapshotResponse": {
+        "properties": {
+          "state_version": {
+            "type": "integer",
+            "title": "State Version",
+            "description": "快照版本号；无快照时后端返回 0（genesis 未初始化前的形态）"
+          },
+          "characters": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Characters",
+            "description": "角色列表（按 character_id ASC）"
+          },
+          "world": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "World",
+            "description": "世界观：{locations: dict, factions: dict, world_rules: list}"
+          },
+          "hooks": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Hooks",
+            "description": "伏笔列表（按 hook_id ASC）"
+          },
+          "debts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debts",
+            "description": "叙事债务列表（按 debt_id ASC）"
+          },
+          "recent_events": {
+            "items": {},
+            "type": "array",
+            "title": "Recent Events",
+            "description": "最近事件（时间线视角）"
+          },
+          "events": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Events",
+            "description": "剧情事件，**按 event_id 键的字典**（不是列表）"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "state_version"
+        ],
+        "title": "SnapshotResponse",
+        "description": "``GET /projects/{pid}/state`` 与 ``GET /projects/{pid}/state/versions/{n}`` 的响应。\n\n``state_version`` 是**唯一**的版本字段名。后端 ``queries.get_current_state``\n与 ``queries.get_snapshot`` 都写 ``state_version``；前端历史上还并列过一个\n``version``，是欠定义类型自己臆造的别名，已删除。"
       },
       "StartWorkflowRequest": {
         "properties": {

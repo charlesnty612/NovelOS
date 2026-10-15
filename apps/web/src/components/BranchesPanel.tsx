@@ -11,6 +11,7 @@ import type {
 import { ErrorBanner, InfoBanner } from './ErrorBanner';
 import { EmptyState } from './EmptyState';
 import { formatDateTime, formatJson } from '../utils/format';
+import { countSnapshot } from '../utils/snapshotCounts';
 
 interface Props {
   projectId: string;
@@ -332,15 +333,21 @@ function BranchStateView({
   branchSnap: SnapshotResponse;
   mainSnap: SnapshotResponse | null;
 }) {
-  const branchChars = countChars(branchSnap.characters);
-  const branchHooks = countArr(branchSnap.hooks);
-  const branchDebts = countArr(branchSnap.debts);
-  const branchEvents = countArr(branchSnap.events);
+  // 口径单点 utils/snapshotCounts（2026-10-15）。改动前本组件自带一份
+  // countArr/countChars，用 `countArr(snap.events)` 数 events——而后端 events 是
+  // **dict**（按 event_id 键），于是 What-if 分支对比的「Events」与「差」两列
+  // **永远显示 0**，分支之间的事件差异根本看不出来。
+  const bc = countSnapshot(branchSnap);
+  const mc = mainSnap ? countSnapshot(mainSnap) : null;
+  const branchChars = bc.characters;
+  const branchHooks = bc.hooks;
+  const branchDebts = bc.debts;
+  const branchEvents = bc.events;
 
-  const mainChars = mainSnap ? countChars(mainSnap.characters) : null;
-  const mainHooks = mainSnap ? countArr(mainSnap.hooks) : null;
-  const mainDebts = mainSnap ? countArr(mainSnap.debts) : null;
-  const mainEvents = mainSnap ? countArr(mainSnap.events) : null;
+  const mainChars = mc ? mc.characters : null;
+  const mainHooks = mc ? mc.hooks : null;
+  const mainDebts = mc ? mc.debts : null;
+  const mainEvents = mc ? mc.events : null;
 
   const diff = (a: number | null, b: number) => {
     if (a === null) return '—';
@@ -432,18 +439,4 @@ function Stat({
       <div className="muted small">{hint}</div>
     </div>
   );
-}
-
-function countArr(v: unknown): number {
-  return Array.isArray(v) ? v.length : 0;
-}
-
-function countChars(v: unknown): number {
-  if (Array.isArray(v)) return v.length;
-  if (v && typeof v === 'object') {
-    const inner = (v as Record<string, unknown>).characters;
-    if (Array.isArray(inner)) return inner.length;
-    if (inner && typeof inner === 'object') return Object.keys(inner).length;
-  }
-  return 0;
 }

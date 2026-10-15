@@ -37,6 +37,8 @@ import { ErrorBanner } from '../components/ErrorBanner';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { Loading } from '../components/Loading';
 import { ChapterPipelineHeader } from './chapter/ChapterPipelineHeader';
+import { ChapterDeliveryActions } from './chapter/ChapterDeliveryActions';
+import { ChapterDeltasSection } from './chapter/ChapterDeltasSection';
 import type {
   WorkflowAction,
   WorkflowStartArgs,
@@ -738,6 +740,21 @@ export function ChapterDetailPage() {
             </div>
           )}
         </div>
+      ) : null}
+
+      {/* G6：本章 observer 抽出的状态变更历史（「这一章改了什么」）。 */}
+      {chapter ? (
+        <ChapterDeltasSection projectId={projectId} chapterId={chapter.chapter_id} />
+      ) : null}
+
+      {/* D1（2026-10-15）：交付态标记 COMMITTED ⇄ RELEASED。与上方「重开返修」
+          同级——都是章节生命周期的收尾动作，不属于四步流水线。 */}
+      {chapter ? (
+        <ChapterDeliveryActions
+          chapter={chapter}
+          busy={submitting || !!activeRun}
+          onChanged={() => chapterCall.reload()}
+        />
       ) : null}
 
       {/* V1.5：运行中横幅。RUNNING/PENDING 时显示节点进度 + 已运行时长；

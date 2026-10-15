@@ -261,16 +261,39 @@ export interface HealthResponse {
   tables?: number | Record<string, number>;
 }
 
+/**
+ * `GET /projects/{pid}/state` 与 `GET /projects/{pid}/state/versions/{n}` 的响应。
+ *
+ * **契约来源**：`packages/core/story_state/models.py::SnapshotResponse`
+ * （该端点已声明 `response_model`，形状由后端保证）。本文件是手写权威面，
+ * `types.generated.ts` 是同源的 drift 对照面（由 `scripts/gen_frontend_types.py` 生成）。
+ *
+ * ⚠️ **2026-10-15 重写**。此前这里是欠定义类型：六个字段全 optional、一个
+ * `[key: string]: unknown` 索引签名，并列声明了 `version?` 与 `state_version?`
+ * 两个**互斥**的版本命名（后端只写 `state_version`，`version` 是这份类型自己
+ * 臆造的别名）。它逼出的那层手写归一化把 `characters`（list）与 `events`
+ * （dict）拍反，导致概览页两个统计项**恒为 0** 且无告警——详见
+ * `endpoints.ts::storyStateApi` 的注释。
+ *
+ * **不再有 `[key: string]: unknown`**：故事状态是开放 JSON 文档，delta 可带额外
+ * 集合键，后端 `SnapshotResponse` 因此声明 `extra="allow"`；但索引签名会让
+ * 拼错字段名静默通过，故这里只列已知的六个，多余键需显式 `as Record<string, unknown>` 读。
+ */
 export interface SnapshotResponse {
-  version?: number;
-  state_version?: number;
-  characters?: unknown;
-  world?: unknown;
-  hooks?: unknown[];
-  debts?: unknown[];
-  events?: unknown[];
-  recent_events?: unknown[];
-  [key: string]: unknown;
+  /** 快照版本号；无快照时后端返回 0。**这是唯一的版本字段名**。 */
+  state_version: number;
+  /** 角色**列表**（不是对象）——按 character_id ASC。 */
+  characters?: Array<Record<string, unknown>>;
+  /** 世界观：{locations: dict, factions: dict, world_rules: list} */
+  world?: Record<string, unknown>;
+  /** 伏笔**列表**——按 hook_id ASC。 */
+  hooks?: Array<Record<string, unknown>>;
+  /** 叙事债务**列表**——按 debt_id ASC。 */
+  debts?: Array<Record<string, unknown>>;
+  /** 最近事件（时间线视角，列表）。 */
+  recent_events?: Array<unknown>;
+  /** 剧情事件，**按 event_id 键的字典**（不是列表）。 */
+  events?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +317,15 @@ export interface Chapter {
   status: ChapterStatus;
   visibility: string;
   who_knows: string[] | null;
+  /**
+   * 所属卷（迁移 0015 加的可空外键列）。未挂卷时为 `null`。
+   *
+   * ⚠️ 后端 `Chapter` 模型**没有声明**这一列，是靠 `model_config = extra="allow"`
+   * + `SELECT *` 透出来的（2026-10-15 实测确认：assign 前 null、assign 后 `vol_…`）。
+   * 一旦有人给该模型换成严格 `response_model`，它会**静默消失**——
+   * 回归看守：`tests/api/test_volume_membership_contract.py`。
+   */
+  volume_id?: string | null;
   created_at: string;
   updated_at: string;
   /** 最近一次 COMPLETED 状态 chapter-review run 的 ended_at；
@@ -1445,4 +1477,207 @@ export interface GenreCheck {
   arc_check?: Record<string, unknown> | null;
   skipped?: string[];
   error?: string | null;
+}
+
+// =====================================================================
+// G6 批次：后端已有、UI 零入口的能力（2026-10-15）
+// ---------------------------------------------------------------------
+// 下面四组类型逐字照抄后端契约，**不写归一化层**（理由见 endpoints.ts
+// `storyStateApi` 的同款注释：归一化曾把两个字段拍反并让统计项恒为 0）。
+// 每条对应后端的一个 `response_model`，形状有 schema 兜底。
+
+/** 卷状态（与 DDL CHECK 对齐，`domain/volume/models.py::VolumeStatus`）。 */
+export type VolumeStatus = 'active' | 'sealed';
+
+/** 卷列表项（`GET /projects/{pid}/volumes`；含 chapter_count 聚合）。 */
+export interface VolumeListItem {
+  volume_id: string;
+  project_id: string;
+  number: number;
+  title: string | null;
+  arc_summary: string | null;
+  status: VolumeStatus;
+  terminal_snapshot_json: Record<string, unknown> | null;
+  chapter_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 卷完整表示（`GET /projects/{pid}/volumes/{vid}` / POST / PATCH 响应）。 */
+export interface Volume extends Omit<VolumeListItem, 'chapter_count'> {}
+
+/** 创建卷请求体（POST /volumes）。number 必填 ≥1；status 不可指定。 */
+export interface VolumeCreatePayload {
+  number: number;
+  title?: string | null;
+  arc_summary?: string | null;
+}
+
+/** 卷部分更新请求体（PATCH /volumes/{vid}）。sealed→active 由后端拒（409）。 */
+export interface VolumeUpdatePayload {
+  title?: string | null;
+  status?: VolumeStatus;
+  arc_summary?: string | null;
+}
+
+/**
+ * 人物关系表行（`GET /projects/{pid}/relationships`，**只读**）。
+ *
+ * ⚠️ 与 `Character.relationships`（角色 core JSON 里的自由字段，CharacterTab 可编辑）
+ * **是两个东西**：本表是有方向的成对关系，由 State Delta 的
+ * `relationship_changes` 驱动写入（S2），S1 只提供只读端点。
+ * 两者同名不同物，UI 不得互相替代。
+ */
+export interface Relationship {
+  id: string;
+  project_id: string;
+  from_character_id: string;
+  to_character_id: string;
+  relation_type: string;
+  state: Record<string, unknown>;
+  last_state_version: number;
+}
+
+/** 签约体检单条（`GET /projects/{pid}/signing-check` 的 items[]）。 */
+export interface SigningCheckItem {
+  key: string;
+  level: string;
+  detail: string;
+  advice?: string;
+}
+
+/** 签约体检结果（`GET /projects/{pid}/signing-check`）。 */
+export interface SigningCheckResult {
+  project_id: string;
+  project_name: string;
+  total_chars: number;
+  generated_at: string;
+  items: SigningCheckItem[];
+  summary: {
+    pass_count: number;
+    warn_count: number;
+    fail_count: number;
+    info_count: number;
+  };
+  word_band_source: string;
+  word_band_rejected?: boolean;
+  genre_opening?: Record<string, unknown> | null;
+}
+
+// ---- 交付判定（`GET /projects/{pid}/delivery-verdict`） ------------------
+// 形状逐字对应后端 `core/delivery/models.py` 的 pydantic 家族；该组 schema
+// 2026-10-15 之前**已在 types.generated.ts 里生成但 UI 不接**（评估 G6）。
+
+/** 判定四档（与后端 `delivery/verdict.py` 一致；不是章状态机）。 */
+export type DeliveryVerdict =
+  | 'deliverable'
+  | 'needs_work'
+  | 'not_deliverable'
+  | 'not_a_candidate';
+
+/** 证据源可达性（诚实面：看不到的要说出来，而不是当作通过）。 */
+export interface DeliveryEvidenceSource {
+  key: string;
+  reachable: boolean;
+  detail: string;
+}
+
+/** 交付判定的单条降级理由。 */
+export interface DeliveryReason {
+  rule_id: string;
+  source: 'quality_issue' | 'length' | 'signing_check' | 'chapter_status' | 'evidence';
+  severity: string;
+  status: string;
+  /** 面向作者的中文说明。 */
+  message: string;
+  /** 证据摘录（引文片段或数字）。 */
+  evidence?: string | null;
+}
+
+/** 字数测量（`quality.wordcount` 口径）。 */
+export interface DeliveryLength {
+  visible_chars: number;
+  target_word_count: number;
+  band_low: number;
+  band_high: number;
+  deviation_pct: number;
+  status: string;
+  tier: string;
+}
+
+/** 质量报告里的一条 issue（gate 由后端 `issue_gate` 权威重推）。 */
+export interface DeliveryIssue {
+  rule_id: string;
+  severity: string;
+  gate: string;
+  message: string;
+}
+
+/** 该章最新质量报告的证据面。 */
+export interface DeliveryQuality {
+  report_id: string;
+  overall: number;
+  evaluated_at?: string | null;
+  draft_version?: number | null;
+  gate_summary?: Record<string, unknown> | null;
+  accepted_override?: Record<string, unknown> | null;
+  issues?: DeliveryIssue[];
+}
+
+/** 签约体检在本章的适用面。 */
+export interface DeliverySigning {
+  scope: string;
+  note?: string;
+  items?: SigningCheckItem[];
+}
+
+export interface DeliverySigningItem {
+  key: string;
+  level: string;
+  detail: string;
+  advice?: string;
+}
+
+/** 一章的交付判定行。 */
+export interface DeliveryChapter {
+  chapter_id: string;
+  number: number;
+  title: string;
+  /** 章节状态（流程位置，非交付判定）。 */
+  status: string;
+  verdict: DeliveryVerdict;
+  blocking_reason?: string | null;
+  draft_version?: number | null;
+  length?: DeliveryLength | null;
+  quality?: DeliveryQuality | null;
+  signing: DeliverySigning;
+  reasons?: DeliveryReason[];
+}
+
+/** 项目级汇总（作者的问题是「这本书能不能交」）。 */
+export interface DeliveryRollUp {
+  chapter_count: number;
+  written_chapter_count: number;
+  deliverable_count: number;
+  needs_work_count: number;
+  not_deliverable_count: number;
+  not_a_candidate_count: number;
+  deliverable_chapter_ids: string[];
+  needs_work_chapter_ids: string[];
+  not_deliverable_chapter_ids: string[];
+  not_a_candidate_chapter_ids: string[];
+  /** 每章 id → 首个降级理由（可交付章不出现）。 */
+  blocking_reason_by_chapter?: Record<string, unknown>;
+}
+
+export interface DeliveryVerdictResponse {
+  project_id: string;
+  project_name: string;
+  generated_at: string;
+  project_verdict: DeliveryVerdict;
+  project_reasons?: DeliveryReason[];
+  roll_up: DeliveryRollUp;
+  evidence_sources?: DeliveryEvidenceSource[];
+  signing_check_scope?: string;
+  chapters?: DeliveryChapter[];
 }

@@ -637,6 +637,23 @@ export interface RevisionNoteUpdate {
   note: string;
 }
 
+export interface SnapshotResponse {
+  /** 快照版本号；无快照时后端返回 0（genesis 未初始化前的形态） */
+  state_version: number;
+  /** 角色列表（按 character_id ASC） */
+  characters?: Array<Record<string, unknown>>;
+  /** 世界观：{locations: dict, factions: dict, world_rules: list} */
+  world?: Record<string, unknown>;
+  /** 伏笔列表（按 hook_id ASC） */
+  hooks?: Array<Record<string, unknown>>;
+  /** 叙事债务列表（按 debt_id ASC） */
+  debts?: Array<Record<string, unknown>>;
+  /** 最近事件（时间线视角） */
+  recent_events?: Array<unknown>;
+  /** 剧情事件，**按 event_id 键的字典**（不是列表） */
+  events?: Record<string, unknown>;
+}
+
 export interface StartWorkflowRequest {
   author_intent?: string | null;
   expected_role?: string | null;

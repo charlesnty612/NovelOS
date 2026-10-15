@@ -97,6 +97,11 @@ export function PlotTab({ projectId }: PlotTabProps) {
   const [creating, setCreating] = useState(false);
   // V3.22「交互反馈统一」：删除事件前 ConfirmDialog 二次确认。
   const [pendingDeleteEventId, setPendingDeleteEventId] = useState<string | null>(null);
+  // 评估 G6：时间线此前**只读**——误建的条目（重复日 / 临时占位）没有清理路径，
+  // 只能改库。后端 `DELETE /timeline/{id}` 一直在（返回 204）。
+  // 不可撤销，所以与事件删除同款：ConfirmDialog 二次确认，不做乐观删除。
+  const [pendingDeleteTimelineId, setPendingDeleteTimelineId] = useState<string | null>(null);
+  const pendingDeleteTimeline = timeline.find((t) => t.id === pendingDeleteTimelineId) ?? null;
 
   const reload = async () => {
     setLoading(true);
@@ -159,6 +164,16 @@ export function PlotTab({ projectId }: PlotTabProps) {
     setPendingDeleteEventId(null);
     try {
       await eventsApi.delete(id);
+      await reload();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : '删除失败');
+    }
+  };
+
+  const doDeleteTimeline = async (id: string) => {
+    setPendingDeleteTimelineId(null);
+    try {
+      await timelineApi.remove(id);
       await reload();
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : '删除失败');
@@ -333,6 +348,14 @@ export function PlotTab({ projectId }: PlotTabProps) {
                       >
                         {shown !== '' ? shown : <span className="muted">（无描述）</span>}
                       </div>
+                      <button
+                        type="button"
+                        className="btn btn--small btn--danger"
+                        data-testid={`timeline-delete-${t.id}`}
+                        onClick={() => setPendingDeleteTimelineId(t.id)}
+                      >
+                        删
+                      </button>
                     </li>
                   );
                 })}
@@ -362,6 +385,26 @@ export function PlotTab({ projectId }: PlotTabProps) {
           testId="plot-event-delete-confirm"
           onCancel={() => setPendingDeleteEventId(null)}
           onConfirm={() => void doDelete(pendingDeleteEventId)}
+        />
+      ) : null}
+      {pendingDeleteTimelineId ? (
+        <ConfirmDialog
+          open={true}
+          title="删除时间线条目"
+          body={
+            pendingDeleteTimeline
+              ? `确认删除 Day ${pendingDeleteTimeline.day_index} 这条时间线索引？` +
+                `删除后不可撤销，剧情事件本身不受影响。` +
+                (pendingDeleteTimeline.event_id
+                  ? `注意：该索引由事件 ${pendingDeleteTimeline.event_id} 自动生成，删除后事件仍在、但不再出现在时间线上。`
+                  : '')
+              : '确认删除该时间线条目？'
+          }
+          confirmText="删除"
+          danger
+          testId="timeline-delete-confirm"
+          onCancel={() => setPendingDeleteTimelineId(null)}
+          onConfirm={() => void doDeleteTimeline(pendingDeleteTimelineId)}
         />
       ) : null}
     </div>

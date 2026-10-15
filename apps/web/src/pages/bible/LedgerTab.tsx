@@ -22,6 +22,7 @@ import {
   HOOK_STATUS_VALUES,
   getNextDebtStatuses,
   getNextHookStatuses,
+  isDebtOverdue,
   isHookOverdue,
   safeGetNextDebtStatuses,
   safeGetNextHookStatuses,
@@ -139,9 +140,11 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
   return (
     <div data-testid="ledger-tab">
       <div className="toolbar">
-        <div className="muted small">
+        <div className="muted small" data-testid="ledger-dual-source-note">
           伏笔台账（PRD §21，五态机）+ 叙事债务（PRD §22，四态机）。
-          管理面（人工维护），不与 state 快照自动同步。
+          这是<b>人工维护面</b>，与「项目总览」里的<b>状态快照</b>计数<b>不自动同步</b>
+          （快照由每次 commit 的 observer 自动推进）——同一本书出现两个「伏笔数」是正常的，
+          快照反映已提交章节的观察结果，这里反映你此刻的意图。
         </div>
       </div>
 
@@ -307,9 +310,32 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
                 </tr>
               </thead>
               <tbody>
-                {debts.map((d) => (
-                  <tr key={d.debt_id}>
-                    <td style={{ maxWidth: 360 }}>{d.description}</td>
+                {debts.map((d) => {
+                  // G7：与伏笔对称的逾期判定（判据见 utils/ledgerState.isDebtOverdue）。
+                  // 改动前债只被渲染成「第 N 章」文本，逾期这件事无处可见。
+                  const overdue = isDebtOverdue(d, chapters);
+                  return (
+                  <tr
+                    key={d.debt_id}
+                    style={
+                      overdue
+                        ? { background: 'rgba(217, 69, 69, 0.08)' }
+                        : undefined
+                    }
+                    data-testid="debt-row"
+                  >
+                    <td style={{ maxWidth: 360 }}>
+                      {d.description}
+                      {overdue ? (
+                        <span
+                          className="badge badge--chapter-failed"
+                          style={{ marginLeft: 8 }}
+                          data-testid="debt-overdue-badge"
+                        >
+                          逾期
+                        </span>
+                      ) : null}
+                    </td>
                     <td>{d.severity.toFixed(2)}</td>
                     <td>
                       <span className={DEBT_STATUS_CLASS[d.status]}>
@@ -342,7 +368,8 @@ export function LedgerTab({ projectId }: LedgerTabProps) {
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
               </table>
             </div>

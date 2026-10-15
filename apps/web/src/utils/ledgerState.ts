@@ -123,13 +123,54 @@ export const DEBT_STATUS_LABEL: Record<DebtStatus, string> = {
  */
 export function isHookOverdue(
   hook: {
-    status: HookStatus;
+    /** 放宽到 `string`：本函数只与终态比对，不需要整个 Literal。
+     *  代价是**未知 status 会被当成「非终态」**（fail-open，多提醒一次）——
+     *  这个方向是安全的：漏报无感，误报只是多染红一行。 */
+    status: string;
     expected_payoff_chapter_id: string | null;
   },
   chapters: Array<{ chapter_id: string; number: number }>,
 ): boolean {
   if (hook.status === 'RESOLVED' || hook.status === 'ABANDONED') return false;
   const targetId = hook.expected_payoff_chapter_id;
+  if (!targetId) return false;
+  const target = chapters.find((c) => c.chapter_id === targetId);
+  if (!target) return false;
+  if (chapters.length === 0) return false;
+  const maxNumber = chapters.reduce((m, c) => (c.number > m ? c.number : m), 0);
+  return target.number < maxNumber;
+}
+
+/**
+ * 判定 debt 是否「逾期」（2026-10-15 补齐，与 `isHookOverdue` 逐条对称）。
+ *
+ * **为什么必须有**：伏笔与债在业务上是同一件事的两面（「到期未了结」），但改动前
+ * 只有伏笔有逾期判定（表格行染红 + 徽标），债的 `deadline_chapter_id` 只被当
+ * 普通列渲染成「第 N 章」文本——作者在同一张表里看到两种待遇，且「债逾期了」
+ * 这件事**没有任何地方会告诉他**。不对称的理由评估文档里也没写出来，故按对称补齐。
+ *
+ * 判据与伏笔同构：截止章号 < 当前最大章号，且状态非终态。
+ * - 伏笔终态：`RESOLVED` / `ABANDONED`
+ * - 债终态：`paid`（已偿清）/ `forgiven`（已豁免）
+ *
+ * `deadline_chapter_id` 为空 / 对应章不存在 / 一章没写时一律**不判逾期**
+ * （同 `isHookOverdue` 的「未约定」口径）。若判据将来后端也做了一份，
+ * **两侧必须同时改**——这是一条会被抄的规则。
+ *
+ * 同一判据也适用于**状态快照**里的 debt 行：`story_state.snapshot._load_debts`
+ * 写出的正是 `{debt_id, status, deadline_chapter_id, …}`，字段同名同形，
+ * 故概览页的待办面板可直接复用本函数，无需第二份实现。
+ */
+export function isDebtOverdue(
+  debt: {
+    /** 同 isHookOverdue：只与终态比对，放宽到 string，未知值按非终态处理。 */
+    status: string;
+    deadline_chapter_id: string | null;
+  },
+  chapters: Array<{ chapter_id: string; number: number }>,
+): boolean {
+  if (debt.status === 'paid' || debt.status === 'forgiven') return false;
+  const targetId = debt.deadline_chapter_id;
   if (!targetId) return false;
   const target = chapters.find((c) => c.chapter_id === targetId);
   if (!target) return false;

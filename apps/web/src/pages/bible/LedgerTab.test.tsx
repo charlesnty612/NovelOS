@@ -249,3 +249,94 @@ describe('LedgerTab 关键流', () => {
     expect(screen.queryByText('OPEN 钩子')).toBeNull();
   });
 });
+// ----------------------------------------------------------------------------
+// G7（2026-10-15）：债的逾期徽标与行高亮——与伏笔对称。
+// 改动前台账页只给伏笔判逾期，债的 deadline_chapter_id 只渲染成「第 N 章」文本。
+// 判别点在 `data-testid="debt-overdue-badge"`：**必须渲染得出来**，
+// 只断言「表格在」抓不到（与概览页那两个恒零统计同款形状）。
+// ----------------------------------------------------------------------------
+
+describe('LedgerTab 债逾期（G7）', () => {
+  const chapter = (n: number) => ({
+    chapter_id: `c${n}`,
+    project_id: 'p1',
+    number: n,
+    title: `第 ${n} 章`,
+    plan_json: {},
+    status: 'PLANNED',
+    visibility: 'VISIBLE',
+    who_knows: null,
+    created_at: '2026-08-23T10:00:00',
+    updated_at: '2026-08-23T10:00:00',
+  });
+
+  const debt = (over: Partial<Record<string, unknown>>) => ({
+    debt_id: 'd1',
+    project_id: 'p1',
+    description: '欠下的人情',
+    created_chapter_id: 'c1',
+    severity: 0.8,
+    deadline_chapter_id: null,
+    status: 'open',
+    visibility: 'RESTRICTED',
+    who_knows: null,
+    created_at: '2026-08-23T10:00:00',
+    updated_at: '2026-08-23T10:00:00',
+    ...over,
+  });
+
+  // 与本文件既有风格一致：直接引用 mock 函数并做同样的双重断言转型。
+  const hooks = hooksApi.listByProject as unknown as ReturnType<typeof vi.fn>;
+  const debts = debtsApi.listByProject as unknown as ReturnType<typeof vi.fn>;
+  const chaps = chaptersApi.listByProject as unknown as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    hooks.mockResolvedValue([]);
+    debts.mockResolvedValue([debt({})]);
+    chaps.mockResolvedValue([chapter(1), chapter(2), chapter(3)]);
+  });
+
+  it('截止章已过 + 未偿清 ⇒ 显示「逾期」徽标', async () => {
+    debts.mockResolvedValue([debt({ deadline_chapter_id: 'c2' })]);
+    render(<LedgerTab projectId="p1" />);
+    expect(await screen.findByTestId('debt-overdue-badge')).toBeInTheDocument();
+  });
+
+  it('已偿清（paid）⇒ 即使截止章已过也不显示徽标', async () => {
+    debts.mockResolvedValue([debt({ deadline_chapter_id: 'c2', status: 'paid' })]);
+    render(<LedgerTab projectId="p1" />);
+    await screen.findByText('欠下的人情');
+    expect(screen.queryByTestId('debt-overdue-badge')).not.toBeInTheDocument();
+  });
+
+  it('未约定截止章 ⇒ 不显示徽标（与伏笔同口径）', async () => {
+    render(<LedgerTab projectId="p1" />);
+    await screen.findByText('欠下的人情');
+    expect(screen.queryByTestId('debt-overdue-badge')).not.toBeInTheDocument();
+  });
+
+  it('徽标与伏笔的徽标用同一个 testId 前缀族，肉眼可分辨是哪一个逾期', async () => {
+    hooks.mockResolvedValue([
+      {
+        hook_id: 'h1',
+        project_id: 'p1',
+        name: '黑玉佩秘密',
+        introduced_chapter_id: 'c1',
+        status: 'OPEN',
+        importance: 0.9,
+        expected_payoff_chapter_id: 'c1',
+        payoff_chapter_id: null,
+        visibility: 'RESTRICTED',
+        who_knows: null,
+        created_at: '2026-08-23T10:00:00',
+        updated_at: '2026-08-23T10:00:00',
+      },
+    ]);
+    debts.mockResolvedValue([debt({ deadline_chapter_id: 'c2' })]);
+    render(<LedgerTab projectId="p1" />);
+    await screen.findByText('欠下的人情');
+    expect(screen.getByTestId('hook-overdue-badge')).toBeInTheDocument();
+    expect(screen.getByTestId('debt-overdue-badge')).toBeInTheDocument();
+  });
+});
