@@ -13,6 +13,35 @@
 - POST /api/projects/{pid}/timeline      手动追加时间线条目
 - DELETE /api/timeline/{id}              删除时间线条目
 - GET  /api/projects/{pid}/relationships 关系列表（S1 只读）
+
+出参契约（G2，2026-10-15 批次（六））
+------------------------------------
+7 个**读**端点已挂 ``response_model``：
+
+===========  =======================================  ====================
+端点          模型                                    形状来源
+===========  =======================================  ====================
+单体 3+1     ``PlotEventOut`` / ``TimelineEventOut``  ``to_dict()`` 逐字镜像
+列表 3       ``list[PlotEventOut]`` /                同上（**实测**，不是
+             ``list[TimelineEventOut]`` /            「应该和单体一样」）
+             ``list[RelationshipOut]``
+===========  =======================================  ====================
+
+⚠️ 三个 **DELETE** 端点仍返回 204（无 body，本就无契约可挂）。
+
+⚠️ 端点上**一律不加** ``response_model_exclude_none``：这些实体有 5~6 个可空列，
+实测它们是「键恒在、值为 null」；加了那个开关会把键整个抹掉，把契约改成另一种形状
+（与 ``simulation`` 的 ``diff`` 恰好相反——那边要的是「空则省略」，这里要的是「空也在」）。
+
+⚠️ 列表行的形状**单独量过**（2026-10-15 实测、2026-10-16 复测，临时库 + 合成夹具，
+见 ``tests/api/test_ledger_plot_list_response_contract.py``）：
+``events`` 13 键 / ``timeline`` 8 键，与单体端点逐字相同；``relationships`` **9 键**
+≡ 它的表列集 9 列（⚠️ 键名两处改名/解码：``relationship_id`` → ``id``、
+``state_json`` → ``state``，故「9≡9」是**键数相等**不是列名逐字相等）。
+
+⚠️ ``relationships`` 原先只有 **7 键**：``visibility`` / ``who_knows``（迁移 0014 加、
+0022 重建表时逐字保留）被 ``PlotService._row_to_relationship`` 丢弃。2026-10-16 已修，
+详见 ``packages/domain/plot/models.py::RelationshipOut``。
 """
 
 from __future__ import annotations
@@ -28,6 +57,7 @@ from packages.domain.plot import (
     ReferencedError,
     ValidationError,
 )
+from packages.domain.plot.models import PlotEventOut, RelationshipOut, TimelineEventOut
 
 router = APIRouter(tags=["plot"])
 
@@ -53,7 +83,11 @@ def _handle(exc: Exception) -> HTTPException:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/projects/{pid}/events", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/projects/{pid}/events",
+    status_code=status.HTTP_201_CREATED,
+    response_model=PlotEventOut,
+)
 def create_event(
     pid: str, payload: dict[str, Any], request: Request
 ) -> dict[str, Any]:
@@ -78,7 +112,7 @@ def create_event(
     return ev.to_dict()
 
 
-@router.get("/projects/{pid}/events")
+@router.get("/projects/{pid}/events", response_model=list[PlotEventOut])
 def list_events(
     pid: str,
     request: Request,
@@ -93,7 +127,7 @@ def list_events(
     return [e.to_dict() for e in events]
 
 
-@router.get("/events/{event_id}")
+@router.get("/events/{event_id}", response_model=PlotEventOut)
 def get_event(event_id: str, request: Request) -> dict[str, Any]:
     svc = _service(request)
     ev = svc.get_event(event_id)
@@ -102,7 +136,7 @@ def get_event(event_id: str, request: Request) -> dict[str, Any]:
     return ev.to_dict()
 
 
-@router.patch("/events/{event_id}")
+@router.patch("/events/{event_id}", response_model=PlotEventOut)
 def update_event(
     event_id: str, payload: dict[str, Any], request: Request
 ) -> dict[str, Any]:
@@ -142,13 +176,17 @@ def delete_event(event_id: str, request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/projects/{pid}/timeline")
+@router.get("/projects/{pid}/timeline", response_model=list[TimelineEventOut])
 def list_timeline(pid: str, request: Request) -> list[dict[str, Any]]:
     svc = _service(request)
     return [t.to_dict() for t in svc.list_timeline_events(pid)]
 
 
-@router.post("/projects/{pid}/timeline", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/projects/{pid}/timeline",
+    status_code=status.HTTP_201_CREATED,
+    response_model=TimelineEventOut,
+)
 def create_timeline(
     pid: str, payload: dict[str, Any], request: Request
 ) -> dict[str, Any]:
@@ -185,7 +223,7 @@ def delete_timeline(timeline_event_id: str, request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/projects/{pid}/relationships")
+@router.get("/projects/{pid}/relationships", response_model=list[RelationshipOut])
 def list_relationships(pid: str, request: Request) -> list[dict[str, Any]]:
     svc = _service(request)
     return [r.to_dict() for r in svc.list_relationships(pid)]

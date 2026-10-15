@@ -555,6 +555,14 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "writer_length_attempts": attempts,
         "writer_length_accepted_attempt": accepted + 1,
         "scene_word_budget": scene_word_budget,
+        # 2026-10-15 批次（六）G9：装配级 token 预算元字段提到**顶层**，
+        # 与上面 ``scene_word_budget`` 同款理由——run 层可见，不必下钻。
+        # ⚠️ 必须单独提出来：``_cap_checkpoint_payload``（engine.py）按顶层键体积
+        # **从大到小**替换超阈值的键，而 ``writer_input`` 实测可达 ~227KB
+        # ⇒ **预算越超，meta 越先随大键一起被换成截断标记**（meta 自身仅 79 字节，
+        # 却是第一个消失的那个）。提到顶层后它永不被截，超预算在 run 记录里可见。
+        # ⚠️ 只提键：不改 payload、不改 prompt、不改缓存键语义。
+        "writer_assembly_meta": payload.get("_assembly_meta"),
     }
 
 

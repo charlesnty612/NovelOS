@@ -73,14 +73,44 @@ class StyleSampleCreate(BaseModel):
     content: str = Field(..., min_length=1)
 
 
+class StyleSample(BaseModel):
+    """文风样例行（``author_style_samples`` 表全列，**恒 6 键、无条件键**）。
+
+    实测：POST 返回体与 GET 列表行**同形**（router 两条路都是整行投影），
+    故共用一个模型；``created_at`` / ``updated_at`` 由 router 写 ``now_iso()``，
+    创建时二者必然相等，之后只有 UPDATE 才会拉开。
+
+    2026-10-15 批次（六）L4 起，``GET`` 列表端点也声明了本模型 ⇒ 这条「同形」
+    从「散文里的观察」变成**被测试钉住的契约**：任一端点多/少一个键，
+    ``tests/api/test_quality_reference_list_response_contract.py`` 必红。
+    """
+
+    sample_id: str
+    project_id: str
+    title: str
+    content: str
+    created_at: str
+    updated_at: str
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 
-@router.get("/projects/{pid}/style-samples")
+@router.get("/projects/{pid}/style-samples", response_model=list[StyleSample])
 def list_style_samples(pid: str, request: Request) -> list[dict]:
-    """列出该项目的全部文风样例（created_at DESC）。"""
+    """列出该项目的全部文风样例（created_at DESC）。
+
+    **复用** POST 用的同一个 :class:`StyleSample`（2026-10-15 批次（六）L4 实测）：
+    两条路都是「整行投影」⇒ 恒 6 键、无条件键。
+
+    ⚠️ **不设 ``extra="allow"``**：本端点的 SQL 是**显式 6 列枚举**（不是
+    ``SELECT *``）⇒ 表将来加列**不会**出现在响应里，多出来的键只可能是 bug
+    （与 ``QualityReportResponse`` 必须开 ``extra="allow"`` 的理由相反——
+    那边是 ``SELECT *``）。判别方式见
+    ``tests/api/test_quality_reference_list_response_contract.py``。
+    """
     if not _project_exists(pid, request):
         raise HTTPException(status_code=404, detail=f"project {pid!r} not found")
     conn = _conn(request)
@@ -99,6 +129,7 @@ def list_style_samples(pid: str, request: Request) -> list[dict]:
 @router.post(
     "/projects/{pid}/style-samples",
     status_code=status.HTTP_201_CREATED,
+    response_model=StyleSample,
 )
 def create_style_sample(
     pid: str, payload: StyleSampleCreate, request: Request,

@@ -143,7 +143,12 @@ def _build_observer_ctx_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     chapter_id = ctx["chapter_id"]
     payload = build_observer_input(db_path, chapter_id, snapshot_mode="trimmed")
-    return {"observer_input": payload}
+    # 2026-10-15 批次（六）G9：装配级 token 预算元字段提到顶层（同款理由与注释，
+    # 见 chapter_write/pipeline.py 的 writer_assembly_meta）。⚠️ 只提键。
+    return {
+        "observer_input": payload,
+        "observer_assembly_meta": payload.get("_assembly_meta"),
+    }
 
 
 def _observer_node(ctx: dict[str, Any]) -> dict[str, Any]:

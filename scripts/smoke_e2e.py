@@ -5,7 +5,7 @@ project → character → model_config → chapter → 四工作流
 （plan → write → review → commit）的端到端链路，断言：
 
 1. GET /                                        → 200 + HTML（SPA 托管 apps/web/dist）
-2. GET /api/health                              → 200，tables=38（业务表 38；含 _migrations 物理共 39）
+2. GET /api/health                              → 200，tables=39（业务表 39；含 _migrations 物理共 40）
 3. POST /api/projects                           → 201 + project_id
 4. POST /api/projects/{pid}/characters          → 201 + character_id（1 个主角）
 5. POST /api/projects/{pid}/world-rules         → 201 + world_rule_id（1 条世界规则；PRD §110 第 3 步「创建世界」）
@@ -50,7 +50,7 @@ project → character → model_config → chapter → 四工作流
   脚本仍按同一契约处理，防 fixture 变化后回退成静默挂起。）
 - 每步 start 后必须轮询到终态：start/resume 端点 V3.5 起异步化，响应恒为 RUNNING，
   真实终态只在 ``GET /api/runs/{run_id}`` 上（COMPLETED / FAILED / CANCELLED）。
-- health.tables = 业务表数（38）；含 _migrations 物理共 39。
+- health.tables = 业务表数（39）；含 _migrations 物理共 40。
 """
 
 from __future__ import annotations
@@ -76,8 +76,8 @@ SERVER_START_TIMEOUT_S = 30
 ENDPOINT_READY_TIMEOUT_S = 30
 HTTP_TIMEOUT_S = 60.0
 
-# health.tables = 业务表数（业务表 38；含 _migrations 物理共 39，health 返回减 1 后的业务表数）
-# 真值核对：``count_tables()`` 排除 sqlite_% 与 chapter_fts% 影子表后返回 39（含 _migrations），
+# health.tables = 业务表数（业务表 39；含 _migrations 物理共 40，health 返回减 1 后的业务表数）
+# 真值核对：``count_tables()`` 排除 sqlite_% 与 chapter_fts% 影子表后返回 40（含 _migrations），
 # 与 README §健康检查、packages/core/db.py docstring、tests/integration/test_health.py 同口径。
 EXPECTED_BUSINESS_TABLES = 39  # 0027 chapter_scene_plans（P1 规划合并落库面）后 38→39
 # V2.0 Wave B 任务一：0009_branch_snapshots.sql 加 branch_snapshots → 34 业务表

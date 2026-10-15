@@ -36,6 +36,11 @@ from fastapi import APIRouter, HTTPException, Request, status
 from packages.core.api.routers.model_profiles import _clean_model_field
 from packages.core.logging_config import get_logger
 from packages.core.model_router import ModelConfigService, ModelRouter, ProviderError
+from packages.core.model_router.models import (
+    ConfigTestResult,
+    ModelConfigOut,
+    ProviderErrorEnvelope,
+)
 from packages.core.model_router.security import (
     _dump_params_json,
     _mask_response,
@@ -49,7 +54,7 @@ log = get_logger("novelos.routers.model_configs")
 router = APIRouter(tags=["model_configs"])
 
 
-@router.post("/model-configs", status_code=status.HTTP_201_CREATED)
+@router.post("/model-configs", status_code=status.HTTP_201_CREATED, response_model=ModelConfigOut)
 def create_model_config(payload: dict, request: Request) -> dict:
     """创建一条 model config。必填字段：``capability / provider / model``。
 
@@ -99,19 +104,30 @@ def create_model_config(payload: dict, request: Request) -> dict:
     return _mask_response(row)
 
 
-@router.get("/model-configs")
+@router.get("/model-configs", response_model=list[ModelConfigOut])
 def list_model_configs(
     request: Request,
     capability: str | None = None,
     provider: str | None = None,
 ) -> list[dict]:
+    """列出 configs（可按 ``capability`` / ``provider`` 过滤）。
+
+    列表行的形状与单条 ``GET /model-configs/{id}`` **逐字相同**（同走
+    :func:`_mask_response`，同源于 service 的 ``SELECT *``）⇒ 复用
+    :class:`ModelConfigOut`，不为列表另立模型。
+
+    ⚠️ ``response_model`` 会**过滤**未声明字段：``ModelConfigOut`` 是
+    ``extra="allow"``，所以「少声明一个字段」在响应侧看不出来（键以 extra 透出），
+    只能从 OpenAPI ``properties`` 断言——判别用例见
+    ``tests/api/test_config_list_response_contract.py``。
+    """
     settings = request.app.state.settings
     svc = ModelConfigService(settings.db_path)
     rows = svc.list(capability=capability, provider=provider)
     return [_mask_response(r) for r in rows]
 
 
-@router.get("/model-configs/{config_id}")
+@router.get("/model-configs/{config_id}", response_model=ModelConfigOut)
 def get_model_config(config_id: str, request: Request) -> dict:
     settings = request.app.state.settings
     svc = ModelConfigService(settings.db_path)
@@ -121,7 +137,7 @@ def get_model_config(config_id: str, request: Request) -> dict:
     return _mask_response(row)
 
 
-@router.patch("/model-configs/{config_id}")
+@router.patch("/model-configs/{config_id}", response_model=ModelConfigOut)
 def patch_model_config(config_id: str, payload: dict, request: Request) -> dict:
     """部分更新。
 
@@ -189,7 +205,12 @@ def delete_model_config(config_id: str, request: Request):
     return None
 
 
-@router.post("/model-configs/{config_id}/test", status_code=status.HTTP_200_OK)
+@router.post(
+    "/model-configs/{config_id}/test",
+    status_code=status.HTTP_200_OK,
+    response_model=ConfigTestResult,
+    responses={502: {"model": ProviderErrorEnvelope}},
+)
 def test_model_config(config_id: str, request: Request) -> dict:
     """ping：用该配置做一次轻量级健康检查，返回 ``{ok, latency_ms, detail, status_code?}``。
 
@@ -212,15 +233,23 @@ def test_model_config(config_id: str, request: Request) -> dict:
             detail=f"model_config {config_id!r} is disabled (enabled=0); cannot /test",
         )
 
-    provider = ModelRouter(settings.db_path).get_provider(config_row)
+    # ⚠️ 2026-10-15 修：同 model_profiles.py 的同款缺陷——`get_provider` 抛的
+    # `ValueError` 原先落在 try 之外且只捕 `ProviderError` ⇒ 未捕获 ⇒
+    # **500 且 text/plain**（非 JSON）。实测复现见 model_profiles.py 的注释。
     # mock provider 走 health_check（恒 ok），与既有 mock 语义一致；
     # 其它 provider 也优先走 health_check，避免向真模型发完整 prompt。
     try:
+        provider = ModelRouter(settings.db_path).get_provider(config_row)
         result = provider.health_check()
     except ProviderError as exc:
         raise HTTPException(
             status_code=502,
             detail={"error": "provider_error", "message": str(exc), "status_code": exc.status_code},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"model_config {config_id!r} 的 provider 配置无效：{exc}",
         ) from exc
     return {
         "config_id": config_id,

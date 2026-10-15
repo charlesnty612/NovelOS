@@ -39,7 +39,7 @@ from fastapi.responses import Response
 from packages.core.db import get_connection
 from packages.core.logging_config import get_logger
 from packages.core.quality.engine import QualityEngine
-from packages.core.quality.models import QualityJudgeResponse
+from packages.core.quality.models import QualityJudgeResponse, QualityReportResponse
 from packages.core.quality.service import (
     QualityService,
     build_quality_context,
@@ -86,13 +86,18 @@ def _attach_judge(row: dict[str, Any] | None) -> dict[str, Any]:
     return row
 
 
-@router.get("/chapters/{chapter_id}/quality")
+@router.get("/chapters/{chapter_id}/quality", response_model=QualityReportResponse)
 def get_chapter_quality(chapter_id: str, request: Request) -> dict:
     """该 chapter 的最新一份 QualityReport；不存在 → 404。
 
     V3.1 P1-2：响应顶层附 ``judge`` 字段（来自 ``quality_reports.judge_json``，
     双轨并存；未评审或评审失败时为 ``null``）。七子分 ``scores_json`` / overall
     / issues_json / formula_hash 等字段不变；judge 不进入 overall 计算。
+
+    ⚠️ 出参模型 ``QualityReportResponse`` 开了 ``extra="allow"``：键集等于
+    ``quality_reports`` 表列集（``SELECT *``）＋ ``judge``，表里加列就会多键。
+    **因此只断言「响应键集」抓不到字段声明被删**，契约测试须另断言 OpenAPI 的
+    ``properties`` / ``required``。
     """
     _ensure_chapter(request, chapter_id)
     row = _service(request).latest_report(chapter_id)
@@ -134,13 +139,32 @@ def save_chapter_judge(chapter_id: str, payload: dict, request: Request) -> dict
     }
 
 
-@router.get("/projects/{project_id}/quality")
+@router.get(
+    "/projects/{project_id}/quality",
+    response_model=list[QualityReportResponse],
+)
 def list_project_quality(
     project_id: str,
     request: Request,
     limit: int = 50,
 ) -> list[dict]:
-    """列出该项目全部 quality report；按 ``created_at`` 降序。"""
+    """列出该项目全部 quality report；按 ``created_at`` 降序。
+
+    **列表行与单体行同形**（2026-10-15 批次（六）L4 实测）：``list_reports`` 与
+    ``latest_report`` 走的是同一个 ``SELECT * FROM quality_reports`` ＋ 同一个
+    :func:`_attach_judge` ⇒ 11 键恒在、逐键同名。⇒ **复用** ``QualityReportResponse``
+    而不是新立一个模型（同一份事实源；新立一份必然与它漂移）。
+
+    ⚠️ 但这是**实测结论，不是先验**：``GET /commits`` 列表行 12 键而
+    ``POST /commits`` 响应 4 键的先例就在同一批里。改 ``list_reports`` 的 SELECT
+    或 ``_attach_judge`` 的弹键逻辑时，本条的同形前提即失效，必须重新量。
+
+    ⚠️ 残余边界（Literal 打在**存量落库数据**上）：``issues_json[]`` 走
+    ``QualityReportIssue`` 的 ``severity / category / gate`` 三个 Literal。一份被
+    手工改脏的 ``issues_json``（比如 ``category`` 写成表外值）会让本端点 **500**，
+    而不是「少报一个字段」。该风险随 ``QualityReportIssue`` 共存，单体端点
+    （``GET /chapters/{cid}/quality``）同样承担，非本端点独有。
+    """
     settings = request.app.state.settings
     from packages.domain.project.service import ProjectService
 
@@ -155,6 +179,7 @@ def list_project_quality(
 @router.post(
     "/chapters/{chapter_id}/quality/evaluate",
     status_code=status.HTTP_201_CREATED,
+    response_model=QualityReportResponse,
 )
 def evaluate_chapter_quality(chapter_id: str, request: Request) -> dict:
     """现场对 chapter 触发一次 Quality 评估并落库，返回 report。
@@ -163,7 +188,8 @@ def evaluate_chapter_quality(chapter_id: str, request: Request) -> dict:
     - 调用 :class:`StoryStateService.get_current_state` 拿 snapshot_pre（与 chapter_commit
       pipeline 的 quality_gate 节点保持同一口径）；
     - 复用 :func:`build_quality_context` + :class:`QualityEngine`；
-    - 落库后返回 report dict（与 GET 端点同 schema）。
+    - 落库后返回 report dict（与 GET 端点**同 schema**，故共用
+      ``QualityReportResponse``）。
     """
     db_path = _db_path(request)
 
@@ -230,6 +256,15 @@ def export_q8_csv(project_id: str, request: Request) -> Response:
     - 响应头 ``Content-Type: text/csv; charset=utf-8`` + ``Content-Disposition: attachment;
       filename="q8-report-<project_id>.csv"``；UTF-8 BOM 以兼容 Excel 中文显示。
     - project 不存在 → 404。
+
+    ⚠️ **本端点刻意不声明 ``response_model``**（2026-10-15 批次（六））：它返回的是
+    **文件下载**（CSV + BOM），不是 JSON。硬套一个 JSON 模型只会给 OpenAPI 写进一条
+    与实际 ``Content-Type`` 相矛盾的契约——比没有契约更坏。实测确认（临时库）：
+    ``content-type: text/csv; charset=utf-8``、
+    ``content-disposition: attachment; filename="q8-report-<project_id>.csv"``、
+    首字节为 UTF-8 BOM ``EF BB BF``。CSV 列头由下方 ``writer.writerow`` 字面量决定：
+    ``chapter_number, chapter_title, chapter_status, ai_chars, human_chars,
+    human_ratio, evaluated_at``。
     """
     settings = request.app.state.settings
     db_path = _db_path(request)

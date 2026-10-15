@@ -41,6 +41,11 @@ from .common import (
     log,
 )
 from .fast_mode import resolve_fast_mode
+from .models import (
+    ProjectInitStarted,
+    RunCancelled,
+    WorkflowStartAccepted,
+)
 
 router = APIRouter(tags=["workflows"])
 
@@ -501,6 +506,12 @@ def _guard_commit_draft_freshness(request: Request, chapter_id: str) -> None:
 @router.post(
     "/projects/init",
     status_code=status.HTTP_201_CREATED,
+    response_model=ProjectInitStarted,
+    # ⚠️ exclude_unset 而非 exclude_none：本端点的 4 个键里 `project_id` / `current_node`
+    # 在 step_mode 暂停时**在场且为 null**（persist 节点还没跑），exclude_none 会把它们
+    # 一起抹掉；而 `pause_payload` 该在时才在，不加开关又会恒以 null 出现。
+    # exclude_unset 精确复现实测（PAUSED 5 键 / 非 PAUSED 4 键）。见 models.py 模块注释。
+    response_model_exclude_unset=True,
 )
 def start_project_init(
     body: ProjectInitRequest,
@@ -525,6 +536,7 @@ def start_project_init(
 @router.post(
     "/projects/{project_id}/chapters/{chapter_id}/plan",
     status_code=status.HTTP_201_CREATED,
+    response_model=WorkflowStartAccepted,
 )
 def start_plan(
     project_id: str,
@@ -544,6 +556,7 @@ def start_plan(
 @router.post(
     "/projects/{project_id}/chapters/{chapter_id}/write",
     status_code=status.HTTP_201_CREATED,
+    response_model=WorkflowStartAccepted,
 )
 def start_write(
     project_id: str,
@@ -694,6 +707,7 @@ def _spawn_auto_commit(
 @router.post(
     "/projects/{project_id}/chapters/{chapter_id}/review",
     status_code=status.HTTP_201_CREATED,
+    response_model=WorkflowStartAccepted,
 )
 def start_review(
     project_id: str,
@@ -713,6 +727,7 @@ def start_review(
 @router.post(
     "/projects/{project_id}/chapters/{chapter_id}/commit",
     status_code=status.HTTP_201_CREATED,
+    response_model=WorkflowStartAccepted,
 )
 def start_commit(
     project_id: str,
@@ -735,7 +750,7 @@ def start_commit(
     )
 
 
-@router.post("/runs/{run_id}/resume")
+@router.post("/runs/{run_id}/resume", response_model=WorkflowStartAccepted)
 def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     db_path = settings.db_path
@@ -974,7 +989,7 @@ def resume_run(run_id: str, body: ResumeRequest, request: Request) -> dict[str, 
 # ---------------------------------------------------------------------------
 
 
-@router.post("/runs/{run_id}/cancel")
+@router.post("/runs/{run_id}/cancel", response_model=RunCancelled)
 def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
     """协作式取消 RUNNING workflow run。
 

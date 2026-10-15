@@ -15,9 +15,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Health Api Health Get"
+                  "$ref": "#/components/schemas/HealthResponse"
                 }
               }
             }
@@ -51,9 +49,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Sync Prompts Api Agents Sync Post"
+                  "$ref": "#/components/schemas/AgentPromptSyncResult"
                 }
               }
             }
@@ -77,6 +73,7 @@
           "agents"
         ],
         "summary": "List Agents",
+        "description": "列出已注册 agent（按 name 升序）。\n\n⚠️ 行的 ``config_json`` 是 **JSON 字符串**而非对象——表列是 TEXT、\n``PromptRegistry.list_agents`` 原样透传。模型刻意声明成 ``str``：声明成 ``dict``\n实测会**校验失败**（Pydantic 不做 JSON 字符串→对象的隐式解析）⇒ 端点 500。",
         "operationId": "list_agents_api_agents_get",
         "responses": {
           "200": {
@@ -85,8 +82,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/AgentListRowOut"
                   },
                   "type": "array",
                   "title": "Response List Agents Api Agents Get"
@@ -103,6 +99,7 @@
           "agents"
         ],
         "summary": "List Agent Prompts",
+        "description": "列出指定 agent 的 prompts（按 version 数字降序）。\n\nagent 不存在时返回 **``[]``（200，不是 404）**——既有行为，本批未改。",
         "operationId": "list_agent_prompts_api_agents__name__prompts_get",
         "parameters": [
           {
@@ -123,8 +120,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/AgentPromptRowOut"
                   },
                   "title": "Response List Agent Prompts Api Agents  Name  Prompts Get"
                 }
@@ -181,9 +177,25 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Run Agent Endpoint Api Agents  Name  Run Post"
+                  "$ref": "#/components/schemas/AgentRunResult"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "provider 错误（provider_error）或 agent 输出不合规（agent_output_invalid）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ProviderErrorEnvelope"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AgentOutputErrorEnvelope"
+                    }
+                  ],
+                  "title": "Response 502 Run Agent Endpoint Api Agents  Name  Run Post"
                 }
               }
             }
@@ -207,7 +219,7 @@
           "ai-call-logs"
         ],
         "summary": "List Ai Call Logs",
-        "description": "分页列出 ai_call_logs（按 created_at DESC）。\n\n查询参数：\n- ``project_id`` —— 可选；按项目过滤（JOIN workflow_runs）。\n- ``node`` —— 可选；按 node_run_id 精确过滤。\n- ``limit`` —— 默认 50，上限 200。\n- ``offset`` —— 默认 0。",
+        "description": "分页列出 ai_call_logs（按 created_at DESC）。\n\n形状 = :class:`AiCallLogSummary`（12 键摘要，**不是** 14 键的详情形状）。\n严格模型 ⇒ 「少声明一个字段」在响应侧立刻可见（少一个键），\n而 ``extra=\"allow\"`` 的行模型（档案/配置/绑定/agent）只能从 OpenAPI 侧抓。\n\n查询参数：\n- ``project_id`` —— 可选；按项目过滤（JOIN workflow_runs）。\n- ``node`` —— 可选；按 node_run_id 精确过滤。\n- ``limit`` —— 默认 50，上限 200。\n- ``offset`` —— 默认 0。",
         "operationId": "list_ai_call_logs_api_ai_call_logs_get",
         "parameters": [
           {
@@ -278,8 +290,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/AiCallLogSummary"
                   },
                   "title": "Response List Ai Call Logs Api Ai Call Logs Get"
                 }
@@ -324,9 +335,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Ai Call Log Api Ai Call Logs  Log Id  Get"
+                  "$ref": "#/components/schemas/AiCallLogDetail"
                 }
               }
             }
@@ -393,7 +402,7 @@
           "author-style-samples"
         ],
         "summary": "List Style Samples",
-        "description": "列出该项目的全部文风样例（created_at DESC）。",
+        "description": "列出该项目的全部文风样例（created_at DESC）。\n\n**复用** POST 用的同一个 :class:`StyleSample`（2026-10-15 批次（六）L4 实测）：\n两条路都是「整行投影」⇒ 恒 6 键、无条件键。\n\n⚠️ **不设 ``extra=\"allow\"``**：本端点的 SQL 是**显式 6 列枚举**（不是\n``SELECT *``）⇒ 表将来加列**不会**出现在响应里，多出来的键只可能是 bug\n（与 ``QualityReportResponse`` 必须开 ``extra=\"allow\"`` 的理由相反——\n那边是 ``SELECT *``）。判别方式见\n``tests/api/test_quality_reference_list_response_contract.py``。",
         "operationId": "list_style_samples_api_projects__pid__style_samples_get",
         "parameters": [
           {
@@ -414,8 +423,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/StyleSample"
                   },
                   "title": "Response List Style Samples Api Projects  Pid  Style Samples Get"
                 }
@@ -468,9 +476,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Style Sample Api Projects  Pid  Style Samples Post"
+                  "$ref": "#/components/schemas/StyleSample"
                 }
               }
             }
@@ -539,7 +545,7 @@
           "backup"
         ],
         "summary": "Download Project Backup",
-        "description": "导出项目备份 JSON。\n\n返回 dict 由 FastAPI 自动 JSON 序列化；额外通过 ``Content-Disposition``\n让浏览器保存为 ``backup-<project_id>.json`` 文件。\n\n项目不存在 → 404；包构造异常 → 500。",
+        "description": "导出项目备份 JSON。\n\n返回 dict 由 FastAPI 自动 JSON 序列化；额外通过 ``Content-Disposition``\n让浏览器保存为 ``backup-<project_id>.json`` 文件。\n\n项目不存在 → 404；包构造异常 → 500。\n\n⚠️ 返回的是 ``JSONResponse`` 实例（为挂 Content-Disposition），**不是** dict——\n原注解 ``-> dict`` 是错的（FastAPI 见到 ``Response`` 实例就跳过序列化，\n那个注解从未生效过）。本函数改为 ``response_model=BackupPackage`` + ``-> Response``：\n模型只进 OpenAPI（契约文档），**不做运行时过滤**。判别用例因此断言 OpenAPI 的\n``properties``，而不是响应体——对响应体的断言在本端点恒真。",
         "operationId": "download_project_backup_api_projects__project_id__backup_get",
         "parameters": [
           {
@@ -558,9 +564,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Download Project Backup Api Projects  Project Id  Backup Get"
+                  "$ref": "#/components/schemas/BackupPackage"
                 }
               }
             }
@@ -584,7 +588,7 @@
           "backup"
         ],
         "summary": "Import Project Backup",
-        "description": "导入备份包为新项目，返回新项目 dict。\n\n请求体：JSON 对象（顶层 5 字段必填；详见 :mod:`packages.core.backup.schema`）。\n返回：201 + 新项目 dict（与 ``POST /api/projects`` 一致）。\n\n错误码：\n- 422 — 备份包格式非法 / 表名不在白名单 / 缺必填字段 / 事务失败。",
+        "description": "导入备份包为新项目，返回新项目 dict。\n\n请求体：JSON 对象（顶层 5 字段必填；详见 :mod:`packages.core.backup.schema`）。\n返回：201 + 新项目 dict（裸 DB 行，见 :class:`ImportedProject`）。\n\n错误码：\n- 422 — 备份包格式非法 / 表名不在白名单 / 缺必填字段 / 事务失败。",
         "operationId": "import_project_backup_api_projects_import_backup_post",
         "requestBody": {
           "content": {
@@ -604,9 +608,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Import Project Backup Api Projects Import Backup Post"
+                  "$ref": "#/components/schemas/ImportedProject"
                 }
               }
             }
@@ -630,6 +632,7 @@
           "capability_bindings"
         ],
         "summary": "List Capability Bindings",
+        "description": "列出**全部**环节（含未绑定的）。\n\n与 ``PUT`` 的响应**逐字同形**：两者都出自同一个\n:meth:`BindingService.list_with_profiles`，因此「未绑定时 ``updated_at`` 为\n``null``（不是省略）、``profiles`` / ``profile_ids`` 为空数组」这一语义在两侧\n完全一致 ⇒ 直接复用 :class:`CapabilityBindingOut`，不为列表另立模型。\n\n这一点是**量过的**，不是推断的（2026-10-15 临时库实测 8 个环节：绑定 1 个、\n未绑定 7 个，两种形态都是 7 键）。",
         "operationId": "list_capability_bindings_api_capability_bindings_get",
         "responses": {
           "200": {
@@ -638,8 +641,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/CapabilityBindingOut"
                   },
                   "type": "array",
                   "title": "Response List Capability Bindings Api Capability Bindings Get"
@@ -687,9 +689,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Upsert Capability Binding Api Capability Bindings  Capability  Put"
+                  "$ref": "#/components/schemas/CapabilityBindingOut"
                 }
               }
             }
@@ -730,9 +730,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Delete Capability Binding Api Capability Bindings  Capability  Delete"
+                  "$ref": "#/components/schemas/CapabilityBindingDeleted"
                 }
               }
             }
@@ -1940,9 +1938,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Project Genre Pack Api Projects  Project Id  Genre Pack Get"
+                  "$ref": "#/components/schemas/GenrePackBinding"
                 }
               }
             }
@@ -1995,9 +1991,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Bind Project Genre Pack Api Projects  Project Id  Genre Pack Bind Post"
+                  "$ref": "#/components/schemas/GenrePackBinding"
                 }
               }
             }
@@ -2040,9 +2034,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Unbind Project Genre Pack Api Projects  Project Id  Genre Pack Unbind Post"
+                  "$ref": "#/components/schemas/GenrePackBinding"
                 }
               }
             }
@@ -2094,9 +2086,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Hook Api Projects  Pid  Hooks Post"
+                  "$ref": "#/components/schemas/Hook"
                 }
               }
             }
@@ -2154,8 +2144,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/Hook"
                   },
                   "title": "Response List Hooks Api Projects  Pid  Hooks Get"
                 }
@@ -2199,9 +2188,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Hook Api Hooks  Hook Id  Get"
+                  "$ref": "#/components/schemas/Hook"
                 }
               }
             }
@@ -2251,9 +2238,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Update Hook Api Hooks  Hook Id  Patch"
+                  "$ref": "#/components/schemas/Hook"
                 }
               }
             }
@@ -2338,9 +2323,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Debt Api Projects  Pid  Debts Post"
+                  "$ref": "#/components/schemas/Debt"
                 }
               }
             }
@@ -2398,8 +2381,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/Debt"
                   },
                   "title": "Response List Debts Api Projects  Pid  Debts Get"
                 }
@@ -2443,9 +2425,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Debt Api Debts  Debt Id  Get"
+                  "$ref": "#/components/schemas/Debt"
                 }
               }
             }
@@ -2495,9 +2475,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Update Debt Api Debts  Debt Id  Patch"
+                  "$ref": "#/components/schemas/Debt"
                 }
               }
             }
@@ -2574,9 +2552,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Model Config Api Model Configs Post"
+                  "$ref": "#/components/schemas/ModelConfigOut"
                 }
               }
             }
@@ -2598,6 +2574,7 @@
           "model_configs"
         ],
         "summary": "List Model Configs",
+        "description": "列出 configs（可按 ``capability`` / ``provider`` 过滤）。\n\n列表行的形状与单条 ``GET /model-configs/{id}`` **逐字相同**（同走\n:func:`_mask_response`，同源于 service 的 ``SELECT *``）⇒ 复用\n:class:`ModelConfigOut`，不为列表另立模型。\n\n⚠️ ``response_model`` 会**过滤**未声明字段：``ModelConfigOut`` 是\n``extra=\"allow\"``，所以「少声明一个字段」在响应侧看不出来（键以 extra 透出），\n只能从 OpenAPI ``properties`` 断言——判别用例见\n``tests/api/test_config_list_response_contract.py``。",
         "operationId": "list_model_configs_api_model_configs_get",
         "parameters": [
           {
@@ -2641,8 +2618,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/ModelConfigOut"
                   },
                   "title": "Response List Model Configs Api Model Configs Get"
                 }
@@ -2686,9 +2662,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Model Config Api Model Configs  Config Id  Get"
+                  "$ref": "#/components/schemas/ModelConfigOut"
                 }
               }
             }
@@ -2741,9 +2715,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Patch Model Config Api Model Configs  Config Id  Patch"
+                  "$ref": "#/components/schemas/ModelConfigOut"
                 }
               }
             }
@@ -2819,12 +2791,20 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Test Model Config Api Model Configs  Config Id  Test Post"
+                  "$ref": "#/components/schemas/ConfigTestResult"
                 }
               }
             }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderErrorEnvelope"
+                }
+              }
+            },
+            "description": "Bad Gateway"
           },
           "422": {
             "description": "Validation Error",
@@ -2865,9 +2845,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Model Profile Api Model Profiles Post"
+                  "$ref": "#/components/schemas/ModelProfileOut"
                 }
               }
             }
@@ -2889,6 +2867,7 @@
           "model_profiles"
         ],
         "summary": "List Model Profiles",
+        "description": "列出档案（``include_enabled_only`` 可只回 enabled 行）。\n\n列表行的 9 键与单条 ``GET /model-profiles/{id}`` **逐字相同**（同走\n:func:`_mask_response`，同源于 service 的 ``SELECT *``）⇒ 复用\n:class:`ModelProfileOut`，不为列表另立模型。\n\n⚠️ 该模型是 ``extra=\"allow\"``：少声明字段在响应侧看不出来（键以 extra 透出），\n只能从 OpenAPI ``properties`` 断言——判别用例见\n``tests/api/test_config_list_response_contract.py``。",
         "operationId": "list_model_profiles_api_model_profiles_get",
         "parameters": [
           {
@@ -2910,8 +2889,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/ModelProfileOut"
                   },
                   "title": "Response List Model Profiles Api Model Profiles Get"
                 }
@@ -2955,9 +2933,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Model Profile Api Model Profiles  Profile Id  Get"
+                  "$ref": "#/components/schemas/ModelProfileOut"
                 }
               }
             }
@@ -3010,9 +2986,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Patch Model Profile Api Model Profiles  Profile Id  Patch"
+                  "$ref": "#/components/schemas/ModelProfileOut"
                 }
               }
             }
@@ -3088,12 +3062,20 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Test Model Profile Api Model Profiles  Profile Id  Test Post"
+                  "$ref": "#/components/schemas/ProfileTestResult"
                 }
               }
             }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderErrorEnvelope"
+                }
+              }
+            },
+            "description": "Bad Gateway"
           },
           "422": {
             "description": "Validation Error",
@@ -3134,9 +3116,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response List Available Models Api Model Profiles Available Models Post"
+                  "$ref": "#/components/schemas/AvailableModelsOut"
                 }
               }
             }
@@ -3190,9 +3170,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Event Api Projects  Pid  Events Post"
+                  "$ref": "#/components/schemas/PlotEventOut"
                 }
               }
             }
@@ -3266,8 +3244,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/PlotEventOut"
                   },
                   "title": "Response List Events Api Projects  Pid  Events Get"
                 }
@@ -3311,9 +3288,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Event Api Events  Event Id  Get"
+                  "$ref": "#/components/schemas/PlotEventOut"
                 }
               }
             }
@@ -3365,9 +3340,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Update Event Api Events  Event Id  Patch"
+                  "$ref": "#/components/schemas/PlotEventOut"
                 }
               }
             }
@@ -3444,8 +3417,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/TimelineEventOut"
                   },
                   "title": "Response List Timeline Api Projects  Pid  Timeline Get"
                 }
@@ -3499,9 +3471,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Timeline Api Projects  Pid  Timeline Post"
+                  "$ref": "#/components/schemas/TimelineEventOut"
                 }
               }
             }
@@ -3580,8 +3550,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/RelationshipOut"
                   },
                   "title": "Response List Relationships Api Projects  Pid  Relationships Get"
                 }
@@ -3819,7 +3788,7 @@
           "quality"
         ],
         "summary": "Get Chapter Quality",
-        "description": "该 chapter 的最新一份 QualityReport；不存在 → 404。\n\nV3.1 P1-2：响应顶层附 ``judge`` 字段（来自 ``quality_reports.judge_json``，\n双轨并存；未评审或评审失败时为 ``null``）。七子分 ``scores_json`` / overall\n/ issues_json / formula_hash 等字段不变；judge 不进入 overall 计算。",
+        "description": "该 chapter 的最新一份 QualityReport；不存在 → 404。\n\nV3.1 P1-2：响应顶层附 ``judge`` 字段（来自 ``quality_reports.judge_json``，\n双轨并存；未评审或评审失败时为 ``null``）。七子分 ``scores_json`` / overall\n/ issues_json / formula_hash 等字段不变；judge 不进入 overall 计算。\n\n⚠️ 出参模型 ``QualityReportResponse`` 开了 ``extra=\"allow\"``：键集等于\n``quality_reports`` 表列集（``SELECT *``）＋ ``judge``，表里加列就会多键。\n**因此只断言「响应键集」抓不到字段声明被删**，契约测试须另断言 OpenAPI 的\n``properties`` / ``required``。",
         "operationId": "get_chapter_quality_api_chapters__chapter_id__quality_get",
         "parameters": [
           {
@@ -3838,9 +3807,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Chapter Quality Api Chapters  Chapter Id  Quality Get"
+                  "$ref": "#/components/schemas/QualityReportResponse"
                 }
               }
             }
@@ -3919,7 +3886,7 @@
           "quality"
         ],
         "summary": "List Project Quality",
-        "description": "列出该项目全部 quality report；按 ``created_at`` 降序。",
+        "description": "列出该项目全部 quality report；按 ``created_at`` 降序。\n\n**列表行与单体行同形**（2026-10-15 批次（六）L4 实测）：``list_reports`` 与\n``latest_report`` 走的是同一个 ``SELECT * FROM quality_reports`` ＋ 同一个\n:func:`_attach_judge` ⇒ 11 键恒在、逐键同名。⇒ **复用** ``QualityReportResponse``\n而不是新立一个模型（同一份事实源；新立一份必然与它漂移）。\n\n⚠️ 但这是**实测结论，不是先验**：``GET /commits`` 列表行 12 键而\n``POST /commits`` 响应 4 键的先例就在同一批里。改 ``list_reports`` 的 SELECT\n或 ``_attach_judge`` 的弹键逻辑时，本条的同形前提即失效，必须重新量。\n\n⚠️ 残余边界（Literal 打在**存量落库数据**上）：``issues_json[]`` 走\n``QualityReportIssue`` 的 ``severity / category / gate`` 三个 Literal。一份被\n手工改脏的 ``issues_json``（比如 ``category`` 写成表外值）会让本端点 **500**，\n而不是「少报一个字段」。该风险随 ``QualityReportIssue`` 共存，单体端点\n（``GET /chapters/{cid}/quality``）同样承担，非本端点独有。",
         "operationId": "list_project_quality_api_projects__project_id__quality_get",
         "parameters": [
           {
@@ -3950,8 +3917,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/QualityReportResponse"
                   },
                   "title": "Response List Project Quality Api Projects  Project Id  Quality Get"
                 }
@@ -3977,7 +3943,7 @@
           "quality"
         ],
         "summary": "Evaluate Chapter Quality",
-        "description": "现场对 chapter 触发一次 Quality 评估并落库，返回 report。\n\n- chapter 不存在 → 404；\n- 调用 :class:`StoryStateService.get_current_state` 拿 snapshot_pre（与 chapter_commit\n  pipeline 的 quality_gate 节点保持同一口径）；\n- 复用 :func:`build_quality_context` + :class:`QualityEngine`；\n- 落库后返回 report dict（与 GET 端点同 schema）。",
+        "description": "现场对 chapter 触发一次 Quality 评估并落库，返回 report。\n\n- chapter 不存在 → 404；\n- 调用 :class:`StoryStateService.get_current_state` 拿 snapshot_pre（与 chapter_commit\n  pipeline 的 quality_gate 节点保持同一口径）；\n- 复用 :func:`build_quality_context` + :class:`QualityEngine`；\n- 落库后返回 report dict（与 GET 端点**同 schema**，故共用\n  ``QualityReportResponse``）。",
         "operationId": "evaluate_chapter_quality_api_chapters__chapter_id__quality_evaluate_post",
         "parameters": [
           {
@@ -3996,9 +3962,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Evaluate Chapter Quality Api Chapters  Chapter Id  Quality Evaluate Post"
+                  "$ref": "#/components/schemas/QualityReportResponse"
                 }
               }
             }
@@ -4022,7 +3986,7 @@
           "quality"
         ],
         "summary": "Export Q8 Csv",
-        "description": "导出全章节「人工加工占比」CSV（PRD §125 合规自证）。\n\n- 数据源：按章节实时调 :func:`compute_char_stats` 读 ``drafts`` 表重算 ai/human\n  字符数（与 ``guardrails.req_q8`` 用同一函数，保证「导出数字 ≡ 评估口径」）。\n  并对该章 ``quality_reports`` 取 ``MAX(created_at)`` 作为 ``evaluated_at``（未评估\n  → 空串）。\n- 输出 CSV 列：``chapter_number, chapter_title, chapter_status, ai_chars,\n  human_chars, human_ratio, evaluated_at``。按 chapter_number 升序。``human_ratio``\n  是百分比（保留 1 位小数），total=0 时输出 ``0.0``。\n- 响应头 ``Content-Type: text/csv; charset=utf-8`` + ``Content-Disposition: attachment;\n  filename=\"q8-report-<project_id>.csv\"``；UTF-8 BOM 以兼容 Excel 中文显示。\n- project 不存在 → 404。",
+        "description": "导出全章节「人工加工占比」CSV（PRD §125 合规自证）。\n\n- 数据源：按章节实时调 :func:`compute_char_stats` 读 ``drafts`` 表重算 ai/human\n  字符数（与 ``guardrails.req_q8`` 用同一函数，保证「导出数字 ≡ 评估口径」）。\n  并对该章 ``quality_reports`` 取 ``MAX(created_at)`` 作为 ``evaluated_at``（未评估\n  → 空串）。\n- 输出 CSV 列：``chapter_number, chapter_title, chapter_status, ai_chars,\n  human_chars, human_ratio, evaluated_at``。按 chapter_number 升序。``human_ratio``\n  是百分比（保留 1 位小数），total=0 时输出 ``0.0``。\n- 响应头 ``Content-Type: text/csv; charset=utf-8`` + ``Content-Disposition: attachment;\n  filename=\"q8-report-<project_id>.csv\"``；UTF-8 BOM 以兼容 Excel 中文显示。\n- project 不存在 → 404。\n\n⚠️ **本端点刻意不声明 ``response_model``**（2026-10-15 批次（六））：它返回的是\n**文件下载**（CSV + BOM），不是 JSON。硬套一个 JSON 模型只会给 OpenAPI 写进一条\n与实际 ``Content-Type`` 相矛盾的契约——比没有契约更坏。实测确认（临时库）：\n``content-type: text/csv; charset=utf-8``、\n``content-disposition: attachment; filename=\"q8-report-<project_id>.csv\"``、\n首字节为 UTF-8 BOM ``EF BB BF``。CSV 列头由下方 ``writer.writerow`` 字面量决定：\n``chapter_number, chapter_title, chapter_status, ai_chars, human_chars,\nhuman_ratio, evaluated_at``。",
         "operationId": "export_q8_csv_api_projects__project_id__quality_q8_export_get",
         "parameters": [
           {
@@ -4094,9 +4058,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Start Deconstruct Api Projects  Project Id  Deconstruct Post"
+                  "$ref": "#/components/schemas/DeconstructStartResponse"
                 }
               }
             }
@@ -4149,9 +4111,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Start Deconstruct Upload Api Projects  Project Id  Deconstruct Upload Post"
+                  "$ref": "#/components/schemas/DeconstructStartResponse"
                 }
               }
             }
@@ -4175,7 +4135,7 @@
           "reference"
         ],
         "summary": "List Project Canons",
-        "description": "列出项目下全部 active canon（按 created_at DESC）。",
+        "description": "列出项目下全部 active canon（按 created_at DESC）。\n\n**不复用** :class:`CanonDetailOut`：列表行是 ``summary_of`` 做的**摘要**投影，\nSQL 只 SELECT 7 列（无 ``report_md``），且 ``canon_json`` 本身**不进响应**——\n它被拆成三个派生量（``logline`` / ``spine_count`` / ``rhythm_chapter_count``）。\n两边**都是 9 键但键名不同**（详见 :class:`CanonSummaryOut` 的 docstring）。\n⚠️ 「同一条 canon，列表 9 键、单体 9 键」极易被误读成同形，\n用一个模型套两条端点会让其中一条**静默丢字段**。",
         "operationId": "list_project_canons_api_projects__project_id__canons_get",
         "parameters": [
           {
@@ -4196,8 +4156,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/CanonSummaryOut"
                   },
                   "title": "Response List Project Canons Api Projects  Project Id  Canons Get"
                 }
@@ -4242,9 +4201,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Canon Api Canons  Canon Id  Get"
+                  "$ref": "#/components/schemas/CanonDetailOut"
                 }
               }
             }
@@ -4330,9 +4287,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Write Canon To Style Sample Api Projects  Project Id  Canons  Canon Id  To Style Sample Post"
+                  "$ref": "#/components/schemas/StyleSampleOut"
                 }
               }
             }
@@ -4575,7 +4530,7 @@
           "signing-check"
         ],
         "summary": "Get Signing Check",
-        "description": "返回该项目的签约体检结果（含 items / summary）。\n\n- project 不存在 → 404 ``{\"detail\": \"project '...' not found\"}``；\n- 成功 → 200 + ``run_signing_check`` 返回的 dict。",
+        "description": "返回该项目的签约体检结果（含 items / summary）。\n\n- project 不存在 → 404 ``{\"detail\": \"project '...' not found\"}``；\n- 成功 → 200 + ``run_signing_check`` 返回的 dict（经 :class:`SigningCheckResult`\n  过滤；两个条件键缺席时保持缺席，见模型区注释）。",
         "operationId": "get_signing_check_api_projects__project_id__signing_check_get",
         "parameters": [
           {
@@ -4594,9 +4549,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Signing Check Api Projects  Project Id  Signing Check Get"
+                  "$ref": "#/components/schemas/SigningCheckResult"
                 }
               }
             }
@@ -4804,9 +4757,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Init State Api Projects  Project Id  State Init Post"
+                  "$ref": "#/components/schemas/SnapshotResponse"
                 }
               }
             }
@@ -4969,9 +4920,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Submit Delta Api Projects  Project Id  Deltas Post"
+                  "$ref": "#/components/schemas/SubmitDeltaResponse"
                 }
               }
             }
@@ -5025,9 +4974,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Commit Delta Api Projects  Project Id  Commits Post"
+                  "$ref": "#/components/schemas/CommitResponse"
                 }
               }
             }
@@ -5049,6 +4996,7 @@
           "story_state"
         ],
         "summary": "List Commits",
+        "description": "列本项目的 commit（每行恒 12 键，实测）。\n\n行是**裸 DB 行**，与 ``POST /commits`` 的 ``CommitResponse``（4 键动作摘要）不同形，\n故另建 ``CommitListItem``——**不按单体端点的形状推列表行**。\n本端点没有条件键 ⇒ **不加**任何 ``response_model_exclude_*`` 开关。",
         "operationId": "list_commits_api_projects__project_id__commits_get",
         "parameters": [
           {
@@ -5069,8 +5017,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/CommitListItem"
                   },
                   "title": "Response List Commits Api Projects  Project Id  Commits Get"
                 }
@@ -5126,9 +5073,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Rollback Commit Api Commits  Commit Id  Rollback Post"
+                  "$ref": "#/components/schemas/RollbackResponse"
                 }
               }
             }
@@ -5152,6 +5097,7 @@
           "story_state"
         ],
         "summary": "List Deltas",
+        "description": "列本章的 state delta（每行恒 18 键，实测）。\n\n⚠️ 行里**没有** ``payload_json`` 键：``restore_delta_from_row`` 把 7 个 change\n数组摊到了顶层（10 元信息 + 7 数组 + ``status``）。7 数组不逐字段建模的理由见\n``StateDeltaListItem`` 的 docstring。\n\n⚠️ **归属校验（2026-10-16 补）**：此前只 ``_ensure_project(project_id)``，\n而 ``path`` 里的 ``project_id`` 与 ``chapter_id`` 是**两个独立变量**——``queries.list_deltas``\n是裸 ``SELECT * FROM state_deltas WHERE chapter_id = ?``，服务端**完全不看 project**，\n于是用别的 project_id 请求同一章会 **200 并原样返回同样的数据行**（实测 2/2 行）。\n现补 :func:`_ensure_chapter_in_project`（404，见该函数 docstring 的错误码理由）。",
         "operationId": "list_deltas_api_projects__project_id__chapters__chapter_id__deltas_get",
         "parameters": [
           {
@@ -5181,8 +5127,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/StateDeltaListItem"
                   },
                   "title": "Response List Deltas Api Projects  Project Id  Chapters  Chapter Id  Deltas Get"
                 }
@@ -5239,9 +5184,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Branch Api Projects  Project Id  Branches Post"
+                  "$ref": "#/components/schemas/BranchCreatedResponse"
                 }
               }
             }
@@ -5263,6 +5206,7 @@
           "story_state"
         ],
         "summary": "List Branches",
+        "description": "列本项目的分支（每行恒 7 键，实测）。\n\n⚠️ 键集与 ``POST /branches`` 的 ``BranchCreatedResponse`` **逐字相同**却**不可复用**：\n列表恒含 ``main`` 分支，而 main 的 ``parent_branch_id`` 是 null（根节点无父），\n``BranchCreatedResponse`` 声明的是必填非空 ``str`` ⇒ 复用会让本端点恒 500。\n本端点没有条件键 ⇒ **不加**任何 ``response_model_exclude_*`` 开关。",
         "operationId": "list_branches_api_projects__project_id__branches_get",
         "parameters": [
           {
@@ -5283,8 +5227,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/BranchSummary"
                   },
                   "title": "Response List Branches Api Projects  Project Id  Branches Get"
                 }
@@ -5310,7 +5253,7 @@
           "story_state"
         ],
         "summary": "Promote Branch",
-        "description": "把分支全部 commits 合并为单个 delta，在 main 上提交（state-delta-v0.md §6.3）。",
+        "description": "把分支全部 commits 合并为单个 delta，在 main 上提交（state-delta-v0.md §6.3）。\n\n⚠️ 这里带的是 ``response_model_exclude_unset=True``，**不是** ``_exclude_none``——\n两者解决的是相反的问题，都不能互换（详见 ``story_state/models.py`` 里\n``BranchPromoteResponse`` 的 docstring 与 ``_drop_if_none`` 的 docstring）：\n\n* 本端点有**两个形状**（空分支 7 键 / 非空分支 8 键），三个键在其中一侧**缺席**。\n  不带 ``exclude_unset`` 时 Pydantic 会拿默认值把缺席的键**补成 ``null``**——\n  实测空分支响应因此从 7 键变成 9 键（凭空多出 ``promoted_from`` / ``snapshot_ref``），\n  那是**加 response_model 本身引入的契约变更**。\n* 而 ``commit_id`` / ``delta_id`` 在空分支形状里是**值为 null 的真键**。\n  用 ``_exclude_none`` 会把它们**抹掉**（键从有变无）。\n\n``exclude_unset`` 只看「生产方有没有给这个键」，两个需求同时满足。",
         "operationId": "promote_branch_api_projects__project_id__branches__branch_id__promote_post",
         "parameters": [
           {
@@ -5350,9 +5293,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Promote Branch Api Projects  Project Id  Branches  Branch Id  Promote Post"
+                  "$ref": "#/components/schemas/BranchPromoteResponse"
                 }
               }
             }
@@ -5376,7 +5317,7 @@
           "story_state"
         ],
         "summary": "Diff Versions",
-        "description": "两个 state_version 之间的结构化 diff。",
+        "description": "两个 state_version 之间的结构化 diff。\n\n⚠️ **刻意不加** ``response_model_exclude_none=True``：六个实体段的「空则省略」\n由模型侧的**字段级** ``exclude_if`` 实现（``story_state/models.py::_drop_if_none``\n写了为什么）。端点级开关是一刀切的，会把恒为 null 的 ``branch_id`` 一起抹掉，\n实测空 diff 的键集从 3 个掉到 2 个——那是既有契约的静默变更。",
         "operationId": "diff_versions_api_projects__project_id__state_diff_get",
         "parameters": [
           {
@@ -5429,9 +5370,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Diff Versions Api Projects  Project Id  State Diff Get"
+                  "$ref": "#/components/schemas/StateDiffResponse"
                 }
               }
             }
@@ -5797,9 +5736,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Start Project Init Api Projects Init Post"
+                  "$ref": "#/components/schemas/ProjectInitStarted"
                 }
               }
             }
@@ -5860,9 +5797,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Start Plan Api Projects  Project Id  Chapters  Chapter Id  Plan Post"
+                  "$ref": "#/components/schemas/WorkflowStartAccepted"
                 }
               }
             }
@@ -5923,9 +5858,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Start Write Api Projects  Project Id  Chapters  Chapter Id  Write Post"
+                  "$ref": "#/components/schemas/WorkflowStartAccepted"
                 }
               }
             }
@@ -5986,9 +5919,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Start Review Api Projects  Project Id  Chapters  Chapter Id  Review Post"
+                  "$ref": "#/components/schemas/WorkflowStartAccepted"
                 }
               }
             }
@@ -6049,9 +5980,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Start Commit Api Projects  Project Id  Chapters  Chapter Id  Commit Post"
+                  "$ref": "#/components/schemas/WorkflowStartAccepted"
                 }
               }
             }
@@ -6103,9 +6032,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Resume Run Api Runs  Run Id  Resume Post"
+                  "$ref": "#/components/schemas/WorkflowStartAccepted"
                 }
               }
             }
@@ -6148,9 +6075,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Cancel Run Api Runs  Run Id  Cancel Post"
+                  "$ref": "#/components/schemas/RunCancelled"
                 }
               }
             }
@@ -6193,9 +6118,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Init Status Api Projects  Project Id  Init Status Get"
+                  "$ref": "#/components/schemas/ProjectInitStatus"
                 }
               }
             }
@@ -6237,9 +6160,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Run Endpoint Api Runs  Run Id  Get"
+                  "$ref": "#/components/schemas/WorkflowRunDetail"
                 }
               }
             }
@@ -6263,6 +6184,7 @@
           "workflows"
         ],
         "summary": "List Runs Endpoint",
+        "description": "列 project 下的 run（每行 13 键，实测）。\n\n``response_model`` 只在**数组的 items** 上生效——``list[dict]`` 在 OpenAPI 里\n是匿名 object，前端拿到的仍是 ``Record<string, unknown>``。加了\n``list[WorkflowRunSummary]`` 后 items 才有具名 ``$ref``。\n\n⚠️ **刻意不加** ``response_model_exclude_none`` / ``exclude_unset``：本端点\n**没有条件键**——``chapter_id`` / ``error`` / ``ended_at`` / ``label`` 都是\n「键恒在、值可为 null」，任一开关都会把它们抹掉，把 13 键砍成更少，等于改契约。\n判别：``tests/api/test_state_list_response_contract.py::test_list_endpoints_declare_no_exclude_switches``",
         "operationId": "list_runs_endpoint_api_projects__project_id__runs_get",
         "parameters": [
           {
@@ -6283,8 +6205,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/WorkflowRunSummary"
                   },
                   "title": "Response List Runs Endpoint Api Projects  Project Id  Runs Get"
                 }
@@ -6329,9 +6250,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Chapter Context Preview Api Chapters  Chapter Id  Context Preview Get"
+                  "$ref": "#/components/schemas/ContextPreview"
                 }
               }
             }
@@ -6393,9 +6312,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Start Gate Revise Api Projects  Project Id  Chapters  Chapter Id  Gate Revise Post"
+                  "$ref": "#/components/schemas/WorkflowStartAccepted"
                 }
               }
             }
@@ -6449,9 +6366,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Location Api Projects  Pid  Locations Post"
+                  "$ref": "#/components/schemas/WorldEntityOut"
                 }
               }
             }
@@ -6493,8 +6408,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/WorldEntityOut"
                   },
                   "title": "Response List Locations Api Projects  Pid  Locations Get"
                 }
@@ -6538,9 +6452,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Location Api Locations  Location Id  Get"
+                  "$ref": "#/components/schemas/WorldEntityOut"
                 }
               }
             }
@@ -6592,9 +6504,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Update Location Api Locations  Location Id  Patch"
+                  "$ref": "#/components/schemas/WorldEntityOut"
                 }
               }
             }
@@ -6681,9 +6591,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Faction Api Projects  Pid  Factions Post"
+                  "$ref": "#/components/schemas/WorldEntityOut"
                 }
               }
             }
@@ -6725,8 +6633,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/WorldEntityOut"
                   },
                   "title": "Response List Factions Api Projects  Pid  Factions Get"
                 }
@@ -6770,9 +6677,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Faction Api Factions  Faction Id  Get"
+                  "$ref": "#/components/schemas/WorldEntityOut"
                 }
               }
             }
@@ -6824,9 +6729,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Update Faction Api Factions  Faction Id  Patch"
+                  "$ref": "#/components/schemas/WorldEntityOut"
                 }
               }
             }
@@ -6913,9 +6816,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create World Rule Api Projects  Pid  World Rules Post"
+                  "$ref": "#/components/schemas/WorldEntityOut"
                 }
               }
             }
@@ -6957,8 +6858,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/WorldEntityOut"
                   },
                   "title": "Response List World Rules Api Projects  Pid  World Rules Get"
                 }
@@ -7002,9 +6902,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get World Rule Api World Rules  World Rule Id  Get"
+                  "$ref": "#/components/schemas/WorldEntityOut"
                 }
               }
             }
@@ -7056,9 +6954,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Update World Rule Api World Rules  World Rule Id  Patch"
+                  "$ref": "#/components/schemas/WorldEntityOut"
                 }
               }
             }
@@ -7151,6 +7047,486 @@
         ],
         "title": "AdoptResponse",
         "description": "采纳响应。"
+      },
+      "AgentListRowOut": {
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "title": "Agent Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role",
+            "description": "= config_json['capability']（见 PromptRegistry._upsert_agent）"
+          },
+          "config_json": {
+            "type": "string",
+            "title": "Config Json",
+            "description": "JSON **字符串**（端点未解析），形如 '{\"capability\": \"reasoning\"}'"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At",
+            "description": "每次 sync 都会刷新（内容未变也刷）；created_at 则始终保留原值"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "agent_id",
+          "name",
+          "role",
+          "config_json",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AgentListRowOut",
+        "description": "``GET /agents`` 的**一行**（:meth:`PromptRegistry.list_agents` 的 SELECT 6 列）。\n\n形状来自 2026-10-15 的临时库实测（``POST /agents/sync`` 播种 16 个 agent 后\ndump 实际行键集），不是照源码读出来的。\n\n⚠️ ``config_json`` 是 **JSON 字符串，不是对象**：``agents`` 表该列是 TEXT，\n``list_agents`` 原样透传（写入方 ``_upsert_agent`` 存的是 ``json.dumps(...)`` 的\n结果）。声明成 ``dict[str, Any]`` **不会**让 Pydantic 帮你解析——实测它**直接校验\n失败**（``Input should be a valid dictionary``）⇒ 整个端点 500（2026-10-15 用\nthrowaway 模型实测，非推断）。要对象请在前端 ``JSON.parse``；后端这里刻意不解析。\n\n``extra=\"allow\"``：SELECT 虽是**显式列清单**，但将来往里加一列时严格模型会把它\n**静默丢掉**——症状是「数据在库里、API 读不到、零报错」（AGENTS 坑区「数据源存在\n≠ 已进装配」）。故本模型宣称「已知这 6 个键」，不宣称封闭。**代价**：删掉任一字段\n声明不会让响应少一个键（键以 extra 身份透出）⇒ 少声明这类突变**只能**从 OpenAPI\n``properties`` 侧判别，响应键集断言恒绿（2026-10-15 M20 同族）。"
+      },
+      "AgentOutputErrorDetail": {
+        "properties": {
+          "error": {
+            "type": "string",
+            "title": "Error",
+            "description": "固定 'agent_output_invalid'"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error",
+          "message"
+        ],
+        "title": "AgentOutputErrorDetail",
+        "description": "``AgentOutputError`` 映射出的 ``detail``（**无** ``status_code``）。"
+      },
+      "AgentOutputErrorEnvelope": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/AgentOutputErrorDetail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "AgentOutputErrorEnvelope"
+      },
+      "AgentPromptRowOut": {
+        "properties": {
+          "prompt_id": {
+            "type": "string",
+            "title": "Prompt Id"
+          },
+          "agent_id": {
+            "type": "string",
+            "title": "Agent Id"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "description": "形如 'v3'（不含 agent 前缀）"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "DRAFT / ACTIVE / DEPRECATED（DB CHECK 约束）"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At",
+            "description": "**内容变化或新增**时才刷新；内容逐字相同的重复 sync 完全跳过 UPDATE"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "prompt_id",
+          "agent_id",
+          "version",
+          "content",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AgentPromptRowOut",
+        "description": "``GET /agents/{name}/prompts`` 的**一行**（:meth:`PromptRegistry.list_prompts` 的 7 列）。\n\n实测（sync 后 16 个 agent，逐个 dump）：恒 7 键、无 null 键。agent 不存在时端点\n返回 **``[]``（200，不是 404）**——既有行为，本批不改、也不建模成错误体。\n\n``version`` 列存的是 ``\"v\" + 数字``（如 ``\"v3\"``），**不含 agent 前缀**；\n与 ``ai_call_logs.prompt_version``（``\"writer:v3\"``）不是同一形态，别混用。\n\n``status`` 取自 DB 的 CHECK 约束（``DRAFT / ACTIVE / DEPRECATED``）。声明成 ``str``\n而非 Literal：约束在 DB 层，枚举收敛属于产品决策；前端按字符串处理即可。\n\n``content`` 是 prompt 全文（writer 系列可达数十 KB），列在这里是因为端点确实返回\n它——列表端点不做截断（前端自己决定要不要展开）。\n\n``extra=\"allow\"``：同 :class:`AgentListRowOut` 的理由（显式 SELECT 将来加列不该被\n静默丢掉），同样意味着「少声明字段」这类突变只能从 OpenAPI 侧抓。"
+      },
+      "AgentPromptSyncResult": {
+        "properties": {
+          "scanned": {
+            "items": {
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array",
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "type": "array",
+            "title": "Scanned"
+          },
+          "registered": {
+            "items": {
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array",
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "type": "array",
+            "title": "Registered"
+          },
+          "updated": {
+            "items": {
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array",
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "type": "array",
+            "title": "Updated",
+            "description": "content 发生变化的子集，可能是空数组"
+          },
+          "agents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Agents"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "scanned",
+          "registered",
+          "updated",
+          "agents"
+        ],
+        "title": "AgentPromptSyncResult",
+        "description": "``POST /agents/sync`` 的 200 响应。\n\n前三项是 ``(agent, version)`` 二元组序列（JSON 侧是二元素数组），\n``agents`` 是去重后的 agent 名升序列表。"
+      },
+      "AgentRunResult": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "agent": {
+            "type": "string",
+            "title": "Agent"
+          },
+          "output": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Output"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "run_id",
+          "agent",
+          "output"
+        ],
+        "title": "AgentRunResult",
+        "description": "``POST /agents/{name}/run`` 的 201 响应。\n\n⚠️ ``output`` **随 agent 而异**：observer 返回 7 个 delta 数组\n（``new_hooks`` / ``new_events`` / ``world_changes`` / ``resolved_hooks`` /\n``relationship_changes`` / ``debt_changes`` / ``character_changes``），\nwriter / director 各有自己的契约。端点只认 ``expected ∈ {observer, director, writer}``，\n没有统一输出形状 ⇒ 声明成 ``dict[str, Any]``，**不得臆造**一个统一字段集。\n\n``output`` 失败时走 502（``agent_output_invalid``），不属本模型。"
+      },
+      "AiCallLogDetail": {
+        "properties": {
+          "call_id": {
+            "type": "string",
+            "title": "Call Id"
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "node_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Run Id"
+          },
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "prompt_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Version"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "retry_count": {
+            "type": "integer",
+            "title": "Retry Count"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "token_usage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Usage"
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "input_context_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Input Context Ids"
+          },
+          "output": {
+            "title": "Output"
+          }
+        },
+        "type": "object",
+        "required": [
+          "call_id",
+          "run_id",
+          "retry_count",
+          "created_at",
+          "input_context_ids"
+        ],
+        "title": "AiCallLogDetail",
+        "description": "``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。\n\n恒 14 键、无条件键：``_summary`` 的 12 个摘要位（其中 ``token_usage_json``\n列被换名成解析后的 ``token_usage``）＋ 详情端点特有的 ``input_context_ids`` /\n``output``。列表端点的 12 键摘要**不含**后两个，故两者不是同一形状。\n\n不可为空 ≠ 恒有值：除 ``call_id`` / ``run_id`` / ``retry_count`` /\n``created_at`` / ``input_context_ids`` 外，实测均可为 null（空 error 列、\n未绑 agent 的历史行、解析失败的 JSON 列 → ``_safe_json_loads`` 返回 None）。\n声明成 ``| None`` 是照实测，**不是**为了松校验。\n\n安全红线：表 schema 本就不含 api_key 列，本模型**不得**新增任何 key/secret\n字段（``_FORBIDDEN_FIELD_KEYS`` 是 router 侧的防御层）。"
+      },
+      "AiCallLogSummary": {
+        "properties": {
+          "call_id": {
+            "type": "string",
+            "title": "Call Id"
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "node_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Run Id"
+          },
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id",
+            "description": "'provider/model' 字符串（mock 路径下是 'mock/mock'）"
+          },
+          "prompt_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Version",
+            "description": "形如 'writer:v3'（含 agent 前缀，与 prompts.version 不同形态）"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "retry_count": {
+            "type": "integer",
+            "title": "Retry Count",
+            "description": "只计「输出不合契约」的重试（0/1），不是引擎的 run 级重试"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "token_usage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Usage"
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "call_id",
+          "run_id",
+          "node_run_id",
+          "agent_id",
+          "model_id",
+          "prompt_version",
+          "latency_ms",
+          "retry_count",
+          "error",
+          "token_usage",
+          "cost",
+          "created_at"
+        ],
+        "title": "AiCallLogSummary",
+        "description": "``GET /ai-call-logs`` 的一行：:func:`_summary` 的 12 键摘要。\n\n恒 12 键、无条件键（:data:`_SUMMARY_FIELDS` 是**定长元组**、逐项写进 out，\n且 ``token_usage_json`` 被换名成解析后的 ``token_usage``）——与\n:class:`AiCallLogDetail` 的 14 键**不是同一形状**：列表行不含\n``input_context_ids`` / ``output``（那两项要读全文，只给详情端点）。\n\n⚠️ 八个可空键**无默认值**（``X | None`` 而非 ``X | None = None``）⇒ 进\nOpenAPI ``required``。这是刻意的：键**恒在**（无数据时值为 ``null``），\n给了默认值就变成「可省略」，前端据此会写出错误的类型（沿用\n:class:`ProfileTestResult` 的同一判定，判别用例见\n``tests/api/test_config_list_response_contract.py``）。\n\n本模型**刻意不加** ``extra=\"allow\"``（与 :class:`AgentListRowOut` 相反的口径，\n理由如下）：摘要是由**白名单元组** :data:`_SUMMARY_FIELDS` 逐项组装的，键集在\n构造上封闭，多出来的键只可能来自那个元组被改动——而那正是需要被看见的变更。\n安全面上它把 :data:`_FORBIDDEN_FIELD_KEYS` 从「防御层」升级成「**出口保证**」：\npydantic v2 默认 ``extra=\"ignore\"``，未声明的键被**丢弃**（响应里根本不出现），\n故即便将来有人往 ``_SUMMARY_FIELDS`` 里塞了一个 ``api_key`` 列，明文也**到不了\n客户端**。⚠️ 代价要说准：那是**静默丢弃**、**不是** 500——「加了一列却被模型\n吞掉」正是 ``extra=\"allow\"`` 要防的反面，本组选择在这里把它记为**已知取舍**\n（宁可丢也不泄），由 ``_SUMMARY_FIELDS`` 的白名单纪律 + 契约测试兜住。\n\n安全红线：与 :class:`AiCallLogDetail` 同——表 schema 本就不含 key 列，\n本模型不得新增任何 key/secret 字段。"
       },
       "ArcAlert": {
         "properties": {
@@ -7524,6 +7900,170 @@
         ],
         "title": "ArcVolumeRow"
       },
+      "AvailableModelsOut": {
+        "properties": {
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "models"
+        ],
+        "title": "AvailableModelsOut",
+        "description": "``POST /model-profiles/available-models`` 的 200 响应。\n\n代理拉取各家 ``/models``（或 Ollama ``/api/tags``）后排序去重的模型名数组。\n拉不到是 4xx/5xx（detail 为纯字符串），不是空数组——空数组只在上游真的返回\n空列表时出现。"
+      },
+      "BackupMetadata": {
+        "properties": {
+          "schema_migrations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Schema Migrations"
+          },
+          "table_count_exported": {
+            "type": "integer",
+            "title": "Table Count Exported"
+          },
+          "exported_table_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Exported Table Names"
+          },
+          "exported_at_iso": {
+            "type": "string",
+            "title": "Exported At Iso"
+          },
+          "api_keys_stripped": {
+            "type": "boolean",
+            "title": "Api Keys Stripped"
+          },
+          "ai_call_logs_excluded": {
+            "type": "boolean",
+            "title": "Ai Call Logs Excluded"
+          },
+          "evaluations_excluded": {
+            "type": "boolean",
+            "title": "Evaluations Excluded"
+          },
+          "workflow_runs_excluded": {
+            "type": "boolean",
+            "title": "Workflow Runs Excluded"
+          },
+          "model_configs_excluded": {
+            "type": "boolean",
+            "title": "Model Configs Excluded"
+          },
+          "reference_canons_excluded": {
+            "type": "boolean",
+            "title": "Reference Canons Excluded"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "schema_migrations",
+          "table_count_exported",
+          "exported_table_names",
+          "exported_at_iso",
+          "api_keys_stripped",
+          "ai_call_logs_excluded",
+          "evaluations_excluded",
+          "workflow_runs_excluded",
+          "model_configs_excluded",
+          "reference_canons_excluded"
+        ],
+        "title": "BackupMetadata",
+        "description": "备份包 ``metadata`` 段：导出事实 + 安全排除标志。\n\n6 个 ``*_excluded / *_stripped`` 恒为 True（它们是「导出侧显式声明排除了\n哪些敏感表」的事实记录，见 :data:`packages.core.backup.service._BACKUP_METADATA_FLAGS`），\n不是可配置开关。"
+      },
+      "BackupPackage": {
+        "properties": {
+          "format": {
+            "type": "string",
+            "title": "Format"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "exported_at": {
+            "type": "string",
+            "title": "Exported At"
+          },
+          "exported_from_project_id": {
+            "type": "string",
+            "title": "Exported From Project Id"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/BackupMetadata"
+          },
+          "project": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Project"
+          },
+          "tables": {
+            "additionalProperties": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "type": "object",
+            "title": "Tables"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "format",
+          "version",
+          "exported_at",
+          "exported_from_project_id",
+          "metadata",
+          "project",
+          "tables"
+        ],
+        "title": "BackupPackage",
+        "description": "备份包顶层（``GET /projects/{project_id}/backup`` 的响应体）。\n\n``format`` / ``version`` / ``exported_at`` / ``project`` / ``tables`` 是导入端\n强校验的 5 个必填键（:data:`packages.core.backup.schema.REQUIRED_TOP_KEYS`）；\n``exported_from_project_id`` 与 ``metadata`` 是导入端不强制、导出端恒写的增强键。"
+      },
+      "BindingProfileOut": {
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "title": "Profile Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          }
+        },
+        "type": "object",
+        "required": [
+          "profile_id",
+          "name",
+          "model",
+          "provider"
+        ],
+        "title": "BindingProfileOut",
+        "description": "``CapabilityBindingOut.profiles[]`` 的一项。\n\n**刻意不含** ``params_json``：绑定列表把档案详情裁到 4 个标识字段，\n密钥状态走 ``/model-profiles/{id}`` 的脱敏读路径（见 ``bindings.py`` 的模块 docstring）。\n同样**没有** ``has_api_key``——没在列表里暴露密钥存在性。"
+      },
       "Body_start_deconstruct_upload_api_projects__project_id__deconstruct_upload_post": {
         "properties": {
           "file": {
@@ -7550,6 +8090,470 @@
           "file"
         ],
         "title": "Body_start_deconstruct_upload_api_projects__project_id__deconstruct_upload_post"
+      },
+      "BranchCreatedResponse": {
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "title": "Branch Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "parent_branch_id": {
+            "type": "string",
+            "title": "Parent Branch Id",
+            "description": "父分支；建在 main 上时是 main 的 branch_id"
+          },
+          "base_state_version": {
+            "type": "integer",
+            "title": "Base State Version"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "建成的瞬间恒为 ACTIVE"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "branch_id",
+          "project_id",
+          "name",
+          "parent_branch_id",
+          "base_state_version",
+          "status",
+          "created_at"
+        ],
+        "title": "BranchCreatedResponse",
+        "description": "``POST /projects/{pid}/branches`` 的 201 响应（实测 7 键恒在）。"
+      },
+      "BranchPromoteResponse": {
+        "properties": {
+          "commit_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Id",
+            "description": "空分支时为 null（键恒在）"
+          },
+          "delta_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta Id",
+            "description": "空分支时为 null（键恒在）"
+          },
+          "state_version": {
+            "type": "integer",
+            "title": "State Version",
+            "description": "⚠️ 空分支时是 base_state_version，不是新版本"
+          },
+          "branch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch Id",
+            "description": "⚠️ 空分支=源分支；非空=main 分支"
+          },
+          "promoted_commits": {
+            "type": "integer",
+            "title": "Promoted Commits"
+          },
+          "replayed_delta_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Replayed Delta Ids",
+            "description": "本次在 main 上重放出的新 delta_id 列表"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status",
+            "description": "只有空分支形状才有（恒为 MERGED）"
+          },
+          "promoted_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Promoted From",
+            "description": "只有非空分支形状才有：源分支 id"
+          },
+          "snapshot_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Ref",
+            "description": "只有非空分支形状才有"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "state_version",
+          "promoted_commits",
+          "replayed_delta_ids"
+        ],
+        "title": "BranchPromoteResponse",
+        "description": "``POST /projects/{pid}/branches/{bid}/promote`` 的 201 响应——**同一端点两个形状**。\n\n实测（临时库 + 合成夹具）::\n\n    空分支（7 键）    {branch_id, status, promoted_commits, commit_id,\n                      state_version, delta_id, replayed_delta_ids}\n    非空分支（8 键）  {commit_id, delta_id, state_version, promoted_from,\n                      promoted_commits, branch_id, replayed_delta_ids,\n                      snapshot_ref}\n\n两处语义分叉，**前端必须知道**，否则一定读错：\n\n1. ``branch_id`` 在两个形状里**指的不是同一个东西**：空分支时它就是**被 promote\n   的那个分支**；非空时它是 **main 的 branch_id**（被 promote 的分支 id 在\n   ``promoted_from``）。实测两者不同值。\n2. ``state_version`` 在两个形状里也不是同一个东西：空分支时是\n   ``branches.base_state_version``（**没有产生新版本**），非空时是最后一次重放\n   落在 main 上的版本。\n\n取并集建模，故有三个键在某一形状里**缺席**（``status`` 只在空分支、\n``promoted_from`` / ``snapshot_ref`` 只在非空分支）——这正是它们带默认值的原因。\n``commit_id`` / ``delta_id`` 在两个形状里都出现，但空分支时**值为 null**。\n\n⚠️ **「缺席」与「值为 null」是两回事，补默认值会把前者变成后者。**\n本模型带默认值 ⇒ 不给 ``response_model_exclude_unset=True`` 的话，Pydantic 会把\n缺席的键补成 ``null``：实测空分支响应从 7 键变成 9 键（凭空多出\n``promoted_from`` / ``snapshot_ref``）——**这是加 response_model 本身引入的契约变更**。\n⇒ 端点上带了 ``response_model_exclude_unset=True``（只看「生产方给没给这个键」）。\n⇒ 但**不能**改用 ``response_model_exclude_none=True``：那会把 ``commit_id`` /\n``delta_id`` 这两个「键在、值为 null」的键抹掉，把「有键」改成「无键」。\n\n另：这三个缺席键带默认值 ⇒ OpenAPI 的 ``required`` 里**没有**它们（也就没有\n``commit_id`` / ``delta_id`` / ``branch_id``）。这是 schema 对「可能缺席」的\n保守声明，与实测并不矛盾——宁可少承诺，不要让前端把可选键当必填。"
+      },
+      "BranchSummary": {
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "title": "Branch Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "parent_branch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Branch Id",
+            "description": "⚠️ main 分支恒为 null（根节点）；子分支指向父分支"
+          },
+          "base_state_version": {
+            "type": "integer",
+            "title": "Base State Version"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "ACTIVE / MERGED / DISCARDED；列表里恒含 main（恒 ACTIVE）"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "branch_id",
+          "project_id",
+          "name",
+          "parent_branch_id",
+          "base_state_version",
+          "status",
+          "created_at"
+        ],
+        "title": "BranchSummary",
+        "description": "``GET /projects/{pid}/branches`` 的**行**（实测恒 7 键）。\n\n⚠️ **键集与 :class:`BranchCreatedResponse` 逐字相同，但不能复用**——类型不同：\n列表恒含 ``main`` 分支，而 main 的 ``parent_branch_id`` 是 **null**（根节点无父）；\n``POST /branches`` 只会新建**子**分支，``BranchCreatedResponse`` 声明的是\n``parent_branch_id: str``（必填非空）。实测：列表第一行（main）该键为 ``None``，\n第二行（子分支）为字符串。**复用会让这条列表端点恒 500。**\n这正是「键集相同 ⇒ 可复用」的先验被实测推翻的第二处。\n\n``extra=\"allow\"``：行来自 ``SELECT * FROM branches``，加列即多一键。"
+      },
+      "CanonDetailOut": {
+        "properties": {
+          "canon_id": {
+            "type": "string",
+            "title": "Canon Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "reader_profile": {
+            "type": "string",
+            "title": "Reader Profile"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "canon_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canon Json"
+          },
+          "report_md": {
+            "type": "string",
+            "title": "Report Md"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "extracts": {
+            "items": {
+              "$ref": "#/components/schemas/CanonExtractOut"
+            },
+            "type": "array",
+            "title": "Extracts"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "canon_id",
+          "project_id",
+          "title",
+          "reader_profile",
+          "status",
+          "report_md",
+          "created_at"
+        ],
+        "title": "CanonDetailOut",
+        "description": "``GET /canons/{canon_id}``：单条 canon 全文 + 其 extracts。\n\n键集来源（独立于实现的第三方基准）：:meth:`ReferenceService.get_canon_detail`\n的 docstring 明列 ``canon_id / project_id / title / reader_profile / status /\ncanon_json / report_md / created_at / extracts``。\n\n⚠️ ``canon_json`` 允许为 ``None``：``json.loads('null')`` 返回 ``None`` 且**不抛**，\n而 ``get_canon_detail`` 的 except 只接 ``(TypeError, ValueError)`` ⇒ 一份\n内容为字面量 ``null`` 的存量 canon 会让 ``canon_json`` 变成 ``None``。\n声明成 ``dict`` 会把这种情况打成 500，故如实建模为可空。"
+      },
+      "CanonExtractOut": {
+        "properties": {
+          "extract_id": {
+            "type": "string",
+            "title": "Extract Id"
+          },
+          "chapter_index": {
+            "type": "integer",
+            "title": "Chapter Index"
+          },
+          "extract_json": {
+            "title": "Extract Json"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "extract_id",
+          "chapter_index",
+          "created_at"
+        ],
+        "title": "CanonExtractOut",
+        "description": "``GET /canons/{cid}`` 里 ``extracts[]`` 的一格。\n\n⚠️ ``extract_json`` 用 :data:`typing.Any`：**这是有意的**。\n``ReferenceService._safe_parse`` 在 JSON 解析失败时**原样返回字符串**\n（「失败返回原值」是它的 docstring 明写的行为），所以该列的运行时类型可能是\ndict / list / str。声明成 ``dict[str, Any]`` 会让一份坏 extract 把整条端点打成\n500；这里如实建模为「不校验的存储载荷」。"
+      },
+      "CanonSummaryOut": {
+        "properties": {
+          "canon_id": {
+            "type": "string",
+            "title": "Canon Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "reader_profile": {
+            "type": "string",
+            "title": "Reader Profile"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "logline": {
+            "type": "string",
+            "title": "Logline",
+            "default": ""
+          },
+          "spine_count": {
+            "type": "integer",
+            "title": "Spine Count",
+            "default": 0
+          },
+          "rhythm_chapter_count": {
+            "type": "integer",
+            "title": "Rhythm Chapter Count",
+            "default": 0
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "canon_id",
+          "project_id",
+          "title",
+          "reader_profile",
+          "status",
+          "created_at"
+        ],
+        "title": "CanonSummaryOut",
+        "description": "``GET /projects/{pid}/canons`` 的**列表行**出参（2026-10-15 批次（六）· L4）。\n\n**键集来源（独立于实现的第三方基准）**：\n:func:`packages.domain.reference.service.summary_of` 的 docstring 明列\n「输出：``canon_id / project_id / title / reader_profile / status / created_at /\nlogline / spine_count / rhythm_chapter_count`` 完整 dict」＝ 恒 9 键、无条件键。\n（前端 ``apps/web/src/api/types.ts`` 的手写 ``CanonSummary`` 逐字一致。）\n\n⚠️ **别把它当成「CanonDetailOut 少几个字段」**——两边**都是 9 键但键名不同**：\n\n=======================================  ======================================\n``CanonSummaryOut``（列表行）           ``CanonDetailOut``（单体）\n=======================================  ======================================\n6 个身份列 + ``logline`` +               6 个身份列 + ``canon_json`` +\n``spine_count`` + ``rhythm_chapter_count``  ``report_md`` + ``extracts``\n=======================================  ======================================\n\n根因：列表的 SQL 只 SELECT 7 列（**无** ``report_md``），而 ``canon_json``\n**本身不进响应**——它被拆成三个派生量（logline 直取、``spine`` / ``emotion_curve``\n取长度）。用同一个模型套两条端点 ⇒ 其中一条静默丢字段或 500。\n「同一条 canon，列表和单体都是 9 键」这个巧合正是最容易被读成同形的地方。\n\n⚠️ ``status`` **刻意不用 Literal**：DDL 有 ``CHECK (status IN\n('active','archived'))``，用 Literal 不会因存量数据炸；但同文件的\n:class:`DeconstructStartResponse` 已定调「新增状态不该让端点 500」，保持一致。\n\n``extra=\"allow\"`` 的理由：``summary_of`` 返回的是**手写字面量 dict**，将来给摘要\n加一个派生键（如 ``technique_count``）是自然演进；不开 ``extra`` 会被\n``response_model`` 静默裁掉（数据在库里、API 读不到、零报错）。\n⚠️ **如实登记残余边界**：该 dict 没有天然注入点，所以「多出来的键能不能透出」\n在本文件里**只能靠 monkeypatch service 制造**（见\n``test_canon_list_passes_through_unknown_keys``）。不换 fixture 的读者会\n以为这条属性是白声明的。"
+      },
+      "CapabilityBindingDeleted": {
+        "properties": {
+          "capability": {
+            "type": "string",
+            "title": "Capability"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted"
+          }
+        },
+        "type": "object",
+        "required": [
+          "capability",
+          "deleted"
+        ],
+        "title": "CapabilityBindingDeleted",
+        "description": "``DELETE /capability-bindings/{capability}`` 的 200 响应。"
+      },
+      "CapabilityBindingOut": {
+        "properties": {
+          "capability": {
+            "type": "string",
+            "title": "Capability"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "环节中文名，来自 CAPABILITY_LABELS"
+          },
+          "agents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Agents",
+            "description": "归属该环节的 agent 名（含 'writer(revise·改稿)' 这类带标注形态）"
+          },
+          "profile_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Profile Ids",
+            "description": "按 fallback 优先序；未绑定时为空数组"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/BindingProfileOut"
+            },
+            "type": "array",
+            "title": "Profiles",
+            "description": "按 profile_ids 顺序解析；缺失项跳过"
+          },
+          "legacy_available": {
+            "type": "boolean",
+            "title": "Legacy Available",
+            "description": "model_configs 中该 capability 有 enabled 行（迁移引导用）"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At",
+            "description": "未绑定时为 null（不是省略）"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "capability",
+          "label",
+          "agents",
+          "profile_ids",
+          "profiles",
+          "legacy_available",
+          "updated_at"
+        ],
+        "title": "CapabilityBindingOut",
+        "description": "``PUT /capability-bindings/{capability}`` 的 200 响应。\n\n⚠️ ``updated_at`` **无默认值且可空**：未绑定该环节时实测为 ``null``\n（``bindings.py`` 的 ``binding[\"updated_at\"] if binding else None``），\n而不是省略。给了默认值就变成「可省略」，前端据此写出的类型是错的。\n\n``profiles`` 与 ``profile_ids`` 恒在：未绑定时是**空数组**而非省略。\n``legacy_available`` 恒在：只看 ``model_configs`` 里该 capability 有无 enabled 行。"
+      },
+      "ChangedDiffItemResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "稳定键：character_id / hook_id / debt_id / …"
+          },
+          "changes": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changes"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "ChangedDiffItemResponse",
+        "description": "``_diff_lists`` 的 changed 元素：``{\"id\": <稳定键>, \"changes\": {…}}``（实测）。\n\n⚠️ ``changes`` **空则整个键省略**（``**({\"changes\": sub} if sub else {})``），\n所以它是条件字段。⚠️ ``changes`` 的**值**刻意不建模成 ``dict[str, FieldDelta]``：\n``_diff_dicts`` 是**任意深度递归**的，实测能产出\n``{\"current_state\": {\"location\": {\"before\": null, \"after\": \"破屋\"}}}`` 这种\n嵌套结构——只有最外层是 ``{before, after}``。把它声明成 ``FieldDelta`` 会让\n校验在真实负载上失败（这正是「读源码建模」的典型翻车点）。"
       },
       "ChangedItem": {
         "properties": {
@@ -8180,6 +9184,306 @@
         "title": "CharacterUpdate",
         "description": "部分更新请求体——所有字段均可选。\n\n只允许修改定义侧字段：``name / role / core_json / visibility / who_knows / aliases / inject_mode``。\n不允许通过本接口修改 ``character_id / project_id / created_at``。\n\n注：``core_json`` 的更新在概念上属于「Definition 变更」；Sprint 2 起应走 State Delta\n通道（PRD §17），Sprint 1 先以直接覆盖方式实现，方法注释保留说明。"
       },
+      "CommitListItem": {
+        "properties": {
+          "commit_id": {
+            "type": "string",
+            "title": "Commit Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "branch_id": {
+            "type": "string",
+            "title": "Branch Id",
+            "description": "NOT NULL；main commit 与分支 commit 各指向自己的分支"
+          },
+          "chapter_id": {
+            "type": "string",
+            "title": "Chapter Id"
+          },
+          "previous_state_version": {
+            "type": "integer",
+            "title": "Previous State Version"
+          },
+          "resulting_state_version": {
+            "type": "integer",
+            "title": "Resulting State Version",
+            "description": "本 commit 产生的版本；回滚 commit 同样占一个版本号"
+          },
+          "delta_id": {
+            "type": "string",
+            "title": "Delta Id"
+          },
+          "validation_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Json",
+            "description": "NOT NULL 列；解析失败时为 null"
+          },
+          "author_approval_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Approval Json",
+            "description": "NOT NULL 列；解析失败时为 null"
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp"
+          },
+          "workflow_run_id": {
+            "type": "string",
+            "title": "Workflow Run Id"
+          },
+          "rollback_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollback Of",
+            "description": "只有回滚产生的 commit 非 null；其余恒为 null"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "commit_id",
+          "project_id",
+          "branch_id",
+          "chapter_id",
+          "previous_state_version",
+          "resulting_state_version",
+          "delta_id",
+          "validation_json",
+          "author_approval_json",
+          "timestamp",
+          "workflow_run_id",
+          "rollback_of"
+        ],
+        "title": "CommitListItem",
+        "description": "``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。\n\n⚠️ **与 :class:`CommitResponse` 不同形，必须另建**：``POST /commits`` 返回的是\n「提交动作的结果摘要」（4 键：``commit_id`` / ``delta_id`` / ``state_version`` /\n``snapshot_ref``），本端点返回的是**裸 DB 行**——``SELECT * FROM commits`` 加上两个\nJSON 列的解析结果。两者唯一的交集是 ``commit_id`` 与 ``delta_id``，\n``state_version`` 在这里是**拆成两个列**（``previous_state_version`` /\n``resulting_state_version``）。**「应该和单体一样」是本轮实测推翻的先验**。\n\n⚠️ ``rollback_of`` 恒可空：实测四条行里三条为 ``null``、只有回滚产生的那条是\n字符串；声明成 ``str`` ⇒ 普通 commit 的整条列表 500（**不是**单行失败，是整页）。\n``validation_json`` / ``author_approval_json`` 同理声明成 ``Optional``——它们经\n``snapshots._parse_json`` 解析，那函数对空串 / 非法 JSON 返回 ``None`` 而非 ``{}``。\n实测四条行都是 dict，但**键恒在** ⇒ 不给默认值（进了 OpenAPI ``required``）。\n\n``extra=\"allow\"``：行来自 ``SELECT *``，迁移给 ``commits`` 加列就会多一个键\n（本表 12 列自 0001 建表起未变，但 ``workflow_runs`` 的 ``instance_id`` 是 0026\n加的同款先例）。代价见模块 docstring。"
+      },
+      "CommitResponse": {
+        "properties": {
+          "commit_id": {
+            "type": "string",
+            "title": "Commit Id"
+          },
+          "delta_id": {
+            "type": "string",
+            "title": "Delta Id"
+          },
+          "state_version": {
+            "type": "integer",
+            "title": "State Version"
+          },
+          "snapshot_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Ref",
+            "description": "main commit 才有；分支 commit 恒为 null（键本身恒在）"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "commit_id",
+          "delta_id",
+          "state_version"
+        ],
+        "title": "CommitResponse",
+        "description": "``POST /projects/{pid}/commits`` 的 201 响应（实测 4 键恒在）。\n\n⚠️ ``snapshot_ref`` **键恒在、值可为 null**：分支 commit 走\n``commits.commit_delta`` 的非 main 分支，那条路径不写 ``story_states``，\n``snapshot_ref`` 恒为 ``None``（实测：分支 commit 返回 ``\"snapshot_ref\": null``）。\n所以这里**不能**声明成 ``str``，也**不能**给端点加 ``response_model_exclude_none``\n——任一条都会让前端 ``ref.snapshot_ref`` 从 ``null`` 变 ``undefined``。"
+      },
+      "ConfigTestResult": {
+        "properties": {
+          "config_id": {
+            "type": "string",
+            "title": "Config Id"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "latency_ms": {
+            "type": "integer",
+            "title": "Latency Ms"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Code"
+          }
+        },
+        "type": "object",
+        "required": [
+          "config_id",
+          "ok",
+          "latency_ms",
+          "detail",
+          "status_code"
+        ],
+        "title": "ConfigTestResult",
+        "description": "``POST /model-configs/{id}/test`` 的 200 响应。\n\n与 :class:`ProfileTestResult` **同构但无** ``hint``：两个 ``/test`` 端点只有档案侧\n接了 ``_unknown_model_hint``（task-28 的形状），配置侧没有。属既有行为，本批不改。\n``status_code`` 同样**无默认值且可空**（网络异常为 ``null``）。"
+      },
+      "ContextPreview": {
+        "properties": {
+          "chapter_id": {
+            "type": "string",
+            "title": "Chapter Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "agents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Agents",
+            "description": "被预览的 agent 名，实测恒 ['director', 'writer', 'observer']"
+          },
+          "layers": {
+            "items": {
+              "$ref": "#/components/schemas/ContextPreviewLayer"
+            },
+            "type": "array",
+            "title": "Layers",
+            "description": "恒 3 层，顺序 L0→L1→L2"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "title": "Total Tokens"
+          },
+          "token_budget": {
+            "type": "integer",
+            "title": "Token Budget"
+          },
+          "within_budget": {
+            "type": "boolean",
+            "title": "Within Budget",
+            "description": "total_tokens <= token_budget"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "chapter_id",
+          "project_id",
+          "agents",
+          "layers",
+          "total_tokens",
+          "token_budget",
+          "within_budget"
+        ],
+        "title": "ContextPreview",
+        "description": "``GET /chapters/{chapter_id}/context-preview`` 的 200 响应（实测恒 7 键）。\n\n**只读 dry-run**：不调 LLM、不写 ``ai_call_logs``，走独立的预览缓存命名空间。\n体积大且随装配内容演进 ⇒ ``layers[].items[]`` 只建模共有键（见\n:class:`ContextPreviewItem`）。"
+      },
+      "ContextPreviewItem": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "description": "条目类型：chapter / project / character / hook / director_plan / …"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "实体 id；非实体条目用下划线常量（如 _snap / _intent / _kp）"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "人类可读摘要"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "name"
+        ],
+        "title": "ContextPreviewItem",
+        "description": "预览条目——**只有这 3 个键是所有 kind 共有的**。\n\n实测三层 items 的键并集各不相同：\n\n* L0 → ``kind / id / name``（4 个条目全是这三键）\n* L1 → ``kind / id / name / role / source / injection / status``（角色带注入策略标记）\n* L2 → ``kind / id / name / beats``（计划条目带 key_beats 计数）\n\n交集恒为 ``kind`` / ``id`` / ``name``（``_push_item`` 无条件写入这三键，L0 的\n直写 append 同款）。因此**只把这三项建模、其余交给 ``extra=\"allow\"``**：\n既让前端拿到可用的类型，又不把「某一层某一 kind 的专属键」误升格成全局契约。\n\n⚠️ 这正是一个**逼不得**的建模点：若图省事统一建模成「所有 kind 都有 role /\nbeats」，前端会照着到处写可选兜底；若改成 ``dict[str, Any]`` 又丢掉全部类型信息。"
+      },
+      "ContextPreviewLayer": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "L0 / L1 / L2"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "该层装载内容的人类可读说明"
+          },
+          "token_estimate": {
+            "type": "integer",
+            "title": "Token Estimate",
+            "description": "该层的 token 估算"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ContextPreviewItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "description": "是否因超预算被截断；实测恒 false（截断尚未实现）"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "token_estimate",
+          "items",
+          "truncated"
+        ],
+        "title": "ContextPreviewLayer",
+        "description": "预览的单个分层（L0 / L1 / L2）。实测三层**逐字同形**、恒 5 键。"
+      },
       "ContinueRequest": {
         "properties": {
           "num_variants": {
@@ -8280,6 +9584,101 @@
         ],
         "title": "ContinueVariant",
         "description": "单个候选 variant 的响应字段。"
+      },
+      "Debt": {
+        "properties": {
+          "debt_id": {
+            "type": "string",
+            "title": "Debt Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "created_chapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created Chapter Id"
+          },
+          "severity": {
+            "type": "number",
+            "title": "Severity"
+          },
+          "deadline_chapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline Chapter Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "acknowledged",
+              "paid",
+              "forgiven"
+            ],
+            "title": "Status"
+          },
+          "visibility": {
+            "type": "string",
+            "title": "Visibility"
+          },
+          "who_knows": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Who Knows"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "debt_id",
+          "project_id",
+          "description",
+          "created_chapter_id",
+          "severity",
+          "deadline_chapter_id",
+          "status",
+          "visibility",
+          "who_knows",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "Debt",
+        "description": "Debt 完整表示，对应数据库行。\n\n⚠️ **响应键集 ≡ ``narrative_debts`` 表列集**（读路径是 ``SELECT *``）。同 ``Hook``：\n声明已知的 11 个键 + ``extra=\"allow\"``，不给可空字段设默认值（空值是 null 而非省略）。"
       },
       "DebtCreate": {
         "properties": {
@@ -8462,6 +9861,79 @@
         "type": "object",
         "title": "DebtUpdate",
         "description": "部分更新 Debt 请求体——所有字段均可选。"
+      },
+      "DeconstructStartResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "current_node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Node"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "book_title": {
+            "type": "string",
+            "title": "Book Title"
+          },
+          "canon_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canon Id"
+          },
+          "extracts_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extracts Count"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "project_id",
+          "book_title"
+        ],
+        "title": "DeconstructStartResponse",
+        "description": "``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。\n\n两条端点都汇到 ``_start_deconstruct_internal``，返回同一个 dict。\n\n⚠️ **本模型引入了一处行为变更**：原实现的三个条件键是「命中才写、否则整个键缺席」；\n声明成 ``Optional`` + 默认 ``None`` 后，它们**恒在**，未命中时为 ``null``。\n\n- 为什么接受：OpenAPI / 前端 codegen 需要一个**稳定**的键集。条件键在\n  TypeScript 里会逼出 ``canon_id?: string`` 与一堆 ``&&`` 判空，而「缺席」在\n  JSON Schema 里根本没有对应表达——这正是本批次要消灭的「前端手写契约」。\n- 代价：存量前端若用 ``\"canon_id\" in body`` 判存在，语义从「已 COMPLETED 且有\n  canon」变成「恒真」。**改判据请改成 ``body.canon_id != null``。**\n  （本仓唯一前端调用方是拆书面板，未用 in 判据；见\n  ``tests/api/test_reveal_and_judge_response_contract.py`` 同批口径。）\n\n不设 ``extra=\"allow\"``：这三个条件键是全部的分支，超出的键只可能是 bug。"
       },
       "DeliveryChapter": {
         "properties": {
@@ -9188,6 +10660,114 @@
         "title": "GenreBindRequest",
         "description": "绑定请求体：``{\"pack_id\": \"...\"}``。"
       },
+      "GenreOpeningRule": {
+        "properties": {
+          "check_id": {
+            "type": "string",
+            "title": "Check Id"
+          },
+          "chapter_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chapter No"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "requirement": {
+            "type": "string",
+            "title": "Requirement"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "keywords_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keywords Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "check_id",
+          "description",
+          "requirement",
+          "status",
+          "detail"
+        ],
+        "title": "GenreOpeningRule",
+        "description": "题材开篇规则的单条机检判定（``evaluate_genre_opening`` 的输出）。\n\n``status ∈ pass / fail / unverifiable / not_written``。``keywords_source``\n是**条件键**：``\"curated\"``（用规则自带词表）/ ``\"auto\"``（从规则文本抽词）；\n抽不出任何词时该键缺席（此时 status 必为 ``unverifiable``，由人工核对）。"
+      },
+      "GenreOpeningSection": {
+        "properties": {
+          "pack_id": {
+            "type": "string",
+            "title": "Pack Id"
+          },
+          "pack_name": {
+            "type": "string",
+            "title": "Pack Name"
+          },
+          "rule_count": {
+            "type": "integer",
+            "title": "Rule Count"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/GenreOpeningRule"
+            },
+            "type": "array",
+            "title": "Rules"
+          },
+          "pass_count": {
+            "type": "integer",
+            "title": "Pass Count"
+          },
+          "fail_count": {
+            "type": "integer",
+            "title": "Fail Count"
+          },
+          "unverifiable_count": {
+            "type": "integer",
+            "title": "Unverifiable Count"
+          },
+          "info_count": {
+            "type": "integer",
+            "title": "Info Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pack_id",
+          "pack_name",
+          "rule_count",
+          "rules",
+          "pass_count",
+          "fail_count",
+          "unverifiable_count",
+          "info_count"
+        ],
+        "title": "GenreOpeningSection",
+        "description": "题材开篇检查段（恒 9 键）。"
+      },
       "GenrePack": {
         "properties": {
           "pack_id": {
@@ -9249,6 +10829,47 @@
         ],
         "title": "GenrePack",
         "description": "题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。"
+      },
+      "GenrePackBinding": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "pack_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pack Id"
+          },
+          "bound": {
+            "type": "boolean",
+            "title": "Bound"
+          },
+          "pack": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenrePack"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "project_id",
+          "bound"
+        ],
+        "title": "GenrePackBinding",
+        "description": "项目 ↔ 题材包绑定（单 slot）的出参形状。\n\n``extra=\"allow\"``：绑定行将来若加派生字段（如 ``bound_at``），宁可透出也不被\n``response_model`` 静默裁掉——「数据在库里、API 读不到」是本仓反复吃过的亏\n（见 ``AGENTS.md`` 坑区「算出来的问题没人能说『不』」同族的契约丢失事故）。\n\n⚠️ 正因为开了 ``extra=\"allow\"``，**只断言响应键集抓不到「字段声明被删」**\n（删了声明，响应照样有该键）。契约测试必须**另**断言 OpenAPI 里本模型的\n``properties`` / ``required``（批次（五）突变 M20 实测存活的那一类）。"
       },
       "GenrePackCreate": {
         "properties": {
@@ -9455,6 +11076,141 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "恒为 ``ok``（本端点只在应用已起来时才可达）"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "description": "pyproject 单源版本，经 importlib 读取"
+          },
+          "tables": {
+            "type": "integer",
+            "title": "Tables",
+            "description": "**业务表数**（已扣除 ``_migrations`` 虚表）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "version",
+          "tables"
+        ],
+        "title": "HealthResponse",
+        "description": "``GET /api/health`` 的响应（2026-10-15 批次（六）补契约）。\n\n实测键集恰好 3 个，全部恒在、恒非 null（临时库实测）——\n故三项都必填且**不给默认值**：给它默认值等于把「漏返回某个键」变成合法响应。\n\n⚠️ ``tables`` 是**业务表数**（总表数减 ``_migrations``），不是物理表数。\n口径散落三处（``count_tables`` 的 docstring、README §健康检查、\n``scripts/smoke_e2e.py`` 的 ``EXPECTED_BUSINESS_TABLES``），\n本批已把后两处的陈旧数字（38/39）订正为 39/40。"
+      },
+      "Hook": {
+        "properties": {
+          "hook_id": {
+            "type": "string",
+            "title": "Hook Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "introduced_chapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Introduced Chapter Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "OPEN",
+              "ACTIVE",
+              "ESCALATED",
+              "RESOLVED",
+              "ABANDONED"
+            ],
+            "title": "Status"
+          },
+          "importance": {
+            "type": "number",
+            "title": "Importance"
+          },
+          "expected_payoff_chapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Payoff Chapter Id"
+          },
+          "payoff_chapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payoff Chapter Id"
+          },
+          "visibility": {
+            "type": "string",
+            "title": "Visibility"
+          },
+          "who_knows": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Who Knows"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "hook_id",
+          "project_id",
+          "name",
+          "introduced_chapter_id",
+          "status",
+          "importance",
+          "expected_payoff_chapter_id",
+          "payoff_chapter_id",
+          "visibility",
+          "who_knows",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "Hook",
+        "description": "Hook 完整表示，对应数据库行。\n\n⚠️ **响应键集 ≡ ``hooks`` 表列集**（读路径是 ``SELECT *``）：表加列 ⇒ 响应加键。\n本类声明 12 个已知键并 ``extra=\"allow\"``，详见模块 docstring「出参契约」段。"
       },
       "HookCreate": {
         "properties": {
@@ -9664,6 +11420,137 @@
         "title": "HookUpdate",
         "description": "部分更新 Hook 请求体——所有字段均可选。"
       },
+      "ImportedProject": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "premise": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Premise"
+          },
+          "genre": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genre"
+          },
+          "target_words": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Words"
+          },
+          "foreshadow_overdue_chapters": {
+            "type": "integer",
+            "title": "Foreshadow Overdue Chapters"
+          },
+          "word_band_json": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Word Band Json"
+          },
+          "genre_pack_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genre Pack Id"
+          },
+          "writing_bible": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Writing Bible"
+          },
+          "fast_mode": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fast Mode"
+          },
+          "import_warnings": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Import Warnings"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "project_id",
+          "name",
+          "status",
+          "created_at",
+          "updated_at",
+          "foreshadow_overdue_chapters"
+        ],
+        "title": "ImportedProject",
+        "description": "``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。\n\n⚠️ 这是**裸 DB 行**（含 ``word_band_json`` 原文），**不是** ``domain`` 层的\n``Project``（后者把该列解析成 ``word_band`` dict 且不含 ``fast_mode``）——\n两者键集不同，混用会让前端按 ``Project`` 读到 ``word_band === undefined``。\n\n``import_warnings`` 是**条件键**：:data:`BackupService._import_warnings` 非空时才\n挂上来（``commits.rollback_of`` 归一化失败的留痕，见 AGENTS 坑区「备份同库重导入」）。\n声明成 ``| None`` 是为了能通过校验，端点侧配 ``response_model_exclude_unset=True``\n才不会把「缺席」渲染成一个凭空的 ``null``——那会让作者以为出了警告。"
+      },
       "ListDiff": {
         "properties": {
           "added": {
@@ -9715,6 +11602,343 @@
         "type": "object",
         "title": "ListDiff",
         "description": "列表段的差异（``_diff_lists`` 的返回）。三个子键同样**空则省略**。"
+      },
+      "ListDiffResponse": {
+        "properties": {
+          "added": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Added"
+          },
+          "removed": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Removed"
+          },
+          "changed": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ChangedDiffItemResponse"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ListDiffResponse",
+        "description": "``_diff_lists`` 的返回：``added`` / ``removed`` / ``changed``，三者都**空则省略**。"
+      },
+      "ModelConfigOut": {
+        "properties": {
+          "config_id": {
+            "type": "string",
+            "title": "Config Id"
+          },
+          "capability": {
+            "type": "string",
+            "title": "Capability"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "params_json": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params Json",
+            "description": "provider 调参解析后的对象；其中 api_key 恒被替换为 '***'，明文不出参"
+          },
+          "enabled": {
+            "type": "integer",
+            "title": "Enabled",
+            "description": "0/1 整数（非布尔）；0 的配置不可用于 /test"
+          },
+          "has_api_key": {
+            "type": "boolean",
+            "title": "Has Api Key"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "config_id",
+          "capability",
+          "provider",
+          "model",
+          "params_json",
+          "enabled",
+          "has_api_key"
+        ],
+        "title": "ModelConfigOut",
+        "description": "``model_configs`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。\n\n比 :class:`ModelProfileOut` 少 ``created_at`` / ``updated_at``——``model_configs``\n表**根本没有时间戳列**（见 ``database/migrations/0001_init.sql:464``），不是漏声明。"
+      },
+      "ModelProfileOut": {
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "title": "Profile Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "params_json": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params Json",
+            "description": "provider 调参（temperature / top_p / base_url / timeout_s …）解析后的对象；其中 api_key 恒被替换为 '***'，明文不出参"
+          },
+          "enabled": {
+            "type": "integer",
+            "title": "Enabled",
+            "description": "0/1 整数（非布尔）；0 的档案不可用于 /test"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "has_api_key": {
+            "type": "boolean",
+            "title": "Has Api Key",
+            "description": "是否已配置密钥；涵盖 params.api_key 与 secrets.json 两个来源"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "profile_id",
+          "name",
+          "provider",
+          "model",
+          "params_json",
+          "enabled",
+          "created_at",
+          "updated_at",
+          "has_api_key"
+        ],
+        "title": "ModelProfileOut",
+        "description": "``model_profiles`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。\n\n``extra=\"allow\"``：service 层是 ``SELECT * FROM model_profiles``。将来加一列\n（加列迁移），严格模型会把它**静默丢掉**——症状是「后端返回了、API 取不到、\n零报错」。故本模型宣称「已知这 9 个键」，不宣称封闭。"
+      },
+      "PlotEventOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "cause": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Cause",
+            "description": "引用的上游 event_id 列表（已从 cause_json 解码）"
+          },
+          "effects": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Effects",
+            "description": "影响的下游 event_id 列表（已从 effects_json 解码）"
+          },
+          "participants": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Participants",
+            "description": "参与角色 character_id 列表（已从 participants_json 解码）"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          },
+          "time": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Time",
+            "description": "已从 time_json 解码，形如 {timeline_day, in_story_date}"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "introduced_chapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Introduced Chapter Id"
+          },
+          "visibility": {
+            "type": "string",
+            "title": "Visibility"
+          },
+          "who_knows": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Who Knows",
+            "description": "知情者 character_id 列表；NULL=沿用默认，[]=显式置空"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description",
+            "description": "迁移 0013 的列；本字段曾因「模型里没有」而对 API 隐形"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "type",
+          "cause",
+          "effects",
+          "participants",
+          "location_id",
+          "time",
+          "status",
+          "introduced_chapter_id",
+          "visibility",
+          "who_knows",
+          "description"
+        ],
+        "title": "PlotEventOut",
+        "description": "``POST|GET|PATCH /api/events/{id}`` 的响应。\n\n``extra=\"allow\"``：``PlotEvent.to_dict`` 是手写白名单，将来加了键而忘了在本类\n声明时，``extra=\"ignore\"`` 会让 ``response_model`` 把它静默裁掉——那正是本批次要\n消灭的「后端有、前端拿不到」缺口。代价见模块 docstring。"
+      },
+      "ProfileTestResult": {
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "title": "Profile Id"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "description": "false 表示「端点可达但鉴权/健康不过」，仍是 200"
+          },
+          "latency_ms": {
+            "type": "integer",
+            "title": "Latency Ms"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "恒为字符串（router 用 `or ''` 兜底，不会是 null）"
+          },
+          "status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Code",
+            "description": "上游 HTTP 码；网络异常时为 null"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint",
+            "description": "仅 400 + 远端错误文本命中模型名标记时出现的中文提示；否则整个键不存在"
+          }
+        },
+        "type": "object",
+        "required": [
+          "profile_id",
+          "ok",
+          "latency_ms",
+          "detail",
+          "status_code"
+        ],
+        "title": "ProfileTestResult",
+        "description": "``POST /model-profiles/{id}/test`` 的 200 响应。\n\n⚠️ **路由必须声明** ``response_model_exclude_unset=True``。原因是本响应里\n**两种\"缺\"语义并存**：\n\n- ``status_code`` **无默认值且可空**——四个 provider 的 ``health_check`` 在网络\n  异常时都返回 ``\"status_code\": None``（``providers.py`` 的 network error 分支），\n  而 router 是 ``result.get(\"status_code\")`` 原样透传 ⇒ 该键**恒在**、值可能为\n  ``null``；\n- ``hint`` **有默认值**——router 只在 ``status_code == 400`` 且远端错误文本命中\n  模型名标记时才 ``payload[\"hint\"] = hint``，不命中时**整个键不存在**（实测：\n  mock provider 的响应恰好 5 键，无 ``hint``）。\n\n``exclude_none=True`` 会把 ``status_code: null`` 一并删掉（**改变了实测行为**）；\n默认的「全给」又会让 ``hint`` 恒以 ``null`` 出现（凭空多一个键）。只有\n``exclude_unset=True`` 精确复刻「dict 里没有的键就不出参、值为 null 的键照出」。\n\n本模型**刻意不用** ``extra=\"allow\"``：payload 是 router 手工拼的字面量，键集\n封闭。多给 ``extra`` 反而会让「删掉 ``hint`` 声明」这类突变**测不出来**（键会以\nextra 身份原样透出，测试恒绿）——见 ``test_profile_test_hint_requires_its_declaration``。"
       },
       "Project": {
         "properties": {
@@ -10045,6 +12269,124 @@
         "title": "ProjectInitRequest",
         "description": "project-init 触发请求体。\n\n- ``brief`` 必填：genre / logline / platform / target_words / title / author_notes。\n- ``project_id`` 可选：传入则挂载到已有项目并更新；不传则创建新项目。\n- ``chapter_seed_count`` 可选：默认 10 章。\n- ``mock_providers`` 可选：测试用脚本化 LLM 输出。\n- ``selected_stages`` 可选：仅跑白名单内的环节；未选环节从落库数据重建为\n  下游 AI 输入，不调 AI、不抛 PauseRequested。省略时全选（与既有行为一致）。\n- ``model_profile_id`` 可选：本次初始化全部 4 个 AI 节点（premise_designer /\n  world_builder / character_designer / volume_outliner）统一使用该 model_profiles\n  档案调用 LLM；不影响全局 capability_bindings。None/缺省 → 走全局\n  capability_bindings / model_configs。"
       },
+      "ProjectInitStage": {
+        "properties": {
+          "stage": {
+            "type": "string",
+            "title": "Stage",
+            "description": "premise / world / character / outline"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "人类可读名（题材定位 / 世界观 / 核心角色 / 卷纲与章节种子）"
+          },
+          "done": {
+            "type": "boolean",
+            "title": "Done",
+            "description": "由 DB 现有数据推导，不建新表"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "人类可读说明；未生成为「未生成」"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "stage",
+          "label",
+          "done",
+          "detail"
+        ],
+        "title": "ProjectInitStage",
+        "description": "project-init 四环节之一的落库状态（premise / world / character / outline）。\n\n实测**四个 stage 逐字同形**，各 4 键，无条件键。"
+      },
+      "ProjectInitStarted": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "RUNNING / PAUSED / COMPLETED / FAILED；同步启动，非恒 RUNNING"
+          },
+          "current_node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Node"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id",
+            "description": "step_mode 暂停时 persist 节点未跑 ⇒ 可为 null"
+          },
+          "pause_payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Payload",
+            "description": "仅 status=PAUSED 时出现；形状随 workflow 而变，不逐字段建模"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "current_node",
+          "project_id"
+        ],
+        "title": "ProjectInitStarted",
+        "description": "``POST /api/projects/init`` 的 201 响应。\n\n与 :class:`WorkflowStartAccepted` 的差别有两条，都是实测的：\n\n1. **多一个 ``project_id``**，且它**可以是 null**——step_mode 下 persist 节点\n   还没执行，``checkpoint_json`` 里取不到（``_start_project_init`` 用\n   ``.get(\"project_id\")``）。故必填可空、不给默认值。\n2. **``status`` 真的不是恒 RUNNING**：本端点用同步的 ``start_with_nodes``，\n   step_mode 下实测直接返回 ``\"PAUSED\"``，并附加 ``pause_payload``。\n\n``pause_payload`` 的**形状随 workflow 而变**（实测：project-init 的 step 暂停\n6 键 ``degraded/draft/error/stage/stage_index/stages_total``；chapter-review 的\nauthor_review 暂停 10 键 ``critic_*/deep_review_*/message/review_report/stage``），\n故声明为 ``dict[str, Any]`` 而不是逐字段建模。端点上配\n``response_model_exclude_unset=True`` 使它**只在 PAUSED 时出现**。"
+      },
+      "ProjectInitStatus": {
+        "properties": {
+          "stages": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectInitStage"
+            },
+            "type": "array",
+            "title": "Stages",
+            "description": "恒 4 行，顺序即 premise→world→character→outline"
+          },
+          "has_any_data": {
+            "type": "boolean",
+            "title": "Has Any Data",
+            "description": "四环节 done 的或；用于 UI 决定是否提示先跑 project-init"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "stages",
+          "has_any_data"
+        ],
+        "title": "ProjectInitStatus",
+        "description": "``GET /projects/{pid}/init-status`` 的 200 响应（实测恒 2 键）。\n\n四环节的判定口径是**数据推导**（premise 看 ``projects.premise``、world 看三张\n世界表任一有行、character 看 ``characters``、outline 看卷有标题且章有\n``chapter_goal``），本模型只描述形状，不复制那套判定规则——那是\n``runs._init_status_for_project`` 的职责。"
+      },
       "ProjectUpdate": {
         "properties": {
           "name": {
@@ -10165,6 +12507,53 @@
         "title": "ProjectUpdate",
         "description": "部分更新请求体——所有字段均可选，未提供则不修改。\n\n   不允许通过该接口修改 ``project_id / created_at``，这两个字段由系统维护。\n\n   ``word_band`` 与「未提供」区分：未提供 → 保留原值；显式 ``null`` →\n清除覆盖（落 DB NULL）；显式 dict → 校验后写 ``word_band_json``。\n   "
       },
+      "ProviderErrorDetail": {
+        "properties": {
+          "error": {
+            "type": "string",
+            "title": "Error",
+            "description": "固定 'provider_error'"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Code",
+            "description": "上游 HTTP 码；provider 未带上来时为 null"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "error",
+          "message",
+          "status_code"
+        ],
+        "title": "ProviderErrorDetail",
+        "description": "``HTTPException(502, detail={...})`` 的 ``detail`` 部分。"
+      },
+      "ProviderErrorEnvelope": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ProviderErrorDetail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "ProviderErrorEnvelope",
+        "description": "FastAPI 把 ``HTTPException(detail=...)`` 包成 ``{\"detail\": ...}``。"
+      },
       "QualityJudgeRecord": {
         "properties": {
           "pacing": {
@@ -10250,6 +12639,270 @@
         ],
         "title": "QualityJudgeResponse",
         "description": "``POST /chapters/{cid}/quality/judge`` 的响应。\n\n⚠️ ``judge`` 是 **nullable 但可缺省**：该章没有任何报告时后端 422，所以 200 回来\n时它一定非空；保留 ``None | None`` 是为了容忍存量行的 ``judge_json IS NULL``。"
+      },
+      "QualityReportIssue": {
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warning",
+              "info"
+            ],
+            "title": "Severity"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "schema_validity",
+              "timeline_consistency",
+              "character_contradiction",
+              "world_rule_contradiction",
+              "knowledge_leakage",
+              "plot",
+              "character",
+              "continuity",
+              "style",
+              "pacing",
+              "foreshadowing",
+              "ai_trace",
+              "payoff",
+              "compliance"
+            ],
+            "title": "Category"
+          },
+          "location": {
+            "type": "string",
+            "title": "Location",
+            "default": "<unknown>"
+          },
+          "rule_id": {
+            "type": "string",
+            "title": "Rule Id"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "gate": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "confirm",
+              "block"
+            ],
+            "title": "Gate",
+            "default": "auto"
+          },
+          "suggestion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggestion"
+          },
+          "evidence_refs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Refs"
+          },
+          "judge_trace": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge Trace"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "severity",
+          "category",
+          "rule_id",
+          "message"
+        ],
+        "title": "QualityReportIssue",
+        "description": "`issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。\n\n⚠️ ``extra=\"allow\"``：issue 字典落库后可能被未来的规则追加证据字段\n（如 ``evidence_excerpt``），出参不该把它们裁掉。"
+      },
+      "QualityReportResponse": {
+        "properties": {
+          "report_id": {
+            "type": "string",
+            "title": "Report Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "chapter_id": {
+            "type": "string",
+            "title": "Chapter Id"
+          },
+          "commit_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Id"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "overall": {
+            "type": "integer",
+            "title": "Overall"
+          },
+          "scores_json": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Scores Json"
+          },
+          "issues_json": {
+            "items": {
+              "$ref": "#/components/schemas/QualityReportIssue"
+            },
+            "type": "array",
+            "title": "Issues Json"
+          },
+          "draft_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Version"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "judge": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QualityJudgeRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "report_id",
+          "project_id",
+          "chapter_id",
+          "overall",
+          "created_at",
+          "judge"
+        ],
+        "title": "QualityReportResponse",
+        "description": "``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。\n\n``extra=\"allow\"`` 的理由见上方第 1 条（键集随表列变化）。"
+      },
+      "RelationshipOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "from_character_id": {
+            "type": "string",
+            "title": "From Character Id"
+          },
+          "to_character_id": {
+            "type": "string",
+            "title": "To Character Id"
+          },
+          "relation_type": {
+            "type": "string",
+            "title": "Relation Type"
+          },
+          "state": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "State",
+            "description": "已从 state_json 解码，形如 {intensity, since_chapter}"
+          },
+          "last_state_version": {
+            "type": "integer",
+            "title": "Last State Version",
+            "description": "DDL NOT NULL；快照版本号"
+          },
+          "visibility": {
+            "type": "string",
+            "title": "Visibility",
+            "description": "迁移 0014 伴随列，默认 'PUBLIC'（与 plot_events 的 'RESTRICTED' 不同）"
+          },
+          "who_knows": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Who Knows",
+            "description": "知情者 character_id 列表；NULL=沿用默认，[]=显式置空"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "from_character_id",
+          "to_character_id",
+          "relation_type",
+          "state",
+          "last_state_version",
+          "visibility",
+          "who_knows"
+        ],
+        "title": "RelationshipOut",
+        "description": "``GET /api/projects/{pid}/relationships`` 的响应行。\n\n**表 9 列 ≡ 响应 9 键 ≡ 模型 9 字段**（2026-10-16 修复后对齐）。\n\n⚠️ **2026-10-16：这里原先是 7 字段**。``visibility`` / ``who_knows``（迁移 0014 加、\n0022 重建表时逐字保留）在服务层被丢弃，本模型照**实测的 7 键**建模，把缺口登记成\n会红的漂移告警。修复后三者重新对齐，「改名/解码」之外**不再有被丢弃的列**——\n漂移告警已反转成新事实（``test_relationships_list_covers_every_column``：\n以 ``PRAGMA table_info`` 为基准，9 列 − 2 个改名 = 7 个直呼键，\n再断言**响应里没有一列缺席**）。\n\n⚠️ 遗留的「改名/解码」形态**没有**消失，两处照旧：\n``relationship_id`` → ``id``、``state_json`` → ``state``（已解码）。\n所以「9 列 ≡ 9 键」是**键数相等**，不是**列名逐字相等**。"
       },
       "ResumeRequest": {
         "properties": {
@@ -10594,6 +13247,195 @@
         ],
         "title": "RevisionNoteUpdate",
         "description": "写入或清除改稿意见的请求体。\n\n- ``note`` 必填字符串；非空白字符串写入 ``plan_json.revision_note``；\n  空串 / 全空白 → 删除该键（语义=清除改稿意见）。\n- 不设 ``max_length``：note 是人工意见，无明确字节上限；底层走 plan_json TEXT。"
+      },
+      "RollbackResponse": {
+        "properties": {
+          "commit_id": {
+            "type": "string",
+            "title": "Commit Id"
+          },
+          "delta_id": {
+            "type": "string",
+            "title": "Delta Id"
+          },
+          "state_version": {
+            "type": "integer",
+            "title": "State Version"
+          },
+          "snapshot_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Ref",
+            "description": "main commit 才有；分支 commit 恒为 null（键本身恒在）"
+          },
+          "rollback_of": {
+            "type": "string",
+            "title": "Rollback Of",
+            "description": "被回滚的 commit_id（= 本次 commit 的来源）"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "commit_id",
+          "delta_id",
+          "state_version",
+          "rollback_of"
+        ],
+        "title": "RollbackResponse",
+        "description": "``POST /commits/{cid}/rollback`` 的 201 响应（实测 5 键 = commit + 1）。\n\n回滚是「生成逆 delta 再走一遍 submit+commit」，所以返回体就是 commit 的返回体\n再加一个 ``rollback_of``（指向被回滚的 commit_id）。⚠️ **实测无 delta 列表**：\n逆 delta 的 7 数组不在这份响应里，只落在 ``state_deltas.payload_json``；\n要读逆 delta 走 ``GET /projects/{pid}/chapters/{cid}/deltas``。"
+      },
+      "RunCancelled": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "成功恒为 CANCELLED；409 冲突体走 FastAPI 的 {detail}"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "run_id",
+          "status"
+        ],
+        "title": "RunCancelled",
+        "description": "``POST /runs/{run_id}/cancel`` 的 200 响应。\n\n实测**恒 2 键**——本端点不加 ``current_node``（取消后 run 已在库里，前端拿\n``run_id`` 去轮询详情即可）。**不为了凑字段硬造**。"
+      },
+      "SigningCheckItem": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "level": {
+            "type": "string",
+            "title": "Level"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "advice": {
+            "type": "string",
+            "title": "Advice"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "level",
+          "detail",
+          "advice"
+        ],
+        "title": "SigningCheckItem",
+        "description": "单条体检项（``signing_check.checks.CheckItem`` 的 dict 投影，恒 4 键）。"
+      },
+      "SigningCheckResult": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "project_name": {
+            "type": "string",
+            "title": "Project Name"
+          },
+          "total_chars": {
+            "type": "integer",
+            "title": "Total Chars"
+          },
+          "generated_at": {
+            "type": "string",
+            "title": "Generated At"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SigningCheckItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/SigningCheckSummary"
+          },
+          "word_band_source": {
+            "type": "string",
+            "title": "Word Band Source"
+          },
+          "word_band_rejected": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Word Band Rejected"
+          },
+          "genre_opening": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenreOpeningSection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_id",
+          "project_name",
+          "total_chars",
+          "generated_at",
+          "items",
+          "summary",
+          "word_band_source"
+        ],
+        "title": "SigningCheckResult",
+        "description": "``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。"
+      },
+      "SigningCheckSummary": {
+        "properties": {
+          "pass_count": {
+            "type": "integer",
+            "title": "Pass Count"
+          },
+          "warn_count": {
+            "type": "integer",
+            "title": "Warn Count"
+          },
+          "fail_count": {
+            "type": "integer",
+            "title": "Fail Count"
+          },
+          "info_count": {
+            "type": "integer",
+            "title": "Info Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pass_count",
+          "warn_count",
+          "fail_count",
+          "info_count"
+        ],
+        "title": "SigningCheckSummary",
+        "description": "四档计数（``level`` 分桶；恒 4 键）。"
       },
       "SimulationIssue": {
         "properties": {
@@ -10942,6 +13784,152 @@
         "type": "object",
         "title": "StartWorkflowRequest"
       },
+      "StateDeltaListItem": {
+        "properties": {
+          "delta_id": {
+            "type": "string",
+            "title": "Delta Id"
+          },
+          "chapter_id": {
+            "type": "string",
+            "title": "Chapter Id"
+          },
+          "workflow_run_id": {
+            "type": "string",
+            "title": "Workflow Run Id"
+          },
+          "previous_state_version": {
+            "type": "integer",
+            "title": "Previous State Version"
+          },
+          "delta_version": {
+            "type": "integer",
+            "title": "Delta Version",
+            "description": "schema 里 const=1；保留 int 而非 Literal 以免过紧"
+          },
+          "schema_version": {
+            "type": "string",
+            "title": "Schema Version"
+          },
+          "created_by": {
+            "type": "string",
+            "title": "Created By"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes",
+            "description": "重试时指向被取代的 delta_id；普通 delta 为 null"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes",
+            "description": "恒为 null（restore_delta_from_row 写死）"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "proposed / validated / applied / rejected / superseded"
+          },
+          "character_changes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Character Changes"
+          },
+          "world_changes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "World Changes"
+          },
+          "relationship_changes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Relationship Changes"
+          },
+          "new_events": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "New Events"
+          },
+          "resolved_hooks": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Resolved Hooks"
+          },
+          "new_hooks": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "New Hooks"
+          },
+          "debt_changes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debt Changes"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "delta_id",
+          "chapter_id",
+          "workflow_run_id",
+          "previous_state_version",
+          "delta_version",
+          "schema_version",
+          "created_by",
+          "created_at",
+          "supersedes",
+          "notes",
+          "status",
+          "character_changes",
+          "world_changes",
+          "relationship_changes",
+          "new_events",
+          "resolved_hooks",
+          "new_hooks",
+          "debt_changes"
+        ],
+        "title": "StateDeltaListItem",
+        "description": "``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。\n\n⚠️ **行里没有 ``payload_json`` 这个键**——这是本组最值得留痕的一条实测结论\n（任务书的预期形状与实测不符）。DB 列 ``payload_json`` 里装的是 7 个 change 数组的\nJSON，而 ``deltas.restore_delta_from_row`` 把它们**摊到顶层**，再拼上 10 个元信息字段\n与 ``status``：10 + 7 + 1 = 18。\n\n⚠️ **7 个数组刻意不逐字段建模**：``docs/state-model/schemas/state-delta.schema.json``\n里每个数组的元素都是具名 ``$ref``（``character_change`` / ``new_hook`` / …），delta\nschema 会演进；在这里复制一份逐字段模型等于造出一个**必然过期**的假契约。\n故只声明到 ``list[dict[str, Any]]``——前端拿到「数组 of 对象」这一层就够写渲染，\n要细节时另开 delta 端点。**同理不要把它们合并成 ``dict[str, Any]``**：实测它们的\n类型是 ``list``（`restore_delta_from_row` 的 ``payload.get(k, [])``），不是 dict。\n\n⚠️ ``notes`` **恒为 null**：``restore_delta_from_row`` 里写死 ``\"notes\": None``\n（``notes`` 不进 payload_json）。声明成 ``Optional[str]`` 而非删掉——键恒在。\n``supersedes`` 才是真正可空的可变列（重试指向旧 delta_id）。\n\n⚠️ **残余边界（如实登记）**：``list[dict[str, Any]]`` 的元素类型来自 delta schema 的\n``items.$ref``，而**写库路径**（``submit_delta`` → ``validate_delta``）会保证它是\n对象；但**绕过 API 直写 DB / 备份导入**的行没有这层保证，那种行会让本页 500。\n收紧到 ``list[Any]`` 能免掉这个风险，代价是丢掉全部类型信息——本仓按前者取舍，\n并在此登记边界，而不是假装它不存在。"
+      },
       "StateDiff": {
         "properties": {
           "version_a": {
@@ -11037,6 +14025,141 @@
         "title": "StateDiff",
         "description": "两个快照的结构化差异。\n\n⚠️ 六个实体段**空则整个键被省略**（见模块 docstring）——读法必须是\n``diff.hooks?.added?.length ?? 0``，不能假设存在。"
       },
+      "StateDiffResponse": {
+        "properties": {
+          "version_a": {
+            "type": "integer",
+            "title": "Version A"
+          },
+          "version_b": {
+            "type": "integer",
+            "title": "Version B"
+          },
+          "branch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch Id",
+            "description": "恒为 null——本端点不支持分支视角"
+          },
+          "characters": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListDiffResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "world": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "World"
+          },
+          "hooks": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListDiffResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "debts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListDiffResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "events_changed": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events Changed"
+          },
+          "recent_events": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListDiffResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "version_a",
+          "version_b"
+        ],
+        "title": "StateDiffResponse",
+        "description": "``GET /projects/{pid}/state/diff?a=&b=`` 的 200 响应。\n\n实测：无实体变更时**恰好 3 键**（``version_a`` / ``version_b`` / ``branch_id``），\n有变更时追加六个实体段里的若干个（实测一次同时出现\n``characters`` / ``hooks`` / ``debts`` / ``events_changed``）。\n\n- 六个实体段用**字段级** ``exclude_if``（理由见 :func:`_drop_if_none` 的 docstring）\n  ——**端点刻意没有** ``response_model_exclude_none=True``，加了会把恒为 null 的\n  ``branch_id`` 一起抹掉（实测：空 diff 从 3 键掉到 2 键）。\n- ``events_changed`` 是**按 event_id 键的字典**（``{event_id: {before, after} | 嵌套 diff}``），\n  不是列表段，故不是 :class:`ListDiffResponse`。\n- ``branch_id`` **恒为 null**：``queries.diff_versions`` 把它写死成 ``None``，\n  传非 None 一律 409（``diff_conflict``）。"
+      },
+      "StyleSample": {
+        "properties": {
+          "sample_id": {
+            "type": "string",
+            "title": "Sample Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sample_id",
+          "project_id",
+          "title",
+          "content",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "StyleSample",
+        "description": "文风样例行（``author_style_samples`` 表全列，**恒 6 键、无条件键**）。\n\n实测：POST 返回体与 GET 列表行**同形**（router 两条路都是整行投影），\n故共用一个模型；``created_at`` / ``updated_at`` 由 router 写 ``now_iso()``，\n创建时二者必然相等，之后只有 UPDATE 才会拉开。\n\n2026-10-15 批次（六）L4 起，``GET`` 列表端点也声明了本模型 ⇒ 这条「同形」\n从「散文里的观察」变成**被测试钉住的契约**：任一端点多/少一个键，\n``tests/api/test_quality_reference_list_response_contract.py`` 必红。"
+      },
       "StyleSampleCreate": {
         "properties": {
           "title": {
@@ -11058,6 +14181,151 @@
         ],
         "title": "StyleSampleCreate",
         "description": "POST 请求体。"
+      },
+      "StyleSampleOut": {
+        "properties": {
+          "sample_id": {
+            "type": "string",
+            "title": "Sample Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sample_id",
+          "project_id",
+          "title",
+          "content",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "StyleSampleOut",
+        "description": "``POST /projects/{pid}/canons/{cid}/to-style-sample`` 的出参。\n\n该端点**复用** ``author_style_samples`` router 的 ``create_style_sample``（直接函数\n调用），因此响应就是文风样例本体的 6 个键 = ``author_style_samples`` 表的全部列\n（见 ``0008_author_style_samples_and_overdue.sql``）。\n\n⚠️ 本模型**只**在 reference 端点上声明；``author_style_samples`` 自己的端点\n仍用 router 内定义的 ``StyleSample``（两者字段逐字相同）。\n⚠️ **两个同形模型并存是已知的重复**：合并会让批次（六）· G7 钉住的\n``$ref.endswith(\"/StyleSampleOut\")`` 断言（端点 ⇄ schema 的接线判别）失败，\n故留待独立裁决，不在本文件顺手改。"
+      },
+      "SubmitDeltaResponse": {
+        "properties": {
+          "delta_id": {
+            "type": "string",
+            "title": "Delta Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Errors",
+            "description": "恒在；无错时是 []（不是缺键）"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "delta_id",
+          "status",
+          "errors"
+        ],
+        "title": "SubmitDeltaResponse",
+        "description": "``POST /projects/{pid}/deltas`` 的 201 响应（实测 3 键恒在）。\n\n⚠️ ``status`` 在这条路径上**恒为 ``\"validated\"``**：``status=\"rejected\"`` 时\nrouter 会抛 422（``detail.errors``），响应体是错误形状而不是本模型。\n字段仍按实测声明成 ``str`` 而非 Literal——把它钉成字面量等于把「将来\n会不会多一种 201 状态」的判断提前烧掉，而校验器 ``validate_delta`` 的\n返回面不受本模块控制。"
+      },
+      "TimelineEventOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "day_index": {
+            "type": "integer",
+            "title": "Day Index",
+            "description": "故事内第几天；DDL NOT NULL，恒在"
+          },
+          "time_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Ref",
+            "description": "可选 HH:MM 等"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "visibility": {
+            "type": "string",
+            "title": "Visibility",
+            "description": "迁移 0014 伴随列，默认 'PUBLIC'（与 plot_events 的 'RESTRICTED' 不同）"
+          },
+          "who_knows": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Who Knows"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "event_id",
+          "day_index",
+          "time_ref",
+          "description",
+          "visibility",
+          "who_knows"
+        ],
+        "title": "TimelineEventOut",
+        "description": "``POST /api/projects/{pid}/timeline`` 的响应（``GET .../timeline`` 同款）。\n\n⚠️ 主键键名同样是 ``id``（DB 列名 ``timeline_event_id``）。"
       },
       "ValidationError": {
         "properties": {
@@ -11361,6 +14629,592 @@
         "type": "object",
         "title": "VolumeUpdate",
         "description": "部分更新请求体——所有字段均可选，未提供则不修改。\n\n``status`` 允许 ``active`` 修正（仅限 PATCH 调用场景下确实需要改 title\n时顺带改 status）；``sealed`` → ``active`` 的反向跳变由 Service 拒绝。"
+      },
+      "WorkflowRunDetail": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "workflow_id": {
+            "type": "string",
+            "title": "Workflow Id",
+            "description": "workflows 表主键；人类可读名见 workflow_name"
+          },
+          "workflow_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Name",
+            "description": "反查 workflows.name；孤儿 run 为 null"
+          },
+          "chapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chapter Id",
+            "description": "project-init 等非章节任务的 run 为 null"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED"
+          },
+          "current_node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Node"
+          },
+          "checkpoint_json": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Checkpoint Json",
+            "description": "暂停/恢复持久化点；键集随 workflow 演进，不建模"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error",
+            "description": "失败原因；成功 run 为 null"
+          },
+          "retry_count": {
+            "type": "integer",
+            "title": "Retry Count"
+          },
+          "started_at": {
+            "type": "string",
+            "title": "Started At"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At",
+            "description": "未到终态为 null"
+          },
+          "instance_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance Id",
+            "description": "0026 新增的实例身份列；未设置时为 null"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunNode"
+            },
+            "type": "array",
+            "title": "Nodes",
+            "description": "按 (started_at, node_run_id) 升序；无节点时为 []"
+          },
+          "pause_payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Payload",
+            "description": "仅 PAUSED 时出现；各 workflow 的挂起节点不同 ⇒ 形状不固定"
+          },
+          "stage_models": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stage Models",
+            "description": "仅 PAUSED 时出现；{agent 名: 本次实际调用的 model_id}，无成功调用时为 {}"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "run_id",
+          "workflow_id",
+          "workflow_name",
+          "chapter_id",
+          "status",
+          "current_node",
+          "checkpoint_json",
+          "error",
+          "retry_count",
+          "started_at",
+          "ended_at",
+          "instance_id",
+          "nodes"
+        ],
+        "title": "WorkflowRunDetail",
+        "description": "``GET /runs/{run_id}`` 的 200 响应。\n\n**键集随 status 变（实测）**：非 PAUSED 13 键；PAUSED 15 键，多出\n``pause_payload`` 与 ``stage_models``。端点上配 ``response_model_exclude_unset=True``\n来复现这个条件性——**不要**改成 ``exclude_none``（会连带抹掉「键在、值为 null」的\n``chapter_id`` / ``error`` / ``ended_at``，把 13 键砍成更少，等于改契约）。\n\n``checkpoint_json`` 声明为 ``dict[str, Any]`` 且**不逐键建模**：实测它的顶层键是\n「workflow 节点 id + ``_`` 前缀引擎内部键 + ctx 键」的合集（chapter-review 一轮\n实测 14 个，含 ``_current_node_id`` / ``author_review`` / ``review_inputs`` /\n``mock_providers``），随 workflow 与节点推进而变，逐字段建模只会造出一个必然\n过期的假契约。\n\n⚠️ **残余边界（如实登记）**：``pause_payload`` / ``stage_models`` 声明为\n``Optional`` + 默认 ``None``，因此「PAUSED 但 ``_extract_pause_payload`` 恰好返回\nNone」时这两个键会以 ``null`` 出现而非缺席。实测 PAUSED run 恒有真实 payload，\n故该分支在本仓不可达；真出现了也是「键在、值为 null」，与本响应里其它可空键同形。"
+      },
+      "WorkflowRunNode": {
+        "properties": {
+          "node_run_id": {
+            "type": "string",
+            "title": "Node Run Id"
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "node_id": {
+            "type": "string",
+            "title": "Node Id",
+            "description": "workflow 定义里的节点 id（不是 agent 名）"
+          },
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id",
+            "description": "纯逻辑节点无 agent ⇒ null"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "PENDING / RUNNING / COMPLETED / FAILED / SKIPPED"
+          },
+          "input_json": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Input Json",
+            "description": "节点输入；DB 列 NOT NULL DEFAULT '{}'，故恒为对象"
+          },
+          "output_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Json",
+            "description": "非结构化输出（SKIPPED / 尚未跑完）时为 null"
+          },
+          "prompt_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Version",
+            "description": "未调 AI 的节点为 null"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id",
+            "description": "未调 AI 的节点为 null"
+          },
+          "token_usage_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Usage Json",
+            "description": "{prompt, completion, total}；未调 AI 为 null"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At",
+            "description": "PENDING（尚未开始）为 null"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At",
+            "description": "未到终态为 null"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "node_run_id",
+          "run_id",
+          "node_id",
+          "agent_id",
+          "status",
+          "input_json",
+          "output_json",
+          "prompt_version",
+          "model_id",
+          "token_usage_json",
+          "latency_ms",
+          "error",
+          "started_at",
+          "ended_at"
+        ],
+        "title": "WorkflowRunNode",
+        "description": "``workflow_run_nodes`` 的一行（run 详情里的 ``nodes[]``）。\n\n⚠️ 键集来自 ``SELECT *`` ⇒ **迁移给该表加列就会多一个键**（实测\n``instance_id`` 同款：0026 给 ``workflow_runs`` 加了列）。故开 ``extra=\"allow\"``。"
+      },
+      "WorkflowRunSummary": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "workflow_id": {
+            "type": "string",
+            "title": "Workflow Id"
+          },
+          "workflow_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Name",
+            "description": "JOIN workflows 反查；孤儿 run 为 null"
+          },
+          "chapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chapter Id",
+            "description": "列表行专属：project-init 等非章节任务的 run 为 null（实测）"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED"
+          },
+          "current_node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Node"
+          },
+          "checkpoint_json": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Checkpoint Json",
+            "description": "键集随 workflow 演进，不逐键建模"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error",
+            "description": "失败原因；成功 run 键在、值为 null"
+          },
+          "retry_count": {
+            "type": "integer",
+            "title": "Retry Count"
+          },
+          "started_at": {
+            "type": "string",
+            "title": "Started At"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At",
+            "description": "未到终态时键在、值为 null"
+          },
+          "instance_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance Id",
+            "description": "0026 新增的实例身份列"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label",
+            "description": "人类可读标签；workflow 名不在中文映射表里时为 null"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "run_id",
+          "workflow_id",
+          "workflow_name",
+          "chapter_id",
+          "status",
+          "current_node",
+          "checkpoint_json",
+          "error",
+          "retry_count",
+          "started_at",
+          "ended_at",
+          "instance_id",
+          "label"
+        ],
+        "title": "WorkflowRunSummary",
+        "description": "``GET /projects/{pid}/runs`` 的**行**（实测恒 13 键）。\n\n⚠️ **不能复用 :class:`WorkflowRunDetail`**：两者是不同形状的两个方向。\n详情 = ``workflow_runs`` 的一行 + ``nodes[]`` + PAUSED 时追加的两个条件键（实测\n非 PAUSED 13 / PAUSED 15）；本列表 = ``workflow_runs`` 的一行（11 键）+ **无 nodes**\n+ ``workflow_name`` + **``label``**。恰好都是 13 键纯属巧合，键集并不相同：\n详情多 ``nodes``，列表多 ``label``。\n\n``label`` 由 ``_compute_run_label`` 从 ``_WORKFLOW_ZH_LABELS`` 推导，**键恒在、\n值可为 null**：实测「workflow 名不在那张映射表里」的 run（探针用 deconstruct-book）\n``label`` 就是 null，而同页 ``workflow_name`` 是字符串。反过来 ``workflow_name``\n也声明成 Optional——它经 JOIN ``workflows`` 反查，孤儿 run 为 null。\n\n``chapter_id`` 可空：project-init 等非章节任务的 run 就是 null（实测）。\n\n``checkpoint_json`` 声明成 ``dict[str, Any]`` 不逐键建模，理由同\n:class:`WorkflowRunDetail`（键集随 workflow 与节点推进而变）。\n\n``extra=\"allow\"``：行来自 ``SELECT wr.*`` ⇒ 迁移给 ``workflow_runs`` 加列就多一键\n（``instance_id`` 就是 0026 的先例）。"
+      },
+      "WorkflowStartAccepted": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id",
+            "description": "新建 run 的主键；真终态需轮询 GET /api/runs/{run_id}"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "启动后恒为 RUNNING（同步化的 project-init 除外）"
+          },
+          "current_node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Node",
+            "description": "恒为 null：异步启动返回时还没有节点在跑；给前端留位置"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "current_node"
+        ],
+        "title": "WorkflowStartAccepted",
+        "description": "章节级起跑端点的统一 201/200 响应。\n\n覆盖 ``POST .../plan`` / ``.../write`` / ``.../review`` / ``.../commit`` /\n``.../gate-revise`` 与 ``POST /runs/{run_id}/resume`` —— 实测**六个端点逐字同形**\n（都是同一批 dict 字面量的再包装），故共用一个模型而不是各建一个。\n\n⚠️ ``status`` 声明为 ``str`` 而非 ``Literal[\"RUNNING\"]``：实测当前**恒**为\n``\"RUNNING\"``（``_start_workflow_core`` 与 ``resume_run`` 都硬编码该值，启动失败\n一律 raise 400/409/422 而非返回），但 ``project-init`` 已经是**同步**启动、\n同一族端点将来也可能改回同步。把「当前取值」写进类型等于宣称一个实现细节是\n契约；本批改为在测试里钉住该不变量（``test_start_endpoints_status_is_running``）。\n\n``current_node`` 必填可空、不给默认值：实测该键**恒在**、值恒 ``null``（异步启动\n时还没有节点在跑）。给了默认值就生成成可选键，前端会误以为它可能缺席。"
+      },
+      "WorldEntityOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "statement": {
+            "type": "string",
+            "title": "Statement",
+            "description": "一句话陈述；未填时为空串（非 null）"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "title": "Data",
+            "description": "data_json 列的反序列化结果；未填时为 {}，也可能是数组"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "PUBLIC",
+              "VISIBLE",
+              "RESTRICTED",
+              "HIDDEN"
+            ],
+            "title": "Visibility",
+            "description": "权限级别"
+          },
+          "who_knows": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Who Knows",
+            "description": "可见者 ID 列表；null = 全员可见"
+          },
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Aliases",
+            "description": "别名列表；恒为数组（world_rules 恒为 []，见模块注释）"
+          },
+          "inject_mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "always",
+              "never"
+            ],
+            "title": "Inject Mode",
+            "description": "触发注入模式（world_rules 恒为 'auto'，见模块注释）"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "name",
+          "statement",
+          "data",
+          "visibility",
+          "who_knows",
+          "aliases",
+          "inject_mode",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "WorldEntityOut",
+        "description": "``locations`` / ``factions`` / ``world_rules`` 三类实体的**出参**形态。\n\n= ``WorldEntity.to_dict()`` 的 11 个键（实测，非照抄）。"
       }
     }
   }

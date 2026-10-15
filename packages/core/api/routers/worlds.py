@@ -18,6 +18,11 @@ from packages.domain.world import (
     WorldService,
 )
 
+# ⚠️ 直接从子模块 import 而非走 ``packages.domain.world.__init__``：本次的
+# 文件边界不含 ``__init__.py``，改它会越界。若要把它提到包级导出，
+# 后续在 ``__init__.py`` 的 ``__all__`` 里补一行即可（router 侧不受影响）。
+from packages.domain.world.models import WorldEntityOut
+
 router = APIRouter(tags=["world"])
 
 
@@ -52,7 +57,11 @@ def _handle_world_error(exc: Exception) -> HTTPException:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/projects/{pid}/locations", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/projects/{pid}/locations",
+    status_code=status.HTTP_201_CREATED,
+    response_model=WorldEntityOut,
+)
 def create_location(pid: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
     svc = _service(request)
     try:
@@ -71,13 +80,19 @@ def create_location(pid: str, payload: dict[str, Any], request: Request) -> dict
     return ent.to_dict()
 
 
-@router.get("/projects/{pid}/locations")
+@router.get(
+    "/projects/{pid}/locations",
+    response_model=list[WorldEntityOut],
+)
 def list_locations(pid: str, request: Request) -> list[dict[str, Any]]:
     svc = _service(request)
     return [e.to_dict() for e in svc.list_locations(pid)]
 
 
-@router.get("/locations/{location_id}")
+@router.get(
+    "/locations/{location_id}",
+    response_model=WorldEntityOut,
+)
 def get_location(location_id: str, request: Request) -> dict[str, Any]:
     svc = _service(request)
     ent = svc.get_location(location_id)
@@ -86,7 +101,10 @@ def get_location(location_id: str, request: Request) -> dict[str, Any]:
     return ent.to_dict()
 
 
-@router.patch("/locations/{location_id}")
+@router.patch(
+    "/locations/{location_id}",
+    response_model=WorldEntityOut,
+)
 def update_location(
     location_id: str, payload: dict[str, Any], request: Request
 ) -> dict[str, Any]:
@@ -122,7 +140,11 @@ def delete_location(location_id: str, request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/projects/{pid}/factions", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/projects/{pid}/factions",
+    status_code=status.HTTP_201_CREATED,
+    response_model=WorldEntityOut,
+)
 def create_faction(pid: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
     svc = _service(request)
     try:
@@ -141,13 +163,19 @@ def create_faction(pid: str, payload: dict[str, Any], request: Request) -> dict[
     return ent.to_dict()
 
 
-@router.get("/projects/{pid}/factions")
+@router.get(
+    "/projects/{pid}/factions",
+    response_model=list[WorldEntityOut],
+)
 def list_factions(pid: str, request: Request) -> list[dict[str, Any]]:
     svc = _service(request)
     return [e.to_dict() for e in svc.list_factions(pid)]
 
 
-@router.get("/factions/{faction_id}")
+@router.get(
+    "/factions/{faction_id}",
+    response_model=WorldEntityOut,
+)
 def get_faction(faction_id: str, request: Request) -> dict[str, Any]:
     svc = _service(request)
     ent = svc.get_faction(faction_id)
@@ -156,7 +184,10 @@ def get_faction(faction_id: str, request: Request) -> dict[str, Any]:
     return ent.to_dict()
 
 
-@router.patch("/factions/{faction_id}")
+@router.patch(
+    "/factions/{faction_id}",
+    response_model=WorldEntityOut,
+)
 def update_faction(
     faction_id: str, payload: dict[str, Any], request: Request
 ) -> dict[str, Any]:
@@ -192,7 +223,11 @@ def delete_faction(faction_id: str, request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/projects/{pid}/world-rules", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/projects/{pid}/world-rules",
+    status_code=status.HTTP_201_CREATED,
+    response_model=WorldEntityOut,
+)
 def create_world_rule(pid: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
     svc = _service(request)
     try:
@@ -209,13 +244,19 @@ def create_world_rule(pid: str, payload: dict[str, Any], request: Request) -> di
     return ent.to_dict()
 
 
-@router.get("/projects/{pid}/world-rules")
+@router.get(
+    "/projects/{pid}/world-rules",
+    response_model=list[WorldEntityOut],
+)
 def list_world_rules(pid: str, request: Request) -> list[dict[str, Any]]:
     svc = _service(request)
     return [e.to_dict() for e in svc.list_world_rules(pid)]
 
 
-@router.get("/world-rules/{world_rule_id}")
+@router.get(
+    "/world-rules/{world_rule_id}",
+    response_model=WorldEntityOut,
+)
 def get_world_rule(world_rule_id: str, request: Request) -> dict[str, Any]:
     svc = _service(request)
     ent = svc.get_world_rule(world_rule_id)
@@ -224,7 +265,10 @@ def get_world_rule(world_rule_id: str, request: Request) -> dict[str, Any]:
     return ent.to_dict()
 
 
-@router.patch("/world-rules/{world_rule_id}")
+@router.patch(
+    "/world-rules/{world_rule_id}",
+    response_model=WorldEntityOut,
+)
 def update_world_rule(
     world_rule_id: str, payload: dict[str, Any], request: Request
 ) -> dict[str, Any]:

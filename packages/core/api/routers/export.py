@@ -16,6 +16,17 @@
 - 文件名：含项目名（ASCII 兜底 + ``filename*=UTF-8''…``），参考
   ``packages/core/api/routers/quality.py`` 的 ``q8-export`` 端点；
 - ``discover_routers`` 自动发现。
+
+**为什么没有 response_model**（2026-10-15 批次（六）实测后**刻意不加**）：
+本端点返回的是**文件体**，不是 JSON——实测 ``format=txt`` → ``text/plain; charset=utf-8``
+（UTF-8 BOM 开头）、``format=docx`` → ``application/vnd.openxmlformats-officedocument
+.wordprocessingml.document``（ZIP 魔数 ``PK\\x03\\x04``）、``format=fanqie`` →
+``text/plain``。Pydantic 模型在这里既无对象可校验，也会把 OpenAPI 的 200 误标成
+JSON ⇒ 给前端 codegen 造一个**假契约**（据此会生成「download ⇒ JSON object」的
+调用方）。声明 ``response_class=Response`` 之类只是把「裸 dict 无模型」换个说法。
+判别：``tests/api/test_misc_router_response_contract.py::test_export_returns_file_not_json``
+把「200 的 Content-Type 非 JSON、body 是字节、OpenAPI 无 application/json」
+钉成断言——本条「跳过」因此是**可审计**的，不是沉默的。
 """
 
 from __future__ import annotations

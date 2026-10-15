@@ -21,6 +21,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from packages.core.api.routers import discover_routers
 from packages.core.config import Settings, get_settings
@@ -165,6 +166,23 @@ async def lifespan(app: FastAPI):
     yield
 
 
+class HealthResponse(BaseModel):
+    """``GET /api/health`` 的响应（2026-10-15 批次（六）补契约）。
+
+    实测键集恰好 3 个，全部恒在、恒非 null（临时库实测）——
+    故三项都必填且**不给默认值**：给它默认值等于把「漏返回某个键」变成合法响应。
+
+    ⚠️ ``tables`` 是**业务表数**（总表数减 ``_migrations``），不是物理表数。
+    口径散落三处（``count_tables`` 的 docstring、README §健康检查、
+    ``scripts/smoke_e2e.py`` 的 ``EXPECTED_BUSINESS_TABLES``），
+    本批已把后两处的陈旧数字（38/39）订正为 39/40。
+    """
+
+    status: str = Field(description="恒为 ``ok``（本端点只在应用已起来时才可达）")
+    version: str = Field(description="pyproject 单源版本，经 importlib 读取")
+    tables: int = Field(description="**业务表数**（已扣除 ``_migrations`` 虚表）")
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """构造 FastAPI 应用。"""
     if settings is None:
@@ -203,7 +221,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    @app.get("/api/health")
+    @app.get("/api/health", response_model=HealthResponse)
     def health() -> dict[str, object]:
         # 重新跑一遍轻量查询，不重新执行迁移
         from packages.core.db import count_tables

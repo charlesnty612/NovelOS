@@ -4,8 +4,10 @@
 
 端点：
 - ``POST /agents/sync`` ——从 ``docs/agents/prompts`` 同步所有 prompt 到 agents/prompts 表。
-- ``GET /agents`` ——列出已注册的 agents。
-- ``GET /agents/{name}/prompts`` ——列出指定 agent 的所有 prompts（按 version 降序）。
+- ``GET /agents`` ——列出已注册的 agents（**6 键**，见 :class:`AgentListRowOut`；
+  其中 ``config_json`` 是 JSON **字符串**不是对象）。
+- ``GET /agents/{name}/prompts`` ——列出指定 agent 的所有 prompts（按 version 降序，
+  **7 键**，见 :class:`AgentPromptRowOut`；agent 不存在返回 ``[]`` 而非 404）。
 - ``POST /agents/{name}/run`` ——执行一次 agent 调用（手工触发 / 测试通道）。
 
 错误码映射：
@@ -23,6 +25,8 @@
 
 from __future__ import annotations
 
+from typing import Union
+
 from fastapi import APIRouter, HTTPException, Request, status
 
 from packages.core.agent_runtime import (
@@ -34,13 +38,21 @@ from packages.core.agent_runtime import (
 )
 from packages.core.logging_config import get_logger
 from packages.core.model_router import ModelNotConfiguredError, ProviderError
+from packages.core.model_router.models import (
+    AgentListRowOut,
+    AgentOutputErrorEnvelope,
+    AgentPromptRowOut,
+    AgentPromptSyncResult,
+    AgentRunResult,
+    ProviderErrorEnvelope,
+)
 
 log = get_logger("novelos.routers.agents")
 
 router = APIRouter(tags=["agents"])
 
 
-@router.post("/agents/sync", status_code=status.HTTP_200_OK)
+@router.post("/agents/sync", status_code=status.HTTP_200_OK, response_model=AgentPromptSyncResult)
 def sync_prompts(request: Request, docs_dir: str = "docs/agents/prompts") -> dict:
     """从 docs_dir 扫描 prompt md 文件并 upsert。"""
     settings = request.app.state.settings
@@ -54,14 +66,24 @@ def sync_prompts(request: Request, docs_dir: str = "docs/agents/prompts") -> dic
     return result
 
 
-@router.get("/agents")
+@router.get("/agents", response_model=list[AgentListRowOut])
 def list_agents(request: Request) -> list[dict]:
+    """列出已注册 agent（按 name 升序）。
+
+    ⚠️ 行的 ``config_json`` 是 **JSON 字符串**而非对象——表列是 TEXT、
+    ``PromptRegistry.list_agents`` 原样透传。模型刻意声明成 ``str``：声明成 ``dict``
+    实测会**校验失败**（Pydantic 不做 JSON 字符串→对象的隐式解析）⇒ 端点 500。
+    """
     settings = request.app.state.settings
     return PromptRegistry(settings.db_path).list_agents()
 
 
-@router.get("/agents/{name}/prompts")
+@router.get("/agents/{name}/prompts", response_model=list[AgentPromptRowOut])
 def list_agent_prompts(name: str, request: Request) -> list[dict]:
+    """列出指定 agent 的 prompts（按 version 数字降序）。
+
+    agent 不存在时返回 **``[]``（200，不是 404）**——既有行为，本批未改。
+    """
     settings = request.app.state.settings
     rows = PromptRegistry(settings.db_path).list_prompts(name)
     if not rows:
@@ -70,7 +92,22 @@ def list_agent_prompts(name: str, request: Request) -> list[dict]:
     return rows
 
 
-@router.post("/agents/{name}/run", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/agents/{name}/run",
+    status_code=status.HTTP_201_CREATED,
+    response_model=AgentRunResult,
+    # ⚠️ 502 有**两种** detail 形状（实测，见 models.AgentOutputErrorDetail）：
+    #   ProviderError        → {"error":"provider_error","message":…,"status_code":…}
+    #   AgentOutputError     → {"error":"agent_output_invalid","message":…}
+    # OpenAPI 一个状态码只能挂一个 schema，故用 Union（渲染成 anyOf）如实表达二选一，
+    # 不假装只有一种。纯文档用途，不改变运行时行为。
+    responses={
+        502: {
+            "model": Union[ProviderErrorEnvelope, AgentOutputErrorEnvelope],  # noqa: UP007
+            "description": "provider 错误（provider_error）或 agent 输出不合规（agent_output_invalid）",
+        }
+    },
+)
 def run_agent_endpoint(name: str, payload: dict, request: Request) -> dict:
     """手工触发一次 agent 调用。请求体：
 

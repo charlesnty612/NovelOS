@@ -74,6 +74,7 @@ commit），自动处理 review / commit 的 Human 节点 PAUSED（resume body �
 from __future__ import annotations
 
 import argparse
+import ctypes  # 只在 Windows 分支（_pid_alive_win）实际调用；wintypes 在函数内惰性导入
 import json
 import os
 import socket
@@ -133,15 +134,103 @@ def _lock_path(data_dir: Path) -> Path:
     return data_dir / LOCK_FILE_NAME
 
 
+def _pid_alive_win(pid: int) -> bool | None:
+    """Windows 专用存活探测（``OpenProcess`` + ``GetExitCodeProcess``）。
+
+    返回 ``True``/``False``；**探测本身无法判定时返回 None**（交由调用方兜底）。
+
+    ⚠️ 为什么需要它（2026-10-16 实测，坑区已登记）
+    --------------------------------------------------
+    ``os.kill(pid, 0)`` 在 Windows 上**不是稳定的存活探测**。实测同一台机器、
+    同一个解释器，四种进程环境下它对**自己**的结果不一致：
+
+    | 进程环境                     | ``os.kill(self, 0)``          |
+    |-----------------------------|-------------------------------|
+    | 普通                         | 无异常（正确）                 |
+    | ``CREATE_NEW_PROCESS_GROUP`` | 无异常（正确）                 |
+    | ``DETACHED_PROCESS``        | ``OSError: [WinError 87]``    |
+
+    而旧实现的 ``except OSError: return False`` 把它读成「**进程已死**」。
+
+    危害不是崩溃，是**锁静默失效**：本模块的单实例锁防的是两个 ``run`` 实例
+    并发写同一个 SQLite（M1 事故根因）。进程若以 detached 方式启动
+    （Windows 计划任务、部分 CI runner、守护场景），**活着的**实例被判死
+    ⇒ 第二个实例以为第一个已死 ⇒ 抢锁覆写 ⇒ 回到 M1 事故。
+
+    实测四种环境下本函数对「自己」恒返回 True、对不存在的 PID 恒返回 False，
+    零第三方依赖（只用 ctypes）。
+    """
+    # PROCESS_QUERY_LIMITED_INFORMATION（0x1000）/ STILL_ACTIVE（259）
+    # wintypes 惰性导入：它在非 Windows 上并不可靠，而本模块声称跨平台。
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # ⚠️ 必须显式声明 argtypes/restype（2026-10-16 补）。ctypes 的默认
+    # ``restype = c_int`` 只有 **32 位**，而 ``HANDLE`` 是**指针宽**（本机 64 位下
+    # ``sizeof(c_void_p) == 8``）⇒ 未声明时句柄会被截断，而截断后的值会被原样传给
+    # ``CloseHandle``，理论上可能关掉**另一个**句柄。
+    #
+    # **实测口径（不得夸大）**：本机 Windows 上**未观测到截断**——4000 次
+    # open/close 循环里句柄值恒为 **384**（占 32 位空间的 0.000018%），因为内核句柄
+    # 是进程句柄表里的**小整数下标**、用完即回收同一下标。所以这条是
+    # **潜在/可移植性缺陷，不是本机已发生的 bug**。但「守门函数依赖一个未声明的
+    # 契约」本身就是它不该有的脆弱性，而修它零风险，故仍然显式声明。
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        err = ctypes.get_last_error()
+        # 87 = ERROR_INVALID_PARAMETER（PID 不存在）、5 = ERROR_ACCESS_DENIED
+        # （存在但无权限）——后者保守判活。
+        if err in (5,):
+            return True
+        if err in (87, 1168,  6):  # 6 = ERROR_INVALID_HANDLE
+            return False
+        return None  # 说不清 → 交给调用方保守兜底
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return None
+        return code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_alive(pid: int) -> bool:
-    """跨平台判断 PID 是否仍在运行（``os.kill(pid, 0)``，不真杀进程）。
+    """跨平台判断 PID 是否仍在运行（不真杀进程）。
 
     - ``ProcessLookupError``（不存在）→ False。
     - ``PermissionError``（存在但权限不够）→ True（保守认定为活）。
-    - 其他 ``OSError``（如 PID<=0）→ False，避免误锁。
+    - **Windows**：``os.kill(pid, 0)`` 不是稳定探测（DETACHED 环境下抛
+      ``WinError 87``，见 :func:`_pid_alive_win` 的实测表），故优先走
+      ``OpenProcess``；那一路也判不出来时**保守返回 True**。
+    - 其他 ``OSError``（如 PID<=0）→ **True**（不是 False！）
+
+    ⚠️ **为什么最后一支从 False 改成 True**（2026-10-16）
+    --------------------------------------------------
+    原注释写「其他 OSError → False，避免误锁」——方向反了。这里的失败模式是
+    **误判活**（永远拿不到锁、要 ``--force-lock`` 才能恢复），而误判死会
+    **让两个实例并发写同一个 DB**（M1 事故本身）。二者不可逆性差着一个量级：
+    误锁有人能手工解开，误判死是数据损坏。
+
+    配套纪律（本函数的 docstring 即为该纪律的载体）：**存活性探测遇到任何
+    解释不了的错误，一律保守假定进程活着**——与 ``PermissionError`` 分支同原则。
     """
     if not isinstance(pid, int) or pid <= 0:
         return False
+    if sys.platform == "win32":
+        probed = _pid_alive_win(pid)
+        if probed is not None:
+            return probed
+        return True  # 探测判不出来 → 保守判活
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -149,7 +238,7 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     except OSError:
-        return False
+        return True  # 未知错误 → 同上，保守判活
     return True
 
 

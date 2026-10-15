@@ -27,6 +27,12 @@ from packages.domain.project.service import ProjectService
 from packages.domain.volume.service import VolumeService
 
 from .common import _extract_pause_payload
+from .models import (
+    ContextPreview,
+    ProjectInitStatus,
+    WorkflowRunDetail,
+    WorkflowRunSummary,
+)
 
 log = get_logger("novelos.routers.workflows")
 
@@ -135,7 +141,7 @@ def _init_status_for_project(db_path: str, project_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/projects/{project_id}/init-status")
+@router.get("/projects/{project_id}/init-status", response_model=ProjectInitStatus)
 def get_init_status(project_id: str, request: Request) -> dict[str, Any]:
     """返回 project-init 四环节各自的落库完成状态（数据推导，不建新表）。
 
@@ -155,7 +161,18 @@ def get_init_status(project_id: str, request: Request) -> dict[str, Any]:
     return payload
 
 
-@router.get("/runs/{run_id}")
+@router.get(
+    "/runs/{run_id}",
+    response_model=WorkflowRunDetail,
+    # ⚠️ exclude_unset 而非 exclude_none：run 详情里 `chapter_id` / `error` /
+    # `ended_at` / `current_node` / `instance_id` 常常**键在、值为 null**（成功 run 的
+    # error、未到终态的 ended_at、project-init 的 chapter_id 都是如此）。用
+    # exclude_none 会把它们全抹掉 ⇒ 13 键变 9 键，等于把契约改小。
+    # 而 `pause_payload` / `stage_models` 只在 PAUSED 时由端点附加，不加开关又会恒以
+    # null 出现。exclude_unset 精确复现实测（非 PAUSED 13 键 / PAUSED 15 键）。
+    # 详见 models.py 的 WorkflowRunDetail 注释。
+    response_model_exclude_unset=True,
+)
 def get_run_endpoint(run_id: str, request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     db_path = settings.db_path
@@ -269,8 +286,19 @@ def _compute_run_label(
     return zh
 
 
-@router.get("/projects/{project_id}/runs")
+@router.get("/projects/{project_id}/runs", response_model=list[WorkflowRunSummary])
 def list_runs_endpoint(project_id: str, request: Request) -> list[dict[str, Any]]:
+    """列 project 下的 run（每行 13 键，实测）。
+
+    ``response_model`` 只在**数组的 items** 上生效——``list[dict]`` 在 OpenAPI 里
+    是匿名 object，前端拿到的仍是 ``Record<string, unknown>``。加了
+    ``list[WorkflowRunSummary]`` 后 items 才有具名 ``$ref``。
+
+    ⚠️ **刻意不加** ``response_model_exclude_none`` / ``exclude_unset``：本端点
+    **没有条件键**——``chapter_id`` / ``error`` / ``ended_at`` / ``label`` 都是
+    「键恒在、值可为 null」，任一开关都会把它们抹掉，把 13 键砍成更少，等于改契约。
+    判别：``tests/api/test_state_list_response_contract.py::test_list_endpoints_declare_no_exclude_switches``
+    """
     settings = request.app.state.settings
     db_path = settings.db_path
     runs = list_runs(db_path, project_id)
@@ -289,7 +317,7 @@ def list_runs_endpoint(project_id: str, request: Request) -> list[dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
-@router.get("/chapters/{chapter_id}/context-preview")
+@router.get("/chapters/{chapter_id}/context-preview", response_model=ContextPreview)
 def get_chapter_context_preview(chapter_id: str, request: Request) -> dict[str, Any]:
     """dry-run：返回 chapter 关联的 LLM context 装配预览。
 

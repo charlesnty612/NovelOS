@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 
 def get_connection(db_path: str | Path) -> sqlite3.Connection:
@@ -81,6 +84,14 @@ _ASSEMBLY_TOKEN_BUDGET = 8000
 # 粗略 token 估算除数：4 字节 ≈ 1 token（中文场景保守近似，与 preview 同款）。
 _TOKEN_DIVISOR = 4
 
+# 超预算告警的**稳定标识**（2026-10-15 批次六 G9 接线）。
+#
+# 为什么需要一个常量：这条 warning 是 ``token_budget_exceeded`` 全仓**唯一的生产消费方**
+# （此前该标记只被自己的单测读到——「数据源存在 ≠ 已进装配」的典型）。判别它的测试与
+# 突变验证都按这串字面量 grep／匹配；写成常量后，标识只有一个改处，且 ruff 的
+# F401 类「定义未用」不会误伤（日志消息里以 %s 引用）。
+_ASSEMBLY_BUDGET_WARN_TAG = "context_engine.assembly_token_budget exceeded"
+
 
 def _estimate_tokens(value: Any) -> int:
     """粗略 token 估算：``len(json.dumps(value, ensure_ascii=False)) // 4``，至少 1。
@@ -107,6 +118,24 @@ def _attach_assembly_meta(
     - ``token_budget_exceeded``：超预算标记——**只告警，不阻断也不改写已装配内容**
       （真裁剪仍靠各字段 cap 与摘要链 token 预算截断；一刀切割会破坏 JSON 契约）；
     - ``summary_truncated``：可选，摘要链是否被预算截断（仅 director 装配传入）。
+
+    **告警接线（2026-10-15 批次六 G9）**——超预算时发一条 ``WARNING`` 日志。
+    为什么需要它：``token_budget_exceeded`` 在接线前的全仓唯一读者是
+    ``tests/unit/test_context_token_budget.py`` 自己，即「数据源存在 ≠ 已进装配」——
+    算出来了、落进 payload 了，但**没有任何生产消费方**，于是「装配超预算」这件事
+    在运行时对作者与运维完全不可见（而真正超预算那一档，恰恰是 ``writer_input`` 体积
+    最大的时候）。日志是本仓既有的「非阻断告警」通道，与
+    :func:`~packages.core.context_engine.builders_common.summaries._inject_scene_word_budget`
+    的 rebalanced / thin_plan 告警同款（同一包、同一「只发信号不阻断」语义、
+    同一 stderr sink，见 ``packages/core/logging_config.py``）。
+
+    口径纪律：**只在真超预算时发**（不是每次装配都发）——否则正常的 3000 字章节
+    装配也会刷屏，把真信号淹掉（坑区「把正常写法与真信号混在一张『命中即报』表里
+    = 噪声淹没信号」）。``agent`` 取 payload 顶层 ``agent`` 键（director / writer /
+    observer 三个装配入口都带；纯单元调用缺该键时回落 ``"?"``，不猜）。
+
+    仍然**只告警**：不抛错、不截断、不改写任何已装配字段。缓存命中路径不重跑本函数
+    （缓存存的就是含 meta 的完整 payload），故同一份装配只告警一次。
     """
     body = {k: v for k, v in payload.items() if k != "_assembly_meta"}
     tokens = _estimate_tokens(body)
@@ -118,6 +147,15 @@ def _attach_assembly_meta(
     if summary_truncated is not None:
         meta["summary_truncated"] = bool(summary_truncated)
     payload["_assembly_meta"] = meta
+    if meta["token_budget_exceeded"]:
+        _log.warning(
+            "%s: agent=%s estimate_tokens=%d budget=%d "
+            "（只告警不阻断；真裁剪靠各字段 cap 与摘要链预算）",
+            _ASSEMBLY_BUDGET_WARN_TAG,
+            payload.get("agent") or "?",
+            tokens,
+            _ASSEMBLY_TOKEN_BUDGET,
+        )
     return payload
 
 

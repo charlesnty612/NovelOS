@@ -6,11 +6,19 @@
 - 三个 build_* 入口的 payload 都带 ``_assembly_meta``；
 - 超预算**不阻断也不改写**已装配内容（只置标记）；
 - preview ``_TOKEN_BUDGET`` 与 ``_assembly_meta.token_budget`` 同源。
+
+2026-10-15 批次（六）G9 新增：**告警接线**的判别用例（§5）。
+此前 ``token_budget_exceeded`` 的全仓唯一读者就是本文件——「数据源存在 ≠ 已进装配」。
+接线后它多了一个生产消费方（装配期 ``WARNING`` 日志），本节用例守的是**那个消费方**，
+不是「meta 里有这个键」——后者恒真、测不到任何机制（坑区「夹具永远不触发闸门 ⇒
+空断言」/「断言了结果 ≠ 判别了机制」）。故每条告警用例都配正反一对：真超预算必发、
+正常装配必不发。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from packages.core.context_engine import preview as preview_mod
@@ -24,11 +32,28 @@ from packages.core.context_engine.builders_common import (
     _attach_assembly_meta,
     _estimate_tokens,
 )
+
+# 告警标识从**定义它的子模块**直取，不走包门面：门面 ``__all__`` 只保留「有生产消费方
+# 的名字」（AGENTS.md 硬规则 1），一个只被本测试引用的标识不该为此进门面。
+from packages.core.context_engine.builders_common.common import _ASSEMBLY_BUDGET_WARN_TAG
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
+
+# 告警 logger 名（``common.py`` 的 ``logging.getLogger(__name__)``）。断言只收这一条
+# logger，避免「别的模块也发过含同名字样的 warning」把用例撑绿。
+_WARN_LOGGER = "packages.core.context_engine.builders_common.common"
+
+
+def _warn_records(caplog) -> list[str]:
+    """本模块 logger 发出的、含告警标识的日志消息原文列表。"""
+    return [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.name == _WARN_LOGGER and _ASSEMBLY_BUDGET_WARN_TAG in rec.getMessage()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -241,3 +266,111 @@ def test_director_oversized_payload_flags_without_blocking(tmp_path: Path):
     # 不阻断：40 条角色 excerpt 全在（真裁剪仍靠各字段 cap / 摘要链预算）
     assert len(payload["character_state_excerpts"]) == 40
     assert payload["story_state_snapshot"]["current_state_version"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 5. 告警接线（2026-10-15 批次六 G9）：消费方真的看到了超预算信号
+# ---------------------------------------------------------------------------
+#
+# 判别纪律（坑区三条同源形状，见 §5 判别要求）：
+#
+# - 本节**不断言**「meta 里有 ``token_budget_exceeded`` 键」——那值本来一直在，
+#   断言恒真、测不到接线（对应「断言了结果 ≠ 判别了机制」）；
+# - 断言对象是**消费方收到的日志记录**（发没发这条告警 + 告警里带的数字对不对）；
+# - 每条「必发」用例都配一条「必不发」的反向用例，否则「无条件每次装配都发一遍
+#   warning」这种把真信号淹成噪声的接线同样能骗过断言（对应「闸门断言必须配反向用例」）。
+#
+# 为什么还要钉「告警里的数字」：只断言「有某条含标识的日志」的话，一条恒空的
+# warning（``... exceeded`` 后面什么都不带）也能过——而那正是「量具没量到目标却报告
+# 量过了」的形状。故要求日志带上**本次实测**的 estimate 与预算值。
+
+# 触发一次真超标所需的字符数（估算口径 = len(json)//4，故字符数取预算 × 4 的数倍留余量）。
+_OVERSIZE_FILLER_CHARS = _ASSEMBLY_TOKEN_BUDGET * 4 + 400
+
+
+def _oversized_payload() -> dict[str, object]:
+    """构造一份**确定**超预算的 payload（含 ``agent`` 键，与三个装配入口同形）。"""
+    return {"agent": "writer", "filler": "字" * _OVERSIZE_FILLER_CHARS}
+
+
+def test_oversized_assembly_emits_budget_warning_with_real_numbers(caplog):
+    """真超标 → 消费方（告警日志）收到信号，且带的是**本次实测**的数字。"""
+    payload = _oversized_payload()
+
+    with caplog.at_level(logging.WARNING):
+        _attach_assembly_meta(payload)
+
+    messages = _warn_records(caplog)
+    assert len(messages) == 1, f"超预算应恰好发一条告警，实得 {messages}"
+    message = messages[0]
+    # 数字必须是**实测值**而非模板值：与本次装配的 estimate / 预算逐字对上。
+    # （恒空或写死的 warning 会在这一条红——这就是判别点。）
+    assert f"estimate_tokens={payload['_assembly_meta']['estimate_tokens']}" in message
+    assert f"budget={_ASSEMBLY_TOKEN_BUDGET}" in message
+    assert "agent=writer" in message
+    # 前置自证：夹具确实超标（防止「量具没量到目标」——桩没进那个分支也报绿）
+    assert payload["_assembly_meta"]["token_budget_exceeded"] is True
+    assert payload["_assembly_meta"]["estimate_tokens"] > _ASSEMBLY_TOKEN_BUDGET
+
+
+def test_small_assembly_emits_no_budget_warning(caplog):
+    """反向用例：正常装配**不得**发告警（否则真信号被噪声淹没）。"""
+    payload = {"agent": "writer", "chapter": {"chapter_id": "ch_1"}}
+
+    with caplog.at_level(logging.WARNING):
+        _attach_assembly_meta(payload)
+
+    assert payload["_assembly_meta"]["token_budget_exceeded"] is False
+    assert _warn_records(caplog) == []
+
+
+def test_budget_warning_path_does_not_alter_assembly(caplog):
+    """「只告警不阻断」：发告警的那次调用，payload 内容逐字未变、返回同一对象。"""
+    payload = _oversized_payload()
+    body_before = {k: v for k, v in payload.items() if k != "_assembly_meta"}
+
+    with caplog.at_level(logging.WARNING):
+        returned = _attach_assembly_meta(payload)
+
+    assert _warn_records(caplog), "本用例的前提是告警真的发了（否则「未改写」是恒真）"
+    assert returned is payload
+    assert {k: v for k, v in payload.items() if k != "_assembly_meta"} == body_before
+
+
+def test_director_oversized_assembly_warns_with_agent_name(tmp_path: Path, caplog):
+    """生产路径（``build_director_input``）真超标 → 消费方看到告警，且带对 agent 名。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid, 1, plan_json='{"chapter_goal": "目标"}')
+    for i in range(40):
+        _insert_character(
+            db_path, pid, f"角色{i}",
+            core_json=json.dumps({"personality": "设定" * 450}, ensure_ascii=False),
+            inject_mode="always",
+        )
+
+    with caplog.at_level(logging.WARNING):
+        payload = build_director_input(db_path, pid, cid, "意图")
+
+    messages = _warn_records(caplog)
+    assert len(messages) == 1, f"director 超标应恰好发一条告警，实得 {messages}"
+    assert "agent=director" in messages[0]
+    assert (
+        f"estimate_tokens={payload['_assembly_meta']['estimate_tokens']}" in messages[0]
+    )
+    # 不阻断：装配内容仍完整（与 §4 同款，只置位不改写）
+    assert len(payload["character_state_excerpts"]) == 40
+
+
+def test_writer_small_assembly_stays_silent(tmp_path: Path, caplog):
+    """反向用例（生产路径）：正常体量的 writer 装配不得发告警。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid, 1, plan_json='{"chapter_goal": "目标"}')
+    _insert_character(db_path, pid, "甲", core_json=json.dumps({"personality": "沉稳"}))
+
+    with caplog.at_level(logging.WARNING):
+        payload = build_writer_input(db_path, cid, {"purpose": "场景"})
+
+    assert payload["_assembly_meta"]["token_budget_exceeded"] is False
+    assert _warn_records(caplog) == []

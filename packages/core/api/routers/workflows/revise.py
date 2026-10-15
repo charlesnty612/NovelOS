@@ -44,6 +44,7 @@ from .common import (
     log,
 )
 from .control import _start_workflow
+from .models import WorkflowStartAccepted
 from .repair_policy import RepairDecision, decide_repair, describe_exhaustion
 
 router = APIRouter(tags=["workflows"])
@@ -473,6 +474,12 @@ def _auto_revise_loop(
 @router.post(
     "/projects/{project_id}/chapters/{chapter_id}/gate-revise",
     status_code=status.HTTP_201_CREATED,
+    # 复用章节级起跑的同一响应形状：gate-revise 内部就是 `_start_workflow(chapter-write)`
+    # 原样返回它的 payload（实测恒 {run_id, status, current_node} 三键）。
+    # ⚠️ 改稿的**修复动作**（regenerate / revise / stop）不在本响应里——那是
+    # repair_policy.decide_repair 在 auto_revise 回路**内部**的决策，落日志与子 run 的
+    # ctx，不经由本端点出参。误以为这里该有那个枚举，会写出一条永不成立的断言。
+    response_model=WorkflowStartAccepted,
 )
 def start_gate_revise(
     project_id: str,

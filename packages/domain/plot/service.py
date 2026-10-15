@@ -44,6 +44,40 @@ from .models import (
     TimelineEvent,
 )
 
+
+def _safe_json(raw: str | None, fallback: Any) -> Any:
+    """DB raw JSON → 解析成功则用之，失败/类型不符则回 ``fallback``。
+
+    2026-10-15 批次（六）新增。**为什么需要它**：``_row_to_event`` /
+    ``_row_to_relationship`` 原先走裸 ``json.loads``，一行脏数据就让
+    ``json.JSONDecodeError`` 冒到路由层 ⇒ **整个列表端点 500**（干净行一起陪葬）。
+
+    这个失效模式是本批**新引入**的：挂上 ``response_model`` 之前，脏数据只是
+    「返回 200 + 奇怪的形状」；挂上之后变成 ``ResponseValidationError`` ⇒ 500。
+    但根因（裸 loads 无兜底）一直都在，与契约无关。
+
+    ⚠️ 兜底**不是**「假装数据没问题」：解析失败时该字段退化成它的默认空值，
+    与「列本身为空」的情形完全同形——这是本仓既有约定（``decode_who_knows``
+    同样如此，其 docstring 明写「解析失败 → None（兜底，避免污染调用方）」）。
+    真要发现数据坏了，看 DB 本身；让**读**路径整体崩掉对谁都没好处。
+
+    脏数据来源：备份导入（``import-backup`` 不跑 ``validate_delta`` 同级的校验）、
+    系统外手工改库。与「写路径有 CHECK/校验兜底」的对照组见
+    ``tests/api/test_ledger_plot_list_response_contract.py``。
+    """
+    if not raw:
+        return fallback
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return fallback
+    # 类型不符也回退：JSON 合法但形状不对（如 who_knows 存成字符串）同样会让
+    # pydantic 校验失败 ⇒ 500，与解析失败是同一类失败。
+    if type(parsed) is not type(fallback):
+        return fallback
+    return parsed
+
+
 # ---------------------------------------------------------------------------
 # 异常
 # ---------------------------------------------------------------------------
@@ -688,15 +722,17 @@ class PlotService:
             id=row["event_id"],
             project_id=row["project_id"],
             type=row["type"],
-            cause=json.loads(row["cause_json"]) if row["cause_json"] else [],
-            effects=json.loads(row["effects_json"]) if row["effects_json"] else [],
-            participants=json.loads(row["participants_json"]) if row["participants_json"] else [],
+            cause=_safe_json(row["cause_json"], []),
+            effects=_safe_json(row["effects_json"], []),
+            participants=_safe_json(row["participants_json"], []),
             location_id=row["location_id"],
-            time=json.loads(row["time_json"]) if row["time_json"] else dict(_TIME_DEFAULT),
+            time=_safe_json(row["time_json"], dict(_TIME_DEFAULT)),
             status=row["status"],
             introduced_chapter_id=row["introduced_chapter_id"],
             visibility=row["visibility"],
-            who_knows=json.loads(row["who_knows"]) if row["who_knows"] else None,
+            # ⚠️ 2026-10-15：改走 ``_decode_who_knows``（timeline 侧早已如此）。
+            # 原先是裸 ``json.loads``：解析失败/形状不对 ⇒ 整个 events 列表 500。
+            who_knows=_decode_who_knows(row["who_knows"]),
             # V3.1 P1-1.1 修复 B1：DB 有 description 列（迁移 0013），行映射先前丢弃该列
             # → list/get/update 路径都拿不到 observer 写入的事件描述。sqlite3.Row
             # 支持按列名取值；旧库若列不存在会抛 KeyError，但 0013 已在生产跑过，
@@ -722,12 +758,22 @@ class PlotService:
 
     @staticmethod
     def _row_to_relationship(row: sqlite3.Row) -> Relationship:
+        # 2026-10-16 修复：补映射迁移 0014 的 visibility/who_knows 伴随列（0022 重建表时
+        # 逐字保留）。原先只映射 7 列 ⇒ 这两列在**服务层**被静默丢弃，DB 里明明有值
+        # 响应里却没有该键。timeline 侧早在 V3.1 P1-1.2 就补过（见 _row_to_timeline），
+        # 唯独 relationship 漏了。
+        # ⚠️ 缺列兜底（遗留防御，与 timeline 侧同款）：0014/0022 都在生产跑过，
+        # 不存在「老库缺列」的场景，但 SELECT * 的行对象支持 ``.keys()``，兜底零成本。
+        # ⚠️ who_knows 必须走 ``_decode_who_knows``，**不得**裸 ``json.loads``：
+        # 解析失败会冒到路由层 ⇒ 整个 relationships 列表 500（干净行陪葬）。
         return Relationship(
             id=row["relationship_id"],
             project_id=row["project_id"],
             from_character_id=row["from_character_id"],
             to_character_id=row["to_character_id"],
             relation_type=row["relation_type"],
-            state=json.loads(row["state_json"]) if row["state_json"] else {},
+            state=_safe_json(row["state_json"], {}),
             last_state_version=row["last_state_version"],
+            visibility=row["visibility"] if "visibility" in row.keys() else "PUBLIC",
+            who_knows=_decode_who_knows(row["who_knows"]) if "who_knows" in row.keys() else None,
         )

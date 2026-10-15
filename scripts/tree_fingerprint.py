@@ -29,13 +29,40 @@ python scripts/tree_fingerprint.py --json       # 机器可读
 
 ```bash
 FP_PRE=$(python scripts/tree_fingerprint.py)
-python -m pytest -n 4 -q --ignore=tests/unit/test_m1_lock.py
+python -m pytest -n 4 -q
 FP_POST=$(python scripts/tree_fingerprint.py)
 [ "$FP_PRE" = "$FP_POST" ] || echo "树在测试期间变了 ⇒ 本次结论作废"
 ```
 
 ⚠️ **绿灯之后再改动照样作废**：指纹一致只证明「跑的过程中树没变」，不证明
 「跑的正是我想跑的那棵树」。改完 `--fix` 之类的东西必须重跑。
+
+## 关于 `test_m1_lock.py` 曾被 `--ignore` 排除（2026-10-16 订正 + 结清）
+
+这个 flag 曾经挂着一个**已被证伪**的理由：「`test_m1_lock.py` 单跑会硬杀整个进程
+树，真因未定位」。原记录犯的是推理错误——把「我复现不出来」当成了「真因还没
+找到」，于是一条从未成立的现象派生出「规避而非修复」的纪律。**证伪依据**：该
+文件单跑实测通过、无任何进程被带走，且**任何跑法下都没出现过**案卷里的
+「0 字节输出 / exit 1 / 无 traceback」。详见 `AGENTS.md` 坑区该条。
+
+**✅ 已结清并撤销该 flag**（批次八）：上一版这里写的未决理由是「该文件被长期排除，
+其用例是否仍与当前实现同步——单跑是绿的，但未验证它在 xdist 并行全量下的表现」。
+该未决项已由一次**不带 `--ignore` 的全量实测**结清：**3312 passed / 1 skipped /
+0 failed**（`-n 4`，399.51s，`test_m1_lock.py` 含在内）。本仓确有「单跑绿、全量红」
+的先例（坑区「子进程输出编码」条），所以这一条不是靠推理放行的，是靠实测。
+
+顺此查出的两件事已一并修掉：
+
+1. 该文件两条 `cmd_run` 用例**原本都是空壳**——一条 `pytest.skip`、理由指向另一条
+   当作「相同路径的覆盖」，而那条的注释里明写「不带 `--force-lock`」。已重写为真跑
+   子进程 + 真写活 PID 锁，以**退出码 5 ↔ 2** 构成正反一对。
+2. 一个**真缺陷**：`os.kill(pid, 0)` 在 Windows 上**不是稳定的存活探测**
+   （`DETACHED_PROCESS` 下抛 `WinError 87`），而 `except OSError: return False`
+   把它读成「进程已死」⇒ **M1 单实例锁静默失效**（活实例被判死 ⇒ 第二实例抢锁
+   ⇒ 两个实例并发写同一 SQLite，正是 M1 事故根因）。已改用
+   `OpenProcess` + `GetExitCodeProcess`，且探测不出结果时**保守判活**。
+
+同一 flag 在 `README.md` 与 `tests/README.md` 两处已同步（批次八）。
 
 ## 口径（改动这里 = 历史哈希全部作废，须在 CHANGELOG 登记）
 

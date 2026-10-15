@@ -1,7 +1,7 @@
 # tests（测试套件）
 
 > 职责：NovelOS 后端的 pytest 套件，按 PRD §70 四级目录组织（unit / integration / workflow / evals），另有 `api/` 集成层与 `unit/` 子域（quality / simulation）。
-> 状态：现行规模——`python -m pytest -n 4 -q --ignore=tests/unit/test_m1_lock.py` 全量 **2956 passed / 1 skipped**（2026-09-27 批次实测；该 `--ignore` 必带，否则 `test_m1_lock.py` 会硬杀整个进程树、跑不出可比总数。V3.9.0 基线为 2059 / 2，52f639f）；前端 vitest **489** 用例（`apps/web`，`npm run test`；vitest 侧本轮未独立复现）。
+> 状态：现行规模——`python -m pytest -n 4 -q` 全量 **3312 passed / 1 skipped**（2026-10-16 批次八实测，指纹 `0e852a6c…`/578 文件跑测前后逐位一致；**`--ignore` 已撤销**——它曾挂的理由「`test_m1_lock.py` 单跑会硬杀整个进程树」经实测证伪：该现象**从未成立**（原记录把「我复现不出来」当成了「我还没找到真因」）。顺此查出并修掉一个**真缺陷**（`os.kill(pid,0)` 在 Windows 非稳定探测 ⇒ M1 单实例锁静默失效），并重写了两条本来都是空壳的 cmd_run 用例。该文件现已进入全量并行验证。V3.9.0 基线为 2059 / 2，52f639f）；前端 vitest **755** 用例 / 56 文件（`apps/web`，`npm run test`）。
 
 ## 职责与边界
 
@@ -21,8 +21,8 @@
 
 | 项 | 说明 |
 |---|---|
-| 全量命令 | `python -m pytest -n 4 -q --ignore=tests/unit/test_m1_lock.py`（xdist 并行，约 6 分钟；`--ignore` 必带，否则跑不出可比总数。依赖 dev extra，裸 `uv sync` 会缺 ruff/pytest-xdist） |
-| 基线 | 2956 passed / 1 skipped（2026-09-27 批次实测；须带 `--ignore=tests/unit/test_m1_lock.py`） |
+| 全量命令 | `python -m pytest -n 4 -q`（xdist 并行，约 7 分钟；**不再带任何 `--ignore`**，含 `test_m1_lock.py`——其曾挂的「硬杀进程树」理由已于 2026-10-16 证伪并撤销，详见 `scripts/tree_fingerprint.py` docstring 与 AGENTS.md 坑区。依赖 dev extra，裸 `uv sync` 会缺 ruff/pytest-xdist） |
+| 基线 | 3312 passed / 1 skipped（2026-10-16 批次八实测，指纹 `0e852a6c…`/578 文件跑测前后逐位一致） |
 | 迁移表数 | `test_apply_migrations_creates_40_tables_total`（迁移后总表 40 = 39 业务表 + `_migrations`）；`test_business_table_count_is_39`（业务表 39，排除 `chapter_fts%` 影子表） |
 | 健康检查 | `test_health_endpoint_returns_ok`：`GET /api/health` → `{status:"ok", version:<包版本>, tables:39}` |
 | 端到端 | 工作流全链由 `scripts/smoke_e2e.py` 覆盖（独立临时库 + 独立端口，自动清理） |
@@ -49,6 +49,7 @@
 
 ```bash
 # 全量（推荐；xdist 需在 venv 内）
+# 要复现上表基线请带 --ignore（该基线就是带 flag 测出来的）：
 python -m pytest -n 4 -q
 
 # 单目录

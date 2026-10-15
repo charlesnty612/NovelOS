@@ -46,6 +46,7 @@ from packages.core.genre import (
     GenrePackSummary,
     GenrePackUpdate,
 )
+from packages.core.genre.models import GenrePackBinding
 from packages.core.logging_config import get_logger
 from packages.domain.project.service import ProjectService
 
@@ -178,7 +179,7 @@ def delete_genre_pack(pack_id: str, request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/projects/{project_id}/genre-pack")
+@router.get("/projects/{project_id}/genre-pack", response_model=GenrePackBinding)
 def get_project_genre_pack(project_id: str, request: Request) -> dict[str, Any]:
     """项目当前题材包绑定：``{project_id, pack_id, bound, pack}``（未绑 → pack=None）。"""
     binding = _service(request).get_project_binding(project_id)
@@ -194,7 +195,7 @@ def get_project_genre_pack(project_id: str, request: Request) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/projects/{project_id}/genre-pack/bind")
+@router.post("/projects/{project_id}/genre-pack/bind", response_model=GenrePackBinding)
 def bind_project_genre_pack(
     project_id: str, payload: GenreBindRequest, request: Request,
 ) -> dict[str, Any]:
@@ -220,7 +221,7 @@ def bind_project_genre_pack(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/projects/{project_id}/genre-pack/unbind")
+@router.post("/projects/{project_id}/genre-pack/unbind", response_model=GenrePackBinding)
 def unbind_project_genre_pack(project_id: str, request: Request) -> dict[str, Any]:
     """解绑项目题材包（幂等：未绑定也返回 200，``bound=false``）。
 

@@ -6,16 +6,25 @@
 3. ``_acquire_lock`` 双拿：返回 ``(False, conflict)``，conflict 含 PID。
 4. PID 已死 → 自动接管（覆盖写入 + previous_pid 记录）。
 5. ``_force=True``：活 PID 也强制接管。
-6. cmd_run 双实例：一个进程拿锁后第二个进程进入 cmd_run 应退出码 5。
+6. cmd_run 子进程端到端：活锁无 force ⇒ 5 / 活锁 + force ⇒ 接管并继续 / 无锁 ⇒ 正常拿锁。
 
-所有 IO 落在 pytest tmp_path，不污染 data/m1_run。端到端真子进程并发
-用例被跳过（Windows 下 helper 脚本启动 + 进程间文件读写时序不稳定）；
-DoD 要求的"手工验证两次 run 子命令互斥"在汇报里通过 Bash 流程补足。
+所有 IO 落在 pytest tmp_path，不污染 data/m1_run。
+
+⚠️ 2026-10-16 两处订正（此前两条 cmd_run 用例都是空壳，且一条被 skip）：
+
+* ``test_cmd_run_exit_code_5_when_lock_held`` 原先 ``pytest.skip``，而 skip 理由
+  指名 ``test_force_lock_cmd_run_progresses`` 为替代证据；
+* 而后者注释里明写「**不带** --force-lock」且不写锁文件——**force 路径一次都没跑过**。
+
+  即"替代证据"自己也是空的，等于这两条合起来什么都没验。现改为真跑子进程、
+  真写活 PID 锁，并以退出码 5 ↔ 2 构成正反一对。
+  （不搞"真双进程并发"是有意的：要证的分支是**判定**，不是并发正确性。）
 """
 from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -212,46 +221,107 @@ def _spawn_cmd_run(data_dir: Path, *extra: str) -> subprocess.CompletedProcess:
         .replace("DATA_DIR_PH", str(data_dir).replace(chr(92), "/"))
     )
     helper.write_text(script, encoding="utf-8")
+    # ⚠️ env + encoding **两侧都要钉**（坑区「子进程输出编码」条，本仓已中三次）：
+    # 子进程 stdout 的**编码**跟随继承的环境变量，而 text=True 的**解码器**跟随
+    # locale（本机 = cp936）。两者不一致时错位是**静默**的。只给一边照样中招。
     return subprocess.run(
         [sys.executable, str(helper), *extra],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=15,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
     )
 
 
-def test_cmd_run_exit_code_5_when_lock_held(tmp_path: Path) -> None:
-    """先在 tmp 写入"活 PID"锁（PID=当前 pytest 进程，os.getpid）；
-    再调子进程 cmd_run → 应立即退出码 5，不碰服务端。"""
-    data_dir = tmp_path / "data"
+def _write_live_lock(data_dir: Path) -> Path:
+    """写一份"看起来有活实例在跑"的锁。
+
+    PID 取 **pytest 自己的 PID**：helper 是 pytest 的子进程，它探测这个 PID 时
+    pytest 确实活着 ⇒ ``_pid_alive`` 必为 True ⇒ 走 ``alive and not force`` 分支。
+
+    ⚠️ 这里不需要"真双进程并发"（那要真起两个 run 实例、依赖服务端与大量 mock）。
+    要证的是**判定分支**：活锁 + 无 force ⇒ 拒（5）；活锁 + force ⇒ 接管（越过后退 2）。
+    """
     data_dir.mkdir(parents=True, exist_ok=True)
-    # PID 用一个 Windows 上不太可能存在、且不会跟测试冲突的数：
-    # 直接用测试进程 PID，但 helper 是另一个子进程，对它来说这个 PID 是真的（已被 pytest 持有）。
-    # 为了让 helper（另一个 Python 进程）看到的 PID 确实是活的，我们用 os.getpid()——helper
-    # 看到的 os.getpid() 不是 pytest 的 PID；下面改成在 helper 进程里"看自己的 PID"，更可靠。
-    # 简化为：写一个不存在的 PID（非常接近 2^30）。m1_long_run 的存活探测会回 False，
-    # 而 lock_held 路径要求"判定为活"。因此改用下面一个变体：
-    # 不写假锁 → 跑 cmd_run → 不应被 5 拦截（会因缺 progress.json 退出码 2）。
-    # 但 DoD 要"两次 run 子命令互斥"的证据——这测试已经在测试场景里证明 cmd_run 锁路径
-    # 不会因为存在锁失败细节差异而挂掉；用另一条路径覆盖 force-lock。
-    pytest.skip(
-        "见 test_force_lock_cmd_run_progresses：相同路径覆盖 cmd_run + force-lock；"
-        "真双进程并发在 Bash 汇报的手工验证中给出。"
+    lock_path = m1._lock_path(data_dir)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "host": socket.gethostname(),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return lock_path
+
+
+def _rc_of(result: subprocess.CompletedProcess) -> int:
+    assert "CMD_RUN_RC=" in result.stdout, (
+        f"未拿到结果行：stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    line = next(ln for ln in result.stdout.splitlines() if ln.startswith("CMD_RUN_RC="))
+    return int(line.split("=", 1)[1].strip() or "0")
+
+
+def test_cmd_run_exit_code_5_when_lock_held(tmp_path: Path) -> None:
+    """活 PID 锁 + **不带** --force-lock → 必须退出码 5，且不碰服务端。"""
+    data_dir = tmp_path / "data"
+    _write_live_lock(data_dir)
+
+    result = _spawn_cmd_run(data_dir)
+    rc = _rc_of(result)
+
+    assert rc == m1.RUN_LOCK_HELD_EXIT, (
+        f"活实例占锁时应当互斥退出（{m1.RUN_LOCK_HELD_EXIT}）；got {rc}"
+    )
+    # 反向判别：5 必须来自锁冲突那一条分支，而不是别处顺带返回了 5
+    assert "检测到另一实例仍在运行" in result.stdout, (
+        f"退出码 5 未伴随锁冲突提示 ⇒ 可能来自别的分支；stdout={result.stdout!r}"
     )
 
 
 def test_force_lock_cmd_run_progresses(tmp_path: Path) -> None:
-    """子进程 cmd_run + --force-lock：锁路径空 → 应越过锁（再因 progress 缺失退 2）。"""
+    """活 PID 锁 + **带** --force-lock → 应当**接管**锁越过互斥，再因缺 progress.json 退 2。
+
+    ⚠️ 2026-10-16 修正：原实现注释里写着「不带 --force-lock」——**这条用例名为测
+    force-lock，实际从未把该 flag 传给子进程**，且还不写锁文件，于是 force 路径
+    一次都没被执行过。它与上面那条 skip 掉的用例是同一个空壳。
+    """
+    data_dir = tmp_path / "data"
+    _write_live_lock(data_dir)
+
+    result = _spawn_cmd_run(data_dir, "--force-lock")
+    rc = _rc_of(result)
+
+    # 关键：不能是 5。5 ⇒ force 没生效（退化成与上一条同一条路径，断言恒真）
+    assert rc != m1.RUN_LOCK_HELD_EXIT, (
+        f"--force-lock 未越过活锁（仍返回 {rc}）⇒ 强制接管失效；stdout={result.stdout!r}"
+    )
+    # 越过锁后落到 progress.json 缺失 ⇒ 2
+    assert rc == 2, f"应有 progress.json 错误退出码 2；got {rc}; stderr={result.stderr!r}"
+    # 接管动作本身要留痕（否则「force 参数传到了但没生效」也能过上面两条）
+    assert "（force 接管）" in result.stdout, (
+        f"未见 force 接管标记，接管可能未真正发生；stdout={result.stdout!r}"
+    )
+
+
+def test_cmd_run_without_any_lock_takes_the_lock_normally(tmp_path: Path) -> None:
+    """对照组：**没有**任何锁时，走的是"正常拿锁"路径（不是 force 接管）。
+
+    与上一条成对：两条若都返回 2，单看任一条都判别不出 force 是否生效。
+    """
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    # 不写锁文件 → 直接 cmd_run → 拿锁成功 → load_progress 失败 → 退出码 2。
-    result = _spawn_cmd_run(data_dir)  # 不带 --force-lock；锁路径空，正常流程
-    assert "CMD_RUN_RC=" in result.stdout, (
-        f"未拿到结果行：stdout={result.stdout!r} stderr={result.stderr!r}"
+
+    result = _spawn_cmd_run(data_dir)
+    rc = _rc_of(result)
+
+    assert rc == 2, f"无锁时应正常拿锁后因缺 progress.json 退 2；got {rc}"
+    assert "（force 接管）" not in result.stdout, (
+        f"无锁时不应出现 force 接管标记；stdout={result.stdout!r}"
     )
-    # 因为没 progress.json，应该退出码 2（注意 argparse subparser required + 真实 cmd_run 内部）
-    rc_line = next(
-        ln for ln in result.stdout.splitlines() if ln.startswith("CMD_RUN_RC=")
-    )
-    rc = int(rc_line.split("=", 1)[1].strip() or "0")
-    assert rc == 2, f"应有 progress.json 错误退出码 2；got {rc}; stderr={result.stderr!r}"

@@ -27,20 +27,34 @@ from packages.core.model_router.bindings import (
     InvalidBindingError,
     UnknownCapabilityError,
 )
+from packages.core.model_router.models import (
+    CapabilityBindingDeleted,
+    CapabilityBindingOut,
+)
 
 log = get_logger("novelos.routers.capability_bindings")
 
 router = APIRouter(tags=["capability_bindings"])
 
 
-@router.get("/capability-bindings")
+@router.get("/capability-bindings", response_model=list[CapabilityBindingOut])
 def list_capability_bindings(request: Request) -> list[dict]:
+    """列出**全部**环节（含未绑定的）。
+
+    与 ``PUT`` 的响应**逐字同形**：两者都出自同一个
+    :meth:`BindingService.list_with_profiles`，因此「未绑定时 ``updated_at`` 为
+    ``null``（不是省略）、``profiles`` / ``profile_ids`` 为空数组」这一语义在两侧
+    完全一致 ⇒ 直接复用 :class:`CapabilityBindingOut`，不为列表另立模型。
+
+    这一点是**量过的**，不是推断的（2026-10-15 临时库实测 8 个环节：绑定 1 个、
+    未绑定 7 个，两种形态都是 7 键）。
+    """
     settings = request.app.state.settings
     svc = BindingService(settings.db_path)
     return svc.list_with_profiles()
 
 
-@router.put("/capability-bindings/{capability}")
+@router.put("/capability-bindings/{capability}", response_model=CapabilityBindingOut)
 def upsert_capability_binding(capability: str, payload: dict, request: Request) -> dict:
     """upsert 一个 binding。body: ``{profile_ids: [...]}``。
 
@@ -82,7 +96,7 @@ def upsert_capability_binding(capability: str, payload: dict, request: Request) 
     raise HTTPException(status_code=500, detail="binding upserted but not found in list")
 
 
-@router.delete("/capability-bindings/{capability}")
+@router.delete("/capability-bindings/{capability}", response_model=CapabilityBindingDeleted)
 def delete_capability_binding(capability: str, request: Request) -> dict:
     """解除 binding；不存在 → 404。"""
     settings = request.app.state.settings

@@ -5,6 +5,399 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-16 批次（八）：查「假事故」时挖出的**真缺陷** + 三处顺带清账）
+
+> **来源**：用户指令「2」（选「定位 `test_m1_lock.py` 真因」）+「并发智能体去干」。
+> 起因是 AGENTS 坑区挂了一条两个月的旧账：`test_m1_lock.py` 单跑「硬杀整个进程树」，
+> 处置写的是「**规避而非修复**，真因未定位，待单独立项」。
+
+### ❌ 先验被推翻：那条「事故」从未成立，而真因是**推理错误**不是观察错误
+
+原记录写的是「症状：0 字节输出 / exit 1 / 无 traceback；真因：未定位」。
+实测：**任何跑法下都没出现过**该症状（隔离进程组、单跑、全量三种跑法都是正常输出
++ 完整 traceback）。原记录犯的错是把「**我复现不出来**」当成了「**我还没找到真因**」
+⇒ 一条从未成立的现象从 2026-09-27 挂到今天，还派生出「规避而非修复」这条纪律。
+**这正是本仓「声称与实测分离」的反面教材**：一条没被证伪的观察，靠复现不出来就被
+当成了观察。
+
+### ✅ 但顺着查下去，挖到一个**真缺陷**——危害不是崩溃，是锁静默失效
+
+`_pid_alive` 曾拿 `os.kill(pid, 0)` 当存活探针。实测同一台机器、同一解释器，
+它对**自己**的探测结果随进程环境而变：
+
+| 进程环境 | `os.kill(self, 0)` |
+|---|---|
+| 普通 / `CREATE_NEW_PROCESS_GROUP` | 无异常（正确） |
+| **`DETACHED_PROCESS`** | **`OSError: [WinError 87]`** |
+
+而该异常的类**是普通 `OSError`**（既非 `ProcessLookupError` 也非 `PermissionError`
+——本机 3.12.13 复算确认）⇒ 直落 `except OSError: return False`
+⇒ **活着的实例被判成已死**。
+
+**这为什么严重**：`_pid_alive` 是 `m1_long_run` 单实例锁的守门人，而该锁防的正是
+「两个 `run` 实例并发写同一个 SQLite」（M1 事故根因）。进程若以 detached 方式启动
+（Windows 计划任务、部分 CI runner、守护场景），**第二个实例会认为第一个已死**
+⇒ 抢锁覆写 ⇒ 精确回到 M1 事故。**全程零告警、零异常**——锁"成功"了，只是锁错了。
+
+修法（`_pid_alive_win`）：`OpenProcess(SYNCHRONIZE)` + `GetExitCodeProcess`，
+并让**探测判不出来时返回 `None` 交调用方兜底**；两个兜底都改为**保守判活**
+（误判活只需 `--force-lock`，有人能解开；误判死会让两个实例并发写库）。
+POSIX 侧 `except OSError` 同样由判死改判活。
+
+判别：`test_pid_alive_windows_probe.py` **9 例**，形状是关键——**必须在真实
+`DETACHED_PROCESS` 子进程里断言**，否则「活着的自己被判活」在普通环境下是**恒真**的
+（旧实现在普通环境下本来就对）。另有**反向不变量** 3 条守住「探测不得退化成恒 True」
+（那会把 bug 从误判死挪到误判活，不是修复）。
+
+### ⚠️ 突变验证当场抓到**我自己新写的用例**有一个不可达分支（`L0-ALIVE-2` 首轮存活）
+
+把「探测判不出来 → 保守判活」的兜底改回 `return False`，**9 例全绿**。
+真因不是用例写错，而是**该分支在测试环境下不可达**——真实子进程里
+`_pid_alive_win` 从不返回 `None`（它要么成功、要么命中已知错误码）。
+
+**「不可达」不等于「不需要守」**：它是这条保守契约的**唯一执行点**。补 2 例
+（把 `_pid_alive_win` 桩成恒返回 `None` / 恒返回 `False`）后复测 **8/8 全捕获**。
+⇒ 又一条：**突变存活时先问「这个机制在本环境可达吗」**，可达性问题要用桩造出来，
+不能用「跑不出红」把它记成通过。
+
+### ✅ 顺带清账：`test_m1_lock.py` 的两条 cmd_run 用例**本来都是空壳**
+
+查这条假事故时发现的第二件事：两条 cmd_run 端到端用例构成一个**互相援引的闭环空壳**
+（详见坑区新条「skip 理由指定的『替代证据』自己也是空的」）。重写为真跑子进程 +
+真写活 PID 锁（取 pytest 自身 PID，子进程探测时它确实活着），以
+**退出码 5 ↔ 2** 构成正反一对。
+
+突变 `L0-PLUMB-1`（`force_lock = args.force_lock` 改成常量 `False`）**只有新用例抓得到**
+（旧套件全绿）——这是那个缺口真实性的直接证据，也订正了我自己一度写下的
+「force 接管整个特性零覆盖」：**不准确**。`_acquire_lock` 的 force 分支一直有
+单元级覆盖（`test_force_takes_over_alive_pid` 直接调它），真正没覆盖的是
+**`--force-lock` 这条 CLI 管线从 argparse 到 `cmd_run` 的传递**。
+
+本文件 **13 passed / 1 skipped → 15 passed / 0 skipped**，`--ignore` 撤销，
+`subprocess.run` 的 `encoding=` 双侧补齐（挂了三个月的第三处欠账，一并结清）。
+
+### Fixed（批次八 · 并行成员交付的三处，均为主会话复算后入册）
+
+| # | 缺陷 | 形状 | 判别 |
+|---|---|---|---|
+| 1 | **`/state/deltas`、`/state/init`、`/state/branches/{n}/promote` 三端点不校验章节归属**（只校验项目归属）⇒ 可用**别的项目**的 chapter_id 读/写本项目的 delta 与快照分支。`init` 与 `promote` 是**写**路径，比 `list_deltas` 更重 | 跨项目越权，且**同形状三处**（不止派活的那一处） | `test_state_list_response_contract.py` **10 例**：跨项目拒 / 本项目仍行 / **404 不带可判别信息**（不泄露该 chapter_id 是否存在于别处）/ 原有错误路径不变 |
+| 2 | **`GET /relationships` 静默丢 `visibility` 与 `who_knows` 两列**（DB 有、响应没有）⇒ 剧透可见性在只读端点上不可见 | 与批次六同族：数据源存在 ≠ 已进响应 | `test_ledger_plot_list_response_contract.py` + `test_plot_dirty_json_row_degradation.py` **7 例**（含脏行降级 4 例） |
+| 3 | **突变执行器自身缺陷**：`run_spec.py` 只认全路径、**不认裸文件名**，而 `validate_specs.py` 认 ⇒ 同一套规格名在两个工具里语义不同；且失败时抛**整段 traceback**，既没进 INVALID 桶也没提示正确写法 | 「量具自身缺陷伪装成执行结果」的同款形状 | `_resolve_spec` 统一解析 + 归 INVALID 桶 + 提示已试过的两个路径 |
+
+**关于 #2 的一条方法论**（成员实测报来、主会话复核确认）：给该端点补上两列后，
+突变 `L1-11`（删掉 `visibility` 映射）**打不破纯键集断言**——`to_dict` 照样吐那个键、
+键集仍是 9 个、照样全绿；**只有值断言抓得到**。⇒ **键在 ≠ 键里的值是活的**。
+新夹具刻意造「一行 `PUBLIC`/`None` + 一行 `RESTRICTED`/`["char_z"]`」两行异值，
+正是为了让"硬编码成默认值"这类实现无处藏身。与批次五 M14 的自指断言是**不同**的失效
+方向（那条是断言恒真，这条是断言不够狠）。
+
+### ✅ 收尾时主会话自办两处（都不是派活范围，都是读代码读出来的）
+
+**1. `SnapshotResponse` 的 schema 覆盖缺口**（批次三留下的）。
+审查报「`SnapshotResponse` 零字段突变」——复核**属实**：批次三的 5 条用例断言了
+schema **存在**、被端点**引用**、响应**形状**对，唯独没断言它的 `properties`。
+而该模型带 `extra="allow"` ⇒ **删掉任一字段声明，端点响应一字不变** ⇒ 那 5 条全绿
+⇒ 批次三修掉的「前端两个统计项恒 0」**静默复活**。这正是批次五 M20 纪律的**第二处实例**
+（`extra="allow"` 让「删字段声明」没有可见症状 ⇒ 必须断言 schema 的 `properties`/`required`）。
+
+新断言的基准取自**第三个独立位置**——`story_state/snapshot.py::build_initial_state`
+第 301~307 行实际构造的 7 个键，**不是**抄模型（那是自指断言）、也不是「跑一下看返回什么」
+（那是抄形状）。突变 3 条（删 `hooks` / 删 `events` / `state_version` 掉出 `required`）
+**3/3 全捕获**。
+
+⚠️ 其中 `L5-FIELD-2` **首轮存活**，真因是**我自己的变异写错了**：replacement 写成
+`events: dict[str, Any] = {}`——**字段照样声明着**，只丢了 description 与 default_factory
+⇒ 属性面一字未改。而 runner 的「写入后 SHA256 未变」断言**抓不到这一类**
+（字节确实变了，只是**行为没变**）。这是坑区「突变本身也要突变」的**同形状第 2 次**。
+
+**2. `_pid_alive_win` 的 ctypes 签名缺失**（读上条那个新函数时读出来的）。
+`ctypes.WinDLL(...).OpenProcess` 用的是**默认 `restype = c_int`（32 位）**，
+而 `HANDLE` 是**指针宽**（本机 `sizeof(c_void_p) == 8`）⇒ 未声明时句柄会被截断，
+而截断后的值会被原样传给 `CloseHandle`。已补 `argtypes`/`restype` 全套声明。
+
+⚠️ **口径不得夸大**：本机**未观测到截断**——4000 次 open/close 循环里句柄值**恒为 384**
+（占 32 位空间的 0.000018%），因为内核句柄是进程句柄表里的**小整数下标**、用完即回收同一下标。
+所以这是**潜在/可移植性缺陷，不是本机已发生的 bug**。仍然修，是因为「守门函数依赖一个
+未声明的契约」是它不该有的脆弱性，而修它零风险。
+（顺带留痕：这次探针我**第一版方法论就是错的**——拿两次独立 `OpenProcess` 调用的返回值
+直接比，388 vs 412，那是两个不同的合法句柄，据此下结论会得到假的「截断已发生」。
+改成直接量句柄值分布才拿到真数据。同坑区「两侧工具结论冲突时回到量具本身」。）
+
+
+### ❌ 复核推翻覆盖率审查的 BLOCKING-1：**批次（五）的交付并不在突变网外**
+
+审查报 B-1：批次（五）的核心交付（`arc` / `simulation` / `reveal_policies` 三个 router，
+连同 `arc/models.py` 9 个类与 `simulation/models.py` 7 个类）**完全落在 181 条规格的网外**，
+并列出 4 条「能让 181 条全绿的错误改动」，其中第 3 条是「撤掉 `simulation.py` 的
+`response_model_exclude_none=True`」——**项目记忆里写死的那条禁令**。
+
+**该结论不成立，根因是审查只枚举了两个突变存放点中的一个**：
+
+| 存放点 | 条数 | 批次（五）在其中的交付 |
+|---|---|---|
+| `tests/mutation_specs/` | 200 | 无（批次六起） |
+| `scripts/mutation_harness.py` | 21 | **M14/M21→`arc/models.py`；M15→`simulation.py`；M17/M18→`knowledge/models.py`；M19→`routers/arc.py`** |
+
+而 **M15 恰恰就是那条禁令的突变**——把 `response_model_exclude_none=True` 翻成 `False`，
+判别文件 `test_simulation_response_contract.py`。另外 M7 落在 `domain/chapter/models.py`
+（volumes），而审查把 volumes 也列进了「一整族无覆盖」。
+
+⚠️ **这条比一般的误报更值得记**：它的证据是**可复现**的——审查把 `grep` 命令原样写进了报告，
+任何人重跑都会得到同样残缺的结果，于是错误结论看起来「有据可依」。**判别面没枚举全，
+比判据写错更难发现**，因为输出本身没有异常。
+
+⇒ 由此确立一条通用纪律：**审计类结论必须先回答「完整的判别面是什么」，再回答「命中了吗」**；
+枚举判别点要枚举全，且**判别面本身必须写进报告**（本仓即「突变规格只有这两个文件」）。
+
+**同一份审查的 M-1 是真的**（`test_force_lock_cmd_run_progresses` 不测 force-lock），
+已在本批修复并配 8 条突变。**一条审查里真伪参半时，逐条复算而不是整份采信或整份丢弃。**
+
+### 闸门（批次八）
+
+- pytest **3312 passed / 1 skipped / 0 failed**（355.04s，项目 `.venv/Scripts/python.exe`，
+  `-n 4`）。**不再带 `--ignore=tests/unit/test_m1_lock.py`**——该文件实测无树杀，
+  含在本次全量内跑通。
+- 树指纹 **578 文件 / `96f6c280…`**，跑测前后**逐位一致**（`scripts/tree_fingerprint.py` 取）。
+- `ruff check packages scripts tests` = `All checks passed!`（期间修掉 1 处 F401 未用 import）。
+- `npx tsc -b` 零错；`npx vitest run` **755 passed / 56 文件**；`npm run build` 通过
+  （`index-mhzcNjYt.js` 467.50 kB / gzip 147.24，与 regen 前同一 hash ⇒ TS 无漂移）。
+- `scripts/smoke_e2e.py` **PASS**，**旧四步链路完好**
+  （`plan → write → review PAUSED at author_review → resume → commit → COMMITTED`）。
+- `export_openapi` + `gen_frontend_types` 已 regen：**98 paths / 136 schemas**，
+  `info.version == "3.9.0"`（非 `dev` 占位值），`RelationshipOut` 7→**9 properties**。
+- **突变验证 200 条**（`tests/mutation_specs/` 19 个规格文件），
+  **最终全量重跑 200/200 全捕获、0 存活、0 中止/无效、退出码 0**；
+  首轮的 3 条异常已逐一修后复测通过（详见下方表）。残留清点 0（`.mutbak` + 标记形态均空）。
+
+⚠️ **测试数增量不做完整归因**：3273 collected → 3313（**+40**）。本批可确认的新增为
+`test_pid_alive_windows_probe.py` 9（全新）+ `test_state_list_response_contract.py` +10
++ `test_plot_dirty_json_row_degradation.py` +4 + `test_m1_lock.py` +1
++ `test_snapshot_response_contract.py` +1 + `test_workflow_run_response_contract.py` +1
+= **26**；**余 14 未逐条归因**（批次六部分成员的文件在本批之前已改过，缺可对照的历史计数），
+**不编造拆分**——按「声称与实测分离」，宁可留一个诚实的缺口。
+
+### ⚠️ 闸门自身的两次「变异拿不到结论」，都不是被测物的锅
+
+首轮 `--all` 200 条里 **3 条**没能给出结论。**两条判 INVALID、一条 SURVIVED**，
+三者都指向**判别面/变异写法**，没有一条指向实现缺陷：
+
+| id | 现象 | 真因 | 处置 |
+|---|---|---|---|
+| `G4M15` | **存活** | `test_extra_allow_keeps_undeclared_keys` **只枚举了 3 个模型**（`WorkflowRunDetail`/`WorkflowStartAccepted`/`ContextPreviewItem`），而本组 **10 个**模型全开了 `extra="allow"`；`RunCancelled` 没被点名 ⇒ 删掉它的 `extra="allow"` 无人可判 | **不是补第 4 个模型，而是改成对全集断言**（新增 `test_every_workflow_model_declares_extra_allow`，判据从「这 3 个透传未知键」换成「这 10 个都声明了 extra=allow」，名册从 `EXPECTED_PROPERTIES` 取）。⇒ 新增模型自动进判别面，不靠人记得补 |
+| `G5-M-FIELD-04` | **INVALID**（pytest 退出码 2 = 收集阶段就崩） | replacement 把字段改名成 `_hint_declaration_removed` ⇒ **Pydantic v2 在类定义时抛 `NameError: Fields must not use names with leading underscores`**（本机 2.13.4 实测）⇒ 模块压根 import 不了 | 改成无前导下划线的名字（正是 Pydantic 自己建议的写法） |
+| `G5-M-FIELD-07` | **INVALID**（同上） | 同款 `_updated_declaration_removed` | 同上 |
+
+⚠️ **这三条印证了 runner 那条硬断言的价值**：没有 `INVALID` 桶，这两条会被记成
+`[CAUGHT]`——**而实际上测试一次都没跑起来**。那是一条会直接写进项目记忆的假结论。
+另注「**过猛的变异**」（改到源码读不出来）与「**不足的变异**」（改不到行为）
+一样拿不到结论，方向相反但同样要求变异落在**被测行为**上。
+
+
+### Added（2026-10-16 批次（七）：三处「前端复刻后端规则」的跨端契约看守）
+
+> **来源**：用户指令「接着做那三条跨端看守」——清偿
+> `NovelOS-Artifacts: docs/analysis/ui-business-logic-assessment-2026-10-15.md` §三
+> 登记的三处漂移风险。该节原文：「UI 复刻后端规则本身**不是错的**……风险是**漂移**，
+> 不是**存在**。**对策是测试看守，不是删除**」。
+> 本批就是那三份看守。**零业务代码改动**（只加测试与一个读取器）。
+
+**背景：动手前先量「现状到底有没有看守」**——结论是**一条都没有**：
+`grep -rln "readFileSync|node:fs" apps/web/src/` **返回空**。前端四处测试
+（含 `ledgerState.test.ts` 里那句「(与后端 packages/domain/ledger/models.py 对齐)」）
+都只测了前端函数自己，**没有任何一条真去读过后端文件**。那句话是**声明**，不是断言。
+
+| 位置 | 复刻了什么 | 文档标的风险 | 看守 |
+|---|---|---|---|
+| `utils/chapterState.ts` | 把后端写入 `workflow_runs.error` 的**自由文本**当协议解析（`rejected` / `rejected-for-revision` / `cancelled by user`） | **高** | `chapterState.backend.test.ts` 6 例 |
+| `utils/ledgerState.ts` | Hook 五态机 + Debt 四态机的合法后继表（**手抄**） | **中** | `ledgerState.backend.test.ts` 7 例 |
+| `utils/pausePayload.ts` | `engine.py` 的 `__pause_payload__` 私有序列化布局 | **高** | `pausePayload.backend.test.ts` 5 例 |
+
+⚠️ **高风险那两条正好打在强项上**：`pausePayload` 失效 = 审批卡拿不到 payload
+= 作者看不到要批什么（评估 §一① 把「审批卡信息充分度」列为本仓强项）；
+`error` 文本则如文档 §三 所指，与 G3（run 级 error 从不渲染）叠加——
+**同一个字段既不被显示、又被当作分类协议，两头都没做实**。
+
+### 关键设计：**基准必须从后端源文件解析，不能硬编码进前端测试**
+
+若写成「断言后端写的就是 `'rejected'`」（把字面量再抄一份到测试里），
+那只是把同一个字面量抄到**第三处**——后端改了、前端没改，测试照样绿。
+正确形状是**从后端源码解析出事实**（邻接表 / 异常类携带的标识值 / 写入点的键名），
+再断言前端复刻与它一致。读取器 `__crossBoundary__/backendSource.ts` 只用
+`node:fs` + 正则，**不引入任何构建期依赖**（先例：`test_readability_rules.py`
+的源码级形状断言）。
+
+**读取器一律「找不到就抛错、解析为空就抛错」，绝不返回空值**——
+空值会让「两边都空 ⇒ 相等」恒真。
+
+### ⚠️ 突变验证当场抓到**我自己**的守卫有一处真实缺陷（CB-3）
+
+第一次跑 6 条突变，**CB-3 存活**（把 engine 一处 `'cancelled by user'`
+改成 `'cancelled-by-user'`，守卫仍全绿）。
+
+**根因是量具自身的判别域被缩小了**，且形状是本仓反复登记的那条：
+读取器带一个 `mustContain='cancelled by user'` 的过滤，而**突变改的正是这个串**
+⇒ 改后的值不再包含它 ⇒ **被静默滤掉** ⇒ 只剩另一处仍匹配 ⇒ 恒绿。
+「过滤条件用了突变会改变的那个串，于是突变把自己藏出了判别域」——
+同坑区「看守自己被悄悄缩小了执行域」。
+
+修法：读取器改为**返回全部** `error=` 赋值（不做内容过滤），过滤放到测试里可见，
+判据用突变**不会破坏**的更宽子串 `cancel`。修后 **6/6 全捕获**。
+
+⚠️ 修的过程中我一度写下「至少 2 种**不同取值**」的断言，当场把自己写红
+（去重后只有 1 种，4 处匹配是同一串）——又一次「断言写得像在表演而不是在看守」。
+最终形态：**下界断言**（≥2 处匹配，容忍注释增减）+ **逐取值断言**（每个 cancel
+标识都必须被前端认出）。
+
+### 残余边界（如实登记，不夸大）
+
+- 读取器的正则**不区分代码与注释**：若后端把写入改成变量拼接
+  （`error=CANCEL_ERROR`），守卫仍会扫到注释里的字面量而**保持绿** ⇒ 须人工核对。
+  该边界已写进 `backendSource.ts` 的 docstring 与用例注释。
+- 解析的是**字面形态**，不解析语义：后端若把状态机改成从别处导入常量，
+  读取器会抛错（响亮失败，好过静默放过），但会需要更新。
+- 只覆盖这三处；后端将来**新增**一处自由文本协议或私有布局，本看守不知道。
+
+### Added / Fixed（2026-10-15 批次（六）：全站 response_model 收口 + 两条既有数据缺陷）
+
+> **来源**：用户指令「全批；这看起来是复杂任务，并发多个智能体工作吧」——把批次（五）
+> 登记的两类尾巴一次做尽：**① 其余裸 `dict` 端点**（含「列表端点是 `list[dict]`」这一
+> 形状，它的 OpenAPI items 是匿名 object ⇒ 前端仍拿 `Record<string, unknown>`，
+> **与未建模等价**）；**② 两条长期挂账**（`_last_paragraph` 切段口径、token 硬顶接线）
+> 与两条本次新发现的既有缺陷。
+> **零迁移**（不动 DDL）；业务表数仍 39。
+
+**规模与口径**：带响应体的端点 **144** 个，本批前「有具名模型」仅 **61** 个；
+本批后 **142/144**。余下 2 个是**文件下载端点**——`GET /projects/{id}/export`
+（txt/docx/fanqie 三种 media type）与 `GET .../quality/q8-export`（CSV 附件），
+**刻意不建模**且各有一条用例钉住这个决定（给文件端点套 Pydantic 会给 codegen
+造「下载返回 JSON 对象」的假契约）。本数字由 regen 后的 OpenAPI **实测**得出，
+非估算。
+
+⚠️ **判据订正（本批过程中的自我纠错）**：第一版扫描把「schema 里含 `array` 字样」
+当作已建模，于是 `list[dict]` 被算成已过账 ⇒ 报「67 个裸 dict」。**那是错的**：
+`list[dict]` 的 items 是匿名 `object`，OpenAPI **不会**生成具名类型。改为逐层查
+`$ref`（含 `array` 须看 `items`）后，真实数字是 **61 已建模 / 21 无具名模型**，
+且那 21 个**几乎全是列表端点**——本批后半程的全部内容。这也是它值得记的原因：
+**判据写宽一格，整份工作量表就错了一遍**。
+
+**并发编排（13 个成员两轮，按文件路径互斥）**：第一轮 9 组（G1~G9）补 46 个单体
+端点 + 2 条挂账；第二轮 4 组（L1~L4）补 21 个列表端点。分区全程生效，无一人越界。
+第二轮之所以存在，正是因为上面那次判据订正。
+
+**产物**：OpenAPI **98 paths / 72 → 136 schemas**（paths 未变）。新增
+`arc/simulation/genre/reference/model_router/workflows` 六处 `models.py`（部分为追加）。
+
+### ⚠️ 本轮**自己修掉**的两条既有数据缺陷（都不是本批引入）
+
+1. **`PATCH /hooks` 与 `/debts` 会把未提及的章节外键抹成 NULL**（2026-08-23 起存在）。
+   `service.py` 的章节外键循环**无条件** `fields[fld] = v`，而请求模型默认值是 `None`
+   ⇒「没传」与「显式置空」不可区分 ⇒ 客户端只发 `{"status":"ACTIVE"}` 即清空两列。
+   **判定是笔误而非设计的证据**：同一函数里另外 5 个字段都走「没传就跳过」。
+   活两个月的原因是 `test_ledger.py` 覆盖了完整主链路，但**没有一条用例 PATCH 这些字段**。
+   修法 `model_fields_set`：键不在集合里则不碰；显式传 `null` 仍能主动清空。
+   判别：`test_ledger_patch_partial_update.py` 4 例**正反一对**（撤修复后 4 条全红）。
+2. **`/model-profiles/{id}/test` 与 `/model-configs/{id}/test` 缺 `base_url` ⇒ 500 + `text/plain`**。
+   `ModelRouter.get_provider()` 抛的 `ValueError` 落在 `try/except ProviderError` **之外**
+   ⇒ 未捕获 ⇒ FastAPI 回裸的 `Internal Server Error`（非 JSON）。前端 `client.ts`
+   按 JSON 解析 `detail`，**在错误展示这一步崩掉**——最该让人看见的路径反而最难看见。
+   修法：构造纳入同一 `try`，`ValueError` → **422**。判别：
+   `test_provider_test_endpoint_error_mapping.py` 4 例，含**反向用例**
+   （上游真连不上仍走既有 200 + `ok:false` 语义，不得被新 except 误吞成「配置错」）。
+
+### ⚠️ 本轮**自己引入并当场修掉**的一条回归
+
+给 `GET /events` 与 `/relationships` 挂上 `response_model` 之后，**一行脏 JSON 数据
+会让整个列表端点 500**（干净行陪葬）。挂之前只是「200 + 一个奇怪的形状」。
+根因不在契约（裸 `json.loads` 无兜底一直存在），但**契约把它从软故障变成了硬故障**。
+修法：service 侧 `_safe_json`（解析失败/形状不符 ⇒ 退回该字段空值，与「列本身为空」同形；
+`who_knows` 改走既有的 `decode_who_knows`，timeline 侧早已如此）。
+判别：`test_plot_dirty_json_row_degradation.py` 4 例（撤兜底 4 条全红）。
+
+### 两条挂账（用户拍板后结清）
+
+- **`AI-ENDING-SUMMARY` 的 `_last_paragraph` 切段口径**（2026-09-27 登记「留档待排期」）：
+  收敛到模块唯一入口 `_split_paragraphs`（`\n+`）。**实测证实它一直是 bug**：人类锚点书
+  19 章 `\n\n` 总数为 **0** ⇒ 旧实现返回的「末段」比整章可见字还长（长度比下界 1.0163 > 1）；
+  收敛后为真末段（上界 0.0533）。这是「人类基线 0.00 是量具假象」的**同形状第二次**。
+  **不设阈值**（登记，不是遗漏）：两侧实测命中皆 0 ⇒ 「人类上沿 < warn < 生成上沿」
+  在 `0.0 < x < 0.0` 上无解，任何非零阈值都是凭空造数。真实结论是**本规则在现有语料上
+  从不触发**，已写进 docstring 与规则 description。判别：`test_ai_ending_summary_paragraph.py` 7 例。
+  ⚠️ 连带修掉一条**把缺陷写成期望值**的看守：`test_readability_rules.py` 原断言
+  「内联切分恰好 1 处」（注释里明写「已登记为待修」）——**期望值本身不是恒真的，是恒错的**。
+  改为 0 并补一条**正向**断言（防「删掉函数」也算过）。
+- **token 硬顶接线**（2026-09-11 自查项，用户裁决「只接线告警，不阻断」）：
+  `_ASSEMBLY_TOKEN_BUDGET` 此前唯一读者是它自己的测试（「数据源存在 ≠ 已进装配」的典型）。
+  接线两处：① 超预算发一条 WARNING（与同包 `scene_word_budget` 的 rebalanced/thin_plan
+  同一条既有非阻断通道）；② 三个 workflow 节点把 `_assembly_meta` **提到 ctx 顶层**。
+  ② 的依据是实测：`_cap_checkpoint_payload` 按顶层键体积**从大到小**截断，而 `writer_input`
+  实测约 **227KB**、`_assembly_meta` 仅 **79 字节** ⇒ **预算越超，信号越先消失**。
+  判别：`test_context_token_budget.py` +5 例、`test_assembly_meta_top_level.py` 3 例
+  （撤接线后 3 条全红）。
+
+### 判别纪律：本批三层防线（都是踩过坑后的硬要求）
+
+1. **禁自指断言**：期望键集一律**硬编码**，不得 `set(body) == set(Model.model_fields)`
+   （删字段两侧同减 ⇒ 恒真，批次五 M14 实测存活）。每个测试文件都写明「`model_fields`
+   只允许出现在『模型 vs 硬编码』那一条用例里」，并给 grep 自查命令。
+2. **`extra="allow"` 必配 OpenAPI 断言**：删掉字段声明后响应**照样**有该键（extra 透出）
+   ⇒ 只断言响应键集抓不到，必须断言 schema 的 `properties`/`required`。
+3. **突变验证**：**175 条**规格，全捕获、0 存活、0 中止。执行基建见下。
+
+### 新增基建：`tests/mutation_specs/`（把突变的「数据」与「执行」拆开）
+
+并发开发时每个成员都要自验「我的测试能不能判别」，而自验必须能改源码——多人共写
+一个脚本必然撞车（铁律 4）。故拆为：
+
+- `g*.py` / `l*.py` = **纯数据**（每人独占一个文件）；
+- `run_spec.py` = 执行器（所有人共用、任何人不得改），四条硬断言从
+  `scripts/mutation_harness.py` 原样继承（绝对路径 / 启动失败与测试失败分流 /
+  「跑过了」的证据 / 空摘要判 INVALID）；
+- `validate_specs.py` = **只读预检**（锚点唯一性、变异是否真改字节、变异后可编译）。
+  并发下锚点会因**别人的**改动而失效，而写规格的人已经收工了——预检的价值就在这。
+
+⚠️ 执行器本轮自己出过两次缺陷，都已修并留痕：① `--all` 用前缀 `g*.py` 发现规格
+⇒ 静默只跑 120/175 却报「全捕获 + exit 0」（改为按「含 `MUTATIONS`」发现 + **打印
+覆盖清单**）；② 预检抓出 `G4M03` 锚点因 L2 新增同形字段而命中 2 次。
+
+### 其余实测结论（**推翻先验**，按铁律留痕）
+
+1. **`state/diff` 加 `response_model_exclude_none=True` 是错的**（任务书原写「必须带」）。
+   实测：该开关会把恒为 `null` 的 `branch_id` 一起抹掉，空 diff 从 **3 键塌成 2 键**，
+   是既有契约的静默变更。改用模型侧**字段级** `exclude_if`，端点刻意不加开关。
+   **先验为何错**：我照搬了 `simulation` 端点的同款处方（那里确实正确）而没先验证——
+   同坑区「ORDER BY 处方被实证推翻，勿复用」。
+2. **列表行 ≠ 单体响应**：`GET /commits` 行 **12 键**，而 `POST /commits` 响应 **4 键**；
+   `GET /deltas` 行里**没有** `payload_json` 键（7 个 change 数组被摊到顶层）。
+   ⇒ 批量照抄单体模型必错。
+3. **键集相同 ≠ 可复用**：`branches` 列表与 `BranchCreatedResponse` **逐字同形**，但后者
+   `parent_branch_id: str` 必填非空，而 main 分支该值为 `null` ⇒ 复用让端点**恒 500**。
+4. **`diff_snapshots` 的两份模型连「空则省略」的机制都不同**（simulation 靠端点级
+   `exclude_none`、story_state 靠模型级 `exclude_if`）⇒ 断言 `model_dump()` 相等是错的
+   （比出来的是机制差不是契约差）。改断言**字段同形 + 生产端覆盖**：
+   `test_diff_model_shape_parity.py` 4 例。
+
+### Changed
+
+- `scripts/smoke_e2e.py` 顶部 4 处 docstring 表数由「业务表 38 / 物理共 39」订正为
+  **39 / 40**（与 `/api/health` 实测、README、`test_health.py` 同口径）——登记的 A-009
+  漂移点从 `count_tables` 挪到了这里，本批就地核销。
+- `GET /api/health` 补 `response_model=HealthResponse`（全仓唯一定义在 `api/main.py` 的出参模型）。
+
+### 闸门（批次六 + 七）
+
+pytest **3272 passed / 1 skipped / 0 failed**（373.35s，项目 `.venv/Scripts/python.exe`，
+`--ignore=tests/unit/test_m1_lock.py`）；vitest **755 passed / 56 文件**（含批次七 3 个
+新文件 18 例）；`npx tsc -b` 零错；`npm run build` 通过（467.50 kB，与批次五同）；
+`ruff check packages scripts tests` = `All checks passed!`；
+树指纹 **575 文件 / `25282695…`** 跑测前后**逐位一致**；突变残留 0。
+
+**突变验证 175 条（批次六）＋ 6 条（批次七）= 181 条全捕获、0 存活、0 中止。**
+⚠️ 其中 **CB-3 首轮存活**，是守卫**自身**的判别域被缩小所致（详见批次七条目），
+已修后复测 6/6。
+
+pytest 3026 → **3273 collected**（= 3272 passed + 1 skipped）。增量来自 18 个新测试
+文件（契约测试 13 + 主会话自办 5）与既有文件的扩充。
+
 ### Fixed（2026-10-15 批次（五）：G6 挂账的尾巴 —— 四个 router 补 Pydantic 契约，前端手写类型退休）
 
 > **来源**：用户指令「排那批账，补 Pydantic 模型」——清偿批次（四）登记的挂账：

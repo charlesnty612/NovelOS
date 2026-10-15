@@ -174,24 +174,41 @@ def test_short_para_shares_the_same_split_entry():
             for i, ln in code_lines
             if 'prose.split("\\n\\n")' in ln
         ]
-    assert len(inline_splits) == 1, (
-        "段切分内联实现应只剩 _last_paragraph 一处（已登记为待修），"
-        f"实测 {len(inline_splits)} 处：{inline_splits}"
+    # 2026-10-15 批次（六）G8：本断言的**期望值从 1 改为 0**。
+    # 旧值 1 不是在描述正确状态，而是把「`_last_paragraph` 仍内联第二份切分」
+    # 这条**已登记的缺陷**写成了期望值（当年注释即写明「已登记为待修」）。
+    # G8 把 `_last_paragraph` 收敛到 `_split_paragraphs` 后，真实值变成 0 ⇒ 旧断言变红。
+    # 这正是坑区「夹具从被测代码的实际输出里抄形状 ⇒ 缺陷被写进断言」的形状：
+    # **期望值本身不是恒真的，它是恒错的**——只不过错的方向是「锁住了缺陷」。
+    assert not inline_splits, (
+        "段切分必须只有 `_split_paragraphs` 一处实现；以下位置又出现了内联切分，"
+        f"口径分叉会回来：{inline_splits}"
     )
-    only_file, only_line, _only_text = inline_splits[0]
-    assert only_file == Path(module.__file__).name, (
-        f"唯一那处内联实现落在 {only_file}，应留在门面 {Path(module.__file__).name}——"
-        "_last_paragraph 被本形状断言钉在门面源码内"
+    # ⚠️ 上面的 `== 0` **单独看是可能恒真的**：把 `_last_paragraph` 整个删掉也能让它绿。
+    # 故配下面这条**正向**断言——收敛必须真的发生在那条路径上，而不是靠少一个函数。
+    _lp_src = sources[Path(module.__file__).name]
+    _lp_lines = _lp_src.splitlines()
+    _lp_at = next(
+        i for i, ln in enumerate(_lp_lines) if ln.startswith("def _last_paragraph")
     )
-    lines = sources[only_file].splitlines()
-    # 向上找该行所属的函数定义（不假设 docstring 占几行）
-    owner = next(
-        ln.strip()
-        for ln in reversed(lines[:only_line])
-        if ln.startswith("def ")
+    _lp_body = "\n".join(
+        ln
+        for ln in _lp_lines[
+            _lp_at
+            : next(
+                (
+                    i
+                    for i in range(_lp_at + 1, len(_lp_lines))
+                    if _lp_lines[i].startswith(("def ", "class "))
+                ),
+                len(_lp_lines),
+            )
+        ]
+        if not ln.lstrip().startswith("#")
     )
-    assert owner.startswith("def _last_paragraph"), (
-        f"唯一那处内联实现在 {only_file}:{only_line}，属于 {owner}，应属于 _last_paragraph"
+    assert "_split_paragraphs(prose)" in _lp_body, (
+        "_last_paragraph 必须走 `_split_paragraphs`；否则它要么用了别的切法、"
+        "要么这条断言只是在数一个已经不存在的函数"
     )
     assert not hasattr(module, "_paragraphs"), (
         "旧的 \\n\\n 切分已删除（唯一消费方 count_short_paras 已改口径）；"

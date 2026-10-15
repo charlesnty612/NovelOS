@@ -210,4 +210,83 @@ __all__ = [
     "QualityReport",
     "QualityJudgeRecord",
     "QualityJudgeResponse",
+    "QualityReportIssue",
+    "QualityReportResponse",
 ]
+
+
+# ------------------------------------------------------- quality 端点出参（2026-10-15 批次（六））
+
+# ⚠️ 下面两个模型是 `GET /chapters/{cid}/quality` 与
+# `POST /chapters/{cid}/quality/evaluate` 的出参。两条端点返回的是**同一份东西**
+# （evaluate 末尾就是 `_attach_judge(latest_report(...))`），故共用一个模型。
+#
+# 三条实测得到的事实决定了模型怎么写：
+#
+# 1. **键集 = `quality_reports` 表的列集（`SELECT *`）＋ `judge`**。列集来源：
+#    `0003_quality_reports.sql`（report_id/project_id/chapter_id/commit_id/run_id/
+#    overall/scores_json/issues_json/created_at）+ `0012`（judge_json）+ `0024`
+#    （draft_version）；`_attach_judge` 把 ``judge_json`` **弹出**并改写成 ``judge``。
+#    ⇒ 表里再加一列，响应就多一个键 ⇒ 本模型必须 ``extra="allow"``，
+#    否则新列会被 ``response_model`` **静默丢掉**（默认 ``extra="ignore"``）。
+# 2. **`extra="allow"` 会吃掉「字段声明被删」这个信号**（键仍以 extra 身份透出）。
+#    ⇒ 契约测试必须**另**断言 OpenAPI 的 ``properties`` / ``required``
+#    （批次（五）突变 M20 实测存活的正是这一条）。
+# 3. **severity 与 gate 是正交的两根轴，不许互相推导**（坑区「算出来的问题没人能说
+#    『不』」的 P0-1 事故）。这里两者都声明为各自的 Literal，且 `gate` 有独立默认值
+#    ``"auto"``——2026-09-18 之前落库的 issue 没有该键，靠这个默认值兼容。
+#
+# 为什么 `issues_json` 另立 `QualityReportIssue` 而不是直接复用上面的 `Issue`：
+# `Issue` 是**引擎内部**类型（pydantic 校验会在构造期抛错），而 `issues_json` 是
+# **历史落库数据**——里面可能混着 `gate` 字段引入之前的旧结构。出参模型必须对
+# 存量脏数据鲁棒，故单列一份、字段更宽松（`extra="allow"`）。
+
+
+class QualityReportIssue(BaseModel):
+    """`issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。
+
+    ⚠️ ``extra="allow"``：issue 字典落库后可能被未来的规则追加证据字段
+    （如 ``evidence_excerpt``），出参不该把它们裁掉。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    severity: Severity
+    category: Category
+    location: str = "<unknown>"
+    rule_id: str
+    message: str
+    # 正交轴：回答「谁能说通过」，不从 severity 推导（2026-09-18 P0-1）。
+    # 默认 "auto" 同时承担「2026-09-18 前的存量 issue 无此键」的兼容职责。
+    gate: Gate = "auto"
+    suggestion: Optional[str] = None
+    evidence_refs: Optional[list[str]] = None
+    judge_trace: Optional[dict[str, Any]] = None
+
+
+class QualityReportResponse(BaseModel):
+    """``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。
+
+    ``extra="allow"`` 的理由见上方第 1 条（键集随表列变化）。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    report_id: str
+    project_id: str
+    chapter_id: str
+    commit_id: Optional[str] = None
+    run_id: Optional[str] = None
+    overall: int
+    # 七子分 + ``_meta``（`scores_json` 落库形态）；解析失败时 service 兜成 ``{}``。
+    scores_json: dict[str, Any] = Field(default_factory=dict)
+    issues_json: list[QualityReportIssue] = Field(default_factory=list)
+    # ``None`` = 该章尚无 draft / 存量报告未回填（0024 迁移的可空列）。
+    draft_version: Optional[int] = None
+    created_at: str
+    # `_attach_judge` 恒写这个键；无 judge 时为 None。
+    # ⚠️ 刻意**不给默认值**——给了默认值它在 OpenAPI 里就不是 required，
+    # 而语义上它「恒在、可空」（与 ``QualityJudgeResponse.judge`` 同一口径）。
+    # 非 null 的 judge_json 必然含四维分——`QualityService.save_judge_score`
+    # 在写入前用 ``JUDGE_REQUIRED_SCORE_KEYS`` 校验过，缺键抛 ValueError（→422）。
+    judge: Optional[QualityJudgeRecord]

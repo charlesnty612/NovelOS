@@ -33,6 +33,12 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from packages.core.logging_config import get_logger
 from packages.core.model_router import ModelRouter, ProfileService, ProviderError
+from packages.core.model_router.models import (
+    AvailableModelsOut,
+    ModelProfileOut,
+    ProfileTestResult,
+    ProviderErrorEnvelope,
+)
 from packages.core.model_router.providers import (
     AnthropicProvider,
     OllamaProvider,
@@ -169,7 +175,7 @@ def _unknown_model_hint(detail: str) -> str | None:
     )
 
 
-@router.post("/model-profiles", status_code=status.HTTP_201_CREATED)
+@router.post("/model-profiles", status_code=status.HTTP_201_CREATED, response_model=ModelProfileOut)
 def create_model_profile(payload: dict, request: Request) -> dict:
     """创建一条档案。必填字段：``name / provider / model``。
 
@@ -218,18 +224,28 @@ def create_model_profile(payload: dict, request: Request) -> dict:
     return _mask_response(row)
 
 
-@router.get("/model-profiles")
+@router.get("/model-profiles", response_model=list[ModelProfileOut])
 def list_model_profiles(
     request: Request,
     include_enabled_only: bool = False,
 ) -> list[dict]:
+    """列出档案（``include_enabled_only`` 可只回 enabled 行）。
+
+    列表行的 9 键与单条 ``GET /model-profiles/{id}`` **逐字相同**（同走
+    :func:`_mask_response`，同源于 service 的 ``SELECT *``）⇒ 复用
+    :class:`ModelProfileOut`，不为列表另立模型。
+
+    ⚠️ 该模型是 ``extra="allow"``：少声明字段在响应侧看不出来（键以 extra 透出），
+    只能从 OpenAPI ``properties`` 断言——判别用例见
+    ``tests/api/test_config_list_response_contract.py``。
+    """
     settings = request.app.state.settings
     svc = ProfileService(settings.db_path)
     rows = svc.list(include_enabled_only=include_enabled_only)
     return [_mask_response(r) for r in rows]
 
 
-@router.get("/model-profiles/{profile_id}")
+@router.get("/model-profiles/{profile_id}", response_model=ModelProfileOut)
 def get_model_profile(profile_id: str, request: Request) -> dict:
     settings = request.app.state.settings
     svc = ProfileService(settings.db_path)
@@ -239,7 +255,7 @@ def get_model_profile(profile_id: str, request: Request) -> dict:
     return _mask_response(row)
 
 
-@router.patch("/model-profiles/{profile_id}")
+@router.patch("/model-profiles/{profile_id}", response_model=ModelProfileOut)
 def patch_model_profile(profile_id: str, payload: dict, request: Request) -> dict:
     """部分更新。
 
@@ -322,7 +338,16 @@ def delete_model_profile(profile_id: str, request: Request):
     return None
 
 
-@router.post("/model-profiles/{profile_id}/test", status_code=status.HTTP_200_OK)
+@router.post(
+    "/model-profiles/{profile_id}/test",
+    status_code=status.HTTP_200_OK,
+    response_model=ProfileTestResult,
+    # ⚠️ 必需：status_code 恒在（可空），hint 命中才存在。exclude_unset 精确复刻
+    # 「dict 里没有的键不出参」；改成 exclude_none 会把 status_code: null 也删掉
+    # （改变实测行为），不写则 hint 会凭空变成 null。依据见 models.ProfileTestResult。
+    response_model_exclude_unset=True,
+    responses={502: {"model": ProviderErrorEnvelope}},
+)
 def test_model_profile(profile_id: str, request: Request) -> dict:
     """ping：用该档案做一次轻量级健康检查。
 
@@ -353,13 +378,27 @@ def test_model_profile(profile_id: str, request: Request) -> dict:
         "params_json": profile_row["params_json"],
         "enabled": profile_row["enabled"],
     }
-    provider = ModelRouter(settings.db_path).get_provider(config_row)
+    # ⚠️ 2026-10-15 修：`get_provider` 会抛 `ValueError`（档案里 provider 配置不合法，
+    # 例如 `openai_compatible` 缺 `base_url`——见 providers.py 的构造校验），而它原先
+    # 落在 `try` **之外**且只捕 `ProviderError` ⇒ 未捕获 ⇒ FastAPI 返回
+    # **500 且 Content-Type 是 text/plain**（不是 JSON）。
+    # 实测：建一个 `provider=openai_compatible` 且 `params_json={}` 的档案后调 /test，
+    # 响应体就是裸的 `Internal Server Error`。前端 `client.ts` 按 JSON `detail` 解析，
+    # 拿到非 JSON 会直接崩在错误展示上。
+    # 处置：把构造纳入同一 try，`ValueError` 映射为 **422**（与相邻那行
+    # 「enabled=0 不能 /test」同属「实体自身状态不满足」这一类，不是上游故障）。
     try:
+        provider = ModelRouter(settings.db_path).get_provider(config_row)
         result = provider.health_check()
     except ProviderError as exc:
         raise HTTPException(
             status_code=502,
             detail={"error": "provider_error", "message": str(exc), "status_code": exc.status_code},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"model_profile {profile_id!r} 的 provider 配置无效：{exc}",
         ) from exc
     status_code = result.get("status_code")
     detail = result.get("detail") or ""
@@ -384,7 +423,7 @@ def test_model_profile(profile_id: str, request: Request) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/model-profiles/available-models")
+@router.post("/model-profiles/available-models", response_model=AvailableModelsOut)
 def list_available_models(payload: dict) -> dict:
     """按 ``provider / base_url / api_key / profile_id`` 调用各家模型列表接口。
 

@@ -97,6 +97,62 @@ async def test_openapi_declares_snapshot_response_for_both_state_endpoints(tmp_p
         )
 
 
+#: ``SnapshotResponse`` 应有的**全部**键。
+#:
+#: ⚠️ 基准取自 **第三个独立位置**——``story_state/snapshot.py::build_initial_state``
+#: 第 301~307 行实际构造的 7 个键，**不是**从 ``SnapshotResponse`` 模型抄的
+#: （抄模型 = 自指断言，见 AGENTS 坑区「自指断言恒真」），也不是「跑一下看返回什么」
+#: （那正是「夹具从被测代码的实际输出里抄形状」那条）。构造器与模型分处两地，
+#: 两者对不上正是本断言要抓的东西。
+_EXPECTED_SNAPSHOT_PROPERTIES = frozenset(
+    {
+        "state_version",
+        "characters",
+        "world",
+        "hooks",
+        "debts",
+        "recent_events",
+        "events",
+    }
+)
+
+#: 只有 ``state_version`` 没有默认值（其余五段都有 ``default_factory``）⇒ 仅它 required。
+#: 这条同样从**模型定义本身可推导**（无 default ⇒ required），不是跑出来的。
+_EXPECTED_SNAPSHOT_REQUIRED = frozenset({"state_version"})
+
+
+@pytest.mark.anyio
+async def test_openapi_snapshot_schema_declares_every_segment(tmp_path: Path):
+    """**schema 的 properties 必须列全 7 段**——这条的存在理由是 ``extra="allow"``。
+
+    ⚠️ 没有这条，「从 ``SnapshotResponse`` 删掉一个字段声明」是**测不到**的：
+    ``model_config = ConfigDict(extra="allow")`` 让未声明的键**照样出现在响应里**
+    ⇒ 既有的形状断言（characters 是 list / events 是 dict…）**照样全绿**，
+    而 OpenAPI 已经不再声明它 ⇒ 前端 codegen 出的 TS 类型少一个字段
+    ⇒ **静默退回批次（三）修掉的那个 bug**（前端欠定义类型把 list 拍成 {}，
+    两个统计项恒 0）。这与批次（五）的 M20 是同一条纪律：**``extra="allow"``
+    让「删字段声明」没有可见症状，必须断言 schema 的 properties/required**。
+    """
+    app = _create_app(tmp_path)
+    r = await _request(app, "GET", "/openapi.json")
+    assert r.status_code == 200, r.text
+    schema = r.json()["components"]["schemas"]["SnapshotResponse"]
+
+    props = frozenset(schema.get("properties", {}))
+    missing = _EXPECTED_SNAPSHOT_PROPERTIES - props
+    assert not missing, (
+        f"SnapshotResponse 的 schema 未声明 {sorted(missing)}——"
+        f"extra=allow 会让它们照样进响应，所以响应形状断言抓不到；"
+        f"但前端 codegen 出的 TS 类型会缺这些字段（实际 properties={sorted(props)}）"
+    )
+
+    required = frozenset(schema.get("required", []))
+    assert required == _EXPECTED_SNAPSHOT_REQUIRED, (
+        f"required 应恰为 {sorted(_EXPECTED_SNAPSHOT_REQUIRED)}"
+        f"（其余五段都有 default_factory）；实际 {sorted(required)}"
+    )
+
+
 # --------------------------------------------------------------------------- 实际形状
 
 

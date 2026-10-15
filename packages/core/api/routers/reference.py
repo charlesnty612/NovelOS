@@ -47,6 +47,12 @@ from packages.core.workflow_runtime.engine import WorkflowEngine
 from packages.core.workflow_runtime.runs import get_run
 from packages.domain.project.service import ProjectService
 from packages.domain.reference import ReferenceService
+from packages.domain.reference.models import (
+    CanonDetailOut,
+    CanonSummaryOut,
+    DeconstructStartResponse,
+    StyleSampleOut,
+)
 
 log = get_logger("novelos.routers.reference")
 
@@ -365,6 +371,7 @@ class DeconstructRequest:
 @router.post(
     "/projects/{project_id}/deconstruct",
     status_code=status.HTTP_201_CREATED,
+    response_model=DeconstructStartResponse,
 )
 def start_deconstruct(
     project_id: str,
@@ -511,6 +518,7 @@ def _start_deconstruct_internal(
 @router.post(
     "/projects/{project_id}/deconstruct-upload",
     status_code=status.HTTP_201_CREATED,
+    response_model=DeconstructStartResponse,
 )
 def start_deconstruct_upload(
     project_id: str,
@@ -588,9 +596,17 @@ def start_deconstruct_upload(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/projects/{project_id}/canons")
+@router.get("/projects/{project_id}/canons", response_model=list[CanonSummaryOut])
 def list_project_canons(project_id: str, request: Request) -> list[dict[str, Any]]:
-    """列出项目下全部 active canon（按 created_at DESC）。"""
+    """列出项目下全部 active canon（按 created_at DESC）。
+
+    **不复用** :class:`CanonDetailOut`：列表行是 ``summary_of`` 做的**摘要**投影，
+    SQL 只 SELECT 7 列（无 ``report_md``），且 ``canon_json`` 本身**不进响应**——
+    它被拆成三个派生量（``logline`` / ``spine_count`` / ``rhythm_chapter_count``）。
+    两边**都是 9 键但键名不同**（详见 :class:`CanonSummaryOut` 的 docstring）。
+    ⚠️ 「同一条 canon，列表 9 键、单体 9 键」极易被误读成同形，
+    用一个模型套两条端点会让其中一条**静默丢字段**。
+    """
     _ensure_project(request, project_id)
     svc = ReferenceService(_db_path(request))
     return svc.list_active_summaries(project_id)
@@ -601,7 +617,7 @@ def list_project_canons(project_id: str, request: Request) -> list[dict[str, Any
 # ---------------------------------------------------------------------------
 
 
-@router.get("/canons/{canon_id}")
+@router.get("/canons/{canon_id}", response_model=CanonDetailOut)
 def get_canon(canon_id: str, request: Request) -> dict[str, Any]:
     """单一 canon 全文（canon_json + report_md + extracts 列表）。"""
     svc = ReferenceService(_db_path(request))
@@ -797,6 +813,7 @@ def _build_style_card(
 @router.post(
     "/projects/{project_id}/canons/{canon_id}/to-style-sample",
     status_code=status.HTTP_201_CREATED,
+    response_model=StyleSampleOut,
 )
 def write_canon_to_style_sample(
     project_id: str,

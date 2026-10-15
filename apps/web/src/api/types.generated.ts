@@ -20,6 +20,127 @@ export interface AdoptResponse {
   appended_chars: number;
 }
 
+export interface AgentListRowOut {
+  /** ``GET /agents`` 的**一行**（:meth:`PromptRegistry.list_agents` 的 SELECT 6 列）。 */
+  agent_id: string;
+  /** ``GET /agents`` 的**一行**（:meth:`PromptRegistry.list_agents` 的 SELECT 6 列）。 */
+  name: string;
+  /** = config_json['capability']（见 PromptRegistry._upsert_agent） */
+  role: string;
+  /** JSON **字符串**（端点未解析），形如 '{"capability": "reasoning"}' */
+  config_json: string;
+  /** ``GET /agents`` 的**一行**（:meth:`PromptRegistry.list_agents` 的 SELECT 6 列）。 */
+  created_at: string;
+  /** 每次 sync 都会刷新（内容未变也刷）；created_at 则始终保留原值 */
+  updated_at: string;
+}
+
+export interface AgentOutputErrorDetail {
+  /** 固定 'agent_output_invalid' */
+  error: string;
+  /** ``AgentOutputError`` 映射出的 ``detail``（**无** ``status_code``）。 */
+  message: string;
+}
+
+export interface AgentOutputErrorEnvelope {
+  detail: AgentOutputErrorDetail;
+}
+
+export interface AgentPromptRowOut {
+  /** ``GET /agents/{name}/prompts`` 的**一行**（:meth:`PromptRegistry.list_prompts` 的 7 列）。 */
+  prompt_id: string;
+  /** ``GET /agents/{name}/prompts`` 的**一行**（:meth:`PromptRegistry.list_prompts` 的 7 列）。 */
+  agent_id: string;
+  /** 形如 'v3'（不含 agent 前缀） */
+  version: string;
+  /** ``GET /agents/{name}/prompts`` 的**一行**（:meth:`PromptRegistry.list_prompts` 的 7 列）。 */
+  content: string;
+  /** DRAFT / ACTIVE / DEPRECATED（DB CHECK 约束） */
+  status: string;
+  /** ``GET /agents/{name}/prompts`` 的**一行**（:meth:`PromptRegistry.list_prompts` 的 7 列）。 */
+  created_at: string;
+  /** **内容变化或新增**时才刷新；内容逐字相同的重复 sync 完全跳过 UPDATE */
+  updated_at: string;
+}
+
+export interface AgentPromptSyncResult {
+  /** ``POST /agents/sync`` 的 200 响应。 */
+  scanned: Array<Array<unknown>>;
+  /** ``POST /agents/sync`` 的 200 响应。 */
+  registered: Array<Array<unknown>>;
+  /** content 发生变化的子集，可能是空数组 */
+  updated: Array<Array<unknown>>;
+  /** ``POST /agents/sync`` 的 200 响应。 */
+  agents: Array<string>;
+}
+
+export interface AgentRunResult {
+  /** ``POST /agents/{name}/run`` 的 201 响应。 */
+  run_id: string;
+  /** ``POST /agents/{name}/run`` 的 201 响应。 */
+  agent: string;
+  /** ``POST /agents/{name}/run`` 的 201 响应。 */
+  output: Record<string, unknown>;
+}
+
+export interface AiCallLogDetail {
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  call_id: string;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  run_id: string;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  node_run_id?: string | null;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  agent_id?: string | null;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  model_id?: string | null;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  prompt_version?: string | null;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  latency_ms?: number | null;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  retry_count: number;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  error?: string | null;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  token_usage?: Record<string, unknown> | null;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  cost?: number | null;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  created_at: string;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  input_context_ids: Array<string>;
+  /** ``GET /ai-call-logs/{log_id}`` 的响应（:func:`_detail` 的产物）。 */
+  output?: unknown;
+}
+
+export interface AiCallLogSummary {
+  /** ``GET /ai-call-logs`` 的一行：:func:`_summary` 的 12 键摘要。 */
+  call_id: string;
+  /** ``GET /ai-call-logs`` 的一行：:func:`_summary` 的 12 键摘要。 */
+  run_id: string;
+  /** ``GET /ai-call-logs`` 的一行：:func:`_summary` 的 12 键摘要。 */
+  node_run_id: string | null;
+  /** ``GET /ai-call-logs`` 的一行：:func:`_summary` 的 12 键摘要。 */
+  agent_id: string | null;
+  /** 'provider/model' 字符串（mock 路径下是 'mock/mock'） */
+  model_id: string | null;
+  /** 形如 'writer:v3'（含 agent 前缀，与 prompts.version 不同形态） */
+  prompt_version: string | null;
+  /** ``GET /ai-call-logs`` 的一行：:func:`_summary` 的 12 键摘要。 */
+  latency_ms: number | null;
+  /** 只计「输出不合契约」的重试（0/1），不是引擎的 run 级重试 */
+  retry_count: number;
+  /** ``GET /ai-call-logs`` 的一行：:func:`_summary` 的 12 键摘要。 */
+  error: string | null;
+  /** ``GET /ai-call-logs`` 的一行：:func:`_summary` 的 12 键摘要。 */
+  token_usage: Record<string, unknown> | null;
+  /** ``GET /ai-call-logs`` 的一行：:func:`_summary` 的 12 键摘要。 */
+  cost: number | null;
+  /** ``GET /ai-call-logs`` 的一行：:func:`_summary` 的 12 键摘要。 */
+  created_at: string;
+}
+
 export interface ArcAlert {
   /** 节奏 / 伏笔告警。``level='fail'`` 是硬信号（charge_streak_exceeded）， */
   level: "warn" | "fail";
@@ -123,6 +244,62 @@ export interface ArcVolumeRow {
   chapter_count: number;
 }
 
+export interface AvailableModelsOut {
+  /** ``POST /model-profiles/available-models`` 的 200 响应。 */
+  models: Array<string>;
+}
+
+export interface BackupMetadata {
+  /** 备份包 ``metadata`` 段：导出事实 + 安全排除标志。 */
+  schema_migrations: Array<string>;
+  /** 备份包 ``metadata`` 段：导出事实 + 安全排除标志。 */
+  table_count_exported: number;
+  /** 备份包 ``metadata`` 段：导出事实 + 安全排除标志。 */
+  exported_table_names: Array<string>;
+  /** 备份包 ``metadata`` 段：导出事实 + 安全排除标志。 */
+  exported_at_iso: string;
+  /** 备份包 ``metadata`` 段：导出事实 + 安全排除标志。 */
+  api_keys_stripped: boolean;
+  /** 备份包 ``metadata`` 段：导出事实 + 安全排除标志。 */
+  ai_call_logs_excluded: boolean;
+  /** 备份包 ``metadata`` 段：导出事实 + 安全排除标志。 */
+  evaluations_excluded: boolean;
+  /** 备份包 ``metadata`` 段：导出事实 + 安全排除标志。 */
+  workflow_runs_excluded: boolean;
+  /** 备份包 ``metadata`` 段：导出事实 + 安全排除标志。 */
+  model_configs_excluded: boolean;
+  /** 备份包 ``metadata`` 段：导出事实 + 安全排除标志。 */
+  reference_canons_excluded: boolean;
+}
+
+export interface BackupPackage {
+  /** 备份包顶层（``GET /projects/{project_id}/backup`` 的响应体）。 */
+  format: string;
+  /** 备份包顶层（``GET /projects/{project_id}/backup`` 的响应体）。 */
+  version: number;
+  /** 备份包顶层（``GET /projects/{project_id}/backup`` 的响应体）。 */
+  exported_at: string;
+  /** 备份包顶层（``GET /projects/{project_id}/backup`` 的响应体）。 */
+  exported_from_project_id: string;
+  /** 备份包顶层（``GET /projects/{project_id}/backup`` 的响应体）。 */
+  metadata: BackupMetadata;
+  /** 备份包顶层（``GET /projects/{project_id}/backup`` 的响应体）。 */
+  project: Record<string, unknown>;
+  /** 备份包顶层（``GET /projects/{project_id}/backup`` 的响应体）。 */
+  tables: Record<string, unknown>;
+}
+
+export interface BindingProfileOut {
+  /** ``CapabilityBindingOut.profiles[]`` 的一项。 */
+  profile_id: string;
+  /** ``CapabilityBindingOut.profiles[]`` 的一项。 */
+  name: string;
+  /** ``CapabilityBindingOut.profiles[]`` 的一项。 */
+  model: string;
+  /** ``CapabilityBindingOut.profiles[]`` 的一项。 */
+  provider: string;
+}
+
 export interface Body_start_deconstruct_upload_api_projects__project_id__deconstruct_upload_post {
   /** 参照书文件（.txt / .epub） */
   file: string;
@@ -130,6 +307,145 @@ export interface Body_start_deconstruct_upload_api_projects__project_id__deconst
   book_title?: string;
   /** 读者档 */
   reader_profile?: string;
+}
+
+export interface BranchCreatedResponse {
+  /** ``POST /projects/{pid}/branches`` 的 201 响应（实测 7 键恒在）。 */
+  branch_id: string;
+  /** ``POST /projects/{pid}/branches`` 的 201 响应（实测 7 键恒在）。 */
+  project_id: string;
+  /** ``POST /projects/{pid}/branches`` 的 201 响应（实测 7 键恒在）。 */
+  name: string;
+  /** 父分支；建在 main 上时是 main 的 branch_id */
+  parent_branch_id: string;
+  /** ``POST /projects/{pid}/branches`` 的 201 响应（实测 7 键恒在）。 */
+  base_state_version: number;
+  /** 建成的瞬间恒为 ACTIVE */
+  status: string;
+  /** ``POST /projects/{pid}/branches`` 的 201 响应（实测 7 键恒在）。 */
+  created_at: string;
+}
+
+export interface BranchPromoteResponse {
+  /** 空分支时为 null（键恒在） */
+  commit_id?: string | null;
+  /** 空分支时为 null（键恒在） */
+  delta_id?: string | null;
+  /** ⚠️ 空分支时是 base_state_version，不是新版本 */
+  state_version: number;
+  /** ⚠️ 空分支=源分支；非空=main 分支 */
+  branch_id?: string | null;
+  /** ``POST /projects/{pid}/branches/{bid}/promote`` 的 201 响应——**同一端点两个形状**。 */
+  promoted_commits: number;
+  /** 本次在 main 上重放出的新 delta_id 列表 */
+  replayed_delta_ids: Array<string>;
+  /** 只有空分支形状才有（恒为 MERGED） */
+  status?: string | null;
+  /** 只有非空分支形状才有：源分支 id */
+  promoted_from?: string | null;
+  /** 只有非空分支形状才有 */
+  snapshot_ref?: string | null;
+}
+
+export interface BranchSummary {
+  /** ``GET /projects/{pid}/branches`` 的**行**（实测恒 7 键）。 */
+  branch_id: string;
+  /** ``GET /projects/{pid}/branches`` 的**行**（实测恒 7 键）。 */
+  project_id: string;
+  /** ``GET /projects/{pid}/branches`` 的**行**（实测恒 7 键）。 */
+  name: string;
+  /** ⚠️ main 分支恒为 null（根节点）；子分支指向父分支 */
+  parent_branch_id: string | null;
+  /** ``GET /projects/{pid}/branches`` 的**行**（实测恒 7 键）。 */
+  base_state_version: number;
+  /** ACTIVE / MERGED / DISCARDED；列表里恒含 main（恒 ACTIVE） */
+  status: string;
+  /** ``GET /projects/{pid}/branches`` 的**行**（实测恒 7 键）。 */
+  created_at: string;
+}
+
+export interface CanonDetailOut {
+  /** ``GET /canons/{canon_id}``：单条 canon 全文 + 其 extracts。 */
+  canon_id: string;
+  /** ``GET /canons/{canon_id}``：单条 canon 全文 + 其 extracts。 */
+  project_id: string;
+  /** ``GET /canons/{canon_id}``：单条 canon 全文 + 其 extracts。 */
+  title: string;
+  /** ``GET /canons/{canon_id}``：单条 canon 全文 + 其 extracts。 */
+  reader_profile: string;
+  /** ``GET /canons/{canon_id}``：单条 canon 全文 + 其 extracts。 */
+  status: string;
+  /** ``GET /canons/{canon_id}``：单条 canon 全文 + 其 extracts。 */
+  canon_json?: Record<string, unknown> | null;
+  /** ``GET /canons/{canon_id}``：单条 canon 全文 + 其 extracts。 */
+  report_md: string;
+  /** ``GET /canons/{canon_id}``：单条 canon 全文 + 其 extracts。 */
+  created_at: string;
+  /** ``GET /canons/{canon_id}``：单条 canon 全文 + 其 extracts。 */
+  extracts?: Array<CanonExtractOut>;
+}
+
+export interface CanonExtractOut {
+  /** ``GET /canons/{cid}`` 里 ``extracts[]`` 的一格。 */
+  extract_id: string;
+  /** ``GET /canons/{cid}`` 里 ``extracts[]`` 的一格。 */
+  chapter_index: number;
+  /** ``GET /canons/{cid}`` 里 ``extracts[]`` 的一格。 */
+  extract_json?: unknown;
+  /** ``GET /canons/{cid}`` 里 ``extracts[]`` 的一格。 */
+  created_at: string;
+}
+
+export interface CanonSummaryOut {
+  /** ``GET /projects/{pid}/canons`` 的**列表行**出参（2026-10-15 批次（六）· L4）。 */
+  canon_id: string;
+  /** ``GET /projects/{pid}/canons`` 的**列表行**出参（2026-10-15 批次（六）· L4）。 */
+  project_id: string;
+  /** ``GET /projects/{pid}/canons`` 的**列表行**出参（2026-10-15 批次（六）· L4）。 */
+  title: string;
+  /** ``GET /projects/{pid}/canons`` 的**列表行**出参（2026-10-15 批次（六）· L4）。 */
+  reader_profile: string;
+  /** ``GET /projects/{pid}/canons`` 的**列表行**出参（2026-10-15 批次（六）· L4）。 */
+  status: string;
+  /** ``GET /projects/{pid}/canons`` 的**列表行**出参（2026-10-15 批次（六）· L4）。 */
+  created_at: string;
+  /** ``GET /projects/{pid}/canons`` 的**列表行**出参（2026-10-15 批次（六）· L4）。 */
+  logline?: string;
+  /** ``GET /projects/{pid}/canons`` 的**列表行**出参（2026-10-15 批次（六）· L4）。 */
+  spine_count?: number;
+  /** ``GET /projects/{pid}/canons`` 的**列表行**出参（2026-10-15 批次（六）· L4）。 */
+  rhythm_chapter_count?: number;
+}
+
+export interface CapabilityBindingDeleted {
+  /** ``DELETE /capability-bindings/{capability}`` 的 200 响应。 */
+  capability: string;
+  /** ``DELETE /capability-bindings/{capability}`` 的 200 响应。 */
+  deleted: boolean;
+}
+
+export interface CapabilityBindingOut {
+  /** ``PUT /capability-bindings/{capability}`` 的 200 响应。 */
+  capability: string;
+  /** 环节中文名，来自 CAPABILITY_LABELS */
+  label: string;
+  /** 归属该环节的 agent 名（含 'writer(revise·改稿)' 这类带标注形态） */
+  agents: Array<string>;
+  /** 按 fallback 优先序；未绑定时为空数组 */
+  profile_ids: Array<string>;
+  /** 按 profile_ids 顺序解析；缺失项跳过 */
+  profiles: Array<BindingProfileOut>;
+  /** model_configs 中该 capability 有 enabled 行（迁移引导用） */
+  legacy_available: boolean;
+  /** 未绑定时为 null（不是省略） */
+  updated_at: string | null;
+}
+
+export interface ChangedDiffItemResponse {
+  /** 稳定键：character_id / hook_id / debt_id / … */
+  id: string;
+  /** ``_diff_lists`` 的 changed 元素：``{"id": <稳定键>, "changes": {…}}``（实测）。 */
+  changes?: Record<string, unknown> | null;
 }
 
 export interface ChangedItem {
@@ -267,6 +583,96 @@ export interface CharacterUpdate {
   inject_mode?: "auto" | "always" | "never" | null;
 }
 
+export interface CommitListItem {
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  commit_id: string;
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  project_id: string;
+  /** NOT NULL；main commit 与分支 commit 各指向自己的分支 */
+  branch_id: string;
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  chapter_id: string;
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  previous_state_version: number;
+  /** 本 commit 产生的版本；回滚 commit 同样占一个版本号 */
+  resulting_state_version: number;
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  delta_id: string;
+  /** NOT NULL 列；解析失败时为 null */
+  validation_json: Record<string, unknown> | null;
+  /** NOT NULL 列；解析失败时为 null */
+  author_approval_json: Record<string, unknown> | null;
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  timestamp: string;
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  workflow_run_id: string;
+  /** 只有回滚产生的 commit 非 null；其余恒为 null */
+  rollback_of: string | null;
+}
+
+export interface CommitResponse {
+  /** ``POST /projects/{pid}/commits`` 的 201 响应（实测 4 键恒在）。 */
+  commit_id: string;
+  /** ``POST /projects/{pid}/commits`` 的 201 响应（实测 4 键恒在）。 */
+  delta_id: string;
+  /** ``POST /projects/{pid}/commits`` 的 201 响应（实测 4 键恒在）。 */
+  state_version: number;
+  /** main commit 才有；分支 commit 恒为 null（键本身恒在） */
+  snapshot_ref?: string | null;
+}
+
+export interface ConfigTestResult {
+  /** ``POST /model-configs/{id}/test`` 的 200 响应。 */
+  config_id: string;
+  /** ``POST /model-configs/{id}/test`` 的 200 响应。 */
+  ok: boolean;
+  /** ``POST /model-configs/{id}/test`` 的 200 响应。 */
+  latency_ms: number;
+  /** ``POST /model-configs/{id}/test`` 的 200 响应。 */
+  detail: string;
+  /** ``POST /model-configs/{id}/test`` 的 200 响应。 */
+  status_code: number | null;
+}
+
+export interface ContextPreview {
+  /** ``GET /chapters/{chapter_id}/context-preview`` 的 200 响应（实测恒 7 键）。 */
+  chapter_id: string;
+  /** ``GET /chapters/{chapter_id}/context-preview`` 的 200 响应（实测恒 7 键）。 */
+  project_id: string;
+  /** 被预览的 agent 名，实测恒 ['director', 'writer', 'observer'] */
+  agents: Array<string>;
+  /** 恒 3 层，顺序 L0→L1→L2 */
+  layers: Array<ContextPreviewLayer>;
+  /** ``GET /chapters/{chapter_id}/context-preview`` 的 200 响应（实测恒 7 键）。 */
+  total_tokens: number;
+  /** ``GET /chapters/{chapter_id}/context-preview`` 的 200 响应（实测恒 7 键）。 */
+  token_budget: number;
+  /** total_tokens <= token_budget */
+  within_budget: boolean;
+}
+
+export interface ContextPreviewItem {
+  /** 条目类型：chapter / project / character / hook / director_plan / … */
+  kind: string;
+  /** 实体 id；非实体条目用下划线常量（如 _snap / _intent / _kp） */
+  id: string;
+  /** 人类可读摘要 */
+  name: string;
+}
+
+export interface ContextPreviewLayer {
+  /** L0 / L1 / L2 */
+  id: string;
+  /** 该层装载内容的人类可读说明 */
+  label: string;
+  /** 该层的 token 估算 */
+  token_estimate: number;
+  /** 预览的单个分层（L0 / L1 / L2）。实测三层**逐字同形**、恒 5 键。 */
+  items: Array<ContextPreviewItem>;
+  /** 是否因超预算被截断；实测恒 false（截断尚未实现） */
+  truncated: boolean;
+}
+
 export interface ContinueRequest {
   /** 续写请求体。 */
   num_variants?: number;
@@ -294,6 +700,31 @@ export interface ContinueVariant {
   elapsed_ms: number;
   /** 单个候选 variant 的响应字段。 */
   error?: string | null;
+}
+
+export interface Debt {
+  /** Debt 完整表示，对应数据库行。 */
+  debt_id: string;
+  /** Debt 完整表示，对应数据库行。 */
+  project_id: string;
+  /** Debt 完整表示，对应数据库行。 */
+  description: string;
+  /** Debt 完整表示，对应数据库行。 */
+  created_chapter_id: string | null;
+  /** Debt 完整表示，对应数据库行。 */
+  severity: number;
+  /** Debt 完整表示，对应数据库行。 */
+  deadline_chapter_id: string | null;
+  /** Debt 完整表示，对应数据库行。 */
+  status: "open" | "acknowledged" | "paid" | "forgiven";
+  /** Debt 完整表示，对应数据库行。 */
+  visibility: string;
+  /** Debt 完整表示，对应数据库行。 */
+  who_knows: Array<string> | null;
+  /** Debt 完整表示，对应数据库行。 */
+  created_at: string;
+  /** Debt 完整表示，对应数据库行。 */
+  updated_at: string;
 }
 
 export interface DebtCreate {
@@ -328,6 +759,25 @@ export interface DebtUpdate {
   visibility?: string | null;
   /** 部分更新 Debt 请求体——所有字段均可选。 */
   who_knows?: Array<string> | null;
+}
+
+export interface DeconstructStartResponse {
+  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
+  run_id: string;
+  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
+  status: string;
+  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
+  current_node?: string | null;
+  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
+  project_id: string;
+  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
+  book_title: string;
+  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
+  canon_id?: string | null;
+  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
+  extracts_count?: number | null;
+  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
+  error?: string | null;
 }
 
 export interface DeliveryChapter {
@@ -534,6 +984,42 @@ export interface GenreBindRequest {
   pack_id: string;
 }
 
+export interface GenreOpeningRule {
+  /** 题材开篇规则的单条机检判定（``evaluate_genre_opening`` 的输出）。 */
+  check_id: string;
+  /** 题材开篇规则的单条机检判定（``evaluate_genre_opening`` 的输出）。 */
+  chapter_no?: number | null;
+  /** 题材开篇规则的单条机检判定（``evaluate_genre_opening`` 的输出）。 */
+  description: string;
+  /** 题材开篇规则的单条机检判定（``evaluate_genre_opening`` 的输出）。 */
+  requirement: string;
+  /** 题材开篇规则的单条机检判定（``evaluate_genre_opening`` 的输出）。 */
+  status: string;
+  /** 题材开篇规则的单条机检判定（``evaluate_genre_opening`` 的输出）。 */
+  detail: string;
+  /** 题材开篇规则的单条机检判定（``evaluate_genre_opening`` 的输出）。 */
+  keywords_source?: string | null;
+}
+
+export interface GenreOpeningSection {
+  /** 题材开篇检查段（恒 9 键）。 */
+  pack_id: string;
+  /** 题材开篇检查段（恒 9 键）。 */
+  pack_name: string;
+  /** 题材开篇检查段（恒 9 键）。 */
+  rule_count: number;
+  /** 题材开篇检查段（恒 9 键）。 */
+  rules: Array<GenreOpeningRule>;
+  /** 题材开篇检查段（恒 9 键）。 */
+  pass_count: number;
+  /** 题材开篇检查段（恒 9 键）。 */
+  fail_count: number;
+  /** 题材开篇检查段（恒 9 键）。 */
+  unverifiable_count: number;
+  /** 题材开篇检查段（恒 9 键）。 */
+  info_count: number;
+}
+
 export interface GenrePack {
   /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
   pack_id: string;
@@ -553,6 +1039,17 @@ export interface GenrePack {
   updated_at: string;
   /** 题材包完整表示（GET /genre-packs/{pack_id}）。``payload`` 为解析后的 dict。 */
   bound_project_count?: number;
+}
+
+export interface GenrePackBinding {
+  /** 项目 ↔ 题材包绑定（单 slot）的出参形状。 */
+  project_id: string;
+  /** 项目 ↔ 题材包绑定（单 slot）的出参形状。 */
+  pack_id?: string | null;
+  /** 项目 ↔ 题材包绑定（单 slot）的出参形状。 */
+  bound: boolean;
+  /** 项目 ↔ 题材包绑定（单 slot）的出参形状。 */
+  pack?: GenrePack | null;
 }
 
 export interface GenrePackCreate {
@@ -608,6 +1105,42 @@ export interface HTTPValidationError {
   detail?: Array<ValidationError>;
 }
 
+export interface HealthResponse {
+  /** 恒为 ``ok``（本端点只在应用已起来时才可达） */
+  status: string;
+  /** pyproject 单源版本，经 importlib 读取 */
+  version: string;
+  /** **业务表数**（已扣除 ``_migrations`` 虚表） */
+  tables: number;
+}
+
+export interface Hook {
+  /** Hook 完整表示，对应数据库行。 */
+  hook_id: string;
+  /** Hook 完整表示，对应数据库行。 */
+  project_id: string;
+  /** Hook 完整表示，对应数据库行。 */
+  name: string;
+  /** Hook 完整表示，对应数据库行。 */
+  introduced_chapter_id: string | null;
+  /** Hook 完整表示，对应数据库行。 */
+  status: "OPEN" | "ACTIVE" | "ESCALATED" | "RESOLVED" | "ABANDONED";
+  /** Hook 完整表示，对应数据库行。 */
+  importance: number;
+  /** Hook 完整表示，对应数据库行。 */
+  expected_payoff_chapter_id: string | null;
+  /** Hook 完整表示，对应数据库行。 */
+  payoff_chapter_id: string | null;
+  /** Hook 完整表示，对应数据库行。 */
+  visibility: string;
+  /** Hook 完整表示，对应数据库行。 */
+  who_knows: Array<string> | null;
+  /** Hook 完整表示，对应数据库行。 */
+  created_at: string;
+  /** Hook 完整表示，对应数据库行。 */
+  updated_at: string;
+}
+
 export interface HookCreate {
   /** 创建 Hook 请求体。 */
   name: string;
@@ -646,6 +1179,37 @@ export interface HookUpdate {
   who_knows?: Array<string> | null;
 }
 
+export interface ImportedProject {
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  project_id: string;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  name: string;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  status: string;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  created_at: string;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  updated_at: string;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  premise?: string | null;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  genre?: string | null;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  target_words?: number | null;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  foreshadow_overdue_chapters: number;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  word_band_json?: string | null;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  genre_pack_id?: string | null;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  writing_bible?: string | null;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  fast_mode?: number | null;
+  /** ``POST /projects/import-backup`` 的响应：导入出的**新** projects 行。 */
+  import_warnings?: Array<string> | null;
+}
+
 export interface ListDiff {
   /** 列表段的差异（``_diff_lists`` 的返回）。三个子键同样**空则省略**。 */
   added?: Array<Record<string, unknown>> | null;
@@ -653,6 +1217,97 @@ export interface ListDiff {
   removed?: Array<Record<string, unknown>> | null;
   /** 列表段的差异（``_diff_lists`` 的返回）。三个子键同样**空则省略**。 */
   changed?: Array<ChangedItem> | null;
+}
+
+export interface ListDiffResponse {
+  /** ``_diff_lists`` 的返回：``added`` / ``removed`` / ``changed``，三者都**空则省略**。 */
+  added?: Array<Record<string, unknown>> | null;
+  /** ``_diff_lists`` 的返回：``added`` / ``removed`` / ``changed``，三者都**空则省略**。 */
+  removed?: Array<Record<string, unknown>> | null;
+  /** ``_diff_lists`` 的返回：``added`` / ``removed`` / ``changed``，三者都**空则省略**。 */
+  changed?: Array<ChangedDiffItemResponse> | null;
+}
+
+export interface ModelConfigOut {
+  /** ``model_configs`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  config_id: string;
+  /** ``model_configs`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  capability: string;
+  /** ``model_configs`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  provider: string;
+  /** ``model_configs`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  model: string;
+  /** provider 调参解析后的对象；其中 api_key 恒被替换为 '***'，明文不出参 */
+  params_json: Record<string, unknown>;
+  /** 0/1 整数（非布尔）；0 的配置不可用于 /test */
+  enabled: number;
+  /** ``model_configs`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  has_api_key: boolean;
+}
+
+export interface ModelProfileOut {
+  /** ``model_profiles`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  profile_id: string;
+  /** ``model_profiles`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  name: string;
+  /** ``model_profiles`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  provider: string;
+  /** ``model_profiles`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  model: string;
+  /** provider 调参（temperature / top_p / base_url / timeout_s …）解析后的对象；其中 api_key 恒被替换为 '***'，明文不出参 */
+  params_json: Record<string, unknown>;
+  /** 0/1 整数（非布尔）；0 的档案不可用于 /test */
+  enabled: number;
+  /** ``model_profiles`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  created_at: string;
+  /** ``model_profiles`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  updated_at: string;
+  /** 是否已配置密钥；涵盖 params.api_key 与 secrets.json 两个来源 */
+  has_api_key: boolean;
+}
+
+export interface PlotEventOut {
+  /** ``POST|GET|PATCH /api/events/{id}`` 的响应。 */
+  id: string;
+  /** ``POST|GET|PATCH /api/events/{id}`` 的响应。 */
+  project_id: string;
+  /** ``POST|GET|PATCH /api/events/{id}`` 的响应。 */
+  type: string;
+  /** 引用的上游 event_id 列表（已从 cause_json 解码） */
+  cause: Array<string>;
+  /** 影响的下游 event_id 列表（已从 effects_json 解码） */
+  effects: Array<string>;
+  /** 参与角色 character_id 列表（已从 participants_json 解码） */
+  participants: Array<string>;
+  /** ``POST|GET|PATCH /api/events/{id}`` 的响应。 */
+  location_id: string | null;
+  /** 已从 time_json 解码，形如 {timeline_day, in_story_date} */
+  time: Record<string, unknown>;
+  /** ``POST|GET|PATCH /api/events/{id}`` 的响应。 */
+  status: string;
+  /** ``POST|GET|PATCH /api/events/{id}`` 的响应。 */
+  introduced_chapter_id: string | null;
+  /** ``POST|GET|PATCH /api/events/{id}`` 的响应。 */
+  visibility: string;
+  /** 知情者 character_id 列表；NULL=沿用默认，[]=显式置空 */
+  who_knows: Array<string> | null;
+  /** 迁移 0013 的列；本字段曾因「模型里没有」而对 API 隐形 */
+  description: string | null;
+}
+
+export interface ProfileTestResult {
+  /** ``POST /model-profiles/{id}/test`` 的 200 响应。 */
+  profile_id: string;
+  /** false 表示「端点可达但鉴权/健康不过」，仍是 200 */
+  ok: boolean;
+  /** ``POST /model-profiles/{id}/test`` 的 200 响应。 */
+  latency_ms: number;
+  /** 恒为字符串（router 用 `or ''` 兜底，不会是 null） */
+  detail: string;
+  /** 上游 HTTP 码；网络异常时为 null */
+  status_code: number | null;
+  /** 仅 400 + 远端错误文本命中模型名标记时出现的中文提示；否则整个键不存在 */
+  hint?: string | null;
 }
 
 export interface Project {
@@ -720,6 +1375,37 @@ export interface ProjectInitRequest {
   model_profile_id?: string | null;
 }
 
+export interface ProjectInitStage {
+  /** premise / world / character / outline */
+  stage: string;
+  /** 人类可读名（题材定位 / 世界观 / 核心角色 / 卷纲与章节种子） */
+  label: string;
+  /** 由 DB 现有数据推导，不建新表 */
+  done: boolean;
+  /** 人类可读说明；未生成为「未生成」 */
+  detail: string;
+}
+
+export interface ProjectInitStarted {
+  /** ``POST /api/projects/init`` 的 201 响应。 */
+  run_id: string;
+  /** RUNNING / PAUSED / COMPLETED / FAILED；同步启动，非恒 RUNNING */
+  status: string;
+  /** ``POST /api/projects/init`` 的 201 响应。 */
+  current_node: string | null;
+  /** step_mode 暂停时 persist 节点未跑 ⇒ 可为 null */
+  project_id: string | null;
+  /** 仅 status=PAUSED 时出现；形状随 workflow 而变，不逐字段建模 */
+  pause_payload?: Record<string, unknown> | null;
+}
+
+export interface ProjectInitStatus {
+  /** 恒 4 行，顺序即 premise→world→character→outline */
+  stages: Array<ProjectInitStage>;
+  /** 四环节 done 的或；用于 UI 决定是否提示先跑 project-init */
+  has_any_data: boolean;
+}
+
 export interface ProjectUpdate {
   /** 部分更新请求体——所有字段均可选，未提供则不修改。 */
   name?: string | null;
@@ -739,6 +1425,20 @@ export interface ProjectUpdate {
   writing_bible?: string | null;
   /** 快通道开关。true=开 / false=显式关 / 显式 null=清除覆盖（落 NULL，回到「未设置」）；省略=保留原值。 */
   fast_mode?: boolean | null;
+}
+
+export interface ProviderErrorDetail {
+  /** 固定 'provider_error' */
+  error: string;
+  /** ``HTTPException(502, detail={...})`` 的 ``detail`` 部分。 */
+  message: string;
+  /** 上游 HTTP 码；provider 未带上来时为 null */
+  status_code: number | null;
+}
+
+export interface ProviderErrorEnvelope {
+  /** FastAPI 把 ``HTTPException(detail=...)`` 包成 ``{"detail": ...}``。 */
+  detail: ProviderErrorDetail;
 }
 
 export interface QualityJudgeRecord {
@@ -763,6 +1463,73 @@ export interface QualityJudgeResponse {
   chapter_id: string;
   /** ``POST /chapters/{cid}/quality/judge`` 的响应。 */
   judge: QualityJudgeRecord | null;
+}
+
+export interface QualityReportIssue {
+  /** `issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。 */
+  severity: "error" | "warning" | "info";
+  /** `issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。 */
+  category: "schema_validity" | "timeline_consistency" | "character_contradiction" | "world_rule_contradiction" | "knowledge_leakage" | "plot" | "character" | "continuity" | "style" | "pacing" | "foreshadowing" | "ai_trace" | "payoff" | "compliance";
+  /** `issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。 */
+  location?: string;
+  /** `issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。 */
+  rule_id: string;
+  /** `issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。 */
+  message: string;
+  /** `issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。 */
+  gate?: "auto" | "confirm" | "block";
+  /** `issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。 */
+  suggestion?: string | null;
+  /** `issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。 */
+  evidence_refs?: Array<string> | null;
+  /** `issues_json[]` 的一格（**出参**形状；与内部 :class:`Issue` 字段同名同义）。 */
+  judge_trace?: Record<string, unknown> | null;
+}
+
+export interface QualityReportResponse {
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  report_id: string;
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  project_id: string;
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  chapter_id: string;
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  commit_id?: string | null;
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  run_id?: string | null;
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  overall: number;
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  scores_json?: Record<string, unknown>;
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  issues_json?: Array<QualityReportIssue>;
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  draft_version?: number | null;
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  created_at: string;
+  /** ``GET /chapters/{cid}/quality`` 与 ``.../quality/evaluate`` 的出参。 */
+  judge: QualityJudgeRecord | null;
+}
+
+export interface RelationshipOut {
+  /** ``GET /api/projects/{pid}/relationships`` 的响应行。 */
+  id: string;
+  /** ``GET /api/projects/{pid}/relationships`` 的响应行。 */
+  project_id: string;
+  /** ``GET /api/projects/{pid}/relationships`` 的响应行。 */
+  from_character_id: string;
+  /** ``GET /api/projects/{pid}/relationships`` 的响应行。 */
+  to_character_id: string;
+  /** ``GET /api/projects/{pid}/relationships`` 的响应行。 */
+  relation_type: string;
+  /** 已从 state_json 解码，形如 {intensity, since_chapter} */
+  state: Record<string, unknown>;
+  /** DDL NOT NULL；快照版本号 */
+  last_state_version: number;
+  /** 迁移 0014 伴随列，默认 'PUBLIC'（与 plot_events 的 'RESTRICTED' 不同） */
+  visibility: string;
+  /** 知情者 character_id 列表；NULL=沿用默认，[]=显式置空 */
+  who_knows: Array<string> | null;
 }
 
 export interface ResumeRequest {
@@ -829,6 +1596,69 @@ export interface RevealPolicyUpdateIn {
 export interface RevisionNoteUpdate {
   /** 写入或清除改稿意见的请求体。 */
   note: string;
+}
+
+export interface RollbackResponse {
+  /** ``POST /commits/{cid}/rollback`` 的 201 响应（实测 5 键 = commit + 1）。 */
+  commit_id: string;
+  /** ``POST /commits/{cid}/rollback`` 的 201 响应（实测 5 键 = commit + 1）。 */
+  delta_id: string;
+  /** ``POST /commits/{cid}/rollback`` 的 201 响应（实测 5 键 = commit + 1）。 */
+  state_version: number;
+  /** main commit 才有；分支 commit 恒为 null（键本身恒在） */
+  snapshot_ref?: string | null;
+  /** 被回滚的 commit_id（= 本次 commit 的来源） */
+  rollback_of: string;
+}
+
+export interface RunCancelled {
+  /** ``POST /runs/{run_id}/cancel`` 的 200 响应。 */
+  run_id: string;
+  /** 成功恒为 CANCELLED；409 冲突体走 FastAPI 的 {detail} */
+  status: string;
+}
+
+export interface SigningCheckItem {
+  /** 单条体检项（``signing_check.checks.CheckItem`` 的 dict 投影，恒 4 键）。 */
+  key: string;
+  /** 单条体检项（``signing_check.checks.CheckItem`` 的 dict 投影，恒 4 键）。 */
+  level: string;
+  /** 单条体检项（``signing_check.checks.CheckItem`` 的 dict 投影，恒 4 键）。 */
+  detail: string;
+  /** 单条体检项（``signing_check.checks.CheckItem`` 的 dict 投影，恒 4 键）。 */
+  advice: string;
+}
+
+export interface SigningCheckResult {
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  project_id: string;
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  project_name: string;
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  total_chars: number;
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  generated_at: string;
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  items: Array<SigningCheckItem>;
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  summary: SigningCheckSummary;
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  word_band_source: string;
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  word_band_rejected?: boolean | null;
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  genre_opening?: GenreOpeningSection | null;
+}
+
+export interface SigningCheckSummary {
+  /** 四档计数（``level`` 分桶；恒 4 键）。 */
+  pass_count: number;
+  /** 四档计数（``level`` 分桶；恒 4 键）。 */
+  warn_count: number;
+  /** 四档计数（``level`` 分桶；恒 4 键）。 */
+  fail_count: number;
+  /** 四档计数（``level`` 分桶；恒 4 键）。 */
+  info_count: number;
 }
 
 export interface SimulationIssue {
@@ -907,6 +1737,45 @@ export interface StartWorkflowRequest {
   auto_commit?: boolean | null;
 }
 
+export interface StateDeltaListItem {
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  delta_id: string;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  chapter_id: string;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  workflow_run_id: string;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  previous_state_version: number;
+  /** schema 里 const=1；保留 int 而非 Literal 以免过紧 */
+  delta_version: number;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  schema_version: string;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  created_by: string;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  created_at: string;
+  /** 重试时指向被取代的 delta_id；普通 delta 为 null */
+  supersedes: string | null;
+  /** 恒为 null（restore_delta_from_row 写死） */
+  notes: string | null;
+  /** proposed / validated / applied / rejected / superseded */
+  status: string;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  character_changes: Array<Record<string, unknown>>;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  world_changes: Array<Record<string, unknown>>;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  relationship_changes: Array<Record<string, unknown>>;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  new_events: Array<Record<string, unknown>>;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  resolved_hooks: Array<Record<string, unknown>>;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  new_hooks: Array<Record<string, unknown>>;
+  /** ``GET /projects/{pid}/chapters/{cid}/deltas`` 的**行**（实测恒 18 键）。 */
+  debt_changes: Array<Record<string, unknown>>;
+}
+
 export interface StateDiff {
   /** 两个快照的结构化差异。 */
   version_a: number;
@@ -928,11 +1797,90 @@ export interface StateDiff {
   recent_events?: ListDiff | null;
 }
 
+export interface StateDiffResponse {
+  /** ``GET /projects/{pid}/state/diff?a=&b=`` 的 200 响应。 */
+  version_a: number;
+  /** ``GET /projects/{pid}/state/diff?a=&b=`` 的 200 响应。 */
+  version_b: number;
+  /** 恒为 null——本端点不支持分支视角 */
+  branch_id?: string | null;
+  /** ``GET /projects/{pid}/state/diff?a=&b=`` 的 200 响应。 */
+  characters?: ListDiffResponse | null;
+  /** ``GET /projects/{pid}/state/diff?a=&b=`` 的 200 响应。 */
+  world?: Record<string, unknown> | null;
+  /** ``GET /projects/{pid}/state/diff?a=&b=`` 的 200 响应。 */
+  hooks?: ListDiffResponse | null;
+  /** ``GET /projects/{pid}/state/diff?a=&b=`` 的 200 响应。 */
+  debts?: ListDiffResponse | null;
+  /** ``GET /projects/{pid}/state/diff?a=&b=`` 的 200 响应。 */
+  events_changed?: Record<string, unknown> | null;
+  /** ``GET /projects/{pid}/state/diff?a=&b=`` 的 200 响应。 */
+  recent_events?: ListDiffResponse | null;
+}
+
+export interface StyleSample {
+  /** 文风样例行（``author_style_samples`` 表全列，**恒 6 键、无条件键**）。 */
+  sample_id: string;
+  /** 文风样例行（``author_style_samples`` 表全列，**恒 6 键、无条件键**）。 */
+  project_id: string;
+  /** 文风样例行（``author_style_samples`` 表全列，**恒 6 键、无条件键**）。 */
+  title: string;
+  /** 文风样例行（``author_style_samples`` 表全列，**恒 6 键、无条件键**）。 */
+  content: string;
+  /** 文风样例行（``author_style_samples`` 表全列，**恒 6 键、无条件键**）。 */
+  created_at: string;
+  /** 文风样例行（``author_style_samples`` 表全列，**恒 6 键、无条件键**）。 */
+  updated_at: string;
+}
+
 export interface StyleSampleCreate {
   /** POST 请求体。 */
   title: string;
   /** POST 请求体。 */
   content: string;
+}
+
+export interface StyleSampleOut {
+  /** ``POST /projects/{pid}/canons/{cid}/to-style-sample`` 的出参。 */
+  sample_id: string;
+  /** ``POST /projects/{pid}/canons/{cid}/to-style-sample`` 的出参。 */
+  project_id: string;
+  /** ``POST /projects/{pid}/canons/{cid}/to-style-sample`` 的出参。 */
+  title: string;
+  /** ``POST /projects/{pid}/canons/{cid}/to-style-sample`` 的出参。 */
+  content: string;
+  /** ``POST /projects/{pid}/canons/{cid}/to-style-sample`` 的出参。 */
+  created_at: string;
+  /** ``POST /projects/{pid}/canons/{cid}/to-style-sample`` 的出参。 */
+  updated_at: string;
+}
+
+export interface SubmitDeltaResponse {
+  /** ``POST /projects/{pid}/deltas`` 的 201 响应（实测 3 键恒在）。 */
+  delta_id: string;
+  /** ``POST /projects/{pid}/deltas`` 的 201 响应（实测 3 键恒在）。 */
+  status: string;
+  /** 恒在；无错时是 []（不是缺键） */
+  errors: Array<string>;
+}
+
+export interface TimelineEventOut {
+  /** ``POST /api/projects/{pid}/timeline`` 的响应（``GET .../timeline`` 同款）。 */
+  id: string;
+  /** ``POST /api/projects/{pid}/timeline`` 的响应（``GET .../timeline`` 同款）。 */
+  project_id: string;
+  /** ``POST /api/projects/{pid}/timeline`` 的响应（``GET .../timeline`` 同款）。 */
+  event_id: string;
+  /** 故事内第几天；DDL NOT NULL，恒在 */
+  day_index: number;
+  /** 可选 HH:MM 等 */
+  time_ref: string | null;
+  /** ``POST /api/projects/{pid}/timeline`` 的响应（``GET .../timeline`` 同款）。 */
+  description: string | null;
+  /** 迁移 0014 伴随列，默认 'PUBLIC'（与 plot_events 的 'RESTRICTED' 不同） */
+  visibility: string;
+  /** ``POST /api/projects/{pid}/timeline`` 的响应（``GET .../timeline`` 同款）。 */
+  who_knows: Array<string> | null;
 }
 
 export interface ValidationError {
@@ -1008,4 +1956,131 @@ export interface VolumeUpdate {
   status?: "active" | "sealed" | null;
   /** 部分更新请求体——所有字段均可选，未提供则不修改。 */
   arc_summary?: string | null;
+}
+
+export interface WorkflowRunDetail {
+  /** ``GET /runs/{run_id}`` 的 200 响应。 */
+  run_id: string;
+  /** workflows 表主键；人类可读名见 workflow_name */
+  workflow_id: string;
+  /** 反查 workflows.name；孤儿 run 为 null */
+  workflow_name: string | null;
+  /** project-init 等非章节任务的 run 为 null */
+  chapter_id: string | null;
+  /** PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED */
+  status: string;
+  /** ``GET /runs/{run_id}`` 的 200 响应。 */
+  current_node: string | null;
+  /** 暂停/恢复持久化点；键集随 workflow 演进，不建模 */
+  checkpoint_json: Record<string, unknown>;
+  /** 失败原因；成功 run 为 null */
+  error: string | null;
+  /** ``GET /runs/{run_id}`` 的 200 响应。 */
+  retry_count: number;
+  /** ``GET /runs/{run_id}`` 的 200 响应。 */
+  started_at: string;
+  /** 未到终态为 null */
+  ended_at: string | null;
+  /** 0026 新增的实例身份列；未设置时为 null */
+  instance_id: string | null;
+  /** 按 (started_at, node_run_id) 升序；无节点时为 [] */
+  nodes: Array<WorkflowRunNode>;
+  /** 仅 PAUSED 时出现；各 workflow 的挂起节点不同 ⇒ 形状不固定 */
+  pause_payload?: Record<string, unknown> | null;
+  /** 仅 PAUSED 时出现；{agent 名: 本次实际调用的 model_id}，无成功调用时为 {} */
+  stage_models?: Record<string, unknown> | null;
+}
+
+export interface WorkflowRunNode {
+  /** ``workflow_run_nodes`` 的一行（run 详情里的 ``nodes[]``）。 */
+  node_run_id: string;
+  /** ``workflow_run_nodes`` 的一行（run 详情里的 ``nodes[]``）。 */
+  run_id: string;
+  /** workflow 定义里的节点 id（不是 agent 名） */
+  node_id: string;
+  /** 纯逻辑节点无 agent ⇒ null */
+  agent_id: string | null;
+  /** PENDING / RUNNING / COMPLETED / FAILED / SKIPPED */
+  status: string;
+  /** 节点输入；DB 列 NOT NULL DEFAULT '{}'，故恒为对象 */
+  input_json: Record<string, unknown>;
+  /** 非结构化输出（SKIPPED / 尚未跑完）时为 null */
+  output_json: Record<string, unknown> | null;
+  /** 未调 AI 的节点为 null */
+  prompt_version: string | null;
+  /** 未调 AI 的节点为 null */
+  model_id: string | null;
+  /** {prompt, completion, total}；未调 AI 为 null */
+  token_usage_json: Record<string, unknown> | null;
+  /** ``workflow_run_nodes`` 的一行（run 详情里的 ``nodes[]``）。 */
+  latency_ms: number | null;
+  /** ``workflow_run_nodes`` 的一行（run 详情里的 ``nodes[]``）。 */
+  error: string | null;
+  /** PENDING（尚未开始）为 null */
+  started_at: string | null;
+  /** 未到终态为 null */
+  ended_at: string | null;
+}
+
+export interface WorkflowRunSummary {
+  /** ``GET /projects/{pid}/runs`` 的**行**（实测恒 13 键）。 */
+  run_id: string;
+  /** ``GET /projects/{pid}/runs`` 的**行**（实测恒 13 键）。 */
+  workflow_id: string;
+  /** JOIN workflows 反查；孤儿 run 为 null */
+  workflow_name: string | null;
+  /** 列表行专属：project-init 等非章节任务的 run 为 null（实测） */
+  chapter_id: string | null;
+  /** PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED */
+  status: string;
+  /** ``GET /projects/{pid}/runs`` 的**行**（实测恒 13 键）。 */
+  current_node: string | null;
+  /** 键集随 workflow 演进，不逐键建模 */
+  checkpoint_json: Record<string, unknown>;
+  /** 失败原因；成功 run 键在、值为 null */
+  error: string | null;
+  /** ``GET /projects/{pid}/runs`` 的**行**（实测恒 13 键）。 */
+  retry_count: number;
+  /** ``GET /projects/{pid}/runs`` 的**行**（实测恒 13 键）。 */
+  started_at: string;
+  /** 未到终态时键在、值为 null */
+  ended_at: string | null;
+  /** 0026 新增的实例身份列 */
+  instance_id: string | null;
+  /** 人类可读标签；workflow 名不在中文映射表里时为 null */
+  label: string | null;
+}
+
+export interface WorkflowStartAccepted {
+  /** 新建 run 的主键；真终态需轮询 GET /api/runs/{run_id} */
+  run_id: string;
+  /** 启动后恒为 RUNNING（同步化的 project-init 除外） */
+  status: string;
+  /** 恒为 null：异步启动返回时还没有节点在跑；给前端留位置 */
+  current_node: string | null;
+}
+
+export interface WorldEntityOut {
+  /** ``locations`` / ``factions`` / ``world_rules`` 三类实体的**出参**形态。 */
+  id: string;
+  /** ``locations`` / ``factions`` / ``world_rules`` 三类实体的**出参**形态。 */
+  project_id: string;
+  /** ``locations`` / ``factions`` / ``world_rules`` 三类实体的**出参**形态。 */
+  name: string;
+  /** 一句话陈述；未填时为空串（非 null） */
+  statement: string;
+  /** data_json 列的反序列化结果；未填时为 {}，也可能是数组 */
+  data: Record<string, unknown> | Array<unknown>;
+  /** 权限级别 */
+  visibility: "PUBLIC" | "VISIBLE" | "RESTRICTED" | "HIDDEN";
+  /** 可见者 ID 列表；null = 全员可见 */
+  who_knows: Array<string> | null;
+  /** 别名列表；恒为数组（world_rules 恒为 []，见模块注释） */
+  aliases: Array<string>;
+  /** 触发注入模式（world_rules 恒为 'auto'，见模块注释） */
+  inject_mode: "auto" | "always" | "never";
+  /** ``locations`` / ``factions`` / ``world_rules`` 三类实体的**出参**形态。 */
+  created_at: string;
+  /** ``locations`` / ``factions`` / ``world_rules`` 三类实体的**出参**形态。 */
+  updated_at: string;
 }

@@ -209,6 +209,16 @@ class LedgerService:
             "expected_payoff_chapter_id",
             "payoff_chapter_id",
         ):
+            # ⚠️ 2026-10-15 修：必须按「客户端**是否传了这个键**」判定，不能按值判。
+            # 原实现无条件 `fields[fld] = v`，而 `HookUpdate` 的默认值是 `None`
+            # ⇒ 「没传」与「显式置空」不可区分 ⇒ 客户端只发 `{"status":"ACTIVE"}`
+            # 就会把三列一起抹成 NULL（**数据丢失**，2026-08-23 起存在）。
+            # 同一函数里其余五个字段都走 `if payload.X is not None`（没传就跳过），
+            # 只有这三个不一致 ⇒ 是笔误不是设计。
+            # 修法用 `model_fields_set`：键不在集合里 = 没传 = 不碰；
+            # 显式传 `null` 仍会真的置空（PATCH 语义要求能主动清空）。
+            if fld not in payload.model_fields_set:
+                continue
             v = getattr(payload, fld)
             if v is not None and not isinstance(v, str):
                 raise ValidationError(f"{fld} must be string or null")
@@ -372,6 +382,10 @@ class LedgerService:
             fields["description"] = description
 
         for fld in ("created_chapter_id", "deadline_chapter_id"):
+            # ⚠️ 2026-10-15 修：与 `update_hook` 同款缺陷，见那里的完整说明。
+            # 原实现无条件 `fields[fld] = v` ⇒ 只 PATCH status 就会把两列抹成 NULL。
+            if fld not in payload.model_fields_set:
+                continue
             v = getattr(payload, fld)
             if v is not None and not isinstance(v, str):
                 raise ValidationError(f"{fld} must be string or null")

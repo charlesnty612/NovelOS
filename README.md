@@ -103,10 +103,14 @@ python -m pytest -q
 ## 测试
 
 ```bash
-# 后端全量（当前基线 2956 passed，1 skipped；-n 4 并行，约 6 分钟）
-# 须带 --ignore=tests/unit/test_m1_lock.py：该文件单跑会硬杀整个进程树（真因未定位），
-# 不带则跑不出与本基线可比的总数
-python -m pytest tests/ -q --ignore=tests/evals --ignore=tests/unit/test_m1_lock.py -n 4
+# 后端全量（当前基线 3312 passed，1 skipped；-n 4 并行，约 7 分钟）
+# --ignore=tests/unit/test_m1_lock.py 已于 2026-10-16 **撤销**：它曾挂的理由
+# 「该文件单跑会硬杀整个进程树、真因未定位」经实测证伪——那是一条从未成立的现象
+# （原记录把「我复现不出来」当成了「我还没找到真因」）。顺此查出并修掉了一个**真缺陷**
+# （`os.kill(pid,0)` 在 Windows 非稳定探测 ⇒ M1 单实例锁静默失效），并重写了两条
+# 本来都是空壳的 cmd_run 用例。现在该文件既无副作用也已进入全量并行验证
+# （3312 那轮即含它）。详见 scripts/tree_fingerprint.py docstring 与 AGENTS.md 坑区。
+python -m pytest tests/ -q --ignore=tests/evals -n 4
 
 # Golden 回归 eval（当前 3/3）
 python scripts/eval_regression.py
@@ -151,7 +155,7 @@ cd apps/web && npm run test
 ## 版本与更新日志
 
 当前版本 **v3.9.0**（`pyproject.toml` 为版本单源；`apps/web/package.json`、`apps/web/package-lock.json`
-与 `uv.lock` 随发版对齐。当前基线：pytest **2956 passed / 1 skipped**（须带 `--ignore=tests/unit/test_m1_lock.py`），vitest **489**（vitest 侧本轮未独立复现））。自 V1.0 起，
+与 `uv.lock` 随发版对齐。当前基线：pytest **3312 passed / 1 skipped**（全量命令**不再带**任何 `--ignore`——含 `test_m1_lock.py`，见上文「测试」一节），vitest **755**（56 个测试文件））。自 V1.0 起，
 所有迭代必须在 `CHANGELOG.md` 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x
 路线登记在同文件「Known Issues / 路线登记」一节。
 

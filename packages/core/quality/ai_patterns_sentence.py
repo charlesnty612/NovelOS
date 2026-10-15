@@ -4,7 +4,8 @@
 
 最小判定长度与段切分口径在 :mod:`ai_patterns_text`。
 ``AI-ENDING-SUMMARY``（章尾升华）**未随本族迁移**——它依赖 ``_last_paragraph``，
-而后者被 test_readability_rules.py 的源码级形状断言钉在门面，见 ai_patterns.py。
+而后者仍随门面留在 ai_patterns.py；**2026-10-15 批次（六）G8 起它也已改走
+``_split_paragraphs``**（此前是模块内第二份独立的段落切分实现，见 text 处的说明）。
 """
 from __future__ import annotations
 

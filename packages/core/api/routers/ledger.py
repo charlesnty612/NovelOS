@@ -12,6 +12,20 @@
 - GET/PATCH  /api/debts/{id}                    详情 / 更新
 - DELETE     /api/debts/{id}                    删除
 
+出参契约（G2，2026-10-15 批次（六））
+------------------------------------
+8 个**读/写**端点已挂 ``response_model``：单体 6 个用 ``Hook`` / ``Debt``，
+列表 2 个用 ``list[Hook]`` / ``list[Debt]``（形状见
+``packages/domain/ledger/models.py`` 的 docstring）。
+
+列表行形状**单独量过**（2026-10-15，临时库 + 合成夹具，见
+``tests/api/test_ledger_plot_list_response_contract.py``）：``hooks`` **12 键**、
+``narrative_debts`` **11 键**，与单体端点逐字相同，且 ≡ 两张表的列集（读路径是
+``SELECT *``）——但**这是量出来的结论，不是照 DDL 推的**：Lead 实测到过反例
+（``GET /commits`` 列表行 12 键而 ``POST /commits`` 响应只有 4 键）。
+
+⚠️ 两个 **DELETE** 端点仍返回 204（无 body，本就无契约可挂）。
+
 错误码
 ------
 - 201 / 200 / 204：成功
@@ -29,8 +43,10 @@ from fastapi.responses import Response
 
 from packages.domain.ledger import (
     ChapterNotFound,
+    Debt,
     DebtCreate,
     DebtUpdate,
+    Hook,
     HookCreate,
     HookUpdate,
     LedgerService,
@@ -70,6 +86,7 @@ def _handle(exc: Exception) -> HTTPException:
 @router.post(
     "/projects/{pid}/hooks",
     status_code=status.HTTP_201_CREATED,
+    response_model=Hook,
 )
 def create_hook(
     pid: str, payload: HookCreate, request: Request
@@ -82,7 +99,7 @@ def create_hook(
     return row
 
 
-@router.get("/projects/{pid}/hooks")
+@router.get("/projects/{pid}/hooks", response_model=list[Hook])
 def list_hooks(
     pid: str,
     request: Request,
@@ -95,7 +112,7 @@ def list_hooks(
         raise _handle(exc) from exc
 
 
-@router.get("/hooks/{hook_id}")
+@router.get("/hooks/{hook_id}", response_model=Hook)
 def get_hook(hook_id: str, request: Request) -> dict[str, Any]:
     svc = _service(request)
     row = svc.get_hook(hook_id)
@@ -104,7 +121,7 @@ def get_hook(hook_id: str, request: Request) -> dict[str, Any]:
     return row
 
 
-@router.patch("/hooks/{hook_id}")
+@router.patch("/hooks/{hook_id}", response_model=Hook)
 def update_hook(
     hook_id: str, payload: HookUpdate, request: Request
 ) -> dict[str, Any]:
@@ -138,6 +155,7 @@ def delete_hook(hook_id: str, request: Request) -> Response:
 @router.post(
     "/projects/{pid}/debts",
     status_code=status.HTTP_201_CREATED,
+    response_model=Debt,
 )
 def create_debt(
     pid: str, payload: DebtCreate, request: Request
@@ -150,7 +168,7 @@ def create_debt(
     return row
 
 
-@router.get("/projects/{pid}/debts")
+@router.get("/projects/{pid}/debts", response_model=list[Debt])
 def list_debts(
     pid: str,
     request: Request,
@@ -163,7 +181,7 @@ def list_debts(
         raise _handle(exc) from exc
 
 
-@router.get("/debts/{debt_id}")
+@router.get("/debts/{debt_id}", response_model=Debt)
 def get_debt(debt_id: str, request: Request) -> dict[str, Any]:
     svc = _service(request)
     row = svc.get_debt(debt_id)
@@ -172,7 +190,7 @@ def get_debt(debt_id: str, request: Request) -> dict[str, Any]:
     return row
 
 
-@router.patch("/debts/{debt_id}")
+@router.patch("/debts/{debt_id}", response_model=Debt)
 def update_debt(
     debt_id: str, payload: DebtUpdate, request: Request
 ) -> dict[str, Any]:

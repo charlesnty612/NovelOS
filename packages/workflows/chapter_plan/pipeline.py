@@ -60,7 +60,14 @@ def _build_ctx_node(ctx: dict[str, Any]) -> dict[str, Any]:
         ),
         expected_role=ctx.get("expected_role", "setup"),
     )
-    return {"director_planner_input": payload}
+    # 2026-10-15 批次（六）G9：装配级 token 预算元字段提到顶层（与 writer 侧同款理由
+    # ——``_cap_checkpoint_payload`` 按体积从大到小截断顶层键，大容器先被整个替换，
+    # 预算越超 meta 越先消失）。详见 chapter_write/pipeline.py 同名键的注释。
+    # ⚠️ 只提键：不改 payload、不改 prompt、不改缓存键语义。
+    return {
+        "director_planner_input": payload,
+        "director_planner_assembly_meta": payload.get("_assembly_meta"),
+    }
 
 
 def _director_planner_node(ctx: dict[str, Any]) -> dict[str, Any]:
