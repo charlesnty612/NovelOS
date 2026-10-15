@@ -20,6 +20,109 @@ export interface AdoptResponse {
   appended_chars: number;
 }
 
+export interface ArcAlert {
+  /** 节奏 / 伏笔告警。``level='fail'`` 是硬信号（charge_streak_exceeded）， */
+  level: "warn" | "fail";
+  /** 节奏 / 伏笔告警。``level='fail'`` 是硬信号（charge_streak_exceeded）， */
+  code: string;
+  /** 节奏 / 伏笔告警。``level='fail'`` 是硬信号（charge_streak_exceeded）， */
+  message: string;
+}
+
+export interface ArcChapterRow {
+  /** 弧光视图里的一行章节。 */
+  number: number;
+  /** 弧光视图里的一行章节。 */
+  title: string;
+  /** 由 plan_json.key_beats[].purpose 里的 [payoff] 标记推断，非作者声明的结构 */
+  has_payoff_beat: boolean;
+  /** 由 plan_json.key_beats[].purpose 里的 [charge] 标记推断 */
+  charge_beat: boolean;
+  /** 弧光视图里的一行章节。 */
+  overall: number | null;
+  /** 弧光视图里的一行章节。 */
+  pacing: number | null;
+  /** 最新草稿的去空白字符数（visible_chars 口径）；无草稿为 null */
+  prose_chars: number | null;
+  /** 弧光视图里的一行章节。 */
+  volume_id: string | null;
+  /** 弧光视图里的一行章节。 */
+  volume_number: number | null;
+}
+
+export interface ArcDebtCounts {
+  open: number;
+  paid: number;
+}
+
+export interface ArcHookCounts {
+  open: number;
+  resolved: number;
+  /** 计划回收章号 < 当前最大章号的伏笔数 */
+  overdue: number;
+}
+
+export interface ArcOverdueReveal {
+  /** 逾期未揭的剧透策略（``reveal_policies.overdue[]`` 的行）。 */
+  policy_id: string;
+  /** 逾期未揭的剧透策略（``reveal_policies.overdue[]`` 的行）。 */
+  target_kind: string;
+  /** 逾期未揭的剧透策略（``reveal_policies.overdue[]`` 的行）。 */
+  target_id: string;
+  /** 逾期未揭的剧透策略（``reveal_policies.overdue[]`` 的行）。 */
+  reveal_by_chapter: number | null;
+  /** 逾期未揭的剧透策略（``reveal_policies.overdue[]`` 的行）。 */
+  audience: string;
+}
+
+export interface ArcPayoff {
+  /** 回收节奏：全书 payoff 次数与「连续蓄力未回收」的最长/当前连击。 */
+  total: number;
+  /** 尾部连续蓄力（charge）章数 */
+  charge_streak: number;
+  /** 回收节奏：全书 payoff 次数与「连续蓄力未回收」的最长/当前连击。 */
+  max_charge_streak: number;
+  /** 回收节奏：全书 payoff 次数与「连续蓄力未回收」的最长/当前连击。 */
+  last_payoff_chapter: number | null;
+}
+
+export interface ArcRevealCounts {
+  planned: number;
+  revealed: number;
+  cancelled: number;
+  overdue: Array<ArcOverdueReveal>;
+}
+
+export interface ArcView {
+  /** ``GET /projects/{pid}/arc`` 的响应。 */
+  project_id: string;
+  /** ``GET /projects/{pid}/arc`` 的响应。 */
+  generated_at: string;
+  /** ``GET /projects/{pid}/arc`` 的响应。 */
+  chapters: Array<ArcChapterRow>;
+  /** ``GET /projects/{pid}/arc`` 的响应。 */
+  payoff: ArcPayoff;
+  /** ``GET /projects/{pid}/arc`` 的响应。 */
+  hooks: ArcHookCounts;
+  /** ``GET /projects/{pid}/arc`` 的响应。 */
+  debts: ArcDebtCounts;
+  /** ``GET /projects/{pid}/arc`` 的响应。 */
+  reveal_policies: ArcRevealCounts;
+  /** ``GET /projects/{pid}/arc`` 的响应。 */
+  volumes: Array<ArcVolumeRow>;
+  /** ``GET /projects/{pid}/arc`` 的响应。 */
+  alerts: Array<ArcAlert>;
+}
+
+export interface ArcVolumeRow {
+  volume_id: string;
+  number: number;
+  title: string | null;
+  /** 卷状态；后端列是 TEXT，未知值原样透出 */
+  status: string;
+  chapter_count: number;
+}
+
 export interface Body_start_deconstruct_upload_api_projects__project_id__deconstruct_upload_post {
   /** 参照书文件（.txt / .epub） */
   file: string;
@@ -27,6 +130,13 @@ export interface Body_start_deconstruct_upload_api_projects__project_id__deconst
   book_title?: string;
   /** 读者档 */
   reader_profile?: string;
+}
+
+export interface ChangedItem {
+  /** ``_diff_lists`` 的 changed 元素：``{"id": <稳定键>, "changes": {…}}``。 */
+  id: string;
+  /** ``_diff_lists`` 的 changed 元素：``{"id": <稳定键>, "changes": {…}}``。 */
+  changes?: Record<string, unknown> | null;
 }
 
 export interface Chapter {
@@ -536,6 +646,15 @@ export interface HookUpdate {
   who_knows?: Array<string> | null;
 }
 
+export interface ListDiff {
+  /** 列表段的差异（``_diff_lists`` 的返回）。三个子键同样**空则省略**。 */
+  added?: Array<Record<string, unknown>> | null;
+  /** 列表段的差异（``_diff_lists`` 的返回）。三个子键同样**空则省略**。 */
+  removed?: Array<Record<string, unknown>> | null;
+  /** 列表段的差异（``_diff_lists`` 的返回）。三个子键同样**空则省略**。 */
+  changed?: Array<ChangedItem> | null;
+}
+
 export interface Project {
   /** 项目完整表示，对应数据库行。 */
   project_id: string;
@@ -622,6 +741,30 @@ export interface ProjectUpdate {
   fast_mode?: boolean | null;
 }
 
+export interface QualityJudgeRecord {
+  /** 落库到 ``quality_reports.judge_json`` 的一格人工评分。 */
+  pacing: number;
+  /** 落库到 ``quality_reports.judge_json`` 的一格人工评分。 */
+  style: number;
+  /** 落库到 ``quality_reports.judge_json`` 的一格人工评分。 */
+  logic: number;
+  /** 落库到 ``quality_reports.judge_json`` 的一格人工评分。 */
+  dialogue: number;
+  /** 落库到 ``quality_reports.judge_json`` 的一格人工评分。 */
+  verdict?: string | null;
+  /** 落库到 ``quality_reports.judge_json`` 的一格人工评分。 */
+  top_issues?: Array<string> | null;
+}
+
+export interface QualityJudgeResponse {
+  /** ``POST /chapters/{cid}/quality/judge`` 的响应。 */
+  report_id: string;
+  /** ``POST /chapters/{cid}/quality/judge`` 的响应。 */
+  chapter_id: string;
+  /** ``POST /chapters/{cid}/quality/judge`` 的响应。 */
+  judge: QualityJudgeRecord | null;
+}
+
 export interface ResumeRequest {
   human_input?: Record<string, unknown> | null;
   auto_revise_max?: number | null;
@@ -632,9 +775,103 @@ export interface ResumeRequest {
   target_word_count?: number | null;
 }
 
+export interface RevealPolicyCreateIn {
+  /** ``POST /projects/{pid}/reveal-policies`` 的入参。 */
+  target_kind: "character" | "location" | "faction" | "world_rule" | "event" | "hook" | "debt" | "relationship";
+  /** ``POST /projects/{pid}/reveal-policies`` 的入参。 */
+  target_id: string;
+  /** ``POST /projects/{pid}/reveal-policies`` 的入参。 */
+  reveal_by_chapter?: number | null;
+  /** ``POST /projects/{pid}/reveal-policies`` 的入参。 */
+  audience?: string;
+  /** ``POST /projects/{pid}/reveal-policies`` 的入参。 */
+  status?: "planned" | "revealed" | "cancelled";
+  /** ``POST /projects/{pid}/reveal-policies`` 的入参。 */
+  revealed_chapter?: number | null;
+  /** ``POST /projects/{pid}/reveal-policies`` 的入参。 */
+  notes?: string | null;
+}
+
+export interface RevealPolicyOut {
+  /** ``reveal_policies`` 行的**出参**形态（= `RevealPolicy.to_dict()` 的 11 个键）。 */
+  policy_id: string;
+  /** ``reveal_policies`` 行的**出参**形态（= `RevealPolicy.to_dict()` 的 11 个键）。 */
+  project_id: string;
+  /** ``reveal_policies`` 行的**出参**形态（= `RevealPolicy.to_dict()` 的 11 个键）。 */
+  target_kind: "character" | "location" | "faction" | "world_rule" | "event" | "hook" | "debt" | "relationship";
+  /** ``reveal_policies`` 行的**出参**形态（= `RevealPolicy.to_dict()` 的 11 个键）。 */
+  target_id: string;
+  /** 计划在第几章前揭开；null = 未定 */
+  reveal_by_chapter: number | null;
+  /** `reader` / `character:<id>` / 逗号混写；DDL default 为 'reader' */
+  audience: string;
+  /** ``reveal_policies`` 行的**出参**形态（= `RevealPolicy.to_dict()` 的 11 个键）。 */
+  status: "planned" | "revealed" | "cancelled";
+  /** ``reveal_policies`` 行的**出参**形态（= `RevealPolicy.to_dict()` 的 11 个键）。 */
+  revealed_chapter: number | null;
+  /** ``reveal_policies`` 行的**出参**形态（= `RevealPolicy.to_dict()` 的 11 个键）。 */
+  notes: string | null;
+  /** ``reveal_policies`` 行的**出参**形态（= `RevealPolicy.to_dict()` 的 11 个键）。 */
+  created_at: string;
+  /** ``reveal_policies`` 行的**出参**形态（= `RevealPolicy.to_dict()` 的 11 个键）。 */
+  updated_at: string;
+}
+
+export interface RevealPolicyUpdateIn {
+  /** ``PATCH /projects/{pid}/reveal-policies/{policy_id}`` 的入参。 */
+  status?: "planned" | "revealed" | "cancelled" | null;
+  /** ``PATCH /projects/{pid}/reveal-policies/{policy_id}`` 的入参。 */
+  revealed_chapter?: number | null;
+  /** ``PATCH /projects/{pid}/reveal-policies/{policy_id}`` 的入参。 */
+  notes?: string | null;
+}
+
 export interface RevisionNoteUpdate {
   /** 写入或清除改稿意见的请求体。 */
   note: string;
+}
+
+export interface SimulationIssue {
+  /** 被拒的 delta（``issues[index]``）。 */
+  index: number;
+  /** 被拒的 delta（``issues[index]``）。 */
+  errors: Array<string>;
+}
+
+export interface SimulationResult {
+  /** 与 branch_id 同值 */
+  simulation_id: string;
+  /** ``POST /simulate`` 与 ``GET /simulations/{id}`` 的响应。 */
+  branch_id: string;
+  /** ⚠️ **必须以 `sim-` 开头**，否则该次推演在 `GET /simulations` 与 `GET /simulations/{id}` 里**查不到**（两者都按 `name LIKE 'sim-%'` 过滤，实测自定义名会 404） */
+  name: string;
+  /** ``POST /simulate`` 与 ``GET /simulations/{id}`` 的响应。 */
+  base_version: number;
+  /** 已成功应用的 delta 条数；失败时是部分应用数 */
+  applied: number;
+  /** ``POST /simulate`` 与 ``GET /simulations/{id}`` 的响应。 */
+  diff: StateDiff;
+  /** ``POST /simulate`` 与 ``GET /simulations/{id}`` 的响应。 */
+  issues: Array<SimulationIssue>;
+  /** 恒为 ARCHIVED（推演结束即归档） */
+  branch_status: string;
+  /** ``POST /simulate`` 与 ``GET /simulations/{id}`` 的响应。 */
+  created_at: string;
+}
+
+export interface SimulationSummary {
+  /** ``GET /simulations`` 的一行（按 created_at DESC）。 */
+  simulation_id: string;
+  /** ``GET /simulations`` 的一行（按 created_at DESC）。 */
+  branch_id: string;
+  /** ``GET /simulations`` 的一行（按 created_at DESC）。 */
+  name: string;
+  /** ``GET /simulations`` 的一行（按 created_at DESC）。 */
+  base_version: number;
+  /** ``GET /simulations`` 的一行（按 created_at DESC）。 */
+  status: string;
+  /** ``GET /simulations`` 的一行（按 created_at DESC）。 */
+  created_at: string;
 }
 
 export interface SnapshotResponse {
@@ -668,6 +905,27 @@ export interface StartWorkflowRequest {
   gate_override?: Record<string, unknown> | null;
   fast_mode?: boolean | null;
   auto_commit?: boolean | null;
+}
+
+export interface StateDiff {
+  /** 两个快照的结构化差异。 */
+  version_a: number;
+  /** 两个快照的结构化差异。 */
+  version_b: number;
+  /** 两个快照的结构化差异。 */
+  branch_id?: string | null;
+  /** 两个快照的结构化差异。 */
+  characters?: ListDiff | null;
+  /** 两个快照的结构化差异。 */
+  world?: Record<string, unknown> | null;
+  /** 两个快照的结构化差异。 */
+  hooks?: ListDiff | null;
+  /** 两个快照的结构化差异。 */
+  debts?: ListDiff | null;
+  /** 两个快照的结构化差异。 */
+  events_changed?: Record<string, unknown> | null;
+  /** 两个快照的结构化差异。 */
+  recent_events?: ListDiff | null;
 }
 
 export interface StyleSampleCreate {

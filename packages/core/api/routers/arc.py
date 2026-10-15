@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from packages.core.arc.models import ArcView
 from packages.core.arc.service import build_arc_view
 from packages.core.logging_config import get_logger
 
@@ -29,7 +30,7 @@ log = get_logger("novelos.routers.arc")
 router = APIRouter(tags=["arc"])
 
 
-@router.get("/projects/{project_id}/arc")
+@router.get("/projects/{project_id}/arc", response_model=ArcView)
 def get_arc_view(project_id: str, request: Request) -> dict:
     """返回该项目的叙事弧光聚合视图（含 chapters / payoff / hooks / debts / alerts）。
 

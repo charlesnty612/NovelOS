@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .issues import Category, Gate, Severity
 
@@ -149,3 +149,65 @@ class QualityReport(BaseModel):
 
 
 __all__ = ["Issue", "QualityContext", "QualityReport"]
+
+
+# ------------------------------------------------------------------- 人工评分 judge
+
+# ⚠️ 下面三个模型是 **2026-10-15 批次（五）** 补的：`POST /chapters/{cid}/quality/judge`
+# 此前是裸 ``dict`` body + 裸 dict 响应，OpenAPI 无 schema，前端手写契约无从校验。
+#
+# 字段形状经实测（`tests/api/test_judge_response_contract.py`），并有三条**反直觉**行为
+# 记在这里，因为它们决定了模型必须怎么写：
+#
+# 1. **越界分不返 422，是静默夹取**。`QualityService.save_judge_score` 对四维做
+#    ``max(0, min(100, int(v)))``，只有**非整数**才 ``ValueError``→422。
+#    ⇒ 前端必须夹完**写回输入框**，否则作者填 150 看到 100 却不知情。
+# 2. **``verdict`` / ``top_issues`` 后端零校验**（service 层原样保留进 JSON）。
+#    ⇒ 长度约束只能在前端兜。
+# 3. **judge_json 会存任意扩展键**：service docstring 明写「额外 verdict / top_issues /
+#    score_avg / usage / dry_run 等字段一并存入 JSON（宽松校验）」。
+#    ⇒ `QualityJudgeRecord` **必须 `extra="allow"`**；声明成严格模型会把这些键
+#    静默丢掉（这正是 `tests/api/test_volume_membership_contract.py` 守的形状）。
+
+
+class QualityJudgeRecord(BaseModel):
+    """落库到 ``quality_reports.judge_json`` 的一格人工评分。
+
+    ``extra="allow"`` 是**必需**的，理由见上方第 3 条：service 明确会一并存入
+    ``score_avg / usage / dry_run`` 等扩展键。
+
+    ⚠️ 本模型只用于**出参**（读回）。入参的校验口径更宽松，见 `QualityJudgePayload`。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    pacing: int
+    style: int
+    logic: int
+    dialogue: int
+    verdict: Optional[str] = None
+    top_issues: Optional[list[str]] = None
+
+
+class QualityJudgeResponse(BaseModel):
+    """``POST /chapters/{cid}/quality/judge`` 的响应。
+
+    ⚠️ ``judge`` 是 **nullable 但可缺省**：该章没有任何报告时后端 422，所以 200 回来
+    时它一定非空；保留 ``None | None`` 是为了容忍存量行的 ``judge_json IS NULL``。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    report_id: str
+    chapter_id: str
+    # router 恒写这个键（`row.get("judge_json")`，无分时为 None）⇒ 必填可空。
+    judge: Optional[QualityJudgeRecord]
+
+
+__all__ = [
+    "Issue",
+    "QualityContext",
+    "QualityReport",
+    "QualityJudgeRecord",
+    "QualityJudgeResponse",
+]

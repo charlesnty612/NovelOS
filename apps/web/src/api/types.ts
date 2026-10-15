@@ -1690,192 +1690,70 @@ export interface DeliveryVerdictResponse {
 }
 
 // ============================================================================
-// 2026-10-15 批次（四）：G6 挂账 5 条的契约类型
+// ============================================================================
+// 2026-10-15 批次（五）：这批类型**不再手写**——后端补了 Pydantic 契约，
+// 它们由 `scripts/gen_frontend_types.py` 从 OpenAPI 生成。
 // ============================================================================
 //
-// ⚠️ **以下 5 组类型全部手写**，因为对应 router 的 body/response 都是裸 `dict`
-// （`reveal_policies.py` / `arc.py` / `simulation.py` / `quality.py` 的 judge 段），
-// OpenAPI 里**没有** schema ⇒ `types.generated.ts` 永远不会生成它们。
+// 批次（四）时这 5 组是手写的（对应 router 的 body/response 都是裸 `dict`）。
+// 批次（五）给 `reveal_policies` / `arc` / `simulation` / `quality`(judge) 补了
+// Pydantic 模型并声明 `response_model` ⇒ OpenAPI 里有 schema ⇒ 下面这些全部
+// 由 codegen 产出。**手写版已删除**，理由是它们与后端之间没有任何机器校验：
+// 后端加一个键，前端要等运行时才发现。
 //
-// 派生来源逐组登记（按 G10 纪律：手写契约必须写明它是从哪儿读出来的，
-// 否则就成了「不知道后端返回什么」的兜底）：
-//   - RevealPolicy      ← `packages/domain/knowledge/models.py:45` 的 `RevealPolicy.to_dict()`
-//   - ArcView           ← `packages/core/arc/service.py::build_arc_view` 返回 dict
-//   - SimulationResult  ← `packages/core/simulation/service.py:125` 的 `SimulationResult.to_dict()`
-//   - StateDiff         ← `packages/core/story_state/snapshots.py:121` 的 `diff_snapshots`
-//   - QualityJudge*     ← `packages/core/quality/service.py:198` 的 `save_judge_score`
+// 类型名有一处**刻意不一致**（代码读起来更顺，生成的名字保持后端口径）：
+//   RevealPolicy   → re-export 自 RevealPolicyOut
+//   RevealPolicyCreate → RevealPolicyCreateIn
+//   RevealPolicyUpdate → RevealPolicyUpdateIn
+//   SnapshotListDiff   → ListDiff
 //
-// **刻意不用 `[key: string]: unknown` 索引签名**（G10 的病根）：快照内的元素是
-// 不透明 blob（按 character_id/hook_id 键），用 `Record<string, unknown>` 精确表达，
-// 而顶层字段一律必填——后端确实每次都返回它们。
-//
-// 挂账：这 4 个 router 应补 Pydantic 模型并声明 `response_model`
-// （`SnapshotResponse` 已是先例）。⚠️ 但 `response_model` 会**过滤**未声明字段——
-// 补模型前必须先核对实际返回的键集，否则会静默丢字段
-// （`tests/api/test_volume_membership_contract.py` 就是这个坑的看守）。
+// ⚠️ `QualityJudgePayload` 仍是手写的，且**这是有意的**：judge 的**请求体**
+// 后端刻意保持宽松（`QualityService.save_judge_score` 的 docstring 明写
+// 「额外字段…宽松校验」并把它们一并存进 judge_json），加请求模型会顺带把
+// 入参校验收紧（pydantic lax 模式会把 `"80"` 静默转成 80，而 service 会 422），
+// 那是一次**没被要求的行为变更**。出参 `QualityJudgeRecord` 已是生成类型。
 
-/** 剧透策略的状态（对齐 DDL CHECK，迁移 0014_knowledge_reveal.sql）。 */
-export type RevealPolicyStatus = 'planned' | 'revealed' | 'cancelled';
+// 重导出**不产生本地绑定**：`RevealPolicyStatus` 等别名要在本文件里引用
+// `RevealPolicy`，`QualityReport.judge` 要引用 `QualityJudgeRecord` ⇒ 先 import 再导出。
+import type {
+  QualityJudgeRecord,
+  RevealPolicyOut,
+} from './types.generated';
 
-/** 被策略指向的实体种类。 */
-export type RevealTargetKind =
-  | 'character'
-  | 'location'
-  | 'faction'
-  | 'world_rule'
-  | 'event'
-  | 'hook'
-  | 'debt'
-  | 'relationship';
+export type {
+  ArcAlert,
+  ChangedItem,
+  ArcChapterRow,
+  ArcDebtCounts,
+  ArcHookCounts,
+  ArcOverdueReveal,
+  ArcPayoff,
+  ArcRevealCounts,
+  ArcView,
+  ArcVolumeRow,
+  ListDiff as SnapshotListDiff,
+  QualityJudgeRecord,
+  QualityJudgeResponse,
+  RevealPolicyCreateIn as RevealPolicyCreate,
+  RevealPolicyOut as RevealPolicy,
+  RevealPolicyUpdateIn as RevealPolicyUpdate,
+  SimulationResult,
+  SimulationSummary,
+  StateDiff,
+} from './types.generated';
+
+/** 剧透策略状态（从生成类型的字段反推，避免与后端枚举各写一份）。 */
+export type RevealPolicyStatus = RevealPolicyOut['status'];
+/** 被策略指向的实体种类（同上）。 */
+export type RevealTargetKind = RevealPolicyOut['target_kind'];
 
 /**
- * 一条剧透策略：「这个秘密什么时候、对谁揭开」。
+ * `POST /chapters/{cid}/quality/judge` 的**请求体**——手写，后端刻意宽松。
  *
- * ⚠️ 与「伏笔 hooks」**不是同一个东西**：hooks 是实体（可 CRUD，本仓有完整 UI），
- * 一条 `target_kind='hook'` 的策略只是**指向**某个 hook_id、约定何时/对谁揭露它。
+ * 四个维度后端必填且会**静默夹取**到 0-100（`max(0, min(100, int(v)))`），
+ * 只有非整数才 422；`verdict` / `top_issues` 后端**零校验**（原样存入 judge_json）。
+ * ⇒ 长度与范围约束只能在前端兜，`ChapterJudgeSection` 已按此实现。
  */
-export interface RevealPolicy {
-  policy_id: string;
-  project_id: string;
-  target_kind: RevealTargetKind;
-  target_id: string;
-  /** 计划在第几章前揭开；null = 未定。 */
-  reveal_by_chapter: number | null;
-  /** `reader`（读者）/ `character:<id>` / 逗号混写。 */
-  audience: string;
-  status: RevealPolicyStatus;
-  revealed_chapter: number | null;
-  notes: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface RevealPolicyCreate {
-  target_kind: RevealTargetKind;
-  target_id: string;
-  reveal_by_chapter?: number | null;
-  audience?: string;
-  status?: RevealPolicyStatus;
-  revealed_chapter?: number | null;
-  notes?: string | null;
-}
-
-/** ⚠️ 后端只认这三个键，其余字段静默忽略。 */
-export interface RevealPolicyUpdate {
-  status?: RevealPolicyStatus;
-  revealed_chapter?: number | null;
-  notes?: string | null;
-}
-
-// ---------------------------------------------------------------- 弧光 / arc
-
-export interface ArcChapterRow {
-  number: number;
-  title: string;
-  has_payoff_beat: boolean;
-  charge_beat: boolean;
-  overall: number | null;
-  pacing: number | null;
-  prose_chars: number | null;
-  volume_id: string | null;
-  volume_number: number | null;
-  // ⚠️ 后端 `build_arc_view` 显式 pop 掉 chapter_id，故此处**没有**该字段——
-  // 不要在 UI 里拿它当行键或跳转目标。
-}
-
-export interface ArcVolumeRow {
-  volume_id: string;
-  number: number;
-  title: string | null;
-  status: string;
-  chapter_count: number;
-}
-
-export interface ArcOverdueReveal {
-  policy_id: string;
-  target_kind: string;
-  target_id: string;
-  reveal_by_chapter: number | null;
-  audience: string;
-}
-
-/** 节奏/伏笔告警。`level=fail` 的两条是硬信号，`warn` 是体检项。 */
-export interface ArcAlert {
-  level: 'warn' | 'fail';
-  code: string;
-  message: string;
-}
-
-export interface ArcView {
-  project_id: string;
-  generated_at: string;
-  chapters: ArcChapterRow[];
-  payoff: {
-    total: number;
-    charge_streak: number;
-    max_charge_streak: number;
-    last_payoff_chapter: number | null;
-  };
-  hooks: { open: number; resolved: number; overdue: number };
-  debts: { open: number; paid: number };
-  reveal_policies: {
-    planned: number;
-    revealed: number;
-    cancelled: number;
-    overdue: ArcOverdueReveal[];
-  };
-  volumes: ArcVolumeRow[];
-  alerts: ArcAlert[];
-}
-
-// ------------------------------------------------------------------ 推演
-
-/** 列表 diff 的元素是不透明快照 blob（按各自 id 键）。 */
-export interface SnapshotListDiff {
-  added?: Record<string, unknown>[];
-  removed?: Record<string, unknown>[];
-  changed?: Array<{ id: string; changes?: Record<string, { before: unknown; after: unknown }> }>;
-}
-
-/** ⚠️ 所有键都可能在为空时**整个省略**（`diff_snapshots` 用「空则不写」）。
- * 读法必须是 `diff.hooks?.added?.length ?? 0`，不能假设存在。 */
-export interface StateDiff {
-  version_a?: number;
-  version_b?: number;
-  branch_id?: string | null;
-  characters?: SnapshotListDiff;
-  world?: Record<string, { before: unknown; after: unknown }>;
-  hooks?: SnapshotListDiff;
-  debts?: SnapshotListDiff;
-  events_changed?: Record<string, unknown>;
-  recent_events?: SnapshotListDiff;
-}
-
-export interface SimulationResult {
-  simulation_id: string;
-  branch_id: string;
-  name: string;
-  base_version: number;
-  /** 已成功应用的 delta 条数（失败时 = 部分应用数）。 */
-  applied: number;
-  diff: StateDiff;
-  issues: Array<{ index: number; errors: string[] }>;
-  branch_status: string;
-  created_at: string;
-}
-
-export interface SimulationSummary {
-  simulation_id: string;
-  branch_id: string;
-  name: string;
-  base_version: number;
-  status: string;
-  created_at: string;
-}
-
-// ------------------------------------------------------- 人工评分 / judge
-
-/** ⚠️ 四个维度后端**必填**且必须是 0-100 的整数，否则 422。 */
 export interface QualityJudgePayload {
   pacing: number;
   style: number;
@@ -1885,21 +1763,4 @@ export interface QualityJudgePayload {
   verdict?: string;
   /** 最多 3 条，每条 ≤30 字。 */
   top_issues?: string[];
-}
-
-export interface QualityJudgeRecord {
-  pacing: number;
-  style: number;
-  logic: number;
-  dialogue: number;
-  verdict?: string | null;
-  top_issues?: string[] | null;
-  [k: string]: unknown;
-}
-
-export interface QualityJudgeResponse {
-  report_id: string;
-  chapter_id: string;
-  /** null = 该报告尚未被打分。 */
-  judge: QualityJudgeRecord | null;
 }

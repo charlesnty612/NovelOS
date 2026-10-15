@@ -65,6 +65,35 @@ export function coerceJson<T = Record<string, unknown>>(value: unknown): T | str
   return value;
 }
 
+/**
+ * 把 FastAPI 的 pydantic 校验错误（``detail`` 是数组）压成一句人能读的话。
+ *
+ * 为什么不直接 ``JSON.stringify``：那是**每个带 Pydantic 请求模型的端点**
+ * （Volume / Chapter / Genre…）的 422 形态，压出来作者看到的是
+ * ``[{"type":"enum","loc":["body","target_kind"],…}]``——把「你填错了哪个字段」
+ * 这条唯一有用的信息埋进一坨符号里。
+ *
+ * 形状：``[{loc: ["body","reveal_by_chapter"], msg: "…"}, …]``
+ * → ``reveal_by_chapter: …``（多条用「；」连接）。非该形态返回 null，交给调用方兜底。
+ */
+function formatValidationDetail(detail: unknown): string | null {
+  if (!Array.isArray(detail) || detail.length === 0) return null;
+  const parts: string[] = [];
+  for (const item of detail) {
+    if (!item || typeof item !== 'object') return null;
+    const rec = item as { loc?: unknown; msg?: unknown };
+    if (typeof rec.msg !== 'string') return null;
+    // loc 形如 ["body", "field", ...subpath]；首段（body/query/…）对作者无意义。
+    const path = Array.isArray(rec.loc) ? rec.loc.slice(1) : [];
+    const field = path
+      .map((p) => (typeof p === 'string' || typeof p === 'number' ? String(p) : ''))
+      .filter(Boolean)
+      .join('.');
+    parts.push(field ? `${field}: ${rec.msg}` : rec.msg);
+  }
+  return parts.length > 0 ? parts.join('；') : null;
+}
+
 async function parseError(resp: Response): Promise<string> {
   const text = await resp.text().catch(() => '');
   if (!text) return resp.statusText || `HTTP ${resp.status}`;
@@ -73,7 +102,7 @@ async function parseError(resp: Response): Promise<string> {
     if (parsed && typeof parsed === 'object' && 'detail' in parsed) {
       const detail = (parsed as { detail: unknown }).detail;
       if (typeof detail === 'string') return detail;
-      return JSON.stringify(detail);
+      return formatValidationDetail(detail) ?? JSON.stringify(detail);
     }
     return text;
   } catch {

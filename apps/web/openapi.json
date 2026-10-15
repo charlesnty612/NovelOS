@@ -369,9 +369,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Arc View Api Projects  Project Id  Arc Get"
+                  "$ref": "#/components/schemas/ArcView"
                 }
               }
             }
@@ -3897,9 +3895,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Save Chapter Judge Api Chapters  Chapter Id  Quality Judge Post"
+                  "$ref": "#/components/schemas/QualityJudgeResponse"
                 }
               }
             }
@@ -4397,8 +4393,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/RevealPolicyOut"
                   },
                   "title": "Response List Reveal Policies Api Projects  Pid  Reveal Policies Get"
                 }
@@ -4440,9 +4435,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "title": "Payload"
+                "$ref": "#/components/schemas/RevealPolicyCreateIn"
               }
             }
           }
@@ -4453,9 +4446,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Create Reveal Policy Api Projects  Pid  Reveal Policies Post"
+                  "$ref": "#/components/schemas/RevealPolicyOut"
                 }
               }
             }
@@ -4506,9 +4497,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "title": "Payload"
+                "$ref": "#/components/schemas/RevealPolicyUpdateIn"
               }
             }
           }
@@ -4519,9 +4508,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Update Reveal Policy Api Projects  Pid  Reveal Policies  Policy Id  Patch"
+                  "$ref": "#/components/schemas/RevealPolicyOut"
                 }
               }
             }
@@ -4664,9 +4651,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Simulate Api Projects  Project Id  Simulate Post"
+                  "$ref": "#/components/schemas/SimulationResult"
                 }
               }
             }
@@ -4711,8 +4696,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/SimulationSummary"
                   },
                   "title": "Response List Simulations Api Projects  Project Id  Simulations Get"
                 }
@@ -4766,9 +4750,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Simulation Api Projects  Project Id  Simulations  Simulation Id  Get"
+                  "$ref": "#/components/schemas/SimulationResult"
                 }
               }
             }
@@ -7170,6 +7152,378 @@
         "title": "AdoptResponse",
         "description": "采纳响应。"
       },
+      "ArcAlert": {
+        "properties": {
+          "level": {
+            "type": "string",
+            "enum": [
+              "warn",
+              "fail"
+            ],
+            "title": "Level"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "level",
+          "code",
+          "message"
+        ],
+        "title": "ArcAlert",
+        "description": "节奏 / 伏笔告警。``level='fail'`` 是硬信号（charge_streak_exceeded），\n``'warn'`` 是体检项。"
+      },
+      "ArcChapterRow": {
+        "properties": {
+          "number": {
+            "type": "integer",
+            "title": "Number"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "has_payoff_beat": {
+            "type": "boolean",
+            "title": "Has Payoff Beat",
+            "description": "由 plan_json.key_beats[].purpose 里的 [payoff] 标记推断，非作者声明的结构"
+          },
+          "charge_beat": {
+            "type": "boolean",
+            "title": "Charge Beat",
+            "description": "由 plan_json.key_beats[].purpose 里的 [charge] 标记推断"
+          },
+          "overall": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overall"
+          },
+          "pacing": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pacing"
+          },
+          "prose_chars": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prose Chars",
+            "description": "最新草稿的去空白字符数（visible_chars 口径）；无草稿为 null"
+          },
+          "volume_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume Id"
+          },
+          "volume_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume Number"
+          }
+        },
+        "type": "object",
+        "required": [
+          "number",
+          "title",
+          "has_payoff_beat",
+          "charge_beat",
+          "overall",
+          "pacing",
+          "prose_chars",
+          "volume_id",
+          "volume_number"
+        ],
+        "title": "ArcChapterRow",
+        "description": "弧光视图里的一行章节。\n\n⚠️ **刻意不含 ``chapter_id``**：后端主动脱敏（见模块 docstring）。"
+      },
+      "ArcDebtCounts": {
+        "properties": {
+          "open": {
+            "type": "integer",
+            "title": "Open"
+          },
+          "paid": {
+            "type": "integer",
+            "title": "Paid"
+          }
+        },
+        "type": "object",
+        "required": [
+          "open",
+          "paid"
+        ],
+        "title": "ArcDebtCounts"
+      },
+      "ArcHookCounts": {
+        "properties": {
+          "open": {
+            "type": "integer",
+            "title": "Open"
+          },
+          "resolved": {
+            "type": "integer",
+            "title": "Resolved"
+          },
+          "overdue": {
+            "type": "integer",
+            "title": "Overdue",
+            "description": "计划回收章号 < 当前最大章号的伏笔数"
+          }
+        },
+        "type": "object",
+        "required": [
+          "open",
+          "resolved",
+          "overdue"
+        ],
+        "title": "ArcHookCounts"
+      },
+      "ArcOverdueReveal": {
+        "properties": {
+          "policy_id": {
+            "type": "string",
+            "title": "Policy Id"
+          },
+          "target_kind": {
+            "type": "string",
+            "title": "Target Kind"
+          },
+          "target_id": {
+            "type": "string",
+            "title": "Target Id"
+          },
+          "reveal_by_chapter": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reveal By Chapter"
+          },
+          "audience": {
+            "type": "string",
+            "title": "Audience"
+          }
+        },
+        "type": "object",
+        "required": [
+          "policy_id",
+          "target_kind",
+          "target_id",
+          "reveal_by_chapter",
+          "audience"
+        ],
+        "title": "ArcOverdueReveal",
+        "description": "逾期未揭的剧透策略（``reveal_policies.overdue[]`` 的行）。"
+      },
+      "ArcPayoff": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "charge_streak": {
+            "type": "integer",
+            "title": "Charge Streak",
+            "description": "尾部连续蓄力（charge）章数"
+          },
+          "max_charge_streak": {
+            "type": "integer",
+            "title": "Max Charge Streak"
+          },
+          "last_payoff_chapter": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Payoff Chapter"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "charge_streak",
+          "max_charge_streak",
+          "last_payoff_chapter"
+        ],
+        "title": "ArcPayoff",
+        "description": "回收节奏：全书 payoff 次数与「连续蓄力未回收」的最长/当前连击。"
+      },
+      "ArcRevealCounts": {
+        "properties": {
+          "planned": {
+            "type": "integer",
+            "title": "Planned"
+          },
+          "revealed": {
+            "type": "integer",
+            "title": "Revealed"
+          },
+          "cancelled": {
+            "type": "integer",
+            "title": "Cancelled"
+          },
+          "overdue": {
+            "items": {
+              "$ref": "#/components/schemas/ArcOverdueReveal"
+            },
+            "type": "array",
+            "title": "Overdue"
+          }
+        },
+        "type": "object",
+        "required": [
+          "planned",
+          "revealed",
+          "cancelled",
+          "overdue"
+        ],
+        "title": "ArcRevealCounts"
+      },
+      "ArcView": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "generated_at": {
+            "type": "string",
+            "title": "Generated At"
+          },
+          "chapters": {
+            "items": {
+              "$ref": "#/components/schemas/ArcChapterRow"
+            },
+            "type": "array",
+            "title": "Chapters"
+          },
+          "payoff": {
+            "$ref": "#/components/schemas/ArcPayoff"
+          },
+          "hooks": {
+            "$ref": "#/components/schemas/ArcHookCounts"
+          },
+          "debts": {
+            "$ref": "#/components/schemas/ArcDebtCounts"
+          },
+          "reveal_policies": {
+            "$ref": "#/components/schemas/ArcRevealCounts"
+          },
+          "volumes": {
+            "items": {
+              "$ref": "#/components/schemas/ArcVolumeRow"
+            },
+            "type": "array",
+            "title": "Volumes"
+          },
+          "alerts": {
+            "items": {
+              "$ref": "#/components/schemas/ArcAlert"
+            },
+            "type": "array",
+            "title": "Alerts"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "project_id",
+          "generated_at",
+          "chapters",
+          "payoff",
+          "hooks",
+          "debts",
+          "reveal_policies",
+          "volumes",
+          "alerts"
+        ],
+        "title": "ArcView",
+        "description": "``GET /projects/{pid}/arc`` 的响应。\n\n``extra=\"allow\"``：这是只读聚合视图，service 可能随新告警种类加顶层键；\n契约描述**已知的 9 个**，不宣称封闭。"
+      },
+      "ArcVolumeRow": {
+        "properties": {
+          "volume_id": {
+            "type": "string",
+            "title": "Volume Id"
+          },
+          "number": {
+            "type": "integer",
+            "title": "Number"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "卷状态；后端列是 TEXT，未知值原样透出"
+          },
+          "chapter_count": {
+            "type": "integer",
+            "title": "Chapter Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "volume_id",
+          "number",
+          "title",
+          "status",
+          "chapter_count"
+        ],
+        "title": "ArcVolumeRow"
+      },
       "Body_start_deconstruct_upload_api_projects__project_id__deconstruct_upload_post": {
         "properties": {
           "file": {
@@ -7196,6 +7550,33 @@
           "file"
         ],
         "title": "Body_start_deconstruct_upload_api_projects__project_id__deconstruct_upload_post"
+      },
+      "ChangedItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "changes": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changes"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "ChangedItem",
+        "description": "``_diff_lists`` 的 changed 元素：``{\"id\": <稳定键>, \"changes\": {…}}``。\n\n⚠️ ``changes`` 同样**空则省略**（见 ``_diff_lists`` 的\n``**({\"changes\": sub} if sub else {})``）。"
       },
       "Chapter": {
         "properties": {
@@ -9283,6 +9664,58 @@
         "title": "HookUpdate",
         "description": "部分更新 Hook 请求体——所有字段均可选。"
       },
+      "ListDiff": {
+        "properties": {
+          "added": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Added"
+          },
+          "removed": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Removed"
+          },
+          "changed": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ChangedItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ListDiff",
+        "description": "列表段的差异（``_diff_lists`` 的返回）。三个子键同样**空则省略**。"
+      },
       "Project": {
         "properties": {
           "project_id": {
@@ -9732,6 +10165,92 @@
         "title": "ProjectUpdate",
         "description": "部分更新请求体——所有字段均可选，未提供则不修改。\n\n   不允许通过该接口修改 ``project_id / created_at``，这两个字段由系统维护。\n\n   ``word_band`` 与「未提供」区分：未提供 → 保留原值；显式 ``null`` →\n清除覆盖（落 DB NULL）；显式 dict → 校验后写 ``word_band_json``。\n   "
       },
+      "QualityJudgeRecord": {
+        "properties": {
+          "pacing": {
+            "type": "integer",
+            "title": "Pacing"
+          },
+          "style": {
+            "type": "integer",
+            "title": "Style"
+          },
+          "logic": {
+            "type": "integer",
+            "title": "Logic"
+          },
+          "dialogue": {
+            "type": "integer",
+            "title": "Dialogue"
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verdict"
+          },
+          "top_issues": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top Issues"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "pacing",
+          "style",
+          "logic",
+          "dialogue"
+        ],
+        "title": "QualityJudgeRecord",
+        "description": "落库到 ``quality_reports.judge_json`` 的一格人工评分。\n\n``extra=\"allow\"`` 是**必需**的，理由见上方第 3 条：service 明确会一并存入\n``score_avg / usage / dry_run`` 等扩展键。\n\n⚠️ 本模型只用于**出参**（读回）。入参的校验口径更宽松，见 `QualityJudgePayload`。"
+      },
+      "QualityJudgeResponse": {
+        "properties": {
+          "report_id": {
+            "type": "string",
+            "title": "Report Id"
+          },
+          "chapter_id": {
+            "type": "string",
+            "title": "Chapter Id"
+          },
+          "judge": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QualityJudgeRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "report_id",
+          "chapter_id",
+          "judge"
+        ],
+        "title": "QualityJudgeResponse",
+        "description": "``POST /chapters/{cid}/quality/judge`` 的响应。\n\n⚠️ ``judge`` 是 **nullable 但可缺省**：该章没有任何报告时后端 422，所以 200 回来\n时它一定非空；保留 ``None | None`` 是为了容忍存量行的 ``judge_json IS NULL``。"
+      },
       "ResumeRequest": {
         "properties": {
           "human_input": {
@@ -9829,6 +10348,238 @@
         "type": "object",
         "title": "ResumeRequest"
       },
+      "RevealPolicyCreateIn": {
+        "properties": {
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "character",
+              "location",
+              "faction",
+              "world_rule",
+              "event",
+              "hook",
+              "debt",
+              "relationship"
+            ],
+            "title": "Target Kind"
+          },
+          "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Target Id"
+          },
+          "reveal_by_chapter": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reveal By Chapter"
+          },
+          "audience": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Audience",
+            "default": "reader"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "planned",
+              "revealed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "default": "planned"
+          },
+          "revealed_chapter": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revealed Chapter"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_kind",
+          "target_id"
+        ],
+        "title": "RevealPolicyCreateIn",
+        "description": "``POST /projects/{pid}/reveal-policies`` 的入参。\n\n⚠️ **服务端仍会再校验一遍**（`KnowledgeService.create` 的枚举 / 范围 / target\n存在性检查），本模型只为让 OpenAPI 有 schema、把 422 的原因提前说清楚。\n\n⚠️ ``reveal_by_chapter`` / ``revealed_chapter`` 必须 ≥1（DDL 与 service 双检）。"
+      },
+      "RevealPolicyOut": {
+        "properties": {
+          "policy_id": {
+            "type": "string",
+            "title": "Policy Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "character",
+              "location",
+              "faction",
+              "world_rule",
+              "event",
+              "hook",
+              "debt",
+              "relationship"
+            ],
+            "title": "Target Kind"
+          },
+          "target_id": {
+            "type": "string",
+            "title": "Target Id"
+          },
+          "reveal_by_chapter": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reveal By Chapter",
+            "description": "计划在第几章前揭开；null = 未定"
+          },
+          "audience": {
+            "type": "string",
+            "title": "Audience",
+            "description": "`reader` / `character:<id>` / 逗号混写；DDL default 为 'reader'"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "planned",
+              "revealed",
+              "cancelled"
+            ],
+            "title": "Status"
+          },
+          "revealed_chapter": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revealed Chapter"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "policy_id",
+          "project_id",
+          "target_kind",
+          "target_id",
+          "reveal_by_chapter",
+          "audience",
+          "status",
+          "revealed_chapter",
+          "notes",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RevealPolicyOut",
+        "description": "``reveal_policies`` 行的**出参**形态（= `RevealPolicy.to_dict()` 的 11 个键）。\n\n字段与类型经实测（临时库跑通端点后 dump 键集）确认，不是照 dataclass 抄的。"
+      },
+      "RevealPolicyUpdateIn": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "planned",
+                  "revealed",
+                  "cancelled"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "revealed_chapter": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revealed Chapter"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RevealPolicyUpdateIn",
+        "description": "``PATCH /projects/{pid}/reveal-policies/{policy_id}`` 的入参。\n\n⚠️ **只有这三个字段被后端读取**，其余键静默忽略——所以这里用\n``extra=\"forbid\"`` 把这件事**显式化**：以前传 ``reveal_by_chapter`` 会被\n悄悄吞掉（返回 200 却什么都没改），现在直接 422。\n\n⚠️ ``revealed_chapter`` **无法清空**：service 把 ``None`` 读作「不提供」，\n发 ``null`` 也改不掉（DDL 与 service 均无「清空」通道）。这是既有缺口，\nUI 侧已按复算口径放行并在 `RevealTab` 里写明。"
+      },
       "RevisionNoteUpdate": {
         "properties": {
           "note": {
@@ -9843,6 +10594,129 @@
         ],
         "title": "RevisionNoteUpdate",
         "description": "写入或清除改稿意见的请求体。\n\n- ``note`` 必填字符串；非空白字符串写入 ``plan_json.revision_note``；\n  空串 / 全空白 → 删除该键（语义=清除改稿意见）。\n- 不设 ``max_length``：note 是人工意见，无明确字节上限；底层走 plan_json TEXT。"
+      },
+      "SimulationIssue": {
+        "properties": {
+          "index": {
+            "type": "integer",
+            "title": "Index"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "index",
+          "errors"
+        ],
+        "title": "SimulationIssue",
+        "description": "被拒的 delta（``issues[index]``）。"
+      },
+      "SimulationResult": {
+        "properties": {
+          "simulation_id": {
+            "type": "string",
+            "title": "Simulation Id",
+            "description": "与 branch_id 同值"
+          },
+          "branch_id": {
+            "type": "string",
+            "title": "Branch Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "⚠️ **必须以 `sim-` 开头**，否则该次推演在 `GET /simulations` 与 `GET /simulations/{id}` 里**查不到**（两者都按 `name LIKE 'sim-%'` 过滤，实测自定义名会 404）"
+          },
+          "base_version": {
+            "type": "integer",
+            "title": "Base Version"
+          },
+          "applied": {
+            "type": "integer",
+            "title": "Applied",
+            "description": "已成功应用的 delta 条数；失败时是部分应用数"
+          },
+          "diff": {
+            "$ref": "#/components/schemas/StateDiff"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/SimulationIssue"
+            },
+            "type": "array",
+            "title": "Issues"
+          },
+          "branch_status": {
+            "type": "string",
+            "title": "Branch Status",
+            "description": "恒为 ARCHIVED（推演结束即归档）"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "simulation_id",
+          "branch_id",
+          "name",
+          "base_version",
+          "applied",
+          "diff",
+          "issues",
+          "branch_status",
+          "created_at"
+        ],
+        "title": "SimulationResult",
+        "description": "``POST /simulate`` 与 ``GET /simulations/{id}`` 的响应。"
+      },
+      "SimulationSummary": {
+        "properties": {
+          "simulation_id": {
+            "type": "string",
+            "title": "Simulation Id"
+          },
+          "branch_id": {
+            "type": "string",
+            "title": "Branch Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "base_version": {
+            "type": "integer",
+            "title": "Base Version"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "simulation_id",
+          "branch_id",
+          "name",
+          "base_version",
+          "status",
+          "created_at"
+        ],
+        "title": "SimulationSummary",
+        "description": "``GET /simulations`` 的一行（按 created_at DESC）。"
       },
       "SnapshotResponse": {
         "properties": {
@@ -10067,6 +10941,101 @@
         },
         "type": "object",
         "title": "StartWorkflowRequest"
+      },
+      "StateDiff": {
+        "properties": {
+          "version_a": {
+            "type": "integer",
+            "title": "Version A"
+          },
+          "version_b": {
+            "type": "integer",
+            "title": "Version B"
+          },
+          "branch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch Id"
+          },
+          "characters": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListDiff"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "world": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "World"
+          },
+          "hooks": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListDiff"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "debts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListDiff"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "events_changed": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events Changed"
+          },
+          "recent_events": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListDiff"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "version_a",
+          "version_b"
+        ],
+        "title": "StateDiff",
+        "description": "两个快照的结构化差异。\n\n⚠️ 六个实体段**空则整个键被省略**（见模块 docstring）——读法必须是\n``diff.hooks?.added?.length ?? 0``，不能假设存在。"
       },
       "StyleSampleCreate": {
         "properties": {

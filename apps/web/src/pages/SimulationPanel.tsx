@@ -146,9 +146,34 @@ const DEBT_STATUS = ['open', 'acknowledged', 'paid', 'forgiven'] as const;
 
 // ── diff 计数 ────────────────────────────────────────────────────────────────
 
-/** 单个 SnapshotListDiff 的变化条数。**所有键都可能整个省略**（后端「空则不写」），
- * 故一律 `?? 0`，绝不假设存在——这是 types.ts 里写死的读法纪律。 */
-export function countListDiff(d: SnapshotListDiff | undefined): number {
+/**
+ * 把 `_diff_dicts` 的叶子读成 `{before, after}`。
+ *
+ * ⚠️ 契约类型在这里只能给 `unknown`——`diff_snapshots` 对 dict 是**递归**的，
+ * 某个字段的值可能是叶子、也可能是嵌套的子 diff，JSON Schema 表达不出来。
+ * 与其到处写 `as`，不如在边界收窄一次，并且对「不是叶子」的形态给出可读兜底
+ * （当成 before 缺失、after 整体替换），而不是渲染成 `[object Object]`。
+ */
+function readFieldDelta(v: unknown): { before: unknown; after: unknown } {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const rec = v as Record<string, unknown>;
+    if ('before' in rec || 'after' in rec) {
+      return { before: rec['before'], after: rec['after'] };
+    }
+    // 嵌套子 diff：整体当作一次替换，别硬摊平成 before/after（那会骗人）。
+    return { before: undefined, after: rec };
+  }
+  return { before: undefined, after: v };
+}
+
+/** 单个 SnapshotListDiff 的变化条数。**所有键都可能整个省略**（后端「空则不写」，
+ * 端点用 `response_model_exclude_none=True` 保住这个语义），故一律 `?? 0`，
+ * 绝不假设存在——这是读 diff 的纪律。
+ *
+ * 形参收 `| null`：契约类型由 codegen 从 Pydantic `Optional[...] = None` 生成，
+ * 出来是 `T | null | undefined`。端点侧永不返回 null（被 exclude_none 抹掉），
+ * 但**类型比现实更宽是安全的**——`!d` 同时挡住了 null 与 undefined。 */
+export function countListDiff(d: SnapshotListDiff | null | undefined): number {
   if (!d) return 0;
   return (d.added?.length ?? 0) + (d.removed?.length ?? 0) + (d.changed?.length ?? 0);
 }
@@ -182,7 +207,7 @@ function ListDiffBlock({
   testId,
 }: {
   title: string;
-  diff: SnapshotListDiff | undefined;
+  diff: SnapshotListDiff | null | undefined;
   testId: string;
 }) {
   const added = diff?.added ?? [];
@@ -214,12 +239,15 @@ function ListDiffBlock({
           {changed.map((c, i) => (
             <li key={c.id ?? i}>
               <strong>{c.id ?? `#${i}`}</strong>
-              {Object.entries(c.changes ?? {}).map(([field, pair]) => (
-                <span key={field} className="muted">
-                  {'  '}
-                  {field}：{JSON.stringify(pair?.before)} → {JSON.stringify(pair?.after)}
-                </span>
-              ))}
+              {Object.entries(c.changes ?? {}).map(([field, pair]) => {
+                const d = readFieldDelta(pair);
+                return (
+                  <span key={field} className="muted">
+                    {'  '}
+                    {field}：{JSON.stringify(d.before)} → {JSON.stringify(d.after)}
+                  </span>
+                );
+              })}
             </li>
           ))}
         </ul>
@@ -709,11 +737,14 @@ export function SimulationPanel({ projectId }: SimulationPanelProps) {
                     世界观<span className="muted small"> {Object.keys(result.diff.world ?? {}).length} 项变更</span>
                   </div>
                   <ul className="small">
-                    {Object.entries(result.diff.world ?? {}).map(([k, pair]) => (
-                      <li key={k}>
-                        {k}：{JSON.stringify(pair?.before)} → {JSON.stringify(pair?.after)}
-                      </li>
-                    ))}
+                    {Object.entries(result.diff.world ?? {}).map(([k, pair]) => {
+                      const d = readFieldDelta(pair);
+                      return (
+                        <li key={k}>
+                          {k}：{JSON.stringify(d.before)} → {JSON.stringify(d.after)}
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               </>

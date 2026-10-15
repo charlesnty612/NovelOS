@@ -195,6 +195,103 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "",
         "src/pages/StoryBiblePage.test.tsx",
     ),
+    # ---- 2026-10-15 批次（五）：M14~M19 守的是**后端 response_model 契约**。
+    # 这批的失效方向是「静默丢字段」：response_model 会过滤未声明字段，少声明一个
+    # 响应就少一个键，而功能测试常常照旧全绿。所以每条突变都对应一种丢法。
+    # M14 少声明一个章节字段 ⇒ 响应少一个键（逐字相等断言必红）。
+    (
+        "M14",
+        "packages/core/arc/models.py",
+        "    volume_number: Optional[int]",
+        "",
+        "tests/api/test_arc_response_contract.py",
+    ),
+    # M15 把 exclude_none 翻成 False ⇒ 六个实体段被序列化成 null，diff 多出六个键。
+    # ⚠️ 这一条在前端是**隐形**的（读法是 `?.` + `?? 0`），只有契约测试抓得到。
+    #
+    # ⚠️ 首版这条突变写成「在锚点上方插一行注释」，**等于什么都没改**（replacement 是
+    # anchor 的超集），于是报出 SURVIVED——量具没量到目标却给出了「存活」结论。
+    # 对策：突变必须**改变行为**，加注释不算。已改为翻转布尔值。
+    (
+        "M15",
+        "packages/core/api/routers/simulation.py",
+        "    response_model_exclude_none=True,\n)\ndef simulate(",
+        "    response_model_exclude_none=False,\n)\ndef simulate(",
+        "tests/api/test_simulation_response_contract.py",
+    ),
+    # M16 撤掉 judge 的 extra="allow" ⇒ score_avg/usage/dry_run 被裁掉
+    # （数据躺在 judge_json 里，API 读不回来，零报错）。
+    (
+        "M16",
+        "packages/core/quality/models.py",
+        '''    model_config = ConfigDict(extra="allow")
+
+    pacing: int
+    style: int
+    logic: int
+    dialogue: int
+    verdict: Optional[str] = None
+    top_issues: Optional[list[str]] = None''',
+        """    pacing: int
+    style: int
+    logic: int
+    dialogue: int
+    verdict: Optional[str] = None
+    top_issues: Optional[list[str]] = None""",
+        "tests/api/test_reveal_and_judge_response_contract.py",
+    ),
+    # M17 撤掉 reveal PATCH 的 extra="forbid" ⇒ 未知字段回到「静默忽略」，
+    # 422 那条用例必红。
+    (
+        "M17",
+        "packages/domain/knowledge/models.py",
+        '''    model_config = ConfigDict(extra="forbid")
+
+    status: RevealStatusLiteral | None = None''',
+        """    status: RevealStatusLiteral | None = None""",
+        "tests/api/test_reveal_and_judge_response_contract.py",
+    ),
+    # M18 出参少一个键 ⇒ 与 dataclass to_dict() 不再同形（两份模型分叉的守门）。
+    (
+        "M18",
+        "packages/domain/knowledge/models.py",
+        "    audience: str = Field(\n"
+        "        description=\"`reader` / `character:<id>` / 逗号混写；DDL default 为 'reader'\",\n"
+        "    )\n"
+        "    status: RevealStatusLiteral",
+        "    status: RevealStatusLiteral",
+        "tests/api/test_reveal_and_judge_response_contract.py",
+    ),
+    # M19 整条 response_model 撤掉 ⇒ OpenAPI 里没有 ArcView schema。
+    (
+        "M19",
+        "packages/core/api/routers/arc.py",
+        '@router.get("/projects/{project_id}/arc", response_model=ArcView)',
+        '@router.get("/projects/{project_id}/arc")',
+        "tests/api/test_arc_response_contract.py",
+    ),
+    # M20 出参少一个键 ⇒ 硬编码键集断言必红（judge 的 report_id/chapter_id/judge）。
+    (
+        "M20",
+        "packages/core/quality/models.py",
+        """    report_id: str
+    chapter_id: str
+    # router 恒写这个键（`row.get("judge_json")`，无分时为 None）⇒ 必填可空。
+    judge: Optional[QualityJudgeRecord]""",
+        """    report_id: str
+    chapter_id: str""",
+        "tests/api/test_reveal_and_judge_response_contract.py",
+    ),
+    # M21 撤掉 ArcView 的 extra="allow" ⇒ service 新增顶层键时被静默裁掉。
+    (
+        "M21",
+        "packages/core/arc/models.py",
+        '''    model_config = ConfigDict(extra="allow")
+
+    project_id: str''',
+        """    project_id: str""",
+        "tests/api/test_arc_response_contract.py",
+    ),
 ]
 
 

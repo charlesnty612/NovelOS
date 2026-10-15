@@ -184,7 +184,7 @@ const simResult = (over: Partial<SimulationResult> = {}): SimulationResult => ({
   name: 'sim-20261015T120000Z',
   base_version: 4,
   applied: 1,
-  diff: {},
+  diff: { version_a: 4, version_b: 5 },
   issues: [],
   branch_status: 'ARCHIVED',
   created_at: '2026-10-15T12:00:00Z',
@@ -442,6 +442,8 @@ describe('SimulationPanel', () => {
     simRun.mockResolvedValue(
       simResult({
         diff: {
+          version_a: 4,
+          version_b: 5,
           characters: {
             added: [{ character_id: 'chr_9' }],
             removed: [{ character_id: 'chr_8' }],
@@ -628,15 +630,19 @@ describe('defaultSimName', () => {
 
 describe('countStateDiff', () => {
   it('所有键都省略 ⇒ 0', () => {
-    expect(countStateDiff({})).toBe(0);
+    expect(countStateDiff({ version_a: 1, version_b: 2 })).toBe(0);
   });
 
   it('键存在但数组为空 ⇒ 仍是 0（空 diff 与有键空 diff 同义）', () => {
-    expect(countStateDiff({ hooks: { added: [], removed: [], changed: [] } })).toBe(0);
+    expect(
+      countStateDiff({ version_a: 1, version_b: 2, hooks: { added: [], removed: [], changed: [] } }),
+    ).toBe(0);
   });
 
   it('逐组累加（list diff + world 字段 + events_changed 键）', () => {
     const diff: StateDiff = {
+      version_a: 1,
+      version_b: 2,
       characters: { added: [{ id: 'a' }], changed: [{ id: 'b' }] },
       debts: { removed: [{ id: 'c' }] },
       world: { a: { before: 1, after: 2 }, b: { before: 1, after: 2 } },

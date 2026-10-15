@@ -23,6 +23,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from packages.core.logging_config import get_logger
 from packages.core.simulation import SimulationError, SimulationService
+from packages.core.simulation.models import SimulationResult, SimulationSummary
 
 log = get_logger("novelos.routers.simulation")
 
@@ -47,6 +48,12 @@ def _ensure_project(request: Request, project_id: str) -> None:
 @router.post(
     "/projects/{project_id}/simulate",
     status_code=status.HTTP_201_CREATED,
+    response_model=SimulationResult,
+    # ⚠️ 必须 exclude_none：`diff_snapshots` 对六个实体段是**空则整个省略**
+    # （见 core/simulation/models.py 模块 docstring）。不排除 None 的话 FastAPI
+    # 会把每个 None 序列化成 `"characters": null` 之类，**凭空多出六个键**，
+    # 把既有契约改掉。实测无实体变更的推演，diff 只有 version_a/version_b/branch_id。
+    response_model_exclude_none=True,
 )
 def simulate(project_id: str, payload: dict, request: Request) -> dict:
     """What-if 推演：在临时分支上应用假设 delta，返回与 main 的结构化 diff，归档分支。
@@ -125,14 +132,18 @@ def simulate(project_id: str, payload: dict, request: Request) -> dict:
 # ----------------------------------------------------------------- list / get
 
 
-@router.get("/projects/{project_id}/simulations")
+@router.get("/projects/{project_id}/simulations", response_model=list[SimulationSummary])
 def list_simulations(project_id: str, request: Request) -> list[dict]:
     """列历史推演（按 created_at DESC）。"""
     _ensure_project(request, project_id)
     return _service(request).list_simulations(project_id)
 
 
-@router.get("/projects/{project_id}/simulations/{simulation_id}")
+@router.get(
+    "/projects/{project_id}/simulations/{simulation_id}",
+    response_model=SimulationResult,
+    response_model_exclude_none=True,  # 同 POST：保住 diff「空则省略」
+)
 def get_simulation(project_id: str, simulation_id: str, request: Request) -> dict:
     """重放某次推演。找不到 → 404。"""
     _ensure_project(request, project_id)

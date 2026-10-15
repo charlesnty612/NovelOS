@@ -5,6 +5,92 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-15 批次（五）：G6 挂账的尾巴 —— 四个 router 补 Pydantic 契约，前端手写类型退休）
+
+> **来源**：用户指令「排那批账，补 Pydantic 模型」——清偿批次（四）登记的挂账：
+> `reveal_policies` / `arc` / `simulation` / `quality`(judge) 四个 router 的
+> body 与 response 都是**裸 `dict`** ⇒ 不进 OpenAPI ⇒ 前端只能手写契约而无机器校验。
+> **零迁移**（不动 DDL）；业务表数仍 39。
+
+**方法论：先量再建，不读源码建模**。`response_model` 会**过滤**未声明字段——
+照源码「读出来」的字段建模，漏一个就是响应静默少一个键，而功能测试常常照旧全绿。
+所以建模前先用**临时库 + 合成夹具**跑通端点、把实际返回的键集 dump 出来
+（`/tmp` 一次性探针，非入库）。这一步当场抓出三件读源码不会知道的事：
+
+- `GET /arc` 的章节行里 `overall / pacing / prose_chars / volume_id / volume_number`
+  是 **`null` 而非省略** ⇒ 模型声明为「必填可空」而不是「可选」；
+- `diff` 的六个实体段是**整个省略**（`diff_snapshots` 的「有差异才写入」），
+  而其余段恒在 ⇒ 前者必须 `= None`，后者不能给默认值；
+- 剧透策略的列表参数真名是 **`status_filter`**（router docstring 写 `status`，代码用前者）。
+
+**四个新模型 + 三处端点声明**：`core/arc/models.py`（ArcView 九件套）、
+`core/simulation/models.py`（SimulationResult / Summary / StateDiff / ListDiff /
+ChangedItem）、`domain/knowledge/models.py` 追加 `RevealPolicyOut` +
+Create/Update 入参、`core/quality/models.py` 追加 `QualityJudgeRecord` /
+`QualityJudgeResponse`。OpenAPI **98 paths / 52→72 schemas**。
+
+### ⚠️ `response_model` 的两个静默丢字段陷阱（都有用例 + 突变看守）
+
+1. **`response_model_exclude_none=True` 是承重的，不是可选的**。
+   推演的 `StateDiff` 六个实体段靠「空则省略」表达「没变化」。不排除 `None` 的话
+   FastAPI 会把每个 `None` 序列化成 `"characters": null` 之类，**凭空多出六个键**，
+   把既有契约改掉。而前端 `SimulationPanel` 的读法是 `diff.hooks?.added?.length ?? 0`，
+   多出来的 null **恰好扛得住** ⇒ 这个回归在前端完全隐形，只有契约测试抓得到。
+2. **`extra="allow"` 会让「删掉字段声明」看不出症状**。
+   `QualityJudgeResponse` 删掉 `judge` 字段后，响应**照样**有这个键（以 extra 身份透出），
+   只有 OpenAPI 里不再声明 ⇒ 前端 codegen 丢掉它的类型。断言「响应键集」抓不到，
+   必须断言 **schema 的 `properties` / `required`**（突变 M20 实测存活，见下）。
+
+**另两个刻意的不对称**：① 剧透 PATCH 的入参加 `extra="forbid"`——过去传
+`reveal_by_chapter` 会**返回 200 却什么都没改**（service 只读三字段），现在直接 422，
+把「静默吞掉」显式化；② 人工评分的**请求体不加模型**——`save_judge_score` 刻意宽松
+（会把 `score_avg / usage / dry_run` 一并存进 `judge_json`），加请求模型会顺带把入参
+校验收紧（pydantic lax 会把 `"80"` 静默转成 80，而 service 会 422），那是一次
+**没被要求的行为变更**。出参加了，入参不加，是本批的一个明确取舍。
+
+### 行为变更（1 处，有测试记录）
+
+**剧透策略入参改用 Pydantic 后，422 的 `detail` 从字符串变成 FastAPI 标准的数组。**
+这是与仓内其它带 Pydantic 请求模型的端点（Volume / Chapter / Genre…）**对齐**——
+reveal 此前是没跟上的那个。`tests/integration/test_reveal_policies_api.py` 相应改断言。
+
+⚠️ 连带发现并修掉一个**全站性**的体验缺口：`apps/web/src/api/client.ts` 此前把非字符串
+`detail` 直接 `JSON.stringify`，于是**每个** pydantic 端点的校验错误在 UI 上都显示成
+一坨 JSON。补 `formatValidationDetail`：压成 `target_kind: Input should be …`（多条用「；」，
+丢掉 `loc` 首段 `body`/`query`），非该形态仍回落 `JSON.stringify`（不吞信息）。
+判别：`client.test.ts` 3 例。
+
+### 前端：手写类型退休，改为 codegen
+
+批次（四）那 5 组手写类型**已删除**，`types.ts` 改为从 `types.generated.ts` 重导出
+（`RevealPolicy`→`RevealPolicyOut`、`SnapshotListDiff`→`ListDiff` 等只做**命名**别名，
+不改语义）。生成类型比手写的**更严**（`Optional[X] = None` 出的是 `T | null | undefined`），
+连带改了 4 个组件的读法——其中 `SimulationPanel` 新增 `readFieldDelta()`，
+因为 `diff_snapshots` 对 dict 是**递归**的，某个字段可能是叶子也可能是嵌套子 diff，
+契约类型只能给 `unknown`，与其到处 `as` 不如在边界收窄一次，且对「不是叶子」的形态
+给出可读兜底而不是 `[object Object]`。
+**`QualityJudgePayload`（请求体）仍手写**，理由见上。
+
+### 突变验证扩到 21 条（M14~M21 为本批新增）
+
+首轮三条出问题，**全部是量具的问题、没有一条是被测代码的问题**：
+
+- **M14 存活**：契约测试的「逐字相等」断言写成「响应键集 == 模型字段集」——
+  把字段从模型里删掉，两侧**同时**少一个键，仍然「相等」⇒ **自指断言恒真**。
+  已改成**硬编码期望键集**（模型之外的第三方基准），另加一条「模型字段集 vs 硬编码」双保险。
+- **M15 存活**：我的突变只插了一行注释，**等于什么都没改**（replacement 是 anchor 的超集）。
+  已改为真正翻转 `response_model_exclude_none=True` → `False`。
+  **教训：突变必须改变行为，加注释不算；脚本报「存活」时先怀疑自己写错了变异。**
+- **M20 存活**：见上文陷阱 2（`extra="allow"` 让删字段无可见症状）⇒ 补 schema 层断言。
+
+⚠️ 同轮 M18 两次被 `[ABORT]`：模型收紧后锚点没同步（`= None` 去掉、docstring 改写），
+「锚点未命中即判脚本自身缺陷、强制中止」按设计拦下——若记成「跳过」，会误报成 18/19。
+
+**闸门**：pytest **3025 passed / 1 skipped / 0 failed**（340.53s，项目 `.venv/Scripts/python.exe`，
+`--ignore=tests/unit/test_m1_lock.py`）；`ruff` clean；vitest **737**（53 文件）；`npx tsc -b` 零错；
+`npm run build` 通过；树指纹 534 文件（+5：两个 models.py、三个契约测试）跑测前后逐位一致
+（`4ca5b823…`）；突变 **21/21 全捕获**、0 存活、0 中止；突变残留 0。
+
 ### Fixed（2026-10-15 批次（四）：G6 挂账 5 条 —— 剧透策略 / 弧光 / 人工评分 / 改稿指令 / what-if 推演）
 
 > **来源**：用户指令「继续做那 5 条挂账」——清偿批次（三）登记的 G6 剩余 5 条。

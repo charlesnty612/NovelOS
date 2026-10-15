@@ -39,6 +39,7 @@ from fastapi.responses import Response
 from packages.core.db import get_connection
 from packages.core.logging_config import get_logger
 from packages.core.quality.engine import QualityEngine
+from packages.core.quality.models import QualityJudgeResponse
 from packages.core.quality.service import (
     QualityService,
     build_quality_context,
@@ -106,6 +107,7 @@ def get_chapter_quality(chapter_id: str, request: Request) -> dict:
 @router.post(
     "/chapters/{chapter_id}/quality/judge",
     status_code=status.HTTP_200_OK,
+    response_model=QualityJudgeResponse,
 )
 def save_chapter_judge(chapter_id: str, payload: dict, request: Request) -> dict:
     """V3.1 P1-2：把 LLM judge 四维评分（pacing/style/logic/dialogue 0-100）+ 扩展

@@ -31,6 +31,11 @@ from packages.domain.knowledge import (
     RevealPolicyService,
     ValidationError,
 )
+from packages.domain.knowledge.models import (
+    RevealPolicyCreateIn,
+    RevealPolicyOut,
+    RevealPolicyUpdateIn,
+)
 
 log = get_logger("novelos.routers.reveal_policies")
 
@@ -50,7 +55,7 @@ def _handle(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=str(exc))
 
 
-@router.get("/projects/{pid}/reveal-policies")
+@router.get("/projects/{pid}/reveal-policies", response_model=list[RevealPolicyOut])
 def list_reveal_policies(
     pid: str,
     request: Request,
@@ -72,10 +77,11 @@ def list_reveal_policies(
 @router.post(
     "/projects/{pid}/reveal-policies",
     status_code=status.HTTP_201_CREATED,
+    response_model=RevealPolicyOut,
 )
 def create_reveal_policy(
     pid: str,
-    payload: dict[str, Any],
+    payload: RevealPolicyCreateIn,
     request: Request,
 ) -> dict[str, Any]:
     """创建 reveal_policy。
@@ -92,24 +98,27 @@ def create_reveal_policy(
     try:
         policy = svc.create(
             project_id=pid,
-            target_kind=payload.get("target_kind", ""),
-            target_id=payload.get("target_id", ""),
-            reveal_by_chapter=payload.get("reveal_by_chapter"),
-            audience=payload.get("audience"),
-            status=payload.get("status"),
-            revealed_chapter=payload.get("revealed_chapter"),
-            notes=payload.get("notes"),
+            target_kind=payload.target_kind,
+            target_id=payload.target_id,
+            reveal_by_chapter=payload.reveal_by_chapter,
+            audience=payload.audience,
+            status=payload.status,
+            revealed_chapter=payload.revealed_chapter,
+            notes=payload.notes,
         )
     except (NotFoundError, ValidationError) as exc:
         raise _handle(exc) from exc
     return policy.to_dict()
 
 
-@router.patch("/projects/{pid}/reveal-policies/{policy_id}")
+@router.patch(
+    "/projects/{pid}/reveal-policies/{policy_id}",
+    response_model=RevealPolicyOut,
+)
 def update_reveal_policy(
     pid: str,
     policy_id: str,
-    payload: dict[str, Any],
+    payload: RevealPolicyUpdateIn,
     request: Request,
 ) -> dict[str, Any]:
     """部分更新 reveal_policy（仅允许改 status / revealed_chapter / notes）。
@@ -121,9 +130,9 @@ def update_reveal_policy(
     try:
         updated = svc.update(
             policy_id,
-            status=payload.get("status"),
-            revealed_chapter=payload.get("revealed_chapter"),
-            notes=payload.get("notes"),
+            status=payload.status,
+            revealed_chapter=payload.revealed_chapter,
+            notes=payload.notes,
         )
     except (NotFoundError, ValidationError) as exc:
         raise _handle(exc) from exc

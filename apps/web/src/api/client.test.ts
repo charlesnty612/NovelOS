@@ -85,6 +85,79 @@ describe('api client', () => {
     }
   });
 
+  // 2026-10-15 批次（五）：FastAPI 的 pydantic 校验错误（detail 是数组）
+  // 此前被 `JSON.stringify` 压成一坨符号，作者看不到「哪个字段错了」。
+  it('detail 是 pydantic 校验错误数组时压成「字段: 说明」而不是 JSON', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: [
+            {
+              type: 'enum',
+              loc: ['body', 'target_kind'],
+              msg: "Input should be 'character' or 'location'",
+            },
+          ],
+        }),
+        { status: 422, headers: { 'content-type': 'application/json' } },
+      ),
+    ) as unknown as typeof fetch;
+
+    try {
+      await api.get('/projects');
+      throw new Error('should have thrown');
+    } catch (e: unknown) {
+      const ae = e as ApiError;
+      expect(ae.status).toBe(422);
+      // 判别点：字段名必须在，且不得是原始 JSON（`[` / `{"type"` 都不该出现）
+      expect(ae.detail).toBe("target_kind: Input should be 'character' or 'location'");
+      expect(ae.detail).not.toContain('"type"');
+      expect(ae.detail).not.toContain('[');
+    }
+  });
+
+  it('多条校验错误用「；」连接，且丢掉 loc 首段（body/query 对作者无意义）', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: [
+            { loc: ['body', 'target_kind'], msg: '枚举不合法' },
+            { loc: ['body', 'reveal_by_chapter'], msg: '必须 ≥1' },
+            { loc: ['body', 'notes', 0], msg: '子路径也要展开' },
+          ],
+        }),
+        { status: 422, headers: { 'content-type': 'application/json' } },
+      ),
+    ) as unknown as typeof fetch;
+
+    try {
+      await api.get('/projects');
+      throw new Error('should have thrown');
+    } catch (e: unknown) {
+      expect((e as ApiError).detail).toBe(
+        'target_kind: 枚举不合法；reveal_by_chapter: 必须 ≥1；notes.0: 子路径也要展开',
+      );
+    }
+  });
+
+  it('detail 是数组但不是校验错误形态 ⇒ 仍回落 JSON.stringify（不吞信息）', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: ['纯文本数组', 2] }), {
+        status: 422,
+        headers: { 'content-type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch;
+
+    try {
+      await api.get('/projects');
+      throw new Error('should have thrown');
+    } catch (e: unknown) {
+      const d = (e as ApiError).detail;
+      expect(d).toContain('纯文本数组');
+      expect(d.startsWith('[')).toBe(true);
+    }
+  });
+
   it('网络层抛错时包装为 ApiError(0)', async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch')) as unknown as typeof fetch;
 

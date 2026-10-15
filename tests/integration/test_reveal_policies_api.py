@@ -165,7 +165,15 @@ def test_create_invalid_target_kind_returns_422(tmp_path: Path):
                 json={"target_kind": "bogus", "target_id": "x"},
             )
             assert r.status_code == 422
-            assert "target_kind" in r.json()["detail"]
+            # 2026-10-15 批次（五）：入参改成 Pydantic 模型后，422 的 `detail` 从
+            # **字符串**（service 的 ValidationError 文案）变成 FastAPI 标准的
+            # **数组**。这是与仓内其它带 Pydantic 请求模型的端点（Volume /
+            # Chapter / Genre…）**对齐**，不是回归——reveal 此前是没跟上的那个。
+            # 断言随之从「字符串里含 target_kind」改成「detail 是数组且指名字段」。
+            detail = r.json()["detail"]
+            assert isinstance(detail, list), detail
+            locs = [tuple(item["loc"]) for item in detail]
+            assert ("body", "target_kind") in locs, detail
 
     asyncio.run(run())
 
