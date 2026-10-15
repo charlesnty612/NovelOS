@@ -60,6 +60,113 @@ describe('EXPECTED_STATUS (按钮入口状态)', () => {
 });
 
 describe('getButtonAvailability', () => {
+  // 快通道（2026-10-14）：commit 在 DRAFTED 也可点，但**仅当 fastMode 为 true**。
+  // 关着时必须与该开关引入前逐字相同——这条是回归看守。
+  it('快通道关闭：DRAFTED 的 commit 仍禁用（与开关引入前一致）', () => {
+    const r = getButtonAvailability('commit', {
+      chapterStatus: 'DRAFTED',
+      activeRun: null,
+    });
+    expect(r.enabled).toBe(false);
+    expect(r.reason).toContain('仅在状态为 REVIEWED 时可用');
+  });
+
+  it('快通道关闭（显式 false）：DRAFTED 的 commit 同样禁用', () => {
+    const r = getButtonAvailability('commit', {
+      chapterStatus: 'DRAFTED',
+      activeRun: null,
+      fastMode: false,
+    });
+    expect(r.enabled).toBe(false);
+  });
+
+  it('快通道开启：DRAFTED 的 commit 启用', () => {
+    expect(
+      getButtonAvailability('commit', {
+        chapterStatus: 'DRAFTED',
+        activeRun: null,
+        fastMode: true,
+      }),
+    ).toEqual({ enabled: true, reason: null });
+  });
+
+  it('快通道只放宽 commit：其余 action 的判定与关闭时逐字相同', () => {
+    // 反例教材：曾把这条写成「review 在 DRAFTED 仍禁用」——错的，
+    // 因为 EXPECTED_STATUS.review 本来就含 DRAFTED（写完草稿就该能审校）。
+    // 真正的不变量是：**快通道开关对 plan/write/review 的判定零影响**。
+    const statuses = ['PLANNED', 'DRAFTED', 'REVIEWED', 'COMMITTED'] as const;
+    for (const s of statuses) {
+      for (const action of ['plan', 'write', 'review'] as const) {
+        const off = getButtonAvailability(action, {
+          chapterStatus: s,
+          activeRun: null,
+        });
+        const on = getButtonAvailability(action, {
+          chapterStatus: s,
+          activeRun: null,
+          fastMode: true,
+        });
+        expect(on, `action=${action} status=${s}`).toEqual(off);
+      }
+    }
+  });
+
+  it('快通道不越过活跃 run 守卫：RUNNING 时一律禁用', () => {
+    const r = getButtonAvailability('commit', {
+      chapterStatus: 'DRAFTED',
+      activeRun: { status: 'RUNNING' },
+      fastMode: true,
+    });
+    expect(r.enabled).toBe(false);
+    expect(r.reason).toContain('进行中的工作流 run');
+  });
+
+  // 审查批次 2026-10-15：此前旁路的**状态边界完全没有用例钉住**——把实现里的
+  // `chapterStatus === 'DRAFTED'` 改成 `chapterStatus !== 'REVIEWED'`，
+  // COMMITTED / PLANNED / RELEASED 会被一并放行，而全量 56 条前端用例照样全绿
+  // （实测突变存活）。旁路最小性此前只对 *action* 有约束，对 *status* 没有。
+  it('快通道旁路的状态边界：只有 DRAFTED 被放行，其余状态判定逐字不变', () => {
+    // 不变量是「快通道对**非 DRAFTED** 状态零影响」，不是「其余状态都禁用」——
+    // REVIEWED 本来就是 commit 的合法状态（EXPECTED_STATUS.commit = ['REVIEWED']），
+    // 它 enabled=true 与快通道无关。
+    // 判别：把实现里的 `=== 'DRAFTED'` 改成 `!== 'REVIEWED'`，COMMITTED /
+    // PLANNED / RELEASED 会被一并放行 ⇒ 与关闭时的结果不等 ⇒ 本用例红。
+    const statuses = ['PLANNED', 'DRAFTED', 'REVIEWED', 'COMMITTED', 'RELEASED'] as const;
+    for (const s of statuses) {
+      const on = getButtonAvailability('commit', {
+        chapterStatus: s,
+        activeRun: null,
+        fastMode: true,
+      });
+      const off = getButtonAvailability('commit', {
+        chapterStatus: s,
+        activeRun: null,
+      });
+      if (s === 'DRAFTED') {
+        expect(on.enabled, 'DRAFTED 应被快通道放行').toBe(true);
+        expect(off.enabled, 'DRAFTED 关闭时不该放行').toBe(false);
+      } else {
+        expect(on, `状态 ${s}：快通道不该改变判定`).toEqual(off);
+      }
+    }
+  });
+
+  it('快通道旁路只在 DRAFTED 生效：REVIEWED 的行为与关闭时逐字相同', () => {
+    // 与上一条互为对照：REVIEWED 是唯一「本来就该放行」的状态，快通道对它
+    // 必须是无操作的——否则「放行 DRAFTED」就退化成了「放行一切非 REVIEWED」。
+    const on = getButtonAvailability('commit', {
+      chapterStatus: 'REVIEWED',
+      activeRun: null,
+      fastMode: true,
+    });
+    expect(on).toEqual(
+      getButtonAvailability('commit', {
+        chapterStatus: 'REVIEWED',
+        activeRun: null,
+      }),
+    );
+  });
+
   it('没有活跃 run、章节状态匹配 → 启用', () => {
     expect(
       getButtonAvailability('plan', {

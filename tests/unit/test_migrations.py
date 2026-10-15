@@ -18,7 +18,7 @@ def _fresh_db(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 1. 迁移主链：空库顺序应用 0001~0030
+# 1. 迁移主链：空库顺序应用 0001~0031
 #    （迁移后总表 40 = 39 业务表 + `_migrations`）
 # ---------------------------------------------------------------------------
 
@@ -137,6 +137,10 @@ def test_apply_migrations_creates_40_tables_total(tmp_path: Path):
     # - 仅替换 idx_commits_rollback_of 索引定义为项目域 (project_id, rollback_of)；
     # - 不增表（业务表 39，总表 40 不变），无回填。
     assert "0030_commits_rollback_of_project_scope.sql" in result["applied"]
+    # 快通道（2026-10-14）：0031_project_fast_mode.sql
+    # - 仅 ALTER TABLE projects 加 fast_mode INTEGER 可空列（NULL=未设置→走默认关）；
+    # - 不增表（业务表 39，总表 40 不变），无回填 → 存量项目行为逐字不变。
+    assert "0031_project_fast_mode.sql" in result["applied"]
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +185,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0028_chapter_outline_json.sql",
         "0029_project_writing_bible.sql",
         "0030_commits_rollback_of_project_scope.sql",
+        "0031_project_fast_mode.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -236,6 +241,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     # R-1 修复：0030 也应被幂等跳过（DROP INDEX IF EXISTS + CREATE UNIQUE INDEX
     # IF NOT EXISTS 自幂等 + _migrations 文件粒度追踪）
     assert "0030_commits_rollback_of_project_scope.sql" in second["skipped"]
+    # 快通道：0031 也应被幂等跳过（同 0029，靠 _migrations 文件粒度追踪）
+    assert "0031_project_fast_mode.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -288,6 +295,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0028_chapter_outline_json.sql",
         "0029_project_writing_bible.sql",
         "0030_commits_rollback_of_project_scope.sql",
+        "0031_project_fast_mode.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -1768,3 +1776,110 @@ def test_0030_rollback_of_migration_is_idempotent(tmp_path: Path):
     assert "0030_commits_rollback_of_project_scope.sql" not in second["applied"]
     assert "0030_commits_rollback_of_project_scope.sql" in second["skipped"]
     assert second["tables"] == first["tables"] == 40, (first["tables"], second["tables"])
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-14：0031_project_fast_mode.sql 专项回归
+# ---------------------------------------------------------------------------
+
+
+def test_0031_fast_mode_column_exists_and_nullable(tmp_path: Path):
+    """0031 给 projects 加 fast_mode INTEGER 可空列（NULL=未设置→走默认关）。
+
+    刻意**不加 DEFAULT 0**：必须能区分「作者未设置」与「作者显式关闭」，
+    否则将来改默认值时无法与作者既有选择区分（同 0023/0029 的可空列范式）。
+    """
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        cols = conn.execute("PRAGMA table_info(projects)").fetchall()
+    finally:
+        conn.close()
+    col_map = {c["name"]: c for c in cols}
+    assert "fast_mode" in col_map, "fast_mode column missing after 0031"
+    col = col_map["fast_mode"]
+    assert col["type"].upper() == "INTEGER", f"expected INTEGER, got {col['type']!r}"
+    assert col["notnull"] == 0, "fast_mode must be nullable"
+    assert col["dflt_value"] is None, "fast_mode has no DEFAULT (NULL=未设置)"
+
+
+def test_0031_fast_mode_migration_is_idempotent(tmp_path: Path):
+    """0031 跑两遍不炸（ALTER ADD COLUMN 不带 IF NOT EXISTS，靠 _migrations 追踪），
+    且不增表（业务表 39 / 总表 40 不变）。"""
+    db_path = _fresh_db(tmp_path)
+    first = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0031_project_fast_mode.sql" in first["applied"]
+
+    second = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert "0031_project_fast_mode.sql" not in second["applied"]
+    assert "0031_project_fast_mode.sql" in second["skipped"]
+    assert second["tables"] == first["tables"] == 40, (first["tables"], second["tables"])
+
+
+def test_0031_fast_mode_does_not_touch_existing_rows(tmp_path: Path):
+    """add-only + 无回填：升级前建好的项目行回读 fast_mode 为 NULL ⇒ 老项目
+    行为逐字不变（闸门照常，快通道默认关）。"""
+    db_path = _fresh_db(tmp_path)
+    # 先只跑 0030 及之前的部分（模拟存量库），再补跑 0031。
+    migrations_dir = tmp_path / "mig_pre"
+    migrations_dir.mkdir()
+    for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if sql_file.name.startswith("0031"):
+            continue
+        (migrations_dir / sql_file.name).write_text(
+            sql_file.read_text(encoding="utf-8"), encoding="utf-8",
+        )
+    apply_migrations(db_path, migrations_dir)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO projects (project_id, name, premise, genre, target_words, "
+            "status, created_at, updated_at) VALUES "
+            "('prj_pre0031', '存量项目', NULL, NULL, NULL, 'ACTIVE', 't', 't')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 补跑 0031
+    apply_migrations(db_path, MIGRATIONS_DIR)
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT fast_mode FROM projects WHERE project_id = ?",
+            ("prj_pre0031",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "存量项目行被 0031 破坏"
+    assert row["fast_mode"] is None, "0031 不得回填：存量行 fast_mode 必须仍为 NULL"
+
+
+def test_0031_fast_mode_roundtrips_1_and_0(tmp_path: Path):
+    """列能存 1/0（作者显式开/关），且 NULL 与 0 语义可区分。"""
+    db_path = _fresh_db(tmp_path)
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    conn = get_connection(db_path)
+    try:
+        for pid in ("prj_fm_on", "prj_fm_off"):
+            conn.execute(
+                "INSERT INTO projects (project_id, name, premise, genre, target_words, "
+                "status, created_at, updated_at) VALUES (?, 'p', NULL, NULL, NULL, "
+                "'ACTIVE', 't', 't')",
+                (pid,),
+            )
+        conn.execute("UPDATE projects SET fast_mode = 1 WHERE project_id = 'prj_fm_on'")
+        conn.execute("UPDATE projects SET fast_mode = 0 WHERE project_id = 'prj_fm_off'")
+        conn.commit()
+        rows = {
+            r["project_id"]: r["fast_mode"]
+            for r in conn.execute("SELECT project_id, fast_mode FROM projects").fetchall()
+        }
+    finally:
+        conn.close()
+    assert rows["prj_fm_on"] == 1
+    assert rows["prj_fm_off"] == 0, "显式关闭必须落 0 而不是 NULL（否则与「未设置」同形）"
+    assert rows["prj_fm_on"] is not None

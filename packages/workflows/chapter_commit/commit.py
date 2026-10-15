@@ -309,8 +309,22 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
         cur = conn.execute("SELECT status FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()
         if cur is None:
             raise ValueError(f"chapter {chapter_id!r} not found")
-        # 状态机：必须先 REVIEWED 才能 COMMITTED；DRAFTED 直接 commit 拒绝
-        if cur["status"] != "REVIEWED":
+        # 状态机：默认必须先 REVIEWED 才能 COMMITTED；DRAFTED 直接 commit 拒绝。
+        #
+        # 快通道（2026-10-14，`ctx["fast_mode"]`，由 projects.fast_mode 驱动）：
+        # 放行 DRAFTED 直提——「写完直接提交」的核心开关，也是本文件**唯一**
+        # 因快通道而改的判定。放行条件刻意收窄为「fast 且当前就是 DRAFTED」：
+        #   - fast 关闭 → 逐字走原逻辑，老项目零行为突变；
+        #   - fast 开启 → 只吃**从没评审过**的章（下面 :318 的时序守卫仍会对
+        #     「审过又改稿」的章拒收，那是数据正确性不是闸门，不归快通道管）。
+        fast = bool(ctx.get("fast_mode"))
+        if fast:
+            if cur["status"] not in ("REVIEWED", "DRAFTED"):
+                raise ValueError(
+                    f"chapter {chapter_id!r} status={cur['status']!r}；快通道只放行 "
+                    "DRAFTED/REVIEWED → COMMITTED，其余状态请走常规评审链"
+                )
+        elif cur["status"] != "REVIEWED":
             raise ValueError(
                 f"chapter {chapter_id!r} status={cur['status']!r}；请先跑 chapter-review 把它推到 REVIEWED"
             )
@@ -348,10 +362,23 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
         conn.close()
 
     svc = StoryStateService(db_path)
+    # 审批人如实登记（2026-10-14 快通道）：快通道预置了 human_input.approved=True，
+    # 若沿用 needs_high_risk 分支就会把 approver 记成 "human" —— commits 表里
+    # 那是一条**假的审批人记录**（压根没人看过这章）。快通道一律记 system:fast_mode。
+    if fast:
+        approver = "system:fast_mode"
+        notes = "快通道自动提交：跳过 chapter-review 与人工审批，未经人工放行"
+    else:
+        approver = "human" if needs_high_risk else "system:workflow"
+        notes = (
+            "chapter-commit workflow auto-approved"
+            if not needs_high_risk
+            else "human approved HIGH risk"
+        )
     author_approval = {
         "approved": True,
-        "approver": "human" if needs_high_risk else "system:workflow",
-        "notes": "chapter-commit workflow auto-approved" if not needs_high_risk else "human approved HIGH risk",
+        "approver": approver,
+        "notes": notes,
     }
     commit_result = svc.commit_delta(delta_id, author_approval, run_id)
 

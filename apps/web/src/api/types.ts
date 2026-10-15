@@ -23,6 +23,15 @@ export interface Project {
   updated_at: string;
   /** V3.7：项目级字数带覆盖；undefined = 项目无覆盖（走后端默认 0.85/1.15/1200） */
   word_band?: ProjectWordBand | null;
+  /**
+   * 快通道（后端迁移 0031 projects.fast_mode）：写完直接提交，跳过人工审批门。
+   * - null/undefined = 未设置（后端回落 env 与默认「关」）
+   * - true = 开、false = 作者显式关
+   *
+   * 只影响闸门是否阻断/挂起，**不影响** observer 等状态更新
+   * （后端 projects.fast_mode 语义，前端不得自行解释成「跳过状态更新」）。
+   */
+  fast_mode?: boolean | null;
 }
 
 export interface ProjectCreatePayload {
@@ -37,6 +46,8 @@ export interface ProjectCreatePayload {
    * - 显式对象 → 后端 resolve_band_config 校验 + 序列化存 word_band_json
    */
   word_band?: ProjectWordBand | null;
+  /** 快通道：undefined = 不写入；显式 true/false = 作者显式选择 */
+  fast_mode?: boolean | null;
 }
 
 export interface ProjectUpdatePayload {
@@ -52,6 +63,13 @@ export interface ProjectUpdatePayload {
    * - 显式对象 → 后端校验 + 序列化存 word_band_json
    */
   word_band?: ProjectWordBand | null;
+  /**
+   * 快通道（后端迁移 0031）：
+   * - 字段未提供（undefined） → 后端保留原值
+   * - 显式 null → 清除覆盖（落 DB NULL，回到「未设置」）
+   * - 显式 true/false → 作者显式开/关
+   */
+  fast_mode?: boolean | null;
 }
 
 // --- V1.4 Sprint 16 / MVP：项目备份 / 恢复 -----------------------------------
@@ -383,6 +401,18 @@ export interface WorkflowStartPayload {
    * 后端对不存在的版本会报错,前端不做校验；约 +1 分钟。
    */
   deep_review?: boolean | null;
+  /**
+   * 快通道自动衔接（仅 chapter-write 生效）：true ⇒ 写作 run 到达 COMPLETED 后
+   * 由服务端守护线程自动起 chapter-commit run，省掉「点写正文 → 等 → 点提交」。
+   * **仅当项目快通道已开启时才生效**——项目 fast_mode 为 null/false 时后端忽略本字段，
+   * 不会自动提交（免得绕过一个作者没同意的 DRAFTED 直提）。
+   */
+  auto_commit?: boolean | null;
+  /**
+   * 快通道单次运行覆盖：显式 true/false 压过 projects.fast_mode 与 env。
+   * 前端一般不传（走项目级开关）；留出是为了「这一章想守门」的一次性例外。
+   */
+  fast_mode?: boolean | null;
 }
 
 export interface WorkflowStartResponse {

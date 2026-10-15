@@ -379,6 +379,8 @@ function ProjectFormModal({
   // （创建场景无覆盖；编辑场景保留原值）。编辑模式下显示「清除」按钮可显式传 null。
   // 初始值来自 initial.word_band；undefined/null（无覆盖）→ 留空（与「全空=默认」语义一致）。
   const initBand = initial?.word_band ?? undefined;
+  // 快通道（2026-10-14）：初值取项目 fast_mode；null/undefined = 未设置 = 关。
+  const [fastMode, setFastMode] = useState(initial?.fast_mode === true);
   const [bandLowRatio, setBandLowRatio] = useState<string>(
     initBand?.low_ratio != null ? String(initBand.low_ratio) : '',
   );
@@ -442,6 +444,22 @@ function ProjectFormModal({
       if (hr !== null) band.high_ratio = hr;
       if (fl !== null) band.floor = fl;
       payload.word_band = band;
+    }
+    // 快通道（2026-10-14 项目级 projects.fast_mode；2026-10-15 修复关闭语义）。
+    //
+    // 规则：**只在提交值与当前值不同的时候才下发该键**。
+    // - 创建 + 勾选        → true（新建即开）
+    // - 创建 + 未勾选      → 省略（落 NULL = 未设置）
+    // - 编辑 + 由开改关    → false（原实现省略 ⇒ 键缺失 ⇒ UPDATE 不带此列
+    //                       ⇒ DB 仍是 1，而复选框已显示未勾选——**静默空操作
+    //                       + 假承诺**。三态里的「显式关」在此界面原本 100%
+    //                       不可达，且与章节页开关语义相反）
+    // - 编辑 + 未动过它    → 省略（不得把 NULL 擅自改写成 0）
+    //
+    // 「未动过就省略」是刻意的：编辑一个 null 的项目哪怕只是改个名字，
+    // 也不该把它的快通道状态从「未设置」偷换成「显式关」。
+    if (fastMode !== (initial?.fast_mode === true)) {
+      payload.fast_mode = fastMode;
     }
     setSubmitting(true);
     try {
@@ -543,6 +561,25 @@ function ProjectFormModal({
             </select>
           </div>
         ) : null}
+
+        {/* 快通道（2026-10-14，项目级 projects.fast_mode）：写完直接提交，跳过
+            人工审批门。文案必须点明「质量判定仍会跑」——否则作者会以为是关掉质检。 */}
+        <div className="form-row">
+          <label>快通道（写完直接提交）</label>
+          <p className="muted small" style={{ margin: '0 0 6px' }}>
+            勾选后：写作完成直接提交，跳过「审校」与人工审批；质量判定仍会跑，只是不拦住。
+            状态更新（伏笔 / 角色目标 / 世界观）照常推进，不受影响。
+          </p>
+          <label className="muted small" style={{ display: 'flex', gap: '6px' }}>
+            <input
+              type="checkbox"
+              checked={fastMode}
+              onChange={(e) => setFastMode(e.target.checked)}
+              data-testid="project-fast-mode-checkbox"
+            />
+            开启快通道
+          </label>
+        </div>
 
         {/* V3.7：字数带覆盖（可选）——留空=不覆盖；与后端 resolve_band_config 校验对齐。
             三个键全留空：提交时省略 word_band 键；任一非空：提交 dict。 */}

@@ -82,6 +82,16 @@ export interface ActiveRunInfo {
 export interface ButtonAvailabilityInput {
   chapterStatus: ChapterStatus;
   activeRun: ActiveRunInfo | null;
+  /**
+   * 快通道是否开启（后端 projects.fast_mode，迁移 0031）。
+   *
+   * 开启时「提交」按钮在 DRAFTED 也可点——对应后端 commit 节点在快通道下
+   * 放行 DRAFTED 直提。**关闭时行为与该开关引入前逐字相同**。
+   *
+   * 刻意**不改** EXPECTED_STATUS 常量：它是与后端 ALLOWED_NEXT 对齐的状态机
+   * 面，与快通道无关；快通道是「旁路」，不是状态机的合法后继。
+   */
+  fastMode?: boolean;
 }
 
 export interface ButtonAvailability {
@@ -116,6 +126,11 @@ export function getButtonAvailability(
       enabled: false,
       reason: '当前有进行中的工作流 run，请等待其完成',
     };
+  }
+  // 快通道旁路：commit 在 DRAFTED 也可直达（对应后端 commit 节点的 fast 放行）。
+  // 只放宽 commit，不放宽其它 action——旁路范围必须最小。
+  if (action === 'commit' && input.fastMode === true && chapterStatus === 'DRAFTED') {
+    return { enabled: true, reason: null };
   }
   const expected = EXPECTED_STATUS[action];
   if (!expected.includes(chapterStatus)) {

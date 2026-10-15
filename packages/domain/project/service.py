@@ -98,6 +98,27 @@ def _coerce_writing_bible(raw: object) -> str | None:
     return None
 
 
+def _coerce_fast_mode(raw: object) -> bool | None:
+    """把 ``projects.fast_mode`` 列值归一为 bool | None（迁移 0031）。
+
+    三态保持：``None``（未设置 / 极老库缺列）≠ ``False``（作者显式关闭）。
+    两者在 DB 与读侧都必须是可区分的形态——否则将来改默认值时，无法判断某项目的
+    0 是「作者明确关的」还是「从来没这回事」。解析时 None 才回落 env 与默认值。
+
+    - None → None；
+    - int 0/1（sqlite INTEGER 的真值形态）→ bool；
+    - bool → 原样；
+    - 其它类型（脏数据）→ None（防御性，不炸 Project 响应）。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):
+        return bool(raw)
+    return None
+
+
 class ProjectService:
     """项目领域服务（projects 表 CRUD）。"""
 
@@ -137,6 +158,8 @@ class ProjectService:
             "writing_bible": _coerce_writing_bible(
                 getattr(payload, "writing_bible", None)
             ),
+            # 快通道（0031）：None=未设置（解析时回落 env/默认关），True/False=作者显式选择。
+            "fast_mode": _coerce_fast_mode(getattr(payload, "fast_mode", None)),
             "created_at": now,
             "updated_at": now,
         }
@@ -147,11 +170,11 @@ class ProjectService:
                 INSERT INTO projects
                     (project_id, name, premise, genre, target_words, status,
                      foreshadow_overdue_chapters, word_band_json, writing_bible,
-                     created_at, updated_at)
+                     fast_mode, created_at, updated_at)
                 VALUES
                     (:project_id, :name, :premise, :genre, :target_words, :status,
                      :foreshadow_overdue_chapters, :word_band_json, :writing_bible,
-                     :created_at, :updated_at)
+                     :fast_mode, :created_at, :updated_at)
                 """,
                 row,
             )
@@ -178,6 +201,8 @@ class ProjectService:
         d["genre_pack_id"] = _coerce_genre_pack_id(d.get("genre_pack_id"))
         # 项目写作圣经（0029）：空白串 / 缺列 → None
         d["writing_bible"] = _coerce_writing_bible(d.get("writing_bible"))
+        # 快通道（0031）：缺列 / NULL → None（未设置，与显式 False 可区分）
+        d["fast_mode"] = _coerce_fast_mode(d.get("fast_mode"))
         return d
 
     # -------------------------------------------------------------------- list
@@ -208,6 +233,7 @@ class ProjectService:
             d["word_band"] = _coerce_word_band(d.get("word_band_json"))
             d["genre_pack_id"] = _coerce_genre_pack_id(d.get("genre_pack_id"))
             d["writing_bible"] = _coerce_writing_bible(d.get("writing_bible"))
+            d["fast_mode"] = _coerce_fast_mode(d.get("fast_mode"))
             out.append(d)
         return out
 
@@ -248,6 +274,11 @@ class ProjectService:
                 fields["writing_bible"] = _coerce_writing_bible(
                     getattr(payload, "writing_bible")
                 )
+            elif fname == "fast_mode":
+                # 快通道（0031）：True→1 / False→0 / 显式 None→NULL（清除覆盖）。
+                # 不在这里回落默认值——「清除」必须真的落 NULL，否则无法把
+                # 「作者显式关」与「作者从未设置」区分开。
+                fields["fast_mode"] = _coerce_fast_mode(getattr(payload, "fast_mode"))
             else:
                 fields[fname] = getattr(payload, fname)
 
@@ -282,6 +313,7 @@ class ProjectService:
         d["word_band"] = _coerce_word_band(d.get("word_band_json"))
         d["genre_pack_id"] = _coerce_genre_pack_id(d.get("genre_pack_id"))
         d["writing_bible"] = _coerce_writing_bible(d.get("writing_bible"))
+        d["fast_mode"] = _coerce_fast_mode(d.get("fast_mode"))
         return d
 
     # ------------------------------------------------------------------- delete
@@ -329,4 +361,5 @@ __all__ = [
     "_coerce_word_band",
     "_coerce_genre_pack_id",
     "_coerce_writing_bible",
+    "_coerce_fast_mode",
 ]

@@ -27,6 +27,16 @@ floor`` 三个可选键。无覆盖（NULL）= 模块默认（0.85 / 1.15 / 1200
 冲突裁决方向（后置、更具体的指令对 LLM 优先级更高）。
 解析单点在 :func:`packages.core.context_engine.builders_common.resolve_author_intent`。
 
+2026-10-14 通过 ``0031_project_fast_mode.sql`` 新增可空三态列 ``fast_mode INTEGER``
+——**项目级快通道开关**：写完一章直接提交，跳过人工审批门（``author_review`` /
+``high_risk_approval``）与 ``quality_gate`` 阻断，代价是没有 critic / deep_reviewer
+的评审意见。**三态**（NULL 未设置 / 1 开 / 0 关）而非 ``NOT NULL DEFAULT 0``：
+必须能区分「作者未设置」与「作者显式关闭」，否则将来改默认值时无法与作者既有
+选择区分（同 0023 / 0029 的可空列范式）。它与上面两列有个关键区别——
+**不进入任何装配 payload**，故不需要缓存键指纹维度；它只改闸门是否阻断/挂起，
+**不改任何状态更新**（``observer`` 仍照跑，story_state 仍照推进）。
+解析单点在 :func:`packages.core.api.routers.workflows.fast_mode.resolve_fast_mode`。
+
 - ``project_id`` 形如 ``prj_<12hex>``，由 Service 层 ``new_id("prj")`` 生成。
 - ``status`` 受 CHECK 约束，仅允许 ``ACTIVE / PAUSED / ARCHIVED``。
 - ``foreshadow_overdue_chapters``：Context Engine 装配开放伏笔清单时
@@ -85,6 +95,14 @@ class ProjectCreate(BaseModel):
             "装配时与运行期 author_intent 按「基线 + 增量」拼接，见模型模块 docstring。"
         ),
     )
+    fast_mode: bool | None = Field(
+        default=None,
+        description=(
+            "快通道：写完直接提交，跳过人工审批门（迁移 0031 的可空三态列）。"
+            "True=开闸门旁路、False=显式关、省略/None=未设置（走默认关）。"
+            "只影响闸门是否阻断/挂起，**不影响** observer 等状态更新。"
+        ),
+    )
 
 
 class ProjectUpdate(BaseModel):
@@ -114,6 +132,13 @@ class ProjectUpdate(BaseModel):
         description=(
             "项目写作圣经。显式 null / 空白串 → 清除（落 NULL）；省略 → 保留原值。"
             "装配优先级见模型模块 docstring（基线 + 增量拼接）。"
+        ),
+    )
+    fast_mode: bool | None = Field(
+        default=None,
+        description=(
+            "快通道开关。true=开 / false=显式关 / 显式 null=清除覆盖（落 NULL，"
+            "回到「未设置」）；省略=保留原值。"
         ),
     )
 
@@ -164,6 +189,13 @@ class Project(BaseModel):
         description=(
             "项目写作圣经（迁移 0029 的可空列）；None = 无圣经 / 极老库缺列。"
             "写入走 POST /projects 与 PATCH /projects/{pid}；不被任何工作流覆盖。"
+        ),
+    )
+    fast_mode: bool | None = Field(
+        default=None,
+        description=(
+            "快通道开关（迁移 0031 的可空三态列）；None = 未设置 / 极老库缺列 → "
+            "解析时回落 env 与默认值（关）。读侧布尔化（NULL→False）。"
         ),
     )
 

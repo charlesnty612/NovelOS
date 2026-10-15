@@ -25,7 +25,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from packages.core.db import get_connection
 from packages.core.model_router.profiles import ProfileService
 from packages.core.workflow_registry import get_workflow
-from packages.core.workflow_runtime.engine import WorkflowRunConflict
+from packages.core.workflow_runtime.engine import WorkflowEngine, WorkflowRunConflict
 from packages.core.workflow_runtime.runs import get_run, get_workflow_name_for_run
 from packages.domain.chapter.service import ChapterService
 
@@ -33,15 +33,22 @@ from .common import (
     ProjectInitRequest,
     ResumeRequest,
     StartWorkflowRequest,
-    _check_chapter,
     _engine,
     _extract_pause_payload,
     _init_genesis_if_needed,
     _mark_auto_revise_loops_cancelled_for_run,
+    check_chapter_in_project,
     log,
 )
+from .fast_mode import resolve_fast_mode
 
 router = APIRouter(tags=["workflows"])
+
+#: 快通道 auto-commit 守护线程的等待 deadline（秒）。
+#: **刻意远大于** resume 里 auto_revise 的 180s：那边等的是一次人工决议（很快），
+#: 这边等的是整章写作（writer 1~3 次 + polisher + condense 循环），十几分钟量级。
+#: 用 180s 会必然超时——与 2026-09-18 字数闭环「轮次耗尽」同源的量级误配。
+_AUTO_COMMIT_DEADLINE_SECONDS: float = 1800.0
 
 
 # ---------------------------------------------------------------------------
@@ -180,9 +187,40 @@ def _start_workflow(
     chapter_id: str,
     body: StartWorkflowRequest,
 ) -> dict[str, Any]:
-    _check_chapter(request, project_id, chapter_id)
+    """从 HTTP Request 起步的薄封装：取 settings / engine 后交给 :func:`_start_workflow_core`。
+
+    拆出 core 是为了让快通道的守护线程能起 commit run——线程里没有 Request 对象，
+    只有 db_path 与 engine。**本函数保持原名与原签名**：`revise.py` 有
+    ``from .control import _start_workflow`` 的跨模块 import 契约，且
+    `tests/api/test_workflow_cancel.py` 在 `control._engine` 上打 monkeypatch——
+    故 engine 必须经模块级 ``_engine(request)`` 查找，不能内联 ``WorkflowEngine(...)``。
+    """
     settings = request.app.state.settings
-    db_path = settings.db_path
+    return _start_workflow_core(
+        workflow_name=workflow_name,
+        engine=_engine(request),
+        db_path=str(settings.db_path),
+        project_id=project_id,
+        chapter_id=chapter_id,
+        body=body,
+    )
+
+
+def _start_workflow_core(
+    *,
+    workflow_name: str,
+    engine: WorkflowEngine,
+    db_path: str,
+    project_id: str,
+    chapter_id: str,
+    body: StartWorkflowRequest,
+) -> dict[str, Any]:
+    """启动一个章节级 workflow run 的**唯一实现**（HTTP 与守护线程共用）。
+
+    ctx 组装只在这里做一次——快通道的 auto-commit 线程复用本函数而不是重拼 ctx，
+    否则两条路径会各自演化出不同的 ctx（坑区「两条路径拼同一件事」的形状）。
+    """
+    check_chapter_in_project(db_path, project_id, chapter_id)
 
     # 并发防护：同 chapter 已有 RUNNING/PENDING run 时拒绝再启动。
     # 原因：章节级工作流（write/review/commit）会并发改 chapter 行 + plan_json + story_state，
@@ -245,7 +283,44 @@ def _start_workflow(
     if body.gate_override is not None:
         initial_ctx["gate_override"] = body.gate_override
 
-    engine = _engine(request)
+    # 快通道（2026-10-14）：本次运行是否跳过人工闸门。三档优先级在
+    # fast_mode.resolve_fast_mode 收口（请求体 > projects.fast_mode > env > 关）。
+    #
+    # **注入顺序必须在请求体字段之后**：fast 为真时要压过请求体的
+    # quality_gate_mode="enforce"（作者显式传 enforce 说明他这章想守门，
+    # 但项目开了快通道=整本书都要快，故 fast 胜出）。反向的逃生舱是请求体
+    # 显式传 fast_mode=false——那在 resolve 阶段就返回 False，不进本分支。
+    fast = resolve_fast_mode(
+        db_path=str(db_path),
+        project_id=project_id,
+        request_value=body.fast_mode,
+    )
+    if fast:
+        initial_ctx["fast_mode"] = True
+        # 门禁照算、报告照落库，只是不阻断（既有 report 语义，0 行为变更）。
+        # 只被 chapter-commit 的 quality_gate 节点读；review 里没有该节点。
+        initial_ctx["quality_gate_mode"] = "report"
+        # 预置批准：high_risk_approval 节点读到 approved=True 直接放行不 PAUSE。
+        # approver 标 "system:fast_mode"（**不是** "human"）——commit 节点会把
+        # 它写进 commits 表，标成 human 就是在审计里留一条假的审批人。
+        #
+        # ⚠️ **必须按 workflow_name 收口到 chapter-commit**（2026-10-15 修复）：
+        # `ctx["human_input"]` 在全仓有**两个**读者，它们语义不同——
+        #   - `chapter_commit/gate.py::_high_risk_approval_node`（预置「放行本闸门」）
+        #   - `chapter_review/pipeline.py::_author_review_node`（resume 时读「人已
+        #     做出的决议」，其 docstring 明写「本 fn 总是抛 PauseRequested」）
+        # 同一个键既当「已决」又当「预先放行」，一旦对 plan/write/review 也注入，
+        # 作者手动点「审校」就会**一句不问地自动批准**、章节直推 REVIEWED（实测
+        # 快通道开→COMPLETED/REVIEWED，关→PAUSED/DRAFTED）。
+        # 快通道的语义是「不跑 chapter-review」，不是「跑但自动批」——
+        # 所以 review 必须拿不到这个键。判别：
+        # `tests/api/test_fast_mode_review_gate.py::test_manual_review_still_pauses_under_fast_mode`
+        if workflow_name == "chapter-commit":
+            initial_ctx["human_input"] = {
+                "approved": True,
+                "approver": "system:fast_mode",
+            }
+
     try:
         run_id = engine.start_with_nodes_async(
             workflow_name,
@@ -476,12 +551,143 @@ def start_write(
     body: StartWorkflowRequest,
     request: Request,
 ) -> dict[str, Any]:
-    return _start_workflow(
+    payload = _start_workflow(
         workflow_name="chapter-write",
         request=request,
         project_id=project_id,
         chapter_id=chapter_id,
         body=body,
+    )
+    # 快通道自动衔接（2026-10-14）：写作 COMPLETED 后自动起 chapter-commit，
+    # 省掉「点写正文 → 等 → 点提交」这一次人工往返。
+    #
+    # 条件：请求体 auto_commit=True **且**本次运行确实解析成了快通道。
+    #
+    # ⚠️ **这不是授权控制**（2026-10-15 订正注释）：原注释写「两个条件都要，避免
+    # 绕过作者没同意的 DRAFTED 直提」，复算不成立——同一个请求体自己就能同时满足
+    # `fast_mode: true` 与 `auto_commit: true`，第二个条件由第一个派生，不构成
+    # 独立约束。它的真实作用是**默认行为**：项目没开快通道时，光勾 auto_commit
+    # 不产生任何效果（前端也从不发 fast_mode，故 UI 面不可达）。
+    #
+    # `payload["status"] == "RUNNING"` 恒真（_start_workflow_core 硬编码该值，
+    # 启动失败一律 raise 400/409/422 而非返回）：留着是防御，不是判别性守卫。
+    #
+    # 这里第二次调 resolve_fast_mode 而不复用 _start_workflow 的结果：解析口径
+    # 只有 resolve_fast_mode 一份（两次调用同函数，不是两套优先级），而让
+    # _start_workflow 为此多返回一个字段会改动 revise.py 的既有调用契约。
+    # 代价是一次 SELECT；TOCTOU 只影响「要不要自动衔接」这一个决定，
+    # 不影响已经固定的 run ctx。
+    if body.auto_commit and payload.get("status") == "RUNNING":
+        db_path = str(request.app.state.settings.db_path)
+        if not resolve_fast_mode(
+            db_path=db_path,
+            project_id=project_id,
+            request_value=body.fast_mode,
+        ):
+            log.info(
+                "auto-commit skipped: fast_mode not enabled for project=%s (run=%s)",
+                project_id,
+                payload["run_id"],
+            )
+            return payload
+        _spawn_auto_commit(
+            db_path=db_path,
+            engine=_engine(request),
+            write_run_id=payload["run_id"],
+            project_id=project_id,
+            chapter_id=chapter_id,
+            body=body,
+        )
+    return payload
+
+
+def _spawn_auto_commit(
+    *,
+    db_path: str,
+    engine: WorkflowEngine,
+    write_run_id: str,
+    project_id: str,
+    chapter_id: str,
+    body: StartWorkflowRequest,
+) -> None:
+    """守护线程：等写作 run 终态 → COMPLETED 则自动起 chapter-commit run。
+
+    形状镜像 ``resume`` 里的 ``_auto_revise_runner``（同款延迟 import、异常只记日志、
+    子 run 状态由前端轮询）。差别两处，都是有意为之：
+
+    1. **deadline 1800s 而非 180s**——auto_revise 那边等的是一次 resume 决议，
+       很快；这边等的是整章写作（writer 1~3 次 + polisher + condense 循环），
+       十几分钟量级，用 180s 会必然超时（这正是 2026-09-18 字数闭环踩过的坑）。
+    2. **只在 COMPLETED 时衔接**——FAILED/CANCELLED 不起 commit（草稿都没落库）。
+
+    并发安全：commit 启动时写 run 已终态，``_check_active_run_for_chapter`` 不会 409；
+    若用户在等待期间自己点了提交，本函数起 run 时会被那条守卫挡下并记日志，
+    不产生重复提交。
+    """
+    import time as _t
+
+    def _runner() -> None:
+        try:
+            deadline = _t.monotonic() + _AUTO_COMMIT_DEADLINE_SECONDS
+            cur: dict[str, Any] | None = None
+            while _t.monotonic() < deadline:
+                cur = get_run(db_path, write_run_id)
+                if cur and cur["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
+                    break
+                _t.sleep(1.0)
+            log.debug(
+                "auto-commit watch (async): write_run_id=%s status=%s err=%s",
+                write_run_id,
+                cur["status"] if cur else None,
+                cur.get("error") if cur else None,
+            )
+            if not cur or cur["status"] != "COMPLETED":
+                log.info(
+                    "auto-commit skipped: write run %s did not reach COMPLETED (status=%s)",
+                    write_run_id,
+                    cur["status"] if cur else None,
+                )
+                return
+
+            # commit run 复用同一条启动路径（ctx 组装只在 _start_workflow_core 一处，
+            # 这里不重拼——两条路径拼同一件事必然分叉，坑区同款形状）。
+            commit_body = StartWorkflowRequest(
+                author_intent=body.author_intent,
+                target_word_count=body.target_word_count,
+                mock_providers=body.mock_providers,
+                model_overrides=body.model_overrides,
+                fast_mode=True,
+            )
+            result = _start_workflow_core(
+                workflow_name="chapter-commit",
+                engine=engine,
+                db_path=db_path,
+                project_id=project_id,
+                chapter_id=chapter_id,
+                body=commit_body,
+            )
+            log.info(
+                "auto-commit started: write_run=%s commit_run=%s",
+                write_run_id,
+                result.get("run_id"),
+            )
+        except Exception as exc:  # noqa: BLE001 — HTTP 已返回，调用方拿不到异常
+            log.exception(
+                "auto-commit daemon thread crashed: write_run_id=%s err=%s",
+                write_run_id,
+                exc,
+            )
+
+    t = threading.Thread(
+        target=_runner,
+        name=f"auto-commit-{write_run_id}",
+        daemon=True,
+    )
+    t.start()
+    log.info(
+        "auto-commit daemon thread started: write_run_id=%s thread=%s",
+        write_run_id,
+        t.name,
     )
 
 

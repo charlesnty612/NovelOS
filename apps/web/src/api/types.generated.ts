@@ -561,6 +561,8 @@ export interface Project {
   genre_pack_id?: string | null;
   /** 项目写作圣经（迁移 0029 的可空列）；None = 无圣经 / 极老库缺列。写入走 POST /projects 与 PATCH /projects/{pid}；不被任何工作流覆盖。 */
   writing_bible?: string | null;
+  /** 快通道开关（迁移 0031 的可空三态列）；None = 未设置 / 极老库缺列 → 解析时回落 env 与默认值（关）。读侧布尔化（NULL→False）。 */
+  fast_mode?: boolean | null;
 }
 
 export interface ProjectCreate {
@@ -578,6 +580,8 @@ export interface ProjectCreate {
   word_band?: Record<string, unknown> | null;
   /** 项目写作圣经：跨章节长期有效的作者硬性约束（题材铁律 / 禁写项 / 称谓与视角约定等）。省略/None=无圣经；空白串按无圣经处理（落 NULL）。装配时与运行期 author_intent 按「基线 + 增量」拼接，见模型模块 docstring。 */
   writing_bible?: string | null;
+  /** 快通道：写完直接提交，跳过人工审批门（迁移 0031 的可空三态列）。True=开闸门旁路、False=显式关、省略/None=未设置（走默认关）。只影响闸门是否阻断/挂起，**不影响** observer 等状态更新。 */
+  fast_mode?: boolean | null;
 }
 
 export interface ProjectInitRequest {
@@ -614,6 +618,8 @@ export interface ProjectUpdate {
   word_band?: Record<string, unknown> | null;
   /** 项目写作圣经。显式 null / 空白串 → 清除（落 NULL）；省略 → 保留原值。装配优先级见模型模块 docstring（基线 + 增量拼接）。 */
   writing_bible?: string | null;
+  /** 快通道开关。true=开 / false=显式关 / 显式 null=清除覆盖（落 NULL，回到「未设置」）；省略=保留原值。 */
+  fast_mode?: boolean | null;
 }
 
 export interface ResumeRequest {
@@ -643,6 +649,8 @@ export interface StartWorkflowRequest {
   draft_version?: number | null;
   deep_review?: boolean | null;
   gate_override?: Record<string, unknown> | null;
+  fast_mode?: boolean | null;
+  auto_commit?: boolean | null;
 }
 
 export interface StyleSampleCreate {

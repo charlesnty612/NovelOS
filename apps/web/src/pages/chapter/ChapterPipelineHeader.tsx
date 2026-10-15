@@ -23,6 +23,11 @@ export interface WorkflowStartArgs {
   fresh_write?: boolean;
   /** 深度二审开关（仅 review 生效）：true ⇒ review 请求体带 deep_review: true */
   deep_review?: boolean;
+  /**
+   * 快通道自动衔接（仅 write 生效）：true ⇒ 写作完成后由服务端自动起 commit run。
+   * 仅当项目快通道已开启时后端才会真的衔接（否则被忽略）。
+   */
+  auto_commit?: boolean;
 }
 
 export type StartWorkflowFn = (
@@ -39,6 +44,10 @@ export function ChapterPipelineHeader({
   deepReview,
   onDeepReviewChange,
   onTitleSaved,
+  fastMode,
+  onFastModeChange,
+  autoCommit,
+  onAutoCommitChange,
 }: {
   chapter: Chapter;
   activeRunStatus: 'PENDING' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | null;
@@ -51,6 +60,15 @@ export function ChapterPipelineHeader({
   onDeepReviewChange: (v: boolean) => void;
   /** 标题改名成功后的回调（页面重拉 chapter） */
   onTitleSaved: () => void | Promise<void>;
+  /**
+   * 快通道（项目级 projects.fast_mode，迁移 0031）：写完直接提交，跳过人工闸门。
+   * 只拆闸门，**不拆状态更新**——observer 照跑，story_state 照推进。
+   */
+  fastMode: boolean;
+  onFastModeChange: (v: boolean) => void;
+  /** 「写正文」专属：写完自动衔接提交（需快通道已开启） */
+  autoCommit: boolean;
+  onAutoCommitChange: (v: boolean) => void;
 }) {
   const activeRunInfo =
     activeRunStatus === 'RUNNING' || activeRunStatus === 'PENDING'
@@ -219,6 +237,23 @@ export function ChapterPipelineHeader({
 
       <div className="panel__section">
         <div className="panel__section-title">工作流操作</div>
+        {/* 快通道（项目级 projects.fast_mode）。放在流水线之上而不是某个 step 里：
+            它改的是「四步要不要走完」，不是其中一步的选项。关闭时四步行为与
+            该开关引入前逐字相同。 */}
+        <label
+          className="wf-step__extra muted small cdp-review-toggle"
+          data-testid="wf-fast-mode-toggle"
+          data-disabled={submitting ? 'true' : 'false'}
+        >
+          <input
+            type="checkbox"
+            data-testid="wf-fast-mode-checkbox"
+            checked={fastMode}
+            disabled={submitting}
+            onChange={(e) => onFastModeChange(e.target.checked)}
+          />
+          快通道：写完直接提交（跳过审校 / 人工审批；质量判定仍会跑，只是不拦住）
+        </label>
         <div className="wf-pipeline" data-testid="wf-pipeline">
           {stepOrder.map((action, idx) => {
             const b = buttonByAction.get(action)!;
@@ -226,6 +261,7 @@ export function ChapterPipelineHeader({
             const avail = getButtonAvailability(b.action, {
               chapterStatus: chapter.status,
               activeRun: activeRunInfo,
+              fastMode,
             });
             const showSelect =
               !profilesCall.error && enabledProfiles.length > 0;
@@ -263,6 +299,8 @@ export function ChapterPipelineHeader({
                       // 「审校」专属：勾选深度二审时透传给页面，未勾选时透传 undefined
                       // （避免误带 false 触发旧契约歧义）。
                       deep_review: b.action === 'review' ? deepReview : undefined,
+                      // 「写正文」专属：快通道自动衔接提交。
+                      auto_commit: b.action === 'write' && fastMode ? autoCommit : undefined,
                     })
                   }
                 >
@@ -289,17 +327,35 @@ export function ChapterPipelineHeader({
                 {/* 「写正文」专属：写作模式（按意见改稿 / 全新重写）。小号 select
                     放在模型下拉下方；仅 write 步骤渲染；其他动作不显示。 */}
                 {b.action === 'write' ? (
-                  <select
-                    className="wf-step__select"
-                    data-testid="wf-write-mode"
-                    value={writeMode}
-                    onChange={(e) => setWriteMode(e.target.value === 'fresh' ? 'fresh' : '')}
-                    title="全新重写忽略旧稿与改稿意见，用于不同模型文风对比"
-                    disabled={submitting}
-                  >
-                    <option value="fresh">模式：全新重写（默认）</option>
-                    <option value="">模式：按意见改稿</option>
-                  </select>
+                  <>
+                    <select
+                      className="wf-step__select"
+                      data-testid="wf-write-mode"
+                      value={writeMode}
+                      onChange={(e) => setWriteMode(e.target.value === 'fresh' ? 'fresh' : '')}
+                      title="全新重写忽略旧稿与改稿意见，用于不同模型文风对比"
+                      disabled={submitting}
+                    >
+                      <option value="fresh">模式：全新重写（默认）</option>
+                      <option value="">模式：按意见改稿</option>
+                    </select>
+                    {/* 快通道自动衔接（仅 write）。仅在项目快通道已开启时可用——
+                        关着时后端会忽略 auto_commit，这里同步禁用避免给出假承诺。 */}
+                    <label
+                      className="wf-step__extra muted small cdp-review-toggle"
+                      data-testid="wf-auto-commit-toggle"
+                      data-disabled={submitting || !fastMode ? 'true' : 'false'}
+                    >
+                      <input
+                        type="checkbox"
+                        data-testid="wf-auto-commit-checkbox"
+                        checked={autoCommit}
+                        disabled={submitting || !fastMode}
+                        onChange={(e) => onAutoCommitChange(e.target.checked)}
+                      />
+                      写完直接提交（跳过审校与审批）
+                    </label>
+                  </>
                 ) : null}
                 {/* 「审校」专属：动态提示将审哪版,让用户在点之前就知道。
                     草稿尚未加载时(selectedDraftVersion=null)显示「暂未选择」。

@@ -12,6 +12,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -74,6 +75,16 @@ class StartWorkflowRequest(BaseModel):
     # ``reason`` 非空才放行。缺失 / 部分覆盖 → 照样阻断（落 ``plan_json.gate_blocked``），
     # 错误信息里带 rule_id 清单与证据摘录。``block`` 档不受此字段影响（硬停不可覆盖）。
     gate_override: dict[str, Any] | None = None
+    # 快通道（2026-10-14，配套迁移 0031）：写完直接提交，跳过人工审批门与
+    # quality_gate 阻断。None = 请求体没说（回落 projects.fast_mode → env → 默认关）；
+    # 显式 False = 本次运行临时关闭（项目级开启后的**逃生舱**）。
+    # 解析单点见同包 fast_mode.resolve_fast_mode；注入 ctx 见 control._start_workflow。
+    # 注意：本字段只改「是否阻断/挂起」，**不改任何状态更新**（observer 照跑）。
+    fast_mode: bool | None = None
+    # 快通道自动衔接：仅对 ``/write`` 有意义。true 时写作 run 到达 COMPLETED 后，
+    # 由守护线程自动起 chapter-commit run（不需要人工点「提交」）。
+    # 对 /plan / /review / /commit 无效（被忽略）——避免误以为会自动写下一章。
+    auto_commit: bool | None = None
 
 
 class ProjectInitRequest(BaseModel):
@@ -177,14 +188,16 @@ def _engine(request: Request) -> WorkflowEngine:
     return WorkflowEngine(settings.db_path)
 
 
-def _check_chapter(request: Request, project_id: str, chapter_id: str) -> tuple[str, str]:
+def check_chapter_in_project(
+    db_path: Path | str, project_id: str, chapter_id: str
+) -> tuple[str, str]:
     """校验 chapter 属于该 project；返回 (project_id, chapter_id)。
 
-    V1.5 起：通过 :class:`ChapterService.get_project_id` 取 project_id；
-    chapter 不存在 → 404；chapter 不属于该 project → 400。
+    db_path 版（**权威实现**）。`_check_chapter` 是它的 Request 薄封装——
+    拆出本函数的唯一原因是快通道的守护线程（auto-commit）手里没有 Request 对象，
+    只有 db_path。校验逻辑只此一份，两条路径不得分叉。
     """
-    settings = request.app.state.settings
-    chapter_pid = ChapterService(settings.db_path).get_project_id(chapter_id)
+    chapter_pid = ChapterService(db_path).get_project_id(chapter_id)
     if chapter_pid is None:
         raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
     if chapter_pid != project_id:
@@ -193,6 +206,17 @@ def _check_chapter(request: Request, project_id: str, chapter_id: str) -> tuple[
             detail=f"chapter {chapter_id!r} does not belong to project {project_id!r}",
         )
     return chapter_pid, chapter_id
+
+
+def _check_chapter(request: Request, project_id: str, chapter_id: str) -> tuple[str, str]:
+    """校验 chapter 属于该 project；返回 (project_id, chapter_id)。
+
+    V1.5 起：通过 :class:`ChapterService.get_project_id` 取 project_id；
+    chapter 不存在 → 404；chapter 不属于该 project → 400。
+    委托给 :func:`check_chapter_in_project`（保持本函数的 Request 入参形状不变）。
+    """
+    settings = request.app.state.settings
+    return check_chapter_in_project(settings.db_path, project_id, chapter_id)
 
 
 def _init_genesis_if_needed(db_path: str, project_id: str, chapter_id: str) -> None:

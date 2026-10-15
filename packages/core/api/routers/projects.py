@@ -15,6 +15,12 @@ null）。绑定写路径在 :mod:`packages.core.api.routers.genre`（bind / unb
 2026-09-18（0029）：``writing_bible``（项目写作圣经）随既有 create / update / 读模型
 一并暴露——自由文本，无需 router 层校验（与 ``premise`` 同口径，空白串由 Service
 归一为 NULL）。装配侧优先级见 :mod:`packages.domain.project.models` 的模块 docstring。
+
+2026-10-14（0031）：``fast_mode``（快通道）随既有 create / update / 读模型暴露，
+同样无需 router 层校验（布尔三态由 Service 的 ``_coerce_fast_mode`` 归一）。
+**它不进任何装配 payload**，故不涉及缓存键指纹；解析与闸门旁路语义见
+:func:`packages.core.api.routers.workflows.fast_mode.resolve_fast_mode`，
+边界（保留 observer、只关闸门不关判定）见 AGENTS.md §二 硬规则 10。
 """
 
 from __future__ import annotations

@@ -45,10 +45,40 @@ def _iter_core_py_files() -> list[Path]:
     return sorted(files)
 
 
+def _is_relative_import(node: ast.AST) -> bool:
+    """是否相对 import（``from . import X`` / ``from ..x import Y``，即 ``level > 0``）。
+
+    **为什么单独看**：``_is_business_import_violation`` 的 ``ImportFrom`` 分支只读
+    ``node.module``。而相对 import 的 ``node.module`` 只是**末段名字**
+    （``from ...workflows import X`` ⇒ ``module == "workflows"``、``level == 3``），
+    ``module`` 里既没有 ``packages`` 前缀也不含点号 ⇒ 对 AST 断言**完全不可见**。
+
+    实测确认该盲区可被真正绕过：``api/main.py`` 里就有
+    ``importlib.import_module("packages" + "." + "workflows")`` 这种拆字符串写法，
+    同时躲开了 AST 检查与源码文本检查两条断言。
+
+    对策不是去解析相对导入的绝对目标（那需要完整包上下文），而是把规则收紧到
+    **无需完整包上下文即可判定**：core 内禁止任何**逃出 ``packages.core`` 包**的
+    相对导入。包内相对导入（``from .common import ...``、``from ..excerpts import ...``）
+    是本仓既有且大量使用的写法（实测 191 处），不在禁止范围内；只有 ``level`` 大到
+    能爬出 ``packages.core`` 的那种才可能够到 ``packages.workflows``。
+
+    判定式：文件的包深度 ``d`` = 相对仓库根的路径段数 − 1（去掉文件名）。
+    ``level == d`` 恰好落到顶层 ``packages``，``level > d`` 已在仓库根之上（非法）。
+    故 ``level >= d`` 即为「逃出 core」。
+    """
+    return isinstance(node, ast.ImportFrom) and node.level > 0
+
+
 def _is_business_import_violation(node: ast.AST) -> tuple[bool, str]:
     """检测 AST 节点是否为业务级 ``import packages.workflows`` / 子模块 / 顶层。
 
     返回 ``(违规, 描述)``。仅命中 ``packages.workflows[.*]?`` 这一类。
+
+    ⚠️ **残余边界（如实登记）**：本函数对**相对 import 完全不可见**（见
+    ``_is_relative_import`` 的说明）。该盲区由独立断言
+    ``test_core_has_no_escaping_relative_imports`` 封住——它禁止 core 内任何
+    ``level >= 包深度`` 的相对导入，从而使本函数的盲区不再可达。
     """
     if isinstance(node, ast.Import):
         for alias in node.names:
@@ -69,6 +99,42 @@ def _is_business_import_violation(node: ast.AST) -> tuple[bool, str]:
             return True, f"from {module} import ..."
         return False, ""
     return False, ""
+
+
+def scan_escaping_relative_imports() -> list[tuple[str, int, str]]:
+    """全量扫描 core，返回**逃出 ``packages.core`` 包**的相对 import。
+
+    判别：往 ``packages/core/quality/engine.py`` 加一行
+    ``from ...workflows import x``（该文件包深度 = 3，level 3 即逃出），
+    ``test_core_has_no_escaping_relative_imports`` 必红——而它对
+    ``test_no_business_import_of_workflows_in_core`` **完全隐形**（两条断言失效方向
+    相反：一条测不到机制，一条测到了机制但漏掉另一种写法）。
+    """
+    out: list[tuple[str, int, str]] = []
+    for path in _iter_core_py_files():
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            tree = ast.parse(source, filename=str(path))
+        except SyntaxError:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        # 包深度 = 路径段数 − 1（去掉文件名本身）。packages/core/quality/engine.py
+        # ⇒ packages.core.quality ⇒ d = 3 ⇒ level >= 3 即逃出 core。
+        package_depth = len(path.relative_to(REPO_ROOT).parts) - 1
+        for node in ast.walk(tree):
+            if _is_relative_import(node) and node.level >= package_depth:
+                out.append(
+                    (
+                        rel,
+                        getattr(node, "lineno", 0),
+                        f"from {'.' * node.level}{node.module or ''} import ... "
+                        f"（level={node.level} >= 包深度 {package_depth}，逃出 packages.core）",
+                    )
+                )
+    return sorted(out)
 
 
 def _has_importlib_dynamic_call(tree: ast.AST) -> bool:
@@ -188,4 +254,32 @@ def test_grep_packages_workflows_in_core_is_zero() -> None:
     assert not hits, (
         "packages/core/ 下出现 'packages.workflows' 字面值（应通过字符串拆装避免）；命中:\n"
         + "\n".join(hits)
+    )
+
+
+def test_core_has_no_escaping_relative_imports() -> None:
+    """``packages/core/`` 内禁止**逃出本包**的相对 import。
+
+    补的是本文件自身的盲区（2026-10-15 审查发现）：
+
+    - ``_is_business_import_violation`` 的 ``ImportFrom`` 分支只读 ``node.module``；
+      相对 import 的 ``node.module`` 只是末段名字（``from ...workflows import X``
+      ⇒ ``module == "workflows"``、``level == 3``），**对 AST 断言完全不可见**。
+    - 兜底的 ``test_grep_packages_workflows_in_core_is_zero`` 找的是
+      ``"packages.workflows"`` **字面值**；相对 import 写的是 ``..workflows``，
+      同样不含该字面量 ⇒ **两条断言同时不可见**。
+
+    所以不能靠把盲区补全（解析相对导入的绝对目标需要完整包上下文），而是把规则
+    收紧到无需完整包上下文即可判定：**包内相对导入照常允许**（本仓既有且大量使用，
+    实测 191 处），**只有 ``level >= 包深度``（即能爬出 ``packages.core``）才违规**。
+
+    判别：往 ``packages/core/quality/engine.py`` 加一行
+    ``from ...workflows import x``（该文件包深度 = 3，level 3 即逃出），
+    本用例必红；而 ``test_no_business_import_of_workflows_in_core`` 仍绿——
+    两条断言的失效方向相反（一条测不到机制，一条测到了机制但漏掉另一种写法）。
+    """
+    hits = scan_escaping_relative_imports()
+    assert not hits, (
+        "packages/core/ 下出现逃出本包的相对 import——那是本文件依赖方向检查的盲区；命中:\n"
+        + "\n".join(f"{rel}:{ln}: {desc}" for rel, ln, desc in hits)
     )

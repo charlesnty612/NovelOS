@@ -257,4 +257,91 @@ describe('ProjectsListPage · 失败反馈与弹窗键盘（V3.10）', () => {
       expect(screen.queryByTestId('project-name')).toBeNull();
     });
   });
+
+  // ---- 快通道（projects.fast_mode）三态 ----
+  //
+  // 审查批次 2026-10-15：此前**整个弹窗没有任何 fast_mode 用例**，导致一个
+  // 静默空操作长期无人察觉——取消勾选时键缺失 ⇒ 后端 model_fields_set 不含
+  // 它 ⇒ UPDATE 不带此列 ⇒ DB 仍是 1，而复选框已显示未勾选，保存还提示成功。
+  // 「关掉快通道」这个动作在项目弹窗上 100% 不可达（三态的「显式关」不可达），
+  // 且与章节页开关（发 `{fast_mode: v}`，能关）语义相反。
+
+  it('快通道-创建：勾选才下发 true；未勾选省略键（=未设置）', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByTestId('new-project-btn'));
+    await waitFor(() => screen.getByTestId('project-name'));
+    await user.type(screen.getByTestId('project-name'), '未设快通道');
+
+    const box = (await screen.findByTestId('project-fast-mode-checkbox')) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+
+    await user.click(screen.getByTestId('project-save'));
+    await waitFor(() => expect(projectsApi.create).toHaveBeenCalledTimes(1));
+
+    const payload = vi.mocked(projectsApi.create).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect('fast_mode' in payload).toBe(false); // 未设置态，不是 false
+  });
+
+  it('快通道-创建：勾选后下发 fast_mode: true', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByTestId('new-project-btn'));
+    await waitFor(() => screen.getByTestId('project-name'));
+    await user.type(screen.getByTestId('project-name'), '开了快通道');
+
+    const box = (await screen.findByTestId('project-fast-mode-checkbox')) as HTMLInputElement;
+    await user.click(box);
+    expect(box.checked).toBe(true);
+
+    await user.click(screen.getByTestId('project-save'));
+    await waitFor(() => expect(projectsApi.create).toHaveBeenCalledTimes(1));
+
+    const payload = vi.mocked(projectsApi.create).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.fast_mode).toBe(true);
+  });
+
+  it('快通道-编辑：项目已开启时取消勾选必须下发 false（回归看守）', async () => {
+    // 判别：把「else if (initial) payload.fast_mode = false」这一支删掉
+    // （退回 2026-10-14 的只发 true），本用例即红。
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      baseProject({ project_id: 'prj_001', name: '已开快通道', fast_mode: true }),
+    ]);
+
+    const user = userEvent.setup();
+    renderPage();
+    const card = await waitFor(() => screen.getByTestId('project-card-prj_001'));
+    await user.click(card.querySelector('button.btn--sm') as HTMLButtonElement);
+
+    const box = (await screen.findByTestId('project-fast-mode-checkbox')) as HTMLInputElement;
+    expect(box.checked).toBe(true); // 初值取自项目
+
+    await user.click(box);
+    expect(box.checked).toBe(false);
+
+    await user.click(screen.getByTestId('project-save'));
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+
+    const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect(payload.fast_mode).toBe(false); // 显式关，必须真的下发
+  });
+
+  it('快通道-编辑：项目未设置时取消勾选省略键（不误转成显式关）', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      baseProject({ project_id: 'prj_001', name: '未设置快通道', fast_mode: null }),
+    ]);
+
+    const user = userEvent.setup();
+    renderPage();
+    const card = await waitFor(() => screen.getByTestId('project-card-prj_001'));
+    await user.click(card.querySelector('button.btn--sm') as HTMLButtonElement);
+
+    const box = (await screen.findByTestId('project-fast-mode-checkbox')) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    await user.click(screen.getByTestId('project-save'));
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+
+    const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect('fast_mode' in payload).toBe(false); // 原样保留，不擅自改语义
+  });
 });

@@ -23,6 +23,24 @@ vi.mock('../api/endpoints', () => ({
     createDraft: vi.fn(),
     reopenChapter: vi.fn(),
   },
+  // 快通道（2026-10-14）：章节页要读项目级 fast_mode 并在开关变更时 PATCH。
+  // 默认实现直接给「项目未开快通道」：本文件有 11 个 describe 各带一份 beforeEach，
+  // 把默认值放工厂里才能保证每个 describe 都拿到可 await 的返回值
+  // （放 beforeEach 只会覆盖其中一个 describe，其余会撞 undefined.then）。
+  projectsApi: {
+    get: vi.fn(async () => ({
+      project_id: 'prj_test',
+      name: 'test',
+      premise: null,
+      genre: null,
+      target_words: null,
+      status: 'ACTIVE',
+      created_at: '',
+      updated_at: '',
+      fast_mode: null,
+    })),
+    update: vi.fn(async () => ({ project_id: 'prj_test' })),
+  },
   qualityApi: {
     latest: vi.fn(),
   },

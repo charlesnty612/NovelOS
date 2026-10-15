@@ -18,10 +18,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { chaptersApi, qualityApi, workflowsApi } from '../api/endpoints';
+import { chaptersApi, projectsApi, qualityApi, workflowsApi } from '../api/endpoints';
 import type {
   Chapter,
   Draft,
+  Project,
   QualityReport,
   WorkflowRun,
   WorkflowStartPayload,
@@ -212,6 +213,30 @@ export function ChapterDetailPage() {
   // 默认不勾；勾选时 review 请求体带 deep_review:true，pause_payload 会
   // 多一个 deep_review_report 分栏。开启后审校约 +1 分钟。
   const [deepReview, setDeepReview] = useState(false);
+
+  // 快通道（项目级 projects.fast_mode，迁移 0031）：写完直接提交，跳过人工闸门。
+  // 初值取项目的 fast_mode（null/undefined = 未设置 = 关）；开关即刻 PATCH 落库。
+  const [fastMode, setFastMode] = useState(false);
+  const [autoCommit, setAutoCommit] = useState(false);
+  const projectCall = useApiCall<Project>(() => projectsApi.get(projectId), [projectId]);
+  useEffect(() => {
+    const v = projectCall.data?.fast_mode;
+    if (v !== undefined && v !== null) setFastMode(v === true);
+  }, [projectCall.data]);
+  const handleFastModeChange = useCallback(
+    async (v: boolean) => {
+      // 乐观更新 + 失败回滚：开关是高频点击，回滚必须跟得上。
+      setFastMode(v);
+      if (v && !autoCommit) setAutoCommit(true);
+      try {
+        await projectsApi.update(projectId, { fast_mode: v });
+      } catch (e: unknown) {
+        setFastMode(!v);
+        setActionErr(e instanceof Error ? e.message : '快通道开关保存失败');
+      }
+    },
+    [projectId, autoCommit],
+  );
   const handleStartWorkflow = useCallback(
     async (action: WorkflowAction, payload?: WorkflowStartArgs, opts?: { confirmed?: boolean }) => {
       // 防呆：章节已有 plan_json 时，「生成计划」需二次确认（覆盖会丢字数规划）
@@ -250,6 +275,7 @@ export function ChapterDetailPage() {
           model_profile_id: _omit,
           fresh_write: rawFreshWrite,
           deep_review: rawDeepReview,
+          auto_commit: rawAutoCommit,
           ...basePayload
         } = payload ?? {};
         void _omit;
@@ -258,8 +284,18 @@ export function ChapterDetailPage() {
         const wantsFreshWrite = action === 'write' && rawFreshWrite === true;
         // 深度二审开关：仅 review 动作支持；其他动作剥离后丢弃。
         const wantsDeepReview = action === 'review' && rawDeepReview === true;
+        // 快通道自动衔接：仅 write 动作支持；其他动作剥离后丢弃。
+        const wantsAutoCommit = action === 'write' && rawAutoCommit === true;
         const hasBusinessFields =
-          Object.keys(basePayload).length > 0 || wantsFreshWrite || wantsDeepReview;
+          Object.keys(basePayload).length > 0 ||
+          wantsFreshWrite ||
+          wantsDeepReview ||
+          wantsAutoCommit;
+        const extraFlags = {
+          ...(wantsFreshWrite ? { fresh_write: true } : {}),
+          ...(wantsDeepReview ? { deep_review: true } : {}),
+          ...(wantsAutoCommit ? { auto_commit: true } : {}),
+        };
         // 无业务字段且无 override 时透传 undefined，保持向后兼容（与旧契约一致）。
         const requestPayload: WorkflowStartPayload | undefined =
           !hasOverride && !hasBusinessFields
@@ -268,18 +304,12 @@ export function ChapterDetailPage() {
             ? {
                 ...basePayload,
                 model_overrides: { [capability]: profileId },
-                ...(wantsFreshWrite ? { fresh_write: true } : {}),
-                ...(wantsDeepReview ? { deep_review: true } : {}),
+                ...extraFlags,
               }
-            : wantsFreshWrite
-            ? ({
+            : ({
                 ...basePayload,
-                fresh_write: true,
-                ...(wantsDeepReview ? { deep_review: true } : {}),
-              } as WorkflowStartPayload)
-            : wantsDeepReview
-            ? ({ ...basePayload, deep_review: true } as WorkflowStartPayload)
-            : (basePayload as WorkflowStartPayload);
+                ...extraFlags,
+              } as WorkflowStartPayload);
         let resp: WorkflowStartResponse;
         if (action === 'plan') resp = await workflowsApi.startPlan(projectId, chapterId, requestPayload);
         else if (action === 'write') resp = await workflowsApi.startWrite(projectId, chapterId, requestPayload);
@@ -453,6 +483,10 @@ export function ChapterDetailPage() {
           deepReview={deepReview}
           onDeepReviewChange={setDeepReview}
           onTitleSaved={() => chapterCall.reload()}
+          fastMode={fastMode}
+          onFastModeChange={handleFastModeChange}
+          autoCommit={autoCommit}
+          onAutoCommitChange={setAutoCommit}
         />
       ) : chapterCall.loading ? (
         <Loading text="加载章节中…" />

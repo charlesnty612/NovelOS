@@ -5,6 +5,235 @@
 
 ## [Unreleased]
 
+### ⚠️ 文档断链登记（2026-10-15 审查批次）
+
+AGENTS 硬规则 7 的立规根因：38ec703 三仓迁移未回填引用，造成 ≥14 处断链——
+反引号路径引用 markdown checker 查不出。本次全量审查查出**另一批**（引用处已就地标注
+`〔断链〕`），三个路径在**软件仓与 NovelOS-Artifacts 双查均不存在**，且 `git log
+--diff-filter=D` 无删除提交 ⇒ **它们从未在这些路径上被提交过**：
+
+| 路径 | 出现处 |
+|---|---|
+| `docs/data-model/data-model-v0.md` | CHANGELOG:1194 / 1255 / 1697 |
+| `docs/roadmap/v1.3-v2.x-plan.md` | CHANGELOG:1703 / 1732 / 1751 / 1773 |
+| `docs/analysis/competitive-analysis-2026-08-24.md` | CHANGELOG:1795 |
+
+**未修复，按登记处理**：历史条目的行号会随文件增长漂移，上表行号同样只在 2026-10-15
+成立；真正的结论是「这三个路径不存在」。同文件内 `docs/sampling-audit-*.md`、
+`docs/analysis/ai-tone-calibration-*.md` 都带了 `NovelOS-Artifacts:` 前缀且文件真实存在
+——**正确写法就在同一个文件里**，可见这三处是漏写而非有意。
+
+
+### 2026-10-15 全量审查修复批次（6 名对抗审查员 + Lead 逐条复算）
+
+> **来源**：用户指令「全面审查此项目」。分 6 个维度并行对抗扫描（后端闸门 / 测试判别力 /
+> 架构铁律 / 文档一致性 / 前后端契约 / 内容层安全），**主会话不采信子代理结论**
+> （AGENTS §三.1）——每条都自己重读源码或重跑探针复算后才入册，R1/R5 报的三处
+> 与我独立得出的结论吻合，构成交叉验证。
+
+**1. CRITICAL：快通道静默自动批准了人工审校闸门。**
+`control._start_workflow_core` 把 `ctx["human_input"] = {"approved": True}` 注入时
+**没有按 workflow 区分**。而该键全仓有**两个读者且语义不同**：
+`chapter_commit/gate.py` 读它当「预置放行本闸门」，
+`chapter_review/pipeline.py::_author_review_node` 读它当「人已经做出的决议」
+（其 docstring 明写「本 fn 总是抛 PauseRequested」）。
+**端到端实测（对照组只翻项目开关）**：
+
+| `projects.fast_mode` | 审校 run | `author_review` | 章节 |
+|---|---|---|---|
+| `true` | **COMPLETED** | COMPLETED | **REVIEWED** |
+| `false` | **PAUSED** | PENDING | DRAFTED |
+
+即：作者在快通道项目上点「审校」，系统一句不问就自批、章节直推 REVIEWED，
+且**全程无任何留痕**。修复 = 预置批准按 `workflow_name == "chapter-commit"` 收口。
+快通道的语义是「不跑 chapter-review」，不是「跑但自动批」。
+
+**2. 根因：预置批准这条路径在端到端层面从未被执行过（空断言）。**
+上一批的 e2e 夹具只产 `risk_level="LOW"` 的 delta ⇒ `_has_high_risk_change` 恒 False
+⇒ `high_risk_approval` 节点在 `gate.py` 的 `if not needs: return` **提前返回、压根不读
+`human_input`** ⇒ 把 `"approved": True` 改成 `False`，3 条 e2e 全绿。
+这是与已登记两条坑区**都不同**的第三种失效形状（已入 AGENTS 坑区）：
+「断言了结果 ≠ 判别了机制」是测不到机制；「夹具自带噪声 ⇒ 失败点漂移」是测到另一个机制；
+**本条是测到了正确节点、但该节点提前返回 ⇒ 断言恒真**。
+新增 `tests/api/test_fast_mode_review_gate.py` 四例：
+人工审校仍 PAUSE（CRITICAL 回归）/ HIGH 风险 + 快通道 ⇒ 不 PAUSE /
+HIGH 风险 + 关快通道 ⇒ 必须 PAUSE（反向用例）/ 临时库无模型配置 ⇒ 真实 Provider 无从构造。
+
+**3. MAJOR：项目弹窗关不掉快通道（推翻 10-14 对作者的使用说明）。**
+`ProjectsListPage` 只在勾选时下发 `fast_mode`；取消勾选 ⇒ 键缺失 ⇒
+`model_fields_set` 不含它 ⇒ UPDATE 不带此列 ⇒ DB 仍是 1，而复选框已显示未勾选、保存还提示成功。
+**「回退就把勾去掉」这句话在项目弹窗上是错的**（章节页的开关发 `{fast_mode: v}`，能关）。
+修复取「**提交值≠当前值才下发**」——不是简单的「补发 false」：后者会把编辑一个
+`null` 项目时的「未设置」偷换成「显式关」（我的第一版修复正是如此，被自己写的用例当场抓红）。
+
+**4. MAJOR：e2e 测试的「全程 mock」声明在机制上为假。**
+`test_fast_commit_e2e.py` 只 mock 了 director/writer/observer；
+`scene_planner`/`summarizer`/`critic` **会真的进 `ModelRouter.call_with_fallback`**——
+拦住它们的是**巧合不是设计**：临时库无模型配置，router 在构造 Provider 之前就抛错，
+错误被各节点 degraded 分支吞掉，测试照样全绿（实测 `scene_planner degraded: no enabled
+model configured` 日志）。**未烧额度**（HTTP 出口 0 命中），§一 硬约束 2 未被违反。
+现由 `test_e2e_db_cannot_reach_a_real_provider` 断言三张模型表均为空——
+把「不发真实模型调用」从散文声明变成机器可校验的不变量。同款形状在
+`test_gate_confirm_e2e.py` 已存在，本批是沿用而非新造。
+
+**5. 代码层其余订正**：`read_project_fast_mode` 的 `except sqlite3.OperationalError`
+收窄为只吞「no such column」（原注释只声称覆盖这一种，却把锁库/disk I/O 一并吞掉——
+锁库会让快通道静默失效）；`start_write` 中两处失准注释按可复算结果订正
+（`payload["status"] == "RUNNING"` 恒真；「两个条件都要避免绕过作者没同意的直提」
+不成立——同一请求体可同时满足两者，它不是授权控制而是默认行为控制）。
+
+**6. 本批自纠的文档错误（均为可数的整数/坐标，当场复算）**：
+`fast_mode.py` docstring「四处消费方」→ 实为 **2**；
+「该文件有 11 个 describe」→ 实为 **13**（HEAD 也是 13，不是行号漂移，是当场数错）；
+AGENTS 坑区里 m1_long_run 的三个行号 977/960/967 → 实为 **979/961/968**
+（**该坑区的主题正是「注释的行号必须可复算」，而我自己写进去的三个数字都是错的**）；
+AGENTS「4 run → 2 run」→ 快通道不摘 plan，实为 **3 run**（计划已存在才是 2），
+且「0 人工往返」另需独立的 `auto_commit` 开关，硬规则 10 从未点名它；
+迁移链 `0001~0030` → **`0001~0031`**（两处，本批只改了一处）；
+作者成员内容红线「18 条 PAUSED」无日期戳 → 补戳并记当前为 **17** 条（10-13 有 1 条走完）。
+
+**7. 存量订正**：`docs` 迁移残留空目录 9 → **6**；`control.py:78/89` → **85/96**；
+`planner_input.py` 目录与行号双错（实为 `packages/workflows/chapter_plan/planner_input.py:37`）；
+8 处指向三个双仓都不存在文档的历史引用已就地标注并登记（见上方「文档断链登记」）。
+
+**8. 树指纹纪律固化**：`scripts/tree_fingerprint.py`。此前那条纪律**只以散文存在**，
+每次手写一行临时代码，导致其产出**谁都无法复核**——同树两次算出不同哈希（试了 6 种合理
+公式都复现不出记录值 `890428ca…`），后来者无法区分「树变了」与「当时公式不同」。
+**没有实现的纪律不是闸门，是仪式**：凡写成可复核哈希的约定，必须同时提供产出它的命令。
+
+**9. 依赖方向看守补洞（存量，2026-10-15 审查发现）**：
+`test_no_core_to_workflows_dep.py` 的 `ImportFrom` 分支只读 `node.module`、
+**从不读 `node.level`** ⇒ `from ...workflows import X`（`module=="workflows"`、
+`level==3`）对 AST 断言**完全不可见**；其兜底的源码文本断言找的是
+`"packages.workflows"` **字面值**，相对导入写的是 `..workflows`，同样不含该字面量
+⇒ **两条断言同时不可见**。
+修法不是去解析相对导入的绝对目标（那需要完整包上下文），而是把规则收紧到
+**无需上下文即可判定**：core 内禁止任何**逃出 `packages.core` 包**的相对导入
+（判定式：`level >= 包深度`，包深度 = 相对仓库根路径段数 − 1）。
+包内相对导入（`from .common import ...`，实测 191 处）照常允许——**第一版我误写成
+「禁止一切相对 import」，被自己的新用例当场抓红**（191 处）：规则必须按真实用法边界划，
+而不是按「越简单越好」的直觉划。
+
+**10. 经审查后判定不修并登记**：auto-commit 守护线程失败对作者不可见
+（`except` 只 `log.exception`；进程重启则无人起 commit，终态是「写 run=COMPLETED、
+章节=DRAFTED」，DB 无任何字段记录本该有一次提交）。**未修**：失败模式罕见
+（409 需用户在等待窗内另起 run／重启），且终态本身**可见**（章节停在 DRAFTED）；
+为此新造持久化标记属超范围投机。沿用 `_auto_revise_runner` 的既有形状。
+若日后该情形被作者实际遇到，再单独立项。
+
+**11. 闸门（Lead 亲跑，指纹用新脚本取，前后逐位一致）**：
+`ruff check packages scripts tests` = `All checks passed!`（修过 1 处 I001）；
+全量 **3002 passed / 1 skipped / 0 failed**（292.55s），
+指纹 `ab46b608…` / **525 文件**，跑前跑后**逐位一致**；
+`npx tsc -b` 零错；`npx vitest run` **500 全绿**（494 + 6）；
+`scripts/smoke_e2e.py` **PASS**——且**旧四步链路完好**
+（`review PAUSED at author_review → resume approved → commit COMPLETED`，
+这条正是本次 CRITICAL 修复的回归保险：非快通道路径仍必须挂在人工门上）；
+`export_openapi` **98 paths / 51 schemas 未变**；突变残留 0（`-CaseSensitive`）。
+基线 **2998 → 3003 collected（+5 全部来自本批）**。
+**本批 7 次突变全部被捕获**，每个都逐个 SHA256 比对确认已还原：
+① 撤 `workflow_name == "chapter-commit"` 收口 → 人工审校用例红；
+② 预置批准 `"approved": True` → `False` → 快通道 HIGH 风险用例红
+（**这条在修复前是存活的**）；
+③ `_has_high_risk_change` 恒 False → 对照组用例红（证明 HIGH 夹具真进闸门分支）；
+④ 临时库播种一行 `model_configs` → 不变量用例红；
+⑤ `chapterStatus === 'DRAFTED'` → `!== 'REVIEWED'` → 状态边界用例红
+（**这条在修复前是存活的**）；⑥ 项目弹窗退回「只发 true」→ 编辑关闭用例红
+（**这条在修复前根本无用例**）；⑦ 往 `packages/core/quality/engine.py` 注入一行
+`from ...workflows import chapter_commit` → 依赖看守的新断言红，而**原有的
+`test_no_business_import_of_workflows_in_core` 仍绿**——正是两条断言盲区方向相反的实证。
+
+### 2026-10-14 快通道：写完直接提交（项目级开关，拆闸门不拆状态更新）
+
+> **来源**：用户指令「工作流太复杂，写一章到提交得花十几分钟，想拆掉所有闸门，
+> LLM 写完一章就跳过后续所有环节直接提交」→ 用户三项裁决（砍到哪层 / 开关粒度 / observer 去留）。
+> **性质**：**有意行为变更**（新项目默认关闭，存量项目行为逐字不变）。
+> **不删任何闸门代码**——本批只加「有条件旁路」，回退成本为零。
+
+1. **问题定位（逐环节核对源码，不是估算）**：写一章到定稿要走 **4 个 workflow run
+   ＋ 2 次人工审批往返 ＋ 最多 2 轮自动改稿**，最多 11 次 LLM 调用。节点序与耗时面：
+
+   | workflow | 节点 | LLM | 人工卡点 |
+   |---|---|---|---|
+   | `chapter-write` | load_plan / scene_planner / writer / polisher / length_check / condense / save_draft | 最多 7 | 无（不抛 `PauseRequested`） |
+   | `chapter-review` | basic_checks / critic_review / deep_review / **author_review(Human)** / mark_reviewed | 2 | **PAUSE，必等人工点批准** |
+   | `chapter-commit` | build_observer_ctx / **observer** / inject_validate / **quality_gate** / **high_risk_approval(Human)** / commit / summarize | 1~2 | quality_gate 可 FAILED；high_risk 可 PAUSE |
+
+2. **⚠️ 本批最关键的技术事实（决定方案形态）**：`observer` 在 **`chapter-commit` 里而不在
+   `chapter_review` 里**。它是唯一抽出角色目标推进 / 伏笔收放 / 世界观 delta 并写
+   `story_state` 的节点 ⇒ **快通道保留它**，砍掉会导致第 2 章起失忆。用户已确认保留。
+   ⇒ 「跳过 review」不会丢状态，这是整套方案能成立的前提。
+3. **落地形态（拆什么 / 留什么）**：
+   - **不跑** `chapter-review` 整条链（省 2 次 LLM ＋ 1 次人工往返）；因 review 不再驳回，
+     自动改稿回路也一并消失（原最坏再多 10 次 LLM）。
+   - **不阻断但不跳过** `quality_gate`：强制 `quality_gate_mode="report"`（该模式本已存在，
+     `should_block` 恒假），**判定照算、报告照落库**，作者事后在章节页「质量」tab 仍看得到。
+   - **不挂起** `high_risk_approval`：ctx 预置 `human_input={"approved": True}`（放行分支本已存在）。
+   - **唯一改判定的一处**：`chapter_commit/commit.py` 的 `status != "REVIEWED"` 校验，
+     快通道下放行 `DRAFTED`。
+   - **写作流水线全保留**（scene_planner / polisher / condense / 字数重试一律不动）——
+     用户裁决「只拆闸门」：那 7 次调用是质量成本，不是闸门。
+4. **开关（三档优先级，单点解析 `workflows/fast_mode.py::resolve_fast_mode`）**：
+   请求体 `StartWorkflowRequest.fast_mode` > `projects.fast_mode`（迁移 0031 新增）>
+   env `NOVELOS_FAST_MODE` > 关。**可空三态**（NULL 未设置 ≠ 0 显式关），与 0023/0029 同款范式——
+   必须能区分「作者从没这回事」与「作者明确关的」。请求体显式 `false` 是**逃生舱**。
+5. **写完自动衔接**：`POST .../write` 传 `auto_commit: true`，写作 run 到达 COMPLETED 后由
+   守护线程自动起 `chapter-commit`。形状镜像 resume 的 `_auto_revise_runner`，**两处有意的差别**：
+   ① deadline **1800s 而非 180s**（那边等一次人工决议，这边等整章写作，180s 必然超时——
+   与 2026-09-18 字数闭环「轮次耗尽」同源的量级误配）；② 只在 COMPLETED 时衔接。
+   **`auto_commit` 与 `fast_mode` 解析结果必须同时成立**才衔接——否则会绕过一个作者
+   没同意的 DRAFTED 直提（这条是 e2e 用例在实现过程中真抓到的缺口，非事后补记）。
+6. **留痕诚实性（硬要求）**：快通道预置的批准若沿用原分支，`commits.author_approval_json`
+   会把审批人记成 `"human"`——那是一条**没人做过的审批记录**。快通道一律记
+   `approver="system:fast_mode"`、`notes="快通道自动提交：跳过 chapter-review 与人工审批，未经人工放行"`，
+   并由 `test_approver_is_not_human` 钉住。
+7. **顺带的结构修正（为承接守护线程）**：`_start_workflow` 拆出 `_start_workflow_core`
+   （ctx 组装只有一份实现，HTTP 与守护线程共用）。**`_start_workflow` 保持原名与原签名**——
+   `revise.py` 有 `from .control import _start_workflow` 的跨模块 import 契约，且
+   `tests/api/test_workflow_cancel.py` 在 `control._engine` 上打 monkeypatch，故 engine 必须
+   仍经模块级 `_engine(request)` 查找（AGENTS 硬规则 1 的「先 grep patch 打点」）。
+   同理 `_check_chapter` 拆出 db_path 版 `check_chapter_in_project`（校验逻辑仍只一份）。
+8. **测试与突变验证**：新增 `tests/unit/test_fast_mode.py`（13 例：四档优先级、三态语义、
+   ctx 注入、注入顺序压过请求体 enforce、逃生舱）与 `tests/api/test_fast_commit_e2e.py`（3 例：
+   写完自动提交且零 PAUSED / 关快通道后 DRAFTED 直提仍被拒 / auto_commit 单独用无效）。
+   **四次突变全部被捕获**：删 `quality_gate_mode=report` → 2 红；删 `human_input` → 2 红；
+   撤 `commit.py` 的 DRAFTED 放行 → e2e 红；摘掉 observer 节点 → observer 看守红。恢复后逐个 SHA256 比对确认无残留。
+
+   ⚠️ **2026-10-15 审查订正——本条说过头了**：上面「删 `human_input` → 2 红」**字面为真**
+   （`test_fast_mode.py::test_fast_mode_true_injects…` 确实红了），但它只证明了
+   **ctx 里有这个键**，**没证明这个键真的起作用**。当次突变实验在**端到端层面是存活的**：
+   把 `control.py` 注入的 `"approved": True` 改成 `False`，3 条 e2e **全绿**——
+   因为夹具的 observer 只产 `risk_level="LOW"` 的 delta ⇒ `_has_high_risk_change` 恒 False
+   ⇒ `high_risk_approval` 节点提前 return ⇒ **`human_input` 一次都没被读**。
+   换言之，那 2 条红来自单测的「键存在」断言，闸门本身从未被执行过。
+   已由 2026-10-15 批次的 `test_fast_mode_review_gate.py` 正反一对用例补上，
+   并把该形状登记进 AGENTS 坑区（「夹具永远不触发闸门 ⇒ 空断言」）。
+12. **闸门（Lead 亲跑，两次，两次指纹均逐位一致）**：**2997 passed / 1 skipped / 0 failed**，
+   权威数 321.46s（`890428ca…`，523 文件）。第一次亦逐位一致（`c789e1ee…`，352.73s），
+   其后 `ruff --fix` 改了一个测试文件的 import 顺序 ⇒ **该次结论不适用于当前树，复跑取权威数**
+   （指纹纪律不是仪式：绿灯之后再改动照样作废）。基线 **2978 → 2998 collected（+20 全部来自本批）**。
+   `ruff check packages scripts tests` = `All checks passed!`；突变残留 0；`npx tsc -b` 零错；
+   `npx vitest run` **494 全绿**（489 + 5）；`scripts/smoke_e2e.py` **PASS**（旧四步链路
+   write → review PAUSED → resume → commit 原样可用 + `check_state_sync` SYNC OK）；
+   `export_openapi` + `gen_frontend_types` 已 regen，**98 paths / 51 schemas 未变**。
+9. **两处夹具/断言自身出错的留痕（本批内发现并修正，均不掩盖）**：
+   - e2e 夹具最初用同一句 ×60 写正文，trigram 重复率冲上 confirm 档，**quality_gate 在
+     commit 节点之前就先拦下 run** ⇒ 「对照组应被状态机拒绝」根本没走到要测的判定，
+     测出来的是另一个原因。改为全不重复的散文后失败点才落到正确的位置。
+     **教训：判别用例的夹具不能自带噪声，否则失败点会漂移。**
+   - 前端新增断言曾写「review 在 DRAFTED 仍禁用」——错的，`EXPECTED_STATUS.review`
+     本就含 DRAFTED（写完草稿就该能审校）。改为断言真正的不变量：**快通道开关对
+     plan/write/review 的判定零影响**。
+10. **前端**：`types.ts` 的 `Project` / 创建 / 更新载荷补 `fast_mode`，`WorkflowStartPayload`
+    补 `fast_mode` / `auto_commit`；`getButtonAvailability` 新增可选入参 `fastMode`
+    （**不改 `EXPECTED_STATUS` 常量**——它是与后端 `ALLOWED_NEXT` 对齐的状态机面，快通道是旁路
+    不是合法后继）；章节页加「快通道」勾选（乐观更新＋失败回滚，切换即 PATCH 落库）与
+    「写完直接提交」勾选（快通道未开时置灰）。`ChapterDetailPage.test.tsx` 的 endpoints mock
+    补 `projectsApi`——**默认值放 mock 工厂而非 beforeEach**，因该文件有 13 个 describe 各带一份
+    beforeEach，放 beforeEach 只覆盖其中一份，其余会撞 `undefined.then`。
+11. **本批**未删任何闸门代码，未动 observer，未动写作流水线，未碰内容层既有测试书籍；
+    全程 mock provider，**零真实 LLM 调用**。
+
 ### 2026-10-14 进度同步：10-13 批次提交前复核 ＋ 两条悬案裁决（含一处先验推翻）
 
 > **来源**：用户指令「同步项目进度」。
@@ -1091,7 +1320,7 @@ gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960
 - **P1b 消费与核销层 v1**：scene_planner 吃爽点摘要（40 条/1500 字符预算+截断标记）+ 配比指令（`scene_type` 可选契约）；writer 文风合并（`genre_style` 子键不覆盖、作者样例优先）；**核销层三规则**（GENRE-RATIO-DEVIATION 配比偏离>10% / GENRE-WORD-BAND-DEVIATION / GENRE-REDLINE-HIT，warning 级、BLOCKING_RULES 零触碰、未绑定整段缺席零行为变化）；writer 缓存键 11→12 元；preview/Project 响应同步。
 - **P2 规则化**：schema v1.1.0（`opening_rules`/`critic_rubric` 可选段，v1 线 minor 兼容）；signing_check `genre_opening` 段（子串启发式，失败/不可核 info 级不阻断）；critic/deep_review payload `genre_rubric`（payoff_focus 逐个核 verify_hint + taboo 命中即 high 一票关注）；scene_planner-v1.md Rule 12 scene_type 输出契约（配比核销模型遵从度的关键）；basic_checks 题材禁词确定性扫描。
 - **P3 同步与前端**：content_sync `genre-push/pull`（slug 规则：中文名 fallback `pack-<id末8>`/保留名防护/同 pack 路径稳定复用；写侧 schema 严校验不落盘；pull 幂等 no-op 不升版本；退出码沿用既有约定）+ StoryBiblePage「题材」标签页（绑定/解绑/爽点型表格/genre_check issues 展示）。**双轨关系**：内容仓 10 维文件=人编辑面，pack.json=运行面，v1 不做自动聚合。
-- **内容仓联动**：`docs/data-model/data-model-v0.md` 表数口径订正（38 业务表，F-7）。
+- **内容仓联动**：`docs/data-model/data-model-v0.md`〔断链〕` 表数口径订正（38 业务表，F-7）。
 
 ### Changed（2026-09-13 V3.9 批次 3：质量评分体系——悬崖聚合 / foreshadowing 双通道 / Q8 口径 / AI 味词表 / 文档对齐）
 
@@ -1152,7 +1381,7 @@ gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960
 - **`db_maintenance.py list` 子命令支持 `--older-than-minutes`**——此前 `list` 硬编码 `DEFAULT_OLDER_THAN_MINUTES=30`，与 `fix` 的参数能力不对称；补同名参数（default 30 行为不变），`list --help` 与 fix 结构对称。
 - **删除 `WorkflowEngine.start()` 死入口**——`engine.py` L241-261 `raise NotImplementedError` 保留入口全仓零调用方（只 `start_with_nodes` 被 routers/pipelines/smoke/evals 消费）；同步模块 docstring L30 由 `start()` 改 `start_with_nodes()`。
 - **测试**：ruff 0；pytest 相关 91 用例零回归（含 test_openapi_contract/test_db_maintenance/test_health/test_engine_* 等）。全量 pytest 基线另计（上一轮实测 1677 passed / 2 skipped）。
-- **范围外留档（下轮处理）**：`scripts/smoke_e2e.py:67,72` 注释仍写「35 业务表」、`docs/data-model/data-model-v0.md:3` 写「34 张」、api/README 的 V3.4 演化轨迹提示——均与本轮口径漂移，不在本 diff 范围。
+- **范围外留档（下轮处理）**：`scripts/smoke_e2e.py:67,72` 注释仍写「35 业务表」、`docs/data-model/data-model-v0.md:3`〔断链〕 写「34 张」、api/README 的 V3.4 演化轨迹提示——均与本轮口径漂移，不在本 diff 范围。
 
 ### Added（2026-09-06 全项目审查落地：四批次优化，P1 缺陷清零 + 数据生命周期 + 巨型文件拆分 + 工程基建）
 
@@ -1594,13 +1823,13 @@ gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960
 - **lint 清零**：修复 260 处 ruff 错误（unused-import / 行超长 / import 排序等，涉及 packages / tests / scripts 共 23 个文件），`ruff check packages tests scripts` 恢复 All checks passed，CI 后端 job 恢复可过；story_state/service.py 的 facade re-export 统一加 `# noqa: F401` 防止自动修复误删。
 - **CI 补前端 job**：`.github/workflows/ci.yml` 新增 web job（Node 20，npm ci → build → vitest），此前 195 个前端测试不在 CI 内。
 - **版本号元数据对齐 2.0.0**：pyproject.toml / apps/web/package.json / packages/core/api/main.py `__version__` 三处由 0.1.0 同步为 2.0.0；test_health 与 test_spa_hosting 的版本断言改为引用 `__version__` 常量，后续升版只改一处。
-- **文档一致性**：docs/data-model/data-model-v0.md 加现状注记（v0 的 28 张表 → 当前 34 张业务表 + chapter_fts，附增量迁移清单）；IMPLEMENTATION-PLAN §4.2 deviation #4（model-configs 明文返回）标记已关闭（router 层 `_mask_response` 已落地）；补 packages/core/workflow_registry/README.md；README 移除对停维护 apps/desktop/vite.config.ts 的消费性表述。
+- **文档一致性**：docs/data-model/data-model-v0.md〔断链〕 加现状注记（v0 的 28 张表 → 当前 34 张业务表 + chapter_fts，附增量迁移清单）；IMPLEMENTATION-PLAN §4.2 deviation #4（model-configs 明文返回）标记已关闭（router 层 `_mask_response` 已落地）；补 packages/core/workflow_registry/README.md；README 移除对停维护 apps/desktop/vite.config.ts 的消费性表述。
 - **新增 ADR-0002**：「model provider API Key 在本地 SQLite 明文存储（MVP 决策）」，记录既有防线（出口掩码 / ai_call_logs 敏感字段黑名单 / 备份排除 model_configs）与未来升级路径。
 - **工作区卫生**：清理 data/ 下 smoke_e2e_* / real_llm_e2e_* 等测试残留文件（主库 novelos.db 不受影响）。
 
 ## [2.0.0] - 2026-08-24
 
-结构性升级（路线图：`docs/roadmap/v1.3-v2.x-plan.md`）。含内部架构破坏性调整，对外 API 契约保持兼容。
+结构性升级（路线图：`docs/roadmap/v1.3-v2.x-plan.md`〔断链〕`）。含内部架构破坏性调整，对外 API 契约保持兼容。
 
 ### Changed（架构）
 
@@ -1629,7 +1858,7 @@ gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960
 
 ## [1.5.0] - 2026-08-24
 
-架构债务与 UI 补缺包（路线图：`docs/roadmap/v1.3-v2.x-plan.md`）。
+架构债务与 UI 补缺包（路线图：`docs/roadmap/v1.3-v2.x-plan.md`〔断链〕`）。
 
 ### Added
 
@@ -1648,7 +1877,7 @@ gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960
 
 ## [1.4.0] - 2026-08-24
 
-发布链路与可观测包（路线图：`docs/roadmap/v1.3-v2.x-plan.md`）。
+发布链路与可观测包（路线图：`docs/roadmap/v1.3-v2.x-plan.md`〔断链〕`）。
 
 ### Added
 
@@ -1670,7 +1899,7 @@ gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960
 
 ## [1.3.0] - 2026-08-24
 
-审稿与文风包（路线图：`docs/roadmap/v1.3-v2.x-plan.md`）。
+审稿与文风包（路线图：`docs/roadmap/v1.3-v2.x-plan.md`〔断链〕`）。
 
 ### Added
 
@@ -1692,7 +1921,7 @@ gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960
 
 ## [1.2.0] - 2026-08-24
 
-竞品对标迭代：基于海外（Sudowrite / NovelAI / NovelCrafter）、国内（蛙蛙 / 彩云小梦 / 平台 AI 政策）与开源社区（13 个代表项目）三路调研的优化落地。分析文档：`docs/analysis/competitive-analysis-2026-08-24.md`。
+竞品对标迭代：基于海外（Sudowrite / NovelAI / NovelCrafter）、国内（蛙蛙 / 彩云小梦 / 平台 AI 政策）与开源社区（13 个代表项目）三路调研的优化落地。分析文档：`docs/analysis/competitive-analysis-2026-08-24.md`〔断链〕`。
 
 ### Added
 
