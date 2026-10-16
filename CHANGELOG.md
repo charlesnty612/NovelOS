@@ -5,6 +5,109 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-16 批次（九）：读路径降级范围 —— 「一行脏数据让整个列表 500」的第 2~4 次实例 + 结清一处登记挂账 + 一处量具假阳性）
+
+> **来源**：定时任务 `arch-review-bugfix`（架构审查与缺陷修复）。工作目录干净，
+> HEAD = `d7788f3`（批次八已提交），基线 pytest 3312 / 1 skipped、指纹 578 文件。
+> 全程**临时库 + 合成夹具**，零真实 LLM 调用、零内容仓接触。
+
+#### A. 脏 JSON 读路径：一行坏数据让**整个列表端点 500**（已复现，四处）
+
+2026-10-15 批次（六）给 plot / relationships 的列表端点挂 `response_model` 时发现：
+service 侧裸 `json.loads` 读 JSON 列，一行脏数据（非法文本**或**合法 JSON 但形状不符）
+会让值冒到路由层 ⇒ **整个列表 500，干净行陪葬**。当时只处置了 plot 一处。
+
+批次九对同形状做**全仓扫**，用**临时库 + 直接塞脏行**实测（`_app` + 直插 SQL），
+修复前四处均复现 500：
+
+| 脏列 | 端点 | 修复前 |
+|---|---|---|
+| `chapters.plan_json` | `GET /projects/{pid}/chapters`、`GET /chapters/{id}` | **500** |
+| `characters.core_json` | `GET /projects/{pid}/characters`、`GET /characters/{id}` | **500** |
+| `character_states.state_json` | `GET /characters/{id}/states`、列表行的 `latest_state_json` | **500** |
+| `locations.data_json`（factions / world_rules 同） | `GET /projects/{pid}/locations` 等 | **500** |
+| `quality_reports.issues_json` / `scores_json`（形状不符） | `GET /projects/{pid}/quality` | **500** |
+
+**共同形状**：同一函数里的**兄弟字段早已兜底**，唯漏的那几处是裸 `json.loads`
+（chapter 内 `outline_json` / `who_knows` 已兜底、character 内 `aliases` / `inject_mode`
+已兜底）——与 `update_hook` 漏 `model_fields_set` 同一种「**笔误不是设计**」。
+
+**修法（单点）**：`write_helpers` 新增 `decode_json_field(raw, *, fallback, allowed=(dict,))`
+——解析失败 / 形状不符 ⇒ 退回该字段空值（与既有 `decode_who_knows` 同源）。
+四处读路径全部改调它。**降级只发生在读路径**，写路径校验不变。
+
+⚠️ **降级 ≠ 掩盖**：`decode_json_field` 只保证「读路径不因脏数据炸」，不校验值域
+（那是写路径的职责）；`outline_json` / `who_knows` 这类**可空**列退 `None`，
+`plan_json` / `core_json` / `data` 这类**非空**列退 `{}`（与「列本来为空」同形）。
+
+判别：`tests/api/test_dirty_json_list_degradation.py` **12 例**（每处一正一脏，
+断言「端点 200 + 干净行仍可见 + 脏字段退空值」）；突变 `L0-ENTJSON1~5` + `L0-QJSON1~2`
+**7 条全捕获**（撤任一调用改回裸 `json.loads` 必红）。
+
+#### B. 结清登记挂账：`_genre_pack_excerpt` 的 `except` 范围收窄
+
+2026-10-15 批次（六）收窄 `fast_mode.py` 时留下一句挂账：「同款过宽写法在
+`builders_common/common.py`（题材包绑定）仍在，本批只收窄本文件；其余挂账待独立处理」。
+
+复算成立且**更严重**：`_genre_pack_excerpt` 裸 `except sqlite3.OperationalError`
+一律降级为「未绑定」，而注释只声称覆盖「0025 未跑的极老库」（缺表 / 缺列）。
+⇒ `database is locked` / `disk I/O error` / `malformed` 被**静默吞掉**：
+作者以为体裁约束生效，产出的正文却没带体裁，**且零告警**——正是本项目最忌的静默降级。
+
+修法：
+1. `common.py` 新增 `_is_missing_schema_error(exc)`（特征子串 `no such table` /
+   `no such column`），收窄 catch；非结构故障**上抛**。
+2. 删掉 `planner_input.py` / `scene_planner.py` 两处**无差别再吞**的外层
+   `except sqlite3.OperationalError`——它们会把内层刚收窄的范围**原样放大**
+   （只收窄内层、不动外层 = 修复对这两条调用链**完全无效**，这是本条的关键）。
+
+判别：`tests/unit/test_genre_pack_schema_error_scope.py` **7 例**（内层缺表/缺列降级、
+锁/I/O/损坏上抛各一；两个调用方各一例证明「外层不再吞」）；突变 `L0-GP1~3` 全捕获。
+
+⚠️ **如实登记的残余**：同形状（裸 `except sqlite3.OperationalError` + 注释只声称
+「老库 / 缺表」）在本仓**还有 ~13 处**，实测清单见 `common.py::_is_missing_schema_error`
+docstring（`chapter_write/writer.py` / `save_draft.py` / `scene_plan_store.py` /
+`chapter_write/pipeline.py` / `planner_input.py` / `scene_planner.py` …）。本批只结清
+**已登记挂账**的那一处；扫尾时应把判别式提为共享单点（`packages/core/db.py`）再逐处收窄
+——**逐处改需逐处实测，不做批量替换**。
+
+#### C. 量具假阳性：`validate_specs.py` 的 `ast.parse` 不容忍文件头 BOM
+
+给 `scene_planner.py` 写突变时，只读预检报：「变异后语法错误（invalid non-printable
+character U+FEFF）」——**假阳性**。真因：Python 的 import 走 `utf-8-sig`、**容忍** BOM，
+而 `ast.parse(str)` 不容忍；不镜像加载器就会把**合法**的带 BOM 源文件误判成语法错误
+⇒ 任何指向它的突变都拿不到结论（同坑区「量具缺陷伪装成被测物有病」）。
+
+实测本仓 **3 个 .py 带 BOM**（`git ls-files` 逐字节扫，全在 `chapter_write/` 下：
+`polisher.py` / `save_draft.py` / `scene_planner.py`，均为 HEAD 既有）。
+修法：`ast.parse(mutated.removeprefix(chr(0xFEFF)))`——单行，且**不放松真正的语法检查**
+（去掉的只有 BOM）。判别：`l0_degradation_scope.py` 的 `L0-GP3` 现在可跑且被捕获。
+
+#### 闸门（项目 .venv，`-n 4`）
+
+- pytest **3331 passed / 1 skipped / 0 failed**（348.78s）——较基线 3312 **+19**，
+  账对得上：`test_dirty_json_list_degradation.py` 12 + `test_genre_pack_schema_error_scope.py` 7；
+- 树指纹 **581 文件 / `442f20c3…`** 跑测前后**逐位一致**（基线 578，+3 = 两个新测试文件 + 一个突变规格）；
+- ruff `All checks passed!`；
+- `npx tsc -b` 零错、`npx vitest run` **755**（56 文件）全绿、`npm run build` 通过
+  （asset hash 与基线同：`index-mhzcNjYt.js` 467.50 kB）——**纯后端批次，前端零改动**；
+- `scripts/smoke_e2e.py` PASS，旧四步链路完好（plan→write→review PAUSED→resume→commit）、
+  state-sync SYNC OK；
+- `export_openapi` + `gen_frontend_types` **先于**全量 pytest 跑：98 paths / 136 schemas
+  **未变**、`openapi.json` / `types.generated.ts` regen 前后逐字节一致（本批未动路由 / 出参模型）；
+- 突变 **210 条全捕获**（原 200 + 本批 10），0 存活、0 中止/无效，残留清点 0。
+
+#### 未做完整归因 / 没攻破的地方
+
+- 本批**未动** `apps/web`，也**未做** UI 侧任何配套（读路径降级对前端是「字段变空值」，
+  与既有「可空列」同形，前端无需改）；
+- 同形状 `except` 过宽**只清了一处**（B 节残余 13 处），**未做逐个实测**——留作扫尾批次；
+- **未评估**是否还有其他「列表端点被一行数据打 500」的形状（如 `pydantic` 的 `Literal`
+  值域校验：ledger `Hook.status` / `Debt.status` 用 `Literal`，一行枚举外值理论上也会
+  500——但 DDL 有 `CHECK` 约束，实测该路径**不可达**，故本轮判定为**非缺陷**，
+  仅记录判断依据，不修）；
+- 定时任务只做了**读 + 复核 + 局部修**：未用常驻子代理（`主会话亲验`优先于并行）；未提交。
+
 ### Fixed（2026-10-16 批次（八）：查「假事故」时挖出的**真缺陷** + 三处顺带清账）
 
 > **来源**：用户指令「2」（选「定位 `test_m1_lock.py` 真因」）+「并发智能体去干」。

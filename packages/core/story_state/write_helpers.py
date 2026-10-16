@@ -29,6 +29,7 @@
 API 契约（V2.0 Wave B 起稳定）：
 - :func:`encode_who_knows`     —— 三态编码（None/[]/list → None/'[]'/JSON）。
 - :func:`decode_who_knows`     —— 反序列化（DB raw → list|None，空字符串/None 视为 None）。
+- :func:`decode_json_field`    —— 读路径 JSON 列解码（形状不符/解析失败 → fallback）。
 - :func:`resolve_visibility`   —— default + value 兜底。
 - :func:`dump_json`            —— 对象/dict/list → JSON（ensure_ascii=False）。
 - :func:`dump_json_or_null`    —— None → NULL；list/dict → JSON。
@@ -91,6 +92,44 @@ def decode_who_knows(raw: str | None) -> list[str] | None:
     if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
         return parsed
     return None
+
+
+def decode_json_field(
+    raw: Any,
+    *,
+    fallback: Any,
+    allowed: tuple[type, ...] = (dict,),
+) -> Any:
+    """**读路径** JSON 列解码：JSON 文本 → ``allowed`` 里的形状；否则 ``fallback``。
+
+    规则（与 :func:`decode_who_knows` 同源，都属「解析失败不污染调用方」这一族）：
+
+    - ``None`` / 空串 / 非字符串（含已是 dict/list）：
+        - 已是 ``allowed`` 的实例 → 原样返回（调用方偶尔传已解码值）；
+        - 否则 → ``fallback``。
+    - ``json.loads`` 抛 ``JSONDecodeError`` → ``fallback``。
+    - 解析成功但**形状不符**（如列里是 ``[1,2]`` 而要求 dict）→ ``fallback``。
+
+    存在理由（2026-10-16 批次九）：读路径里一行**脏 JSON** 会让整个列表端点 500
+    （``json.loads`` 抛值 → pydantic 校验抛值 → 干净行一起陪葬）。与
+    :func:`decode_who_knows` 是同一形状，只是列不同。判别：把某处调用改回裸
+    ``json.loads``，那条端点的「脏行不 500」用例必须变红。
+
+    ``allowed`` 默认只收 ``dict``——绝大多数 JSON 列语义就是对象；世界实体
+    ``data_json`` 允许数组，调用方显式传 ``allowed=(dict, list)``。
+
+    ⚠️ 本函数**只解码、不校验值域**（那是各领域 service 的写路径职责）：它保证的是
+    「读路径不因脏数据而炸」，不是「数据合法」。
+    """
+    if isinstance(raw, allowed):
+        return raw
+    if not isinstance(raw, str) or not raw:
+        return fallback
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return fallback
+    return parsed if isinstance(parsed, allowed) else fallback
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +234,7 @@ def who_knows_update_clause(
 __all__ = [
     "encode_who_knows",
     "decode_who_knows",
+    "decode_json_field",
     "resolve_visibility",
     "dump_json",
     "dump_json_or_null",

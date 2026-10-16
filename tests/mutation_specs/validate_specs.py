@@ -61,7 +61,12 @@ def check_one(mid: str, rel: str, anchor: str, replacement: str, test_file: str)
 
     if rel.endswith(".py"):
         try:
-            ast.parse(mutated)
+            # ⚠️ 去文件头 BOM 再解析（2026-10-16 批次九）：Python 的 import 走
+            # utf-8-sig、**容忍** BOM，而 ``ast.parse(str)`` 不容忍——不镜像加载器就会
+            # 把**合法**的带 BOM 源文件误判成「变异后语法错误」，于是任何指向它的突变
+            # 都拿不到结论（同坑区「量具缺陷伪装成被测物有病」）。本仓实测 3 个 .py
+            # 带 BOM，全在 chapter_write/ 下：polisher / save_draft / scene_planner。
+            ast.parse(mutated.removeprefix(chr(0xFEFF)))
         except SyntaxError as exc:
             problems.append(f"{mid}: 变异后语法错误（{exc}）→ 跑起来会「收集失败」而非断言红")
 

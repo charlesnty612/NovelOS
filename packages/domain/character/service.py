@@ -34,6 +34,9 @@ from pathlib import Path
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.story_state.write_helpers import (
+    decode_json_field as _decode_json_field,
+)
+from packages.core.story_state.write_helpers import (
     decode_who_knows as _load_who_knows,
 )
 
@@ -97,9 +100,12 @@ class CharacterService:
     @staticmethod
     def _row_to_character(row: sqlite3.Row, state_row: sqlite3.Row | None) -> dict:
         d = dict(row)
-        # core_json 反序列化
-        if "core_json" in d and isinstance(d["core_json"], str):
-            d["core_json"] = json.loads(d["core_json"]) if d["core_json"] else {}
+        # ``core_json`` / ``latest_state_json`` 读路径走共享解码助手：一行脏 JSON
+        # （非法文本或形状不符）不得让整个列表端点 500（plot 侧 2026-10-15 同款处置）。
+        # ⚠️ 2026-10-16 批次九：这两处原先是裸 ``json.loads``（同函数的 who_knows /
+        # aliases / inject_mode 早已兜底），实测 GET /projects/{pid}/characters 与
+        # GET /characters/{id} 均因一行脏数据 500。
+        d["core_json"] = _decode_json_field(d.get("core_json"), fallback={})
         d["who_knows"] = _load_who_knows(d.get("who_knows"))
         # V2.0 Wave B 任务二：0010 加的 aliases / inject_mode 列。
         # 旧库升级时若读不到列（极老库）→ fallback（与 builder 行为一致）。
@@ -108,8 +114,7 @@ class CharacterService:
 
         if state_row is not None:
             d["latest_state_version"] = state_row["state_version"]
-            raw_state = state_row["state_json"]
-            d["latest_state_json"] = json.loads(raw_state) if raw_state else {}
+            d["latest_state_json"] = _decode_json_field(state_row["state_json"], fallback={})
         else:
             d["latest_state_version"] = 0
             d["latest_state_json"] = {}
@@ -118,8 +123,7 @@ class CharacterService:
     @staticmethod
     def _row_to_state(row: sqlite3.Row) -> dict:
         d = dict(row)
-        if "state_json" in d and isinstance(d["state_json"], str):
-            d["state_json"] = json.loads(d["state_json"]) if d["state_json"] else {}
+        d["state_json"] = _decode_json_field(d.get("state_json"), fallback={})
         d["who_knows"] = _load_who_knows(d.get("who_knows"))
         return d
 

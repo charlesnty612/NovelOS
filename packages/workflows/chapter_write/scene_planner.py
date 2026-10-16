@@ -167,12 +167,11 @@ def _collect_scene_planner_inputs(
             genre_pack_inject, genre_pack_audit = _genre_pack_excerpt(
                 conn_g, project_id, consumer=_GENRE_PACK_CONSUMER_PLANNER,
             )
-        except sqlite3.OperationalError:
-            # 老库 / 缺表 → 视为未绑定，不阻断 Scene Planner 装配。
-            genre_pack_inject = None
-            genre_pack_audit = None
         finally:
             conn_g.close()
+        # ⚠️ 2026-10-16 批次九：此处的 ``except sqlite3.OperationalError`` 已删——
+        # 降级语义由 ``_genre_pack_excerpt`` 内部唯一承载（缺表/缺列 → 未绑定），
+        # 外层再吞一次会把内层刚收窄的范围放大（锁 / I/O 故障变静默丢题材包）。
 
     # world_state_excerpts：复用既有字段结构（P2-补洞），让 Scene Planner 能看到
     # world_rules_relevant（项目级硬设定，如原著要素锁），保证"沿传 Director 约束"

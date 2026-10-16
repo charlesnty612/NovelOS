@@ -169,11 +169,12 @@ def _merge_genre_pack_planner_fields(payload: dict[str, Any], db_path: str, proj
         planner_inject, planner_audit = _genre_pack_excerpt(
             conn, project_id, consumer=_GENRE_PACK_CONSUMER_PLANNER
         )
-    except sqlite3.OperationalError:
-        # 老库 / 缺表 → 视为未绑定题材包，不阻断装配。
-        planner_inject, planner_audit = None, None
     finally:
         conn.close()
+    # ⚠️ 2026-10-16 批次九：此处的 ``except sqlite3.OperationalError`` 已删。
+    # ``_genre_pack_excerpt`` 内部**自己**把「缺表/缺列」降级为 ``(None, None)``，
+    # 外层无差别再吞一次会把内层刚收窄的范围原样放大（锁 / I/O 故障又变静默丢题材包）。
+    # 「老库 / 缺表 → 未绑定」的语义由内层唯一承载，行为对本例零变化。
     if not isinstance(planner_inject, dict):
         return
     merged = dict(payload.get("genre_pack") or {})

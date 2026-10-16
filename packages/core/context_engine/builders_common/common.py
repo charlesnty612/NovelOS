@@ -652,6 +652,28 @@ def _ratio_instruction(
     return text
 
 
+#: SQLite「缺表 / 缺列」报错的特征子串（迁移未跑的极老库）。**故意取子串而非异常类**：
+#: 这两类共用 ``sqlite3.OperationalError``，只有消息能区分「结构缺失」与「运行时故障」
+#: （``database is locked`` / ``disk I/O error`` / ``malformed``）。
+_MISSING_SCHEMA_MARKERS: tuple[str, ...] = ("no such table", "no such column")
+
+
+def _is_missing_schema_error(exc: sqlite3.OperationalError) -> bool:
+    """``OperationalError`` 是否属「缺表/缺列」（即迁移未跑的极老库）。
+
+    用途：把 ``except sqlite3.OperationalError`` 的**降级范围**收窄到「结构缺失」，
+    让真正的运行时故障（锁 / I/O / 损坏）上抛而不是被静默吞掉。
+    ⚠️ 同形状（裸 ``except sqlite3.OperationalError`` + 注释只声称「老库/缺表」）
+    在本仓还有多处：``chapter_write/writer.py`` / ``save_draft.py`` /
+    ``chapter_plan/scene_plan_store.py`` / ``chapter_write/pipeline.py`` /
+    ``planner_input.py`` / ``scene_planner.py`` …（2026-10-16 实测 ~13 处）。
+    本批只结清**已登记挂账**的 ``_genre_pack_excerpt`` 一处；扫尾时把本判别式提为
+    共享单点（``packages/core/db.py``）再逐处收窄。
+    """
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _MISSING_SCHEMA_MARKERS)
+
+
 def _genre_pack_excerpt(
     conn: sqlite3.Connection,
     project_id: str,
@@ -697,8 +719,17 @@ def _genre_pack_excerpt(
             """,
             (project_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
-        # 0025 未跑过的极老库 → 视为未绑定（与无题材包行为零差异）。
+    except sqlite3.OperationalError as exc:
+        # ⚠️ 收窄（2026-10-16 批次九）：只有「迁移未跑 ⇒ 缺表/缺列」才降级为「未绑定」。
+        # 原为裸 ``except sqlite3.OperationalError``，而注释只声称覆盖「0025 未跑的
+        # 极老库」——**捕获范围与注释主张不符**（本仓反复登记的「注释必须可复算」）。
+        # ``database is locked`` / ``disk I/O error`` / ``malformed`` 一律上抛：静默丢题材包
+        # 等于「作者以为体裁约束生效、产出的正文却没带体裁且零告警」，正是本项目最忌的
+        # 静默降级形状（同 ``routers/workflows/fast_mode.py`` 的收窄理由）。
+        #   判别：把某处调用改成裸 except，``tests/unit/test_genre_pack_schema_error_scope.py``
+        #   必红（判据：非缺表/缺列的 OperationalError 必须冒出来，不被吞）。
+        if not _is_missing_schema_error(exc):
+            raise
         return None, None
     if row is None:
         return None, None

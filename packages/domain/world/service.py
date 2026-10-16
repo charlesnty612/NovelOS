@@ -28,6 +28,9 @@ from pathlib import Path
 from typing import Any
 
 from packages.core.ids import new_id, now_iso
+from packages.core.story_state.write_helpers import (
+    decode_json_field as _decode_json_field,
+)
 
 # V2.0 Wave B：双写面共享写入助手（与 write_through 同源）
 from packages.core.story_state.write_helpers import (
@@ -543,10 +546,12 @@ class WorldService:
     # -------------------------------------------------------------------- 辅助
 
     def _row_to_entity(self, cfg: _EntityConfig, row: sqlite3.Row) -> WorldEntity:
-        # V2.0 Wave B：data_json 走标准 json.loads（dict 语义，未抽到 write_helpers
-        # ——保持简单）；who_knows 走 write_helpers._decode_who_knows 与
-        # canon 写透读侧统一（list[str] | None 类型约束）。
-        data = json.loads(row["data_json"]) if row["data_json"] else {}
+        # V2.0 Wave B：data_json 走共享解码助手 ``decode_json_field``（读路径，形状
+        # 不符/解析失败 → {}）。⚠️ 2026-10-16 批次九：原先是裸 ``json.loads``，一行
+        # 脏 data_json 让 ``GET /projects/{pid}/locations``（factions / world-rules 同）
+        # 整个列表 500。``WorldEntityOut.data`` 允许对象**或数组** ⇒ ``allowed`` 两项。
+        # who_knows 走 write_helpers._decode_who_knows 与 canon 写透读侧统一。
+        data = _decode_json_field(row["data_json"], fallback={}, allowed=(dict, list))
         who_knows_raw = row["who_knows"]
         who_knows = _decode_who_knows(who_knows_raw)
         # V2.0 Wave B 任务二：触发键字段（locations/factions；world_rules 走默认）

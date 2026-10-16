@@ -40,6 +40,9 @@ from typing import Any
 from packages.core.db import get_connection
 from packages.core.ids import now_iso
 from packages.core.quality.models import QualityContext, QualityReport
+from packages.core.story_state.write_helpers import (
+    decode_json_field as _decode_json_field,
+)
 from packages.domain.chapter.draft_resolver import resolve_draft
 
 __all__ = [
@@ -77,28 +80,21 @@ class QualityService:
         if row is None:
             return None
         d = dict(row)
-        # scores_json / issues_json 解析
-        if "scores_json" in d and isinstance(d["scores_json"], str):
-            try:
-                d["scores_json"] = json.loads(d["scores_json"])
-            except json.JSONDecodeError:
-                d["scores_json"] = {}
-        if "issues_json" in d and isinstance(d["issues_json"], str):
-            try:
-                d["issues_json"] = json.loads(d["issues_json"])
-            except json.JSONDecodeError:
-                d["issues_json"] = []
+        # ``*_json`` 读路径一律走共享解码助手（``write_helpers.decode_json_field``）：
+        # 除了「语法就坏」的文本，**形状不符**（如 ``issues_json`` 存成对象）同样降级——
+        # 一行脏数据不得让整个质量报告列表端点 500（plot / chapter / character 同款处置）。
+        # ⚠️ 2026-10-16 批次九：原实现只挡 ``JSONDecodeError``、不挡形状，实测
+        # ``GET /projects/{pid}/quality`` 遇一行 ``issues_json={"a":1}`` 即 500。
+        if "scores_json" in d:
+            d["scores_json"] = _decode_json_field(d["scores_json"], fallback={})
+        if "issues_json" in d:
+            d["issues_json"] = _decode_json_field(
+                d["issues_json"], fallback=[], allowed=(list,)
+            )
         # V3.1 P1-2：judge_json 解析；缺四维分列迁移前旧库无此列 → 字段缺失则跳过
         # （保留 None）。
         if "judge_json" in d:
-            raw = d["judge_json"]
-            if raw is None or raw == "":
-                d["judge_json"] = None
-            else:
-                try:
-                    d["judge_json"] = json.loads(raw)
-                except json.JSONDecodeError:
-                    d["judge_json"] = None
+            d["judge_json"] = _decode_json_field(d["judge_json"], fallback=None)
         return d
 
     # ---------------------------------------------------------------- save

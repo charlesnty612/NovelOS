@@ -39,6 +39,9 @@ from pathlib import Path
 
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
+from packages.core.story_state.write_helpers import (
+    decode_json_field as _decode_json_field,
+)
 
 from .models import (
     ALLOWED_NEXT,
@@ -124,28 +127,19 @@ class ChapterService:
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
         d = dict(row)
-        # plan_json 反序列化
-        if "plan_json" in d and isinstance(d["plan_json"], str):
-            d["plan_json"] = json.loads(d["plan_json"]) if d["plan_json"] else {}
-        # outline_json（0028 策展大纲槽）反序列化；NULL / 空串 → None（= 未策展，
-        # 装配侧回落到 plan_json 同名字段）
-        if "outline_json" in d:
-            raw_outline = d["outline_json"]
-            if isinstance(raw_outline, str) and raw_outline:
-                try:
-                    d["outline_json"] = json.loads(raw_outline)
-                except json.JSONDecodeError:
-                    d["outline_json"] = None
-            else:
-                d["outline_json"] = None
-        # who_knows 是 JSON 字符串数组（NULL 或 '[]' 或 '["..."]')
-        if "who_knows" in d and d["who_knows"]:
-            try:
-                d["who_knows"] = json.loads(d["who_knows"])
-            except json.JSONDecodeError:
-                d["who_knows"] = None
-        else:
-            d["who_knows"] = None
+        # ``plan_json`` / ``outline_json`` / ``who_knows`` 读路径一律走共享解码助手
+        # （``packages.core.story_state.write_helpers``）：一行**脏 JSON**（非法文本或
+        # 形状不符）不得让整个列表端点 500——这正是 plot 侧 2026-10-15 同类缺陷的处置。
+        # ⚠️ 2026-10-16 批次九：``plan_json`` 原先是裸 ``json.loads``（同一函数内
+        # outline_json / who_knows 早已兜底，唯它漏了）。实测一行脏 plan_json 让
+        # ``GET /projects/{pid}/chapters`` 与 ``GET /chapters/{id}`` 双双 500，干净行陪葬。
+        d["plan_json"] = _decode_json_field(d.get("plan_json"), fallback={})
+        # outline_json（0028 策展大纲槽）：NULL / 空串 / 脏 → None（= 未策展）
+        d["outline_json"] = _decode_json_field(d.get("outline_json"), fallback=None)
+        # who_knows：JSON 字符串数组；形状不符（对象 / 标量）→ None
+        d["who_knows"] = _decode_json_field(
+            d.get("who_knows"), fallback=None, allowed=(list,)
+        )
         return d
 
     # ------------------------------------------------------------------ create
