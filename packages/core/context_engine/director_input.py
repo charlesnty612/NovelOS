@@ -41,6 +41,7 @@ from .cache import (
     _fingerprint_outline_json,
     _fingerprint_plan_json,
     _fingerprint_writing_bible,
+    characters_fingerprint,
 )
 from .canon import (
     _reference_canon_excerpt,
@@ -338,9 +339,11 @@ def build_director_input(
 
     缓存（V2.0 Wave C 任务二）：L0/L1 装配结果按
     ``(project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
-    active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref, ns)``
+    active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
+    chars_fp, prompt_label, ns)``
     键做进程内缓存；同一 (project, state_version, chapter, plan_json 内容, 大纲内容,
-    canon, 作者意图, 项目写作圣经, 目标字数, 题材包, 命名空间) 第二次调用直接返回缓存条目。
+    canon, 作者意图, 项目写作圣经, 目标字数, 题材包, 角色内容, 提示词版本, 命名空间)
+    第二次调用直接返回缓存条目。
 
     V2.0 Wave C P1-1 修复：键追加 ``plan_fp``（chapters.plan_json 原文 sha256[:16]），
     解决 plan_json UPDATE 后 state_version 不变时的脏命中。``plan_fp == 'uncached'``
@@ -362,6 +365,13 @@ def build_director_input(
     运行期原文指纹、``bible_fp`` = 圣经原文指纹——两个来源各自独立入键，任一变化都
     miss。**缺 ``bible_fp`` 会让「改圣经后同 state_version」脏命中旧装配**
     （与 0028 大纲槽同形的硬规则 2 教训）。
+
+    2026-10-16（E1，外部报告「角色圣经写闺蜜、正文里却是业务员」）：键再追加
+    ``chars_fp``（:func:`...cache.characters_fingerprint`，与 writer 键同源同值）。
+    ``characters.core_json`` 整份进 payload 的 ``character_state_excerpts.core_json``，
+    而角色页的新增 / 改设定不写 story_state、不推 ``state_version`` ⇒ 缺该维度时改角色
+    后**重跑同一章**命中旧装配。⚠️ 边界：写新章时 ``chapter_no`` 不同 ⇒ 旧实现也不脏命中。
+    判别：``tests/unit/test_e1_character_cache_key.py``。
 
     ``namespace``（关键词参数，默认 ``""``）：键尾命名空间标记。``preview_context``
     传 ``"preview"`` 拆开 dry-run 与生产的键空间，避免预览的空意图 / 默认 2200 字
@@ -405,16 +415,26 @@ def build_director_input(
     # 解析一次、同时喂 payload 与缓存键：进了 payload 就必须进键（硬规则 2）。**两者必须
     # 同批改**——只改 payload 不改键会让 v1/v2 两次装配落到同一键，制造真正的脏命中。
     prompt_label = active_prompt_label(db_path, "director", fallback="director:v1")
+    # 2026-10-16（E1，外部报告「角色圣经写闺蜜、正文里却是业务员」）：键追加角色内容
+    # 指纹 ``chars_fp``。director 与 writer 读的是**同一个** ``_character_state_excerpts``
+    # （同 SELECT 同 JOIN，只 ``trigger_corpus`` 不同）⇒ 共用这一个指纹维度。
+    # 角色页的新增 / 改设定不写 story_state、不推 ``state_version`` ⇒ 缺该维度时改角色
+    # 后重跑同一章命中旧装配：planner 拿着改动前的角色设定排计划，写出来的正文与角色
+    # 圣经不符（与 0028 ``outline_json`` 同形的硬规则 2 违规）。
+    # 落在 prompt_label 之前 ⇒ 键尾两元（prompt 标签 / 命名空间标记）语义不变
+    # （``tests/unit/test_prompt_label_key.py`` 的 ``DIRECTOR_KEY_LEN`` 13 → 14）。
+    chars_fp = characters_fingerprint(db_path, project_id)
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
         active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
-        prompt_label,
+        chars_fp, prompt_label,
         _cache_namespace_tag(namespace),
     )
     cacheable = (
         plan_fp != _FINGERPRINT_UNCACHED
         and intent_fp != _FINGERPRINT_UNCACHED
         and bible_fp != _FINGERPRINT_UNCACHED
+        and chars_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)

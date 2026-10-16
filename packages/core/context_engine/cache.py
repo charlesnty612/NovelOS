@@ -6,8 +6,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sqlite3
 import threading as _threading
+from pathlib import Path
 from typing import Any
+
+from packages.core.db import get_connection, is_missing_schema_error
 
 _CACHE_MAX_SIZE = 256
 # V2.0 Wave C P1-1：装配缓存键加入内容指纹维度。
@@ -26,6 +30,13 @@ _CACHE_MAX_SIZE = 256
 # ``author_intent.raw``（基线 + 增量拼接），两个来源各自独立，故各占一个键维度
 # （与「项目级 wb_fp / 运行级 target_word_count 分列」同款）；缺该维度则改圣经后
 # 同 state_version 脏命中旧装配。
+# 2026-10-16（E1，外部报告「角色圣经写闺蜜、正文里却是业务员」）：director / writer
+# 键再各补一个 ``chars_fp`` 维度（角色内容指纹，见 ``characters_fingerprint``）——
+# ``characters.core_json`` 整份进 payload 的 ``character_state_excerpts.core_json``，
+# 而 ``CharacterService.create / update``（角色页手动新增 / 改设定）**不写 story_state、
+# 不推 state_version**（``packages/core/api/routers/characters.py`` 无 write_through），
+# 故旧键里没有任何维度会因角色改动而变 ⇒ 同 state_version + 同 chapter_no 重跑该章
+# 命中旧装配 ⇒ 正文沿用改动前的角色设定。与 0028 ``outline_json`` 逐字同形。
 # 失效仍以 state_version + chapter_no 为主线；commit 完成后调
 # ``_invalidate_cache_for_chapter`` 显式兜底（state_version 推进也会带走它）。
 _assembly_cache: dict[tuple, dict[str, Any]] = {}
@@ -80,6 +91,111 @@ def _fingerprint_outline_json(outline_json_raw: Any) -> str:
     口径与 :func:`_fingerprint_plan_json` 逐字一致（原文 str / 已解析对象同款处理）。
     """
     return _fingerprint_plan_json(outline_json_raw)
+
+
+# ---------------------------------------------------------------------------
+# 角色内容指纹（2026-10-16 E1）——「改角色设定 / 手动新增角色」必须 miss 装配缓存
+# ---------------------------------------------------------------------------
+#
+# **列集选择（本段是设计判断，不是实现细节）**
+#
+# 规则一句话：**指纹 = 该项目全部角色的「业务列」+ 各角色最新一条状态行；不含记账时间戳。**
+#
+# - **覆盖 ``_character_state_excerpts``（``builders_common/excerpts.py``）读取的每一列**，
+#   外加两个「不直接进 payload 但决定 payload 形状」的列：
+#   - ``aliases`` / ``inject_mode``：决定条目是 full / summary / suppressed。漏任一列，
+#     改它时 payload 的**条目集合与形态**会变而键不变 ⇒ 脏命中（本次
+#     ``test_e1_aliases_change_misses_cache`` / ``test_e1_inject_mode_change_misses_cache`` 钉住）。
+#   - ``character_states`` 的最新 ``state_version`` / ``state_json``（LEFT JOIN）：进
+#     payload 的 ``current_state`` / ``latest_state_version``。生产上角色状态由 observer
+#     delta 推进且同时推 ``story_states.state_version``（常态已被键的主维度覆盖），
+#     但手工写 character_states 不推 ⇒ 该列属「潜在脏命中面」，一并覆盖。
+# - **额外纳入 ``who_knows``**：它不被 excerpt 读取，但同属角色的业务列（与
+#   ``visibility`` 同属知识权限面）。纳入只多一次重装（免费），漏掉则要求另维护一份
+#   「未被消费」手挑名单——那正是会随源码演进悄悄缩小的形状（判别面不得手挑）。
+#   ⇒ **失效方向刻意不对称**：多算 = 一次重装；少算 = 静默的错正文。
+# - **排除 ``created_at`` / ``updated_at``**：纯记账时间戳，不进 payload。纳入会让
+#   「只 bump updated_at、内容一字未动」也 miss（payload 逐字相同，miss 是白付代价），
+#   并让「拿 MAX(updated_at) 当指纹」这种假修通过全部判别。
+# - **排除 ``project_id``**：它是查询条件本身，恒等于键首元。
+#
+# 上面四条排除/纳入都是**可执行的断言**（``tests/unit/test_e1_character_cache_key.py``）：
+# 业务列全集由 ``PRAGMA table_info(characters)`` 推导，指纹覆盖面由本 SQL 推导，
+# 且断言 excerpt SQL 的列集合 ⊆ 指纹 SQL 的列集合（两处都从源码文本推导，不手抄）。
+#
+# **指纹计算的位置**：不在 ``_peek_chapter_context``（``builders_common/common.py``，
+# 本仓 Lead 独占）里，而在装配入口各自调用一次独立小查询。代价：命中路径 DB 连接
+# 1 → 2（实测增量见 CHANGELOG）。若后续 Lead 愿意在 peek 的单条 JOIN 里带出
+# ``characters_fp``，即可回到 1 连接——那需要 common.py 改动，不在本成员边界内。
+#
+# ⚠️ 残余边界（如实登记）：本 SQL 与 ``_character_state_excerpts`` 的 SQL 是**两份文本**，
+# 由上面的「excerpt ⊆ fingerprint」断言看守同步；若将来 excerpt 改 JOIN 而断言被一并
+# 改宽，守望即失效。
+
+_CHARACTERS_FINGERPRINT_SQL = """
+    SELECT c.character_id, c.name, c.role, c.core_json, c.visibility,
+           c.aliases, c.inject_mode, c.who_knows,
+           cs.state_version AS latest_state_version,
+           cs.state_json   AS latest_state_json
+    FROM characters c
+    LEFT JOIN character_states cs
+      ON cs.character_id = c.character_id
+     AND cs.state_version = (
+          SELECT MAX(state_version) FROM character_states WHERE character_id = c.character_id
+     )
+    WHERE c.project_id = ?
+    ORDER BY c.character_id ASC
+"""
+
+
+def _fingerprint_characters(rows: Any) -> str:
+    """计算角色内容指纹（sha256 前 16 字符），口径对齐 :func:`_fingerprint_plan_json`。
+
+    - ``None``（读不到角色表 / 无项目行）→ ``_FINGERPRINT_NONE``；
+    - ``[]``（项目确实没有角色）→ 空列表自身的稳定哈希，**与 None 区分**（两者落到
+      同一占位符会让降级态与「空项目」共用键空间）；
+    - 行是 ``tuple`` / ``list`` / ``sqlite3.Row``，一律转 list 后按 ``json.dumps(
+      sort_keys=True, ensure_ascii=False)`` 计算 ⇒ 元素顺序即指纹的一部分（查询侧
+      已用 ``ORDER BY c.character_id`` 定序）；
+    - 不可序列化 → ``_FINGERPRINT_UNCACHED``，调用方据此跳过缓存（与同文件其余
+      指纹函数逐字一致，绝不静默降级成某个稳定值——那正是脏命中）。
+    """
+    try:
+        if rows is None:
+            return _FINGERPRINT_NONE
+        normalized_rows = [list(r) for r in rows]
+        normalized = json.dumps(normalized_rows, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:_FINGERPRINT_LEN]
+    except Exception:  # noqa: BLE001 —— 不可序列化时跳过缓存
+        return _FINGERPRINT_UNCACHED
+
+
+def characters_fingerprint(db_path: str | Path, project_id: str | None) -> str:
+    """读该项目全部角色行并算指纹（writer / director 两条缓存键共用这一个维度）。
+
+    **降级范围**（与 2026-10-16 批次十的收窄口径同形）：仅「结构缺失」（缺表 / 缺列）
+    返回 ``_FINGERPRINT_NONE``；``database is locked`` / ``disk I/O error`` / ``malformed``
+    等运行时故障**上抛**——角色指纹是缓存键维度，静默归 None = 用「读不到角色」的键形态
+    去命中「角色已改」的旧装配，正是本函数要修的脏命中形状。
+    判别：``tests/unit/test_e1_character_cache_key.py``。
+    """
+    if not project_id:
+        return _FINGERPRINT_NONE
+    try:
+        conn = get_connection(db_path)
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return _FINGERPRINT_NONE
+    try:
+        rows = conn.execute(_CHARACTERS_FINGERPRINT_SQL, (project_id,)).fetchall()
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return _FINGERPRINT_NONE
+    finally:
+        conn.close()
+    return _fingerprint_characters(rows)
 
 
 def _fingerprint_scene_plan(scene_plan: Any) -> str:

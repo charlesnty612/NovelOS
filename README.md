@@ -79,6 +79,47 @@ python -m packages.core.api.main
 
 浏览器打开 http://127.0.0.1:18081 即可使用（后端同时托管 SPA 与 `/api`）。
 
+## 授权状态（请先读这一节）
+
+本仓库**当前没有 LICENSE 文件**。按著作权默认规则，这意味着**保留一切权利**：
+克隆下来不等于获得使用许可。本项目最初的定位是「单用户本机自用工具」，
+尚未做公开发布前的授权决策。
+
+如果你是在克隆后使用本软件，请知悉上述状态并联系作者确认授权方式。
+
+> 决策记录：2026-10-16 曾就「补一份 LICENSE」征询，裁决为**暂不添加**——
+> 许可文本是一份有法律后果的授权，且一旦提交进 git 历史即难以撤回，
+> 不应由工具代为签署。补授权时请一并决定是否要改「单用户自用」的产品定位。
+
+## 更新到最新版（克隆安装的用户看这里）
+
+仓库的 `data/` 与 `apps/web/dist/` **都不在版本库里**（见 `.gitignore`）——
+你的书稿与本地库因此不会被 `git pull` 碰到，但也意味着**产物要自己重建**。
+
+```bash
+git pull
+# 依赖变了才需要（有输出才做）：
+git diff --stat HEAD@{1}..HEAD -- pyproject.toml uv.lock apps/web/package.json
+#   ↑ 有输出 ⇒ cd apps/web && npm install && npm run build && cd ..
+#   ↑ 无输出 ⇒ 跳过
+
+# 重启服务。启动时若检测到代码已更新，会在日志里打印新旧 commit；
+#   若同时提示 apps/web/src 有变更，务必重建前端（见下）
+python -m packages.core.api.main
+```
+
+### 三条必须知道的规则
+
+1. **改了前端的版本，`git pull` 之后界面还是旧的。** 后端从磁盘托管
+   `apps/web/dist`，而 `dist/` 不入库 ⇒ 克隆用户必须自己 `npm run build`，
+   否则得到「**新后端 + 旧界面**」。**这不会报错**，只会行为诡异
+   （后端返回了新字段界面不认，或反之）。启动时的版本检查会针对这一条单独提示。
+2. **数据库迁移自动跑。** 新增迁移随 `git pull` 过来，服务启动时
+   `apply_migrations` 补上（日志：`migrations applied=N skipped=M`）。
+   本仓迁移纪律是**只加不改**，存量库不会被打断。
+3. **改了 `pyproject.toml` 要 `uv sync --extra dev`**（不是裸 `uv sync`——
+   裸的会把 ruff / pytest / xdist 一起 pruning 掉）。
+
 ## 开发规范
 
 提交前跑一遍 lint 与测试（ruff 配置已固化在本 pyproject，测试文件豁免 E501）：

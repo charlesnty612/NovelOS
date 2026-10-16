@@ -401,14 +401,17 @@ def test_agent_prompts_list_returns_the_measured_seven_keys(tmp_path: Path):
     _seed_agents(app)
 
     rows = _rows(app, "/api/agents/writer/prompts")
-    assert len(rows) == 3, f"writer 有 v1/v2/v3 三版，实得 {len(rows)}"
+    # ⚠️ 2026-10-16 批次十一新增 ``writer-v4.md``（角色圣经到达 writer）⇒ 3 → 4 版。
+    # 本条守的是「**响应形状**逐字不变」与「版本按数字降序」，不是某一版的个数；
+    # 但仍保留个数断言（多一版就多一行，没被静默丢弃/合并）。
+    assert len(rows) == 4, f"writer 有 v1/v2/v3/v4 四版，实得 {len(rows)}"
     for row in rows:
         assert set(row) == set(EXPECTED_PROMPT_KEYS), (
             f"多={sorted(set(row) - EXPECTED_PROMPT_KEYS)} "
             f"少={sorted(EXPECTED_PROMPT_KEYS - set(row))}"
         )
     # version 列存的是 "v"+数字，不含 agent 前缀（与 ai_call_logs.prompt_version 不同形态）
-    assert [r["version"] for r in rows] == ["v3", "v2", "v1"]
+    assert [r["version"] for r in rows] == ["v4", "v3", "v2", "v1"]
     assert rows[0]["agent_id"] == rows[1]["agent_id"], "同一 agent 的多版 prompt 共用 agent_id"
     assert rows[0]["status"] == "ACTIVE"
 

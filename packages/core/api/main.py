@@ -163,6 +163,20 @@ async def lifespan(app: FastAPI):
             )
         except Exception as exc:  # noqa: BLE001 —— sync 失败不应拖垮服务启动
             log.warning("prompt sync failed (non-fatal): %s", exc)
+
+    # 版本更新提示（2026-10-16 批次十一）。克隆安装的用户靠 ``git pull`` 更新，
+    # 而 ``apps/web/dist`` **不在版本库** ⇒ 改了前端的版本会出现「新后端 + 旧界面」
+    # 且**不报任何错**。这里只针对这一条给可执行提示，不做泛泛的版本播报。
+    # ⚠️ 诊断代码绝不阻断启动：本模块所有失败路径都返回 None。
+    try:
+        from packages.core.api.version_check import check_for_update
+
+        notice = check_for_update(_REPO_ROOT, Path(settings.db_path).parent)
+        if notice is not None:
+            for line in notice.as_log_lines():
+                log.warning("%s", line)
+    except Exception as exc:  # noqa: BLE001 —— 提示失败不应拖垮服务启动
+        log.debug("version check skipped (non-fatal): %s", exc)
     yield
 
 

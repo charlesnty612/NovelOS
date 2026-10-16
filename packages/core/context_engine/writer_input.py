@@ -40,8 +40,10 @@ from .cache import (
     _cache_namespace_tag,
     _cache_put,
     _fingerprint_author_intent,
+    _fingerprint_plan_json,
     _fingerprint_scene_plan,
     _fingerprint_writing_bible,
+    characters_fingerprint,
 )
 from .canon import (
     _REFERENCE_CANON_CONSUMER_WRITER,
@@ -401,6 +403,15 @@ def build_writer_input(
     ``intent_fp`` = 运行期原文指纹、``bible_fp`` = 圣经原文指纹——两个来源各自
     独立入键，任一变化都 miss。**缺 ``bible_fp`` 会让「改圣经后同 state_version」
     脏命中旧装配**（正是本次要修的同类形状，硬规则 2）。
+
+    2026-10-16（E1，外部报告「角色圣经写闺蜜、正文里却是业务员」）：键再追加
+    ``chars_fp``（:func:`...cache.characters_fingerprint`）。``characters.core_json``
+    整份进 payload 的 ``character_state_excerpts.core_json``，而角色页的新增 / 改设定
+    不写 story_state、不推 ``state_version`` ⇒ 缺该维度时改角色后**重跑同一章**
+    （同 chapter_no + 同 state_version）会命中旧装配，正文沿用改动前的角色设定。
+    ⚠️ 边界：写**新章**时 ``chapter_no`` 维度本就不同 ⇒ 旧实现也不脏命中。
+    判别：``tests/unit/test_e1_character_cache_key.py``（含「只 bump updated_at
+    必须仍命中」的反向不变量，防拿时间戳当指纹的假修）。
     """
     if context_mode not in ("full", "paged"):
         raise ValueError(
@@ -443,18 +454,35 @@ def build_writer_input(
     writing_bible = peek.get("writing_bible")
     bible_fp = _fingerprint_writing_bible(writing_bible)
     effective_intent = resolve_author_intent(writing_bible, author_intent)
+    # 2026-10-16（E1）：缓存键追加角色内容指纹 ``chars_fp``。``characters.core_json``
+    # 整份进 payload 的 ``character_state_excerpts.core_json``，而角色页的新增 / 改设定
+    # （``CharacterService.create / update``）**不写 story_state、不推 state_version**
+    # ⇒ 旧键里没有任何维度会因角色改动而变 ⇒ 同 state_version + 同 chapter_no 重跑本章
+    # 命中旧装配 ⇒ 正文沿用改动前的角色设定（外部报告实证：角色圣经写「闺蜜」，
+    # 正文里该角色却以业务员出场）。与 0028 ``outline_json`` 同形的硬规则 2 违规。
+    # 放在 prompt_label 之前，使键尾两元（prompt 标签 / 命名空间标记）语义不变。
+    chars_fp = characters_fingerprint(db_path, project_id)
+    # ⚠️ **2026-10-16 批次十一**：`plan_json` 进 payload（``director_plan`` 四字段 +
+    # ``chapter.expected_role`` + **触发扫描语料** ``_build_trigger_corpus``）却**从未入键**
+    # —— director 键有 ``plan_fp``、writer 键没有，是 ``chars_fp`` 的**逐字同形**
+    # （硬规则 2「凡进 payload 的装配参数必须入键」）。后果：改大纲 / 重排计划后，
+    # 同 state_version + 同 chapter_no 重跑 writer ⇒ 命中旧装配 ⇒ 连「本章该注入
+    # 哪些角色」都停留在改计划之前（触发语料是 ``plan_json`` 拼出来的）。
+    plan_fp = _fingerprint_plan_json(peek.get("plan_json_raw"))
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
         scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id,
-        target_word_count, genre_pack_ref, intent_fp, bible_fp, prompt_label,
-        _cache_namespace_tag(namespace),
+        target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,
+        plan_fp, prompt_label, _cache_namespace_tag(namespace),
     )
-    # 不可序列化（scene_fp / intent_fp / bible_fp == 'uncached'）→ 跳过缓存，避免不同
-    # 原文落在同一占位键上互相脏命中（与 director 的 cacheable 判定同款）。
+    # 不可序列化（scene_fp / intent_fp / bible_fp / chars_fp == 'uncached'）→ 跳过缓存，
+    # 避免不同原文落在同一占位键上互相脏命中（与 director 的 cacheable 判定同款）。
     cacheable = (
         scene_fp != _FINGERPRINT_UNCACHED
         and intent_fp != _FINGERPRINT_UNCACHED
         and bible_fp != _FINGERPRINT_UNCACHED
+        and chars_fp != _FINGERPRINT_UNCACHED
+        and plan_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)
@@ -837,6 +865,26 @@ def _build_writer_input_paged(
     }
 
     # 2. character_state_excerpts：touched 全量 + 其余摘要
+    #
+    # ⚠️ **2026-10-16 批次十一**：原先只看 ``touched_chars``，于是本节会把**本场出场**
+    # 的角色也削成 ``{character_id, name, role}``——``core_json`` 整个丢弃，
+    # 模型只剩一个名字 ⇒ 外部报告的「角色圣经写闺蜜、正文里却是业务员」。
+    # 三条放行依据，每条都有**既有的成文契约**，不是新策略：
+    #   ① ``inject_mode='always'``：0010 迁移注释「always：无视命中，永远完整注入」，
+    #      且 :mod:`relevance` 的 docstring 也承诺「始终完整保留」。⚠️ 该承诺此前
+    #      在本节**从未兑现**——连主角都照样被削平（实测 ``characters_full == 0``）。
+    #   ② ``role == 'protagonist'``：同上，:mod:`relevance` 明写主角始终完整保留。
+    #   ③ **本场出场**（``scene_plan["characters"]`` 存的是 id）：本文件 :200 的注释
+    #      「scene_plan 是 director 没看过的额外信号（含本场参与角色）」此前**为假**，
+    #      因为 ``touched`` 来自历史 commit、不含本场。注释与代码不符按代码为准并改代码。
+    # 纯增量：只可能把「摘要」变成「全量」，不会减少任何注入；``inject_mode='never'``
+    # 的角色早在 L1 就被 suppress，这里看不到。
+    scene_chars: set[str] = set()
+    if isinstance(scene_plan, dict):
+        raw_scene_chars = scene_plan.get("characters")
+        if isinstance(raw_scene_chars, list):
+            scene_chars = {str(x) for x in raw_scene_chars if isinstance(x, (str, int))}
+
     chars_in = full_payload.get("character_state_excerpts") or []
     chars_out: list[dict[str, Any]] = []
     if isinstance(chars_in, list):
@@ -844,7 +892,16 @@ def _build_writer_input_paged(
             if not isinstance(c, dict):
                 continue
             cid = c.get("character_id")
-            if isinstance(cid, str) and cid in touched_chars:
+            keep_full = (
+                isinstance(cid, str)
+                and (
+                    cid in touched_chars
+                    or cid in scene_chars
+                    or c.get("inject_mode") == "always"
+                    or c.get("role") == "protagonist"
+                )
+            )
+            if keep_full:
                 chars_out.append(c)
                 stats["characters_full"] += 1
             else:

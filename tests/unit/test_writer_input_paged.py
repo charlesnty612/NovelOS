@@ -329,7 +329,17 @@ def test_paged_mode_injects_context_mode_marker_and_stats(tmp_path: Path):
 
 
 def test_paged_mode_touched_characters_full_others_summarized(tmp_path: Path):
-    """touched character 全量；其他 character 仅摘要（无 current_state 大字段）。"""
+    """touched 与**本场出场**的角色全量；其余仅摘要（无 current_state 大字段）。
+
+    ⚠️ **2026-10-16 批次十一改判**（本条原断言 ``characters_full == 1``，即
+    **本场出场的 char_bob 被削成摘要**——那正是外部报告「角色圣经写闺蜜、正文里
+    却是业务员」的路径：``_SCENE_PLAN["characters"]`` 里就有 bob，模型却只拿到他的
+    名字）。分页层原先只认 ``touched``（来自历史 commit 的 ``character_changes``），
+    **完全不看本场**，于是「本文件 :200 注释声称 scene_plan 含本场参与角色」为假。
+    修法见 ``writer_input.py::_build_writer_input_paged`` 的 keep_full 条件。
+
+    carol 既未被 touch、也不在本场 ⇒ **仍应**是摘要（防修复退化成「一律全量」）。
+    """
     _cache_reset()
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
@@ -349,13 +359,15 @@ def test_paged_mode_touched_characters_full_others_summarized(tmp_path: Path):
     chars = payload["character_state_excerpts"]
     assert len(chars) == 3
     stats = payload["context_paging_stats"]
-    assert stats["characters_full"] == 1
-    assert stats["characters_summary"] == 2
+    # alice(touched) + bob(本场出场) 全量；carol 摘要
+    assert stats["characters_full"] == 2
+    assert stats["characters_summary"] == 1
     alice = next(c for c in chars if c.get("character_id") == "char_alice")
     bob = next(c for c in chars if c.get("character_id") == "char_bob")
+    carol = next(c for c in chars if c.get("character_id") == "char_carol")
     assert "current_state" in alice  # touched 全量
-    assert "summary_marker" in bob    # 摘要项带标记
-    assert "current_state" not in bob  # 摘要去掉大字段
+    assert "current_state" in bob    # 本场出场同样全量（批次十一）
+    assert "summary_marker" in carol  # 摘要项带标记
 
 
 def test_paged_mode_locations_touched_vs_summary(tmp_path: Path):
@@ -451,7 +463,16 @@ def test_paged_mode_hooks_layer_handling(tmp_path: Path):
 
 
 def test_paged_mode_no_touch_all_summary_path(tmp_path: Path):
-    """无 touched → 所有实体走摘要路径。"""
+    """无 touched 时：**本场出场**的角色仍全量，其余实体走摘要路径。
+
+    ⚠️ **2026-10-16 批次十一改判**（原断言 ``characters_full == 0``，即
+    **本场唯一出场角色的角色圣经被整块丢弃**）。``touched`` 只来自历史 commit，
+    「第一次出场」的角色必然不在其中 ⇒ 这正是手动新增角色「只给模型一个名字」的
+    结构性原因。
+
+    location 仍走摘要：本批**只**修了 character 的放行条件（locations/factions 的
+    L3 本就只看 touched），故此处断言维持原值。
+    """
     _cache_reset()
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
@@ -461,8 +482,8 @@ def test_paged_mode_no_touch_all_summary_path(tmp_path: Path):
     # 不插任何 commit → touched 全空
     payload = build_writer_input(db_path, cid, _SCENE_PLAN, context_mode="paged")
     stats = payload["context_paging_stats"]
-    assert stats["characters_full"] == 0
-    assert stats["characters_summary"] == 1
+    assert stats["characters_full"] == 1  # alice 在 _SCENE_PLAN["characters"] 里
+    assert stats["characters_summary"] == 0
     assert stats["locations_full"] == 0
     assert stats["locations_summary"] == 1
 

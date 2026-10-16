@@ -572,6 +572,62 @@ def _clip_world_rule_statement(statement: Any) -> str:
     return statement[:_WORLD_RULE_STATEMENT_MAX_CHARS] + _WORLD_RULE_TRUNCATED_SUFFIX
 
 
+#: 角色 core_json 的**现行五键**契约（``project_init/_normalize_characters`` 与
+#: ``apps/web/src/pages/bible/CharacterTab.tsx`` 的 ``CORE_FIELDS`` 一致）。
+#: 顺序 = 摘要里的呈现顺序（从「是什么人」到「要什么」到「挡在哪」）。
+_CORE_ONE_LINE_KEYS = ("distinctive_trait", "goal", "motivation", "conflict")
+
+#: 角色 core_json 单条摘要的字符 cap（与 world_rule 同一量级，防 digest 膨胀）
+_CORE_ONE_LINE_MAX_CHARS = 200
+
+
+def _core_one_line(core: dict[str, Any]) -> str:
+    """把角色 ``core_json`` 压成一句话摘要 —— **OOC 审查的判据**。
+
+    ⚠️ **2026-10-16 批次十一修复的正是「判据恒空」**。此前这里读的是**顶层**
+    ``core_json.one_line`` / ``.statement``，而全仓 ``"one_line"`` 只有 4 处、
+    **全部是读取或构造**——三个 ``core_json`` 写入方（``project_init`` /
+    ``domain.character.service`` / ``story_state.write_through``）都只产现行五键，
+    没有任何生产方写顶层键。⇒ ``critic-v1.md`` 规则 6「设定一致性（OOC）审查」
+    对所有经 UI / project_init 创建的角色**结构性失明**，作者看到的是「审过了」
+    而题材/人物约束其实一条都没进去。
+
+    为什么一直没被发现：``tests/workflow/test_chapter_review_settings_digest.py``
+    的夹具**用的就是** ``{"one_line": ...}`` 这个没有任何生产方会产出的形状 ⇒
+    绿灯靠虚构成立（同 AGENTS 坑区「夹具抄形状」的**反向姊妹形状**：
+    此处是夹具**凭空发明**了形状）。
+
+    改法：按现行五键拼摘要；``relationships`` 渲染成「与 X：<描述>」；
+    **保留旧顶层形状兜底**（导入 / 历史数据可能有）。
+    """
+    parts: list[str] = []
+    for key in _CORE_ONE_LINE_KEYS:
+        v = core.get(key)
+        if isinstance(v, str) and v.strip():
+            parts.append(v.strip())
+    rels = core.get("relationships")
+    if isinstance(rels, list):
+        for rel in rels[:3]:  # 只取前 3 条关系，摘要有界
+            if not isinstance(rel, dict):
+                continue
+            to_name = rel.get("to_name")
+            desc = rel.get("one_line") or rel.get("relation_type")
+            if isinstance(to_name, str) and to_name.strip() and isinstance(desc, str) and desc.strip():
+                parts.append(f"与{to_name.strip()}：{desc.strip()}")
+    if parts:
+        line = "；".join(parts)
+        if len(line) > _CORE_ONE_LINE_MAX_CHARS:
+            return line[:_CORE_ONE_LINE_MAX_CHARS]
+        return line
+
+    # 兜底：旧形状（顶层 one_line / statement）
+    for legacy_key in ("one_line", "statement"):
+        v = core.get(legacy_key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:_CORE_ONE_LINE_MAX_CHARS]
+    return ""
+
+
 def _collect_settings_digest(db_path: str, project_id: str) -> list[dict[str, Any]]:
     """V3.9：组装 critic / deep_review 的设定上下文摘要。
 
@@ -655,16 +711,9 @@ def _collect_settings_digest(db_path: str, project_id: str) -> list[dict[str, An
             )
             continue
 
-        one_line = ""
-        if isinstance(core, dict):
-            val = core.get("one_line")
-            if isinstance(val, str):
-                one_line = val
-            else:
-                # 兜底：用 statement（结构不固定时的最小有用描述）
-                stmt = core.get("statement")
-                if isinstance(stmt, str):
-                    one_line = stmt
+        # ⚠️ 批次十一：判据改走现行五键单点（此前读顶层 one_line/statement，
+        # 而无任何生产方写它们 ⇒ 判据恒空 ⇒ OOC 审查对全部角色失明）。
+        one_line = _core_one_line(core) if isinstance(core, dict) else ""
         digest.append({
             "kind": "character",
             "name": r["name"],

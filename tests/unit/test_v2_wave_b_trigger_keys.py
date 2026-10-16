@@ -421,7 +421,11 @@ def test_director_input_auto_untriggered_downgrades_to_summary(tmp_path: Path):
         db_path, pid,
         plan_json={"chapter_goal": "完全无关的剧情", "key_beats": ["普通对话"]},
     )
-    char_id = _insert_character(db_path, pid, name="林昭", role="protagonist")
+    # ⚠️ 2026-10-16 批次十一：夹具助手默认 ``role="protagonist"``，而主角在 L1
+    # 已改为**无条件放行**（relevance 层「主角始终完整保留」的既有承诺，此前在
+    # 整条链上一处都不兑现）。本条要测的是「``auto`` 未命中 ⇒ 降级摘要」，
+    # 故载体必须**换成非主角**，否则测到的是主角放行而非触发判据。
+    char_id = _insert_character(db_path, pid, name="林昭", role="other")
 
     out = build_director_input(db_path, pid, cid, "意图")
 
@@ -623,9 +627,17 @@ def test_writer_input_no_match_downgrades_to_summary(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, plan_json={"chapter_goal": "无关剧情"})
-    char_id = _insert_character(db_path, pid, name="林昭")
+    # ⚠️ 2026-10-16 批次十一：夹具助手默认 ``role="protagonist"``，而主角在 L1
+    # 已改为**无条件放行**（relevance 层「主角始终完整保留」的既有承诺，此前在
+    # 整条链上一处都不兑现）。本条要测的是「``auto`` 未命中 ⇒ 降级摘要」，
+    # 故载体必须**换成非主角**，否则测到的是主角放行而非触发判据。
+    char_id = _insert_character(db_path, pid, name="林昭", role="other")
 
-    out = build_writer_input(db_path, cid, {"purpose": "无关描述"})
+    # 显式关掉 relevance 层：非主角且未被识别为 involved 的角色会在那一层被削，
+    # 而那一层的摘要**不带** ``_injection`` 标记 ⇒ 会以 ``KeyError`` 掩盖掉 L1 的结论。
+    # 本条要测的正是 L1 的 full/summary 判定，故隔离掉下游。
+    out = build_writer_input(db_path, cid, {"purpose": "无关描述"},
+                             context_mode="full", relevance_trim=False)
 
     chars = out["character_state_excerpts"]
     lin = next(c for c in chars if c["character_id"] == char_id)
@@ -738,7 +750,9 @@ def test_preview_marks_full_summary_suppressed(tmp_path: Path):
         plan_json={"chapter_goal": "林昭夜探王城"},
     )
     full_char = _insert_character(db_path, pid, name="林昭", inject_mode="always")
-    miss_char = _insert_character(db_path, pid, name="陈风", inject_mode="auto")
+    # ⚠️ 同上：陈风必须是**非主角**，否则它因主角放行恒为 full、
+    # 「summary」这一格就永远走不到（批次十一前的夹具默认 role 是 protagonist）。
+    miss_char = _insert_character(db_path, pid, name="陈风", inject_mode="auto", role="other")
     supp_char = _insert_character(db_path, pid, name="隐者", inject_mode="never")
 
     out = preview_context(str(db_path), pid, cid)
