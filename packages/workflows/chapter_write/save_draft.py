@@ -13,7 +13,7 @@ from typing import Any
 
 from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.agent_runtime.structured_output import strip_think_blocks
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.ids import new_id, now_iso
 from packages.core.quality.normalize import find_internal_identifiers, normalize_prose
 from packages.core.quality.wordcount import visible_chars
@@ -115,9 +115,20 @@ def _save_draft_node(ctx: dict[str, Any]) -> dict[str, Any]:
                     "WHERE chapter_id = ?",
                     (json.dumps(plan_obj, ensure_ascii=False), now, chapter_id),
                 )
-            except sqlite3.OperationalError:
-                # 缺列 / 缺表：兜底不阻断 save_draft
-                pass
+            except sqlite3.OperationalError as exc:
+                # 缺列 / 缺表：兜底不阻断 save_draft（极老库 / 迁移未跑）。
+                #
+                # 2026-10-16 批次十收窄：注释主张的就是「缺列 / 缺表」，故只让结构缺失
+                # 降级。**这是本组风险最高的一处**——try 包住的是**写**
+                # （``UPDATE chapters SET plan_json``），而 WAL 单写者：并发写/嵌套
+                # 另开连接写库会等 busy_timeout 5s 后抛
+                # ``OperationalError: database is locked``（AGENTS 坑区 M1-a 实证，
+                # daemon 线程还会把 traceback 吞掉）。原先裸 except 会把那次写失败
+                # 读成「本章没触发 condense 偏差」，而下游评审核销 W-LEN 意见正是
+                # 依据这条 deviations 注记 ⇒ **注记没落库被当成「没有偏差」**，
+                # 零告警。收窄后上抛：本 run 显式失败，作者重试即可。
+                if not is_missing_schema_error(exc):
+                    raise
         # 先看是否有 draft 行（按 chapter + version 累计）
         max_row = conn.execute(
             "SELECT MAX(version) AS v FROM drafts WHERE chapter_id = ?",

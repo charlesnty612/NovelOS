@@ -285,7 +285,14 @@ def test_continue_chapter_from_other_project_returns_404(tmp_path: Path):
                 json={"num_variants": 1},
             )
             assert r.status_code == 404, r.text
-            assert "does not belong" in r.json()["detail"]
+            # ⚠️ 2026-10-16 批次十**反转**：原断言 `"does not belong" in detail`
+            # **把泄露钉住了**——告诉调用方「这个 chapter 确实存在，只是不给你」。
+            # 本仓是单用户本机自用工具，「不属于」即「本项目下查不到」，故两种归属失败
+            # 必须返回逐字相同的 404。口径与 workflows.common.check_chapter_in_project
+            # 一致（见 test_chapter_ownership_status.py）。
+            assert r.json()["detail"] == f"chapter {cid!r} not found"
+            for leak in ("belong", "project", pid_b):
+                assert leak not in r.json()["detail"], f"detail 泄漏了归属线索 {leak!r}"
 
     asyncio.run(run())
 

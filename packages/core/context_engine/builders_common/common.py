@@ -20,6 +20,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from packages.core.db import is_missing_schema_error
+
 _log = logging.getLogger(__name__)
 
 
@@ -652,26 +654,18 @@ def _ratio_instruction(
     return text
 
 
-#: SQLite「缺表 / 缺列」报错的特征子串（迁移未跑的极老库）。**故意取子串而非异常类**：
-#: 这两类共用 ``sqlite3.OperationalError``，只有消息能区分「结构缺失」与「运行时故障」
-#: （``database is locked`` / ``disk I/O error`` / ``malformed``）。
-_MISSING_SCHEMA_MARKERS: tuple[str, ...] = ("no such table", "no such column")
-
-
 def _is_missing_schema_error(exc: sqlite3.OperationalError) -> bool:
-    """``OperationalError`` 是否属「缺表/缺列」（即迁移未跑的极老库）。
+    """``OperationalError`` 是否属「缺表/缺列」。
 
-    用途：把 ``except sqlite3.OperationalError`` 的**降级范围**收窄到「结构缺失」，
-    让真正的运行时故障（锁 / I/O / 损坏）上抛而不是被静默吞掉。
-    ⚠️ 同形状（裸 ``except sqlite3.OperationalError`` + 注释只声称「老库/缺表」）
-    在本仓还有多处：``chapter_write/writer.py`` / ``save_draft.py`` /
-    ``chapter_plan/scene_plan_store.py`` / ``chapter_write/pipeline.py`` /
-    ``planner_input.py`` / ``scene_planner.py`` …（2026-10-16 实测 ~13 处）。
-    本批只结清**已登记挂账**的 ``_genre_pack_excerpt`` 一处；扫尾时把本判别式提为
-    共享单点（``packages/core/db.py``）再逐处收窄。
+    ⚠️ **实现已提到共享单点** ``packages.core.db.is_missing_schema_error``（2026-10-16
+    批次十）——本函数保留为**薄转发**，只为不打断本模块内的既有引用；新代码一律
+    直接 ``from packages.core.db import is_missing_schema_error``。
+
+    提单点的理由：批次九只清了 ``_genre_pack_excerpt`` 一处，而同形状在本仓有 ~13 处。
+    判别式**留一份**才谈得上「逐处收窄」——留 N 份就等于留 N 个可以各自漂移的真相源，
+    而「判据在哪」本身就是本仓反复登记的失效来源（坑区：判别面/口径必须唯一）。
     """
-    msg = str(exc).lower()
-    return any(marker in msg for marker in _MISSING_SCHEMA_MARKERS)
+    return is_missing_schema_error(exc)
 
 
 def _genre_pack_excerpt(
@@ -886,7 +880,13 @@ def _project_max_state_version(conn: sqlite3.Connection, project_id: str) -> int
             "SELECT MAX(state_version) AS max_sv FROM story_states WHERE project_id = ?",
             (project_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        # ⚠️ 收窄（2026-10-16 批次十）：docstring 只声称「无快照 / 表缺失 → 0」，
+        # 原裸 except 却把 `database is locked` / `disk I/O error` 一并吞成 0——
+        # **捕获范围宽于注释主张**（本仓反复登记的「注释必须可复算」）。state_version
+        # 是缓存键主维度，静默归 0 ⇒ 同 key 命中另一个项目的装配 = 脏命中。
+        if not _is_missing_schema_error(exc):
+            raise
         return 0
     if row is None:
         return 0
@@ -900,8 +900,12 @@ def _try_project_word_band_json(conn: sqlite3.Connection, project_id: str) -> st
             "SELECT word_band_json FROM projects WHERE project_id = ?",
             (project_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         # 0023 未跑过的极老库 → 列不存在 → 视为无覆盖（与无覆盖行为零差异）。
+        # ⚠️ 收窄（2026-10-16 批次十）：只让「缺表/缺列」降级；锁 / I/O / 损坏上抛。
+        # 静默吞 `database is locked` ⇒ 作者的字数带退回服务端默认，且零告警。
+        if not _is_missing_schema_error(exc):
+            raise
         return None
     if row is None:
         return None
@@ -922,8 +926,12 @@ def _try_project_writing_bible(conn: sqlite3.Connection, project_id: str) -> str
             "SELECT writing_bible FROM projects WHERE project_id = ?",
             (project_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         # 0029 未跑过的极老库 → 列不存在 → 视为无圣经（与无圣经行为零差异）。
+        # ⚠️ 收窄（2026-10-16 批次十）：只让「缺表/缺列」降级；锁 / I/O / 损坏上抛。
+        # 圣经同时喂 payload 与缓存键指纹，静默吞故障 ⇒ 铁律整段消失且键维度失真。
+        if not _is_missing_schema_error(exc):
+            raise
         return None
     if row is None:
         return None
@@ -943,7 +951,12 @@ def _try_active_canon_id(conn: sqlite3.Connection, project_id: str) -> str | Non
             """,
             (project_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        # ⚠️ 收窄（2026-10-16 批次十）：docstring 只声称「表缺失 / 无 canon → None」；
+        # 原裸 except 把锁 / I/O / 损坏一并吞成「无 canon」⇒ canon_id 是缓存键维度，
+        # 静默归 None = 用「无 canon」的键形状去命中另一项目的装配。
+        if not _is_missing_schema_error(exc):
+            raise
         return None
     return row["canon_id"] if row else None
 
@@ -965,8 +978,13 @@ def _try_project_genre_pack_ref(conn: sqlite3.Connection, project_id: str) -> st
             """,
             (project_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         # 0025 未跑过的极老库（无 genre_packs 表 / 无 genre_pack_id 列）→ 未绑定。
+        # ⚠️ 收窄（2026-10-16 批次十）：只让「缺表/缺列」降级。静默吞锁 / I/O ⇒
+        # genre_pack_ref 归 None = **director 缓存键的题材包维度被写成 '__none__'**
+        # ⇒ 换包后同 state_version 仍脏命中（硬规则 2「漏键 = 脏命中」）。
+        if not _is_missing_schema_error(exc):
+            raise
         return None
     if row is None:
         return None
@@ -1043,7 +1061,10 @@ def _peek_chapter_context(
       （0029，见 :func:`resolve_author_intent`），两处同源同值；
     - ``genre_pack_ref`` = 绑定题材包指纹 ``<pack_id>@<version>``（未绑定 / 极老库 → None），
       供 director 缓存键的题材包维度使用（题材库 P1a）；
-    - 任一字段缺失 / 异常 → 该字段安全 fallback，不抛错（连接打不开 → 全空态）；
+    - **降级范围**（批次十收窄后，与下列 helper 的 docstring 逐条同形）：仅「结构缺失」
+      （缺表 / 缺列，即迁移未跑的极老库）才逐字段安全 fallback；``database is locked`` /
+      ``disk I/O error`` / ``malformed`` / ``readonly`` 等**运行时故障一律上抛**——
+      静默降级会让缓存键维度失真（脏命中）且零告警。连接打不开 → 全空态。
     - ``project_id`` 显式传入时以其为准（保留 ``_peek_chapter_no_state_version`` 旧语义）；
       传 None 则用章节行自带的 ``project_id``（唯一正确来源）。
     """
@@ -1099,7 +1120,8 @@ def _peek_chapter_no_state_version_plan(
 
     返回 ``(chapter_no, state_version, plan_json_raw)``。
     ``plan_json_raw`` 是 DB 原文 str（不做解析，避免破坏键稳定性）；
-    缺失 → ``None``。任一异常 → 对应字段安全 fallback，不抛错。
+    缺失 → ``None``。降级范围同 :func:`_peek_chapter_context`：**仅缺表 / 缺列**才逐字段
+    fallback，锁 / I/O 等运行时故障上抛（批次十收窄）。
     V3.9 批次 2.3：薄封装 :func:`_peek_chapter_context`（单连接 JOIN）。
     """
     info = _peek_chapter_context(db_path, chapter_id, project_id=project_id)

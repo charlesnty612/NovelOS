@@ -40,14 +40,81 @@ _TABLE_COUNT_QUERY = (
     "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'chapter_fts%'"
 )
 
+# ---------------------------------------------------------------------------
+# 「结构缺失」判别式（2026-10-16 批次十 · 清欠账时提为共享单点）
+# ---------------------------------------------------------------------------
+#: SQLite「缺表 / 缺列」报错的特征子串（迁移未跑的极老库）。
+#:
+#: **故意取子串而非异常类**：这两类与运行时故障**共用** ``sqlite3.OperationalError``，
+#: 只有消息能区分「结构缺失」与「故障」——本机实测（3.12 / SQLite 3.x）：
+#:
+#: ==============================  ==========================================
+#: 实测消息                          判定
+#: ==============================  ==========================================
+#: ``no such table: nope_t``         结构缺失 ✅（降级为「按未建处理」）
+#: ``no such column: nope_col``     结构缺失 ✅
+#: ``database is locked``            故障 ❌（必须上抛）
+#: ``disk I/O error``                故障 ❌
+#: ``database disk image is malformed`` 故障 ❌
+#: ``attempt to write a readonly database`` 故障 ❌
+#: ``database or disk is full``      故障 ❌
+#: ``table t already exists``        故障 ❌（迁移重复执行，必须上抛）
+#: ==============================  ==========================================
+_MISSING_SCHEMA_MARKERS: tuple[str, ...] = ("no such table", "no such column")
+
+
+def is_missing_schema_error(exc: sqlite3.OperationalError) -> bool:
+    """``exc`` 是否属「缺表 / 缺列」（即迁移未跑的极老库）。
+
+    **用途**：把 ``except sqlite3.OperationalError`` 的**降级范围**收窄到「结构缺失」，
+    让真正的运行时故障（锁 / I/O / 损坏 / 只读 / 磁盘满）**上抛**而不是被静默吞掉。
+
+    **为什么值得收窄**：静默吞掉 ``database is locked`` 的后果不是崩溃，而是
+    **降级被当成正常**——例如题材包绑定失败被读成「项目没绑定题材包」，
+    于是「作者以为体裁约束生效、产出的正文却没带体裁」，**全程零告警**。
+    同 ``routers/workflows/fast_mode.py`` 的收窄理由。
+
+    ⚠️ **用它的前提**（两条，缺一条就别用）：
+    ① 那个 ``except`` 的注释**只**声称覆盖「老库 / 缺表」——若注释声称的更宽，
+       收窄就是**改变契约**而非修缺陷，须先确认；
+    ② 调用点外层**没有**再套一层无差别 ``except`` 把它重新吞回去——
+       批次九实测：内层收窄了而 ``planner_input.py`` / ``scene_planner.py``
+       外层无差别再吞 ⇒ 那两条调用链的修复**完全无效**。**收窄必须连外层一起看。**
+    """
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _MISSING_SCHEMA_MARKERS)
+
 
 def get_connection(db_path: Path | str) -> sqlite3.Connection:
     """开启外键 PRAGMA 与 WAL 日志模式的连接；row_factory 设为 Row 便于查询。"""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    # WAL 模式：读写并发更高；对测试库（tmp_path）同样适用，sqlite 自动忽略失败
-    conn.execute("PRAGMA journal_mode = WAL")
+    # WAL 模式：读写并发更高；对测试库（tmp_path）同样适用。
+    #
+    # ⚠️ 2026-10-16 **实测推翻**旧注释「sqlite 自动忽略失败」——切 journal 模式需要
+    # 排他锁，他连接持写锁时本句**抛** ``sqlite3.OperationalError: database is locked``。
+    # （只读介质 / 网络盘 / 从未成功切过 WAL 的库上，这条路径真实可达。）
+    #
+    # ⚠️ **顺序刻意排在 busy_timeout 之前**（勿"顺手优化"成之后）：把 busy_timeout
+    # 提前会让本句先等满 5s 再抛——同样的异常、多花 5 秒。本仓 M1 事故的教训就是
+    # 「宁可立刻失败也不要挂住」，连接创建是热路径。
+    #
+    # 为什么不直接让它抛：WAL 是**并发优化、不是正确性前提**，失败时退回 rollback
+    # journal 继续用，功能完全不受影响。可一旦冒出去，调用方
+    # ``_peek_chapter_context`` / ``_peek_project_context`` 的
+    # ``except Exception -> 全空态`` 会把「打不开库」当成「库里没这个章」——
+    # 于是 ``state_version`` / ``genre_pack_ref`` 等缓存键维度被写成 ``0`` /
+    # ``'__none__'``（硬规则 2「漏键 = 脏命中」），**且零告警**。
+    # 这是本仓反复登记的「静默降级」形状最隐蔽的一层：脏的不是数据，是缓存键。
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        log.warning(
+            "切 WAL 失败，退回 rollback journal（并发降低，功能不受影响）：%s",
+            db_path,
+            exc_info=True,
+        )
     # 写锁竞争时等待 5s，避免并发写入触发 SQLITE_BUSY 报错
     conn.execute("PRAGMA busy_timeout = 5000")
     return conn

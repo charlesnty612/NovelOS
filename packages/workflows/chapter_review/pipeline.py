@@ -51,7 +51,7 @@ import sqlite3
 from typing import Any
 
 from packages.core.agent_runtime.runner import run_agent
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.genre.consumers import (
     count_forbidden_word_hits,
     critic_rubric,
@@ -137,6 +137,8 @@ def _collect_genre_check(
       核销对象必须与被审对象同一版（否则字数带会拿写稿 run 的旧 ``length_report``
       去量另一份正文，2026-09-18 实证缺陷）；
     - 无绑定题材包 → ``None``（调用方整段跳过，零行为变化）；
+    - **绑定读取失败 ≠ 无绑定**：前者必须进报告（``bound=False`` + ``error`` 非空），
+      后者才返回 ``None``。见下方「布尔门遮蔽」注记（2026-10-16 批次十修复）；
     - verifier 内部已全容错，这里再兜一层异常（核销失败绝不阻断评审）。
     """
     try:
@@ -146,7 +148,15 @@ def _collect_genre_check(
             "chapter_review.genre_check failed: chapter_id=%s err=%s", chapter_id, exc,
         )
         return None
-    if not result.bound:
+    # ⚠️ **布尔门遮蔽**（2026-10-16 批次十修复前的缺陷，本仓首次登记该失效形状）：
+    # 原写作 ``if not result.bound: return None``，把「绑定读取失败」与「项目确实没绑定」
+    # 压成同一条路径——而 verifier 恰恰用 ``bound=False + error`` 表达前者
+    # （``verify_chapter``：``result.error = f"binding_read_failed: {exc}"`` +
+    # ``skipped.append("genre_pack_unavailable")``，且注释明写「**不得**落成 no_binding」）。
+    # 于是 ``GenreCheckResult.error`` 字段**结构上不可达**：作者看到一份「干净」的评审报告，
+    # 题材核销其实根本没跑成，**零告警**。同硬规则 9 的形状——字段存在 ≠ 进得了装配，
+    # 只是这次挡路的不是 except，是**一个布尔判断**（代码里连「吞异常」的字样都没有）。
+    if not result.bound and result.error is None:
         return None
     return result.to_dict()
 
@@ -241,11 +251,28 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
                         "SELECT word_band_json FROM projects WHERE project_id = ?",
                         (chapter_project_id,),
                     ).fetchone()
-                except sqlite3.OperationalError:
+                except sqlite3.OperationalError as exc:
+                    # ⚠️ 2026-10-16 批次十：降级范围收窄到「缺表 / 缺列」（0023 未跑的
+                    # 极老库缺 ``projects.word_band_json`` 列）——这正是本处该降级的**唯一**
+                    # 合法理由。原先裸捕获把 ``database is locked`` / ``disk I/O error`` /
+                    # ``database disk image is malformed`` 一并读成「项目没配字数带」，
+                    # 于是评审报告**按默认 ±15% / ±30% 判字**、在带内且零 warning，
+                    # 作者在 reviewer UI 看到的是与项目设定不符的「在带内」结论并据此放行。
+                    # 这不是「审稿被跳过」，而是**审稿照常跑完、结论却是错的**——
+                    # 危害形态与「静默跳过」同族（质量闸门失效）但更隐蔽：有报告、无告警。
+                    if not is_missing_schema_error(exc):
+                        raise
                     band_row = None
             finally:
                 conn2.close()
-        except Exception:  # noqa: BLE001 —— 防御性：读库失败视为无覆盖
+        except Exception as exc:  # noqa: BLE001 —— 防御性：非 DB 异常仍视为无覆盖
+            # ``sqlite3.OperationalError`` 是 ``Exception`` 的子类：无差别再吞一次会把上面
+            # 刚收窄的范围**原样放大**，使收窄变成死代码——批次九 planner_input /
+            # scene_planner 踩过同款（「内层收了、外层又吞 ⇒ 修复完全无效」）。
+            # 故此层只对**非** DB 异常降级；DB 故障一律上抛（让 run 显式 FAILED，
+            # 作者看得见「审稿失败：database is locked」并可重试）。
+            if isinstance(exc, sqlite3.OperationalError):
+                raise
             band_row = None
         if band_row is not None and band_row["word_band_json"]:
             try:

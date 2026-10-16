@@ -196,24 +196,39 @@ def check_chapter_in_project(
     db_path 版（**权威实现**）。`_check_chapter` 是它的 Request 薄封装——
     拆出本函数的唯一原因是快通道的守护线程（auto-commit）手里没有 Request 对象，
     只有 db_path。校验逻辑只此一份，两条路径不得分叉。
+
+    ⚠️ **两种归属失败返回逐字相同的 404**（2026-10-16 批次十收口）：
+    「chapter 不存在」与「chapter 属于别的 project」**都**是 404 + 同一句 detail。
+    - 为什么：本仓是**单用户本机自用工具**（AGENTS §一），「不属于本项目」不是权限
+      问题而是**对象在本项目下查不到**。返回 400/403 等于告诉调用方「这个 chapter
+      确实存在，只是不给你」——那是一条**跨项目存在性泄露**。
+    - **只换状态码不够**：若留着 ``does not belong to project`` 的 detail，等于用
+      detail 把要避免的泄露又漏一遍。判别：`tests/api/test_chapter_ownership_status.py`
+      逐字断言 detail 模板一致且不含 `belong`/`project` 等线索。
+    - 真正的区分写进 INFO 日志，作者侧读起来一样。
+    - 本仓既有口径已一致：``story_state/branches.py`` 的 branch 跨作用域同样走 404。
     """
     chapter_pid = ChapterService(db_path).get_project_id(chapter_id)
     if chapter_pid is None:
         raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
     if chapter_pid != project_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"chapter {chapter_id!r} does not belong to project {project_id!r}",
+        log.info(
+            "chapter 不属于 project，按 404 处理：chapter=%s project=%s", chapter_id, project_id
         )
+        raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
     return chapter_pid, chapter_id
 
 
 def _check_chapter(request: Request, project_id: str, chapter_id: str) -> tuple[str, str]:
     """校验 chapter 属于该 project；返回 (project_id, chapter_id)。
 
-    V1.5 起：通过 :class:`ChapterService.get_project_id` 取 project_id；
-    chapter 不存在 → 404；chapter 不属于该 project → 400。
+    V1.5 起：通过 :class:`ChapterService.get_project_id` 取 project_id。
     委托给 :func:`check_chapter_in_project`（保持本函数的 Request 入参形状不变）。
+
+    ⚠️ 2026-10-16 批次十**订正**本 docstring：原文写「chapter 不属于该 project → 400」，
+    那已不是现行行为——权威实现现在对**两种**归属失败都返回 404 + 同一句 detail
+    （理由见 :func:`check_chapter_in_project`）。**失准的注释比没有注释更贵**：它会让
+    后来者按 400 去写调用方逻辑。
     """
     settings = request.app.state.settings
     return check_chapter_in_project(settings.db_path, project_id, chapter_id)

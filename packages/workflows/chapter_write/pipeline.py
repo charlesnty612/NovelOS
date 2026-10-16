@@ -84,7 +84,7 @@ from packages.core.context_engine.builders import (
     _REFERENCE_CANON_CONSUMER_PLANNER,
     _reference_canon_excerpt,
 )
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.model_router.router import capability_for
 from packages.core.quality.wordcount import (
     DEFAULT_TARGET_WORD_COUNT,
@@ -522,7 +522,16 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
             "ORDER BY rowid DESC LIMIT 1",
             (run_id, ctx.get("_current_node_run_id")),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        # 收窄（2026-10-16 批次十）：上方注释主张的降级范围只有「mock 路径无
+        # ai_call_logs 行 → None」——那是**查不到行**，不是 DB 故障。原裸 except 会把
+        # ``database is locked`` / ``disk I/O error`` 同样读成 None，而本键正是
+        # 「本 run 真实落库模型 id」的权威源：save_draft 取不到就写
+        # ``model_id="mock/mock"``（save_draft.py:143）⇒ **真实模型调用在审计面被
+        # 记成 mock**，且 ``prompt_version`` 悄悄降级到 ACTIVE 标签（save_draft.py:55）。
+        # 审计面记一条不存在的记录，与 fast_mode 审批人记 "human" 同族。
+        if not is_missing_schema_error(exc):
+            raise
         row = None
     finally:
         conn.close()

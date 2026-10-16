@@ -5,6 +5,122 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-16 批次（十）：`except sqlite3.OperationalError` 过宽欠账全批结清 —— 22 处收窄 + 2 处 Lead 自办修复 + 一处契约变更驳回）
+
+> **来源**：用户指令「把欠账清掉，这看起来是个复杂任务，并发多个智能体去做」。
+> 并行 **5 名成员**（E1~E5），按文件路径互斥；Lead 自办共享单点与两处无归属的修复。
+> 全程**临时库 + 合成夹具**，零真实 LLM 调用、零内容仓接触（AGENTS §一 两条硬约束）。
+> 提交时基线见文末一致性矩阵；⚠️ **本条的实测数字待闸门跑完后回填**。
+
+#### A. 欠账的由来
+
+批次九修完 `_genre_pack_excerpt` 一处后，判定式被提到共享单点
+`packages/core/db.py::is_missing_schema_error`，并在 docstring 里**如实登记残余**：
+「同形状裸 `except sqlite3.OperationalError` 全仓还有 ~13 处，未逐个实测；扫尾时
+提为共享单点再逐处收窄，不做批量替换」。批次十就是那次扫尾。
+
+**逐处判定的三问**（写进任务书，成员逐处作答）：
+① 该 `except` 的注释**只**声称覆盖「缺表 / 缺列」吗？
+② 调用点**外层**有没有再套一层无差别 `except` 把它吞回去？
+③ 纯读路径**结构上不可能**收到 `database is locked` 吗？
+
+⚠️ **③ 的前提被实测推翻**：成员按「WAL 下只读不吃锁」主张保留若干处，Lead 复算发现
+该前提**依赖于 WAL 真的生效**，而 `get_connection` 的注释恰恰写着切 WAL「sqlite 自动忽略失败」
+（见 §C，那条注释是错的）⇒ 只要 WAL 没切上，**所有这些 SELECT 都会吃锁**。于是无一处以
+「结构上不可能」为由保留。
+
+#### B. 收窄清单（22 处）
+
+| 组 | 文件 | 处数 |
+|---|---|---|
+| E1 | `arc/service.py`（4）/ `scripts/world_switch.py`（1）/ `scripts/db_maintenance.py`（1） | 6 |
+| E2 | `builders_common/common.py`（5）/ `ledger.py`（1）/ `summaries.py`（2） | 8 |
+| E3 | `writer_input.py`（5）/ `genre/verifier.py`（1）/ `retrieval/service.py`（1） | 7 |
+| E4 | `chapter_plan/planner_input.py` / `scene_plan_store.py` / `chapter_review/pipeline.py` | 5 处判定 |
+| E5 | `chapter_write/`（`writer.py` / `save_draft.py` / `scene_planner.py` / `pipeline.py` / `length.py`） | 10 处判定 |
+
+**逐处判定表**由各成员在汇报中给出，Lead 对每组抽样亲验（读码 + 探针复算），
+结论见 §D。
+
+#### C. Lead 自办的两处修复（成员无归属 / 影响面跨包）
+
+**C-1 `get_connection` 的注释被实测证伪，且危害链一路通到缓存键**
+
+`packages/core/db.py` 原注释写「sqlite 自动忽略失败」。**假的**：`PRAGMA journal_mode = WAL`
+要拿排他锁，他连接持写锁时**抛** `database is locked`（实测：直接跑 `get_connection`
+的完整语句序列 + 他连接 `BEGIN EXCLUSIVE` 即复现）。
+
+危害不在「建连接失败」，在**失败之后没人知道**：
+
+    _peek_chapter_context / _peek_project_context
+        except Exception -> 全空态
+            -> state_version = 0 / genre_pack_ref = None
+                -> 缓存键维度写成 0 与 '__none__'
+                    -> 同 state_version 脏命中（硬规则 2「漏键 = 脏命中」），零告警
+
+**全仓最隐蔽的一层：脏的不是数据，是缓存键。**
+
+修法：WAL 是并发优化、不是正确性前提 ⇒ 失败退回 rollback journal 并 `log.warning`，
+**不让异常冒出去**（冒出去只会换来一个静默的脏键）。
+⚠️ 顺序**刻意**排在 `busy_timeout` 之前：提前会让本句先白等 5s 再抛。
+
+**C-2 `genre_check.error` 的布尔门遮蔽（本仓首次登记该失效家族）**
+
+`chapter_review/pipeline.py::_collect_genre_check` 原写 `if not result.bound: return None`，
+而 `verify_chapter` 恰恰**用** `bound=False + error` 表达「绑定读取失败」（其源码注释明写
+「**不得**落成 `no_binding`」）⇒ **`GenreCheckResult.error` 结构上不可达**：作者看到一份
+「干净」的评审报告，题材核销其实根本没跑成，零告警。
+
+**挡路的根本不是 except，是一个 `if`** —— 代码里连「吞异常」的字样都没有，读代码的人不会把它当吞。
+同硬规则 9（字段存在 ≠ 进得了装配），失效面从「except」换成「布尔」。
+
+#### D. Lead 驳回的一处收窄（**改变契约 ≠ 修缺陷**）
+
+E1 收窄了 `arc/service.py::_summarize_reveal_policies`，理由是「唯一点名的成因是 0014 未跑（缺表）」。
+**驳回**：该函数 docstring 原文是「SQL 异常（0014 未跑**等** OperationalError）→ 返回全零 +
+空 overdue」——**那个「等」是显式的宽口径契约，不是笔误**，按 `is_missing_schema_error`
+文档化的前提①（注释声称更宽 ⇒ 收窄=改契约，须先确认）。
+
+处置：① 回退该处收窄；② 加一条**钉现状而非钉现状正确**的用例
+`test_arc_reveal_policies_keeps_wide_contract_pending_ruling`——没有它，下轮扫尾会把这处
+收窄掉，而「契约变更」与「顺手统一风格」在 diff 表面一模一样；③ 删掉随之锚点归零的
+突变 `E1-ARC3`（**删掉 + 写明理由**，不是留着让 run_spec 每次 ABORT）。
+
+⇒ **沉淀**：该前提不能只躺在 `is_missing_schema_error` 的 docstring 里，必须在**判定表**中
+逐处显式回答——E1 当时正是照「唯一点名的成因」推的，且**自己主动上报了边界情形**，
+说明这条纪律必须落在能被执行的位置。
+
+#### E. 本批新登记的坑（详见 AGENTS.md 坑区）
+
+1. **布尔门遮蔽**（C-2）——`except` 之外的第五种遮蔽面。
+2. **降级的下游不是「显示错」，是「执行不可逆写」**——`world_switch.py::_fill_evidence`
+   在锁故障下 `rows=[] ⇒ eras={} ⇒ _era_decision(∅) == ("archive","closed_era")`（实测）
+   ⇒ **`--apply` 把本该 `skip` 的跨位面实体全部置 `inject_mode='archived'`**，零告警。
+   本批后果最重的一处。判别：`test_e1_world_switch_lock_raises_instead_of_blanket_archive`
+   末尾直接断言那个判定值，让危害在测试里可见而不只在注释里。
+3. **契约承诺存在 ≠ 数据源存在**（硬规则 9 的**反向**）——`director_input.py` 硬编码
+   `"style_constraints_id": None` 且无任何代码路径能让它非 null（该列在**全部迁移里
+   0 命中**，已用真迁移过的库逐列核对），而 `director-v1.md` 承诺 `"string 或 null"`
+   还给了个具体例子 ⇒ **教模型编一个永远用不上的字段**。**登记不修**：属产品定位级
+   （§一 裁决授权边界）。⚠️ writer 侧那个 `style_constraints` 段是**活的**，死的只是
+   director 那个 `*_id` 字段。
+4. **rollback journal 下 `BEGIN EXCLUSIVE` 挡整个文件，连 `SELECT 1` 都挡**——量具侧教训：
+   能挡住 `journal_mode` 的锁按定义就会挡读，于是「不抛」与「可用」**不可能同时断言**
+   ⇒ 按时机拆开断言，夹具释放需幂等。
+5. **「顺手优化」PRAGMA 顺序**——Lead 自踩：修 `get_connection` 时把 `busy_timeout`
+   提前，自家测试**第一次跑就红**，耗时 0.5s → 22.43s。两个数字一起指认真因。
+   ⚠️ 该顺序**无突变看守**（只能写时序断言，必然脆），已在 `e7` docstring 里
+   **如实登记为声称**。
+
+#### F. 登记不修的残余（不在「清欠账」的工程授权内）
+
+| 项 | 为什么现在不修 |
+|---|---|
+| `director_input.py:144` `except Exception -> return []` 仍吞掉 `retrieval/service.py:333` 上抛的锁 | 其注释写「FTS 虚表不存在**等**降级」，同样是显式宽口径；且修它要先定「召回失败该不该让整个装配失败」（本仓最重的 M1 教训是别让读路径挂死）。**按严重性排序不修**：它只造成**质量降级**，而 §E-2 那条是**不可逆写** |
+| `db_maintenance.py` 退出码契约与实际不符 | docstring 承诺 2（参数错/内部异常），`main()` 无顶层 except ⇒ 实测 **exit 1** + 裸 traceback。改它属 CLI 契约变更 |
+| `arc/service.py` 的 `_summarize_hooks` / `_summarize_debts` / `_load_latest_quality_per_chapter` / `_load_latest_draft_chars_per_chapter` **一条 except 都没有** | 与本次收窄方向**相反**的不对称：该降级的没降级。加 except 属**新增行为** |
+| `writer_input.py:169` 的字数带读收窄**在生产链路不可达** | peek 恒返回 dict ⇒ `peek is not None` 恒真。改它是为防将来新增无-peek 调用方，**不是生产缺陷修复**——按「声称与实测分离」不许写成修了生产 bug |
+
 ### Fixed（2026-10-16 批次（九）：读路径降级范围 —— 「一行脏数据让整个列表 500」的第 2~4 次实例 + 结清一处登记挂账 + 一处量具假阳性）
 
 > **来源**：定时任务 `arch-review-bugfix`（架构审查与缺陷修复）。工作目录干净，

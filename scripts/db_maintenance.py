@@ -75,7 +75,7 @@ from pathlib import Path
 # 让脚本可直接运行（python scripts/db_maintenance.py --db ...）。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from packages.core.db import get_connection  # noqa: E402
+from packages.core.db import get_connection, is_missing_schema_error  # noqa: E402
 from packages.core.ids import now_iso  # noqa: E402
 
 STALE_ERROR_MARKER = "stale cleanup: process died mid-run (db_maintenance)"
@@ -376,6 +376,13 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 rows = _find_old_logs(conn, days=days)
             except sqlite3.OperationalError as exc:
+                # 收窄（2026-10-16 批次十）：上面注释声称的范围就是「表不存在」，
+                # 故只放结构缺失。锁 / I/O / 损坏 / 只读 / 磁盘满必须上抛——
+                # 否则 `prune-logs` 会把「**读不到** ai_call_logs」当成
+                # 「**没有**过期日志」打印 `[skip] … nothing to prune` 并**退出码 0**，
+                # 运维以为清理完成、实际一行没查（dry-run 的整个用途是提前看见）。
+                if not is_missing_schema_error(exc):
+                    raise
                 print(f"[skip] ai_call_logs unavailable ({exc}); nothing to prune")
                 return 0
             if args.export:

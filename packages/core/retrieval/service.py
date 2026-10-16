@@ -46,7 +46,7 @@ import re
 import sqlite3
 from typing import Any
 
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 
 _log = logging.getLogger(__name__)
 
@@ -330,7 +330,21 @@ def _current_volume_id(
             ).fetchone()
         else:
             return None
-    except sqlite3.OperationalError:  # 旧库缺列 → 保持旧行为（不过滤）
+    except sqlite3.OperationalError as exc:
+        # ⚠️ 收窄（2026-10-16 批次十）：只有「迁移 0015 未跑 ⇒ 缺 ``chapters.volume_id``
+        # 列」才保持旧行为（不过滤）。原为裸 ``except sqlite3.OperationalError``，
+        # 而上一行 docstring 与本注释都只声称覆盖「旧库缺列」——**捕获范围比注释主张宽**。
+        # ``database is locked`` / ``disk I/O error`` / ``database disk image is
+        # malformed`` 一律上抛：把它们读成「本章属卷未知 ⇒ 不做同卷过滤」，等于让
+        # **换卷后新卷第一章召回上一世的正文**（本函数存在的全部理由就是防这个）。
+        #   判别：``tests/unit/test_db_error_scope_e3.py``——非缺表/缺列必须冒出来。
+        # ⚠️ **残余（上报，见 CHANGELOG）**：唯一生产调用方
+        # ``context_engine/director_input.py::_recall_passages`` 在 ``search()`` 外层
+        # 套了裸 ``except Exception → return []``，会把本处刚收窄出来的故障原样吞回
+        # 「召回不到」。该文件不在本批分工内 ⇒ 此处的收窄在生产链路上**尚不可观测**，
+        # 待其归属成员处置后本判别才真正生效。
+        if not is_missing_schema_error(exc):
+            raise
         return None
     if row is None:
         return None

@@ -14,6 +14,8 @@ import json
 import sqlite3
 from typing import Any
 
+from packages.core.db import is_missing_schema_error
+
 
 def _plot_graph_excerpt(conn: sqlite3.Connection, project_id: str) -> dict[str, Any]:
     rows = conn.execute(
@@ -163,8 +165,12 @@ def _project_overdue_chapters(
             "SELECT foreshadow_overdue_chapters FROM projects WHERE project_id = ?",
             (project_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         # 极老库（0008 未跑）可能没列 → fallback 常量。
+        # ⚠️ 收窄（2026-10-16 批次十）：只让「缺表/缺列」降级。静默吞 `database is
+        # locked` ⇒ overdue 阈值退回 30 而作者在项目里配的是别的值，零告警。
+        if not is_missing_schema_error(exc):
+            raise
         return _FORESHADOW_OVERDUE_CHAPTERS
     if row is None:
         return _FORESHADOW_OVERDUE_CHAPTERS

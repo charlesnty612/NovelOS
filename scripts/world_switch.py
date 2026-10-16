@@ -170,7 +170,7 @@ from packages.core.context_engine.builders_common import (  # noqa: E402
     _DEBT_OPEN_STATUSES,
     _HOOK_OPEN_STATUSES,
 )
-from packages.core.db import get_connection  # noqa: E402
+from packages.core.db import get_connection, is_missing_schema_error  # noqa: E402
 from packages.core.ids import now_iso  # noqa: E402
 from packages.domain.character import CharacterService, CharacterUpdate  # noqa: E402
 from packages.domain.ledger import (  # noqa: E402
@@ -535,7 +535,17 @@ def _fill_evidence(conn: sqlite3.Connection, project_id: str, state: dict) -> No
             "FROM plot_events WHERE project_id = ? ORDER BY event_id ASC",
             (project_id,),
         ).fetchall()
-    except sqlite3.OperationalError:  # pragma: no cover - 极老库无 plot_events
+    except sqlite3.OperationalError as exc:  # pragma: no cover - 极老库无 plot_events
+        # 收窄（2026-10-16 批次十）：注释声称的范围就是「极老库无 plot_events」（缺表），
+        # 故只放结构缺失。
+        #
+        # ⚠️ **此处是本文件后果最重的一处降级**，收窄的理由不只是「一致性」：
+        # rows=[] ⇒ eras={} ⇒ :func:`_era_decision` 落到「完全没有证据」分支，
+        # 对**每个** canon 实体返回 ``("archive", "closed_era")``。也就是说——
+        # **一次读锁就把「跨位面实体不该归档」判反了，--apply 会把本该 skip 的实体
+        # 全部置 inject_mode='archived'**。裸 except 让这条路径全程零告警。
+        if not is_missing_schema_error(exc):
+            raise
         rows = []
     for row in rows:
         refs: set[str] = set()

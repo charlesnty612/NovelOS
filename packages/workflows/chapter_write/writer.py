@@ -16,7 +16,7 @@ from typing import Any
 
 from packages.core.agent_runtime.revision_fidelity import REVISION_CHECKLIST_MARKER
 from packages.core.agent_runtime.structured_output import strip_think_blocks
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.quality.wordcount import classify_prose_length
 
 _log = logging.getLogger(__name__)
@@ -51,6 +51,15 @@ def _latest_draft_text(db_path: str, chapter_id: str) -> str:
 
     无 draft 行或 content 为空 → 返回空串。DB 异常（缺失表/列）→ 返回空串，
     与既有"上下文缺失不阻断 writer run"口径一致。
+
+    ⚠️ 2026-10-16 批次十：上面的降级范围**只**覆盖「缺表 / 缺列」（docstring 原话
+    「缺失表/列」），故收窄到 ``is_missing_schema_error``。原先裸
+    ``except sqlite3.OperationalError`` 会把 ``database is locked`` 一并吞掉，
+    而该处**在写路径上**：``pipeline.py`` 用本函数结果做 ``mode`` 判定
+    （``draft_text and revision_note → revise``），空串 ⇒ **revise 静默退化为
+    write 整章重写**；同时 ``revision_fidelity`` 保真闸门因 ``upstream`` 为空
+    直接 ``return``（``structured_output.py:514``）⇒ **闸门同时被解除**。
+    两个后果叠加且零告警，正是「降级被当成正常」的形状。
     """
     conn = get_connection(db_path)
     try:
@@ -59,7 +68,9 @@ def _latest_draft_text(db_path: str, chapter_id: str) -> str:
             "ORDER BY version DESC LIMIT 1",
             (chapter_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
         return ""
     finally:
         conn.close()

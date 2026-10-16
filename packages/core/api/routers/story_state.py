@@ -110,35 +110,19 @@ def _ensure_chapter_in_project(request: Request, project_id: str, chapter_id: st
 
     **归属判定只此一份**：委派 :func:`workflows.common.check_chapter_in_project`
     （本仓权威实现；``_check_chapter`` 只是它的 Request 薄封装，其 docstring 明写
-    「校验逻辑只此一份，两条路径不得分叉」）。本函数**不重写「什么算属于」**，
-    只做两件本文件特有的事：
+    「校验逻辑只此一份，两条路径不得分叉」）。
 
-    1. 把它对「不属于本 project」抛的 **400 改写成 404**；
-    2. detail 统一成 ``chapter ... not found``——「不存在」与「在别处」返回
-       **逐字相同**的 404。只换状态码而留着 ``does not belong to`` 的 detail，
-       等于用 detail 把 403 想避免的泄露又漏一遍。
-
-    为什么是 404 而不是 400/403：本仓是**单用户本机自用工具**（AGENTS §一），
-    「这个 chapter 属于别人」不是权限问题而是**对象不存在**——这条 URL 指向的对象
-    在本项目下就是查不到的。且与**本文件既有口径一致**：``promote`` 的 branch 跨
-    作用域同样走 404（``story_state/branches.py`` 内部抛 ``BranchNotFound``
-    「does not belong to project」，本 router 映射 404）。
-
-    真正的区分（存在 vs 归属不符）写进服务日志，作者侧两侧读起来一样。
+    ⚠️ 2026-10-16 批次十**简化**：本函数原先是「捕获 helper 抛的 400、改写成 404、
+    统一 detail」的 workaround——因为当时的权威实现对「不属于本 project」返回 400。
+    政策现已收进 helper 本身（两种归属失败都返回 404 + 同一句 detail，理由见
+    :func:`check_chapter_in_project`），故这里的 catch-rewrite **成了死代码**：
+    它不再改变任何响应，只是把一个 HTTPException 拆包再包一遍。
+    ⇒ 删除。**保留它反而有害**：它捕获 `HTTPException` 再重抛，等于给「helper 将来
+    新增第三种退出码」留了一个会被静默改写的口子——正是它当初注释里警告的那件事。
     """
     from packages.core.api.routers.workflows.common import check_chapter_in_project
 
-    try:
-        check_chapter_in_project(request.app.state.settings.db_path, project_id, chapter_id)
-    except HTTPException as exc:
-        if exc.status_code != 400:
-            # 该 helper 目前只有两种出口：404（chapter 不存在，原样放行）与
-            # 400（跨 project）。其余状态码**不得**被本函数吞掉改写。
-            raise
-        log.info(
-            "chapter 不属于 project，按 404 处理：chapter=%s project=%s", chapter_id, project_id
-        )
-        raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found") from exc
+    check_chapter_in_project(request.app.state.settings.db_path, project_id, chapter_id)
 
 
 # ----------------------------------------------------------------- genesis & state

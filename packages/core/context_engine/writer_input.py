@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.core.agent_runtime.prompts import active_prompt_label
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.quality.wordcount import resolve_band_config, word_band
 
 from .builders_common import (
@@ -140,7 +140,21 @@ def _build_writer_input_uncached(
         # Sprint 15 / V1.3：取项目最近 ≤2 篇文风样例，每篇截断 ≤1000 字。
         style_samples = _author_style_samples(conn, project_id)
         # V3.7：项目级字数带覆盖（projects.word_band_json）。
-        # 列缺失 / 异常 / 解析失败 → 视为无覆盖（与模块默认一致，零行为变化）。
+        # 三条降级路径（逐条对应下面的分支，注释按分支改写以保持可复算）：
+        #   ① 缺表 / 缺列（迁移未跑的极老库）→ 视为无覆盖；
+        #   ② 值异常（JSON 合法但不是 dict）→ 视为无覆盖；
+        #   ③ 解析失败（非法 JSON）→ 视为无覆盖。
+        # ⚠️ ①②③ 之外的 DB 故障（锁 / I/O / 损坏 / 只读 / 磁盘满）**不再降级**
+        # （2026-10-16 批次十收窄，原为裸 ``except sqlite3.OperationalError``）：
+        # 静默丢掉项目字数带覆盖 ⇒ 本章按**模块默认字数带**写，而项目配置里作者亲手
+        # 设的字数带没生效，且零告警（作者读到的字数与项目设置不一致，无从归因）。
+        #   判别：tests/unit/test_db_error_scope_e3.py
+        # ⚠️ **可达性如实登记**：生产唯一入口 :func:`build_writer_input` 恒传非 None 的
+        # ``peek``（``_peek_chapter_context`` 返回的是字段齐全的 dict，见
+        # ``builders_common/common.py::_empty_chapter_peek``）⇒ **本 except 在生产链路上
+        # 不可达**，只有直接调 ``_build_writer_input_uncached`` / ``_build_writer_input_paged``
+        # 而不传 peek 时才会命中（现有调用方：仓库内无，仅测试）。收窄照做（契约正确、
+        # 防止将来新增无 peek 调用方时静默），但不要把它当成生产缺陷的修复。
         word_band_overrides: dict | None = None
         if peek is not None:
             # V3.9 批次 2.3：复用 peek 的单连接结果（同一行，口径与下面 SQL 一致）。
@@ -152,7 +166,10 @@ def _build_writer_input_uncached(
                     "SELECT word_band_json FROM projects WHERE project_id = ?",
                     (project_id,),
                 ).fetchone()
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as exc:
+                # ①②之外一律上抛（降级范围与上方注释逐条对齐）。
+                if not is_missing_schema_error(exc):
+                    raise
                 prow = None
             if prow is not None:
                 wb_raw = prow["word_band_json"]
@@ -560,7 +577,15 @@ def _filter_hidden_by_reveal_policies(
         return 0
     try:
         conn = get_connection(db_path)
-    except Exception:  # noqa: BLE001
+    except sqlite3.OperationalError as exc:
+        # ⚠️ 收窄（2026-10-16 批次十）：建连失败只在「结构缺失」时降级为「不阻断装配」。
+        # 原为裸 ``except Exception``——锁 / I/O / 损坏会被读成「没有 reveal policy
+        # ⇒ 无需过滤」，而本函数的**降级方向是信息泄露**（不是「少注入点东西」，
+        # 而是「本该拦住的 HIDDEN 实体被原样放进 writer 上下文」），比别处的降级更糟。
+        if not is_missing_schema_error(exc):
+            raise
+        return 0
+    except Exception:  # noqa: BLE001 —— 非 DB 异常维持既有降级（非本条债的处置面）
         return 0
     try:
         rows = conn.execute(
@@ -570,8 +595,15 @@ def _filter_hidden_by_reveal_policies(
             """,
             (project_id,),
         ).fetchall()
-    except sqlite3.OperationalError:
-        # 极老库（0014 未跑）→ 表不存在 → 不阻断装配
+    except sqlite3.OperationalError as exc:
+        # 极老库（0014 未跑 ⇒ 缺 reveal_policies 表）→ 不阻断装配。
+        # ⚠️ 收窄（2026-10-16 批次十）：原为裸 ``except sqlite3.OperationalError``，
+        # 而本注释只声称覆盖「表不存在」——捕获范围比注释主张宽。锁 / I/O / 损坏上抛：
+        # 它们**不是**「没有 planned policy」，而是「有 policy 但读不到」，静默返回 0
+        # 会把 HIDDEN 实体连摘要一起留在 writer 上下文（剧透进正文）。
+        #   判别：tests/unit/test_db_error_scope_e3.py
+        if not is_missing_schema_error(exc):
+            raise
         return 0
     finally:
         conn.close()
@@ -609,7 +641,13 @@ def _filter_hidden_by_reveal_policies(
     # 这里只过滤「既被 policy 约束 planned+reader 又是 HIDDEN」的子集，避免误删）
     try:
         conn2 = get_connection(db_path)
-    except Exception:  # noqa: BLE001
+    except sqlite3.OperationalError as exc:
+        # 同上：建连失败只在「结构缺失」时降级；锁 / I/O / 损坏上抛
+        # （降级方向是 HIDDEN 实体泄露，见本函数 docstring）。
+        if not is_missing_schema_error(exc):
+            raise
+        return 0
+    except Exception:  # noqa: BLE001 —— 非 DB 异常维持既有降级（非本条债的处置面）
         return 0
     try:
         hidden_chars: set[str] = set()
@@ -639,7 +677,16 @@ def _filter_hidden_by_reveal_policies(
                 list(planned_facs),
             ).fetchall():
                 hidden_facs.add(r["faction_id"])
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        # ⚠️ 收窄（2026-10-16 批次十）：原为裸 ``except sqlite3.OperationalError``
+        # **且无任何注释**——无契约可依，按「注释只声称覆盖缺表/缺列」的缺省口径收窄。
+        # 本处查 ``characters/locations/factions.visibility``，三表与三列均由
+        # ``0001_init.sql`` 建出 ⇒ 实际能命中的只有「表本身不存在」这一种结构缺失。
+        # 锁 / I/O / 损坏上抛：静默 ``return 0`` = 「HIDDEN 实体一个都没过滤」，
+        # 与上面读 policies 那处同向，且是本仓最忌的静默方向（见函数 docstring）。
+        #   判别：tests/unit/test_db_error_scope_e3.py
+        if not is_missing_schema_error(exc):
+            raise
         return 0
     finally:
         conn2.close()

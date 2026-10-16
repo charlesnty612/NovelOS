@@ -46,7 +46,7 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.ids import now_iso
 from packages.core.quality.wordcount import visible_chars
 from packages.domain.project.service import ProjectService
@@ -283,7 +283,12 @@ def _project_overdue_chapters(conn: sqlite3.Connection, project_id: str) -> int:
             "SELECT foreshadow_overdue_chapters FROM projects WHERE project_id = ?",
             (project_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        # 收窄（2026-10-16 批次十）：只放「列/表缺失」过，其余故障上抛。
+        # 原注释声称的范围就是「列缺」；裸 except 会把 database is locked 读成
+        # 「该列取不到」⇒ 逾期阈值静默退回 30（arc 视图算错，全程零告警）。
+        if not is_missing_schema_error(exc):
+            raise
         return _DEFAULT_FORESHADOW_OVERDUE_CHAPTERS
     if row is None:
         return _DEFAULT_FORESHADOW_OVERDUE_CHAPTERS
@@ -374,7 +379,12 @@ def _load_volumes(
             """,
             (project_id,),
         ).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        # 收窄（2026-10-16 批次十）：docstring 声称「0015 未跑（volumes 表不存在）」，
+        # 故只放结构缺失；锁 / I/O / 损坏 / 只读 / 磁盘满一律上抛——否则
+        # 「读不到卷」被读成「本书没有卷」，卷结构整节静默消失。
+        if not is_missing_schema_error(exc):
+            raise
         return out
     for r in rows:
         out.append(
@@ -441,6 +451,23 @@ def _summarize_reveal_policies(
             (project_id,),
         ).fetchall()
     except sqlite3.OperationalError:
+        # ⚠️ **本函数刻意不收窄**（2026-10-16 批次十 · Lead 裁决）。同文件另三处
+        # （``_project_overdue_chapters`` / ``_load_volumes`` /
+        # ``build_arc_view`` 的 volumes 回退）本批已收窄，因为它们各自的注释
+        # **只**声称「缺表 / 缺列」。本函数的 docstring 原文是：
+        #
+        #     SQL 异常（0014 未跑等 OperationalError）→ 返回全零 + 空 overdue，
+        #     不阻断 arc 装配。
+        #
+        # 那里的「等」不是笔误，是**显式的宽口径契约**。按
+        # ``db.is_missing_schema_error`` 文档化的前提①（注释声称更宽 ⇒
+        # 收窄是**改变契约**而非修缺陷），此处须保留宽口径，除非另行裁决。
+        #
+        # 真实的取舍（**尚未裁决，登记为欠账**）：收窄会让「读剧透策略时恰逢锁」
+        # 从「arc 视图照出、剧透到期数显示 0」变成「整个 arc 视图 500」。
+        # 本工具是单用户本机自用（AGENTS §一），我倾向 500（可见 > 静默错），
+        # 但那是**契约变更**，不在「清欠账」的授权内。
+        # ⇒ 下轮若要收窄，须同时把上面那句 docstring 改窄，并登记为行为变更。
         return out
 
     overdue: list[dict[str, Any]] = []
@@ -630,7 +657,13 @@ def build_arc_view(db_path: str | Path, project_id: str) -> dict[str, Any]:
                 """,
                 (project_id,),
             ).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            # 收窄（2026-10-16 批次十）：只放「volumes 表/列缺失」过。
+            # 注释声称的范围就是「0015 未跑（volumes 表缺失）」，而裸 except 会把
+            # database is locked 也吞进来、进而用**同样被锁**的裸 chapters 查询重试
+            # ——失败点漂移到 fallback SQL，真因（锁）被藏进一条看似无害的重试里。
+            if not is_missing_schema_error(exc):
+                raise
             # volumes 表缺失 → 回退到无卷信息的纯 chapters 查询
             chapter_rows = conn.execute(
                 """

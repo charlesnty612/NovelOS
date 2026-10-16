@@ -23,6 +23,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from packages.core.db import is_missing_schema_error
+
 from .common import _TOKEN_DIVISOR, get_connection
 
 _log = logging.getLogger(__name__)
@@ -35,13 +37,20 @@ def _volume_id_of_chapter(conn: sqlite3.Connection, chapter_id: str) -> str | No
     （保持 2026-09-16 之前的旧行为）：章节不存在 / 章节未挂卷（``volume_id IS NULL``，
     迁移 0015 允许）/ 旧库缺 ``chapters.volume_id`` 列（迁移 0015 之前，读列直接
     ``OperationalError`` → 就地降级，不让装配崩）。
+    ⚠️ **降级范围仅限「缺表/缺列」**（批次十收窄）：锁 / I/O / 损坏一律上抛，否则卷 id
+    会被静默读成「未挂卷」，同卷过滤随之失效而无人察觉。
     """
     try:
         row = conn.execute(
             "SELECT volume_id FROM chapters WHERE chapter_id = ?",
             (chapter_id,),
         ).fetchone()
-    except sqlite3.OperationalError:  # 旧库缺列 → 保持旧行为（不过滤）
+    except sqlite3.OperationalError as exc:  # 旧库缺列 → 保持旧行为（不过滤）
+        # ⚠️ 收窄（2026-10-16 批次十）：只让「缺表/缺列」降级。静默吞 `database is
+        # locked` ⇒ 卷 id 读成「未挂卷」⇒ **同卷过滤静默失效**，上一世正文尾段倒灌进
+        # 新卷首章（快穿冷开场被破），且零告警。
+        if not is_missing_schema_error(exc):
+            raise
         return None
     if row is None:
         return None
@@ -67,7 +76,11 @@ def _volume_id_of_chapter_no(
             "ORDER BY chapter_id ASC LIMIT 1",
             (project_id, int(chapter_no)),
         ).fetchone()
-    except sqlite3.OperationalError:  # 旧库缺列 → 保持旧行为（不过滤）
+    except sqlite3.OperationalError as exc:  # 旧库缺列 → 保持旧行为（不过滤）
+        # ⚠️ 收窄（2026-10-16 批次十）：同 :func:`_volume_id_of_chapter`，只让「缺表/缺列」
+        # 降级；锁 / I/O 上抛（否则同卷过滤静默失效，跨位面正文回灌）。
+        if not is_missing_schema_error(exc):
+            raise
         return None
     if row is None:
         return None

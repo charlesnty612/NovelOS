@@ -397,6 +397,24 @@ class BackupService:
             try:
                 conn.execute("PRAGMA foreign_keys = ON")
             except sqlite3.OperationalError:
+                # ⚠️ **刻意保持宽口径，不收窄**（2026-10-16 批次十 复核后决定）。
+                # 这一处不是「读路径降级」，是**连接拆卸前的收尾**，收窄会引入回归：
+                #   ① 它在 `finally` 里，且上面紧邻 `except Exception: rollback(); raise`。
+                #      实测（本机 3.12.13）：在 finally 里 `raise` 会**顶掉在途异常**——
+                #      作者真正该看的 `ValueError("backup import would create dangling
+                #      foreign keys …")` 会被 `OperationalError("database is locked")`
+                #      替换掉（`__context__` 保留但 traceback 主线变了）。
+                #   ② 它没有任何「降级语义」可丢：`PRAGMA foreign_keys` 是**连接局部**设置
+                #      （SQLite 规范），本连接下一行就被 close()，而每次新建连接都由
+                #      `packages.core.db.get_connection` 重新 `PRAGMA foreign_keys = ON`。
+                #      实测：即便另一连接持 EXCLUSIVE 锁、即便只读连接，
+                #      `PRAGMA foreign_keys = ON/OFF` **都不抛 OperationalError**；
+                #      事务内调用则是静默 no-op（实测 fk_enabled 仍为 0）。
+                #   ⇒ 本条 except 的危害面为空，改它只会把诊断信息搞坏。
+                #   对照：真正的「静默丢数据」风险在**数据路径**上，而那条路径
+                #      （_existing_tables / _fk_violations / _import_table_rows）
+                #      **没有** 任何裸 except —— _existing_tables 用 sqlite_master
+                #      过滤而非靠异常探测，缺表不会走到 FK 校验。
                 pass
             conn.close()
 

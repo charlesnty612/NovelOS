@@ -19,7 +19,7 @@ from packages.core.context_engine.builders_common import (
     _GENRE_PACK_CONSUMER_PLANNER,
     _genre_pack_excerpt,
 )
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.genre.target_words import resolve_target_word_count
 from packages.workflows.chapter_plan.planner_input import collect_planner_context
 
@@ -147,8 +147,19 @@ def _collect_scene_planner_inputs(
             reference_canon_inject, reference_canon_audit = _reference_canon_excerpt(
                 conn3, project_id, consumer=_REFERENCE_CANON_CONSUMER_PLANNER,
             )
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             # 老库 / 缺表 → 视为无 canon，不阻断 Scene Planner 装配。
+            #
+            # 2026-10-16 批次十收窄：注释主张的范围就是「老库 / 缺表」，故只让
+            # 「缺表 / 缺列」降级。原先裸 except 把 ``database is locked`` /
+            # ``disk I/O error`` 一并吞掉 ⇒ canon 读取被故障读成「该项目没有
+            # canon」，scene_planner 于是在**零告警**下丢掉 emotion_curve（张力曲线）
+            # 与 payoff_list（Scene 级爽点排布）——与 ``_genre_pack_excerpt`` 的
+            # 收窄理由同形（约束被静默丢弃 ⇒ 正文不按约束生成）。
+            # ⚠️ ``_reference_canon_excerpt``（canon.py:53）本身**不**捕获
+            # ``sqlite3.OperationalError``，故本处是它唯一的兜底，能真正收到故障。
+            if not is_missing_schema_error(exc):
+                raise
             reference_canon_inject = None
             reference_canon_audit = None
         finally:
@@ -201,9 +212,15 @@ def _collect_scene_planner_inputs(
                 }
                 for r in rule_rows
             ]
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             # 老库 / 缺表 → 保留空列表，不阻断 Scene Planner 装配。
-            pass
+            #
+            # 2026-10-16 批次十收窄：注释主张的就是「老库 / 缺表」⇒ 只让缺表/缺列
+            # 降级。原先裸 except 会把锁 / I/O / 损坏读成「该项目没有 world_rules」，
+            # 而本段装的正是**项目级硬设定**（原著要素锁等，见上方注释）⇒ 设定
+            # 从模型视野里静默消失、正文违反硬约束且零告警。
+            if not is_missing_schema_error(exc):
+                raise
         finally:
             conn2.close()
 

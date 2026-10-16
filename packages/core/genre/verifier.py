@@ -77,7 +77,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.genre.consumers import normalize_word_band
 from packages.core.quality.wordcount import visible_chars
 
@@ -431,8 +431,25 @@ def _load_bound_pack(db_path: str | Path, project_id: str | None) -> dict[str, A
                 """,
                 (project_id,),
             ).fetchone()
-        except sqlite3.OperationalError:
-            # 0025 未跑过的极老库 → 视为未绑定。
+        except sqlite3.OperationalError as exc:
+            # ⚠️ 收窄（2026-10-16 批次十）：只有「0025 未跑过的极老库（缺 ``genre_packs``
+            # 表 / 缺 ``projects.genre_pack_id`` 列）」才视为未绑定。原为裸
+            # ``except sqlite3.OperationalError``，**捕获范围比注释主张宽**。
+            # 本函数是**校验器**的入口，「降级」方向比别处更糟：``database is locked``
+            # / ``disk I/O error`` / ``database disk image is malformed`` 被读成
+            # 「项目没绑定题材包」⇒ ``bound=False`` + ``skipped=["no_binding"]`` +
+            # ``error=None`` ⇒ **本章题材核销整段跳过、零 issue、零告警**，
+            # 即「读者可见性约束没核」被当成「没有约束可核」。
+            #   判别：``tests/unit/test_db_error_scope_e3.py``——锁 / I/O / 损坏必须
+            #   落成 ``skipped=["genre_pack_unavailable"]`` + ``error`` 含
+            #   ``binding_read_failed``，**不得**落成 ``no_binding``。
+            # ⚠️ **残余（上报，见 CHANGELOG）**：``workflows/chapter_review/pipeline.py``
+            # 第 149 行 ``if not result.bound: return None`` 会把 ``bound=False`` 的结果
+            # 整段丢弃——而绑定读取失败必然 ``bound=False``，于是 ``error`` / ``skipped``
+            # 仍到不了 ``review_report``。该文件不在本批分工内 ⇒ 本收窄在生产评审链路上
+            # **暂不可观测**（但 verifier 层契约已修正，且这是唯一能让它可观测的前置）。
+            if not is_missing_schema_error(exc):
+                raise
             return None
     finally:
         conn.close()

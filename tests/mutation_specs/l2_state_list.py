@@ -209,13 +209,20 @@ MUTATIONS = [
 '    try:\n',
 'tests/api/test_state_list_response_contract.py',
     ),
-    (
-'L2-18',
-'packages/core/api/routers/story_state.py',
-'raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found") from exc',
-'raise HTTPException(status_code=404, detail=exc.detail) from exc',
-'tests/api/test_state_list_response_contract.py',
-    ),
+    # ⚠️ L2-18 已于 2026-10-16 批次十**删除**（不是失效后放着不管）。
+    #
+    # 原条目守的是 story_state.py 里那层「捕获 400 → 改写成 404」的 workaround
+    # （锚点 = `raise HTTPException(..., detail=f"chapter ... not found") from exc`）。
+    # 批次十把「两种归属失败返回同一形状 404」这条政策**收进了权威实现**
+    # `workflows/common.py::check_chapter_in_project`，那层 workaround 随之删除
+    # ⇒ **锚点归零**。这正是本文件 docstring 登记的那个形状的**反向版本**：
+    # 锚点不只会因**别人新增**同名声明而重复命中，也会因**机制被删**而命中 0 次。
+    #
+    # 删它不是丢覆盖：它守的性质（「404 的 detail 不得泄露归属」）现在由
+    # `tests/mutation_specs/e6_chapter_ownership_status.py` 的 OWN-1（权威 helper
+    # 退回 400+泄露）与 OWN-2（continuation 第二处泄露）覆盖，且那两条**在权威位置**，
+    # 比原来守一处 workaround 更贴近机制；另有一条全仓源码形状守卫兜住新增端点。
+
     (
 'L2-19',
 'packages/core/api/routers/story_state.py',

@@ -22,7 +22,7 @@ from packages.core.context_engine.builders_common import (
     _GENRE_PACK_CONSUMER_PLANNER,
     _genre_pack_excerpt,
 )
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.quality.wordcount import DEFAULT_TARGET_WORD_COUNT
 
 # PromptRegistry 的 ACTIVE 版本标签（docs/agents/prompts/director_planner-v2.md）。
@@ -51,18 +51,40 @@ def load_project_style_constraints(db_path: str, project_id: str) -> dict[str, A
 
     对老库（无 style_constraints 表 / 无列）做防御性捕获，避免 DDL 差异阻断装配。
     （P1 前为 ``chapter_write.pipeline._load_project_style_constraints``，逻辑逐字搬移。）
+
+    ⚠️ 2026-10-16 批次十：**降级范围按本 docstring 声称的收窄到「缺表 / 缺列」**。
+    原先两处裸 ``except sqlite3.OperationalError`` + 一处 ``except Exception`` 把
+    ``database is locked`` / ``disk I/O error`` / ``database disk image is malformed``
+    一起读成「项目没配文风约束」⇒ 装配回落 ``SCENE_PLANNER_DEFAULT_STYLE``，
+    **正文没带项目文风而作者与模型都看不出来**（零告警）。判别：
+    ``tests/unit/test_db_error_scope_e4.py``。
+
+    收窄必须**连开连接这一半一起做**（本函数的既有实测）：``get_connection`` 里
+    ``PRAGMA journal_mode = WAL`` 排在 ``PRAGMA busy_timeout = 5000`` **之前**，
+    且非 WAL 库（= 老库形态，正是本降级声称要覆盖的那批）上只要有并发写事务，
+    **开连接本身就抛** ``database is locked``——锁压根到不了下面两条 SELECT。
+    探针实测见 ``tests/unit/test_db_error_scope_e4.py`` 的文档字符串。
     """
     try:
         conn = get_connection(db_path)
-    except Exception:  # noqa: BLE001
+    except sqlite3.OperationalError as exc:
+        # 非结构故障不得降级成「默认文风」：那正是「静默降级被当成正常」的形状
+        # （DB 整体不可用 ≠ 这个项目没配文风）。判别单点 = packages.core.db。
+        if not is_missing_schema_error(exc):
+            raise
+        return dict(SCENE_PLANNER_DEFAULT_STYLE)
+    except Exception:  # noqa: BLE001 —— 非 DB 失败（路径类型错等）仍按默认文风
         return dict(SCENE_PLANNER_DEFAULT_STYLE)
     try:
         row = conn.execute(
             "SELECT style_constraints_id FROM projects WHERE project_id = ?",
             (project_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        # 先关连接再判定：上抛路径也要归还连接（降级路径的行为不变）。
         conn.close()
+        if not is_missing_schema_error(exc):
+            raise
         return dict(SCENE_PLANNER_DEFAULT_STYLE)
     style_id = row["style_constraints_id"] if row else None
     if style_id:
@@ -71,8 +93,10 @@ def load_project_style_constraints(db_path: str, project_id: str) -> dict[str, A
                 "SELECT config_json FROM style_constraints WHERE style_constraints_id = ?",
                 (style_id,),
             ).fetchone()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             conn.close()
+            if not is_missing_schema_error(exc):
+                raise
             return dict(SCENE_PLANNER_DEFAULT_STYLE)
         if sc_row and sc_row["config_json"]:
             try:

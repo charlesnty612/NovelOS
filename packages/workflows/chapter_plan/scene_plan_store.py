@@ -21,7 +21,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.ids import new_id, now_iso
 
 _TABLE = "chapter_scene_plans"
@@ -112,7 +112,17 @@ def load_scene_plan(db_path: str | Path, chapter_id: str) -> dict[str, Any] | No
     """
     try:
         conn = get_connection(str(db_path))
-    except Exception:  # noqa: BLE001 —— 读侧任何失败都按「未命中」降级
+    except sqlite3.OperationalError as exc:
+        # ⚠️ 批次十：原注释写「读侧任何失败都按未命中降级」，而本函数 docstring 声称的
+        # 降级面是「无行 / 老库（0027 未跑）/ payload 非法」——**锁 / I/O / 损坏不在其中**。
+        # `database is locked` 被读成「未命中」⇒ scene_planner 节点改走 LLM 重规划路径：
+        # 多烧一次调用、且正文依据的场景计划与 chapter-plan 那次不一致（仍无告警）。
+        # 且非 WAL 库上「开连接」就先于 SELECT 抛（见 planner_input 同款实测），
+        # 不收窄这一层则下面那层对锁永远不可达。
+        if not is_missing_schema_error(exc):
+            raise
+        return None
+    except Exception:  # noqa: BLE001 —— 非 DB 失败仍按「未命中」降级
         return None
     try:
         row = conn.execute(
@@ -123,8 +133,11 @@ def load_scene_plan(db_path: str | Path, chapter_id: str) -> dict[str, Any] | No
             """,
             (chapter_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
-        # 0027 未迁移的老库 → 视为未命中（与「有行但空」同路径）
+    except sqlite3.OperationalError as exc:
+        # 0027 未迁移的老库 → 视为未命中（与「有行但空」同路径）。
+        # 批次十：仅「缺表 / 缺列」降级；其余运行时故障上抛（连接由 finally 归还）。
+        if not is_missing_schema_error(exc):
+            raise
         return None
     finally:
         conn.close()

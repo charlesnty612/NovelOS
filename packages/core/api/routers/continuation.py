@@ -141,12 +141,13 @@ def _resolve_chapter(
     if chapter is None:
         raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
     if chapter.get("project_id") != project_id:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"chapter {chapter_id!r} does not belong to project {project_id!r}"
-            ),
+        # ⚠️ 与 workflows.common.check_chapter_in_project **逐字同款**：两种归属失败
+        # （不存在 / 属于别处）都返回 404 + 同一句 detail，不在 detail 里泄露存在性。
+        # 「不属于」在本仓（单用户本机自用）不是权限问题，是「本项目下查不到这个对象」。
+        log.info(
+            "chapter 不属于 project，按 404 处理：chapter=%s project=%s", chapter_id, project_id
         )
+        raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")
     status_value = chapter.get("status")
     if status_value not in _CONTINUABLE_STATUSES:
         raise HTTPException(
