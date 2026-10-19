@@ -1,13 +1,13 @@
 # database（数据库迁移）
 
-> 职责：NovelOS 的 SQLite 数据库 schema 与迁移文件仓库；权威 DDL 见 `database/migrations/`（现行 0001~0030，共 30 个迁移；后续增量以目录清单为准），由 `packages/core/db.py` 的迁移 runner 顺序执行。
+> 职责：NovelOS 的 SQLite 数据库 schema 与迁移文件仓库；权威 DDL 见 `database/migrations/`（现行 0001~0031，共 31 个迁移；后续增量以目录清单为准），由 `packages/core/db.py` 的迁移 runner 顺序执行。
 > 状态：现行口径 **39 张业务表**（+ runner 自建 `_migrations` 物理共 40 张；`chapter_fts%` FTS5 影子表不计入业务表口径）。
 
 ## 职责与边界
 
 **做**：
 - 提供权威 DDL（`migrations/*.sql`，按文件名升序执行）
-- 通过 `database/migrations/` 全链迁移（现行 0001~0030，共 30 个迁移）建立并演进 schema（PRD §67 起逐版本增补；现行业务表 39 张）
+- 通过 `database/migrations/` 全链迁移（现行 0001~0031，共 31 个迁移）建立并演进 schema（PRD §67 起逐版本增补；现行业务表 39 张）
 - 与 `packages/core/db.py` 的迁移 runner 配合实现幂等迁移
 
 **不做**：
@@ -18,7 +18,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| `database/migrations/*.sql`（现行 0001~0030，共 30 个迁移） | 唯一 DDL 来源；按文件名升序执行 |
+| `database/migrations/*.sql`（现行 0001~0031，共 31 个迁移） | 唯一 DDL 来源；按文件名升序执行 |
 
 ### 表清单（39 业务表 + runner 自建 `_migrations` 物理共 40）
 

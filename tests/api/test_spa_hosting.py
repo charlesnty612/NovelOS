@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from pathlib import Path
 
 import httpx
@@ -252,3 +253,65 @@ def test_spa_fallback_api_root_returns_404_json(tmp_path: Path, monkeypatch):
     assert "text/html" not in r.headers["content-type"], r.headers.get("content-type")
     body = r.json()
     assert body["detail"] == "Not Found"
+
+
+# ============================================================================
+# 2026-10-19：契约产物不得依赖构建产物（CI 红测根因的直接看守）
+#
+# 事故：``GET /`` 的行为随 ``apps/web/dist`` 在不在而变 ⇒ 活 OpenAPI 的路径集
+# 也跟着变（本地 98 paths 无 ``/`` vs CI 99 paths 多 ``/``）⇒ 入库的
+# ``apps/web/openapi.json`` 与 CI 侧活 schema 对不上 ⇒
+# ``test_openapi_contract.py`` 自 2026-09-09 起**每次 push 恒红**，
+# 而本地全量闸门全绿（本地有 dist）⇒ 红了 30+ 次无人看红。
+#
+# 本用例断言的是**不变式**（比「比对某个文件」更强、更一般）：
+# **两种环境下的活 OpenAPI 路径集必须逐字相同。**
+# 撤掉 ``main.py`` root 端点的 ``include_in_schema=False`` ⇒ 无 dist 侧多出
+# ``/`` ⇒ 两集合不等 ⇒ 本用例必红。
+# ============================================================================
+
+
+def _openapi_paths(dist_env: str | None) -> set[str]:
+    """按给定的 ``NOVELOS_WEB_DIST`` 构造 app，返回其活 OpenAPI 的路径集。
+
+    ``dist_env`` 为 None ⇒ 指向一个**不存在**的路径（= 干净 clone / CI 的形态）。
+    """
+    import os
+
+    from packages.core import config as config_mod
+
+    os.environ["NOVELOS_WEB_DIST"] = dist_env or ""
+    config_mod.reset_settings()
+    try:
+        settings = Settings(data_dir=Path(tempfile.mkdtemp(prefix="novelos_openapi_env_")), log_level="ERROR")
+        app = create_app(settings)
+        return set(app.openapi()["paths"])
+    finally:
+        config_mod.reset_settings()
+
+
+def test_openapi_paths_identical_with_and_without_dist(tmp_path: Path, monkeypatch):
+    """**活 OpenAPI 的路径集不得随 ``apps/web/dist`` 在不在而变。**
+
+    通用纪律：契约产物的正确性不得依赖构建产物是否存在——凡「同一份代码在两种
+    环境下产出不同路由表」的分支，其环境差异必须被 ``include_in_schema`` 排除在
+    契约之外。``apps/web/dist/`` **不在版本库**（``.gitignore``）⇒ 干净 clone 与
+    CI 必然缺它 ⇒ 若不钉这条不变式，CI 必红而本地必绿，两边都不报错。
+    """
+    dist = _make_fake_dist(tmp_path)
+
+    with_dist = _openapi_paths(str(dist))
+    without_dist = _openapi_paths(str(tmp_path / "no_such_dist"))
+
+    assert with_dist == without_dist, (
+        "活 OpenAPI 的路径集随 apps/web/dist 存在与否而变——"
+        f"仅 dist 存在时有: {sorted(with_dist - without_dist)}；"
+        f"仅 dist 缺失时有: {sorted(without_dist - with_dist)}；"
+        "契约产物不得依赖构建产物（检查 main.py root 端点的 include_in_schema）"
+    )
+    # 附带钉住两条不该出现的路径（dist 存在时走 SPA catch-all，本身就在 schema 外）
+    assert "/" not in with_dist, "SPA 托管时 catch-all 不该进 OpenAPI"
+    assert "/" not in without_dist, (
+        "纯后端模式下 GET / 也不该进 OpenAPI（root 端点缺 include_in_schema=False）"
+    )
+

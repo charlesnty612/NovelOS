@@ -5,6 +5,134 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-19 批次（十二）：CI 连续 30+ 次全红 —— 根因修复 + 不变式看守 + 突变规格 + 文档对齐）
+
+> **来源**：用户指令「先把文档对齐；然后上 GitHub 找同类热门项目做技术面评估」→「修 CI，然后提交这批文档对齐」。
+> 全程**零真实 LLM 调用、零内容仓接触**（AGENTS §一 两条硬约束）。
+
+#### A. 根因：契约产物的正确性依赖「构建产物在不在」
+
+`packages/core/api/main.py` 的 SPA 托管分支随 `apps/web/dist` 是否存在而**改变路由表**，
+而 `dist/` **不在版本库**（干净 clone / CI 必然缺）：
+
+| 环境 | 分支 | 活 OpenAPI |
+|---|---|---|
+| 本地（有 dist） | SPA 分支，catch-all 带 `include_in_schema=False` | 98 paths，**无** `/` |
+| CI（无 dist） | `else` 分支的 `@app.get("/")`，**默认进 schema** | 99 paths，**多出** `/` |
+
+入库的 `apps/web/openapi.json` 是在本地（带 dist）生成的 ⇒ 差集恰为 `['/']`。
+
+**一个根因，两个症状**（backend / e2e smoke 各自红，web job 绿）：
+
+1. backend：`test_openapi_json_file_matches_live_schema` + `test_openapi_json_check_rejects_stale_copy`
+   报「仅活 schema 有 `['/']`」——**其余 3561 条全绿**
+2. e2e smoke：`[smoke] FAIL - GET /: content-type='application/json' expected text/html`
+   （`scripts/smoke_e2e.py` 假设 dist 必然存在）——**四步链路本身全绿**
+
+⇒ **CI 自 2026-09-09 起每次 push 全红**（`gh run list` 实测最近 30 条无一绿色），
+而本地全量闸门全绿 ⇒ 红了 30+ 次无人看红。
+
+#### B. 修法（四层，缺一不可）
+
+1. **`packages/core/api/main.py`**：root 端点加 `include_in_schema=False`（与同文件 SPA
+   catch-all 的做法一致）⇒ 两种环境下活 schema 均为 98 paths。
+2. **`scripts/smoke_e2e.py`**：`GET /` 断言改为**按实际部署形态**分支——SPA ⇒ `text/html`
+   且正文含 HTML；纯后端 ⇒ `application/json` 且 `service == "novelos"`。
+   ⚠️ **不是放宽成「什么都行」**：两种形态各自都钉了判据。
+3. **不变式看守**（新增）：`tests/api/test_spa_hosting.py::test_openapi_paths_identical_with_and_without_dist`
+   断言**两种环境下的活 OpenAPI 路径集逐字相同**。
+   ⚠️ 比「比对某个文件」更强、更一般；且与 `test_openapi_contract.py` **互不覆盖**——
+   后者只在「无 dist」环境红，前者在**任一**环境红。
+4. **突变规格**（新增）：`tests/mutation_specs/l6_openapi_env_independence.py`
+   - `ENV-1` 撤 root 端点的 `include_in_schema` ⇒ 无 dist 侧多出 `/`
+   - `ENV-2` 撤 SPA catch-all 的 ⇒ **有** dist 侧多出 `/{full_path}`
+   - **只钉 ENV-1 的话，「把 catch-all 也改成进 schema」这种看起来同样合理的改法能全绿**
+     ——本仓坑区登记过「修复动作只有一个 → 越修越坏」与「过修」两族（批次十 `E1-ARC3`
+     即因过修被回退）。**2/2 全捕获**，0 存活 0 中止 0 无效，残留清点 0。
+
+#### C. 闸门（本次亲跑）
+
+| 闸门 | 结果 |
+|---|---|
+| 契约测试 × 两种环境 | **各 8 passed**（有 dist / `NOVELOS_WEB_DIST` 指向不存在路径） |
+| 全量 pytest（`.venv`，`-n 4`） | **3578 passed / 1 skipped / 1 xfailed**（3580 collected，405.21s） |
+| `ruff check packages scripts tests` | All checks passed |
+| `npx tsc -b` / `npx vitest run` | 零错 / **755 passed（56 文件）** |
+| `smoke_e2e.py` × 两种形态 | **均 PASS**（本地 `GET /` text/html；无 dist `GET /` application/json）**+ SYNC OK** |
+| `export_openapi` + `gen_frontend_types` | 98 paths / 136 schemas / 136 interfaces，**regen 后产物逐字节一致（零漂移）** |
+| 树指纹 | **612 文件 / `5663ac14…`**，跑测前后**逐位一致**（611 = 610 + 1 新增规格） |
+| 突变 `ENV-1`/`ENV-2` | **2/2 全捕获**，残留清点 0 |
+
+#### D. 通用纪律（已入 AGENTS.md 坑区）
+
+**契约产物的正确性不得依赖构建产物是否存在**——凡「同一份代码在两种环境下产出不同
+路由表」的分支，其环境差异必须被 `include_in_schema` 排除在契约之外。
+
+> 附一条**自我修正**：本批初稿在 CHANGELOG 与对外汇报里写成「CI 长期红是 NovelOS 独有
+> 的短板」。**实测证伪**：同侪 `neuro-book` 连续 5 条红、`storyforge` 红、对手方
+> `AI-Novel-Writing-Assistant` 10-19 也红 ⇒ **「CI 长期红」是这条赛道的通病**。
+> NovelOS 真正特殊的只是「**红的理由只有一个、机械可修，却红了 30+ 次没人看**」。
+> 而 `InkOS`（10388★）最近 5 条 CI 全绿 ⇒ 绿 CI 在本赛道**可达**。
+
+### Changed（2026-10-19 批次（十二）之二：文档对齐 —— 过期基线数字与失真描述）
+
+> **来源**：用户指令「先把文档对齐；然后上 GitHub 找同类热门项目做技术面评估」。
+> 本条是同批的**文档对齐**部分；同批另有一条 `### Fixed（批次（十二）：CI 连续 30+ 次全红）` 改了 `packages/` `tests/` `scripts/` ⇒ **本提交最终的树指纹是 612 文件 / `5663ac14…`**（见上方那条的闸门表）。
+> 本条记录的对齐口径来自**文档对齐阶段**的实测（尚未改代码时）；最终以同批 Fixed 条的闸门表为准。
+
+#### A. 文档对齐（过期基线数字）
+
+本批的口径**全部来自本次亲跑实测**，不是抄上一轮记录：
+
+| 闸门 | 本次实测 |
+|---|---|
+| pytest（`.venv`，`-n 4`） | **3561 passed / 1 skipped / 1 xfailed**（481.51s）＋ `tests/evals` 16 例 ⇒ **3577 passed / 1 skipped / 1 xfail**（3579 collected），与 AGENTS 批次十一基线**逐位吻合** |
+| vitest | **755 passed / 56 文件**（29.82s） |
+| `ruff check packages scripts tests` | All checks passed |
+| `npx tsc -b` | 零错 |
+| 树指纹 | `611 文件 / 2f5ff533…`，**跑测前后逐位一致**（文档对齐阶段；加 CI 修复后为 612 / `5663ac14…`） |
+
+修掉的过期数字（**只在活文档里改，历史记录一律不动**）：
+
+| 文件 | 原写 | 改为 |
+|---|---|---|
+| `README.md:49` | `0001~0030，共 30 个迁移` | `0001~0031，共 31 个迁移`（补 `0031 项目级快通道` 进关键迁移表） |
+| `README.md:147` | `当前基线 3488 passed，1 skipped` | `3577 passed / 1 skipped / 1 xfail，3579 collected` |
+| `README.md:153` | `（3488 那轮即含它）` | `（3577 那轮即含它）` |
+| `README.md:165` | `vitest；当前 489——vitest 侧本轮未独立复现` | `vitest；当前 755 用例 / 56 文件`（同文件 `:199` 已写 755，原状**自相矛盾**） |
+| `README.md:199` | `pytest 3488 passed / 1 skipped` | `3577 passed / 1 skipped / 1 xfail` |
+| `README.md` / `tests/README.md` | `约 7 分钟` | `约 8~10 分钟`（批次十一 597.72s ＋ 本次 481.51s） |
+| `tests/README.md:4,25` | `3488 passed / 1 skipped（批次十，指纹 a19ae699…/598）` | `3577 / 1 / 1 xfail（批次十一，指纹 2f5ff533…/611）` |
+| `database/README.md:3,10,21` | `现行 0001~0030，共 30 个迁移`（3 处） | `现行 0001~0031，共 31 个迁移` |
+
+**不动的地方**（按 AGENTS §二 硬规则 7）：① `AGENTS.md` 一致性矩阵里**已划删除线的历史行**（批次十及更早）——那是审计留痕，改它等于抹掉历史；② `CHANGELOG.md` 里的历史条目；③ `docs/reviews/2026-09-27-full-audit/` 下的调查文档（自带「日期 + HEAD + 性质」横幅，其「0001~0030」是**该快照当时**的真陈述）；④ `scripts/tree_fingerprint.py` docstring 里的「3312 passed / 1 skipped」——那是**批次八那一次具体测量**的记录，不是活基线声明。
+
+#### B. 登记：CI 自 2026-09-09 起每次 push 全红（根因已定位；**已于同批修复**，见上方「批次（十二）：CI 连续 30+ 次全红」条）
+
+`gh run list` 实测：**最近 30 条 run 无一绿色**（最早回溯到 2026-09-09）。而本地全量闸门全绿 ⇒ 纯环境差异。
+
+**根因（已复现验证）**：`packages/core/api/main.py:273-304` 的 SPA 托管分支随 `apps/web/dist` 是否存在而**改变路由表**，而 `dist/` 不在版本库：
+
+- dist 存在（本地）⇒ SPA 分支，catch-all 带 `include_in_schema=False` ⇒ 活 OpenAPI **无** `/`（98 paths）
+- dist 不存在（CI 干净 clone）⇒ `else` 分支的 `@app.get("/")` **默认进 schema** ⇒ 活 OpenAPI **多出** `/`（99 paths）
+
+入库的 `apps/web/openapi.json` 是在**本地（带 dist）**生成的 ⇒ 差集恰为 `['/']`。
+
+**一个根因，两个症状**（backend / e2e smoke 两个 job 各自红，web job 绿）：
+
+1. backend：`test_openapi_json_file_matches_live_schema` + `test_openapi_json_check_rejects_stale_copy` 报「仅活 schema 有 `['/']`」——**其余 3561 条全绿**
+2. e2e smoke：`[smoke] FAIL - GET /: content-type='application/json' expected text/html`（`scripts/smoke_e2e.py:406` 假设 dist 必然存在）——**四步链路本身全绿**（plan→write→review PAUSED→resume→commit→COMMITTED、observer 内容在场、`SYNC OK`）
+
+**修法（已实测可行；同批已执行，见上方「批次（十二）」条）**：给 `main.py:302` 的 root 端点加 `include_in_schema=False` ⇒ 两种环境下活 schema 均为 98 paths，与入库 `openapi.json` 逐位相同（实测：去 `/` 后 paths 相等、schemas 相等、`info.version` 均 `3.9.0`）；`types.generated.ts` 只依赖 `components.schemas` ⇒ **前端零 regen**。与同文件 SPA catch-all 已用 `include_in_schema=False` 的做法一致。smoke 侧另需让 `GET /` 断言分支感知（或 CI 先构建前端）。
+
+**通用纪律（已入 AGENTS.md 坑区）**：**契约产物的正确性不得依赖构建产物是否存在**。凡「同一份代码在两种环境下产出不同路由表」的分支，其环境差异必须被 `include_in_schema` 排除在契约之外。
+
+#### C. 本批**没有**做的事（避免误读）
+
+- **突变执行器**：文档对齐阶段只清点了 **295 条**规格条目（逐文件 `importlib` 计数），**没有执行**；同批的 CI 修复阶段**新写并实跑了** `l6_openapi_env_independence.py`（2/2 全捕获）。**「295/295 全捕获」仍是批次十一的记录，不是本批实测**——本批只实跑了新增的 2 条。
+- **CI 修复**：见上方「批次（十二）」条（本条写于修复前，现已修完并加了不变式看守 + 突变规格）。
+- **未动历史文档**：见 §A「不动的地方」。
+
 ### Fixed（2026-10-16 批次（十）：`except sqlite3.OperationalError` 过宽欠账全批结清 —— 22 处收窄 + 2 处 Lead 自办修复 + 一处契约变更驳回）
 
 > **来源**：用户指令「把欠账清掉，这看起来是个复杂任务，并发多个智能体去做」。

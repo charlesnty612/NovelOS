@@ -398,13 +398,38 @@ def run_smoke() -> int:
 
         client = httpx.Client(base_url=base_url, timeout=HTTP_TIMEOUT_S)
 
-        # ---- (1) GET / SPA 托管（apps/web/dist 存在时返回 index.html）
+        # ---- (1) GET /：**两种合法形态**，按实际部署断言
+        #   · SPA 托管（``apps/web/dist`` 存在）⇒ text/html 的 index.html；
+        #   · 纯后端模式（dist 缺失——干净 clone / CI 的常态，因为 dist/ 不在版本库）
+        #     ⇒ application/json 的服务信息端点（``packages/core/api/main.py`` 的 ``else`` 分支）。
+        # 两种都是**成文契约**，但**只能按实际形态断言**：此处早先写死 "expected text/html"，
+        # 于是 dist 缺失的环境（CI）必红，而链路的其余步骤全绿 ⇒ 典型的假红
+        # （2026-10-19 修；同一根因另有一条：活 OpenAPI 多了 ``/``，见 main.py 的注释）。
         try:
             r = client.get("/")
             ct = r.headers.get("content-type", "")
             _assert(r.status_code == 200, f"GET / status={r.status_code}")
-            _assert("text/html" in ct, f"GET / content-type={ct!r} expected text/html")
-            _assert("<html" in r.text.lower() or "<!doctype" in r.text.lower(), "GET / not HTML")
+            is_html = "text/html" in ct
+            is_json = "application/json" in ct
+            _assert(
+                is_html or is_json,
+                f"GET / content-type={ct!r} 既非 SPA 的 text/html、也非纯后端的 application/json",
+            )
+            if is_html:
+                _assert(
+                    "<html" in r.text.lower() or "<!doctype" in r.text.lower(),
+                    "GET / 声称 text/html 但正文不是 HTML",
+                )
+            else:
+                try:
+                    body = r.json()
+                except ValueError as e:
+                    _assert(False, f"GET / 声称 application/json 但正文解析失败: {e}")
+                    body = {}
+                _assert(
+                    body.get("service") == "novelos",
+                    f"GET / 声称 application/json 但正文不像服务信息端点: {body}",
+                )
             print(f"[smoke] OK GET /  (status=200, content-type={ct})")
         except AssertionError as e:
             failures.append(f"GET /: {e}")

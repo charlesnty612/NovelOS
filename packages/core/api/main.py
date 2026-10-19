@@ -299,7 +299,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         log.info("SPA hosting disabled: dist not found at %s", _DEFAULT_WEB_DIST)
 
         # 纯后端模式：保留 ``GET /`` 服务信息端点（Sprint 0 行为）。
-        @app.get("/")
+        #
+        # ⚠️ ``include_in_schema=False`` 是**必需**的，不是可选的：这个端点**只在
+        # ``apps/web/dist`` 缺失时存在**，而 ``dist/`` 不在版本库（干净 clone / CI 必然缺），
+        # 同时 SPA 分支的 catch-all 早已用 ``include_in_schema=False`` 把 ``/`` 排除在
+        # schema 外 ⇒ 缺了这一行，**活 OpenAPI 的路径集会随构建产物在不在而变**：
+        # 本地（带 dist）98 paths 且无 ``/``，CI（无 dist）99 paths 且多 ``/``
+        # ⇒ 入库的 ``apps/web/openapi.json`` 与 CI 侧活 schema 必然对不上，
+        # ``tests/api/test_openapi_contract.py`` 恒红（2026-09-09 起因，2026-10-19 修）。
+        #
+        # 通用纪律：**契约产物的正确性不得依赖构建产物是否存在**——凡「同一份代码在两种
+        # 环境下产出不同路由表」的分支，其环境差异必须被 ``include_in_schema`` 排除在契约之外。
+        @app.get("/", include_in_schema=False)
         def root() -> dict[str, str]:
             return {"service": "novelos", "version": __version__, "docs": "/docs"}
 

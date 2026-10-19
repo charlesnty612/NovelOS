@@ -1,6 +1,6 @@
 # domain（领域服务层）
 
-> 职责：NovelOS 的领域业务服务——围绕 Project / Character / World / Plot / Chapter / Timeline / Relationship / Hooks 八个聚合根，对应 PRD §15-22 与 `database/migrations/0001_init.sql` 中 28 张业务表的 CRUD 与业务规则。
+> 职责：NovelOS 的领域业务服务——围绕 Project / Character / World / Plot / Chapter / Timeline / Relationship / Hooks 八个聚合根，对应 PRD §15-22 与现行 **39 张业务表**（`0001_init.sql` 起 28 张，后续迁移陆续加表；权威清单见 `database/README.md` 与 `database/migrations/`）的 CRUD 与业务规则。
 > 状态：空骨架（规划 Sprint 1）。
 
 ## 职责与边界
