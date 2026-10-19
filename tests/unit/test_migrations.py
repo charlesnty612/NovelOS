@@ -18,12 +18,12 @@ def _fresh_db(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 1. 迁移主链：空库顺序应用 0001~0031
-#    （迁移后总表 40 = 39 业务表 + `_migrations`）
+# 1. 迁移主链：空库顺序应用 0001~0032
+#    （迁移后总表 42 = 41 业务表 + `_migrations`）
 # ---------------------------------------------------------------------------
 
 
-def test_apply_migrations_creates_40_tables_total(tmp_path: Path):
+def test_apply_migrations_creates_42_tables_total(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     result = apply_migrations(db_path, MIGRATIONS_DIR)
     # 业务表 = 总表 - _migrations
@@ -51,7 +51,9 @@ def test_apply_migrations_creates_40_tables_total(tmp_path: Path):
     #   instance_id 可空列（启动自愈归属标记）→ **不增表**，业务表仍 38，总表仍 39。
     # P1 规划合并：0027_chapter_scene_plans 加 chapter_scene_plans 业务表
     #   → 业务表 39，总表 40。
-    assert result["tables"] == 40, f"expected 40 (39+_migrations), got {result['tables']}"
+    # 内部消费外部 skill（0032）：0024 之后… 0032_skills.sql 加 skills +
+    #   project_skills 两张业务表 → 业务表 41，总表 42。
+    assert result["tables"] == 42, f"expected 42 (41+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
     # Sprint 5 review F2：0002_drafts_unique.sql 也应被应用
@@ -141,6 +143,10 @@ def test_apply_migrations_creates_40_tables_total(tmp_path: Path):
     # - 仅 ALTER TABLE projects 加 fast_mode INTEGER 可空列（NULL=未设置→走默认关）；
     # - 不增表（业务表 39，总表 40 不变），无回填 → 存量项目行为逐字不变。
     assert "0031_project_fast_mode.sql" in result["applied"]
+    # 内部消费外部 skill（2026-10-19）：0032_skills.sql
+    # - 新建 skills（skill 主表）+ project_skills（项目 ↔ skill 多 slot 有序绑定）；
+    # - 纯新增表、无回填；业务表 39 → 41，总表 40 → 42。
+    assert "0032_skills.sql" in result["applied"]
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +192,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0029_project_writing_bible.sql",
         "0030_commits_rollback_of_project_scope.sql",
         "0031_project_fast_mode.sql",
+        "0032_skills.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -243,6 +250,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0030_commits_rollback_of_project_scope.sql" in second["skipped"]
     # 快通道：0031 也应被幂等跳过（同 0029，靠 _migrations 文件粒度追踪）
     assert "0031_project_fast_mode.sql" in second["skipped"]
+    # 内部消费外部 skill：0032 也应被幂等跳过（同 0029，靠 _migrations 文件粒度追踪）
+    assert "0032_skills.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -296,6 +305,7 @@ def test_migrations_table_records_filename(tmp_path: Path):
         "0029_project_writing_bible.sql",
         "0030_commits_rollback_of_project_scope.sql",
         "0031_project_fast_mode.sql",
+        "0032_skills.sql",
     }
     for r in rows:
         assert r["applied_at"]
@@ -436,7 +446,7 @@ def test_0023_word_band_migration_is_idempotent(tmp_path: Path):
     assert third["tables"] == first["tables"]
 
 
-def test_business_table_count_is_39(tmp_path: Path):
+def test_business_table_count_is_41(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     apply_migrations(db_path, MIGRATIONS_DIR)
     conn = get_connection(db_path)
@@ -460,7 +470,8 @@ def test_business_table_count_is_39(tmp_path: Path):
     # 题材库 P1a：0025_genre_packs 加 genre_packs → 业务表 38
     # V3.9 全量检修 F6：0026 仅给 workflow_runs 加 instance_id 列 → 业务表仍 38
     # P1 规划合并：0027_chapter_scene_plans 加 chapter_scene_plans → 业务表 39
-    assert len(names) == 39, f"expected 39 business tables, got {len(names)}"
+    # 内部消费外部 skill：0032_skills 加 skills + project_skills → 业务表 41
+    assert len(names) == 41, f"expected 41 business tables, got {len(names)}"
     # 抽检：PRD §67 关键表
     for expected in ("projects", "characters", "chapters", "commits", "state_deltas", "ai_call_logs"):
         assert expected in names, f"missing table {expected}"
@@ -475,6 +486,9 @@ def test_business_table_count_is_39(tmp_path: Path):
     assert "volumes" in names, "volumes table should exist (V3.4 多卷与规模组织层)"
     assert "model_profiles" in names, "model_profiles table should exist (V3.7 模型档案 + 环节绑定)"
     assert "capability_bindings" in names, "capability_bindings table should exist (V3.7 模型档案 + 环节绑定)"
+    # 内部消费外部 skill：skill 主表 + 项目 ↔ skill 多 slot 有序绑定关联表
+    assert "skills" in names, "skills table should exist (内部消费外部 skill)"
+    assert "project_skills" in names, "project_skills table should exist (内部消费外部 skill)"
 
 
 def test_0011_chapter_fts_virtual_table_exists(tmp_path: Path):
@@ -643,7 +657,7 @@ def test_0025_genre_packs_migration_is_idempotent(tmp_path: Path):
     assert "0025_genre_packs.sql" not in second["applied"]
     assert "0025_genre_packs.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
-    assert first["tables"] == 40, f"expected 40 (39 business + _migrations), got {first['tables']}"
+    assert first["tables"] == 42, f"expected 42 (41 business + _migrations), got {first['tables']}"
 
 
 def test_0026_workflow_runs_instance_id_column(tmp_path: Path):
@@ -677,7 +691,7 @@ def test_0026_instance_id_migration_is_idempotent(tmp_path: Path):
     second = apply_migrations(db_path, MIGRATIONS_DIR)
     assert "0026_workflow_runs_instance_id.sql" not in second["applied"]
     assert "0026_workflow_runs_instance_id.sql" in second["skipped"]
-    assert second["tables"] == first["tables"] == 40, (first["tables"], second["tables"])
+    assert second["tables"] == first["tables"] == 42, (first["tables"], second["tables"])
 
 
 def test_0027_chapter_scene_plans_table(tmp_path: Path):
@@ -766,7 +780,7 @@ def test_0027_chapter_scene_plans_migration_is_idempotent(tmp_path: Path):
     second = apply_migrations(db_path, MIGRATIONS_DIR)
     assert "0027_chapter_scene_plans.sql" not in second["applied"]
     assert "0027_chapter_scene_plans.sql" in second["skipped"]
-    assert second["tables"] == first["tables"] == 40, (first["tables"], second["tables"])
+    assert second["tables"] == first["tables"] == 42, (first["tables"], second["tables"])
 
 
 def test_0013_plot_events_has_description_column(tmp_path: Path):
@@ -1775,7 +1789,7 @@ def test_0030_rollback_of_migration_is_idempotent(tmp_path: Path):
     second = apply_migrations(db_path, MIGRATIONS_DIR)
     assert "0030_commits_rollback_of_project_scope.sql" not in second["applied"]
     assert "0030_commits_rollback_of_project_scope.sql" in second["skipped"]
-    assert second["tables"] == first["tables"] == 40, (first["tables"], second["tables"])
+    assert second["tables"] == first["tables"] == 42, (first["tables"], second["tables"])
 
 
 # ---------------------------------------------------------------------------
@@ -1814,7 +1828,9 @@ def test_0031_fast_mode_migration_is_idempotent(tmp_path: Path):
     second = apply_migrations(db_path, MIGRATIONS_DIR)
     assert "0031_project_fast_mode.sql" not in second["applied"]
     assert "0031_project_fast_mode.sql" in second["skipped"]
-    assert second["tables"] == first["tables"] == 40, (first["tables"], second["tables"])
+    # 内部消费外部 skill：0032 也应被幂等跳过（同 0029，靠 _migrations 文件粒度追踪）
+    assert "0032_skills.sql" in second["skipped"]
+    assert second["tables"] == first["tables"] == 42, (first["tables"], second["tables"])
 
 
 def test_0031_fast_mode_does_not_touch_existing_rows(tmp_path: Path):

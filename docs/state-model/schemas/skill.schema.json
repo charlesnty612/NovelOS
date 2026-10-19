@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novelos.local/schemas/skill.schema.json",
+  "title": "Skill Payload",
+  "description": "NovelOS skill payload v1.0.0 —— 内部消费外部 skill 的**运行面**载体。skill 是跨作品资产：一份「可移植的通用手艺」说明（怎么写对白潜台词 / 怎么埋悬念 / 怎么写章末钩子 …），由内容仓（NovelOS-Content）策展、在本表只存**软件层消费子集**的 JSON。版本线 v1.0.0：主版本 v1 线内兼容（minor / patch 只做加法，旧 v1.0.0 payload 继续有效），跨主版本另起 schema 文件。**内容不变量**：SKILL.md 全文与 references 全文属内容仓（编辑面），本 payload 为运行面——软件仓不解析 SKILL.md，只消费本 schema 描述的结构。**故意不设的字段**（每条都有理由，见对应条目的 description）：`scripts`（执行外部代码 ⇒ 安全 + 三仓分离红线）、`ratio` / `threshold` / `score` / `weight` / `target_ratio`（AGENTS.md F-19 红线：可测算子只作体检、不作处方；一旦进入 skill 就会被模型当成指标去凑）、`prompt` / `system_prompt`（会打破 `prompt_version` 单源，模型回声与落库版本会分叉）。`additionalProperties: false` 是「软件层只承载消费子集」的硬保证：顶层多写一个键（如 `version`）即校验失败。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "instructions"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^skill\\.v1\\.[0-9]+\\.[0-9]+$",
+      "description": "payload schema 版本线锚点；v1 线内 minor / patch 兼容（如 skill.v1.0.0 与 skill.v1.1.0 均可被本 schema 消费）。"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "skill 名称（也用于端点列表的可读标识）。"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "一句话描述：这个 skill 解决什么问题。可空。"
+    },
+    "instructions": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20000,
+      "description": "手艺本体：可移植的通用做法。注入装配 payload 的 `skills` 段（受字符预算约束，超限按 `__skills_truncated__` 标记截断）。**不含**项目专属设定、角色名、剧情——那些属内容仓的编辑面与项目级设定，不属 skill。"
+    },
+    "applies_to": {
+      "type": "array",
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["director", "scene_planner", "writer", "critic", "deep_reviewer"]
+      },
+      "description": "适用环节白名单。**缺席语义 = 不限定范围 = 全部环节适用**（避免出现「校验通过但永不生效」的死资源——那是本仓反复登记的「数据源存在 ≠ 已进装配」形状）。出现时按集合过滤：不在集合内的环节不注入该 skill。`checks` 的确定性扫描只在该集合含 `critic` / `deep_reviewer` 时发生（检查项是审查口径，不是写作口径）。"
+    },
+    "references": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "$ref": "#/$defs/Reference" },
+      "description": "参考材料（示例片段 / 术语表 / 清单）。⚠️ **不是渐进披露**：本仓模型**没有 tool use**，模型无法「按需读取」——因此 references 必须在**装配期**随 instructions 一起注入（受段字符预算约束）。reference 全文属内容仓；此处只存运行面需要的标题与正文片段。"
+    },
+    "checks": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "$ref": "#/$defs/Check" },
+      "description": "检查项：可确定性扫描的**字面**特征（如「对白里出现『其实』」）。命中 ⇒ **恒 warning**，只落 `review_report.warnings[]`（旁路通道），**绝不**接入 `scan_ai_patterns`（那会自动进 `quality_reports` 与提交门禁）。检查项是「存在/不存在」型判定，**不是**占比型指标——本 schema 刻意不提供 ratio / threshold / score 字段以杜绝 F-19 形状（可测算子只作体检、不作处方）。"
+    }
+  },
+  "$defs": {
+    "Reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "title", "body"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "内容仓内的来源路径（审计用；软件层不解析、不读取该路径）。"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "参考材料标题（注入后模型看到的可读标识）。"
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 20000,
+          "description": "参考材料正文（装配期注入；受 skill 段总字符预算约束）。"
+        }
+      }
+    },
+    "Check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["check_id", "description"],
+      "properties": {
+        "check_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "description": "检查项标识（小写字母数字与 . _ -）。命中时落库的 rule_id 恒为 `SKILL-<check_id>`——该命名空间**不在**任何后果表（阻断 / 确认 / 可改稿 / 可修订）内，故即使将来误入 errors 也只会「表外 rule_id ⇒ 硬停交人工」，不会自动改稿、更不会阻断提交。"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "这项检查在查什么（人话口径，进 warnings 文本）。"
+        },
+        "keywords": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "description": "命中词表（子串计数口径，与题材包禁词扫描同款）。缺席 = 本检查项不做确定性扫描，只作为声明给模型看。"
+        }
+      }
+    }
+  }
+}

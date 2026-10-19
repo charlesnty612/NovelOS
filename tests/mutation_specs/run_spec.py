@@ -54,7 +54,18 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WEB = ROOT / "apps" / "web"
-PY = str(ROOT / ".venv" / "Scripts" / "python.exe")
+#: 子进程用的 Python 解释器。
+#:
+#: **Windows 优先用项目 venv**（``.venv/Scripts/python.exe``）——本仓铁律：全量 pytest
+#: 一律用 venv 解释器（系统 python 的 editable 元数据缺失，会把版本读成 ``dev``，
+#: 误判成 schema 漂移）。**但 venv 路径是 Windows 形状** ⇒ 在 Linux CI 上不存在 ⇒
+#: 子进程会 ``FileNotFoundError`` ⇒ 与「用例红」在退出码上完全同形（坑区已登记四次：
+#: 非零退出码同时承载「跑过了且红」与「压根没跑」）。
+#:
+#: ⇒ **venv 存在就用它，不存在就退回当前解释器**（CI 里 ``sys.executable`` 就是
+#: ``pip install -e ".[dev]"`` 装进的那个环境，依赖齐全）。
+_VENV_PY = ROOT / ".venv" / "Scripts" / "python.exe"
+PY = str(_VENV_PY) if _VENV_PY.exists() else sys.executable
 VITEST = WEB / "node_modules" / ".bin" / ("vitest.cmd" if sys.platform == "win32" else "vitest")
 SPEC_DIR = ROOT / "tests" / "mutation_specs"
 

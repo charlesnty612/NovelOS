@@ -14,6 +14,10 @@
   / 不写 migration / 不调 LLM / 不启动服务。（例外：``genre-pull`` 的语义
   就是把内容仓 pack.json 导入运行库，会写 ``genre_packs`` 行——其余命令仍
   全只读。）
+- **漂移可见**：内容仓与运行库两侧的题材包可能分叉（DB 更新没回写文件、
+  或文件更新没拉进库）。:mod:`packages.core.content_sync.drift` 提供**只读**
+  巡检（``genre-doctor`` 子命令），把「分叉」从「静默」变成「可查」；
+  ``genre-pull`` 遇反向漂移时亦**响亮告警**（但不改变 pull 既有行为）。
 - **只新增内容仓**：不在内容仓已有文件上做就地破坏；只创建
   ``<content-dir>/<slug>/`` 新子目录。
 - **不同书严格隔离**：每本书通过独立子目录隔离；slug 冲突时自动追加
@@ -27,6 +31,16 @@
 
 from __future__ import annotations
 
+from .drift import (
+    DIRECTION_CONTENT_NEWER,
+    DIRECTION_CONTENT_ONLY,
+    DIRECTION_DB_NEWER,
+    DIRECTION_DB_ONLY,
+    DriftItem,
+    GenreDriftReport,
+    compare_versions,
+    detect_genre_drift,
+)
 from .paths import (
     BOOK_DIRS,
     BOOK_SLUG_HINT,
@@ -54,17 +68,25 @@ __all__ = [
     "BOOK_SLUG_HINT",
     "CONTENT_MANIFEST_FILENAME",
     "DEFAULT_CONTENT_DIR",
+    "DIRECTION_CONTENT_NEWER",
+    "DIRECTION_CONTENT_ONLY",
+    "DIRECTION_DB_NEWER",
+    "DIRECTION_DB_ONLY",
     "GENRES_DIR",
     "GENRE_PACK_FILENAME",
     "ContentSyncService",
+    "DriftItem",
+    "GenreDriftReport",
     "GenrePackDoc",
     "GenrePullResult",
     "GenreSyncResult",
     "Manifest",
     "SyncResult",
+    "compare_versions",
     "content_manifest_path",
     "derive_genre_slug",
     "derive_slug",
+    "detect_genre_drift",
     "genre_pack_path",
     "genres_dir",
     "manifest_path",

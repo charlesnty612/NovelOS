@@ -5,6 +5,252 @@
 
 ## [Unreleased]
 
+### Added（2026-10-20 批次（十三）：skill 生态落地 —— 对外可分发的 skill 包 + 对内 skill 新资源类型）
+
+> **来源**：用户指令「推上去；另外已经开始给别人用了，看一下怎么让我们的软件支持这些 skill」
+> →「全量修复，并发智能体，期间自行裁决」。
+> 全程**零真实 LLM 调用、零内容仓接触**（AGENTS §一 两条硬约束）。
+> 执行形态：**6 名并发成员**（文件路径互斥）+ Lead 自办；Lead **逐条亲验**关键项
+> （AGENTS §三 规则 1：critical/major 亲自读码/探针/复算后才入册）。
+
+#### A. 对外：`skills/novelos/` —— 可分发的 Agent Skill 包（E 组交付，Lead 复验）
+
+| 文件 | 内容 |
+|---|---|
+| `skills/novelos/SKILL.md` | Agent Skills 规范的 **6 个 frontmatter 字段**（`name` / `description` / `license` / `compatibility` / `metadata` / `allowed-tools`），**顶层不得有 `version`** |
+| `skills/novelos/references/*.md`（5 份） | setup / chapter / quality / delivery / limits |
+| `skills/novelos/scripts/novelos.py`（1045 行） | **stdlib-only** 薄客户端（零第三方依赖；离线可跑） |
+| `skills/novelos/scripts/check_skill_package.py`（1076 行） | 契约自检 **46 项** + **7 条变异**自检 |
+| `.claude-plugin/{plugin,marketplace}.json` | Claude Code：`source` 必须是**字符串**且以 `"./"` 开头 |
+| `.codex-plugin/plugin.json` | Codex：`source` 形状是 `{"source": "local"}` |
+| `.agents/plugins/marketplace.json` | Agent Skills 标准市场清单 |
+| `.cursor-plugin/{plugin,marketplace}.json` | Cursor：`additionalProperties:false` 真的实现（未知键直接判红） |
+
+**三平台的 `source` 形状互不兼容**（这是「一份 SKILL.md 装三个平台」的真门槛，
+照抄任一家的形状到另一家 ⇒ 装不上）⇒ **分文件写，不共用一份**。
+
+**Lead 复验**：46 项检查全过、7/7 变异全被预期检查捕获；**修 10 处占位 URL**
+（`https://github.com/NovelOS/NovelOS` → `charlesnty612/NovelOS`）——占位 URL
+在 marketplace 里是**装不上的**；**补 stdout UTF-8 重配**（见下）。
+
+#### B. 对内：skill 作为**新资源类型**（F 组交付，Lead 复验 + 补主干漏项）
+
+照抄硬规则 3 的 genre_pack 范式：
+
+| 要素 | 落地 |
+|---|---|
+| 自有表 | 迁移 `0032_skills.sql`：`skills` + `project_skills`（多 slot **有序**绑定，FK 级联）⇒ 业务表 **39 → 41** |
+| 自有 schema 版本线 | `docs/state-model/schemas/skill.schema.json`，`^skill\.v1\.[0-9]+\.[0-9]+$` + `additionalProperties:false` |
+| CRUD router | `packages/core/api/routers/skill.py`（8 端点，`response_model` 全声明） |
+| 项目绑定 | `project_skills` **关联表**（不是 JSON 列）——理由：① 多 slot **有序** JSON 列做不到；② 避免「JSON 列一条脏数据 ⇒ 读侧退空值 ⇒ 键形态与主路径不同形 ⇒ 脏命中」这一族缺陷 |
+| builder 注入 | 5 个消费环节：director / scene_planner / writer / critic / deep_reviewer（+ Lead 补的合并体，见 E） |
+| 缓存键指纹 | `skills_fp`（**含 id 与 version** ⇒ 改 payload 必 miss）⇒ director 键 **14→15**、writer 键 **17→18** |
+
+**schema 刻意不设的字段**（每条都有理由，是本设计最见功夫处）：
+`scripts`（执行外部代码 ⇒ 安全 + 三仓分离红线）、
+`ratio` / `threshold` / `score` / `weight` / `target_ratio`（**F-19 红线**：
+可测算子只作体检、不作处方；一旦进 skill 就会被模型当指标去凑）、
+`prompt` / `system_prompt`（会打破 `prompt_version` 单源 ⇒ 模型回声与落库版本分叉）。
+
+**5 份提示词升版**（不原地改：原地改内容不升版 ⇒ 两套正文共用一个版本标签）：
+`writer-v5` / `director-v2` / `scene_planner-v2` / `critic-v2` / `deep_reviewer-v2`
+——每份两处：§5 输入契约新增**顶层** `skills` 段 + 「缺席语义 / 优先级裁决 /
+截断标记 / checks 非指标」说明段。**缺席语义 = 不限定范围 = 全部环节适用**
+（否则「校验通过但永不生效」的死资源成为常态 —— 本仓反复登记的
+「数据源存在 ≠ 已进装配」形状）。
+
+**F 组自陈的一处首轮突变存活**：`SKILL-FILTER-1` 首轮存活，真因是**变异打在一行
+死代码上**（生产链路的 consumer 恒为元组，`skill_applies_to` 的 `str` 分支不可达）——
+**不是实现错、也不是测试错**；已把变异改到生效分支并把该事实留痕进 docstring。
+（与坑区「脚本报存活时，先怀疑量具，再怀疑变异，最后才怀疑被测物」同款。）
+
+#### C. `checks` 走**旁路**，绝不进提交门禁（设计原文如此）
+
+skill 的 `checks` 是**字面特征**扫描，命中 ⇒ 恒 warning，只落
+`review_report.warnings[]`；**绝不**接入 `scan_ai_patterns`（那会自动进
+`quality_reports` 与提交门禁）。5 份提示词里都加了显式的**反 gaming 条款**
+（不得为了规避检查而回避或堆砌相关措辞）——⚠️ **效果未验证**。
+
+### Fixed（2026-10-20 批次（十三）：人类基线看守在 CI 里恒 skip 而报绿 —— 「没跑」被报成「通过」）
+
+**5 个测试文件**（`test_human_baseline_ai_thresholds` / `test_readability_baseline` /
+`test_dialogue_echo_baseline` / `test_ai_ending_summary_paragraph` /
+`test_continuity_time`）在语料不可得时**裸 `pytest.skip`** ⇒ CI 永远绿。
+而语料在 **内容仓 `NovelOS-Content`**（按硬规则 5 **不推 GitHub**）⇒ **CI 永远拿不到**
+⇒「检测器阈值是按人类基线校准过的」这一结论**在任何别人机器上不可复现**，
+而 CI 从不报这件事。
+
+**修法**：① 缺席**必须显式记录**——JSONL 状态记录（受影响看守清单 / 查过的路径 /
+时间戳）+ 一条带可 grep 标记 `HUMAN-BASELINE-CORPUS-UNAVAILABLE` 的 `UserWarning`；
+② 判别面**派生**（扫 `test_*.py` 里对 `gate.require_reference_corpus(` 的调用，
+**不手挑名单**）；③ **元测试**判「缺席时看守会不会被报成绿」——注入 skip→pass 故障
+（`NOVELOS_HUMAN_BASELINE_FAULT=skip_to_pass`）⇒ 必须红（**Lead 亲跑：1 failed / 6 passed**）；
+④ **默认仍 skip**（Lead 裁决：语料永不可得 ⇒ 恒红 = CI 永久红 = 本批刚修掉的病；
+但 `NOVELOS_REQUIRE_HUMAN_BASELINE=1` 可一键转红）。
+
+**Lead 复验**：`git diff` 证实 5 个被改文件 **0 个 `def test` / 0 个 `assert` 被删**
+（只换了「定位语料 + 跳过」的机制）⇒ 符合「零变更重构以测试数零增减为硬验收」。
+
+**派生物** `scripts/human_baseline_synthetic.py`：**自造**语料校准器——
+⚠️ **它不是人类基线**，只证明算子活着、口径可复算，**不得**用它改任何阈值。
+
+**顺带钉进 CI**（闸门在门框上）：`python scripts/human_baseline_synthetic.py` 作为
+CI backend job 的一步 ⇒ CI 日志里永远能看到「人类侧在本环境未执行」。
+
+**⚠️ 途中踩到的真陷阱（新增 AGENTS 坑区一条）**：自定义 Warning 类定义在**测试模块**里
+⇒ pytest-xdist 把 worker 的警告按「模块 + 类名」序列化、交给**控制器重新 import** 才能还原
+⇒ 控制器那边 import 不到 ⇒ `ModuleNotFoundError: No module named 'unit'`
+⇒ **INTERNALERROR，整个 `-n 4` 运行崩掉**。
+⇒ 语料缺席的警告一律用**内置** `UserWarning`（xdist 对内置类别不重新 import），
+可 grep 的标记放在**消息**里。⚠️ CI 的 backend job 跑的是 `pytest tests/ -q`（**不带 `-n`**）
+⇒ 这类崩**只在本地并行全量时出现**，平时不容易撞上。
+
+### Fixed（2026-10-20 批次（十三）：两处「同一事实写着不同的数」—— 提示词 vs 代码、description vs docstring）
+
+#### D. 提示词里的阈值与代码常量分叉 ⇒ 模型的「验收口径」与门禁口径互相矛盾
+
+`docs/agents/prompts/polisher-v1.md` 三处写「破折号 / 省略号密度 每千字 **≤ 6 处**」，
+而生产阈值 `DEFAULT_DASH_THRESHOLD_PER_1K` 自 2026-09-16 起就是 **1.0**
+（沿革 6 → 3.5 → 1.0，**提示词那份手抄的副本没跟着改**）
+⇒ 模型按提示词把密度降到 6 就算「完成」（§9 E-POL-05 就是它的验收标准），
+而 `AI-PUNCT-ABUSE` 算子按 1.0 判 ⇒ **润色节点做了一轮「修完还是红」**。
+
+**修法**：① **升版**（新建 `polisher-v2.md`）而非原地改；三处口径行同时补全**分母口径**
+（「破折号 + 连续省略号 ≥2 个，**合计**，每千**可见字符**」——算子的 `visible_chars`
+只剔空白、**标点计入**）；② `_polish_node` 的 payload `prompt_version` 由硬编码
+`"polisher:v1"` 改读 `active_prompt_label(...)` ⇒ 升版后不再「payload 声明 v1、
+实际调用 v2」；③ **恒等看守**（ACTIVE 版提示词三处口径行的数字必须**逐字等于**代码常量，
+且**双向**——把**代码常量**改成 6.0 也必红）。
+**突变 3/3 全捕获**（`POLD-1` 改回硬编码标签 / `POLD-2` 把**提示词**退回 6 /
+`POLD-3` 把**代码常量**改成 6.0；`POLD-2` 改的是 **`.md`** 文件——本仓此前的突变
+全部落在 `.py` 上，这是第一次验「runner 能改非 `.py` 且能还原」）。
+
+#### E. 规则 description 与算子实现模块 docstring 的数字分叉
+
+`AI_PATTERN_RULES[CONT-TIME-BACKSTEP].description` 写「原始 **6** 条候选中 5 条是误报」，
+而 `continuity_time.py` 的 docstring 写「原始 **8** 条候选里只有 1 条真（precision 12.5%）」
+⇒ 6 候选 ⇒ 1/6 ≈ **16.7%**，与 12.5% 不符。
+**裁决依据（未复算）**：docstring **逐条列出了误报实例**（段首戳 5 + 右邻期限语 1 +
+跨午夜顺行 1 = **7**）⇒ 7 + 1 = 8，与 12.5% = 1/8 逐位吻合 ⇒ **8 是真值**。
+⚠️ **该裁决未依赖任何复算**——AGENTS §一 硬约束 1 禁止指向 dev 库既有项目复算，
+**所以「必须复算」这条路本来就不通**；能靠仓内已登记的逐条判档表定案的，就定案。
+
+#### F. 检测器证据表里的多来源数字不是「矛盾」，是「没标语料」
+
+「人类侧对举密度」的 0.22 / 0.12 / 0.00 三个值**都真**——它们是**三个不同语料**
+（人类样章 4843 字 / 3 篇 8665 字 / 榜一侯府弧 19 章）。
+⇒ 通用纪律：多来源数字**必须标语料再并列**，否则读者会当成矛盾、并去「裁决」一个
+不存在的问题；比值字段（`separation` / R 值）**必须写明是哪一对语料**。
+
+#### G. `AI-SHORT-PARA` 生成侧 258 / 2.064 vs 260 / 2.080（同一语料的两次测量）
+
+**裁决（未复算）**：说话人行守卫的宽度在 2026-09-27 被对抗审查打回后
+**从 {1,6} 收窄到 {1,3}** ⇒ 2 段被误豁免的文本回到命中 ⇒ 生成侧 258 → **260**
+⇒ **260 / 2.080 是当前代码口径下的终值**（判据：常量描述的是**检测器当前行为**，
+而检测器行为已变）。测试常量已订正。⚠️ 历史留痕不动：CHANGELOG 2026-09-27 条目
+记的「257 → 260 → 258 命中 / 2.064」是**收窄前**的记录。
+
+### Added（2026-10-20 批次（十三）：检测器证据包 + 内容仓漂移检测 + 竞品对标订正）
+
+- **检测器证据表** `packages/core/quality/detector_evidence.json`（16 条规则：
+  66 条代码引用 + 12 条行为探针 + 逐条判据）+ 只读漂移看守
+  `scripts/detector_evidence_check.py`（**比对代码实际值而非注释**；退出码 0/1/2）
+  + 召回率脚手架 `scripts/ai_pattern_recall.py`（**合成代理，不是真实召回率**）
+  + 证据表用法写进 `packages/core/quality/README.md` §5.7。
+- **内容仓漂移检测** `packages/core/content_sync/drift.py` +
+  `scripts/content_sync.py genre-doctor`（只读；退出码 0/1/2）。
+  **Lead 在真实库上复现了缺陷**：`[db_newer] genre-male-quicktrans-v1 DB v10 > 内容仓 v6`，EXIT=1。
+- **竞品对标订正** `docs/roadmap/竞品对标-inkos-2026-09-11.md`（+190 行，**带日期地**
+  订正 17 项，**保留原数字不抹除**：SKILL.md 827→81 行、built-in skills 15→20、
+  stars 9710→10389、issues 232→247、pushed_at 2026-08-25→2026-10-18）。
+- **skill 生态对标主文档** `docs/roadmap/skill-生态对标与发布形态-2026-10-19.md`（~1060 行）。
+- **m2-judge 编码核验记录** `docs/evaluation/m2-judge/judge_results-encoding-verification-2026-10-19.md`。
+
+### Changed（2026-10-20 批次（十三）：授权状态 = AGPL-3.0（推翻 2026-10-16 的「暂不添加」裁决））
+
+根目录新增 **`LICENSE`**（AGPL-3.0 全文，逐字取自 gnu.org，**逐字节一致**已核），
+`pyproject.toml` 加分类器（用 classifier 而非 PEP 639 的 SPDX 字符串——后者要
+setuptools>=77，而本仓 build-system 只钉 `setuptools>=68`），README「授权状态」段
+**带 2026-10-19 推翻 2026-10-16 裁决的完整留痕**。
+
+**为什么推翻**：「暂不添加」的前提是「纯自用工具」（2026-09-11 裁决）；
+而 2026-10-19 事实已变——**本软件已开始给他人使用**，「保留一切权利」从此不再是
+中性的默认态，而是**实际的法律暴露**（别人在无许可的情况下使用一份有版权的公开仓库）。
+`docs/roadmap/v3.9-业务逻辑优化与治理.md` 的 R3 条目本就把 LICENSE 列为
+「转公开发布的硬阻塞，届时重估」——**重估条件已触发**。
+**选型理由（AGPL-3.0 而非 MIT）**：授权**不可撤回**（MIT 一旦授出即对所有既有副本
+永久生效），而**收紧随时可做** ⇒ **风险不对称时取严**；且与同路线最大同类项目
+（InkOS，AGPL-3.0）一致。**本裁决由主会话在用户授权「全量修复 + 期间自行裁决」下作出。**
+
+### Fixed（2026-10-20 批次（十三）：合并体 `director_planner` 漏声明 `skills` —— 漏的恰好是主干，Lead 自办）
+
+F 组的 5 份提示词升版**唯独漏了合并体** `director_planner`，而它恰恰是
+**chapter-plan 的活路径**（`chapter_plan/pipeline.py::_director_planner_node`；
+独立 director 节点已不再被 chapter-plan 调用）⇒ 装配侧**确实**把 `skills` 段放进了
+合并 payload（`planner_input.py::_merge_skill_planner_fields`），
+而提示词**没有声明**这个键 ⇒ 模型不知道它是什么、跟谁冲突时听谁的
+⇒ 与「author_intent 死参数」事故同形（**「进了装配」也不等于「模型看得懂」**）。
+且 F 组的死参数守卫的判别面 `SKILL_CONSUMER_AGENTS` 也是**那五个角色名**
+⇒ **守卫与实现一起漏**，全绿。
+
+**修法**：① 新增 `director_planner-v3.md`（v2 逐字保留 + §5 契约加顶层 `skills` 键 +
+缺席语义 / 优先级裁决 / 截断标记 / checks 非指标 说明段），并同步
+`test_director_planner_prompt_registration.py`（`PROMPT_FILE` → v3、版本标签 → v3）；
+② 守卫的判别面**分成两层**：`SKILL_CONSUMER_AGENTS`（**角色**名册）+ 
+`SKILL_MERGED_CALL_SITES`（**合并体调用点**）⇒ 断言遍历二者之**并集**。
+**突变 2/2 全捕获**（`SKILL-MERGED-1` 改键名 / `SKILL-MERGED-2` 删优先级裁决条款）。
+⚠️ `director_planner-v2.md` 的 **v0.2 底稿 hash 核对口径自 v3 起作废**（正文加了
+skills 段 ⇒ 不再声称与底稿逐字节一致；v2 文件仍在库内可回溯）——**逐字节 provenance
+与「加一段」的修法天然冲突**，改 prompt 时必须一并订正那条声明。
+
+**通用纪律**：**判别面按「角色」枚举时，必须再问一句「这些角色有没有以别的形态被调用」**
+——本仓的角色与**调用点**不是一一对应（director + scene_planner 合并成 director_planner
+一次调用），**名册只列角色就会漏掉合并体**。
+
+### Changed（2026-10-20 批次（十三）：闸门接进 CI ——「闸门存在 ≠ 闸门在门框上」）
+
+本仓的 **308+ 条突变规格**与新写的**契约自检**此前**都只在本地跑，CI 从不执行**
+⇒ 它们的红永远没人看见（同批次十二修掉的「CI 连续 30+ 次全红」同族）。
+
+- `.github/workflows/ci.yml` 的 backend job 新增两步：
+  `python scripts/detector_evidence_check.py`（证据表 vs 代码实际值）+
+  `python skills/novelos/scripts/check_skill_package.py --selftest`（46 项 + 7 变异）+
+  `python scripts/human_baseline_synthetic.py`（合成语料校准器）。
+- `tests/mutation_specs/run_spec.py`：**子进程解释器改为「venv 存在就用它、不存在就退回
+  `sys.executable`」**——原先硬编码 Windows 形状的 `.venv/Scripts/python.exe`，
+  在 Linux CI 上必然 `FileNotFoundError`，而它与「用例红」在退出码上**完全同形**
+  （坑区已登记四次：非零退出码同时承载「跑过了且红」与「压根没跑」）。
+
+⚠️ **突变套件本身暂不接进 CI（显式登记，不是漏做）**：全量突变在本机实测 **~45 分钟**
+（310 条 × 8~10 秒），接进每次 push 会显著拉长反馈环；更关键的是**未在 Linux 上
+dry-run**——`l0_pid_alive` 一族突变针对的是 **Windows 专属语义**（`os.kill(pid,0)` 在
+detached 进程上抛 `WinError 87`），在 Linux 上可能变成**存活** ⇒ CI 恒红。
+⇒ **处置计划**：先在 CI 上跑一次 dry-run 拿到「哪几条在 Linux 上存活」的清单，
+再决定是接线、还是给那几条加平台判定。**在拿到那份清单之前不接**——
+这正是本批修掉的「闸门在门框上 ≠ 闸门是绿的」的同族反面：
+**没验证过的闸门接进门框，只会把 CI 变成新的「红了没人看红」。**
+
+#### 闸门（本次亲跑，Lead 亲自执行）
+
+| 闸门 | 结果 |
+|---|---|
+| 全量 pytest | **3717 passed / 1 skipped / 1 xfailed / 0 failed**（435.26s，`.venv`，`-n 4`）＝ 3719 collected，较基线 3580 **+139** |
+| 树指纹（跑测前后） | **644 文件 / `dac9cd81…` 逐位一致**（612 → 644 = +32 新增文件） |
+| ruff | `All checks passed!` |
+| `npx tsc -b` / `npx vitest run` / `npm run build` | 零错 / **755 全绿**（56 文件）/ 通过，asset hash **同基线** `index-mhzcNjYt.js`（本批零前端代码改动） |
+| `scripts/smoke_e2e.py` | **PASS** —— plan→write→review（PAUSED→resume）→commit 四步链路完好 + observer 内容在场 + **SYNC OK** + `tables=41` |
+| `export_openapi` + `gen_frontend_types` | **103 paths / 142 schemas**（98/136 → +5 path / +6 schema） |
+| 突变验证（全量 `--all`） | **310/310 全捕获**，0 存活 / 0 中止 / 0 无效；残留清点 0（`.mutbak` 扫描 + 标记形态扫描 + 关键文件逐位复核，三项均干净） |
+| `uv sync --extra dev` | 已跑（`pyproject.toml` 加了 license 分类器 ⇒ 硬规则 8）⇒ `/api/health` 的 version 实测读出 **3.9.0**（非 `dev`） |
+
+⚠️ **突变首轮有 3 条 `[ABORT]`（锚点失效，**不是**存活）**，已修并重跑：
+`E1-1`/`E1-2`（0032 给 writer/director 的缓存键各加一维 `skills_fp` ⇒ 键元组尾行形态变了 ⇒ 锚点命中 0 次）
+与 `L0-GP1`（0032 在 `builders_common/common.py` 新增 `_skill_excerpt`，其 except 块与题材包那处**逐字同形**
+⇒ 锚点命中 2 次）⇒ 已改锚点（E1 两处补 `skills_fp`；L0-GP1 补尾随的 `if row is None:` 以重新唯一）
+⇒ 单独重跑 **3/3 CAUGHT** ⇒ 再跑全量 **310/310 全绿**。
+这正是坑区登记过的「并发批次里，突变锚点用单行同形声明是脆的」——
+**锚点失效不随实现好坏出现，它随别人的改动出现。**
+
 ### Fixed（2026-10-19 批次（十二）：CI 连续 30+ 次全红 —— 根因修复 + 不变式看守 + 突变规格 + 文档对齐）
 
 > **来源**：用户指令「先把文档对齐；然后上 GitHub 找同类热门项目做技术面评估」→「修 CI，然后提交这批文档对齐」。

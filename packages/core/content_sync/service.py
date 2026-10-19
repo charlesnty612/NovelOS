@@ -22,6 +22,8 @@
   的题材包目录。
 - :data:`SyncResult` / :class:`GenreSyncResult` / :class:`GenrePullResult`：
   push / pull 的返回结构。
+- :mod:`packages.core.content_sync.drift`：题材包**版本漂移巡检**
+  （``genre-doctor`` 子命令的底座；只读）。
 
 设计要点：
 
@@ -65,7 +67,7 @@ from packages.core.genre import (
 )
 from packages.core.logging_config import get_logger
 
-from . import queries
+from . import drift, queries
 from .paths import (
     BOOK_DIRS,
     GENRES_DIR,
@@ -139,6 +141,9 @@ class GenrePullResult:
       （幂等 no-op，不产生新版本）；
     - ``version`` 为操作后 DB 侧版本号（**不**采用 pack.json 里写的 version：
       version 由 DB 单调维护，文件版本只作审计提示）。
+    - ``warnings``：**不改变 pull 行为**的告警清单（如「DB version 高于内容仓
+      文件 version」的反向漂移）。既有行为（创建 / 更新 / no-op / version 自增）
+      完全不变；告警只负责「响亮地说出来」，处置由人决定。
     """
 
     pack_id: str
@@ -149,6 +154,7 @@ class GenrePullResult:
     version: int = 0
     file_version: int = 0
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +589,13 @@ class ContentSyncService:
           更新但不升版本（与 :meth:`GenrePackService.update` 语义一致）；
         - 对内容仓**只读**：pull 不写任何文件、不刷新根 manifest。
 
+        **反向漂移告警（不改变既有行为）**：DB 侧 ``version`` 高于内容仓文件
+        ``version`` 时（DB 的编辑结果没回写内容仓），往
+        :attr:`GenrePullResult.warnings` 追加一条告警并写 stderr 日志——
+        pull 的方向仍是「以内容仓为准」，**不**因为告警而改变创建 / 更新 / no-op
+        与 version 自增的任何行为。判定口径与 ``genre-doctor`` 巡检共用
+        :func:`packages.core.content_sync.drift.compare_versions`。
+
         文件缺失 / JSON 非法 → ``ValueError``。返回 :class:`GenrePullResult`。
         """
         source = self._resolve_genre_source(slug_or_path)
@@ -629,6 +642,30 @@ class ContentSyncService:
             result.version = int(created.get("version") or 1)
             log.info("pull_genre_pack: created pack_id=%s from=%s", pack_id, source)
             return result
+
+        # ---- 反向漂移告警（**不改变 pull 既有行为**）------------------------
+        # 判定口径与 ``genre-doctor`` 巡检共用
+        # :func:`packages.core.content_sync.drift.compare_versions`（单点，不两套）。
+        #   · DB version > 文件 version ⇒ **反向漂移**：DB 侧有更新的编辑结果没回写
+        #     内容仓；本次 pull 仍以内容仓为准（pull 语义不变），但必须响亮告警，
+        #     否则「一次旧 pull 静默覆盖 DB 新版本」全程零告警。
+        #   · 文件 version > DB version ⇒ 正常「拉新内容」，不告警。
+        db_version = int(existing.get("version") or 0)
+        direction = drift.compare_versions(doc.version, db_version)
+        if direction == drift.DIRECTION_DB_NEWER:
+            msg = (
+                f"反向漂移：运行库 genre_packs['{pack_id}'].version={db_version} 高于内容仓 "
+                f"pack.json version={doc.version}（{source}）——DB 侧的更新没有回写内容仓；"
+                f"本次 pull 仍以内容仓为准（pull 语义不变），若要保留 DB 版本请先 genre-push。"
+            )
+            result.warnings.append(msg)
+            log.warning("pull_genre_pack: %s", msg)
+        elif direction == drift.DIRECTION_CONTENT_NEWER:
+            log.info(
+                "pull_genre_pack: 内容仓 version=%s 新于 DB version=%s（正常拉新）",
+                doc.version,
+                db_version,
+            )
 
         payload_same = existing.get("payload") == doc.payload
         meta_same = (

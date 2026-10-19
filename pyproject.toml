@@ -7,6 +7,13 @@ name = "novelos"
 version = "3.9.0"
 description = "NovelOS - local-first novel writing operating system"
 requires-python = ">=3.11"
+# 授权：AGPL-3.0-only（2026-10-19 裁决，见 README「授权状态」）。
+# 这里用 classifier 而非 PEP 639 的 `license = "..."` SPDX 字符串——后者要 setuptools>=77，
+# 而本仓 build-system 只钉 `setuptools>=68`；classifier 在所有版本上都能解析，且
+# 许可证全文在根目录 LICENSE（逐字取自 gnu.org）。
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+]
 dependencies = [
     # 版本锁定（==）：2026-08 发现无上界约束会拉到最新 fastapi/starlette，
     # 其 include_router 对本仓库的路由组装静默失效（24 个业务路由挂载为 0），

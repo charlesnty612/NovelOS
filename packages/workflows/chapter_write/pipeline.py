@@ -76,6 +76,7 @@ import logging
 import sqlite3
 from typing import Any
 
+from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.agent_runtime.revision_fidelity import preserved_ratio
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.agent_runtime.structured_output import strip_think_blocks
@@ -636,9 +637,16 @@ def _polish_node(ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
     ai_findings = precheck["ai_pattern_hits"]
+    # 2026-10-19 批次十三：本模块此前硬编码 "polisher:v1"。polisher 升 v2（阈值与
+    # 生产代码对齐）后，payload 仍声明 v1 ⇒ 模型照抄回声、而 ``ai_call_logs`` 记真值
+    # v2 ⇒ 同一条链上两个值、零告警（与 writer v1→v2 的四处口径分叉同形，已登记于
+    # AGENTS 坑区）。权威口径只有一处：prompts 表里该 agent 最高 ACTIVE 行。
+    # ⚠️ 本节点**无缓存键**（run_agent 无缓存，polisher 段不进 context_engine 装配
+    # 缓存）⇒ 不涉及「漏键=脏命中」；此处只修「声明漂移」这一层。
+    polisher_prompt_label = active_prompt_label(db_path, "polisher", fallback="polisher:v1")
     payload: dict[str, Any] = {
         "agent": "polisher",
-        "prompt_version": "polisher:v1",
+        "prompt_version": polisher_prompt_label,
         "draft_text": raw_prose,
         "ai_findings": ai_findings,
         "style_constraints": {

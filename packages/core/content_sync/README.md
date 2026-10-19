@@ -15,7 +15,9 @@
   并刷新内容仓根 `manifest.json` 的 `genres` 段；
 - `genre-pull`：内容仓 `pack.json` → schema 校验 → 运行库 `genre_packs` 行
   （无则创建 / 有则更新）；
-- `list` / `init`：内容仓书目录枚举与骨架预建。
+- `list` / `init`：内容仓书目录枚举与骨架预建；
+- `genre-doctor`（别名 `check-drift`）：**只读**巡检题材包版本漂移
+  （内容仓 `pack.json` ↔ 运行库 `genre_packs`），见下「漂移巡检」。
 
 **不做**
 
@@ -30,6 +32,7 @@
 |---|---|---|
 | `list` / `init` / `push` / `genre-push` | 只读 | 只新增 / 覆盖既有产物 |
 | `genre-pull` | **写**（`genre_packs` 行） | **只读**（不写任何文件） |
+| `genre-doctor` | 只读 | 只读（**两侧都不写**） |
 
 `genre-pull` 是唯一会写运行库的命令——它的语义就是把内容仓的 `pack.json` 导入运行库。
 其余命令全程只 SELECT。
@@ -101,17 +104,141 @@ python scripts/content_sync.py --db data/novelos.db --content-dir D:/zcodeprojec
     genre-pull pack-trans-v1                   # slug（相对 <content-dir>/genres/）
 python scripts/content_sync.py ... genre-pull D:/zcodeproject/NovelOS-Content/genres/男主快穿
 python scripts/content_sync.py ... genre-pull <...>/genres/pack-trans-v1/pack.json
+
+# 题材包版本漂移巡检（只读；两侧都不写）
+python scripts/content_sync.py --db data/novelos.db --content-dir D:/zcodeproject/NovelOS-Content \
+    genre-doctor                               # 人读逐行输出
+python scripts/content_sync.py ... genre-doctor --json          # 机器可读
+python scripts/content_sync.py ... check-drift --json           # 等价别名
 ```
 
 `--db` 默认 `data/novelos.db`；`--content-dir` 默认 `D:/zcodeproject/NovelOS-Content`。
 
 ### 退出码
 
-| 码 | 含义 |
-|---|---|
-| `0` | 成功 |
-| `1` | 参数错误 / project 或题材包不存在 / 数据库读不开 / `pack.json` 缺失或不合 schema |
-| `2` | 部分产物写入失败（产物计数 > 0 但 `errors` 非空） |
+| 码 | 含义（通用子命令） | 含义（`genre-doctor`） |
+|---|---|---|
+| `0` | 成功 | **无版本漂移**（且无巡检错误） |
+| `1` | 参数错误 / project 或题材包不存在 / 数据库读不开 / `pack.json` 缺失或不合 schema | **检出版本漂移** |
+| `2` | 部分产物写入失败（产物计数 > 0 但 `errors` 非空） | **巡检自身出错**（运行库读不开 / `pack.json` 不可解析等）；**巡检错误优先于漂移** |
+
+## 漂移巡检（`genre-doctor`）
+
+### 为什么需要它
+
+题材包是「双轨」资产：运行面在运行库 `genre_packs` 表，运行面副本在内容仓
+`genres/<slug>/pack.json`。两侧靠 `genre-push` / `genre-pull` 单向搬运，但
+**没有任何机制检测两侧已经分叉**。实测（2026-10-19 复核，dev 库 + 内容仓）：
+
+```text
+DB   genre_packs['genre-male-quicktrans-v1'].version = 10   (updated_at 2026-09-17)
+文件  genres/male-quicktransmigration/pack.json    .version =  6   (synced_at 2026-09-14)
+```
+
+DB 比文件新 **4 个版本**——DB 侧的编辑结果没回写内容仓——而全链路**零告警**：
+`genre-push` 不检查、`genre-pull` 不检查（且 pull 一次旧文件就能把 DB 的新版本
+静默覆盖回旧内容）。`genre-doctor` 把这件事从「静默」变成「可查」。
+
+### 判定口径
+
+对内容仓每个 `genres/<slug>/pack.json`，按 `pack_id` 与运行库 `genre_packs`
+的同行比对 `version`，报出四类状态：
+
+| `direction` | 含义 | 处置方向（**本巡检不自动处置**） |
+|---|---|---|
+| （无） | 两侧 `version` 一致 | 静默通过，不报 |
+| `content_newer` | 内容仓 version 更高 | 正常：待 `genre-pull` 拉进运行库 |
+| `db_newer` | 运行库 version 更高 | **反向漂移**：DB 的更新没回写内容仓 ⇒ 需 `genre-push` |
+| `content_only` | 内容仓有 `pack.json`、运行库无该 `pack_id` | 运行库缺包 ⇒ 需 `genre-pull` |
+| `db_only` | 运行库有该 `pack_id`、内容仓无 `pack.json` | 内容仓缺包 ⇒ 需 `genre-push` |
+
+判定用的 `version` 口径与 `genre-push` / `genre-pull` **逐字一致**，不另起一套解析：
+
+- 内容仓侧走 `GenrePackDoc.from_dict`（`version` 缺失 / 非法 → `0`；`pack_id`
+  缺失 → 回退目录 slug——与 `pull_genre_pack` 同款）；
+- 运行库侧走 `GenrePackService` 的行投影（`genre_packs.version` 列）。
+
+两侧比较共用单点 `drift.compare_versions()`（`packages/core/content_sync/drift.py`）。
+
+### 用法与输出
+
+```bash
+python scripts/content_sync.py --db data/novelos.db \
+    --content-dir D:/zcodeproject/NovelOS-Content genre-doctor
+```
+
+人读形态（逐行 + 汇总）：
+
+```text
+题材包版本漂移巡检（只读）
+  内容仓: D:\zcodeproject\NovelOS-Content
+  运行库: D:\zcodeproject\NovelOS\data\novelos.db
+  检查题材包数: 1
+
+  [db_newer] genre-male-quicktrans-v1  DB v10 > 内容仓 v6  ← ...\genres\male-quicktransmigration\pack.json
+
+漂移 1 处 / 检查 1 个 / 巡检错误 0 处
+```
+
+机器可读形态（`--json`）：
+
+```json
+{
+  "drift": [
+    {
+      "pack_id": "genre-male-quicktrans-v1",
+      "direction": "db_newer",
+      "content_version": 6,
+      "db_version": 10,
+      "content_path": "D:\\...\\genres\\male-quicktransmigration\\pack.json",
+      "slug": "male-quicktransmigration",
+      "content_synced_at": "2026-09-14T14:30:28+08:00",
+      "db_updated_at": "2026-09-17T13:43:22.742316+00:00",
+      "db_source_path": "genres/male-quicktransmigration"
+    }
+  ],
+  "checked": 1,
+  "ok": false,
+  "errors": []
+}
+```
+
+- `checked` = 两侧 `pack_id` **并集**的规模（一致项 + 漂移项 + 单边项都计入）；
+- `ok` = 无漂移**且**无巡检错误；
+- `errors` = 巡检过程中的问题（`pack.json` 不可解析、`genre_packs` 表缺失等），
+  **不计入 `drift`**——它们是「巡检没能完成比对」的信号 ⇒ 退出码 `2`；
+- `db_source_path` = 运行库行记录的内容仓来源路径（`genre_packs.source_path`），
+  在「DB 有、内容仓无」时它就是「文件该放在哪」的指针。
+
+### 已知边界
+
+1. **只比对 `version` 字段，不比对 payload 内容**——同版本号但内容不同的情况
+   查不出来（版本号相同即视为一致）。
+2. **内容仓的 `synced_at` 与运行库的 `updated_at` 语义不同、不可直接比**：
+   前者是「落盘时刻」，后者是「行更新时刻」，且运行库那侧会被**任何**字段的
+   更新改写（含只改元信息）。两者在 JSON 里仅作**人工排查参考，不参与判定**。
+3. **只覆盖题材包（`genres/` 命名空间）**：书目录（`novel/` / `canon/` …）的
+   同步漂移不在本巡检范围内。
+4. **只读**：两侧都不写。发现漂移后**不会**自动 push / pull——处置是人的决定。
+5. **`pack_id` 缺失的文件按目录 slug 归键**（与 `genre-pull` 同款回退）；若内容仓
+   出现重复 `pack_id`，取排序后的首个并记一条巡检错误。
+
+### `genre-pull` 的反向漂移告警
+
+`genre-pull` 一个 pack 时，若**运行库 version 高于内容仓文件 version**
+（反向漂移），会：
+
+- 往返回结构的 `warnings` 列表追加一条告警（CLI 同时打到 **stderr**，
+  stdout 仍只留机器可读 JSON）；
+- **不改变 pull 的既有行为**——pull 的方向仍是「以内容仓为准」（创建 / 更新 /
+  no-op / version 自增全部照旧）。告警只负责「响亮地说出来」，怎么处置由人决定。
+
+```text
+$ python scripts/content_sync.py ... genre-pull pack-trans-v1
+WARNING: 反向漂移：运行库 genre_packs['genre-male-quicktrans-v1'].version=10 高于内容仓
+        pack.json version=6（...）——DB 侧的更新没有回写内容仓；本次 pull 仍以内容仓为准
+        （pull 语义不变），若要保留 DB 版本请先 genre-push。
+```
 
 ## slug 规则
 
@@ -152,6 +279,8 @@ python scripts/content_sync.py ... genre-pull <...>/genres/pack-trans-v1/pack.js
 
 `genre-pull` **不采用** `pack.json` 里的 `version` 覆盖 DB（version 由 DB 单调维护；
 文件里的 version 只作审计提示，回显在 CLI 输出的 `file_version`）。
+因此「DB 的 version 比文件新」在 pull 里是**静默的**——本版为此**加告警不改语义**
+（见「漂移巡检」章的「`genre-pull` 的反向漂移告警」）。
 
 ## 失效模式（写侧严格、读侧容错）
 
@@ -165,6 +294,10 @@ python scripts/content_sync.py ... genre-pull <...>/genres/pack-trans-v1/pack.js
 | `pack.json` 写失败（磁盘 / 权限） | 进 `errors`；有产物 → 退出码 2，零产物 → 退出码 1 |
 | 根 `manifest.json` 存在但 JSON 非法 | 记 warning，按「新建」处理（覆盖为合法清单，不抛错） |
 | `list` 遇到坏 `manifest.json` | 该目录仅缺字段，不影响其它行 |
+| `genre-pull` 遇**反向漂移**（DB version 高于内容仓文件 version） | 进 `warnings` + stderr 告警；**既有行为不变**（仍以内容仓为准） |
+| `genre-doctor` 遇到不可解析的 `pack.json` | 进 `errors`（不中断整次巡检）→ 退出码 2 |
+| `genre-doctor` 遇到运行库「缺表 / 缺列」 | 降级为「DB 侧为空」+ 记 `errors` → 退出码 2 |
+| `genre-doctor` 遇到运行库锁 / I/O 故障 | **上抛**（不静默降级——那会让「巡检通过」变成假结论）→ CLI 退出码 2 |
 
 ## 模块结构
 
@@ -174,11 +307,13 @@ python scripts/content_sync.py ... genre-pull <...>/genres/pack-trans-v1/pack.js
 | `slug.py` | book / pack slug 归一化与冲突去重（无外部依赖、确定性） |
 | `queries.py` | 书的 DB 读取层（全 `SELECT`，按 project_id 精确取数） |
 | `service.py` | `ContentSyncService`：`init_book` / `push_book` / `list_books` / `push_genre_pack` / `pull_genre_pack` / `list_genres`；卷合并 txt 复用 exporter helper |
-| CLI | `scripts/content_sync.py`（`list` / `init` / `push` / `genre-push` / `genre-pull`） |
+| `drift.py` | 题材包**版本漂移巡检**：`detect_genre_drift` / `compare_versions`（单点比较口径）/ `DriftItem` / `GenreDriftReport` |
+| CLI | `scripts/content_sync.py`（`list` / `init` / `push` / `genre-push` / `genre-pull` / `genre-doctor`） |
 
 ## 依赖
 
-- `packages.core.db.get_connection`、`packages.core.ids`、`packages.core.logging_config`；
+- `packages.core.db.get_connection`、`packages.core.db.is_missing_schema_error`（降级范围收窄）、
+  `packages.core.ids`、`packages.core.logging_config`；
 - `packages.core.exporter.build_txt`（正文 txt）、`packages.core.backup.BackupService`（JSON 备份包）；
 - `packages.core.genre`（题材包 CRUD / 绑定 / `validate_payload` 校验器——写侧严格
   与 API 422 同一口径，错误串格式 `[schema] <path>: <message>`）；
@@ -189,4 +324,7 @@ python scripts/content_sync.py ... genre-pull <...>/genres/pack-trans-v1/pack.js
 - `tests/unit/test_content_sync_service.py` —— 书同步（产物齐全 / 幂等 / slug 稳定 / 隔离）；
 - `tests/unit/test_content_sync_slug.py` —— book slug 派生与去重；
 - `tests/unit/test_content_sync_genre.py` —— 题材包 push / pull / slug / manifest /
-  双轨 / CLI 退出码。
+  双轨 / CLI 退出码；
+- `tests/unit/test_content_sync_drift.py` —— 版本漂移巡检（四类方向 / `--json` 字段 /
+  退出码 0-1-2）、`genre-pull` 反向漂移告警（**行为不变**）、降级收窄（缺表降级 /
+  故障上抛）、**突变自检**（比较机制是承重的）。

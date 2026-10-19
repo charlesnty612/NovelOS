@@ -44,14 +44,12 @@
 
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from packages.core.content_sync.paths import DEFAULT_CONTENT_DIR
 from packages.core.quality.ai_patterns import (
     _AI_ENDING_SUMMARY_PHRASES,
     _last_paragraph,
@@ -60,8 +58,12 @@ from packages.core.quality.ai_patterns import (
 )
 from packages.core.quality.wordcount import visible_chars
 
+from . import _human_baseline_gate as gate
+
+#: 标记「本文件是人类基线看守」（故障注入插件据此定位目标用例）。
+HUMAN_BASELINE_GUARD = True
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_REFERENCE_SUBPATH = Path("reference-books/榜一-快穿之人渣洗白手册/侯府凤凰男")
 _DEV_DB = _REPO_ROOT / "data" / "novelos.db"
 
 # 实测登记值（2026-10-15；见模块 docstring 的复算口径）。改这些数之前先重跑逐章复算。
@@ -75,25 +77,13 @@ _LAST_PARA_MAX_RATIO = 0.10
 _LAST_PARA_OLD_MIN_RATIO = 1.0163
 
 
-def _reference_dir() -> Path | None:
-    candidates: list[Path] = []
-    env_dir = os.environ.get("NOVELOS_CONTENT_DIR")
-    if env_dir:
-        candidates.append(Path(env_dir))
-    candidates.append(DEFAULT_CONTENT_DIR)
-    candidates.append(_REPO_ROOT.parent / "NovelOS-Content")
-    for root in candidates:
-        target = root / _REFERENCE_SUBPATH
-        if target.is_dir():
-            return target
-    return None
-
-
 def _human_chapters() -> list[tuple[str, str]]:
-    """榜一侯府弧全部 19 章（与 ``test_human_baseline_ai_thresholds`` 同一取数口径）。"""
-    ref_dir = _reference_dir()
-    if ref_dir is None:  # pragma: no cover - 环境前提缺失
-        pytest.skip(f"内容仓参考书目录不存在：{_REFERENCE_SUBPATH}")
+    """榜一侯府弧全部 19 章（与 ``test_human_baseline_ai_thresholds`` 同一取数口径）。
+
+    语料定位与「不可得怎么办」由 :mod:`unit.quality._human_baseline_gate` 统一处理
+    （本文件**不得**再自带裸 ``pytest.skip``——那会绕开状态记录与警告）。
+    """
+    ref_dir = gate.require_reference_corpus(__name__)
     numbered = [
         (int(m.group(1)), p)
         for p in ref_dir.glob("*.txt")

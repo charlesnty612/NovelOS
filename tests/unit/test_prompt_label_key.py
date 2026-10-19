@@ -28,8 +28,9 @@ from packages.core.ids import new_id, now_iso
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
-DIRECTOR_KEY_LEN = 14  # 12 → 13：新增 prompt_label 维度；13 → 14：新增 chars_fp 角色维度
-#                       （E1，2026-10-16；键尾两元恒为 prompt_label + ns_tag）
+DIRECTOR_KEY_LEN = 15  # 12 → 13：新增 prompt_label 维度；13 → 14：新增 chars_fp 角色维度
+#                       （E1，2026-10-16）；14 → 15：新增 skills_fp 绑定 skill 集合维度
+#                       （0032 内部消费外部 skill；键尾两元恒为 prompt_label + ns_tag）
 
 
 def _fresh_db(tmp_path: Path) -> Path:

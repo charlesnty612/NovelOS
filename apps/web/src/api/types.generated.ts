@@ -1704,6 +1704,86 @@ export interface SimulationSummary {
   created_at: string;
 }
 
+export interface Skill {
+  /** skill 完整表示（GET /api/skills/{skill_id}）。``payload`` 为解析后的 dict。 */
+  skill_id: string;
+  /** skill 完整表示（GET /api/skills/{skill_id}）。``payload`` 为解析后的 dict。 */
+  name: string;
+  /** skill 完整表示（GET /api/skills/{skill_id}）。``payload`` 为解析后的 dict。 */
+  description?: string | null;
+  /** skill 完整表示（GET /api/skills/{skill_id}）。``payload`` 为解析后的 dict。 */
+  version: number;
+  /** 运行面 payload（schema：docs/state-model/schemas/skill.schema.json）。⚠️ references 不是渐进披露——模型无 tool use，装配期全量注入。 */
+  payload?: Record<string, unknown>;
+  /** skill 完整表示（GET /api/skills/{skill_id}）。``payload`` 为解析后的 dict。 */
+  source_path?: string | null;
+  /** skill 完整表示（GET /api/skills/{skill_id}）。``payload`` 为解析后的 dict。 */
+  created_at: string;
+  /** skill 完整表示（GET /api/skills/{skill_id}）。``payload`` 为解析后的 dict。 */
+  updated_at: string;
+  /** skill 完整表示（GET /api/skills/{skill_id}）。``payload`` 为解析后的 dict。 */
+  bound_project_count?: number;
+}
+
+export interface SkillBindRequest {
+  /** 绑定请求体：``{"skill_ids": ["skl_a", "skl_b"]}``。 */
+  skill_ids?: Array<string>;
+}
+
+export interface SkillCreate {
+  /** 创建 skill 请求体（POST /api/skills）。 */
+  name: string;
+  /** 创建 skill 请求体（POST /api/skills）。 */
+  description?: string | null;
+  /** 创建 skill 请求体（POST /api/skills）。 */
+  payload?: Record<string, unknown>;
+  /** 显式 skill_id（内容仓 slug）；省略则生成 skl_<12hex>。 */
+  skill_id?: string | null;
+  /** 内容仓来源路径（审计用；软件层不解析）。 */
+  source_path?: string | null;
+}
+
+export interface SkillSummary {
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  skill_id: string;
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  name: string;
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  description?: string | null;
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  version: number;
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  source_path?: string | null;
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  created_at: string;
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  updated_at: string;
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  applies_to?: Array<string>;
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  reference_count?: number;
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  check_count?: number;
+  /** skill 摘要投影（列表端点 / 绑定集合）。 */
+  bound_project_count?: number;
+}
+
+export interface SkillUnbindRequest {
+  /** 解绑请求体：``{"skill_id": "skl_a"}``（幂等：未绑定也返回 200）。 */
+  skill_id: string;
+}
+
+export interface SkillUpdate {
+  /** 更新 skill 请求体（PUT /api/skills/{skill_id}）；提供 payload 时 version 自增。 */
+  name?: string | null;
+  /** 更新 skill 请求体（PUT /api/skills/{skill_id}）；提供 payload 时 version 自增。 */
+  description?: string | null;
+  /** 更新 skill 请求体（PUT /api/skills/{skill_id}）；提供 payload 时 version 自增。 */
+  payload?: Record<string, unknown> | null;
+  /** 更新 skill 请求体（PUT /api/skills/{skill_id}）；提供 payload 时 version 自增。 */
+  source_path?: string | null;
+}
+
 export interface SnapshotResponse {
   /** 快照版本号；无快照时后端返回 0（genesis 未初始化前的形态） */
   state_version: number;

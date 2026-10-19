@@ -18,6 +18,7 @@ from .builders_common import (
     _DEFAULT_TARGET_WORD_COUNT,
     _GENRE_PACK_CONSUMER_WRITER,
     _HOOK_OPEN_STATUSES,
+    _SKILL_CONSUMER_WRITER,
     _attach_assembly_meta,
     _author_style_samples,
     _build_trigger_corpus,
@@ -31,6 +32,7 @@ from .builders_common import (
     _recent_prose_tail,
     _row_to_chapter,
     _safe_copy,
+    _skill_excerpt,
     _world_state_excerpts,
     resolve_author_intent,
 )
@@ -42,6 +44,7 @@ from .cache import (
     _fingerprint_author_intent,
     _fingerprint_plan_json,
     _fingerprint_scene_plan,
+    _fingerprint_skills,
     _fingerprint_writing_bible,
     characters_fingerprint,
 )
@@ -191,6 +194,11 @@ def _build_writer_input_uncached(
         genre_pack_inject, genre_pack_audit = _genre_pack_excerpt(
             conn, project_id, consumer=_GENRE_PACK_CONSUMER_WRITER,
         )
+        # 内部消费外部 skill：项目绑定的 skill 集合 → 独立新段 ``skills``
+        #（与题材包双资源并存、互不覆盖；不塞进 style_constraints）。
+        skill_inject, skill_audit = _skill_excerpt(
+            conn, project_id, consumer=_SKILL_CONSUMER_WRITER,
+        )
     finally:
         conn.close()
 
@@ -310,6 +318,13 @@ def _build_writer_input_uncached(
     if genre_pack_audit is not None:
         payload["_genre_pack_consumed"] = genre_pack_audit
 
+    # 内部消费外部 skill：**独立新段** ``skills``（绝不塞进 style_constraints 等
+    # 既有段）+ 溯源审计 ``_skills_consumed``。未绑定 / 无适用 skill → 两键皆不出现。
+    if skill_inject is not None:
+        payload["skills"] = skill_inject
+    if skill_audit is not None:
+        payload["_skills_consumed"] = skill_audit
+
     # P2 Context Engine：章节级相关性裁剪。默认开启，可在调用层 / 环境变量关闭。
     _apply_relevance_trim(
         payload,
@@ -377,6 +392,12 @@ def build_writer_input(
     ``<pack_id>@<version>`` 指纹；未绑定 → ``'__none__'``）。题材体的
     ``style_constraints`` 经 ``genre_style`` 子键进 payload，换包 / 换版本必须
     各自 miss，否则 writer 读到旧题材体例（与 director 键同形的 V3.9 批次 1B 教训）。
+
+    内部消费外部 skill（0032）：键再追加 ``skills_fp``（项目绑定 skill 集合的指纹，
+    **含 id 与 version**；未绑定 → ``'__none__'``）。skill 集合进 payload 的**独立
+    新段** ``skills`` ⇒ 必须进键（硬规则 2）：换 skill / 改 skill payload
+    （PUT ⇒ version 自增）/ 改绑定集合都必须 miss，否则 writer 拿着改之前的旧手艺
+    写正文。口径与 director 键逐字同形。
 
     ``namespace``（关键词参数，默认 ``""``）：键尾命名空间标记。``preview_context``
     传 ``"preview"`` 拆开 dry-run 与生产的键空间（预览默认 2200 字 / 空 scene），
@@ -469,20 +490,27 @@ def build_writer_input(
     # 同 state_version + 同 chapter_no 重跑 writer ⇒ 命中旧装配 ⇒ 连「本章该注入
     # 哪些角色」都停留在改计划之前（触发语料是 ``plan_json`` 拼出来的）。
     plan_fp = _fingerprint_plan_json(peek.get("plan_json_raw"))
+    # 内部消费外部 skill：项目绑定 skill 集合的指纹（**含 id 与 version**；未绑定 ⇒
+    # ``"__none__"``）。该集合进 payload 的**独立新段** ``skills`` ⇒ 必须进键
+    # （硬规则 2，与 director 键逐字同形）：换 skill / 改 skill payload（version
+    # 自增）/ 改绑定集合都必须 miss，否则 writer 拿着改之前的旧手艺写正文。
+    skills_fp = _fingerprint_skills(peek.get("skills_ref"))
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
         scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id,
         target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,
-        plan_fp, prompt_label, _cache_namespace_tag(namespace),
+        plan_fp, skills_fp, prompt_label, _cache_namespace_tag(namespace),
     )
-    # 不可序列化（scene_fp / intent_fp / bible_fp / chars_fp == 'uncached'）→ 跳过缓存，
-    # 避免不同原文落在同一占位键上互相脏命中（与 director 的 cacheable 判定同款）。
+    # 不可序列化（scene_fp / intent_fp / bible_fp / chars_fp / skills_fp == 'uncached'）
+    # → 跳过缓存，避免不同原文落在同一占位键上互相脏命中（与 director 的 cacheable
+    # 判定同款）。
     cacheable = (
         scene_fp != _FINGERPRINT_UNCACHED
         and intent_fp != _FINGERPRINT_UNCACHED
         and bible_fp != _FINGERPRINT_UNCACHED
         and chars_fp != _FINGERPRINT_UNCACHED
         and plan_fp != _FINGERPRINT_UNCACHED
+        and skills_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)

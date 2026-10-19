@@ -296,16 +296,16 @@ def test_critic_ok_report_in_pause_payload(tmp_path: Path):
             assert "review_report" in payload
             assert payload["review_report"]["chapter_id"] == cid
 
-            # ai_call_logs 出现 critic:v1 调用（status='ok'）
+            # ai_call_logs 出现 critic:v2 调用（status='ok'；2026-10-19 升版：skill 段到达 critic）
             conn = get_connection(app.state.settings.db_path)
             try:
                 rows = conn.execute(
                     "SELECT prompt_version FROM ai_call_logs WHERE prompt_version = ?",
-                    ("critic:v1",),
+                    ("critic:v2",),
                 ).fetchall()
             finally:
                 conn.close()
-            assert len(rows) >= 1, "ai_call_logs 缺少 critic:v1 调用记录"
+            assert len(rows) >= 1, "ai_call_logs 缺少 critic:v2 调用记录"
 
     asyncio.run(run())
 
@@ -462,7 +462,7 @@ async def _set_chapter_number(app, cid: str, number: int) -> None:
         conn.close()
 
 
-async def _count_critic_logs(app, prompt_version: str = "critic:v1") -> int:
+async def _count_critic_logs(app, prompt_version: str = "critic:v2") -> int:
     conn = get_connection(app.state.settings.db_path)
     try:
         row = conn.execute(

@@ -262,16 +262,16 @@ def test_scene_planner_ok_produces_structured_scene_plan(tmp_path: Path):
             body = r.json()
             body = await _wait_run_terminal(app, body["run_id"], expected=("COMPLETED",))
 
-            # 校验 ai_call_logs 有 scene_planner:v1 调用
+            # 校验 ai_call_logs 有 scene_planner:v2 调用（2026-10-19 升版：skill 段到达 scene_planner）
             conn = get_connection(app.state.settings.db_path)
             try:
                 row = conn.execute(
                     "SELECT COUNT(*) AS n FROM ai_call_logs WHERE prompt_version = ?",
-                    ("scene_planner:v1",),
+                    ("scene_planner:v2",),
                 ).fetchone()
             finally:
                 conn.close()
-            assert row["n"] == 1, "ai_call_logs 缺少 scene_planner:v1 调用记录"
+            assert row["n"] == 1, "ai_call_logs 缺少 scene_planner:v2 调用记录"
 
             # 校验 chapter 状态
             r = await _request(app, "GET", f"/api/chapters/{cid}")
@@ -374,7 +374,7 @@ def test_scene_planner_missing_mock_degrades_to_stub(tmp_path: Path):
             try:
                 row = conn.execute(
                     "SELECT COUNT(*) AS n FROM ai_call_logs WHERE prompt_version = ?",
-                    ("scene_planner:v1",),
+                    ("scene_planner:v2",),
                 ).fetchone()
             finally:
                 conn.close()

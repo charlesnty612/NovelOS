@@ -78,8 +78,8 @@ def test_default_migrations_dir_anchored_when_cwd_is_elsewhere(tmp_path: Path) -
         f"异 CWD 启动应跑完全部 {expected} 个迁移，实际 applied={payload['applied']}；"
         f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     )
-    # 业务表 39（总数 40 = 39 + _migrations）——迁移真执行过
-    assert payload["tables"] == 40, payload
+    # 业务表 41（总数 42 = 41 + _migrations）——迁移真执行过
+    assert payload["tables"] == 42, payload
 
 
 def test_apply_migrations_warns_when_dir_missing(tmp_path: Path, caplog) -> None:

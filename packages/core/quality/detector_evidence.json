@@ -1,0 +1,1516 @@
+{
+  "schema_version": "1.0.0",
+  "table_id": "novelos.detector_evidence",
+  "generated_for": "人工维护的检测器效果证据表（human-maintained evidence table）。**不是自动生成的产物**——没有任何脚本会写这个文件；它的内容靠人手维护，由 scripts/detector_evidence_check.py **只读**地与代码里的实际值比对。",
+  "generated_by": "packages/core/quality/detector_evidence.json（人工维护，无生成器）",
+  "last_reviewed": "2026-10-20",
+  "maintainer_contract": [
+    "① 改任何检测器的阈值 / 词表 / 正则 / severity ⇒ **必须**同时改本表对应条目，否则 scripts/detector_evidence_check.py 退出码 1（漂移）并在输出里点名。",
+    "② 本表**不复制**「定阈依据」的论证正文，只存 `basis_ref`（权威出处指针）+ 一句 `basis_summary`（人写摘要）。复制论证正文等于制造第二份要同步的文本——那正是本表要治的病。",
+    "③ `human_side` / `generated_side` 里的数字**无法由代码验证**（需要语料复算），看守脚本只核 `code_refs` / `word_lists` / `regexes` / `probes` 四类机器可判项。数字本身的真伪靠 `recompute_entry` 指向的复算入口人工重算。",
+    "④ 没有实测数字的规则**一律写 null + evidence_status=missing**，不许从注释里「看起来像数字」的片段硬抠。"
+  ],
+  "status_vocabulary": {
+    "measured": "人类侧与生成侧两侧都有实测数字（两侧皆 0 也算 measured，但须在 notes 里说明「机会数为 0」与「测出来是 0」的差别）。",
+    "partial": "只有一侧有数字，或两侧数字的语料标识/口径不全。",
+    "missing": "本仓没有任何实测数字 ⇒ 数字字段一律 null。",
+    "deprecated": "该算子已废弃、从未发货（不在 AI_PATTERN_RULES 内）。"
+  },
+  "corpora": {
+    "houfu_human_19ch": {
+      "label": "文风锚点书榜一《快穿之人渣洗白手册》侯府弧",
+      "kind": "human",
+      "chapters": 19,
+      "visible_chars": 37806,
+      "raw_chars": 38566,
+      "note": "visible_chars 与 raw_chars 是两个口径（37,806 = 去空白可见字；38,566 = 原始字符数），不是矛盾数字。",
+      "location": "NovelOS-Content: reference-books/榜一-快穿之人渣洗白手册/侯府凤凰男/*.txt（内容仓，只读；正文按三仓分离不进软件仓）",
+      "collected_on": "2026-09-16 ~ 2026-10-15"
+    },
+    "dev_db_92ch": {
+      "label": "本库 8 项目全部最新草稿（生成侧）",
+      "kind": "generated",
+      "chapters": 92,
+      "visible_chars": 263347,
+      "location": "data/novelos.db（dev 库，只读）",
+      "collected_on": "2026-09-18"
+    },
+    "dev_db_97ch": {
+      "label": "dev 库全库各章最新版（生成侧）",
+      "kind": "generated",
+      "chapters": 97,
+      "visible_chars": 276500,
+      "location": "data/novelos.db（dev 库，只读）",
+      "collected_on": "2026-10-15"
+    },
+    "book01_48ch": {
+      "label": "新书 01（prj_bcb9d1930bd4）全弧",
+      "kind": "generated",
+      "chapters": 48,
+      "visible_chars": 122350,
+      "note": "**字数口径冲突**：短段族记 125,024 可见字（2026-09-27），可读性族记 122,350 可见字（2026-09-17）。两次采集时点不同、快照不同，两处都如实保留，不合并。",
+      "location": "data/novelos.db（dev 库，只读）",
+      "collected_on": "2026-09-17 / 2026-09-27"
+    },
+    "book01_short_para_48ch": {
+      "label": "新书 01（prj_bcb9d1930bd4）全弧——短段族口径",
+      "kind": "generated",
+      "chapters": 48,
+      "visible_chars": 125024,
+      "location": "data/novelos.db（dev 库，只读）",
+      "collected_on": "2026-09-27"
+    },
+    "book01_arc_48ch": {
+      "label": "新书 01 全弧（破折号口径）",
+      "kind": "generated",
+      "chapters": 48,
+      "visible_chars": 63625,
+      "location": "data/novelos.db（dev 库，只读）",
+      "collected_on": "2026-09-16"
+    },
+    "external_batch_33ch": {
+      "label": "外部对照研究移植批次的生成侧语料",
+      "kind": "generated",
+      "chapters": 33,
+      "visible_chars": 87599,
+      "location": "data/novelos.db（dev 库，只读）",
+      "collected_on": "2026-09-15"
+    },
+    "human_sample_4": {
+      "label": "author_style_samples（明确标注的人类原文节选）",
+      "kind": "human",
+      "chapters": 4,
+      "visible_chars": 9029,
+      "location": "data/novelos.db（dev 库，只读）",
+      "collected_on": "2026-09-18"
+    },
+    "human_sample_1_batch": {
+      "label": "外部研究移植批次的人类样章",
+      "kind": "human",
+      "chapters": 1,
+      "visible_chars": 4843,
+      "location": "data/novelos.db（dev 库，只读）",
+      "collected_on": "2026-09-15"
+    }
+  },
+  "rules": [
+    {
+      "rule_id": "AI-FORBIDDEN-WORD",
+      "name": "AI 高频套话/禁用词命中（两层制）",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "partial",
+      "threshold_summary": "硬套话层命中即报；弱词层同章堆积才报（单词 ≥3 次 或 本层合计 ≥6 次）；总命中 ≥10 ⇒ severity 升 error。",
+      "human_side": {
+        "corpus": "human_sample_1_batch",
+        "hits": null,
+        "rate_per_1k": null,
+        "per_word_rates": {
+          "忽然": 0.2,
+          "好像": 0.2
+        },
+        "note": "19 个词里 15 个两侧都近乎零命中；本仓只留下 2 个词的人侧速率。"
+      },
+      "generated_side": {
+        "corpus": "external_batch_33ch",
+        "hits": null,
+        "rate_per_1k": null,
+        "per_word_rates": {
+          "忽然": 0.24,
+          "突然": 0.19
+        },
+        "note": "R(忽然)=1.18（无区分力）；R(突然)=∞（人侧 0）。改造前「命中即报」时代 67% 的章节被报——那是噪声淹没信号的证据，不是阈值依据。",
+        "chapter_hit_rate": {
+          "before_two_tier_split": 0.67,
+          "after_two_tier_split": 0.14,
+          "after_split_detail": "书1 3/21 章 · 书2 3/12 章",
+          "note": "章节命中率而非词频：两层制把「命中即报」的一表拆成两层后，噪声从 67% 降到 14%。"
+        }
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-09-15",
+        "recompute_entry": "scripts/ai_tone_calibrate.py",
+        "basis_ref": "packages/core/quality/ai_patterns_sentence.py:24-67"
+      },
+      "code_refs": [
+        {
+          "name": "_WEAK_WORD_PER_WORD_LIMIT",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "_WEAK_WORD_PER_WORD_LIMIT",
+          "kind": "value",
+          "value": 3,
+          "basis_ref": "packages/core/quality/ai_patterns_sentence.py:66",
+          "basis_summary": "弱词层「单词堆积」门：同章同一弱词 ≥3 次才报警（命中即报会把 67% 章节判成异常）。"
+        },
+        {
+          "name": "_WEAK_WORD_TOTAL_LIMIT",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "_WEAK_WORD_TOTAL_LIMIT",
+          "kind": "value",
+          "value": 6,
+          "basis_ref": "packages/core/quality/ai_patterns_sentence.py:67",
+          "basis_summary": "弱词层「本层合计堆积」门：合计 ≥6 次才报警。"
+        },
+        {
+          "name": "_SEVERITY_UPGRADE_LIMITS[AI-FORBIDDEN-WORD]",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "_SEVERITY_UPGRADE_LIMITS",
+          "key": "AI-FORBIDDEN-WORD",
+          "kind": "dict_item",
+          "value": 10,
+          "basis_ref": "packages/core/quality/ai_patterns_sentence.py:115-120",
+          "basis_summary": "总命中数 ≥10 ⇒ severity 由 warning 升 error。"
+        }
+      ],
+      "word_lists": [
+        {
+          "name": "AI_PATTERN_HARD_CLICHES",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "AI_PATTERN_HARD_CLICHES",
+          "count": 8,
+          "sha256": "1a86e3a6d4af8e8e3eecda5eaa674c9c2c3c5b788ae336b7d85c7fff85f3fa47",
+          "kind": "list"
+        },
+        {
+          "name": "AI_PATTERN_WEAK_WORDS",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "AI_PATTERN_WEAK_WORDS",
+          "count": 10,
+          "sha256": "e1a925548937c010df53e14345f2affc085802ad2b4ff943b303e395cc8542d3",
+          "kind": "list"
+        },
+        {
+          "name": "AI_PATTERN_FORBIDDEN_WORDS",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "AI_PATTERN_FORBIDDEN_WORDS",
+          "count": 18,
+          "sha256": "0ac19c9434ef4b6f443f2ced91b77ded33e6bc50b861f402815c5f80348da1ab",
+          "kind": "list"
+        }
+      ],
+      "known_false_positives": [
+        "「忽然」「好像」「不禁」等是中文小说的正常用词——两层制之前它们撑起几乎全部噪声（章节命中率 67%）。"
+      ],
+      "known_dead_rules": [],
+      "conflicts": [],
+      "probes": [
+        {
+          "expect_hit": true,
+          "text": "他忽然停下。风从窗缝里挤进来。他忽然又停下。屋里安静得能听见瓦响。他忽然回头看了一眼。",
+          "why": "弱词「忽然」同章 3 次 ⇒ 应触发堆积门（若 _WEAK_WORD_PER_WORD_LIMIT 被改成 >3 或比较符被写成 >，此探针必红）。"
+        },
+        {
+          "expect_hit": false,
+          "text": "他忽然停下。风从窗缝里挤进来。他抬头看了看梁上的灰。屋里安静得能听见瓦响。他慢慢坐回原处。",
+          "why": "「忽然」只 1 次、其余词表零命中 ⇒ 不应触发（守护「弱词层不命中即报」这条纪律本身没被拆掉）。"
+        }
+      ]
+    },
+    {
+      "rule_id": "AI-TRIPLET-OPENING",
+      "name": "连续 3 句以相同两字词开头",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "missing",
+      "threshold_summary": "同开头 run ≥3 句即报（阈值 **3 是内联字面量**，没有命名常量 ⇒ 由行为探针看守）；run ≥5 ⇒ severity 升 error。",
+      "human_side": null,
+      "generated_side": null,
+      "separation": null,
+      "source": {
+        "collected_on": null,
+        "recompute_entry": "scripts/ai_tone_calibrate.py",
+        "basis_ref": "packages/core/quality/ai_patterns_sentence.py:192-227"
+      },
+      "code_refs": [
+        {
+          "name": "_SEVERITY_UPGRADE_LIMITS[AI-TRIPLET-OPENING]",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "_SEVERITY_UPGRADE_LIMITS",
+          "key": "AI-TRIPLET-OPENING",
+          "kind": "dict_item",
+          "value": 5,
+          "basis_ref": "packages/core/quality/ai_patterns_sentence.py:115-120",
+          "basis_summary": "run 长度 ≥5 ⇒ severity 由 warning 升 error。"
+        }
+      ],
+      "word_lists": [],
+      "regexes": [],
+      "known_false_positives": [],
+      "known_dead_rules": [],
+      "conflicts": [
+        "本规则**没有任何人类侧/生成侧实测分布**——两侧数字均为 null（evidence_status=missing）。待办：跑 scripts/ai_tone_calibrate.py 补两侧分布与 R。"
+      ],
+      "probes": [
+        {
+          "expect_hit": true,
+          "text": "月光洒在窗台上。月光落了一地。月光把人影拉得很长。",
+          "why": "三句以「月光」开头 ⇒ 应命中（内联阈值 3 改成 4 或改成 > 时本探针必红）。"
+        },
+        {
+          "expect_hit": false,
+          "text": "月光洒在窗台上。夜风穿过回廊。月光落了一地。更鼓敲过三响。",
+          "why": "最长同开头 run = 2 ⇒ 不应命中（防止「阈值改成 2」这类放宽被放过）。"
+        }
+      ]
+    },
+    {
+      "rule_id": "AI-PRONOUN-PILE",
+      "name": "「他/她」主语排比堆砌",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "missing",
+      "threshold_summary": "同 run ≥3 句以「他/她」开头即报（阈值 **3 是内联字面量** ⇒ 由行为探针看守）；run ≥5 ⇒ severity 升 error。",
+      "human_side": null,
+      "generated_side": null,
+      "separation": null,
+      "source": {
+        "collected_on": null,
+        "recompute_entry": "scripts/ai_tone_calibrate.py",
+        "basis_ref": "packages/core/quality/ai_patterns_sentence.py:231-260"
+      },
+      "code_refs": [
+        {
+          "name": "_SEVERITY_UPGRADE_LIMITS[AI-PRONOUN-PILE]",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "_SEVERITY_UPGRADE_LIMITS",
+          "key": "AI-PRONOUN-PILE",
+          "kind": "dict_item",
+          "value": 5,
+          "basis_ref": "packages/core/quality/ai_patterns_sentence.py:115-120",
+          "basis_summary": "run 长度 ≥5 ⇒ severity 由 warning 升 error。"
+        }
+      ],
+      "word_lists": [],
+      "regexes": [
+        {
+          "name": "_PRONOUN_START_RE",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "_PRONOUN_START_RE",
+          "sha256": "c4f3b938a766bc8c49299ee0255201e4a9c59a8c170a68a87fafdc2f06016e06",
+          "kind": "regex"
+        }
+      ],
+      "known_false_positives": [],
+      "known_dead_rules": [],
+      "conflicts": [
+        "本规则**没有任何人类侧/生成侧实测分布**——两侧数字均为 null（evidence_status=missing）。"
+      ],
+      "probes": [
+        {
+          "expect_hit": true,
+          "text": "他推开门。他没有说话。他慢慢坐了下来。",
+          "why": "三句以「他」开头 ⇒ 应命中（内联阈值 3 被改时本探针必红）。"
+        },
+        {
+          "expect_hit": false,
+          "text": "他推开门。夜风穿过回廊。他没有说话。更鼓敲过三响。",
+          "why": "最长 run = 2 ⇒ 不应命中。"
+        }
+      ]
+    },
+    {
+      "rule_id": "AI-ENDING-SUMMARY",
+      "name": "章尾总结/升华体套话",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "**无阈值**（二元判定）：末段含 12 条短语任一条即 warning。实测两侧皆 0 ⇒ 分位数为 0，「人类侧上沿 < warn < 生成侧上沿」无解 ⇒ 任何非零阈值都是凭空造的数。",
+      "human_side": {
+        "corpus": "houfu_human_19ch",
+        "hits": 0,
+        "rate_per_1k": 0.0,
+        "chapters_with_hits": 0,
+        "chapters_total": 19,
+        "note": "12 条短语在人类 19 章**全章零出现**（不只是末段）⇒ 机会数存在、命中为 0 是「真没有」不是「测不到」。阳性对照：合成末段含短语时算子照常命中。同一批修复还实测：收敛后算子在人类 19 章上**能看见 27~68 段**（量具动得了）。",
+        "last_paragraph_length": {
+          "old_split_blank_line": {
+            "sum": 38566,
+            "mean": 2029.8,
+            "min": 1319,
+            "max": 2940
+          },
+          "converged_split_newline": {
+            "sum": 787,
+            "mean": 41.4,
+            "min": 9,
+            "max": 104
+          },
+          "note": "旧口径把整章当「末段」在扫（人类语料一行一段，\n\n 总数=0）⇒「末段」比整章可见字还长（比值下界 1.0163 > 1）。收敛后为真末段（比值上界 0.0533）。同一批修复在 tests/unit/quality/test_ai_ending_summary_paragraph.py 有完整表。"
+        }
+      },
+      "generated_side": {
+        "corpus": "dev_db_97ch",
+        "hits": 0,
+        "rate_per_1k": 0.0,
+        "chapters_with_hits": 0,
+        "chapters_total": 97,
+        "note": "97 章合计只出现 1 次（「这一刻」，且不在末段）⇒ 被正确口径拒之。段切分口径 2026-10-15 由「按空行」收敛到「\\n+」（旧口径在人类一行一段语料上把整章当末段扫，末段均值 2030 字；收敛后 41 字）。"
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-10-15",
+        "recompute_entry": "scripts/ai_tone_calibrate.py",
+        "basis_ref": "packages/core/quality/ai_patterns.py:173-186, 330-371"
+      },
+      "code_refs": [],
+      "word_lists": [
+        {
+          "name": "_AI_ENDING_SUMMARY_PHRASES",
+          "module": "packages.core.quality.ai_patterns",
+          "attr": "_AI_ENDING_SUMMARY_PHRASES",
+          "count": 12,
+          "sha256": "3cc1e4b924d6fbde9cc920d0950785977eb47b1c742636687f46f742e00334e0",
+          "kind": "list"
+        }
+      ],
+      "regexes": [],
+      "known_false_positives": [],
+      "known_dead_rules": [
+        "**真实语料上从不触发（死规则）**：人类 19 章 + 生成侧 97 章合计 0 命中。阳性对照证明算子本身能匹配，故 0 是「真没有」不是「测不到」。若将来任一语料出现命中，须同时重测两条分布再谈定阈值，不得只改阈值。"
+      ],
+      "conflicts": [],
+      "probes": [
+        {
+          "expect_hit": true,
+          "text": "他关上门。\n\n雨停了。从此以后，再没人提起那件事。",
+          "why": "末段含「从此以后」⇒ 应命中（末段口径若被改回按空行/整章扫，本探针仍应命中；改短语表则必红）。"
+        },
+        {
+          "expect_hit": false,
+          "text": "他关上门。\n\n雨停了。巷子里的水顺着墙根流下去。",
+          "why": "末段无套话短语 ⇒ 不应命中（守护「短语表没有被放宽成子串匹配」）。"
+        }
+      ]
+    },
+    {
+      "rule_id": "AI-PUNCT-ABUSE",
+      "name": "破折号/省略号滥用",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "每千字「——」或「……」出现数 > 1.0 处报 warning；≥ 2× 阈值（2.0）直接报 error。阈值沿革：6（初版，死规则——本仓实测 max 4.73 都够不到）→ 3.5（2026-09-15，本仓旧语料 p85）→ **1.0**（2026-09-16，按人类基线收紧）。",
+      "human_side": {
+        "corpus": "houfu_human_19ch",
+        "hits": null,
+        "rate_per_1k": 0.19,
+        "chapters_total": 19,
+        "note": "榜一侯府弧 19 章 / 37806 可见字。"
+      },
+      "generated_side": {
+        "corpus": "book01_arc_48ch",
+        "hits": null,
+        "rate_per_1k": 1.73,
+        "chapters_total": 48,
+        "note": "新书 01 全弧 63625 可见字，R=9.34。另一批口径（33 章 / 87599 字）测得 R=2.83（来源研究值 3.0）。",
+        "old_corpus_distribution": {
+          "corpus": "本仓旧语料（2026-09-15）",
+          "mean_per_1k": 2.33,
+          "p90_per_1k": 3.89,
+          "max_per_1k": 4.73,
+          "note": "这组数字是「初版阈值 6 是死规则」的依据：本仓实测 max 4.73 都够不到 6，连自家分布的上沿都触发不了。"
+        }
+      },
+      "separation": 9.34,
+      "source": {
+        "collected_on": "2026-09-16",
+        "recompute_entry": "scripts/ai_tone_calibrate.py",
+        "basis_ref": "packages/core/quality/ai_patterns_sentence.py:82-92"
+      },
+      "code_refs": [
+        {
+          "name": "DEFAULT_DASH_THRESHOLD_PER_1K",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "DEFAULT_DASH_THRESHOLD_PER_1K",
+          "kind": "value",
+          "value": 1.0,
+          "basis_ref": "packages/core/quality/ai_patterns_sentence.py:82-92",
+          "basis_summary": "人类 0.19/千字 ×5 ≈ 0.95 → 取 1.0：对榜一留约 5 倍宽容，对生成侧 1.73 立即报警。3.5 落在两侧之外（连自家均值都够不到）＝死规则。"
+        }
+      ],
+      "word_lists": [],
+      "regexes": [
+        {
+          "name": "_DASH_OR_ELLIPSIS_RE",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "_DASH_OR_ELLIPSIS_RE",
+          "sha256": "19b3977428faf3ca46df2611ea4fdd8e393682be74f1344a50c672d3ed3913a5",
+          "kind": "regex"
+        }
+      ],
+      "known_false_positives": [],
+      "known_dead_rules": [
+        "**初版阈值 6 曾是死规则**：本仓旧语料实测 mean 2.33 / p90 3.89 / **max 4.73** 每千字——连自家分布上沿都够不到 6，落在实测分布之外 ⇒ 永不触发。2026-09-15 降到 3.5（p85），2026-09-16 再降到 1.0（按人类基线）。"
+      ],
+      "conflicts": [],
+      "probes": []
+    },
+    {
+      "rule_id": "AI-EXPLAIN-TONE",
+      "name": "解释腔高密度",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "missing",
+      "threshold_summary": "二元判定（8 条解释连接词/句式任一命中即报）；命中总数 ≥5 ⇒ severity 升 error。",
+      "human_side": null,
+      "generated_side": null,
+      "separation": null,
+      "source": {
+        "collected_on": null,
+        "recompute_entry": "scripts/ai_tone_calibrate.py",
+        "basis_ref": "packages/core/quality/ai_patterns_sentence.py:69-80, 288-311"
+      },
+      "code_refs": [
+        {
+          "name": "_SEVERITY_UPGRADE_LIMITS[AI-EXPLAIN-TONE]",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "_SEVERITY_UPGRADE_LIMITS",
+          "key": "AI-EXPLAIN-TONE",
+          "kind": "dict_item",
+          "value": 5,
+          "basis_ref": "packages/core/quality/ai_patterns_sentence.py:115-120",
+          "basis_summary": "命中总数 ≥5 ⇒ severity 由 warning 升 error。"
+        }
+      ],
+      "word_lists": [
+        {
+          "name": "_AI_EXPLAIN_PATTERNS",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "_AI_EXPLAIN_PATTERNS",
+          "count": 8,
+          "sha256": "b794f775ff96329acd054e76422aaabd077b261215ee8a0105e0c5fa91f1c43b",
+          "note": "元素是 (regex, 标签) 二元组；指纹只对 regex 串取（标签仅用于展示）。",
+          "kind": "list_first"
+        }
+      ],
+      "regexes": [],
+      "known_false_positives": [],
+      "known_dead_rules": [],
+      "conflicts": [
+        "本规则**没有任何人类侧/生成侧实测分布**——两侧数字均为 null（evidence_status=missing）。"
+      ],
+      "probes": [
+        {
+          "expect_hit": true,
+          "text": "他来得迟。换句话说，事情已经定了。",
+          "why": "命中「换句话说」⇒ 应命中（解释连接词表被改动时必红）。"
+        },
+        {
+          "expect_hit": false,
+          "text": "他来得迟。事情已经定了，谁也改不了。",
+          "why": "无解释连接词 ⇒ 不应命中。"
+        }
+      ]
+    },
+    {
+      "rule_id": "AI-CONTRAST-PAIR",
+      "name": "对举结构「不是……而是……」密度偏高",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "partial",
+      "threshold_summary": "每千字命中数 > 1.5 处报 warning（无 error 档）。阈值 ≈ 本仓实测生成侧 0.76/千字 的两倍。",
+      "human_side": {
+        "corpus": "human_sample_1_batch",
+        "hits": null,
+        "rate_per_1k": 0.22,
+        "chapters_total": 1,
+        "note": "**三处人侧数字互不相同**：0.22/千字（ai_patterns_sentence.py:110 常量注释，语料=人类样章 4843 字）· 0.12/千字（tests/unit/quality/test_ai_patterns.py::test_contrast_pair_quiet_when_sparse docstring）· 0.00/千字（docs/roadmap/v3.9 F-12，2026-09-16 榜一侯府弧 19 章口径）。本表如实并列三值，不裁决。",
+        "rate_per_1k_alternatives": [
+          0.22,
+          0.12,
+          0.0
+        ]
+      },
+      "generated_side": {
+        "corpus": "external_batch_33ch",
+        "hits": null,
+        "rate_per_1k": 0.76,
+        "chapters_total": 33,
+        "note": "0.76/千字（33 章 / 87599 字，2026-09-15 移植批次）· 0.90/千字（新书 01 前 24 章 / 63625 字，2026-09-16）。来源研究值 0.73/千字、研究 R=3.4（研究值非本仓值）。",
+        "rate_per_1k_alternatives": [
+          0.76,
+          0.9
+        ]
+      },
+      "separation": 6.63,
+      "source": {
+        "collected_on": "2026-09-15 / 2026-09-16",
+        "recompute_entry": "scripts/ai_tone_calibrate.py",
+        "basis_ref": "packages/core/quality/ai_patterns_sentence.py:110-112"
+      },
+      "code_refs": [
+        {
+          "name": "DEFAULT_CONTRAST_PAIR_RATE_PER_1K",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "DEFAULT_CONTRAST_PAIR_RATE_PER_1K",
+          "kind": "value",
+          "value": 1.5,
+          "basis_ref": "packages/core/quality/ai_patterns_sentence.py:110-112",
+          "basis_summary": "人类侧亦有该结构（0.22/千字）⇒ 按密度报警而非单例判定；阈值取本仓实测生成侧 0.76 的约两倍。"
+        }
+      ],
+      "word_lists": [],
+      "regexes": [
+        {
+          "name": "_CONTRAST_PAIR_RE",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "_CONTRAST_PAIR_RE",
+          "sha256": "83afb39100fb96dc0e8465bc2eee97eade6a5d0c68f4ccacceda4e520cde9fdf",
+          "kind": "regex"
+        }
+      ],
+      "known_false_positives": [],
+      "known_dead_rules": [],
+      "conflicts": [
+        "人侧密度三值并存：0.22（常量注释）/ 0.12（测试 docstring）/ 0.00（roadmap F-12）——待裁决（需重跑复算入口）。",
+        "R 值口径冲突：CHANGELOG 2026-09-15 记「对举 R=6.63」（33 章 87599 字 vs 3 篇 8665 字），与常量注释的 R=3.4（=0.76/0.22）不是同一对数字。",
+        "本仓两代测量（0.76 与 0.90）差 18%，语料不同（33 章 vs 24 章）。"
+      ],
+      "probes": []
+    },
+    {
+      "rule_id": "AI-SHORT-PARA",
+      "name": "短句独立成段（节拍器式行文）",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "每千字短段数 > 1.0 处报 warning（无 error 档）。阈值沿革：7.5（初版）→ 5.5（2026-09-15，本仓**旧语料**逐章 p90）→ 1.0（2026-09-16）→ **1.0 不动**（2026-09-27 复核：改的是论证链不是阈值）。",
+      "human_side": {
+        "corpus": "houfu_human_19ch",
+        "hits": 8,
+        "rate_per_1k": 0.212,
+        "chapters_with_hits": 6,
+        "chapters_over_threshold": 1,
+        "chapters_total": 19,
+        "prose_only": {
+          "hits": 5,
+          "rate_per_1k": 0.132,
+          "chapters_over_threshold": 0
+        },
+        "note": "8 条命中逐条分类：散文 5 / 分隔线 2 / 平台标记 1；唯一超阈的 ch19（rate 2.29）完全由 3 条非散文行造成。纯排版件/平台标记的排除规则**尚未实现**（登记为待办）。旧登记的「人类 0.00/千字」是「\\n\\n 切分」造成的量具假象，2026-09-27 已订正。"
+      },
+      "generated_side": {
+        "corpus": "book01_short_para_48ch",
+        "hits": 260,
+        "rate_per_1k": 2.08,
+        "chapters_over_threshold": 34,
+        "chapters_total": 48,
+        "note": "**三个值并存（2026-10-20 批次十三已裁决前两个）**：260 命中 / 2.080（ai_patterns_paragraph.py 常量注释 + ai_patterns.py 规则 description）· 258 命中 / 2.064（tests/unit/quality/test_human_baseline_ai_thresholds.py 的 GENERATED_SHORT_PARA_PER_1K，**已订正为 2.080**）· 2.62（2026-09-16 首测，24 章 / 63625 字口径——**不同语料**，不是同一量的另一个值）。裁决依据（未复算）：说话人行守卫的宽度在 2026-09-27 被对抗审查打回后从 {1,6} 收窄到 {1,3} ⇒ 2 段被误豁免的文本回到命中 ⇒ 生成侧 258 → 260（ai_patterns_paragraph.py :111 / :117 明写「收窄后这 2 段回到命中」）⇒ 260 / 2.080 是**当前代码口径下的终值**，258 / 2.064 是收窄前的状态。⚠️ 裁决未依赖任何复算（AGENTS §一 硬约束 1 禁止指向 dev 库既有项目复算）；判据是「常量描述的是检测器当前行为，而检测器行为已变」。⚠️ 历史留痕不动：CHANGELOG 2026-09-27 条目记的「257 → 260 → 258 命中 / 2.064」是收窄前的记录。",
+        "rate_per_1k_alternatives": [
+          2.08,
+          2.064,
+          2.62
+        ]
+      },
+      "separation": 9.8,
+      "source": {
+        "collected_on": "2026-09-16 ~ 2026-09-27",
+        "recompute_entry": "scripts/ai_tone_calibrate.py",
+        "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:21-53"
+      },
+      "code_refs": [
+        {
+          "name": "DEFAULT_SHORT_PARA_RATE_PER_1K",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_SHORT_PARA_RATE_PER_1K",
+          "kind": "value",
+          "value": 1.0,
+          "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:21-53",
+          "basis_summary": "人类侧 0.212/千字（×5 宽容上限 ≈1.06）与生成侧 2.080/千字之间取 1.0；分离度 9.8×。"
+        },
+        {
+          "name": "_PARA_OPENER_MAX_CHARS",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "_PARA_OPENER_MAX_CHARS",
+          "kind": "value",
+          "value": 12,
+          "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:128",
+          "basis_summary": "「短段」窗口：整段可见字 ≤12 字才算短句独立成段（≤12 字窗口内真信号与合法写法字面同构，除说话人行外不做豁免）。"
+        },
+        {
+          "name": "_MIN_PROSE_CHARS_FOR_DENSITY",
+          "module": "packages.core.quality.ai_patterns_text",
+          "attr": "_MIN_PROSE_CHARS_FOR_DENSITY",
+          "kind": "value",
+          "value": 200,
+          "basis_ref": "packages/core/quality/ai_patterns_text.py:50-52",
+          "basis_summary": "密度类算子的最小判定正文长度（几十字的片段算密度没有统计意义）。"
+        }
+      ],
+      "word_lists": [],
+      "regexes": [
+        {
+          "name": "_ANAPHORA_RE",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "_ANAPHORA_RE",
+          "sha256": "2c0a744412d4fa05031335508548c36e5f0f0385f8914cf874af5b7c9bbef981",
+          "kind": "regex"
+        },
+        {
+          "name": "_DIALOGUE_START_RE",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "_DIALOGUE_START_RE",
+          "sha256": "daf367f757bab462b5efc76f34d2f2fc17a42d307e943a323a754166e316899c",
+          "kind": "regex"
+        },
+        {
+          "name": "_SPEAKER_LINE_RE",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "_SPEAKER_LINE_RE",
+          "sha256": "17b203ab8f8fc9e660873b2ec8f2ad5f052fa1127671634a1c4553283a48181c",
+          "kind": "regex"
+        },
+        {
+          "name": "_PERSONAL_START_RE",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "_PERSONAL_START_RE",
+          "sha256": "9c04c10d054474a750ea881943791d56eabf6aeb35dac14d3e4e508c23c4f9cc",
+          "kind": "regex"
+        }
+      ],
+      "known_false_positives": [
+        "说话人行守卫 `_SPEAKER_LINE_RE` 只替掉 2 处人类命中（1 处人名说话人行 + 1 处字段行）；分支②分不清「人名行」与「常见名词标签行」（字面同构，两侧语料生成侧 0 例）。"
+      ],
+      "known_dead_rules": [],
+      "conflicts": [
+        "生成侧 260 命中 / 2.080（常量注释 + 规则 description）vs 258 命中 / 2.064（测试常量）——**2026-10-20 批次十三已裁决并订正**：说话人行守卫宽度收窄（{1,6} → {1,3}）后 2 段回到命中 ⇒ 260 / 2.080 是当前代码口径下的终值；测试常量已改为 2.080（未复算，理由见本条 generated_side.note）。"
+      ],
+      "probes": []
+    },
+    {
+      "rule_id": "AI-ANTHRO-VEHICLE",
+      "name": "拟人化喻体（职业/角色类）",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "同章命中 ≥3 处才报（无 error 档）——单例不判，因为正则分不出「理想化职业人格」（生成侧）与「具体个人」（人类侧）。",
+      "human_side": {
+        "corpus": null,
+        "hits": 0,
+        "rate_per_1k": 0.0,
+        "note": "本仓生成侧与人类侧均零命中 ⇒ 无数据可校（休眠守卫）。"
+      },
+      "generated_side": {
+        "corpus": null,
+        "hits": 0,
+        "rate_per_1k": 0.0,
+        "note": "同上。来源研究称 R=7.3（理想化职业人格作喻体），但那不是本仓实测。"
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-09-15",
+        "recompute_entry": "scripts/ai_tone_calibrate.py",
+        "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:55-59"
+      },
+      "code_refs": [
+        {
+          "name": "DEFAULT_ANTHRO_VEHICLE_MIN_COUNT",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_ANTHRO_VEHICLE_MIN_COUNT",
+          "kind": "value",
+          "value": 3,
+          "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:55-59",
+          "basis_summary": "仅按同章出现次数报警、不做单例判定（两侧字面同形，无区分力可依）。"
+        }
+      ],
+      "word_lists": [
+        {
+          "name": "_ANTHRO_ROLE_WORDS",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "_ANTHRO_ROLE_WORDS",
+          "count": 145,
+          "sha256": "fcab769ec5ef4ad151cb4987fc87b3844806ac58f4fa01baa34a1444eec11f89",
+          "note": "该常量是**一个正则片段字符串**（不是 list），count = 字符数；指纹按整串 sha256 取。",
+          "kind": "str"
+        }
+      ],
+      "regexes": [
+        {
+          "name": "_ANTHRO_VEHICLE_RE",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "_ANTHRO_VEHICLE_RE",
+          "sha256": "93ad4464d982d2e217441cd491b70b3b598a41e74b9dfb52ae42cccea2344934",
+          "kind": "regex"
+        }
+      ],
+      "known_false_positives": [],
+      "known_dead_rules": [],
+      "conflicts": [
+        "两侧皆零命中 ⇒ **无法定阈**（0 ⇒ 阈值不变式无解）。当前阈值 3 是**堆积门**（照弱词层/长段先例），不是分布标定值。"
+      ],
+      "probes": [
+        {
+          "expect_hit": true,
+          "text": "他像一位老师那样站着。她像一名工匠那样低着头。他像一位老师那样笑了一下。",
+          "why": "同章 3 处职业类喻体 ⇒ 应命中（min_count 被改小时本探针必红）。"
+        },
+        {
+          "expect_hit": false,
+          "text": "他像一位老师那样站着。她像一名工匠那样低着头。",
+          "why": "只有 2 处 ⇒ 不应命中（守护「单例不判」这条纪律）。"
+        }
+      ]
+    },
+    {
+      "rule_id": "AI-LONG-PARA",
+      "name": "长段堆积",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "单段可见字 >100 计入长段；单章长段数 ≥2 ⇒ warning；**任一段 >140 ⇒ 直接 error**（单段即报）。可见字 <600 的片段不判。",
+      "human_side": {
+        "corpus": "houfu_human_19ch",
+        "paragraphs_over_100": 7,
+        "paragraphs_over_140": 0,
+        "paragraphs_total": 779,
+        "max_paragraph_chars": 135,
+        "chapters_over_threshold": 7,
+        "chapters_total": 19,
+        "note": "人类基线每章至多 1 段超 100 字（7/19 章各 1 段）——单段超长是正常写作，故 warning 要求「单章 ≥2 段」。",
+        "avg_paragraph_chars": 48.5,
+        "paragraphs_over_120": 2
+      },
+      "generated_side": {
+        "corpus": "book01_48ch",
+        "paragraphs_over_100": 133,
+        "paragraphs_over_140": 16,
+        "paragraphs_total": 3061,
+        "max_paragraph_chars": 212,
+        "chapters_over_threshold": null,
+        "note": "最多 9 段/章（ch30）。>120 字段落：我们 46 段 vs 榜一 2 段（779 段的 0.26%）。⚠️ 阈值 140 距人类最大段长 135 只剩 5 字余量（登记的遗留项）。",
+        "paragraphs_over_120": 46
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-09-17",
+        "recompute_entry": "scripts/readability_audit.py",
+        "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:68-91"
+      },
+      "code_refs": [
+        {
+          "name": "DEFAULT_LONG_PARA_WARN_CHARS",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_LONG_PARA_WARN_CHARS",
+          "kind": "value",
+          "value": 100,
+          "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:84-91",
+          "basis_summary": "「一段 5~6 行实心字」是手机阅读头号杀手；人类侧 779 段里 7 段超 100（0.9%）。"
+        },
+        {
+          "name": "DEFAULT_LONG_PARA_ERROR_CHARS",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_LONG_PARA_ERROR_CHARS",
+          "kind": "value",
+          "value": 140,
+          "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:84-91",
+          "basis_summary": ">140 字段落在榜一 779 段里**零出现** ⇒ 单段即判 error（我们 16 段、最长 212 字）。"
+        },
+        {
+          "name": "DEFAULT_LONG_PARA_MIN_COUNT",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_LONG_PARA_MIN_COUNT",
+          "kind": "value",
+          "value": 2,
+          "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:84-91",
+          "basis_summary": "堆积门：人类基线每章至多 1 段超 100 字，故 warning 要求单章 ≥2 段。"
+        },
+        {
+          "name": "_MIN_PROSE_CHARS_FOR_READABILITY",
+          "module": "packages.core.quality.ai_patterns_text",
+          "attr": "_MIN_PROSE_CHARS_FOR_READABILITY",
+          "kind": "value",
+          "value": 600,
+          "basis_ref": "packages/core/quality/ai_patterns_text.py:16-19",
+          "basis_summary": "可读性类算子的最小判定长度（长段 / 对白可见字共用）。"
+        }
+      ],
+      "word_lists": [],
+      "regexes": [],
+      "known_false_positives": [],
+      "known_dead_rules": [],
+      "conflicts": [],
+      "probes": []
+    },
+    {
+      "rule_id": "AI-DIALOGUE-LOW",
+      "name": "对话占比过低",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "对话（成对“…”内可见字）占全章可见字 <12% ⇒ **warning（唯一档位）**。可见字 <600 不判。<8% 的 error 档已于 2026-09-17 撤回。",
+      "human_side": {
+        "corpus": "houfu_human_19ch",
+        "dialogue_ratio": 0.165,
+        "dialogue_chars": 6229,
+        "visible_chars": 37806,
+        "chapters_below_threshold": 8,
+        "chapters_total": 19,
+        "note": "首章 0.0%（整章无对话）、第 19 章 40.6%——章级方差极大，人类作者写得出整章无对话的动作戏。"
+      },
+      "generated_side": {
+        "corpus": "book01_48ch",
+        "dialogue_ratio": 0.114,
+        "dialogue_chars": 13941,
+        "visible_chars": 122350,
+        "note": "贴着本仓题材包 style_constraints 对话区间 10~32% 的地板。"
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-09-17",
+        "recompute_entry": "scripts/readability_audit.py",
+        "basis_ref": "packages/core/quality/ai_patterns_dialogue.py:23-47"
+      },
+      "code_refs": [
+        {
+          "name": "DEFAULT_DIALOGUE_LOW_WARN_RATIO",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "DEFAULT_DIALOGUE_LOW_WARN_RATIO",
+          "kind": "value",
+          "value": 0.12,
+          "basis_ref": "packages/core/quality/ai_patterns_dialogue.py:23-47",
+          "basis_summary": "榜一 16.5% / 番茄男频主流 25~40% / 本仓题材包区间 10~32% ⇒ 取 12%；只作提示不作闸门，绝不进 errors 桶。"
+        }
+      ],
+      "word_lists": [],
+      "regexes": [
+        {
+          "name": "_DIALOGUE_PAIR_RE",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "_DIALOGUE_PAIR_RE",
+          "sha256": "7be607da8b60b113f385f5b3739c1203efc05d525ec7c6523115b257c861cbad",
+          "kind": "regex"
+        }
+      ],
+      "known_false_positives": [
+        "人类锚点书 19 章里 8 章低于 12%——**人类基线本身就会触发**；故本规则只作提示、不作闸门。"
+      ],
+      "known_dead_rules": [],
+      "conflicts": [
+        "**该指标已被明令「不可作处方」**（AGENTS F-19）：对话占比是可优化指标，<8% error 档连同题材包/生成驱动的「对话占比 ≥20%」硬指标一起施行后，模型为凑指标编造对白并破人设（ch3）/ 产出接龙零推进的灌水对白（ch33）。"
+      ],
+      "probes": []
+    },
+    {
+      "rule_id": "AI-DIALOGUE-ECHO",
+      "name": "相邻对白接词回声",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "复述型：后句实义字中 ≥70% 出现在前句；接词型：两侧可比 且 重叠系数 ≥0.66 且 后句开口连续重合 ≥2 字。单侧实义字 <2 字不参与成对比较。severity 恒 warning。",
+      "human_side": {
+        "corpus": "houfu_human_19ch",
+        "hits": 1,
+        "chapters_with_hits": 1,
+        "chapters_total": 19,
+        "candidate_pairs": 61,
+        "note": "那 1 对是「信息递增但用词撞车」的合法写法（「…我们明天一早就在城门口等吧」→「好啊，明儿个我们就在城门口等他们。」）。"
+      },
+      "generated_side": {
+        "corpus": "book01_48ch",
+        "hits": 23,
+        "chapters_with_hits": 18,
+        "chapters_total": 48,
+        "candidate_pairs": 674,
+        "note": "**数字冲突**：README §5.6 记「26 对 / 20 章（48 章）」，模块 docstring 记「该登记已过期」——无守卫时 34 对 / 24 章，加可比性守卫后 **23 对 / 18 章**。本表取模块 docstring 的终值，README 记为过期。逐条判档：34 对里合法写法 6 / 存疑 3 / 真信号 1，其余为守卫剔除。"
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-09-17 ~ 2026-09-27",
+        "recompute_entry": "scripts/readability_audit.py",
+        "basis_ref": "packages/core/quality/ai_patterns_dialogue.py:49-167"
+      },
+      "code_refs": [
+        {
+          "name": "DEFAULT_DIALOGUE_ECHO_MIN_RATIO",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "DEFAULT_DIALOGUE_ECHO_MIN_RATIO",
+          "kind": "value",
+          "value": 0.7,
+          "basis_ref": "packages/core/quality/ai_patterns_dialogue.py:115-121",
+          "basis_summary": "复述型：后句实义字 ≥70% 出现在前句（必命中样例 `见周账房了？`→`见了` recall 1.00）。"
+        },
+        {
+          "name": "DEFAULT_DIALOGUE_ECHO_MIN_OVERLAP",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "DEFAULT_DIALOGUE_ECHO_MIN_OVERLAP",
+          "kind": "value",
+          "value": 0.66,
+          "basis_ref": "packages/core/quality/ai_patterns_dialogue.py:122-129",
+          "basis_summary": "接词型：0.66 而非 0.70——必命中样例实测 2/3 = 0.67，0.70 会漏掉它；人侧两阈值同为 0 对。"
+        },
+        {
+          "name": "DEFAULT_DIALOGUE_ECHO_MIN_OPENING",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "DEFAULT_DIALOGUE_ECHO_MIN_OPENING",
+          "kind": "value",
+          "value": 2,
+          "basis_ref": "packages/core/quality/ai_patterns_dialogue.py:129-138",
+          "basis_summary": "开口 ≥2 字是**精确率守卫**（放开到 0 时生成侧多出 22 对「前句的词出现在后句中段/末尾」型误报）。"
+        },
+        {
+          "name": "_MIN_DIALOGUE_ECHO_CHARS",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "_MIN_DIALOGUE_ECHO_CHARS",
+          "kind": "value",
+          "value": 2,
+          "basis_ref": "packages/core/quality/ai_patterns_dialogue.py:145-147",
+          "basis_summary": "成对资格下限：单侧实义字 <2（单字应答）不参与成对比较。"
+        },
+        {
+          "name": "_MIN_DIALOGUE_ECHO_COMPARABLE_CHARS",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "_MIN_DIALOGUE_ECHO_COMPARABLE_CHARS",
+          "kind": "value",
+          "value": 3,
+          "basis_ref": "packages/core/quality/ai_patterns_dialogue.py:148-166",
+          "basis_summary": "重叠系数可比性下限①：任一侧实义字 <3 时 overlap 必为 1.00（分母落在 2 字那一侧），该读数不携带信息。"
+        },
+        {
+          "name": "_DIALOGUE_ECHO_ASYMMETRY_LIMIT",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "_DIALOGUE_ECHO_ASYMMETRY_LIMIT",
+          "kind": "value",
+          "value": 2.0,
+          "basis_ref": "packages/core/quality/ai_patterns_dialogue.py:96-113",
+          "basis_summary": "可比性下限②：后句 ≥2× 前句时后句是超集，min() 分母被前句钉死 ⇒ overlap 读数机械失效。**该值是定义性选择，不是标定所得**（首轮交付写成「取自 11 对下界」是循环论证，已订正）。"
+        }
+      ],
+      "word_lists": [],
+      "regexes": [
+        {
+          "name": "_SUBSTANTIVE_CHAR_RE",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "_SUBSTANTIVE_CHAR_RE",
+          "sha256": "2886692b79796c493f7168e0d6de1d54224ce2cfa82a1dd2d50d03a2ecf4d2f5",
+          "kind": "regex"
+        }
+      ],
+      "known_false_positives": [
+        "算子只看字面重合、**不判断对白是否有后果**——信息递增但用词撞车的正常对白会被计入（人侧那 1 对即此类）。",
+        "守卫在「复述关键词后补理由」家族内与回声度**反相关**（按长度比剔除，恰剔掉该族字面重复较高的那些）。"
+      ],
+      "known_dead_rules": [],
+      "conflicts": [
+        "命中数三处不一致：README §5.6「26 对 / 20 章」／模块 docstring「34 对 / 24 章（无守卫）」→「23 对 / 18 章（守卫后）」／AGENTS 坑区「26 对 / 48 章」。本表取 23 / 18，其余两处记为过期。",
+        "守卫值 2.0 的正当性来自**度量的可解释性**，不来自精度/召回标定——注释里已明写，别把它当「实测标定值」引用。",
+        "全量审计（docs/roadmap/v3.9，2026-09-27）记「命中总体仅 35 对（全部读过）」，生产语料登记 34 对——差 1 对，疑为存疑那条被排除；待裁决。"
+      ],
+      "probes": []
+    },
+    {
+      "rule_id": "AI-BEAT-REPEAT",
+      "name": "同章远距小句复现",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "共享串 ≥6 字 且 双侧覆盖率 ≥60% 且 两处相距 ≥200 字 且 数字守卫（共享串数字/量词占比 <0.6）；章级门：命中 ≥2 处 **且** 密度 >1.0/千字。severity 恒 warning，但 rule_id 在 CONFIRM_RULES 内（gate=confirm）。",
+      "human_side": {
+        "corpus": "houfu_human_19ch",
+        "hits": 2,
+        "rate_per_1k": 0.05,
+        "chapters_over_threshold": 0,
+        "chapters_total": 19,
+        "note": "2 处分属两章、各 1 处——都是逐字级小句复现，人类作者也会这么写，只是极少。"
+      },
+      "generated_side": {
+        "corpus": "dev_db_92ch",
+        "hits": 307,
+        "rate_per_1k": 1.17,
+        "chapters_over_threshold": 64,
+        "chapters_total": 92,
+        "precision_sampling": {
+          "sampled": 52,
+          "true_positive": 43,
+          "false_positive": 9,
+          "precision": 0.827
+        }
+      },
+      "separation": 23.4,
+      "source": {
+        "collected_on": "2026-09-18",
+        "recompute_entry": "scripts/ai_tone_calibrate.py",
+        "basis_ref": "packages/core/quality/beat_repeat.py:46-73"
+      },
+      "code_refs": [
+        {
+          "name": "DEFAULT_BEAT_MIN_CHARS",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "DEFAULT_BEAT_MIN_CHARS",
+          "kind": "value",
+          "value": 6,
+          "basis_ref": "packages/core/quality/beat_repeat.py:88-91",
+          "basis_summary": "共享串最小字数：5 字档引入大量「同前缀不同谓语」误报，6 字档抽样精确率更高。"
+        },
+        {
+          "name": "DEFAULT_BEAT_MIN_COVER",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "DEFAULT_BEAT_MIN_COVER",
+          "kind": "value",
+          "value": 0.6,
+          "basis_ref": "packages/core/quality/beat_repeat.py:93-99",
+          "basis_summary": "双侧覆盖率门：挡掉「长片段里共有的名词短语」型命中。0.6 是实测分离点（真节拍 0.67/0.72 保留，事实复指 0.46 被挡）。"
+        },
+        {
+          "name": "DEFAULT_BEAT_MIN_GAP_CHARS",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "DEFAULT_BEAT_MIN_GAP_CHARS",
+          "kind": "value",
+          "value": 200,
+          "basis_ref": "packages/core/quality/beat_repeat.py:101-104",
+          "basis_summary": "最小间距 200 字（≈3~5 段）：近距重复是复制粘贴，已由 shingle / trigram / 接词回声覆盖。"
+        },
+        {
+          "name": "DEFAULT_BEAT_NUMERAL_MAX_RATIO",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "DEFAULT_BEAT_NUMERAL_MAX_RATIO",
+          "kind": "value",
+          "value": 0.6,
+          "basis_ref": "packages/core/quality/beat_repeat.py:106-109",
+          "basis_summary": "数字守卫：首版抽样里账目数字复述占全部误报的一半。"
+        },
+        {
+          "name": "DEFAULT_BEAT_MIN_COUNT",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "DEFAULT_BEAT_MIN_COUNT",
+          "kind": "value",
+          "value": 2,
+          "basis_ref": "packages/core/quality/beat_repeat.py:111-114",
+          "basis_summary": "章级堆积门：人类基线 19 章**没有一章**达到 2 处 ⇒ 该门在人类侧零误报。"
+        },
+        {
+          "name": "DEFAULT_BEAT_RATE_PER_1K",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "DEFAULT_BEAT_RATE_PER_1K",
+          "kind": "value",
+          "value": 1.0,
+          "basis_ref": "packages/core/quality/beat_repeat.py:111-114",
+          "basis_summary": "密度门：人类侧 0.05/千字、生成侧 1.17/千字，阈值 1.0 落在两者之间。"
+        },
+        {
+          "name": "MIN_PROSE_CHARS_FOR_BEATS",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "MIN_PROSE_CHARS_FOR_BEATS",
+          "kind": "value",
+          "value": 200,
+          "basis_ref": "packages/core/quality/beat_repeat.py:116-118",
+          "basis_summary": "最小判定长度（照 _MIN_PROSE_CHARS_FOR_DENSITY 先例）。"
+        }
+      ],
+      "word_lists": [],
+      "regexes": [
+        {
+          "name": "_CLAUSE_BREAK_RE",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "_CLAUSE_BREAK_RE",
+          "sha256": "2ada02ccf34ee368e1afc18c4998f3f73b8845b01f4dc5c964c5cb1cb435b22b",
+          "kind": "regex"
+        },
+        {
+          "name": "_KEEP_CHAR_RE",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "_KEEP_CHAR_RE",
+          "sha256": "2886692b79796c493f7168e0d6de1d54224ce2cfa82a1dd2d50d03a2ecf4d2f5",
+          "kind": "regex"
+        }
+      ],
+      "known_false_positives": [
+        "两类误报：① 专名/文件名/术语的复指（「族老会的决议」）；② 共用骨架 + 不同宾语（「看了一眼通话时长 / 看了一眼通话记录」）。"
+      ],
+      "known_dead_rules": [],
+      "conflicts": [],
+      "probes": []
+    },
+    {
+      "rule_id": "CONT-CLOCK-DAYBREAK",
+      "name": "深夜时钟与天亮标记矛盾",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "深夜档钟点（凌晨/半夜/深夜/夜半 + 钟点）与其后同章天亮类标记配对，间距 ≤3000 字且中间无时间推进标记即报。severity 恒 warning。",
+      "human_side": {
+        "corpus": "houfu_human_19ch",
+        "hits": 0,
+        "rate_per_1k": 0.0,
+        "chapters_total": 19,
+        "opportunity_count": 0,
+        "note": "**机会数为 0**：人类基线 19 章里「点」出现 64 次全是「一点/有点/点头」，跨 19 章零个钟点标记。故「人类侧 0 命中」**不含信息**，不可作零误报证据，R 值不可采信（脚本输出 inf 的正确读法是「无机会」）。"
+      },
+      "generated_side": {
+        "corpus": "dev_db_92ch",
+        "hits": 1,
+        "rate_per_1k": 0.0038,
+        "chapters_with_hits": 1,
+        "chapters_total": 92,
+        "note": "真命中 ch_2d2b57090ecd（凌晨两点十七分 → 天际线泛亮）。"
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-09-18",
+        "recompute_entry": "scripts/ai_tone_calibrate.py --all-projects",
+        "basis_ref": "packages/core/quality/continuity_time.py:1-124（含 27 条候选逐条判定表）"
+      },
+      "code_refs": [
+        {
+          "name": "DEFAULT_MAX_GAP_CHARS",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "DEFAULT_MAX_GAP_CHARS",
+          "kind": "value",
+          "value": 3000,
+          "basis_ref": "packages/core/quality/continuity_time.py:104-124",
+          "basis_summary": "唯一真命中的间距 2283 字符，本仓语料**不含**更长的候选 ⇒ 该值**无法由数据分辨**，写为常量只是留一个可校准旋钮。"
+        }
+      ],
+      "word_lists": [
+        {
+          "name": "_EARLY_PERIODS",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_EARLY_PERIODS",
+          "count": 4,
+          "sha256": "99e8feef56b9f0aebcaa3cf0d0522838eff35689f9486106872767aa645d22bc",
+          "kind": "list"
+        },
+        {
+          "name": "_MORNING_PERIODS",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_MORNING_PERIODS",
+          "count": 6,
+          "sha256": "42c0ac27fc9faec4278941ebe390380432e777a9430b4df01ffbfa6ff83645f3",
+          "kind": "list"
+        },
+        {
+          "name": "_NOON_PERIODS",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_NOON_PERIODS",
+          "count": 3,
+          "sha256": "0210605250057ac99987e2de58a3a1940a4f5d2c3e69b14bcd1c992cca64377a",
+          "kind": "list"
+        },
+        {
+          "name": "_AFTERNOON_PERIODS",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_AFTERNOON_PERIODS",
+          "count": 2,
+          "sha256": "efc412625abdbb2835e147780cbe9d3735b6b8e806e0852ba19b4eccb44f5f18",
+          "kind": "list"
+        },
+        {
+          "name": "_EVENING_PERIODS",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_EVENING_PERIODS",
+          "count": 4,
+          "sha256": "fe0e3955c28f53423e226f3696133cf937e7512f1ce178bd28e313ab03a81c93",
+          "kind": "list"
+        },
+        {
+          "name": "_NIGHTISH_PERIODS",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_NIGHTISH_PERIODS",
+          "count": 2,
+          "sha256": "2a420ceab78e64187b3d7dac72f8577a035520cc167047a01bbe37f786f92b37",
+          "kind": "list"
+        }
+      ],
+      "regexes": [
+        {
+          "name": "_CLOCK_RE",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_CLOCK_RE",
+          "sha256": "0a45c84166b1c94f2d7555726c5bb91e608a570497d8a600a2da40c84daaa0e2",
+          "kind": "regex"
+        },
+        {
+          "name": "_DAYBREAK_RE",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_DAYBREAK_RE",
+          "sha256": "f7b9f1da6be56151d081373ab3fb86867dba6d7157b06cd5b7ef9919747dad5f",
+          "kind": "regex"
+        },
+        {
+          "name": "_ADVANCE_RE",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_ADVANCE_RE",
+          "sha256": "269e6f85c0c40a22e4277cd2a64d19b424a6df6b4aa44733e0d52a0ca868230a",
+          "kind": "regex"
+        }
+      ],
+      "known_false_positives": [
+        "钟点守卫依据：本仓实测 **102 处「一点」全是副词**（「一点也不」「一点光」「一点点」）——故裸钟点必须带时段前缀才判。"
+      ],
+      "known_dead_rules": [],
+      "conflicts": [],
+      "probes": []
+    },
+    {
+      "rule_id": "CONT-TIME-BACKSTEP",
+      "name": "同章相邻时点回退",
+      "family": "ai_pattern",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "同章相邻两个可排序时点，后者比前者早 ≥2 小时即报（跨午夜顺行 / 左邻计划语 / 右邻期限语三类守卫除外）。severity 恒 warning。",
+      "human_side": {
+        "corpus": "houfu_human_19ch",
+        "hits": 0,
+        "rate_per_1k": 0.0,
+        "chapters_total": 19,
+        "opportunity_count": 0,
+        "note": "基线书仅 2 处「时辰」且都不是时点 ⇒ 机会数 0，「人类侧 0 处」不含信息。"
+      },
+      "generated_side": {
+        "corpus": "dev_db_92ch",
+        "hits": 1,
+        "rate_per_1k": 0.0038,
+        "chapters_with_hits": 1,
+        "chapters_total": 92,
+        "note": "加守卫后 1 处（prj_5be9256febad ch6：亥时 → 午时无交代回退，回退 10 小时）。误报簇时距 3~6 小时（含 1 档跨午夜 18 小时）⇒ **2.0 小时的阈值不能分离真假**，分离靠段首戳等守卫，2.0 只是把 1 小时量级的噪声挡在门外。",
+        "backstep_hours_true_positive": 10,
+        "backstep_hours_false_positives": [
+          3,
+          4,
+          4,
+          4,
+          6
+        ]
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-09-19",
+        "recompute_entry": "scripts/ai_tone_calibrate.py --all-projects",
+        "basis_ref": "packages/core/quality/continuity_time.py:1-124"
+      },
+      "code_refs": [
+        {
+          "name": "DEFAULT_MIN_BACKSTEP_HOURS",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "DEFAULT_MIN_BACKSTEP_HOURS",
+          "kind": "value",
+          "value": 2.0,
+          "basis_ref": "packages/core/quality/continuity_time.py:126-129",
+          "basis_summary": "回退判定门：后者比前者早 ≥2 小时即报（跨午夜顺行不算）。"
+        },
+        {
+          "name": "DEFAULT_MAX_GAP_CHARS",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "DEFAULT_MAX_GAP_CHARS",
+          "kind": "value",
+          "value": 3000,
+          "basis_ref": "packages/core/quality/continuity_time.py:104-124",
+          "basis_summary": "两标记间距上限（与 CONT-CLOCK-DAYBREAK 共用同一常量）。"
+        }
+      ],
+      "word_lists": [
+        {
+          "name": "SHICHEN_START_HOURS",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "SHICHEN_START_HOURS",
+          "count": 12,
+          "sha256": "c2115d7d63441c26e540920c0a3ce09d0cddb0e294536f2dec2ea76fadd25e6c",
+          "note": "时辰→一天内小时的折算表（元素是 (时辰, 小时) 二元组，指纹按排序后的 item 取）。",
+          "kind": "sorted_items"
+        }
+      ],
+      "regexes": [
+        {
+          "name": "_SHICHEN_RE",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_SHICHEN_RE",
+          "sha256": "cda7b4feb08dac361b0f634b408598bf0ffabb3950f3123d8c3a0d637d240acf",
+          "kind": "regex"
+        },
+        {
+          "name": "_LEFT_PLAN_RE",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_LEFT_PLAN_RE",
+          "sha256": "9e676f7d7eb6cf141d2accab8425fe8ead5e16c847bc8f4b1c7bb042f277ce24",
+          "kind": "regex"
+        },
+        {
+          "name": "_RIGHT_REF_RE",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "_RIGHT_REF_RE",
+          "sha256": "79f753f2b226b9183112dfaf5afe3e8be40506d9378905b275ea9b48028ef0d7",
+          "kind": "regex"
+        }
+      ],
+      "known_false_positives": [
+        "四条守卫（段首戳 / 右邻期限语 / 跨午夜顺行 / 时间推进标记）是在**同一批候选上**逐层定出来的，**没有留出验证集**——其中「段首戳」一条即可排除本仓全部 7 条误报。故本算子可信度**低于** CONT-CLOCK-DAYBREAK（后者 1 候选 1 真、零拟合）。"
+      ],
+      "known_dead_rules": [],
+      "conflicts": [
+        "**候选数与精确率冲突（2026-10-19 批次十三已裁决并修复）**：模块 docstring 写「原始 8 条候选里只有 1 条真（precision 12.5%）」，而 AI_PATTERN_RULES 的 description 写「原始 6 条候选中 5 条是误报」（6 候选 ⇒ 1/6 ≈ 16.7%，与 12.5% 不符）。**裁决依据 = 算术自洽 + 仓内已登记的逐条实例可数**：12.5% = 1/8，且模块 docstring 逐条列出的误报为「段首戳 5 条 + 右邻期限语 + 跨午夜顺行」= **7 条误报** ⇒ 7 + 1 = 8，与 12.5% 逐位吻合 ⇒ **8 是真值，description 里的 6 是笔误**（已改为「原始 8 条候选中 7 条是误报」）。⚠️ 该裁决**未依赖任何复算**——AGENTS §一 硬约束 1 禁止指向 dev 库既有项目复算，故只能靠仓内已登记的逐条判档表定案。",
+        "另一条候选检查（「白天标记 → 夜晚标记」，14 条候选 14 条误报）已整体废弃、未进代码。"
+      ],
+      "probes": []
+    },
+    {
+      "rule_id": "RULE_STYLE_REPETITION_TRIGRAM",
+      "name": "trigram 重复率（style 子分；不在 AI_PATTERN_RULES 内）",
+      "family": "style_subscore",
+      "severity": "warning",
+      "deprecated": false,
+      "evidence_status": "measured",
+      "threshold_summary": "两档：重复率 >0.16 ⇒ warning（gate=auto）；>0.25 ⇒ 该条单条上修为 gate=confirm。severity 恒 warning。",
+      "human_side": {
+        "corpus": "houfu_human_19ch",
+        "mean": 0.0754,
+        "median": 0.0787,
+        "min": 0.0535,
+        "max": 0.0949,
+        "chapters_total": 19,
+        "note": "9/19 章超旧阈值 0.08。"
+      },
+      "generated_side": {
+        "corpus": "dev_db_92ch",
+        "min": 0.0619,
+        "median": 0.1333,
+        "p90": 0.1749,
+        "max": 0.2097,
+        "chapters_total": 92,
+        "note": "仅 2/92 章低于旧阈值 0.08。真实事故章 0.3037（ch_92bac068ff0d v6 / 2374 字）；同章其余 12 版 0.085~0.130 ⇒ 事故是单版异常。",
+        "percentiles": {
+          "min": 0.0619,
+          "p25": 0.11,
+          "p50": 0.1333,
+          "p75": 0.1494,
+          "p85": 0.1621,
+          "p90": 0.1749,
+          "p95": 0.185,
+          "p99": 0.2022,
+          "max": 0.2097
+        },
+        "post_change_measured": {
+          "human_warn": 0,
+          "human_confirm": 0,
+          "generated_no_issue": 78,
+          "generated_warn": 14,
+          "generated_confirm": 0,
+          "corpus": "92 章生成侧逐章复算；全库 110 条历史 trigram 命中复算 = 92 静默 / 17 warn / 1 confirm",
+          "note": "改后实测：人类侧 0 warn / 0 confirm；生成侧 92 章里 0 章达 confirm。"
+        }
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-09-18",
+        "recompute_entry": "tests/unit/quality/test_trigram_tiers.py",
+        "basis_ref": "packages/core/quality/scoring.py:85-118"
+      },
+      "code_refs": [
+        {
+          "name": "STYLE_TRIGRAM_WARN_THRESHOLD",
+          "module": "packages.core.quality.scoring",
+          "attr": "STYLE_TRIGRAM_WARN_THRESHOLD",
+          "kind": "value",
+          "value": 0.16,
+          "basis_ref": "packages/core/quality/scoring.py:99-106",
+          "basis_summary": "取生成侧 p85 = 0.1621 圆整；人类锚点书 max 0.0949 只有该值的 0.59 倍 ⇒ 人稿一条都不报。"
+        },
+        {
+          "name": "STYLE_TRIGRAM_CONFIRM_THRESHOLD",
+          "module": "packages.core.quality.scoring",
+          "attr": "STYLE_TRIGRAM_CONFIRM_THRESHOLD",
+          "kind": "value",
+          "value": 0.25,
+          "basis_ref": "packages/core/quality/scoring.py:107-118",
+          "basis_summary": "生成侧 max 0.2097 与事故 0.3037 的几何中点（√=0.252）圆整。旧值 0.08 落在正常分布内部 ⇒ 退化成「人人必点」的橡皮图章。"
+        }
+      ],
+      "word_lists": [],
+      "regexes": [],
+      "known_false_positives": [],
+      "known_dead_rules": [],
+      "conflicts": [
+        "本条**曾被撤销出 CONFIRM_RULES**（2026-09-18）：「量级依赖的后果不要写进 rule_id 静态表」。现改走 scoring.score_style 的单条上修路径。"
+      ],
+      "probes": []
+    }
+  ],
+  "deprecated_rules": [
+    {
+      "rule_id": "AI-TRANSLATIONESE",
+      "name": "译文句式（外语文献直译腔）",
+      "family": "ai_pattern",
+      "severity": null,
+      "deprecated": true,
+      "evidence_status": "deprecated",
+      "human_side": {
+        "corpus": null,
+        "hits": null,
+        "rate_per_1k": 1.15
+      },
+      "generated_side": {
+        "corpus": null,
+        "hits": null,
+        "rate_per_1k": 0.59
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-09-15",
+        "recompute_entry": null,
+        "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:61-66"
+      },
+      "code_refs": [],
+      "word_lists": [],
+      "regexes": [],
+      "known_false_positives": [],
+      "known_dead_rules": [
+        "2026-09-15 抽样核查后**整体废弃、不保留死代码**：来源研究在说明文语料上得 R=2.6~5.3，但本仓实测生成侧 0.59/千字 vs 人类 1.15/千字（R=0.49，**方向相反**）⇒ 无区分力。"
+      ],
+      "conflicts": [
+        "本条与下一条（「过长前置定语」）在 AGENTS 坑区记为「AI-TRANSLATIONESE 废弃」——本表把两条都登记在此，因为它们**从未发货**（不在 AI_PATTERN_RULES 内）。"
+      ],
+      "probes": []
+    },
+    {
+      "rule_id": "AI-LONG-ATTRIBUTIVE",
+      "name": "过长前置定语",
+      "family": "ai_pattern",
+      "severity": null,
+      "deprecated": true,
+      "evidence_status": "deprecated",
+      "human_side": null,
+      "generated_side": {
+        "corpus": null,
+        "hits": 97,
+        "rate_per_1k": null
+      },
+      "separation": null,
+      "source": {
+        "collected_on": "2026-09-15",
+        "recompute_entry": null,
+        "basis_ref": "packages/core/quality/ai_patterns_paragraph.py:61-66"
+      },
+      "code_refs": [],
+      "word_lists": [],
+      "regexes": [],
+      "known_false_positives": [],
+      "known_dead_rules": [
+        "抽样 97 条命中里 **95 条是误报**（「看着两人的背影消失在堂后的门槛里。」根本不是长定语）⇒ 精确率不合格，整条废弃。"
+      ],
+      "conflicts": [],
+      "probes": []
+    }
+  ],
+  "kind_vocabulary": {
+    "value": "标量常量：直接按值比较（数值 int/float 互通）。",
+    "dict_item": "字典常量的某一项：value[attr][key] 按值比较。",
+    "list": "字符串列表：count = 元素个数；sha256 = '\n'.join(str(x)) 的 sha256。",
+    "list_first": "二元组列表，只取每组的第 0 项（(regex, 标签) 这类：标签仅用于展示，不参与指纹）。",
+    "sorted_items": "字典：count = 键数；sha256 = '\n'.join(str(kv) for kv in sorted(value.items())) 的 sha256。",
+    "str": "整串常量（正则片段字符串等）：count = 字符数；sha256 = 整串的 sha256。",
+    "regex": "编译后的正则：sha256 = re.Pattern.pattern 的 sha256（标志位不在指纹内）。"
+  }
+}

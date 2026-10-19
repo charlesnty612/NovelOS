@@ -7,7 +7,7 @@
 算子                 榜一侯府弧（人类基线） 新书 01 全弧（生成侧） 旧阈值
 ==================== ===================== ==================== ==========
 ``AI-PUNCT-ABUSE``   0.19 / 千字            1.73 / 千字           3.5
-``AI-SHORT-PARA``    ~~0.00~~ → **0.212**  2.064 / 千字          5.5
+``AI-SHORT-PARA``    ~~0.00~~ → **0.212**  2.080 / 千字          5.5
 ==================== ===================== ==================== ==========
 
 **2026-09-27 订正：``AI-SHORT-PARA`` 的「人类基线 0.00」是量具假象，不是实测。**
@@ -17,7 +17,19 @@
 用 ``\\n+``——口径分叉过一次。口径统一后重测（详见
 ``packages/core/quality/ai_patterns.py::DEFAULT_SHORT_PARA_RATE_PER_1K``）：
 人类侧 8 命中 / 0.212 每千字（改口径、尚未叠加说话人行守卫时是 10 / 0.265），
-生成侧 258 命中 / 2.064 每千字，**分离度 9.7×**。
+生成侧 260 命中 / 2.080 每千字，**分离度 9.8×**。
+
+**2026-10-20 批次十三订正（生成侧 258 → 260）**：上面这个数此前写的是「258 命中 /
+2.064 每千字」，与 ``packages/core/quality/ai_patterns_paragraph.py`` 的常量注释
+（「260 命中 / 2.080」）**对不上**——两者是**同一语料**（新书 01 全弧 48 章 /
+125024 可见字）的同一次测量。**裁决依据（未复算）**：说话人行守卫的宽度在
+2026-09-27 被对抗审查打回后**从 {1,6} 收窄到 {1,3}** ⇒ **2 段被误豁免的文本回到
+命中** ⇒ 生成侧 258 → 260（该文件 :111 / :117 明写「收窄后这 2 段回到命中，
+生成侧命中数 258 → 260」）⇒ **260 / 2.080 是当前代码口径下的终值**，258 / 2.064
+是收窄**之前**的状态。⚠️ 该裁决**未依赖任何复算**——AGENTS §一 硬约束 1 禁止指向
+dev 库既有项目复算；判据是「常量描述的是**检测器当前行为**，而检测器行为已变」。
+⚠️ 历史留痕不动：CHANGELOG 2026-09-27 条目记的「257 → 260 → 258 命中 / 2.064」
+是**收窄前**的记录，按规矩不抹除，只在此处订正其口径。
 
 两条纪律写进本文件防回退：
 
@@ -32,20 +44,21 @@
    本文件按全弧 19 章逐章复算命中数 / 每千字 / 超阈值章数，把数字钉在实测值上：
    **把段切分改回 ``\\n\\n`` 必然转红**（人类侧命中数掉到 0）。
 
-正文数据在内容仓（三仓分离：正文不进软件仓），按
-``NOVELOS_CONTENT_DIR`` → ``DEFAULT_CONTENT_DIR`` → 软件仓同级目录 的顺序定位；
-内容仓不在本机时跳过（环境前提缺失，非断言软化）。
+正文数据在内容仓（三仓分离：正文不进软件仓），语料定位与「不可得怎么办」**全部**
+收在 :mod:`unit.quality._human_baseline_gate` 这一个判定点里：内容仓不在本机时
+**不无声跳过**——会写状态记录、发一条带 ``HUMAN-BASELINE-CORPUS-UNAVAILABLE``
+标记的警告，并可用 ``NOVELOS_REQUIRE_HUMAN_BASELINE=1`` 把它变成**判红**。
+（2026-10-19 改批：此前这里是裸 ``pytest.skip`` ⇒ CI 里恒 skip ⇒ 人类基线看守
+在 CI 中从未生效过，而 CI 报绿。判别见 ``test_human_baseline_ci_visibility.py``。）
 """
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
 import pytest
 
-from packages.core.content_sync.paths import DEFAULT_CONTENT_DIR
 from packages.core.quality.ai_patterns import (
     DEFAULT_DASH_THRESHOLD_PER_1K,
     DEFAULT_SHORT_PARA_RATE_PER_1K,
@@ -54,12 +67,17 @@ from packages.core.quality.ai_patterns import (
 )
 from packages.core.quality.wordcount import visible_chars
 
+from . import _human_baseline_gate as gate
+
+#: 标记「本文件是人类基线看守」（故障注入插件据此定位目标用例）。
+HUMAN_BASELINE_GUARD = True
+
 # --- 实测基线（2026-09-27 重算；改阈值前先重算这几个数） ---------------------
 
 HUMAN_DASH_PER_1K = 0.19  # 榜一侯府弧 19 章 / 37806 可见字
 HUMAN_SHORT_PARA_PER_1K = 0.212  # 榜一侯府弧全弧 8 命中 / 37806 可见字
 GENERATED_DASH_PER_1K = 1.73  # 新书 01 全弧 63625 字
-GENERATED_SHORT_PARA_PER_1K = 2.064  # prj_bcb9d1930bd4 48 章 / 125024 可见字 258 命中
+GENERATED_SHORT_PARA_PER_1K = 2.080  # prj_bcb9d1930bd4 48 章 / 125024 可见字 260 命中（说话人行守卫宽度收窄到 {1,3} 之后的终值；此前记的 258 / 2.064 是收窄前的状态）
 
 # 人类短段基线的**全弧分布**（2026-09-27 复算，19 章）：
 #   8 命中 / 0.212 每千字 / 6 章有命中 / 1 章超阈值 1.0。
@@ -81,25 +99,6 @@ HUMAN_SHORT_PARA_PROSE_CHAPTERS_OVER_THRESHOLD = 0
 # 高于它 = 阈值脱离人类基线量级；同时必须低于生成侧实测均值，否则永不触发。
 _MAX_TOLERANCE_PER_1K = 1.0
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_REFERENCE_SUBPATH = Path("reference-books/榜一-快穿之人渣洗白手册/侯府凤凰男")
-
-
-def _reference_dir() -> Path | None:
-    """定位榜一侯府弧正文目录；内容仓不在本机时返回 None。"""
-    candidates: list[Path] = []
-    env_dir = os.environ.get("NOVELOS_CONTENT_DIR")
-    if env_dir:
-        candidates.append(Path(env_dir))
-    candidates.append(DEFAULT_CONTENT_DIR)
-    candidates.append(_REPO_ROOT.parent / "NovelOS-Content")
-    for root in candidates:
-        target = root / _REFERENCE_SUBPATH
-        if target.is_dir():
-            return target
-    return None
-
-
 def _first_chapters(n: int = 3) -> list[tuple[str, str]]:
     """按章号取前 n 章 ``(章号标签, 正文)``。"""
     numbered = _numbered_reference_files()
@@ -120,9 +119,12 @@ def _all_chapters() -> list[tuple[str, str]]:
 
 
 def _numbered_reference_files() -> list[tuple[int, Path]]:
-    ref_dir = _reference_dir()
-    if ref_dir is None:  # pragma: no cover - 环境前提缺失
-        pytest.skip(f"内容仓参考书目录不存在：{_REFERENCE_SUBPATH}")
+    """榜一侯府弧全部章文件（按章号升序）。
+
+    语料定位与「不可得怎么办」由 :mod:`unit.quality._human_baseline_gate` 统一处理
+    （本文件**不得**再自带裸 ``pytest.skip``——那会绕开状态记录与警告）。
+    """
+    ref_dir = gate.require_reference_corpus(__name__)
     numbered: list[tuple[int, Path]] = []
     for path in ref_dir.glob("*.txt"):
         m = re.search(r"第(\d+)章", path.name)
@@ -281,14 +283,14 @@ def _is_non_prose_layout(hit: str) -> bool:
 
 
 def test_short_para_threshold_separates_human_from_generated():
-    """阈值 1.0 仍落在人机两条分布**之间**（9.7× 分离度），本次未动阈值。
+    """阈值 1.0 仍落在人机两条分布**之间**（9.8× 分离度），本次未动阈值。
 
     2026-09-27 修的是**论证链**（人类基线由假象变回实测），不是阈值本身：
-    0.212 vs 2.064 的分离度与修正前的 0.00 vs 2.62 同量级，故 1.0 维持。
+    0.212 vs 2.080 的分离度与修正前的 0.00 vs 2.62 同量级，故 1.0 维持。
     """
     separation = GENERATED_SHORT_PARA_PER_1K / HUMAN_SHORT_PARA_PER_1K
     assert separation > 5.0, (
-        f"人机分离度实测 {separation:.1f}×（0.212 vs 2.064）已不足 5×——"
+        f"人机分离度实测 {separation:.1f}×（0.212 vs 2.080）已不足 5×——"
         "阈值 1.0 的「留宽容」前提不再成立，须重新校准"
     )
     assert HUMAN_SHORT_PARA_PER_1K < DEFAULT_SHORT_PARA_RATE_PER_1K
@@ -316,7 +318,7 @@ def test_dash_threshold_within_measured_distribution():
 
 
 def test_short_para_threshold_within_measured_distribution():
-    """短段阈值同理：榜一 0.212、生成侧 2.064——阈值必须落在两者之间。"""
+    """短段阈值同理：榜一 0.212、生成侧 2.080——阈值必须落在两者之间。"""
     assert DEFAULT_SHORT_PARA_RATE_PER_1K <= _MAX_TOLERANCE_PER_1K, (
         f"短段阈值 {DEFAULT_SHORT_PARA_RATE_PER_1K} 超出人类基线"
         f" {HUMAN_SHORT_PARA_PER_1K}/千字 的宽容上限 {_MAX_TOLERANCE_PER_1K}"

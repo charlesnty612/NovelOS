@@ -1,0 +1,29 @@
+{
+  "name": "novelos",
+  "displayName": "NovelOS",
+  "description": "驱动本机 NovelOS 写小说：plan→write→review→commit 章节闭环、Story State 快照与差分、质量门禁、交付判定与投稿包导出。",
+  "version": "0.1.0",
+  "author": {
+    "name": "NovelOS"
+  },
+  "publisher": "NovelOS",
+  "homepage": "https://github.com/charlesnty612/NovelOS",
+  "repository": "https://github.com/charlesnty612/NovelOS",
+  "license": "AGPL-3.0",
+  "keywords": [
+    "novel",
+    "writing",
+    "story",
+    "chinese-novel",
+    "local-first"
+  ],
+  "category": "writing",
+  "tags": [
+    "novel",
+    "writing",
+    "local-first"
+  ],
+  "skills": [
+    "./skills/"
+  ]
+}

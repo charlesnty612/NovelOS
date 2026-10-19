@@ -43,8 +43,9 @@ def test_health_endpoint_returns_ok(tmp_path: Path):
     # V3.7 模型档案 + 环节绑定：0016_model_profiles.sql 加 model_profiles + capability_bindings → 37 业务表
     # 题材库 P1a：0025_genre_packs.sql 加 genre_packs → 38 业务表
     # P1 规划合并：0027_chapter_scene_plans.sql 加 chapter_scene_plans → 39 业务表
-    # （含 _migrations 物理共 40）
-    assert data["tables"] == 39
+    # 内部消费外部 skill：0032_skills.sql 加 skills + project_skills → 41 业务表
+    # （含 _migrations 物理共 42）
+    assert data["tables"] == 41
 
 
 def test_root_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

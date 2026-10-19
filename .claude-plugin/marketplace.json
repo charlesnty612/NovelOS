@@ -1,0 +1,25 @@
+{
+  "name": "novelos",
+  "owner": {
+    "name": "NovelOS",
+    "url": "https://github.com/charlesnty612/NovelOS"
+  },
+  "description": "NovelOS 插件市场：本地优先的小说写作 OS 及其 Agent Skill 包。",
+  "metadata": {
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "novelos",
+      "source": "./",
+      "description": "驱动本机 NovelOS 写小说：plan→write→review→commit 章节闭环、Story State、质量门禁、交付导出。",
+      "version": "0.1.0",
+      "category": "writing",
+      "tags": [
+        "novel",
+        "writing",
+        "local-first"
+      ]
+    }
+  ]
+}

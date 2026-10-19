@@ -322,7 +322,7 @@ def test_deep_review_default_skipped(tmp_path: Path):
             try:
                 row = conn.execute(
                     "SELECT COUNT(*) AS n FROM ai_call_logs WHERE prompt_version = ?",
-                    ("deep_reviewer:v1",),
+                    ("deep_reviewer:v2",),
                 ).fetchone()
             finally:
                 conn.close()
@@ -412,16 +412,16 @@ def test_deep_review_ok_report_in_pause_payload(tmp_path: Path):
             # review_report 仍存在
             assert "review_report" in payload
 
-            # ai_call_logs 出现 deep_reviewer:v1 调用（status='ok'）
+            # ai_call_logs 出现 deep_reviewer:v2 调用（status='ok'；2026-10-19 升版）
             conn = get_connection(app.state.settings.db_path)
             try:
                 rows = conn.execute(
                     "SELECT prompt_version FROM ai_call_logs WHERE prompt_version = ?",
-                    ("deep_reviewer:v1",),
+                    ("deep_reviewer:v2",),
                 ).fetchall()
             finally:
                 conn.close()
-            assert len(rows) >= 1, "ai_call_logs 缺少 deep_reviewer:v1 调用记录"
+            assert len(rows) >= 1, "ai_call_logs 缺少 deep_reviewer:v2 调用记录"
 
     asyncio.run(run())
 

@@ -36,6 +36,30 @@ NovelOS 面向长篇小说作者：在本地运行完整的小说生产闭环。
 - **续写助手（V2.2）**：章节详情页一键生成多候选续写并排对比、采纳即追加草稿新版本。见 packages/core/api/routers/continuation.py。
 - **真实长跑验证（V2.2）**：50+ 章 MiniMax-M3 连续生成验证状态机零衰减；观测报告与 judge 探针见 docs/evaluation/。
 
+## 对外：Agent Skill 包（`skills/novelos/`）
+
+本仓另附一份**可分发的 Agent Skill 包**——装进任意支持 Agent Skills 规范的宿主
+（Claude Code / Codex / Cursor …），即可**用自然语言驱动本机 NovelOS**：
+起章节、跑质量体检、查交付判定。
+
+| 装哪儿 | 清单文件 | `source` 形状 |
+|---|---|---|
+| Claude Code | `.claude-plugin/plugin.json` + `.claude-plugin/marketplace.json` | **字符串**，且以 `"./"` 开头 |
+| Codex | `.codex-plugin/plugin.json` | `{"source": "local"}` |
+| Cursor | `.cursor-plugin/plugin.json` + `.cursor-plugin/marketplace.json` | `"."`；`additionalProperties:false` **真的实现**（未知键直接判红） |
+| Agent Skills 标准市场 | `.agents/plugins/marketplace.json` | — |
+
+> **三平台的 `source` 形状互不兼容**——照抄任一家的形状到另一家 ⇒ 装不上
+> ⇒ **分文件写，不共用一份**。
+
+- **零第三方依赖**：客户端 `skills/novelos/scripts/novelos.py` 只用标准库；
+  `--help` 在**离线**状态可跑（自检里会打掉 `socket` 来证明这一点）。
+- **契约自检**：`python skills/novelos/scripts/check_skill_package.py --selftest`
+  —— 46 项检查 + 7 条变异自检（把包改坏 ⇒ 对应检查必须报红）。
+- **前提**：本机 NovelOS 服务在跑（默认 `http://127.0.0.1:18081`）。
+  ⚠️ 本仓 API **无鉴权**、CORS 仅限本机 ⇒ 该 skill 只适用于**本机自用**，
+  不要把服务暴露到公网。
+
 ## 仓库结构
 
 ```
@@ -46,7 +70,10 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0031_project_fast_mode.sql，共 31 个迁移，39 张业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包 / 0026 run 实例归属 / 0027 场景计划 / 0028 大纲槽 / 0029 写作圣经 / 0030 回滚索引项目内收窄 / 0031 项目级快通道）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0032_skills.sql，共 32 个迁移，41 张业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包 / 0026 run 实例归属 / 0027 场景计划 / 0028 大纲槽 / 0029 写作圣经 / 0030 回滚索引项目内收窄 / 0031 项目级快通道 / 0032 内部消费外部 skill）
+skills/novelos/           对外可分发的 Agent Skill 包（SKILL.md + 5 份 references + stdlib 薄客户端
+                         + 契约自检 46 项；三平台清单见 .claude-plugin/ / .codex-plugin/ /
+                         .cursor-plugin/ / .agents/）
 tests/                   pytest（unit / integration / workflow / api / evals）
 scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
 docs/                    设计文档、PRD、实现计划（docs/impl/IMPLEMENTATION-PLAN-v0.md）
@@ -64,7 +91,7 @@ jsonschema / httpx；测试另需 pytest / ruff）。
 # 1) 安装依赖
 pip install -e ".[dev]"
 
-# 2) 执行数据库迁移（生成 data/novelos.db；39 张业务表 + _migrations 物理共 40 张）
+# 2) 执行数据库迁移（生成 data/novelos.db；41 张业务表 + _migrations 物理共 42 张）
 python scripts/migrate.py
 
 # 3) 前端构建（构建产物 apps/web/dist，后端会自动托管）
@@ -79,17 +106,30 @@ python -m packages.core.api.main
 
 浏览器打开 http://127.0.0.1:18081 即可使用（后端同时托管 SPA 与 `/api`）。
 
-## 授权状态（请先读这一节）
+## 授权状态
 
-本仓库**当前没有 LICENSE 文件**。按著作权默认规则，这意味着**保留一切权利**：
-克隆下来不等于获得使用许可。本项目最初的定位是「单用户本机自用工具」，
-尚未做公开发布前的授权决策。
+本仓库采用 **GNU Affero General Public License v3.0（AGPL-3.0-only）**，
+许可证全文见 [`LICENSE`](LICENSE)（逐字取自 gnu.org，未作任何改动）。
 
-如果你是在克隆后使用本软件，请知悉上述状态并联系作者确认授权方式。
+- **你可以**：自由使用、修改、再分发（含商业使用）。
+- **必须**：改动后**以 AGPL-3.0 继续分发**；**通过网络提供服务时**（§13），
+  必须向使用者提供**完整对应源码**——这是 AGPL 相对 GPL 的核心差异。
+- **保留**：作者保留著作权；本项目不提供任何担保。
 
-> 决策记录：2026-10-16 曾就「补一份 LICENSE」征询，裁决为**暂不添加**——
-> 许可文本是一份有法律后果的授权，且一旦提交进 git 历史即难以撤回，
-> 不应由工具代为签署。补授权时请一并决定是否要改「单用户自用」的产品定位。
+> **决策记录（2026-10-19 订正 2026-10-16 的裁决）**
+>
+> - 2026-10-16 曾就「补一份 LICENSE」征询，裁决为**暂不添加**，理由是
+>   「许可文本是一份有法律后果的授权，不应由工具代为签署」。
+> - **推翻理由**：该裁决的前提是「**纯自用工具**」（2026-09-11 裁决）。而 2026-10-19
+>   事实已变——**本软件已开始给他人使用**，「保留一切权利」从此不再是中性的默认态，
+>   而是**实际的法律暴露**（别人在无许可的情况下使用一份有版权的公开仓库）。
+>   `docs/roadmap/v3.9-业务逻辑优化与治理.md` 的 R3 条目本就把 LICENSE 列为
+>   「转公开发布的硬阻塞，届时重估」——**重估条件已触发**。
+> - **选型理由（AGPL-3.0 而非 MIT）**：授权**不可撤回**（MIT 一旦授出即对所有既有副本
+>   永久生效），而**收紧随时可做**（著作权人可再许可）⇒ **风险不对称时取严**。
+>   AGPL-3.0 亦与同路线的最大同类项目（InkOS，AGPL-3.0）一致。
+> - **本裁决由主会话在用户授权「全量修复 + 期间自行裁决」下作出并留痕**；
+>   改判只需重写 `LICENSE` 并同步本节与 `pyproject.toml` 的分类器。
 
 ## 更新到最新版（克隆安装的用户看这里）
 
@@ -139,7 +179,7 @@ python -m pytest -q
 - 前端 dev 代理从 `NOVELOS_PORT` / `NOVELOS_API_PORT` 读后端端口（见 `apps/web/vite.config.ts`）；
   改端口后需重启 vite dev 才生效。
 
-健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=39`，业务表数；含 `_migrations` 物理共 40 张）。
+健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=41`，业务表数；含 `_migrations` 物理共 42 张）。
 
 ## 测试
 

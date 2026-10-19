@@ -76,16 +76,17 @@ SERVER_START_TIMEOUT_S = 30
 ENDPOINT_READY_TIMEOUT_S = 30
 HTTP_TIMEOUT_S = 60.0
 
-# health.tables = 业务表数（业务表 39；含 _migrations 物理共 40，health 返回减 1 后的业务表数）
-# 真值核对：``count_tables()`` 排除 sqlite_% 与 chapter_fts% 影子表后返回 40（含 _migrations），
+# health.tables = 业务表数（业务表 41；含 _migrations 物理共 42，health 返回减 1 后的业务表数）
+# 真值核对：``count_tables()`` 排除 sqlite_% 与 chapter_fts% 影子表后返回 42（含 _migrations），
 # 与 README §健康检查、packages/core/db.py docstring、tests/integration/test_health.py 同口径。
-EXPECTED_BUSINESS_TABLES = 39  # 0027 chapter_scene_plans（P1 规划合并落库面）后 38→39
+EXPECTED_BUSINESS_TABLES = 41  # 0032 skills（内部消费外部 skill）后 39→41（+2 张表）
 # V2.0 Wave B 任务一：0009_branch_snapshots.sql 加 branch_snapshots → 34 业务表
 # V2.0 Wave B 任务二：0010_trigger_keys.sql 仅 ALTER TABLE 加列，不增表 → 仍 34 业务表
 # V3.3：0014_knowledge_reveal.sql 重建 reveal_policies（表早已存在于基线，不增数）→ 仍 34 业务表
 # V3.4：0015_volumes.sql 加 volumes → 35 业务表
 # V3.7：0016_model_profiles.sql 加 model_profiles + capability_bindings → 37 业务表
 # 题材库 P1a：0025_genre_packs.sql 加 genre_packs → 38 业务表
+# 内部消费外部 skill：0032_skills.sql 加 skills + project_skills → 39→41 业务表
 
 # run 终态（引擎状态机；PAUSED 是「等人工决议」的中间态，resume 后继续推进）。
 RUN_TERMINAL_STATUSES = ("COMPLETED", "FAILED", "CANCELLED")

@@ -238,6 +238,8 @@ def test_merged_peek_matches_legacy_peek_wrappers(tmp_path: Path):
         "active_canon_id": "can_a",
         # 题材库 P1a：绑定题材包指纹（未绑定 → None；director 缓存键维度）
         "genre_pack_ref": None,
+        # 0032 skill 维度：peek 一次预读项目绑定的 skill 集合指纹（未绑定 → None）
+        "skills_ref": None,
     }
     assert _peek_chapter_no_state_version(db_path, pid, cid) == (4, 9)
     assert _peek_chapter_no_state_version_plan(db_path, pid, cid) == (4, 9, plan)

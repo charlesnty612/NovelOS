@@ -31,6 +31,25 @@ jobs:
         run: ruff check packages tests scripts
       - name: Pytest
         run: python -m pytest tests/ -q
+      - name: Contract self-checks (evidence table + skill package)
+        run: |
+          # 「闸门存在 ≠ 闸门在门框上」——这两条**契约产物类**看守此前只在本地跑，
+          # CI 从不执行 ⇒ 它们的红永远没人看见（同本批修的 CI 30+ 次全红同族）。
+          #   ① 证据表（packages/core/quality/detector_evidence.json）与**代码实际值**
+          #      逐条相符（66 条代码引用 + 12 条行为探针；退出码 0/1/2）；
+          #   ② 对外 skill 包的三平台清单 / frontmatter / 引用完整性合规
+          #      （46 项检查 + 7 条变异自检）。
+          python scripts/detector_evidence_check.py
+          python skills/novelos/scripts/check_skill_package.py --selftest
+      - name: Human-baseline proxy (synthetic corpus — NOT the human baseline)
+        run: |
+          # 内容仓 NovelOS-Content **不推 GitHub**（硬规则 5）⇒ CI 永远拿不到
+          # 人类基线语料 ⇒「阈值是按人类基线校准过的」在 CI 上**不可复现**
+          # （本仓已把这件事从「裸 skip」改成「显式记录 + 标记 + 可选转红」，
+          #   见 tests/unit/quality/HUMAN_BASELINE.md）。
+          # 此处跑**自造语料**校准器：它只证明算子活着、口径可复算，
+          # **不得**用它改任何阈值。
+          python scripts/human_baseline_synthetic.py
       - name: Dependency audit (pip-audit)
         run: |
           python -m pip install pip-audit

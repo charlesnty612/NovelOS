@@ -12,6 +12,7 @@ from packages.core.db import get_connection
 from .builders_common import (
     _DEFAULT_TARGET_WORD_COUNT,
     _DIRECTOR_SUMMARY_TOKEN_BUDGET,
+    _SKILL_CONSUMER_DIRECTOR,
     _attach_assembly_meta,
     _build_trigger_corpus,
     _character_state_excerpts,
@@ -27,6 +28,7 @@ from .builders_common import (
     _recent_chapter_summaries,
     _row_to_chapter,
     _row_to_project,
+    _skill_excerpt,
     _truncate_summaries_to_token_budget,
     _world_state_excerpts,
     resolve_author_intent,
@@ -40,6 +42,7 @@ from .cache import (
     _fingerprint_author_intent,
     _fingerprint_outline_json,
     _fingerprint_plan_json,
+    _fingerprint_skills,
     _fingerprint_writing_bible,
     characters_fingerprint,
 )
@@ -236,6 +239,11 @@ def _build_director_input_uncached(
         # 题材库 P1a：项目绑定题材包时的 director 注入段（结构模板摘要 / 爽点类型
         # 清单 + 密度约束文本化 / pacing 摘要）；未绑定 → (None, None) 零注入。
         genre_pack_inject, genre_pack_audit = _genre_pack_excerpt(conn, project_id)
+        # 内部消费外部 skill：项目绑定的 skill 集合 → 独立新段 ``skills``
+        #（与题材包双资源并存、互不覆盖）。未绑定 / 无适用 skill → (None, None)。
+        skill_inject, skill_audit = _skill_excerpt(
+            conn, project_id, consumer=_SKILL_CONSUMER_DIRECTOR,
+        )
     finally:
         conn.close()
 
@@ -312,6 +320,12 @@ def _build_director_input_uncached(
         payload["genre_pack"] = genre_pack_inject
     if genre_pack_audit is not None:
         payload["_genre_pack_consumed"] = genre_pack_audit
+    # 内部消费外部 skill：**独立新段** ``skills``（绝不塞进 genre_pack /
+    # style_constraints 等既有段）+ 溯源审计 ``_skills_consumed``。
+    if skill_inject is not None:
+        payload["skills"] = skill_inject
+    if skill_audit is not None:
+        payload["_skills_consumed"] = skill_audit
     # Sprint 14：摘要链 + 前章尾段 + 开放伏笔清单。
     # 沿用 agent-contracts §3.1「不在权威契约内」的扩展键惯例；无 chapter_summaries 行 /
     # 无 planted 状态伏笔 / 无前章 → 给空列表 / 空 dict，调用方按空态处理。
@@ -340,9 +354,10 @@ def build_director_input(
     缓存（V2.0 Wave C 任务二）：L0/L1 装配结果按
     ``(project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
     active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
-    chars_fp, prompt_label, ns)``
+    chars_fp, skills_fp, prompt_label, ns)``
     键做进程内缓存；同一 (project, state_version, chapter, plan_json 内容, 大纲内容,
-    canon, 作者意图, 项目写作圣经, 目标字数, 题材包, 角色内容, 提示词版本, 命名空间)
+    canon, 作者意图, 项目写作圣经, 目标字数, 题材包, 角色内容, 绑定 skill 集合,
+    提示词版本, 命名空间)
     第二次调用直接返回缓存条目。
 
     V2.0 Wave C P1-1 修复：键追加 ``plan_fp``（chapters.plan_json 原文 sha256[:16]），
@@ -372,6 +387,13 @@ def build_director_input(
     而角色页的新增 / 改设定不写 story_state、不推 ``state_version`` ⇒ 缺该维度时改角色
     后**重跑同一章**命中旧装配。⚠️ 边界：写新章时 ``chapter_no`` 不同 ⇒ 旧实现也不脏命中。
     判别：``tests/unit/test_e1_character_cache_key.py``。
+
+    内部消费外部 skill（0032）：键再追加 ``skills_fp``（项目绑定 skill 集合的指纹，
+    **含 id 与 version**；未绑定 ⇒ ``"__none__"``）。skill 集合进 payload 的**独立
+    新段** ``skills`` ⇒ 必须进键（硬规则 2「凡进 payload 的装配参数必须入键」）：
+    换 skill / 改 skill payload（PUT ⇒ version 自增）/ 改绑定集合都必须 miss，
+    否则 director 拿着改之前的旧手艺规划本章。口径与 ``genre_pack_ref`` /
+    ``chars_fp`` 逐字同形。判别：``tests/unit/test_skill_cache_key.py``。
 
     ``namespace``（关键词参数，默认 ``""``）：键尾命名空间标记。``preview_context``
     传 ``"preview"`` 拆开 dry-run 与生产的键空间，避免预览的空意图 / 默认 2200 字
@@ -424,10 +446,16 @@ def build_director_input(
     # 落在 prompt_label 之前 ⇒ 键尾两元（prompt 标签 / 命名空间标记）语义不变
     # （``tests/unit/test_prompt_label_key.py`` 的 ``DIRECTOR_KEY_LEN`` 13 → 14）。
     chars_fp = characters_fingerprint(db_path, project_id)
+    # 内部消费外部 skill：项目绑定 skill 集合的指纹（**含 id 与 version**）。
+    # 该维度进 payload 的 ``skills`` 段 ⇒ 必须进键（硬规则 2）：换 skill /
+    # 改 skill payload（version 自增）/ 改绑定都必须 miss，否则 director 拿着
+    # 改之前的旧手艺规划本章。口径与降级路径 / 空态**逐字同形**（未绑定 ⇒
+    # ``"__none__"``，与 ``genre_pack_ref`` 同形）。
+    skills_fp = _fingerprint_skills(peek.get("skills_ref"))
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
         active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
-        chars_fp, prompt_label,
+        chars_fp, skills_fp, prompt_label,
         _cache_namespace_tag(namespace),
     )
     cacheable = (
@@ -435,6 +463,7 @@ def build_director_input(
         and intent_fp != _FINGERPRINT_UNCACHED
         and bible_fp != _FINGERPRINT_UNCACHED
         and chars_fp != _FINGERPRINT_UNCACHED
+        and skills_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)

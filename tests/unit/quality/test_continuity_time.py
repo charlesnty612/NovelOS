@@ -56,13 +56,9 @@ D04  e642#ch3       三点多（裸钟点）                            不判  
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
-import pytest
-
-from packages.core.content_sync.paths import DEFAULT_CONTENT_DIR
 from packages.core.quality import continuity_time as ct
 from packages.core.quality.ai_patterns import (
     AI_PATTERN_RULES,
@@ -70,6 +66,11 @@ from packages.core.quality.ai_patterns import (
     DEFAULT_MIN_BACKSTEP_HOURS,
     scan_ai_patterns,
 )
+
+from . import _human_baseline_gate as gate
+
+#: 标记「本文件是人类基线看守」（故障注入插件据此定位目标用例）。
+HUMAN_BASELINE_GUARD = True
 
 # ---------------------------------------------------------------------------
 # 真实夹具（逐句引用自 data/novelos.db 的生产正文；不整章复制）
@@ -412,29 +413,10 @@ def test_hits_land_in_review_report_warnings(tmp_path: Path):
 # 人类基线：机会数为 0（把「不可采信」这件事本身钉住，防止被当成零误报证据）
 # ---------------------------------------------------------------------------
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_REFERENCE_SUBPATH = Path("reference-books/榜一-快穿之人渣洗白手册/侯府凤凰男")
-
-
-def _reference_dir() -> Path | None:
-    """定位榜一侯府弧正文目录；内容仓不在本机时返回 None。"""
-    candidates: list[Path] = []
-    env_dir = os.environ.get("NOVELOS_CONTENT_DIR")
-    if env_dir:
-        candidates.append(Path(env_dir))
-    candidates.append(DEFAULT_CONTENT_DIR)
-    candidates.append(_REPO_ROOT.parent / "NovelOS-Content")
-    for root in candidates:
-        target = root / _REFERENCE_SUBPATH
-        if target.is_dir():
-            return target
-    return None
-
-
 def _reference_chapters() -> list[tuple[str, str]]:
-    ref_dir = _reference_dir()
-    if ref_dir is None:  # pragma: no cover - 环境前提缺失
-        pytest.skip(f"内容仓参考书目录不存在：{_REFERENCE_SUBPATH}")
+    """榜一侯府弧全部 19 章（语料定位与「不可得怎么办」由
+    :mod:`unit.quality._human_baseline_gate` 统一处理）。"""
+    ref_dir = gate.require_reference_corpus(__name__)
     numbered: list[tuple[int, Path]] = []
     for path in ref_dir.glob("*.txt"):
         m = re.search(r"第(\d+)章", path.name)

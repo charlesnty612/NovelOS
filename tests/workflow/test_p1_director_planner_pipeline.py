@@ -10,7 +10,7 @@ chapter-write 读落库 scene_plan（命中跳过 / 未命中保留降级）。
 4. 白名单命中 → 既有 output-invalid 重试：二次合规则 run COMPLETED（重试计数落
    ai_call_logs）；两次都命中则 run FAILED（不静默放行）；
 5. chapter-write：命中落库 scene_plan → 跳过自身 scene_planner 调用
-   （``scene_planner_status='from_plan'``、ai_call_logs 无 scene_planner:v1 行）；
+   （``scene_planner_status='from_plan'``、ai_call_logs 无 scene_planner:v2 行）；
 6. chapter-write：未命中 → 走原 scene_planner 单节点调用（降级路径必须保留）。
 
 设计：引擎级直连 tmp 库（不依赖 HTTP 轮询），章节计划由本用例的 mock 产出
@@ -367,7 +367,7 @@ def test_plan_merged_output_persists_plan_and_scene_plan(
     assert row is not None, "scene_plan 未落库"
     assert row["run_id"] == run_id
     assert row["source"] == "director_planner"
-    assert row["prompt_version"] == "director_planner:v2"
+    assert row["prompt_version"] == "director_planner:v3"
     assert row["scene_count"] == 2
     stored = json.loads(row["payload_json"])
     assert stored == payload["scene_plan"]
@@ -473,7 +473,7 @@ def test_plan_whitelist_violation_retries_then_succeeds(
     try:
         row = conn.execute(
             "SELECT retry_count, error FROM ai_call_logs "
-            "WHERE prompt_version = 'director_planner:v2'"
+            "WHERE prompt_version = 'director_planner:v3'"
         ).fetchone()
     finally:
         conn.close()
@@ -539,7 +539,7 @@ def test_plan_corrupt_key_beats_retries_then_succeeds(
     try:
         row = conn.execute(
             "SELECT retry_count, error FROM ai_call_logs "
-            "WHERE prompt_version = 'director_planner:v2'"
+            "WHERE prompt_version = 'director_planner:v3'"
         ).fetchone()
     finally:
         conn.close()
@@ -597,7 +597,7 @@ def test_write_uses_persisted_scene_plan_and_skips_llm(engine: WorkflowEngine, d
     ]
     assert scene_node["scene_planner_source"]["source"] == "director_planner"
 
-    assert _ai_call_count(db_path, "scene_planner:v1") == 0, "命中落库场景不应再调 scene_planner"
+    assert _ai_call_count(db_path, "scene_planner:v2") == 0, "命中落库场景不应再调 scene_planner"
     assert _ai_call_count_prefix(db_path, "writer:") == 1, (
         "writer 节点应恰好调 1 次 LLM（版本按 docs 注册自动升版，勿写死版本号）"
     )
@@ -675,7 +675,7 @@ def test_write_falls_back_to_scene_planner_when_no_persisted_plan(
     outputs = _node_outputs(db_path, write_run_id)
     assert outputs["scene_planner"]["scene_planner_status"] == "ok"
     assert outputs["scene_planner"]["scene_plan"]["scenes"][0]["purpose"] == "降级路径规划出的场景"
-    assert _ai_call_count(db_path, "scene_planner:v1") == 1
+    assert _ai_call_count(db_path, "scene_planner:v2") == 1
 
 
 def test_write_ignores_persisted_row_with_empty_scenes(engine: WorkflowEngine, db_path: Path):
@@ -858,7 +858,7 @@ def test_api_full_chain_with_merged_plan(tmp_path: Path):
             assert write_run["status"] == "COMPLETED"
             outputs = _node_outputs(db_path, write_run_id)
             assert outputs["scene_planner"]["scene_planner_status"] == "from_plan"
-            assert _ai_call_count(db_path, "scene_planner:v1") == 0
+            assert _ai_call_count(db_path, "scene_planner:v2") == 0
 
             # 3. review（人工节点 approved）
             r = await _request(

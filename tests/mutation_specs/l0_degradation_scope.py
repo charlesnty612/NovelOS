@@ -61,12 +61,19 @@ MUTATIONS = [
     ),
     (
         # 收窄被撤（回到裸 ``except sqlite3.OperationalError``）⇒ 锁 / I/O 又被静默吞
+        # ⚠️ **锚点带尾随上下文（2026-10-20 批次十三修）**：0032 批次在同文件新增了
+        # ``_skill_excerpt``，其 except 块与本处**逐字同形**（``if not
+        # _is_missing_schema_error(exc): raise`` + ``return None, None``）⇒ 锚点命中
+        # **2 次** ⇒ ``[ABORT]``。⇒ 锚点补上**尾随的 ``if row is None:``**
+        # （skill 侧是 ``if not rows:``）⇒ 重新唯一。
         "L0-GP1",
         "packages/core/context_engine/builders_common/common.py",
         """        if not _is_missing_schema_error(exc):
             raise
+        return None, None
+    if row is None:
         return None, None""",
-        "        return None, None",
+        "        return None, None\n    if row is None:\n        return None, None",
         "tests/unit/test_genre_pack_schema_error_scope.py",
     ),
     (

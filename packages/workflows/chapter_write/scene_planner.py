@@ -11,13 +11,16 @@ import logging
 import sqlite3
 from typing import Any
 
+from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.context_engine.builders import (
     _REFERENCE_CANON_CONSUMER_PLANNER,
     _reference_canon_excerpt,
 )
 from packages.core.context_engine.builders_common import (
     _GENRE_PACK_CONSUMER_PLANNER,
+    _SKILL_CONSUMER_PLANNER,
     _genre_pack_excerpt,
+    _skill_excerpt,
 )
 from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.genre.target_words import resolve_target_word_count
@@ -131,6 +134,9 @@ def _collect_scene_planner_inputs(
     - 题材库 P1b：项目绑定题材包时注入 ``genre_pack`` 段（爽点类型摘要 + 配比声明 +
       配比指令，见 :func:`...builders_common._genre_pack_excerpt` 的 scene_planner
       consumer 口径）+ ``_genre_pack_consumed`` 溯源审计；未绑定 → 两键都不出现。
+    - 内部消费外部 skill：项目绑定 skill 时注入 ``skills`` 段（独立新段，与题材包
+      双资源并存）+ ``_skills_consumed`` 溯源审计；按 ``applies_to`` 过滤
+      （不含 ``scene_planner`` 的 skill 不注入本节点）。
     """
     context = collect_planner_context(db_path, chapter_id)
     project_id = context["project_id"]
@@ -184,6 +190,20 @@ def _collect_scene_planner_inputs(
         # 降级语义由 ``_genre_pack_excerpt`` 内部唯一承载（缺表/缺列 → 未绑定），
         # 外层再吞一次会把内层刚收窄的范围放大（锁 / I/O 故障变静默丢题材包）。
 
+    # 内部消费外部 skill：项目绑定的 skill 集合 → 独立新段 ``skills``（与题材包
+    # 双资源并存、互不覆盖）。按 ``applies_to`` 过滤（不含 ``scene_planner`` 的
+    # skill 不注入本节点）。未绑定 / 无适用 skill → 两键都不出现。
+    skill_inject: dict | None = None
+    skill_audit: list | None = None
+    if project_id:
+        conn_s = get_connection(db_path)
+        try:
+            skill_inject, skill_audit = _skill_excerpt(
+                conn_s, project_id, consumer=_SKILL_CONSUMER_PLANNER,
+            )
+        finally:
+            conn_s.close()
+
     # world_state_excerpts：复用既有字段结构（P2-补洞），让 Scene Planner 能看到
     # world_rules_relevant（项目级硬设定，如原著要素锁），保证"沿传 Director 约束"
     # 不会因本节点缺 world_rules 而退化为凭印象。L0 world_rules 全量常驻，与
@@ -226,7 +246,12 @@ def _collect_scene_planner_inputs(
 
     payload: dict[str, Any] = {
         "agent": "scene_planner",
-        "prompt_version": _SCENE_PLANNER_PROMPT_VERSION,
+        # 版本口径统一（2026-10-19，与 writer / director 同款）：常量只作 fallback，
+        # 真值取 **ACTIVE 提示词行**——升版后仍硬编码 ⇒ payload 声明旧版、模型照抄
+        # 回声、而 ``ai_call_logs`` 记真值（2026-09-16 writer 事故的同形）。
+        "prompt_version": active_prompt_label(
+            db_path, "scene_planner", fallback=_SCENE_PLANNER_PROMPT_VERSION,
+        ),
         "chapter": {
             "chapter_id": chapter_id,
             "title": context["chapter_title"],
@@ -266,4 +291,9 @@ def _collect_scene_planner_inputs(
         payload["genre_pack"] = genre_pack_inject
     if genre_pack_audit is not None:
         payload["_genre_pack_consumed"] = genre_pack_audit
+    # 内部消费外部 skill：**独立新段** ``skills`` + 溯源审计 ``_skills_consumed``。
+    if skill_inject is not None:
+        payload["skills"] = skill_inject
+    if skill_audit is not None:
+        payload["_skills_consumed"] = skill_audit
     return payload

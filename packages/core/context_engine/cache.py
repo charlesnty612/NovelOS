@@ -48,6 +48,12 @@ _FINGERPRINT_LEN = 16
 _FINGERPRINT_NONE = "none"
 # 「跳过缓存」的指纹占位（与 'none' 区分；调用方据此判走 uncached）
 _FINGERPRINT_UNCACHED = "uncached"
+# 「项目未绑定任何 skill」的指纹占位。
+# ⚠️ 刻意**不是** ``_FINGERPRINT_NONE``（"none"）：skill 维度与题材包维度
+# （``genre_pack_ref`` 的未绑定占位）同形，用 ``"__none__"`` ⇒ 两处的「未绑定」
+# 在键里读起来一致，便于肉眼核对键形态（硬规则 2「主 JOIN / 降级路径 / 空态
+# 三处键形态逐字同形」）。
+_SKILL_FINGERPRINT_NONE = "__none__"
 
 # preview dry-run（``preview_context``）的独立命名空间：默认口径是空意图 +
 # 2200 字，与生产参数同值时也必须互不命中（前端挂载章节详情页即自动打预览，
@@ -250,6 +256,54 @@ def _fingerprint_writing_bible(writing_bible: Any) -> str:
     不可序列化 → ``_FINGERPRINT_UNCACHED``，调用方据此跳过缓存。
     """
     return _fingerprint_author_intent(writing_bible)
+
+
+def _fingerprint_skills(skills_ref: Any) -> str:
+    """计算项目绑定 skill 集合的稳定指纹（sha256 前 16 字符）。
+
+    口径（设计钉死）：``sha256(json.dumps([{"skill_id": sid, "version": ver} for ...
+    按 skill_id 排序], sort_keys=True, ensure_ascii=False))[:16]``。
+
+    - **必须含 version**：payload 变更 ⇒ version 自增（PUT 改 payload 时）⇒ 只按 id
+      算会脏命中（改了 skill 的 instructions 却命中改之前的旧装配）。这与
+      ``genre_pack_ref``（``<pack_id>@<version>``）同款纪律。
+    - 未绑定（``None`` / 空串 / 空集合）→ ``"__none__"``（与 ``genre_pack_ref`` 的
+      未绑定占位**同形**，便于肉眼核对键形态）。
+    - **顺序无关**：内部按 ``skill_id`` 排序 ⇒ 两条读取路径（主 JOIN 的
+      ``group_concat`` 聚合 / 降级路径的逐项读）即便聚合顺序不同，也算出**同一个**
+      指纹（硬规则 2「主 JOIN 与降级路径的键形态必须逐字同形」的落地方式）。
+      ⚠️ **如实登记的边界**：绑定**顺序**（``project_skills.ord``）不进指纹——两个
+      skill 的相对顺序对被注入方无语义（各自独立的通用手艺，不存在「后者覆盖前者」）。
+      若将来引入「有序 skill 栈」（后一条覆盖前一条的写法），**必须**把 ``ord``
+      进指纹，否则改顺序不 miss ⇒ 脏命中。
+    - 串形态非法（``skills_ref`` 不是 str）→ ``_FINGERPRINT_UNCACHED``（调用方据此
+      跳过缓存；绝不静默降级成某个稳定值——那正是脏命中）。
+
+    输入串形态：``"<skill_id>:<version>|<skill_id>:<version>"``（由 peek 的
+    ``group_concat(skill_id || ':' || version, '|')`` 产生）。``skill_id`` 的字符集
+    被 :class:`packages.core.skill.model.SkillCreate` 限死（不含 ``:`` / ``|``），
+    故切分无歧义。
+    """
+    if skills_ref is None or skills_ref == "":
+        return _SKILL_FINGERPRINT_NONE
+    if not isinstance(skills_ref, str):
+        return _FINGERPRINT_UNCACHED
+    try:
+        entries: list[dict[str, Any]] = []
+        for part in skills_ref.split("|"):
+            if not part:
+                continue
+            skill_id, _, version = part.rpartition(":")
+            if not skill_id:
+                continue
+            entries.append({"skill_id": skill_id, "version": int(version)})
+        if not entries:
+            return _SKILL_FINGERPRINT_NONE
+        entries.sort(key=lambda e: e["skill_id"])
+        normalized = json.dumps(entries, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:_FINGERPRINT_LEN]
+    except Exception:  # noqa: BLE001 —— 不可序列化时跳过缓存
+        return _FINGERPRINT_UNCACHED
 
 
 def _cache_reset() -> None:

@@ -377,7 +377,7 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 |---|---|---|---|---|
 | 单段可见字 | >100 字 7 段（每章至多 1 段，最长 135）· >140 字 0 段 | >100 字 133 段 · >140 字 16 段（最长 212） | `AI-LONG-PARA` | >100 → warning（单章 ≥2 段）· >140 → error（单段即报） |
 | 对话占比（成对“…”内可见字 ÷ 全章可见字） | 16.5% | 11.4% | `AI-DIALOGUE-LOW` | **<12% → warning（唯一档）**——<8% error 档 2026-09-17 撤回 |
-| 相邻对白接词回声 | 1 对 / 1 章（19 章） | 26 对 / 20 章（48 章） | `AI-DIALOGUE-ECHO` | 复述型 ≥0.70 **或** 接词型 ≥0.66 且开口 ≥2 字 → warning（恒 warning） |
+| 相邻对白接词回声 | 1 对 / 1 章（19 章） | **23 对 / 18 章**（48 章；重叠系数可比性守卫生效后，无守卫时 34 对 / 24 章） | `AI-DIALOGUE-ECHO` | 复述型 ≥0.70 **或** 接词型 ≥0.66 且开口 ≥2 字 → warning（恒 warning） |
 
 - 三条规则的**元数据与注册**在 `packages/core/quality/ai_patterns.py`（`AI_PATTERN_RULES`
   与 `scan_ai_patterns`，后者仍是唯一对外入口），**算子实现**按族拆到了子模块：
@@ -419,6 +419,49 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
   对白会被计入（人侧那 1 对即此类），判定权在人工/LLM 评审；
   ③ 对话占比阈值仍需按更多人类语料复校，榜一逐章仍有 8/19 章低于 12%（动作戏章
   天然无对话），该噪声已登记为回归上限（≤10 章）。
+
+### 5.7 检测器效果证据表与漂移看守（2026-10-19 新增）
+
+§5.1~§5.6 里的每个数字（人类侧 vs 生成侧的命中数、每千字密度、精确率抽样）原本
+**只以源码注释的形式存在**。注释没有机器校验 ⇒「改了阈值/词表但注释没改」会静默
+发生——**声称还挂在，但已经不真了**。本节引入两张配套资产：
+
+| 资产 | 路径 | 职责 |
+|---|---|---|
+| 证据表 | `packages/core/quality/detector_evidence.json` | 逐规则记录：严重度 / 人类侧数据 / 生成侧数据 / 语料与采集日期 / 阈值与定阈依据 / 已知误报 / 已知死规则 / 是否废弃。**人工维护**（表内 `generated_for` 字段写明了这一点） |
+| 漂移看守 | `scripts/detector_evidence_check.py` | 把表里的**断言值**与**代码里的实际值**逐条比对，不一致就点名报错。**只读** |
+| 召回脚手架 | `scripts/ai_pattern_recall.py` | 给定语料目录，按同一口径重算每条规则的命中数 / 每千字 / 阈值。**只读、不联网、不内置语料** |
+| 合成代理语料 | `packages/core/quality/detector_evidence_corpus/` | 本批**原创**合成文本（`positive/` AI 腔 · `negative/` 自然句 · `time_markers/` 时间标记），用于验证脚手架口径自洽 |
+
+**看守比对的四类量**（全部取自**代码里的真实值**，不是注释文本）：
+
+1. **常量**——阈值、守卫下限、severity 升级门（`kind=value` / `dict_item`）；
+2. **词表**——元素个数 **与** 内容 sha256 双查（只查个数会漏掉「换了一个词但个数不变」）；
+3. **正则**——`re.Pattern.pattern` 的 sha256（算子过宽/过窄最常见的成因）；
+4. **行为探针**——阈值**没有命名常量**的规则（`AI-TRIPLET-OPENING` / `AI-PRONOUN-PILE`
+   的「3」是内联字面量）靠探针看守；探针成对（`expect_hit=true` 与 `false` 各一条），
+   **双向**都成立才算探针活着。
+
+外加两项全局：**规则集**（表里的 rule_id 集合必须与 `AI_PATTERN_RULES` 逐条相等）与
+**severity**（必须与规则表登记的一致）。退出码：`0` 一致 / `1` 有漂移 / `2` 自身出错。
+
+```bash
+python scripts/detector_evidence_check.py            # 人读报告
+python scripts/detector_evidence_check.py --json     # 机器可读
+python scripts/ai_pattern_recall.py --corpus <目录> [--corpus <目录2> ...]
+```
+
+⚠️ **证据表不复制「定阈依据」的论证正文**，只存 `basis_ref`（权威出处指针）+
+一句 `basis_summary`——复制论证正文等于制造第二份要同步的文本，那正是本表要治的病。
+⚠️ **人侧/生成侧的数字无法由代码验证**（需语料复算），看守只核上面四类机器可判项；
+数字本身的真伪靠表内 `recompute_entry` 指向的复算入口人工重算。
+⚠️ **召回脚手架目前只能产出「合成代理」数字**：真实 AI 文本只能来自真实模型调用
+（AGENTS §一 硬约束 2 禁止用 NovelOS 自身发起真实调用来验证软件行为），dev 库既有
+书稿也不得作为验证语料（硬约束 1）⇒ 真实召回率**本批无法取得**。
+
+**改任何检测器的阈值 / 词表 / 正则 / severity ⇒ 必须同时改证据表**，否则看守红。
+判别：`tests/unit/quality/test_detector_evidence.py`（含正反一对与突变自检）、
+`tests/unit/quality/test_ai_pattern_recall.py`。
 
 ---
 
@@ -511,6 +554,9 @@ ai_trace 各写一份，改一边忘另一边就漂移。现统一为 `packages/
 ## 9. 测试
 
 - 单元测试：`tests/unit/quality/` 覆盖 8 条 Guardrail / 5 项爽感 / 6 子分 / 聚合 / engine 端到端。
+- 证据表与漂移看守：`test_detector_evidence.py`（表结构自洽 + 守卫视绿/红正反一对 +
+  比较逻辑的突变自检）、`test_ai_pattern_recall.py`（召回脚手架跑通 / 输出自洽 /
+  正负例区分度 / 只读）——详见 §5.7。
 - Regression：Sprint 6 集成任务后须接入 `tests/evals/golden/`（spec §5）。
 - 命名约定：以 `test_<feature>_<scenario>` 命名，与 `tests/unit/test_validator.py` 对齐。
 

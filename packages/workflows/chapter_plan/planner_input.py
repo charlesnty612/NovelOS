@@ -20,7 +20,10 @@ from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.context_engine import build_director_input
 from packages.core.context_engine.builders_common import (
     _GENRE_PACK_CONSUMER_PLANNER,
+    _SKILL_CONSUMER_DIRECTOR,
+    _SKILL_CONSUMER_PLANNER,
     _genre_pack_excerpt,
+    _skill_excerpt,
 )
 from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.quality.wordcount import DEFAULT_TARGET_WORD_COUNT
@@ -218,6 +221,45 @@ def _merge_genre_pack_planner_fields(payload: dict[str, Any], db_path: str, proj
         payload["_genre_pack_consumed"] = director_audit
 
 
+def _merge_skill_planner_fields(payload: dict[str, Any], db_path: str, project_id: str) -> None:
+    """把 **合并角色**（director + scene_planner）适用的 skill 段写回 payload（就地改写）。
+
+    为什么需要这一步：``build_director_planner_input`` 继承 director 装配，而 director
+    装配的 ``skills`` 段只含 ``applies_to`` 命中 ``director`` 的 skill；本合并体同时
+    扮演「场景规划」角色 ⇒ 命中 ``scene_planner`` 的 skill 也该对它可见。做法与题材包
+    的合并口径同款（``_merge_genre_pack_planner_fields`` 把 director 段与 planner 段
+    **合并**进同一个 ``genre_pack`` 键），区别是 skill 段按「合并角色」**重算**一次
+    （``applies_to`` 命中 director **或** scene_planner 即注入），而不是拼接两段——
+    拼接会让同一条 skill 出现两次，且字符预算（2000）会被两份相同内容吃掉。
+
+    溯源：``_skills_consumed`` 同步为合并角色口径（重算，不合并两份审计）。
+    """
+    if not project_id:
+        return
+    conn = get_connection(db_path)
+    try:
+        inject, audit = _skill_excerpt(
+            conn, project_id,
+            consumer=(_SKILL_CONSUMER_DIRECTOR, _SKILL_CONSUMER_PLANNER),
+        )
+    finally:
+        conn.close()
+    # 降级语义由 ``_skill_excerpt`` 内部唯一承载（缺表/缺列 → 未绑定）；
+    # 外层不再套一层无差别 except（同 ``_merge_genre_pack_planner_fields`` 的理由：
+    # 批次九的教训——外层再吞一次会把内层刚收窄的范围放大）。
+    if inject is None:
+        # 本角色无适用 skill ⇒ 移除继承自 director 段的 skills（避免留下一个
+        # 「只含 director 适用项」的半截段，让合并体看到的口径与计算口径不一致）。
+        payload.pop("skills", None)
+        payload.pop("_skills_consumed", None)
+        return
+    payload["skills"] = inject
+    if audit is not None:
+        payload["_skills_consumed"] = audit
+    else:
+        payload.pop("_skills_consumed", None)
+
+
 def build_director_planner_input(
     db_path: str | Path,
     project_id: str,
@@ -232,7 +274,8 @@ def build_director_planner_input(
     组成 = :func:`~packages.core.context_engine.build_director_input` 的 director 段
     （story state / 角色 / 世界观 / hook / debt / canon / 前章尾段 / 召回……）
     ∪ :func:`collect_planner_context` 的规划期段（可用角色 / 地点 / 文风 / 前章散文占位）
-    ∪ 题材包 planner 段（配比声明 + 配比指令）。
+    ∪ 题材包 planner 段（配比声明 + 配比指令）
+    ∪ **合并角色**（director + scene_planner）适用的 skill 段（独立新段 ``skills``）。
 
     与 A/B 驱动 ``p1_ab/run_merged_ab_v2.build_payload`` 的合并口径一致；差别仅为
     生产侧从 DB 现装配（驱动复用首轮重建产物）。
@@ -258,6 +301,7 @@ def build_director_planner_input(
     payload["style_constraints"] = context["style_constraints"]
     payload["recent_prose"] = context["recent_prose"]
     _merge_genre_pack_planner_fields(payload, str(db_path), project_id)
+    _merge_skill_planner_fields(payload, str(db_path), project_id)
     return payload
 
 

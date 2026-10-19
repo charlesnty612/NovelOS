@@ -122,13 +122,15 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
             assert summarizer_prompts[0]["status"] == "ACTIVE"
             assert summarizer_prompts[0]["version"] == "v1"
 
-            # V1.3：critic:v1 ACTIVE prompt 已注册（LLM 评审员落地）
+            # V1.3：critic ACTIVE prompt 已注册（LLM 评审员落地）
+            # ⚠️ 2026-10-19 内部消费外部 skill：新增 ``critic-v2.md``（skill 段到达
+            # critic）⇒ ACTIVE 由 v1 变 v2（``prompts.version`` 取自文件名）。
             r = await _request(app, "GET", "/api/agents/critic/prompts")
             assert r.status_code == 200
             critic_prompts = r.json()
             assert len(critic_prompts) >= 1
             assert critic_prompts[0]["status"] == "ACTIVE"
-            assert critic_prompts[0]["version"] == "v1"
+            assert critic_prompts[0]["version"] == "v2"
 
     asyncio.run(run())
 

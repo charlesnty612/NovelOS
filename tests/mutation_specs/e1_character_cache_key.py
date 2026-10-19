@@ -16,6 +16,12 @@ state_version）命中旧装配。修法 = 加 ``chars_fp`` 键维度
 ⚠️ 锚点唯一性：本批并发开发会让源码漂移，锚点命中 ≠ 1 时 ``run_spec.py`` 判
 ``[ABORT]``（按设计强制中止，不是「跳过」）⇒ 先跑只读预检
 ``.venv/Scripts/python.exe tests/mutation_specs/validate_specs.py e1_character_cache_key.py``。
+
+⚠️ **锚点随并发批次漂移（2026-10-20 批次十三实测并已修）**：E1-1 / E1-2 的锚点原本
+覆盖「键元组尾部两行」，而 0032 批次给 writer / director 的键**各加了一维**
+``skills_fp`` ⇒ 锚点**命中 0 次** ⇒ ``[ABORT]``（既不是「跳过」也不是「存活」——
+「压根没跑」在退出码上与「跑过且红」同形，这正是本仓反复登记的量具侧失效）。
+⇒ 已把两处锚点更新为**含 ``skills_fp`` 的当前形态**（各自仍唯一）。
 """
 
 MUTATIONS = [
@@ -26,9 +32,9 @@ MUTATIONS = [
         "E1-1",
         "packages/core/context_engine/writer_input.py",
         "target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,\n"
-        "        plan_fp, prompt_label, _cache_namespace_tag(namespace),\n",
+        "        plan_fp, skills_fp, prompt_label, _cache_namespace_tag(namespace),\n",
         "target_word_count, genre_pack_ref, intent_fp, bible_fp,\n"
-        "        plan_fp, prompt_label, _cache_namespace_tag(namespace),  # E1-MUT: 撤角色维度\n",
+        "        plan_fp, skills_fp, prompt_label, _cache_namespace_tag(namespace),  # E1-MUT: 撤角色维度\n",
         "tests/unit/test_e1_character_cache_key.py",
     ),
     # ------------------------------------------------------------------
@@ -37,8 +43,8 @@ MUTATIONS = [
     (
         "E1-2",
         "packages/core/context_engine/director_input.py",
-        "        chars_fp, prompt_label,\n        _cache_namespace_tag(namespace),\n",
-        "        prompt_label,  # E1-MUT: 撤角色维度\n        _cache_namespace_tag(namespace),\n",
+        "        chars_fp, skills_fp, prompt_label,\n        _cache_namespace_tag(namespace),\n",
+        "        skills_fp, prompt_label,  # E1-MUT: 撤角色维度\n        _cache_namespace_tag(namespace),\n",
         "tests/unit/test_e1_character_cache_key.py",
     ),
     # ------------------------------------------------------------------

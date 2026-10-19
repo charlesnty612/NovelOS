@@ -1,7 +1,11 @@
 """接词回声的人类基线看守 + 对话规则降级在**真实人类语料**上的复核。
 
 语料：文风锚点书榜一《快穿之人渣洗白手册》侯府弧 19 章 / 37806 可见字（内容仓，
-三仓分离：正文不进软件仓）；不在本机时 ``pytest.skip``。
+三仓分离：正文不进软件仓）；语料定位与「不可得怎么办」收在
+:mod:`unit.quality._human_baseline_gate`——不在本机时**不无声跳过**：写状态记录 +
+发一条带 ``HUMAN-BASELINE-CORPUS-UNAVAILABLE`` 标记的警告，并可用
+``NOVELOS_REQUIRE_HUMAN_BASELINE=1`` 把它变成**判红**（2026-10-19 改批：此前是裸
+``pytest.skip`` ⇒ CI 里恒 skip ⇒ 人类基线看守在 CI 中从未生效过，而 CI 报绿）。
 
 **N 是怎么定出来的（不是拍脑袋）**：跑 ``count_dialogue_echoes`` 逐章量出来的——
 实测全弧命中 **1 对 / 1 章**，故登记上限就是 1（本文件用 ``<=`` 断言）。那 1 对
@@ -26,7 +30,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -39,35 +42,25 @@ from packages.core.quality.ai_patterns import (
 )
 from packages.core.quality.wordcount import visible_chars
 
+from . import _human_baseline_gate as gate
+
+#: 标记「本文件是人类基线看守」（故障注入插件据此定位目标用例）。
+HUMAN_BASELINE_GUARD = True
+
 # --- 实测基线（2026-09-27 重算；改阈值前先重跑 count_dialogue_echoes） -------
 HUMAN_ECHO_PAIRS = 1  # 全弧命中对数（19 章）；守卫生效前后均为 1 对
 HUMAN_ECHO_CHAPTERS = 1  # 其中有命中的章数
 HUMAN_ECHO_CANDIDATE_PAIRS = 61  # 相邻对白对总数（与阈值无关的语料锚点）
 HUMAN_ECHO_VISIBLE_CHARS = 37806  # 与 test_readability_baseline 同源
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_REFERENCE_SUBPATH = Path("reference-books/榜一-快穿之人渣洗白手册/侯府凤凰男")
-
-
-def _reference_dir() -> Path | None:
-    """定位榜一侯府弧正文目录；内容仓不在本机时返回 None。"""
-    candidates: list[Path] = []
-    env_dir = os.environ.get("NOVELOS_CONTENT_DIR")
-    if env_dir:
-        candidates.append(Path(env_dir))
-    candidates.append(_REPO_ROOT.parent / "NovelOS-Content")
-    for root in candidates:
-        target = root / _REFERENCE_SUBPATH
-        if target.is_dir():
-            return target
-    return None
-
 
 def _arc_chapters() -> list[tuple[str, str]]:
-    """榜一侯府弧全部 19 章 ``(章标签, 正文)``，按章号升序。"""
-    ref_dir = _reference_dir()
-    if ref_dir is None:  # pragma: no cover - 环境前提缺失
-        pytest.skip(f"内容仓参考书目录不存在：{_REFERENCE_SUBPATH}")
+    """榜一侯府弧全部 19 章 ``(章标签, 正文)``，按章号升序。
+
+    语料定位与「不可得怎么办」由 :mod:`unit.quality._human_baseline_gate` 统一处理
+    （本文件**不得**再自带裸 ``pytest.skip``——那会绕开状态记录与警告）。
+    """
+    ref_dir = gate.require_reference_corpus(__name__)
     numbered: list[tuple[int, Path]] = []
     for path in ref_dir.glob("*.txt"):
         m = re.search(r"第(\d+)章", path.name)

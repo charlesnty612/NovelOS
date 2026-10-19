@@ -4721,6 +4721,390 @@
         }
       }
     },
+    "/api/skills": {
+      "post": {
+        "tags": [
+          "skill"
+        ],
+        "summary": "Create Skill",
+        "description": "创建 skill（201）；``payload`` 不合 schema → 422；``skill_id`` 冲突 → 422。\n\n⚠️ **``payload.references` 不是渐进披露**：本仓模型**没有 tool use**，无法「按需\n读取」——references 在**装配期**随 instructions 一起注入（受 ``skills`` 段 2000\n字符预算约束）。API 消费方**不应**假定「模型能自己取参考材料」。",
+        "operationId": "create_skill_api_skills_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Skill"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "skill"
+        ],
+        "summary": "List Skills",
+        "description": "列出 skill 摘要（``created_at DESC``；``?name=`` 精确过滤）。",
+        "operationId": "list_skills_api_skills_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SkillSummary"
+                  },
+                  "title": "Response List Skills Api Skills Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/skills/{skill_id}": {
+      "get": {
+        "tags": [
+          "skill"
+        ],
+        "summary": "Get Skill",
+        "description": "skill 全文（payload 已解析为 dict）。\n\n⚠️ **``payload.references` 不是渐进披露**：本仓模型**没有 tool use**，无法「按需\n读取」——references 在**装配期**随 instructions 一起注入（受 ``skills`` 段 2000\n字符预算约束）。API 消费方**不应**假定「模型能自己取参考材料」。",
+        "operationId": "get_skill_api_skills__skill_id__get",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Skill"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "skill"
+        ],
+        "summary": "Update Skill",
+        "description": "更新 skill；提供 ``payload`` 时 version 自增（装配缓存键指纹跟随）。",
+        "operationId": "update_skill_api_skills__skill_id__put",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Skill"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "skill"
+        ],
+        "summary": "Delete Skill",
+        "description": "删除 skill；仍被项目绑定 → 409（先 unbind 再删）。",
+        "operationId": "delete_skill_api_skills__skill_id__delete",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{project_id}/skills": {
+      "get": {
+        "tags": [
+          "skill"
+        ],
+        "summary": "List Project Skills",
+        "description": "项目当前绑定的 skill 集合（**有序**：``ord`` 小者在前）+ 全文 payload。",
+        "operationId": "list_project_skills_api_projects__project_id__skills_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Skill"
+                  },
+                  "title": "Response List Project Skills Api Projects  Project Id  Skills Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{project_id}/skills/bind": {
+      "post": {
+        "tags": [
+          "skill"
+        ],
+        "summary": "Bind Project Skills",
+        "description": "绑定 skill 到项目（**多 slot 有序**，覆盖式）。\n\n404：项目或任一 skill 不存在（**整体失败，不留半套绑定**）。响应含绑定后的\n有序集合（全文）。",
+        "operationId": "bind_project_skills_api_projects__project_id__skills_bind_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillBindRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Skill"
+                  },
+                  "title": "Response Bind Project Skills Api Projects  Project Id  Skills Bind Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{project_id}/skills/unbind": {
+      "post": {
+        "tags": [
+          "skill"
+        ],
+        "summary": "Unbind Project Skill",
+        "description": "解绑项目的某个 skill（幂等：未绑定也返回 200，集合照常返回）。\n\n404：项目不存在。",
+        "operationId": "unbind_project_skill_api_projects__project_id__skills_unbind_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillUnbindRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Skill"
+                  },
+                  "title": "Response Unbind Project Skill Api Projects  Project Id  Skills Unbind Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/projects/{project_id}/state/init": {
       "post": {
         "tags": [
@@ -13559,6 +13943,298 @@
         ],
         "title": "SimulationSummary",
         "description": "``GET /simulations`` 的一行（按 created_at DESC）。"
+      },
+      "Skill": {
+        "properties": {
+          "skill_id": {
+            "type": "string",
+            "title": "Skill Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload",
+            "description": "运行面 payload（schema：docs/state-model/schemas/skill.schema.json）。⚠️ references 不是渐进披露——模型无 tool use，装配期全量注入。"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "bound_project_count": {
+            "type": "integer",
+            "title": "Bound Project Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "skill_id",
+          "name",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "Skill",
+        "description": "skill 完整表示（GET /api/skills/{skill_id}）。``payload`` 为解析后的 dict。\n\n⚠️ **``payload.references` 不是渐进披露**：本仓模型**没有 tool use**，无法「按需\n读取」——references 在**装配期**随 instructions 一起注入（受段字符预算约束）。\nAPI 消费方**不应**假定「模型能自己取参考材料」，也不应假定未出现在 payload 里的\n内容对模型可见。"
+      },
+      "SkillBindRequest": {
+        "properties": {
+          "skill_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 50,
+            "title": "Skill Ids"
+          }
+        },
+        "type": "object",
+        "title": "SkillBindRequest",
+        "description": "绑定请求体：``{\"skill_ids\": [\"skl_a\", \"skl_b\"]}``。\n\n**列表顺序即注入顺序**（写入 ``project_skills.ord``）；重复 id 去重（保留首次\n出现的位置）。**覆盖式**：绑定会先清掉该项目既有绑定。"
+      },
+      "SkillCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "skill_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120,
+                "pattern": "^[A-Za-z0-9._-]{1,120}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skill Id",
+            "description": "显式 skill_id（内容仓 slug）；省略则生成 skl_<12hex>。"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path",
+            "description": "内容仓来源路径（审计用；软件层不解析）。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "SkillCreate",
+        "description": "创建 skill 请求体（POST /api/skills）。\n\n``skill_id`` 可显式指定（内容仓 slug）；省略时由 service 生成 ``skl_<12hex>``。\n``payload`` 原样透传（jsonschema 校验权威）。"
+      },
+      "SkillSummary": {
+        "properties": {
+          "skill_id": {
+            "type": "string",
+            "title": "Skill Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "applies_to": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Applies To"
+          },
+          "reference_count": {
+            "type": "integer",
+            "title": "Reference Count",
+            "default": 0
+          },
+          "check_count": {
+            "type": "integer",
+            "title": "Check Count",
+            "default": 0
+          },
+          "bound_project_count": {
+            "type": "integer",
+            "title": "Bound Project Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "skill_id",
+          "name",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SkillSummary",
+        "description": "skill 摘要投影（列表端点 / 绑定集合）。\n\n派生字段 ``applies_to`` 从 payload 解析；缺字段 / 解析失败 → 空列表（不炸）。"
+      },
+      "SkillUnbindRequest": {
+        "properties": {
+          "skill_id": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Skill Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "skill_id"
+        ],
+        "title": "SkillUnbindRequest",
+        "description": "解绑请求体：``{\"skill_id\": \"skl_a\"}``（幂等：未绑定也返回 200）。"
+      },
+      "SkillUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          }
+        },
+        "type": "object",
+        "title": "SkillUpdate",
+        "description": "更新 skill 请求体（PUT /api/skills/{skill_id}）；提供 payload 时 version 自增。"
       },
       "SnapshotResponse": {
         "properties": {

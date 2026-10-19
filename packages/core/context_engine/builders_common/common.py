@@ -4,8 +4,10 @@
   ``_row_to_project`` / ``_row_to_chapter`` / ``_latest_draft`` / ``_chapter_project_id`` /
   ``_safe_copy``；
 - 题材库 P1a/P1b：``_genre_pack_excerpt`` 注入段（director / scene_planner / writer 三 consumer）；
+- 内部消费外部 skill（0032）：``_skill_excerpt`` 注入段（5 个 consumer：
+  director / scene_planner / writer / critic / deep_reviewer）；
 - peek 预读（V3.9 批次 2.3）：缓存键预判 + uncached 装配共用的「1 连接 1 条 JOIN」轻查询，
-  含 ``state_version`` / 题材包指纹 / active canon / word_band 原文各维度。
+  含 ``state_version`` / 题材包指纹 / **绑定 skill 指纹** / active canon / word_band 原文各维度。
 
 本模块是包内最底层（不 import 兄弟子模块）；既有引用仍经包门面
 ``packages.core.context_engine.builders_common``（全量再导出）。
@@ -21,6 +23,11 @@ from pathlib import Path
 from typing import Any
 
 from packages.core.db import is_missing_schema_error
+from packages.core.skill.consumers import (
+    build_skills_segment,
+    skill_applies_to,
+    skill_block,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -806,6 +813,126 @@ def _genre_pack_excerpt(
 
 
 # ---------------------------------------------------------------------------
+# 内部消费外部 skill：``skills`` 注入段（5 个 consumer）
+# ---------------------------------------------------------------------------
+#
+# 架构裁决（与题材包**完全独立**的双资源）：
+# - skill 是**外部可移植的通用手艺**（怎么写对白潜台词 / 怎么埋悬念 …），题材包是
+#   **题材公约**（爽点分类法 / 配比 / 节奏红线）。两者不共用表、不共用 schema 版本线。
+# - 注入形态 = **独立新段** ``payload["skills"]``：绝不塞进 ``genre_pack`` /
+#   ``style_constraints`` / 任何既有段（否则无法单独关闭 / 单独溯源）。
+# - **缺席时零注入**：未绑定 / 行缺失 / payload 非法 → 不写 payload 键（既有装配
+#   行为逐字段不变）。
+#
+# 缓存键：``skills_fp``（项目绑定 skill 集合的指纹，含 id **与** version）——
+# 换 skill / 升 version / 改绑定都必须 miss（硬规则 2「凡进 payload 的装配参数
+# 必须入键」；与 ``genre_pack_ref`` / ``chars_fp`` 同形）。
+#
+# 降级范围：表 / 列缺失（0032 未跑的极老库）→ 视为未绑定；锁 / I/O / 损坏**上抛**
+# （静默丢 skill ＝「作者以为手艺生效、正文却没带，且零告警」——与题材包同款理由）。
+_SKILL_CONSUMER_DIRECTOR = "director"
+_SKILL_CONSUMER_PLANNER = "scene_planner"
+_SKILL_CONSUMER_WRITER = "writer"
+_SKILL_CONSUMER_CRITIC = "critic"
+_SKILL_CONSUMER_DEEP_REVIEWER = "deep_reviewer"
+_SKILL_CONSUMERS = (
+    _SKILL_CONSUMER_DIRECTOR,
+    _SKILL_CONSUMER_PLANNER,
+    _SKILL_CONSUMER_WRITER,
+    _SKILL_CONSUMER_CRITIC,
+    _SKILL_CONSUMER_DEEP_REVIEWER,
+)
+
+# 项目绑定的 skill 行（**多 slot 有序**：``ord`` 小者在前；同 ord 按 skill_id 稳定
+# 排序）。``payload_json`` 原文在装配层解析（解析失败整条跳过）。
+_SKILL_ROWS_SQL = """
+    SELECT ps.ord AS ord, sk.skill_id AS skill_id, sk.name AS name,
+           sk.version AS version, sk.payload_json AS payload_json
+    FROM project_skills ps
+    JOIN skills sk ON sk.skill_id = ps.skill_id
+    WHERE ps.project_id = ?
+    ORDER BY ps.ord ASC, sk.skill_id ASC
+"""
+
+
+def _skill_excerpt(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    consumer: str | tuple[str, ...] = _SKILL_CONSUMER_DIRECTOR,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]] | None]:
+    """读项目绑定的 skill（``project_skills`` ⋈ ``skills``）。
+
+    返回 ``(inject, audit)``：
+    - inject：写入 payload 的 **``skills`` 段**（``{"items": [...], "__skills_truncated__"?}``）；
+      None = 未绑定 / 无适用 skill（调用方**不写该键**，零行为变化）；
+    - audit：``[{"skill_id", "version", "consumed_fields"}]``（每个被注入的 skill 一条），
+      落到 ctx 顶层 ``_skills_consumed``（与 ``_genre_pack_consumed`` 同款溯源口径）。
+
+    consumer 口径（5 个）：``director`` / ``scene_planner`` / ``writer`` / ``critic`` /
+    ``deep_reviewer``；其它 consumer → ``(None, None)``（不注入）。
+    ``consumer`` 亦可传**元组**（合并角色，如 ``("director", "scene_planner")``
+    给「导演 + 场景规划」合并体）——命中任一即适用。
+
+    过滤：``applies_to`` 不含本 consumer 的 skill **整条不注入**（缺席 = 不限定范围
+    = 全部适用，见 :func:`packages.core.skill.consumers.skill_applies_to`）。
+
+    容错：表缺失（0032 未跑）→ ``(None, None)``；payload 非法 → 该条跳过。
+    """
+    consumers = (consumer,) if isinstance(consumer, str) else tuple(consumer)
+    if not consumers or any(c not in _SKILL_CONSUMERS for c in consumers):
+        return None, None
+    try:
+        rows = conn.execute(_SKILL_ROWS_SQL, (project_id,)).fetchall()
+    except sqlite3.OperationalError as exc:
+        # ⚠️ 收窄（同 _genre_pack_excerpt）：只有「缺表 / 缺列」才降级为「未绑定」；
+        # ``database is locked`` / ``disk I/O error`` 一律上抛——静默丢 skill 等于
+        # 「作者以为手艺生效、正文却没带，且零告警」。
+        if not _is_missing_schema_error(exc):
+            raise
+        return None, None
+    if not rows:
+        return None, None
+
+    prepared: list[dict[str, Any]] = []
+    audit: list[dict[str, Any]] = []
+    for row in rows:
+        payload = _parse_json(row["payload_json"])
+        if not isinstance(payload, dict):
+            continue
+        entry = {
+            "skill_id": row["skill_id"],
+            "name": row["name"],
+            "version": row["version"],
+            "payload": payload,
+        }
+        prepared.append(entry)
+        # 审计只记**本 consumer 真正消费到**的 skill（被 applies_to 过滤掉的
+        # 不算消费——否则溯源面会比实际注入面大，排查时会被误导）。
+        if not skill_applies_to(payload, consumers):
+            continue
+        block = skill_block(entry, payload)
+        if block is None:
+            continue
+        consumed = ["instructions"]
+        if "references" in block:
+            consumed.append("references")
+        if "checks" in block:
+            consumed.append("checks")
+        audit.append({
+            "skill_id": block["skill_id"],
+            "version": block["version"],
+            "consumed_fields": consumed,
+        })
+
+    inject = build_skills_segment(prepared, consumers)
+    if inject is None:
+        return None, None
+    return inject, audit or None
+
+
+
+# ---------------------------------------------------------------------------
 # 缓存键预判 / uncached 装配共用的轻量预读（V3.9 批次 2.3）
 # ---------------------------------------------------------------------------
 #
@@ -828,6 +955,10 @@ _PEEK_CHAPTER_SQL = """
               FROM projects pj2
               LEFT JOIN genre_packs gp ON gp.pack_id = pj2.genre_pack_id
              WHERE pj2.project_id = COALESCE(?, ch.project_id))      AS genre_pack_ref,
+           (SELECT group_concat(sk.skill_id || ':' || sk.version, '|')
+              FROM project_skills ps
+              JOIN skills sk ON sk.skill_id = ps.skill_id
+             WHERE ps.project_id = COALESCE(?, ch.project_id))       AS skills_ref,
            pj.word_band_json                   AS word_band_json,
            pj.writing_bible                    AS writing_bible
     FROM chapters ch
@@ -864,6 +995,7 @@ def _empty_chapter_peek(chapter_id: str, project_id: str | None = None) -> dict[
         "writing_bible": None,
         "active_canon_id": None,
         "genre_pack_ref": None,
+        "skills_ref": None,
     }
 
 
@@ -992,6 +1124,42 @@ def _try_project_genre_pack_ref(conn: sqlite3.Connection, project_id: str) -> st
     return ref if ref else None
 
 
+def _try_project_skills_ref(conn: sqlite3.Connection, project_id: str) -> str | None:
+    """单连接读项目绑定 skill 指纹串；表缺失 / 未绑定 → None。
+
+    串形态与 :data:`_PEEK_CHAPTER_SQL` 内联子查询**逐字一致**
+    （``group_concat(skill_id || ':' || version, '|')``）——缓存键的 skill 维度在
+    两个路径（主 SQL / 降级逐项读）必须同形，否则降级路径会把键维度写成另一种
+    形状导致脏命中（硬规则 2）。
+
+    ⚠️ 顺序**不重要**：指纹函数内部按 ``skill_id`` 排序（见
+    :func:`packages.core.context_engine.cache._fingerprint_skills`）⇒ 两条路径的
+    ``group_concat`` 聚合顺序即便不同，也算出**同一个**指纹。
+    """
+    try:
+        row = conn.execute(
+            """
+            SELECT group_concat(sk.skill_id || ':' || sk.version, '|') AS skills_ref
+            FROM project_skills ps
+            JOIN skills sk ON sk.skill_id = ps.skill_id
+            WHERE ps.project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        # 0032 未跑过的极老库（无 project_skills / skills 表）→ 未绑定。
+        # ⚠️ 收窄：只让「缺表/缺列」降级。静默吞锁 / I/O ⇒ skills_fp 归 None =
+        # **缓存键的 skill 维度被写成 '__none__'** ⇒ 换 skill 后同 state_version
+        # 仍脏命中（硬规则 2「漏键 = 脏命中」）。
+        if not _is_missing_schema_error(exc):
+            raise
+        return None
+    if row is None:
+        return None
+    ref = row["skills_ref"]
+    return ref if ref else None
+
+
 def _peek_chapter_context_conn(
     conn: sqlite3.Connection, chapter_id: str, *, project_id: str | None = None,
 ) -> dict[str, Any]:
@@ -999,7 +1167,7 @@ def _peek_chapter_context_conn(
     try:
         row = conn.execute(
             _PEEK_CHAPTER_SQL,
-            (project_id, project_id, project_id, project_id, chapter_id),
+            (project_id, project_id, project_id, project_id, project_id, chapter_id),
         ).fetchone()
     except sqlite3.Error:
         return _peek_chapter_context_degraded(conn, chapter_id, project_id)
@@ -1017,6 +1185,7 @@ def _peek_chapter_context_conn(
         "writing_bible": (row["writing_bible"] if "writing_bible" in row.keys() else None) or None,
         "active_canon_id": row["active_canon_id"] or None,
         "genre_pack_ref": row["genre_pack_ref"] or None,
+        "skills_ref": (row["skills_ref"] if "skills_ref" in row.keys() else None) or None,
     }
 
 
@@ -1043,6 +1212,7 @@ def _peek_chapter_context_degraded(
         info["writing_bible"] = _try_project_writing_bible(conn, pid)
         info["active_canon_id"] = _try_active_canon_id(conn, pid)
         info["genre_pack_ref"] = _try_project_genre_pack_ref(conn, pid)
+        info["skills_ref"] = _try_project_skills_ref(conn, pid)
     return info
 
 
@@ -1052,7 +1222,7 @@ def _peek_chapter_context(
     """单连接轻量预读（缓存键预判 + uncached 装配复用；V3.9 批次 2.3）。
 
     返回 ``{found, chapter_id, project_id, chapter_no, state_version, plan_json_raw,
-    word_band_json, writing_bible, active_canon_id, genre_pack_ref}``：
+    word_band_json, writing_bible, active_canon_id, genre_pack_ref, skills_ref}``：
 
     - ``state_version`` = ``MAX(story_states.state_version)``（无快照 → 0），口径见
       :func:`_project_max_state_version`；
@@ -1061,6 +1231,9 @@ def _peek_chapter_context(
       （0029，见 :func:`resolve_author_intent`），两处同源同值；
     - ``genre_pack_ref`` = 绑定题材包指纹 ``<pack_id>@<version>``（未绑定 / 极老库 → None），
       供 director 缓存键的题材包维度使用（题材库 P1a）；
+    - ``skills_ref`` = 绑定 skill 集合指纹串 ``"<skill_id>:<version>|..."``
+      （未绑定 / 极老库 → None），供 director / writer 缓存键的 skill 维度使用
+      （0032；指纹计算见 :func:`packages.core.context_engine.cache._fingerprint_skills`）；
     - **降级范围**（批次十收窄后，与下列 helper 的 docstring 逐条同形）：仅「结构缺失」
       （缺表 / 缺列，即迁移未跑的极老库）才逐字段安全 fallback；``database is locked`` /
       ``disk I/O error`` / ``malformed`` / ``readonly`` 等**运行时故障一律上抛**——

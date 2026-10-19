@@ -50,6 +50,7 @@ import re
 import sqlite3
 from typing import Any
 
+from packages.core.agent_runtime.prompts import active_prompt_label
 from packages.core.agent_runtime.runner import run_agent
 from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.genre.consumers import (
@@ -67,6 +68,12 @@ from packages.core.quality.wordcount import (
     classify_prose_length,
     resolve_band_config,
 )
+from packages.core.skill.consumers import (
+    build_skills_segment,
+    collect_skill_checks,
+    skill_check_hits,
+)
+from packages.core.skill.service import SkillService
 from packages.core.workflow_runtime.engine import PauseRequested, WorkflowNode
 from packages.domain.chapter.draft_resolver import resolve_draft
 
@@ -190,6 +197,61 @@ def _collect_genre_review_data(db_path: str, project_id: str) -> dict[str, Any]:
         "forbidden_words": forbidden_words(payload),
         "rubric": critic_rubric(payload),
     }
+
+
+def _collect_skill_review_data(db_path: str, project_id: str) -> dict[str, Any]:
+    """内部消费外部 skill：**一次**读项目绑定 skill，供评审侧两处消费。
+
+    - ``skills``：注入 critic / deep_review payload 的**独立新段**（按
+      ``applies_to`` 过滤——不含 ``critic`` / ``deep_reviewer`` 的 skill 不注入；
+      未绑定 / 无适用 → ``None`` ⇒ 调用方不写该键）；
+    - ``checks``：适用于评审环节的**检查项**（确定性字面扫描用）——命中恒
+      warning，只进 ``review_report.warnings[]``（**旁路通道**）。
+
+    ⚠️ **降级范围（收窄）**：只有「缺表 / 缺列」（0032 未跑的极老库）才降级为「未绑定」；
+    ``database is locked`` / ``disk I/O error`` / ``malformed`` 等**运行时故障一律上抛**
+    ——静默丢 skill 等于「作者以为手艺生效、评审却没带，且零告警」（与题材包读取
+    收窄同款理由）。非 DB 失败（路径类型错等）才降级，并**必带 warning 日志**
+    （降级不静默）。
+
+    ⚠️ **检查项绝不走 ``scan_ai_patterns``**：那条通道会自动进 ``quality_reports``
+    与提交门禁（AGENTS.md 硬规则 4 的 severity 矩阵），而 skill 检查是**作者声明的
+    检查项**、不是软件层的质量判定 ⇒ 只走 warnings 旁路，rule_id 恒 ``SKILL-*``
+    （该命名空间不在任何后果表内 ⇒ 即使将来误入 errors 也只会「表外 rule_id ⇒
+    硬停交人工」）。
+    """
+    empty: dict[str, Any] = {"skills": None, "checks": []}
+    if not project_id:
+        return empty
+    try:
+        bound = SkillService(db_path).list_project_skills(project_id)
+    except sqlite3.OperationalError as exc:
+        # 缺表 / 缺列 ⇒ 视为未绑定（不阻断评审）；锁 / I/O / 损坏 ⇒ 上抛。
+        if not is_missing_schema_error(exc):
+            raise
+        return empty
+    except sqlite3.Error:
+        # 其它 sqlite 故障（malformed / 只读 / 磁盘满）**上抛**——降级会掩盖真故障。
+        raise
+    except Exception as exc:  # noqa: BLE001 —— 非 DB 失败（路径类型错等）→ 降级 + 留痕
+        _log.warning(
+            "chapter_review.skill read failed: project_id=%s err=%s", project_id, exc,
+        )
+        return empty
+    if not bound:
+        return empty
+    rows = [
+        {
+            "skill_id": s.get("skill_id"),
+            "name": s.get("name"),
+            "version": s.get("version"),
+            "payload": s.get("payload") or {},
+        }
+        for s in bound
+    ]
+    segment = build_skills_segment(rows, ("critic", "deep_reviewer"))
+    checks = collect_skill_checks(rows, ("critic", "deep_reviewer"))
+    return {"skills": segment, "checks": checks}
 
 
 def _fetch_chapter_number(db_path: str, chapter_id: str) -> int | None:
@@ -353,6 +415,13 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
         if chapter_project_id
         else {"forbidden_words": [], "rubric": None}
     )
+    # 内部消费外部 skill：项目绑定 skill 集合 → ① critic / deep_review payload 的
+    # ``skills`` 段；② 检查项的**确定性字面扫描**（旁路通道，恒 warning）。
+    skill_data = (
+        _collect_skill_review_data(db_path, chapter_project_id)
+        if chapter_project_id
+        else {"skills": None, "checks": []}
+    )
 
     warnings: list[str] = []
     errors: list[dict[str, Any]] = []
@@ -384,6 +453,14 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
     # 命中 → warning 级文本行（不进 errors、不阻断）；未命中 / 未声明禁用词 → 零输出。
     for word, count in count_forbidden_word_hits(prose, genre_data.get("forbidden_words") or ()):
         warnings.append(f"[GENRE-FORBIDDEN-WORD] {word} ×{count}")
+    # 内部消费外部 skill：检查项命中 → **恒 warning**（旁路通道；不进 errors、
+    # 不进 ai_pattern_hits、不进 quality_reports、不进任何门禁）。
+    # 文本形态照抄题材禁词通道（``[GENRE-FORBIDDEN-WORD] <词> ×N``）的同款口径。
+    for hit in skill_check_hits(prose, skill_data.get("checks") or []):
+        detail = f"（{hit['description']}）" if hit.get("description") else ""
+        warnings.append(
+            f"[{hit['rule_id']}] {hit['keyword']} ×{hit['count']}{detail}"
+        )
     for hit in ai_hits:
         if hit.get("severity") == "error":
             errors.append(hit)
@@ -428,6 +505,7 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
             draft_text=prose,
             plan=plan_dict,
             genre_rubric=genre_data.get("rubric"),
+            skills=skill_data.get("skills"),
         )
         review_inputs_error = None
     return {
@@ -460,6 +538,7 @@ def _collect_review_inputs(
     draft_text: str,
     plan: dict[str, Any],
     genre_rubric: dict[str, Any] | None = None,
+    skills: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """一次性取齐 critic / deep_review 共享输入（V3.9 批次 5.7）。
 
@@ -476,6 +555,8 @@ def _collect_review_inputs(
       - ``settings_digest``：设定摘要（world_rules + 角色档案，两节点共用）
       - ``genre_rubric``：题材审查要点（题材库 P2；由 basic_checks 单次读题材包投影，
         未被绑定 / 未声明 ``critic_rubric`` → ``None``）
+      - ``skills``：外部 skill 的手艺说明段（内部消费外部 skill；由 basic_checks 单次
+        读项目绑定 skill 并按 ``applies_to`` 过滤；未绑定 / 无适用 → ``None``）
 
     ``open_hooks`` / ``settings_digest`` 取数失败一律降级为空列表（不抛错）——
     与改造前两个 AI 节点各自的 try/except 语义一致：设定上下文缺失不阻断评审。
@@ -502,6 +583,7 @@ def _collect_review_inputs(
         "open_hooks": open_hooks,
         "settings_digest": _collect_settings_digest(db_path, project_id),
         "genre_rubric": genre_rubric,
+        "skills": skills,
     }
 
 
@@ -834,7 +916,14 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     payload = {
         "agent": "critic",
-        "prompt_version": _CRITIC_PROMPT_VERSION,
+        # 版本口径统一（2026-10-19，与 writer / director / observer / director_planner 同款）：
+        # payload 声明的 prompt_version 必须取 **ACTIVE 提示词行的真值**，常量只作
+        # fallback（临时库 / 未 sync 场景）。⚠️ 升版后仍硬编码常量 ⇒ payload 声明旧版、
+        # 模型照抄回声（`critic_report.prompt_version` 落旧版）、而 `ai_call_logs` 记
+        # 真值——**同一条链两个值且无任何报错**（2026-09-16 writer 事故的同形）。
+        "prompt_version": active_prompt_label(
+            db_path, "critic", fallback=_CRITIC_PROMPT_VERSION,
+        ),
         "chapter": {
             "title": None,
             "target_word_count": resolve_target_word_count(
@@ -852,6 +941,10 @@ def _critic_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
     # 题材库 P2：题材审查要点（可选输入；缺席 = 未绑定题材包 / 未声明 critic_rubric）。
     if genre_rubric is not None:
         payload["genre_rubric"] = genre_rubric
+    # 内部消费外部 skill：手艺说明段（可选输入；缺席 = 未绑定 skill / 无适用项）。
+    skills = shared.get("skills")
+    if skills is not None:
+        payload["skills"] = skills
 
     try:
         out = run_agent(
@@ -1002,7 +1095,10 @@ def _deep_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     payload = {
         "agent": "deep_reviewer",
-        "prompt_version": _DEEP_REVIEWER_PROMPT_VERSION,
+        # 版本口径统一（2026-10-19，同 critic 节点）：常量只作 fallback，真值取 ACTIVE。
+        "prompt_version": active_prompt_label(
+            db_path, "deep_reviewer", fallback=_DEEP_REVIEWER_PROMPT_VERSION,
+        ),
         "chapter": {
             "title": None,
             "target_word_count": resolve_target_word_count(
@@ -1027,6 +1123,10 @@ def _deep_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
     # 题材库 P2：题材审查要点（与 critic 同一份；缺席 = 未绑定 / 未声明 critic_rubric）。
     if genre_rubric is not None:
         payload["genre_rubric"] = genre_rubric
+    # 内部消费外部 skill：手艺说明段（与 critic 同一份；缺席 = 未绑定 / 无适用项）。
+    skills = shared.get("skills")
+    if skills is not None:
+        payload["skills"] = skills
 
     try:
         out = run_agent(

@@ -1,0 +1,33 @@
+{
+  "name": "novelos",
+  "version": "0.1.0",
+  "license": "AGPL-3.0",
+  "author": {
+    "name": "NovelOS",
+    "email": "support@novelos.local",
+    "url": "https://github.com/charlesnty612/NovelOS"
+  },
+  "description": "驱动本机 NovelOS 写小说：plan→write→review→commit 章节闭环、Story State 快照与差分、质量门禁、交付判定与投稿包导出。",
+  "homepage": "https://github.com/charlesnty612/NovelOS",
+  "repository": "https://github.com/charlesnty612/NovelOS",
+  "keywords": [
+    "novel",
+    "writing",
+    "story",
+    "chinese-novel",
+    "local-first"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "NovelOS",
+    "developerName": "NovelOS",
+    "category": "Writing",
+    "shortDescription": "在本机 NovelOS 上完成长篇小说的建书、写章、审校与交付。",
+    "longDescription": "通过本机 NovelOS REST API 驱动小说生产闭环：建立项目与题材包、绑定模型环节、逐章执行 plan→write→review→commit、读取 Story State 快照与差分、按 block/confirm/auto 三档质量门禁读取并放行评审、执行交付判定与签约体检、导出 txt/docx/投稿包。全部数据留在本机。",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ]
+  }
+}
