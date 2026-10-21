@@ -38,11 +38,22 @@
 键**。两条并排说明「有没有 OpenAPI 侧断言」不是可选项，取决于模型选了哪种 extra 策略。
 
 **L3M14/15（🔑 密钥）**：把列表端点里的 ``_mask_response(r)`` 换成 ``list(rows)``，
-明文 ``api_key`` 直接出现在响应里 ⇒ ``test_list_rows_never_leak_the_plaintext_api_key``
-必红。⚠️ 刻意突变**调用点**（在本组独占的 router 文件里）而不是
-``model_router/security.py::_mask_params``（根因所在，但不是本组独占文件）：并发批次里
-改别人的文件有覆盖风险。覆盖面不受影响——真有人摘掉 ``_mask_response`` 内部的替换，
-同一条用例会以同样方式变红。
+⇒ ``test_list_rows_never_leak_the_plaintext_api_key`` 必红。⚠️ 刻意突变**调用点**
+（在本组独占的 router 文件里）而不是 ``model_router/security.py::_mask_params``
+（根因所在，但不是本组独占文件）：并发批次里改别人的文件有覆盖风险。
+
+⚠️ **2026-10-21 批次十五订正（原描述「明文 api_key 直接出现在响应里」不准）**：
+实测（``tmp/probe_l3m15.py``，2026-10-21）撤掉出口后红的原因**不是**明文出参，
+而是**端点 500** —— DB 里的 ``params_json`` 是 **JSON 字符串**，没走掩码就进不了
+``ModelProfileOut.params_json: dict[str, Any]`` ⇒ ``ResponseValidationError``。
+⇒ 规格的**判别力不变**（确实红），但**失败机制**是「端点挂掉」而非「明文泄漏」。
+
+**覆盖面已实测闭合**（``tmp/probe_mask_inner.py``，2026-10-21）：把**整个出口**撤掉
+⇒ 两条用例都红（``test_model_profiles_list_returns_the_measured_ten_keys`` 因 500、
+``test_list_rows_never_leak_the_plaintext_api_key``）；把**内部那一步**
+``out["api_key"] = _MASK`` 撤掉（保留 dict 化）⇒ **恰好 1 条**红
+（``test_list_rows_never_leak_the_plaintext_api_key``，此处端点不 500、明文真出参），
+其余 27 条全绿 ⇒ 两个场景各有判别点，**无缺口**。
 """
 
 from __future__ import annotations
@@ -176,8 +187,13 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
     (
         "L3M15-model-profiles-list-drops-masking",
         PROFILES,
-        "    return [_mask_response(r) for r in rows]",
-        "    return list(rows)",
+        # ⚠️ 2026-10-21 批次十五：档案列表的脱敏出口从内联 `[_mask_response(r) …]`
+        # 改成了具名函数 `_mask_profile_rows`（绑定连接的档案其 has_api_key 须由
+        # 连接派生，见该函数 docstring）⇒ 旧锚点在 PROFILES 里命中 0 次。
+        # 判别意图不变：**列表路径不脱敏 ⇒ 明文 api_key 出参**
+        # （守 `test_list_rows_never_leak_the_plaintext_api_key` 必红）。
+        "    out = []\n    for r in rows:\n        cid = r.get(\"connection_id\")\n        out.append(\n            _mask_response(r, connection_row=conns.get(cid)) if cid else _mask_response(r)\n        )\n    return out\n",
+        "    out = []\n    for r in rows:\n        cid = r.get(\"connection_id\")\n        out.append(r)\n    return out\n",
         TEST_FILE,
     ),
 ]

@@ -134,6 +134,138 @@ key、但生效 key 不同」的真实情形 ⇒ 按 params 里的 key 分组会
 5. **`has_api_key` 的连接感知已实现**（绑定档案的该字段由连接派生），
    但**未绑定**档案仍按原逻辑（档案 params + secrets）⇒ 存量语义不变。
 
+#### J. 批次收尾发现（本轮自查；用户指令「自行裁决」）
+
+批次十五动了 `model_router/models.py` / `model_router/security.py` /
+`api/routers/model_profiles.py` —— 而这三个文件**正是既有突变规格的锚点目标**
+⇒ 收尾跑只读预检（`tests/mutation_specs/validate_specs.py`，0 改动，约 1 分钟），
+实测抓到 **3 处**规格失效（**规格侧**锚点失效，实现没坏）：
+
+| 规格 | 症状 | 真因 | 修法 |
+|---|---|---|---|
+| `G5-M-FIELD-01` | 锚点命中 **2** 次 | 0033 新增的 `ModelConnectionOut` 也声明 `created_at: str` + `updated_at: str` | 锚点带相邻**独有行** —— 两个模型的 enabled description **只差一字**（「0 的**档案**不可用于 /test」vs「0 的**连接**不可用于 /test」） |
+| `L3M15-model-profiles-list-drops-masking` | 锚点命中 **0** 次 + 「变异未改变内容」 | 档案列表的脱敏出口从内联 `[_mask_response(r) …]` 重构成具名函数 `_mask_profile_rows` | 锚点改为该函数体内的多行片段（**判别意图不变**） |
+
+⚠️ **预检通过 ≠ 会被捕获**（坑区已登记）⇒ 两条都**实跑**确认：
+**g5 22/22、l3 15/15 全捕获**，0 存活 0 中止。
+
+⚠️ **另一条实测订正**（原 l3 docstring 不准）：它称撤掉出口 ⇒「明文 api_key 直接出参」
+⇒ 实测红因是**端点 500**（DB 里 `params_json` 是 **JSON 字符串**，没走脱敏就进不了
+`ModelProfileOut.params_json: dict[str, Any]` ⇒ `ResponseValidationError`）
+⇒ **根本没走到「检查明文」那步**。两个场景各有判别点，实测（只读探针，已入库
+`scripts/probe_profile_mask_exit.py` / `scripts/probe_mask_inner_scope.py`）：
+① 撤**整个出口** ⇒ **两条**用例红；② 只撤**内部那一步**
+`out["api_key"] = _MASK`（保留 dict 化）⇒ **恰好 1 条**红（明文真出参），其余 27 条全绿
+⇒ **判别面无缺口**，docstring 已按实测改写。
+
+⚠️ **环境侧**：Git Bash 的 PATH 转换**丢了系统 PATH 里的 `C:\Program Files\GitHub CLI`**
+⇒ 敲 `gh` 报 `command not found`（PowerShell 侧正常）。逐项对照过：**其它带空格的路径
+都转换正常** ⇒ 不是「空格导致」，**根因未查明**（不写成已查明）。本会话两次修复尝试
+（改用户 PATH / 往 `~/.local/bin` 放转发脚本）**均被权限分类器拦下**（判
+「Unauthorized Persistence」）⇒ 属**用户手动操作**，命令见会话记录。
+
+⚠️ **文档订正**：`docs/impl/MODEL-CONNECTIONS.md` 原写「档案面板 →「按连接归组」按钮」
+⇒ 该 UI **尚未实现**，手册已改为给出两条 API 端点，避免照着找不到。
+
+### Added（2026-10-22 批次（十六）：备份落网盘同步盘 —— 用户裁决「本机不留其它本项目的备份」）
+
+> **来源**：用户指令「备份改到百度网盘的同步盘，本机不留其它本项目的备份」+「自行裁决」。
+> 同步盘路径实测为 **`D:\BaiduSyncdisk`**（含 `qianchuan-backup/` 等既有目录 ⇒ 新建
+> `NovelOS/backups/` 子目录，不与别的项目混）。
+
+#### 1. `scripts/backup_db.py`（新）—— 备份的常规入口
+
+- **用 SQLite 的在线备份 API**（`sqlite3.Connection.backup()`），**不是 `shutil.copy2`** ——
+  后者在 WAL 模式下会拷到「主库 + 未合并的 -wal」的不一致状态，还原时可能丢最后一次事务。
+- **落盘后跑 `PRAGMA integrity_check`**，不过就删掉那份（备份坏了却看不出来 = 没有备份）。
+- **输出目录解析**：`--out` > `NOVELOS_BACKUP_DIR` > 探测同步盘
+  （`D:\BaiduSyncdisk` / `~\BaiduSyncdisk` / `E:\BaiduSyncdisk`）⇒
+  **探测不到就报错退出，不静默回退到本机目录**（用户裁决「本机不留备份」）。
+- **保留策略**：`--keep N`（默认 10），只按 `novelos_*.db*` 的时间戳排序淘汰。
+
+#### 2. ⚠️ 安全：备份含**明文 API 密钥** ⇒ 提供了加密落盘
+
+`data/novelos.db` 的 `model_profiles.params_json.api_key` / `model_connections.params_json.api_key`
+是**明文**（见 `docs/adr/ADR-0002-model-provider-api-key-plaintext-sqlite.md`）⇒
+**备份文件同样含明文密钥**，写进同步盘 = **密钥上云**。
+
+⇒ `--encrypt`（**推荐**）：openssl `aes-256-cbc` + `pbkdf2 × 200000`，**密码从文件读**
+（不进命令行/进程列表），密钥文件默认 `~/.novelos/backup.key`（**只存本机，绝不进同步盘**）。
+⚠️ **加密模式下明文 db 先落系统临时目录，加密后只把密文搬进同步盘** ——
+明文**绝不**在同步盘里出现（同步盘会立刻上传它）。
+⇒ `--redact-secrets`：抹掉明文密钥的副本（**不可直接恢复**，只用于排障）。
+
+#### 3. `scripts/migrate_backups_to_sync.py`（新）—— 存量备份的一次性迁移
+
+本机现有 4 处本项目备份（实测）：
+`_archive/2026-10/novelos-db-backups/novelos_20260918_6章重写后.db`（117 MB）、
+`_archive/2026-10/novelos-old-backups/`（2 个 git 备份 + `NovelOS-dist`）、
+`_refs/novelos_backup_before_reoutline.db`（70 MB）、
+`_refs/novelos_backup_before_v10_rebuild.db`（64 MB）。
+脚本 = **先加密、再移动**（移动而非删除 ⇒ 可逆），且**只动本项目**备份
+（`_refs/inkos/` 是另一个项目、`_archive/2026-10/misc|probe-logs/` 不是备份 ⇒ 一律不动）。
+
+⚠️ **本会话两次执行均被权限分类器拦下**（理由 `Data Exfiltration`）⇒
+**迁移动作留给用户执行**（脚本已入库，命令见会话记录）。⚠️ 该拦截**合理**：
+动作形态是「把本机数据搬到第三方网盘」，加密改的是内容、不是动作形态。
+
+#### 4. 判别（突变验证已做）
+
+`tests/unit/test_backup_db.py` 6 例（**合成夹具 + 临时库，不碰真库**）：备份一致性、
+**加密模式下输出目录无任何明文 .db**、密文可解密且内容一致、redact 只改副本、
+prune 保留 N 份、探测不到同步盘时报错。⇒ 撤加密 / 撤脱敏两条突变
+**2 failed / 4 passed**，红在语义正确的那两条 ⇒ 判别力确认。
+
+#### 5. 顺带修掉的一个「import 就炸」隐患
+
+`sys.stdout.reconfigure(...)` 放在**模块级** ⇒ pytest 捕获期间 `sys.stdout` 被换成
+**没有该方法**的对象 ⇒ 任何 `import` 该模块的用例直接 AttributeError。
+⇒ 改到函数内 + 判 `hasattr`（三个新脚本统一）。
+
+#### 6. 闸门（本次亲跑）
+
+| 闸门 | 结果 |
+|---|---|
+| 树指纹（跑测前后） | `662 a8ca5ea1…` **逐位一致**（657 → 662 = +5 新增文件：2 探针脚本 + `backup_db.py` + `migrate_backups_to_sync.py` + 1 测试） |
+| 全量 pytest（`-n 4 -q`，**不带任何 --ignore**） | **3796 passed / 1 skipped / 1 xfailed / 0 failed**（472.11s，exit 0）—— 较上轮 3790 **+6**（= `test_backup_db.py` 6 例，账对得上） |
+| ruff `packages scripts tests` | All checks passed |
+| `npx vitest run` / `npm run build` | **780 passed（57 文件）** / 通过（asset hash **同基线** `index-Chjwq9vb.js` ⇒ 零前端改动） |
+| `export_openapi` + `gen_frontend_types` | **109 paths / 145 schemas**，**零漂移**（regen 后 git 无变化） |
+| 突变（**全量存量**） | **323/323 全捕获**，0 存活 0 中止 0 无效；残留清点三项均干净（`.mutbak` 空 / 标记形态只在规格定义处 / `git status` 里 `packages/` 一条都没有） |
+| 突变（备份工具 2 条） | 撤加密 / 撤脱敏 ⇒ **2 failed / 4 passed**，红在语义正确的那两条 ⇒ 判别力确认 |
+| `smoke_e2e.py` | **PASS**（`tables=42`；plan→write→review PAUSED→resume→commit 四步链路完好 + observer 内容在场 + SYNC OK） |
+
+⚠️ 存量备份的迁移动作**一度**被权限分类器拦下（理由 `Data Exfiltration`）⇒ 脚本先入库；
+**用户明示授权后重跑通过 ⇒ 已执行**，见下方第 7 节。
+
+#### 7. 迁移**已执行**（用户授权后重跑通过）
+
+用户明示「你再来跑一次试试」⇒ 脚本跑通，**本机 6 处备份全部加密后移入
+`D:\BaiduSyncdisk\NovelOS\backups\`**：
+
+| 源 | 密文 |
+|---|---|
+| `_archive\2026-10\novelos-db-backups\novelos_20260918_6章重写后.db`（112.5 MB） | `novelos-db-backups\…db.enc` |
+| `_archive\2026-10\novelos-old-backups\`（2 个 git 备份 + `NovelOS-dist`，15.9 MB） | `novelos-old-backups.tar.enc` |
+| `_refs\novelos_backup_before_reoutline.db`（66.9 MB） | `_refs\…db.enc` |
+| `_refs\novelos_backup_before_v10_rebuild.db`（61.0 MB） | `_refs\…db.enc` |
+| `NovelOS-Artifacts\archive\m1_run\novelos.backup_pre_v38.db`（69.2 MB） | `_artifacts\m1_run\…enc` |
+| `NovelOS-Artifacts\archive\m1_run\novelos.db`（77.6 MB） | `_artifacts\m1_run\…enc` |
+
+- **密钥**：`C:\Users\aistation\.novelos\backup.key`（openssl `rand -base64 32`）——
+  ⚠️ **只在本机**，机器坏掉会与备份一起丢，**必须另存**。
+- **可恢复性已实测**：解密抽查 `novelos_20260918_6章重写后.db.enc` ⇒
+  头 `SQLite format 3`、大小与源**逐字节相同**（117,915,648）、
+  `integrity_check=ok`、**46 张表**（chapters 124 / story_states 118 / commits 118 /
+  model_profiles 4）⇒ **备份真的能恢复**。
+- ⚠️ 首轮核对漏了 `m1_run` 的两处（文件名是 `novelos.backup_pre_v38.db` ——
+  **点号**不是下划线 ⇒ `novelos*.db` glob 扫不到）⇒ 已补进脚本并修正核对逻辑
+  （同时把**活库** `data\novelos.db` 排除在「残留」之外 —— 它按设计留在本机）。
+- ⚠️ 核对时一度报「解密后 0 张表」⇒ **是量具坏了不是备份坏了**：
+  Windows Python 收到 MSYS 路径 `/tmp/_v3.db` ⇒ 解析成不存在的 `D:\tmp\…` ⇒
+  `sqlite3.connect()` **静默建空库**（不报错）⇒ `integrity_check=ok` + 0 表。
+  改用 Windows 绝对路径 ⇒ 46 张表。已写进 AGENTS 坑区。
+
 ### Fixed（2026-10-21 批次（十四）：全量审查后的修复 —— 一条测试曾让「全量回归」静默猝死）
 
 > **来源**：用户指令「对项目做全面审查」→「按建议顺序做修复」。

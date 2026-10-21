@@ -46,8 +46,13 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         MODELS,
         # ModelProfileOut 少声明 created_at。它 extra="allow" ⇒ 响应仍有该键，
         # 只有 OpenAPI properties 断言能抓到。
-        '    created_at: str\n    updated_at: str\n',
-        "    updated_at: str\n",
+        # ⚠️ 2026-10-21 批次十五：0033 加了 `ModelConnectionOut`，它也声明
+        # `created_at: str` + `updated_at: str` ⇒ 旧的二行锚点命中 2 次（执行器
+        # 会 [ABORT]）。按坑区「锚点用相邻独有行重新唯一」修法：带上
+        # `ModelProfileOut` 独有的 enabled 行——两个模型的 description 只差一字
+        # （「0 的**档案**不可用于 /test」vs「0 的**连接**不可用于 /test」）。
+        '    enabled: int = Field(description="0/1 整数（非布尔）；0 的档案不可用于 /test")\n    created_at: str\n    updated_at: str\n',
+        '    enabled: int = Field(description="0/1 整数（非布尔）；0 的档案不可用于 /test")\n    updated_at: str\n',
         TEST_FILE,
     ),
     (
