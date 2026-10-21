@@ -1,9 +1,164 @@
-# 更新日志（CHANGELOG）
+﻿# 更新日志（CHANGELOG）
 
 > **留痕规矩（自 V1.0 起强制）**：此后所有迭代——功能、修复、迁移、行为变更——合并前必须在本文件追加条目。
 > 发版惯例：发版时把 `## [Unreleased]` 改名为 `## [X.Y.Z] - 日期`，并重新加回空的 `## [Unreleased]` 承接下一轮。
 
 ## [Unreleased]
+
+### Fixed（2026-10-21 批次（十四）：全量审查后的修复 —— 一条测试曾让「全量回归」静默猝死）
+
+> **来源**：用户指令「对项目做全面审查」→「按建议顺序做修复」。
+> 执行形态：**只在会话内复用 3 名成员**（`novelos-dev-a` / `novelos-dev-b` / `novelos-reviewer`，
+> 用户明令不新增成员）；**判断归 Lead**（成员只做机械取证与受控突变），critical/major 逐条亲验。
+> 全程**零真实 LLM 调用、零内容仓接触**。
+> 审查报告（属痕迹仓）：`NovelOS-Artifacts: docs/analysis/full-review-2026-10-21.md`（含 14 条缺陷的分级与证据）。
+
+#### A. 一条**测试**会杀掉运行它的整个控制台 ⇒ 本项目在 cmd/pwsh 下跑不了全量回归（critical）
+
+`tests/unit/test_pid_alive_windows_probe.py` 的 `_CHILD_PROBE` 无条件执行
+`os.kill(os.getpid(), 0)`。**Windows 上 `signal.CTRL_C_EVENT == 0`**，而 CPython 对
+`CTRL_C_EVENT` 走 `GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)`——**这不是存活探测，
+是给该 pid 所在控制台广播 Ctrl+C**。子进程与父进程共享控制台（`flags=0` 那一档）时，
+pytest 与调用它的 shell 一并收到 ⇒ 整棵进程树消失。
+
+- 实测（修前）：全量 `pytest -n 4 -q` 在 **67% 处静默猝死**（exit 1 / 无 traceback / 日志截断）；
+  `pytest tests/unit/test_pid_alive_windows_probe.py -k "not non_positive_pids"`（只剩 detached 档）
+  → **8 passed / 2.56s**；`-k non_positive_pids`（唯一 `flags=0` 档）→ **shell 静默死**。
+- **为什么 CI 从没发现**：CI 跑 Ubuntu ⇒ 该文件整体 `skipif(not WIN)`；而批次十三记录的
+  「3717 passed」是在 **pty 型控制台**（Claude Code Bash）下取得的——那里
+  `GenerateConsoleCtrlEvent` 失败、不广播 Ctrl+C，于是绿。换到真控制台就必然死。
+- **连带**：`tests/mutation_specs/l0_pid_alive.py` 全部突变都指向该文件 ⇒ 全量突变在真控制台下
+  同样跑不完。
+- **修法**：新增 `_child_creationflags()`——非 detached 档一律补 `CREATE_NEW_CONSOLE`，
+  把爆炸半径关进子进程自己的控制台。修后**整文件 9 passed / 3.28s，shell 存活**。
+- **AGENTS 坑区订正**：原「`test_m1_lock.py` 硬杀进程树」被判为「现象从未复现」——该判断
+  **对 m1_lock 成立**（复跑 15 passed / 2.31s），但**同批次新增的这个文件复现了同一症状**。
+  ⇒ 已补一条：把现象判为「从未复现」时必须同时问「同批次新增的文件有没有复现它」。
+
+#### B. 开发库落后一条迁移 ⇒ 活应用常驻降级路径，大纲维度缓存键失效（critical）
+
+- `data/novelos.db` 只跑到 **0031**，`0032_skills.sql` 未应用（无 `skills` / `project_skills` 表）
+  ⇒ peek 主 JOIN（内联 `project_skills` 子查询）**每次抛错** ⇒ 一直走
+  `_peek_chapter_context_degraded`，而该降级路径**不回填 `outline_json_raw`**
+  ⇒ `outline_fp` 恒 `"none"` ⇒ **改 `chapters.outline_json` 后同 state_version 重跑仍命中旧装配**
+  （硬规则 2「主 JOIN 与降级路径的键形态必须逐字同形」被违反，零告警）。
+  实测：该章 outline 612 字符，peek 返回 `None`。
+- **修法**：① `python scripts/migrate.py` 把 dev 库补到 0032（`applied=1 skipped=31`，
+  `skills` / `project_skills` 到位，peek 恢复返回 612 字符）；② 代码侧降级路径改为
+  **两条 SQL 逐档重试**（先「与主 JOIN 同形」的含 outline 列，缺列再退三列档），
+  使「极老库」与「缺表库」都被覆盖；③ 顺带把该路径的 `except sqlite3.Error` 收窄成
+  「仅缺表/缺列 → 空态，锁 / I/O / 损坏上抛」。
+- 判别：`tests/unit/test_peek_degraded_outline.py`（5 例；**撤 outline 列 ⇒ 2 例红**，已突变验证）。
+
+#### C. 装配缓存键缺「世界观三表」与 `reveal_policies` 维度（major，与 E1 角色指纹逐字同形）
+
+`_world_state_excerpts` 整份读 `locations / factions / world_rules` 进 payload；writer 侧还按
+`reveal_policies` 裁剪 HIDDEN 实体。两者都是装配输入却**无键维度**，而 `packages/domain/**`
+内**没有任何 `story_states` 写入**（PATCH 设定、新增策略都不推 `state_version`）⇒
+改设定 / 加一条 `planned+reader` 策略后重跑同一章 ⇒ 命中旧装配：前者正文沿用旧设定、
+后者 **HIDDEN 角色仍在 writer 上下文里（剧透方向，该拦的没拦）**。
+
+- 修法：`cache.py` 新增 `world_fingerprint` / `reveal_policies_fingerprint`
+  （**列集由 PRAGMA 推导**，排除 `project_id/created_at/updated_at`；单表缺失记 `"missing"`
+  占位而不拖垮整条维度），进 writer 键（18→20 元）与 director 键（15→16 元）。
+- 判别：`tests/unit/test_writer_input_reveal_filter.py` 新增 4 例
+  （改 locations 必须 miss × writer/director；新增策略必须 miss 且实体消失；策略改 revealed 必须 miss）；
+  **两个新维度各打成常量 ⇒ 各 2 例红**（已突变验证）。
+- 连带：`test_prompt_label_key.py::DIRECTOR_KEY_LEN` 15→16、`test_skill_injection.py` 的
+  15/18→16/20，以及 **`e1_character_cache_key.py` 的 E1-1/E1-2 与 `l7_skill_cache_key.py` 的
+  SKILL-KEY-1/2 锚点**（键尾形态变了 ⇒ 命中 0 次）——已按新形态订正并**实跑 `[CAUGHT]`**。
+  这正是坑区「锚点失效不随实现好坏出现，它随别人的改动出现」。
+
+#### D. 守卫执行域被手挑名册缩小（major，**突变实测存活**）
+
+`tests/unit/test_db_error_scope_e2.py:384` 的 `_TARGET_FILES` 只列 3 个文件，而
+`builders_common/` 实有 4 个子模块——`excerpts.py`（30 KB、同族 DB 读）**在名册之外**；
+往它注入一个裸 `except sqlite3.OperationalError` 后该守卫 **31 passed（突变存活）**，
+而那条用例的 docstring 当时写着「判别面不靠手挑名单」（**测试对自身的描述与事实不符**）。
+
+- 修法：`_TARGET_FILES` 改为 `_SRC_DIR.glob("*.py")` 全集推导；新增
+  `test_target_roster_is_derived_from_package_and_includes_excerpts`（名册 == 包内成员 +
+  必须含 `excerpts.py` + 数量下界）。修后基线 34 passed，注入裸 handler ⇒
+  **点名 `excerpts.py` 变红**（已突变验证）。
+
+#### E. 突变规格覆盖面被高估（major）
+
+实测：43 个规格文件 / 108 个去重目标 / `packages/` 223 个 py ⇒ 覆盖 64；
+`packages/core/quality` **4/23**（`issues.py` / `aggregate.py` / `engine.py` / `beat_repeat.py`
+全无规格）、`packages/workflows/chapter_commit/` **0/7** ⇒ 「质量门禁已覆盖」没有量具支撑。
+
+- 修法：新增 `tests/mutation_specs/quality_gate.py`（5 条：blocked 恒假 / confirm 分支 /
+  AI-* 接线 / beat_repeat 扫描 / trigram confirm 上修）与
+  `tests/mutation_specs/chapter_commit_gate.py`（2 条：`confirm_unresolved` 恒 False /
+  gate_override 校验放宽）。**7/7 手工实测会红 + 终稿字节再跑一遍全 `[CAUGHT]`**（Lead 独立复跑）。
+- `validate_specs.py` 全量：**43 文件 / 317 条 / 0 问题**。
+- 仍缺：`quality/` 其余 18 个文件、`chapter_commit/` 其余 5 个文件（登记，不声称覆盖）。
+
+#### F. 前端契约双源漂移（major）
+
+`apps/web/src/api/types.ts`（147 条手写声明）里有 **35 个名字**既在 OpenAPI
+`components.schemas` 里、又是独立手写副本（只 19 个名字是从 `types.generated.ts` 重导出）；
+字段级实测缺：`Chapter.outline_json`、`Character.aliases` / `inject_mode`、
+`ContinueVariant.error`。TS 少字段**不报错**，78 处 import 吃旧副本，而
+`test_openapi_contract.py` 只校 generated ↔ 活 schema、**从不看 types.ts**。
+
+- 修法：① 补上 4 个真实缺失字段（语义按 OpenAPI：`outline_json?: Record<string,unknown>|null`、
+  `aliases?: string[]`、`inject_mode?: "auto"|"always"|"never"`、`error?: string|null`）；
+  ② 新增机器看守 `tests/api/test_frontend_types_contract.py`（5 例）：新增漂移 ⇒ 红并点名、
+  清单不得有僵尸条目（退债必须显式删项）、清单 ≤35 不许增长、重导出**源名**必须真存在
+  （`RevealPolicyOut as RevealPolicy` 这类别名已按源名比对）、本批 4 字段撤掉必红。
+- **诚实边界**：35 个手写副本**未做批量重导出**（`extends` / `Omit<>` / 内联对象三种形态需要
+  TS 解析器，纯正则做会产假阳性——实测第一版脚本就误判出 9 个假缺字段）。看守把存量债
+  写成**可数清单**，新增漂移从此被机器阻断；退债路线=逐个改成 `export type X = GeneratedX` 并从清单删项。
+
+#### G. 顺带修掉的卫生问题（minor）
+
+- `packages/core/ids.py::now_iso` docstring 写「秒级精度」，**实测微秒**——该注释曾被用来支撑
+  「`created_at` 同秒并列 ⇒ 时序不稳」的论证，属**论证强度夸大**（结论不变：`version DESC`
+  仍是草稿「最新」的唯一口径，因为 version 是发布序）。
+- `chapter_commit/commit.py`（2 处）与 `chapter_commit/gate.py`（1 处）把
+  `get_connection(db_path)` **内联传参且从不 close**（全仓其余 40+ 处都是 try/finally）
+  ⇒ 改为显式 close。
+- `tests/workflow/test_workflow_resume_after_crash.py` 的
+  `pytest.skip("chapter-review workflow not registered")`：把**被测前提**当**跳过条件**
+  ⇒ workflow 注册消失时静默跳过（skip 与「跑过且通过」在退出码上同形）⇒ 改为**硬断言**。
+- **AGENTS 措辞订正（实现不改）**：硬规则 10 原写 `auto_commit` 是「另一个**独立**开关」，
+  读起来像「单独打开即可自动提交」——不成立也不必成立（不开快通道时章停在 `DRAFTED`，
+  commit 的 `status != "REVIEWED"` 校验会拒）⇒ 两个开关是**串联**：`fast_mode` 决定能否
+  走到 DRAFTED、`auto_commit` 决定到了之后要不要自动接 commit。**记一句就够**：
+  fast_mode 关着时勾 auto_commit 不产生任何效果。
+
+#### H. 登记不修（留档，不声称已修）
+
+1. `chapter_plan` 的 `WORKFLOW` **没有 `checkpoint_exclude`**（write / review / commit 三家都有）
+   ⇒ 该家 checkpoint 每次落整份 `director_planner_input` + 镜像键。**需先量化体积、并核对前端
+   run 详情页是否消费该 checkpoint**，故本批不动。
+2. 「`resolve_draft` 是全仓唯一的『最新』口径」这句是**声称**：非判定面仍有 6+ 处
+   `created_at DESC`（`chapter_commit/summary.py`、`control.py`、`commit.py`、
+   `builders_common/common.py`、`summaries.py`、`retrieval/service.py`）——判定面已全部带
+   被审版本（无放行路径），非判定面要的是「当前正文」，**风险低但措辞要改**。
+3. `docs/` 顶层空目录实测 **5 个**（architecture / data-model / deconstruct / evals / testing），
+   AGENTS 记「2026-10-15 实测 6 个」⇒ 引用 docs/ 内文件仍须现查。
+
+#### 闸门（本次亲跑）
+
+| 闸门 | 结果 |
+|---|---|
+| 树指纹（跑测前后） | `648 9a4c61ed…` **逐位一致**（644 → 648 = +4 新增文件：审查报告 + 2 个突变规格 + 1 个看守） |
+| 全量 pytest（`-n 4 -q`，**不带任何 --ignore**） | **3738 passed / 1 skipped / 1 xfailed / 0 failed**（407.94s，exit 0）—— 本轮关键：这条命令此前在本机**跑不完**（见 §A） |
+| ruff `packages scripts tests` | All checks passed |
+| `npx tsc -b` / `npx vitest run` / `npm run build` | 0 错 / **755 passed（56 文件）** / 通过，asset hash `index-mhzcNjYt.js`（与基线一致） |
+| `validate_specs.py` | 43 文件 / 317 条 / **0 问题** |
+| 突变（新增/订正的 4 组规格） | `E1-1..8` + `SKILL-KEY-1/2` + `Q-*`(5) + `C-*`(2) 全 `[CAUGHT]`，存活 0、中止 0 |
+| `check_state_sync --db data/novelos.db` | SYNC OK（5 个无快照项目按设计不计漂移） |
+
+⚠️ **首次闸门作废并重跑（留痕）**：第一次全量（`3734 passed`）跑完后指纹前后不一致
+（`68ced61f…` → `8f690654…`），定位到**唯一**被改文件
+`tests/api/test_frontend_types_contract.py`——那是 dev-b 与我**并发写同一文件**造成的
+（它的版本把 35 笔双源债写成「已清零、清单为空」，而 `types.ts` 实际一条没动，
+用例自己就是红的）。处理：中断成员 → Lead 重写该文件（35 笔逐条登记理由 + 新增漂移阻断 +
+「有效面」字段判别，9 passed，删 `Chapter.outline_json` ⇒ 精确红）→ **重跑全量**得
+上表绿测。教训：**指纹不一致时先定位被改文件再决定重跑**，别把「树变了」误读成「测出问题」。
 
 ### Added（2026-10-20 批次（十三）：skill 生态落地 —— 对外可分发的 skill 包 + 对内 skill 新资源类型）
 
