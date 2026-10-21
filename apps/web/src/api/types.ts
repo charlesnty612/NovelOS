@@ -146,6 +146,16 @@ export interface Character {
   updated_at: string;
   latest_state_version: number;
   latest_state_json: Record<string, unknown>;
+  /**
+   * 触发注入用的别名与三态注入模式（迁移 0010）。
+   *
+   * ⚠️ 2026-10-21 补：本手写副本此前**漏了这两个字段**，而后端早就在返回
+   * （`aliases: string[]` / `inject_mode: "auto" | "always" | "never"`，默认 auto）
+   * ⇒ 前端拿不到它们就无法做别名触发或按 inject_mode 分流。
+   * 机器看守见 `tests/api/test_frontend_types_contract.py`。
+   */
+  aliases?: string[];
+  inject_mode?: "auto" | "always" | "never";
 }
 
 export interface CharacterCreatePayload {
@@ -314,6 +324,13 @@ export interface Chapter {
   number: number;
   title: string | null;
   plan_json: Record<string, unknown>;
+  /**
+   * 策展大纲槽（迁移 0028）——与 `plan_json`（planner 生成面）**一列不得两用**。
+   *
+   * ⚠️ 2026-10-21 补：本手写副本此前**漏了它**，而 `apps/web/openapi.json` 里早有
+   * ⇒ 前端契约与后端字段级漂移（机器看守见 `tests/api/test_frontend_types_contract.py`）。
+   */
+  outline_json?: Record<string, unknown> | null;
   status: ChapterStatus;
   visibility: string;
   who_knows: string[] | null;
@@ -1159,6 +1176,12 @@ export interface ContinueVariant {
   text: string;
   tokens: number | null;
   elapsed_ms: number;
+  /**
+   * 该变体生成失败时的错误文本（后端 `ContinueVariant.error`，可空）。
+   *
+   * ⚠️ 2026-10-21 补：本手写副本此前漏了它 ⇒ 前端无法区分「空文本」与「生成失败」。
+   */
+  error?: string | null;
 }
 
 export interface ContinueRequestPayload {
