@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { normalizeProfile, referenceApi } from './endpoints';
+import { normalizeConnection, normalizeProfile, referenceApi } from './endpoints';
 import { ApiError } from './client';
-import type { ModelProfile } from './types';
+import type { ModelConnectionOut, ModelProfile } from './types';
 
 // 回归：后端 _mask_response 读路径返回的键是 params_json（dict），
 // 前端表单统一读 params。曾因读错键把 params 映射成空对象，导致
@@ -52,6 +52,58 @@ describe('normalizeProfile', () => {
   it('两者都缺失时 params 兜底为空对象', () => {
     const out = normalizeProfile({ ...baseRow });
     expect(out.params).toEqual({});
+  });
+});
+
+// 连接层（2026-10-21 批次十五）：params_json 同样可能是 dict 或 JSON 字符串
+// （后端 `parse_params` 两种都收）⇒ 前端归一化必须两种都能读。
+describe('normalizeConnection', () => {
+  const baseRow = {
+    connection_id: 'mcn_test',
+    name: 'opencode',
+    provider: 'openai_compatible',
+    base_url: 'https://opencode.ai/inference/go/openai/v1',
+    enabled: 1,
+    created_at: '2026-10-21T10:00:00+00:00',
+    updated_at: '2026-10-21T10:00:00+00:00',
+  } as unknown as ModelConnectionOut;
+
+  it('params_json 是 dict 时原样保留', () => {
+    const row = {
+      ...baseRow,
+      params_json: {
+        api_key: '***',
+        headers: { 'x-opencode-session': '{{session_id}}' },
+        models_url: 'https://opencode.ai/inference/go/v1/models',
+      },
+      has_api_key: true,
+    } as unknown as ModelConnectionOut;
+    const out = normalizeConnection(row);
+    expect(out.params_json?.['api_key']).toBe('***');
+    expect(out.params_json?.['headers']).toEqual({
+      'x-opencode-session': '{{session_id}}',
+    });
+    expect(out.params_json?.['models_url']).toBe(
+      'https://opencode.ai/inference/go/v1/models',
+    );
+    expect(out.has_api_key).toBe(true);
+  });
+
+  it('params_json 是 JSON 字符串时也能解析', () => {
+    const row = {
+      ...baseRow,
+      params_json: '{"headers":{"x-opencode-session":"{{session_id}}"}}',
+    } as unknown as ModelConnectionOut;
+    const out = normalizeConnection(row);
+    expect(out.params_json?.['headers']).toEqual({
+      'x-opencode-session': '{{session_id}}',
+    });
+  });
+
+  it('params_json 缺失时兜底为空对象；has_api_key 缺省为 false', () => {
+    const out = normalizeConnection({ ...baseRow } as unknown as ModelConnectionOut);
+    expect(out.params_json).toEqual({});
+    expect(out.has_api_key).toBe(false);
   });
 });
 

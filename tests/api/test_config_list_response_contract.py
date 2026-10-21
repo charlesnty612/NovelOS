@@ -100,6 +100,8 @@ EXPECTED_PROFILE_KEYS = frozenset(
         "created_at",
         "updated_at",
         "has_api_key",
+        # 2026-10-21 批次十五（连接层）：档案可引用一条「连接」；null = 独立配置
+        "connection_id",
     }
 )
 EXPECTED_BINDING_KEYS = frozenset(
@@ -156,6 +158,11 @@ EXPECTED_DECLARED_PROPERTIES = {
 # 必须出现在 required 里的键。三个模型的 6 个键**可空但恒在**（无数据时值为 null），
 # 给了默认值就会退出 required，前端据此会误以为它可省略 ⇒ 必须钉住。
 EXPECTED_REQUIRED = dict(EXPECTED_DECLARED_PROPERTIES)
+# ⚠️ 2026-10-21 批次十五（连接层）：``connection_id`` 有默认值 None
+# （独立配置的档案）⇒ 进 properties、**不进 required**。
+EXPECTED_REQUIRED["ModelProfileOut"] = EXPECTED_REQUIRED["ModelProfileOut"] - {
+    "connection_id"
+}
 
 #: AiCallLogSummary 里「值可为 null 但键恒在」的键——**schema 层**口径（8 个都声明成
 #: ``X | None`` 且都进 required；实测它们确实都可为空，只是 mock 路径下只有前 3 个真的空）。
@@ -330,7 +337,7 @@ def test_model_configs_list_returns_the_measured_seven_keys(tmp_path: Path):
     assert _req(app, "GET", "/api/model-configs?provider=nope").json() == []
 
 
-def test_model_profiles_list_returns_the_measured_nine_keys(tmp_path: Path):
+def test_model_profiles_list_returns_the_measured_ten_keys(tmp_path: Path):
     app = _create_app(tmp_path)
     _seed_profile(app)
     _seed_profile(app, name="第二档案", params_json=None, enabled=0)

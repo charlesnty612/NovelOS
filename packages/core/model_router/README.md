@@ -89,9 +89,10 @@ test_provider = router.get_provider({"provider": "mock", "model": "x", "params_j
 | `params.temperature` / `top_p` / ... | 否 | 透传至请求体顶层 |
 
 `api_key` 解析顺序（`resolve_api_key`，provider 字段大写）：
-1. `params_json["api_key"]`（明文存于 DB，仅 MVP 演示用，不推荐生产）；
-2. 环境变量 `NOVELOS_API_KEY_ANTHROPIC`；
-3. 都没有 → `None`。
+1. `secrets.json` 的 `api_keys[<connection_id>]` / `api_keys[<profile_id>]` / `api_keys[<provider>]`；
+2. `params_json["api_key"]`（明文存于 DB，仅 MVP 演示用，不推荐生产）；
+3. 环境变量 `NOVELOS_API_KEY_ANTHROPIC`；
+4. 都没有 → `None`。（完整 6 级顺序见下方「`api_key` 解析顺序」节）
 
 ### Ollama（`provider="ollama"`）
 本地 `/api/chat` 同步调用器，无需 `api_key`。
@@ -116,9 +117,44 @@ test_provider = router.get_provider({"provider": "mock", "model": "x", "params_j
 > 注：Ollama 也兼容 OpenAI Chat Completions 协议；选 `provider="openai_compatible"` + `base_url=http://127.0.0.1:11434/v1` 也可（沿用 Sprint 3 路径），按需取舍。
 
 ### `api_key` 解析顺序（`resolve_api_key`，所有 provider 共用）
-1. `params_json["api_key"]`（明文存于 DB，仅 MVP 演示用，不推荐生产）；
-2. 环境变量 `NOVELOS_API_KEY_<PROVIDER大写>`（如 `NOVELOS_API_KEY_ANTHROPIC`、`NOVELOS_API_KEY_OPENAI_COMPATIBLE`）；
-3. 都没有 → `None`。`OllamaProvider` 构造时根本不读 key；`OpenAICompatibleProvider` 无 key 通常仍可访问本地 / Ollama 服务，由 Provider 自行决定是否 401。
+0. `secrets.json` 的 `api_keys[<connection_id>]`（**连接级**，2026-10-21 批次十五新增，**最高**）；
+1. `secrets.json` 的 `api_keys[<profile_id>]`（档案级）；
+2. `secrets.json` 的 `api_keys[<provider>]`（provider 级通用）；
+3. `secrets.json` 的 `api_keys[<env_name>]`（兼容旧条目）；
+4. `params_json["api_key"]`（明文存于 DB，仅 MVP 演示用，不推荐生产）；
+5. 环境变量 `NOVELOS_API_KEY_<PROVIDER大写>`（如 `NOVELOS_API_KEY_ANTHROPIC`、`NOVELOS_API_KEY_OPENAI_COMPATIBLE`）；
+6. 都没有 → `None`。`OllamaProvider` 构造时根本不读 key；`OpenAICompatibleProvider` 无 key 通常仍可访问本地 / Ollama 服务，由 Provider 自行决定是否 401。
+
+⚠️ **绑定连接的档案不再查第 1 级**：绑定后 key 归连接所有（否则「改了连接的 key 却不生效」——
+最贵的一类「显示与实际失真」）。
+
+## V3.9.5：连接层（2026-10-21 批次十五）—— 连接与档案解耦
+
+**动机**：用户裁决「同一厂商，想分配不同模型承担不同职责，需要要重新完全新建」。
+0016 的两层架构解开了「模型 ↔ 环节」，但没解开「模型 ↔ 连接」：
+`provider / base_url / api_key` 与模型名焊在同一条记录里 ⇒ 同一厂商的多个模型
+要把 base_url / api_key 各重填一遍。
+
+| 层 | 表 | 负责 |
+|---|---|---|
+| 连接 | `model_connections`（迁移 0033） | provider / base_url / api_key / headers / models_url |
+| 档案 | `model_profiles`（既有）+ 可空列 `connection_id` | model / thinking / reasoning_effort / timeout_s / temperature … |
+
+- **连接是唯一权威**：档案绑了连接 ⇒ 连接级字段**全部**取自连接，档案自己的同名键被忽略
+  （防「一列两用」）。档案的 `provider` 列降级为**派生镜像**（连接改 provider 时同步刷新）。
+- **存量零行为变化**：档案的 `connection_id` 为 `NULL` ⇒ 走原 `params_json` 路径，逐位不变。
+- **请求头**：连接级 `params_json.headers`，值支持 `{{run_id}}` / `{{session_id}}`
+  （封闭集合；其它占位符写时 422）。`{{session_id}}` ⇒ `ses_<sha256(run_id)[:32]>`；
+  无 run 上下文（探针）⇒ `ses_probe_<sha256(connection_id)[:16]>`。
+  ⚠️ 敏感头名（authorization / x-api-key / …）在读路径**逐键掩码**；
+  `x-opencode-session` 这类非凭据头**不掩**。
+- **保留键清单唯一权威**：`effective.RESERVED_PARAM_KEYS`（`base_url` / `api_key` /
+  `api_key_env` / `timeout_s` / `headers` / `models_url`）——**不进上游请求体**
+  （漏剔 ⇒ OpenAI 兼容 API 直接 400）。
+- **归组**：存量档案按**生效 key**分组（不是 `params_json.api_key` —— 档案级 secrets
+  会覆盖它，按后者分组会**串用凭据**）；先预览、用户确认后才写。
+- 新增模块：`effective.py`（生效配置解析 + 保留键 + 头渲染）、`connections.py`（CRUD）、
+  `api/routers/connections.py`（REST）。
 
 ## Sprint 8：健康检查（`/model-configs/{id}/test` → `Provider.health_check`）
 

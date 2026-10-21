@@ -734,7 +734,7 @@ def test_router_call_with_fallback_first_succeeds(tmp_path: Path):
     # 拦截 get_provider：替换为返回我们注入 transport 的 Provider
     router = ModelRouter(db_path)
 
-    def patched_get(row, *, scripted=None):
+    def patched_get(row, *, scripted=None, run_id=None, extra_headers=None):
         return OpenAICompatibleProvider(
             base_url="https://x",
             api_key=None,
@@ -760,7 +760,7 @@ def test_router_call_with_fallback_skips_failed_first_uses_second(tmp_path: Path
     router = ModelRouter(db_path)
     from packages.core.model_router.providers import OpenAICompatibleProvider
 
-    def patched_get(row, *, scripted=None):
+    def patched_get(row, *, scripted=None, run_id=None, extra_headers=None):
         if row["config_id"] == cid_fail:
             # 每次都返 500
             transport = httpx.MockTransport(lambda req: httpx.Response(500, text="boom"))
@@ -804,7 +804,7 @@ def test_router_call_with_fallback_all_fail_raises_aggregate(tmp_path: Path):
 
     transport = httpx.MockTransport(lambda req: httpx.Response(500, text="boom"))
 
-    def patched_get(row, *, scripted=None):
+    def patched_get(row, *, scripted=None, run_id=None, extra_headers=None):
         return OpenAICompatibleProvider(
             base_url="https://x", api_key=None, model=row["model"],
             client=httpx.Client(transport=transport),

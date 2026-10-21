@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -32,7 +33,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 
 from packages.core.logging_config import get_logger
-from packages.core.model_router import ModelRouter, ProfileService, ProviderError
+from packages.core.model_router import ConnectionService, ModelRouter, ProfileService, ProviderError
+from packages.core.model_router.effective import group_profiles_by_connection, parse_params
 from packages.core.model_router.models import (
     AvailableModelsOut,
     ModelProfileOut,
@@ -51,6 +53,7 @@ from packages.core.model_router.security import (
     _prepare_patch_params,
     _prepare_post_params,
 )
+from packages.core.secrets_store import resolve_profile_api_key
 
 log = get_logger("novelos.routers.model_profiles")
 
@@ -182,7 +185,14 @@ def create_model_profile(payload: dict, request: Request) -> dict:
     入参 ``params_json.api_key`` 的特殊值与 ``/model-configs`` 同语义：
     - ``""`` 或 ``"***"`` → 视为未设置，落库时不写 api_key。
     - 其他字符串 → 原样落库（明文）。
+
+    **连接绑定**（2026-10-21 批次十五）：可传 ``connection_id`` ⇒ 该档案的
+    provider / base_url / api_key / headers **全部取自连接**（档案自身的同名键被忽略）。
+    ⚠️ 传了与连接不一致的 provider → **422**（不静默采纳）——
+    连接的 provider 是唯一权威，两处分叉会让「同一连接挂不同 provider」这种
+    荒谬配置混进库。
     """
+    settings = request.app.state.settings
     name = payload.get("name")
     provider = payload.get("provider")
     model = payload.get("model")
@@ -191,6 +201,23 @@ def create_model_profile(payload: dict, request: Request) -> dict:
     if not (isinstance(provider, str) and provider):
         raise HTTPException(status_code=422, detail="provider required")
     model = _clean_model_field(model, field="model")
+    connection_id = _resolve_connection_id(payload.get("connection_id"))
+    if connection_id:
+        conn_row = ConnectionService(settings.db_path).get(connection_id)
+        if conn_row is None:
+            raise HTTPException(
+                status_code=422, detail=f"model_connection {connection_id!r} not found"
+            )
+        conn_provider = conn_row["provider"]
+        if provider != conn_provider:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"provider 与所选连接不一致：连接是 {conn_provider!r}，"
+                    f"收到 {provider!r}（连接是 provider 的唯一权威）"
+                ),
+            )
+        provider = conn_provider
     try:
         # 契约兼容：params_json（旧）优先；缺失则读 params（新契约，前端按约定发）。
         # 两者都无 → None → _normalize_params 返回空 dict（保留原行为）。
@@ -205,7 +232,6 @@ def create_model_profile(payload: dict, request: Request) -> dict:
         raise HTTPException(status_code=422, detail="enabled must be 0 or 1")
     enabled_int = 1 if enabled in (1, True) else 0
 
-    settings = request.app.state.settings
     svc = ProfileService(settings.db_path)
     try:
         row = svc.create(
@@ -214,6 +240,7 @@ def create_model_profile(payload: dict, request: Request) -> dict:
             model=model,
             params=params_dict,
             enabled=enabled_int,
+            connection_id=connection_id,
         )
     except Exception as exc:
         from sqlite3 import IntegrityError
@@ -221,7 +248,53 @@ def create_model_profile(payload: dict, request: Request) -> dict:
         if isinstance(exc, IntegrityError):
             raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
         raise
-    return _mask_response(row)
+    return _mask_profile_row(row, settings.db_path)
+
+
+def _resolve_connection_id(raw: Any) -> str | None:
+    """规范化入参 ``connection_id``；``None`` / 空串 / 非字符串 → 422 或 None。
+
+    - 缺键 / ``None`` → ``None``（独立档案，存量形态）；
+    - 非空字符串 → 原样（调用方负责校验存在性）；
+    - 其它类型 → 422。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw.strip() or None
+    raise HTTPException(status_code=422, detail="connection_id must be a string or null")
+
+
+def _mask_profile_rows(rows: list[dict], db_path: str) -> list[dict]:
+    """档案列表的读路径出口：绑定连接的档案，其 ``has_api_key`` **由连接派生**。
+
+    ⚠️ 2026-10-21 批次十五：绑定后档案自己 params 里那份 key **不生效**
+    （运行时解析链不再查档案级 secrets）⇒ 拿它判定会让「连接上清空了 key」
+    仍显示「已配置密钥」（显示与实际失真）。
+    """
+    conn_ids = {r.get("connection_id") for r in rows if r.get("connection_id")}
+    conns: dict[str, dict] = {}
+    if conn_ids:
+        conns = {
+            c["connection_id"]: c
+            for c in ConnectionService(db_path).get_many(sorted(conn_ids))
+        }
+    out = []
+    for r in rows:
+        cid = r.get("connection_id")
+        out.append(
+            _mask_response(r, connection_row=conns.get(cid)) if cid else _mask_response(r)
+        )
+    return out
+
+
+def _mask_profile_row(row: dict, db_path: str) -> dict:
+    """单条档案的读路径出口（同 :func:`_mask_profile_rows`）。"""
+    cid = row.get("connection_id")
+    if not cid:
+        return _mask_response(row)
+    conn_row = ConnectionService(db_path).get(cid)
+    return _mask_response(row, connection_row=conn_row)
 
 
 @router.get("/model-profiles", response_model=list[ModelProfileOut])
@@ -242,7 +315,7 @@ def list_model_profiles(
     settings = request.app.state.settings
     svc = ProfileService(settings.db_path)
     rows = svc.list(include_enabled_only=include_enabled_only)
-    return [_mask_response(r) for r in rows]
+    return _mask_profile_rows(rows, settings.db_path)
 
 
 @router.get("/model-profiles/{profile_id}", response_model=ModelProfileOut)
@@ -252,7 +325,7 @@ def get_model_profile(profile_id: str, request: Request) -> dict:
     row = svc.get(profile_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"model_profile {profile_id!r} not found")
-    return _mask_response(row)
+    return _mask_profile_row(row, settings.db_path)
 
 
 @router.patch("/model-profiles/{profile_id}", response_model=ModelProfileOut)
@@ -305,17 +378,39 @@ def patch_model_profile(profile_id: str, payload: dict, request: Request) -> dic
         if v not in (0, 1, True, False):
             raise HTTPException(status_code=422, detail="enabled must be 0 or 1")
         fields["enabled"] = 1 if v in (1, True) else 0
+    if "connection_id" in payload:
+        # 缺键 = 不动；显式 null = **解绑**（退回独立配置）。
+        connection_id = _resolve_connection_id(payload["connection_id"])
+        fields["connection_id"] = connection_id
+        if connection_id:
+            conn_row = ConnectionService(settings.db_path).get(connection_id)
+            if conn_row is None:
+                raise HTTPException(
+                    status_code=422, detail=f"model_connection {connection_id!r} not found"
+                )
+            conn_provider = conn_row["provider"]
+            requested = payload.get("provider")
+            if requested is not None and requested != conn_provider:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"provider 与所选连接不一致：连接是 {conn_provider!r}，"
+                        f"收到 {requested!r}（连接是 provider 的唯一权威）"
+                    ),
+                )
+            # 连接是 provider 的唯一权威 ⇒ 档案的 provider 列由服务端写入
+            fields["provider"] = conn_provider
 
     if not fields:
         row = svc.get(profile_id)
         if row is None:
             raise HTTPException(status_code=404, detail=f"model_profile {profile_id!r} not found")
-        return _mask_response(row)
+        return _mask_profile_row(row, settings.db_path)
 
     row = svc.update_partial(profile_id, fields)
     if row is None:
         raise HTTPException(status_code=404, detail=f"model_profile {profile_id!r} not found")
-    return _mask_response(row)
+    return _mask_profile_row(row, settings.db_path)
 
 
 @router.delete("/model-profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -370,6 +465,8 @@ def test_model_profile(profile_id: str, request: Request) -> dict:
         )
 
     # 构造与 model_configs 行同键名的 dict，复用 ModelRouter.get_provider。
+    # ⚠️ 2026-10-21 批次十五：带上 connection_id ⇒ get_provider 会解析连接，
+    #    绑定连接的档案（自身 params 里没有 base_url）也能被正确构造。
     config_row = {
         "config_id": profile_row["profile_id"],
         "capability": "creative_writing",  # 仅用于 provider 构造，无业务影响
@@ -377,6 +474,7 @@ def test_model_profile(profile_id: str, request: Request) -> dict:
         "model": profile_row["model"],
         "params_json": profile_row["params_json"],
         "enabled": profile_row["enabled"],
+        "connection_id": profile_row.get("connection_id"),
     }
     # ⚠️ 2026-10-15 修：`get_provider` 会抛 `ValueError`（档案里 provider 配置不合法，
     # 例如 `openai_compatible` 缺 `base_url`——见 providers.py 的构造校验），而它原先
@@ -409,6 +507,12 @@ def test_model_profile(profile_id: str, request: Request) -> dict:
         "detail": detail,
         "status_code": status_code,
     }
+    # ⚠️ 2026-10-21 批次十五：``probe`` 是**条件键** —— provider 的 health_check
+    # 返回了它（models 探测 / 退化的 chat 探测）才带上；不返回时整个键不存在
+    # （与 hint 同样的范式：response_model_exclude_unset=True）。
+    probe = result.get("probe")
+    if isinstance(probe, str) and probe:
+        payload["probe"] = probe
     # 400 且错误文本指向模型名 → 追加中文提示。这是**新增可选字段**：既有 5 个字段
     # 逐字不变，不命中时响应体与本批之前完全一致（正常错误继续原样透传）。
     if status_code == 400:
@@ -423,8 +527,146 @@ def test_model_profile(profile_id: str, request: Request) -> dict:
 # ---------------------------------------------------------------------------
 
 
+@router.post("/model-profiles/group-by-connection")
+def preview_group_by_connection(request: Request):
+    """**按连接归组**的分组预览（只读，不写库）。
+
+    ⚠️ **为什么不做自动回填**（2026-10-21 批次十五，先验判断被推翻必须留痕）：
+    生效 key 的权威解析链是 ``secrets_store.resolve_profile_api_key``，5 级里
+    **最高两级读的是 secrets.json（一个文件）** ⇒ SQL 迁移看不见它们。
+    本仓 secrets.json **现存的条目正是档案级**（实测 ``mprof_f95e3c7b4127``）
+    ⇒ 存在「两个档案的 params 里写着同一个 key、但生效 key 不同」的真实情形。
+    按 params 里的 key 分组会把它们合并 ⇒ **凭据静默串用**（表现为某档案突然 401）。
+
+    ⇒ 归组键由**运行期同一个解析函数**算出（:func:`group_profiles_by_connection`），
+    且**先给用户看预览**、用户点头后才写。
+
+    响应：
+    - ``groups[]`` —— 每组含 ``group_key``（provider / base_url / api_key_env /
+      api_key_set）、``profile_ids``、建议的连接名、``key_fingerprint``
+      （生效 key 的 sha256 前 4 位，**不泄密**）、``key_consistent``
+      （组内各档案的生效 key 是否完全相同 —— 不同则**不能**归到一条连接）。
+    """
+    settings = request.app.state.settings
+    svc = ProfileService(settings.db_path)
+    rows = svc.list()
+    groups = group_profiles_by_connection(rows)
+    out = []
+    for g in groups:
+        pids = g["profile_ids"]
+        fingerprints = set()
+        for pid in pids:
+            row = svc.get(pid)
+            if row is None:
+                continue
+            params = parse_params(row.get("params_json"))
+            eff_key = resolve_profile_api_key(
+                row.get("profile_id"),
+                row.get("provider"),
+                [params["api_key_env"]] if params.get("api_key_env") else None,
+                params.get("api_key"),
+            )
+            fingerprints.add(
+                hashlib.sha256((eff_key or "").encode("utf-8")).hexdigest()[:4]
+                if eff_key
+                else ""
+            )
+        g = dict(g)
+        g["key_fingerprint"] = next(iter(fingerprints)) if len(fingerprints) == 1 else ""
+        g["key_consistent"] = len(fingerprints) <= 1
+        out.append(g)
+    return {"groups": out}
+
+
+@router.post("/model-profiles/apply-grouping")
+def apply_grouping(payload: dict, request: Request) -> dict:
+    """把档案归到连接上（``assignments``: ``[{connection_id, profile_ids}]``）。
+
+    ⚠️ **生效 key 必须不变** —— 绑定连接后档案不再查 ``secrets[profile_id]``，
+    改用 ``secrets[connection_id]`` ⇒ 若连接的生效 key 与档案归组前的生效 key
+    不同，该档案的密钥**会静默换掉**（⇒ 401 或计费到别人的号）。
+    ⇒ 本端点**逐条校验**，不一致直接 422 并说明是哪一条、差在哪。
+
+    校验通过才写 ``connection_id``（provider 列由服务端从连接继承）。
+    """
+    settings = request.app.state.settings
+    svc = ProfileService(settings.db_path)
+    conn_svc = ConnectionService(settings.db_path)
+    assignments = payload.get("assignments")
+    if not isinstance(assignments, list) or not assignments:
+        raise HTTPException(
+            status_code=422, detail="assignments must be a non-empty array"
+        )
+
+    applied: list[str] = []
+    for item in assignments:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=422, detail="each assignment must be an object")
+        connection_id = item.get("connection_id")
+        profile_ids = item.get("profile_ids")
+        if not isinstance(connection_id, str) or not connection_id:
+            raise HTTPException(
+                status_code=422, detail="assignment.connection_id must be a non-empty string"
+            )
+        if not isinstance(profile_ids, list) or not profile_ids:
+            raise HTTPException(
+                status_code=422, detail="assignment.profile_ids must be a non-empty array"
+            )
+        conn_row = conn_svc.get(connection_id)
+        if conn_row is None:
+            raise HTTPException(
+                status_code=422, detail=f"model_connection {connection_id!r} not found"
+            )
+        conn_params = parse_params(conn_row.get("params_json"))
+        conn_key = resolve_profile_api_key(
+            None,
+            conn_row.get("provider"),
+            None,
+            conn_params.get("api_key"),
+            connection_id=connection_id,
+        )
+        conn_base = (conn_row.get("base_url") or "").rstrip("/")
+        for pid in profile_ids:
+            row = svc.get(str(pid))
+            if row is None:
+                raise HTTPException(
+                    status_code=422, detail=f"model_profile {pid!r} not found"
+                )
+            params = parse_params(row.get("params_json"))
+            prof_key = resolve_profile_api_key(
+                row.get("profile_id"),
+                row.get("provider"),
+                [params["api_key_env"]] if params.get("api_key_env") else None,
+                params.get("api_key"),
+            )
+            if (prof_key or "") != (conn_key or ""):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"档案 {pid!r} 的生效密钥与连接 {connection_id!r} 不一致 —— "
+                        "归组会换掉该档案的密钥（绑定后不再查档案级 secrets）。"
+                        "请把连接的密钥改成与该档案一致后再归组。"
+                    ),
+                )
+            prof_base = (params.get("base_url") or "").rstrip("/")
+            if prof_base != conn_base:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"档案 {pid!r} 的 base_url（{prof_base!r}）与连接 "
+                        f"{connection_id!r}（{conn_base!r}）不一致 —— 归组会换掉地址。"
+                    ),
+                )
+            svc.update_partial(
+                str(pid),
+                {"connection_id": connection_id, "provider": conn_row["provider"]},
+            )
+            applied.append(str(pid))
+    return {"applied": applied, "count": len(applied)}
+
+
 @router.post("/model-profiles/available-models", response_model=AvailableModelsOut)
-def list_available_models(payload: dict) -> dict:
+def list_available_models(payload: dict, request: Request) -> dict:
     """按 ``provider / base_url / api_key / profile_id`` 调用各家模型列表接口。
 
     用途：模型档案编辑表单「拉取模型」按钮的支撑端点。后端代理请求以
@@ -437,6 +679,11 @@ def list_available_models(payload: dict) -> dict:
     - ``api_key`` (str, 可选) —— 明文直接用；缺省走 ``resolve_api_key``：先查档案
       ``profile_id``、再 ``provider`` 默认 env（``NOVELOS_API_KEY_<PROVIDER>``）。
     - ``profile_id`` (str, 可选) —— 已有档案 ID；用于上面提到的解析优先级。
+    - ``connection_id`` (str, 可选) —— **连接路径**（2026-10-21 批次十五）：
+      provider / base_url / api_key / headers / models_url **全部取自该连接**；
+      给了连接时 ``provider`` 不再必填。
+
+    ⚠️ **不传 ``connection_id`` 时的行为与改造前逐字相同**（inline 路径保留）。
 
     错误处理：
     - ``400`` —— 必填缺失 / 该 provider 必须有 key 但解析不到；detail 仅文案不含 key。
@@ -445,27 +692,55 @@ def list_available_models(payload: dict) -> dict:
     响应：
     - ``{"models": ["id1", "id2", ...]}`` —— 排序去重后的字符串数组。
     """
-    provider = payload.get("provider")
-    if not (isinstance(provider, str) and provider):
-        raise HTTPException(status_code=422, detail="provider required")
-
-    raw_base_url = payload.get("base_url")
-    base_url: str | None = None
-    if isinstance(raw_base_url, str) and raw_base_url.strip():
-        base_url = raw_base_url.strip()
-
-    raw_api_key = payload.get("api_key")
-    inline_api_key: str | None = None
-    if isinstance(raw_api_key, str) and raw_api_key.strip():
-        inline_api_key = raw_api_key.strip()
-        # 安全：不接受脱敏占位符作为「真密钥」。
-        if inline_api_key == "***":
+    # ---- 连接路径（2026-10-21 批次十五）：一切取自连接 ----
+    conn_models_url: str | None = None
+    conn_headers: dict[str, str] = {}
+    raw_connection_id = payload.get("connection_id")
+    if raw_connection_id is not None:
+        if not isinstance(raw_connection_id, str) or not raw_connection_id.strip():
+            raise HTTPException(
+                status_code=422, detail="connection_id must be a non-empty string"
+            )
+        settings = request.app.state.settings
+        conn_row = ConnectionService(settings.db_path).get(raw_connection_id.strip())
+        if conn_row is None:
+            raise HTTPException(
+                status_code=422, detail=f"model_connection {raw_connection_id!r} not found"
+            )
+        conn_params = parse_params(conn_row.get("params_json"))
+        provider = conn_row["provider"]
+        base_url = (conn_row.get("base_url") or "").rstrip("/") or None
+        inline_api_key = conn_params.get("api_key")
+        if isinstance(inline_api_key, str) and inline_api_key == "***":
             inline_api_key = None
+        conn_models_url = conn_params.get("models_url") or None
+        raw_conn_headers = conn_params.get("headers")
+        if isinstance(raw_conn_headers, dict):
+            conn_headers = {
+                k: v for k, v in raw_conn_headers.items() if isinstance(v, str)
+            }
+    else:
+        provider = payload.get("provider")
+        if not (isinstance(provider, str) and provider):
+            raise HTTPException(status_code=422, detail="provider required")
 
-    raw_profile_id = payload.get("profile_id")
-    profile_id: str | None = None
-    if isinstance(raw_profile_id, str) and raw_profile_id.strip():
-        profile_id = raw_profile_id.strip()
+        raw_base_url = payload.get("base_url")
+        base_url: str | None = None
+        if isinstance(raw_base_url, str) and raw_base_url.strip():
+            base_url = raw_base_url.strip()
+
+        raw_api_key = payload.get("api_key")
+        inline_api_key: str | None = None
+        if isinstance(raw_api_key, str) and raw_api_key.strip():
+            inline_api_key = raw_api_key.strip()
+            # 安全：不接受脱敏占位符作为「真密钥」。
+            if inline_api_key == "***":
+                inline_api_key = None
+
+        raw_profile_id = payload.get("profile_id")
+        profile_id: str | None = None
+        if isinstance(raw_profile_id, str) and raw_profile_id.strip():
+            profile_id = raw_profile_id.strip()
 
     # ---- mock：固定假列表，无需任何外部调用 ----
     if provider == "mock":
@@ -476,7 +751,7 @@ def list_available_models(payload: dict) -> dict:
         target_base = base_url or OllamaProvider.DEFAULT_BASE_URL
         url = f"{target_base.rstrip('/')}/api/tags"
         try:
-            resp = httpx.get(url, timeout=_FETCH_LIST_TIMEOUT_S)
+            resp = httpx.get(url, headers=conn_headers or None, timeout=_FETCH_LIST_TIMEOUT_S)
         except httpx.HTTPError as exc:
             raise HTTPException(
                 status_code=502,
@@ -518,6 +793,7 @@ def list_available_models(payload: dict) -> dict:
             "x-api-key": api_key,
             "anthropic-version": AnthropicProvider.ANTHROPIC_VERSION,
         }
+        headers.update(conn_headers)
         try:
             resp = httpx.get(url, headers=headers, timeout=_FETCH_LIST_TIMEOUT_S)
         except httpx.HTTPError as exc:
@@ -545,10 +821,14 @@ def list_available_models(payload: dict) -> dict:
             status_code=400,
             detail=f"拉取模型列表失败：{provider!r} 需提供 base_url",
         )
-    url = f"{base_url.rstrip('/')}/models"
+    # ⚠️ 2026-10-21 批次十五：``models_url`` 覆盖默认的 ``{base_url}/models``
+    #    （opencode 的模型列表**不在** {base_url}/models 上 ⇒ 不配就打错 URL）。
+    url = conn_models_url or f"{base_url.rstrip('/')}/models"
     headers: dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    # 连接级自定义头（如 x-opencode-session）随探测请求一起发
+    headers.update(conn_headers)
     try:
         resp = httpx.get(url, headers=headers, timeout=_FETCH_LIST_TIMEOUT_S)
     except httpx.HTTPError as exc:

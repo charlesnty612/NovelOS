@@ -33,6 +33,7 @@ from typing import Any
 
 import httpx
 
+from .effective import RESERVED_PARAM_KEYS
 from .exceptions import ProviderError
 
 _LOG = logging.getLogger(__name__)
@@ -241,6 +242,8 @@ class OpenAICompatibleProvider:
         *,
         timeout: float = 240.0,
         client: httpx.Client | None = None,
+        extra_headers: dict[str, str] | None = None,
+        models_url: str | None = None,
     ) -> None:
         if not base_url:
             raise ValueError("base_url must be a non-empty string")
@@ -253,6 +256,13 @@ class OpenAICompatibleProvider:
         self.timeout = timeout
         # 允许测试注入 httpx.MockTransport（task书口径）；None 时构造新 client
         self._client = client
+        # 自定义请求头（2026-10-21 批次十五）：连接级 headers + 运行级覆盖。
+        # 合并顺序见 _headers()：provider 默认 < 连接级 < 运行级。
+        self.extra_headers = dict(extra_headers or {})
+        # 模型列表端点覆盖（默认 {base_url}/models）。
+        # opencode 的模型列表**不在** {base_url}/models 上（Go 套餐是
+        # https://opencode.ai/inference/go/v1/models），不配就会打错 URL ⇒ 假失败。
+        self.models_url = models_url or None
 
     def _ensure_client(self) -> httpx.Client:
         if self._client is None:
@@ -268,6 +278,9 @@ class OpenAICompatibleProvider:
         h = {"Content-Type": "application/json"}
         if self.api_key:
             h["Authorization"] = f"Bearer {self.api_key}"
+        # 自定义头**覆盖**同名默认头（连接级 headers 可以改 Content-Type 等；
+        # 鉴权头的撞车在 API 写时校验层被拒，见 api/routers/connections.py）。
+        h.update(self.extra_headers)
         return h
 
     def complete(self, messages: Messages, params: dict | None = None) -> CompletionResult:
@@ -295,7 +308,9 @@ class OpenAICompatibleProvider:
         # 剔除本地保留键，避免被透传到上游请求体（脏参数）。
         # 这些是 NovelOS 自身解析用的字段（如 base_url 用于构造 URL、api_key 已走 Authorization 头），
         # 上游 OpenAI 兼容 API 看到会直接报 400。
-        for k in ("base_url", "timeout_s", "api_key", "api_key_env"):
+        # ⚠️ 键集合来自 effective.RESERVED_PARAM_KEYS（**唯一权威**）——
+        #    此前本处与 router.py 各写一份副本，加一个键要记得改两处，漏一处就 400。
+        for k in RESERVED_PARAM_KEYS:
             request_params.pop(k, None)
         # 调用方可能传了 stream=False（少数情况下游不支持流式）；强制打开。
         # 同理 stream_options 也可能由调用方误传，统一由本 Provider 注入并剔除。
@@ -476,7 +491,7 @@ class OpenAICompatibleProvider:
 
         任何 2xx → ok=True；其它或网络异常 → ok=False。timeout 单位秒。
         """
-        url = f"{self.base_url}/models"
+        url = self.models_url or f"{self.base_url}/models"
         client = self._ensure_client()
         start = time.monotonic()
         try:
@@ -488,6 +503,7 @@ class OpenAICompatibleProvider:
                 "status_code": None,
                 "detail": f"network error: {exc}",
                 "latency_ms": latency,
+                "probe": "models",
             }
         latency = int((time.monotonic() - start) * 1000)
         if resp.status_code < 400:
@@ -496,6 +512,76 @@ class OpenAICompatibleProvider:
                 "status_code": resp.status_code,
                 "detail": "reachable",
                 "latency_ms": latency,
+                "probe": "models",
+            }
+        if resp.status_code in (404, 405, 501):
+            # 端点不存在 ⇒ 退化探测（见 _probe_chat 的 docstring）
+            return self._probe_chat(timeout=timeout, start=start, models_status=resp.status_code)
+        snippet = (resp.text or "")[:200]
+        return {
+            "ok": False,
+            "status_code": resp.status_code,
+            "detail": f"HTTP {resp.status_code}: {snippet}",
+            "latency_ms": latency,
+            "probe": "models",
+        }
+
+    def _probe_chat(
+        self,
+        *,
+        timeout: float | None,
+        start: float,
+        models_status: int,
+    ) -> dict[str, Any]:
+        """降级探测：发一条**极小**的 chat/completions 请求。
+
+        为什么需要降级：**模型列表端点不是通用约定**。
+        - opencode（Go 套餐）的模型列表在 ``/inference/go/v1/models``，
+          **不在** ``{base_url}/models`` 上；
+        - 不少中转 / 聚合网关干脆不实现它。
+
+        只打 ``/models`` 会把「端点完全可用」判成「连接失败」——**假失败**。
+        降级路径发一条 ``max_tokens=1`` 的最小请求，**200 / 401 都算「可达」**
+        （401 只说明鉴权没过、端点活着；与 ``AnthropicProvider.health_check``
+        的既有语义一致）。
+
+        ⚠️ 该降级会**消耗 1 个 token**（上游真的收了一次请求）。
+        它只发生在用户**手工触发**的「测试连接」路径上，不是自动化验证路径
+        （自动化测试一律用 ``httpx.MockTransport``，不发真实请求）。
+        """
+        body = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": "ok"}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+        url = f"{self.base_url}/chat/completions"
+        client = self._ensure_client()
+        try:
+            resp = client.post(
+                url, json=body, headers=self._headers(), timeout=timeout or self.timeout
+            )
+        except httpx.HTTPError as exc:
+            latency = int((time.monotonic() - start) * 1000)
+            return {
+                "ok": False,
+                "status_code": None,
+                "detail": f"network error: {exc}",
+                "latency_ms": latency,
+                "probe": "chat",
+            }
+        latency = int((time.monotonic() - start) * 1000)
+        if resp.status_code < 400 or resp.status_code == 401:
+            note = "（鉴权未通过，但端点可达）" if resp.status_code == 401 else ""
+            return {
+                "ok": True,
+                "status_code": resp.status_code,
+                "detail": (
+                    f"模型列表端点不可用（HTTP {models_status}），已用极小请求探测："
+                    f"端点可达{note}"
+                ),
+                "latency_ms": latency,
+                "probe": "chat",
             }
         snippet = (resp.text or "")[:200]
         return {
@@ -503,6 +589,7 @@ class OpenAICompatibleProvider:
             "status_code": resp.status_code,
             "detail": f"HTTP {resp.status_code}: {snippet}",
             "latency_ms": latency,
+            "probe": "chat",
         }
 
 
@@ -535,6 +622,7 @@ class AnthropicProvider:
         *,
         timeout: float = 60.0,
         client: httpx.Client | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         if not model:
             raise ValueError("model must be a non-empty string")
@@ -543,6 +631,8 @@ class AnthropicProvider:
         self.model = model
         self.timeout = timeout
         self._client = client
+        # 自定义请求头（2026-10-21 批次十五）；合并顺序：provider 默认 < 自定义。
+        self.extra_headers = dict(extra_headers or {})
 
     def _ensure_client(self) -> httpx.Client:
         if self._client is None:
@@ -561,6 +651,8 @@ class AnthropicProvider:
         }
         if self.api_key:
             h["x-api-key"] = self.api_key
+        # 自定义头覆盖同名默认头（鉴权头撞车在 API 写时校验层被拒）。
+        h.update(self.extra_headers)
         return h
 
     @staticmethod
@@ -595,7 +687,14 @@ class AnthropicProvider:
         if params:
             # params 透传 temperature / top_p / max_tokens 等；
             # max_tokens 优先用 params 里的（与 OpenAI 兼容 Provider 保持一致语义）。
-            body.update({k: v for k, v in params.items() if v is not None})
+            # ⚠️ 2026-10-21 批次十五：**剔除本地保留键**（base_url / api_key /
+            #    api_key_env / timeout_s / headers / models_url）——它们是 NovelOS
+            #    自己的构造参数，不该进上游请求体（Anthropic 会因未知字段 400）。
+            #    ⚠️ **这是一处行为变化**：直调 AnthropicProvider 并把 base_url 放进
+            #    params 的调用方，其请求体**不再**含该字段。生产路径（router 的
+            #    extras 计算）本就剔过 ⇒ 运行期行为不变。已在 CHANGELOG 显式声明。
+            clean = {k: v for k, v in params.items() if k not in RESERVED_PARAM_KEYS}
+            body.update({k: v for k, v in clean.items() if v is not None})
 
         url = f"{self.base_url}/v1/messages"
         client = self._ensure_client()
@@ -704,6 +803,7 @@ class OllamaProvider:
         *,
         timeout: float = 60.0,
         client: httpx.Client | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         if not model:
             raise ValueError("model must be a non-empty string")
@@ -711,6 +811,8 @@ class OllamaProvider:
         self.model = model
         self.timeout = timeout
         self._client = client
+        # 自定义请求头（2026-10-21 批次十五）；合并顺序：provider 默认 < 自定义。
+        self.extra_headers = dict(extra_headers or {})
 
     def _ensure_client(self) -> httpx.Client:
         if self._client is None:
@@ -723,7 +825,9 @@ class OllamaProvider:
         return self._client
 
     def _headers(self) -> dict[str, str]:
-        return {"Content-Type": "application/json"}
+        h = {"Content-Type": "application/json"}
+        h.update(self.extra_headers)
+        return h
 
     def complete(self, messages: Messages, params: dict | None = None) -> CompletionResult:
         body: dict[str, Any] = {
@@ -733,9 +837,14 @@ class OllamaProvider:
         }
         if params:
             # Ollama 把 sampling 参数放在 options 子对象里；其它键（如 format）放顶层。
+            # ⚠️ 2026-10-21 批次十五：剔除本地保留键（否则 headers / base_url 会被
+            #    当 sampling 参数塞进 options 子对象——虽无害但语义错误）。
+            #    ⚠️ **行为变化**：直调 OllamaProvider 并把 base_url 放进 params 的调用方，
+            #    其请求体不再含该字段。生产路径（router）本就剔过 ⇒ 运行期不变。
+            clean = {k: v for k, v in params.items() if k not in RESERVED_PARAM_KEYS}
             opts: dict[str, Any] = {}
             passthrough_keys = ("format",)
-            for k, v in params.items():
+            for k, v in clean.items():
                 if k in passthrough_keys:
                     body[k] = v
                 else:
@@ -827,9 +936,11 @@ def resolve_api_key(
     *,
     profile_id: str | None = None,
     env_name: str | None = None,
+    connection_id: str | None = None,
 ) -> str | None:
     """按统一优先级解析 API Key（V3.8 扩展 secrets.json 来源）：
 
+    0. ``secrets.json`` 中 ``api_keys[<connection_id>]``（连接级；2026-10-21 批次十五新增）
     1. ``secrets.json`` 中 ``api_keys[<profile_id>]``（profile_id 非 None 时优先）；
     2. ``secrets.json`` 中 ``api_keys[<provider>]``；
     3. ``secrets.json`` 中 ``api_keys[<env_name>]``（兼容旧条目）；
@@ -838,6 +949,9 @@ def resolve_api_key(
 
     都没有 → 返回 None（Mock Provider 不需要 key；OpenAI 兼容 Provider 若无 key
     通常仍可访问本地 / Ollama 服务，由 Provider 自行处理是否 401）。
+
+    ⚠️ **绑定连接的档案不再拥有 key** ⇒ 绑定态调用方应传 ``profile_id=None``
+    且 ``connection_id=<连接 id>``（此时不查档案级 secrets 条目）。
     """
     # 延迟导入避免循环依赖（providers ← secrets_store ← logging_config，
     # secrets_store 与 providers 同级，不存在循环；但仍保持 lazy 以减小启动开销）
@@ -858,6 +972,7 @@ def resolve_api_key(
         provider=provider,
         env_names=env_names,
         params_api_key=params_api_key,
+        connection_id=connection_id,
     )
 
 

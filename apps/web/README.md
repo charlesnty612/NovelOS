@@ -104,6 +104,9 @@ apps/web/
     │   ├── QualityPanel.test.tsx
     │   ├── ContextPreviewPanel.tsx  # AI 上下文装配可见化（V1.4 Sprint 13）
     │   ├── ContextPreviewPanel.test.tsx
+    │   ├── ConnectionsPanel.tsx     # 模型连接层（地址/密钥/自定义头；一键挂模型档案）
+    │   ├── ConnectionsPanel.test.tsx
+    │   ├── providerOptions.ts       # provider 下拉清单（连接与档案共用，单点）
     │   ├── BranchesPanel.tsx        # What-if 分支管理（V1.5 Sprint 17）
     │   └── BranchesPanel.test.tsx
     ├── layout/

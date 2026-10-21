@@ -515,13 +515,13 @@ def test_skill_excerpt_propagates_non_schema_operational_error(tmp_path):
 
 
 def test_migration_adds_two_business_tables(tmp_path):
-    """0032 加两张业务表（业务表 39 → 41）。"""
+    """0032 加两张业务表（业务表 39 → 41；0033 再加 1 张 → 42）。"""
     from packages.core.db import count_tables
 
     db_path = tmp_path / "m.db"
     apply_migrations(db_path, MIGRATIONS_DIR)
     # count_tables 含 _migrations ⇒ 42
-    assert count_tables(db_path) == 42
+    assert count_tables(db_path) == 43
 
 
 def test_review_side_skill_read_propagates_lock_error(tmp_path, monkeypatch):

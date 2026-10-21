@@ -67,6 +67,10 @@ EXPECTED_PROFILE_KEYS = frozenset(
         "created_at",
         "updated_at",
         "has_api_key",
+        # ⚠️ 2026-10-21 批次十五（连接层）：档案可引用一条「连接」
+        # （model_connections）；null = 独立配置（存量形态）。
+        # ⚠️ 它**有默认值 None** ⇒ 进 properties、不进 required（见 EXPECTED_REQUIRED）。
+        "connection_id",
     }
 )
 EXPECTED_CONFIG_KEYS = frozenset(
@@ -81,7 +85,13 @@ EXPECTED_CONFIG_KEYS = frozenset(
     }
 )
 EXPECTED_PROFILE_TEST_KEYS = frozenset({"profile_id", "ok", "latency_ms", "detail", "status_code"})
+# ⚠️ 2026-10-21 批次十五：``probe``（探测走 models 还是退化的 chat 探测）是
+# **条件键** —— 只有 provider 的 health_check 返回了它，响应里才带这个键
+# （测试里的 stub provider 不返回 ⇒ 响应里没有）。
+# ⇒ 「模型声明的字段集 / OpenAPI properties」含 probe，
+#   「响应实测键集」不含 —— 两个基线必须分开，否则无法表达条件键。
 EXPECTED_PROFILE_TEST_KEYS_WITH_HINT = EXPECTED_PROFILE_TEST_KEYS | {"hint"}
+EXPECTED_PROFILE_TEST_KEYS_DECLARED = EXPECTED_PROFILE_TEST_KEYS | {"hint", "probe"}
 EXPECTED_CONFIG_TEST_KEYS = frozenset({"config_id", "ok", "latency_ms", "detail", "status_code"})
 EXPECTED_AVAILABLE_MODELS_KEYS = frozenset({"models"})
 EXPECTED_BINDING_KEYS = frozenset(
@@ -124,7 +134,7 @@ EXPECTED_DECLARED_PROPERTIES = {
     "ModelConfigOut": EXPECTED_CONFIG_KEYS,
     "CapabilityBindingOut": EXPECTED_BINDING_KEYS,
     "BindingProfileOut": EXPECTED_BINDING_PROFILE_KEYS,
-    "ProfileTestResult": EXPECTED_PROFILE_TEST_KEYS_WITH_HINT,
+    "ProfileTestResult": EXPECTED_PROFILE_TEST_KEYS_DECLARED,
     "ConfigTestResult": EXPECTED_CONFIG_TEST_KEYS,
     "AvailableModelsOut": EXPECTED_AVAILABLE_MODELS_KEYS,
     "CapabilityBindingDeleted": EXPECTED_BINDING_DELETED_KEYS,
@@ -133,11 +143,11 @@ EXPECTED_DECLARED_PROPERTIES = {
 }
 # 无默认值 ⇒ 进 required。hint / updated 之外的可空键同样必在（值可为 null，但键恒在）。
 EXPECTED_REQUIRED: dict[str, frozenset[str]] = {
-    "ModelProfileOut": EXPECTED_PROFILE_KEYS,
+    "ModelProfileOut": EXPECTED_PROFILE_KEYS - {"connection_id"},
     "ModelConfigOut": EXPECTED_CONFIG_KEYS,
     "CapabilityBindingOut": EXPECTED_BINDING_KEYS,
     "BindingProfileOut": EXPECTED_BINDING_PROFILE_KEYS,
-    # ProfileTestResult：hint 有默认值 ⇒ 条件键，不进 required
+    # ProfileTestResult：hint / probe 有默认值 ⇒ 条件键，不进 required
     "ProfileTestResult": EXPECTED_PROFILE_TEST_KEYS,
     "ConfigTestResult": EXPECTED_CONFIG_TEST_KEYS,
     "AvailableModelsOut": EXPECTED_AVAILABLE_MODELS_KEYS,
@@ -231,8 +241,13 @@ def _schema_of(schema: dict, path: str, method: str, code: str) -> str | None:
 # ============================================================ ① 响应键集（实测基准）
 
 
-def test_profile_write_and_read_paths_return_the_measured_nine_keys(tmp_path: Path):
-    """POST / GET / PATCH 三条路径都恰好 9 键（含无参数时建的空 params 档案）。"""
+def test_profile_write_and_read_paths_return_the_measured_ten_keys(tmp_path: Path):
+    """POST / GET / PATCH 三条路径都恰好 10 键（含无参数时建的空 params 档案）。
+
+    ⚠️ 2026-10-21 批次十五（连接层）：9 → 10 键，新增 ``connection_id``
+    （档案引用的连接；null = 独立配置）。**基线是硬编码的第三方基准**，
+    改它 = 承认一次契约变更，不能顺手改。
+    """
     app = _create_app(tmp_path)
     created = _seed_profile(app)
     assert set(created) == set(EXPECTED_PROFILE_KEYS), (
@@ -305,7 +320,7 @@ def test_available_models_returns_only_the_models_key(tmp_path: Path):
     [
         (ModelProfileOut, EXPECTED_PROFILE_KEYS),
         (ModelConfigOut, EXPECTED_CONFIG_KEYS),
-        (ProfileTestResult, EXPECTED_PROFILE_TEST_KEYS_WITH_HINT),
+        (ProfileTestResult, EXPECTED_PROFILE_TEST_KEYS_DECLARED),
         (ConfigTestResult, EXPECTED_CONFIG_TEST_KEYS),
         (AvailableModelsOut, EXPECTED_AVAILABLE_MODELS_KEYS),
         (CapabilityBindingOut, EXPECTED_BINDING_KEYS),
@@ -388,10 +403,15 @@ def test_openapi_declares_every_key(model_name: str, tmp_path: Path):
     assert expected_required <= required, (
         f"{model_name} 该进 required 的没进：{sorted(expected_required - required)}"
     )
-    # 反向：hint 是唯一有默认值的键，**不该**出现在 required 里
+    # 反向：hint / probe 是条件键，**不该**出现在 required 里
     if model_name == "ProfileTestResult":
-        assert "hint" not in required, (
-            "hint 是条件键（命中才出现），进 required 会让前端误以为它恒在"
+        for cond_key in ("hint", "probe"):
+            assert cond_key not in required, (
+                f"{cond_key} 是条件键（命中才出现），进 required 会让前端误以为它恒在"
+            )
+    if model_name == "ModelProfileOut":
+        assert "connection_id" not in required, (
+            "connection_id 有默认值 None（独立配置的档案）⇒ 不该进 required"
         )
 
 

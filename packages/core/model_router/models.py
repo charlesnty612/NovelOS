@@ -116,6 +116,63 @@ class ModelProfileOut(BaseModel):
     has_api_key: bool = Field(
         description="是否已配置密钥；涵盖 params.api_key 与 secrets.json 两个来源",
     )
+    connection_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "引用的连接 id（model_connections）；null = 该档案是「独立配置」"
+            "（自带 base_url / api_key，存量档案的默认形态）"
+        ),
+    )
+
+
+class ConnectionPresetOut(BaseModel):
+    """``GET /model-connections/presets`` 的元素：一档「连接预设」。
+
+    预设 = **一键填表**（provider / base_url / params.headers / params.models_url），
+    填完仍可逐项改 ⇒ 预设过期不会把人卡住。
+    ⚠️ **不含 api_key** —— 预设只给「连哪里、带什么头」。
+    """
+
+    preset_id: str
+    label: str
+    provider: str
+    base_url: Optional[str] = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    note: Optional[str] = None
+
+
+class ModelConnectionOut(BaseModel):
+    """``model_connections`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。
+
+    **连接层**（2026-10-21 批次十五）：把「连到哪里 / 怎么认证 / 带哪些头」与
+    「用什么模型」分离——同一厂商的多个档案共享一条连接，改一次 key 全局生效。
+
+    ``extra="allow"``：service 层是 ``SELECT * FROM model_connections``，
+    与 :class:`ModelProfileOut` 同款口径（将来加列迁移时不被静默丢掉）。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    connection_id: str
+    name: str
+    provider: str
+    base_url: Optional[str] = Field(
+        default=None,
+        description="连接级 base_url；anthropic / ollama 可空（用 provider 默认值）",
+    )
+    params_json: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "连接级调参（api_key / headers / models_url）解析后的对象；"
+            "其中 api_key 恒被替换为 '***'，headers 里的敏感头逐键脱敏"
+        ),
+    )
+    enabled: int = Field(description="0/1 整数（非布尔）；0 的连接不可用于 /test")
+    created_at: str
+    updated_at: str
+    has_api_key: bool = Field(
+        description="是否已配置密钥；涵盖 params.api_key 与 secrets.json 两个来源",
+    )
 
 
 class ModelConfigOut(BaseModel):
@@ -174,6 +231,35 @@ class ProfileTestResult(BaseModel):
     hint: Optional[str] = Field(
         default=None,
         description="仅 400 + 远端错误文本命中模型名标记时出现的中文提示；否则整个键不存在",
+    )
+    probe: Optional[str] = Field(
+        default=None,
+        description=(
+            "连通性探测走的是哪条路：'models'（GET 模型列表端点，默认）/ "
+            "'chat'（模型列表端点 404/405/501 时退化的极小请求探测）。"
+            "⚠️ 降级探测会**真的消耗 1 个 token**（上游收了一次请求）——"
+            "它只发生在用户手工触发的 /test 路径上"
+        ),
+    )
+
+
+class ConnectionTestResult(BaseModel):
+    """``POST /model-connections/{id}/test`` 的 200 响应。
+
+    与 :class:`ProfileTestResult` **同构**（字段名换 connection_id）。
+    ``status_code`` 同样**无默认值且可空**（网络异常为 ``null``）；
+    ``probe`` 是**有默认值**的键 ⇒ 路由必须声明 ``response_model_exclude_unset=True``，
+    否则 ``probe`` 恒以 ``null`` 出现（凭空多一个键）。
+    """
+
+    connection_id: str
+    ok: bool = Field(description="false 表示「端点不可达或健康不过」，仍是 200")
+    latency_ms: int
+    detail: str = Field(description="恒为字符串（router 用 `or ''` 兜底，不会是 null）")
+    status_code: Optional[int] = Field(description="上游 HTTP 码；网络异常时为 null")
+    probe: Optional[str] = Field(
+        default=None,
+        description="探测路径：'models'（模型列表端点）/ 'chat'（退化探测）",
     )
 
 

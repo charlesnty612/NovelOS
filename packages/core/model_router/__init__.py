@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from .bindings import BindingService
 from .configs import ModelConfigService
+from .connections import ConnectionService
 from .exceptions import (
     AggregateProviderError,
     ModelNotConfiguredError,
@@ -47,6 +48,7 @@ __all__ = [
     "ModelRouter",
     "ModelConfigService",
     "ProfileService",
+    "ConnectionService",
     "BindingService",
     "MockProvider",
     "OpenAICompatibleProvider",

@@ -634,6 +634,36 @@ export interface ConfigTestResult {
   status_code: number | null;
 }
 
+export interface ConnectionPresetOut {
+  /** ``GET /model-connections/presets`` 的元素：一档「连接预设」。 */
+  preset_id: string;
+  /** ``GET /model-connections/presets`` 的元素：一档「连接预设」。 */
+  label: string;
+  /** ``GET /model-connections/presets`` 的元素：一档「连接预设」。 */
+  provider: string;
+  /** ``GET /model-connections/presets`` 的元素：一档「连接预设」。 */
+  base_url?: string | null;
+  /** ``GET /model-connections/presets`` 的元素：一档「连接预设」。 */
+  params?: Record<string, unknown>;
+  /** ``GET /model-connections/presets`` 的元素：一档「连接预设」。 */
+  note?: string | null;
+}
+
+export interface ConnectionTestResult {
+  /** ``POST /model-connections/{id}/test`` 的 200 响应。 */
+  connection_id: string;
+  /** false 表示「端点不可达或健康不过」，仍是 200 */
+  ok: boolean;
+  /** ``POST /model-connections/{id}/test`` 的 200 响应。 */
+  latency_ms: number;
+  /** 恒为字符串（router 用 `or ''` 兜底，不会是 null） */
+  detail: string;
+  /** 上游 HTTP 码；网络异常时为 null */
+  status_code: number | null;
+  /** 探测路径：'models'（模型列表端点）/ 'chat'（退化探测） */
+  probe?: string | null;
+}
+
 export interface ContextPreview {
   /** ``GET /chapters/{chapter_id}/context-preview`` 的 200 响应（实测恒 7 键）。 */
   chapter_id: string;
@@ -1245,6 +1275,27 @@ export interface ModelConfigOut {
   has_api_key: boolean;
 }
 
+export interface ModelConnectionOut {
+  /** ``model_connections`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  connection_id: string;
+  /** ``model_connections`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  name: string;
+  /** ``model_connections`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  provider: string;
+  /** 连接级 base_url；anthropic / ollama 可空（用 provider 默认值） */
+  base_url?: string | null;
+  /** 连接级调参（api_key / headers / models_url）解析后的对象；其中 api_key 恒被替换为 '***'，headers 里的敏感头逐键脱敏 */
+  params_json?: Record<string, unknown>;
+  /** 0/1 整数（非布尔）；0 的连接不可用于 /test */
+  enabled: number;
+  /** ``model_connections`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  created_at: string;
+  /** ``model_connections`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
+  updated_at: string;
+  /** 是否已配置密钥；涵盖 params.api_key 与 secrets.json 两个来源 */
+  has_api_key: boolean;
+}
+
 export interface ModelProfileOut {
   /** ``model_profiles`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。 */
   profile_id: string;
@@ -1264,6 +1315,8 @@ export interface ModelProfileOut {
   updated_at: string;
   /** 是否已配置密钥；涵盖 params.api_key 与 secrets.json 两个来源 */
   has_api_key: boolean;
+  /** 引用的连接 id（model_connections）；null = 该档案是「独立配置」（自带 base_url / api_key，存量档案的默认形态） */
+  connection_id?: string | null;
 }
 
 export interface PlotEventOut {
@@ -1308,6 +1361,8 @@ export interface ProfileTestResult {
   status_code: number | null;
   /** 仅 400 + 远端错误文本命中模型名标记时出现的中文提示；否则整个键不存在 */
   hint?: string | null;
+  /** 连通性探测走的是哪条路：'models'（GET 模型列表端点，默认）/ 'chat'（模型列表端点 404/405/501 时退化的极小请求探测）。⚠️ 降级探测会**真的消耗 1 个 token**（上游收了一次请求）——它只发生在用户手工触发的 /test 路径上 */
+  probe?: string | null;
 }
 
 export interface Project {

@@ -93,10 +93,14 @@ class ProfileService:
         model: str,
         params: dict,
         enabled: int,
+        connection_id: str | None = None,
     ) -> dict:
         """插入一条档案，返回新行 dict。
 
         ``params`` 应是入参已剥离 mask/空 api_key 后的纯 dict；service 仅做 json 序列化。
+
+        ``connection_id``（2026-10-21 批次十五）：引用的连接；``None`` = 独立配置
+        （存量档案的形态，行为与改造前逐字相同）。
         """
         profile_id = new_id("mprof")
         params_str = self._dump_params(params)
@@ -106,10 +110,21 @@ class ProfileService:
             conn.execute(
                 """
                 INSERT INTO model_profiles
-                    (profile_id, name, provider, model, params_json, enabled, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (profile_id, name, provider, model, params_json, enabled,
+                     created_at, updated_at, connection_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (profile_id, name, provider, model, params_str, enabled, ts, ts),
+                (
+                    profile_id,
+                    name,
+                    provider,
+                    model,
+                    params_str,
+                    enabled,
+                    ts,
+                    ts,
+                    connection_id,
+                ),
             )
             conn.commit()
         finally:

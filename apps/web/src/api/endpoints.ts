@@ -22,6 +22,10 @@ import type {
   CharacterState,
   CharacterUpdatePayload,
   Commit,
+  ConnectionCreatePayload,
+  ConnectionPresetOut,
+  ConnectionTestResult,
+  ConnectionUpdatePayload,
   ContextPreviewResponse,
   ContinueAdoptPayload,
   ContinueAdoptResponse,
@@ -49,6 +53,7 @@ import type {
   ModelConfigCreatePayload,
   ModelConfigTestResult,
   ModelConfigUpdatePayload,
+  ModelConnectionOut,
   ModelProfile,
   ModelProfileCreatePayload,
   ModelProfileTestResult,
@@ -551,6 +556,53 @@ export const modelProfilesApi = {
       payload,
       { signal: AbortSignal.timeout(15000) },
     ),
+};
+
+// -------------------------------------------------------------- model connections
+// 2026-10-21 批次十五「连接层」：连接（provider / base_url / api_key / headers）与
+// 档案（用什么模型 / 怎么调）拆成两层 ⇒ 同一厂商的多个档案挂同一条连接，
+// 改一次密钥 / 地址 / 头，三条档案同时生效。
+//
+// ⚠️ 读路径下 `params_json.api_key` 恒为 "***"，`params_json.headers` 里的**敏感头**
+// 逐键为 "***"（`x-opencode-session` 这类非凭据头**不掩**）⇒ 不回填到输入框。
+//
+// ⚠️ PATCH 的 `params` 语义：**缺键 = 保留原值**、显式 `null` = 删除该键；
+// `headers` 是 dict ⇒ **逐键**语义（值 "***" = 该键不改）。
+export function normalizeConnection(row: ModelConnectionOut): ModelConnectionOut {
+  return {
+    ...row,
+    params_json: (coerceJson(row.params_json) as Record<string, unknown>) ?? {},
+    has_api_key: row.has_api_key ?? false,
+  };
+}
+
+export const connectionsApi = {
+  /**
+   * 连接预设清单（**一键填表**）。
+   *
+   * ⚠️ 权威清单在后端 `packages/core/model_router/presets.py`（**只此一处**）
+   * ⇒ 前端只渲染、不硬编码任何 URL（避免同一组地址在前后端各写一份）。
+   * 预设的 `params` 含 `headers` / `models_url`，**不含 api_key**。
+   */
+  presets: () => api.get<ConnectionPresetOut[]>('/model-connections/presets'),
+  list: (query?: { include_enabled_only?: boolean }) =>
+    api
+      .get<ModelConnectionOut[]>('/model-connections', query)
+      .then((rows) => rows.map(normalizeConnection)),
+  get: (id: string) =>
+    api.get<ModelConnectionOut>(`/model-connections/${id}`).then(normalizeConnection),
+  create: (payload: ConnectionCreatePayload) =>
+    api.post<ModelConnectionOut>('/model-connections', payload).then(normalizeConnection),
+  update: (id: string, payload: ConnectionUpdatePayload) =>
+    api
+      .patch<ModelConnectionOut>(`/model-connections/${id}`, payload)
+      .then(normalizeConnection),
+  // 204。被任何档案引用 → 409（detail.referenced_by 列出引用它的档案）。
+  remove: (id: string) => api.delete<void>(`/model-connections/${id}`),
+  // 探测 `GET {models_url}`（缺省 `{base_url}/models`）。连接层没有 model 概念
+  // ⇒ **不降级到 chat 探测**：端点 404/405/501 时如实报「该端点不提供模型列表」。
+  test: (id: string) =>
+    api.post<ConnectionTestResult>(`/model-connections/${id}/test`, {}),
 };
 
 // -------------------------------------------------------------- capability bindings

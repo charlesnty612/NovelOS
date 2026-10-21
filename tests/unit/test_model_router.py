@@ -1201,7 +1201,11 @@ def test_fallback_warnings_put_provider_error_and_unexpected_fields_in_message(
             raise RuntimeError("socket blew up")
 
     flaky = _FlakyProvider()
-    monkeypatch.setattr(router, "get_provider", lambda row, scripted=None: flaky)
+    monkeypatch.setattr(
+        router,
+        "get_provider",
+        lambda row, scripted=None, run_id=None, extra_headers=None: flaky,
+    )
 
     with caplog.at_level(logging.WARNING, logger="novelos.model_router"):
         with pytest.raises(AggregateProviderError):
@@ -1244,7 +1248,7 @@ def test_fallback_construct_failed_warning_puts_diagnostic_fields_in_message(
     )
     router = ModelRouter(db_path)
 
-    def _raise(row, scripted=None):
+    def _raise(row, scripted=None, run_id=None, extra_headers=None):
         raise ValueError("params_json.base_url missing")
 
     monkeypatch.setattr(router, "get_provider", _raise)

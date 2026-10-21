@@ -152,10 +152,12 @@ def resolve_profile_api_key(
     params_api_key: str | None,
     *,
     secrets: dict[str, str] | None = None,
+    connection_id: str | None = None,
 ) -> str | None:
     """按统一优先级解析 API key（单点收口）。
 
     优先级（高 → 低）：
+      0. ``secrets[<connection_id>]``（连接级；2026-10-21 批次十五新增，**最高**）
       1. ``secrets[<profile_id>]``（档案级，覆盖最具体）
       2. ``secrets[<provider>]``（provider 级通用）
       3. ``secrets[<env_name>]``（逐个 env_name 试；支持兼容旧 key）
@@ -163,10 +165,22 @@ def resolve_profile_api_key(
       5. 环境变量 ``env_name``（逐个）
 
     返回首个非空字符串；全部为空 → ``None``。
+
+    ⚠️ **连接级身份与档案级身份互斥**：绑定了连接的档案**不再拥有 key**
+    ⇒ 调用方（:mod:`packages.core.model_router.effective`）在绑定态传
+    ``profile_id=None`` 且 ``connection_id=<连接 id>``，此时**不查** ``secrets[profile_id]``。
+    这样「档案还挂着旧的档案级 secrets 条目」不会在连接接管后继续生效
+    （否则改连接上的 key 却不生效，是最难查的一类「显示与实际失真」）。
+
+    ⚠️ ``secrets[<provider>]`` 在多连接场景有歧义（多个连接同 provider 时都会命中），
+    但 ``secrets[<connection_id>]`` 更具体且排在前面 ⇒ 只有一个「provider 级默认 key」
+    的连接会命中这一级。
     """
     if secrets is None:
         secrets = load_api_keys()
 
+    if connection_id and secrets.get(connection_id):
+        return secrets[connection_id]
     if profile_id and secrets.get(profile_id):
         return secrets[profile_id]
     if provider:

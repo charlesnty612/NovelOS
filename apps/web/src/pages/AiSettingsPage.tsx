@@ -3,11 +3,13 @@ import { Link, useParams } from 'react-router-dom';
 import {
   agentsApi,
   capabilityBindingsApi,
+  connectionsApi,
   modelProfilesApi,
 } from '../api/endpoints';
 import type {
   Agent,
   CapabilityBinding,
+  ModelConnectionOut,
   ModelProfile,
   ModelProfileCreatePayload,
   ModelProfileTestResult,
@@ -18,18 +20,13 @@ import type {
 import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
 import { ConfirmDialog } from '../components/ConfirmDialog';
+import { ConnectionsPanel } from '../components/ConnectionsPanel';
 import { Loading } from '../components/Loading';
 import { Modal } from '../components/Modal';
+import { PROVIDER_OPTIONS, PROVIDER_SHORT_LABEL } from '../components/providerOptions';
 import { useApiCall } from '../hooks/useApiCall';
 import { formatDateTime } from '../utils/format';
 import { ApiError } from '../api/client';
-
-const PROVIDER_OPTIONS = [
-  { value: 'openai_compatible', label: 'OpenAI 兼容（OpenAI / DeepSeek / Ollama 等）' },
-  { value: 'anthropic', label: 'Anthropic（Claude 原生 Messages API）' },
-  { value: 'ollama', label: 'Ollama（本地 /api/chat，无需密钥）' },
-  { value: 'mock', label: 'Mock（本地兜底）' },
-];
 
 export function AiSettingsPage() {
   const { pid } = useParams();
@@ -37,8 +34,9 @@ export function AiSettingsPage() {
     <div>
       <h1 className="section-title">AI 设置</h1>
       <p className="section-subtitle">
-        在这里决定每个生产环节用哪个模型：先在「模型档案」里配好接口与密钥，再到「环节分配」
-        把档案指派给题材定位、正文写作等环节。Agent 提示词版本也在本页查看与同步。
+        在这里决定每个生产环节用哪个模型：先在「模型连接」里配好接口与密钥，再到「模型档案」
+        里挂上具体模型（同一厂商的多个模型可以共用一条连接），最后到「环节分配」把档案指派给
+        题材定位、正文写作等环节。Agent 提示词版本也在本页查看与同步。
       </p>
 
       <InfoBanner>
@@ -48,7 +46,10 @@ export function AiSettingsPage() {
         </span>
       </InfoBanner>
 
+      {/* ⚠️ `.panel-grid` 是两列网格（index.css:728-737），1100px 以下自动折成单列。
+          四个面板按 2×2 排布 ⇒ 无需改 CSS，窄屏折行由既有 media query 兜住。 */}
       <div className="panel-grid">
+        <ConnectionsPanel />
         <ModelProfilesPanel />
         <CapabilityBindingsPanel />
         <AgentsPanel />
@@ -73,6 +74,12 @@ function ModelProfilesPanel() {
     () => capabilityBindingsApi.list(),
     [],
   );
+  // 连接列表：档案行要显示「所属连接」，档案表单要能选连接。
+  // ⚠️ 与 ConnectionsPanel 各自拉一份（两个面板互不共享状态，增删连接互不牵连）。
+  const connections = useApiCall<ModelConnectionOut[]>(
+    () => connectionsApi.list(),
+    [],
+  );
   const [editing, setEditing] = useState<ModelProfile | null>(null);
   const [creating, setCreating] = useState(false);
   const [testResult, setTestResult] = useState<ModelProfileTestResult | null>(null);
@@ -88,6 +95,13 @@ function ModelProfilesPanel() {
   // V3.22「交互反馈统一」：删除档案二次确认 + 保存成功短暂条幅。
   const [deleteProfileId, setDeleteProfileId] = useState<string | null>(null);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
+
+  // connection_id → 连接名（档案行显示「所属连接」）。
+  const connectionNameById = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const c of connections.data ?? []) map[c.connection_id] = c.name;
+    return map;
+  }, [connections.data]);
 
   // 成功条幅 2.5s 自动消失。用 effect 承载而非在调用点 window.setTimeout：
   // 卸载时自动清理定时器（否则组件已卸载仍会 setState）。
@@ -112,6 +126,8 @@ function ModelProfilesPanel() {
       </div>
 
       <ErrorBanner>{list.error}</ErrorBanner>
+      {/* 连接列表拉不到时档案表单的「使用连接」态不可用 —— 如实报出来，不静默。 */}
+      <ErrorBanner>{connections.error}</ErrorBanner>
 
       {list.loading ? (
         <Loading />
@@ -155,6 +171,22 @@ function ModelProfilesPanel() {
                     }`}
                   >
                     {Number(m.enabled) === 1 ? '启用' : '停用'}
+                  </span>
+                  {/* 所属连接：绑了连接显示连接名，没绑显示「独立配置」。 */}
+                  <span
+                    className={`badge ${
+                      m.connection_id ? 'badge--info' : 'badge--archived'
+                    }`}
+                    data-testid={`profile-connection-badge-${m.profile_id}`}
+                    title={
+                      m.connection_id
+                        ? '地址 / 密钥 / 请求头取自这条连接'
+                        : '独立配置：自带地址与密钥'
+                    }
+                  >
+                    {m.connection_id
+                      ? (connectionNameById[m.connection_id] ?? m.connection_id)
+                      : '独立配置'}
                   </span>
                   <span
                     className="badge badge--archived"
@@ -354,6 +386,7 @@ function ModelProfilesPanel() {
       {creating ? (
         <ModelProfileFormModal
           title="新建模型档案"
+          connections={connections.data ?? []}
           onCancel={() => setCreating(false)}
           onSubmit={async (payload: ModelProfileCreatePayload) => {
             await modelProfilesApi.create(payload);
@@ -368,12 +401,20 @@ function ModelProfilesPanel() {
         <ModelProfileFormModal
           title={`编辑：${editing.name || editing.profile_id}`}
           initial={editing}
+          connections={connections.data ?? []}
           onCancel={() => setEditing(null)}
           onSubmit={async (payload: ModelProfileUpdatePayload) => {
             await modelProfilesApi.update(editing.profile_id, payload);
             setEditing(null);
             void list.reload();
             setSavedNotice('已保存');
+          }}
+          onUnbind={async () => {
+            // ⚠️ 只带 connection_id: null（后端部分更新：缺键 = 不改）。
+            await modelProfilesApi.update(editing.profile_id, { connection_id: null });
+            setEditing(null);
+            void list.reload();
+            setSavedNotice('已解除连接关联');
           }}
         />
       ) : null}
@@ -800,17 +841,27 @@ function AgentsPanel() {
 }
 
 // =============================================================================
-// ModelProfileFormModal —— 档案表单：去 capability 下拉、加 name 必填
+// ModelProfileFormModal —— 档案表单：双模（使用连接 / 自定义配置）
 // =============================================================================
+
+/** 档案表单的两种配置来源。 */
+type ProfileConfigMode = 'connection' | 'custom';
 
 interface ModelProfileFormModalProps {
   title: string;
   initial?: ModelProfile;
+  /** 可选连接列表（连接态的下拉候选）。 */
+  connections: ModelConnectionOut[];
   onCancel: () => void;
   /** 编辑/新建由父组件传不同的 submit（create 必填 name，update 部分更新） */
   onSubmit:
     | ((payload: ModelProfileCreatePayload) => Promise<void>)
     | ((payload: ModelProfileUpdatePayload) => Promise<void>);
+  /**
+   * 显式解绑：PATCH **只带** `connection_id: null`（其余字段不动）。
+   * 缺省（新建档案 / 未绑定档案）时表单不渲染解绑入口。
+   */
+  onUnbind?: () => Promise<void>;
 }
 
 interface ParamsState {
@@ -947,8 +998,10 @@ const THINKING_BADGE_LABEL: Record<ThinkingMode, string> = {
 function ModelProfileFormModal({
   title,
   initial,
+  connections,
   onCancel,
   onSubmit,
+  onUnbind,
 }: ModelProfileFormModalProps) {
   const initialParams = (initial?.params as Record<string, unknown>) ?? {};
   const [name, setName] = useState<string>(initial?.name ?? '');
@@ -980,9 +1033,40 @@ function ModelProfileFormModal({
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchHint, setFetchHint] = useState<string | null>(null);
 
-  const isMock = provider === 'mock';
-  const isAnthropic = provider === 'anthropic';
-  const isOllama = provider === 'ollama';
+  // ---------------------------------------------------------------------------
+  // 双模：使用连接 / 自定义配置（2026-10-21 批次十五）
+  //
+  // - **连接态**：地址 / 密钥 / 自定义头全归连接 ⇒ 表单里**不显示**这三个输入框，
+  //   只填模型名 + 思考模式；提交的 provider 取自所选连接。
+  // - **自定义态**：完全保持既有行为（自带 base_url / api_key）。
+  // - **默认态**：编辑一个**存量**档案（connection_id 为 null）⇒ 落在「自定义配置」，
+  //   存量档案的读写路径逐字不变。
+  // ---------------------------------------------------------------------------
+  const [mode, setMode] = useState<ProfileConfigMode>(
+    initial?.connection_id ? 'connection' : 'custom',
+  );
+  const [connectionId, setConnectionId] = useState<string>(
+    initial?.connection_id ?? '',
+  );
+  // 「解除连接关联」进行中标志（按钮禁用 + 文案）。
+  const [unbinding, setUnbinding] = useState(false);
+
+  const isConnectionMode = mode === 'connection';
+  const selectedConnection = useMemo(
+    () => connections.find((c) => c.connection_id === connectionId) ?? null,
+    [connections, connectionId],
+  );
+  // 连接态下 provider / base_url 都取自连接；自定义态取表单自身的。
+  const effectiveProvider = isConnectionMode
+    ? (selectedConnection?.provider ?? '')
+    : provider;
+  const effectiveBaseUrl = isConnectionMode
+    ? (selectedConnection?.base_url ?? '')
+    : params.baseUrl;
+
+  const isMock = effectiveProvider === 'mock';
+  const isAnthropic = effectiveProvider === 'anthropic';
+  const isOllama = effectiveProvider === 'ollama';
   const requireBaseUrl = !isMock && !isAnthropic && !isOllama;
   const baseUrlPlaceholder = isAnthropic
     ? '留空 = 官方 api.anthropic.com'
@@ -991,37 +1075,31 @@ function ModelProfileFormModal({
       : 'https://api.openai.com/v1';
 
   // V3.8「拉取模型」：调用后端代理端点，把模型 id 写回 <datalist>。
-  // - Anthropic 允许不填 base_url（走官方默认）；
-  // - Ollama 允许不填 base_url（走本地默认）；
-  // - Mock 不需要拉取（按钮始终禁用，datalist 显示 mock-model）；
+  // - Anthropic 允许不填 base_url（走官方默认）;
+  // - Ollama 允许不填 base_url（走本地默认）;
+  // - Mock 不需要拉取（按钮始终禁用，datalist 显示 mock-model）;
   // - 其余要求填 base_url。
+  // - **连接态**：只发 connection_id —— 后端从连接取 provider / 地址 / 密钥 / 头。
   const baseUrlFilledForFetch = params.baseUrl.trim().length > 0;
-  const canFetchModels =
-    isMock ||
-    (isAnthropic || isOllama) ||
-    baseUrlFilledForFetch;
+  const canFetchModels = isConnectionMode
+    ? connectionId !== ''
+    : isMock || (isAnthropic || isOllama) || baseUrlFilledForFetch;
 
   const handleFetchModels = async () => {
     setErr(null);
     setFetchHint(null);
     setFetchingModels(true);
     try {
-      const payload: {
-        provider: string;
-        base_url?: string;
-        profile_id?: string;
-      } = {
-        provider,
-      };
-      if (params.baseUrl.trim()) payload.base_url = params.baseUrl.trim();
-      if (initial?.profile_id) payload.profile_id = initial.profile_id;
-      // 用户若在表单上填了新 api_key，随请求发（后端会优先用之）；否则后端走
-      // resolve_api_key 解析。注意：前端永远不显示 / 也不打日志密文。
-      const inlineApiKey = params.apiKey.trim();
-      const resp = await modelProfilesApi.fetchAvailableModels({
-        ...payload,
-        ...(inlineApiKey ? { api_key: inlineApiKey } : {}),
-      });
+      const resp = isConnectionMode
+        ? await modelProfilesApi.fetchAvailableModels({ connection_id: connectionId })
+        : await modelProfilesApi.fetchAvailableModels({
+            provider,
+            ...(params.baseUrl.trim() ? { base_url: params.baseUrl.trim() } : {}),
+            ...(initial?.profile_id ? { profile_id: initial.profile_id } : {}),
+            // 用户若在表单上填了新 api_key，随请求发（后端会优先用之）；否则后端走
+            // resolve_api_key 解析。注意：前端永远不显示 / 也不打日志密文。
+            ...(params.apiKey.trim() ? { api_key: params.apiKey.trim() } : {}),
+          });
       const ids = Array.isArray(resp?.models)
         ? resp.models.filter((x): x is string => typeof x === 'string' && x.length > 0)
         : [];
@@ -1037,16 +1115,17 @@ function ModelProfileFormModal({
     }
   };
 
-  // 切换 provider / base_url 时清掉旧候选，避免与新端点不匹配。
+  // 切换 provider / 连接时清掉旧候选，避免与新端点不匹配。
   // 留 base_url 时的逐字符清空不禁用——候选人放掉就放掉，由用户主动重拉。
   useEffect(() => {
     setAvailableModels([]);
     setFetchHint(null);
     // 注：依赖 provider 即覆盖性切换；base_url 不入依赖以免抖动。
-  }, [provider]);
+  }, [effectiveProvider, connectionId]);
 
   const hasApiKey = !!initial?.has_api_key;
-  const canShowClearKeyButton = !!initial && hasApiKey && !isMock && !isOllama;
+  const canShowClearKeyButton =
+    !!initial && hasApiKey && !isMock && !isOllama && !isConnectionMode;
   const apiKeyPlaceholder = isAnthropic
     ? hasApiKey
       ? clearKeyRequested
@@ -1059,6 +1138,45 @@ function ModelProfileFormModal({
         : '已配置（留空则不修改）'
       : '（可选；留空则运行时从环境变量读取）';
 
+  /**
+   * 把思考模式写进 params（两种模式共用）。
+   *
+   * 与后端约定：payload 键值显式 null = 删除该键；缺键 = 保留 DB 原值（部分更新）。
+   * 因此「回默认」用 null 显式删除，避免与「未提供该字段」混淆。
+   */
+  const applyThinkingToParams = (
+    paramsOut: Record<string, unknown>,
+    target: { isMock: boolean },
+  ) => {
+    if (!target.isMock) {
+      delete paramsOut['thinking'];
+      delete paramsOut['reasoning_effort'];
+      if (thinkingMode === 'off') {
+        paramsOut['thinking'] = { type: 'disabled' };
+      } else if (thinkingMode === 'on') {
+        paramsOut['thinking'] = { type: 'enabled' };
+      } else if (thinkingMode === 'adaptive') {
+        // MiniMax M 系列专用值：enabled 不是合法枚举（仅 adaptive/disabled）
+        paramsOut['thinking'] = { type: 'adaptive' };
+      } else if (
+        thinkingMode === 'low' ||
+        thinkingMode === 'medium' ||
+        thinkingMode === 'high' ||
+        thinkingMode === 'max'
+      ) {
+        paramsOut['reasoning_effort'] = thinkingMode;
+      } else if (thinkingMode === 'default') {
+        // 「默认（跟随端点）」= 显式删除 thinking / reasoning_effort，触发后端 null 语义
+        if ('thinking' in initialParams) paramsOut['thinking'] = null;
+        if ('reasoning_effort' in initialParams) paramsOut['reasoning_effort'] = null;
+      }
+    } else {
+      // mock provider 没有「思考」概念，强制清除避免残留
+      delete paramsOut['thinking'];
+      delete paramsOut['reasoning_effort'];
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
@@ -1070,6 +1188,46 @@ function ModelProfileFormModal({
       setErr('模型不能为空');
       return;
     }
+
+    // ========================================================================
+    // 连接态：地址 / 密钥 / 头归连接 ⇒ 档案级只带模型名与思考参数
+    // ========================================================================
+    if (isConnectionMode) {
+      if (!connectionId) {
+        setErr('请选择一条连接');
+        return;
+      }
+      const conn = selectedConnection;
+      if (!conn) {
+        setErr('所选连接不存在（可能已被删除），请重新选择');
+        return;
+      }
+      // paramsOut 以 initialParams 为基底（快照），只由表单管理思考参数；
+      // 地址 / 密钥 / 头是连接级的，档案侧不重复携带（后端绑定态也会忽略它们）。
+      const connParamsOut: Record<string, unknown> = { ...initialParams };
+      applyThinkingToParams(connParamsOut, { isMock });
+      setSubmitting(true);
+      try {
+        await onSubmit({
+          name: name.trim(),
+          // provider 由连接决定（连接是唯一权威；不一致后端会 422）。
+          provider: conn.provider,
+          model: model.trim(),
+          params: connParamsOut,
+          enabled: enabled ? 1 : 0,
+          connection_id: conn.connection_id,
+        });
+      } catch (e: unknown) {
+        setErr(e instanceof Error ? e.message : '保存失败');
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
+    // ========================================================================
+    // 自定义态：既有行为逐字保留（存量档案 connection_id 为 null 走的就是这条）
+    // ========================================================================
     if (requireBaseUrl && !params.baseUrl.trim()) {
       setErr('该接口类型需要填写接口地址');
       return;
@@ -1104,48 +1262,40 @@ function ModelProfileFormModal({
       delete paramsOut['api_key'];
     }
     // 思考模式：表单是该字段的唯一管理面，按选项写/删 thinking / reasoning_effort。
-    // 与后端约定：payload 键值显式 null = 删除该键；缺键 = 保留 DB 原值（部分更新）。
-    // 因此「回默认」用 null 显式删除，避免与「未提供该字段」混淆。
-    if (!isMock) {
-      delete paramsOut['thinking'];
-      delete paramsOut['reasoning_effort'];
-      if (thinkingMode === 'off') {
-        paramsOut['thinking'] = { type: 'disabled' };
-      } else if (thinkingMode === 'on') {
-        paramsOut['thinking'] = { type: 'enabled' };
-      } else if (thinkingMode === 'adaptive') {
-        // MiniMax M 系列专用值：enabled 不是合法枚举（仅 adaptive/disabled）
-        paramsOut['thinking'] = { type: 'adaptive' };
-      } else if (
-        thinkingMode === 'low' ||
-        thinkingMode === 'medium' ||
-        thinkingMode === 'high' ||
-        thinkingMode === 'max'
-      ) {
-        paramsOut['reasoning_effort'] = thinkingMode;
-      } else if (thinkingMode === 'default') {
-        // 「默认（跟随端点）」= 显式删除 thinking / reasoning_effort，触发后端 null 语义
-        if ('thinking' in initialParams) paramsOut['thinking'] = null;
-        if ('reasoning_effort' in initialParams) paramsOut['reasoning_effort'] = null;
-      }
-    } else {
-      // mock provider 没有「思考」概念，强制清除避免残留
-      delete paramsOut['thinking'];
-      delete paramsOut['reasoning_effort'];
-    }
+    applyThinkingToParams(paramsOut, { isMock });
     setSubmitting(true);
     try {
-      await onSubmit({
+      const base: ModelProfileCreatePayload & ModelProfileUpdatePayload = {
         name: name.trim(),
         provider,
         model: model.trim(),
         params: paramsOut,
         enabled: enabled ? 1 : 0,
-      });
+      };
+      // ⚠️ 自定义态保存**不带** connection_id 键（缺键 = 不改绑定）。
+      // 解绑是**另一个动作**（表单里的「解除连接关联」按钮 ⇒ PATCH connection_id: null）。
+      await onSubmit(base);
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : '保存失败');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /**
+   * 显式解绑：PATCH 只带 `connection_id: null`（其余字段不动）。
+   * ⚠️ 不走表单保存路径——解绑后档案退回「独立配置」，地址 / 密钥要另行补齐。
+   */
+  const handleUnbind = async () => {
+    if (!onUnbind) return;
+    setErr(null);
+    setUnbinding(true);
+    try {
+      await onUnbind();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : '解除连接关联失败');
+    } finally {
+      setUnbinding(false);
     }
   };
 
@@ -1161,6 +1311,72 @@ function ModelProfileFormModal({
       <form onSubmit={handleSubmit}>
         <ErrorBanner>{err}</ErrorBanner>
 
+        {/* ---- 配置来源：使用连接 / 自定义配置（双模） ---- */}
+        <div className="form-row">
+          <label>配置来源</label>
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                marginBottom: 0,
+                fontSize: 13,
+                color: 'inherit',
+              }}
+            >
+              <input
+                type="radio"
+                checked={isConnectionMode}
+                onChange={() => setMode('connection')}
+                data-testid="profile-mode-connection"
+              />
+              使用连接
+            </label>
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                marginBottom: 0,
+                fontSize: 13,
+                color: 'inherit',
+              }}
+            >
+              <input
+                type="radio"
+                checked={mode === 'custom'}
+                onChange={() => setMode('custom')}
+                data-testid="profile-mode-custom"
+              />
+              自定义配置
+            </label>
+          </div>
+        </div>
+
+        {isConnectionMode ? (
+          <div className="form-row">
+            <label>连接 *</label>
+            <select
+              value={connectionId}
+              onChange={(e) => setConnectionId(e.target.value)}
+              data-testid="profile-connection"
+            >
+              <option value="">请选择一条连接…</option>
+              {connections.map((c) => (
+                <option key={c.connection_id} value={c.connection_id}>
+                  {c.name}（{PROVIDER_SHORT_LABEL[c.provider] ?? c.provider}）
+                </option>
+              ))}
+            </select>
+            <div className="muted small" data-testid="profile-connection-hint">
+              {selectedConnection
+                ? `接口地址、密钥与自定义请求头都取自「${selectedConnection.name}」。`
+                : '接口地址、密钥与自定义请求头都取自所选连接。'}
+            </div>
+          </div>
+        ) : null}
+
         <div className="form-row">
           <label>名称 *</label>
           <input
@@ -1171,20 +1387,59 @@ function ModelProfileFormModal({
           />
         </div>
 
-        <div className="form-row">
-          <label>接口类型 *</label>
-          <select
-            value={provider}
-            onChange={(e) => setProvider(e.target.value)}
-            data-testid="profile-provider"
-          >
-            {PROVIDER_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        {isConnectionMode ? (
+          <div className="form-row">
+            <label>接口类型</label>
+            <div className="muted small" data-testid="profile-provider-readonly">
+              {selectedConnection
+                ? (PROVIDER_SHORT_LABEL[selectedConnection.provider] ??
+                  selectedConnection.provider)
+                : '（先选一条连接）'}
+            </div>
+          </div>
+        ) : (
+          <div className="form-row">
+            <label>接口类型 *</label>
+            <select
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+              data-testid="profile-provider"
+            >
+              {PROVIDER_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* 已绑定的档案：显式解绑入口（PATCH connection_id: null）。 */}
+        {initial?.connection_id ? (
+          <div className="form-row">
+            <label>连接关联</label>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span className="muted small" data-testid="profile-bound-connection">
+                当前绑定：
+                {connections.find((c) => c.connection_id === initial.connection_id)
+                  ?.name ??
+                  initial.connection_id}
+              </span>
+              <button
+                type="button"
+                className="btn btn--sm btn--danger"
+                onClick={() => {
+                  void handleUnbind();
+                }}
+                disabled={unbinding}
+                data-testid="profile-unbind-connection"
+                title="解除后该档案退回独立配置（自带地址与密钥）"
+              >
+                {unbinding ? '解除中…' : '解除连接关联'}
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         <div className="form-row">
           <label>模型 *</label>
@@ -1203,7 +1458,9 @@ function ModelProfileFormModal({
               disabled={!canFetchModels || fetchingModels}
               title={
                 !canFetchModels
-                  ? '请先填写接口地址'
+                  ? isConnectionMode
+                    ? '请先选择一条连接'
+                    : '请先填写接口地址'
                   : '按当前接口类型与地址拉取可选模型'
               }
               data-testid="profile-fetch-models"
@@ -1245,7 +1502,11 @@ function ModelProfileFormModal({
           ) : null}
         </div>
 
-        {!isMock ? (
+        {isConnectionMode ? (
+          <InfoBanner>
+            接口地址、API 密钥与自定义请求头由所选连接统一提供 —— 这里只填模型名与思考模式。
+          </InfoBanner>
+        ) : !isMock ? (
           <div className="form-grid">
             <div className="form-row">
               <label>接口地址 {requireBaseUrl ? '*' : ''}</label>
@@ -1333,7 +1594,8 @@ function ModelProfileFormModal({
           >
             {(() => {
               // V3.8：按端点收窄候选档位。
-              const narrowed = getThinkingOptions(provider, params.baseUrl);
+              // ⚠️ 连接态下端点信息取自**所选连接**（provider + base_url）。
+              const narrowed = getThinkingOptions(effectiveProvider, effectiveBaseUrl);
               const values = narrowed.map((o) => o.value);
               // 编辑档案时，初值 inferThinkingMode 可能落在当前端点不支持的选项里
               // （如 MiniMax 域编辑老档案存的是 'on' / 'medium'）—— 渲染期回退为
@@ -1356,7 +1618,9 @@ function ModelProfileFormModal({
             })()}
           </select>
           {(() => {
-            const values = getThinkingOptions(provider, params.baseUrl).map((o) => o.value);
+            const values = getThinkingOptions(effectiveProvider, effectiveBaseUrl).map(
+              (o) => o.value,
+            );
             if ((values as string[]).includes(thinkingMode)) return null;
             return (
               <div className="muted small" data-testid="profile-thinking-out-of-list">

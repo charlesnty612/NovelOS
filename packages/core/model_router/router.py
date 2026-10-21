@@ -29,6 +29,7 @@ from typing import Any
 from packages.core.db import get_connection
 from packages.core.logging_config import get_logger
 
+from .effective import RESERVED_PARAM_KEYS, resolve_effective
 from .exceptions import (
     AggregateProviderError,
     ModelNotConfiguredError,
@@ -39,7 +40,6 @@ from .providers import (
     MockProvider,
     OllamaProvider,
     OpenAICompatibleProvider,
-    resolve_api_key,
 )
 
 log = get_logger("novelos.model_router")
@@ -193,7 +193,7 @@ class ModelRouter:
                 for pid in profile_ids:
                     row = conn.execute(
                         """
-                        SELECT profile_id, provider, model, params_json, enabled
+                        SELECT profile_id, provider, model, params_json, enabled, connection_id
                         FROM model_profiles
                         WHERE profile_id = ? AND enabled = 1
                         """,
@@ -208,10 +208,11 @@ class ModelRouter:
                         "model": row["model"],
                         "params_json": row["params_json"],
                         "enabled": row["enabled"],
+                        "connection_id": row["connection_id"],
                     })
             finally:
                 conn.close()
-            return out
+            return self._filter_disabled_connections(out)
 
         # 无 binding → 回落 model_configs（旧行为）
         conn = get_connection(self.db_path)
@@ -285,69 +286,115 @@ class ModelRouter:
         config_row: dict[str, Any],
         *,
         scripted: Any | None = None,
+        run_id: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+        connection_row: dict[str, Any] | None = None,
     ):
-        """按 ``config_row['provider']`` 字段分发构造 Provider。
+        """按**生效配置**构造 Provider（连接优先）。
 
+        - 档案**未绑定连接** ⇒ 与改造前逐字相同（provider / base_url / api_key
+          全部取自档案的 ``params_json``）。
+        - 档案**已绑定连接** ⇒ provider / base_url / api_key / headers /
+          models_url **全部取自连接**（档案的同名键被忽略）。
         - ``"mock"`` → :class:`MockProvider`（``scripted`` 透传；默认 None，回显空 JSON）。
         - ``"anthropic"`` → :class:`AnthropicProvider`（``base_url`` 可省，默认官方）。
         - ``"ollama"`` → :class:`OllamaProvider`（``base_url`` 可省，默认本地）。
         - 其它（``openai`` / ``openai_compatible`` / ``deepseek`` 等）→
-          :class:`OpenAICompatibleProvider`，``base_url`` 来自 ``params_json.base_url``，
-          ``api_key`` 通过 :func:`resolve_api_key` 解析。
+          :class:`OpenAICompatibleProvider`。
+
+        ``run_id`` 供请求头模板渲染（``{{run_id}}`` / ``{{session_id}}``）；
+        ``extra_headers`` 是**运行级**覆盖层（合并顺序：provider 默认 < 连接级 < 运行级）。
         """
-        provider_name = (config_row.get("provider") or "").strip().lower()
+        connection_id = config_row.get("connection_id") or None
+        if connection_row is None and connection_id:
+            connection_row = self._load_connection(connection_id)
+
+        eff = resolve_effective(config_row, connection_row, run_id=run_id)
+        provider_name = (eff.provider or "").strip().lower()
         if provider_name == "mock":
             return MockProvider(scripted=scripted)
 
-        # params_json 可能是字符串（DB 原始）或 dict（get_provider 调用方预解析）
-        params_raw = config_row.get("params_json") or "{}"
-        if isinstance(params_raw, dict):
-            params = params_raw
-        else:
-            try:
-                params = json.loads(params_raw)
-            except (TypeError, ValueError):
-                params = {}
+        headers = dict(eff.headers)
+        if extra_headers:
+            headers.update(extra_headers)
 
         if provider_name == "anthropic":
-            api_key = resolve_api_key(
-                provider_name,
-                params,
-                profile_id=config_row.get("config_id"),
-            )
             return AnthropicProvider(
-                base_url=params.get("base_url") or None,
-                api_key=api_key,
-                model=config_row["model"],
+                base_url=eff.base_url,
+                api_key=eff.api_key,
+                model=eff.model,
+                extra_headers=headers,
             )
 
         if provider_name == "ollama":
             return OllamaProvider(
-                base_url=params.get("base_url") or None,
-                model=config_row["model"],
+                base_url=eff.base_url,
+                model=eff.model,
+                extra_headers=headers,
             )
 
         # 其它 → OpenAI 兼容（OpenAI / DeepSeek / 通义 等）
-        base_url = params.get("base_url")
-        if not base_url:
+        if not eff.base_url:
             raise ValueError(
-                f"provider {provider_name!r} requires params_json.base_url "
+                f"provider {provider_name!r} requires a base_url "
                 f"(config_id={config_row.get('config_id')})"
             )
-        api_key = resolve_api_key(
-            provider_name,
-            params,
-            profile_id=config_row.get("config_id"),
-        )
-        timeout = params.get("timeout_s", 240.0)
+        timeout = eff.timeout_s if eff.timeout_s is not None else 240.0
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("params_json.timeout_s must be a positive number of seconds")
         return OpenAICompatibleProvider(
-            base_url=base_url,
-            api_key=api_key,
-            model=config_row["model"],
+            base_url=eff.base_url,
+            api_key=eff.api_key,
+            model=eff.model,
             timeout=timeout,
+            extra_headers=headers,
+            models_url=eff.models_url,
         )
+
+    def _load_connection(self, connection_id: str) -> dict[str, Any] | None:
+        """按主键取一条连接；不存在 → None。
+
+        ⚠️ 返回 None 时，:func:`resolve_effective` 会**抛配置错误**（悬空引用），
+        **不静默回落**到档案自身的 base_url（那会掩盖配置错误，让用户以为连上了）。
+        """
+        conn = get_connection(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT * FROM model_connections WHERE connection_id = ?", (connection_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        return dict(row) if row is not None else None
+
+    def _filter_disabled_connections(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """剔除「绑定了**已停用连接**」的档案。
+
+        语义对齐既有的「enabled=0 的 profile 自动从 binding 候选链跳过」——
+        连接被停用 ⇒ 引用它的档案同样不可用。
+
+        ⚠️ 悬空 ``connection_id``（指向不存在的连接）**不在此剔除**：
+        它要走到 :meth:`get_provider` 才抛配置错误（**显式失败好过静默跳过**——
+        静默跳过会让候选链空掉，用户看到的是「没配模型」而不是「连接坏了」）。
+        """
+        conn_ids = {r.get("connection_id") for r in rows if r.get("connection_id")}
+        if not conn_ids:
+            return rows
+        conn = get_connection(self.db_path)
+        try:
+            placeholders = ",".join("?" * len(conn_ids))
+            disabled = {
+                r["connection_id"]
+                for r in conn.execute(
+                    f"SELECT connection_id FROM model_connections "
+                    f"WHERE connection_id IN ({placeholders}) AND enabled = 0",
+                    list(conn_ids),
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        if not disabled:
+            return rows
+        return [r for r in rows if r.get("connection_id") not in disabled]
 
     # -------------------------------------------------------------- call_with_fallback
     def call_with_fallback(
@@ -358,6 +405,8 @@ class ModelRouter:
         params: dict[str, Any] | None = None,
         scripted: Any | None = None,
         profile_id: str | None = None,
+        run_id: str | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """失败转移：按 rowid 顺序逐个尝试该 capability 的 enabled configs。
 
@@ -392,7 +441,7 @@ class ModelRouter:
             try:
                 row = conn.execute(
                     """
-                    SELECT profile_id, provider, model, params_json, enabled
+                    SELECT profile_id, provider, model, params_json, enabled, connection_id
                     FROM model_profiles
                     WHERE profile_id = ? AND enabled = 1
                     """,
@@ -416,7 +465,16 @@ class ModelRouter:
                 "model": row["model"],
                 "params_json": row["params_json"],
                 "enabled": row["enabled"],
+                "connection_id": row["connection_id"],
             }]
+            candidates = self._filter_disabled_connections(candidates)
+            if not candidates:
+                err = ModelNotConfiguredError(capability)
+                err.args = (
+                    f"profile_id={profile_id!r} 绑定的连接已停用 "
+                    f"(capability={capability!r})",
+                )
+                raise err
             used_capability = capability
         else:
             candidates = self.list_enabled(capability)
@@ -445,7 +503,9 @@ class ModelRouter:
         for row in candidates:
             cid = row.get("config_id") or "<unknown>"
             try:
-                provider = self.get_provider(row, scripted=scripted)
+                provider = self.get_provider(
+                    row, scripted=scripted, run_id=run_id, extra_headers=extra_headers
+                )
             except Exception as exc:  # noqa: BLE001 —— 构造失败也视为一次尝试失败
                 msg = f"construct failed: {exc}"
                 log.warning(
@@ -456,9 +516,12 @@ class ModelRouter:
                 attempts.append((cid, msg))
                 last_exc = exc
                 continue
-            # 解析该行 params_json：构造键（base_url/timeout_s/api_key/api_key_env）
-            # 已被 get_provider 消费，不进请求体；其余键作为 extras 透传。
+            # 解析该行 params_json：构造键（base_url/timeout_s/api_key/api_key_env/
+            # headers/models_url）已被 get_provider 消费，不进请求体；其余键作为 extras 透传。
             # 解析失败 → {}（与 get_provider 同风格）。
+            # ⚠️ 保留键集合来自 effective.RESERVED_PARAM_KEYS（**唯一权威**）——
+            #    此前本处与 providers.py 各写一份副本，漏一处就把该键当请求体
+            #    发给上游（OpenAI 兼容 API 直接 400）。
             _raw = row.get("params_json") or "{}"
             if isinstance(_raw, dict):
                 _parsed = _raw
@@ -467,10 +530,7 @@ class ModelRouter:
                     _parsed = json.loads(_raw)
                 except (TypeError, ValueError):
                     _parsed = {}
-            _extras = {
-                k: v for k, v in _parsed.items()
-                if k not in ("base_url", "timeout_s", "api_key", "api_key_env")
-            }
+            _extras = {k: v for k, v in _parsed.items() if k not in RESERVED_PARAM_KEYS}
             merged: dict[str, Any] | None = {**_extras, **(params or {})}
             try:
                 completion = provider.complete(messages, params=merged or None)
@@ -478,6 +538,13 @@ class ModelRouter:
                 if used_capability != capability:
                     row = dict(row)
                     row["capability"] = used_capability
+                # ⚠️ 2026-10-21 批次十五：**生效 provider 覆写档案列**。
+                #    绑定连接的档案，其 provider 列只是派生镜像（连接的 provider
+                #    才是权威）⇒ 下游（ai_call_logs.model_id）必须记**实际用的**那个，
+                #    否则日志会把「连到 opencode 却用了 anthropic」记成 anthropic。
+                if row.get("provider") != provider.name:
+                    row = dict(row)
+                    row["provider"] = provider.name
                 return completion, row
             except ProviderError as exc:
                 msg = f"{exc} (status_code={exc.status_code})"

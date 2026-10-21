@@ -1351,6 +1351,12 @@ export interface ModelProfile {
   has_api_key?: boolean;
   created_at?: string;
   updated_at?: string;
+  /**
+   * 引用的连接 id（`model_connections`）。
+   * null / 缺省 = 该档案是「独立配置」（自带 base_url / api_key，存量档案的默认形态）。
+   * 有值 ⇒ provider / base_url / api_key / headers 全部取自连接，档案自身的同名键被忽略。
+   */
+  connection_id?: string | null;
 }
 
 export interface ModelProfileCreatePayload {
@@ -1359,6 +1365,8 @@ export interface ModelProfileCreatePayload {
   model: string;
   params: Record<string, unknown> | string | null;
   enabled?: 0 | 1 | boolean;
+  /** 绑定到某条连接；provider 必须等于该连接的 provider（否则后端 422）。 */
+  connection_id?: string | null;
 }
 
 export interface ModelProfileUpdatePayload {
@@ -1367,6 +1375,11 @@ export interface ModelProfileUpdatePayload {
   model?: string;
   params?: Record<string, unknown> | string | null;
   enabled?: 0 | 1 | boolean;
+  /**
+   * 绑定到某条连接。
+   * ⚠️ **缺键 = 不改**（部分更新语义）；**显式 `null` = 解绑**（退回独立配置）。
+   */
+  connection_id?: string | null;
 }
 
 export interface ModelProfileTestResult {
@@ -1377,12 +1390,68 @@ export interface ModelProfileTestResult {
   status_code?: number | null;
 }
 
+// ---------------------------------------------------------------------------
+// 模型连接（2026-10-21 批次十五「连接层」）
+//
+// 「连接」= 连到哪里 / 怎么认证 / 带哪些头；「档案」= 用什么模型 / 怎么调。
+// 同一厂商的多个档案挂在同一条连接上 ⇒ 改一次 key / base_url / headers 全局生效。
+//
+// ⚠️ **响应类型走重导出**（`ModelConnectionOut` / `ConnectionTestResult` 来自
+// `types.generated.ts`）——后端已补 `response_model`，手写副本会与后端漂移。
+// 下面两个**请求体**是手写的：后端刻意用裸 `dict` 入参（加 Pydantic 模型会顺带
+// 收紧入参校验，属 AGENTS 明确允许的手写面）。
+//
+// ⚠️ 名字**不可**与 `types.generated.ts` 里的任何 interface 重名——
+// `tests/api/test_frontend_types_contract.py` 会把「同名手写副本」判红。
+// ---------------------------------------------------------------------------
+
+/**
+ * 连接级 `params`。**只允许三个键**（后端对其它键返回 422）：
+ * `api_key` / `headers` / `models_url`。
+ *
+ * - `api_key`：连接级密钥。PATCH 时 `""` = 清除、`"***"` = 不改、缺键 = 不改。
+ * - `headers`：`{头名: 头值}`。**逐键**语义（PATCH 时值 `"***"` = 该键不改）；
+ *   值里可写占位符 `{{run_id}}` / `{{session_id}}`（封闭集合，写别的后端返 422）。
+ * - `models_url`：模型列表端点（缺省 `{base_url}/models`）。
+ */
+export interface ConnectionParamsPayload {
+  api_key?: string | null;
+  headers?: Record<string, string | null> | null;
+  models_url?: string | null;
+}
+
+/** `POST /model-connections` 请求体。`name` / `provider` 必填。 */
+export interface ConnectionCreatePayload {
+  name: string;
+  provider: string;
+  base_url?: string | null;
+  params?: ConnectionParamsPayload | null;
+  enabled?: 0 | 1 | boolean;
+}
+
+/**
+ * `PATCH /model-connections/{id}` 请求体（部分更新）。
+ *
+ * ⚠️ `params` 语义：**缺键 = 保留原值**、显式 `null` = 删除该键；
+ * `headers` 是 dict ⇒ **逐键**语义（值 `"***"` = 该键不改）。
+ */
+export interface ConnectionUpdatePayload {
+  name?: string;
+  provider?: string;
+  base_url?: string | null;
+  params?: ConnectionParamsPayload | null;
+  enabled?: 0 | 1 | boolean;
+}
+
 /** V3.8 「拉取模型」端点（POST /model-profiles/available-models）载荷与响应。 */
 export interface FetchAvailableModelsPayload {
-  provider: string;
+  /** ⚠️ 走连接（传 `connection_id`）时**不再必填**——provider 由连接决定。 */
+  provider?: string;
   base_url?: string;
   api_key?: string;
   profile_id?: string;
+  /** 走连接时：连接的 provider / base_url / api_key / headers 带上（provider 不再必填）。 */
+  connection_id?: string | null;
 }
 
 export interface FetchAvailableModelsResponse {
@@ -1754,7 +1823,10 @@ export type {
   ArcRevealCounts,
   ArcView,
   ArcVolumeRow,
+  ConnectionTestResult,
+  ConnectionPresetOut,
   ListDiff as SnapshotListDiff,
+  ModelConnectionOut,
   QualityJudgeRecord,
   QualityJudgeResponse,
   RevealPolicyCreateIn as RevealPolicyCreate,

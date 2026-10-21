@@ -32,6 +32,33 @@ API 返回、日志、备份等对外或持久化导出路径必须继续执行�
 - backup 导出采用白名单并排除 `model_configs`，同时在 metadata 中标记 `api_keys_stripped`。
 - 日志路径不打印 API Key；任何新增日志或诊断输出都应遵守同一原则。
 
+### 4.1 增补（2026-10-21 批次十五「连接层」）
+
+引入「连接层」（`model_connections`）后，**同一决策的适用面扩大了**：
+`model_connections.params_json.api_key` 与 `model_profiles.params_json.api_key`
+一样是**明文存 SQLite**（`model_profiles` 那一列自 0016 迁移起就是这样，
+本 ADR 原先只提 `model_configs` ⇒ 防线清单与现实脱节，此处补齐）。
+
+新增/强化的防线：
+
+- **读路径掩码扩到连接表**：`api/routers/connections.py::_mask_connection` 对
+  list/get/create/patch 全部出口掩 `api_key` 并返回 `has_api_key`；
+  且 `headers` 里的**敏感头逐键掩码**（`authorization` / `x-api-key` / `api-key` /
+  `x-goog-api-key` / `proxy-authorization` / `cookie` / `set-cookie` / `x-auth-token`），
+  非凭据头（如 `x-opencode-session`）**不掩**。
+- **backup 白名单同样排除 `model_connections` / `model_profiles`**（白名单是闭合的，
+  新表默认不在内）——⚠️ **这条必须有断言**（`tests/api/test_model_connections_api.py::
+  test_model_connections_not_in_export_whitelist`），不能靠「白名单默认不包含」这个推理。
+- **写路径的键语义分层**：`headers` 是 dict ⇒ 走**逐键** PATCH 语义
+  （`***` 保留该键原值 / `""`·`None` 删该键 / 缺键保留），
+  **不能**套用标量 `api_key` 的三态 ⇒ 否则前端把读回的 `***` 原样提交会把
+  **真值写成 `***`**（密钥静默失效）。
+- **鉴权头与 api_key 撞车 ⇒ 写时 422**：连接既配 `api_key` 又在 `headers` 里写
+  鉴权头 ⇒ 拒绝（二选一）——否则自定义头会**静默架空**密钥通道，而
+  `has_api_key` 仍显示 true（「显示与实际失真」）。
+- **日志路径仍不打印 API Key**：新增的 `model_router.fallback.*` warning 只带
+  `capability` / `config_id` / 错误串，不带 params。
+
 ## 5. 风险与升级路径
 
 ### 5.1 风险

@@ -5,6 +5,134 @@
 
 ## [Unreleased]
 
+### Added（2026-10-21 批次（十五）：模型连接层 —— 同一厂商的多个模型不再各填一遍 key/base_url）
+
+> **来源**：用户指令「你看一下软件的 LLM 配置的，我感觉现在的 LLM 配置有点不顺手，你来帮我优化一下；
+> 另外，如果我想配置 opencode go 的话，你看要怎么搞」（附 opencode Console 文档：
+> 每次请求须带 `x-opencode-session: ses_...`）。
+> **用户裁决**：① 痛点是「同一厂商，想分配不同模型承担不同职责，需要要重新完全新建」；
+> ② session id **每个写作 run 一个**（由 `run_id` 派生）；③ 删连接被引用时**拒绝删除并列出引用者**；
+> ④ opencode 用 **Go 套餐**（`https://opencode.ai/inference/go/openai/v1`）。
+> 全程**零真实 LLM 调用、零内容仓接触**（AGENTS §一 两条硬约束）。
+
+#### A. 根因：两层架构只解了一半
+
+0016 迁移建的 `model_profiles` + `capability_bindings` 解开了「**模型 ↔ 环节**」，
+但没解开「**模型 ↔ 连接**」——`provider / base_url / api_key` 与模型名焊在同一条记录里。
+于是同一厂商想让 gpt-5.5 写正文、claude-opus 做推理、便宜模型做评审时，
+必须建 3 个档案并把 base_url / api_key 各重填 3 遍（改一次 key 要改三处，漏一处就串味）。
+
+#### B. 新增连接层（迁移 0033）
+
+| 要素 | 落地 |
+|---|---|
+| 表 | `model_connections`（connection_id / name / provider / base_url / params_json / enabled / 时间戳）⇒ 业务表 41 → **42** |
+| 引用 | `model_profiles` 加**可空**列 `connection_id` ⇒ 存量档案 `NULL` 时**行为逐位不变** |
+| 职责划分 | 连接级 = provider / base_url / api_key / headers / models_url；档案级 = model / thinking / reasoning_effort / timeout_s / temperature …（**timeout_s 归档案级**：不同模型响应速度不同） |
+| 权威 | **连接是 provider / base_url / api_key / headers 的唯一权威**；档案的 provider 列降级为派生镜像（连接改 provider 时同步刷新档案列） |
+| API | `/api/model-connections` CRUD + `/test`；档案 POST/PATCH 接受 `connection_id`（`null` = 解绑） |
+
+#### C. 自定义请求头 + opencode 接入
+
+- 连接级 `params_json.headers`（`dict[str,str]`），值支持 **`{{run_id}}` / `{{session_id}}`**
+  两个占位符（**封闭集合**，其它占位符写时 422 ⇒ 不静默发字面量给上游）。
+- `{{session_id}}` 渲染成 `ses_<sha256(run_id)[:32]>`（run 上下文）或
+  `ses_probe_<sha256(connection_id)[:16]>`（探针上下文）——
+  ⚠️ **不是** `"unknown"`（那会让所有请求共用一个 session，制造「假成功」）。
+- opencode 即用配置：provider `openai_compatible` / base_url
+  `https://opencode.ai/inference/go/openai/v1` / key `oc_sk_...`（`Authorization: Bearer`）/
+  headers `{"x-opencode-session": "{{session_id}}"}` / models_url
+  `https://opencode.ai/inference/go/v1/models`。
+
+#### D. 顺带修掉的「假失败」
+
+`OpenAICompatibleProvider.health_check` 打的是 `GET {base_url}/models`，而
+**opencode 的模型列表不在 `{base_url}/models` 上**（Go 套餐是 `/inference/go/v1/models`），
+不少中转网关干脆不实现它 ⇒ 「测试连接」把完全可达的端点判成失败。
+⇒ ① 连接级可选 `models_url` 覆盖；② `health_check` 两段式：models 端点
+**404/405/501** ⇒ 退化为**极小 chat 请求探测**（200/401 都算可达，照搬 `AnthropicProvider`
+的既有语义）。⚠️ 降级探测**真的消耗 1 个 token**（上游收了一次请求）——
+它只发生在**用户手工触发**的 `/test` 路径上，不是自动化验证路径。
+
+#### E. ⚠️ 先验判断被推翻（必须留痕）：**自动回填是错的**
+
+初版迁移方案是「按 `(provider, base_url, api_key)` 三元组**自动回填** `connection_id`」——
+**该方案会串用凭据**：生效 key 的权威解析链 `resolve_profile_api_key` 有 5 级，
+**最高两级读的是 secrets.json（一个文件）** ⇒ SQL 迁移看不见它们；而本仓 secrets.json
+**现存的条目正是档案级**（实测 `mprof_f95e3c7b4127`）⇒ 存在「两个档案 params 里写着同一个
+key、但生效 key 不同」的真实情形 ⇒ 按 params 里的 key 分组会把它们合并 ⇒
+**凭据静默串用**（表现为某档案突然 401 / 计费到别人的号）。
+
+⇒ **迁移 0033 刻意不做回填**（文件头有完整留痕），改由应用层的**显式归组动作**：
+分组键由运行期同一个解析函数算出（`effective.group_profiles_by_connection`），
+**先展示分组预览**给用户确认，确认后才写；且归组时**逐条校验生效 key 一致**
+（不一致 ⇒ 422，绝不静默换密钥）。
+
+#### F. 连带修掉的三处既有隐患
+
+| 隐患 | 处置 |
+|---|---|
+| **浅层掩码**（`_mask_params` 只看 `api_key` 那一层）⇒ `headers` 里的明文 `authorization` 会被回吐给前端 | 掩码**递归一层**（敏感头名小写比较）；`x-opencode-session` 显式**不掩** |
+| **dict 型字段套用标量 PATCH 语义** ⇒ 前端把读回的 `***` 原样提交 ⇒ **真值被写成 `***`** | `headers` 走**逐键**语义（`***` 保留该键 / `""`·`None` 删该键 / 缺键保留 / `headers: null` 删整个键） |
+| **保留键清单的副本**（同一语义写在 5 处，漏一处就把该键当请求体发给上游 ⇒ 400） | 收敛成**一处定义** `effective.RESERVED_PARAM_KEYS`；顺带发现 `AnthropicProvider` / `OllamaProvider` 的 `complete()` **此前根本不剔保留键**（今天靠 router 层兜底）⇒ 补剔。⚠️ **这是一处真实的行为变化**：直调这两个 provider 并把 `base_url` 放进 params 的调用方，其请求体会变；**生产路径无变化**（router 本就剔过） |
+
+#### G. 厂商预设（「内置就解决了请求头之类的问题」——用户裁决）
+
+用户要求「如果用户配 opencode go 的套餐，内置就解决了请求头之类的问题」
+⇒ 新增 **`GET /api/model-connections/presets`**（清单在后端
+`packages/core/model_router/presets.py`，**唯一权威**；前端只渲染、不硬编码任何地址），
+连接表单里选一个模板 ⇒ **自动填好** provider / base_url / headers / models_url，
+用户**只填密钥**即可（填完仍可逐项改 ⇒ 预设过期不会把人卡住）。
+
+| 预设 | base_url | 自带请求头 |
+|---|---|---|
+| `opencode_go` | `https://opencode.ai/inference/go/openai/v1` | `x-opencode-session: {{session_id}}` |
+| `opencode_go_anthropic` | `https://opencode.ai/inference/go/anthropic` | 同上（Claude 系走原生协议） |
+| `opencode_payg` | `https://opencode.ai/inference/openai/v1` | 同上 |
+| `commandcode_goat` | `https://api.commandcode.ai/provider/v1` | **`x-cmd-zdr: 1`** |
+| `kimi_code` | `https://api.kimi.com/coding/v1` | — |
+| `minimax_cn` | `https://api.minimax.cn/v1` | — |
+| `opendesign_go` | **留空**（官方未公开固定端点） | — |
+| `openai` / `anthropic` / `deepseek` / `kimi` / `ollama_local` | 各自官方地址 | — |
+
+⚠️ **两处与用户初始认知不同，按官方文档处理**（并在预设说明里标出）：
+① **Command Code GOAT 套餐官方要求每个请求带 `x-cmd-zdr: 1`**（缺了会被拒）
+⇒ 它是本清单里除 opencode 外**唯一**需要固定请求头的服务商；
+② **OpenDesign Go 的 API 端点官方未公开固定值** ⇒ 预设**留空**由用户从账号页填
+（**不编造地址**）。
+
+#### H. 闸门（本次亲跑）
+
+| 闸门 | 结果 |
+|---|---|
+| 树指纹（跑测前后） | `657 866e859c…` **逐位一致**（648 → 657 = +9 新增文件：4 个后端模块 + 4 个测试/规格 + 1 个迁移） |
+| 全量 pytest（`-n 4 -q`，**不带任何 --ignore**） | **3790 passed / 1 skipped / 1 xfailed / 0 failed**（478.31s，exit 0）—— 较基线 3719 collected **+73** |
+| ruff `packages scripts tests` | All checks passed |
+| `npx tsc -b --force` / `npx vitest run` / `npm run build` | 0 错 / **780 passed（57 文件）** / 通过（基线 755/56 ⇒ **+25 例**） |
+| `export_openapi` + `gen_frontend_types` | **109 paths / 145 schemas**（103/142 → +6 path / +3 schema） |
+| 突变（新增 `tests/mutation_specs/l10_model_connections.py`） | **6/6 全捕获**，0 存活 0 中止；残留清点 0（`.mutbak` + 标记形态 + 逐字节复核，三项均干净） |
+| `smoke_e2e.py` | **PASS**（`tables=42`；plan→write→review PAUSED→resume→commit 四步链路完好 + observer 内容在场 + SYNC OK） |
+
+⚠️ **全量突变套件（既有 310+ 条）本轮未重跑** ⇒ **不声称「全量突变通过」**（如实登记）。
+⚠️ **零真实 LLM 调用**（AGENTS §一 硬约束 2）：全部走 mock / 临时库；
+「拉取模型」「测试连接」的**上游真实行为未验证**。
+
+#### I. 已知边界（如实登记，不声称已解决）
+
+1. **`continuation.py` 的续写调用不传 `run_id`** ⇒ 该路径上的请求头会渲染成
+   **按连接派生的探针 session id**（`ses_probe_…`，稳定但不是「某个写作 run 的 session」）。
+   该功能是「续写变体」而非写作 run 的一部分，**当前形态可接受**；
+   若将来要求「同一篇续写共享一个 session」，需给该端点造 run 上下文。
+2. **`model_configs`（旧表）不参与连接层** ⇒ 旧表的行没有 `connection_id`，
+   仍走原 `params_json` 路径（**零行为变化**）。旧表接入连接层需另立项。
+3. **连接级 `params` 只允许 `api_key` / `headers` / `models_url`**；
+   `timeout_s` 等调参归**档案**级（不同模型响应速度不同）⇒ 想给整条连接设 timeout
+   需逐档案设置。**登记为待讨论的产品选择**。
+4. **归组动作需要用户确认**：迁移**刻意不回填**（见 §E）⇒ 存量档案要享受
+   「改一处全局生效」的收益，需走一次「按连接归组」（预览 → 确认）。
+5. **`has_api_key` 的连接感知已实现**（绑定档案的该字段由连接派生），
+   但**未绑定**档案仍按原逻辑（档案 params + secrets）⇒ 存量语义不变。
+
 ### Fixed（2026-10-21 批次（十四）：全量审查后的修复 —— 一条测试曾让「全量回归」静默猝死）
 
 > **来源**：用户指令「对项目做全面审查」→「按建议顺序做修复」。
@@ -139,12 +267,20 @@ pytest 与调用它的 shell 一并收到 ⇒ 整棵进程树消失。
    被审版本（无放行路径），非判定面要的是「当前正文」，**风险低但措辞要改**。
 3. `docs/` 顶层空目录实测 **5 个**（architecture / data-model / deconstruct / evals / testing），
    AGENTS 记「2026-10-15 实测 6 个」⇒ 引用 docs/ 内文件仍须现查。
+   **⚠️ 2026-10-21 订正（数字与口径都写错了，实测订正）**：本条把 `evals/patches` 这个**嵌套**
+   空目录记成了 `evals`——**`evals` 本身不空**（它下面还有子目录）。实测准确口径：
+   **顶层空目录 4 个**（architecture / data-model / deconstruct / testing），
+   **递归空目录 6 个**（+ 嵌套的 `evals/patches`、`evaluation/smoke_runs`）。
+   ⇒ AGENTS 硬规则 7 已补「2026-10-21 实测递归 6 个（顶层 4 个）」并加「**须标明递归还是顶层口径**」
+   （2026-10-15 那句「6 个」未标口径，与本次「顶层 4 / 递归 6」并存时**不是矛盾，是两个口径**——同
+   「多来源数字必须标语料」纪律）。**通用纪律**：**目录计数必须连口径一起写**，否则下一个复核者
+   会在「顶层还是递归」上打转。
 
 #### 闸门（本次亲跑）
 
 | 闸门 | 结果 |
 |---|---|
-| 树指纹（跑测前后） | `648 9a4c61ed…` **逐位一致**（644 → 648 = +4 新增文件：审查报告 + 2 个突变规格 + 1 个看守） |
+| 树指纹（跑测前后） | `648 9a4c61ed…` **逐位一致**（644 → 648 = +4 新增文件）**⚠️ 2026-10-21 订正构成**：原文写「审查报告 + 2 个突变规格 + 1 个看守」——**审查报告在痕迹仓 `NovelOS-Artifacts`，不在指纹口径内**（口径 = `packages/ tests/ scripts/ database`）⇒ 实际 4 个是 `tests/api/test_frontend_types_contract.py` + `tests/unit/test_peek_degraded_outline.py` + `tests/mutation_specs/quality_gate.py` + `tests/mutation_specs/chapter_commit_gate.py`（`git diff --name-status 343ead7 HEAD` 实测）。**文件数（648）与哈希（`9a4c61ed…`）两处不受影响**，只是构成记错了 |
 | 全量 pytest（`-n 4 -q`，**不带任何 --ignore**） | **3738 passed / 1 skipped / 1 xfailed / 0 failed**（407.94s，exit 0）—— 本轮关键：这条命令此前在本机**跑不完**（见 §A） |
 | ruff `packages scripts tests` | All checks passed |
 | `npx tsc -b` / `npx vitest run` / `npm run build` | 0 错 / **755 passed（56 文件）** / 通过，asset hash `index-mhzcNjYt.js`（与基线一致） |

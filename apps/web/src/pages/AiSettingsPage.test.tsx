@@ -2,10 +2,16 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AiSettingsPage, inferThinkingMode } from './AiSettingsPage';
-import { agentsApi, capabilityBindingsApi, modelProfilesApi } from '../api/endpoints';
+import {
+  agentsApi,
+  capabilityBindingsApi,
+  connectionsApi,
+  modelProfilesApi,
+} from '../api/endpoints';
 import type {
   Agent,
   CapabilityBinding,
+  ModelConnectionOut,
   ModelProfile,
 } from '../api/types';
 
@@ -32,6 +38,15 @@ vi.mock('../api/endpoints', async () => {
       bind: vi.fn(),
       unbind: vi.fn(),
     },
+    // ⚠️ 必须显式覆盖：mock 工厂里的 `...actual` 会把真实实现带进来 ⇒ 发真请求。
+    connectionsApi: {
+      list: vi.fn(),
+      get: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      test: vi.fn(),
+    },
   };
 });
 
@@ -54,6 +69,31 @@ const profileNoKey: ModelProfile = {
   name: 'plain',
   params: { base_url: 'https://api.openai.com/v1' },
   has_api_key: false,
+};
+
+/** 连接夹具（2026-10-21 批次十五「连接层」）。 */
+const connFixture: ModelConnectionOut = {
+  connection_id: 'mcn_001',
+  name: 'opencode',
+  provider: 'openai_compatible',
+  base_url: 'https://opencode.ai/inference/go/v1',
+  params_json: { api_key: '***' },
+  enabled: 1,
+  created_at: '2026-10-21T10:00:00+00:00',
+  updated_at: '2026-10-21T10:00:00+00:00',
+  has_api_key: true,
+};
+
+/** 挂在连接上的档案（地址 / 密钥归连接，档案自身没有 base_url）。 */
+const boundProfile: ModelProfile = {
+  profile_id: 'mpf_bound',
+  name: 'opencode-creative',
+  provider: 'openai_compatible',
+  model: 'gpt-4o-mini',
+  params: {},
+  enabled: 1,
+  has_api_key: false,
+  connection_id: 'mcn_001',
 };
 
 const baseAgent: Agent = {
@@ -154,6 +194,7 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
     });
     vi.mocked(modelProfilesApi.list).mockResolvedValue([baseProfile]);
     vi.mocked(capabilityBindingsApi.list).mockResolvedValue(bindingsFixture);
+    vi.mocked(connectionsApi.list).mockResolvedValue([connFixture]);
   });
 
   // -------------------- 模型档案：保留 create happy path + 掩码不回显 -----------------
@@ -746,6 +787,7 @@ describe('AiSettingsPage · V3.10 整备回归', () => {
     vi.mocked(agentsApi.listPrompts).mockResolvedValue([]);
     vi.mocked(modelProfilesApi.list).mockResolvedValue([baseProfile]);
     vi.mocked(capabilityBindingsApi.list).mockResolvedValue(bindingsFixture);
+    vi.mocked(connectionsApi.list).mockResolvedValue([connFixture]);
   });
 
   it('「编辑」直接用行数据打开表单，不再多发一次 list()', async () => {
@@ -803,5 +845,167 @@ describe('AiSettingsPage · V3.10 整备回归', () => {
     expect(offRow).toHaveTextContent('停用');
     expect(onRow).not.toHaveTextContent('enabled');
     expect(offRow).not.toHaveTextContent('disabled');
+  });
+});
+
+// =============================================================================
+// 2026-10-21 批次十五「连接层」：档案表单双模（使用连接 / 自定义配置）
+// =============================================================================
+
+describe('AiSettingsPage · 模型连接（连接层）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(agentsApi.list).mockResolvedValue([baseAgent]);
+    vi.mocked(agentsApi.listPrompts).mockResolvedValue([]);
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([baseProfile]);
+    vi.mocked(capabilityBindingsApi.list).mockResolvedValue(bindingsFixture);
+    vi.mocked(connectionsApi.list).mockResolvedValue([connFixture]);
+  });
+
+  it('本页挂载了「模型连接」面板（判别点 = 面板自己的 data-testid）', async () => {
+    renderPage();
+
+    // ⚠️ 判别点必须是**被挂物专属**的：这里用面板自己的 testid，
+    // 不用 modelProfilesApi.list 之类「父页面本来也会调的公共端点」。
+    expect(await screen.findByTestId('model-connections-panel')).toBeInTheDocument();
+    expect(screen.getByTestId('model-connections-panel')).toHaveTextContent('模型连接');
+  });
+
+  it('档案行显示所属连接名；未绑定的显示「独立配置」', async () => {
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([baseProfile, boundProfile]);
+
+    renderPage();
+
+    expect(
+      await screen.findByTestId('profile-connection-badge-mpf_001'),
+    ).toHaveTextContent('独立配置');
+    expect(screen.getByTestId('profile-connection-badge-mpf_bound')).toHaveTextContent(
+      'opencode',
+    );
+  });
+
+  it('档案表单「使用连接」态：不显示地址 / 密钥输入框，提交带 connection_id 与连接的 provider', async () => {
+    vi.mocked(modelProfilesApi.create).mockResolvedValue({
+      ...boundProfile,
+      profile_id: 'mpf_new',
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('new-model-profile'));
+    fireEvent.click(await screen.findByTestId('profile-mode-connection'));
+
+    const sel = (await screen.findByTestId('profile-connection')) as HTMLSelectElement;
+    fireEvent.change(sel, { target: { value: 'mcn_001' } });
+
+    // 连接态：地址 / 密钥输入框**不出现**
+    expect(screen.queryByTestId('profile-base-url')).toBeNull();
+    expect(screen.queryByTestId('profile-api-key')).toBeNull();
+
+    fireEvent.change(screen.getByTestId('profile-name'), {
+      target: { value: 'opencode-creative' },
+    });
+    fireEvent.change(screen.getByTestId('profile-model'), {
+      target: { value: 'gpt-4o-mini' },
+    });
+    fireEvent.click(screen.getByTestId('profile-save'));
+
+    await waitFor(() => {
+      expect(modelProfilesApi.create).toHaveBeenCalledTimes(1);
+    });
+    const payload = vi.mocked(modelProfilesApi.create).mock
+      .calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.connection_id).toBe('mcn_001');
+    // provider 取自所选连接（连接是唯一权威）
+    expect(payload.provider).toBe('openai_compatible');
+    // 档案级不重复携带地址 / 密钥
+    const paramsOut = payload.params as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(paramsOut, 'base_url')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(paramsOut, 'api_key')).toBe(false);
+  });
+
+  it('编辑存量档案（connection_id=null）：默认落在「自定义配置」态，提交**不含** connection_id 键', async () => {
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([baseProfile]);
+    vi.mocked(modelProfilesApi.update).mockResolvedValue(baseProfile);
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('model-profile-edit-mpf_001'));
+
+    // 存量档案走自定义配置：地址 / 密钥输入框都在，连接下拉不存在
+    expect(await screen.findByTestId('profile-base-url')).toBeInTheDocument();
+    expect(screen.getByTestId('profile-api-key')).toBeInTheDocument();
+    expect(screen.queryByTestId('profile-connection')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('profile-save'));
+
+    await waitFor(() => {
+      expect(modelProfilesApi.update).toHaveBeenCalledTimes(1);
+    });
+    const [, payload] = vi.mocked(modelProfilesApi.update).mock.calls[0]!;
+    // ⚠️ 用 hasOwnProperty 判「键不存在」——不能用 toBeUndefined
+    // （键存在但值为 undefined 与键不存在是两件事）。
+    expect(
+      Object.prototype.hasOwnProperty.call(payload as object, 'connection_id'),
+    ).toBe(false);
+    // 既有行为不变：地址照旧在 params 里
+    const paramsOut = (payload as Record<string, unknown>).params as Record<string, unknown>;
+    expect(paramsOut).toHaveProperty('base_url', 'https://api.openai.com/v1');
+  });
+
+  it('解除连接关联：PATCH 只带 connection_id: null', async () => {
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([boundProfile]);
+    vi.mocked(modelProfilesApi.update).mockResolvedValue(boundProfile);
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('model-profile-edit-mpf_bound'));
+    fireEvent.click(await screen.findByTestId('profile-unbind-connection'));
+
+    await waitFor(() => {
+      expect(modelProfilesApi.update).toHaveBeenCalledTimes(1);
+    });
+    const [id, payload] = vi.mocked(modelProfilesApi.update).mock.calls[0]!;
+    expect(id).toBe('mpf_bound');
+    expect((payload as Record<string, unknown>).connection_id).toBeNull();
+    expect(
+      Object.prototype.hasOwnProperty.call(payload as object, 'connection_id'),
+    ).toBe(true);
+  });
+
+  it('连接态：思考档位按**所选连接的地址**收窄（minimax 域 → default/off/adaptive）', async () => {
+    const minimaxConn: ModelConnectionOut = {
+      ...connFixture,
+      connection_id: 'mcn_mini',
+      name: 'minimax',
+      base_url: 'https://api.minimax.chat/v1',
+    };
+    vi.mocked(connectionsApi.list).mockResolvedValue([connFixture, minimaxConn]);
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('new-model-profile'));
+    fireEvent.click(await screen.findByTestId('profile-mode-connection'));
+    const sel = (await screen.findByTestId('profile-connection')) as HTMLSelectElement;
+    fireEvent.change(sel, { target: { value: 'mcn_mini' } });
+
+    const thinking = (await screen.findByTestId(
+      'profile-thinking-select',
+    )) as HTMLSelectElement;
+    const values = Array.from(thinking.querySelectorAll('option')).map(
+      (o) => (o as HTMLOptionElement).value,
+    );
+    expect(values).toEqual(['default', 'off', 'adaptive']);
+  });
+
+  it('自定义配置态行为不变：地址 / 密钥输入框仍在，provider 可选', async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('new-model-profile'));
+
+    expect(await screen.findByTestId('profile-base-url')).toBeInTheDocument();
+    expect(screen.getByTestId('profile-api-key')).toBeInTheDocument();
+    expect(screen.getByTestId('profile-provider')).toBeInTheDocument();
+    expect(screen.queryByTestId('profile-connection')).toBeNull();
   });
 });

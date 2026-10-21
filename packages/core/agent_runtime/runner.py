@@ -415,7 +415,7 @@ def run_agent(
                         completion = provider.complete(messages)
                     else:
                         completion, config_row = ModelRouter(db_path).call_with_fallback(
-                            capability, messages, profile_id=profile_id
+                            capability, messages, profile_id=profile_id, run_id=run_id
                         )
                         model_id = f"{config_row['provider']}/{config_row['model']}"
                     if empty_stream_already_retried:

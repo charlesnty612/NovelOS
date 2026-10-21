@@ -1443,6 +1443,274 @@
         }
       }
     },
+    "/api/model-connections/presets": {
+      "get": {
+        "summary": "List Connection Presets",
+        "description": "列出连接预设（**一键填表**：provider / base_url / headers / models_url）。\n\n⚠️ **必须声明在 ``/model-connections/{connection_id}`` 之前**——否则\nFastAPI 会把 ``presets`` 当成 ``connection_id`` 匹配掉（路由按声明顺序）。\n\n权威清单在 :mod:`packages.core.model_router.presets`（**只此一处**）⇒\n前端只渲染、不硬编码任何 URL（避免同一组地址在前后端各写一份）。",
+        "operationId": "list_connection_presets_api_model_connections_presets_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConnectionPresetOut"
+                  },
+                  "type": "array",
+                  "title": "Response List Connection Presets Api Model Connections Presets Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/model-connections": {
+      "post": {
+        "summary": "Create Model Connection",
+        "description": "创建一条连接。必填：``name / provider``。\n\n``openai_compatible`` 的 ``base_url`` 必填（与档案同口径）——\n该 provider 没有可用的默认端点。",
+        "operationId": "create_model_connection_api_model_connections_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "List Model Connections",
+        "description": "列出所有连接（``include_enabled_only`` 可选过滤）。",
+        "operationId": "list_model_connections_api_model_connections_get",
+        "parameters": [
+          {
+            "name": "include_enabled_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Enabled Only"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModelConnectionOut"
+                  },
+                  "title": "Response List Model Connections Api Model Connections Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/model-connections/{connection_id}": {
+      "get": {
+        "summary": "Get Model Connection",
+        "description": "按主键取单条；不存在 → 404。",
+        "operationId": "get_model_connection_api_model_connections__connection_id__get",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "Update Model Connection",
+        "description": "部分更新（name / provider / base_url / params / enabled）。\n\n``params`` 走 PATCH 语义：**缺键 = 保留原值**、显式 ``null`` = 删除该键；\n``headers`` 是 dict ⇒ **逐键**语义（``***`` = 该键不改）。",
+        "operationId": "update_model_connection_api_model_connections__connection_id__patch",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete Model Connection",
+        "description": "删除（204）。\n\n⚠️ **被任何档案引用 → 409**（照既有「删档案被 binding 引用就 409」的范式）：\n**不做静默解绑**——那会把档案变成「悬空引用」这种第三态，\n且用户下一次改 key 时会踩空。``detail.referenced_by`` 列出引用它的档案。",
+        "operationId": "delete_model_connection_api_model_connections__connection_id__delete",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/model-connections/{connection_id}/test": {
+      "post": {
+        "summary": "Test Model Connection",
+        "description": "探测连接的可达性。\n\n打 ``GET {models_url}``（缺省 ``{base_url}/models``）。\n⚠️ **不降级到 chat 探测**（连接层没有 model 概念）⇒ 端点 404/405/501 时\n如实报「该端点不提供模型列表」并给出可执行指引，**不假成功**。\n（档案侧的 ``/test`` 有 model，可以降级到极小 chat 请求探测。）",
+        "operationId": "test_model_connection_api_model_connections__connection_id__test_post",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionTestResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/projects/{project_id}/chapters/{chapter_id}/continue": {
       "post": {
         "tags": [
@@ -2825,7 +3093,7 @@
           "model_profiles"
         ],
         "summary": "Create Model Profile",
-        "description": "创建一条档案。必填字段：``name / provider / model``。\n\n入参 ``params_json.api_key`` 的特殊值与 ``/model-configs`` 同语义：\n- ``\"\"`` 或 ``\"***\"`` → 视为未设置，落库时不写 api_key。\n- 其他字符串 → 原样落库（明文）。",
+        "description": "创建一条档案。必填字段：``name / provider / model``。\n\n入参 ``params_json.api_key`` 的特殊值与 ``/model-configs`` 同语义：\n- ``\"\"`` 或 ``\"***\"`` → 视为未设置，落库时不写 api_key。\n- 其他字符串 → 原样落库（明文）。\n\n**连接绑定**（2026-10-21 批次十五）：可传 ``connection_id`` ⇒ 该档案的\nprovider / base_url / api_key / headers **全部取自连接**（档案自身的同名键被忽略）。\n⚠️ 传了与连接不一致的 provider → **422**（不静默采纳）——\n连接的 provider 是唯一权威，两处分叉会让「同一连接挂不同 provider」这种\n荒谬配置混进库。",
         "operationId": "create_model_profile_api_model_profiles_post",
         "requestBody": {
           "required": true,
@@ -3090,13 +3358,79 @@
         }
       }
     },
+    "/api/model-profiles/group-by-connection": {
+      "post": {
+        "tags": [
+          "model_profiles"
+        ],
+        "summary": "Preview Group By Connection",
+        "description": "**按连接归组**的分组预览（只读，不写库）。\n\n⚠️ **为什么不做自动回填**（2026-10-21 批次十五，先验判断被推翻必须留痕）：\n生效 key 的权威解析链是 ``secrets_store.resolve_profile_api_key``，5 级里\n**最高两级读的是 secrets.json（一个文件）** ⇒ SQL 迁移看不见它们。\n本仓 secrets.json **现存的条目正是档案级**（实测 ``mprof_f95e3c7b4127``）\n⇒ 存在「两个档案的 params 里写着同一个 key、但生效 key 不同」的真实情形。\n按 params 里的 key 分组会把它们合并 ⇒ **凭据静默串用**（表现为某档案突然 401）。\n\n⇒ 归组键由**运行期同一个解析函数**算出（:func:`group_profiles_by_connection`），\n且**先给用户看预览**、用户点头后才写。\n\n响应：\n- ``groups[]`` —— 每组含 ``group_key``（provider / base_url / api_key_env /\n  api_key_set）、``profile_ids``、建议的连接名、``key_fingerprint``\n  （生效 key 的 sha256 前 4 位，**不泄密**）、``key_consistent``\n  （组内各档案的生效 key 是否完全相同 —— 不同则**不能**归到一条连接）。",
+        "operationId": "preview_group_by_connection_api_model_profiles_group_by_connection_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/model-profiles/apply-grouping": {
+      "post": {
+        "tags": [
+          "model_profiles"
+        ],
+        "summary": "Apply Grouping",
+        "description": "把档案归到连接上（``assignments``: ``[{connection_id, profile_ids}]``）。\n\n⚠️ **生效 key 必须不变** —— 绑定连接后档案不再查 ``secrets[profile_id]``，\n改用 ``secrets[connection_id]`` ⇒ 若连接的生效 key 与档案归组前的生效 key\n不同，该档案的密钥**会静默换掉**（⇒ 401 或计费到别人的号）。\n⇒ 本端点**逐条校验**，不一致直接 422 并说明是哪一条、差在哪。\n\n校验通过才写 ``connection_id``（provider 列由服务端从连接继承）。",
+        "operationId": "apply_grouping_api_model_profiles_apply_grouping_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Apply Grouping Api Model Profiles Apply Grouping Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/model-profiles/available-models": {
       "post": {
         "tags": [
           "model_profiles"
         ],
         "summary": "List Available Models",
-        "description": "按 ``provider / base_url / api_key / profile_id`` 调用各家模型列表接口。\n\n用途：模型档案编辑表单「拉取模型」按钮的支撑端点。后端代理请求以\n避免浏览器跨域、CORS 与密文外带；前端只看到列表不接触 key。\n\n请求体（所有键均可选除 ``provider``）：\n- ``provider`` (str, 必填) —— ``mock / openai_compatible / anthropic / ollama`` 等。\n- ``base_url`` (str, 可选) —— 若空，按 provider 选用官方默认；OpenAI 兼容 / 自建\n  端点必须提供。\n- ``api_key`` (str, 可选) —— 明文直接用；缺省走 ``resolve_api_key``：先查档案\n  ``profile_id``、再 ``provider`` 默认 env（``NOVELOS_API_KEY_<PROVIDER>``）。\n- ``profile_id`` (str, 可选) —— 已有档案 ID；用于上面提到的解析优先级。\n\n错误处理：\n- ``400`` —— 必填缺失 / 该 provider 必须有 key 但解析不到；detail 仅文案不含 key。\n- ``502`` —— 拉取失败（超时、非 2xx、解析坏 JSON）。detail 仅文案不含 key。\n\n响应：\n- ``{\"models\": [\"id1\", \"id2\", ...]}`` —— 排序去重后的字符串数组。",
+        "description": "按 ``provider / base_url / api_key / profile_id`` 调用各家模型列表接口。\n\n用途：模型档案编辑表单「拉取模型」按钮的支撑端点。后端代理请求以\n避免浏览器跨域、CORS 与密文外带；前端只看到列表不接触 key。\n\n请求体（所有键均可选除 ``provider``）：\n- ``provider`` (str, 必填) —— ``mock / openai_compatible / anthropic / ollama`` 等。\n- ``base_url`` (str, 可选) —— 若空，按 provider 选用官方默认；OpenAI 兼容 / 自建\n  端点必须提供。\n- ``api_key`` (str, 可选) —— 明文直接用；缺省走 ``resolve_api_key``：先查档案\n  ``profile_id``、再 ``provider`` 默认 env（``NOVELOS_API_KEY_<PROVIDER>``）。\n- ``profile_id`` (str, 可选) —— 已有档案 ID；用于上面提到的解析优先级。\n- ``connection_id`` (str, 可选) —— **连接路径**（2026-10-21 批次十五）：\n  provider / base_url / api_key / headers / models_url **全部取自该连接**；\n  给了连接时 ``provider`` 不再必填。\n\n⚠️ **不传 ``connection_id`` 时的行为与改造前逐字相同**（inline 路径保留）。\n\n错误处理：\n- ``400`` —— 必填缺失 / 该 provider 必须有 key 但解析不到；detail 仅文案不含 key。\n- ``502`` —— 拉取失败（超时、非 2xx、解析坏 JSON）。detail 仅文案不含 key。\n\n响应：\n- ``{\"models\": [\"id1\", \"id2\", ...]}`` —— 排序去重后的字符串数组。",
         "operationId": "list_available_models_api_model_profiles_available_models_post",
         "requestBody": {
           "content": {
@@ -9744,6 +10078,113 @@
         "title": "ConfigTestResult",
         "description": "``POST /model-configs/{id}/test`` 的 200 响应。\n\n与 :class:`ProfileTestResult` **同构但无** ``hint``：两个 ``/test`` 端点只有档案侧\n接了 ``_unknown_model_hint``（task-28 的形状），配置侧没有。属既有行为，本批不改。\n``status_code`` 同样**无默认值且可空**（网络异常为 ``null``）。"
       },
+      "ConnectionPresetOut": {
+        "properties": {
+          "preset_id": {
+            "type": "string",
+            "title": "Preset Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "preset_id",
+          "label",
+          "provider"
+        ],
+        "title": "ConnectionPresetOut",
+        "description": "``GET /model-connections/presets`` 的元素：一档「连接预设」。\n\n预设 = **一键填表**（provider / base_url / params.headers / params.models_url），\n填完仍可逐项改 ⇒ 预设过期不会把人卡住。\n⚠️ **不含 api_key** —— 预设只给「连哪里、带什么头」。"
+      },
+      "ConnectionTestResult": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "description": "false 表示「端点不可达或健康不过」，仍是 200"
+          },
+          "latency_ms": {
+            "type": "integer",
+            "title": "Latency Ms"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "恒为字符串（router 用 `or ''` 兜底，不会是 null）"
+          },
+          "status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Code",
+            "description": "上游 HTTP 码；网络异常时为 null"
+          },
+          "probe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Probe",
+            "description": "探测路径：'models'（模型列表端点）/ 'chat'（退化探测）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connection_id",
+          "ok",
+          "latency_ms",
+          "detail",
+          "status_code"
+        ],
+        "title": "ConnectionTestResult",
+        "description": "``POST /model-connections/{id}/test`` 的 200 响应。\n\n与 :class:`ProfileTestResult` **同构**（字段名换 connection_id）。\n``status_code`` 同样**无默认值且可空**（网络异常为 ``null``）；\n``probe`` 是**有默认值**的键 ⇒ 路由必须声明 ``response_model_exclude_unset=True``，\n否则 ``probe`` 恒以 ``null`` 出现（凭空多一个键）。"
+      },
       "ContextPreview": {
         "properties": {
           "chapter_id": {
@@ -12087,6 +12528,71 @@
         "title": "ModelConfigOut",
         "description": "``model_configs`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。\n\n比 :class:`ModelProfileOut` 少 ``created_at`` / ``updated_at``——``model_configs``\n表**根本没有时间戳列**（见 ``database/migrations/0001_init.sql:464``），不是漏声明。"
       },
+      "ModelConnectionOut": {
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url",
+            "description": "连接级 base_url；anthropic / ollama 可空（用 provider 默认值）"
+          },
+          "params_json": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params Json",
+            "description": "连接级调参（api_key / headers / models_url）解析后的对象；其中 api_key 恒被替换为 '***'，headers 里的敏感头逐键脱敏"
+          },
+          "enabled": {
+            "type": "integer",
+            "title": "Enabled",
+            "description": "0/1 整数（非布尔）；0 的连接不可用于 /test"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "has_api_key": {
+            "type": "boolean",
+            "title": "Has Api Key",
+            "description": "是否已配置密钥；涵盖 params.api_key 与 secrets.json 两个来源"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "connection_id",
+          "name",
+          "provider",
+          "enabled",
+          "created_at",
+          "updated_at",
+          "has_api_key"
+        ],
+        "title": "ModelConnectionOut",
+        "description": "``model_connections`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。\n\n**连接层**（2026-10-21 批次十五）：把「连到哪里 / 怎么认证 / 带哪些头」与\n「用什么模型」分离——同一厂商的多个档案共享一条连接，改一次 key 全局生效。\n\n``extra=\"allow\"``：service 层是 ``SELECT * FROM model_connections``，\n与 :class:`ModelProfileOut` 同款口径（将来加列迁移时不被静默丢掉）。"
+      },
       "ModelProfileOut": {
         "properties": {
           "profile_id": {
@@ -12128,6 +12634,18 @@
             "type": "boolean",
             "title": "Has Api Key",
             "description": "是否已配置密钥；涵盖 params.api_key 与 secrets.json 两个来源"
+          },
+          "connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Id",
+            "description": "引用的连接 id（model_connections）；null = 该档案是「独立配置」（自带 base_url / api_key，存量档案的默认形态）"
           }
         },
         "additionalProperties": true,
@@ -12311,6 +12829,18 @@
             ],
             "title": "Hint",
             "description": "仅 400 + 远端错误文本命中模型名标记时出现的中文提示；否则整个键不存在"
+          },
+          "probe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Probe",
+            "description": "连通性探测走的是哪条路：'models'（GET 模型列表端点，默认）/ 'chat'（模型列表端点 404/405/501 时退化的极小请求探测）。⚠️ 降级探测会**真的消耗 1 个 token**（上游收了一次请求）——它只发生在用户手工触发的 /test 路径上"
           }
         },
         "type": "object",
