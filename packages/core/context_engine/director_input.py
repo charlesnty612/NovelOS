@@ -45,6 +45,7 @@ from .cache import (
     _fingerprint_skills,
     _fingerprint_writing_bible,
     characters_fingerprint,
+    world_fingerprint,
 )
 from .canon import (
     _reference_canon_excerpt,
@@ -452,10 +453,16 @@ def build_director_input(
     # 改之前的旧手艺规划本章。口径与降级路径 / 空态**逐字同形**（未绑定 ⇒
     # ``"__none__"``，与 ``genre_pack_ref`` 同形）。
     skills_fp = _fingerprint_skills(peek.get("skills_ref"))
+    # 2026-10-21（P1-3）：键追加**世界观三表**内容指纹。``_world_state_excerpts`` 整份读
+    # locations / factions / world_rules 进 payload，而 ``packages/domain/**`` 里没有任何
+    # story_states 写入（PATCH 设定不推 ``state_version``）⇒ 缺该维度时改设定后重跑同一章
+    # 命中旧装配：planner 与 writer 都拿着改动前的世界设定（与 ``chars_fp`` 同形的硬规则 2
+    # 违规；E1 只补了角色，未补世界观三表）。同放在 prompt_label 之前。
+    world_fp = world_fingerprint(db_path, project_id)
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
         active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
-        chars_fp, skills_fp, prompt_label,
+        chars_fp, world_fp, skills_fp, prompt_label,
         _cache_namespace_tag(namespace),
     )
     cacheable = (
@@ -463,6 +470,7 @@ def build_director_input(
         and intent_fp != _FINGERPRINT_UNCACHED
         and bible_fp != _FINGERPRINT_UNCACHED
         and chars_fp != _FINGERPRINT_UNCACHED
+        and world_fp != _FINGERPRINT_UNCACHED
         and skills_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:

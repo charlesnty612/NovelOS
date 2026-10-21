@@ -16,8 +16,13 @@
   ``test_writer_cache_key_also_has_skills_dimension`` 必红。
 
 ⚠️ 两条都**不是**「删字段声明」那种改字节不改行为的弱变异：删掉的是**键的一元**，
-键的元数从 15 变 14 / 18 变 17 ⇒ 判别用例里的「键元数」与「只差一个位置」两条
+键的元数从 16 变 15 / 20 变 19 ⇒ 判别用例里的「键元数」与「只差一个位置」两条
 断言同时具备判别力。
+
+⚠️ **2026-10-21 锚点订正**：P1-3/P1-4 给 director 键加了 `world_fp`、给 writer 键加了
+`world_fp` + `reveal_fp` ⇒ 两条锚点原文失配（命中 0 次，`validate_specs.py` 报 ❌）。
+这正是坑区登记的「锚点失效不随实现好坏出现，它随别人的改动出现」——改键元组的人
+必须同批跑 `validate_specs.py` 并订正锚点。现锚点已对齐新键形态。
 
 判别
 ----
@@ -31,19 +36,15 @@ MUTATIONS = [
     (
         "SKILL-KEY-1",
         "packages/core/context_engine/director_input.py",
-        "        active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,\n"
-        "        chars_fp, skills_fp, prompt_label,\n",
-        "        active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,\n"
-        "        chars_fp, prompt_label,\n",
+        "        chars_fp, world_fp, skills_fp, prompt_label,\n",
+        "        chars_fp, world_fp, prompt_label,\n",
         "tests/unit/test_skill_injection.py",
     ),
     (
         "SKILL-KEY-2",
         "packages/core/context_engine/writer_input.py",
-        "        target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,\n"
-        "        plan_fp, skills_fp, prompt_label, _cache_namespace_tag(namespace),\n",
-        "        target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,\n"
-        "        plan_fp, prompt_label, _cache_namespace_tag(namespace),\n",
+        "        world_fp, reveal_fp, plan_fp, skills_fp, prompt_label,\n",
+        "        world_fp, reveal_fp, plan_fp, prompt_label,\n",
         "tests/unit/test_skill_injection.py",
     ),
 ]

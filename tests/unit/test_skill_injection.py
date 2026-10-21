@@ -237,7 +237,7 @@ def test_director_cache_key_has_skills_dimension(tmp_path):
     after = [k for k in cache_mod._assembly_cache if k[0] == pid and k[3] == "director"]
     assert len(after) == 1
     b, a = before[0], after[0]
-    assert len(b) == len(a) == 15, f"director 键应为 15 元，实得 {len(b)} / {len(a)}"
+    assert len(b) == len(a) == 16, f"director 键应为 16 元，实得 {len(b)} / {len(a)}"
     diff_positions = [i for i, (x, y) in enumerate(zip(b, a)) if x != y]
     assert len(diff_positions) == 1, (
         f"绑定 skill 后键应只变一个维度，实得 {diff_positions}：{b} → {a}"
@@ -342,8 +342,8 @@ def test_writer_cache_key_also_has_skills_dimension(tmp_path):
     keys_after = [k for k in cache_mod._assembly_cache if k[0] == pid and k[3] == "writer"]
     assert len(keys_after) == 1
     before, after = keys_before[0], keys_after[0]
-    assert len(before) == len(after) == 18, (
-        f"writer 键应为 18 元（17 + skills_fp），实得 {len(before)} / {len(after)}"
+    assert len(before) == len(after) == 20, (
+        f"writer 键应为 20 元（19 + world_fp + reveal_fp），实得 {len(before)} / {len(after)}"
     )
     diff_positions = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
     assert len(diff_positions) == 1, (

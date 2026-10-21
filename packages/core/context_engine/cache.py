@@ -204,6 +204,117 @@ def characters_fingerprint(db_path: str | Path, project_id: str | None) -> str:
     return _fingerprint_characters(rows)
 
 
+# ---------------------------------------------------------------------------
+# 世界观三表 + reveal_policies 内容指纹（2026-10-21）——E1 角色指纹的同形状补齐
+# ---------------------------------------------------------------------------
+#
+# **为什么必须补**：`_world_state_excerpts` 整份读 locations / factions /
+# world_rules 进 payload；writer 侧还经 `_filter_hidden_by_reveal_policies` 按
+# reveal_policies 裁剪实体。两者都是**装配输入**，却都无键维度 —— 而
+# `packages/domain/**` 内没有任何 `story_states` 写入（手工 PATCH 设定、新加一条
+# planned+reader 策略都不推 state_version），缓存失效又只在 chapter_commit 后按章
+# 兜底 ⇒ **改设定 / 加知识权限策略后重跑同一章 ⇒ 命中旧装配**：前者正文沿用旧
+# 设定，后者 HIDDEN 角色仍在 writer 上下文里（**剧透方向**，该拦的没拦）。
+#
+# **列集由 PRAGMA 推导，不手挑**（与 chars_fp 同源纪律）：业务列全集 −
+# {project_id, created_at, updated_at}。时间戳进键会让「只 bump updated_at」白付
+# 一次重装；project_id 是查询条件本身。
+#
+# **单表缺失不拖垮整个维度**：某张表不存在（极老库）时该表记 ``"missing"`` 占位，
+# 其余表照常参与指纹——否则「缺一张表」会让整条维度恒 ``"none"``，把另外两张表的
+# 判别力一起丢掉（这是 chars_fp 单表形态不会遇到的形状）。
+_FINGERPRINT_ROW_EXCLUDED = frozenset({"project_id", "created_at", "updated_at"})
+
+_WORLD_FINGERPRINT_TABLES: tuple[tuple[str, str], ...] = (
+    ("locations", "location_id"),
+    ("factions", "faction_id"),
+    ("world_rules", "world_rule_id"),
+)
+
+_REVEAL_FINGERPRINT_TABLES: tuple[tuple[str, str], ...] = (
+    ("reveal_policies", "policy_id"),
+)
+
+
+def _fingerprint_table_rows(
+    conn: sqlite3.Connection, table: str, id_column: str, project_id: str,
+) -> Any:
+    """读一张表的业务列（列集 PRAGMA 推导）；表/列缺失 → ``"missing"`` 占位。
+
+    非「缺表/缺列」的运行时故障**上抛**（锁 / I/O 静默归 none = 缓存键维度失真）。
+    """
+    try:
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return "missing"
+    if not cols:
+        return "missing"
+    keep = [c for c in cols if c not in _FINGERPRINT_ROW_EXCLUDED]
+    if not keep:
+        keep = [id_column]
+    sql = (
+        f"SELECT {', '.join(keep)} FROM {table} "
+        f"WHERE project_id = ? ORDER BY {id_column} ASC"
+    )
+    try:
+        rows = conn.execute(sql, (project_id,)).fetchall()
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return "missing"
+    return [list(r) for r in rows]
+
+
+def _fingerprint_tables(
+    db_path: str | Path, project_id: str | None, tables: tuple[tuple[str, str], ...],
+) -> str:
+    """多表内容指纹：``[[表名, 行集], ...]`` 的稳定哈希（sha256 前 16）。
+
+    - 无 project_id → ``_FINGERPRINT_NONE``；连接打不开 / 缺表 → ``"missing"`` 占位；
+    - 不可序列化 → ``_FINGERPRINT_UNCACHED``，调用方据此跳过缓存（绝不静默落到某个
+      稳定值——那正是脏命中）。
+    """
+    if not project_id:
+        return _FINGERPRINT_NONE
+    try:
+        conn = get_connection(db_path)
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return _FINGERPRINT_NONE
+    try:
+        snapshot = [
+            [table, _fingerprint_table_rows(conn, table, id_column, project_id)]
+            for table, id_column in tables
+        ]
+    finally:
+        conn.close()
+    try:
+        normalized = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:_FINGERPRINT_LEN]
+    except Exception:  # noqa: BLE001 —— 不可序列化时跳过缓存
+        return _FINGERPRINT_UNCACHED
+
+
+def world_fingerprint(db_path: str | Path, project_id: str | None) -> str:
+    """``locations`` / ``factions`` / ``world_rules`` 三表内容指纹（writer + director 共用）。
+
+    判别：``tests/unit/test_world_reveal_cache_key.py``（改任一表必须 miss）。
+    """
+    return _fingerprint_tables(db_path, project_id, _WORLD_FINGERPRINT_TABLES)
+
+
+def reveal_policies_fingerprint(db_path: str | Path, project_id: str | None) -> str:
+    """``reveal_policies`` 内容指纹（writer 侧按它裁剪 HIDDEN 实体，见 P1-4）。
+
+    判别：``tests/unit/test_world_reveal_cache_key.py``（加一条 planned+reader 策略
+    必须 miss，否则 HIDDEN 角色剧透）。
+    """
+    return _fingerprint_tables(db_path, project_id, _REVEAL_FINGERPRINT_TABLES)
+
+
 def _fingerprint_scene_plan(scene_plan: Any) -> str:
     """计算 scene_plan 的稳定指纹（json.dumps sort_keys=True 的 sha256 前 16）。
 

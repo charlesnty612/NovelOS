@@ -26,25 +26,25 @@ state_version）命中旧装配。修法 = 加 ``chars_fp`` 键维度
 
 MUTATIONS = [
     # ------------------------------------------------------------------
-    # 撤掉修复：writer 键退回 15 元（无角色维度）
+    # 撤掉修复：writer 键退回（无角色维度）
     # ------------------------------------------------------------------
     (
         "E1-1",
         "packages/core/context_engine/writer_input.py",
         "target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,\n"
-        "        plan_fp, skills_fp, prompt_label, _cache_namespace_tag(namespace),\n",
+        "        world_fp, reveal_fp, plan_fp, skills_fp, prompt_label,\n",
         "target_word_count, genre_pack_ref, intent_fp, bible_fp,\n"
-        "        plan_fp, skills_fp, prompt_label, _cache_namespace_tag(namespace),  # E1-MUT: 撤角色维度\n",
+        "        world_fp, reveal_fp, plan_fp, skills_fp, prompt_label,  # E1-MUT: 撤角色维度\n",
         "tests/unit/test_e1_character_cache_key.py",
     ),
     # ------------------------------------------------------------------
-    # 撤掉修复：director 键退回 13 元
+    # 撤掉修复：director 键退回（无角色维度）
     # ------------------------------------------------------------------
     (
         "E1-2",
         "packages/core/context_engine/director_input.py",
-        "        chars_fp, skills_fp, prompt_label,\n        _cache_namespace_tag(namespace),\n",
-        "        skills_fp, prompt_label,  # E1-MUT: 撤角色维度\n        _cache_namespace_tag(namespace),\n",
+        "        chars_fp, world_fp, skills_fp, prompt_label,\n",
+        "        world_fp, skills_fp, prompt_label,  # E1-MUT: 撤角色维度\n",
         "tests/unit/test_e1_character_cache_key.py",
     ),
     # ------------------------------------------------------------------

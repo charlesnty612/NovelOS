@@ -47,6 +47,8 @@ from .cache import (
     _fingerprint_skills,
     _fingerprint_writing_bible,
     characters_fingerprint,
+    reveal_policies_fingerprint,
+    world_fingerprint,
 )
 from .canon import (
     _REFERENCE_CANON_CONSUMER_WRITER,
@@ -495,20 +497,33 @@ def build_writer_input(
     # （硬规则 2，与 director 键逐字同形）：换 skill / 改 skill payload（version
     # 自增）/ 改绑定集合都必须 miss，否则 writer 拿着改之前的旧手艺写正文。
     skills_fp = _fingerprint_skills(peek.get("skills_ref"))
+    # 2026-10-21（P1-3 / P1-4）：缓存键追加**世界观三表**与 **reveal_policies** 内容指纹。
+    # 两者都是装配输入却原先无键维度：
+    #   - ``_world_state_excerpts`` 整份读 locations / factions / world_rules 进 payload；
+    #   - ``_filter_hidden_by_reveal_policies`` 按 reveal_policies 裁剪 HIDDEN 实体。
+    # 而 ``packages/domain/**`` 内没有任何 story_states 写入（PATCH 设定 / 新增策略都不推
+    # state_version），缓存失效又只在 commit 后按章兜底 ⇒ 改设定或加一条 planned+reader
+    # 策略后重跑同一章会命中旧装配（前者正文沿用旧设定，后者 HIDDEN 角色**剧透**）。
+    # 与 ``chars_fp`` 逐字同形，同样放在 prompt_label 之前保持键尾两元语义不变。
+    world_fp = world_fingerprint(db_path, project_id)
+    reveal_fp = reveal_policies_fingerprint(db_path, project_id)
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
         scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id,
         target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,
-        plan_fp, skills_fp, prompt_label, _cache_namespace_tag(namespace),
+        world_fp, reveal_fp, plan_fp, skills_fp, prompt_label,
+        _cache_namespace_tag(namespace),
     )
-    # 不可序列化（scene_fp / intent_fp / bible_fp / chars_fp / skills_fp == 'uncached'）
-    # → 跳过缓存，避免不同原文落在同一占位键上互相脏命中（与 director 的 cacheable
-    # 判定同款）。
+    # 不可序列化（scene_fp / intent_fp / bible_fp / chars_fp / world_fp / reveal_fp /
+    # skills_fp == 'uncached'）→ 跳过缓存，避免不同原文落在同一占位键上互相脏命中
+    # （与 director 的 cacheable 判定同款）。
     cacheable = (
         scene_fp != _FINGERPRINT_UNCACHED
         and intent_fp != _FINGERPRINT_UNCACHED
         and bible_fp != _FINGERPRINT_UNCACHED
         and chars_fp != _FINGERPRINT_UNCACHED
+        and world_fp != _FINGERPRINT_UNCACHED
+        and reveal_fp != _FINGERPRINT_UNCACHED
         and plan_fp != _FINGERPRINT_UNCACHED
         and skills_fp != _FINGERPRINT_UNCACHED
     )
