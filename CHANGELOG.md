@@ -266,6 +266,23 @@ prune 保留 N 份、探测不到同步盘时报错。⇒ 撤加密 / 撤脱敏�
   `sqlite3.connect()` **静默建空库**（不报错）⇒ `integrity_check=ok` + 0 表。
   改用 Windows 绝对路径 ⇒ 46 张表。已写进 AGENTS 坑区。
 
+#### 8. 活库（项目本体）也已备份 + 密钥进私有网盘（用户裁决）
+
+- 用户追问「项目的本体有备份到同步盘吗」⇒ 此前只迁了**历史备份文件**，**活库**
+  `data\novelos.db` 本身还只在本机 ⇒ 补跑 `backup_db.py --encrypt` ⇒
+  `D:\BaiduSyncdisk\NovelOS\backups\novelos_20261022_024121.db.enc`（122.3 MB 密文）。
+  **可恢复性实测**：解密 ⇒ `integrity_check=ok`、**49 张表**、projects 13 /
+  chapters 177 / commits 134 / story_states 134 / model_profiles 2 /
+  model_connections 0（尚未建连接）。
+- **用户裁决「密钥也传到同步盘，那是我的私有云盘」** ⇒ 密钥复制到
+  `D:\BaiduSyncdisk\NovelOS\backup.key`（SHA256 `158bd9e5…` 与本机
+  `~/.novelos/backup.key` 逐位一致）。
+  ⚠️ **推翻本会话先验判断（留痕）**：我先前建议「密钥别放网盘（放进去等于没加密）」，
+  前提是「第三方云盘」；本仓网盘是**用户自己的私有云盘** ⇒ 密钥不同步过去则
+  **机器坏掉时备份读不开** ⇒ 备份失去意义 ⇒ 用户判断更合理。
+  **恢复路径**：机器坏 ⇒ 从网盘取回 `backup.key` 放回 `C:\Users\<user>\.novelos\backup.key`
+  ⇒ 脚本与解密即刻可用。⚠️ 知情接受的代价：拿到网盘 = 拿到模型密钥。
+
 ### Fixed（2026-10-21 批次（十四）：全量审查后的修复 —— 一条测试曾让「全量回归」静默猝死）
 
 > **来源**：用户指令「对项目做全面审查」→「按建议顺序做修复」。
