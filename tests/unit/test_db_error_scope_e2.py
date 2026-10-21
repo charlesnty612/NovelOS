@@ -381,7 +381,31 @@ def test_degraded_path_still_degrades_on_missing_schema(monkeypatch) -> None:
 # D 组：判别面覆盖全集——三个源文件里不再存在裸 OperationalError handler
 # --------------------------------------------------------------------------------------
 
-_TARGET_FILES = ("common.py", "ledger.py", "summaries.py")
+# ⚠️ 判别面**从目录推导**，不得手挑名册（2026-10-21 修）：
+# 原实现是 `("common.py", "ledger.py", "summaries.py")` —— 而包内实有 4 个子模块，
+# `excerpts.py`（30 KB、同族 DB 读）**在名册之外** ⇒ 往它注入一个裸
+# `except sqlite3.OperationalError` 后本组用例仍 **31 passed**（突变存活，实测）。
+# 更糟的是那条用例的 docstring 当时写着「判别面不靠手挑名单」——**测试对自身的
+# 描述与事实不符**（同坑区「skip 理由当断言核」一族：说明文字是复核者唯一入口）。
+# 现改为 `glob("*.py")` 全集推导 + 名册断言（域不得静默缩小），
+# 范式同 `tests/unit/quality/test_readability_rules.py` 的 `ai_patterns*.py` 读法。
+_TARGET_FILES = tuple(sorted(p.name for p in _SRC_DIR.glob("*.py")))
+
+
+def test_target_roster_is_derived_from_package_and_includes_excerpts() -> None:
+    """名册必须等于包内实际模块集合，且必须含 ``excerpts.py``。
+
+    判别：把 ``_TARGET_FILES`` 改回手挑三项 ⇒ 本用例必红；把 ``excerpts.py``
+    加进 ``_TARGET_FILES`` 而删掉 glob ⇒ 同样必红（两条方向都守）。
+    """
+    on_disk = {p.name for p in _SRC_DIR.glob("*.py")}
+    assert set(_TARGET_FILES) == on_disk, (
+        "判别域被缩小/扩大了：名册与包内实际模块不一致 "
+        f"missing={sorted(on_disk - set(_TARGET_FILES))} "
+        f"extra={sorted(set(_TARGET_FILES) - on_disk)}"
+    )
+    assert "excerpts.py" in on_disk, "包内应有 excerpts.py（2026-10-21 事故那个漏网文件）"
+    assert len(on_disk) >= 4, f"包内模块数异常少：{sorted(on_disk)}"
 
 
 def _bare_operational_error_handlers(path: Path) -> list[int]:
