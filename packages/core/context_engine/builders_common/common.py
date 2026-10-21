@@ -967,8 +967,27 @@ _PEEK_CHAPTER_SQL = """
 """
 
 # 降级 SQL：极老库缺 reference_canons 表 / projects.word_band_json 列时上面的 JOIN 抛
-# OperationalError → 退回只读章节三列，项目维度各项独立 try（逐项与旧 _peek_* 同语义）。
+# OperationalError → 退回只读章节列，项目维度各项独立 try（逐项与旧 _peek_* 同语义）。
+#
+# ⚠️ **必须与主 JOIN 同形带出 `outline_json`**（2026-10-21 修，硬规则 2）：
+# 装配缓存键的 `outline_fp` 由 `outline_json_raw` 算（`_fingerprint_outline_json`）；
+# 本降级路径原先只读三列 ⇒ `outline_fp` 恒为「指纹 None」的 `"none"` ⇒ **改
+# `chapters.outline_json` 后同 state_version 重跑仍命中旧装配**，而 payload 里的
+# `chapter.outline` 是新值（uncached 路径独立读章节行）—— 大纲改动对 director 装配
+# 完全无效且零告警。这正是硬规则 2「主 JOIN 与降级路径的键形态必须逐字同形」。
+#
+# **触发面不是「极老库才走」**（2026-10-21 实测）：dev 库当时停在迁移 0031（缺
+# `skills` / `project_skills` 表）⇒ 主 JOIN 每次抛错 ⇒ 降级是常态。
+#
+# 0028 之前的老库连 `chapters.outline_json` 这一列都没有 ⇒ 列级再降一档
+# （`_LEGACY`）：那时「大纲」这个输入本身不存在，读不到不算丢维度。
 _PEEK_CHAPTER_FALLBACK_SQL = """
+    SELECT number AS chapter_no, project_id AS project_id, plan_json AS plan_json,
+           outline_json AS outline_json
+    FROM chapters WHERE chapter_id = ?
+"""
+
+_PEEK_CHAPTER_FALLBACK_SQL_LEGACY = """
     SELECT number AS chapter_no, project_id AS project_id, plan_json AS plan_json
     FROM chapters WHERE chapter_id = ?
 """
@@ -1189,13 +1208,41 @@ def _peek_chapter_context_conn(
     }
 
 
+def _read_fallback_chapter_row(
+    conn: sqlite3.Connection, chapter_id: str,
+) -> sqlite3.Row | None:
+    """降级读章节行：先按**与主 JOIN 同形**的列集读（含 ``outline_json``），缺列再退三列版。
+
+    ⚠️ 不能只留一条 SQL 靠外层 ``except`` 兜：``chapters`` 表在、而
+    ``outline_json`` 列不在（0028 之前的库）时，缺列错误与缺表错误同属
+    ``OperationalError`` —— 必须**逐档重试**，才能既保住大纲维度、又不把极老库
+    读成空态。非「缺表/缺列」的故障（锁 / I/O / 损坏）照旧上抛，不在此静默降级
+    （吞掉它们会让缓存键维度失真，见同文件其余 ``_try_*`` 的收窄注释）。
+    """
+    try:
+        return conn.execute(_PEEK_CHAPTER_FALLBACK_SQL, (chapter_id,)).fetchone()
+    except sqlite3.OperationalError as exc:
+        if not _is_missing_schema_error(exc):
+            raise
+    return conn.execute(_PEEK_CHAPTER_FALLBACK_SQL_LEGACY, (chapter_id,)).fetchone()
+
+
 def _peek_chapter_context_degraded(
     conn: sqlite3.Connection, chapter_id: str, project_id: str | None,
 ) -> dict[str, Any]:
-    """JOIN 失败时的逐项降级读（语义与收敛前各 ``_peek_*`` 单函数一致）。"""
+    """JOIN 失败时的逐项降级读（语义与收敛前各 ``_peek_*`` 单函数一致）。
+
+    ⚠️ 本路径是**缓存键维度**的来源之一，必须与主 JOIN 逐字同形（硬规则 2）：
+    ``outline_json_raw`` 少一个 ⇒ ``outline_fp`` 恒 ``"none"`` ⇒ 改大纲脏命中。
+    """
     try:
-        row = conn.execute(_PEEK_CHAPTER_FALLBACK_SQL, (chapter_id,)).fetchone()
-    except sqlite3.Error:
+        row = _read_fallback_chapter_row(conn, chapter_id)
+    except sqlite3.OperationalError as exc:
+        # 只把「缺表/缺列」读成空态（连 chapters 表都没有的库）；锁 / I/O / 损坏
+        # **一律上抛**——静默降级会让缓存键维度失真且零告警（与同文件其余 _try_*
+        # 的收窄口径一致；2026-10-21 顺带收窄原 `except sqlite3.Error`）。
+        if not _is_missing_schema_error(exc):
+            raise
         return _empty_chapter_peek(chapter_id, project_id)
     if row is None:
         return _empty_chapter_peek(chapter_id, project_id)
@@ -1205,6 +1252,10 @@ def _peek_chapter_context_degraded(
         "found": True,
         "chapter_no": _as_int_or(row["chapter_no"]),
         "plan_json_raw": row["plan_json"],
+        # 与主 JOIN 同形（0028+ 的库必有该列；更老的库由 _LEGACY 档读不到 → None）。
+        "outline_json_raw": (
+            row["outline_json"] if "outline_json" in row.keys() else None
+        ),
     })
     if pid:
         info["state_version"] = _project_max_state_version(conn, pid)
