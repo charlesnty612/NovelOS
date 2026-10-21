@@ -25,6 +25,16 @@
 
 ⚠️ 附带守一条反向不变量：探测**不能**退化成「一律返回 True」。
 否则「不存在的 PID」也判活 ⇒ 陈旧锁永远解不开 ⇒ 与原缺陷等价，只是反了个方向。
+
+⚠️⚠️ **2026-10-21 事故补充（本模块曾经自伤，务必别退回）**：本文件此前会让
+**运行它的整个控制台进程树**静默消失（pytest 全量在 67% 处猝死、无 traceback）。
+机制是 ``_CHILD_PROBE`` 里的 ``os.kill(os.getpid(), 0)``：Windows 上
+``signal.CTRL_C_EVENT == 0``，CPython 把它翻成
+``GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)``—— **广播 Ctrl+C，不是探测存活**。
+子进程与父进程共享控制台时，Ctrl+C 同时落到 pytest 与调用它的 shell 上。
+修法见 :func:`_child_creationflags`（非 detached 档一律 ``CREATE_NEW_CONSOLE``）。
+**新增任何「在子进程里调 ``os.kill(pid, 0)``」的用例，必须先确认该子进程没有
+共享控制台**——这条不变量没有别的看守，只能靠这段文字与那个 helper。
 """
 
 from __future__ import annotations
@@ -42,6 +52,7 @@ import m1_long_run as m1  # noqa: E402
 
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_NEW_CONSOLE = 0x00000010
 WIN = sys.platform == "win32"
 
 # 子进程里跑的探针：把探测结果打印成机器可读的一行。
@@ -69,6 +80,31 @@ print("PROBE_JSON=" + json.dumps(result), flush=True)
 '''
 
 
+def _child_creationflags(flags: int) -> int:
+    """探针子进程的创建标志——**非 detached 档必须再给一个独立控制台**。
+
+    ⚠️ 2026-10-21（本仓实测，事故级）：Windows 上 ``signal.CTRL_C_EVENT == 0``，
+    而 CPython 的 ``os.kill(pid, 0)`` 对 ``CTRL_C_EVENT`` 走的是
+    ``GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)``——**它不是存活探测，而是给
+    ``pid`` 所在控制台广播 Ctrl+C**。``_CHILD_PROBE`` 里那句
+    ``os.kill(os.getpid(), 0)`` 因此在**与父进程共享控制台**时会连带杀掉
+    **运行测试的整棵控制台进程树**：
+
+    - 实测 1：`pytest -n 4 -q` 全量在 67% 处静默猝死（exit 1、无 traceback、
+      日志截断）——因为 ``flags=0`` 那一档就是共享控制台；
+    - 实测 2：单跑本文件没有任何输出、连调用它的 shell 一起死；
+    - 实测 3：``-k "not non_positive_pids"``（只剩 detached 档）→ 8 passed / 2.56s。
+
+    ``DETACHED_PROCESS`` 档本身没有控制台 ⇒ ``GenerateConsoleCtrlEvent`` 失败
+    （``WinError 87``）⇒ 安全（这也正是 AGENTS 坑区记的「87」的来源，但它只记了
+    症状，没记「非 detached 档会广播 Ctrl+C」这一半）。故只给**非 detached** 档
+    补 ``CREATE_NEW_CONSOLE``，让探针的爆炸半径被关在子进程自己的控制台里。
+    """
+    if flags & DETACHED_PROCESS:
+        return flags
+    return flags | CREATE_NEW_CONSOLE
+
+
 def _run_child(flags: int) -> dict:
     script = _CHILD_PROBE.replace("__SCRIPTS__", str(ROOT / "scripts").replace("\\", "/"))
     out = subprocess.run(
@@ -76,7 +112,7 @@ def _run_child(flags: int) -> dict:
         capture_output=True,
         text=True,
         timeout=60,
-        creationflags=flags,
+        creationflags=_child_creationflags(flags),
     )
     assert out.returncode == 0, f"探针子进程挂了 rc={out.returncode}: {out.stderr[-800:]}"
     line = next(ln for ln in out.stdout.splitlines() if ln.startswith("PROBE_JSON="))
