@@ -112,6 +112,7 @@ key、但生效 key 不同」的真实情形 ⇒ 按 params 里的 key 分组会
 | `export_openapi` + `gen_frontend_types` | **109 paths / 145 schemas**（103/142 → +6 path / +3 schema） |
 | 突变（新增 `tests/mutation_specs/l10_model_connections.py`） | **6/6 全捕获**，0 存活 0 中止；残留清点 0（`.mutbak` + 标记形态 + 逐字节复核，三项均干净） |
 | `smoke_e2e.py` | **PASS**（`tables=42`；plan→write→review PAUSED→resume→commit 四步链路完好 + observer 内容在场 + SYNC OK） |
+| GitHub CI（run `39635433432`，**Linux**） | **3 job 全绿**：backend (pytest + ruff) 9m55s / web (build + vitest) 57s / e2e smoke (state sync included) 23s —— **本地是 Windows、CI 是 Linux** ⇒ 本批 3790 条用例**在 Linux 上亦全绿**；⚠️ 突变套件**未接进 CI**（挂账「未在 Linux dry-run ⇒ 先不接」仍成立） |
 
 ⚠️ **全量突变套件（既有 310+ 条）本轮未重跑** ⇒ **不声称「全量突变通过」**（如实登记）。
 ⚠️ **零真实 LLM 调用**（AGENTS §一 硬约束 2）：全部走 mock / 临时库；
