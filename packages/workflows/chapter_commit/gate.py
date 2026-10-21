@@ -448,9 +448,14 @@ def _quality_gate_node(ctx: dict[str, Any]) -> dict[str, Any]:
     project_id = ctx.get("project_id")
     if not project_id:
         svc = StoryStateService(db_path)
-        project_id = svc._project_id_for_chapter(  # noqa: SLF001
-            get_connection(db_path), chapter_id
-        )
+        # 2026-10-21 卫生修复：连接改为显式 close（原实现内联传参、从不 close）。
+        _conn = get_connection(db_path)
+        try:
+            project_id = svc._project_id_for_chapter(  # noqa: SLF001
+                _conn, chapter_id
+            )
+        finally:
+            _conn.close()
     if not project_id:
         raise ValueError(f"chapter {chapter_id!r} not found")
 

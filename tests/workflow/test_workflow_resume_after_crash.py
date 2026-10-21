@@ -248,10 +248,15 @@ def test_resume_unrelated_state_returns_no_resume(tmp_path: Path):
     # 这里我们仅断言：resume 一个非 PAUSED run 抛 ValueError
     # run_id 的 status 可能是 COMPLETED 或 RUNNING（如果没调 run_agent）。两者都应抛 ValueError。
     wf = get_workflow("chapter-review")
-    if wf is None:
-        import pytest
-
-        pytest.skip("chapter-review workflow not registered")
+    # ⚠️ 2026-10-21：原实现是 `pytest.skip("chapter-review workflow not registered")`。
+    # 那是把**被测前提**（chapter-review 必须已注册）当成了**跳过条件**：一旦注册被
+    # 误删/改名，本用例静默跳过，而「跳过」与「跑过且通过」在退出码上完全同形
+    # ⇒ 覆盖静默消失（同坑区「skip 理由不是元数据，它是对覆盖率的断言」）。
+    # 改为硬断言：注册消失本身就是缺陷，必须红。
+    assert wf is not None, (
+        "chapter-review 未注册——本用例的前提已失效；workflow 注册消失是独立缺陷，"
+        "不得以 skip 掩盖（原 skip 理由见 CHANGELOG 2026-10-21）"
+    )
     raised = False
     try:
         engine.resume(run_id, wf["nodes"])

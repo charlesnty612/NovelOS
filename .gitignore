@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 *.pyo
 # 突变验证的中途备份（tests/mutation_specs/run_spec.py 与 scripts/mutation_harness.py
@@ -64,4 +64,5 @@ secrets*.json*
 # 会话级临时暂存区：探针脚本 / 时序对比 / 临时 payload 响应 / 手工日志。
 # 一次性排障产物，非交付物；证据要留的先摘进 NovelOS-Artifacts 再删（2026-10-14 登记）
 /tmp/
-
+# 本地工具配置（Claude Code 会话设置），非项目内容
+.claude/

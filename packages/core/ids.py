@@ -28,5 +28,14 @@ def new_id(prefix: str) -> str:
 
 
 def now_iso() -> str:
-    """返回 UTC ISO-8601 时间戳字符串，秒级精度（带 ``+00:00`` 偏移）。"""
+    """返回 UTC ISO-8601 时间戳字符串，**微秒**精度（带 ``+00:00`` 偏移）。
+
+    ⚠️ 2026-10-21 订正：原文写「秒级精度」——实测是微秒
+    （``2026-10-21T11:50:13.208030+00:00``）。这条注释曾被用来支撑
+    「``created_at`` 同秒并列 ⇒ 时序不稳」的论证（``domain/chapter/draft_resolver.py``
+    的 docstring），那套论证因此在**时序**这条腿上被夸大：同秒并列实际几乎不成立。
+    结论不变（草稿的「最新」口径仍统一走 ``version DESC``，因为 version 是发布序、
+    而 created_at 是写入时刻），但**论证强度**要按微秒精度重述：分叉风险来自
+    「两个站点各自定义最新」，不是来自时钟精度。
+    """
     return datetime.now(timezone.utc).isoformat()

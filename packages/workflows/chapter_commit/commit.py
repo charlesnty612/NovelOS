@@ -90,9 +90,17 @@ def _inject_validate_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     # 取当前 state_version 作 previous_state_version（不依赖 observer_payload，原口径）
     svc = StoryStateService(db_path)
-    project_id = svc._project_id_for_chapter(  # noqa: SLF001
-        get_connection(db_path), chapter_id
-    )
+    # 2026-10-21 卫生修复：原实现把 `get_connection(db_path)` 内联传给 helper，
+    # 连接**从不 close**（全仓其余 40+ 处都是 try/finally）。CPython 引用计数会在
+    # 表达式结束后回收，故不是硬泄漏；但 WAL 下会短暂多持一份读快照，且与全仓
+    # 连接纪律不一致。helper 签名不变（它只借 conn 用）。
+    _conn = get_connection(db_path)
+    try:
+        project_id = svc._project_id_for_chapter(  # noqa: SLF001
+            _conn, chapter_id
+        )
+    finally:
+        _conn.close()
     if project_id is None:
         raise ValueError(f"chapter {chapter_id!r} not found")
     current_state = svc.get_current_state(project_id)
@@ -403,9 +411,15 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
             _peek_project_id_from_chapter,
         )
         _proj_id = _peek_project_id_from_chapter(db_path, chapter_id)
-        _chap_row = get_connection(db_path).execute(
-            "SELECT number FROM chapters WHERE chapter_id = ?", (chapter_id,),
-        ).fetchone()
+        # 2026-10-21 卫生修复：原先 `get_connection(...).execute(...)` 内联且不 close
+        # （CPython 引用计数会回收，但 WAL 下短暂多持读快照，且与全仓纪律不一致）。
+        _conn = get_connection(db_path)
+        try:
+            _chap_row = _conn.execute(
+                "SELECT number FROM chapters WHERE chapter_id = ?", (chapter_id,),
+            ).fetchone()
+        finally:
+            _conn.close()
         if _proj_id is not None and _chap_row is not None:
             _invalidate_cache_for_chapter(_proj_id, int(_chap_row["number"] or 0))
     except Exception:  # noqa: BLE001 —— 失效失败不阻断 commit
