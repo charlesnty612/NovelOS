@@ -38,9 +38,21 @@ jobs:
           #   ① 证据表（packages/core/quality/detector_evidence.json）与**代码实际值**
           #      逐条相符（66 条代码引用 + 12 条行为探针；退出码 0/1/2）；
           #   ② 对外 skill 包的三平台清单 / frontmatter / 引用完整性合规
-          #      （46 项检查 + 7 条变异自检）。
+          #      （**49 项检查 + 8 条变异自检**；2026-10-22 批次十九起新增
+          #        app-version-consistency 三条 + 变异 M8，此前写的 46+7 已过期）。
           python scripts/detector_evidence_check.py
           python skills/novelos/scripts/check_skill_package.py --selftest
+      - name: Mutation-spec precheck (read-only, ~1s)
+        run: |
+          # 「突变套件不进 CI」是已知缺口（全量约 13 分钟，只在发版前跑，见 AGENTS §四 三档闸位）。
+          # 但**只读预检**只花约 1 秒，且它恰好覆盖全量跑的**一半目的**：
+          # 「既有锚点没被本批改动打断」。锚点一断，这里立刻红 —— 比等某条突变
+          # 在 13 分钟末尾报 [ABORT] 更早、更准，且不写任何源码。
+          #   ① validate_specs.py：规格形态 / 锚点唯一性 / 替换有效性；
+          #   ② run_spec.py --all --precheck：同一批判据的旁路复核（目标/测试文件存在、
+          #      replacement 与 anchor 不同、锚点恰好命中 1 次）。
+          python tests/mutation_specs/validate_specs.py
+          python tests/mutation_specs/run_spec.py --all --precheck
       - name: Human-baseline proxy (synthetic corpus — NOT the human baseline)
         run: |
           # 内容仓 NovelOS-Content **不推 GitHub**（硬规则 5）⇒ CI 永远拿不到

@@ -5,6 +5,91 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-22 批次（二十二）：review 剩余 bug 全收口 —— 架构看守重写 + 两条 minor）
+
+> **来源**：用户「把 review 出来的 bug 都修复下」。前两批已处理 P0-1/P0-3/P1-1/P1-3/P1-4/P1-6/P1-8 与
+> 闸门提速；本批收口**剩下的 4 条**：P0-2（review 唯一 major）、P1-2、P1-5、P2-4。
+> **2 名成员 + Lead**；`packages/` 仅 1 处（缓存失效留痕）。
+
+#### 1. P0-2 架构分层看守重写（**含一次 Lead 自己的 critical，被对抗审查抓出**）
+
+**旧实现的三个病**（对抗审查实测，把 7 种合成写法喂给它自己的判据）：
+① 静态 import 拦得住，但 `importlib.import_module("packages"+"."+"workflows")` 与 `__import__(...)` 拆字符串写法**全漏**（5/7）；
+② 兜底断言「core 下不得出现 `packages.workflows` 字面值」**反过来逼**任何动态 import 只能拆字符串 —— 而
+`packages/core/api/main.py:215` 用的正是这种形态 ⇒ **两条断言互相打架，动态方向零机器约束**；
+③ docstring 承诺的 `main.py` 豁免（`_is_inside_importlib_call`）**从未实现**（恒返回 `False`）。
+
+**Lead 第一版重写也带一个 critical**（对抗审查抓出，如实留痕）：判据改为「AST 常量折叠 + 白名单」后，
+折叠器 `_module_string_env` **只遍历 `tree.body`**（模块级），而 `main.py` 的 `_workflows_pkg` 绑在
+**`create_app()` 函数体内（4 空格缩进）** ⇒ 折不出来 ⇒ **看守在自己的树上红 2 条**
+（`2 failed / 15 passed`）。**讽刺点**：这一版正是为抓「拆字符串动态 import」而写的，却折不出项目唯一那条。
+
+**定稿判据**（dev-a 落地，Lead 裁决 4 处口径）：
+- **折叠器扩到全树**（`ast.walk`）+ **同名多值即不可折叠**（防遮蔽误判）+ 迭代到不动点（支持 `A="packages."` → `B=A+"workflows"` 链）；
+- **主判据换成「callee 无关」的规则 R**：任一 `ast.Call` 的**任一实参**折叠出的字符串若命中**点分路径**
+  `packages.workflows`（`(?<![\w.])packages\.workflows(?![\w])`，故 `notpackages.workflows` 不误判）⇒ 违规。
+  一次堵死全部间接化：`getattr(importlib,"import_module")` / `from importlib import import_module` /
+  `import importlib as il` / `functools.partial` / `exec(拆字符串)` / 星号解包；
+- **「不可判定」规则收窄到已知 import callee** ⇒ 不会把 `log.warning(<非折叠>)` 这类全判了；
+- **`GUARDED_ROOTS` 参数化**：core 与 domain 各跑一遍动态扫描 + 字面量禁令 ⇒ **domain 不再是半边看守**；
+- 白名单改**精确集合相等**（原只钉条数 ⇒ 把唯一那条换成另一个文件测试照绿）+ `NON_FOLDABLE` 降到 **`(rel, callee)` 调用级**；
+- **删掉 `main.py` 的字面值豁免**（实测该文件含该字面值 **0 次** ⇒ 豁免用不上），字面值禁令恢复全局生效；
+- 静态判据把 `from X import Y` 视作 `X.Y`（堵上 `from packages import workflows` 这个更阴的写法）。
+
+**证据**：8 种绕过形态 **8/8 拦住**（各自标出命中通道：violation / unfingerprintable）；3 条合法形态
+（`import_module("packages.core.quality")` / `__import__("json")` / main.py 白名单那条）**不误报**；
+**白名单承重证明**：清空 `ALLOWED_DYNAMIC_WORKFLOW_IMPORTS` ⇒ `main.py:216` 立刻变违规（说明它真的被扫到并命中白名单，
+不是「恰好不报」）；真实扫描 core/domain 均 `violations=0 / unfingerprintable=0`、相对逃逸 0。
+突变 `q4_layering_guard.py` **3 条**（撤 `BinOp` 折叠 / 撤 callee 解析 / 白名单加一条）⇒ **3/3 CAUGHT**，
+且 `Q4-CALLEE-1` 精确落在 `star-args` 用例、`Q4-WHITELIST-1` 精确落在「精确集合相等」断言（旧版只钉条数会存活）。
+
+#### 2. P1-2 `check_state_sync` 的判据强度写明（它此前的 `SYNC OK` 会被误读）
+
+判据是**实体 id 集合**的双向差集（DB 侧 `fetch_db_ids`、快照侧同样只抽 id）⇒ 能证明**实体成员**在两侧一致，
+**不能证明某个已存在实体的内容是否正确**（例：快照里那条角色 `state.location` 已错、id 仍在 ⇒ 照样 `SYNC OK`）。
+- `scripts/check_state_sync.py` 新增 :32-46 一节「判据强度：`SYNC OK` 能证明什么、不能证明什么」；
+  `database/README.md:61` 并入既有「维护注意点」一句同口径；**判据逻辑不动**。
+- `tests/unit/test_script_check_state_sync.py`（**1 例**）把口径变成**可执行**看守（docstring 必须含四个关键词）。
+  ⚠️ dev-b 主动**砍掉**了自己先写的一条反向断言（「docstring 不得含『校验实体内容』」）—— 那是**必然自伤**：
+  写「不校验实体内容」时该子串天然存在（同 AGENTS 坑区「正则扫源码计数类断言只能用下界」）。
+
+#### 3. P2-4 缓存失效失败不再静默
+
+`packages/workflows/chapter_commit/commit.py:425` 原 `except Exception: pass`（注释「失效失败不阻断 commit」——
+**该决定保留**）⇒ 失效失败**零痕迹**，后果是后续装配**脏命中旧缓存**而无人知道。
+- 改为 `except Exception as exc:` + `_log.warning(...)`（用同文件既有 `_log`），带 **project_id / chapter_no / 异常摘要**；
+  仍不抛、仍不阻断（`status_after == "COMMITTED"` 不变）。
+- 顺带修一个会变成「二次崩溃」的隐患：新增 `_proj_id` / `_chap_no` 初始化 —— 异常可能发生在两者赋值**之前**
+  （import/建连失败），handler 里直接引用会 `NameError`，把「留痕」变成「再崩一次」。
+- 判别：`tests/unit/test_ctx_b_commit_cache_invalidate_warning.py` **2 例**（失效失败 ⇒ commit 仍成功 + 有 warning +
+  带三样信息；正常路径**不得**出现该 warning）—— 驱动的是**真实 `_commit_node` 路径**（照既有 `fake_commit` 先例）；
+  突变 `COMMIT-INVAL-1`（warning 降 debug）⇒ **CAUGHT**。
+
+#### 4. P1-5 只读预检接进 CI（+ 顺手订正 CI 里的过期数字）
+
+`.github/workflows/ci.yml` 的 backend job 新增 **「Mutation-spec precheck (read-only, ~1s)」**：
+`validate_specs.py` + `run_spec.py --all --precheck`。理由：全量突变仍不进 CI（约 13 分钟，发版前才跑），
+但**只读预检**覆盖了全量跑的**一半目的**——「既有锚点没被本批改动打断」，且锚点一断**立刻红**，
+比等某条突变在 13 分钟末尾报 `[ABORT]` 更早更准，且不写任何源码。
+顺带订正该 step 注释里过期的「46 项检查 + 7 条变异自检」→ **49 项 + 8 条**（批次十九起）。
+
+#### 5. 闸门（Lead 亲跑）
+
+| 项 | 结果 |
+|---|---|
+| 全量 pytest（`-n 20`） | **3916 passed / 1 skipped / 1 xfailed / 0 failed**，**170.36s（2:50）** |
+| 树指纹 | **695 文件 / `42224143…`**，跑测前后逐位一致 |
+| 全量突变（`--jobs 16`） | **382/382 全捕获**（0 存活/中止/无效，exit 0），**12.7 分钟**；还原 OK 382 / 失败 0 |
+| 突变残留 | `*.mutbak` **0**；**107 个被突变文件逐个与日志 SHA 相同（差异 0）** |
+| ruff / OpenAPI | `All checks passed!`；109 paths / 145 schemas **零漂移** |
+
+#### 6. 已知边界（如实登记）
+
+- 规则 R 是 **callee 无关**的 ⇒ 若有人在 core/domain 里**拆字符串**拼出一个**仅供日志/注释**的 `"packages.workflows"`，
+  会被判违规（而字面值禁令抓不到，因为源码里没有字面量）。这是规则 R **强于**字面值禁令的方向，今天 **0 例**。
+- review 里仍**未处理**的非 bug 项：`AiSettingsPage.tsx` 1649 行（> 1500 硬顶，纯前端拆分需独立批次）、
+  指纹查询合并进 `peek` 连接（性能，AGENTS 已登记「下轮做很便宜」）、其余 59 处吞异常（只修了后果最重的一处）。
+
 ### Fixed（2026-10-22 批次（二十一）之四：项目 review 的 P0/P1 落地 —— 含一处被推翻的 P0）
 
 > **来源**：项目 review（`docs/reviews/project-review-2026-10-22.md`）+ 用户「按全文处理」。

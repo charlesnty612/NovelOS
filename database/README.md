@@ -58,6 +58,7 @@ python -c "from packages.core.db import apply_migrations; print(apply_migrations
 - **时间戳**：所有时间字段为 ISO-8601 TEXT，与 `state-delta.schema.json` / `state-commit.schema.json` 对齐。
 - **可见性枚举**：`visibility` 四级 `PUBLIC / VISIBLE / RESTRICTED / HIDDEN`（PRD §4 原则 7）。
 - **业务表数校验**：`tests/unit/test_migrations.py` 的 `test_apply_migrations_creates_43_tables_total`（迁移后总表 43 = 42 业务表 + `_migrations`）与 `test_business_table_count_is_42`（业务表 42，排除 `chapter_fts%`）；新增 / 删除表必须同步更新该测试。
+- **快照漂移巡检的口径**：`scripts/check_state_sync.py` 的判据是**实体 id 集合**的双向差集（DB 侧与快照侧都只抽 id）⇒ 它只校验**实体集合成员关系**（`only_in_db` / `only_in_snapshot`），**不校验实体内容** ⇒ **`SYNC OK` ≠ 状态内容正确**（某实体 id 在、但内容已错，本脚本发现不了）。详见该脚本 docstring 的「判据强度」段。
 
 > ⚠️ 名实不符已了结（2026-09-30，**2026-10-22 批次十九再核**）：这两条**测试名**过去含历史数字 `34`，后被改为 `40 / 39`；`0033_model_connections` 加表后业务表 41→42、总表 42→43，测试名随断言语义同步改为 `..._creates_43_tables_total` / `..._count_is_42`。**改名时若只改测试而不回头修引用，就会留下失效引用**——本文件上述两处正是这样漂了一轮（2026-10-22 订正）。旧名见 `git log -p tests/unit/test_migrations.py`。
 - **权威文档**：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§1 D-I5（Schema 权威）、§2 Sprint 0/1/2；`docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md）；`docs/state-model/schemas/state-delta.schema.json` / `state-commit.schema.json`。

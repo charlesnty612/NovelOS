@@ -405,6 +405,14 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
     # 正常情况下 state_version 已推进，缓存键自然失效；此处对"plan_json
     # 被 UPDATE 但 state_version 未变"的边界场景提供最后一道防线。
     # 任何异常均吞掉——失效失败绝不能阻断 commit。
+    #
+    # ⚠️ 2026-10-22（批次二十二 P2-4）：**失效失败必须留痕**——此前这里是
+    # ``except Exception: pass`` ⇒ **零痕迹**。后果不是「commit 失败」，而是
+    # 「该章后续装配**静默命中旧缓存**（脏命中）而无人知道」⇒ 读者看到的是一份
+    # 用旧上下文生成的新正文。⇒ 现在：仍不抛、仍不阻断 commit（**行为不变**），
+    # 但必须留一条 warning（带 project_id / chapter_no / 异常摘要）。
+    _proj_id: str | None = None
+    _chap_no: int | None = None
     try:
         from packages.core.context_engine.builders import (
             _invalidate_cache_for_chapter,
@@ -421,9 +429,14 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
         finally:
             _conn.close()
         if _proj_id is not None and _chap_row is not None:
-            _invalidate_cache_for_chapter(_proj_id, int(_chap_row["number"] or 0))
-    except Exception:  # noqa: BLE001 —— 失效失败不阻断 commit
-        pass
+            _chap_no = int(_chap_row["number"] or 0)
+            _invalidate_cache_for_chapter(_proj_id, _chap_no)
+    except Exception as exc:  # noqa: BLE001 —— 失效失败不阻断 commit，但**必须留痕**
+        _log.warning(
+            "chapter_commit: 装配缓存失效失败（project_id=%s chapter_no=%s）"
+            "——commit 仍成功，但该章后续装配**可能命中旧缓存**：%s",
+            _proj_id, _chap_no, exc,
+        )
 
     # V2.0 Wave C 任务一：commit 成功后 upsert 本章正文进 chapter_fts（FTS5 全文检索虚表）。
     # 失败按 summarize 节点相同语义降级：log warning，不阻断 commit。
