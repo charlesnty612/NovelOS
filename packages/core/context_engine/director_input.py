@@ -479,8 +479,20 @@ def build_director_input(
     # **锚点原文**（AGENTS 坑区「改一个模块会打断既有突变规格的锚点 ⇒ 执行器
     # [ABORT]」）⇒ 本维度落在身份行之后的**空行**上；键尾两元语义不变。
     project_meta_fp = project_meta_fingerprint(db_path, project_id, conn=_conn)
+    # 2026-10-23（P0-1 候选 C）：缓存键追加**所属卷**维度 ``volume_scope``。
+    # ``chapters.volume_id`` 决定三处同卷过滤（近窗 3 / 上一章尾段 / 召回，见
+    # ``builders_common/summaries.py`` 与 ``retrieval/service.py``），而
+    # ``VolumeService.assign_chapter`` 只改该列 + ``updated_at``、**不推**
+    # ``state_version`` ⇒ 缺该维度时「先装配、后挂卷」会在同键上命中旧卷窗口
+    # （硬规则 2「凡进 payload 的装配输入必须入键」的同形又一次）。
+    # 哨兵：未挂卷 / 旧库缺列 → ``"__none__"``（与 genre_pack_ref / skills_fp 同款，
+    # 语义=不过滤，= 旧行为逐字保留）。
+    # ⚠️ 位置：单独成行、落在身份行之后——既有突变规格 ``E1-2`` / ``SKILL-KEY-1``
+    # 的锚点原文就在 ``chars_fp, world_fp, skills_fp, prompt_label,`` 那一行。
+    volume_scope = peek.get("volume_id") or "__none__"
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
+        volume_scope,
         project_meta_fp,
         active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
         chars_fp, world_fp, skills_fp, prompt_label,

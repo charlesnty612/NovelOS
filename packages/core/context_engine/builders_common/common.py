@@ -945,6 +945,7 @@ _PEEK_CHAPTER_SQL = """
            ch.project_id                       AS project_id,
            ch.plan_json                        AS plan_json,
            ch.outline_json                     AS outline_json,
+           ch.volume_id                        AS volume_id,
            (SELECT MAX(sv.state_version) FROM story_states sv
              WHERE sv.project_id = COALESCE(?, ch.project_id))       AS state_version,
            (SELECT rc.canon_id FROM reference_canons rc
@@ -983,10 +984,21 @@ _PEEK_CHAPTER_SQL = """
 # （`_LEGACY`）：那时「大纲」这个输入本身不存在，读不到不算丢维度。
 _PEEK_CHAPTER_FALLBACK_SQL = """
     SELECT number AS chapter_no, project_id AS project_id, plan_json AS plan_json,
-           outline_json AS outline_json
+           outline_json AS outline_json,
+           volume_id AS volume_id
     FROM chapters WHERE chapter_id = ?
 """
 
+# ⚠️ **本档覆盖的是 <0028（缺 ``outline_json`` 列）的库，不是「0015 之前」**
+# （2026-10-23 P0-1 候选 C 复核时订正了注释口径）。因此它同时覆盖
+# **0015–0027 窗口**——那个窗口的库**有** ``chapters.volume_id``（0015 引入），
+# 但本档刻意不读（LEAD 裁决 2026-10-23：不新增第三档 SQL）。残留后果：
+# 该窗口下 peek 的 ``volume_id`` 恒为 ``None`` ⇒ 装配缓存键的 ``volume_scope``
+# 写成哨兵 ``"__none__"``，而 payload 侧 ``summaries._volume_id_of_chapter``
+# **能**读到真实卷并真的做同卷过滤 ⇒ 键缺维度、装配却按卷变 = 同一「脏命中」形状的
+# **窄口径残留**（先装配后挂卷时仍可能命中旧卷窗口）。影响面仅限「从未跑过迁移、
+# 停在 0015–0027」的极旧库（单用户本地工具下实际为零）；临时库一律跑全量迁移，
+# 故该窗口无可写出的判别测试。登记而非修复，勿把它当成新引入的缺陷。
 _PEEK_CHAPTER_FALLBACK_SQL_LEGACY = """
     SELECT number AS chapter_no, project_id AS project_id, plan_json AS plan_json
     FROM chapters WHERE chapter_id = ?
@@ -1010,6 +1022,9 @@ def _empty_chapter_peek(chapter_id: str, project_id: str | None = None) -> dict[
         "state_version": 0,
         "plan_json_raw": None,
         "outline_json_raw": None,
+        # 2026-10-23（P0-1 候选 C）：所属卷维度。未挂卷 / 旧库缺列 ⇒ None，
+        # 装配缓存键按哨兵 "__none__" 处理（不过滤，= 旧行为逐字保留）。
+        "volume_id": None,
         "word_band_json": None,
         "writing_bible": None,
         "active_canon_id": None,
@@ -1200,6 +1215,9 @@ def _peek_chapter_context_conn(
         "state_version": _as_int_or(row["state_version"]),
         "plan_json_raw": row["plan_json"],
         "outline_json_raw": (row["outline_json"] if "outline_json" in row.keys() else None),
+        # 所属卷（迁移 0015 引入的列）——装配缓存键 `volume_scope` 的唯一来源。
+        # 主 JOIN 一定带出该列；守卫只是为假行 / 极老库兜底（缺键 ⇒ None）。
+        "volume_id": (row["volume_id"] if "volume_id" in row.keys() else None) or None,
         "word_band_json": row["word_band_json"] or None,
         "writing_bible": (row["writing_bible"] if "writing_bible" in row.keys() else None) or None,
         "active_canon_id": row["active_canon_id"] or None,
@@ -1256,6 +1274,11 @@ def _peek_chapter_context_degraded(
         "outline_json_raw": (
             row["outline_json"] if "outline_json" in row.keys() else None
         ),
+        # 所属卷：FALLBACK 档（0028+，必然含 0015 引入的 volume_id）读得到；
+        # 落到 _LEGACY 档（<0028）时缺键 ⇒ None ⇒ 键维写哨兵 "__none__"（见常量旁注释）。
+        "volume_id": (
+            row["volume_id"] if "volume_id" in row.keys() else None
+        ) or None,
     })
     if pid:
         info["state_version"] = _project_max_state_version(conn, pid)
@@ -1274,13 +1297,19 @@ def _peek_chapter_context(
     """单连接轻量预读（缓存键预判 + uncached 装配复用；V3.9 批次 2.3）。
 
     返回 ``{found, chapter_id, project_id, chapter_no, state_version, plan_json_raw,
-    word_band_json, writing_bible, active_canon_id, genre_pack_ref, skills_ref}``：
+    outline_json_raw, volume_id, word_band_json, writing_bible, active_canon_id,
+    genre_pack_ref, skills_ref}``：
 
     - ``state_version`` = ``MAX(story_states.state_version)``（无快照 → 0），口径见
       :func:`_project_max_state_version`；
     - ``plan_json_raw`` / ``word_band_json`` / ``writing_bible`` 为 DB 原文（不做解析，
       避免破坏键稳定性）；``writing_bible`` 同时喂「装配 payload」与「缓存键指纹」
       （0029，见 :func:`resolve_author_intent`），两处同源同值；
+    - ``volume_id`` = 当前章所属卷（``chapters.volume_id``，迁移 0015）；未挂卷 /
+      旧库缺列 → ``None``。同卷过滤（近窗 3 + 上一章尾段 + 召回）**按它**决定是否
+      加谓词，故它同时是装配输入与缓存键维度（2026-10-23 P0-1 候选 C：
+      ``VolumeService.assign_chapter`` 只改该列 + ``updated_at``，**不推**
+      ``state_version`` ⇒ 缺该维度时「先装配、后挂卷」会在同键上脏命中旧卷窗口）；
     - ``genre_pack_ref`` = 绑定题材包指纹 ``<pack_id>@<version>``（未绑定 / 极老库 → None），
       供 director 缓存键的题材包维度使用（题材库 P1a）；
     - ``skills_ref`` = 绑定 skill 集合指纹串 ``"<skill_id>:<version>|..."``

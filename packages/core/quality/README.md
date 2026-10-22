@@ -10,18 +10,39 @@
 
 ```
 packages/core/quality/
-├── __init__.py          # 公共 API 导出
-├── README.md            # 本文件
-├── models.py            # pydantic：Issue / QualityContext / QualityReport
-├── issues.py            # Issue 构造器 / severity 矩阵 / 阻断白名单 BLOCKING_RULES / 确认白名单 CONFIRM_RULES
-├── aggregate.py         # 七维平均 compute_overall + scoring_formula_hash（覆盖 severity 矩阵）+ GateSummary
-├── ai_flavor.py         # AI 味共享词表（scan_ai_patterns 权威源 + 密度工具）
-├── ai_trace.py          # AI 痕迹子分（章内/跨章重复 + 套话命中）
-├── scoring.py           # 六子分 rule-based
-├── guardrails.py        # 8 条 Guardrail（spec §4.1-§4.8）；公共 helper compute_shingles
-├── payoff.py            # 爽感 H-1~H-5（spec §3.7）
-└── engine.py            # QualityEngine.evaluate(ctx) -> QualityReport
+├── __init__.py                 # 公共 API 导出（门面）
+├── README.md                   # 本文件
+├── models.py                   # pydantic：Issue / QualityContext / QualityReport
+├── issues.py                   # Issue 构造器 / severity 矩阵 / 阻断白名单 BLOCKING_RULES / 确认白名单 CONFIRM_RULES
+├── aggregate.py                # 七维平均 compute_overall + scoring_formula_hash（覆盖 severity 矩阵）+ GateSummary
+├── engine.py                   # QualityEngine.evaluate(ctx) -> QualityReport
+├── service.py                  # 落库层：QualityService / build_quality_context / compute_char_stats
+├── guardrails.py               # 8 条 Guardrail（spec §4.1-§4.8）；公共 helper compute_shingles
+├── scoring.py                  # 六子分 rule-based
+├── payoff.py                   # 爽感 H-1~H-5（spec §3.7）
+├── ai_flavor.py                # AI 味信号共享词表与密度工具
+├── ai_trace.py                 # AI 痕迹子分（章内/跨章重复 + 套话命中）
+├── ai_patterns.py              # AI 味 / AI 腔确定性检测——门面（规则表 + 唯一入口 scan_ai_patterns + 再导出）
+├── ai_patterns_sentence.py     # 句式 / 词面族算子（禁用词 / 三连句式 / 代词堆砌 / 标点滥用 / 解释腔 / 对举）
+├── ai_patterns_paragraph.py    # 段落族算子（短段 / 长段 / 拟人化喻体）
+├── ai_patterns_dialogue.py     # 对白族算子（对白可见字占比 / 相邻对白回声）
+├── ai_patterns_text.py         # 段切分口径（\n+）与最小判定长度（多族共用单点）
+├── beat_repeat.py              # 同章远距小句字面复现（AI-BEAT-REPEAT）
+├── continuity_taxonomy.py      # 评审固定分类法 + 连续性规则 id 稳定名册
+├── continuity_time.py          # 章内时点矛盾（CONT-CLOCK-DAYBREAK / CONT-TIME-BACKSTEP）
+├── normalize.py                # 正文规整与内部标识检出
+├── outline_check.py            # 卷纲质量检查
+├── style_trend.py              # Style 跨章趋势监测（M2-C）
+├── wordcount.py                # 章节字数度量与字数带（V3.7）
+├── detector_evidence.json      # 检测器效果证据表（人工维护；漂移看守比对代码实际值）
+└── detector_evidence_corpus/   # 合成代理语料（供召回脚手架自检；**不是**人类基线）
 ```
+
+> 本清单的 **`.py` 部分（23 个）**与 `tests/unit/quality/test_quality_module_inventory.py`
+> 的 `_EXPECTED_MODULE_FILES` ↔ `glob("*.py")` **双向核对**（增 / 删 / 改名 / 合并必红）。
+> ⚠️ **口径声明（2026-10-23 批次二十四审查订正）**：该用例钉的是**名册 ↔ 目录**，
+> **不读本 README** ⇒ 本文这份清单是**副本、无机器看守**（2026-10-23 之前它曾漂到 11/23）。
+> 修法是让该用例解析本段代码树并与目录比对，已登记为待办；在此之前改模块时须**人工同步本清单**。
 
 ---
 
@@ -92,7 +113,7 @@ from packages.core.quality.ai_flavor import AI_FLAVOR_MARKERS, AI_CLICHES, scan_
 ```python
 class Issue(BaseModel):
     severity: Literal["error","warning","info"]
-    category: Literal[...]  # 13 个值，与 guardrail / 子分 / 爽感一一对齐
+    category: Literal[...]  # 14 个值，与 guardrail / 子分 / 爽感一一对齐
     location: str            # "<chapter_id>" 或 "<chapter_id>:<scene_id>"，缺则 "<unknown>"
     rule_id: str             # "RULE_<NAME>" 或特殊：SCHEMA_VALIDATION_FAILED / scoring_missing_subscore
     message: str             # 人类可读一句话
@@ -102,7 +123,11 @@ class Issue(BaseModel):
     judge_trace: Optional[dict]
 ```
 
-13 个 `category`：`schema_validity / timeline_consistency / character_contradiction / world_rule_contradiction / knowledge_leakage / plot / character / continuity / style / pacing / foreshadowing / payoff / compliance`。
+14 个 `category`（顺序与 `packages/core/quality/issues.py` 的 `Category` 字面量逐字一致）：
+`schema_validity / timeline_consistency / character_contradiction / world_rule_contradiction / knowledge_leakage / plot / character / continuity / style / pacing / foreshadowing / ai_trace / payoff / compliance`。
+
+> ⚠️ `ai_trace` 是 ai_trace 子分（§5.4）产出的 issue 类别——V3.9 加 ai_trace 子分时
+> 同步加进 `Category`，本 README 此前漏列（写成 13 个），2026-10-23 订正。
 
 `gate` 是 **severity 之外的第二根轴**（「多严重」vs「必须怎么处理」）。
 ``make_issue`` 与 ``QualityEngine.evaluate`` 会材料化该字段落库（前端 / API 可直接读），

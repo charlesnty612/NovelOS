@@ -31,24 +31,37 @@ OUTLINE = '{"chapter_goal": "新大纲：主角改走暗线", "version": 9}'
 def _make_db(path: Path, *, with_outline: bool) -> None:
     """只建 ``chapters`` 一张表 ⇒ 主 JOIN 必失败 ⇒ 强制走降级路径。
 
-    ``with_outline=False`` 模拟 0028 之前的库（连列都没有），用于验证「列级再降
-    一档」不会把极老库读成空态。
+    ⚠️ **列集必须与真实迁移阶梯同形**（2026-10-23 订正）：``volume_id`` 由 **0015**
+    引入、``outline_json`` 由 **0028** 引入 ⇒ 「有 outline 而无 volume」是真实库
+    **不可能**的形状（AGENTS 坑区「夹具形状抄错 / 凭空发明」那族）。故两分支都带
+    ``volume_id``，只有 outline 分支差异：
+
+    * ``with_outline=True``（= 0028+ 形状 ⇒ 走 **FALLBACK** 档：主 JOIN 因缺
+      ``story_states`` / ``reference_canons`` / ``projects`` 等表失败，FALLBACK 的
+      ``outline_json + volume_id`` 列集齐全 ⇒ 读到 outline 原文）；
+    * ``with_outline=False``（= 0015–0027 形状 ⇒ 走 **LEGACY** 档：FALLBACK 因缺
+      ``outline_json`` 列失败 → 退三列版；该档刻意不读 volume_id，见 common.py
+      常量旁「0015–0027 残留」注释）。
+
+    两分支各自覆盖一档，补 volume 列**不会**把 LEGACY 覆盖丢掉（断言未改）。
     """
     cols = "chapter_id TEXT PRIMARY KEY, number INTEGER, project_id TEXT, plan_json TEXT"
     if with_outline:
-        cols += ", outline_json TEXT"
+        cols += ", outline_json TEXT, volume_id TEXT"
+    else:
+        cols += ", volume_id TEXT"
     conn = sqlite3.connect(path)
     try:
         conn.execute(f"CREATE TABLE chapters ({cols})")
         if with_outline:
             conn.execute(
-                "INSERT INTO chapters VALUES (?, ?, ?, ?, ?)",
-                ("ch_degraded", 7, "prj_degraded", '{"plan": 1}', OUTLINE),
+                "INSERT INTO chapters VALUES (?, ?, ?, ?, ?, ?)",
+                ("ch_degraded", 7, "prj_degraded", '{"plan": 1}', OUTLINE, None),
             )
         else:
             conn.execute(
-                "INSERT INTO chapters VALUES (?, ?, ?, ?)",
-                ("ch_degraded", 7, "prj_degraded", '{"plan": 1}'),
+                "INSERT INTO chapters VALUES (?, ?, ?, ?, ?)",
+                ("ch_degraded", 7, "prj_degraded", '{"plan": 1}', None),
             )
         conn.commit()
     finally:

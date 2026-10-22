@@ -553,8 +553,19 @@ def build_writer_input(
     # ⇒ 本维度落在身份行之后的**空行**上；键尾两元（prompt 标签 / 命名空间标记）
     # 语义不变。
     title_fp = chapter_title_fingerprint(db_path, chapter_id, conn=_conn)
+    # 2026-10-23（P0-1 候选 C）：缓存键追加**所属卷**维度 ``volume_scope``。
+    # writer 的三处取数（上一章正文尾段 ``_recent_prose_tail`` / 摘要链 / FTS 召回）都
+    # 按 ``chapters.volume_id`` 做同卷过滤（快穿冷开场，见 ``builders_common/summaries.py``
+    # 与 ``retrieval/service.py``），而 ``VolumeService.assign_chapter`` 只改该列 +
+    # ``updated_at``、**不推** ``state_version`` ⇒ 缺该维度时「先装配、后挂卷」会在同键上
+    # 命中旧卷窗口（正文把上一世尾段倒灌进新卷首章，硬规则 2 的同形又一次）。
+    # 哨兵：未挂卷 / 旧库缺列 → ``"__none__"``（= 不过滤，旧行为逐字保留）。
+    # ⚠️ 位置：单独成行、落在身份行之后——既有突变规格 ``E1-1`` / ``SKILL-KEY-2`` /
+    # ``STYLE-KEY-1`` / ``TITLE-KEY-1`` 的锚点原文在那几行，不得改动。
+    volume_scope = peek.get("volume_id") or "__none__"
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
+        volume_scope,
         title_fp,
         scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id, style_fp,
         target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,

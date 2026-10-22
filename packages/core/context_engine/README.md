@@ -622,15 +622,23 @@ build_writer_input(
   意图一笔带过）。判据取当前章 `volume_id`：为空（未挂卷）或旧库缺该列 → **不过滤**
   （= 旧行为逐字保留；卷内各章同卷，卷 1 与存量项目零行为变化）。本节目上方的「已知未
   闭环」三处章号取数即由本次改动闭环（该节按批次留痕不改写）；看守测试
-  `tests/unit/test_volume_scope_context.py`。**残留（缓存键，未在本批实施）**：该过滤依赖
-  当前章 `chapters.volume_id`，而装配缓存键（`cache.py` / `director_input.py` /
-  `writer_input.py`）无此维度，`state_version` / `chapter_no` / `plan_fp` / `outline_fp`
-  也推不出它——`VolumeService.assign_chapter` 只改 `chapters.volume_id`（+`updated_at`），
-  不推 `state_version`、不动 plan/outline，故「先装配、后改挂卷」会在同键上脏命中旧卷
-  窗口。补齐方案：director / writer 两键各加一位 `volume_id`（与 `target_word_count` 同
-  款直接入键），取值复用 `_peek_chapter_context`——`_PEEK_CHAPTER_SQL` 多读一列即可，
-  命中路径仍是 1 连接 1 条 SQL（`test_context_peek_convergence.py` 口径不变）。键构造
-  文件不在本批独占范围，故登记不修。
+  `tests/unit/test_volume_scope_context.py`。
+- **装配缓存键的卷维度（2026-10-23 批次二十四落地，此前登记为「未在本批实施」）**：同卷
+  过滤依赖当前章 `chapters.volume_id`，而 `VolumeService.assign_chapter` 只改
+  `chapters.volume_id`（+`updated_at`）、不推 `state_version`、不动 plan/outline ⇒ 键缺
+  该维度时「先装配、后改挂卷」会在同键上脏命中旧卷窗口。**已修**：director / writer 两键
+  各加一位 `volume_scope`（键元数 18 / 23；取值 `peek["volume_id"] or "__none__"`，哨兵
+  语义 = 未挂卷 / 旧库缺列 = 不过滤 = 旧行为逐字保留）；`_PEEK_CHAPTER_SQL` 与
+  `_PEEK_CHAPTER_FALLBACK_SQL` 同形各多读一列，`_empty_chapter_peek` 与降级合并同形带键
+  （键集与主路径**对称差 0**）。命中路径仍是 1 连接 1 条 SQL
+  （`test_context_peek_convergence.py` 口径不变）。判别：`tests/unit/test_volume_scope_cache_key.py`
+  4 例（挂卷必 miss 且窗口真的变 / 换挂回原卷窗口恢复的正反一对 / 哨兵同形 + 键长）+
+  突变 `VOL-1`/`VOL-2`/`VOL-3`（全捕获）。
+  ⚠️ **已知残留（裁决不修）**：`_PEEK_CHAPTER_FALLBACK_SQL_LEGACY` 覆盖 <0028，其中
+  **0015–0027 窗口**的库有 `chapters.volume_id` 但 peek 读不到 ⇒ 键落哨兵 `__none__`，
+  而 payload 侧 `summaries._volume_id_of_chapter` 读得到真实卷并真的过滤 ⇒ 该窗口仍存在
+  同形状脏命中。影响面 ≈ 0（需「从未跑 `scripts/migrate.py` 且停在 0015–0027」）；
+  按裁决不新增第三档 SQL，登记于此。
 - **`_suppressed_*` 元标记只发 id、不发 name**（`builders_common/excerpts.py`）：块本身
   保留（preview 仍能区分「已剔除 / 未命中降级」，前端同时渲染 id），但 `name` 不再进
   payload——整个 payload 被 `agent_runtime.runner` 序列化进 user message，带 name 的

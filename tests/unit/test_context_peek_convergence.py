@@ -264,6 +264,8 @@ def test_merged_peek_matches_legacy_peek_wrappers(tmp_path: Path):
         "plan_json_raw": plan,
         # 0028 大纲槽：peek 一并预读 outline_json 原文（director 装配注入 + 缓存键维度）
         "outline_json_raw": None,
+        # 0015 所属卷：peek 一并预读（同卷过滤输入 + director/writer 缓存键 volume_scope）
+        "volume_id": None,
         "word_band_json": None,
         # 0029 项目写作圣经：peek 一并预读原文（装配 payload + 缓存键维度，两处同源）
         "writing_bible": None,
