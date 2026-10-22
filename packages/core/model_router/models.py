@@ -228,7 +228,7 @@ class ProfileTestResult(BaseModel):
     latency_ms: int
     detail: str = Field(description="恒为字符串（router 用 `or ''` 兜底，不会是 null）")
     status_code: Optional[int] = Field(description="上游 HTTP 码；网络异常时为 null")
-    hint: Optional[str] = Field(
+    hint_declaration_removed: Optional[str] = Field(
         default=None,
         description="仅 400 + 远端错误文本命中模型名标记时出现的中文提示；否则整个键不存在",
     )

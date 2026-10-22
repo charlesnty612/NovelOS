@@ -117,6 +117,17 @@ await waitFor(() => expect(listDeltas).toHaveBeenCalledWith('p1', 'ch_1'));
 ⚠️ **CI 修复效果待 CI 验证**（推送后看 run；批次十六那两条红 run 是失败态，
 本条修复的正是它们指向的用例）。
 
+**⇒ CI 回填（run `39717309182`，commit `729880d`）：3 job 全绿 ✓**
+
+| job | 结果 |
+|---|---|
+| `web (build + vitest)` | **success** —— 正是批次十六那两条 run 里**红掉的那个 job**，本次修复生效 |
+| `backend (pytest + ruff)` | **success** |
+| `e2e smoke (state sync included)` | **success** |
+
+⇒ 本地全绿（Windows）**与** CI 全绿（Linux）**同时成立** ⇒ 该修复在两个平台上都有效
+（这正是本条教训的两端：**本地绿不等于 CI 绿**，反过来 CI 绿也不等于本地绿 —— 两端都要各跑一次）。
+
 见下表。
 
 ### Added（2026-10-21 批次（十五）：模型连接层 —— 同一厂商的多个模型不再各填一遍 key/base_url）
