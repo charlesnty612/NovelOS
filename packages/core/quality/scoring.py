@@ -44,6 +44,10 @@ PLOT_UNAUTHORIZED_EVENT_DEDUCTION: int = 10
 PLOT_NO_PLAN_NEUTRAL: int = 85
 """plan 无 key_beats 时的中性分。"""
 
+# ⚠️ **依据强度：规格来源（非实测分位）**（2026-10-22 批次二十一补记）。
+#   出处：``packages/core/quality/README.md`` §4 子分表（plot 行）——
+#   「``len(new_events) > key_beats + 2`` ⇒ 每超额 -10」。
+#   ⇒ 数值来自**规格给定**，**不是**本仓实测分位；引用时勿称「实测阈值」。
 PLOT_EXTRA_SLACK: int = 2
 """len(new_events) > len(key_beats) + PLOT_EXTRA_SLACK 才算"超额"。"""
 
@@ -124,13 +128,27 @@ STYLE_DIALOGUE_DEDUCTION: int = 5
 # ---- pacing (§3.5) -----
 PACING_FLAT_DEDUCTION: int = 20
 PACING_NO_END_HOOK_DEDUCTION: int = 15
+# ⚠️ **依据强度：规格来源（非实测分位）**（2026-10-22 批次二十一补记）。
+#   出处：README §4 子分表（pacing 行）——「5 段对话密度极差 < 0.05 -20」。
 PACING_FLAT_RANGE_THRESHOLD: float = 0.05
+# ⚠️ **依据强度：规格来源（非实测分位）**（2026-10-22 批次二十一补记）。
+#   出处同上（pacing 行）——MVP 代理实现按「5 段对话密度」分段，且「段落 < 1 不扣分」
+#   ⇒ 段落目标与对话密度同口径，**5 段**。
 PACING_PARAGRAPH_TARGET: int = 5
 
 # ---- foreshadowing (§3.6) -----
+# ⚠️ **依据强度：规则推导**（2026-10-22 批次二十一补记）。
+#   数值由下方 :data:`FORESHADOW_PLANT_WEIGHT` 的**约束 A** 反推：只埋不兑的铺垫章
+#   得分（= 中性分 + 权重增量）必须 **≥ 中性分**，否则「多埋钩子反而比不埋低分」
+#   会诱导作者无视伏笔 ⇒ 中性分 ≤ 85 ⇒ 取 85。
+#   ⇒ 它**不是**独立拍脑袋的数，但也**不是**语料实测分位。
 FORESHADOW_NO_HOOKS_NEUTRAL: int = 85
 """本章完全不涉及钩子（new_hooks / resolved_hooks 均为空）时的中性分。"""
 
+# ⚠️ **依据强度：规则推导（约束给出区间，区间内的具体取值是经验选择）**
+# （2026-10-22 批次二十一补记）。下方 docstring 已逐条写出推导：
+#   **0.85 ≤ w < 1 由约束 A/B 给出**；**具体取 0.9** 是该区间内的经验选择
+#   （非语料实测分位），引用时勿称「实测标定值」。
 FORESHADOW_PLANT_WEIGHT: float = 0.9
 """埋设通道权重（V3.9 批次 3.2「埋设/兑现双通道」公式）。
 

@@ -17,10 +17,12 @@
 
 from __future__ import annotations
 
+import argparse
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 DEST_ROOT = Path(r"D:\BaiduSyncdisk\NovelOS\backups")
 KEY_FILE = Path.home() / ".novelos" / "backup.key"
@@ -132,7 +134,46 @@ def encrypt_dir(src: Path, dest: Path) -> None:
         tar_path.unlink(missing_ok=True)
 
 
-def main() -> int:
+def _plan_moves(
+    moves: list[tuple[Path, str]], dest_root: Path,
+) -> list[dict[str, Any]]:
+    """算出「将要做什么」——**纯计算**：只 stat 源与目标，**不写不删**。
+
+    每项：``{"src": Path, "rel": str, "dest": Path, "action": str}``，``action`` ∈
+    ``encrypt+delete-source`` / ``skip-missing`` / ``skip-exists``。
+
+    ⚠️ 这段逻辑与 :func:`main` 的真实执行**共用同一套判定口径**（源不存在 /
+    目标已存在 ⇒ 跳过），否则「计划」会说谎（AGENTS 坑区「声称与实测分离」）。
+    """
+    plan: list[dict[str, Any]] = []
+    for src, rel in moves:
+        dest = dest_root / rel
+        if not src.exists():
+            action = "skip-missing"
+        elif dest.exists():
+            action = "skip-exists"
+        else:
+            action = "encrypt+delete-source"
+        plan.append({"src": src, "rel": rel, "dest": dest, "action": action})
+    return plan
+
+
+def _print_plan(
+    plan: list[dict[str, Any]], dest_root: Path, prune_dirs: list[Path],
+) -> None:
+    """打印迁移计划（**dry-run 的唯一输出**）：将加密什么、将删什么、目标在哪。"""
+    print(f"[DRY-RUN] 目标根：{dest_root}")
+    print(f"[DRY-RUN] 加密方式：{CIPHER} + pbkdf2 x{PBKDF2_ITER}（openssl）")
+    for item in plan:
+        print(f"[DRY-RUN] {item['action']}：{item['src']} -> {item['dest']}")
+        if item["action"] == "encrypt+delete-source":
+            print(f"[DRY-RUN]     源将在加密成功后**被删除**：{item['src']}")
+    for d in prune_dirs:
+        print(f"[DRY-RUN] PRUNE（若为空则删目录）：{d}")
+    print("[DRY-RUN] 本次**未写任何文件、未删任何源、未生成密钥**。")
+
+
+def main(argv: list[str] | None = None) -> int:
     # ⚠️ **重配 stdout/stderr 必须在这里，不能放模块级**（2026-10-22 批次二十修）：
     # 模块级的副作用会让 ``import scripts.migrate_backups_to_sync`` **当场崩**——
     # pytest 捕获期的 ``sys.stdout`` 没有 ``reconfigure`` 方法 ⇒ 任何 import 它的
@@ -144,6 +185,26 @@ def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+    # ⚠️ 2026-10-22（批次二十一 P1-6）：加 argparse ⇒ ``--help`` 自动可用。
+    # **默认行为逐字不变**（不带 --dry-run 时走原路径）；``--dry-run`` 只打印计划，
+    # **不写不删**（也不生成密钥文件）。
+    ap = argparse.ArgumentParser(
+        prog="migrate_backups_to_sync",
+        description=(
+            "把本机现有的 NovelOS 备份**加密后**移到网盘同步盘"
+            "（不可逆：加密成功后会**删除源文件**）——"
+            "先用 --dry-run 看计划，再不带该参数执行。"
+        ),
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只打印迁移计划（将加密什么 / 将删哪些源 / 目标路径），**不写不删**",
+    )
+    args = ap.parse_args(argv)
+    if args.dry_run:
+        _print_plan(_plan_moves(MOVES, DEST_ROOT), DEST_ROOT, PRUNE_DIRS)
+        return 0
     print(f"[目标] {DEST_ROOT}")
     print(f"[加密] {CIPHER} + pbkdf2 x{PBKDF2_ITER}（openssl）\n")
     ensure_key()

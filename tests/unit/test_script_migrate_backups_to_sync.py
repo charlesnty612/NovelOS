@@ -30,6 +30,8 @@ import ast
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "migrate_backups_to_sync.py"
 
@@ -106,3 +108,105 @@ def test_pure_helpers_are_now_importable_and_correct(tmp_path):
     f.write_bytes(b"x" * 17)
     assert dir_size(f) == 17
     assert dir_size(tmp_path) == 17
+
+
+# ---------------------------------------------------------------------------
+# 批次二十一 P1-6：``--dry-run`` / ``--help``
+#
+# ⚠️ **绝不执行真实迁移**：本段把模块级常量（MOVES / DEST_ROOT / KEY_FILE /
+# PRUNE_DIRS）全部指到 ``tmp_path`` 的合成目录 ⇒ 真实备份路径**一次都不会被碰**。
+# 真实路径（``D:\zcodeproject\...`` / ``D:\BaiduSyncdisk\...``）在本文件中
+# **从未出现**。
+# ---------------------------------------------------------------------------
+
+
+def _dry_run_env(tmp_path, monkeypatch):
+    """把脚本的路径常量全部指向合成目录，返回 (module, 源文件, 源目录, 目标根, 密钥文件)。"""
+    import scripts.migrate_backups_to_sync as mod
+
+    src_file = tmp_path / "src" / "backup.db"
+    src_file.parent.mkdir(parents=True, exist_ok=True)
+    src_file.write_bytes(b"x" * 10)
+    src_dir = tmp_path / "src" / "backups-dir"
+    src_dir.mkdir(exist_ok=True)
+    (src_dir / "a.txt").write_text("a", encoding="utf-8")
+
+    dest = tmp_path / "dest"
+    key = tmp_path / "backup.key"
+    monkeypatch.setattr(
+        mod, "MOVES", [(src_file, "backup.db.enc"), (src_dir, "backups-dir.enc")],
+    )
+    monkeypatch.setattr(mod, "DEST_ROOT", dest)
+    monkeypatch.setattr(mod, "KEY_FILE", key)
+    monkeypatch.setattr(mod, "PRUNE_DIRS", [])
+    return mod, src_file, src_dir, dest, key
+
+
+def test_dry_run_prints_the_plan_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    """``--dry-run`` ⇒ 打印计划（将加密什么 / 将删哪些源 / 目标路径），**不写不删**。"""
+    mod, src_file, src_dir, dest, key = _dry_run_env(tmp_path, monkeypatch)
+
+    rc = mod.main(["--dry-run"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # 源**未被删**
+    assert src_file.exists(), "dry-run 不得删除源文件"
+    assert src_dir.exists(), "dry-run 不得删除源目录"
+    # 目标**未被写**
+    assert not dest.exists() or not any(dest.rglob("*")), "dry-run 不得写目标"
+    # 密钥**未被生成**（dry-run 不需要密钥）
+    assert not key.exists(), "dry-run 不得生成密钥文件"
+    # 计划输出含预期条目
+    assert str(src_file) in out, f"计划须列出源路径，实得 {out!r}"
+    assert str(dest / "backup.db.enc") in out, f"计划须列出目标路径，实得 {out!r}"
+    assert str(src_dir) in out
+    assert "encrypt+delete-source" in out
+    assert "被删除" in out, "计划必须明说「源会被删」——这是不可逆动作的预告"
+
+
+def test_dry_run_reports_skips_for_missing_source_and_existing_target(
+    tmp_path, monkeypatch, capsys
+):
+    """dry-run 的判定口径与真实执行一致（源不存在 / 目标已存在 ⇒ 跳过）。"""
+    import scripts.migrate_backups_to_sync as mod
+
+    missing = tmp_path / "src" / "gone.db"
+    existing_src = tmp_path / "src" / "x.db"
+    existing_src.parent.mkdir(parents=True, exist_ok=True)
+    existing_src.write_bytes(b"x" * 3)
+    dest = tmp_path / "dest"
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "exists.enc").write_bytes(b"old")
+    key = tmp_path / "backup.key"
+    monkeypatch.setattr(
+        mod, "MOVES", [(missing, "gone.db.enc"), (existing_src, "exists.enc")],
+    )
+    monkeypatch.setattr(mod, "DEST_ROOT", dest)
+    monkeypatch.setattr(mod, "KEY_FILE", key)
+    monkeypatch.setattr(mod, "PRUNE_DIRS", [])
+
+    rc = mod.main(["--dry-run"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "skip-missing" in out, f"源不存在须标为 skip-missing，实得 {out!r}"
+    assert "skip-exists" in out, f"目标已存在须标为 skip-exists，实得 {out!r}"
+    assert (dest / "exists.enc").read_bytes() == b"old", "dry-run 不得覆盖既有目标"
+
+
+def test_help_is_available_and_mentions_dry_run(tmp_path, monkeypatch, capsys):
+    """``--help`` 自动可用（argparse），且说明里写清「不可逆」与 ``--dry-run``。"""
+    import scripts.migrate_backups_to_sync as mod
+
+    monkeypatch.setattr(mod, "MOVES", [])
+    monkeypatch.setattr(mod, "DEST_ROOT", tmp_path / "dest")
+    monkeypatch.setattr(mod, "KEY_FILE", tmp_path / "backup.key")
+    monkeypatch.setattr(mod, "PRUNE_DIRS", [])
+
+    with pytest.raises(SystemExit) as exc:
+        mod.main(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--dry-run" in out
+    assert "不可逆" in out, "帮助文本须明说该操作不可逆（源会被删）"

@@ -24,9 +24,21 @@ DEFAULT_TARGET_WORD_COUNT = 3000
 
 # writer 纪律 Rule 15：计划低于此值时下限保护到 1200。
 _MIN_BAND_FLOOR = 1200
-# warning 阈值（偏离 target 比例绝对值超过此值即升 warning）。
+# band 半宽（带 = target × (1 ± 本值)）。
+# ⚠️ **依据强度：经验值（未经语料校准）**（2026-10-22 批次二十一补记）。
+#   ±15% 的容忍带是**产品约定**（无实测分位、无 spec 数值）；它同时是
+#   ``_DEFAULT_LOW_RATIO`` / ``_DEFAULT_HIGH_RATIO`` 的派生源。
+#   另注：V3.9 §5.2 起，review 的 warning/error **判据已不再直接引用本比例**
+#   （改为「出带即 warning、带外偏离超过带边缘到 target 的距离即 error」），
+#   见 README §13.2 ⇒ 本常量现在只是 **band 构造默认值**。
 _WARNING_RATIO = 0.15
-# error 阈值（偏离 target 比例绝对值超过此值即记 error；与 band 外缘对齐）。
+# ⚠️ **保留常量 · 当前无消费方**（2026-10-22 批次二十一实测）。
+#   依据强度：**经验值（未经语料校准）**。
+#   ① 它**不再被任何代码引用**（全仓 grep 只有本行定义；README §13.2 记载
+#      「V3.9 §5.2 起 review 的 warning/error 判据不再直接引用这两个比例」）；
+#   ② **原注释「与 band 外缘对齐」与数值不符**：band 外缘偏离 = ``_WARNING_RATIO``
+#      = 15%，而本值是 30% ⇒ 该说法不成立，按「注释与代码冲突以代码为准」订正；
+#   ③ 保留它是为了不破坏外部深路径 import（本仓纪律），**本轮不改值**。
 _ERROR_RATIO = 0.30
 
 # resolve_band_config 默认值的派生源（与 word_band 默认参数同口径，避免硬编码两份）。

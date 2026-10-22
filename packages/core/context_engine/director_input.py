@@ -45,6 +45,7 @@ from .cache import (
     _fingerprint_skills,
     _fingerprint_writing_bible,
     characters_fingerprint,
+    project_meta_fingerprint,
     world_fingerprint,
 )
 from .canon import (
@@ -460,8 +461,23 @@ def build_director_input(
     # 命中旧装配：planner 与 writer 都拿着改动前的世界设定（与 ``chars_fp`` 同形的硬规则 2
     # 违规；E1 只补了角色，未补世界观三表）。同放在 prompt_label 之前。
     world_fp = world_fingerprint(db_path, project_id)
+    # 2026-10-22（批次二十一 P0-1-A）：键追加**项目元信息**（name/genre/premise）
+    # 内容指纹 ``project_meta_fp``。``project["name"]`` / ``project.get("genre")`` /
+    # ``project.get("premise")`` 进 payload 的 ``project`` 段，且这三个字段**被
+    # prompt 契约显式承诺**给模型（``docs/agents/prompts/director_planner-v3.md``
+    # §5：``"project": { "project_id", "name", "genre", "premise" }``）；
+    # 而改项目前提走 ``PATCH /api/projects/{id}`` ⇒
+    # ``domain/project/service.py`` 的 ``UPDATE projects`` **不推 state_version**
+    # ⇒ 缺该维度时改 premise 后同 state_version 重跑该章命中旧装配 ⇒
+    # **planner 拿着改动前的 premise 排计划，零告警**（与 chars_fp / style_fp 同形）。
+    # ⚠️ **位置刻意单独成行**：director 键的 ``chars_fp, world_fp, skills_fp,
+    # prompt_label,`` 那一行是既有突变规格 ``E1-2`` 与 ``SKILL-KEY-1`` 的
+    # **锚点原文**（AGENTS 坑区「改一个模块会打断既有突变规格的锚点 ⇒ 执行器
+    # [ABORT]」）⇒ 本维度落在身份行之后的**空行**上；键尾两元语义不变。
+    project_meta_fp = project_meta_fingerprint(db_path, project_id)
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
+        project_meta_fp,
         active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
         chars_fp, world_fp, skills_fp, prompt_label,
         _cache_namespace_tag(namespace),
@@ -473,6 +489,7 @@ def build_director_input(
         and chars_fp != _FINGERPRINT_UNCACHED
         and world_fp != _FINGERPRINT_UNCACHED
         and skills_fp != _FINGERPRINT_UNCACHED
+        and project_meta_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)

@@ -47,6 +47,7 @@ from .cache import (
     _fingerprint_skills,
     _fingerprint_writing_bible,
     author_style_samples_fingerprint,
+    chapter_title_fingerprint,
     characters_fingerprint,
     reveal_policies_fingerprint,
     world_fingerprint,
@@ -531,16 +532,31 @@ def build_writer_input(
     # 那两行之外的空位，避免打断既有规格；键尾两元（prompt 标签 / 命名空间标记）
     # 语义不变（仍在 prompt_label 之前）。
     style_fp = author_style_samples_fingerprint(db_path, project_id)
+    # 2026-10-22（批次二十一 P0-1-B）：缓存键追加**本章标题**内容指纹 ``title_fp``。
+    # ``chapter.get("title")`` 进 writer payload 的 ``chapter`` 段，且章标题**被
+    # prompt 契约显式承诺**给模型（``docs/agents/prompts/writer-v5.md`` §5 与示例
+    # ``"title": "夜叩青石"``）；而改章标题走 ``PATCH /api/chapters/{id}`` ⇒
+    # ``domain/chapter/service.py`` 的 ``UPDATE chapters`` **不推 state_version**
+    # ⇒ 缺该维度时改标题后同 state_version 重跑该章命中旧装配 ⇒
+    # 正文按改动前的标题写，**零告警**（与 chars_fp / style_fp 同形）。
+    # ⚠️ **位置刻意单独成行**：writer 键的 ``scene_fp…style_fp,`` /
+    # ``target_word_count…chars_fp,`` / ``world_fp…prompt_label,`` 三行是既有突变
+    # 规格 ``STYLE-KEY-1`` / ``E1-1`` / ``SKILL-KEY-2`` 的**锚点原文**
+    # （AGENTS 坑区「改一个模块会打断既有突变规格的锚点 ⇒ 执行器 [ABORT]」）
+    # ⇒ 本维度落在身份行之后的**空行**上；键尾两元（prompt 标签 / 命名空间标记）
+    # 语义不变。
+    title_fp = chapter_title_fingerprint(db_path, chapter_id)
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
+        title_fp,
         scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id, style_fp,
         target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,
         world_fp, reveal_fp, plan_fp, skills_fp, prompt_label,
         _cache_namespace_tag(namespace),
     )
     # 不可序列化（scene_fp / intent_fp / bible_fp / chars_fp / world_fp / reveal_fp /
-    # style_fp / skills_fp == 'uncached'）→ 跳过缓存，避免不同原文落在同一占位键上
-    # 互相脏命中（与 director 的 cacheable 判定同款）。
+    # style_fp / title_fp / skills_fp == 'uncached'）→ 跳过缓存，避免不同原文落在
+    # 同一占位键上互相脏命中（与 director 的 cacheable 判定同款）。
     cacheable = (
         scene_fp != _FINGERPRINT_UNCACHED
         and intent_fp != _FINGERPRINT_UNCACHED
@@ -551,6 +567,7 @@ def build_writer_input(
         and style_fp != _FINGERPRINT_UNCACHED
         and plan_fp != _FINGERPRINT_UNCACHED
         and skills_fp != _FINGERPRINT_UNCACHED
+        and title_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)

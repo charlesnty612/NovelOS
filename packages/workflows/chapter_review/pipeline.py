@@ -288,6 +288,18 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
     word_band_overrides: dict | None = None
     chapter_project_id: str | None = None
     plan_dict: dict[str, Any] = {}
+    # ⚠️ 2026-10-22（批次二十一 P0-3）：**DB 读失败不再静默**。
+    # 改造前这里是一个 ``except Exception: pass``，把「**读不到章节行**」与
+    # 「plan 解析降级」一起吞掉 ⇒ 空 plan 下**照常审稿、照常出报告、零告警**：
+    # 作者看到的是一份「审过了」的报告，而 plan / 项目上下文**根本没读到**。
+    # ⇒ 现在两种失败**分开**：
+    #   ① **DB 读失败** ⇒ ``log.error``（带 chapter_id）+ 报告里留一行
+    #      ``[REVIEW-DB-READ-FAILED]``（走既有 ``warnings`` 旁路通道，评审 UI 直读）；
+    #   ② **plan 解析降级** ⇒ ``_parse_plan_json`` 自身 fail-soft（非法 JSON → ``{}``，
+    #      恒不抛）⇒ 既有降级语义**逐字不变**。
+    # ⚠️ **不改成直接抛**：那会把「审稿照常跑完」变成「run 失败」⇒ 属**行为变更**，
+    # 须 Lead 单独裁决（本次只做「不许静默」）。
+    chapter_read_error: str | None = None
     try:
         conn = get_connection(db_path)
         try:
@@ -297,11 +309,16 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
             ).fetchone()
         finally:
             conn.close()
-        if prow is not None:
-            chapter_project_id = prow["project_id"]
-            plan_dict = _parse_plan_json(prow["plan_json"])
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 —— 读库失败：降级但**留痕**（不静默）
+        chapter_read_error = f"{type(exc).__name__}: {exc}"
+        _log.error(
+            "chapter_review.basic_checks chapter read failed: chapter_id=%s err=%s",
+            chapter_id, exc,
+        )
+        prow = None
+    if prow is not None:
+        chapter_project_id = prow["project_id"]
+        plan_dict = _parse_plan_json(prow["plan_json"])
     # 无论 target 是否显式传入，都尝试读项目覆盖（与 target 来源解耦——ctx 传
     # target 也应跟随项目覆盖；这是 V3.7 升级语义的关键）。
     if chapter_project_id:
@@ -466,6 +483,15 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
             errors.append(hit)
         else:
             warnings.append(f"[{hit['rule_id']}] {hit['message']}")
+    # ⚠️ 2026-10-22（批次二十一 P0-3）：**DB 读失败的留痕**——走既有 ``warnings``
+    # 旁路通道（评审 UI 直读），**不进 errors**（errors 语义上承载「字数严重级条目」，
+    # 见 ``packages/workflows/chapter_review/README.md``）⇒ **不改变任何门禁行为**
+    # （warnings 是信息性提示，不阻断 run）。
+    if chapter_read_error:
+        warnings.append(
+            f"[REVIEW-DB-READ-FAILED] 读取章节行失败（{chapter_read_error}）："
+            f"plan 与项目上下文**未经读取**，审稿结论可能不完整"
+        )
 
     report = {
         "chapter_id": chapter_id,
@@ -493,7 +519,12 @@ def _basic_checks_node(ctx: dict[str, Any]) -> dict[str, Any]:
             warnings.append(f"[{issue.get('rule_id')}] {issue.get('message')}")
     # V3.9 批次 5.7：critic / deep_review 共享取数——本节点（必跑首节点）一次取齐，
     # 两个 AI 节点直接消费 ctx["review_inputs"]，不再各自把同一批 SQL 重跑一遍。
-    if chapter_project_id is None:
+    if chapter_read_error:
+        # ⚠️ 2026-10-22（批次二十一 P0-3）：**「读不到」不等于「不存在」**——
+        # 原文案会写 "not found"，与真实病因（读库失败）相反 ⇒ 误导排查方向。
+        review_inputs: dict[str, Any] | None = None
+        review_inputs_error: str | None = f"chapter read failed: {chapter_read_error}"
+    elif chapter_project_id is None:
         # 章节行缺失（draft 孤儿）：与改造前 critic 的取数口径一致 → 标记不可用，
         # critic / deep_review 按既有「inputs 失败」路径降级，不误用空项目上下文。
         review_inputs: dict[str, Any] | None = None

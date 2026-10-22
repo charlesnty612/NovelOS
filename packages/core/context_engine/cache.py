@@ -252,10 +252,25 @@ _STYLE_SAMPLE_FINGERPRINT_TABLES: tuple[tuple[str, str], ...] = (
 )
 
 
+# ``projects`` 表里**真正进装配 payload** 的三列（2026-10-22 批次二十一 P0-1-A）。
+# ⚠️ **必须显式收窄**：``projects`` 的业务列全集含 ``writing_bible`` /
+# ``word_band_json`` / ``fast_mode`` / ``genre_pack_id`` 等**已有独立键维度**的列
+# ⇒ 若用「业务列全集」当指纹，那些列的改动会**重复**触发本维度（过度失效），
+# 且本维度的语义会变得不可读（「项目元信息」实际含了字数带覆盖）。
+# ⇒ 列集 = PRAGMA 推导后**显式收窄**到这三列（与 world_fingerprint 的列集纪律
+# 同源，但**多一步收窄**——因为 projects 的「业务列」≠「装配消费的列」）。
+_PROJECT_META_COLUMNS: tuple[str, ...] = ("name", "genre", "premise")
+
+
 def _fingerprint_table_rows(
     conn: sqlite3.Connection, table: str, id_column: str, project_id: str,
+    *, keep_columns: tuple[str, ...] | None = None,
 ) -> Any:
     """读一张表的业务列（列集 PRAGMA 推导）；表/列缺失 → ``"missing"`` 占位。
+
+    ``keep_columns``：**显式收窄**的列集（None = 业务列全集 −
+    {project_id, created_at, updated_at}）。收窄时仍以 PRAGMA 的列序为准
+    （⇒ 指纹与列的物理顺序无关地稳定）。
 
     非「缺表/缺列」的运行时故障**上抛**（锁 / I/O 静默归 none = 缓存键维度失真）。
     """
@@ -267,7 +282,10 @@ def _fingerprint_table_rows(
         return "missing"
     if not cols:
         return "missing"
-    keep = [c for c in cols if c not in _FINGERPRINT_ROW_EXCLUDED]
+    if keep_columns is not None:
+        keep = [c for c in cols if c in keep_columns]
+    else:
+        keep = [c for c in cols if c not in _FINGERPRINT_ROW_EXCLUDED]
     if not keep:
         keep = [id_column]
     sql = (
@@ -281,6 +299,19 @@ def _fingerprint_table_rows(
             raise
         return "missing"
     return [list(r) for r in rows]
+
+
+def _hash_snapshot(snapshot: Any) -> str:
+    """把一个「行集快照」哈希成稳定指纹（sha256 前 16）。
+
+    不可序列化 → ``_FINGERPRINT_UNCACHED``（调用方据此跳过缓存；绝不静默落到
+    某个稳定值——那正是脏命中）。
+    """
+    try:
+        normalized = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:_FINGERPRINT_LEN]
+    except Exception:  # noqa: BLE001 —— 不可序列化时跳过缓存
+        return _FINGERPRINT_UNCACHED
 
 
 def _fingerprint_tables(
@@ -307,11 +338,7 @@ def _fingerprint_tables(
         ]
     finally:
         conn.close()
-    try:
-        normalized = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:_FINGERPRINT_LEN]
-    except Exception:  # noqa: BLE001 —— 不可序列化时跳过缓存
-        return _FINGERPRINT_UNCACHED
+    return _hash_snapshot(snapshot)
 
 
 def world_fingerprint(db_path: str | Path, project_id: str | None) -> str:
@@ -363,6 +390,109 @@ def author_style_samples_fingerprint(db_path: str | Path, project_id: str | None
     （``STYLE-KEY-1`` 撤掉 ``style_fp`` 维度 ⇒ 加/删样例后键不变 ⇒ 必红）。
     """
     return _fingerprint_tables(db_path, project_id, _STYLE_SAMPLE_FINGERPRINT_TABLES)
+
+
+def project_meta_fingerprint(db_path: str | Path, project_id: str | None) -> str:
+    """``projects`` 的 **name / genre / premise** 三列内容指纹（2026-10-22 批次二十一 P0-1-A）。
+
+    **为什么必须补**（硬规则 2「凡进 payload 的装配参数必须入键」的同形状**第 5 次**）：
+    director 装配把 ``project["name"]`` / ``project.get("genre")`` /
+    ``project.get("premise")`` 写进 payload 的 ``project`` 段
+    （``director_input.py`` 的 ``_build_director_input_uncached``），
+    而这三个字段**被 prompt 契约显式承诺**给模型
+    （``docs/agents/prompts/director_planner-v3.md`` 的 §5：
+    ``"project": { "project_id", "name", "genre", "premise" }``）。
+    作者改项目前提走 ``PATCH /api/projects/{id}`` ⇒
+    ``packages/domain/project/service.py`` 的 ``UPDATE projects`` **只 commit()，
+    不推 ``story_states.state_version``** ⇒ 旧键里没有任何维度会因它而变 ⇒
+    同 ``state_version`` + 同 ``chapter_no`` 重跑该章**命中旧装配** ⇒
+    **planner 拿着改动前的 premise 排计划，零告警**。
+
+    列集：**PRAGMA 推导 + 显式收窄**到 ``_PROJECT_META_COLUMNS``
+    （name / genre / premise）——``projects`` 的业务列全集里还有
+    ``writing_bible`` / ``word_band_json`` / ``genre_pack_id`` 等**已有独立键维度**
+    的列，不收窄就会与那些维度重复（过度失效）且语义不可读。
+
+    判别：突变规格 ``tests/mutation_specs/q1_meta_title_key.py``
+    （``META-KEY-1`` 撤掉 ``project_meta_fp`` 维度 ⇒ 改 premise 后键不变 ⇒ 必红）。
+    """
+    if not project_id:
+        return _FINGERPRINT_NONE
+    try:
+        conn = get_connection(db_path)
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return _FINGERPRINT_NONE
+    try:
+        rows = _fingerprint_table_rows(
+            conn, "projects", "project_id", project_id,
+            keep_columns=_PROJECT_META_COLUMNS,
+        )
+    finally:
+        conn.close()
+    return _hash_snapshot([["projects", rows]])
+
+
+def _fingerprint_chapter_title(conn: sqlite3.Connection, chapter_id: str) -> Any:
+    """本章 ``title`` 一列（列集 PRAGMA 推导 + 显式收窄）；行/列缺失 → ``"missing"``。
+
+    ⚠️ 与 :func:`_fingerprint_table_rows` 不同：这里按 **chapter_id** 取**单行**
+    （不是「项目下全部行」）——装配消费的是**本章**的标题。
+    """
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(chapters)").fetchall()]
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return "missing"
+    if "title" not in cols:
+        return "missing"
+    try:
+        row = conn.execute(
+            "SELECT title FROM chapters WHERE chapter_id = ?", (chapter_id,)
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return "missing"
+    if row is None:
+        return "missing"
+    return [row[0]]
+
+
+def chapter_title_fingerprint(db_path: str | Path, chapter_id: str) -> str:
+    """``chapters.title``（**本章**）内容指纹（2026-10-22 批次二十一 P0-1-B）。
+
+    **为什么必须补**（同形状第 5 次的另一个实例）：writer 装配把
+    ``chapter.get("title")`` 写进 payload 的 ``chapter`` 段
+    （``writer_input.py`` 的 ``_build_writer_input_uncached``），
+    而章标题**被 prompt 契约显式承诺**给模型
+    （``docs/agents/prompts/writer-v5.md`` 的 §5 与示例
+    ``"chapter": {..., "title": "夜叩青石", ...}``）。
+    作者改章标题走 ``PATCH /api/chapters/{id}`` ⇒
+    ``packages/domain/chapter/service.py`` 的 ``UPDATE chapters`` 同样**只 commit()、
+    不推 state_version** ⇒ 旧键里没有任何维度会因它而变 ⇒
+    同 ``state_version`` + 同 ``chapter_no`` 重跑该章**命中旧装配** ⇒
+    **正文按改动前的标题写，零告警**。
+
+    判别：突变规格 ``tests/mutation_specs/q1_meta_title_key.py``
+    （``TITLE-KEY-1`` 撤掉 ``title_fp`` 维度 ⇒ 改 title 后键不变 ⇒ 必红）。
+    """
+    if not chapter_id:
+        return _FINGERPRINT_NONE
+    try:
+        conn = get_connection(db_path)
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return _FINGERPRINT_NONE
+    try:
+        rows = _fingerprint_chapter_title(conn, chapter_id)
+    finally:
+        conn.close()
+    return _hash_snapshot([["chapters.title", rows]])
+
 
 
 def _fingerprint_scene_plan(scene_plan: Any) -> str:

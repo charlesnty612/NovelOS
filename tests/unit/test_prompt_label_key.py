@@ -28,10 +28,12 @@ from packages.core.ids import new_id, now_iso
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
-DIRECTOR_KEY_LEN = 16  # 12 → 13：新增 prompt_label 维度；13 → 14：新增 chars_fp 角色维度
+DIRECTOR_KEY_LEN = 17  # 12 → 13：新增 prompt_label 维度；13 → 14：新增 chars_fp 角色维度
 #                       （E1，2026-10-16）；14 → 15：新增 skills_fp 绑定 skill 集合维度
 #                       （0032 内部消费外部 skill）；15 → 16：新增 world_fp 世界观三表
-#                       内容指纹（P1-3，2026-10-21；键尾两元恒为 prompt_label + ns_tag）
+#                       内容指纹（P1-3，2026-10-21；键尾两元恒为 prompt_label + ns_tag）；
+#                       16 → 17：新增 project_meta_fp 项目 name/genre/premise 维度
+#                       （P0-1-A，2026-10-22 批次二十一）
 
 
 def _fresh_db(tmp_path: Path) -> Path:

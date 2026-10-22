@@ -5,6 +5,93 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-22 批次（二十一）之四：项目 review 的 P0/P1 落地 —— 含一处被推翻的 P0）
+
+> **来源**：项目 review（`docs/reviews/project-review-2026-10-22.md`）+ 用户「按全文处理」。
+> **2 名会话内成员 + Lead 自办**；零真实 LLM 调用、零内容仓接触。
+
+#### 1. P0-1 缓存键第 5 次：`projects.name/genre/premise` 与 `chapters.title` 补维度
+
+`director_input` 用 `project["name"]/genre/premise`、`writer_input` 用 `chapter["title"]`，
+而这两个字段的写路径（`domain/project/service.py` 的 `UPDATE projects`、`domain/chapter/service.py`
+的 `UPDATE chapters`）**都不推 `state_version`**，键里也没有任何相关维度 ⇒ 作者改**项目设定**或**章标题**
+后重跑同一章会**命中旧装配**（发给模型的仍是旧 premise / 旧标题），零告警。**同形状第 5 次**。
+
+- `cache.py` 新增 `project_meta_fingerprint()`（`projects` 的 name/genre/premise 三列，PRAGMA 推导 + 显式收窄，
+  因为同表还有 `writing_bible`/`word_band_json` 已有各自维度）与 `chapter_title_fingerprint()`（按 `chapter_id` 取单行）；
+  内部把 `_fingerprint_tables` 的哈希段抽成 `_hash_snapshot`（**行为逐字不变**）。
+- 键长：director **16 → 17**（`project_meta_fp`）、writer **21 → 22**（`title_fp`）；`cacheable` 同步；
+  三个测试侧长度常量同步（`DIRECTOR_KEY_LEN` / `WRITER_KEY_LEN` / `test_skill_injection.py` 两处）。
+- ⚠️ **新维度单独成行**：既有五条规格（`E1-1`/`E1-2`/`SKILL-KEY-1`/`SKILL-KEY-2`/`STYLE-KEY-1`）的锚点原文
+  逐字未动 ⇒ `validate_specs.py` 63 文件 / 379 条 / **0 问题**。
+- 判别：`tests/unit/test_ctx_b_meta_title_key.py` **5 例**（改 premise/改标题必 miss、不动必命中、
+  **preview 路径同样吃到新维度**）；突变 `META-KEY-1`/`TITLE-KEY-1` ⇒ **2/2 CAUGHT**。
+
+#### 2. P0-3 审稿静默降级：把「DB 读失败」与「plan 解析降级」拆开
+
+`chapter_review/pipeline.py` 原 `except Exception: pass` 把 `SELECT plan_json` 的 **DB 读失败**与
+`_parse_plan_json` 的**解析降级**一并吞掉 ⇒ 审稿在**空 plan** 下照常跑完出报告，零告警。
+- 拆成：DB 读失败 ⇒ `log.error`（带 chapter_id）+ 报告 `warnings` 里留一行 `[REVIEW-DB-READ-FAILED]`；
+  `_parse_plan_json` 的 fail-soft 语义**逐字不动**（它恒不抛）。顺带订正误导文案（读失败 ≠「章节不存在」）。
+- **走 `warnings` 而非 `errors`**：`errors` 语义承载字数严重级条目，写进去会混淆消费方；`warnings` 是既有
+  非阻断通道 ⇒ **门禁行为零变化**。**未改成「直接抛」**（那会把「审稿跑完」变「run 失败」= 行为变更）。
+- 判别：4 例（日志/留痕/文案不谎报/正常路径零变化）；突变 `REVIEW-DB-1`/`-2` ⇒ **2/2 CAUGHT**。
+
+#### 3. ⚠️ P0-4 被推翻：**delta「重放多一行」不是缺陷，是三个有意行为**
+
+review 曾判定「`state_deltas` 无 `(chapter_id, delta_version)` 唯一约束 ⇒ 同一 delta 重放会多一行并再推
+`state_version`」。**该判断不成立**，证据三层：
+1. `delta_version` **恒为 1**（DDL `DEFAULT 1` + 两处 INSERT 硬编码）⇒ 该键**不承载唯一性信息**；
+2. `init_genesis` 自己就落一行 `(chapter_id, 1)` ⇒ 按该键做预检会把**每章第一个真实 delta** 误判成重放；
+3. 改用 `(chapter_id, workflow_run_id, delta_version)` 后仍炸：`branches.promote_branch` **刻意**「按序重放、
+   不复用原 delta 行」（避免 PK 冲突与跨分支溯源混乱）⇒ **「多一行 + 再推一次 state_version」正是 promote 的设计行为**；
+   且同一 run 合法可写多行 delta（**回滚的逆 delta 复用原 run_id**）。
+⇒ **实测回归**：加上预检后 `10 failed / 6 errors`（`test_rollback_character_delete` 5 例、`test_snapshot_*` 3 例、
+`test_story_state_api`、`test_state_list_response_contract` 6 个 setup error），日志铁证
+`duplicate (chapter_id=ch_85fbe…, workflow_run_id=wfr_dlt_char_add, delta_version=1) → 跳过插入`。
+⇒ **处置：整体回退**（`commits.py` / `chapter_commit/commit.py` 回到 HEAD，删掉对应的测试与规格）。回退后
+上述 16 项**全部恢复绿**（47 passed + 8 passed）。
+⇒ **留痕的教训**：「表上没有唯一约束」**不等于**「写入会重复」——中间可能隔着**有意为之的生产者**
+（promote 重放 / 逆 delta）。**先找「谁会合法写第二行」，再谈幂等。**
+
+#### 4. P1-3 12 个无依据常量：全部归类，**一个都不编造**
+
+`packages/core/quality/` 的 191 个模块级常量**逐值比对，差异 0**（只改注释）：其中 12 个原无出处，现逐个标注为
+**规格来源**（`PLOT_EXTRA_SLACK` / `PACING_FLAT_RANGE_THRESHOLD` / `PACING_PARAGRAPH_TARGET`，出自 README §4）、
+**规则推导**（`FORESHADOW_NO_HOOKS_NEUTRAL` 由 `FORESHADOW_PLANT_WEIGHT` 的约束反推；后者 0.85≤w<1 区间内取 0.9）、
+或**经验值（未经语料校准）**（`_WEAK_WORD_*` / `_LEFT_TOKEN_CHARS` / `_RIGHT_REF_CHARS` / `_ECHO_SAMPLE_MAX_CHARS` /
+`_WARNING_RATIO` / `_ERROR_RATIO`）。顺带订正一处「注释与代码冲突」：`_ERROR_RATIO` 原注释称「与 band 外缘对齐」
+（实际 band 外缘偏离 15%，此处 30%），且该常量**当前无任何消费方**（全仓只有定义行）。
+
+#### 5. P1-4 质量域 rule_id 总账（此前「规则全集拿不到」）
+
+新增 `tests/unit/quality/test_quality_rule_id_ledger.py`（**4 例**）+ 突变 `QLEDGER-1/-2`（**2/2 CAUGHT**）：
+从 `packages/core/quality/**.py` 的 AST 字面量抽全集，**钉住 N = 50**（注册表内 **26** / 外硬编码 **24**），
+逐条登记 rule_id → 所在文件 → 是否在注册表内；四条断言覆盖「增/删/改名」「挪文件」「进出注册表」「每个 id 有签发点」。
+**44/50 有 Python 签发点**；余 **6 个是 `CRITIC_TAXONOMY` 的键**（由 LLM critic 产出、Python 不签发）⇒
+**显式登记为已知缺口**，不硬凑（补上签发点时该断言也会红 ⇒ 提示更新总账）。
+**裁决：不给 `guardrails` 的 12 个硬编码 id 建注册表**——总账已解决「全集可见」，注册表会引入无消费方的间接层。
+
+#### 6. P1-6 `migrate_backups_to_sync.py` 加 `--dry-run` / `--help`
+
+该脚本**跑一次就是 `openssl` 加密 + 删源备份**，且此前**无 argparse / 无 `--help` / 无 `--dry-run`**。
+- 新增 `--dry-run`：把判定逻辑抽成纯函数 `_plan_moves()`（只 stat、不写不删，**与真实执行共用判定口径**：
+  源缺失⇒skip-missing / 目标已存在⇒skip-exists / 否则 encrypt+delete-source），并在 `ensure_key()` **之前**提前返回
+  ⇒ **不写不删、不生成密钥**；默认行为逐字不变。
+- 判别：`tests/unit/test_script_migrate_backups_to_sync.py` 3 → **6 例**（计划输出 / 源未删 / 目标未写 / 密钥未生成 /
+  判定与真实一致 / `--help` 写明不可逆）；突变 `DRYRUN-1`/`-2` ⇒ **2/2 CAUGHT**。所有路径常量 monkeypatch 到 `tmp_path`。
+
+#### 7. 闸门实测（Lead 亲跑）
+
+| 项 | 结果 |
+|---|---|
+| 全量 pytest | **3892 passed / 1 skipped / 1 xfailed / 0 failed**（`-n 4` 454.78s） |
+| **同棵树 `-n 20`** | **3892 passed / 1 / 1**，**175.61s（2:55）**——用例数逐位相同 ⇒ **全量 pytest 从 7:34 → 2:55** |
+| 树指纹（跑测前后） | **691 文件 / `2b8808c1…`** 逐位一致 |
+| **全量突变 `--jobs 16`** | **378/378 全捕获**（0 存活/中止/无效，exit 0），**12.7 分钟**（串行 52.7 分钟）；还原 OK 378 / 失败 0 |
+| 突变残留 | `*.mutbak` **0**；**105 个被突变文件逐个与日志记录 SHA 相同（差异 0）** |
+| ruff / OpenAPI | `All checks passed!`；109 paths / 145 schemas **零漂移** |
+
 ### Changed（2026-10-22 批次（二十一）之一：突变闸门提速 —— 全量 53min → 13min，常规批次降到秒~分钟级）
 
 > **来源**：用户指令「现在全量一次为什么会要1个小时，这太恐怖了」「后期岂不是要跑几个小时」

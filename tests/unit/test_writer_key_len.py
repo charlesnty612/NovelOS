@@ -1,12 +1,12 @@
 """writer 装配缓存键的**键长钉子**（dev-b 批次十九）。
 
 **这是测试侧钉子**（与既有惯例一致）：生产侧 `packages/core/context_engine/` 内
-**没有** `*_KEY_LEN` 常量——director 的 `DIRECTOR_KEY_LEN = 16` 同样只存在于
+**没有** `*_KEY_LEN` 常量——director 的 `DIRECTOR_KEY_LEN = 17` 同样只存在于
 ``tests/unit/test_prompt_label_key.py:31``。本文件照该先例给 writer 补一个
-``WRITER_KEY_LEN = 21``，让「键长」不再只靠人眼核对。
+``WRITER_KEY_LEN = 22``，让「键长」不再只靠人眼核对。
 
 **为什么需要**：writer 键每加一个内容指纹维度就多一元（world_fp → reveal_fp →
-plan_fp → skills_fp → style_fp…），而键元数变化**没有任何机器看守** ⇒
+plan_fp → skills_fp → style_fp → title_fp…），而键元数变化**没有任何机器看守** ⇒
 「键与 payload 的维度逐字同形」这条硬规则 2 的前提（键里有的维度 == payload 里
 消费的权威输入）会悄悄漂移。本文件把当前键长钉住，并同时钉住**键尾两元**
 （prompt 标签 / 命名空间标记）与「各内容指纹维度都落在 prompt_label 之前」。
@@ -31,8 +31,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
 #: writer 缓存键元数。20 → 21 = 2026-10-22 批次十九新增「作者文风样例」维度
-#: （``style_fp``）。历史沿革：19 → 20 = world_fp + reveal_fp（2026-10-21）。
-WRITER_KEY_LEN = 21
+#: （``style_fp``）；21 → 22 = 2026-10-22 批次二十一新增「本章标题」维度
+#: （``title_fp``，P0-1-B）。历史沿革：19 → 20 = world_fp + reveal_fp（2026-10-21）。
+WRITER_KEY_LEN = 22
 
 
 def _fresh_db(tmp_path: Path) -> Path:
