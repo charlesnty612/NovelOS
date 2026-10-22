@@ -33,7 +33,8 @@
 - :mod:`packages.core.agent_runtime.runner`（run_agent 调用方式、mock_script 注入）
 - :mod:`packages.core.quality.guardrails`（G-sim 13 字 shingle 实现）
 - :mod:`packages.core.workflow_runtime.engine`（engine 启动方式）
-- ``docs/reference-canon/reference-canon-v0.md`` + ``schemas/reference-canon.schema.json``
+- 内容仓 NovelOS-Content 的 ``docs/reference-canon/reference-canon-v0.md``
+  + ``schemas/reference-canon.schema.json``
 """
 
 from __future__ import annotations

@@ -33,11 +33,12 @@
 **2026-10-15 批次（六）G8：``_last_paragraph`` 的口径已收敛到 ``_split_paragraphs``。**
 它此前内联第二份按空行切分的实现（2026-09-27 留档待排期的那个），现已复用模块内
 唯一切段入口——单换行语料上不再把整章当「末段」扫。实测数据与「为何不设阈值」见
-该函数 docstring。⚠️ **连带待办**（本轮铁律「文件互斥」内未做，须另行指派）：
-``tests/unit/quality/test_readability_rules.py`` 的形状级断言原写「内联段落切分应
-只剩 ``_last_paragraph`` 一处」（``len(inline_splits) == 1``），收敛后应为 **0**，
-该断言需随之订正；同批 ``ai_patterns_text.py`` 与 ``ai_patterns_sentence.py`` 里
-「仍内联第二份实现 / 已登记为待修」的说明文字也已失准。
+该函数 docstring。
+✅ **当时的「连带待办」已全部收口**（2026-10-15 批次六 G8 同期完成，此处补记于
+2026-10-22 工程卫生批次）：① ``tests/unit/quality/test_readability_rules.py`` 的
+形状级断言已从「内联段落切分只剩 ``_last_paragraph`` 一处」（``len == 1``）改为
+**「一处也没有」（``assert not inline_splits``）**；② ``ai_patterns_text.py`` 与
+``ai_patterns_sentence.py`` 里「仍内联第二份实现 / 已登记为待修」的说明文字均已订正。
 """
 from __future__ import annotations
 

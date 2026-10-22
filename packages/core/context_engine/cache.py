@@ -301,7 +301,8 @@ def _fingerprint_tables(
 def world_fingerprint(db_path: str | Path, project_id: str | None) -> str:
     """``locations`` / ``factions`` / ``world_rules`` 三表内容指纹（writer + director 共用）。
 
-    判别：``tests/unit/test_world_reveal_cache_key.py``（改任一表必须 miss）。
+    判别：突变规格 ``tests/mutation_specs/e1_character_cache_key.py``
+    （``E1-1`` 撤掉 ``world_fp`` 维度 ⇒ 改任一表键不变 ⇒ 必红）。
     """
     return _fingerprint_tables(db_path, project_id, _WORLD_FINGERPRINT_TABLES)
 
@@ -309,8 +310,9 @@ def world_fingerprint(db_path: str | Path, project_id: str | None) -> str:
 def reveal_policies_fingerprint(db_path: str | Path, project_id: str | None) -> str:
     """``reveal_policies`` 内容指纹（writer 侧按它裁剪 HIDDEN 实体，见 P1-4）。
 
-    判别：``tests/unit/test_world_reveal_cache_key.py``（加一条 planned+reader 策略
-    必须 miss，否则 HIDDEN 角色剧透）。
+    判别：突变规格 ``tests/mutation_specs/e1_character_cache_key.py``
+    （``E1-2`` 撤掉 ``reveal_fp`` 维度 ⇒ 加一条 planned+reader 策略键不变 ⇒ 必红，
+    否则 HIDDEN 角色剧透）。
     """
     return _fingerprint_tables(db_path, project_id, _REVEAL_FINGERPRINT_TABLES)
 

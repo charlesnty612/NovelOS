@@ -30,7 +30,7 @@
 - 清理：无论如何退出（成功或异常），临时分支 status 都会被设为 ``'ARCHIVED'``。
   不删行，保留 commits 供 ``get_simulation`` 重放。
 - Simulation 不做 LLM 推演、不调用 Observer、不生成 narrative；只做状态推演
-  （v0 与 docs/PRD设计评审-2026-08-23.md §47/§90 一致）。
+  （v0 与内容仓 NovelOS-Content 的 docs/PRD设计评审-主控版-2026-08-23.md §47/§90 一致）。
 """
 
 from __future__ import annotations

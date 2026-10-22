@@ -70,7 +70,7 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0032_skills.sql，共 32 个迁移，41 张业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包 / 0026 run 实例归属 / 0027 场景计划 / 0028 大纲槽 / 0029 写作圣经 / 0030 回滚索引项目内收窄 / 0031 项目级快通道 / 0032 内部消费外部 skill）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0033_model_connections.sql，共 33 个迁移，42 张业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包 / 0026 run 实例归属 / 0027 场景计划 / 0028 大纲槽 / 0029 写作圣经 / 0030 回滚索引项目内收窄 / 0031 项目级快通道 / 0032 内部消费外部 skill / 0033 模型连接层）
 skills/novelos/           对外可分发的 Agent Skill 包（SKILL.md + 5 份 references + stdlib 薄客户端
                          + 契约自检 46 项；三平台清单见 .claude-plugin/ / .codex-plugin/ /
                          .cursor-plugin/ / .agents/）
@@ -91,7 +91,7 @@ jsonschema / httpx；测试另需 pytest / ruff）。
 # 1) 安装依赖
 pip install -e ".[dev]"
 
-# 2) 执行数据库迁移（生成 data/novelos.db；41 张业务表 + _migrations 物理共 42 张）
+# 2) 执行数据库迁移（生成 data/novelos.db；42 张业务表 + _migrations 物理共 43 张）
 python scripts/migrate.py
 
 # 3) 前端构建（构建产物 apps/web/dist，后端会自动托管）
@@ -238,8 +238,8 @@ cd apps/web && npm run test
 
 ## 版本与更新日志
 
-当前版本 **v3.9.0**（`pyproject.toml` 为版本单源；`apps/web/package.json`、`apps/web/package-lock.json`
-与 `uv.lock` 随发版对齐。当前基线：pytest **3578 passed / 1 skipped / 1 xfail**（3580 collected；全量命令**不再带**任何 `--ignore`——含 `test_m1_lock.py`，见上文「测试」一节），vitest **755**（56 个测试文件））。自 V1.0 起，
+当前版本 **v3.10.0**（`pyproject.toml` 为版本单源；`apps/web/package.json`、`apps/web/package-lock.json`
+与 `uv.lock` 随发版对齐。当前基线：pytest **3796 passed / 1 skipped / 1 xfail**（3798 collected；全量命令**不再带**任何 `--ignore`——含 `test_m1_lock.py`，见上文「测试」一节），vitest **780**（57 个测试文件））。自 V1.0 起，
 所有迭代必须在 `CHANGELOG.md` 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x
 路线登记在同文件「Known Issues / 路线登记」一节。
 

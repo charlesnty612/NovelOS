@@ -379,7 +379,8 @@ def _run_observer_legs_in_parallel(
     - 收集后返回 ``(leg_a_out, leg_b_out, wall_ms)``。wall_ms 用 ``time.monotonic()``
       度量，仅供测试 / 观测断言「真并发」。
 
-    设计动机（V3.5 提速调研结论）：见 ``docs/roadmap/v3-plan.md`` 已知问题——双腿
+    设计动机（V3.5 提速调研结论）：见内容仓 NovelOS-Content 的
+    ``docs/roadmap/v3-plan.md`` 已知问题——双腿
     并发让 wall_time ≈ max(t_leg_a, t_leg_b)，单次路径 ≈ sum(t_leg_a, t_leg_b)。
     实测 m1_run（service_tier=priority 启用）：单腿 60-180s ⇒ 并发收益 30-50%。
 

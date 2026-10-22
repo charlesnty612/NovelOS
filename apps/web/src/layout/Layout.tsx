@@ -1,12 +1,9 @@
 import { Outlet, useLocation, useParams, Link, matchPath } from 'react-router-dom';
 import { useApiCall } from '../hooks/useApiCall';
-import { projectsApi } from '../api/endpoints';
+import { healthApi, projectsApi } from '../api/endpoints';
 import { Loading } from '../components/Loading';
 import { StatusBadge } from '../components/StatusBadge';
-import type { Project } from '../api/types';
-
-/** 侧栏底部版本标识；发版时随 pyproject / package.json 一同对齐（AGENTS 版本纪律）。 */
-const APP_VERSION_LABEL = 'NovelOS v3.9.0';
+import type { HealthResponse, Project } from '../api/types';
 
 interface NavItem {
   path: string;
@@ -28,6 +25,13 @@ export function Layout() {
     async () => (pid ? projectsApi.get(pid) : Promise.reject(new Error('no project'))),
     [pid],
   );
+
+  // 侧栏底部版本标识：**从后端读**（`/api/health` 的 version ← 后端 importlib 读
+  // pyproject = 真单源）。⚠️ 此前是**硬编码常量**（`NovelOS v3.9.0`）⇒ 每次发版
+  // 都得手动同步第 5 处，漏一处界面就报旧版本号；且原测试断言的是那个常量本身
+  // ⇒ **自指断言**（改真源它不报，改它才绿）——与 AGENTS 坑区「自指断言恒真」同族。
+  // 取不到时只显示产品名，**不显示可能过时的版本号**。
+  const { data: health } = useApiCall<HealthResponse>(() => healthApi.get(), []);
 
   const projectNav: NavItem[] = pid
     ? [
@@ -90,7 +94,7 @@ export function Layout() {
         ) : null}
         <div className="app-sidebar__spacer" />
         <div className="app-sidebar__section app-sidebar__item--muted app-sidebar__version">
-          {APP_VERSION_LABEL}
+          {health?.version ? `NovelOS v${health.version}` : ''}
         </div>
       </aside>
 

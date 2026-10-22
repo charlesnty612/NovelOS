@@ -225,7 +225,8 @@ def _observer_parallel_enabled(ctx: dict[str, Any] | None = None) -> bool:
     - 否则读环境变量 ``NOVELOS_OBSERVER_PARALLEL``，缺省视为 on；
     - off 取值：``0 / false / off / no``。
 
-    设计动机（V3.5 提速调研结论）：见 ``docs/roadmap/v3-plan.md`` 已知问题节——
+    设计动机（V3.5 提速调研结论）：见内容仓 NovelOS-Content 的
+    ``docs/roadmap/v3-plan.md`` 已知问题节——
     service_tier=priority 已启用，但 provider 拥堵窗口仍可能饿死双腿；
     并发提交能让 wall_time 接近 max(leg_a, leg_b) 而非 sum（每腿实测 60-180s）。
     """

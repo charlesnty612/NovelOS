@@ -18,7 +18,8 @@ _REFERENCE_CANON_STYLE_MAX_CHARS = 1500
 _REFERENCE_CANON_PROTAGONIST_TAGS_CAP = 6
 _REFERENCE_CANON_PROTAGONIST_FOILS_CAP = 4
 
-# consumer 取值（与 agent-contracts + docs/reference-canon/reference-canon-v0.md §4.1 对齐）
+# consumer 取值（与 agent-contracts + 内容仓 NovelOS-Content 的
+# docs/reference-canon/reference-canon-v0.md §4.1 对齐）
 _REFERENCE_CANON_CONSUMER_DIRECTOR = "director"
 _REFERENCE_CANON_CONSUMER_PLANNER = "scene_planner"
 _REFERENCE_CANON_CONSUMER_WRITER = "writer"
@@ -45,7 +46,8 @@ def _reference_canon_excerpt(
         * ``"writer"``：style_params（整体 JSON ≤1500 字符，超出逐项删减）。
 
     设计：
-    - MVP 单参照系（多书加权合并策略见 docs/reference-canon/reference-canon-v0.md §4.1 OV-2，defer）。
+    - MVP 单参照系（多书加权合并策略见内容仓 NovelOS-Content 的
+      docs/reference-canon/reference-canon-v0.md §4.1 OV-2，defer）。
     - canon_json 解析失败 → 容错返回 (None, None)，不抛错。
     - 缺字段 → 跳过该字段，consumed_fields 不计。
     - director 行为与 Sprint 11 下半实现逐字段一致（key 名 / 顺序 / 截断上限不变）。

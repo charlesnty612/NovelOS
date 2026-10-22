@@ -138,7 +138,7 @@ def _resolve_stage_input(ctx: dict[str, Any], stage: str) -> dict[str, Any]:
                 rev = revisions.get(output_key)
                 # 仅在用户真正提供了"非空 dict"时才采纳第 1 层修订；
                 # 空 dict 视为"未提供"，回退到 ctx/draft 兜底，避免
-                # 静默用空数据落库并触发占位章（参见
+                # 静默用空数据落库并触发占位章（参见内容仓 NovelOS-Content 的
                 # docs/testing/audit-project-init-frontend-20260829.md §一.3）。
                 if isinstance(rev, dict) and rev:
                     return rev

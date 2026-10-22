@@ -5,6 +5,127 @@
 
 ## [Unreleased]
 
+## [3.10.0] - 2026-10-22
+
+> **本段说明**：本段一次性收录 **2026-09-13 → 2026-10-22（40 天）** 的 13 个批次
+> （批次九~十八），此前它们一直堆在 `## [Unreleased]` 里（**3423 行 / 85 个小节**），
+> 致使「本文件头部规矩」里写的发版惯例（把 `## [Unreleased]` 改名并加回空段）**40 天
+> 没被执行**——版本号也停在 3.9.0（74 个已推送的 commit 未发版）。
+> ⚠️ **本段内的小节按写入顺序排列，非时间序**（历史如此，勿按位置推断先后）；
+> 精确时间见各小节标题里的日期与批次号。
+> ⚠️ **V3.6.0 ~ V3.9.0 四版至今没有发版段、也没有 git tag**（最高 tag 仍为 `v3.5.0`）
+> ⇒ 属**历史欠账**，本段不回填（回填需逐版核对内容，成本与风险都高于收益），
+> **登记待排期**。
+
+### Changed（2026-10-22 批次（十八）：工程卫生 —— 断链修复 + 死代码清理 + 探针收敛 + 版本归档）
+
+> **来源**：用户指令「做工程卫生」。
+> **做法**：三个只读调查 agent 并行摸底（仓库垃圾 / 死代码与一次性产物 / 文档引用与数字一致性），
+> 逐条**复核**后执行——**不盲从**：agent 报为「断链」的「自 `routers/workflows.py` 拆出」
+> 这类**历史沿革说明**语义正确，**不改**；agent 报的「124 处断链」经逐条核对后只处理
+> **代码内活引用**与**确已失效**的那些。
+> **边界不变**：零真实 LLM 调用、零内容仓接触、只动软件层。
+
+#### 1. 修断链：**判别面指错文件**是最贵的一类
+
+| 位置 | 原文 | 改后 |
+|---|---|---|
+| `packages/core/quality/models.py` | 「字段形状经实测（`tests/api/test_judge_response_contract.py`）」 | 该文件**不存在** ⇒ 真实路径 `tests/api/test_reveal_and_judge_response_contract.py`（judge 与 reveal 合并在同一文件） |
+| `packages/domain/knowledge/models.py` | 「`tests/api/test_reveal_policy_response_contract.py` 有专门用例…」 | 同上，**不存在** ⇒ 同一真实路径 |
+| `packages/core/context_engine/director_input.py` | 「判别：`tests/unit/test_skill_cache_key.py`」 | 该文件**全历史从未提交过** ⇒ 真实判别面是突变规格 `tests/mutation_specs/l7_skill_cache_key.py`（`SKILL-KEY-1/2`） |
+| `packages/core/context_engine/cache.py`（2 处） | 「判别：`tests/unit/test_world_reveal_cache_key.py`」 | 同上**从未存在** ⇒ 真实判别面是 `tests/mutation_specs/e1_character_cache_key.py`（`E1-1` 撤 `world_fp` / `E1-2` 撤 `reveal_fp`） |
+| `packages/core/simulation/service.py` | 「`docs/PRD设计评审-2026-08-23.md` §47/§90」 | 该文件在**内容仓**且实际名为 `PRD设计评审-主控版-…` ⇒ 补仓库名 + 正确文件名 |
+
+⚠️ **这三处指向的判别面其实都存在**（在突变规格里），只是 docstring 指了**不存在的
+单测文件名** ⇒ 复核者照着找不到 ⇒ 「判别」二字失效。
+
+#### 2. 修「缺仓库名前缀」（硬规则 7）—— 只改**非提示词**文件
+
+`packages/` 里的 8 处（`canon.py` ×2、`deconstruct_book/pipeline.py`、
+`project_init/pipeline.py`、`chapter_commit/observer.py`、`chapter_commit/pipeline_common.py`、
+`routers/__init__.py`、`simulation/service.py`）补上 `NovelOS-Content:` 前缀。
+
+⚠️ **提示词文件里的 30+ 处同类问题登记不修**（理由见下）。
+
+#### 3. 修「假声明」与「数字漂移」——**它们比断链更容易误导人**
+
+| 位置 | 原文（失准） | 实测 | 处置 |
+|---|---|---|---|
+| `scripts/README.md` 头部 ×2 + 总览表标题 | 「现行 **25** 个脚本」 | **31** 个 | 改数字；总览表补齐 8 个漏登的脚本（`tree_fingerprint` / `mutation_harness` / `mutation_probe` / `backup_db` / `detector_evidence_check` / `human_baseline_synthetic` / `ai_pattern_recall` / `migrate_backups_to_sync`） |
+| `scripts/README.md`「**不做**」 | 「**不实现数据库备份 / 恢复**」 | 已被 `scripts/backup_db.py` 推翻 | 改为**区分层面**：项目级导出/恢复在 `packages/core/backup/`；**主库整体备份到网盘同步盘**是 `backup_db.py`（2026-10-22 用户裁决）⇒ **不构成重复** |
+| `packages/core/quality/ai_patterns.py` | 一段「⚠️ **连带待办**（须另行指派）」列出 3 项 | **三项 2026-10-15 批次六 G8 早已全部做完** | 删「待办」段，改写为**完成态**陈述（**事已做完但注释没删** = 最典型的卫生问题） |
+| `AGENTS.md` §四 | 「突变验证（**13** 条硬编码变异）」 | **21** 条 | 改数字 |
+| `AGENTS.md` §四 | 「迁移（新库全链 **0001~0031**）」 | 实际 **0001~0033**（且**同一文件 `:43` 写的正是 0033 ⇒ 自相矛盾**） | 改数字 |
+| `AGENTS.md` §一 | 「**18 条** PAUSED run（2026-09-30 实测）」 | 实测 **17** 条（`:164` 早已写「复测为 17 条」⇒ **两处打架**） | 统一为 17，并注明 18→17 的来由 |
+| `README.md` ×3 | 「**32** 个迁移 / **41** 张业务表 / pytest **3578** / vitest **755**（56 文件）」 | 33 / 42 / 3796 / 780（57 文件） | 全部订正 |
+| `database/README.md` ×4 | 「0001~0031，共 **31** 个迁移 / **39** 张业务表」 | 0001~0033 / 33 / 42 | 全部订正 |
+| `AGENTS.md` §六矩阵 | 批次十五那行基线**未划掉**（与批次十七行并存，两行都标 ✅） | — | 按既有 `~~删除线~~` 惯例划掉 |
+| `packages/workflows/chapter_review/pipeline.py` | 同一件 TODO 在 docstring 与行内注释**各写一遍** | — | 合并为一处 |
+
+#### 4. 删死代码 5 个 + **三个同款探针收敛成一个**
+
+**删除**（每件都有依据）：
+
+| 文件 | 为什么能删 |
+|---|---|
+| `scripts/probe_mask_inner_scope.py`、`scripts/probe_profile_mask_exit.py` | 一次性探针；**结论已固化**在 AGENTS 坑区与 `tests/mutation_specs/l3_config_list.py` 的 docstring |
+| `scripts/migrate_m1_run_to_main.py` | 一次性迁移；其源库 `data/m1_run/` **已不存在** ⇒ **永不可能再跑**；AGENTS/CHANGELOG/README 三处**零引用** |
+| `scripts/smoke_ch063_split.py` | 硬编码源库 `data/m1_run/novelos.db` + 章节 id，源库已不存在 ⇒ **永不可能再跑**；三处零引用 |
+| `docs/agents/scripts/verify_summarizer_sync.py` | ad-hoc 脚本，其核心断言**已固化为** `tests/integration/test_summarizer_prompt_registration.py`（3 个测试） |
+
+⚠️ **「结论已固化」与「工具还在」是两件事**：删除前先把结论落到别处（AGENTS / 规格 docstring），
+不留在代码里当唯一凭据。
+
+**收敛**：`scripts/mutation_probe.py`（新）——「临时改一处 → 跑定向测试 → **逐条报告红了哪几条用例**
+→ finally 逐字节还原 + SHA 校验」，并带「执行器在飞（存在 `*.mutbak`）即拒绝运行」的闸。
+**它补的是执行器 `run_spec.py` 缺的一环**：执行器只给「哪个文件、几条失败」，复核者**无法确认
+「红的是预期那条」**；本探针把失败用例名逐条列出。
+
+#### 5. 前端版本号：消除**第 5 处**副本 + 一处**自指断言**
+
+`Layout.tsx` 此前写死 `const APP_VERSION_LABEL = 'NovelOS v3.9.0'`，而 `Layout.test.tsx`
+断言的**正是那个常量** ⇒ 改真源（pyproject）它不报、改常量才绿 ⇒ **自指断言**
+（同坑区「自指断言恒真」）。
+
+⇒ 改为从 `/api/health` 读 `version`（后端 importlib 读 pyproject = 真单源）⇒
+**发版只改 pyproject 一处**。配套判别写法：测试用**显眼的假版本号** `9.9.9-probe`
+并断言「**不出现**旧硬编码串」⇒ 这样断言才**判别**「版本号是动态的」而不是「恰好等于当前版本」；
+另加一条降级用例（health 取不到 ⇒ 版本位**留空**，不显示可能过时的版本，也不与品牌名重复）。
+
+#### 6. 版本归档：**40 天 / 74 个已推送 commit 未发版**
+
+- CHANGELOG 的 `## [Unreleased]` 段堆了 **3423 行 / 85 个小节 / 13 个批次**，而
+  **文件头部自己写着**「发版时把 `## [Unreleased]` 改名为 `## [X.Y.Z] - 日期`」——
+  **40 天没被执行** ⇒ 本次照规矩归档为 `## [3.10.0] - 2026-10-22`，并加回空的 `## [Unreleased]`。
+- 版本 **3.9.0 → 3.10.0**，五处同步（pyproject / package.json / package-lock.json / uv.lock /
+  `.claude-plugin/plugin.json`）+ `uv lock` + **`uv sync --extra dev`**（刷新 editable 元数据，
+  否则 `/api/health` 对外报旧版 —— AGENTS 已记的错核销形状）。
+- `export_openapi` + `gen_frontend_types` regen ⇒ `openapi.json` 的 `info.version` 随之为 3.10.0，
+  **schemas 零变化** ⇒ 前端 `types.generated.ts` 零漂移。
+- ⚠️ **V3.6.0 ~ V3.9.0 四版至今无发版段、也无 git tag**（最高 tag 仍 `v3.5.0`）⇒ 历史欠账，
+  本次**不回填**（回填需逐版核对内容），**登记待排期**。
+
+#### 7. 闸门
+
+| 闸门 | 结果 |
+|---|---|
+| 全量 pytest | **3800 passed / 1 skipped / 1 xfailed / 0 failed**（447.25s，项目 `.venv`，`-n 4`）—— 较上轮 3796 **+4**（= `tests/unit/test_mutation_probe.py` 4 例，**账对得上**） |
+| 全量 vitest | **781 全绿**（57 文件）—— 较上轮 780 **+1**（= Layout「取不到版本号时版本位留空」那条降级用例） |
+| `npx tsc -b --force` | **零错** |
+| `npm run build` | 通过（asset hash `index-JjznepmV.js` —— **与基线 `index-mhzcNjYt.js` 不同**，因 `Layout.tsx` 确有代码改动，**属预期**） |
+| ruff | `All checks passed!`（`packages scripts tests`） |
+| OpenAPI | **109 paths / 145 schemas**（`info.version` 随发版为 **3.10.0**）；`types.generated.ts` **零漂移**（只依赖 `components.schemas`） |
+| 树指纹 | **662 文件 / `5730c09f…`**（上轮 663 → 删 4 个 `scripts/` + 增 3 个新文件；`docs/` 不在指纹口径内） |
+| smoke e2e | **PASS**（四步链路完好 + observer 在场 + SYNC OK） |
+| 突变（本批新增） | **3/3 CAUGHT**（`MP-1` 撤还原 / `MP-2` 撤并发闸 / `MP-3` 撤锚点唯一性检查），还原校验 OK |
+| 突变（**全量 328 条**） | ⏳ **本轮开跑中**（预检 46 文件 / 328 条 / **0 问题**）—— 结论待补记 |
+
+⚠️ **本批突变规格 328 条**（上轮 325 + 本批 3 条 `l12_mutation_probe.py`）。
+⚠️ **本批改了多个突变目标文件的 docstring**（`quality/models.py`、`context_engine/cache.py`、
+`context_engine/director_input.py`、`api/routers/__init__.py`、`simulation/service.py`、
+`domain/knowledge/models.py` 等）⇒ **锚点可能被自己的改动打断** ⇒ 收尾**必跑只读预检**
+（已跑：**0 问题**）与**全量突变**（结论待补）。
+
 ### Fixed（2026-10-22 批次（十七）：CI 连续两次红 —— 一条前端竞态断言（本地全绿 / CI 恒红））
 
 > **来源**：用户问「项目目前是什么情况」⇒ 查 CI 时发现：批次十六的**两次** push
@@ -318,8 +439,9 @@ key、但生效 key 不同」的真实情形 ⇒ 按 params 里的 key 分组会
 ⚠️ **另一条实测订正**（原 l3 docstring 不准）：它称撤掉出口 ⇒「明文 api_key 直接出参」
 ⇒ 实测红因是**端点 500**（DB 里 `params_json` 是 **JSON 字符串**，没走脱敏就进不了
 `ModelProfileOut.params_json: dict[str, Any]` ⇒ `ResponseValidationError`）
-⇒ **根本没走到「检查明文」那步**。两个场景各有判别点，实测（只读探针，已入库
-`scripts/probe_profile_mask_exit.py` / `scripts/probe_mask_inner_scope.py`）：
+⇒ **根本没走到「检查明文」那步**。两个场景各有判别点，实测（只读探针，**已于
+2026-10-22 工程卫生批次删除**——同款探针收敛为通用单点 `scripts/mutation_probe.py`；
+结论已固化在 `tests/mutation_specs/l3_config_list.py` 的 docstring 与 AGENTS 坑区）：
 ① 撤**整个出口** ⇒ **两条**用例红；② 只撤**内部那一步**
 `out["api_key"] = _MASK`（保留 dict 化）⇒ **恰好 1 条**红（明文真出参），其余 27 条全绿
 ⇒ **判别面无缺口**，docstring 已按实测改写。

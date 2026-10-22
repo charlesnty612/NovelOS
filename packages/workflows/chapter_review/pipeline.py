@@ -1048,7 +1048,6 @@ def _deep_review_node(ctx: dict[str, Any]) -> dict[str, Any]:
     - ``draft_text`` / ``plan_summary`` / ``settings_digest``：取自 ``review_inputs``。
     - ``prev_chapter_summaries``：当前项目暂未启用 summarizer 的「按章节一句话摘要」字段
       透传——本节点传空数组；待 summarizer 落库后由上层补齐并经 run_agent 注入。
-      此处留 TODO 注释待后续 summarizer 章节摘要接入。
     - ``critic_report``：若 critic 节点已跑出 ``critic_status='ok'``，把 ``ctx["critic_report"]``
       透传给 deep_reviewer 作为盲区对照基准（§3.4 边界）。
     - ``genre_rubric``：题材审查要点（题材库 P2）——与 critic 同一份投影，非 None 时进

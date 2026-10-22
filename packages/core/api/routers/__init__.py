@@ -18,8 +18,8 @@ V3.3 Capability 模块开关化（轻量方案）：
   文件名去 ``.py``，如 ``"simulation"`` / ``"arc"`` / ``"reference"``）出现在
   ``disabled`` 集合中的模块，跳过其路由挂载并在 import 阶段记一条 ``info`` 日志。
 - ``disabled=None`` 表示不启用过滤（向后兼容旧调用方）。
-- 本机制仅过滤 HTTP 路由面；workflow 注册隔离不在本轻量方案范围（见
-  ``docs/roadmap/v3.3-v3.5-candidates-design.md`` §四边界说明）。
+- 本机制仅过滤 HTTP 路由面；workflow 注册隔离不在本轻量方案范围（见内容仓
+  NovelOS-Content 的 ``docs/roadmap/v3.3-v3.5-candidates-design.md`` §四边界说明）。
 """
 
 from __future__ import annotations

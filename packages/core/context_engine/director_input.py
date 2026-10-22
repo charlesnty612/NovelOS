@@ -394,7 +394,8 @@ def build_director_input(
     新段** ``skills`` ⇒ 必须进键（硬规则 2「凡进 payload 的装配参数必须入键」）：
     换 skill / 改 skill payload（PUT ⇒ version 自增）/ 改绑定集合都必须 miss，
     否则 director 拿着改之前的旧手艺规划本章。口径与 ``genre_pack_ref`` /
-    ``chars_fp`` 逐字同形。判别：``tests/unit/test_skill_cache_key.py``。
+    ``chars_fp`` 逐字同形。判别：突变规格 ``tests/mutation_specs/l7_skill_cache_key.py``
+    （``SKILL-KEY-1/2`` 撤掉 ``skills_fp`` 维度 ⇒ 绑定 skill 前后键不变 ⇒ 必红）。
 
     ``namespace``（关键词参数，默认 ``""``）：键尾命名空间标记。``preview_context``
     传 ``"preview"`` 拆开 dry-run 与生产的键空间，避免预览的空意图 / 默认 2200 字

@@ -1,7 +1,7 @@
 # scripts（运维脚本）
 
-> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 25 个脚本：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke、卷纲体检与开卷、章节量产等），均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
-> 状态：现行入口 25 个（`ls scripts/*.py`）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
+> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 31 个脚本：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke、卷纲体检与开卷、章节量产等），均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
+> 状态：现行入口 31 个（`ls scripts/*.py`，2026-10-22 实测）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
 
 ## 职责与边界
 
@@ -12,7 +12,10 @@
 
 **不做**：
 - 不实现生产部署脚本（Phase B Tauri 壳已于 2026-08-23 由用户裁决关闭，Web 版交付即目标达成）
-- 不实现数据库备份 / 恢复（已实现于 `packages/core/backup/` + `/api/projects/{pid}/backup` 端点，不在 `scripts/` 重复）
+- 不实现**项目级**备份 / 恢复（已实现于 `packages/core/backup/` + `/api/projects/{pid}/backup` 端点，不在 `scripts/` 重复）。
+  ⚠️ **这不是「不做备份」**：`scripts/backup_db.py` 做的是**另一件事**——把**整个主库**备份到
+  网盘同步盘（2026-10-22 用户裁决「备份改到百度网盘的同步盘，本机不留其它本项目的备份」），
+  两者是不同层面（项目级导出 vs 主库快照），**不构成重复**。
 
 ## 对外接口
 
@@ -21,17 +24,20 @@
 | `scripts/migrate.py` | `scripts/migrate.py:16` | `main() -> int` | 执行 SQLite 迁移并打印 `applied / skipped / tables / db` |
 | `scripts/serve.py` | `scripts/serve.py:31` | `main() -> int` | 启动 uvicorn，host/port 取自 `Settings` |
 
-### 脚本总览（现行 25 个）
+### 脚本总览（现行 31 个）
 
 | 类别 | 脚本 |
 |---|---|
 | 迁移 / 服务 | `migrate.py`、`serve.py` |
 | 内容仓同步 | `content_sync.py`（见下文专节） |
-| 库维护 / 一次性迁移 | `db_maintenance.py`（workflow_runs 清理 / prune-logs / vacuum）、`migrate_m1_run_to_main.py` |
-| 评估 / 长跑探针 | `eval_regression.py`、`m1_long_run.py`、`m1_report.py`、`m2_judge.py`、`real_llm_e2e.py` |
+| 库维护 / 一次性迁移 | `db_maintenance.py`（workflow_runs 清理 / prune-logs / vacuum）、`migrate_backups_to_sync.py`（**一次性**：把存量本项目备份加密后移到网盘同步盘；**动作待用户执行**） |
+| 备份 | `backup_db.py`（把**主库**备份到网盘同步盘；`--encrypt` 加密落盘、`--redact-secrets` 出脱敏副本、`--keep N` 保留最近 N 份） |
+| 评估 / 长跑探针 | `eval_regression.py`、`m1_long_run.py`、`m1_report.py`、`m2_judge.py`、`real_llm_e2e.py`、`ai_pattern_recall.py`（AI 味算子召回率脚手架） |
 | Schema / 前端类型 | `export_openapi.py`、`gen_frontend_types.py` |
-| 端到端 / 冒烟 | `smoke_e2e.py`、`smoke_ch063_split.py` |
-| 一致性核查 | `check_state_sync.py` |
+| 端到端 / 冒烟 | `smoke_e2e.py` |
+| 一致性核查 | `check_state_sync.py`、`detector_evidence_check.py`（检测器证据表 vs 代码实际值，只读比对，退出码 0/1/2） |
+| 人类基线代理 | `human_baseline_synthetic.py`（**自造语料**校准器，**不是**人类基线；只证明算子活着，不得用它改阈值） |
+| 闸门 / 突变 | `tree_fingerprint.py`（源码树指纹，闸门前后各跑一次）、`mutation_harness.py`（21 条硬编码突变，前置脚本）、`mutation_probe.py`（**通用探针**：临时改一处 → 跑定向测试 → 报「红了哪几条」→ 逐字节还原；带「执行器在飞即拒绝」的闸） |
 | 卡死 run 巡检 | `inspect_stalled_runs.py`（PAUSED/RUNNING/PENDING 逐条 + 审批实质内容摘要，只读；`--apply` 故意不实现，见下文专节） |
 | 卷纲 / 开卷 / 世界切换 | `outline_check.py`（卷纲体检，见其模块 docstring）、`open_volume.py`（见下文专节）、`world_switch.py`（快穿换位面时按既有机制封存上一世作用域，默认 dry-run） |
 | 正文规整 / 算子校准 / 可读性回放 | `normalize_chapters.py`（引号漂移 + 内部标识体检，默认 dry-run）、`ai_tone_calibrate.py`（AI 味算子校准 + 精确率抽样）、`readability_audit.py`（长段 / 对话占比 / 接词回声三指标只读回放 + 锚点书人类基线对照） |

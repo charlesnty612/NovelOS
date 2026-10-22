@@ -84,7 +84,7 @@ class RevealPolicy:
 # 换掉会动到 service 层与 `KnowledgeService` 的所有调用点，收益不抵风险。
 #
 # ⚠️ 两份模型必须保持同形，否则会出现「入参校验用一套、出参序列化用另一套」的
-# 静默分叉。`tests/api/test_reveal_policy_response_contract.py` 有专门用例把
+# 静默分叉。`tests/api/test_reveal_and_judge_response_contract.py` 有专门用例把
 # `RevealPolicyOut` 的字段集与 `RevealPolicy.to_dict()` 的键集**逐字比对**。
 
 RevealTargetKindLiteral = Literal[

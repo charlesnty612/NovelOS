@@ -156,7 +156,7 @@ __all__ = ["Issue", "QualityContext", "QualityReport"]
 # ⚠️ 下面三个模型是 **2026-10-15 批次（五）** 补的：`POST /chapters/{cid}/quality/judge`
 # 此前是裸 ``dict`` body + 裸 dict 响应，OpenAPI 无 schema，前端手写契约无从校验。
 #
-# 字段形状经实测（`tests/api/test_judge_response_contract.py`），并有三条**反直觉**行为
+# 字段形状经实测（`tests/api/test_reveal_and_judge_response_contract.py`），并有三条**反直觉**行为
 # 记在这里，因为它们决定了模型必须怎么写：
 #
 # 1. **越界分不返 422，是静默夹取**。`QualityService.save_judge_score` 对四维做
