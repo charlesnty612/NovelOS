@@ -14,11 +14,41 @@
 
 用法::
 
+    # 单规格（开发期自验，最常用）
     .venv/Scripts/python.exe tests/mutation_specs/run_spec.py tests/mutation_specs/g1_world.py
 
-全组合并跑（收尾闸门用）::
+    # 只跑「本批改动命中的」突变（**每批收尾的默认口径**，见下）
+    .venv/Scripts/python.exe tests/mutation_specs/run_spec.py --changed
 
-    .venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all
+    # 只读预检（秒级，不做任何突变）
+    .venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --precheck
+
+    # 全量（发版前 / 周期性；并行 8 路）
+    .venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --jobs 8
+
+闸门的三个档位（2026-10-22 批次二十一修订，**这是纪律变更**）
+------------------------------------------------------------------
+原纪律是「每批收尾都跑一次全量」，370 条 × 每条新起一个 pytest 进程 ≈ **53 分钟**，
+且随规格只增不减（2026-10-15 起 21 → 120 → 370，**线性膨胀**）⇒ 到 1000 条就会变成
+两三个小时。**这不是「测试慢」，是「把 370 次进程启动重复付了一遍」**：每条突变
+的 pytest 固定开销（解释器 + 应用 import + collect ≈ 4–6s）远大于被测断言本身。
+
+| 档位 | 命令 | 目标耗时 | 频率 |
+|---|---|---|---|
+| **只读预检** | `--all --precheck` | **秒级** | 每次改动后（可进 CI） |
+| **增量突变** | `--changed`（默认取 `git diff HEAD --name-only`） | **分钟级** | **每批收尾（新默认）** |
+| **全量突变** | `--all --jobs 8` | 十几分钟 | 发版前 / 每周 |
+
+为什么可以这样拆：全量跑的**真正目的**有两个 —— ①「本批改动没打断既有锚点」②
+「既有的 370 条判别力还在」。① 是**纯只读计算**（`count(anchor) == 1` + 测试文件存在 +
+replacement 有语法），秒级可做完，而且**比跑全量更灵敏**（锚点一断立刻报，不必等到
+某条突变 `[ABORT]`）。② 与「本批改了什么」无关，是**周期性健康检查**，不需要每批付
+53 分钟。**只有 ① 与「本批新增/修改的规格」必须每批验**，而它们天然只涉及本批改过的
+文件 ⇒ `--changed` 正好覆盖。
+
+⚠️ **不要**为了省时间把多条突变塞进同一个 pytest 进程（例如 `pytest.main()` 复跑）：
+已 import 的模块会缓存旧字节 ⇒ **突变根本不生效** ⇒ 静默假绿。每条突变必须落在
+**独立的新进程**里，这是本执行器不可让渡的语义。
 
 四条硬断言（从 ``scripts/mutation_harness.py`` 原样继承，**不许删**）
 ----------------------------------------------------------------
@@ -39,6 +69,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import importlib.util
 import os
@@ -168,8 +199,25 @@ def _sha(p: pathlib.Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def run_one(mid: str, rel: str, anchor: str, replacement: str, test_file: str) -> str:
-    """跑一条突变，返回 CAUGHT / SURVIVED / ABORT / INVALID 之一。"""
+def run_one(
+    mid: str,
+    rel: str,
+    anchor: str,
+    replacement: str,
+    test_file: str,
+    *,
+    fail_fast: bool = False,
+) -> str:
+    """跑一条突变，返回 CAUGHT / SURVIVED / ABORT / INVALID 之一。
+
+    ``fail_fast``（``--fail-fast``）：给 pytest 加 ``-x`` —— 首个用例失败即停。
+    本执行器只需要「退出码是否为 0」来判 CAUGHT，不关心红了几条 ⇒ 通常能省掉
+    目标用例之后那些用例的执行时间。
+    ⚠️ 边界：若突变导致的是 **error**（而非 failure），``-x`` 下输出可能既无
+    ``" passed"`` 也无 ``" failed"`` ⇒ 会被 ``_assert_tests_ran`` 判成 ``INVALID``。
+    那是**响亮失败**（执行器最后 exit 1），不会静默通过；但默认仍**关闭** ``-x``，
+    由调用方显式开启。
+    """
     path = ROOT / rel
     original = path.read_text(encoding="utf-8")
     before = _sha(path)
@@ -188,7 +236,10 @@ def run_one(mid: str, rel: str, anchor: str, replacement: str, test_file: str) -
         is_py = test_file.startswith("tests/")
         try:
             if is_py:
-                ok, out = _run([PY, "-m", "pytest", test_file, "-q"], ROOT)
+                py_args = [PY, "-m", "pytest", test_file, "-q", "-p", "no:cacheprovider"]
+                if fail_fast:
+                    py_args.append("-x")
+                ok, out = _run(py_args, ROOT)
                 runner = "pytest"
             else:
                 ok, out = _run([str(VITEST), "run", test_file], WEB)
@@ -254,32 +305,208 @@ def _resolve_spec(arg: str) -> pathlib.Path:
     )
 
 
+def _git_changed_paths(rev: str) -> set[str]:
+    """``--changed`` 的「改动文件」口径：已跟踪 diff + 未跟踪新文件。
+
+    **口径写死在这里**（不做智能推断）：``git diff --name-only <rev>`` 的并集
+    ``git ls-files --others --exclude-standard``。后者必须算进来——新增的规格文件
+    与被新增的模块都在里面，漏了它们等于「新写的突变永远不进增量闸门」。
+    """
+    changed: set[str] = set()
+    for cmd in (
+        ["git", "diff", "--name-only", rev],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    ):
+        r = subprocess.run(
+            cmd,
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if r.returncode != 0:
+            raise LaunchFailure(f"{' '.join(cmd)} 失败：{r.stderr[-300:]}")
+        changed |= {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
+    return changed
+
+
+def precheck(entries: list[tuple[str, str, str, str, str, str]]) -> tuple[list[str], int]:
+    """**只读预检**：不改任何源码，秒级验完「突变是否还能被施加」。
+
+    四类问题（与 ``run_one`` 的四个失败桶一一对应，只是提前到「不花钱」的阶段）：
+    1. 目标文件不存在 ⇒ 将来 ``[INVALID]``/崩；
+    2. 锚点命中 != 1 ⇒ 将来 ``[ABORT]``；
+    3. 定向测试文件不存在 ⇒ 将来跑出 exit 4 被误读；
+    4. ``replacement == anchor`` ⇒ 变异等于没改（``run_one`` 靠 SHA 变化兜底，但那时
+       已经花掉了一次 pytest 启动）。
+
+    ⇒ 本函数就是「每批收尾」要的那一档：**它比跑全量更灵敏**（锚点一断立刻报），
+    而且成本是毫秒级。实测 370 条全量 **0.2 秒**（2026-10-22）。
+
+    入参是**已组装的条目**（而不是规格文件）⇒ 与 ``--changed`` 可组合：
+    ``--changed --precheck`` = 「只预检本批改动命中的那些突变」，即每批真正要的那一步。
+    """
+    problems: list[str] = []
+    for _spec_name, mid, rel, anchor, replacement, test_file in entries:
+        path = ROOT / rel
+        if not path.is_file():
+            problems.append(f"{mid}: 目标文件不存在 {rel}")
+            continue
+        hits = path.read_text(encoding="utf-8", errors="replace").count(anchor)
+        if hits != 1:
+            problems.append(f"{mid}: 锚点命中 {hits} 次（要求恰好 1）@ {rel}")
+        if anchor == replacement:
+            problems.append(f"{mid}: replacement 与 anchor 相同 ⇒ 变异不会生效")
+        tf = (ROOT / test_file) if test_file.startswith("tests/") else (WEB / test_file)
+        if not tf.is_file():
+            problems.append(f"{mid}: 定向测试文件不存在 {test_file}")
+    return problems, len(entries)
+
+
+def _bin_by_target(entries: list[tuple], jobs: int) -> list[list[int]]:
+    """按**目标文件**分组后做 LPT 装箱 —— 同一个 ``rel`` 绝不同时给两个 worker。
+
+    为什么必须按 ``rel`` 而不按规格分片：不同规格会改**同一个文件**
+    （`E1-1` 与 `SKILL-KEY-2` 都锚在 `writer_input.py`，各自还有独立备份路径
+    ``<file>.mutbak``）⇒ 两个 worker 同时改同一文件会互相覆盖备份、并且把对方的
+    改动当成自己的「原文」写回去 ⇒ **静默污染源码**。按 ``rel`` 分组是唯一安全的分片单位。
+    """
+    by_rel: dict[str, list[int]] = {}
+    for idx, it in enumerate(entries):
+        by_rel.setdefault(it[2], []).append(idx)
+    bins: list[list[int]] = [[] for _ in range(max(1, jobs))]
+    load = [0] * len(bins)
+    for rel, idxs in sorted(by_rel.items(), key=lambda kv: -len(kv[1])):
+        target = load.index(min(load))
+        bins[target].extend(idxs)
+        load[target] += len(idxs)
+    return bins
+
+
 def main(argv: list[str]) -> int:
-    if argv and argv[0] == "--all":
+    spec_args: list[str] = []
+    use_all = False
+    jobs = 1
+    use_changed = False
+    changed_since = "HEAD"
+    fail_fast = False
+    precheck_only = False
+
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--all":
+            use_all = True
+        elif arg == "--jobs" and i + 1 < len(argv):
+            jobs = int(argv[i + 1])
+            i += 1
+        elif arg.startswith("--jobs="):
+            jobs = int(arg.split("=", 1)[1])
+        elif arg == "--changed":
+            use_changed = True
+        elif arg == "--changed-since" and i + 1 < len(argv):
+            changed_since = argv[i + 1]
+            i += 1
+        elif arg.startswith("--changed-since="):
+            changed_since = arg.split("=", 1)[1]
+        elif arg == "--fail-fast":
+            fail_fast = True
+        elif arg == "--precheck":
+            precheck_only = True
+        elif arg in ("-h", "--help"):
+            print("用法: run_spec.py <规格文件...> | --all  [--jobs N] [--changed] [--precheck]")
+            print("      --changed [--changed-since REV]  只跑「改动命中目标文件」的突变")
+            print("      --precheck                       只做只读预检（秒级，不改源码）")
+            print("      --jobs N                         按目标文件分片并行（默认 1=串行）")
+            print("      --fail-fast                      pytest 加 -x（首红即停）")
+            return 0
+        elif arg.startswith("-"):
+            print(f"[INVALID]  未知选项：{arg}")
+            return 2
+        else:
+            spec_args.append(arg)
+        i += 1
+
+    if use_all:
         spec_files = discover_specs()
         print(f"[覆盖] 发现规格文件 {len(spec_files)} 个：" f"{[p.name for p in spec_files]}")
     else:
         try:
-            spec_files = [_resolve_spec(a) for a in argv]
+            spec_files = [_resolve_spec(a) for a in spec_args]
         except LaunchFailure as exc:
             print(f"[INVALID]  {exc}")
             return 2
     if not spec_files:
-        print("用法: run_spec.py <规格文件...> | --all")
+        print("用法: run_spec.py <规格文件...> | --all  [--jobs N] [--changed] [--precheck]")
         return 2
+
+    # ---- 组装条目（并按 --changed 过滤）----
+    entries: list[tuple[str, str, str, str, str, str]] = []
+    for sf in spec_files:
+        for mid, rel, anchor, replacement, test_file in load_spec(sf):
+            entries.append((sf.name, mid, rel, anchor, replacement, test_file))
+
+    if use_changed:
+        try:
+            changed = _git_changed_paths(changed_since)
+        except LaunchFailure as exc:
+            print(f"[INVALID]  {exc}")
+            return 2
+        before_n = len(entries)
+        entries = [e for e in entries if e[2] in changed]
+        print(
+            f"[增量] 改动文件 {len(changed)} 个；突变 {before_n} → {len(entries)} 条"
+            f"（口径：git diff --name-only {changed_since} ∪ 未跟踪文件）"
+        )
+        if not entries:
+            print("✅ 本批没有任何突变的目标文件被改动 ⇒ 增量闸门无事可做（exit 0）")
+            return 0
+
+    # ---- 只读预检（在 --changed 过滤之后 ⇒ 可组合成「本批秒级闸门」）----
+    if precheck_only:
+        problems, total = precheck(entries)
+        scope = "（已按 --changed 收窄）" if use_changed else ""
+        print(f"[预检] 突变 {total} 条{scope} / 问题 {len(problems)} 处")
+        for p in problems:
+            print(f"  ✗ {p}")
+        print("✅ 全部可安全交给 run_spec.py 执行" if not problems else "❌ 预检未通过")
+        return 1 if problems else 0
 
     survived: list[str] = []
     aborted: list[str] = []
-    for sf in spec_files:
-        print("=" * 78)
-        print(f"规格: {sf.name}")
-        for mid, rel, anchor, replacement, test_file in load_spec(sf):
-            line = run_one(mid, rel, anchor, replacement, test_file)
-            print(line, flush=True)
-            if line.startswith("[SURVIVED]"):
-                survived.append(mid)
-            elif line.startswith("[ABORT]") or line.startswith("[INVALID]"):
-                aborted.append(mid)
+
+    def _record(line: str) -> None:
+        print(line, flush=True)
+        if line.startswith("[SURVIVED]"):
+            survived.append(line.split(":", 1)[0].replace("[SURVIVED]", "").strip())
+        elif line.startswith("[ABORT]") or line.startswith("[INVALID]"):
+            aborted.append(line.split(":", 1)[0].split("]")[-1].strip())
+
+    if jobs <= 1:
+        # 串行：保持历史输出形态（带「规格:」分段），便于与旧日志对照
+        last_spec = None
+        for spec_name, mid, rel, anchor, replacement, test_file in entries:
+            if spec_name != last_spec:
+                print("=" * 78)
+                print(f"规格: {spec_name}")
+                last_spec = spec_name
+            _record(
+                run_one(mid, rel, anchor, replacement, test_file, fail_fast=fail_fast)
+            )
+    else:
+        bins = _bin_by_target(entries, jobs)
+
+        def _work(idxs: list[int]) -> None:
+            for idx in idxs:
+                _, mid, rel, anchor, replacement, test_file = entries[idx]
+                _record(
+                    run_one(mid, rel, anchor, replacement, test_file, fail_fast=fail_fast)
+                )
+
+        print(f"[并行] {jobs} 路（按目标文件分片；同一文件绝不并发）")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            list(pool.map(_work, [b for b in bins if b]))
 
     print("=" * 78)
     print(f"突变存活: {survived or '无'}")

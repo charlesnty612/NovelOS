@@ -183,6 +183,9 @@ python scripts/migrate.py            # 迁移（新库全链 0001~0033）
 python -m ruff check packages scripts tests   # lint（测试文件豁免 E501）
 python -m pytest -n 4 -q             # 全量（约 4 分钟；xdist 需在 venv）
 .venv/Scripts/python.exe scripts/mutation_harness.py   # 突变验证（**21 条**硬编码变异，退出码 0=全捕获/1=有存活或中止；2026-10-15 批次（三）建、（四）扩到 13、批次（五）扩到 21，⚠️ 会临时改源码 ⇒ **禁与任何读/写源码的操作并发**，含 git add/commit）
+.venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --changed --precheck   # **每批收尾档①**：只读预检本批改动命中的突变（锚点==1 / 目标与测试文件存在 / replacement 真变了）——实测 **0.2 秒**
+.venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --changed             # **每批收尾档②**：增量突变（典型 20~40 条 × ~2s ≈ **1~3 分钟**）
+.venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --jobs 12             # **发版前/周期性档③**：全量（串行 53min → 12 路并行 **~13min**）
 cd apps/web && npx tsc -b && npx vitest run && npm run build
 python scripts/export_openapi.py && python scripts/gen_frontend_types.py   # schema 漂移后 regen（必须用项目 .venv 解释器跑；系统 python 因 editable 元数据缺失会把 version 读成 `dev`，误判为 schema 漂移——2026-09-27 dev-b 实证）
 python scripts/smoke_e2e.py          # 端到端（临时库+独立端口，自动清理）

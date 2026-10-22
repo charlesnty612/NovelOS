@@ -58,16 +58,48 @@ from .schema import BACKUP_FORMAT, BACKUP_VERSION, EXPORTED_TABLES, validate_bac
 __all__ = ["BackupService"]
 
 
-# 备份包 metadata 中显式声明"已剔除/未导出"的标记字段；
-# 这些字段值恒为 True（写入包时），供下游审计 / 自证使用。
-_BACKUP_METADATA_FLAGS: dict[str, bool] = {
-    "api_keys_stripped": True,
-    "ai_call_logs_excluded": True,
-    "evaluations_excluded": True,
-    "workflow_runs_excluded": True,
-    "model_configs_excluded": True,
-    "reference_canons_excluded": True,
+# 备份包 metadata 中显式声明"已剔除/未导出"的标记字段。
+#
+# ⚠️ 2026-10-22 批次二十一（项目 review P1-1）：这些标记**原先全是硬编码 True** ——
+# 也就是说它们只陈述「我们希望如此」，不陈述「包内实际如何」。一旦有人把
+# ``model_profiles`` / ``model_connections`` 加进 ``EXPORTED_TABLES``，包体里就会
+# 真的带上明文 ``api_key``（它存在 ``params_json`` 里，见 ADR-0002），而 metadata
+# 仍然自证 ``api_keys_stripped: true`` ⇒ 导入方无从察觉。
+# ⇒ 现在改为**从 ``EXPORTED_TABLES`` 派生**：标记为 True 当且仅当「该声明涉及的表
+# 一张都没被导出」。判据是集合不相交，不是「我以为没导出」；将来谁加表，标记会
+# **自己变假**。（注：包体侧另有一道独立看守 ——
+# ``tests/unit/test_backup_export_import.py::test_export_metadata_has_api_keys_stripped``
+# 递归扫全包禁止出现 ``"api_key"`` 字段；本改动补的是「**声明**不得是恒真常量」这一半。）
+_FLAG_REQUIRED_ABSENT_TABLES: dict[str, tuple[str, ...]] = {
+    "api_keys_stripped": ("model_profiles", "model_connections"),
+    "ai_call_logs_excluded": ("ai_call_logs",),
+    "evaluations_excluded": ("evaluations",),
+    "workflow_runs_excluded": ("workflow_runs", "workflow_run_nodes"),
+    "model_configs_excluded": ("model_configs",),
+    "reference_canons_excluded": ("reference_canons", "canon_extracts"),
 }
+
+
+def backup_metadata_flags() -> dict[str, bool]:
+    """把「已剔除」声明从 ``EXPORTED_TABLES`` **派生**出来（不再硬编码）。
+
+    每个标记为 True 当且仅当它列举的表**一张都没被导出**（集合不相交）。
+    返回的 dict 与历史常量同名同序 ⇒ 对外契约不变。
+
+    判别力：``tests/unit/test_backup_metadata_flags.py`` 用 monkeypatch 往
+    ``EXPORTED_TABLES`` 注入 ``model_profiles`` ⇒ 断言 ``api_keys_stripped``
+    **变假**（硬编码实现会让该用例红）。
+    """
+    exported = set(EXPORTED_TABLES)
+    return {
+        flag: not (set(tables) & exported)
+        for flag, tables in _FLAG_REQUIRED_ABSENT_TABLES.items()
+    }
+
+
+#: 向后兼容别名（``api/routers/backup.py`` 的 docstring 引用了这个名字）。
+#: ⚠️ 新代码请直接用 :func:`backup_metadata_flags`（每次现算，不吃 import 期快照）。
+_BACKUP_METADATA_FLAGS: dict[str, bool] = backup_metadata_flags()
 
 
 def _list_migrations(db_path: Path | str) -> list[str]:
@@ -202,7 +234,7 @@ class BackupService:
             "table_count_exported": len(tables),
             "exported_table_names": list(tables.keys()),
             "exported_at_iso": now_iso(),  # 额外时间戳，与顶层 exported_at 同步
-            **_BACKUP_METADATA_FLAGS,
+            **backup_metadata_flags(),
         }
 
         # 4. 顶层包

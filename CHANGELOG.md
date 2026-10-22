@@ -5,6 +5,88 @@
 
 ## [Unreleased]
 
+### Changed（2026-10-22 批次（二十一）之一：突变闸门提速 —— 全量 53min → 13min，常规批次降到秒~分钟级）
+
+> **来源**：用户指令「现在全量一次为什么会要1个小时，这太恐怖了」「后期岂不是要跑几个小时」
+> 「纪律该修订就修订」。**Lead 自办**，改的是**执行器与纪律**，不动被测代码的语义。
+
+#### 1. 先定性：不是「测试慢」，是「重复付 370 次进程启动」
+
+实测拆解（`data/mutation_gate_20261022_b20.log`）：
+
+| 观测 | 数字 |
+|---|---|
+| 全量突变 370 条总墙钟 | **52.7 分钟 ⇒ 每条 8.5 秒** |
+| 全量 pytest 3865 用例（`-n 4`） | **7.2 分钟**（对照：两者不是一回事） |
+| 单文件 pytest 的固定开销（`--collect-only`） | **1.8 秒** |
+| 只 import 主要依赖 | 0.6 秒 |
+
+根因：`run_spec.py` 每条突变都 `subprocess.run([PY, "-m", "pytest", <单文件>, "-q"])`
+⇒ **解释器启动 + 应用 import + collect + 临时库/迁移 fixture 要重付 370 遍**，
+而真正「被测断言」只占其中很小一段。**规格只增不减**（2026-10-15 起 21 → 120 → 370），
+按原纪律「每批收尾跑全量」线性膨胀 ⇒ 破了 1000 条就是两三个小时。
+
+#### 2. 修法：把「一档」拆成「三档」+ 两个并行/快速开关
+
+`tests/mutation_specs/run_spec.py` 新增（**串行默认行为完全不变**，老日志可继续对照）：
+
+| 开关 | 作用 |
+|---|---|
+| `--precheck` | **只读预检**：目标文件存在 + 锚点恰好命中 1 次 + `replacement != anchor` + 定向测试文件存在。**不写任何源码** |
+| `--changed [--changed-since REV]` | **增量**：只跑「目标文件在 `git diff --name-only REV` ∪ 未跟踪文件里」的突变。可与 `--precheck` 组合 |
+| `--jobs N` | **按目标文件分片并行**。⚠️ 必须按 `rel` 分片而不是按规格：不同规格会改**同一个文件**（`E1-1`/`SKILL-KEY-2` 都锚在 `writer_input.py`，共用同一个 `<file>.mutbak`）⇒ 并发会互相覆盖备份、把对方的改动当原文写回 ⇒ **静默污染源码** |
+| `--fail-fast` | pytest 加 `-x`（首红即停）。默认关闭：若突变导致的是 **error** 而非 failure，`-x` 下输出可能既无 `" passed"` 也无 `" failed"` ⇒ 会被 `_assert_tests_ran` 判 `INVALID`（**响亮失败**，不会静默通过），故由调用方显式开启 |
+
+**实测（同机 32 逻辑核）**：
+
+| 场景 | 结果 |
+|---|---|
+| `--all --precheck`（370 条） | **0.2 秒** |
+| `--all --changed --precheck`（当前脏树，14 个改动文件） | 收窄到 **36 条 / 0.24 秒** |
+| 28 条突变：串行 vs `--jobs 7` | **269.6s → 79.3s（3.4×）**，两次均 28/28 CAUGHT、28/28 还原校验 OK |
+| 84 条突变 `--jobs 12` | **175.9s（每条 2.1s）**，84/84 CAUGHT、84/84 还原 OK、`*.mutbak` 0 |
+| 全量 370 条外推（`--jobs 12`） | **≈13 分钟**（原 52.7 分钟） |
+
+#### 3. 纪律修订（**这是规则变更，不是实现细节**）
+
+**原**：每批收尾都跑一次全量突变。
+**现**（三档，已写进 `AGENTS.md §四`）：
+
+| 档位 | 命令 | 耗时 | 频率 |
+|---|---|---|---|
+| ① 只读预检 | `run_spec.py --all --changed --precheck` | **0.2s** | 每次改动后（可进 CI） |
+| ② 增量突变 | `run_spec.py --all --changed` | 典型 **1~3 分钟** | **每批收尾（新默认）** |
+| ③ 全量突变 | `run_spec.py --all --jobs 12` | **~13 分钟** | 发版前 / 每周 |
+
+**为什么可以这样拆**：全量跑的真实目的有两个 —— (a)「本批改动没打断既有锚点」；
+(b)「既有 370 条的判别力还在」。(a) 是**纯只读计算**，`--precheck` 秒级做完且**比跑全量更灵敏**
+（锚点一断立刻报，不必等某条突变 `[ABORT]`）；(b) 与本批改了什么无关，属周期性健康检查。
+只有「本批新增/修改的规格」必须每批验 ⇒ 它们天然只涉及本批改过的文件 ⇒ `--changed` 正好覆盖。
+
+**⚠️ 明确禁止的「提速」**：把多条突变塞进同一个 pytest 进程（`pytest.main()` 复跑）。
+已 import 的模块会缓存旧字节 ⇒ **突变根本不生效 ⇒ 静默假绿**。每条突变必须落在独立新进程里。
+
+### Fixed（2026-10-22 批次（二十一）之二：备份「已剔除」标记不再是恒真常量）
+
+`packages/core/backup/service.py` 的 6 个 `api_keys_stripped` / `*_excluded` 标记**原先是硬编码 `True`** ——
+它们只陈述「我们希望如此」，不陈述「包内实际如何」。一旦有人把 `model_profiles` / `model_connections`
+加进 `EXPORTED_TABLES`，包体就会真的带上明文 `api_key`（存在 `params_json`，ADR-0002），
+而 metadata 仍自证 `api_keys_stripped: true` ⇒ 导入方无从察觉。
+
+- 改为 `_FLAG_REQUIRED_ABSENT_TABLES`（声明每个标记涉及哪些表）+ `backup_metadata_flags()`
+  **从 `EXPORTED_TABLES` 派生**：标记为真 ⟺ 声明涉及的表**一张都没被导出**（集合不相交）。
+- 判别：`tests/unit/test_backup_metadata_flags.py` **12 例**，核心是 `test_flag_flips_to_false_when_its_table_is_exported`
+  （monkeypatch 往导出集合里注入 `model_profiles` 等 ⇒ 对应标记**必须变假**；**硬编码实现必红**），
+  外加「每个标记必须声明表」（防新增 flag 退化成新的恒真常量）与「声明表当前确实不在导出集合」。
+- **不重复看守**：包体侧原本就有 `test_backup_export_import.py::test_export_metadata_has_api_keys_stripped`
+  递归扫全包禁止出现 `"api_key"` 字段 —— 本次补的是「**声明**不得是恒量」这一半。
+
+### Fixed（2026-10-22 批次（二十一）之三：一处失效引用）
+
+`CHANGELOG.md` 里引用 `test_engine_q8_error_zero` / `test_engine_q8_error_zero_overrides_ai_trace` /
+`test_q8_human_ratio_error` 三个**已随改名消失**的用例名 ⇒ 订正为现行判别面
+（`test_engine_q8_low_ratio_default_warning_partial_score` / `test_engine_q8_strict_env_zero`），并就地留痕。
+
 ### Added（2026-10-22 批次（二十）：补「看守的看守」——质量域结构钉 + 零测试脚本 8→2）
 
 > **来源**：批次十九的三份测绘报告里点出的两处覆盖面缺口，用户指令「按建议来」。
@@ -3876,7 +3958,7 @@ gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960
 
 - **3.1 悬崖聚合改造**：`error` 分 blocking / informational 两组，仅 blocking（`rule_id ∈ issues.BLOCKING_RULES`：SCHEMA_VALIDATION_FAILED / RULE_CHAR_DEAD_ACTIVE / RULE_WORLD_HARD_RULE_CHANGED / RULE_Q6_OVERLAP_RATE / RULE_Q8_HUMAN_RATIO_LOW / scoring_missing_subscore）把 `overall` 归零并触发 gate 阻断；informational error 保留七维平均部分分、只进 issues。`chapter_commit/gate.py` 阻断判定同步改 `is_blocking_issue`（节点返回新增 `quality_blocking_count`）。`scoring_formula_hash` 输入扩展为「公式文本 + severity 配置指纹（矩阵 / 规则级覆盖 / 白名单）」⇒ 旧 hash `51a11a5c5d415dcc` → 新 `a945c6602f6a9f92`。
 - **3.2 foreshadowing 双通道（钉住旧行为的测试更新）**：`resolved / (new + resolved)` → `round(100 × (resolved + 0.9 × new) / (resolved + new))`，修复「铺垫章 0 分 < 不涉及钩子的 85 中性分」倒挂。对照：埋 3 兑 0 = 0 → **90**；埋 1 兑 1 = 50 → **95**；只兑 = 100 不变。`tests/unit/quality/test_scoring.py` 原 `assert score == 50` 两例按新口径更新（这正是本批次要修的错误行为）。
-- **3.3 Q8 口径修正 + 默认降级（钉住旧行为的测试更新）**：`compute_char_stats` 新增 `writer:v1` 等 prompt_version 前缀 → AI 侧（含口径 note `RULE_Q8_STATS_NOTE`），未知 created_by 不计入且留痕（证据：生产 drafts 44 行中 `writer:v1` ×36、`human` ×8）。< 30% 红线默认 **warning**（`MVP_RULE_OVERRIDES`），显式 `NOVELOS_QUALITY_Q8_STRICT=1` 才 error/阻断；理由：本工具是 AI 写作工具，维持 error 会让 enforce 默认拦死全部纯 AI 章（README §4.5 留痕）。`tests/unit/quality/test_engine.py::test_engine_q8_error_zero`、`test_ai_trace.py::test_engine_q8_error_zero_overrides_ai_trace`、`test_guardrails.py::test_q8_human_ratio_error` 三例按新裁决更新。
+- **3.3 Q8 口径修正 + 默认降级（钉住旧行为的测试更新）**：`compute_char_stats` 新增 `writer:v1` 等 prompt_version 前缀 → AI 侧（含口径 note `RULE_Q8_STATS_NOTE`），未知 created_by 不计入且留痕（证据：生产 drafts 44 行中 `writer:v1` ×36、`human` ×8）。< 30% 红线默认 **warning**（`MVP_RULE_OVERRIDES`），显式 `NOVELOS_QUALITY_Q8_STRICT=1` 才 error/阻断；理由：本工具是 AI 写作工具，维持 error 会让 enforce 默认拦死全部纯 AI 章（README §4.5 留痕）。`tests/unit/quality/test_engine.py::test_engine_q8_error_zero`、`test_ai_trace.py::test_engine_q8_error_zero_overrides_ai_trace`、`test_guardrails.py::test_q8_human_ratio_error` 三例按新裁决更新。（⚠️ **2026-10-22 批次二十一订正失效引用**：上面这三个用例名**均已随改名消失**；现行判别面是 `tests/unit/quality/test_engine.py::test_engine_q8_low_ratio_default_warning_partial_score` 与 `::test_engine_q8_strict_env_zero`。改名时没回头修引用，正是 AGENTS 硬规则 7「文档引用纪律」记的那类断链。）
 - **3.4 AI 味四算合一（行为不变）**：新增 `packages/core/quality/ai_flavor.py` 为唯一词表源（`AI_FLAVOR_MARKERS` / `AI_CLICHES` + 密度工具 `marker_hits_per_kchars`）；`guardrails.AI_MARKERS`、`ai_trace.AI_CLICHES` 改为引用。style/ai_trace 5 个 fixture 分数逐项不变（100/100、70/73、75/80、60/73、85/80）；critic LLM 维度进评分仍不做（R9 留档，README §6.1 决策指针）。
 - **3.5 文档对齐（R14/R7）**：`docs/evaluation/quality-scoring-v0.md` 升 v0.2——§2.1 旧六子分权重表标删除线留演化史、error 语义改 blocking/informational、`scoring_formula_hash` 覆盖矩阵、§3.6 双通道、§3.7 H-3 标 warning（矩阵封顶）/H-5 越级标未实现、§4.8 Q8 默认 warning 与统计口径、§6.3 条件 4「baseline −3」标删除线并给 R7 理由；`payoff.py` docstring 与 `quality/README.md`（§4.2~§4.5 矩阵+白名单+变更流程、§5.2 取值表、§5.5 分工）同步。`4.4 severity 矩阵变更流程`：改矩阵必须同步三处 + hash 变 + 回归测试。
 - **测试**：`tests/unit/quality` 196 例全绿（新增 `test_severity_matrix.py` / `test_q8_stats.py` / `test_ai_flavor.py` / `test_gate_blocking.py` 及各文件突变验证用例）；`tests/api -k "quality or gate or scoring"` + `tests/unit -k "ai_trace or payoff or foreshadow"` + `tests/workflow -k "commit or gate or quality"` 全绿；ruff 0。
