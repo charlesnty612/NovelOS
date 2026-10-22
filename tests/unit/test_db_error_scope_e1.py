@@ -437,18 +437,30 @@ def test_e1_db_maintenance_missing_table_still_skips(tmp_path: Path, capsys) -> 
     assert "[skip] ai_call_logs unavailable" in capsys.readouterr().out
 
 
-def test_e1_db_maintenance_lock_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """反：锁 ⇒ 上抛，**不得**打印「nothing to prune」并退出 0。
+def test_e1_db_maintenance_lock_exits_2_without_faking_nothing_to_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """反：锁 ⇒ 契约 **exit 2 + stderr 点名 locked**，且 **stdout 绝无 nothing-to-prune**。
 
-    不收窄时运维会读到「nothing to prune」+ 退出码 0 ⇒ 以为清理完成、实际一行没查
-    （而 dry-run 的全部用途就是提前看见）。
+    原判别点（批次十 E1）：不收窄时运维会读到「nothing to prune」+ 退出码 0 ⇒ 以为
+    清理完成、实际一行没查（dry-run 的全部用途就是提前看见）⇒ 当时用「必须抛」来钉。
+    **2026-10-23 审计 C F-4** 把 `db_maintenance.main` 的未捕获异常出口改成契约形态
+    （单行诊断 + exit 2，docstring 承诺「内部异常 ⇒ 2」）⇒ 出口从「必须抛」变为
+    「必须 exit 2」；**判别意图不变**，且三条断言缺一不可：
+    ① ``rc == 2``；② stderr 点名 ``locked``；③ stdout 不得出现 ``nothing to prune``。
+    （函数名随之订正：旧名 ``..._lock_raises`` 描述的是 F-4 之前的出口，已不成立。）
     """
     db_path = _migrated_db(tmp_path)
     victim, holder = _victim_conn_under_lock(db_path)
     monkeypatch.setattr(db_maintenance, "get_connection", lambda *a, **k: victim)
     try:
-        with pytest.raises(sqlite3.OperationalError, match="locked"):
-            db_maintenance.main(["--db", db_path, "prune-logs", "--days", "1"])
+        rc = db_maintenance.main(["--db", db_path, "prune-logs", "--days", "1"])
+        captured = capsys.readouterr()
+        assert rc == 2, f"锁错误必须收口为契约 exit 2，实得 {rc}"
+        assert "locked" in captured.err, f"stderr 必须点名 locked，实得 {captured.err!r}"
+        assert "nothing to prune" not in captured.out, (
+            f"stdout 不得把锁错误伪装成「无事可做」，实得 {captured.out!r}"
+        )
     finally:
         victim.close()
         holder.rollback()

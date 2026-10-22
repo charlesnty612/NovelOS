@@ -16,6 +16,10 @@
 - ``--apply`` 是原地改库，会绕过工作流状态机——它只做「引号字形替换 + 标识上报」
   这两件语义零变更的事；任何涉及叙述内容的修补都必须走 gate-revise 流水线。
 - 内部标识**只报不改**（删了句子就断，见 ``find_internal_identifiers`` docstring）。
+- **dry-run 严格只读**（2026-10-23 审计 C F-3）：用 ``mode=ro`` 打开 + ``is_file()``
+  前置守卫 ⇒ 路径写错**不会创建 0 字节库**、也不会有任何写副作用；数据库操作错误
+  一律单行诊断 + 退出码 2（此前是裸 traceback + exit 1）。``--apply`` 仍走普通 RW
+  连接（写入路径不受影响），且逐章打印可见字数 diff 摘要后再落库。
 """
 
 from __future__ import annotations
@@ -109,7 +113,17 @@ def rescale_paragraphs(text: str, limit: int) -> tuple[str, int]:
     return "\n".join(out_lines), cut
 
 
-def main() -> int:
+def _open_db(db_path: Path, *, read_only: bool) -> sqlite3.Connection:
+    """dry-run 用 ``mode=ro``（绝不创建 / 绝不写入）；``--apply`` 才走普通 RW 连接。"""
+    if read_only:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    else:
+        conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="data/novelos.db")
     ap.add_argument("--project", required=True)
@@ -121,10 +135,18 @@ def main() -> int:
         metavar="N",
         help="顺带把超过 N 可见字的段落按句切开（只插换行，语义零变更）",
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
-    conn = sqlite3.connect(args.db)
-    conn.row_factory = sqlite3.Row
+    db_path = Path(args.db)
+    # 前置守卫：sqlite3.connect 对不存在的路径会**静默创建空库**——dry-run 必须先拦。
+    if not db_path.is_file():
+        print(f"ERROR: 数据库不存在或不是文件: {db_path}", file=sys.stderr)
+        return 2
+    try:
+        conn = _open_db(db_path, read_only=not args.apply)
+    except sqlite3.Error as exc:
+        print(f"ERROR: 打不开数据库 {db_path}: {exc}", file=sys.stderr)
+        return 2
     try:
         drafts = _latest_drafts(conn, args.project)
         if not drafts:
@@ -135,6 +157,7 @@ def main() -> int:
         leaks: list[tuple[int, list[str]]] = []
         total_cut = 0
         cut_chapters: list[int] = []
+        changed_drafts = 0
         for number, draft_id, content in drafts:
             fixed, changes = normalize_prose(content)
             if args.split_paras > 0:
@@ -152,6 +175,14 @@ def main() -> int:
                 total_q += q
                 touched.append(number)
                 print(f"ch{number:2d}  引号 {q} 对  →  “”")
+            if fixed != content:
+                changed_drafts += 1
+                before = visible_chars(content)
+                after = visible_chars(fixed)
+                print(
+                    f"ch{number:2d}  diff：可见字 {before} → {after}"
+                    f"（{after - before:+d}）"
+                )
             if args.apply and fixed != content:
                 conn.execute(
                     "UPDATE drafts SET content = ? WHERE draft_id = ?",
@@ -165,14 +196,19 @@ def main() -> int:
             more = "…" if len(cut_chapters) > 12 else ""
             print(f"长段切分：{len(cut_chapters)}/{len(drafts)} 章共切开 {total_cut} 段"
                   f"（阈值 {args.split_paras} 可见字；{head}{more}）")
-        print(f"{len(touched)}/{len(drafts)} 章有引号变更，合计 {total_q} 对"
-              f"（{'已写入' if args.apply else 'dry-run，未写入'}）")
+        print(f"{len(touched)}/{len(drafts)} 章有引号变更，合计 {total_q} 对；"
+              f"{changed_drafts} 章正文{'将变更' if not args.apply else '已变更'}"
+              f"（{'已写入' if args.apply else 'dry-run，未写入；确认 diff 后加 --apply'}）")
         if leaks:
             print("内部标识命中（只报不改，需人工或 gate-revise 处理）：")
             for number, ids in leaks:
                 print(f"  ch{number}: {', '.join(ids)}")
         else:
             print("内部标识：0 命中")
+    except sqlite3.Error as exc:
+        # 顶层兜底（F-3）：数据库错误 → 单行诊断 + exit 2（不再裸 traceback + exit 1）。
+        print(f"ERROR: 数据库操作失败（{db_path}）: {exc}", file=sys.stderr)
+        return 2
     finally:
         conn.close()
     return 0

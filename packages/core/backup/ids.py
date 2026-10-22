@@ -3,8 +3,9 @@
 职责：
 - 定义 :data:`TABLE_META`：每张导出表的「主键列名、新主键前缀、外键列清单」。
 - :func:`new_pk` 按表名生成新主键（仅对单列字符串主键生效）。
-- :func:`new_composite_pk` 处理复合主键（``character_states`` / ``story_states``），
-  保持不变，仅生成新 ``project_id`` 与 ``character_id`` / ``commit_id`` 即可。
+- :func:`new_composite_pk` 处理复合主键（``character_states`` / ``story_states`` /
+  ``project_skills``），保持不变，仅生成新 ``project_id`` 与
+  ``character_id`` / ``commit_id`` 即可。
 
 设计要点：
 - 单源真相：TABLE_META 是 id 重映射的唯一规格，``service.py`` 全部按此驱动；
@@ -70,6 +71,15 @@ TABLE_META: dict[str, dict[str, Any]] = {
     "state_deltas":         {"pk_col": "delta_id",             "pk_prefix": "dlt"},
     "commits":              {"pk_col": "commit_id",            "pk_prefix": "cmt"},
     "quality_reports":      {"pk_col": "report_id",            "pk_prefix": "qr"},
+
+    # L5：2026-10-23 批次二十六（审计 C F-1 补漏）
+    # chapter_scene_plans（0027）：单列主键 scene_plan_id（csp_*）；chapter_id 由
+    #   全局映射改成新章 id（UNIQUE 约束仍在每项目内成立）。
+    "chapter_scene_plans":  {"pk_col": "scene_plan_id",        "pk_prefix": "csp"},
+    # project_skills（0032）：复合主键 (project_id, skill_id)。导入时只替换
+    #   project_id；skill_id **保留**——skills 是跨作品资产、不进项目包（见
+    #   service._insert_composite_pk_table 的缺失 skill 跳过 + warning 口径）。
+    "project_skills":       {"pk_col": None,                   "pk_prefix": None},
 }
 
 
@@ -102,7 +112,9 @@ def new_composite_pk(table_name: str) -> dict[str, Any]:
     """复合主键占位：返回空 dict，由调用方在 row dict 上保留原有主键字段。
 
     实际语义：``character_states`` 保留 ``character_id / state_version``；
-    ``story_states`` 保留 ``project_id / state_version``。
+    ``story_states`` 保留 ``project_id / state_version``；
+    ``project_skills`` 保留 ``(project_id, skill_id)`` 复合主键（导入端只替换
+    ``project_id``，``skill_id`` 指向目标库既有跨作品资产）。
 
     本函数仅作为占位接口存在，便于 service.py 用统一路径处理单/复合主键；
     返回的 dict 永远是空的，调用方无需读取。

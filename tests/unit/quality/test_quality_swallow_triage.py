@@ -9,6 +9,11 @@
 **移除根 logger 上的全部 handler**（``for h in list(root.handlers): root.removeHandler(h)``）
 ⇒ caplog 装在根上的 handler 可能被抹掉 ⇒ 记录丢失 ⇒ 断言变成「恒红/恒绿」的
 假信号。⇒ 本文件直接往**具名 logger** 上挂自己的 handler，绕开根 handler 的手术。
+
+⚠️ **而且必须显式设 logger 级别**（2026-10-23 task-12 X-1 修复）：具名 logger 没有
+自己的级别时**有效级别继承根 logger**，而 ``configure_logging`` 设了根级别**从不
+复原** ⇒ 任何一次 ``create_app(log_level="ERROR")`` 都会让本文件的断言恒红。
+详见 :class:`_LogCapture` 的 docstring。
 """
 
 from __future__ import annotations
@@ -31,19 +36,36 @@ class _Collector(logging.Handler):
 
 
 class _LogCapture:
-    """挂在**具名 logger** 上的日志捕获器（上下管理器）。"""
+    """挂在**具名 logger** 上的日志捕获器（上下管理器）。
+
+    ⚠️ **必须显式设 logger 级别**（2026-10-23 task-12 X-1 修复）：
+
+    具名 logger 若**没有自己的级别**（``level == NOTSET``），其**有效级别**由
+    **根 logger 继承** ⇒ 而仓内 ``packages.core.logging_config.configure_logging()``
+    会 ``root.setLevel(level)`` 且**从不复原** ⇒ 任何一次
+    ``create_app(Settings(log_level="ERROR"))``（仓内 6 处）都会把**根级别**永久
+    压成 ERROR ⇒ WARNING 记录在**到达 handler 之前**就被 logger 级别滤掉 ⇒ 本
+    捕获器看到 **0 条** ⇒ ``assert len(cap.records) == 1`` 恒红。
+
+    ⇒ 本类在 ``__enter__`` 显式 ``setLevel(DEBUG)``（把级别钉在自己身上，不再
+    继承根级别），``__exit__`` **复原原级别**（不留下副作用给后续用例）。
+    """
 
     def __init__(self, logger: logging.Logger) -> None:
         self._logger = logger
         self.records: list[logging.LogRecord] = []
         self._handler = _Collector(self.records)
+        self._prev_level: int = logger.level
 
     def __enter__(self) -> _LogCapture:
+        self._prev_level = self._logger.level
+        self._logger.setLevel(logging.DEBUG)
         self._logger.addHandler(self._handler)
         return self
 
     def __exit__(self, *exc: object) -> bool:
         self._logger.removeHandler(self._handler)
+        self._logger.setLevel(self._prev_level)
         return False
 
     def messages(self) -> list[str]:

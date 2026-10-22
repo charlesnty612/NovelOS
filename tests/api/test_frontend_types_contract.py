@@ -87,6 +87,11 @@ HANDWRITTEN_DEBT: dict[str, str] = {
 #: 清单长度上限：防止「遇到红就往清单加一项」这种退化解法。
 DEBT_CAP = 35
 
+#: **历史实测值**（2026-10-21 批次：35 笔）——独立于 ``DEBT_CAP`` 的硬编码锚点。
+#: Y-3（2026-10-23）：`test_debt_never_grows` 只断言 ``len <= DEBT_CAP``；若有人把
+#: ``DEBT_CAP`` 改成 36，那条断言仍是绿的（自指）⇒ 本常量专门守「上限只许递减」。
+_DEBT_CAP_HISTORICAL = 35
+
 #: 本批（2026-10-21）修掉的真实漂移字段：必须在**有效面**上可见（撤掉必红）。
 REQUIRED_VISIBLE_FIELDS: tuple[tuple[str, str], ...] = (
     ("Chapter", "outline_json"),
@@ -185,6 +190,20 @@ def test_debt_entries_have_reasons() -> None:
     """每条登记都必须写非空理由（空理由让复核者停止追问，等于没登记）。"""
     empty = sorted(name for name, reason in HANDWRITTEN_DEBT.items() if not reason.strip())
     assert not empty, f"HANDWRITTEN_DEBT 里有条目没写理由：{empty}"
+
+
+def test_debt_cap_must_not_exceed_historical_value() -> None:
+    """Y-3（2026-10-23）：上限本身不得被放宽——断言对象是**硬编码历史值**，不是 DEBT_CAP。
+
+    背景：`test_debt_never_grows` 的期望取的是 ``DEBT_CAP`` 本身 ⇒ 把 35 改成 36 仍全绿
+    （自指断言）。这里用独立的 ``_DEBT_CAP_HISTORICAL`` 钉「只许递减」。
+    """
+    assert DEBT_CAP <= _DEBT_CAP_HISTORICAL, (
+        f"DEBT_CAP 被放宽到 {DEBT_CAP} > 历史值 {_DEBT_CAP_HISTORICAL}：双源债清单只许递减"
+    )
+    assert len(HANDWRITTEN_DEBT) <= _DEBT_CAP_HISTORICAL, (
+        f"实际清单 {len(HANDWRITTEN_DEBT)} 项 > 历史上限 {_DEBT_CAP_HISTORICAL}"
+    )
 
 
 def test_debt_never_grows() -> None:

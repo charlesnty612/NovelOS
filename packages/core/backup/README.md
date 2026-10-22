@@ -1,7 +1,7 @@
 # core.backup — 项目级 JSON 备份 / 恢复
 
 > 职责：V1.4 Sprint 16 / MVP 落地的「整项目导出 / 导入」能力——单 JSON 包，
-> 23 张业务表行级备份；导入为新项目（不覆盖源项目），主键、外键与 JSON 列内嵌
+> 25 张业务表行级备份；导入为新项目（不覆盖源项目），主键、外键与 JSON 列内嵌
 > 实体 id 全部重映射，单事务回环。
 
 ## 1. 模块结构
@@ -23,7 +23,7 @@ from packages.core.backup import (
     BackupService,             # 主入口
     BACKUP_FORMAT,             # "novelos-backup"
     BACKUP_VERSION,            # 1
-    EXPORTED_TABLES,           # 23 张表的导出白名单（tuple）
+    EXPORTED_TABLES,           # 25 张表的导出白名单（tuple）
     TABLE_META,                # 表级元信息：主键列 / 主键前缀
     validate_backup,           # 导入前格式校验
 )
@@ -59,7 +59,7 @@ from packages.core.backup.json_ids import (
   "exported_from_project_id": "<原项目 id>",
   "metadata": {
     "schema_migrations": ["0001_init.sql", ..., "0025_genre_packs.sql"],
-    "table_count_exported": 23,
+    "table_count_exported": 25,
     "exported_table_names": ["characters", "locations", ...],
     "exported_at_iso": "<iso8601 UTC>",
     "api_keys_stripped": true,
@@ -96,7 +96,7 @@ from packages.core.backup.json_ids import (
 | `model_configs_excluded` | `true` | 模型路由配置未导出（全局 + 含 API key） |
 | `reference_canons_excluded` | `true` | 拆书参照系未导出（v1.4 MVP defer） |
 
-## 4. 导出表清单（共 23 张）
+## 4. 导出表清单（共 25 张）
 
 ### 4.1 第一波（仅依赖 `projects.project_id`，14 张）
 
@@ -132,13 +132,26 @@ from packages.core.backup.json_ids import (
 22. `commits`（State Commit）
 23. `quality_reports`（质量评估报告）
 
-### 4.4 显式排除（不在白名单）
+### 4.4 第四波（2026-10-23 批次二十六 · 审计 C F-1 补漏，2 张）
+
+24. `chapter_scene_plans`（章节场景计划落库面；迁移 0027。`payload_json` 内嵌
+    `chapter_id` / 角色 / 地点 id ⇒ 走 `JSON_ID_COLUMNS` 重映射；`scene_plan_id`
+    新前缀 `csp`）
+25. `project_skills`（项目 ↔ skill 有序绑定；迁移 0032。**只导绑定行**，`skills`
+    本体是跨作品资产不导出；导入时目标库缺该 skill ⇒ 跳过并记 `import_warnings`
+    <project_id, skill_id>，绝不插入悬挂 FK）
+
+### 4.5 显式排除（不在白名单）
 
 - `model_configs`（全局表 + 含 API key，红线）
 - `agents` / `prompts` / `workflows`（全局）
 - `workflow_runs` / `workflow_run_nodes` / `ai_call_logs`（运行时）
 - `evaluations`（与 quality_reports 冗余）
 - `reference_canons` / `canon_extracts`（v1.4 MVP defer，避免引入拆书工作流相关数据）
+- `skills`（**跨作品资产**，与 `genre_packs` 同类；只导出项目级绑定行
+  `project_skills`——导入到没有该 skill 的库时绑定跳过并留 warning）
+- `model_profiles` / `model_connections` / `capability_bindings`（全局模型配置；
+  `params_json.api_key` 是明文密钥，ADR-0002 红线，绝不随项目包走）
 
 ## 5. ID 重映射
 
@@ -248,7 +261,7 @@ walk 规则（`remap_json_column` / `remap_json_value`）：
 
 `tests/unit/test_backup.py`：
 
-- `test_export_contains_expected_tables` —— 导出包含全部 23 张表，行数正确。
+- `test_export_contains_expected_tables` —— 导出包含全部 25 张表，行数正确。
 - `test_export_metadata_has_api_keys_stripped` —— metadata 标记 + 递归扫描包内无 `api_key`。
 - `test_export_strips_ai_call_logs_and_evaluations` —— 不含运行时 / 敏感表。
 - `test_export_404_like_for_missing_project` —— 不存在项目 → ValueError。
@@ -273,10 +286,32 @@ V3.9 检修新增（F1/F2/F3/F4）：
 - `test_import_rejects_dangling_fk_and_rolls_back` —— 悬空 FK 整体回滚 + 报错含列名。
 - `test_import_ignores_pre_existing_fk_violations` —— 库内历史违例不阻断干净包导入。
 
+2026-10-23 批次二十六（审计 C F-1）新增：
+
+- `test_project_scoped_migration_tables_are_exported_or_exempt` —— **非自指看守**：
+  从迁移后的真实 schema 派生「带 `project_id` 的业务表」，断言 ⊆ 白名单 ∪ 显式
+  豁免清单（`_PROJECT_SCOPED_EXEMPTIONS` 逐条理由，空理由/幽灵项即红）。替代自指
+  断言 `expected = set(EXPORTED_TABLES)`（那种断言在白名单漏掉 scene_plans 65 行时
+  仍然全绿）。
+- `test_roundtrip_preserves_scene_plans_and_skill_bindings` —— 两表 export→import
+  往返：行数 / 溯源列 / 主键与章节 id 重映射 / `payload_json` 内嵌 id 重映射 /
+  绑定行 `skill_id` 保留。
+- `test_import_skips_binding_with_locatable_warning_when_skill_missing` —— 目标库缺
+  skill 时绑定跳过 + `import_warnings` **带 project_id 与 skill_id**（可定位），且
+  不插入悬挂 FK。
+
 ## 10. 已知边界 / V1.x 升级路径
 
 - **`reference_canons` / `canon_extracts`**：V1.4 MVP 不导出；V1.5 若需支持
-  参照系备份，需在 `EXPORTED_TABLES` 末尾追加并补全 `TABLE_META` + `id 重映射`。
+  参照系备份，需在 `EXPORTED_TABLES` 末尾追加并补全 `TABLE_META` + `id 重映射`
+  + **同步 `_PROJECT_SCOPED_EXEMPTIONS`**（若从豁免清单移出）与 `JSON_ID_COLUMNS`
+  （若有 JSON 列）。
+- **新增项目级表时的四件套**（2026-10-23 批次二十六沉淀）：① `EXPORTED_TABLES`
+  末尾追加（不改既有顺序）；② `ids.py::TABLE_META` 登记主键前缀 / 复合主键；
+  ③ `json_ids.py::JSON_ID_COLUMNS` 登记 JSON 列（`test_json_id_columns_cover_schema`
+  看守）；④ 非自指看守 `test_project_scoped_migration_tables_are_exported_or_exempt`
+  会自动要求「导出或写理由豁免」——**不要**再补一条 `expected=set(EXPORTED_TABLES)`
+  式的自指断言。
 - **`workflow_runs` + `nodes` + `ai_call_logs`**：刻意排除；这是运行时数据，
   重新跑工作流即可恢复。后续若想「冻结工作流历史一并备份」，需独立设计版本
   （建议 v2 协议，分包存储）。

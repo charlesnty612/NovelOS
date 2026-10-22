@@ -1,7 +1,7 @@
 """BackupService（V1.4 Sprint 16 / MVP）—— 项目级 JSON 备份 / 恢复。
 
 职责：
-- :meth:`BackupService.export_project`：把指定项目相关的 23 张业务表 SELECT * 出来，
+- :meth:`BackupService.export_project`：把指定项目相关的 25 张业务表 SELECT * 出来，
   按 :data:`schema.EXPORTED_TABLES` 顺序组装成备份包 dict（含 metadata 标记与
   时间戳）。
 - :meth:`BackupService.import_project`：把备份包导入为**新项目**（不覆盖源项目）；
@@ -15,7 +15,11 @@
   （``story_states.commit_id`` → ``commits``、``chapters.volume_id`` → ``volumes``）
   与 JSON 列内嵌 id 因此都能命中；逐表边插边建映射会让前向引用留在旧命名空间。
 - 复合主键：``character_states`` 保留 ``state_version`` 仅替换 ``character_id``；
-  ``story_states`` 保留 ``state_version`` 替换 ``project_id / commit_id``。
+  ``story_states`` 保留 ``state_version`` 替换 ``project_id / commit_id``；
+  ``project_skills``（2026-10-23 批次二十六）只替换 ``project_id``，``skill_id``
+  **保留**——``skills`` 是跨作品资产（同 ``genre_packs``），不随项目包导出；
+  目标库缺该 skill 的绑定行跳过并记 ``import_warnings``（见
+  :meth:`_insert_project_skills_rows`）。
 - 自引用外键：``branches.parent_branch_id`` / ``state_deltas.supersedes`` 在
   第一轮 INSERT 时（外键列 NULL 占位），同时把 ``(table, pk_col, new_pk_value,
   old_target)`` 记入 ``_self_ref_rewrites`` 内存清单；第二轮
@@ -40,6 +44,14 @@
   workflows / workflow_runs / workflow_run_nodes / ai_call_logs（运行时或全局）。
 - 不导出 reference_canons / canon_extracts（v1.4 MVP 暂不导出拆书工作流相关数据）；
   详见 README「已知边界」。
+- **不导出 ``skills`` 本体**（2026-10-23 批次二十六）：它是跨作品资产（与
+  ``genre_packs`` 同类），只导出项目级绑定行 ``project_skills``；因此把项目包
+  导入到**没有该 skill** 的库时，绑定行会被跳过并写 ``import_warnings``——
+  这是「不把全局资产塞进项目包」与「不伪造跨作品资产」之间的知情取舍。
+- **导出 ``chapter_scene_plans``**（0027）：scene_plan 是 chapter-plan 同 run 落库
+  的派生面，但它是**审计面**（source / prompt_version / run_id）且下游 writer 命中
+  即跳过自身场景规划 ⇒ 不随备份走会导致「导入后重新多烧一次 LLM」，故按项目业务表
+  导出；其 ``payload_json`` 内嵌实体 id 走 ``JSON_ID_COLUMNS`` 重映射。
 """
 
 from __future__ import annotations
@@ -644,6 +656,10 @@ class BackupService:
         #   - project_id → 替换；commit_id → 替换
         if not rows:
             return
+        if table == "project_skills":
+            # 2026-10-23 批次二十六：跨作品绑定行的专用路径（见方法 docstring）。
+            self._insert_project_skills_rows(conn, rows, project_id_map)
+            return
         all_keys = list(rows[0].keys())
 
         columns_clause = ", ".join(all_keys)
@@ -672,6 +688,56 @@ class BackupService:
                 f"INSERT INTO {table} ({columns_clause}) VALUES ({placeholders})",
                 new_row,
             )
+
+    # ---------------------------------------------------------------- project_skills
+
+    def _insert_project_skills_rows(
+        self,
+        conn: sqlite3.Connection,
+        rows: list[dict],
+        project_id_map: dict[str, str],
+    ) -> None:
+        """``project_skills``（复合主键）导入路径：换 ``project_id``、保留 ``skill_id``。
+
+        ``skills`` 是**跨作品资产**，不随项目包导出（见模块 docstring「边界」）⇒
+        目标库可能没有该 skill：
+        - 缺 ``skills`` 表（0032 未跑）或目标库无该 ``skill_id`` ⇒ **跳过该绑定行**并
+          记 ``import_warnings``（插入悬挂 FK 会被提交前 ``foreign_key_check`` 整包拒绝；
+          「丢一条绑定」远比「整包导不进来」可控，且 warning 可审计）；
+        - 目标库已有该 skill ⇒ 插入 ``(new_project_id, skill_id, ord)``；复合主键
+          由「单项目导入 + 每 skill 至多一条绑定」保证唯一。
+        """
+        if not rows:
+            return
+        has_skills = bool(_existing_tables(conn, ("skills",)))
+        existing: set[str] = set()
+        if has_skills:
+            existing = {
+                r["skill_id"]
+                for r in conn.execute("SELECT skill_id FROM skills").fetchall()
+            }
+        columns = list(rows[0].keys())  # project_id / skill_id / ord
+        stmt = (
+            f"INSERT INTO project_skills ({', '.join(columns)}) "
+            f"VALUES ({', '.join(':' + c for c in columns)})"
+        )
+        for row in rows:
+            skill_id = row.get("skill_id")
+            old_project_id = row.get("project_id")
+            if skill_id not in existing:
+                # 可定位标识（lead 要求，同批次二十三「吞异常要带可定位标识」）：
+                # 导入后作者/排障者必须能看出「哪个项目的哪条绑定没进来」。
+                self._import_warnings.append(
+                    "project_skills: 项目 "
+                    f"{old_project_id!r} 的绑定 skill {skill_id!r} 在目标库不存在"
+                    "（跨作品资产不随项目包导出），该绑定已跳过"
+                )
+                continue
+            new_row: dict[str, Any] = {k: row.get(k) for k in columns}
+            new_row["project_id"] = project_id_map.get(
+                new_row.get("project_id"), new_row.get("project_id")
+            )
+            conn.execute(stmt, new_row)
 
     # ---------------------------------------------------------------- second pass
 

@@ -2,19 +2,20 @@
 
 覆盖：
 
-1. ``docs/agents/prompts/director_planner-v2.md`` 经 ``PromptRegistry.sync_from_docs``
-   注册为 ``('director_planner', 2)``，``get_active_prompt`` 取回内容与文件逐字一致
-   （版本标签 ``director_planner:v2``）；
+1. ``docs/agents/prompts/director_planner-v4.md`` 经 ``PromptRegistry.sync_from_docs``
+   注册为 ``('director_planner', 4)``，``get_active_prompt`` 取回内容与文件逐字一致
+   （版本标签 ``director_planner:v4``）；
 2. capability 三处登记一致：``agent_runtime.prompts._AGENT_TO_CAPABILITY`` ==
    ``model_router.AGENT_CAPABILITY``（两者必须相等，见 prompts.py 模块注释），
    且 ``director_planner`` 归 ``creative_writing``、在 ``CAPABILITY_LABELS`` 正文写作组内；
 3. prompt 文件关键契约短语防回删（v0.2 加固：单对象硬约束 / 空输入白名单 /
    E-MRG-16 / E-MRG-17 / 配比分摊口径）——与 ``test_genre_prompt_contracts`` 同款口径。
 
-prompt 内容 provenance：**v3**（2026-10-19 批次十三）= **v2 逐字保留** + §5 输入契约新增
-顶层 ``skills`` 段声明 + 「缺席语义 / 优先级裁决 / 截断标记 / checks 非指标」说明段
-（内部消费外部 skill；与 writer-v5 / director-v2 / scene_planner-v2 / critic-v2 /
-deep_reviewer-v2 同款口径）。**为什么升版而不是原地改**：提示词原地改内容不升版
+prompt 内容 provenance：**v4**（2026-10-23 批次二十五）= **v3 逐字保留** + 三处章名生成增量
+（§7 输出契约新增顶层 ``title`` / §7 规则区「起名 / 回显」/ §5 ``chapter.title`` 旁注）。
+**v4 必须保留 v3 的顶层 ``skills`` 段**（批次十三的合并体契约，``l10_skill_merged_prompt.py``
+钉住）与 v0.2 加固短语；v3 文件仍在库内可回溯，**不得原地改 v3**。
+**为什么升版而不是原地改**：提示词原地改内容不升版
 会让两套正文共用一个版本标签（本仓铁律）。**为什么合并体此前漏了**：
 §5 契约段与说明段都在 ``§5`` 之内，v2 的该段与另外 5 份提示词**不同款** ⇒
 F 组的死参数守卫（``test_skill_prompt_contract.py`` 的 ``SKILL_CONSUMER_AGENTS``）
@@ -24,9 +25,9 @@ chapter-plan 的**活路径**（独立 director 节点已不再被 chapter-plan 
 ⚠️ **v0.2 底稿的 hash 核对口径自 v3 起作废**：v2 逐字取自
 `_refs/p1_merged_prompt_v2.md` 的 ``PROMPT-BEGIN`` / ``PROMPT-END`` 区间
 （v0.2 底稿，25545 字符 / sha256 前缀 ``28cdcb2150663075``），v3 加了 skills 段
-⇒ **不再声称与 v0.2 底稿逐字节一致**（v2 文件仍在库内可回溯）。prompt 正文内的
+⇒ **不再声称与 v0.2 底稿逐字节一致**（v2/v3 文件仍在库内可回溯）。prompt 正文内的
 ``prompt_version`` 示例值仍是 ``director_planner:v0.2-draft``（与 A/B 证据同源，
-不改文本以保持与 v2 的差异面最小）；注册侧版本标签 = 文件名版本（v3），
+不改文本以保持差异面最小）；注册侧版本标签 = 文件名版本（**v4**），
 二者映射关系由本测试钉住。
 """
 
@@ -49,7 +50,7 @@ from packages.core.model_router.router import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPTS_DIR = REPO_ROOT / "docs" / "agents" / "prompts"
-PROMPT_FILE = PROMPTS_DIR / "director_planner-v3.md"
+PROMPT_FILE = PROMPTS_DIR / "director_planner-v4.md"
 
 # v0.2 加固关键短语（缺失即回删：任一消失都意味着 prompt 不再承载对应硬约束）。
 _PROMPT_MARKERS: tuple[str, ...] = (
@@ -85,13 +86,13 @@ def test_sync_from_docs_registers_director_planner(tmp_path: Path):
     registry = PromptRegistry(db_path)
     result = registry.sync_from_docs(PROMPTS_DIR)
 
-    assert ("director_planner", 3) in result["scanned"]
-    assert ("director_planner", 3) in result["registered"]
+    assert ("director_planner", 4) in result["scanned"]
+    assert ("director_planner", 4) in result["registered"]
     assert "director_planner" in result["agents"]
 
     prompt_id, version_label, content = registry.get_active_prompt("director_planner")
     assert prompt_id.startswith("prm_")
-    assert version_label == "director_planner:v3"
+    assert version_label == "director_planner:v4"
     assert content == PROMPT_FILE.read_text(encoding="utf-8")
 
     agents = {a["name"]: a for a in registry.list_agents()}
@@ -106,17 +107,17 @@ def test_sync_from_docs_is_idempotent_for_director_planner(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     registry = PromptRegistry(db_path)
     first = registry.sync_from_docs(PROMPTS_DIR)
-    assert ("director_planner", 3) in first["registered"]
+    assert ("director_planner", 4) in first["registered"]
 
     second = registry.sync_from_docs(PROMPTS_DIR)
-    assert ("director_planner", 3) in second["registered"]
-    assert ("director_planner", 3) not in second["updated"], "内容未变不应触发 UPDATE"
+    assert ("director_planner", 4) in second["registered"]
+    assert ("director_planner", 4) not in second["updated"], "内容未变不应触发 UPDATE"
 
 
 def test_director_planner_prompt_keeps_v02_hardening_markers():
     text = PROMPT_FILE.read_text(encoding="utf-8")
     missing = [m for m in _PROMPT_MARKERS if m not in text]
-    assert not missing, f"director_planner-v2.md 丢失 v0.2 加固短语：{missing}"
+    assert not missing, f"director_planner-v4.md 丢失 v0.2 加固短语：{missing}"
     # 双契约段（导演 required / 场景 required）都在
     section = text.split("## 7. Output Schema", 1)[1]
     assert "scene_plan" in section

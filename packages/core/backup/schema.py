@@ -44,7 +44,8 @@ REQUIRED_TOP_KEYS = {"format", "version", "exported_at", "project", "tables"}
 # 顺序即为重映射顺序（service.py 严格按此顺序执行）；
 # 修改顺序或表名都会破坏导入兼容性，请谨慎变更。
 #
-# 覆盖 23 张表（V1.4 MVP + V3.9 补 volumes）：
+# 覆盖 25 张表（V1.4 MVP + V3.9 补 volumes + 2026-10-23 批次二十六补
+# chapter_scene_plans / project_skills）：
 # - 第一波（仅依赖 projects）：characters / locations / factions / world_rules /
 #   hooks / narrative_debts / volumes / chapters / branches / memories /
 #   reveal_policies / author_style_samples / chapter_summaries / story_states
@@ -52,6 +53,9 @@ REQUIRED_TOP_KEYS = {"format", "version", "exported_at", "project", "tables"}
 # - 第三波（依赖 plot_events/locations）：plot_events / timeline_events
 # - 第四波（依赖 character/chapter/state）：relationships / state_deltas / commits /
 #   quality_reports
+# - 第五波（2026-10-23 批次二十六补漏）：chapter_scene_plans（0027，依赖 chapters）/
+#   project_skills（0032，只导**绑定行**——skills 本体是跨作品资产，与 genre_packs
+#   同类不进项目包；导入时目标库缺该 skill 的绑定行会跳过并留 import_warnings）
 #
 # volumes（迁移 0015）排在 chapters 之前：chapters.volume_id → volumes.volume_id，
 # 顺序与 FK 依赖方向一致（导入端 id 映射已在 INSERT 前全局预建，顺序不构成硬依赖，
@@ -80,6 +84,11 @@ EXPORTED_TABLES: tuple[str, ...] = (
     "state_deltas",
     "commits",
     "quality_reports",
+    # 2026-10-23 批次二十六（审计 C F-1）：项目级派生面与绑定表此前漏在白名单外
+    # ⇒ 导出→导入静默丢 scene_plan 与 skill 绑定。两者都带 project_id、都由业务写，
+    # 属于「项目相关业务表」；追加在末尾（不改既有顺序 = 不破坏旧包的导入兼容契约）。
+    "chapter_scene_plans",
+    "project_skills",
 )
 
 

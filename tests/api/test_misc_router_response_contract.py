@@ -111,7 +111,8 @@ EXPECTED_PROJECT_ROW_KEYS = {
     "fast_mode",
 }
 # 备份包导出的表白名单张数（packages/core/backup/schema.py::EXPORTED_TABLES）
-EXPECTED_BACKUP_TABLE_COUNT = 23
+# 23 → 25：2026-10-23 批次二十六补 chapter_scene_plans / project_skills（审计 C F-1）
+EXPECTED_BACKUP_TABLE_COUNT = 25
 
 # POST /import-backup：实测恒 13 键（projects 整行）；import_warnings 是条件键
 EXPECTED_IMPORT_KEYS = EXPECTED_PROJECT_ROW_KEYS | {"import_warnings"}
@@ -379,7 +380,7 @@ def test_backup_package_model_fields_match_hardcoded():
 
 
 def test_backup_response_body_keys_match_hardcoded(tmp_path: Path):
-    """实际响应体：顶层 7 键 + metadata 10 键 + project 13 键 + tables 23 张。"""
+    """实际响应体：顶层 7 键 + metadata 10 键 + project 13 键 + tables 25 张。"""
     app = _create_app(tmp_path)
     pid = _make_project(app, "备份契约")
     _seed_chapter_with_draft(app, pid, 1, "正文" * 30)

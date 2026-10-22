@@ -6,13 +6,21 @@
 备份里的 ``params_json.api_key`` 是**明文密钥**（ADR-0002）⇒ 直接上云 = 密钥裸奔到
 第三方。权限分类器也确实把「往网盘拷备份」判成了 **Data Exfiltration**（拦下了）。
 ⇒ 解法 = **openssl 加密后再上云**：密文**可恢复**（满足备份的用途），明文密钥
-**不出本机**。密码从**文件**读（不进命令行/进程列表），密码文件放
-``D:\\zcodeproject\\_refs\\novelos_backup_key.txt``（**不是备份目录**，不违反
-「本机不留备份」）⇒ ⚠️ **机器坏掉时密码也会丢**，必须另行保存（会话里已给用户）。
+**不出本机**。密码从**文件**读（不进命令行/进程列表），密钥文件默认
+``~/.novelos/backup.key``（2026-10-23 订正：旧文写的
+``D:\\zcodeproject\\_refs\\novelos_backup_key.txt`` 已过期；用户 2026-10-22 裁决
+**另存一份到私有网盘**，两处 SHA256 应一致）⇒ ⚠️ **机器坏掉时密码也会丢**，
+必须另行保存。
 
 **移动而非删除** ⇒ 满足「本机不留」，且可逆（同步盘上仍有密文）。
 只动**本项目**的备份；`_refs/inkos/`（另一个项目）与 `_archive/2026-10/misc|probe-logs/`
 （非备份产物）**一律不动**。
+
+⚠️ **失败/半途中断的语义（2026-10-23 审计 C F-2 修）**：加密后**立刻解密冒烟**
+（只验可解，明文只落系统临时目录）；冒烟失败 ⇒ 删掉坏密文、**保留源文件**并返回 1。
+目标已存在 ⇒ 默认**记失败（rc=1）**而不是静默跳过——「加密完成、删源之前」中断会
+留下源+半截密文，此时 rc 0 会把「迁移未完成」伪装成成功；确认上一次确实完整后，
+才用 ``--accept-existing`` 显式放行。
 """
 
 from __future__ import annotations
@@ -21,6 +29,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -134,6 +143,42 @@ def encrypt_dir(src: Path, dest: Path) -> None:
         tar_path.unlink(missing_ok=True)
 
 
+def decrypt_smoke(dest: Path) -> None:
+    """加密后**立刻解密冒烟**（F-2，2026-10-23）：只验密文可解，不落明文到同步盘。
+
+    为什么必须做：``openssl enc`` 退出码 0 不等于「密文可恢复」——密钥文件被换、
+    写到一半磁盘满、跨盘复制截断都可能留下**不可解**的 ``.enc``；而脚本设计是
+    「加密成功后删源」，先删再发现解不开 = **备份即丢**。
+
+    实现：解到**系统临时目录**（``tempfile.TemporaryDirectory``，退出即删），
+    核对产物非空后丢弃；绝不在同步盘/源目录落明文。解不开 → 由调用方删掉坏密文、
+    保留源文件并记失败。
+    """
+    with tempfile.TemporaryDirectory(prefix="novelos_decrypt_smoke_") as work:
+        probe = Path(work) / "probe.bin"
+        subprocess.run(
+            [
+                OPENSSL,
+                "enc",
+                "-d",
+                f"-{CIPHER}",
+                "-pbkdf2",
+                "-iter",
+                PBKDF2_ITER,
+                "-in",
+                str(dest),
+                "-out",
+                str(probe),
+                "-pass",
+                f"file:{KEY_FILE}",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        if not probe.is_file() or probe.stat().st_size == 0:
+            raise RuntimeError(f"解密冒烟未产出内容：{dest}")
+
+
 def _plan_moves(
     moves: list[tuple[Path, str]], dest_root: Path,
 ) -> list[dict[str, Any]]:
@@ -201,9 +246,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="只打印迁移计划（将加密什么 / 将删哪些源 / 目标路径），**不写不删**",
     )
+    ap.add_argument(
+        "--accept-existing",
+        action="store_true",
+        help=(
+            "目标已存在时视为可接受（默认记失败 rc=1——源仍在 + 目标已存在 = 上次"
+            "迁移可能半途中断；确认目标完整可解后才可加本开关）"
+        ),
+    )
     args = ap.parse_args(argv)
     if args.dry_run:
         _print_plan(_plan_moves(MOVES, DEST_ROOT), DEST_ROOT, PRUNE_DIRS)
+        if not args.accept_existing:
+            print(
+                "[DRY-RUN] 注：实际执行时「目标已存在」默认记**失败 rc=1**"
+                "（除非加 --accept-existing）"
+            )
         return 0
     print(f"[目标] {DEST_ROOT}")
     print(f"[加密] {CIPHER} + pbkdf2 x{PBKDF2_ITER}（openssl）\n")
@@ -216,15 +274,29 @@ def main(argv: list[str] | None = None) -> int:
         dest = DEST_ROOT / rel
         size = dir_size(src)
         if dest.exists():
-            print(f"[SKIP] 目标已存在，不覆盖：{dest}")
+            if args.accept_existing:
+                print(f"[SKIP] 目标已存在（--accept-existing）：{dest}")
+            else:
+                print(
+                    f"[FAIL] 目标已存在但源仍在：{dest} —— 上次迁移可能中断"
+                    "（或目标为半截密文）；确认目标完整后可加 --accept-existing "
+                    "重跑，或人工处理后删除目标"
+                )
+                ok = False
             continue
         try:
             if src.is_dir():
                 encrypt_dir(src, dest)
             else:
                 encrypt_file(src, dest)
-        except (OSError, subprocess.CalledProcessError) as exc:
+            # 加密后立刻解密冒烟：可解才允许删源（否则坏密文会被当作备份上云）
+            decrypt_smoke(dest)
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
             print(f"[FAIL] {src} -> {dest}：{exc}")
+            # 坏 / 半截密文不留在同步盘：否则下一次会被 skip-exists 挡住，
+            # 且「同名目标存在」会被误读成「已迁移完成」。
+            if dest.exists():
+                dest.unlink(missing_ok=True)
             ok = False
             continue
         shutil.rmtree(src) if src.is_dir() else src.unlink()

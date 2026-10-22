@@ -13,7 +13,7 @@
 --------------------
 - **A**：director 装配把 ``project["name"]/genre/premise`` 写进 payload 的
   ``project`` 段，且这三个字段**被 prompt 契约显式承诺**给模型
-  （``docs/agents/prompts/director_planner-v3.md`` §5：
+  （``docs/agents/prompts/director_planner-v4.md`` §5：
   ``"project": { "project_id", "name", "genre", "premise" }``）；
   作者改项目前提走 ``PATCH /api/projects/{id}`` ⇒
   ``packages/domain/project/service.py`` 的 ``UPDATE projects`` **只 commit()、

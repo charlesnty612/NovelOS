@@ -18,7 +18,7 @@ chapter-plan 调用）。后果与「author_intent 死参数」事故同形：
 
 两条突变各钉一个失效方向
 ------------------------
-* **SKILL-MERGED-1** 把 ``director_planner-v3.md`` 的顶层 ``skills`` 键改名成
+* **SKILL-MERGED-1** 把 ``director_planner-v4.md`` 的顶层 ``skills`` 键改名成
   ``skill``（**改字节但不改行为**的弱变异：JSON 仍合法、提示词仍「有声明」，
   只是声明的是另一个键）⇒ 声明的键名与 payload 的键名对不上 ⇒
   ``test_latest_prompt_of_every_skill_consumer_declares_skills_segment`` 必红。
@@ -33,14 +33,14 @@ chapter-plan 调用）。后果与「author_intent 死参数」事故同形：
 MUTATIONS = [
     (
         "SKILL-MERGED-1",
-        "docs/agents/prompts/director_planner-v3.md",
+        "docs/agents/prompts/director_planner-v4.md",
         '  "skills": {\n    "items": [\n',
         '  "skill": {\n    "items": [\n',
         "tests/unit/test_skill_prompt_contract.py",
     ),
     (
         "SKILL-MERGED-2",
-        "docs/agents/prompts/director_planner-v3.md",
+        "docs/agents/prompts/director_planner-v4.md",
         "> - **优先级裁决**：`skills` 段是外部可移植的通用手艺，仅在 `author_intent`、",
         "> - （MUTATION-SKILL-MERGED-2：删掉优先级裁决条款）",
         "tests/unit/test_skill_prompt_contract.py",

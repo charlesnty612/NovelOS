@@ -180,6 +180,12 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
     plan_payload: dict[str, Any] = {
         # 白名单：director 新增字段须**人工登记本表**，否则静默丢弃（不落 plan_json）。
         # scene_plan 不在此表：它落 chapter_scene_plans（见下），不进 plan_json。
+        # title（2026-10-23 批次二十五；批次二十七订正注释与口径）：
+        # 来源 = director_planner §7 输出契约的顶层 ``title``（v4 起声明）。v3 及以前
+        # 的提示词无该键 ⇒ 本键**恒存在、值恒为 null**（白名单写死键名，不是「键缺席」）。
+        # ⚠️ **本键 = 模型建议名**；**生效名见 ``chapters.title``**（作者标题优先，
+        # 仅空标题才回填）——两个面同键不同义，消费方勿混取。
+        "title": director_output.get("title"),
         "chapter_goal": director_output.get("chapter_goal"),
         "core_conflict": director_output.get("core_conflict"),
         "turning_point": director_output.get("turning_point"),
@@ -203,12 +209,39 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
     scenes = scene_plan.get("scenes") if isinstance(scene_plan, dict) else None
     has_scene_plan = isinstance(scenes, list) and bool(scenes)
 
+    # 2026-10-23 批次二十五：章名回填的**取值归一化**（与白名单分开，白名单保留原文）。
+    # planner 给 null / 空串 / 纯空白 ⇒ 视同「没给」，不碰列；给出非空串 ⇒ strip 后采用。
+    # 只在**空标题**上生效（作者已填标题一字不改，见下方 UPDATE 的 WHERE 守卫）。
+    # ⚠️ **空白口径必须与 SQL 守卫逐字一致**（批次二十七 S-1，真缺陷修复）：
+    # 两侧统一为 ``{空格, TAB, CR, LF}``（U+0020 / U+0009 / U+000D / U+000A）。
+    # 刻意**排除 NBSP（U+00A0）**：它在正文里是可见字符，两侧都不当空白——
+    # 否则「标题只有一个 NBSP」会被判空并被模型名覆盖（作者数据被悄悄改写）。
+    planner_title_raw = director_output.get("title")
+    planner_title = (
+        planner_title_raw.strip(" \t\r\n")
+        if isinstance(planner_title_raw, str) and planner_title_raw.strip(" \t\r\n")
+        else None
+    )
+
     conn = get_connection(db_path)
     try:
         conn.execute(
             "UPDATE chapters SET plan_json = ?, updated_at = ? WHERE chapter_id = ?",
             (json.dumps(plan_payload, ensure_ascii=False), _now(), chapter_id),
         )
+        # 空标题回填（同一事务、同一连接；不另开连接——AGENTS 坑区「事务内另开连接写库」）。
+        # WHERE 守卫在**同一条语句里**判「当前列为空」⇒ 读-写竞态窗口为零；非空标题
+        # 不会进入 SET，原作者名一字不改。
+        # ⚠️ **SQLite 的 ``TRIM(x)`` 只吃 ASCII 空格**（批次二十七 S-1 实测：``"\t"`` 的
+        # ``LENGTH(TRIM(x))`` 仍为 1）⇒ 显式给字符集 ``{空格, TAB, CR, LF}``，与上面的
+        # Python ``strip(" \t\r\n")`` **逐字同口径**。NBSP 两边都不算空白（正文可见字符）。
+        if planner_title is not None:
+            conn.execute(
+                "UPDATE chapters SET title = ? "
+                "WHERE chapter_id = ? AND (title IS NULL OR "
+                "TRIM(title, ' ' || CHAR(9) || CHAR(10) || CHAR(13)) = '')",
+                (planner_title, chapter_id),
+            )
         if has_scene_plan and project_id:
             scene_plan_id = save_scene_plan(
                 conn,

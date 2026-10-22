@@ -367,7 +367,7 @@ def test_plan_merged_output_persists_plan_and_scene_plan(
     assert row is not None, "scene_plan 未落库"
     assert row["run_id"] == run_id
     assert row["source"] == "director_planner"
-    assert row["prompt_version"] == "director_planner:v3"
+    assert row["prompt_version"] == "director_planner:v4"
     assert row["scene_count"] == 2
     stored = json.loads(row["payload_json"])
     assert stored == payload["scene_plan"]
@@ -473,7 +473,7 @@ def test_plan_whitelist_violation_retries_then_succeeds(
     try:
         row = conn.execute(
             "SELECT retry_count, error FROM ai_call_logs "
-            "WHERE prompt_version = 'director_planner:v3'"
+            "WHERE prompt_version = 'director_planner:v4'"
         ).fetchone()
     finally:
         conn.close()
@@ -539,7 +539,7 @@ def test_plan_corrupt_key_beats_retries_then_succeeds(
     try:
         row = conn.execute(
             "SELECT retry_count, error FROM ai_call_logs "
-            "WHERE prompt_version = 'director_planner:v3'"
+            "WHERE prompt_version = 'director_planner:v4'"
         ).fetchone()
     finally:
         conn.close()

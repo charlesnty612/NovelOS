@@ -337,7 +337,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     db_path: Path = args.db
@@ -416,6 +416,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         conn.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI 入口：内部异常统一收口为「单行诊断 + 退出码 2」（F-4，2026-10-23）。
+
+    模块顶部「退出码」节承诺 ``2 —— 参数错误 / DB 文件不存在 / 内部异常``；此前
+    ``main()`` 没有顶层 except ⇒ 未捕获异常 exit 1 + 裸 traceback，运维看到的是
+    堆栈而不是一行诊断。这里只把**异常出口**改成契约形态，正常路径（0）与「缺库 2」
+    逐字不变；argparse 的参数错误走 ``SystemExit(2)``（``SystemExit`` 不继承
+    ``Exception``，不会被本 wrapper 改写）。
+    """
+    try:
+        return _main(argv)
+    except Exception as exc:  # noqa: BLE001 —— CLI 顶层兜底（契约承诺 exit 2）
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

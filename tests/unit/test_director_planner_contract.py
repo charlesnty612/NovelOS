@@ -187,6 +187,11 @@ def test_golden_merged_output_passes_double_contract(name: str):
     validate_contract(
         "director_planner", payload, input_payload=_A_B_WHITELIST_INPUT
     )
+    # Y-1 反例：golden 通过 ≠ 闸门恒真——改坏 schema_version 必拒
+    bad = _load_golden(name)
+    bad["schema_version"] = "director-plan.v0"
+    with pytest.raises(AgentOutputError, match="director-plan.v1"):
+        validate_contract("director_planner", bad)
 
 
 @pytest.mark.parametrize("name", GOLDEN_FILES)
@@ -202,12 +207,22 @@ def test_golden_merged_output_zero_hallucinated_hook_debt_ids(name: str):
 def test_director_planner_scene_plan_optional_plan_only():
     """scene_plan 缺席 = 计划-only 输出：不判契约失败（降级由 chapter-plan 记录）。"""
     validate_contract("director_planner", _minimal_plan_only())
+    # Y-1 反例：缺席放行 ≠ 腐烂放行——key_beats 在场但元素是裸字符串必拒
+    bad = _minimal_plan_only()
+    bad["key_beats"] = ["碎片"]
+    with pytest.raises(AgentOutputError, match=r"key_beats\[0\] must be an object"):
+        validate_contract("director_planner", bad)
 
 
 def test_director_planner_valid_scene_plan_passes():
     payload = _minimal_plan_only()
     payload["scene_plan"] = _minimal_scene_plan()
     validate_contract("director_planner", payload)
+    # Y-1 反例：合法 scene_plan 通过 ≠ 非对象也通过
+    bad = _minimal_plan_only()
+    bad["scene_plan"] = "not an object"
+    with pytest.raises(AgentOutputError, match="scene_plan must be an object"):
+        validate_contract("director_planner", bad)
 
 
 def test_director_planner_rejects_bad_scene_schema_version():
@@ -300,6 +315,12 @@ def test_whitelist_accepts_ids_present_in_input():
         debt_handling=[{"debt_id": "debt_real", "action": "advance", "rationale": "y"}],
     )
     validate_contract("director_planner", payload, input_payload=input_payload)
+    # Y-1 反例：命中放行 ≠ 白名单恒真——同输入换成幻觉 ID 必拒
+    bad = _payload_with(
+        hook_handling=[{"hook_id": "hook_fake", "action": "advance", "rationale": "x"}],
+    )
+    with pytest.raises(AgentOutputError, match="not in input hook set"):
+        validate_contract("director_planner", bad, input_payload=input_payload)
 
 
 def test_whitelist_rejects_unknown_hook_and_debt_ids_non_empty_input():
@@ -349,6 +370,13 @@ def test_whitelist_null_location_allowed():
     validate_contract(
         "director_planner", payload, input_payload=_A_B_WHITELIST_INPUT
     )
+    # Y-1 反例：null 地点允许 ≠ 任意 ID 允许——塞一个输入集合外的角色必拒
+    bad = _payload_with()
+    bad["scene_plan"]["scenes"][0]["characters"] = ["char_ghost"]
+    with pytest.raises(AgentOutputError):
+        validate_contract(
+            "director_planner", bad, input_payload=_A_B_WHITELIST_INPUT
+        )
 
 
 def test_whitelist_not_applied_when_other_expected():
@@ -357,6 +385,13 @@ def test_whitelist_not_applied_when_other_expected():
     payload["hook_handling"] = [{"hook_id": "hook_made_up", "action": "advance", "rationale": "x"}]
     # director 档只查 schema_version（既有口径，不因本次改动收紧）
     validate_contract("director", payload, input_payload={"hook_ledger_excerpt": []})
+    # Y-1 反例：同一载荷在 director_planner 档 + 空输入集合 ⇒ 白名单必拒
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract(
+            "director_planner", payload,
+            input_payload={"hook_ledger_excerpt": [], "narrative_debt_excerpt": []},
+        )
+    assert "must be []" in str(exc.value)
 
 
 def test_whitelist_error_is_capped():
@@ -550,6 +585,11 @@ def test_missing_plan_arrays_still_pass():
     }
     validate_contract("director_planner", payload)
     validate_contract("director", payload)
+    # Y-1 反例：键缺席放行 ≠ 键在场腐烂也放行
+    bad = dict(payload)
+    bad["key_beats"] = {"beat_id": "beat_001"}
+    with pytest.raises(AgentOutputError, match="key_beats must be a list"):
+        validate_contract("director_planner", bad)
 
 
 def test_director_expected_also_guarded():
@@ -566,6 +606,11 @@ def test_valid_five_beat_plan_passes():
     validate_contract(
         "director_planner", _five_beat_plan(), input_payload=_A_B_WHITELIST_INPUT
     )
+    # Y-1 反例：完整计划通过 ≠ 元素字段缺失也通过
+    bad = _five_beat_plan()
+    bad["key_beats"][0].pop("purpose")
+    with pytest.raises(AgentOutputError, match="missing required field"):
+        validate_contract("director_planner", bad)
 
 
 def test_golden_fixture_mutation_is_caught_by_key_beats_shape():

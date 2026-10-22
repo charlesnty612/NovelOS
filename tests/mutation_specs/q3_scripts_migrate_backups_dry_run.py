@@ -17,6 +17,10 @@
   ⚠️ 本条突变会**真的**调用 openssl 并删掉夹具里的**合成**源文件（``tmp_path``
   里的假文件）⇒ 真实备份路径**一次都不会被碰**（测试把模块级常量
   MOVES / DEST_ROOT / KEY_FILE 全部指向 ``tmp_path``）。
+  ⚠️ **2026-10-23 批次二十六锚点订正**（审计 C F-2）：dry-run 分支新增
+  ``--accept-existing`` 提示打印 ⇒ 原 3 行锚点命中 0 次（``[ABORT]`` 形状）。
+  锚点已扩到当前分支全文（含提示打印），replacement = 去掉末尾 ``return 0``
+  ——语义仍是「不再提前返回」。
 
 判别
 ----
@@ -37,9 +41,19 @@ MUTATIONS = [
         "scripts/migrate_backups_to_sync.py",
         "    if args.dry_run:\n"
         "        _print_plan(_plan_moves(MOVES, DEST_ROOT), DEST_ROOT, PRUNE_DIRS)\n"
+        "        if not args.accept_existing:\n"
+        "            print(\n"
+        "                \"[DRY-RUN] 注：实际执行时「目标已存在」默认记**失败 rc=1**\"\n"
+        "                \"（除非加 --accept-existing）\"\n"
+        "            )\n"
         "        return 0\n",
         "    if args.dry_run:\n"
-        "        _print_plan(_plan_moves(MOVES, DEST_ROOT), DEST_ROOT, PRUNE_DIRS)\n",
+        "        _print_plan(_plan_moves(MOVES, DEST_ROOT), DEST_ROOT, PRUNE_DIRS)\n"
+        "        if not args.accept_existing:\n"
+        "            print(\n"
+        "                \"[DRY-RUN] 注：实际执行时「目标已存在」默认记**失败 rc=1**\"\n"
+        "                \"（除非加 --accept-existing）\"\n"
+        "            )\n",
         "tests/unit/test_script_migrate_backups_to_sync.py",
     ),
 ]

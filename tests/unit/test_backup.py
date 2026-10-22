@@ -12,7 +12,8 @@
 **``test_json_id_columns_cover_schema`` 有意留在门面**：
 ``packages/core/backup/README.md`` 按「文件::用例名」引用它（json_ids 清单与
 真实 schema 的漂移看守），用例一旦迁走该引用即断链。留在门面后 collect 数仍
-与拆分前一致（门面 1 + 子模块 18 = 19）。
+与拆分前一致（门面 1 + 子模块 21 = 22；子模块 18 → 21 = 2026-10-23 批次二十六
+审计 C F-1 新增 3 例：白名单往返 / 非自指覆盖看守 / 缺 skill 的可定位 warning）。
 
 门面只 re-export 共享 fixture/helper，**不 re-export 其它 ``test_*`` 函数**——
 否则 pytest 会把同一条用例收集两次（子模块一次、门面一次），破坏「collect 数

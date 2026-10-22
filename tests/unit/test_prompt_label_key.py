@@ -223,9 +223,9 @@ def test_director_planner_payload_prompt_version_follows_active(tmp_path: Path):
     p0 = build_director_planner_input(db_path, pid, cid, "意图")
     assert p0["prompt_version"] == "director_planner:v2", "无 ACTIVE 行时应回落常量"
 
-    _sync_prompt(tmp_path, db_path, "director_planner", 3)
+    _sync_prompt(tmp_path, db_path, "director_planner", 4)
     p1 = build_director_planner_input(db_path, pid, cid, "意图")
-    assert p1["prompt_version"] == "director_planner:v3", "升版后 payload 声明必须跟随 ACTIVE"
+    assert p1["prompt_version"] == "director_planner:v4", "升版后 payload 声明必须跟随 ACTIVE"
 
 
 # ---------------------------------------------------------------------------
@@ -289,18 +289,18 @@ def test_scene_plan_persisted_prompt_version_follows_active(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, 1)
-    _sync_prompt(tmp_path, db_path, "director_planner", 3)
+    _sync_prompt(tmp_path, db_path, "director_planner", 4)
 
     # 回声故意污染成 v999：若任一落库面采回声，对应断言红。
     _run_save_plan(db_path, pid, cid, "director_planner:v999")
 
     row = load_scene_plan(db_path, cid)
     assert row is not None, "本轮产出非空 scene_plan，必须落库"
-    assert row["prompt_version"] == "director_planner:v3", (
-        f"chapter_scene_plans 落库值必须取 ACTIVE 真值 director_planner:v3，"
+    assert row["prompt_version"] == "director_planner:v4", (
+        f"chapter_scene_plans 落库值必须取 ACTIVE 真值 director_planner:v4，"
         f"实得 {row['prompt_version']!r}"
     )
-    assert _plan_json_prompt_version(db_path, cid) == "director_planner:v3", (
+    assert _plan_json_prompt_version(db_path, cid) == "director_planner:v4", (
         "chapters.plan_json 的 prompt_version 必须与 scene_plan 同源，不得落模型回声"
     )
 

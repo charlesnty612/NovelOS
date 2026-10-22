@@ -148,6 +148,12 @@ def _valid_observer_payload() -> dict:
 
 def test_validate_contract_observer_ok():
     validate_contract("observer", _valid_observer_payload())
+    # Y-1 反例（2026-10-23）：结构闸门真的在——缺一个 change 数组即拒；
+    # 若 validate_contract 被改成 no-op，这里必红。
+    bad = _valid_observer_payload()
+    del bad["new_events"]
+    with pytest.raises(AgentOutputError, match="new_events"):
+        validate_contract("observer", bad)
 
 
 def test_validate_contract_observer_missing_array():
@@ -166,12 +172,22 @@ def test_validate_contract_observer_forbidden_key_no_longer_raises():
     payload = _valid_observer_payload()
     payload["delta_id"] = "dlt_xyz"
     validate_contract("observer", payload)  # 不抛错
+    # Y-1 反例：越权字段放行 ≠ 结构闸门失效——同一判据下缺数组仍必拒
+    structural = _valid_observer_payload()
+    del structural["resolved_hooks"]
+    with pytest.raises(AgentOutputError, match="resolved_hooks"):
+        validate_contract("observer", structural)
 
 
 def test_validate_contract_observer_deviations_no_longer_raises():
     payload = _valid_observer_payload()
     payload["deviations"] = []
     validate_contract("observer", payload)  # 不抛错
+    # Y-1 反例：deviations 可剥离，但 7 数组的结构闸门仍在
+    structural = _valid_observer_payload()
+    del structural["new_hooks"]
+    with pytest.raises(AgentOutputError, match="new_hooks"):
+        validate_contract("observer", structural)
 
 
 def test_validate_contract_observer_non_list_value():
@@ -217,6 +233,11 @@ def _full_observer_payload() -> dict:
 def test_validate_contract_observer_full_object_payload_ok():
     """防误杀：7 数组各含合规对象 → 通过（元素守卫只拦形状，不查字段必填面）。"""
     validate_contract("observer", _full_observer_payload())
+    # Y-1 反例：同一基准里塞一个裸字符串元素 → 必拒
+    bad = _full_observer_payload()
+    bad["new_events"].append("碎片")
+    with pytest.raises(AgentOutputError, match=r"new_events\[1\] must be an object"):
+        validate_contract("observer", bad)
 
 
 @pytest.mark.parametrize("array_name", sorted(OBSERVER_ALLOWED_KEYS))
@@ -251,6 +272,11 @@ def test_validate_contract_observer_guards_only_the_seven_arrays():
     payload["deviations"] = ["碎片", {"from": "a", "to": "b"}]
     payload["open_questions"] = ["随便的字符串数组"]
     validate_contract("observer", payload)  # 不抛错
+    # Y-1 反例：「非 7 数组不看形状」≠「7 数组也不看」——塞碎片必拒
+    bad = _full_observer_payload()
+    bad["debt_changes"].append(["payoff"])
+    with pytest.raises(AgentOutputError, match=r"debt_changes\[1\] must be an object"):
+        validate_contract("observer", bad)
 
 
 def test_validate_contract_observer_shape_errors_capped():
@@ -381,6 +407,9 @@ def test_strip_observer_violations_keys_sorted():
 
 def test_validate_contract_director_ok():
     validate_contract("director", {"schema_version": "director-plan.v1", "chapter_id": "ch_1"})
+    # Y-1 反例：schema_version 闸门活着（no-op 化 validate_contract 时必红）
+    with pytest.raises(AgentOutputError, match="director-plan.v1"):
+        validate_contract("director", {"schema_version": "director-plan.v0", "chapter_id": "ch_1"})
 
 
 def test_validate_contract_director_missing_schema_version():
@@ -395,6 +424,12 @@ def test_validate_contract_writer_ok():
         "prose": "正文",
         "self_report": {"word_count": 1, "scene_count": 1},
     })
+    # Y-1 反例：缺 prose 必拒（writer 闸门不是恒真）
+    with pytest.raises(AgentOutputError, match="prose"):
+        validate_contract("writer", {
+            "schema_version": "writer-output.v1",
+            "self_report": {},
+        })
 
 
 def test_validate_contract_writer_missing_prose():
@@ -417,11 +452,17 @@ def test_validate_contract_writer_missing_self_report():
 
 def test_validate_contract_none_passes_anything():
     validate_contract(None, {"anything": True})
+    # Y-1 反例：None 只是「不指定 agent」的旁路——指定 director 时同一载荷必拒
+    with pytest.raises(AgentOutputError):
+        validate_contract("director", {"anything": True})
 
 
 def test_validate_contract_unknown_passes_through():
     # 未知 expected → 当 None 处理
     validate_contract("foo", {"anything": True})
+    # Y-1 反例：未知名旁路 ≠ 已知名也旁路
+    with pytest.raises(AgentOutputError):
+        validate_contract("director", {"anything": True})
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +583,13 @@ def test_validate_contract_writer_revise_low_ratio_with_deviations_passes():
         ]),
         input_payload={"mode": "revise", "draft_text": _REVISE_UPSTREAM},
     )
+    # Y-1 反例：同载荷去掉申报 → 必拒（保真闸门不是恒真）
+    with pytest.raises(AgentOutputError):
+        validate_contract(
+            "writer",
+            _revise_writer_payload(_REWRITE_PROSE),
+            input_payload={"mode": "revise", "draft_text": _REVISE_UPSTREAM},
+        )
 
 
 def test_validate_contract_writer_revise_high_ratio_zero_deviations_passes():
@@ -553,6 +601,13 @@ def test_validate_contract_writer_revise_high_ratio_zero_deviations_passes():
         _revise_writer_payload(prose),
         input_payload={"mode": "revise", "draft_text": _REVISE_UPSTREAM},
     )
+    # Y-1 反例：换成低保留比正稿 → 必拒
+    with pytest.raises(AgentOutputError):
+        validate_contract(
+            "writer",
+            _revise_writer_payload(_REWRITE_PROSE),
+            input_payload={"mode": "revise", "draft_text": _REVISE_UPSTREAM},
+        )
 
 
 def test_validate_contract_writer_write_mode_low_ratio_passes():
@@ -562,6 +617,13 @@ def test_validate_contract_writer_write_mode_low_ratio_passes():
         _revise_writer_payload(_REWRITE_PROSE),
         input_payload={"mode": "write", "draft_text": _REVISE_UPSTREAM},
     )
+    # Y-1 反例：同载荷改 mode=revise → 必拒（write 放行是闸门条件而非恒真）
+    with pytest.raises(AgentOutputError):
+        validate_contract(
+            "writer",
+            _revise_writer_payload(_REWRITE_PROSE),
+            input_payload={"mode": "revise", "draft_text": _REVISE_UPSTREAM},
+        )
 
 
 def test_validate_contract_writer_revise_without_draft_text_passes():
@@ -576,3 +638,10 @@ def test_validate_contract_writer_revise_without_draft_text_passes():
         _revise_writer_payload(_REWRITE_PROSE),
         input_payload={"mode": "revise"},
     )
+    # Y-1 反例：补上非空 draft_text → 同一载荷必拒
+    with pytest.raises(AgentOutputError):
+        validate_contract(
+            "writer",
+            _revise_writer_payload(_REWRITE_PROSE),
+            input_payload={"mode": "revise", "draft_text": _REVISE_UPSTREAM},
+        )

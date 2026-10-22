@@ -111,8 +111,23 @@ def _rel(path: Path) -> str:
 
 
 def _parse(path: Path) -> ast.AST | None:
+    """解析源码 AST；解析失败返回 ``None``（调用方须**显式**处理，不得静默跳过）。
+
+    ⚠️ **必须用 ``utf-8-sig``**（2026-10-23 task-12 X-2 修复）：Python 的 import 走
+    ``utf-8-sig``（**容忍 BOM**），而 ``ast.parse(str)`` **不容忍** BOM ⇒ 此前用
+    ``utf-8`` 读 ⇒ BOM 字符留在串首 ⇒ ``ast.parse`` 抛 ``SyntaxError`` ⇒ 本函数
+    ``except`` 吞掉返回 ``None`` ⇒ **调用方（各扫描点）``continue`` 静默跳过**
+    ⇒ 分层看守自己的执行域少了一块。
+
+    实测（本仓真实语料）：``packages/**`` 扫描根共 **227** 个 ``.py``，其中 **3 个**
+    带 BOM（``packages/workflows/chapter_write/{polisher,save_draft,scene_planner}.py``）
+    ⇒ 旧写法下执行域只有 **224/227**；改 ``utf-8-sig`` 后 **227/227**。
+
+    ⚠️ **校验器必须镜像被测运行时的加载语义**（这里 = Python import 的 BOM 容忍）——
+    否则会把一个**合法源文件**误判成「语法错误」，再被 ``except`` 吞成「没看见」。
+    """
     try:
-        return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        return ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
     except (OSError, UnicodeDecodeError, SyntaxError):
         return None
 
@@ -741,3 +756,70 @@ def test_real_entry_main_function_local_binding_is_clean(monkeypatch):
     violations, unfingerprintable = scan_dynamic_workflow_imports("packages/core")
     assert not violations, violations
     assert not unfingerprintable, unfingerprintable
+
+
+# ===========================================================================
+# 批次二十四后（2026-10-23 task-12 X-2）：**看守自己的执行域**可见
+# ===========================================================================
+
+
+def test_every_guarded_python_file_is_actually_parsed() -> None:
+    """⑨ 遍历到的每个 ``.py`` 都必须**真被解析**——不许静默跳过。
+
+    ⚠️ **为什么必须钉这条**：``_parse`` 对解析失败返回 ``None``，而各扫描点都是
+    ``if tree is None: continue`` ⇒ **解析失败的文件被静默跳过**，分层看守
+    **看不见**它们 ⇒ 一条分层破口可以藏在里面而门禁全绿。
+
+    ⇒ 本条把「跳过」变成**红**并点名文件，并把**执行域**写成可复算的计数：
+    **解析到的文件数 == 遍历到的文件数**（逐个扫描根 + 合计）。
+
+    ⚠️ **判别点是真的**：本仓 ``packages/**`` 扫描根内有 **3 个带 BOM 的源文件**，
+    用 ``utf-8`` 读它们 ⇒ ``ast.parse`` 抛 ``SyntaxError`` ⇒ 被跳过 ⇒ 本条红；
+    改 ``utf-8-sig`` 后 ⇒ 全部解析成功 ⇒ 本条绿。
+    """
+    total_all = 0
+    parsed_all = 0
+    for root_rel, _forbidden, _desc in LAYERING_DIRECTIONS:
+        files = _iter_py_files(REPO_ROOT / root_rel)
+        skipped = [_rel(p) for p in files if _parse(p) is None]
+        assert not skipped, (
+            f"{root_rel} 下这些 .py **解析失败被静默跳过**（分层看守看不见它们）：{skipped}"
+            "（BOM 文件须用 utf-8-sig 读——Python import 容忍 BOM，ast.parse 不容忍）"
+        )
+        total_all += len(files)
+        parsed_all += len(files) - len(skipped)
+
+    # 扫描根必须覆盖**整个库层**（``packages/``）⇒ 「全仓 .py」在库层内无死角。
+    scanned_roots = {root_rel for root_rel, _f, _d in LAYERING_DIRECTIONS}
+    assert "packages" in scanned_roots, (
+        f"扫描根没覆盖整个库层 packages/（当前 {sorted(scanned_roots)}）"
+        "⇒ 「全仓 .py 无死角」这个前提不成立"
+    )
+    assert parsed_all == total_all, (
+        f"执行域有洞：解析到 {parsed_all} 个 / 遍历到 {total_all} 个 .py"
+    )
+
+
+def test_parse_handles_a_utf8_bom_file(tmp_path: Path) -> None:
+    """⑨′ **合成** BOM 文件 ⇒ ``_parse`` 必须看得见它（不依赖仓内恰好有 BOM 文件）。
+
+    ⚠️ **为什么要合成一条**：上面那条真实数据判定依赖「仓内此刻恰好有带 BOM 的文件」
+    ⇒ 哪天有人把那些文件的 BOM 去掉，它就**恒绿**（不再判别）。
+    ⇒ 本条用 ``tmp_path`` 造一个带 BOM 的 ``.py`` ⇒ 无论仓内 BOM 状况如何都判别。
+
+    判别：撤掉 ``_parse`` 的 ``utf-8-sig``（退回 ``utf-8``）⇒ 本条必红。
+    """
+    bom_file = tmp_path / "bom_module.py"
+    bom_file.write_bytes(
+        b"\xef\xbb\xbf" + b"import os\n\n\ndef f():\n    return os.sep\n"
+    )
+    assert bom_file.read_bytes().startswith(b"\xef\xbb\xbf"), "夹具前提：BOM 真的写进去了"
+
+    tree = _parse(bom_file)
+    assert tree is not None, (
+        "带 BOM 的 .py 解析失败 ⇒ _parse 静默跳过它 ⇒ 分层看守看不见这个文件"
+        "（须用 utf-8-sig 读，与 Python import 的加载语义一致）"
+    )
+    assert any(
+        isinstance(node, ast.FunctionDef) and node.name == "f" for node in ast.walk(tree)
+    ), "解析出的 AST 里没有那个函数 ⇒ 解析结果不是这份源码的"

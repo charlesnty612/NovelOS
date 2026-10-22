@@ -5,6 +5,81 @@
 
 ## [Unreleased]
 
+### Changed（2026-10-23 批次（二十五）：章名自动生成 + 备份白名单补全 + 全量偶发 5 红根因修复 + 看守补强）
+
+> **来源**：用户「继续干你的活，期间由你自行裁决」+「新增章节后生成计划章节名不会自动生成，加入排期修复」+「测试太臃肿，简化一下，由你自行裁决」⇒ 先做全面 review（三路只读审计）再修复。
+> **3 名成员（ops-dev / quality-dev / reviewer）+ Lead**；零真实 LLM 调用、零内容仓接触。三路审计结论见 `docs/reviews/`（A/C 已回填，B 见下）。
+
+#### 1. 章名自动生成（用户报障；⚠️ Lead 先验判断被推翻并留痕）
+
+**用户现象**：新建章节 → 生成计划 → 章节名仍为空（列表显示「（未命名）」）。
+
+**Lead 的错误结论（留痕）**：我最初判定「`director_planner-v3.md:108` 承诺 `"title"` 但被 `plan_payload` 白名单静默丢弃」——**错**：`:108` 在 §5 **输入契约**（`chapter.title`），§7 输出契约明写「不允许任何额外键」且**无** `title`。ops-dev 读全文推翻，我复算确认。**真根因：系统根本没有章名生成机制**（提示词不产出、落库路径不存在）。
+
+**做法（A1 提示词升版，非原地改）**：
+- 新建 `docs/agents/prompts/director_planner-v4.md`（v3 逐字保留 + 3 处增量：§7 Schema 增 `"title"`、§7 起名/回显规则〔空标题 ⇒ 起 2–12 字短名；作者已定 ⇒ 原样回显或 null〕、§5 输入旁注）；**skills 段与 v0.2 加固 12 条短语逐字保留**（sha `e0098708…` 两版相同）；v3 **零改动**。
+- `chapter_plan/pipeline.py::_save_plan_node`：`plan_payload` 白名单登记 `title`（注释写明「**本键 = 模型建议名**，生效名见 `chapters.title`」）+ **同事务同连接**空标题回填（`WHERE … `，作者标题一字不改）。
+- 版本钉子 4 处同步（registration / prompt_label_key / p1_pipeline / `l10` 规格 target）。
+- 判别：`tests/unit/test_chapter_title_autofill.py` 12+2 例（正反一对：空标题回填 / 作者标题逐字保留；null/空串/纯空白不写；plan_json 可读；v4 契约声明）+ 突变 `TTL-1~4`（撤回填 / 无条件覆盖 / 白名单删键 / **删 v4 的 title 声明**）。
+
+⚠️ **空白口径真缺陷（review 抓出，Lead 实测确认）**：SQLite `TRIM(x)=''` **只吃 ASCII 空格**（`\t`/`\n`/NBSP 都不算空），而 Python `.strip()` 全算空 ⇒ 列值若为 `"\t"`，回填**静默不生效**。已统一为 **{空格, TAB, CR, LF}** 两侧同口径（`TRIM(title, ' ' || CHAR(9) || CHAR(10) || CHAR(13))` ↔ `strip(" \t\r\n")`），**NBSP 两侧都不算空白**（正文可见字符，刻意排除）。
+
+⚠️ **v4 的起名质量未验证**（禁真实 LLM）⇒ 只声称「plumbing 已由 14 例 + 4 突变看守」。
+
+#### 2. 项目导出/导入遗漏两张业务表（静默丢数据；审计 C 唯一数据安全项）
+
+`packages/core/backup/schema.py::EXPORTED_TABLES` 23 张缺 `chapter_scene_plans`（0027；dev 库 **65 行**）与 `project_skills`（0032）⇒ 导出→导入后 **planner 场景计划 / skill 绑定静默消失**。且看守自指（`expected = set(EXPORTED_TABLES)`）⇒ 白名单怎么漂都不红。
+
+做法：白名单 23→**25**（末尾追加，旧序不动）；`skills` 判为跨作品资产 ⇒ **只导绑定行**，导入缺 skill ⇒ 跳过 + warning **带 project_id/skill_id**（不插悬挂 FK）；新增**非自指**看守——从迁移后真实 schema 派生「带 `project_id` 的表」（**23 张**）⊆ 白名单 ∪ 显式豁免（豁免 = `{projects, reference_canons}`，逐条理由 + 幽灵项断言）；往返测试断言**内容**（scene_plan 主键 / payload 内嵌 id 重映射、skill_id/ord 保留）。
+
+#### 3. 三个「脚本看似成功」的坑
+
+| 项 | 修前 | 修后 |
+|---|---|---|
+| `migrate_backups_to_sync` 目标已存在 | `[SKIP]` 且 `ok=True` ⇒ **rc 0**（上次在「加密完成、删源前」中断 ⇒ 源文件永留且 rc 0 掩盖） | 记失败 ⇒ **rc 1**；`--accept-existing` 才放行；加密后加 **解密冒烟**（失败删坏密文、保源） |
+| `normalize_chapters` dry-run | `sqlite3.connect(args.db)`（RW）⇒ 坏路径 **创建 0 字节库** + 裸 traceback exit 1 | dry-run `mode=ro` + `is_file()` 守卫 + 顶层 except → 单行诊断 + **exit 2**（坏路径零文件）；`--apply` 仍 RW 可写（有真实写入用例） |
+| `db_maintenance` 退出码 | docstring 承诺「内部异常 ⇒ 2」，`main()` 无顶层 except ⇒ **exit 1 + 裸 traceback** | 顶层 `except Exception` → 单行 stderr + **exit 2**；`SystemExit` 不受影响（argparse 参数错仍 2） |
+
+⚠️ **行为变更（CLI 契约）**：`backup_db --keep 0` 从「全保留」改为**显式拒绝（rc 2）**（`--keep` 必须 ≥1）；`migrate_backups_to_sync` 目标已存在默认 rc **1**（此前 0）；`--accept-existing` 时**本次不删源**（源仍留本机）。三处均已在 docstring/help 写明，此处为 CHANGELOG 留痕。
+⚠️ **E1 判别点出口适配**（`test_db_error_scope_e1.py`）：原「锁必须上抛」改为「**rc==2 + stderr 点名 locked + stdout 绝无 nothing-to-prune**」三条件（F-4 把抛出改为契约 exit 2，**判别意图不变**）；其余 14 处 raises 未动。
+
+#### 4. 全量偶发 5 红的根因（审计 A 交给 task-7 的线索，Lead 当场复现）
+
+**现象**：一次全量 `-n 20` 出 **5 failed**（全在 `test_quality_domain_swallow_triage.py`），随后三次全绿。
+**根因**：`create_app(Settings(log_level="ERROR"))` → `configure_logging()` 把**根 logger 级别设成 ERROR 且从不复原**；triage 用例的 `_LogCapture` 挂在**具名 logger**（未显式设级别 ⇒ 继承根级别）⇒ WARNING 被过滤 ⇒ `len(records)==1` 看到 0。仓内 **6 处**用 `log_level="ERROR"` ⇒ 触发与否取决于 xdist 调度顺序。
+**Lead 复现命令（可作裁决证据）**：`pytest tests/api/test_openapi_contract.py tests/unit/test_quality_domain_swallow_triage.py -q -p no:randomly` ⇒ 修前 **5 failed / 8 passed**，修后 **13 passed**。
+**修法（测试侧，未改生产代码）**：两处 `_LogCapture.__enter__` 显式 `setLevel(DEBUG)` + `__exit__` 复原；新增 `tests/unit/test_logger_level_isolation.py` 4 例（机制线 / 机理钉 / 复原钉 / **端到端子进程跑上面那条命令**）。
+⚠️ **根因仍在生产侧**（`configure_logging` 不复原根级别）⇒ 新写的日志断言仍须显式设级别；生产侧修法登记待办。
+
+**同批 X-2**：`test_no_core_to_workflows_dep.py:115` 的 `_parse` 用 `encoding="utf-8"` + `except SyntaxError: return None` ⇒ 仓内 **3 个 BOM 文件静默跳过**。已改 `utf-8-sig` + 新增「每个 .py 都必须真被解析」（`packages` 根 227/227、三根合计 422/422，跳过 0；含合成 BOM 判定）。
+
+#### 5. 看守补强（审计 A 的「22 条只断言不抛」+ 零突变模块）
+
+- **22 条伪测试补反例**（`test_structured_output.py` 13 / `test_director_planner_contract.py` 8 / `test_wordcount.py` 1）：把 `validate_contract` 临时改 no-op ⇒ 修前 **135 passed（全绿）**、修后 **61 failed / 39 passed 且 22 条新反例全部在 FAILED 名单**。生产代码 `structured_output.py` **零改动**。
+- **`structured_output.py` 零突变规格** ⇒ 新建 `l16_structured_output.py` **5 条**（schema_version / 计划数组形状 / input ID 白名单 / observer 缺数组 / writer prose）。
+- **`DEBT_CAP=35` 上限自指** ⇒ 新增独立硬编码 `_DEBT_CAP_HISTORICAL=35`：`DEBT_CAP=36` 时**恰好新看守红、旧自指用例仍绿**（自指证据留档）。
+
+#### 6. 闸门（Lead 亲跑）
+
+| 项 | 结果 |
+|---|---|
+| 全量 pytest `-n 20` | **3987 passed / 1 skipped / 1 xfailed / 0 failed**，172.52s（较批次二十四 3945 **+42**） |
+| 树指纹 | **713 文件 / `5f203809…`**，跑测前后**逐位一致** |
+| ruff | `All checks passed!` |
+| 突变 `--changed` | **34 条全 CAUGHT / 0 存活 / 0 中止**（含 l14/l15/l16、Q4 三条守卫突变、MUT-NORM、DRYRUN） |
+| 突变残留 | `.mutbak` **0** |
+| 双轴审查 | task-5：**0 critical / 0 major / 5 minor**；task-11：**0 critical / 0 major / 4 minor**；SHA 冻结 10/10 逐位一致 |
+
+#### 7. 本批明确不做 / 待办
+
+1. **测试精简（用户要求）**：`task-6` 已立（两阶段裁决在板上），因写域与 task-12/13 冲突而阻塞，批次提交后放行；审计 A 已给关键情报：**臃肿主因不在参数化**（85 块、最大 10 例），而在**文件级重复**。
+2. **证据表语义字段裸奔（audit B · critical）**：28 项扰动 **26 项无守卫**（`corpora`/`status_vocabulary`/`separation`/`evidence_status`/两侧数字/`threshold_summary`/`basis_ref`）⇒ 已立 task-16。
+3. **genre 6/8 模块零突变 + quality README 副本无看守** ⇒ 已立 task-17。
+4. **备份白名单守卫口径只覆盖「有 project_id 列」**（JOIN 派表不在覆盖内，FK 闭包 35 张 vs 守卫 23 张）⇒ 登记。
+5. **生产侧日志根级别不复原** ⇒ 登记（测试侧已示范正确写法）。
+6. **真实 openssl 往返从未实跑**（测试用 fake openssl）⇒ 「解密冒烟」参数正确性仅读码核对。
+7. **`genre/verifier.py` 1224 行**（距 1500 余 276）⇒ 未逼近，登记「趁未到顶拆成本最低」。
+
 ### Changed（2026-10-23 批次（二十四）：装配缓存键补 volume 维度 + genre 域结构钉 + 两处文档假事实订正）
 
 > **来源**：用户「继续干你的活，期间由你自行裁决」⇒ 承接 review 2026-10-22 的 P0-1 候选 C 与批次二十三 §6 登记项。

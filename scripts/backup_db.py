@@ -23,8 +23,13 @@
     python scripts/backup_db.py                       # 备份到探测到的同步盘
     python scripts/backup_db.py --out D:\\BaiduSyncdisk\\NovelOS\\backups
     python scripts/backup_db.py --redact-secrets      # 不含明文密钥（不可恢复）
-    python scripts/backup_db.py --keep 20             # 保留最近 20 份
-    python scripts/backup_db.py --list                # 只看会写到哪里
+    python scripts/backup_db.py --keep 20             # 保留最近 20 份（必须 ≥1）
+    python scripts/backup_db.py --list                # 只看会写到哪里（先校验源库）
+
+⚠️ ``--keep`` 语义（2026-10-23 F-6 订正）：只接受 **≥1**。旧实现 ``keep=0`` 走
+「全保留」分支，与「保留最近 N 份」直觉相反、又容易被读成「全删」⇒ CLI 直接拒绝。
+``--list`` 现在**先**做 ``源库 is_file()`` 校验再打印——旧实现先返回，源路径打错也
+会 exit 0。
 """
 
 from __future__ import annotations
@@ -174,16 +179,22 @@ def redact_secrets(target: Path) -> int:
 
 
 def prune(out_dir: Path, keep: int) -> list[Path]:
-    """只保留最近 ``keep`` 份备份（``novelos_*.db`` 与 ``novelos_*.db.enc`` 都算）。"""
+    """只保留最近 ``keep`` 份备份（``novelos_*.db`` 与 ``novelos_*.db.enc`` 都算）。
+
+    ``keep`` 必须 ≥1（2026-10-23 F-6）：旧实现把 ``keep=0`` 静默当成「全保留」，
+    与参数名直觉相反且不同人读成「全删」⇒ 在这里显式拒绝，避免两种误读。
+    """
+    if keep < 1:
+        raise ValueError(f"keep must be >= 1, got {keep!r}")
     backups = sorted(out_dir.glob("novelos_*.db*"))
     removed = []
-    for old in backups[:-keep] if keep > 0 else []:
+    for old in backups[:-keep]:
         old.unlink()
         removed.append(old)
     return removed
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     # ⚠️ 本机控制台默认 cp936（AGENTS 坑区「Windows 默认 cp936 吞中文」）⇒ 改 utf-8。
     # ⚠️ **必须在函数里、且判 hasattr**：pytest 捕获期间 ``sys.stdout`` 被换成
     # 没有 ``reconfigure`` 的对象 ⇒ 模块级调用会让 **import 就炸**。
@@ -194,7 +205,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="备份 NovelOS 主库到网盘同步盘")
     ap.add_argument("--db", default=str(DEFAULT_DB), help="源库路径（默认 data/novelos.db）")
     ap.add_argument("--out", default=None, help="输出目录（默认探测同步盘）")
-    ap.add_argument("--keep", type=int, default=10, help="保留最近 N 份（默认 10）")
+    ap.add_argument(
+        "--keep",
+        type=int,
+        default=10,
+        help="保留最近 N 份（默认 10；**必须 ≥ 1**——0 不是「全保留」也不是「全删」，"
+             "语义歧义故直接拒绝）",
+    )
     ap.add_argument("--redact-secrets", action="store_true", help="抹掉明文密钥（该副本不可恢复）")
     ap.add_argument(
         "--encrypt",
@@ -204,12 +221,21 @@ def main() -> int:
     ap.add_argument(
         "--key-file",
         default=str(DEFAULT_KEY_FILE),
-        help=f"加密密钥文件（默认 {DEFAULT_KEY_FILE}；只存本机，绝不进同步盘）",
+        help=f"加密密钥文件（默认 {DEFAULT_KEY_FILE}；⚠️ 2026-10-22 用户裁决："
+             "另存一份到**私有**网盘 —— 两处 SHA256 应一致；密钥丢失 = 备份不可恢复）",
     )
     ap.add_argument("--list", action="store_true", help="只打印将要写到哪里，不执行")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    # --keep 0 旧语义是「全保留」（`if keep > 0 else []`），与「保留最近 N 份」直觉相反，
+    # 且不同人读成「全删」；两种解释都危险 ⇒ 显式拒绝并要求 ≥1（F-6，2026-10-23）。
+    if args.keep < 1:
+        ap.error("--keep 必须 >= 1（保留最近 N 份；0 的语义有歧义，已拒绝）")
 
+    # 源库校验**先于** --list（F-6）：此前 --list 在 is_file() 之前返回 ⇒ 源路径
+    # 打错也打印「未执行任何写入」并 exit 0，预检看不出问题。
     src = Path(args.db).expanduser()
+    if not src.is_file():
+        raise SystemExit(f"[ABORT] 源库不存在：{src}")
     out_dir = resolve_out_dir(args.out)
 
     print(f"[源库]   {src}")
@@ -217,8 +243,6 @@ def main() -> int:
     if args.list:
         print("[--list] 未执行任何写入")
         return 0
-    if not src.is_file():
-        raise SystemExit(f"[ABORT] 源库不存在：{src}")
     if args.redact_secrets:
         print("[模式]   抹除明文密钥 ⇒ 该副本**不可直接恢复**")
     elif args.encrypt:

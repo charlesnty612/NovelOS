@@ -72,6 +72,10 @@ JSON_ID_COLUMNS: dict[str, tuple[str, ...]] = {
     "state_deltas":         ("payload_json",),
     "commits":              ("validation_json", "author_approval_json"),
     "quality_reports":      ("scores_json", "issues_json", "judge_json"),
+    # 2026-10-23 批次二十六（审计 C F-1）：scene_plan 原文内含 chapter_id /
+    # involved_characters / characters / location 等实体 id ⇒ 必须重映射，
+    # 否则导入副本的 scene_plan 指向源项目命名空间（writer 按 id 取实体时悬空）。
+    "chapter_scene_plans":  ("payload_json",),
 }
 
 

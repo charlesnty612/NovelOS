@@ -476,7 +476,7 @@ def project_meta_fingerprint(
     ``project.get("premise")`` 写进 payload 的 ``project`` 段
     （``director_input.py`` 的 ``_build_director_input_uncached``），
     而这三个字段**被 prompt 契约显式承诺**给模型
-    （``docs/agents/prompts/director_planner-v3.md`` 的 §5：
+    （``docs/agents/prompts/director_planner-v4.md`` 的 §5：
     ``"project": { "project_id", "name", "genre", "premise" }``）。
     作者改项目前提走 ``PATCH /api/projects/{id}`` ⇒
     ``packages/domain/project/service.py`` 的 ``UPDATE projects`` **只 commit()，

@@ -468,7 +468,7 @@ def build_director_input(
     # 2026-10-22（批次二十一 P0-1-A）：键追加**项目元信息**（name/genre/premise）
     # 内容指纹 ``project_meta_fp``。``project["name"]`` / ``project.get("genre")`` /
     # ``project.get("premise")`` 进 payload 的 ``project`` 段，且这三个字段**被
-    # prompt 契约显式承诺**给模型（``docs/agents/prompts/director_planner-v3.md``
+    # prompt 契约显式承诺**给模型（``docs/agents/prompts/director_planner-v4.md``
     # §5：``"project": { "project_id", "name", "genre", "premise" }``）；
     # 而改项目前提走 ``PATCH /api/projects/{id}`` ⇒
     # ``domain/project/service.py`` 的 ``UPDATE projects`` **不推 state_version**

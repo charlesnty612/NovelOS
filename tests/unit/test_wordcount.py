@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from packages.core.quality.wordcount import (
     classify_prose_length,
     resolve_band_config,
@@ -225,14 +227,15 @@ def test_resolve_band_config_unknown_keys_ignored():
 
 
 def test_resolve_band_config_non_dict_raises():
-    """overrides 非 dict（str / list / int）→ ValueError。"""
+    """overrides 非 dict（str / list / int）→ ValueError。
+
+    Y-1（2026-10-23）：原实现用 try/except + raise AssertionError 手工判别，
+    AST 口径无 assert / 无 pytest.raises ⇒ 改为标准 `pytest.raises`（判别不变，
+    可被 no-op 化突变直接抓）。
+    """
     for bad in ["foo", [1, 2], 42]:
-        try:
+        with pytest.raises(ValueError):
             resolve_band_config(bad)  # type: ignore[arg-type]
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"expected ValueError for {bad!r}")
 
 
 def test_resolve_band_config_low_ratio_bounds():
