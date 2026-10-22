@@ -15,22 +15,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.workflow_runtime.engine import (
     _CHECKPOINT_MAX_BYTES,
     _CHECKPOINT_TRUNCATED_KEY,
     PauseRequested,
-    WorkflowEngine,
     WorkflowNode,
     _cap_checkpoint_payload,
 )
 
-
-def _make_engine(tmp_path: Path) -> WorkflowEngine:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return WorkflowEngine(settings.db_path)
+from ._shared import _make_engine
 
 
 def _get_checkpoint(db_path: Path, run_id: str) -> dict:

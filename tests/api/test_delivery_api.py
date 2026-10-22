@@ -18,10 +18,10 @@ from pathlib import Path
 
 import httpx
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
+
+from ._shared import _create_app, _make_client
 
 #: 干净章的开篇：冲突词（羞辱/震惊）+ 对话句 + 主角名 + 金手指词，全在 1000 字内，
 #: 保证 signing_check 的黄金三章三项都不落 fail。
@@ -29,15 +29,8 @@ _CLEAN_HEAD = "李晨被人当面羞辱，全场震惊。「你算什么？」�
 _TARGET_VISIBLE = 2500
 
 
-def _make_client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:

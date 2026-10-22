@@ -11,14 +11,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import httpx
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.db import apply_migrations
+from ._shared import _create_app, _request, _run
 
 _PAYLOAD: dict = {
     "schema_version": "genre-pack.v1.0.0",
@@ -30,20 +27,10 @@ _PAYLOAD: dict = {
 }
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
-async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        return await client.request(method, path, **kwargs)
 
 
-def _run(coro):
-    return asyncio.run(coro)
 
 
 async def _make_project(app, name: str = "题材项目") -> str:

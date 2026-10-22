@@ -22,21 +22,18 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.domain.chapter.models import ALLOWED_NEXT, ChapterUpdate
 from packages.domain.chapter.service import ChapterService, ChapterTransitionError
+
+from ._shared import _make_settings
 
 # ---------------------------------------------------------------------------
 # 工厂函数（与 test_chapter_revision_note.py 同款）
 # ---------------------------------------------------------------------------
 
 
-def _make_settings(tmp_path: Path) -> Settings:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return settings
 
 
 def _make_project(db_path: str, name: str = "reopen 项目") -> str:

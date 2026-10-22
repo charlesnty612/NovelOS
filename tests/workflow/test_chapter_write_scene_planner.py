@@ -14,23 +14,11 @@ from pathlib import Path
 
 import httpx
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 
+from ._shared import _create_app, _get_run_via_http, _make_client
 
 # 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
-async def _get_run_via_http(app, run_id: str) -> dict | None:
-    import httpx
-    transport = httpx.ASGITransport(app=app)
-    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
-    try:
-        r = await client.get(f"/api/runs/{run_id}")
-    finally:
-        await client.aclose()
-    if r.status_code == 404:
-        return None
-    return r.json()
 
 
 async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 60.0) -> dict:
@@ -52,15 +40,8 @@ async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED
             return run
         await asyncio.sleep(0.2)
     raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
-def _make_client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:

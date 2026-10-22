@@ -16,8 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.quality.issues import make_issue
 from packages.core.quality.models import QualityReport
@@ -26,15 +25,13 @@ from packages.workflows.chapter_commit import gate as gate_mod
 # 事故量级正文（trigram 实测 0.3348）由两档阈值的判别测试提供，避免两处各写一份。
 from tests.unit.quality.test_trigram_tiers import incident_prose as _incident_prose
 
+from ._shared import _make_db
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_db(tmp_path: Path) -> str:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return str(settings.db_path)
 
 
 def _make_project(db_path: str) -> str:

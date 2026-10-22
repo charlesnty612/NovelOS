@@ -598,3 +598,112 @@ def test_description_numbers_are_all_registered(guard, table: dict):
                     f"{entry['rule_id']} 的 code_ref 登记缺 module/attr"
                 )
     assert total >= 80, f"登记的数字数异常偏少（{total}）⇒ 登记被清掉了？"
+
+
+# ---------------------------------------------------------------------------
+# 5. 2026-10-23 批次二十七 task-22（审查 minor M-1/M-2/M-3）
+# ---------------------------------------------------------------------------
+
+HUMAN_BASELINE = ROOT / "tests" / "unit" / "quality" / "HUMAN_BASELINE.md"
+
+
+def test_guard_is_red_when_descriptions_injection_is_empty(guard, table: dict):
+    """M-1：descriptions 注入为空 ⇒ 登记了 ``description_numbers`` 的条目必须报 **error**。
+
+    修前行为（2026-10-23 实测留证）：``check_table(table, descriptions=lambda: {})``
+    返回 **errors=0 / drifts=0 / consistent=True** —— Q-4 的「登记 ↔ 活 description」
+    半边**整体静默失效**，而 resolver / rule_table / scan 失效时都会响亮报错。
+    """
+    result = guard.check_table(table, descriptions=lambda: {})
+    assert result.errors, (
+        "descriptions 整体为空时 Q-4 半边静默失效（修前 errors=0）——"
+        "必须对「登记了 description_numbers 却取不到 live description」显式报错"
+    )
+    text = " | ".join(result.errors)
+    assert "description_numbers" in text and "取不到 live description" in text, text
+    registered_ids = {
+        entry["rule_id"] for entry in table["rules"] if entry.get("description_numbers")
+    }
+    assert any(rid in text for rid in registered_ids), (
+        f"error 必须点名具体 rule_id（带 rule_id 的可定位信息），实际：{result.errors}"
+    )
+    assert not result.consistent
+
+
+def test_regex_kind_with_non_pattern_reports_drift_not_crash(guard, table: dict):
+    """M-2：``kind="regex"`` 但 resolver 返回非 Pattern ⇒ 报 drift，**不得抛异常**。
+
+    修前行为（2026-10-23 实测留证）：直接抛 ``AttributeError: 'int' object has no
+    attribute 'pattern'`` —— CLI 被 ``main()`` 收口成 exit 2（响亮），但库调用方会崩。
+    """
+    real_resolver = guard.default_resolver
+    target = next(
+        ref
+        for entry in table["rules"]
+        for ref in entry.get("regexes", [])
+        if ref.get("kind") == "regex" and ref.get("attr")
+    )
+
+    def wrong_type_resolver(module: str, attr: str):
+        if module == target["module"] and attr == target["attr"]:
+            return 123  # 声明是 regex，实际给 int
+        return real_resolver(module, attr)
+
+    result = guard.check_table(table, resolver=wrong_type_resolver)  # 不得抛
+    named = [d for d in result.drifts if d.name == target["attr"]]
+    assert named, f"非 Pattern 值必须报 drift 并点名 {target['attr']}，实际：{result.drifts}"
+    drift = named[0]
+    assert drift.kind == "regex"
+    assert drift.expected == "re.Pattern"
+    assert drift.actual == "int"
+
+
+def _human_baseline_section8_rows() -> dict[str, dict[str, str]]:
+    """解析 ``HUMAN_BASELINE.md`` §8 的九行可达性表格（``corpus_id`` → 各列）。"""
+    text = HUMAN_BASELINE.read_text(encoding="utf-8")
+    section = text.split("## 8. 九份语料的**可达性登记**", 1)[1]
+    table_part = section.split("**为什么 9/9 都是", 1)[0]
+    rows: dict[str, dict[str, str]] = {}
+    for line in table_part.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) != 6:  # corpus_id / 种类 / 章数 / 位置 / in_version_control / reproducible_by
+            continue
+        rows[cells[0].strip("`")] = {
+            "kind": cells[1],
+            "chapters": cells[2],
+            "in_version_control": cells[4].strip("`"),
+            "reproducible_by": cells[5].strip("`"),
+        }
+    return rows
+
+
+def test_human_baseline_section8_matches_evidence_corpora(table: dict):
+    """M-3：``HUMAN_BASELINE.md`` §8 九行表格 ↔ JSON ``corpora`` **逐行双向比对**。
+
+    修前：§8 自称「副本、无机器看守」（诚实但仍是假事实温床——改 JSON 或改文档都无人红）。
+    现在：本节多一行 / 少一行 / 任一格的值（种类 / 章数 / ``in_version_control`` /
+    ``reproducible_by``）与 JSON 不同 ⇒ 本用例必红。
+    """
+    rows = _human_baseline_section8_rows()
+    corpora = table["corpora"]
+    assert set(rows) == set(corpora), (
+        "HUMAN_BASELINE §8 表格与 JSON corpora 的 corpus_id 集合不一致："
+        f"文档多出 {sorted(set(rows) - set(corpora))} / "
+        f"文档缺少 {sorted(set(corpora) - set(rows))}"
+    )
+    for corpus_id, row in rows.items():
+        corpus = corpora[corpus_id]
+        expected_vc = str(bool(corpus["in_version_control"])).lower()
+        assert row["in_version_control"] == expected_vc, (
+            f"{corpus_id} 的 in_version_control：文档 {row['in_version_control']!r} "
+            f"vs JSON {expected_vc!r}"
+        )
+        assert row["reproducible_by"] == corpus["reproducible_by"], (
+            f"{corpus_id} 的 reproducible_by：文档 {row['reproducible_by']!r} "
+            f"vs JSON {corpus['reproducible_by']!r}"
+        )
+        assert row["kind"] == corpus["kind"], f"{corpus_id} 的 kind 不一致"
+        assert row["chapters"] == str(corpus["chapters"]), f"{corpus_id} 的章数不一致"

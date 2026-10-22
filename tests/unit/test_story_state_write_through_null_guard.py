@@ -40,6 +40,8 @@ import httpx
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 
+from ._shared import _evidence
+
 # ----------------------------------------------------------------- helpers
 
 
@@ -75,8 +77,6 @@ async def _make_chapter(app, pid: str, number: int = 1, title: str = "第一章"
     return r.json()["chapter_id"]
 
 
-def _evidence(chapter_id: str) -> dict:
-    return {"chapter_id": chapter_id, "scene_id": None, "excerpt": "excerpt", "span": None}
 
 
 def _make_meta(delta_id: str, chapter_id: str, prev_version: int) -> dict:

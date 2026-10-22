@@ -14,9 +14,9 @@ from pathlib import Path
 
 import httpx
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
+
+from ._shared import _create_app, _make_client, _observer_noop_script
 
 # ---------------------------------------------------------------------------
 # 异步轮询 / 装配 helpers（与既有 chapter_write 测试一致）
@@ -51,15 +51,8 @@ async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED
     raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
 
 
-def _make_client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
@@ -194,27 +187,6 @@ def _polisher_script(polished: str | None = None, *, summary: str = "去掉『�
     ]
 
 
-def _observer_noop_script() -> list[str]:
-    return [
-        json.dumps(
-            {
-                "schema_version": "observer.v1",
-                "prompt_version": "observer:v1",
-                "chapter_id": "ch_xxx",
-                "narrative_observations": [],
-                "continuity_observations": [],
-                "world_state_observations": [],
-                "relationship_observations": [],
-                "new_events": [],
-                "resolved_hooks": [],
-                "new_hooks": [],
-                "debt_changes": [],
-                "world_changes": [],
-                "relationship_changes": [],
-            },
-            ensure_ascii=False,
-        )
-    ]
 
 
 # ---------------------------------------------------------------------------

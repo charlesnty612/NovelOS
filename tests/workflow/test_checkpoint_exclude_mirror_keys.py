@@ -25,12 +25,12 @@ from pathlib import Path
 
 import httpx
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.workflows.chapter_commit.pipeline import WORKFLOW as COMMIT_WORKFLOW
 from packages.workflows.chapter_review.pipeline import WORKFLOW as REVIEW_WORKFLOW
+
+from ._shared import _create_app
 
 # 非 Human 节点镜像键中「必须进 exclude」的集合（其余两个键为消费契约，见模块 docstring）
 _COMMIT_MIRROR_EXCLUDE = {
@@ -50,10 +50,6 @@ _REVIEW_MIRROR_KEEP = {"author_review"}
 # ---------------------------------------------------------------------------
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
 def _make_client(app) -> httpx.AsyncClient:

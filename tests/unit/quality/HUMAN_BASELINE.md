@@ -185,10 +185,13 @@ python scripts/readability_audit.py
 `in_version_control` 与 `reproducible_by` 两个**机器可判**字段——本节是它们的
 人类可读版本。
 
-⚠️ **口径声明（2026-10-23 批次二十六审查订正）**：本节是**副本、无机器看守**——权威值在
-JSON 的 `corpora` 段（受 `tests/unit/quality/test_detector_evidence.py` 的对应用例看守）。
-改 JSON 的 `corpora` 时必须**人工同步本节**；本节漂移不会有任何测试变红。
-（原文写「两处**必须一致**，由……用例看守」是**不成立的声称**：全仓没有任何用例读本文件。）
+✅ **口径声明（2026-10-23 批次二十七 task-22 修，前身是「副本、无机器看守」）**：本节是副本，
+但**已有机器看守**——`tests/unit/quality/test_detector_evidence.py::test_human_baseline_section8_matches_evidence_corpora`
+解析本表九行并与 JSON `corpora` 段**逐行双向比对**：本节多一行 / 少一行，或任一格的
+`in_version_control` / `reproducible_by` / 种类 / 章数与 JSON 不同 ⇒ 该用例必红。
+⇒ 改 JSON 的 `corpora` 时**必须同批同步本节**（不靠人工自觉，靠测试变红）。
+（历史：批次二十六审查曾订正本节为「副本、无机器看守」——那是诚实但残缺的描述；
+本批补上真比对后改回「由用例看守」，这次是真的。）
 
 **实测结论：9/9 份语料都不在「任何人 clone 后能拿到」的位置。**
 

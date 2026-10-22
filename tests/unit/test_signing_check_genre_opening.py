@@ -22,6 +22,8 @@ from packages.core.genre.service import validate_payload
 from packages.core.ids import new_id, now_iso
 from packages.core.signing_check.service import format_summary, run_signing_check
 
+from ._shared import _insert_project
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
@@ -71,21 +73,6 @@ def _fresh_db(tmp_path: Path) -> Path:
     return db_path
 
 
-def _insert_project(db_path: Path) -> str:
-    pid = new_id("prj")
-    now = now_iso()
-    conn = get_connection(db_path)
-    try:
-        conn.execute(
-            "INSERT INTO projects (project_id, name, premise, genre, target_words, "
-            "status, created_at, updated_at) VALUES (?, 'P', NULL, NULL, NULL, "
-            "'ACTIVE', ?, ?)",
-            (pid, now, now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return pid
 
 
 def _insert_chapter(db_path: Path, pid: str, number: int, content: str) -> str:

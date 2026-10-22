@@ -15,16 +15,11 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.workflow_runtime.engine import WorkflowEngine, WorkflowNode
 
-
-def _make_engine(tmp_path: Path) -> WorkflowEngine:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return WorkflowEngine(settings.db_path)
+from ._shared import _make_engine
 
 
 def _ensure_workflow(conn, name: str = "cancel-test-wf") -> str:

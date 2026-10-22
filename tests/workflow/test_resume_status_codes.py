@@ -27,6 +27,8 @@ from packages.core.api.routers.workflows import log as wf_log
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
+from ._shared import _make_client
+
 
 def _setup_app(tmp_path: Path):
     # log_level=DEBUG 让 caplog 能捕到 logging.debug 留痕（验收条件）
@@ -36,9 +38,6 @@ def _setup_app(tmp_path: Path):
     return app, settings
 
 
-def _make_client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
 def _run(coro):

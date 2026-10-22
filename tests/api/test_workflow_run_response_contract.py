@@ -45,7 +45,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from packages.core.api.main import create_app
 from packages.core.api.routers.workflows.models import (
     ContextPreview,
     ContextPreviewItem,
@@ -60,6 +59,8 @@ from packages.core.api.routers.workflows.models import (
 )
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
+
+from ._shared import _create_app
 
 # ---------------------------------------------------------------------------
 # 期望键集：**硬编码**，不写成 set(Model.model_fields)（自指断言恒真，见模块 docstring）
@@ -354,10 +355,6 @@ def _observer_script(chapter_id: str, character_id: str) -> list[str]:
     ]
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
 def _make_client(app) -> httpx.AsyncClient:

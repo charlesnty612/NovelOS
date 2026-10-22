@@ -14,26 +14,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import httpx
-
-from packages.core.api.main import create_app
 from packages.core.backup.schema import EXPORTED_TABLES
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
+
+from ._shared import _create_app, _request
 
 _SECRET = "sk-connection-secret-12345"
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
-async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        return await client.request(method, path, **kwargs)
 
 
 def _post_connection(app, **overrides):

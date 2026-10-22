@@ -12,17 +12,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.quality.models import QualityReport
 from packages.core.quality.service import QualityService
 
-
-def _make_db(tmp_path: Path) -> str:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return str(settings.db_path)
+from ._shared import _make_db
 
 
 def _make_project(db_path: str) -> str:

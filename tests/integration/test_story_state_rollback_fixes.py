@@ -23,6 +23,8 @@ import httpx
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 
+from ._shared import _evidence, _make_meta
+
 # ----------------------------------------------------------------- helpers
 
 
@@ -65,23 +67,8 @@ async def _make_chapter(app, pid: str, number: int = 1, title: str = "第一章"
     return r.json()["chapter_id"]
 
 
-def _evidence(chapter_id: str) -> dict:
-    return {"chapter_id": chapter_id, "scene_id": None, "excerpt": "excerpt", "span": None}
 
 
-def _make_meta(delta_id: str, chapter_id: str, prev_version: int) -> dict:
-    return {
-        "delta_id": delta_id,
-        "delta_version": 1,
-        "schema_version": "state-delta-v0",
-        "chapter_id": chapter_id,
-        "workflow_run_id": f"wfr_{delta_id}",
-        "previous_state_version": prev_version,
-        "created_by": "observer:v1",
-        "created_at": "2026-08-23T10:00:00+00:00",
-        "supersedes": None,
-        "notes": None,
-    }
 
 
 async def _setup_project(tmp_path: Path):

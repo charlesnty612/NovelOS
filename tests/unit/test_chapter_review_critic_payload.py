@@ -18,6 +18,8 @@ from packages.workflows.chapter_review.pipeline import (
     _critic_review_node,
 )
 
+from ._shared import _insert_draft
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
@@ -61,18 +63,6 @@ def _insert_chapter(db_path: Path, project_id: str, number: int = 1) -> str:
     return cid
 
 
-def _insert_draft(db_path: Path, chapter_id: str, content: str) -> None:
-    conn = get_connection(db_path)
-    try:
-        conn.execute(
-            "INSERT INTO drafts (draft_id, chapter_id, version, content, created_by, "
-            "prompt_version, model_id, created_at) VALUES "
-            "(?, ?, ?, ?, 'test:writer:v1', NULL, NULL, ?)",
-            (new_id("drf"), chapter_id, 1, content, now_iso()),
-        )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _critic_output_ok() -> dict:

@@ -41,13 +41,14 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import httpx
 import pytest
 from fastapi import HTTPException
 
 from packages.core.api.main import create_app
 from packages.core.api.routers.workflows.common import check_chapter_in_project
 from packages.core.config import Settings
+
+from ._shared import _request
 
 #: 两种归属失败共用的 detail 模板——**唯一的真相源**（期望值硬编码，不从实现反推）
 NOT_FOUND_TEMPLATE = "chapter {cid!r} not found"
@@ -80,10 +81,6 @@ async def _seed_two_projects(app) -> tuple[str, str, str]:
     return pid_a, pid_b, cid_a
 
 
-async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        return await client.request(method, path, **kwargs)
 
 
 async def _make_project(app, name: str) -> str:

@@ -35,6 +35,8 @@ from packages.core.story_state.snapshot import (
 )
 from packages.core.story_state.write_through import apply_inverse_cleanup_to_state
 
+from ._shared import _evidence, _make_meta
+
 # ----------------------------------------------------------------- helpers (integration)
 
 
@@ -106,23 +108,8 @@ async def _make_world_rule(app, pid: str, name: str, statement: str) -> str:
     return r.json()["id"]
 
 
-def _evidence(chapter_id: str) -> dict:
-    return {"chapter_id": chapter_id, "scene_id": None, "excerpt": "excerpt", "span": None}
 
 
-def _make_meta(delta_id: str, chapter_id: str, prev_version: int) -> dict:
-    return {
-        "delta_id": delta_id,
-        "delta_version": 1,
-        "schema_version": "state-delta-v0",
-        "chapter_id": chapter_id,
-        "workflow_run_id": f"wfr_{delta_id}",
-        "previous_state_version": prev_version,
-        "created_by": "observer:v1",
-        "created_at": "2026-08-23T10:00:00+00:00",
-        "supersedes": None,
-        "notes": None,
-    }
 
 
 # ----------------------------------------------------------------- 1. e2e rollback

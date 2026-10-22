@@ -81,6 +81,8 @@ from packages.core.story_state.models import (
     SubmitDeltaResponse,
 )
 
+from ._shared import _evidence
+
 # ---------------------------------------------------------------------------
 # 硬编码期望键集：**模型之外的第三方基准**，不得写成 set(Model.model_fields)
 # ---------------------------------------------------------------------------
@@ -182,8 +184,6 @@ async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
         return await c.request(method, path, **kwargs)
 
 
-def _evidence(chapter_id: str) -> dict:
-    return {"chapter_id": chapter_id, "scene_id": None, "excerpt": "excerpt", "span": None}
 
 
 async def _seeded(tmp_path: Path):

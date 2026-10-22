@@ -27,6 +27,8 @@ import os
 import sys
 from pathlib import Path
 
+from ._shared import _insert_chapter
+
 # 允许在 tests/unit/ 目录直接 pytest 运行
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -85,24 +87,6 @@ def _insert_project(db_path: Path) -> str:
     return pid
 
 
-def _insert_chapter(db_path: Path, project_id: str, number: int = 1) -> str:
-    cid = new_id("ch")
-    now = now_iso()
-    conn = get_connection(db_path)
-    try:
-        conn.execute(
-            """
-            INSERT INTO chapters
-                (chapter_id, project_id, number, title, plan_json, status,
-                 visibility, who_knows, created_at, updated_at)
-            VALUES (?, ?, ?, 't', '{}', 'PLANNED', 'VISIBLE', NULL, ?, ?)
-            """,
-            (cid, project_id, number, now, now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return cid
 
 
 def _insert_character_with_state(

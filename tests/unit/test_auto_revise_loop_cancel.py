@@ -21,15 +21,10 @@ from pathlib import Path
 import pytest
 
 from packages.core.api.routers import workflows as wf
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 
-
-def _db(tmp_path: Path) -> str:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return str(settings.db_path)
+from ._shared import _db
 
 
 def _ensure_workflow(db_path: str, name: str = "chapter-review") -> str:

@@ -12,15 +12,14 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-
-import httpx
 
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
+
+from ._shared import _make_client, _run
 
 
 def _setup_app(tmp_path: Path):
@@ -30,13 +29,8 @@ def _setup_app(tmp_path: Path):
     return app, settings
 
 
-def _make_client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
-def _run(coro):
-    return asyncio.run(coro)
 
 
 def _ensure_workflow(conn, name: str) -> str:

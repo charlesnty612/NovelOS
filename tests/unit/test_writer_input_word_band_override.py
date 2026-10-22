@@ -16,6 +16,8 @@ import os
 import sys
 from pathlib import Path
 
+from ._shared import _insert_chapter
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -59,24 +61,6 @@ def _insert_project(
     return pid
 
 
-def _insert_chapter(db_path: Path, project_id: str, number: int = 1) -> str:
-    cid = new_id("ch")
-    now = now_iso()
-    conn = get_connection(db_path)
-    try:
-        conn.execute(
-            """
-            INSERT INTO chapters
-                (chapter_id, project_id, number, title, plan_json, status,
-                 visibility, who_knows, created_at, updated_at)
-            VALUES (?, ?, ?, 't', '{}', 'PLANNED', 'VISIBLE', NULL, ?, ?)
-            """,
-            (cid, project_id, number, now, now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return cid
 
 
 def _set_project_word_band_json(db_path: Path, project_id: str, raw: str | None) -> None:

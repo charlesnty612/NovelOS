@@ -18,14 +18,13 @@ from pathlib import Path
 
 import httpx
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.db import apply_migrations
 from packages.workflows.chapter_review.pipeline import (
     _SUGGESTED_HASH_LIMIT,
     _merge_suggested_hashes,
     _suggestion_hash,
 )
+
+from ._shared import _create_app, _make_client
 
 _PROSE = "无边的林海托着第一缕晨曦，远处的溪声把夜雾推向山脚，露珠沿着叶柄滑落，碎成一道细小的微光。"
 _SUGGESTION_REPEAT = "让男主主动提一句玉佩。"
@@ -63,15 +62,8 @@ def test_merge_suggested_hashes_dedupes_and_caps():
 # ---------------------------------------------------------------------------
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
-def _make_client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:

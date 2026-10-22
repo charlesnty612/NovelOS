@@ -18,24 +18,19 @@ import json
 import time
 from pathlib import Path
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations
 from packages.core.workflow_registry import register_workflow
 from packages.core.workflow_runtime.engine import (
     PauseRequested,
-    WorkflowEngine,
     WorkflowNode,
 )
 from packages.core.workflow_runtime.runs import get_run
+
+from ._shared import _make_engine
 
 _WF_NAME = "m3-resume-exclude-wf"
 _EXCLUDE = ["big", "probe"]
 
 
-def _make_engine(tmp_path: Path) -> WorkflowEngine:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return WorkflowEngine(settings.db_path)
 
 
 def _register_wf() -> None:

@@ -19,23 +19,20 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.domain.chapter.service import (
     ChapterService,
     RevisionNoteStatusNotAllowed,
 )
 
+from ._shared import _make_settings
+
 # ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
 
-def _make_settings(tmp_path: Path) -> Settings:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return settings
 
 
 def _make_project(db_path: str, name: str = "revision_note 项目") -> str:

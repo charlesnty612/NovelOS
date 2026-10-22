@@ -696,7 +696,20 @@ def _check_descriptions(
         rid = entry.get("rule_id", "<unknown>")
         live_desc = descriptions.get(rid)
         if live_desc is None:
-            continue  # 不在 AI_PATTERN_RULES 里（style_subscore / 废弃条目）⇒ 无活 description
+            # 2026-10-23 批次二十七 M-1（审查 minor，最要紧）：注入 / import 失配导致
+            # descriptions 整体为空时，Q-4 的「登记 ↔ 活 description」这半边会**整体
+            # 静默失效**（errors=0 / drifts=0，对照 resolver/rule_table/scan 失效时都响亮）。
+            # ⇒ 该条目只要登记了 description_numbers，就必须显式报 error（带 rule_id）。
+            # 无登记条目的 continue 仍保留：不在 AI_PATTERN_RULES 里的 style_subscore /
+            # 废弃条目本来就没有活 description。
+            registrations = entry.get("description_numbers")
+            if isinstance(registrations, list) and registrations:
+                result.errors.append(
+                    f"{rid} 登记了 description_numbers，但取不到 live description"
+                    "（AI_PATTERN_RULES.description 缺失 / descriptions 注入源为空）"
+                    "⇒ Q-4 的「登记 ↔ 活 description」核对无法执行，必须显式报错"
+                )
+            continue
         registrations = entry.get("description_numbers")
         if not isinstance(registrations, list):
             result.errors.append(
@@ -983,6 +996,22 @@ def _check_ref(
                 )
             )
     elif kind == "regex":
+        # 2026-10-23 批次二十七 M-2（审查 minor）：resolver / 注入源返回非 Pattern 时，
+        # ``_fingerprint_regex`` 会抛 AttributeError——CLI 被 main() 收口成 exit 2（响亮），
+        # 但**库调用方（测试 / 其它工具）会直接崩**。⇒ 按 kind 先校验类型，不符报 drift
+        # （带 ref 名与期望类型），绝不抛。
+        if not isinstance(actual, re.Pattern):
+            result.drifts.append(
+                Drift(
+                    kind=kind,
+                    rule_id=rule_id,
+                    name=name,
+                    expected="re.Pattern",
+                    actual=type(actual).__name__,
+                    detail=f"{module}.{attr} 声明 kind=regex 但不是 re.Pattern",
+                )
+            )
+            return
         actual_sha = _fingerprint_regex(actual)
         if not _values_equal(ref.get("sha256"), actual_sha):
             result.drifts.append(

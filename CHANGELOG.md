@@ -5,6 +5,45 @@
 
 ## [Unreleased]
 
+### Changed（2026-10-23 批次（二十七）：测试体系阶段一（结构去重）+ 证据表看守自检三修）
+
+> **来源**：用户「测试太臃肿，简化一下，由你自行裁决」+ 批次二十六双轴审查的 3 条 minor。零真实 LLM、零内容仓接触。
+
+#### 1. 测试体系阶段一：按包 `_shared.py` 收敛（**零断言 / 零用例损失**）
+
+- 新增 5 个**按包**共用模块：`tests/{api,unit,workflow,integration,unit/quality}/_shared.py`，收 **23 个跨文件逐字相同**的 helper（`_create_app` / `_make_client` / `_request` / `_get_run_via_http` / `_insert_project` / `_insert_chapter` / `_make_settings` / `_make_engine` …）。
+- 改写 **95 个测试文件**：删本地副本 → `from ._shared import …`（**函数名不变 ⇒ 调用点一行未改**）；沿用仓内既有形态（`tests/unit/skill_fixtures.py` 的「按包 + 相对 import」），**未给 `tests/` 加 `__init__.py`**（免改全仓模块名）。
+- 行数（`splitlines` 口径，119 个被改文件）：物理行 **55,642 → 54,970（−672 / −1.21%）**；docstring −83 / 代码 −665 / 空行 +76；**test_ 函数 1,126 → 1,126**。
+- **零判别力损失（Lead 独立复算，非采信）**：全树 assert **13,140 → 13,153**、test 函数 **3,646 → 3,649** —— 增量 **+13 / +3 全部来自本批 task-22 新增用例**，阶段一**没有删/改/放宽任何断言**；23 个被搬函数与 HEAD 原件 **AST 归一化后逐字相同**。
+
+#### 2. ⚠️ 目标订正留痕：「物理行 ↓≥8%」在阶段一范围内**不可达**（Lead 估计被实测推翻）
+
+成员给出**四路实测上界**（非估计）：① 函数级跨文件复制粘贴可去 4,106 行（2.81%）；② 再叠加「同文件内/模块级/docstring 重复」到 6,257 行（**4.27% 为上界**）；③ 逐行重复绝对上界 27.32%，但那是 Python 语法噪声底线（`assert` / `)` / `return`），不可收敛；④ 扣除「import 行吃收益 / 同名多实现 / **带装饰器的 fixture 搬走会变语义** / 相对 import 不可搬 / 非 test_ 文件本身即共用模块」后，**可安全搬的只有 672 行**。
+⇒ **8% 只能靠阶段二（删冗余用例）拿到**；削 36,000 行 docstring（占全树 24%）被判定为**削价值**，Lead 否决。**阶段一目标改为「零判别力损失下的可达上界」，实测 −1.21% 已接受**；阶段二另立项（带突变证据）。
+
+#### 3. 证据表看守的三处自检缺口（批次二十六审查 minor）
+
+1. **`_check_descriptions` 静默失效**：`live_desc is None: continue` ⇒ 注入 `descriptions=lambda: {}` 时 **errors=0 / drifts=0**（Q-4 判据整体失效且零提示）⇒ 改为「条目登记了 `description_numbers` 却取不到活 description ⇒ 报 error（带 rule_id）」。
+2. **`kind="regex"` 而值非 `re.Pattern`** ⇒ 未捕获 `AttributeError`（CLI 被 `main()` 收口成 exit 2，但**库调用方会崩**）⇒ 按 kind 先校验类型，不符报 **drift**（带 ref 名与期望类型）。
+3. **`HUMAN_BASELINE.md` §8** 的「两处必须一致」曾无机器看守（批次二十六已把措辞改成「副本、无机器看守」）⇒ 本批**补真比对**（解析 §8 九行表格 ↔ JSON `corpora` 双向：id 集合 / 种类 / 章数 / `in_version_control` / `reproducible_by`），并把措辞改回「由用例看守」——**这次是真的**。
+- 判别：`tests/mutation_specs/l19_evidence_guard_selfchecks.py` **4 条**（`EV-M1-DESC` / `EV-M2-REGEX` / `EV-M3-VALUE` / `EV-M3-ROW`）⇒ **实跑 4/4 CAUGHT**。
+
+#### 4. 闸门（Lead 亲跑）
+
+| 项 | 结果 |
+|---|---|
+| 全量 pytest `-n 20` | **4015 passed / 1 skipped / 1 xfailed / 0 failed**（173.41s；较批次二十六 4012 **+3** = task-22 新增例） |
+| 树指纹 | **722 文件 / `6ff53c09…`**，跑测前后**逐位一致** |
+| ruff | `All checks passed!` |
+| 突变实跑 | `l19` **4/4 CAUGHT**；`--changed` **0 存活** |
+| 残留 | `.mutbak` **0** |
+| 审查 | 本批 minor 由 Lead 直接判决（成员自带「撤修复必红」自证 4/4）；**阶段二另派双轴审查** |
+
+#### 5. 待办
+
+1. **阶段二（删冗余用例）**：需带「删除清单 + 每条被哪个 mutation 仍捕获」的证据，且**全量突变捕获率不降**；Lead 已给基线（`run_spec --all --jobs 16`，428 条）。
+2. 批次二十六审查余下 1 条 minor（冻结清单流程项，已补核）。
+
 ### Fixed（2026-10-23 批次（二十六）：证据表语义看守（critical）+ genre 突变补盲 + 两条存活突变修复）
 
 > **来源**：全面 review 的三路审计中的 **B 路（质量/题材域）**：1 critical + 5 major + 7 minor；Lead 逐条复验后分两路由两名开发并行修（写域互斥）。零真实 LLM、零内容仓接触。

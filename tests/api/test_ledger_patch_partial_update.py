@@ -34,15 +34,13 @@ import httpx
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 
+from ._shared import _request
+
 
 def _create_app(tmp_path: Path):
     return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
 
 
-async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        return await client.request(method, path, **kwargs)
 
 
 def _seed(app) -> tuple[str, str, str]:

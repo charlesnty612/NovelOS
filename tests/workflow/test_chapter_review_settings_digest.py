@@ -16,20 +16,16 @@ import asyncio
 import json
 from pathlib import Path
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.workflows.chapter_review.pipeline import _collect_settings_digest
+
+from ._shared import _create_app
 
 # ---------------------------------------------------------------------------
 # 复用 test_chapter_review_critic 的脚手架（最小裁剪，避免 import 拉全文件）
 # ---------------------------------------------------------------------------
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
 def _make_client(app):

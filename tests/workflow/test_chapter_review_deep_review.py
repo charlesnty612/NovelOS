@@ -19,27 +19,16 @@ from pathlib import Path
 import httpx
 
 from packages.core.agent_runtime.prompts import _AGENT_TO_CAPABILITY as PROMPTS_AGENT_TO_CAPABILITY
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.model_router.router import AGENT_CAPABILITY
+
+from ._shared import _create_app, _get_run_via_http, _make_client
 
 # ---------------------------------------------------------------------------
 # 脚手架（裁剪自 test_chapter_review_critic.py，保持口径一致）
 # ---------------------------------------------------------------------------
 
 
-async def _get_run_via_http(app, run_id: str) -> dict | None:
-    import httpx
-    transport = httpx.ASGITransport(app=app)
-    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
-    try:
-        r = await client.get(f"/api/runs/{run_id}")
-    finally:
-        await client.aclose()
-    if r.status_code == 404:
-        return None
-    return r.json()
 
 
 async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED", "FAILED"), timeout: float = 60.0) -> dict:
@@ -61,15 +50,8 @@ async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED
     )
 
 
-def _make_client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:

@@ -31,9 +31,9 @@ import httpx
 import pytest
 
 from packages.core.agent_runtime.revision_fidelity import REVISE_MIN_PRESERVED_RATIO
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
+
+from ._shared import _create_app, _make_client, _observer_noop_script
 
 
 @pytest.fixture(autouse=True)
@@ -92,15 +92,8 @@ async def _wait_run_terminal(
 # ---------------------------------------------------------------------------
 
 
-def _make_client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
@@ -277,27 +270,6 @@ def _writer_script_with_marker_in_write_mode(body: str) -> list[str]:
     ]
 
 
-def _observer_noop_script() -> list[str]:
-    return [
-        json.dumps(
-            {
-                "schema_version": "observer.v1",
-                "prompt_version": "observer:v1",
-                "chapter_id": "ch_xxx",
-                "narrative_observations": [],
-                "continuity_observations": [],
-                "world_state_observations": [],
-                "relationship_observations": [],
-                "new_events": [],
-                "resolved_hooks": [],
-                "new_hooks": [],
-                "debt_changes": [],
-                "world_changes": [],
-                "relationship_changes": [],
-            },
-            ensure_ascii=False,
-        )
-    ]
 
 
 def _read_writer_node_output(db_path: str, run_id: str) -> dict | None:

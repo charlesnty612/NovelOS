@@ -32,22 +32,19 @@ from packages.core.api.routers.workflows.fast_mode import (
     read_project_fast_mode,
     resolve_fast_mode,
 )
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.domain.chapter.models import ChapterCreate
 from packages.domain.chapter.service import ChapterService
 from packages.domain.project.models import ProjectCreate
 from packages.domain.project.service import ProjectService
+
+from ._shared import _db
 
 # ---------------------------------------------------------------------------
 # 夹具
 # ---------------------------------------------------------------------------
 
 
-def _db(tmp_path: Path) -> str:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return str(settings.db_path)
 
 
 def _project(db_path: str, name: str = "fm project") -> str:

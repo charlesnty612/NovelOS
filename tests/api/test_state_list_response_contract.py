@@ -64,7 +64,6 @@ import httpx
 import pytest
 from fastapi.routing import APIRoute
 
-from packages.core.api.main import create_app
 from packages.core.api.routers import story_state as story_state_router
 from packages.core.api.routers.workflows.models import WorkflowRunSummary
 from packages.core.config import Settings
@@ -76,6 +75,8 @@ from packages.core.story_state.models import (
     CommitListItem,
     StateDeltaListItem,
 )
+
+from ._shared import _create_app, _evidence
 
 # ---------------------------------------------------------------------------
 # 硬编码期望键集：**模型之外的第三方基准**，不得写成 set(Model.model_fields)
@@ -189,10 +190,6 @@ EXPECTED_REQUIRED: dict[str, set[str]] = dict(EXPECTED_PROPERTIES)
 # ---------------------------------------------------------------------------
 
 
-def _create_app(tmp_path: Path):
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return create_app(settings)
 
 
 def _make_client(app) -> httpx.AsyncClient:
@@ -218,8 +215,6 @@ async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
         return await c.request(method, path, **kwargs)
 
 
-def _evidence(chapter_id: str) -> dict:
-    return {"chapter_id": chapter_id, "scene_id": None, "excerpt": "excerpt", "span": None}
 
 
 def _delta(chapter_id: str, character_id: str, prev_version: int, location: str) -> dict:

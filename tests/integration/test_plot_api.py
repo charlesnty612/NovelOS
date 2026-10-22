@@ -16,21 +16,15 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
-
-import httpx
 
 from packages.core.api.main import create_app
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 
-
-def _make_client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
+from ._shared import _make_client, _run
 
 
 def _build_app(
@@ -84,8 +78,6 @@ def _build_app(
     return app, pid, char_ids, location_id
 
 
-def _run(coro):
-    return asyncio.run(coro)
 
 
 def test_event_crud_happy_path(tmp_path: Path):

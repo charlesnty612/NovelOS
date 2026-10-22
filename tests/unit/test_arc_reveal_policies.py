@@ -13,13 +13,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from ._shared import _make_settings
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.core.arc.service import build_arc_view  # noqa: E402
-from packages.core.config import Settings  # noqa: E402
-from packages.core.db import apply_migrations, get_connection  # noqa: E402
+from packages.core.db import get_connection  # noqa: E402
 from packages.core.ids import new_id, now_iso  # noqa: E402
 from packages.domain.knowledge import RevealPolicyService  # noqa: E402
 from packages.domain.project.service import ProjectService  # noqa: E402
@@ -27,10 +28,6 @@ from packages.domain.project.service import ProjectService  # noqa: E402
 MIGRATIONS_DIR = ROOT / "database" / "migrations"
 
 
-def _make_settings(tmp_path: Path) -> Settings:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return settings
 
 
 def _make_project(db_path: str, name: str = "rp-arc") -> str:

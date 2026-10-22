@@ -14,19 +14,13 @@ import asyncio
 import time
 from pathlib import Path
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations
 from packages.core.workflow_runtime.engine import (
     PauseRequested,
     WorkflowEngine,
     WorkflowNode,
 )
 
-
-def _make_engine(tmp_path: Path) -> WorkflowEngine:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return WorkflowEngine(settings.db_path)
+from ._shared import _make_engine
 
 
 async def _wait_for_terminal(engine: WorkflowEngine, run_id: str, *, timeout: float = 10.0) -> str:

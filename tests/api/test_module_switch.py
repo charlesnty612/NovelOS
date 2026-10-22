@@ -21,10 +21,7 @@ from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
 
-
-def _make_client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
+from ._shared import _make_client
 
 
 def _create_app(tmp_path: Path, disabled_modules: list[str] | None = None):

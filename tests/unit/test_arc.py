@@ -28,10 +28,11 @@ from packages.core.arc.service import (
     _payoff_ratio_recent,
     build_arc_view,
 )
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.domain.project.service import ProjectService
+
+from ._shared import _make_settings
 
 # ---------------------------------------------------------------------------
 # 工厂函数
@@ -398,10 +399,6 @@ def test_alerts_charge_streak_fail_overrides_density_when_streak_present():
 # ---------------------------------------------------------------------------
 
 
-def _make_settings(tmp_path: Path) -> Settings:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return settings
 
 
 def _make_project(db_path: str, name: str = "测试") -> str:
