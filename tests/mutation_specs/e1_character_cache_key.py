@@ -115,18 +115,22 @@ MUTATIONS = [
     # 过度修正：任何异常都返回稳定占位符（静默降级 = 把「读不到」当成「没改过」）
     # ------------------------------------------------------------------
     (
+        # ⚠️ 2026-10-22 批次二十三（热路径：指纹查询合并进 peek 的连接）：角色指纹的
+        # 查询体搬进了新 helper ``_characters_fingerprint_conn``（连接由调用方持有）
+        # ⇒ 锚点原文随源码演化。**语义不变**（仍是「任何异常都返回稳定占位符 ⇒
+        # 静默降级 = 把『读不到』当成『没改过』」⇒ 定向用例必红）。
         "E1-7",
         "packages/core/context_engine/cache.py",
+        "    try:\n"
+        "        rows = conn.execute(_CHARACTERS_FINGERPRINT_SQL, (project_id,)).fetchall()\n"
         "    except sqlite3.OperationalError as exc:\n"
         "        if not is_missing_schema_error(exc):\n"
         "            raise\n"
-        "        return _FINGERPRINT_NONE\n"
+        "        return _FINGERPRINT_NONE\n",
         "    try:\n"
-        "        rows = conn.execute(_CHARACTERS_FINGERPRINT_SQL, (project_id,)).fetchall()\n",
+        "        rows = conn.execute(_CHARACTERS_FINGERPRINT_SQL, (project_id,)).fetchall()\n"
         "    except sqlite3.OperationalError:\n"
-        "        return _FINGERPRINT_NONE  # E1-MUT: 吞掉锁 / I/O 故障\n"
-        "    try:\n"
-        "        rows = conn.execute(_CHARACTERS_FINGERPRINT_SQL, (project_id,)).fetchall()\n",
+        "        return _FINGERPRINT_NONE  # E1-MUT: 吞掉锁 / I/O 故障\n",
         "tests/unit/test_characters_fingerprint_error_scope.py",
     ),
     # ------------------------------------------------------------------

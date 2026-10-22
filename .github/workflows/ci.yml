@@ -91,6 +91,36 @@ jobs:
       - name: Test
         run: npm run test
 
+  windows-compat:
+    name: windows (OS-specific paths)
+    runs-on: windows-latest
+    steps:
+      # 为什么要有这个 job（2026-10-22 项目 review 的 CI 覆盖缺口）：
+      #   - 其余 3 个 job 全是 `ubuntu-latest` ⇒ **Windows 专属路径零覆盖**；
+      #   - 而本仓三次真实事故都只在 Windows 上暴露：
+      #     ① `os.kill(pid, 0)` 在 Windows 是**给控制台广播 Ctrl+C**（signal.CTRL_C_EVENT == 0）
+      #        ⇒ 共享控制台时整棵进程树消失（`_child_creationflags()` 补 `CREATE_NEW_CONSOLE` 修的）；
+      #     ② `DETACHED_PROCESS` 下 `os.kill(pid,0)` 抛 `WinError 87` ⇒ `_pid_alive` 误报「已死」；
+      #     ③ 临时库删除留下孤儿进程（python.exe 是启动器 stub）。
+      #   - Python 版本取 **3.12**（与开发机一致；backend job 是 3.11）⇒ 顺带覆盖 3.12 腿。
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Windows-only tests (skipped on Linux CI)
+        # 这两个文件在 ubuntu 上整片 `skipif(not WIN)` / 走不到 → 只有这里真跑。
+        run: python -m pytest tests/unit/test_pid_alive_windows_probe.py tests/unit/test_m1_lock.py -q
+      - name: Parallel path smoke (xdist + temp dirs on Windows)
+        # backend job 的 pytest **不带 `-n`**（串行）⇒ 并行路径在 CI 上零覆盖。
+        # 这里跑一小片带 `-n 4`：覆盖 xdist worker 的临时目录/文件句柄/进程语义差异。
+        run: python -m pytest tests/unit/quality tests/unit/test_no_core_to_workflows_dep.py -q -n 4
+
   smoke:
     name: e2e smoke (state sync included)
     runs-on: ubuntu-latest

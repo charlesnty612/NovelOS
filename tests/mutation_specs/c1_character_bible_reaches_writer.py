@@ -64,9 +64,13 @@ MUTATIONS = [
         "tests/unit/test_character_bible_reaches_writer.py",
     ),
     (
+        # ⚠️ 2026-10-22 批次二十三（热路径：指纹查询合并进 peek 的连接）：锚点原文
+        # 随源码演化——``characters_fingerprint`` 现在多传一个 ``conn=``（复用装配器
+        # 持有的那条连接）。**语义不变**（仍是「撤掉 chars_fp 维度 ⇒ 改角色圣经后
+        # 脏命中」⇒ 定向用例必红）。
         "CB-FP",
         "packages/core/context_engine/writer_input.py",
-        "    chars_fp = characters_fingerprint(db_path, project_id)",
+        "    chars_fp = characters_fingerprint(db_path, project_id, conn=_conn)",
         '    chars_fp = "CB-FP-MUTATION: 常量指纹，退化成脏命中"',
         "tests/unit/test_character_bible_reaches_writer.py",
     ),

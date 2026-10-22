@@ -37,7 +37,17 @@ MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
 # 参与 DB 访问计数的模块（各自 ``from packages.core.db import get_connection``，
 # 需逐模块替换模块属性）。
+#
+# ⚠️ **2026-10-22 批次二十三：本清单漏了一个模块，导致这两条用例的「量具」静默失效。**
+# 背景：装配指纹查询合并进 peek 的连接（`cache.py::with_fingerprint_conn` 装饰器持一条
+# 连接贯穿 peek + 六个指纹）。副作用是**连接的开点从 `builders_common` 移到了 `cache`**，
+# 而本清单里没有 `cache` ⇒ 计数器读到 **0 次连接**（不是「变多了」，是**看不见了**），
+# 两条用例因此红（`assert 0 == 1`）。
+# ⇒ 这类「固定模块清单」的计数器，**连接开点搬家时必然失效**，而失效方向是
+# 「计数归零」——看起来像「行为变好了」，实际看守已经不在执行域内（AGENTS 坑区
+# 「看守自己被悄悄缩小了执行域」同族）。后续再动连接开点时，必须同步本清单。
 _COUNTER_MODULES = (
+    "packages.core.context_engine.cache",
     "packages.core.context_engine.builders_common",
     "packages.core.context_engine.director_input",
     "packages.core.context_engine.writer_input",
@@ -169,12 +179,29 @@ def _count_db_access(monkeypatch) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# 1. DB 访问量：命中路径 1 连接 1 条 SQL
+# 1. DB 访问量：命中路径 **1 连接**（SQL 条数 = peek 1 + 指纹探测）
 # ---------------------------------------------------------------------------
+#
+# ⚠️ **2026-10-22 批次二十三订正：原断言是 `sql == 1`，而它只在「量具看不见」时成立。**
+#
+# 历史真相：改造前，命中路径的真数是 **7 条连接**（peek 1 + 六个指纹各 1），
+# 但本文件的计数清单里**没有 `cache.py`**（六个指纹函数都在那里）⇒ 指纹那 6 条
+# 连接与它们的 SQL **全部不可见** ⇒ 计数器只看到 builders_common 的 1 条 ⇒ `sql == 1` 假绿。
+#
+# 批次二十三把指纹查询合并进 peek 的一条连接后，`cache.py` 进了清单 ⇒ 量具第一次能看见全貌：
+#   `conns == 1`（这正是本次优化的性质：**一条连接贯穿 peek + 六个指纹**）
+#   `sql == 14 / 10`（peek 1 条 + 六个指纹的 PRAGMA/SELECT；writer 比 director 多两条，因为
+#    writer 多 `style_fp` 与 `title_fp` 两个维度）
+# ⇒ **`sql` 不是性能承诺，是「装配输入变化要可见」的钉子**：改装配器/指纹表集合时同步本数字。
+# ⇒ 教训（AGENTS 坑区同族）：**「固定模块清单」的计数器在连接开点搬家时必然失效，
+#    而且失效方向是「计数归零/变小」——看起来像行为变好，实际是看守掉出了执行域。**
 
 
 def test_writer_cache_hit_uses_single_connection(tmp_path: Path, monkeypatch):
-    """writer 缓存命中路径：1 连接 1 条 SQL（收敛前 5 连接 / 5 条）。"""
+    """writer 缓存命中路径：**1 条连接**（贯穿 peek + 六个指纹），SQL = peek 1 + 指纹探测。
+
+    改造前真值 7 连接（计数器因未含 `cache.py` 而只见 1 条 ⇒ 旧断言 `sql == 1` 是假绿）。
+    """
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, 1, plan_json='{"chapter_goal": "x"}')
@@ -186,12 +213,16 @@ def test_writer_cache_hit_uses_single_connection(tmp_path: Path, monkeypatch):
     payload = build_writer_input(db_path, cid, {"purpose": "场景"})
 
     assert counters["conns"] == 1, counters
-    assert counters["sql"] == 1, counters
+    # peek 1 + 指纹探测 13（chars/world×3表/reveal/style/project_meta/title 的 PRAGMA+SELECT）
+    assert counters["sql"] == 14, counters
     assert payload["agent"] == "writer"
 
 
 def test_director_cache_hit_uses_single_connection(tmp_path: Path, monkeypatch):
-    """director 缓存命中路径：1 连接 1 条 SQL（收敛前 3 连接 / 3 条）。"""
+    """director 缓存命中路径：**1 条连接**（贯穿 peek + 三个指纹），SQL = peek 1 + 指纹探测。
+
+    改造前真值 5 连接（计数器盲区同上）。
+    """
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cid = _insert_chapter(db_path, pid, 1, plan_json='{"chapter_goal": "x"}')
@@ -203,7 +234,8 @@ def test_director_cache_hit_uses_single_connection(tmp_path: Path, monkeypatch):
     payload = build_director_input(db_path, pid, cid, "意图")
 
     assert counters["conns"] == 1, counters
-    assert counters["sql"] == 1, counters
+    # peek 1 + 指纹探测 9（chars/world×3表/reveal/project_meta —— director 无 style/title 维度）
+    assert counters["sql"] == 10, counters
     assert payload["agent"] == "director"
 
 

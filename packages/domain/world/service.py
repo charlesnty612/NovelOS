@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.core.ids import new_id, now_iso
+from packages.core.logging_config import get_logger
 from packages.core.story_state.write_helpers import (
     decode_json_field as _decode_json_field,
 )
@@ -44,6 +45,10 @@ from packages.core.story_state.write_helpers import (
 )
 
 from .models import VISIBILITY_VALUES, WorldEntity
+
+#: 本模块日志（2026-10-22 批次二十三：吞异常分诊 → B 类留痕；本层此前无 logger，
+#: 引入的是仓内既有唯一约定 ``packages.core.logging_config.get_logger``）。
+log = get_logger("novelos.domain.world.service")
 
 # ---------------------------------------------------------------------------
 # V2.0 Wave B 任务二：触发键助手（与 character service 同源语义）
@@ -67,7 +72,13 @@ def _load_aliases(raw: str | None) -> list[str]:
         return []
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        # 2026-10-22 批次二十三（B 类留痕）：控制流不变（仍退空列表），但**留痕**——
+        # 本函数无实体 id 入参，故用**阶段名**定位（world.aliases）。
+        log.warning(
+            "world.aliases 解析失败 ⇒ 别名退化为空列表（实体别名静默丢失）：err=%s",
+            exc,
+        )
         return []
     if isinstance(parsed, list):
         return [str(x) for x in parsed if isinstance(x, (str, int, float))]

@@ -39,11 +39,17 @@ from typing import Any
 
 from packages.core.db import get_connection
 from packages.core.ids import now_iso
+from packages.core.logging_config import get_logger
 from packages.core.quality.models import QualityContext, QualityReport
 from packages.core.story_state.write_helpers import (
     decode_json_field as _decode_json_field,
 )
 from packages.domain.chapter.draft_resolver import resolve_draft
+
+#: 本模块日志（2026-10-22 批次二十三：吞异常分诊 → B 类留痕）。
+#: 说明：本层此前**没有**任何 logger；这里引入的是仓内**既有唯一**日志约定
+#: ``packages.core.logging_config.get_logger``（全仓 35 个文件在用），不是新日志机制。
+log = get_logger("novelos.quality.service")
 
 __all__ = [
     "QualityService",
@@ -516,7 +522,16 @@ def load_reference_texts(db_path: str | Path, project_id: str) -> list[str]:
     for txt in sorted(refs_dir.glob("*.txt")):
         try:
             out.append(txt.read_text(encoding="utf-8"))
-        except OSError:
+        except OSError as exc:
+            # 2026-10-22 批次二十三（B 类留痕）：本函数 docstring 明写
+            # 「文件读取异常 → 跳过该文件（**log warning** 但不阻断）」
+            # ——原先只 continue、无日志 ⇒ docstring 承诺的那条 warning 从未兑现。
+            log.warning(
+                "参照文件读取失败 ⇒ 跳过该文件（不阻断）：project_id=%s path=%s err=%s",
+                project_id,
+                txt,
+                exc,
+            )
             continue
     return out
 
@@ -550,7 +565,15 @@ def capture_reference_consumption(db_path: str | Path, project_id: str) -> dict[
         for txt in sorted(refs_dir.glob("*.txt")):
             try:
                 chars = len(txt.read_text(encoding="utf-8"))
-            except OSError:
+            except OSError as exc:
+                # 2026-10-22 批次二十三（B 类留痕）：文件**存在**却报 0 字 = 统计失真，
+                # 而调用方（quality_gate / evaluate）无从分辨 ⇒ 留痕。
+                log.warning(
+                    "参照文件读取失败 ⇒ 该文件按 0 字计入统计：project_id=%s path=%s err=%s",
+                    project_id,
+                    txt,
+                    exc,
+                )
                 chars = 0
             files.append({"name": txt.name, "chars": chars})
     return {
@@ -605,7 +628,16 @@ def compute_payoff_history(db_path: str | Path, project_id: str, limit: int = 5)
                 continue
             try:
                 payload = json.loads(payload_row["payload_json"] or "{}")
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                # 2026-10-22 批次二十三（B 类留痕）：这里 append(0) 与「确实没有 payoff」
+                # **同形** ⇒ 脏 payload 与「无 payoff」不可区分 ⇒ 留痕。
+                log.warning(
+                    "state_deltas.payload_json 解析失败 ⇒ 该章 payoff 记 0"
+                    "（与「确实无 payoff」同形）：chapter_id=%s delta_id=%s err=%s",
+                    ch["chapter_id"],
+                    row["delta_id"],
+                    exc,
+                )
                 history.append(0)
                 continue
             if not isinstance(payload, dict):
@@ -654,7 +686,15 @@ def _read_chapter_plan(db_path: str | Path, chapter_id: str) -> dict[str, Any]:
         return {}
     try:
         v = json.loads(row["plan_json"])
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        # 2026-10-22 批次二十三（B 类留痕）：控制流不变（仍退空 plan），
+        # 但**留痕**——否则调用方只看到「本章无 plan」，与「plan 脏了」不可区分。
+        log.warning(
+            "chapters.plan_json 解析失败 ⇒ 退化为空 plan（评估按「无 plan」算）："
+            "chapter_id=%s err=%s",
+            chapter_id,
+            exc,
+        )
         return {}
     return v if isinstance(v, dict) else {}
 

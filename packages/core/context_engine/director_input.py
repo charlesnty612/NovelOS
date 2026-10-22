@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,7 @@ from .cache import (
     _fingerprint_writing_bible,
     characters_fingerprint,
     project_meta_fingerprint,
+    with_fingerprint_conn,
     world_fingerprint,
 )
 from .canon import (
@@ -342,6 +344,7 @@ def _build_director_input_uncached(
     return _attach_assembly_meta(payload, summary_truncated=summaries_truncated)
 
 
+@with_fingerprint_conn
 def build_director_input(
     db_path: str | Path,
     project_id: str,
@@ -350,6 +353,7 @@ def build_director_input(
     *,
     target_word_count: int = _DEFAULT_TARGET_WORD_COUNT,
     namespace: str = "",
+    _conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """组装 Director 输入（agent-contracts §3.1 + V2.0 Wave C 任务一 召回 + 任务二 缓存）。
 
@@ -412,7 +416,7 @@ def build_director_input(
     """
     # 单连接 peek：chapter_no / state_version / plan_json 原文 / word_band / active canon
     # / 绑定题材包指纹（不命中再全量装配；peek 结果一并传给 uncached 复用）
-    peek = _peek_chapter_context(db_path, chapter_id, project_id=project_id)
+    peek = _peek_chapter_context(db_path, chapter_id, project_id=project_id, conn=_conn)
     chapter_no = peek["chapter_no"]
     state_version = peek["state_version"]
     plan_fp = _fingerprint_plan_json(peek["plan_json_raw"])
@@ -448,7 +452,7 @@ def build_director_input(
     # 圣经不符（与 0028 ``outline_json`` 同形的硬规则 2 违规）。
     # 落在 prompt_label 之前 ⇒ 键尾两元（prompt 标签 / 命名空间标记）语义不变
     # （``tests/unit/test_prompt_label_key.py`` 的 ``DIRECTOR_KEY_LEN`` 13 → 14）。
-    chars_fp = characters_fingerprint(db_path, project_id)
+    chars_fp = characters_fingerprint(db_path, project_id, conn=_conn)
     # 内部消费外部 skill：项目绑定 skill 集合的指纹（**含 id 与 version**）。
     # 该维度进 payload 的 ``skills`` 段 ⇒ 必须进键（硬规则 2）：换 skill /
     # 改 skill payload（version 自增）/ 改绑定都必须 miss，否则 director 拿着
@@ -460,7 +464,7 @@ def build_director_input(
     # story_states 写入（PATCH 设定不推 ``state_version``）⇒ 缺该维度时改设定后重跑同一章
     # 命中旧装配：planner 与 writer 都拿着改动前的世界设定（与 ``chars_fp`` 同形的硬规则 2
     # 违规；E1 只补了角色，未补世界观三表）。同放在 prompt_label 之前。
-    world_fp = world_fingerprint(db_path, project_id)
+    world_fp = world_fingerprint(db_path, project_id, conn=_conn)
     # 2026-10-22（批次二十一 P0-1-A）：键追加**项目元信息**（name/genre/premise）
     # 内容指纹 ``project_meta_fp``。``project["name"]`` / ``project.get("genre")`` /
     # ``project.get("premise")`` 进 payload 的 ``project`` 段，且这三个字段**被
@@ -474,7 +478,7 @@ def build_director_input(
     # prompt_label,`` 那一行是既有突变规格 ``E1-2`` 与 ``SKILL-KEY-1`` 的
     # **锚点原文**（AGENTS 坑区「改一个模块会打断既有突变规格的锚点 ⇒ 执行器
     # [ABORT]」）⇒ 本维度落在身份行之后的**空行**上；键尾两元语义不变。
-    project_meta_fp = project_meta_fingerprint(db_path, project_id)
+    project_meta_fp = project_meta_fingerprint(db_path, project_id, conn=_conn)
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
         project_meta_fp,

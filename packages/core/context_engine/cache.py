@@ -176,7 +176,22 @@ def _fingerprint_characters(rows: Any) -> str:
         return _FINGERPRINT_UNCACHED
 
 
-def characters_fingerprint(db_path: str | Path, project_id: str | None) -> str:
+def _characters_fingerprint_conn(
+    conn: sqlite3.Connection, project_id: str,
+) -> str:
+    """在**已持有连接**上算角色指纹（连接由调用方负责关闭）。"""
+    try:
+        rows = conn.execute(_CHARACTERS_FINGERPRINT_SQL, (project_id,)).fetchall()
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return _FINGERPRINT_NONE
+    return _fingerprint_characters(rows)
+
+
+def characters_fingerprint(
+    db_path: str | Path, project_id: str | None, *, conn: sqlite3.Connection | None = None,
+) -> str:
     """读该项目全部角色行并算指纹（writer / director 两条缓存键共用这一个维度）。
 
     **降级范围**（与 2026-10-16 批次十的收窄口径同形）：仅「结构缺失」（缺表 / 缺列）
@@ -184,24 +199,25 @@ def characters_fingerprint(db_path: str | Path, project_id: str | None) -> str:
     等运行时故障**上抛**——角色指纹是缓存键维度，静默归 None = 用「读不到角色」的键形态
     去命中「角色已改」的旧装配，正是本函数要修的脏命中形状。
     判别：``tests/unit/test_e1_character_cache_key.py``。
+
+    ``conn``（2026-10-22 批次二十三，热路径优化）：**可选的已持有连接**——传入时
+    复用该连接（不再自建连）；``None`` ⇒ 保持旧行为（自建连、用完即关）。
+    ⚠️ 连接的**关闭责任在调用方**（本函数不关传入的连接）。
     """
     if not project_id:
         return _FINGERPRINT_NONE
+    if conn is not None:
+        return _characters_fingerprint_conn(conn, project_id)
     try:
-        conn = get_connection(db_path)
+        own = get_connection(db_path)
     except sqlite3.OperationalError as exc:
         if not is_missing_schema_error(exc):
             raise
         return _FINGERPRINT_NONE
     try:
-        rows = conn.execute(_CHARACTERS_FINGERPRINT_SQL, (project_id,)).fetchall()
-    except sqlite3.OperationalError as exc:
-        if not is_missing_schema_error(exc):
-            raise
-        return _FINGERPRINT_NONE
+        return _characters_fingerprint_conn(own, project_id)
     finally:
-        conn.close()
-    return _fingerprint_characters(rows)
+        own.close()
 
 
 # ---------------------------------------------------------------------------
@@ -314,53 +330,111 @@ def _hash_snapshot(snapshot: Any) -> str:
         return _FINGERPRINT_UNCACHED
 
 
+def _fingerprint_tables_conn(
+    conn: sqlite3.Connection, project_id: str, tables: tuple[tuple[str, str], ...],
+) -> str:
+    """在**已持有连接**上算多表指纹（连接的关闭责任在调用方）。"""
+    snapshot = [
+        [table, _fingerprint_table_rows(conn, table, id_column, project_id)]
+        for table, id_column in tables
+    ]
+    return _hash_snapshot(snapshot)
+
+
 def _fingerprint_tables(
     db_path: str | Path, project_id: str | None, tables: tuple[tuple[str, str], ...],
+    *, conn: sqlite3.Connection | None = None,
 ) -> str:
     """多表内容指纹：``[[表名, 行集], ...]`` 的稳定哈希（sha256 前 16）。
 
     - 无 project_id → ``_FINGERPRINT_NONE``；连接打不开 / 缺表 → ``"missing"`` 占位；
     - 不可序列化 → ``_FINGERPRINT_UNCACHED``，调用方据此跳过缓存（绝不静默落到某个
       稳定值——那正是脏命中）。
+
+    ``conn``（2026-10-22 批次二十三，热路径优化）：**可选的已持有连接**——传入时复用
+    该连接（不再自建连）；``None`` ⇒ 保持旧行为（自建连、用完即关）。
+    ⚠️ 连接的**关闭责任在调用方**。
     """
     if not project_id:
         return _FINGERPRINT_NONE
+    if conn is not None:
+        return _fingerprint_tables_conn(conn, project_id, tables)
     try:
-        conn = get_connection(db_path)
+        own = get_connection(db_path)
     except sqlite3.OperationalError as exc:
         if not is_missing_schema_error(exc):
             raise
         return _FINGERPRINT_NONE
     try:
-        snapshot = [
-            [table, _fingerprint_table_rows(conn, table, id_column, project_id)]
-            for table, id_column in tables
-        ]
+        return _fingerprint_tables_conn(own, project_id, tables)
     finally:
-        conn.close()
-    return _hash_snapshot(snapshot)
+        own.close()
 
 
-def world_fingerprint(db_path: str | Path, project_id: str | None) -> str:
+def with_fingerprint_conn(fn):
+    """装饰器：装配器**一条连接**贯穿 peek + 全部指纹（2026-10-22 批次二十三 · 热路径）。
+
+    - 打开连接 → 以 ``_conn=`` 关键字注入被装饰函数 → 调用 → **finally 关闭**；
+    - 建连失败 ⇒ **不注入**（交回函数自己按旧口径降级：peek 走全空态、指纹各自
+      返回 ``_FINGERPRINT_NONE``）⇒ **失败语义与改造前逐字相同**；
+    - 连接**不跨调用缓存** ⇒ 无 WAL 快照滞留、无跨线程共享（每次调用自开自关）。
+
+    ⚠️ **为什么用装饰器、而不是在装配函数体里 try/finally**：这条连接要贯穿
+    「peek + 五个指纹」，而它们在函数体里**不连续**（中间夹着 intent / bible /
+    genre_pack 等纯计算）⇒ 合并成一条连接就得把整段**缩进一层** ⇒ 而那整段里坐着
+    **既有突变规格的锚点原文**（``e1_character_cache_key.py::E1-1`` 的两行键元组 +
+    它的 cacheable 两行守卫、``l7_skill_cache_key.py::SKILL-KEY-2`` 的键元组行、
+    ``q1_style_sample_key.py::STYLE-KEY-1`` 的键元组行）⇒ 缩进会**打断既有规格**
+    （AGENTS 坑区「改一个模块会打断既有突变规格的锚点 ⇒ 执行器 [ABORT]」）。
+    ⇒ 装饰器让**函数体一字不改**（锚点原文逐字存活）。
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if kwargs.get("_conn") is not None:
+            return fn(*args, **kwargs)
+        db_path = kwargs.get("db_path")
+        if db_path is None and args:
+            db_path = args[0]
+        try:
+            conn = get_connection(db_path)
+        except Exception:  # noqa: BLE001 —— 建连失败 ⇒ 交回函数自己降级（旧行为）
+            return fn(*args, **kwargs)
+        try:
+            return fn(*args, _conn=conn, **kwargs)
+        finally:
+            conn.close()
+
+    return wrapper
+
+
+def world_fingerprint(
+    db_path: str | Path, project_id: str | None, *, conn: sqlite3.Connection | None = None,
+) -> str:
     """``locations`` / ``factions`` / ``world_rules`` 三表内容指纹（writer + director 共用）。
 
     判别：突变规格 ``tests/mutation_specs/e1_character_cache_key.py``
     （``E1-1`` 撤掉 ``world_fp`` 维度 ⇒ 改任一表键不变 ⇒ 必红）。
     """
-    return _fingerprint_tables(db_path, project_id, _WORLD_FINGERPRINT_TABLES)
+    return _fingerprint_tables(db_path, project_id, _WORLD_FINGERPRINT_TABLES, conn=conn)
 
 
-def reveal_policies_fingerprint(db_path: str | Path, project_id: str | None) -> str:
+def reveal_policies_fingerprint(
+    db_path: str | Path, project_id: str | None, *, conn: sqlite3.Connection | None = None,
+) -> str:
     """``reveal_policies`` 内容指纹（writer 侧按它裁剪 HIDDEN 实体，见 P1-4）。
 
     判别：突变规格 ``tests/mutation_specs/e1_character_cache_key.py``
     （``E1-2`` 撤掉 ``reveal_fp`` 维度 ⇒ 加一条 planned+reader 策略键不变 ⇒ 必红，
     否则 HIDDEN 角色剧透）。
     """
-    return _fingerprint_tables(db_path, project_id, _REVEAL_FINGERPRINT_TABLES)
+    return _fingerprint_tables(db_path, project_id, _REVEAL_FINGERPRINT_TABLES, conn=conn)
 
 
-def author_style_samples_fingerprint(db_path: str | Path, project_id: str | None) -> str:
+def author_style_samples_fingerprint(
+    db_path: str | Path, project_id: str | None, *, conn: sqlite3.Connection | None = None,
+) -> str:
     """``author_style_samples`` 内容指纹（作者文风样例，writer 消费）。
 
     **为什么必须补**（硬规则 2「凡进 payload 的装配参数必须入键」的同形状第 4 次）：
@@ -389,10 +463,12 @@ def author_style_samples_fingerprint(db_path: str | Path, project_id: str | None
     判别：突变规格 ``tests/mutation_specs/q1_style_sample_key.py``
     （``STYLE-KEY-1`` 撤掉 ``style_fp`` 维度 ⇒ 加/删样例后键不变 ⇒ 必红）。
     """
-    return _fingerprint_tables(db_path, project_id, _STYLE_SAMPLE_FINGERPRINT_TABLES)
+    return _fingerprint_tables(db_path, project_id, _STYLE_SAMPLE_FINGERPRINT_TABLES, conn=conn)
 
 
-def project_meta_fingerprint(db_path: str | Path, project_id: str | None) -> str:
+def project_meta_fingerprint(
+    db_path: str | Path, project_id: str | None, *, conn: sqlite3.Connection | None = None,
+) -> str:
     """``projects`` 的 **name / genre / premise** 三列内容指纹（2026-10-22 批次二十一 P0-1-A）。
 
     **为什么必须补**（硬规则 2「凡进 payload 的装配参数必须入键」的同形状**第 5 次**）：
@@ -415,22 +491,31 @@ def project_meta_fingerprint(db_path: str | Path, project_id: str | None) -> str
 
     判别：突变规格 ``tests/mutation_specs/q1_meta_title_key.py``
     （``META-KEY-1`` 撤掉 ``project_meta_fp`` 维度 ⇒ 改 premise 后键不变 ⇒ 必红）。
+
+    ``conn``（2026-10-22 批次二十三，热路径优化）：**可选的已持有连接**——传入时复用
+    该连接（不再自建连）；``None`` ⇒ 保持旧行为（自建连、用完即关）。
     """
     if not project_id:
         return _FINGERPRINT_NONE
+    if conn is not None:
+        rows = _fingerprint_table_rows(
+            conn, "projects", "project_id", project_id,
+            keep_columns=_PROJECT_META_COLUMNS,
+        )
+        return _hash_snapshot([["projects", rows]])
     try:
-        conn = get_connection(db_path)
+        own = get_connection(db_path)
     except sqlite3.OperationalError as exc:
         if not is_missing_schema_error(exc):
             raise
         return _FINGERPRINT_NONE
     try:
         rows = _fingerprint_table_rows(
-            conn, "projects", "project_id", project_id,
+            own, "projects", "project_id", project_id,
             keep_columns=_PROJECT_META_COLUMNS,
         )
     finally:
-        conn.close()
+        own.close()
     return _hash_snapshot([["projects", rows]])
 
 
@@ -461,7 +546,9 @@ def _fingerprint_chapter_title(conn: sqlite3.Connection, chapter_id: str) -> Any
     return [row[0]]
 
 
-def chapter_title_fingerprint(db_path: str | Path, chapter_id: str) -> str:
+def chapter_title_fingerprint(
+    db_path: str | Path, chapter_id: str, *, conn: sqlite3.Connection | None = None,
+) -> str:
     """``chapters.title``（**本章**）内容指纹（2026-10-22 批次二十一 P0-1-B）。
 
     **为什么必须补**（同形状第 5 次的另一个实例）：writer 装配把
@@ -478,21 +565,43 @@ def chapter_title_fingerprint(db_path: str | Path, chapter_id: str) -> str:
 
     判别：突变规格 ``tests/mutation_specs/q1_meta_title_key.py``
     （``TITLE-KEY-1`` 撤掉 ``title_fp`` 维度 ⇒ 改 title 后键不变 ⇒ 必红）。
+
+    ``conn``（2026-10-22 批次二十三，热路径优化）：**可选的已持有连接**——传入时复用
+    该连接（不再自建连）；``None`` ⇒ 保持旧行为（自建连、用完即关）。
     """
     if not chapter_id:
         return _FINGERPRINT_NONE
+    if conn is not None:
+        rows = _fingerprint_chapter_title(conn, chapter_id)
+        return _hash_snapshot([["chapters.title", rows]])
     try:
-        conn = get_connection(db_path)
+        own = get_connection(db_path)
     except sqlite3.OperationalError as exc:
         if not is_missing_schema_error(exc):
             raise
         return _FINGERPRINT_NONE
     try:
-        rows = _fingerprint_chapter_title(conn, chapter_id)
+        rows = _fingerprint_chapter_title(own, chapter_id)
     finally:
-        conn.close()
+        own.close()
     return _hash_snapshot([["chapters.title", rows]])
 
+
+# ---------------------------------------------------------------------------
+# 装配指纹的**连接复用**（2026-10-22 批次二十三 · 热路径优化）
+# ---------------------------------------------------------------------------
+#
+# **为什么**：AGENTS 坑区登记「``chars_fp`` 单独一项就是 +4.05ms / +64%，且 85% 的
+# 增量是**多开了一次连接**、不是多查了一次数据」。原先每个指纹函数**各自
+# ``get_connection(...)``** ⇒ 一次装配要开 5~6 条连接，只为读几个 id 集合。
+#
+# **怎么做的**：六个指纹函数全部接受**可选的 ``conn``**（``None`` ⇒ 保持旧行为
+# 自建连，**API 兼容**：既有调用方与测试零改动）；装配器用
+# :func:`with_fingerprint_conn` **一条连接**贯穿 peek + 全部指纹。
+#
+# ⚠️ **连接生命周期**：本模块**不缓存连接**、不复用跨调用的连接 ⇒ 无 WAL 快照
+# 滞留、无跨线程共享（每次调用自开自关，与改造前同生命周期）。
+# --------------------------------------------------------------------------
 
 
 def _fingerprint_scene_plan(scene_plan: Any) -> str:

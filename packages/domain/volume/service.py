@@ -45,11 +45,16 @@ from pathlib import Path
 
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
+from packages.core.logging_config import get_logger
 from packages.core.story_state.snapshots import (
     latest_snapshot_version,
 )
 
 from .models import VolumeCreate, VolumeUpdate
+
+#: 本模块日志（2026-10-22 批次二十三：吞异常分诊 → B 类留痕；本层此前无 logger，
+#: 引入的是仓内既有唯一约定 ``packages.core.logging_config.get_logger``）。
+log = get_logger("novelos.domain.volume.service")
 
 # ---------------------------------------------------------------------------
 # 异常
@@ -110,7 +115,17 @@ class VolumeService:
         if "terminal_snapshot_json" in d and d["terminal_snapshot_json"]:
             try:
                 d["terminal_snapshot_json"] = json.loads(d["terminal_snapshot_json"])
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                # 2026-10-22 批次二十三（B 类留痕 · Lead 显式批准的第 9 处）：
+                # 控制流不变（仍落 None，与「列本身为空 → None」同形，符合本仓既有
+                # 约定，见 plot/service.py 的同款 docstring），但**留痕**——
+                # 否则「脏 JSON」与「列本身为空」在调用方眼里完全同形，无法分辨。
+                log.warning(
+                    "volumes.terminal_snapshot_json 解析失败 ⇒ 退化为 None"
+                    "（与「列本身为空」同形）：volume_id=%s err=%s",
+                    d.get("volume_id"),
+                    exc,
+                )
                 d["terminal_snapshot_json"] = None
         else:
             d["terminal_snapshot_json"] = None

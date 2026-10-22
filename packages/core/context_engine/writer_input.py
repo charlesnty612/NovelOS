@@ -50,6 +50,7 @@ from .cache import (
     chapter_title_fingerprint,
     characters_fingerprint,
     reveal_policies_fingerprint,
+    with_fingerprint_conn,
     world_fingerprint,
 )
 from .canon import (
@@ -340,6 +341,7 @@ def _build_writer_input_uncached(
     return _attach_assembly_meta(payload)
 
 
+@with_fingerprint_conn
 def build_writer_input(
     db_path: str | Path,
     chapter_id: str,
@@ -350,6 +352,7 @@ def build_writer_input(
     relevance_trim: bool | None = None,
     author_intent: str | None = None,
     namespace: str = "",
+    _conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """组装 Writer 输入（agent-contracts §4.1 + Sprint 15/V1.3 author_style_samples
     + V2.0 Wave B 任务二 条件触发动态注入 + V2.0 Wave C 任务一 召回 + 任务二 缓存
@@ -452,7 +455,7 @@ def build_writer_input(
     relevance_trim_final = _resolve_relevance_trim(relevance_trim)
     # V3.9 批次 2.3：键预判从 4 个 ``_peek_*``（4 连接，其一解析整份快照）收敛为
     # 单连接单条 JOIN；peek 结果复用给 uncached 装配（word_band_json 原文）。
-    peek = _peek_chapter_context(db_path, chapter_id)
+    peek = _peek_chapter_context(db_path, chapter_id, conn=_conn)
     project_id = peek["project_id"]
     chapter_no = peek["chapter_no"]
     state_version = peek["state_version"]
@@ -493,7 +496,11 @@ def build_writer_input(
     # 命中旧装配 ⇒ 正文沿用改动前的角色设定（外部报告实证：角色圣经写「闺蜜」，
     # 正文里该角色却以业务员出场）。与 0028 ``outline_json`` 同形的硬规则 2 违规。
     # 放在 prompt_label 之前，使键尾两元（prompt 标签 / 命名空间标记）语义不变。
-    chars_fp = characters_fingerprint(db_path, project_id)
+    # 2026-10-22（批次二十三 · 热路径优化）：五个指纹**共用一条连接**（原先每个
+    # 指纹函数各自 ``get_connection(...)`` ⇒ 一次装配开 5~6 条连接；AGENTS 坑区登记
+    # ``chars_fp`` 单独一项 +4.05ms/+64%，85% 的增量是**多开一次连接**而非多查一次
+    # 数据）。口径与逐个调用**逐字相同** ⇒ 指纹值不变（连接由装饰器持有并关闭）。
+    chars_fp = characters_fingerprint(db_path, project_id, conn=_conn)
     # ⚠️ **2026-10-16 批次十一**：`plan_json` 进 payload（``director_plan`` 四字段 +
     # ``chapter.expected_role`` + **触发扫描语料** ``_build_trigger_corpus``）却**从未入键**
     # —— director 键有 ``plan_fp``、writer 键没有，是 ``chars_fp`` 的**逐字同形**
@@ -514,8 +521,8 @@ def build_writer_input(
     # state_version），缓存失效又只在 commit 后按章兜底 ⇒ 改设定或加一条 planned+reader
     # 策略后重跑同一章会命中旧装配（前者正文沿用旧设定，后者 HIDDEN 角色**剧透**）。
     # 与 ``chars_fp`` 逐字同形，同样放在 prompt_label 之前保持键尾两元语义不变。
-    world_fp = world_fingerprint(db_path, project_id)
-    reveal_fp = reveal_policies_fingerprint(db_path, project_id)
+    world_fp = world_fingerprint(db_path, project_id, conn=_conn)
+    reveal_fp = reveal_policies_fingerprint(db_path, project_id, conn=_conn)
     # 2026-10-22（批次十九）：缓存键追加**作者文风样例**内容指纹 ``style_fp``。
     # ``_author_style_samples`` 把项目最近 ≤2 篇「作者本人散文样例」注入 payload 的
     # ``author_style_samples.samples`` 段；而作者新增 / 删除样例走
@@ -531,7 +538,7 @@ def build_writer_input(
     # 「改一个模块会打断既有突变规格的锚点 ⇒ 执行器会 [ABORT]」）⇒ 本维度落在
     # 那两行之外的空位，避免打断既有规格；键尾两元（prompt 标签 / 命名空间标记）
     # 语义不变（仍在 prompt_label 之前）。
-    style_fp = author_style_samples_fingerprint(db_path, project_id)
+    style_fp = author_style_samples_fingerprint(db_path, project_id, conn=_conn)
     # 2026-10-22（批次二十一 P0-1-B）：缓存键追加**本章标题**内容指纹 ``title_fp``。
     # ``chapter.get("title")`` 进 writer payload 的 ``chapter`` 段，且章标题**被
     # prompt 契约显式承诺**给模型（``docs/agents/prompts/writer-v5.md`` §5 与示例
@@ -545,7 +552,7 @@ def build_writer_input(
     # （AGENTS 坑区「改一个模块会打断既有突变规格的锚点 ⇒ 执行器 [ABORT]」）
     # ⇒ 本维度落在身份行之后的**空行**上；键尾两元（prompt 标签 / 命名空间标记）
     # 语义不变。
-    title_fp = chapter_title_fingerprint(db_path, chapter_id)
+    title_fp = chapter_title_fingerprint(db_path, chapter_id, conn=_conn)
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
         title_fp,

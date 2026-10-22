@@ -24,6 +24,11 @@ from pathlib import Path
 from typing import Any
 
 from packages.core.db import get_connection
+from packages.core.logging_config import get_logger
+
+#: 本模块日志（2026-10-22 批次二十三：吞异常分诊 → B 类留痕；本层此前无 logger，
+#: 引入的是仓内既有唯一约定 ``packages.core.logging_config.get_logger``）。
+log = get_logger("novelos.domain.reference.service")
 
 __all__ = ["ReferenceService", "summary_of"]
 
@@ -134,7 +139,16 @@ class ReferenceService:
         canon_json_raw = row["canon_json"]
         try:
             canon_json_obj = json.loads(canon_json_raw) if canon_json_raw else {}
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            # 2026-10-22 批次二十三（B 类留痕）：控制流不变（仍退空对象），但**留痕**——
+            # 同文件 ``summary_of`` 的成文契约是「解析失败 → 保留 row 字段」，
+            # 这里却退成 {} ⇒ 摘要信息静默全丢且调用方不知情。
+            log.warning(
+                "reference_canons.canon_json 解析失败 ⇒ canon_json 退化为 {}"
+                "（摘要信息静默丢失）：canon_id=%s err=%s",
+                canon_id,
+                exc,
+            )
             canon_json_obj = {}
 
         return {

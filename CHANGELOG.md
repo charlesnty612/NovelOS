@@ -5,6 +5,121 @@
 
 ## [Unreleased]
 
+### Changed（2026-10-22 批次（二十三）：装配指纹合并进 peek 连接 + 吞异常分诊 + CI 补 Windows）
+
+> **来源**：用户「继续处理」⇒ 处理 review 里**已登记但未做**的三项非 bug 项。
+> **2 名成员 + Lead**；零真实 LLM 调用、零内容仓接触。
+
+#### 1. 性能：六个装配指纹查询**合并进 peek 的那条连接**
+
+**改造前实测**（只读探针，临时库 + 合成夹具，N=50，两次跑一致；计数口径 = **遍历全部持有
+`get_connection` 的模块**，不手挑名单 —— 第一版手挑名单漏了 `retrieval` / `genre.target_words`，计数偏小）：
+
+| 路径 | 建连/次 | 毫秒/次 |
+|---|---|---|
+| writer 未命中缓存 | **10** | 20.4 / 21.9 |
+| writer 命中缓存 | **7** | 12.9 / 14.6 |
+| director 未命中 | **6** | 13.3 / 13.6 |
+| director 命中 | **5** | 9.8 / 12.6 |
+
+**改造后**：
+
+| 路径 | 建连/次 | 毫秒/次 |
+|---|---|---|
+| writer 未命中 | **5** | 14.1 / 12.8 |
+| writer 命中 | **2** | 9.3 / 7.3 |
+| director 未命中 | **3** | 11.4 / 10.0 |
+| director 命中 | **2** | 9.1 / 10.3 |
+
+**做法**：六处指纹函数（`characters` / `world` / `reveal` / `style` / `project_meta` / `title`）与
+`_peek_chapter_context` 全部加**可选 `conn`**（`None` ⇒ 旧行为自建连，**API 兼容**）；
+新增 `with_fingerprint_conn` **装饰器**持一条连接贯穿 peek + 全部指纹。
+⚠️ **刻意不用「在装配函数体里 try/finally 合并」**：那要把「peek + 五个指纹」整段**缩进**，
+而那段里坐着 `E1-1` / `SKILL-KEY-2` / `STYLE-KEY-1` / `TITLE-KEY-1` 的**锚点原文** ⇒ 缩进必打断既有规格
+（AGENTS 坑区「改一个模块会打断既有突变规格的锚点」）。装饰器让**函数体一字不改**。
+主 JOIN 与降级路径**仍走同一条连接、逐字同形**（都经 `_peek_chapter_context_conn`）。
+
+**等价性（三重验证，缺一不可）**：
+1. 六个指纹值**逐位相同**（改造前 == 改造后 == 批次十九记录基线：
+   `chars=cb376a5e…` / `world=a262e6ca…` / `reveal=90e2cfc6…` / `style=52943ed6…` /
+   `project_meta=99da2db1…` / `title=24c913a6…`）；
+2. **缓存键元组本身逐位相同**（writer 22 元、director 17 元）⇒ 键未变，命中行为必然未变；
+3. **命中/未命中计数逐位相同**（18 / 22，同一编排脚本跑改造前后）。
+
+**判别**：`tests/unit/test_ctx_b_fingerprint_conn_reuse.py` **3 例** —— 命中路径建连 `<= 2`；
+**负对照**（不传 `conn` 时六个指纹各开一条 = 6）**同时证明「旧行为保留」与「计数器是灵的」**
+（否则前两条可能恒真而毫无判别力）；突变 `FP-CONN-1`（装饰器不注入 conn）⇒ **CAUGHT**。
+被改锚点的两条既有规格单跑：`c1` **8/8 CAUGHT**、`e1` **8/8 CAUGHT**（语义未变）。
+
+#### 2. 吞异常分诊：`quality` + `domain` 两层，**真吞 16 处 → A7 / B9 / C0**
+
+口径：AST 遍历 `ast.ExceptHandler`，范围内共 **28** 个 handler，其中**真吞**（不重抛、不记日志）**16** 处。
+
+- **A 类 7 处（不动）**：每处都有**成文依据**（函数 docstring 或行内注释明写「为什么可以吞」），
+  例如 `draft_resolver` 三处「版本号不可解析/打不开库/查询异常」的语义、`plot/service.py:72` 的长段论证、
+  `reference/service.py:63/82`。
+- **B 类 9 处（已改：只加 `log.warning`，捕获宽度与控制流一字未动）**：`quality/service.py` ×4
+  （plan_json 解析失败 / 参照文件读取失败 ×2 / state_deltas payload 解析失败）、
+  `domain/chapter` plan_json、`domain/character` aliases、`domain/reference` canon_json、
+  `domain/world` aliases、**`domain/volume` terminal_snapshot_json（第 9 处，Lead 复核后由 C 改判为 B）**。
+  每处都带**可定位标识**（chapter_id / project_id+路径 / delta_id / canon_id / volume_id / 阶段名）。
+- **C 类 0 处**：原判 C 的 `volume/service.py:113` 经复核后改判 B —— 判据是「脏 JSON → None」与
+  「列本身为空 → None」（同函数第 116 行）**完全同形**，那正是本仓既有约定（`plot/service.py:72` docstring 同款措辞）
+  ⇒ 问题不是「该不该降级」，而是**降级要留痕**。
+- 判别：**9 条用例**，每条断言「仍不抛 + 仍按原语义降级 + **恰好 1 条**日志 + 含可定位标识」；
+  突变 `QSWALLOW-1/2/3` ⇒ **3/3 CAUGHT**（撤 warning ⇒ 红，而被测行为不变 ⇒ 判别点专属）。
+- ⚠️ **logger 引入的口径**：质量层与领域层此前**一个 logger 都没有**（历史欠账）⇒ 用的是仓内**既有唯一**约定
+  `packages.core.logging_config.get_logger`（全仓 36 个文件在用），**不是新日志机制**。
+
+#### 3. CI 补 Windows job（此前 3 个 job 全 `ubuntu-latest` ⇒ Windows 专属路径零覆盖）
+
+新增 `windows-compat`（`windows-latest` + **Python 3.12**，顺带覆盖 3.12 腿）：
+- 跑 `test_pid_alive_windows_probe.py` + `test_m1_lock.py`（这两个文件在 Linux 上整片 skip）；
+- 跑带 `-n 4` 的一小片（`tests/unit/quality` + 分层看守）—— backend job 的 pytest **不带 `-n`**；
+- 理由写进注释：本仓三次真实事故（`os.kill(pid,0)` 广播 Ctrl+C / `DETACHED_PROCESS` 抛 WinError 87 /
+  临时库孤儿进程）**都只在 Windows 暴露**。
+
+#### 4. ⚠️ 订正一处「量具盲区」（既有测试假绿，不是本轮引入的回归）
+
+`tests/unit/test_context_peek_convergence.py` 的两条用例断言「缓存命中路径 **1 连接 1 条 SQL**」，
+本轮闸门红（`assert 0 == 1`）。**根因不是行为回归，是量具掉出了执行域**：
+该文件的 `_COUNTER_MODULES` 是**固定模块清单**，而六个指纹函数都在 `cache.py` 里、**清单中没有 cache**
+⇒ 指纹那 6 条连接与它们的 SQL **全部不可见** ⇒ 旧断言 `sql == 1` 只在「看不见」时成立
+（改造前真值为 **7 连接**）。
+**处置**：① 清单补 `packages.core.context_engine.cache`；② 断言改成如实口径 ——
+`conns == 1`（这正是本次优化的性质）+ `sql == 14 / 10`（peek 1 + 指纹探测；writer 比 director 多两个维度），
+并注明「`sql` 不是性能承诺，是『装配输入变化要可见』的钉子」。
+⇒ **教训（AGENTS 坑区同族，新增一条形状）**：**「固定模块清单」的计数器在连接开点搬家时必然失效，
+且失效方向是「计数归零/变小」——看起来像行为变好，实际是看守掉出了执行域。**
+
+#### 5. 闸门（Lead 亲跑）
+
+| 项 | 结果 |
+|---|---|
+| 全量 pytest（`-n 20`） | **3928 passed / 1 skipped / 1 xfailed / 0 failed**，**169.31s（2:49）** |
+| 树指纹 | **700 文件 / `04c55407…`**，跑测前后逐位一致 |
+| 全量突变（`--jobs 16`） | **386/386 全捕获**（0 存活/中止/无效，exit 0），**11 分钟**；还原 OK 386 / 失败 0 |
+| 突变残留 | `*.mutbak` **0**；**108 个被突变文件逐个与日志 SHA 相同（差异 0）** |
+| ruff / OpenAPI | `All checks passed!`；109 paths / 145 schemas 零漂移 |
+
+#### 6. 已知边界 / 决策登记（本批**明确不做**）
+
+1. **`apps/web/src/pages/AiSettingsPage.tsx` 1649 行**（唯一超 1500 硬顶的**生产模块**；`types.generated.ts` 生成物、
+   `types.ts` 类型声明面不计）⇒ **本批不拆**。理由：拆分要动 32 个前端测试的回归面（`AiSettingsPage.test.tsx` 1011 行），
+   而收益只是「符合行数硬顶」、无功能收益 ⇒ 排期另议。
+   ⚠️ 顺带订正 AGENTS 的理解口径：**「存量挂账已于 2026-09-13 V4.0 批次全部清零」指的是被点名的 4 个热点，
+   不是全仓审计** —— 实测仍有此 1 个生产文件超限。
+2. **`chapters.volume_id` 是真实 DB 列但不在 OpenAPI 契约**（靠 `Chapter` 的 `extra="allow"` 透出）⇒
+   前端必须手写该字段、codegen 无法告警。**本批不改**：要么把它建模进 `Chapter`（会变更 API 响应 schema +
+   前端 codegen 与契约测试），要么删前端手写面（前端会失去该字段），两者都**超出「修 bug」范围**，登记待议。
+3. **`configure_logging()` 会移除根 logger 的全部 handler** ⇒ **pytest `caplog` 在本仓不可靠**
+   （测试期间任何首次 `get_logger` 都会抹掉 caplog 的 handler）。本批用例已改为「往具名 logger 挂自有 handler」。
+   要真修（初始化幂等 / 测试专用配置）属独立批次 —— 改日志初始化会波及全仓日志行为。
+4. **命中路径残留的第 2 条连接**：`core/agent_runtime/prompts.py:141`（`active_prompt_label` 读 `prompts` 表），
+   不是指纹、且在另一成员的域内 ⇒ 本批未动。收益：命中路径 2 → 1。
+5. 其余 59 处吞异常（`core/api` / `core/story_state` / `workflows` / `scripts`）**未分诊** —— 本轮只做了
+   `quality` + `domain` 两层（16 处真吞）。下一批可继续。
+
 ### Fixed（2026-10-22 批次（二十二）：review 剩余 bug 全收口 —— 架构看守重写 + 两条 minor）
 
 > **来源**：用户「把 review 出来的 bug 都修复下」。前两批已处理 P0-1/P0-3/P1-1/P1-3/P1-4/P1-6/P1-8 与

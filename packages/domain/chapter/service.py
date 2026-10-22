@@ -39,6 +39,7 @@ from pathlib import Path
 
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
+from packages.core.logging_config import get_logger
 from packages.core.story_state.write_helpers import (
     decode_json_field as _decode_json_field,
 )
@@ -48,6 +49,10 @@ from .models import (
     ChapterCreate,
     ChapterUpdate,
 )
+
+#: 本模块日志（2026-10-22 批次二十三：吞异常分诊 → B 类留痕；本层此前无 logger，
+#: 引入的是仓内既有唯一约定 ``packages.core.logging_config.get_logger``）。
+log = get_logger("novelos.domain.chapter.service")
 
 
 class ChapterError(Exception):
@@ -523,7 +528,15 @@ class ChapterService:
                     if not isinstance(plan, dict):
                         # 历史脏数据：plan_json 不是 dict 形态，视为 {}，避免破坏 schema
                         plan = {}
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    # 2026-10-22 批次二十三（B 类留痕）：控制流不变（仍视作空 plan），
+                    # 但**留痕**——否则下游按「该章无 plan」判定，与「plan 脏了」不可区分。
+                    log.warning(
+                        "chapters.plan_json 解析失败 ⇒ 视为空 plan（下游按「无 plan」走）："
+                        "chapter_id=%s err=%s",
+                        chapter_id,
+                        exc,
+                    )
                     plan = {}
             else:
                 plan = {}

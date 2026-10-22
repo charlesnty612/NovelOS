@@ -1269,6 +1269,7 @@ def _peek_chapter_context_degraded(
 
 def _peek_chapter_context(
     db_path: str | Path, chapter_id: str, *, project_id: str | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """单连接轻量预读（缓存键预判 + uncached 装配复用；V3.9 批次 2.3）。
 
@@ -1291,15 +1292,25 @@ def _peek_chapter_context(
       静默降级会让缓存键维度失真（脏命中）且零告警。连接打不开 → 全空态。
     - ``project_id`` 显式传入时以其为准（保留 ``_peek_chapter_no_state_version`` 旧语义）；
       传 None 则用章节行自带的 ``project_id``（唯一正确来源）。
+
+    ``conn``（2026-10-22 批次二十三 · 热路径优化）：**可选的已持有连接**——传入时
+    复用该连接（**不关闭**，关闭责任在调用方）；``None`` ⇒ 保持旧行为（自建连、
+    用完即关）。
+
+    ⚠️ **主 JOIN 与降级路径逐字同形**（硬规则 2）：两条路径都经
+    :func:`_peek_chapter_context_conn` ⇒ 降级读（``_peek_chapter_context_degraded``）
+    与主 JOIN **用同一条连接、同一套列** ⇒ 键维度形态一致。
     """
+    if conn is not None:
+        return _peek_chapter_context_conn(conn, chapter_id, project_id=project_id)
     try:
-        conn = get_connection(db_path)
+        own = get_connection(db_path)
     except Exception:  # noqa: BLE001 —— 打不开库 → 全空态（旧 _peek_project_id_* 同款）
         return _empty_chapter_peek(chapter_id, project_id)
     try:
-        return _peek_chapter_context_conn(conn, chapter_id, project_id=project_id)
+        return _peek_chapter_context_conn(own, chapter_id, project_id=project_id)
     finally:
-        conn.close()
+        own.close()
 
 
 def _peek_project_context(db_path: str | Path, project_id: str | None) -> dict[str, Any]:
