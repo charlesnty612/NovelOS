@@ -768,6 +768,125 @@ def check_version_consistency(skill_dir: Path, repo_root: Path) -> list[Check]:
     return checks
 
 
+_PROJECT_VERSION_RE = re.compile(r'^\s*version\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
+
+
+def _read_pyproject_version(repo_root: Path) -> str | None:
+    """读仓库 ``pyproject.toml`` 的 ``[project].version``（stdlib-only，Python 3.9 兼容）。
+
+    不用 ``tomllib``：本脚本声明「Python 3.9+ 标准库」，而 ``tomllib`` 是 3.11 才进标准库。
+    这里只需要一个扁平键，改为「先切 ``[project]`` 段、再正则取 version」，顺带避免误命中
+    ``[tool.*]`` 段里的同名字段。
+    """
+    path = repo_root / "pyproject.toml"
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8")
+    m = re.search(r"^\[project\]\s*$(.*?)(?=^\[)", text, re.MULTILINE | re.DOTALL)
+    segment = m.group(1) if m else text
+    vm = _PROJECT_VERSION_RE.search(segment)
+    return vm.group(1) if vm else None
+
+
+def check_app_version_consistency(skill_dir: Path, repo_root: Path) -> list[Check]:
+    """``metadata.novelosVersion`` 必须与 app 版本、各平台清单里的同键副本一致。
+
+    为什么单列一条检查
+    ------------------
+    ``check_version_consistency`` 比的是 ``metadata.version``——那是 **skill 包自身**的
+    版本号（0.1.0），与 NovelOS 应用的版本是两条线。真正声明「本包面向哪个 app 版本」的
+    是 ``metadata.novelosVersion``，它与 ``.claude-plugin/plugin.json`` 的
+    ``metadata.novelosVersion`` **同键同义** ⇒ 发版时是**第 6 处**必须同步的副本，
+    此前没有任何机器校验。
+
+    2026-10-22 实测（批次十九）：app 已是 ``3.10.0``（``pyproject`` 与 ``plugin.json``
+    都是 3.10.0），而 ``skills/novelos/SKILL.md`` 仍写 ``3.9.0`` 且长期无人发现——
+    因为唯一的相关检查只盯 ``metadata.version``，而它恰好是对的。
+
+    口径
+    ----
+    - 与各平台清单的同键副本比对：**两份都在时必查**（纯分发副本也能自查）。
+    - 与 ``pyproject.toml`` 的 ``[project].version`` 比对：**仓库里有 pyproject 时才查**；
+      纯分发上下文没有 pyproject ⇒ 跳过，不当失败（与 ``check_version_consistency``
+      「清单缺失就 continue」同款，不制造假红）。
+    """
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.is_file():
+        return [
+            Check(
+                "app-version-consistency/skill",
+                False,
+                "缺少 SKILL.md，无法比对 metadata.novelosVersion",
+            )
+        ]
+    try:
+        front, _ = parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        return [Check("app-version-consistency/skill", False, f"frontmatter 解析失败：{exc}")]
+    metadata = front.get("metadata")
+    declared = metadata.get("novelosVersion") if isinstance(metadata, dict) else None
+    checks: list[Check] = [
+        Check(
+            "app-version-consistency/skill",
+            isinstance(declared, str) and bool(declared),
+            (
+                f"SKILL.md metadata.novelosVersion = {declared!r}"
+                if isinstance(declared, str)
+                else f"SKILL.md metadata.novelosVersion 缺失或非字符串：{declared!r}"
+            ),
+        )
+    ]
+
+    for platform, rel in PLUGIN_MANIFESTS.items():
+        path = repo_root / rel
+        if not path.is_file():
+            continue
+        try:
+            data = _load_json(path)
+        except (OSError, json.JSONDecodeError) as exc:
+            checks.append(
+                Check(f"app-version-consistency/{platform}", False, f"{rel} 读取失败：{exc}")
+            )
+            continue
+        manifest_meta = data.get("metadata") if isinstance(data, dict) else None
+        manifest_declared = (
+            manifest_meta.get("novelosVersion") if isinstance(manifest_meta, dict) else None
+        )
+        if manifest_declared is None:
+            continue
+        ok = isinstance(declared, str) and manifest_declared == declared
+        checks.append(
+            Check(
+                f"app-version-consistency/{platform}",
+                ok,
+                (
+                    f"{rel} metadata.novelosVersion={manifest_declared!r} 与 SKILL.md 逐字一致"
+                    if ok
+                    else f"{rel} metadata.novelosVersion={manifest_declared!r} ≠ "
+                    f"SKILL.md metadata.novelosVersion={declared!r}"
+                ),
+            )
+        )
+
+    app_version = _read_pyproject_version(repo_root)
+    if app_version is not None:
+        ok = isinstance(declared, str) and declared == app_version
+        checks.append(
+            Check(
+                "app-version-consistency/pyproject",
+                ok,
+                (
+                    f"SKILL.md metadata.novelosVersion 与 pyproject [project].version="
+                    f"{app_version!r} 一致"
+                    if ok
+                    else f"SKILL.md metadata.novelosVersion={declared!r} ≠ "
+                    f"pyproject [project].version={app_version!r}（发版漏同步）"
+                ),
+            )
+        )
+    return checks
+
+
 def check_references(skill_dir: Path) -> list[Check]:
     """SKILL.md 引用的资源都存在；且 references/ 与 scripts/ 里没有孤儿文件。"""
     checks: list[Check] = []
@@ -866,6 +985,7 @@ def run_all_checks(skill_dir: Path, repo_root: Path) -> list[Check]:
     checks.extend(check_marketplace_shapes(repo_root))
     checks.extend(check_frontmatter(skill_dir))
     checks.extend(check_version_consistency(skill_dir, repo_root))
+    checks.extend(check_app_version_consistency(skill_dir, repo_root))
     checks.extend(check_references(skill_dir))
     checks.extend(check_client_help_offline(skill_dir))
     return checks
@@ -905,6 +1025,15 @@ def _mutate_skill_md(path: Path, mutation: str) -> None:
         text = text.replace('version: "0.1.0"', 'version: "9.9.9"', 1)
     elif mutation == "bad-name":
         text = text.replace("name: novelos", "name: Novel_OS", 1)
+    elif mutation == "novelos-version-mismatch":
+        # 第 6 处版本副本：--selftest 的坏副本里不复制 pyproject.toml ⇒ 该变异由
+        # 「SKILL.md ↔ plugin.json 同键比对」那条抓（app-version-consistency/claude）。
+        text = re.sub(
+            r'novelosVersion:\s*"[^"]*"',
+            'novelosVersion: "9.9.9"',
+            text,
+            count=1,
+        )
     path.write_text(text, encoding="utf-8")
 
 
@@ -974,6 +1103,11 @@ def run_selftest(skill_dir: Path, repo_root: Path) -> tuple[bool, list[str]]:
             "M7 引用指向不存在的文件",
             "references/exists/references/quality.md",
             "missing-reference",
+        ),
+        (
+            "M8 novelosVersion 与 app 版本不一致（第 6 处版本副本）",
+            "app-version-consistency/claude",
+            "skill-md:novelos-version-mismatch",
         ),
     ]
 

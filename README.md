@@ -72,7 +72,7 @@ packages/workflows/      工作流（chapter_plan / chapter_write / chapter_revi
                          deconstruct_book / project_init / simulation）
 database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0033_model_connections.sql，共 33 个迁移，42 张业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包 / 0026 run 实例归属 / 0027 场景计划 / 0028 大纲槽 / 0029 写作圣经 / 0030 回滚索引项目内收窄 / 0031 项目级快通道 / 0032 内部消费外部 skill / 0033 模型连接层）
 skills/novelos/           对外可分发的 Agent Skill 包（SKILL.md + 5 份 references + stdlib 薄客户端
-                         + 契约自检 46 项；三平台清单见 .claude-plugin/ / .codex-plugin/ /
+                         + 契约自检 49 项；三平台清单见 .claude-plugin/ / .codex-plugin/ /
                          .cursor-plugin/ / .agents/）
 tests/                   pytest（unit / integration / workflow / api / evals）
 scripts/                 运维脚本（migrate.py / serve.py / eval_regression.py / smoke_e2e.py）
@@ -91,7 +91,8 @@ jsonschema / httpx；测试另需 pytest / ruff）。
 # 1) 安装依赖
 pip install -e ".[dev]"
 
-# 2) 执行数据库迁移（生成 data/novelos.db；42 张业务表 + _migrations 物理共 43 张）
+# 2) 执行数据库迁移（生成 data/novelos.db；42 张业务表；含 `_migrations` 共 43 张，
+#    另有 FTS5 虚表 chapter_fts 及其影子表不计入）
 python scripts/migrate.py
 
 # 3) 前端构建（构建产物 apps/web/dist，后端会自动托管）
@@ -179,20 +180,20 @@ python -m pytest -q
 - 前端 dev 代理从 `NOVELOS_PORT` / `NOVELOS_API_PORT` 读后端端口（见 `apps/web/vite.config.ts`）；
   改端口后需重启 vite dev 才生效。
 
-健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=41`，业务表数；含 `_migrations` 物理共 42 张）。
+健康检查：`curl http://127.0.0.1:18081/api/health`（应返回 `tables=42`，业务表数；含 `_migrations` 共 43 张）。
 
 ## 测试
 
 ```bash
-# 后端全量（当前基线 3578 passed / 1 skipped / 1 xfail，3580 collected；-n 4 并行，约 7~10 分钟）
+# 后端全量（当前基线 3800 passed / 1 skipped / 1 xfailed，3802 collected；-n 4 并行，约 7~10 分钟）
 # --ignore=tests/unit/test_m1_lock.py 已于 2026-10-16 **撤销**：它曾挂的理由
 # 「该文件单跑会硬杀整个进程树、真因未定位」经实测证伪——那是一条从未成立的现象
 # （原记录把「我复现不出来」当成了「我还没找到真因」）。顺此查出并修掉了一个**真缺陷**
 # （`os.kill(pid,0)` 在 Windows 非稳定探测 ⇒ M1 单实例锁静默失效），并重写了两条
 # 本来都是空壳的 cmd_run 用例。现在该文件既无副作用也已进入全量并行验证
-# （3578 那轮即含它）。详见 scripts/tree_fingerprint.py docstring 与 AGENTS.md 坑区。
+# （3800 那轮即含它）。详见 scripts/tree_fingerprint.py docstring 与 AGENTS.md 坑区。
 # 注：**不带任何 --ignore**（`tests/evals` 的 16 例评估回归同样计入基线，自包含且全绿，
-# 5.68s）⇒ 本命令产出即上面那个 3578；此前此处带 `--ignore=tests/evals`，产出 3561，
+# 5.68s）⇒ 本命令产出即上面那个 3800；此前此处带 `--ignore=tests/evals`，产出 3561，
 # 与基线对不上，已撤销。
 python -m pytest tests/ -q -n 4
 
@@ -205,7 +206,7 @@ python scripts/smoke_e2e.py
 # 真实 MiniMax-M3 LLM 端到端验证（需 MINIMAX_API_KEY，会产生调用费用）
 python scripts/real_llm_e2e.py
 
-# 前端单测（vitest；当前 755 用例 / 56 文件）
+# 前端单测（vitest；当前 781 用例 / 57 文件）
 cd apps/web && npm run test
 ```
 
@@ -239,7 +240,7 @@ cd apps/web && npm run test
 ## 版本与更新日志
 
 当前版本 **v3.10.0**（`pyproject.toml` 为版本单源；`apps/web/package.json`、`apps/web/package-lock.json`
-与 `uv.lock` 随发版对齐。当前基线：pytest **3796 passed / 1 skipped / 1 xfail**（3798 collected；全量命令**不再带**任何 `--ignore`——含 `test_m1_lock.py`，见上文「测试」一节），vitest **780**（57 个测试文件））。自 V1.0 起，
+与 `uv.lock` 随发版对齐。当前基线：pytest **3800 passed / 1 skipped / 1 xfailed**（3802 collected；全量命令**不再带**任何 `--ignore`——含 `test_m1_lock.py`，见上文「测试」一节），vitest **781**（57 个测试文件））。自 V1.0 起，
 所有迭代必须在 `CHANGELOG.md` 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x
 路线登记在同文件「Known Issues / 路线登记」一节。
 

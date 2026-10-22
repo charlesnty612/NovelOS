@@ -445,3 +445,58 @@ def test_human_baseline_has_no_clock_opportunity_and_zero_hits():
         f"人类基线时点标记数从登记值 2 变为 {markers}——基线书换了，"
         "docstring 的「机会数为 0」结论与人类侧数字必须一并重算"
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-22 批次十九：补「突变看守缺口」用例（dev-a）
+# ---------------------------------------------------------------------------
+# 下面两条补的是**突变实测存活**暴露出来的缺口（`tests/mutation_specs/`
+# q2_quality_continuity_time.py 实跑：QT-BACKSTEP-1 / QT-ADVANCE-1 两条
+# 突变改完后**本文件全绿** ⇒ 这两道守卫当时**真的没有守门测试**）。
+#
+# ⚠️ 补法必须**钉住既有成文契约**（模块 docstring / 函数 docstring 已写明的
+# 判定口径），不得借机引入新语义：`_time_backstep_conflicts` 的 docstring
+# 明写「回退至少 N 小时」「四道守卫」。
+
+#: 回退不足 ``DEFAULT_MIN_BACKSTEP_HOURS``（2.0 小时）的正例：15 时 → 14 时。
+#: 刻意选「时段前缀明确」的钟点（下午三点 / 下午两点），保证 ``_clock_hour``
+#: 能算出一天内小时数（无时段前缀的裸钟点按设计返回 None、不参与判定）。
+_SUB_THRESHOLD_BACKSTEP = "下午三点，账房的灯还亮着。\n\n下午两点，院外传来更鼓。"
+
+#: 同一条回退（亥时 21 时 → 午时 12 时）**带 / 不带**中间推进标记，构成正反一对。
+_BACKSTEP_9H_NO_ADVANCE = "亥时，内室只剩一盏油灯。\n\n午时，正堂。"
+_BACKSTEP_9H_WITH_ADVANCE = (
+    "亥时，内室只剩一盏油灯。\n\n他熬了一夜，窗外的光一点点挪进来。\n\n午时，正堂。"
+)
+
+
+def test_sub_threshold_backstep_is_not_reported():
+    """回退**不足量级门槛**（2 小时）不算回退 ⇒ 不得报。
+
+    这道「量级门槛」守卫此前无专属用例：既有真命中用例是 10 小时回退
+    （亥时→午时），既有负例则全都被**别的**守卫（期限语 / 计划语 / 段首戳）
+    挡掉 ⇒ 把门槛撤掉（任何倒退都算回退）时全套仍绿。
+    """
+    assert ct.time_conflicts(_SUB_THRESHOLD_BACKSTEP) == []
+    assert not _hits(_SUB_THRESHOLD_BACKSTEP, "CONT-TIME-BACKSTEP")
+
+
+def test_backstep_suppressed_by_advance_marker_between_stamps():
+    """规则 B（``CONT-TIME-BACKSTEP``）自己的**推进标记**守卫。
+
+    既有 ``test_advance_marker_between_markers_suppresses_hit`` 断言的是
+    ``CONT-CLOCK-DAYBREAK``（**规则 A**）那条路径上的推进标记；规则 B 内部的
+    ``_has_advance`` 守卫**没有专属用例** ⇒ 撤掉它时本文件仍全绿。
+    这就是坑区「断言了结果 ≠ 判别了机制」的姊妹形状：**测试测的是另一个节点
+    上的同一个机制**。
+
+    正反一对：同一对时点，去掉推进标记就必须命中 ⇒ 证明判别点落在**推进标记**
+    这道守卫上，而不是被别的守卫顺带挡掉。
+    """
+    # 反证：没有推进标记时，同一对时点就是真回退（9 小时）
+    assert _hits(_BACKSTEP_9H_NO_ADVANCE, "CONT-TIME-BACKSTEP"), (
+        "对照：缺推进标记时应当命中 CONT-TIME-BACKSTEP，否则本用例不判别"
+    )
+    # 有推进标记 ⇒ 不报
+    assert not _hits(_BACKSTEP_9H_WITH_ADVANCE, "CONT-TIME-BACKSTEP")
+    assert ct.time_conflicts(_BACKSTEP_9H_WITH_ADVANCE) == []

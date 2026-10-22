@@ -25,7 +25,7 @@
 **权威清单以 `database/migrations/` 迁移文件为准**（2026-09-13 三仓检修：原按 `0001_init.sql` 列举的「28 张表」口径已过期；现行 42 张业务表，2026-10-22 实测）：
 
 - 现场枚举：`grep -h "CREATE TABLE" database/migrations/*.sql`；
-- 口径：排除 `_migrations` 与 `chapter_fts%`（FTS5 影子表），与 `tests/unit/test_migrations.py` 的表数断言、`/api/health` 的 `tables:39` 对齐；
+- 口径：排除 `_migrations` 与 `chapter_fts%`（FTS5 影子表），与 `tests/unit/test_migrations.py` 的表数断言、`/api/health` 的 `tables:42` 对齐；
 - 演进：`0001_init` 28 张起，0004/0007/0008/0009/0015/0016/0025/0027 等迁移陆续加表；逐版本增量以迁移文件与 CHANGELOG 为准。
 
 > 设计意图速览（v0 起沿用，现行命名以迁移文件为准）：`projects` 为项目根；故事状态三件套 `story_states`（快照）/ `commits` / `state_deltas`；工作流 `workflow_runs` / `workflow_run_nodes`；质量 `quality_reports`；参照系 `reference_canons` / `canon_extracts`；题材库 `genre_packs`。逐表字段与注释以各迁移文件为准。
@@ -57,7 +57,7 @@ python -c "from packages.core.db import apply_migrations; print(apply_migrations
 - **TEXT 主键**：人类可读前缀（`prj_/char_/event_/hook_/debt_/commit_`...），便于日志追踪。
 - **时间戳**：所有时间字段为 ISO-8601 TEXT，与 `state-delta.schema.json` / `state-commit.schema.json` 对齐。
 - **可见性枚举**：`visibility` 四级 `PUBLIC / VISIBLE / RESTRICTED / HIDDEN`（PRD §4 原则 7）。
-- **业务表数校验**：`tests/unit/test_migrations.py` 的 `test_apply_migrations_creates_40_tables_total`（迁移后总表 40 = 39 业务表 + `_migrations`）与 `test_business_table_count_is_39`（业务表 39，排除 `chapter_fts%`）；新增 / 删除表必须同步更新该测试。
+- **业务表数校验**：`tests/unit/test_migrations.py` 的 `test_apply_migrations_creates_43_tables_total`（迁移后总表 43 = 42 业务表 + `_migrations`）与 `test_business_table_count_is_42`（业务表 42，排除 `chapter_fts%`）；新增 / 删除表必须同步更新该测试。
 
-> ⚠️ 名实不符已了结（2026-09-30）：上面这两条**测试名**过去含历史数字 `34`，而断言实为迁移后**总表** 40 与**业务表** 39。现已按断言语义改名（旧名见 `git log -p tests/unit/test_migrations.py`，全仓零残留）。
+> ⚠️ 名实不符已了结（2026-09-30，**2026-10-22 批次十九再核**）：这两条**测试名**过去含历史数字 `34`，后被改为 `40 / 39`；`0033_model_connections` 加表后业务表 41→42、总表 42→43，测试名随断言语义同步改为 `..._creates_43_tables_total` / `..._count_is_42`。**改名时若只改测试而不回头修引用，就会留下失效引用**——本文件上述两处正是这样漂了一轮（2026-10-22 订正）。旧名见 `git log -p tests/unit/test_migrations.py`。
 - **权威文档**：`docs/impl/IMPLEMENTATION-PLAN-v0.md`（历史计划）§1 D-I5（Schema 权威）、§2 Sprint 0/1/2；`docs/state-model/state-delta-v0.md`（已迁内容仓 NovelOS-Content:docs/state-model/state-delta-v0.md）；`docs/state-model/schemas/state-delta.schema.json` / `state-commit.schema.json`。

@@ -207,3 +207,27 @@ def test_continuity_findings_accepts_deterministic_ids_too():
         [{"rule_id": "CONT-TIME-BACKSTEP", "quote": "亥时", "suggestion": "补交代"}]
     )
     assert len(out) == 1 and out[0]["rule_id"] == "CONT-TIME-BACKSTEP"
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-22 批次十九：补「突变看守缺口」用例（dev-a）
+# ---------------------------------------------------------------------------
+# 补的是**突变实测存活**暴露的缺口（`tests/mutation_specs/q2_quality_registry.py`
+# 实跑：QTAX-NS-1 把闭集判定改成 `CONT-` 前缀猜测后**本文件全绿**）。
+
+
+def test_unregistered_cont_prefix_id_is_not_continuous():
+    """连续性命名空间是**闭集名册**，不是 ``CONT-`` 前缀猜测。
+
+    既有 ``test_is_continuity_rule_id_covers_both_namespaces`` 只验了
+    「已登记 id ⇒ True」与「``AI-FLAVOR`` ⇒ False」；**没有**验
+    「**未登记**的 ``CONT-xxx`` ⇒ False」⇒ 前缀猜测与闭集判定在它眼里同形。
+
+    钉闭集的理由（既有成文契约，不引入新语义）：AGENTS 坑区
+    「规则名说自己是连续性，报告里归成文风」的修法就是
+    「**映射从 taxonomy 名册派生**」⇒ 名册必须是闭集；
+    且 ``CRITIC_TAXONOMY`` / ``DETERMINISTIC_CONTINUITY_RULE_IDS`` 本身就是
+    显式 frozenset 闭集。
+    """
+    assert not tax.is_continuity_rule_id("CONT-NOT-IN-THE-REGISTRY")
+    assert not tax.is_continuity_rule_id("CONT-CLOCK-DAYBREAK-TYPO")

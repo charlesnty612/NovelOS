@@ -256,14 +256,59 @@ def test_resolve_band_config_high_ratio_lower_than_one():
         raise AssertionError("expected ValueError")
 
 
-def test_resolve_band_config_high_ratio_lower_than_low_ratio():
-    """high_ratio < low_ratio → ValueError（带单调性）。"""
+def test_resolve_band_config_low_high_pair_rejected_by_high_ratio_floor():
+    """``{"low_ratio": 0.95, "high_ratio": 0.9}`` ⇒ ValueError。
+
+    ⚠️ **改名留痕（2026-10-22 批次十九）**：本用例旧名
+    ``test_resolve_band_config_high_ratio_lower_than_low_ratio``，宣称测的是
+    「``high_ratio < low_ratio`` ⇒ ValueError（带单调性）」。
+    **它名实不符**：真正拒掉这个输入的是**逐键**的 ``high_ratio ≥ 1``（0.9 < 1），
+    而「带单调性」那道检查当时**结构上不可达**（见 ``wordcount.py`` 函数末尾
+    注释：逐键校验已保证 ``low_ratio ≤ 1 ≤ high_ratio``）⇒ 任何输入都触发不了它。
+    ⇒ 旧名把**没测到的东西**说成测了（AGENTS 坑区「测试的自我描述与事实不符」
+    同族：skip 理由 / 用例名都是对覆盖率的断言）⇒ 改名为它真正测的事。
+
+    断言保持它**能真正红**：ValueError + 消息指明是哪个键。
+    """
     try:
         resolve_band_config({"low_ratio": 0.95, "high_ratio": 0.9})
     except ValueError as exc:
         assert "low_ratio" in str(exc) or "high_ratio" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_resolve_band_config_band_monotonicity_is_structural():
+    """带单调性（``high_ratio >= low_ratio``）由**逐键校验结构性保证**，不是独立分支。
+
+    2026-10-22 之前 ``resolve_band_config`` 末尾有一条
+    ``if cfg["high_ratio"] < cfg["low_ratio"]: raise ValueError``——
+    但逐键校验已保证 ``low_ratio ∈ (0, 1]`` 且 ``high_ratio ≥ 1``
+    ⇒ 恒有 ``high >= low`` ⇒ **那条分支永远不执行** ⇒ 突变验证也抓不到它
+    （等价突变）⇒ 已删除（``packages/core/quality/wordcount.py``）。
+
+    本用例钉的是**不变式本身**（正向表述），不钉某个具体实现形状：
+    ① 凡**被接受**的配置，``high_ratio >= low_ratio`` 恒成立；
+    ② 给出「通过」与「拒绝」两端的实例，并指出拒绝由**哪条规则**做出。
+    """
+    for overrides in (
+        {},
+        {"low_ratio": 1.0, "high_ratio": 1.0},
+        {"low_ratio": 0.5, "high_ratio": 2.0},
+        {"low_ratio": 0.85, "high_ratio": 1.15},
+        {"floor": 1500},
+    ):
+        got = resolve_band_config(overrides)
+        assert got["high_ratio"] >= got["low_ratio"], (overrides, got)
+
+    # 下界端：low 取上界 1.0 时，high 也必须 ≥ 1 ⇒ high=0.99 被**逐键**规则拒
+    assert resolve_band_config({"low_ratio": 1.0, "high_ratio": 1.0})["low_ratio"] == 1.0
+    try:
+        resolve_band_config({"low_ratio": 1.0, "high_ratio": 0.99})
+    except ValueError as exc:
+        assert "high_ratio" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for high_ratio < 1")
 
 
 def test_resolve_band_config_floor_must_be_non_negative_int():

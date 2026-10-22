@@ -6,7 +6,7 @@ compatibility: 需要本机可运行的 NovelOS 服务（默认 http://127.0.0.1
 metadata:
   version: "0.1.0"
   source: "https://github.com/charlesnty612/NovelOS"
-  novelosVersion: "3.9.0"
+  novelosVersion: "3.10.0"
 allowed-tools: Bash, Read, Grep, Glob
 ---
 

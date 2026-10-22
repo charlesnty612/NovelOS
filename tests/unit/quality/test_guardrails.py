@@ -614,3 +614,58 @@ def test_q8_no_data_includes_note():
     issues = g.req_q8(0, 0, note="Q8 统计口径：2 个未知 created_by 未计入")
     no_data = [i for i in issues if i.rule_id == "RULE_Q8_NO_DATA"]
     assert no_data and "未知 created_by" in no_data[0].message
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-22 批次十九：补「段切分双入口」守门用例（dev-a）
+# ---------------------------------------------------------------------------
+
+
+def test_guardrails_paragraph_split_matches_the_single_entry():
+    """``guardrails._paragraphs`` 与全仓唯一段切分入口 ``_split_paragraphs``
+    **结果等价**——它们是**两份实现**，**不是两套口径**。
+
+    ⚠️ **先验判断被推翻，必须留痕（2026-10-22 实测）**
+    --------------------------------------------------
+    本仓此前登记过一条结论：「``guardrails._paragraphs``（``\\n\\s*\\n`` 优先）与
+    ``ai_patterns_text._split_paragraphs``（``\\n+``）是**两套口径**」。
+    **实测不成立**，该结论作废：
+
+    ``guardrails._paragraphs`` 的内层还有一句 ``p.split("\\n")``——它把外层
+    分出来的每一块**再按单换行切一遍** ⇒ **净结果就是「任意换行都切」**，
+    与 ``_split_paragraphs`` **逐字相同**。docstring 里那句
+    「按 ``\\n\\n`` 优先、``\\n`` 次之切段」描述的是**算法步骤**，不是**不同结果**。
+
+    实测口径：对 20,025 个输入（定向边界样本 + 随机 fuzz）逐位比对，
+    两者输出**零处不一致**；且把外层分隔符从 ``\\n\\s*\\n`` 改成 ``\\n\\n``
+    之后，输出**仍然零处不一致** ⇒ 那是**等价突变**（改它不改变任何可观测行为）
+    ⇒ **任何测试都抓不到它**——这才是它首轮 ``[SURVIVED]`` 的真因，
+    **不是**「缺守门测试」。
+
+    两条推论（都改写了我先前的判断，交 Lead 裁决）：
+    ① 「把两个实现收敛成单点」是**零行为变更**的重构 ⇒ **不需要**重算 guardrails
+       8 条规则的阈值（那才是「无阈值重测就勿合并」顾虑的来源）。
+    ② 本用例**不阻止**收敛：收敛之后本断言仍然成立（自己等于自己）。
+       它钉的是**不变式**「两份实现不得分叉」。
+
+    判别：把 ``guardrails._paragraphs`` 的内层 ``p.split("\\n")`` 去掉 ⇒
+    单换行不再切段 ⇒ 段数与内容立刻与唯一入口不一致 ⇒ 本用例转红。
+    """
+    from packages.core.quality.ai_patterns_text import _split_paragraphs
+
+    samples = [
+        "a\nb",  # 单换行
+        "a\n\nb",  # 空行
+        "a\n \nb",  # 空白行
+        "a\n\t\nb",  # 制表符行
+        "a\n\n\nb",  # 连续空行
+        "a \n\n b",  # 段首尾带空格
+        "a\r\nb",  # CRLF
+        "a\r\n\r\nb",
+        "第一段。\n第二段。\n\n第三段。",
+        "x\n\n\n\ny",
+        "",
+        "   ",
+    ]
+    for text in samples:
+        assert g._paragraphs(text) == _split_paragraphs(text), repr(text)

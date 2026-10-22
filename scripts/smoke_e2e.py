@@ -5,7 +5,7 @@ project → character → model_config → chapter → 四工作流
 （plan → write → review → commit）的端到端链路，断言：
 
 1. GET /                                        → 200 + HTML（SPA 托管 apps/web/dist）
-2. GET /api/health                              → 200，tables=39（业务表 39；含 _migrations 物理共 40）
+2. GET /api/health                              → 200，tables=42（业务表 42；含 _migrations 共 43）
 3. POST /api/projects                           → 201 + project_id
 4. POST /api/projects/{pid}/characters          → 201 + character_id（1 个主角）
 5. POST /api/projects/{pid}/world-rules         → 201 + world_rule_id（1 条世界规则；PRD §110 第 3 步「创建世界」）
@@ -50,7 +50,7 @@ project → character → model_config → chapter → 四工作流
   脚本仍按同一契约处理，防 fixture 变化后回退成静默挂起。）
 - 每步 start 后必须轮询到终态：start/resume 端点 V3.5 起异步化，响应恒为 RUNNING，
   真实终态只在 ``GET /api/runs/{run_id}`` 上（COMPLETED / FAILED / CANCELLED）。
-- health.tables = 业务表数（39）；含 _migrations 物理共 40。
+- health.tables = 业务表数（42）；含 _migrations 共 43。
 """
 
 from __future__ import annotations
@@ -435,7 +435,7 @@ def run_smoke() -> int:
         except AssertionError as e:
             failures.append(f"GET /: {e}")
 
-        # ---- (2) GET /api/health → 200，tables=38（业务表 38；含 _migrations 物理共 39）
+        # ---- (2) GET /api/health → 200，tables=42（业务表 42；含 _migrations 共 43）
         try:
             r = client.get("/api/health")
             _assert(r.status_code == 200, f"/api/health status={r.status_code}")

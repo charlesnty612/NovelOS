@@ -131,7 +131,10 @@ def resolve_band_config(overrides: dict | None) -> dict[str, float | int]:
       - ``low_ratio`` ∈ (0, 1]（开区间 0、闭区间 1）。
       - ``high_ratio`` ≥ 1（不能小于 1，否则上带落到 target 以下）。
       - ``floor`` ≥ 0 整数（不是 int / 含小数 / 负数都拒）。
-      - ``high_ratio`` ≥ ``low_ratio``（带单调性：避免 low > high 倒挂）。
+      - ``high_ratio`` ≥ ``low_ratio``（带单调性：避免 low > high 倒挂）——
+        **由逐键校验结构性保证**（``low_ratio ∈ (0, 1]`` 且 ``high_ratio ≥ 1``
+        ⇒ 恒有 ``low_ratio ≤ 1 ≤ high_ratio``），因此**没有**独立的运行时分支：
+        2026-10-22 之前此处有一条**永远不执行**的检查，已删除（见函数末尾注释）。
 
     返回 dict 键固定为 ``{"low_ratio", "high_ratio", "floor"}``，类型分别
     ``float / float / int``——便于消费方直接 ``word_band(target, **cfg)`` 调用。
@@ -176,7 +179,15 @@ def resolve_band_config(overrides: dict | None) -> dict[str, float | int]:
             if iv < 0:
                 raise ValueError("floor 必须满足 floor ≥ 0")
             cfg["floor"] = iv
-    # 带单调性：high_ratio ≥ low_ratio（low_ratio > 1 等边界 case 也走同一检查）。
-    if cfg["high_ratio"] < cfg["low_ratio"]:
-        raise ValueError("high_ratio 必须 ≥ low_ratio（带单调性）")
+    # ⚠️ 2026-10-22（批次十九）**删除**了一条不可达分支。
+    #     原先此处是：
+    #         if cfg["high_ratio"] < cfg["low_ratio"]:
+    #             raise ValueError("high_ratio 必须 ≥ low_ratio（带单调性）")
+    #     ——它**在结构上不可达**：逐键校验已保证 ``low_ratio ∈ (0, 1]`` 且
+    #     ``high_ratio ≥ 1`` ⇒ 恒有 ``high_ratio ≥ low_ratio``
+    #     ⇒ **任何输入都触发不了它** ⇒ 突变验证也永远抓不到它（等价突变：
+    #     改它不改变任何可观测行为）。
+    #     带单调性这条不变式由**逐键校验结构性保证**，故不需要独立运行时分支。
+    #     判别：tests/unit/test_wordcount.py
+    #     ::test_resolve_band_config_band_monotonicity_is_structural
     return cfg

@@ -235,6 +235,22 @@ _REVEAL_FINGERPRINT_TABLES: tuple[tuple[str, str], ...] = (
     ("reveal_policies", "policy_id"),
 )
 
+# 作者文风样例表（2026-10-22 批次十九）。列集同款由 PRAGMA 推导：
+# 业务列全集 − {project_id, created_at, updated_at} ⇒ 保留
+# {sample_id, title, content}——正是 writer 注入 ``author_style_samples.samples``
+# 时读的那三列（``builders_common/summaries.py::_author_style_samples``）。
+#
+# ⚠️ **已知边界（2026-10-22 对抗审查 m1）**：payload 的**选样**是
+# ``ORDER BY created_at DESC LIMIT 2`` ⇒ ``created_at`` 在语义上**也是装配输入**，
+# 但本维度把它排除了。当前**不可达**：``author_style_samples`` 只有 INSERT / DELETE
+# 端点，没有能改 ``created_at`` 的 UPDATE（删后重建会让 ``sample_id`` 与
+# ``created_at`` 同时变 ⇒ 指纹照样变）。
+# ⇒ **将来若新增「编辑样例」或「调整顺序」类端点，必须同批复审本维度**：
+# 那时要么把 ``created_at`` 纳入指纹，要么证明选样不依赖它。
+_STYLE_SAMPLE_FINGERPRINT_TABLES: tuple[tuple[str, str], ...] = (
+    ("author_style_samples", "sample_id"),
+)
+
 
 def _fingerprint_table_rows(
     conn: sqlite3.Connection, table: str, id_column: str, project_id: str,
@@ -315,6 +331,38 @@ def reveal_policies_fingerprint(db_path: str | Path, project_id: str | None) -> 
     否则 HIDDEN 角色剧透）。
     """
     return _fingerprint_tables(db_path, project_id, _REVEAL_FINGERPRINT_TABLES)
+
+
+def author_style_samples_fingerprint(db_path: str | Path, project_id: str | None) -> str:
+    """``author_style_samples`` 内容指纹（作者文风样例，writer 消费）。
+
+    **为什么必须补**（硬规则 2「凡进 payload 的装配参数必须入键」的同形状第 4 次）：
+    writer 装配把该项目最近 ≤2 篇「作者本人散文样例」注入 payload 的
+    ``author_style_samples.samples`` 段（``_build_writer_input_uncached``），
+    而作者新增 / 删除样例走 ``api/routers/author_style_samples.py`` 的
+    INSERT / DELETE —— **只写该表，不推 ``story_states.state_version``**
+    ⇒ 旧键里没有任何维度会因样例改动而变 ⇒ 同 ``state_version`` +
+    同 ``chapter_no`` 重跑该章**命中旧装配** ⇒ 正文不按作者文风写
+    （且 ``style_constraints.genre_style`` 的 ``priority`` 标记不同步），
+    **全程零告警**。
+
+    与 ``world_fingerprint`` / ``reveal_policies_fingerprint`` 逐字同形：
+    复用 :func:`_fingerprint_tables` + :func:`_fingerprint_table_rows`，
+    **列集由 PRAGMA 推导、不手挑**（见本文件「列集由 PRAGMA 推导」纪律段）。
+
+    口径边界（如实登记）：
+    - 指纹覆盖**该项目的全部样例行**，而 payload 只取**最近 ≤2 篇**
+      （``ORDER BY created_at DESC, sample_id DESC LIMIT 2``）⇒ 指纹是
+      payload 输入的**超集**。这是**刻意不对称**：多算 = 多一次重装（免费），
+      少算 = 静默的错正文（AGENTS 坑区「失效方向刻意不对称」先例）。
+    - ``created_at`` / ``updated_at`` 不进指纹（纯记账时间戳）；``content``
+      进指纹 ⇒ 即便将来加「改样例内容」的端点，改内容也必然 miss。
+    - 缺表（迁移 0008 未跑）→ 该表记 ``"missing"`` 占位，不拖垮整条维度。
+
+    判别：突变规格 ``tests/mutation_specs/q1_style_sample_key.py``
+    （``STYLE-KEY-1`` 撤掉 ``style_fp`` 维度 ⇒ 加/删样例后键不变 ⇒ 必红）。
+    """
+    return _fingerprint_tables(db_path, project_id, _STYLE_SAMPLE_FINGERPRINT_TABLES)
 
 
 def _fingerprint_scene_plan(scene_plan: Any) -> str:

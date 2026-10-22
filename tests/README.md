@@ -22,9 +22,9 @@
 | 项 | 说明 |
 |---|---|
 | 全量命令 | `python -m pytest -n 4 -q`（xdist 并行，约 8~10 分钟；**不再带任何 `--ignore`**，含 `test_m1_lock.py`——其曾挂的「硬杀进程树」理由已于 2026-10-16 证伪并撤销，详见 `scripts/tree_fingerprint.py` docstring 与 AGENTS.md 坑区。依赖 dev extra，裸 `uv sync` 会缺 ruff/pytest-xdist） |
-| 基线 | 3578 passed / 1 skipped / 1 xfail（3580 collected；2026-10-19 批次十二实测，指纹 `5663ac14…`/612 文件跑测前后逐位一致） |
-| 迁移表数 | `test_apply_migrations_creates_40_tables_total`（迁移后总表 40 = 39 业务表 + `_migrations`）；`test_business_table_count_is_39`（业务表 39，排除 `chapter_fts%` 影子表） |
-| 健康检查 | `test_health_endpoint_returns_ok`：`GET /api/health` → `{status:"ok", version:<包版本>, tables:39}` |
+| 基线 | 3800 passed / 1 skipped / 1 xfailed（3802 collected；2026-10-22 批次十八实测 3800/1/1、指纹 `5730c09f…`/662 文件跑测前后逐位一致；批次十九 Lead 独立复跑同为 3800/1/1） |
+| 迁移表数 | `test_apply_migrations_creates_43_tables_total`（迁移后总表 43 = 42 业务表 + `_migrations`）；`test_business_table_count_is_42`（业务表 42，排除 `chapter_fts%` 影子表） |
+| 健康检查 | `test_health_endpoint_returns_ok`：`GET /api/health` → `{status:"ok", version:<包版本>, tables:42}` |
 | 端到端 | 工作流全链由 `scripts/smoke_e2e.py` 覆盖（独立临时库 + 独立端口，自动清理） |
 
 > ⚠️ 名实不符已了结（2026-09-30）：上表这两条**测试名**过去含历史数字 `34`，而断言实为迁移后**总表** 40 与**业务表** 39。现已按断言语义改名（旧名见 `git log -p tests/unit/test_migrations.py`，全仓零残留）。

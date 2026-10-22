@@ -342,8 +342,8 @@ def test_writer_cache_key_also_has_skills_dimension(tmp_path):
     keys_after = [k for k in cache_mod._assembly_cache if k[0] == pid and k[3] == "writer"]
     assert len(keys_after) == 1
     before, after = keys_before[0], keys_after[0]
-    assert len(before) == len(after) == 20, (
-        f"writer 键应为 20 元（19 + world_fp + reveal_fp），实得 {len(before)} / {len(after)}"
+    assert len(before) == len(after) == 21, (
+        f"writer 键应为 21 元（20 + style_fp 作者文风样例维度），实得 {len(before)} / {len(after)}"
     )
     diff_positions = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
     assert len(diff_positions) == 1, (

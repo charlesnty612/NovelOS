@@ -46,6 +46,7 @@ from .cache import (
     _fingerprint_scene_plan,
     _fingerprint_skills,
     _fingerprint_writing_bible,
+    author_style_samples_fingerprint,
     characters_fingerprint,
     reveal_policies_fingerprint,
     world_fingerprint,
@@ -401,6 +402,13 @@ def build_writer_input(
     （PUT ⇒ version 自增）/ 改绑定集合都必须 miss，否则 writer 拿着改之前的旧手艺
     写正文。口径与 director 键逐字同形。
 
+    2026-10-22（批次十九）：键再追加 ``style_fp``（作者文风样例内容指纹，见
+    :func:`...cache.author_style_samples_fingerprint`）。项目级「作者本人散文样例」
+    进 payload 的 ``author_style_samples.samples`` 段，而新增 / 删除样例只写
+    ``author_style_samples`` 表、**不推 state_version** ⇒ 缺该维度时改样例后同
+    state_version 重跑该章会命中旧装配 ⇒ 正文不按作者文风写，**零告警**
+    （硬规则 2 的同形状第 4 次：plan_json → prompt_label → chars_fp → style_fp）。
+
     ``namespace``（关键词参数，默认 ``""``）：键尾命名空间标记。``preview_context``
     传 ``"preview"`` 拆开 dry-run 与生产的键空间（预览默认 2200 字 / 空 scene），
     生产调用不传即保持原行为。命中返回**深拷贝**，调用方可安全就地改写。
@@ -507,16 +515,32 @@ def build_writer_input(
     # 与 ``chars_fp`` 逐字同形，同样放在 prompt_label 之前保持键尾两元语义不变。
     world_fp = world_fingerprint(db_path, project_id)
     reveal_fp = reveal_policies_fingerprint(db_path, project_id)
+    # 2026-10-22（批次十九）：缓存键追加**作者文风样例**内容指纹 ``style_fp``。
+    # ``_author_style_samples`` 把项目最近 ≤2 篇「作者本人散文样例」注入 payload 的
+    # ``author_style_samples.samples`` 段；而作者新增 / 删除样例走
+    # ``api/routers/author_style_samples.py`` 的 INSERT / DELETE —— **只写该表、
+    # 不推 story_states.state_version** ⇒ 缺该维度时改样例后重跑同一章
+    # （同 state_version + 同 chapter_no）命中旧装配 ⇒ 正文不按作者文风写、
+    # 且 ``style_constraints.genre_style`` 的 ``priority`` 标记不同步，**零告警**
+    # （与 chars_fp / world_fp / reveal_fp 逐字同形的硬规则 2 违规）。
+    # ⚠️ **位置刻意不紧邻 prompt_label**：writer 键的
+    # ``target_word_count…chars_fp,`` 与 ``world_fp…prompt_label,`` 两行是既有
+    # 突变规格 ``e1_character_cache_key.py::E1-1`` 与
+    # ``l7_skill_cache_key.py::SKILL-KEY-2`` 的**锚点原文**（AGENTS 坑区
+    # 「改一个模块会打断既有突变规格的锚点 ⇒ 执行器会 [ABORT]」）⇒ 本维度落在
+    # 那两行之外的空位，避免打断既有规格；键尾两元（prompt 标签 / 命名空间标记）
+    # 语义不变（仍在 prompt_label 之前）。
+    style_fp = author_style_samples_fingerprint(db_path, project_id)
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
-        scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id,
+        scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id, style_fp,
         target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,
         world_fp, reveal_fp, plan_fp, skills_fp, prompt_label,
         _cache_namespace_tag(namespace),
     )
     # 不可序列化（scene_fp / intent_fp / bible_fp / chars_fp / world_fp / reveal_fp /
-    # skills_fp == 'uncached'）→ 跳过缓存，避免不同原文落在同一占位键上互相脏命中
-    # （与 director 的 cacheable 判定同款）。
+    # style_fp / skills_fp == 'uncached'）→ 跳过缓存，避免不同原文落在同一占位键上
+    # 互相脏命中（与 director 的 cacheable 判定同款）。
     cacheable = (
         scene_fp != _FINGERPRINT_UNCACHED
         and intent_fp != _FINGERPRINT_UNCACHED
@@ -524,6 +548,7 @@ def build_writer_input(
         and chars_fp != _FINGERPRINT_UNCACHED
         and world_fp != _FINGERPRINT_UNCACHED
         and reveal_fp != _FINGERPRINT_UNCACHED
+        and style_fp != _FINGERPRINT_UNCACHED
         and plan_fp != _FINGERPRINT_UNCACHED
         and skills_fp != _FINGERPRINT_UNCACHED
     )

@@ -236,3 +236,32 @@ def test_payoff_evaluate_accepts_dict():
         }
     )
     assert isinstance(iss, list)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-22 批次十九：补「突变看守缺口」用例（dev-a）
+# ---------------------------------------------------------------------------
+# 补的是**突变实测存活**暴露的缺口（`tests/mutation_specs/q2_quality_misc.py`
+# 实跑：QPAY-PAID-1 把「只认 status_after == 'paid'」放宽成「有 status_after
+# 就算」后**本文件全绿**）。
+
+
+def test_unpaid_debt_is_not_counted_as_payoff():
+    """「已偿债务」只认 ``status_after == "paid"``；**未偿**不算本章 payoff。
+
+    既有 H-2 / H-3 用例的 delta 里**只有** ``resolved_hooks``，没有任何
+    ``status_after != "paid"`` 的 debt ⇒ 把该判据放宽时全套仍绿。
+
+    本例给一条 ``status_after="unpaid"`` 的债务：它**不得**被计成本章 payoff
+    ⇒ H-2（最近 3 章 payoff 全 0 且本章无 payoff）**应当**触发。
+    """
+    iss = payoff_evaluate(
+        _ctx(
+            draft="末段突然发生了变故？",
+            payoff_history=[0, 0, 0],
+            delta={"debt_changes": [{"debt_id": "d1", "status_after": "unpaid"}]},
+        )
+    )
+    assert any(i.rule_id == "RULE_H2_NO_CLIMAX_3CH" for i in iss), (
+        "未偿债务不得计为本章 payoff ⇒ H-2 应触发（否则『已偿债务』判据被放宽了）"
+    )

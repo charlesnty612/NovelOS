@@ -1,9 +1,141 @@
-﻿# 更新日志（CHANGELOG）
+# 更新日志（CHANGELOG）
 
 > **留痕规矩（自 V1.0 起强制）**：此后所有迭代——功能、修复、迁移、行为变更——合并前必须在本文件追加条目。
 > 发版惯例：发版时把 `## [Unreleased]` 改名为 `## [X.Y.Z] - 日期`，并重新加回空的 `## [Unreleased]` 承接下一轮。
 
 ## [Unreleased]
+
+### Changed（2026-10-22 批次（十九）：装配缓存键第 4 次同形状 + 分发物版本漂移 + 质量域突变覆盖面 + 文档对账）
+
+> **来源**：用户指令「可以动手了，先掌握项目的情况」⇒ 先做三份**只读测绘**（质量域 / 装配-工作流-脚本域 /
+> 「文档声称 vs 实测」对账），据证据排优先级后落地。**3 名会话内成员**（`dev-a` / `dev-b` / `reviewer`）
+> **+ Lead 自办**，按文件路径互斥；**零真实 LLM 调用、零内容仓接触、未改任何既有章节正文**。
+> 对抗审查结论 **0 critical / 0 major / 3 minor**（全部收口，见 §6）。
+
+#### 1. 真缺陷：作者文风样例进 payload，却**没有缓存键维度**（同形状第 4 次）
+
+| 环节 | 位置（改动前） | 事实 |
+|---|---|---|
+| 注入 payload | `context_engine/writer_input.py:287-290` | `author_style_samples.samples` 进 writer 装配输出 |
+| 数据源 | `context_engine/builders_common/summaries.py:238` | `ORDER BY created_at DESC LIMIT 2` 取最近两篇 |
+| 缓存键 | `context_engine/writer_input.py:510-516` | **20 元**，含 `wb/chars/world/reveal/plan/skills/intent/bible/prompt` 九类指纹，**独无文风样例** |
+| 写表端点 | `api/routers/author_style_samples.py:164-172`(INSERT) / `:193-198`(DELETE) | 只 `commit()`，**不推 `state_version`** |
+
+⇒ 作者加/删样例后重跑同一章 = 同 `state_version` + 同 `chapter_no` ⇒ **命中旧装配**：正文不按作者本人文风写，
+且 `style_constraints` 的 `priority="below_author_style_samples"` 标记也不同步，**全程零告警**。
+**同形状第 4 次**（前三次：`plan_json`/`outline_fp` → `prompt_label` → `chars_fp`；2026-10-21 又补过 `world_fp`/`reveal_fp`，
+其注释 `writer_input.py:500-509` 写的正是同一族道理）。
+
+**修法**（照 `world_fingerprint` / `reveal_policies_fingerprint` 逐字同形）：
+- `cache.py` 新增 `author_style_samples_fingerprint()`：复用 `_fingerprint_tables` + `_fingerprint_table_rows`，
+  **列集由 PRAGMA 推导**（`_FINGERPRINT_ROW_EXCLUDED` 排掉 `project_id/created_at/updated_at` ⇒ 实得 `{sample_id,title,content}`，
+  与 payload 消费的三列一致，且指纹 ⊇ payload ⇒ 多算方向安全）；
+- `writer_input.py` 键 **20 → 21**（`style_fp` 插在 `active_canon_id` 之后）+ `cacheable` 同步加 `style_fp != UNCACHED`；
+- ⚠️ **键位刻意不紧邻 `prompt_label`**：`target_word_count…chars_fp,` 与 `world_fp…prompt_label,` 两行是既有突变规格
+  `E1-1` / `SKILL-KEY-2` 的**锚点原文**，落在它们之外的空位才不打断（已在代码注释写明，防后来者「整理」回去）。
+- 判别：`tests/unit/test_ctx_b_style_sample_key.py` **6 例**（加/删/改内容必 miss；不变 / 只 bump `updated_at` / 别的项目必命中，
+  断言打在 **payload 内容 + uncached 调用次数**上，不是「键不等」）+ `tests/unit/test_writer_key_len.py` **3 例**（测试侧 `WRITER_KEY_LEN = 21`）
+  + 突变 `STYLE-KEY-1` ⇒ **CAUGHT**（只读探针另证：突变态恰红 3 条目标用例、3 条反向不变量仍绿 ⇒ **判别点专属**）。
+
+#### 2. 分发物版本漂移：`skills/novelos/SKILL.md` 的 `novelosVersion` 停在 **3.9.0**（第 **6** 处副本）
+
+app 已是 3.10.0、`.claude-plugin/plugin.json` 也是 3.10.0，而对外分发的 skill 包仍写 `3.9.0`；根因是
+`check_skill_package.py` 只校 `metadata.version`（**skill 包自身**版本 0.1.0，另一条线），**从不看这个键** ⇒
+「发版要同步第 6 处」这条纪律**写在 AGENTS 里但没有机器看守**。
+- 修：`SKILL.md` 改 `3.10.0`；`check_skill_package.py` 新增 `check_app_version_consistency`（3 条检查：
+  skill ↔ 各平台清单同键、skill ↔ `pyproject [project].version`；**纯分发副本无 pyproject 时跳过，不造假红**），
+  并把 `--selftest` 的变异从 7 扩到 **8**（新增 `M8 novelosVersion 与 app 版本不一致` ⇒ 实测被抓住）。
+- 契约自检 **46 → 49 项**；CI 本来就在跑 `check_skill_package.py --selftest` ⇒ **看守自动进 CI**，无需改 workflow。
+- AGENTS §四 版本纪律同步改为「**六处**」，并登记该键与 `metadata.version` 的语义差别。
+
+#### 3. 质量域突变覆盖面：**13 个零规格模块 → 0**
+
+测绘实测（改动前）：`packages/core/quality/` 23 个模块，只有 **9 个**被突变规格 target；328 条突变里只有 **16 条**
+指向质量域（4.9%），测试命中 `tests/unit/quality/` 的仅 **9 条**；`ai_patterns_text`（`_split_paragraphs` 唯一入口）、
+`continuity_time`、`guardrails` 等 13 个模块**零规格** ⇒ 改坏它们不会有任何突变变红。
+
+- 新增 **5 个规格 / 31 条**（`tests/mutation_specs/q2_quality_*.py`）：覆盖 `ai_patterns_text`+`ai_patterns_paragraph`(4)、
+  `continuity_time`(4)、`guardrails`(4)、`style_trend`/`payoff`/`ai_patterns_dialogue`/`ai_trace`/`normalize`(10)、
+  `outline_check`/`wordcount`/`ai_flavor`/`continuity_taxonomy`(9)。
+- 质量域被 target 的模块 **9 → 22**；质量域条目 **16 → 45**；零规格模块 **13 → 0**（`__init__.py` 无机制，不计）。
+- **首轮 8 条 `[SURVIVED]` 逐条定性**（幸存是发现，不是失败）：**真缺口 5 条**（补了 5 条守门测试，见 §3.1）、
+  **等价突变 1 条**（`payoff` 首版 replacement 等于矩阵现值 ⇒ 不可观测，改用矩阵外值后 CAUGHT）、
+  **死代码 1 条**（见 §4）、**真无守门 1 条**（`guardrails` 段切分 ⇒ 见 §6(a) 的**先验推翻**）。
+- §3.1 **新增 6 条守门测试**（纯新增，语料无关 ⇒ CI 上真红不 skip）：`continuity_time` 2（回退量级门槛 / 推进标记守卫，正反一对）、
+  `style_trend` 1（中间一步平盘 ⇒ 证严格单调）、`payoff` 1（未偿债务不计 payoff）、`continuity_taxonomy` 1（未登记 `CONT-` id 非连续性）、
+  `guardrails` 1（两份段切分实现**不得分叉**）。
+
+#### 4. 真缺陷：`wordcount.resolve_band_config` 的**不可达分支** + 一条「名实不符」的测试
+
+- `packages/core/quality/wordcount.py` 曾有 `if cfg["high_ratio"] < cfg["low_ratio"]: raise ValueError(...)`。
+  但逐键校验已保证 `low_ratio ∈ (0,1]` 且 `high_ratio ≥ 1` ⇒ `low ≤ 1 ≤ high` ⇒ 该分支**结构上不可达**。
+- 同文件测试 `test_resolve_band_config_high_ratio_lower_than_low_ratio`（输入 `{low:0.95, high:0.9}`）实际是**先被
+  `high_ratio ≥ 1` 拦掉** ⇒ **测试名说的事它没测**（AGENTS 坑区「测试的自我描述与事实不符」同族）。
+- 修：删不可达分支 + docstring 如实说明「该不变式由逐键校验结构保证、无独立运行时分支」；用例**改名为它真正测的事**；
+  新增 `test_resolve_band_config_band_monotonicity_is_structural` 钉正向不变式；新增突变 `QWC-CFG-2` 看守「删分支」这件事。
+  **零行为变更证明**：HEAD 版 vs 改后版在 **30,020 组输入**（20 定向 + 30,000 fuzz）上比对「返回值 / 异常类型与消息」⇒ **差异 0 处**。
+
+#### 5. 文档对账：6 处「声称 vs 实测」不符，已订正
+
+| # | 位置 | 不符 | 订正 |
+|---|---|---|---|
+| M1 | `README.md:182/187/193/195/208` | 批次十八声称「README ×3 全部订正」，实测仍留 `tables=41`、`3578/3580`、`755 用例/56 文件` | 全部改 42/43、3800/3802、781/57 |
+| M2 | `README.md:187` vs `:242` | **两套过期基线并存**（3578 与 3796），且后者也落后一轮 | 统一为 3800/3802 · 781(57) |
+| M3 | `skills/novelos/SKILL.md:9` | 第 6 处版本副本停在 3.9.0 且无看守 | 见 §2 |
+| M4 | `database/README.md:28/60` | 引用**不存在的测试名** `..._creates_40_tables_total` / `..._count_is_39`，且称 `/api/health` 返回 `tables:39`（实为 42）；同文件 L62 还写着「全仓零残留」 | 改 `..._43_tables_total` / `..._count_is_42` / `tables:42`，并把「改名没回头修引用」这条教训写进该段 |
+| M5 | `README.md:73/94`、`database/README.md:23`、`tests/README.md:25-27`、`scripts/smoke_e2e.py:8/53/438` | 「物理共 43 张」把口径值写成物理数（还有 `chapter_fts` + 4 影子表）；smoke docstring 的 `tables=39/物理 40` 滞后 3 轮 | 统一为「业务表 42；含 `_migrations` 共 43 张，FTS5 虚表及影子表不计入」；`tests/README.md` 基线同步到 3800/3802 |
+| M6 | `AGENTS.md` 坑区 | 原记「`_last_paragraph` 仍 `\n\n` · 登记不修」——**实测 2026-10-15 批次（六）G8 早已收敛到 `_split_paragraphs`** | 改判「✅ 已修」，并登记「**『声称未修』与『声称已修』是同一种假事实**」 |
+
+#### 6. ⚠️ 先验判断被推翻（必须留痕）
+
+**(a)「`guardrails._paragraphs` 与 `ai_patterns_text._split_paragraphs` 口径不同」——不成立。**
+该前提是 Lead 与 dev-a **共同**据以立处置方案（补守门测试 / 收敛单点）的依据。实测：
+- Lead 与 dev-a 各自独立 fuzz：**20,009 / 20,025 例**（定向边界 + 随机，字符集含 `\n`/`\n\n`/`\n \n`/`\n\t\n`/`\r\n`/`\u00a0`/
+  全角空格/纯空白行）⇒ **输出差异 0 处**；
+- 根因：`guardrails._paragraphs` 外层按 `\n\s*\n` 分块后，**内层又 `p.split("\n")` 切一遍** ⇒ 净效果 = 「任意换行都切」，
+  与 `\n+` 单入口**逐字等价**。它 docstring 里「`\n\n` 优先、`\n` 次之」描述的是**算法步骤**，不是**结果**；
+- ⇒ 据此设计的突变（`\n\s*\n`→`\n\n`）是**等价突变**，`[SURVIVED]` 不代表缺守门测试；「构造让两口径给出不同结果的文本」
+  **不可能存在** ⇒ 要求的那条用例**写不出来**。改交的等价物：一条钉「**两份实现不得分叉**」的不变式用例
+  （收敛成单点后仍成立）+ 可观测的突变 `QG-PARA-1`（撤内层 `split("\n")`）⇒ CAUGHT；
+- **因裁决依据已变，收敛成单点从「需重测 8 条规则阈值」降级为「零行为变更重构」**——但**本批不做**：
+  本批已含 2 处 `packages/` 行为改动（缓存键 + 删死分支），再叠重构会让「零变更重构」与「缺陷修复」混在同一闸门里，
+  难以归因；**登记待排期**（排期时直接复用本轮 fuzz 证据）；
+- 方法论已并入 AGENTS 坑区：**判定两个实现「是否分叉」必须比净输出，不得据 docstring 或代码形态推断**；
+  且**突变 `[SURVIVED]` 时先判「等价」，再判「缺口」**。
+
+**(b) Lead 转述压缩造成口径错位**：dev-a 原文说「`QPAY-SEV-1` 的**首版** replacement 等于矩阵现值 ⇒ 等价突变」，
+Lead 转述成「该条突变等价」⇒ 读起来像最终规格不可观测。**实际终版 replacement（矩阵外值 `error`）可观测且已 CAUGHT**。
+由 reviewer 抓出并订正（AGENTS §三.6「子代理之间也会数字互斥，主会话裁决不偏向审查员」先例）。
+
+**(c)** 见 §5 的 M6：坑区原记「代码没修」，实际早修 —— 反向的假事实。
+
+#### 7. 闸门（Lead 亲跑，逐项实测）
+
+| 闸门 | 结果 |
+|---|---|
+| `ruff check packages scripts tests skills` | `All checks passed!` |
+| `export_openapi` + `gen_frontend_types`（**须先于全量 pytest**） | **109 paths / 145 schemas**；regen 后 `git status` **零漂移** |
+| 全量 pytest（`.venv`，`-n 4`） | **3816 passed / 1 skipped / 1 xfailed / 0 failed**（457.69s，exit 0）—— 较基线 3800 **+16**，**逐项对得上**（dev-b 6+3=9，dev-a 5+1+1=7） |
+| 树指纹（跑测前后各一次） | **670 文件 / `3aa49743330fc5df…`**，**逐位一致**（662 → 670 = +8 新文件：6 规格 + 2 测试） |
+| **全量突变 `run_spec.py --all`** | **360/360 全捕获**（0 存活 / 0 中止 / 0 无效，**exit 0**）；还原校验 **OK 360 / 失败 0**；规格 **46 → 52** |
+| 突变残留清点（三项） | `*.mutbak` **0**；源码域标记形态 **0**；**97 个被突变文件逐个与日志记录的还原 SHA256 相同（差异 0）** |
+| skill 契约自检 | `check_skill_package.py --selftest` ⇒ **49 项全绿 + 8 个变异全被抓住** |
+| `check_state_sync --db data/novelos.db` | **SYNC OK**（5 个无快照项目按设计不计漂移） |
+| `smoke_e2e.py`（临时库 + 独立端口） | **PASS** —— plan → write → **review PAUSED at `author_review` → resume** → commit 四步链路完好、`chapter.status=COMMITTED`、observer 内容在场、`drafts`/`quality` 可读、**SYNC OK**（9 组断言全绿，exit 0） |
+
+#### 8. 已知边界 / 待排期（如实登记，不声称已解决）
+
+1. **`created_at` 决定文风样例选样（`ORDER BY created_at DESC LIMIT 2`）却被指纹排除**（对抗审查 minor m1）。
+   当前**不可达**：`author_style_samples` 只有 INSERT / DELETE，没有能改 `created_at` 的 UPDATE（删后重建会让
+   `sample_id` 与 `created_at` 同时变 ⇒ 指纹照样变）。**已在 `cache.py` 该表常量上方写明「将来加编辑/排序类端点必须同批复审本维度」**。
+2. **`guardrails._paragraphs` 收敛成单点**：已证零行为变更（§6a），**待排期**（建议独立成批，配等价性证明）。
+3. **两套突变执行器并存**（`scripts/mutation_harness.py` 21 条 + `tests/mutation_specs/run_spec.py` 360 条）——仍登记待排期。
+4. **突变套件未接 CI**（未在 Linux dry-run；本机全量约 70 分钟）。
+5. **`mutation_probe.py` 的 Windows argv 剥引号陷阱**（本轮 dev-b 实测）：PowerShell 5.1 传原生 argv 会**吞掉内嵌双引号** ⇒
+   含引号的 replacement 被静默变形为未定义名字 ⇒ 运行期 `NameError` ⇒ **全部用例变红**、探针报「6 条全红」——
+   看起来「捕获得很彻底」，其实红的原因不是被测机制。**对策**：探针复核一律走 `--anchor-file` / `--replacement-file`；
+   规格里的 replacement 尽量**不含引号**。「捕获得太彻底」本身就是可疑信号。
+6. 质量域仍**无**跨模块守卫钉「`payoff` severity 必须等于矩阵当前取值」（等价突变边界），要真钉住需另立规格。
 
 ## [3.10.0] - 2026-10-22
 
