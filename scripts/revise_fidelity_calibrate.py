@@ -68,6 +68,13 @@ def _connect_ro(db_path: Path) -> sqlite3.Connection:
 
 
 def _percentile(sorted_vals: list[float], q: float) -> float:
+    """按索引取的分位数（``int(q*n)``，**不做线性插值**）。
+
+    ⚠️ **与 ``delta_anchoring_calibrate._quantile`` 不是同一口径**（那边是**线性
+    插值**：``q=0.5`` 于 ``[1,2,3,4]`` 得 ``2.5``；本函数得 ``3``）⇒ **两个脚本
+    输出的 p50 不可直接比较**。两者量的东西本就不同（delta bigram 覆盖率 vs
+    revise 保真比），故**刻意不统一**，只是必须把口径写下来。
+    """
     if not sorted_vals:
         return float("nan")
     idx = min(len(sorted_vals) - 1, int(q * len(sorted_vals)))

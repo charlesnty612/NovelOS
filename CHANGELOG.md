@@ -5,6 +5,96 @@
 
 ## [Unreleased]
 
+### Added（2026-10-22 批次（二十）：补「看守的看守」——质量域结构钉 + 零测试脚本 8→2）
+
+> **来源**：批次十九的三份测绘报告里点出的两处覆盖面缺口，用户指令「按建议来」。
+> **2 名会话内成员**（`dev-a` / `dev-b`）+ Lead 自办；只读验证 + 新建测试为主，**`packages/` 零改动**、
+> `scripts/` 仅 2 处小修（见 §2）；零真实 LLM 调用、零内容仓接触。
+
+#### 1. 质量域「结构钉」：6 个模块在域内零 import 的盲区 → 1（且是结构上不可 import 的那个）
+
+**缺口**（批次十九实测）：`tests/unit/quality/` 里 `ai_patterns_dialogue` / `ai_patterns_paragraph` /
+`ai_patterns_sentence` / `ai_patterns_text` / `style_trend` / `__init__` **零直接 import** ⇒ 它们只被
+`ai_patterns.py` 门面间接覆盖 ⇒ **改名、搬家、被合并、公开符号被悄悄挪走，都不会有域内测试变红**。
+（注意措辞：这些模块**并不缺测试**，缺的是**结构看守**——「间接覆盖」不等于「结构被钉住」。）
+
+新增 `tests/unit/quality/test_quality_module_inventory.py`（**11 例**，四层）：
+1. **模块清单集合相等**（23 个 `.py`，glob 现场数）⇒ 增/删/改名/合并必红；
+2. **逐模块可直接导入**（静态 import 全部 22 子模块 + 动态 `importlib` 同对象）+ 每模块**自己定义** 1–3 个钉住符号
+   （含机制单点 `_split_paragraphs` / `DETERMINISTIC_CONTINUITY_RULE_IDS` / `issue_gate`+`BLOCKING_RULES` /
+   `ai_pattern_issues` / trigram 两档常量）；
+3. **门面一致性**：`__all__` 44 个名字全部可解析、**无自指元素**（硬规则 1）、无重复、**关键公开名必须仍在**（27 个，子集断言）；
+4. **五族职责边界**：各族**定义**自己那批规则符号、**任一族都不得定义别族的**、门面必须再导出四族全部钉住符号。
+
+⚠️ **「拥有」的判定口径是本批最难的一步**：**不能用 `hasattr`** —— 一族 import 别族的单点来**消费**是合法的
+（`ai_patterns_paragraph` import 了 `ai_patterns_text._split_paragraphs`），用 `hasattr` 会把「合法消费」误判成「跨族串味」
+（第一版就这样误报红过）。改用 **AST「符号在该模块源码里被定义」**：跨族判定用「定义」、再导出判定用「能取到」。
+
+- 判别：`tests/mutation_specs/q2_quality_inventory.py` **2 条**，均「破坏结构但**不破坏 import**」（否则会变成收集期
+  `ImportError` = 假捕获）：`QINV-1` 从 `__init__.__all__` 删一个名字（`import` 不动 ⇒ 包仍可用、只有**公开面**变了）；
+  `QINV-2` 把门面对某族规则函数的 import 改成别名（规则从门面被摘掉）。实跑 **2/2 CAUGHT**，且**各自只红一条断言**。
+- 结果：域内零直接 import 的模块 **6 → 1**（只剩 `__init__`，结构上不可静态 import）。
+- ⚠️ **顺带实测陷阱（已写进测试 docstring，不单列 AGENTS）**：`from packages.core.quality import __init__` **不报错**，
+  但绑到的是**模块对象的 `__init__` 方法**（method-wrapper），不是子模块 ⇒ 「收下即忘 / 静默错对象」家族。
+- ⚠️ **先验判断被推翻（Lead 给的突变写法不可行）**：我建议「族内把规则函数改名为 `_legacy_xxx`」，实测**会打断门面的
+  import**（门面 import 了四族几乎全部模块级符号）⇒ 那是**收集期 ImportError**，红的原因不是结构断言 ⇒ **假捕获**。
+  改为在**可观测的一侧**（门面 import 改别名）施加同一失效形状。
+
+#### 2. 零测试脚本 **8 → 2**，其中补上了「定义闸门口径的脚本自身」
+
+**缺口**（批次十九实测）：`scripts/` 31 个脚本里 8 个零测试，含 **`tree_fingerprint.py`（闸门脚本自身）**。
+
+新增 **6 个测试文件 / 38 例**（语料无关、CI 不 skip、**零不可逆操作**）：
+
+| 脚本 | 例数 | 钉的是什么 |
+|---|---|---|
+| `tree_fingerprint.py` | 10 | 口径的**正向表述**：只 `os.utime` 改 mtime、内容一字未动 ⇒ 指纹**变**（同时证明「哈希不含内容」）；`os.utime` 精确还原 ⇒ 回到原值（可逆）；等长+同 mtime+改内容 ⇒ 指纹**不变**（钉已知局限）；扫描范围**只**含 `packages/tests/scripts/database`（改 `docs/`、`apps/web/` 都不改指纹）；只收 `.py/.sql`、排除 `__pycache__`、缺根不崩、`count` 与文件数一致、CLI 契约 |
+| `mutation_harness.py` | 8 | **21 条硬编码变异的只读预检**（此前 `run_spec.py` 那 360 条有 `validate_specs.py`，而 21 条**没有任何预检**）：条数 21、五元组形态、编号 M1..M21 唯一连续、目标文件存在、**锚点恰好命中 1 次**、replacement 确实改变内容、变异后仍可解析、定向用例文件存在 |
+| `normalize_chapters.py` | 4 | 纯函数：短段原样、长段按句切且**只插换行一字不改**（拼接逐字还原）、**引号未闭合处不切**、`rescale_paragraphs` 段落外结构保留 |
+| `m1_report.py` | 7 | 容错契约：坏 JSON/缺文件 ⇒ `None` 不抛；`_safe_get` 链式取值 + 中段非 dict 回落；坏文件**被跳过且列入 `skipped`**（不崩也不静默丢） |
+| 两个 `*_calibrate` | 6 | **两套分位数口径各自钉死**：`_quantile` = 线性插值（q=.5 于 [1,2,3,4] ⇒ **2.5**）；`_percentile` = 按索引取（⇒ **3**）；空 ⇒ **NaN 不是 0.0**（否则会被误读成「覆盖率 0」） |
+
+**不补的 2 个（各带实测理由）**：
+- `migrate_backups_to_sync.py` —— 本轮**先修了它的 import 期副作用**（见下），随后补了 3 例；真正不可测的是
+  它的 `--apply` 路径（openssl 加密 + 删源）；
+- `real_llm_e2e.py` —— 主体是真实 LLM 端到端，§一 硬约束 2 直接禁止；可测的纯 helper 价值低且 flaky。
+
+**两处 `scripts/**` 小修**（经 Lead 逐条批准，`git diff --stat` = 2 files / +18 / −3）：
+1. `migrate_backups_to_sync.py`：**删掉模块级 `sys.stdout/stderr.reconfigure`（原 :25-26），挪进 `main()` 开头 + `hasattr` 守卫**
+   （形状照 `mutation_probe.py:141-143` 的既有正确写法）⇒ **import 不再触碰 stdout**、CLI 行为逐字不变。
+   危害实证：旧形态下 `sys.stdout` 为 `StringIO` 时 `import` 就崩（`AttributeError: '_io.StringIO' object has no attribute 'reconfigure'`）
+   ⇒ 该模块从「可测」变成「不可测」，而它恰是唯一还带**不可逆动作**的脚本 ⇒ 越不可测越危险。
+   守卫形态：新测试 `tests/unit/test_script_migrate_backups_to_sync.py` 3 例（import 后 stdout 未变 + AST 断言「模块顶层不得出现
+   `*.reconfigure`」+ 两个此前完全测不了的纯函数）。**回归会以收集期 `AttributeError` 响亮失败，不会静默通过**。
+2. `revise_fidelity_calibrate.py`：给 `_percentile` **补 docstring**（零行为变更）——写明「按索引取、非线性插值」，
+   并声明「**与 `delta_anchoring_calibrate._quantile` 不是同一口径，两脚本的 p50 不可直接比较**」。
+   （两个脚本各钉一套口径是对的；缺的是**代码里没写下来**。）
+
+#### 3. 闸门（Lead 亲跑）
+
+| 闸门 | 结果 |
+|---|---|
+| `ruff check packages scripts tests skills` | `All checks passed!` |
+| `export_openapi` + `gen_frontend_types` | **109 paths / 145 schemas**，regen 后**零漂移** |
+| 全量 pytest（`.venv`，`-n 4`） | **3865 passed / 1 skipped / 1 xfailed / 0 failed**（431.92s，exit 0）—— 较批次十九 3816 **+49**，**逐项对得上**（dev-a 11 + dev-b 38） |
+| 树指纹（前后各一次） | **683 文件 / `d109ae1a…`**，**逐位一致**（670 → 683 = +13 新文件：6 规格 + 7 测试） |
+| **全量突变 `run_spec.py --all`** | **370/370 全捕获**（0 存活 / 0 中止 / 0 无效，**exit 0**）；还原校验 **OK 370 / 失败 0**；规格 52 → **58** |
+| 残留清点（三项） | `*.mutbak` **0**；源码域标记 **0**；**104 个被突变文件逐个与日志记录的还原 SHA256 相同（差异 0）** |
+| `validate_specs.py` 只读预检 | **58 文件 / 370 条 / 0 问题** |
+
+#### 4. 已知边界 / 登记待排期
+
+1. ⚠️ **`scripts/migrate_backups_to_sync.py` 是「跑一次就真动手」的脚本**：**无 `argparse`、无 `--help`、无 `--dry-run`**
+   （本批实测）⇒ 执行即 `ensure_key()` 写密钥 + `openssl` 加密 + **删源备份**（`shutil.rmtree`/`unlink`）。
+   ⇒ 本批**没有执行它**，验收改用 4 条只读探针。**建议下一批加 `--dry-run` / `--help`**（照 `world_switch.py` 默认 dry-run、
+   `inspect_stalled_runs.py` 故意不实现 `--apply` 的既有惯例），让不可逆动作**执行前可预览**。
+2. 两套突变执行器并存（21 条硬编码 + 370 条 specs）：本批只给 21 条补了**只读预检**，**未合并**——并入 §四命令清单需单独裁决。
+3. 两个 `*_calibrate` 的**读库路径**（`_gate_population` / `_adjacent_pairs`）与 `m1_report` 的 DB 渲染函数仍未覆盖：
+   需合成夹具造 `story_states`/`drafts`，成本收益待单独评。
+4. 第 1 层的**模块清单用精确集合相等**（刻意保留）：将来新增质量域模块会**强制**改动该断言 ⇒ 是「结构性提醒」，
+   代价是加模块时要多改一处。已评估过「子集 + 名册」方案（仓里 `test_readability_rules.py` 那族的用法），
+   **本批刻意选精确相等**：这个文件的存在意义就是「结构变化必须有人看」。
+
 ### Changed（2026-10-22 批次（十九）：装配缓存键第 4 次同形状 + 分发物版本漂移 + 质量域突变覆盖面 + 文档对账）
 
 > **来源**：用户指令「可以动手了，先掌握项目的情况」⇒ 先做三份**只读测绘**（质量域 / 装配-工作流-脚本域 /

@@ -22,9 +22,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
 DEST_ROOT = Path(r"D:\BaiduSyncdisk\NovelOS\backups")
 KEY_FILE = Path.home() / ".novelos" / "backup.key"
 OPENSSL = r"C:\Program Files\Git\mingw64\bin\openssl.exe"
@@ -136,6 +133,17 @@ def encrypt_dir(src: Path, dest: Path) -> None:
 
 
 def main() -> int:
+    # ⚠️ **重配 stdout/stderr 必须在这里，不能放模块级**（2026-10-22 批次二十修）：
+    # 模块级的副作用会让 ``import scripts.migrate_backups_to_sync`` **当场崩**——
+    # pytest 捕获期的 ``sys.stdout`` 没有 ``reconfigure`` 方法 ⇒ 任何 import 它的
+    # 测试都在**收集期**就炸 ⇒ 该脚本从此「不可测」，而它恰好是唯一还带不可逆动作
+    # 的脚本（越不可测越危险）。
+    # 形状照 ``scripts/mutation_probe.py`` 的既有正确写法：函数内 + 判 hasattr
+    # （管道重定向 / 嵌入调用时也没有该方法）。
+    # **CLI 行为不变**：作为脚本运行时仍在第一条 print 之前完成 UTF-8 重配。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     print(f"[目标] {DEST_ROOT}")
     print(f"[加密] {CIPHER} + pbkdf2 x{PBKDF2_ITER}（openssl）\n")
     ensure_key()
