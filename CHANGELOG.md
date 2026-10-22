@@ -5,6 +5,120 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-22 批次（十七）：CI 连续两次红 —— 一条前端竞态断言（本地全绿 / CI 恒红））
+
+> **来源**：用户问「项目目前是什么情况」⇒ 查 CI 时发现：批次十六的**两次** push
+> （`e467cf3` / `06581e1`）的 **web job 都红**，而**本地全量 vitest 780 全绿**。
+> ⚠️ **批次十六只动了 `scripts/` 与文档，根本没碰前端** ⇒ 红的是一条**早就在那里**的
+> 竞态断言，被连续两次 push 带上去。
+
+#### 1. 症状
+
+两条 CI run（`39654459279` / `39655441184`）的 **web job** 失败，
+**backend 与 e2e smoke 两个 job 全绿**；web job 内 **780 条里恰好 1 条红**：
+
+```
+FAIL src/pages/SimulationPanel.test.tsx > SimulationPanel > 按 number 列出章节；切换章节 ⇒ 重新取该章 delta
+AssertionError: expected "spy" to be called with arguments: [ 'p1', 'ch_1' ]
+Number of calls: 0
+```
+
+⇒ `listDeltas` **一次都没被调用过** ⇒ 断言抢在取数之前跑了。
+
+#### 2. 真因：**同步断言挂在 await 链后面 = 竞态**
+
+`SimulationPanel.tsx` 的两个 effect 是**串联**的：
+
+1. 取章节列表的 effect：`.then(rows => { setChapters(rows); setChapterId(...) })`
+   ⇒ **`chapterId` 在这里落定**；
+2. 取 delta 的 effect：依赖 `loadDeltas`（依赖 `chapterId`）
+   ⇒ **它要等第 1 步落定后才被调度**，且它是 React 的 **passive effect**（调度时机不定），
+   内部还要 `await` 一层。
+
+而原断言是**同步**的：
+
+```ts
+const sel = await screen.findByTestId('simulation-chapter-select');  // select 渲染出来了
+expect(listDeltas).toHaveBeenCalledWith('p1', 'ch_1');              // ← 同步断言，取数还没发生
+```
+
+⇒ **「组件已渲染」与「数据已取回」之间没有 happens-before 关系**。
+本地 CPU 空闲、mock 立即 resolve ⇒ effect 已被调度 ⇒ 绿；
+**CI 并行 57 个文件、CPU 争抢 ⇒ effect 调度被推后 ⇒ 红**。
+（同一条用例的**下一行**本来就用了 `waitFor` ⇒ 同一文件里两种观察方式并存，
+作者当时把「select 出现」当成了「delta 已取」。）
+
+#### 3. 修法：观察点落在行为之后，**判别点不变**
+
+```ts
+await waitFor(() => expect(listDeltas).toHaveBeenCalledWith('p1', 'ch_1'));
+```
+
+⚠️ **不改生产代码**（改实现去迁就测试 = 把量具的缺陷写进被测物）。
+**判别点一字未动**：仍要求 `listDeltas` 以 `('p1','ch_1')` 被调用过。
+
+#### 4. ⚠️ 改断言形态 ⇒ **必须重验判别力**（本仓纪律）
+
+判别面缩小是「看起来测到了」变「测不到」的最常见路径。新增突变规格
+`tests/mutation_specs/l11_simulation_panel_delta_fetch.py` 两条，各钉一个失效方向：
+
+| 突变 | 做法 | 预期红的那条 |
+|---|---|---|
+| `SIMDELTA-1` | `listDeltas(projectId, chapterId)` → `listDeltas(projectId, 'ch_1')`（恒取第一章） | 用例**后半句**（切到 ch_2 后不再重取） |
+| `SIMDELTA-2` | 撤掉「取 delta」那个 effect | 用例**前半句**（根本不取） |
+
+⇒ 实跑 **2/2 CAUGHT**、0 存活 0 中止，**还原校验 OK**。
+另用只读探针取证「**红的是预期那条**」（突变摘要只说 `1 failed`，不点名用例）：
+
+```
+[汇总]   Tests  1 failed | 31 passed (32)
+[失败用例] （共 1 条）
+   - SimulationPanel > 按 number 列出章节；切换章节 ⇒ 重新取该章 delta
+[还原] SHA 2acab9c0711bb8a6 == 前值 2acab9c0711bb8a6 ? True
+```
+
+⇒ **恰好 1 条红**、红的是目标用例、**其余 31 条全绿** ⇒ 判别点**专属**
+（不是公共 API 被同文件其它用例也调用）。
+
+#### 5. ⚠️ 同形状**全量扫过**（不是「改完一处就算」）
+
+本仓纪律要求「同一形状抓到第二次 ⇒ 沉淀」，但**反过来也要查**：这形状**还有没有第二处**。
+⇒ 写只读扫描器（`apps/web/src` 全量 `.test.ts*`），判据 = 「裸同步断言某个 api mock
+的调用」且「其前 8 行内既无 `waitFor`、也无 `fireEvent`/`userEvent`、也无 `await`」
+⇒ **前文没有任何东西保证被断言的行为已经发生**。
+
+结果 **5 处候选**，逐条判：
+
+| 位置 | 形态 | 判定 |
+|---|---|---|
+| `ContinuePanel.test.tsx:77` / `:132` | `expect(continuationApi.generate/adopt).toHaveBeenCalledWith(...)` | **安全** —— `fireEvent.click` 触发，调用在**事件处理器**里同步发生 |
+| `BranchesPanel.test.tsx:270` | `expect(storyStateApi.getBranchState).toHaveBeenCalledWith(...)` | **安全** —— 同上（`handleToggle` 里 `Promise.all([...])` 的数组**同步求值**） |
+| `ProjectInitPanel.test.tsx:1280` / `:1562` / `:1563` | `not.toHaveBeenCalled()` | **形态正确，无需改** —— 否定式断言本就该是**同步**的（要等反而等它发生）；且 `workflowsApi.get` 的两处调用点（`useProjectInitOrchestration.ts:397` / `:548`）都是**用户动作触发**，不是 mount 自动轮询 ⇒ 断言稳定 |
+
+⇒ **肯定式**竞态断言全仓**仅此 1 处**（已修）。**否定式**那 3 处属**另一个族**
+（断言时点太早 ⇒ 可能恒真 / 偶发红），**本批登记不修**。
+
+#### 6. 闸门
+
+| 闸门 | 结果 |
+|---|---|
+| 全量 pytest | **3796 passed / 1 skipped / 1 xfailed / 0 failed**（440.62s，项目 `.venv`，`-n 4`）—— 与批次十六基线**逐位一致**（零增减：新规格文件非 `test_` 前缀，不进收集面） |
+| 全量 vitest | **780 全绿**（57 文件） |
+| ruff | `All checks passed!`（`packages scripts tests`） |
+| OpenAPI | **109 paths / 145 schemas —— 零漂移**（`export_openapi` + `gen_frontend_types` regen 后 git 无变化） |
+| 树指纹 | **663 文件 / `7da524c2…`** 跑测前后**逐位一致**（662 → 663 = +1 新规格文件） |
+| smoke e2e | **PASS**（plan→write→review PAUSED→resume→commit 四步链路完好 + observer 内容在场 + SYNC OK） |
+| 突变（本批新增） | **2/2 CAUGHT**（`SIMDELTA-1` / `SIMDELTA-2`），0 存活 0 中止，**还原校验 OK** |
+
+⚠️ **全量 325 条突变本轮未重跑**：本批**后端源码零改动**（`git status` 逐条为证：
+只有前端测试 + 新规格文件 + 文档）⇒ 其余 323 条的判别面不变（批次十六实测 323/323 全捕获）
+⇒ **不声称「全量突变通过」**。
+
+⚠️ **CI 修复效果待 CI 验证**（推送后看 run；批次十六那两条红 run 是失败态，
+本条修复的正是它们指向的用例）。
+
+见下表。
+
 ### Added（2026-10-21 批次（十五）：模型连接层 —— 同一厂商的多个模型不再各填一遍 key/base_url）
 
 > **来源**：用户指令「你看一下软件的 LLM 配置的，我感觉现在的 LLM 配置有点不顺手，你来帮我优化一下；

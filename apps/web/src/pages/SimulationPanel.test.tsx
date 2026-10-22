@@ -221,7 +221,13 @@ describe('SimulationPanel', () => {
     const sel = await screen.findByTestId('simulation-chapter-select');
     expect(sel).toHaveTextContent('第1章 入夜');
     expect(sel).toHaveTextContent('第2章 旧账');
-    expect(listDeltas).toHaveBeenCalledWith('p1', 'ch_1');
+    // ⚠️ 这里**必须等**，不能同步断言（2026-10-22 修 CI flaky）：
+    // `chapterId` 由「取章节列表」那个 effect 的 .then 落定 ⇒ select 渲染出来时，
+    // 取 delta 的 effect（依赖 chapterId）**还没跑**；而那个 effect 又是
+    // React 的 passive effect（调度时机不定）⇒ 同步断言抢在它前面跑，
+    // 本地绿、CI 并行 57 文件时被推后 ⇒ 红（CI 实测 `Number of calls: 0`）。
+    // 判别点不变：仍要求 listDeltas 以 ('p1','ch_1') 被调用过。
+    await waitFor(() => expect(listDeltas).toHaveBeenCalledWith('p1', 'ch_1'));
 
     await userEvent.selectOptions(sel, 'ch_2');
     await waitFor(() => expect(listDeltas).toHaveBeenCalledWith('p1', 'ch_2'));
