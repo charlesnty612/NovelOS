@@ -109,10 +109,15 @@ await waitFor(() => expect(listDeltas).toHaveBeenCalledWith('p1', 'ch_1'));
 | 树指纹 | **663 文件 / `7da524c2…`** 跑测前后**逐位一致**（662 → 663 = +1 新规格文件） |
 | smoke e2e | **PASS**（plan→write→review PAUSED→resume→commit 四步链路完好 + observer 内容在场 + SYNC OK） |
 | 突变（本批新增） | **2/2 CAUGHT**（`SIMDELTA-1` / `SIMDELTA-2`），0 存活 0 中止，**还原校验 OK** |
+| 突变（全量） | **325/325 全捕获**（0 存活 / 0 中止 / 0 无效，**exit 0**），**残留清点三项**：`.mutbak` 空 / 标记形态 0 命中 / `git status` 见下 |
 
-⚠️ **全量 325 条突变本轮未重跑**：本批**后端源码零改动**（`git status` 逐条为证：
-只有前端测试 + 新规格文件 + 文档）⇒ 其余 323 条的判别面不变（批次十六实测 323/323 全捕获）
-⇒ **不声称「全量突变通过」**。
+⚠️ **残留清点抓到我自己的操作失误**（第 7 节详述）：全量突变在后台跑时我执行了
+`git add -A` + commit ⇒ 把执行器当时施加的突变态扫进了提交 `b3d1624` 并推送
+⇒ 该 run `39719293362` **CI 真的红了** ⇒ 已用 `448b5d0` 单独提交撤回。
+⇒ **`git status` 当时确实报了 `M packages/core/model_router/models.py`**，
+但它只会说「这个文件与 HEAD 不同」，**不会说「HEAD 本身是坏的」** ——
+是 `git log -S` 追出「这个突变串是哪条提交引入的」才定位到根因。
+**残留清点不可走过场。**
 
 ⚠️ **CI 修复效果待 CI 验证**（推送后看 run；批次十六那两条红 run 是失败态，
 本条修复的正是它们指向的用例）。
@@ -127,6 +132,42 @@ await waitFor(() => expect(listDeltas).toHaveBeenCalledWith('p1', 'ch_1'));
 
 ⇒ 本地全绿（Windows）**与** CI 全绿（Linux）**同时成立** ⇒ 该修复在两个平台上都有效
 （这正是本条教训的两端：**本地绿不等于 CI 绿**，反过来 CI 绿也不等于本地绿 —— 两端都要各跑一次）。
+
+#### 7. ⚠️ **操作失误留痕**：突变态误入提交并推送（Lead 自踩，已修复）
+
+**这一节是本批最贵的教训，比修复本身重要。**
+
+经过：全量突变（325 条）在**后台**跑着，我同时在**前台**做别的事 ——
+其中一件是「回填 CI 结果」的文档提交。执行器当时正跑到 `G5-M-FIELD-04`，
+把 `packages/core/model_router/models.py` 的 `ProfileTestResult.hint`
+临时改成了 `hint_declaration_removed`（该突变的 replacement 形态）。
+**我在那个窗口里执行了 `git add -A` + commit** ⇒ 突变态被扫进暂存区、进入提交、
+**并被推送**。执行器随后把工作区还原了 ⇒ 终局是
+**「工作区看着正常、HEAD 却是突变态」**。
+
+危害（实证，非推演）：`ProfileTestResult` 的响应键变成 `hint_declaration_removed`
+⇒ **模型契约被破坏** ⇒ CI **真的红了**（run `39719293362` backend job 失败）。
+
+| 环节 | 事实 |
+|---|---|
+| 坏提交 | `b3d1624`（提交消息写的是 `docs:`，**内容却夹带了 `.py` 的源码突变** —— 消息与内容不符） |
+| 推送 | 已推送到 `origin/master` |
+| CI 证据 | run `39719293362` = **failure**（backend job）⇒ 契约确实被破坏 |
+| 修复 | `448b5d0` 单独提交，把该文件恢复到正确态（`hint`），并**如实写明根因**（未与其它改动混提） |
+| 修复验证 | `tests/api/test_model_config_response_contract.py` + `test_frontend_types_contract.py` **54 passed**；修复后 CI run `39723043282` **3 job 全绿** ✓ |
+
+**为什么没被当场放过**：全量突变跑完后我做了**残留清点**（三项：`.mutbak` / 标记形态 /
+`git status`）⇒ `git status` 显示 `M packages/core/model_router/models.py`
+⇒ **若当时没查清就放过，坏的 HEAD 会留在仓库里**。但注意它的伪装形态：
+`git status` 只会说「这个文件与 HEAD 不同」，**不会说「HEAD 本身是坏的」** ——
+是 `git log -S` 追出「这个字符串是 `b3d1624` 引入的」才定位到根因。
+
+⇒ **新纪律（已入 AGENTS 坑区）**：
+① **执行器在飞时禁止对工作区做任何写操作** —— `git add`/`commit`/`checkout`/`lint --fix`/
+格式化/批量改文件，**一个都别做**。原先只写了「禁与 pytest 并发」，**不够**：
+真正的禁对象是**任何会读/写源码的东西**。
+② 提交前 `git diff --cached --stat` **逐条看暂存区** —— `docs:` 消息里出现 `.py` 就是警报。
+③ 提交窗口必须与执行窗口**互斥**（同样适用于 codegen、批量格式化、并发 agent 改文件）。
 
 见下表。
 
