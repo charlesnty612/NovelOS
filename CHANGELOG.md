@@ -121,6 +121,16 @@
 | 突变（**全量 328 条**） | **328/328 全捕获**（0 存活 / 0 中止 / 0 无效，**exit 0**），**残留清点三项均干净**（`.mutbak` 空 / 标记形态 0 命中 / `git status` 空），指纹与跑测前**逐位一致** |
 
 ⚠️ **本批突变规格 328 条**（上轮 325 + 本批 3 条 `l12_mutation_probe.py`）。
+
+**⇒ CI 回填：两条 run 均 3 job 全绿 ✓**
+
+| run | commit | 结果 |
+|---|---|---|
+| `39731479189` | `1652472`（本批主提交） | **success** —— backend / web / e2e smoke 全绿 |
+| `39737282059` | `5782a67`（留痕补记） | **success** —— 同上 |
+
+⇒ **版本 bump 到 3.10.0 之后，Linux 上的 3802 条用例仍全绿**（版本改动没打断
+`test_openapi_contract` / `test_startup_version_check` 这类读版本的用例）。
 ⚠️ **本批改了多个突变目标文件的 docstring**（`quality/models.py`、`context_engine/cache.py`、
 `context_engine/director_input.py`、`api/routers/__init__.py`、`simulation/service.py`、
 `domain/knowledge/models.py` 等）⇒ **锚点可能被自己的改动打断** ⇒ 收尾**必跑只读预检**
