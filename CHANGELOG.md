@@ -131,6 +131,36 @@
 
 ⇒ **版本 bump 到 3.10.0 之后，Linux 上的 3802 条用例仍全绿**（版本改动没打断
 `test_openapi_contract` / `test_startup_version_check` 这类读版本的用例）。
+
+### 补记（批次十八之二）：历史 tag 与 `[3.6.0]` 段补齐
+
+**缺什么**：`git tag` 最高只到 `v3.5.0` ⇒ **v3.6.0 / v3.7.0 / v3.8.0 / v3.9.0 四个 tag 全缺**；
+CHANGELOG 的 `## [3.6.0]` 段也缺（3.5.0 段与 3.7.0 段之间没有它）。
+
+**真相：`[3.6.0]` 段不是「没写」，是后来被**合并**掉了。**
+`9583a91`（V3.6.0 发版）时它**存在**；`f3a994c`（V3.7.0+V3.8.0 同窗发版）把它**整段删除**，
+同时把 V3.6 的 4 个小节（Added / Fixed / Changed / Known Issues）**并进了 `[3.7.0]` 段**
+⇒ **内容没丢，是版本段被合并**。
+
+⇒ 补法 = 把那 4 个小节**提回**独立版本段（= 恢复 `9583a91` 时的原结构），
+**不是**再插一份（那会与 `[3.7.0]` 段里的同一份内容重复）。用脚本做，末尾断言
+「除新增的标题行外全文逐字相同」⇒ **内容零丢失**（BOM 亦保持）。
+
+**tag 点的判据**（照 v3.5.0 的既有惯例：**tag 打在「该版本号已对齐 + CHANGELOG 版本段已写好」之后**）：
+
+| tag | commit | 依据 |
+|---|---|---|
+| `v3.6.0` | `9583a91` | 该处 `pyproject` = **3.6.0** 且 CHANGELOG 有 `[3.6.0]` 段 |
+| `v3.7.0` | `f3a994c` | **「同窗发版」**：pyproject 从 3.6.0 **直接跳到 3.8.0**（`version = "3.7.0"` 全历史 **0 命中**）⇒ 3.7.0 与 3.8.0 同一时刻发布 ⇒ **同点打 tag** |
+| `v3.8.0` | `f3a994c` | 同上 |
+| `v3.9.0` | `df98091` | `52f639f`（版本号对齐 3.8.0→3.9.0）处 `[3.9.0]` 段数 = **0**，`df98091` 处 = **1** ⇒ 按惯例取后者 |
+| `v3.10.0` | `a47c08a` | 本批 CI 回填提交（版本号 3.10.0 与 `[3.10.0]` 段均已在位） |
+
+⚠️ **tag 类型**：一律**轻量**（`git cat-file -t` = `commit`），与既有 18 个 tag 一致
+（不与 annotated 混用 —— 混用会让 `git describe` 的输出形态前后不一致）。
+
+⇒ 已推送；远端核对：`gh api repos/charlesnty612/NovelOS/tags` 取回 5 个 tag 的 sha
+与本地**逐位一致**。⇒ **本仓现有 23 个 tag，覆盖 v1.0.0 → v3.10.0 连续全部版本。**
 ⚠️ **本批改了多个突变目标文件的 docstring**（`quality/models.py`、`context_engine/cache.py`、
 `context_engine/director_input.py`、`api/routers/__init__.py`、`simulation/service.py`、
 `domain/knowledge/models.py` 等）⇒ **锚点可能被自己的改动打断** ⇒ 收尾**必跑只读预检**
@@ -3960,6 +3990,8 @@ gate 分档走 `issue_gate` **现推**而非读落库字段（实测该库 0/960
 ### Fixed
 - word_band 低目标 floor 抬升导致 low>high 倒挂：high 钳制 `max(high, low)` 并锚定边界测试（恰 ±15%/±30% 判定方向用例固定）。
 
+
+## [3.6.0] - 2026-08-27
 
 ### Added（V3.6「流式根治挂起 + 前缀缓存重排 + commit 三路并发」）
 - **OpenAI 兼容 Provider 流式化**：`complete()` 改 `client.stream` + SSE 逐行解析（`data: {...}` / `[DONE]`），并加 `time.monotonic()` 总时长硬顶 deadline——根治非流式下整连接挂起而 read timeout（字节间隔语义）不生效的问题。`health_check` 保持非流式。
