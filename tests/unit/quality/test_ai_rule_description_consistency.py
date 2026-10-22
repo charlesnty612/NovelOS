@@ -94,3 +94,28 @@ def test_rule_description_candidate_count_matches_module_docstring():
             f"{rule_id} 的候选数内部不自洽：{m_desc} 条误报 + {t_doc} 条真 "
             f"= {m_desc + t_doc}，但 description 声称共 {n_desc} 条"
         )
+
+
+# ---------------------------------------------------------------------------
+# N-2（2026-10-23 task-16 Q-4）：过期值不许排在当前值前面
+# ---------------------------------------------------------------------------
+
+
+def test_dialogue_echo_description_leads_with_the_current_numbers():
+    """AI-DIALOGUE-ECHO 的 description 必须**先说当前口径**，历史口径另起一句。
+
+    ⚠️ **缺陷形状**（「同一份文档里两个数，读者先读到过期的那个」）：
+    原 description 写「本仓 48 章 **34 对 / 24 章**命中（守卫生效后 23 对 / 18 章）」
+    ⇒ 读者先读到**过期**的 34/24，当前值反而缩在括号里 ⇒ 照它调阈值会调偏。
+    ⇒ 判别：当前值（23 对 / 18 章）的位置必须**早于**历史值（34 对 / 24 章）。
+    """
+    desc = _rule_description("AI-DIALOGUE-ECHO")
+    current = desc.find("23 对 / 18 章")
+    historical = desc.find("34 对 / 24 章")
+    assert current != -1, f"description 里找不到当前口径「23 对 / 18 章」：\n    {desc!r}"
+    assert historical != -1, f"description 里找不到历史口径「34 对 / 24 章」：\n    {desc!r}"
+    assert current < historical, (
+        "当前口径的数字必须排在历史口径**前面**——"
+        "读者先读到的必须是现在生效的那组数\n"
+        f"    desc={desc!r}"
+    )

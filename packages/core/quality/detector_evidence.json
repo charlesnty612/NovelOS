@@ -3,16 +3,16 @@
   "table_id": "novelos.detector_evidence",
   "generated_for": "人工维护的检测器效果证据表（human-maintained evidence table）。**不是自动生成的产物**——没有任何脚本会写这个文件；它的内容靠人手维护，由 scripts/detector_evidence_check.py **只读**地与代码里的实际值比对。",
   "generated_by": "packages/core/quality/detector_evidence.json（人工维护，无生成器）",
-  "last_reviewed": "2026-10-20",
+  "last_reviewed": "2026-10-23",
   "maintainer_contract": [
     "① 改任何检测器的阈值 / 词表 / 正则 / severity ⇒ **必须**同时改本表对应条目，否则 scripts/detector_evidence_check.py 退出码 1（漂移）并在输出里点名。",
     "② 本表**不复制**「定阈依据」的论证正文，只存 `basis_ref`（权威出处指针）+ 一句 `basis_summary`（人写摘要）。复制论证正文等于制造第二份要同步的文本——那正是本表要治的病。",
-    "③ `human_side` / `generated_side` 里的数字**无法由代码验证**（需要语料复算），看守脚本只核 `code_refs` / `word_lists` / `regexes` / `probes` 四类机器可判项。数字本身的真伪靠 `recompute_entry` 指向的复算入口人工重算。",
+    "③ `human_side` / `generated_side` 里的**数字本身**无法由代码验证（需要语料复算）⇒ 数字的**真伪**靠 `recompute_entry` 指向的复算入口人工重算；但数字的**结构自洽**由看守机器判：`corpus` ∈ `corpora` 键集、`evidence_status` ∈ `status_vocabulary`、`measured` 由定义派生（两侧各有实测数字 + corpus + chapters_total 全非 null）、`separation` 落在两侧 rate 的**舍入包络**内、`chapters_total` 与 `corpora[corpus].chapters` 相等（2026-10-23 task-16 Q-1 补齐）。",
     "④ 没有实测数字的规则**一律写 null + evidence_status=missing**，不许从注释里「看起来像数字」的片段硬抠。"
   ],
   "status_vocabulary": {
-    "measured": "人类侧与生成侧两侧都有实测数字（两侧皆 0 也算 measured，但须在 notes 里说明「机会数为 0」与「测出来是 0」的差别）。",
-    "partial": "只有一侧有数字，或两侧数字的语料标识/口径不全。",
+    "measured": "人类侧与生成侧两侧都有实测数字，**且**两侧都登记了 `corpus` 与 `chapters_total`（两侧皆 0 也算 measured，但须在 notes 里说明「机会数为 0」与「测出来是 0」的差别）。",
+    "partial": "只有一侧有数字，或两侧数字的语料标识/口径不全（如 `corpus` 或 `chapters_total` 为 null）。",
     "missing": "本仓没有任何实测数字 ⇒ 数字字段一律 null。",
     "deprecated": "该算子已废弃、从未发货（不在 AI_PATTERN_RULES 内）。"
   },
@@ -25,7 +25,9 @@
       "raw_chars": 38566,
       "note": "visible_chars 与 raw_chars 是两个口径（37,806 = 去空白可见字；38,566 = 原始字符数），不是矛盾数字。",
       "location": "NovelOS-Content: reference-books/榜一-快穿之人渣洗白手册/侯府凤凰男/*.txt（内容仓，只读；正文按三仓分离不进软件仓）",
-      "collected_on": "2026-09-16 ~ 2026-10-15"
+      "collected_on": "2026-09-16 ~ 2026-10-15",
+      "in_version_control": false,
+      "reproducible_by": "本机"
     },
     "dev_db_92ch": {
       "label": "本库 8 项目全部最新草稿（生成侧）",
@@ -33,7 +35,9 @@
       "chapters": 92,
       "visible_chars": 263347,
       "location": "data/novelos.db（dev 库，只读）",
-      "collected_on": "2026-09-18"
+      "collected_on": "2026-09-18",
+      "in_version_control": false,
+      "reproducible_by": "本机"
     },
     "dev_db_97ch": {
       "label": "dev 库全库各章最新版（生成侧）",
@@ -41,7 +45,9 @@
       "chapters": 97,
       "visible_chars": 276500,
       "location": "data/novelos.db（dev 库，只读）",
-      "collected_on": "2026-10-15"
+      "collected_on": "2026-10-15",
+      "in_version_control": false,
+      "reproducible_by": "本机"
     },
     "book01_48ch": {
       "label": "新书 01（prj_bcb9d1930bd4）全弧",
@@ -50,7 +56,9 @@
       "visible_chars": 122350,
       "note": "**字数口径冲突**：短段族记 125,024 可见字（2026-09-27），可读性族记 122,350 可见字（2026-09-17）。两次采集时点不同、快照不同，两处都如实保留，不合并。",
       "location": "data/novelos.db（dev 库，只读）",
-      "collected_on": "2026-09-17 / 2026-09-27"
+      "collected_on": "2026-09-17 / 2026-09-27",
+      "in_version_control": false,
+      "reproducible_by": "本机"
     },
     "book01_short_para_48ch": {
       "label": "新书 01（prj_bcb9d1930bd4）全弧——短段族口径",
@@ -58,7 +66,9 @@
       "chapters": 48,
       "visible_chars": 125024,
       "location": "data/novelos.db（dev 库，只读）",
-      "collected_on": "2026-09-27"
+      "collected_on": "2026-09-27",
+      "in_version_control": false,
+      "reproducible_by": "本机"
     },
     "book01_arc_48ch": {
       "label": "新书 01 全弧（破折号口径）",
@@ -66,7 +76,9 @@
       "chapters": 48,
       "visible_chars": 63625,
       "location": "data/novelos.db（dev 库，只读）",
-      "collected_on": "2026-09-16"
+      "collected_on": "2026-09-16",
+      "in_version_control": false,
+      "reproducible_by": "本机"
     },
     "external_batch_33ch": {
       "label": "外部对照研究移植批次的生成侧语料",
@@ -74,7 +86,9 @@
       "chapters": 33,
       "visible_chars": 87599,
       "location": "data/novelos.db（dev 库，只读）",
-      "collected_on": "2026-09-15"
+      "collected_on": "2026-09-15",
+      "in_version_control": false,
+      "reproducible_by": "本机"
     },
     "human_sample_4": {
       "label": "author_style_samples（明确标注的人类原文节选）",
@@ -82,7 +96,9 @@
       "chapters": 4,
       "visible_chars": 9029,
       "location": "data/novelos.db（dev 库，只读）",
-      "collected_on": "2026-09-18"
+      "collected_on": "2026-09-18",
+      "in_version_control": false,
+      "reproducible_by": "本机"
     },
     "human_sample_1_batch": {
       "label": "外部研究移植批次的人类样章",
@@ -90,7 +106,9 @@
       "chapters": 1,
       "visible_chars": 4843,
       "location": "data/novelos.db（dev 库，只读）",
-      "collected_on": "2026-09-15"
+      "collected_on": "2026-09-15",
+      "in_version_control": false,
+      "reproducible_by": "本机"
     }
   },
   "rules": [
@@ -206,7 +224,13 @@
           "text": "他忽然停下。风从窗缝里挤进来。他抬头看了看梁上的灰。屋里安静得能听见瓦响。他慢慢坐回原处。",
           "why": "「忽然」只 1 次、其余词表零命中 ⇒ 不应触发（守护「弱词层不命中即报」这条纪律本身没被拆掉）。"
         }
-      ]
+      ],
+      "severity_escalation": {
+        "to": "error",
+        "kind": "count",
+        "value": 10
+      },
+      "description_numbers": []
     },
     {
       "rule_id": "AI-TRIPLET-OPENING",
@@ -253,6 +277,21 @@
           "expect_hit": false,
           "text": "月光洒在窗台上。夜风穿过回廊。月光落了一地。更鼓敲过三响。",
           "why": "最长同开头 run = 2 ⇒ 不应命中（防止「阈值改成 2」这类放宽被放过）。"
+        }
+      ],
+      "severity_escalation": {
+        "to": "error",
+        "kind": "count",
+        "value": 5
+      },
+      "description_numbers": [
+        {
+          "kind": "inline_literal",
+          "file": "packages/core/quality/ai_patterns_sentence.py",
+          "function": "_scan_triplet_opening",
+          "value": 3,
+          "note": "「连续 3 句及以上」的内联阈值（不是 _WEAK_WORD_PER_WORD_LIMIT——同值不同常量）",
+          "in_description": "3"
         }
       ]
     },
@@ -309,6 +348,21 @@
           "expect_hit": false,
           "text": "他推开门。夜风穿过回廊。他没有说话。更鼓敲过三响。",
           "why": "最长 run = 2 ⇒ 不应命中。"
+        }
+      ],
+      "severity_escalation": {
+        "to": "error",
+        "kind": "count",
+        "value": 5
+      },
+      "description_numbers": [
+        {
+          "kind": "inline_literal",
+          "file": "packages/core/quality/ai_patterns_sentence.py",
+          "function": "_scan_pronoun_pile",
+          "value": 3,
+          "note": "「连续 3 句及以上」的内联阈值（不是 _WEAK_WORD_PER_WORD_LIMIT——同值不同常量）",
+          "in_description": "3"
         }
       ]
     },
@@ -385,6 +439,47 @@
           "text": "他关上门。\n\n雨停了。巷子里的水顺着墙根流下去。",
           "why": "末段无套话短语 ⇒ 不应命中（守护「短语表没有被放宽成子串匹配」）。"
         }
+      ],
+      "description_numbers": [
+        {
+          "kind": "table_field",
+          "path": "human_side.chapters_total",
+          "value": 19.0,
+          "in_description": "19"
+        },
+        {
+          "kind": "table_text",
+          "value": 2030.0,
+          "in_description": "2030"
+        },
+        {
+          "kind": "table_text",
+          "value": 41.0,
+          "in_description": "41"
+        },
+        {
+          "kind": "table_field",
+          "path": "word_lists[0].count",
+          "value": 12.0,
+          "in_description": "12"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.chapters_total",
+          "value": 97.0,
+          "in_description": "97"
+        },
+        {
+          "kind": "table_text",
+          "value": 1.0,
+          "in_description": "1"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.hits",
+          "value": 0.0,
+          "in_description": "0"
+        }
       ]
     },
     {
@@ -431,6 +526,15 @@
           "value": 1.0,
           "basis_ref": "packages/core/quality/ai_patterns_sentence.py:82-92",
           "basis_summary": "人类 0.19/千字 ×5 ≈ 0.95 → 取 1.0：对榜一留约 5 倍宽容，对生成侧 1.73 立即报警。3.5 落在两侧之外（连自家均值都够不到）＝死规则。"
+        },
+        {
+          "name": "DEFAULT_DASH_ERROR_MULTIPLIER",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "DEFAULT_DASH_ERROR_MULTIPLIER",
+          "kind": "value",
+          "value": 2,
+          "basis_ref": "packages/core/quality/ai_patterns_sentence.py:102-110",
+          "basis_summary": "破折号/省略号命中率的 error 升级乘数——2026-10-23 task-16 Q-3：此前是内联字面量 2，证据表钉不到 ⇒ 改 2→3 表仍显示一致；现提为命名常量可被本表钉住。"
         }
       ],
       "word_lists": [],
@@ -447,8 +551,53 @@
       "known_dead_rules": [
         "**初版阈值 6 曾是死规则**：本仓旧语料实测 mean 2.33 / p90 3.89 / **max 4.73** 每千字——连自家分布上沿都够不到 6，落在实测分布之外 ⇒ 永不触发。2026-09-15 降到 3.5（p85），2026-09-16 再降到 1.0（按人类基线）。"
       ],
-      "conflicts": [],
-      "probes": []
+      "conflicts": [
+        "R 值口径：本字段的 9.34 与本条目两侧**已存到两位小数**的 rate（人侧 0.19 / 生侧 1.73）派生值 9.1053 不同；两者之差落在两侧 rate 的**舍入包络** [1.725/0.195, 1.735/0.185] = [8.846, 9.378] 内 ⇒ **不判为口径分叉**。⚠️ 但**哪一对未舍入的 rate 得出 9.34，本表未登记**（表内只存两位小数）⇒ 该数字的来源仍待人工确认。（2026-10-23 task-16 Q-1④ 登记：此前本条 conflicts 为空 ⇒ 该口径此前未登记；当时的看守判据是「separation 必须等于表内 rate 的比值」，会把舍入误差误判成分叉 ⇒ 判据改为舍入包络。）"
+      ],
+      "probes": [
+        {
+          "text": "他愣了一下——不是惊愕，是某种更深的疲惫。窗外雨声不停——像是有人在敲。桌上的灯忽明忽暗——谁也没去管它。她终于开口——声音很轻——像怕惊动什么似的。那句没说完的话一直悬着——像一枚不肯落地的棋子。屋里没有人动——连呼吸都放轻了。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": true,
+          "why": "破折号密度超阈值（阈值 1.0/千字）⇒ 应命中；本探针钉住「阈值常量 DEFAULT_DASH_THRESHOLD_PER_1K」与「升级乘数 DEFAULT_DASH_ERROR_MULTIPLIER」两处（前者改小 / 后者改大都必红）。"
+        },
+        {
+          "text": "他愣了一下，不是惊愕，是某种更深的疲惫。窗外雨声不停，像是有人在敲。桌上的灯忽明忽暗，谁也没去管它。她终于开口，声音很轻，像怕惊动什么似的。那句没说完的话一直悬着，像一枚不肯落地的棋子。屋里没有人动，连呼吸都放轻了。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": false,
+          "why": "同样长度但零破折号 ⇒ 不应命中（守护「密度阈值」没被改成 0）。"
+        }
+      ],
+      "severity_escalation": {
+        "to": "error",
+        "kind": "rate_multiplier",
+        "value": 2
+      },
+      "description_numbers": [
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_sentence",
+          "attr": "DEFAULT_DASH_THRESHOLD_PER_1K",
+          "value": 1.0,
+          "in_description": "1.0"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.rate_per_1k",
+          "value": 0.19,
+          "in_description": "0.19"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.rate_per_1k",
+          "value": 1.73,
+          "in_description": "1.73"
+        },
+        {
+          "kind": "external",
+          "value": 3.5,
+          "note": "**历史阈值**：破折号密度阈值曾取 3.5（落在实测分布之外 ⇒ 死规则），2026-09-16 收紧到 1.0。历史值保留在 description 里作为沿革说明。",
+          "in_description": "3.5"
+        }
+      ]
     },
     {
       "rule_id": "AI-EXPLAIN-TONE",
@@ -506,7 +655,13 @@
           "text": "他来得迟。事情已经定了，谁也改不了。",
           "why": "无解释连接词 ⇒ 不应命中。"
         }
-      ]
+      ],
+      "severity_escalation": {
+        "to": "error",
+        "kind": "count",
+        "value": 5
+      },
+      "description_numbers": []
     },
     {
       "rule_id": "AI-CONTRAST-PAIR",
@@ -539,7 +694,7 @@
           0.9
         ]
       },
-      "separation": 6.63,
+      "separation": 3.45,
       "source": {
         "collected_on": "2026-09-15 / 2026-09-16",
         "recompute_entry": "scripts/ai_tone_calibrate.py",
@@ -570,10 +725,41 @@
       "known_dead_rules": [],
       "conflicts": [
         "人侧密度三值并存：0.22（常量注释）/ 0.12（测试 docstring）/ 0.00（roadmap F-12）——待裁决（需重跑复算入口）。",
-        "R 值口径冲突：CHANGELOG 2026-09-15 记「对举 R=6.63」（33 章 87599 字 vs 3 篇 8665 字），与常量注释的 R=3.4（=0.76/0.22）不是同一对数字。",
+        "R 值口径冲突：**本字段原先记的 6.63 已改为按本条目两侧 rate 派生的 3.45**（0.76/0.22）——CHANGELOG 2026-09-15 记的「对举 R=6.63」（33 章 87599 字 vs 3 篇 8665 字），与常量注释的 R=3.4（=0.76/0.22）不是同一对数字。",
         "本仓两代测量（0.76 与 0.90）差 18%，语料不同（33 章 vs 24 章）。"
       ],
-      "probes": []
+      "probes": [
+        {
+          "text": "他不是不敢说，是不知道该怎么说。这事不是她做错了，是他们一开始就选错了路。她不是不生气，是气到连话都说不出来。那天不是偶然，是早就注定的结局。我不是没听见，是故意装作没听见。他要的答案不是我不知道，是我不肯给。这局面不是还能挽回，是早就无可挽回。他站在门边没有动。院子里的槐树落了一地叶子。远处的更夫敲过三更。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": true,
+          "why": "「不是…而是…」对举结构密度超阈值（1.5/千字）⇒ 应命中；本探针钉住对举正则与密度阈值两侧。"
+        },
+        {
+          "text": "他不敢说，不知道该怎么说。这事她做错了，他们一开始就选错了路。她生气，气到连话都说不出来。那天偶然，早就注定的结局。我没听见，故意装作没听见。他要的答案我不知道，我不肯给。这局面还能挽回，早就无可挽回。他站在门边没有动。院子里的槐树落了一地叶子。远处的更夫敲过三更。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": false,
+          "why": "同长度但零对举结构 ⇒ 不应命中（守护正则没被放宽成子串匹配）。"
+        }
+      ],
+      "description_numbers": [
+        {
+          "kind": "external",
+          "value": 3.4,
+          "note": "**外部研究值**：来源研究（lieflat-less-ai-tone）的对举 R=3.4，不是本仓实测值（本仓实测派生值 = 3.45）。",
+          "in_description": "3.4"
+        },
+        {
+          "kind": "external",
+          "value": 0.73,
+          "note": "**外部研究值**：来源研究的生成侧对举密度 0.73/千字。",
+          "in_description": "0.73"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.rate_per_1k",
+          "value": 0.22,
+          "in_description": "0.22"
+        }
+      ]
     },
     {
       "rule_id": "AI-SHORT-PARA",
@@ -683,7 +869,101 @@
       "conflicts": [
         "生成侧 260 命中 / 2.080（常量注释 + 规则 description）vs 258 命中 / 2.064（测试常量）——**2026-10-20 批次十三已裁决并订正**：说话人行守卫宽度收窄（{1,6} → {1,3}）后 2 段回到命中 ⇒ 260 / 2.080 是当前代码口径下的终值；测试常量已改为 2.080（未复算，理由见本条 generated_side.note）。"
       ],
-      "probes": []
+      "probes": [
+        {
+          "text": "夜深了。\n雨停了。\n灯灭了。\n门开了。\n人走了。\n风起了。\n天亮了。\n信到了。\n油灯灭了。\n巷子空了。\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人，又低头把那一行数目重抄了一遍，墨迹在纸面上洇开一小团，迟迟没有干。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": true,
+          "why": "叙述短句独立成段的密度超阈值（1.0/千字）⇒ 应命中；本探针钉住短段口径（段切分 + 排除正则 + 12 字窗口）。"
+        },
+        {
+          "text": "夜深了，雨停了，灯灭了，门开了，人走了。\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人，又低头把那一行数目重抄了一遍，墨迹在纸面上洇开一小团，迟迟没有干。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": false,
+          "why": "同样字数但短句**不成段**（连成一段）⇒ 不应命中（守护「段切分口径」没被改回另一种切法）。"
+        }
+      ],
+      "description_numbers": [
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "_PARA_OPENER_MAX_CHARS",
+          "value": 12.0,
+          "in_description": "12"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.rate_per_1k",
+          "value": 0.212,
+          "in_description": "0.212"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.chapters_total",
+          "value": 19.0,
+          "in_description": "19"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.hits",
+          "value": 8.0,
+          "in_description": "8"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.chapters_with_hits",
+          "value": 6.0,
+          "in_description": "6"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_SHORT_PARA_RATE_PER_1K",
+          "value": 1.0,
+          "in_description": "1"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_ANTHRO_VEHICLE_MIN_COUNT",
+          "value": 3.0,
+          "in_description": "3"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.prose_only.rate_per_1k",
+          "value": 0.132,
+          "in_description": "0.132"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.prose_only.chapters_over_threshold",
+          "value": 0.0,
+          "in_description": "0"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.rate_per_1k",
+          "value": 2.08,
+          "in_description": "2.080"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.chapters_total",
+          "value": 48.0,
+          "in_description": "48"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.hits",
+          "value": 260.0,
+          "in_description": "260"
+        },
+        {
+          "kind": "table_field",
+          "path": "separation",
+          "value": 9.8,
+          "in_description": "9.8"
+        }
+      ]
     },
     {
       "rule_id": "AI-ANTHRO-VEHICLE",
@@ -691,19 +971,19 @@
       "family": "ai_pattern",
       "severity": "warning",
       "deprecated": false,
-      "evidence_status": "measured",
+      "evidence_status": "partial",
       "threshold_summary": "同章命中 ≥3 处才报（无 error 档）——单例不判，因为正则分不出「理想化职业人格」（生成侧）与「具体个人」（人类侧）。",
       "human_side": {
         "corpus": null,
         "hits": 0,
         "rate_per_1k": 0.0,
-        "note": "本仓生成侧与人类侧均零命中 ⇒ 无数据可校（休眠守卫）。"
+        "note": "本仓生成侧与人类侧均零命中 ⇒ 无数据可校（休眠守卫）。⚠️ **语料标识未登记**（corpus=null）——查不到当初扫的是哪份语料，故按 status_vocabulary 只能算 partial，不算 measured。"
       },
       "generated_side": {
         "corpus": null,
         "hits": 0,
         "rate_per_1k": 0.0,
-        "note": "同上。来源研究称 R=7.3（理想化职业人格作喻体），但那不是本仓实测。"
+        "note": "同上（corpus 未登记 ⇒ partial）。来源研究称 R=7.3（理想化职业人格作喻体），但那不是本仓实测。"
       },
       "separation": null,
       "source": {
@@ -758,6 +1038,14 @@
           "text": "他像一位老师那样站着。她像一名工匠那样低着头。",
           "why": "只有 2 处 ⇒ 不应命中（守护「单例不判」这条纪律）。"
         }
+      ],
+      "description_numbers": [
+        {
+          "kind": "external",
+          "value": 7.3,
+          "note": "**外部研究值**：来源研究称拟人化喻体 R=7.3，不是本仓实测（本仓两侧皆零命中 ⇒ 无 R）。",
+          "in_description": "7.3"
+        }
       ]
     },
     {
@@ -788,7 +1076,8 @@
         "max_paragraph_chars": 212,
         "chapters_over_threshold": null,
         "note": "最多 9 段/章（ch30）。>120 字段落：我们 46 段 vs 榜一 2 段（779 段的 0.26%）。⚠️ 阈值 140 距人类最大段长 135 只剩 5 字余量（登记的遗留项）。",
-        "paragraphs_over_120": 46
+        "paragraphs_over_120": 46,
+        "chapters_total": 48
       },
       "separation": null,
       "source": {
@@ -839,7 +1128,69 @@
       "known_false_positives": [],
       "known_dead_rules": [],
       "conflicts": [],
-      "probes": []
+      "probes": [
+        {
+          "text": "她把信纸摊在桌上，一字一句地读完了那封没有落款的信，读到第三遍的时候才隐约觉出不对——信里提到的那场大火，发生的时间比父亲离家那天早了整整半年，而那时候父亲明明还在京中任职，连家书都每月一封从未断过。她把这几处日期在心里来回算了三遍，越算越觉得后背发凉，于是把信纸重新折好，塞回信封，压在了案头那摞账册的最底下。\n\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人，又低头把那一行数目重抄了一遍，墨迹在纸面上洇开一小团，迟迟没有干。\n\n她伸手把窗支子推开一条缝，夜风裹着凉意灌进来，吹得案上的纸角翻起又落下，她伸手压住，忽然想起小时候母亲也是这样压着信纸。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": true,
+          "why": "存在超长段（>140 可见字 ⇒ error 档）⇒ 应命中；本探针钉住 warn/error 两档的字符阈值（DEFAULT_LONG_PARA_WARN_CHARS / _ERROR_CHARS）。"
+        },
+        {
+          "text": "他把手里的账册合上，说：“外头雨大，明日再算也不迟。”\n\n老账房点头应了，把笔搁在砚台边，说：“那就等明日的账。”\n\n她站在门槛上没有进去，只问：“信里那件事，当真要回他？”\n\n“先别急。”他把窗支子推开一条缝，“等天亮再说。”\n\n外头巷子里有人挑着担子过去，扁担吱呀吱呀响个不停。\n\n“这雨，下到什么时候才停。”她自言自语地说了一句。\n\n他没有答话，只把桌上的灯芯挑亮了些，火苗晃了两下。\n\n“你若要走，就把钥匙留下。”她终于转过身来看着他。\n\n他伸手在桌面上敲了两下，说：“钥匙我带着。”\n\n院子里那棵老槐落了一地叶子，扫帚扫过去沙沙地响。\n\n“你说过会留下。”她的声音低了下去，“说过两回。”\n\n他说不出话来，只是把手按在窗棂上，指节慢慢泛了白。\n\n“天要亮了。”远处有人喊了一声，更夫的梆子跟着响。\n\n她把那封没有落款的信重新折好，塞回信封里，压在账册底下。\n\n“随你。”她终于开口，“只是别怪我没拦过你。”\n\n门轴吱呀一响，夜风灌进来，把案上的纸吹得翻起一角。\n\n“也好。”他轻声说，像是说给自己听的，“也好。”\n\n她没有再问下去，转身把灯吹灭了一半，屋里暗下来。\n\n雨声慢慢小了，檐下的水线断断续续地滴着。\n\n两个人谁也没有再说话，各自守着自己那一半黑暗。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": false,
+          "why": "同样字数但无任何超长段（每段均 <100 字）⇒ 不应命中（守护长段判据没被改成「整章算一段」）。"
+        }
+      ],
+      "severity_escalation": {
+        "to": "error",
+        "kind": "chars",
+        "value": 140
+      },
+      "description_numbers": [
+        {
+          "kind": "table_text",
+          "value": 5.0,
+          "in_description": "5"
+        },
+        {
+          "kind": "table_text",
+          "value": 6.0,
+          "in_description": "6"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_LONG_PARA_WARN_CHARS",
+          "value": 100.0,
+          "in_description": "100"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_LONG_PARA_MIN_COUNT",
+          "value": 2.0,
+          "in_description": "2"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_SHORT_PARA_RATE_PER_1K",
+          "value": 1.0,
+          "in_description": "1"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_paragraph",
+          "attr": "DEFAULT_LONG_PARA_ERROR_CHARS",
+          "value": 140.0,
+          "in_description": "140"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.paragraphs_total",
+          "value": 779.0,
+          "in_description": "779"
+        }
+      ]
     },
     {
       "rule_id": "AI-DIALOGUE-LOW",
@@ -863,7 +1214,8 @@
         "dialogue_ratio": 0.114,
         "dialogue_chars": 13941,
         "visible_chars": 122350,
-        "note": "贴着本仓题材包 style_constraints 对话区间 10~32% 的地板。"
+        "note": "贴着本仓题材包 style_constraints 对话区间 10~32% 的地板。",
+        "chapters_total": 48
       },
       "separation": null,
       "source": {
@@ -899,7 +1251,71 @@
       "conflicts": [
         "**该指标已被明令「不可作处方」**（AGENTS F-19）：对话占比是可优化指标，<8% error 档连同题材包/生成驱动的「对话占比 ≥20%」硬指标一起施行后，模型为凑指标编造对白并破人设（ch3）/ 产出接龙零推进的灌水对白（ch33）。"
       ],
-      "probes": []
+      "probes": [
+        {
+          "text": "她把信纸摊在桌上，一字一句地读完了那封没有落款的信，读到第三遍的时候才隐约觉出不对——信里提到的那场大火，发生的时间比父亲离家那天早了整整半年，而那时候父亲明明还在京中任职，连家书都每月一封从未断过。她把这几处日期在心里来回算了三遍，越算越觉得后背发凉，于是把信纸重新折好，塞回信封，压在了案头那摞账册的最底下。\n\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人，又低头把那一行数目重抄了一遍，墨迹在纸面上洇开一小团，迟迟没有干。\n\n她伸手把窗支子推开一条缝，夜风裹着凉意灌进来，吹得案上的纸角翻起又落下，她伸手压住，忽然想起小时候母亲也是这样压着信纸。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": true,
+          "why": "整章无对白 ⇒ 对话占比 0 < 阈值 0.12 ⇒ 应命中；本探针钉住占比口径（引号正则 + 可见字分母）与阈值常量。"
+        },
+        {
+          "text": "他把手里的账册合上，说：“外头雨大，明日再算也不迟。”\n\n老账房点头应了，把笔搁在砚台边，说：“那就等明日的账。”\n\n她站在门槛上没有进去，只问：“信里那件事，当真要回他？”\n\n“先别急。”他把窗支子推开一条缝，“等天亮再说。”\n\n外头巷子里有人挑着担子过去，扁担吱呀吱呀响个不停。\n\n“这雨，下到什么时候才停。”她自言自语地说了一句。\n\n他没有答话，只把桌上的灯芯挑亮了些，火苗晃了两下。\n\n“你若要走，就把钥匙留下。”她终于转过身来看着他。\n\n他伸手在桌面上敲了两下，说：“钥匙我带着。”\n\n院子里那棵老槐落了一地叶子，扫帚扫过去沙沙地响。\n\n“你说过会留下。”她的声音低了下去，“说过两回。”\n\n他说不出话来，只是把手按在窗棂上，指节慢慢泛了白。\n\n“天要亮了。”远处有人喊了一声，更夫的梆子跟着响。\n\n她把那封没有落款的信重新折好，塞回信封里，压在账册底下。\n\n“随你。”她终于开口，“只是别怪我没拦过你。”\n\n门轴吱呀一响，夜风灌进来，把案上的纸吹得翻起一角。\n\n“也好。”他轻声说，像是说给自己听的，“也好。”\n\n她没有再问下去，转身把灯吹灭了一半，屋里暗下来。\n\n雨声慢慢小了，檐下的水线断断续续地滴着。\n\n两个人谁也没有再说话，各自守着自己那一半黑暗。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": false,
+          "why": "同样字数但对白占比充足 ⇒ 不应命中（守护阈值没被改成 0）。"
+        }
+      ],
+      "description_numbers": [
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "DEFAULT_DIALOGUE_LOW_WARN_RATIO",
+          "value": 12.0,
+          "unit": "percent",
+          "in_description": "12"
+        },
+        {
+          "kind": "table_text",
+          "value": 16.5,
+          "in_description": "16.5"
+        },
+        {
+          "kind": "table_text",
+          "value": 25.0,
+          "in_description": "25"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "_ECHO_SAMPLE_MAX_CHARS",
+          "value": 40.0,
+          "in_description": "40"
+        },
+        {
+          "kind": "table_text",
+          "value": 10.0,
+          "in_description": "10"
+        },
+        {
+          "kind": "table_text",
+          "value": 32.0,
+          "in_description": "32"
+        },
+        {
+          "kind": "table_text",
+          "value": 600.0,
+          "in_description": "600"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.chapters_below_threshold",
+          "value": 8.0,
+          "in_description": "8"
+        },
+        {
+          "kind": "table_text",
+          "value": 0.0,
+          "in_description": "0.0"
+        }
+      ]
     },
     {
       "rule_id": "AI-DIALOGUE-ECHO",
@@ -1007,7 +1423,83 @@
         "守卫值 2.0 的正当性来自**度量的可解释性**，不来自精度/召回标定——注释里已明写，别把它当「实测标定值」引用。",
         "全量审计（docs/roadmap/v3.9，2026-09-27）记「命中总体仅 35 对（全部读过）」，生产语料登记 34 对——差 1 对，疑为存疑那条被排除；待裁决。"
       ],
-      "probes": []
+      "probes": [
+        {
+          "text": "“你回来了。”\n“你回来了。”\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人，又低头把那一行数目重抄了一遍，墨迹在纸面上洇开一小团，迟迟没有干。\n\n“你回来了。”\n“好。”\n\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": true,
+          "why": "相邻对白逐字复述 ⇒ 复述型命中（recall ≥ 0.70）⇒ 应命中；本探针钉住复述/接词两条判据与 min_ratio / min_overlap / min_opening 三个阈值。"
+        },
+        {
+          "text": "“你回来了。”\n“这么晚，天都黑了。”\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人，又低头把那一行数目重抄了一遍，墨迹在纸面上洇开一小团，迟迟没有干。\n\n“路上还顺利？”\n“托你的福。”\n\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": false,
+          "why": "相邻对白无共同实义字 ⇒ 不应命中（守护「重叠口径」没被放宽）。"
+        }
+      ],
+      "description_numbers": [
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "DEFAULT_DIALOGUE_ECHO_MIN_RATIO",
+          "value": 70.0,
+          "unit": "percent",
+          "in_description": "70"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "DEFAULT_DIALOGUE_ECHO_MIN_OPENING",
+          "value": 2,
+          "note": "「开口连续重合 ≥2 字」",
+          "in_description": "2"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.ai_patterns_dialogue",
+          "attr": "DEFAULT_DIALOGUE_ECHO_MIN_OVERLAP",
+          "value": 0.66,
+          "in_description": "0.66"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.chapters_total",
+          "value": 48.0,
+          "in_description": "48"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.hits",
+          "value": 23.0,
+          "in_description": "23"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.chapters_with_hits",
+          "value": 18.0,
+          "in_description": "18"
+        },
+        {
+          "kind": "table_text",
+          "value": 34.0,
+          "in_description": "34"
+        },
+        {
+          "kind": "table_text",
+          "value": 24.0,
+          "in_description": "24"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.chapters_total",
+          "value": 19.0,
+          "in_description": "19"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.hits",
+          "value": 1.0,
+          "in_description": "1"
+        }
+      ]
     },
     {
       "rule_id": "AI-BEAT-REPEAT",
@@ -1131,7 +1623,101 @@
       ],
       "known_dead_rules": [],
       "conflicts": [],
-      "probes": []
+      "probes": [
+        {
+          "text": "雨声一直没停，屋檐下的水线连成一片，把后院的石阶泡得发亮。\n\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人，又低头把那一行数目重抄了一遍，墨迹在纸面上洇开一小团，迟迟没有干。\n\n屋里的灯芯爆了个小小的火花，影子在墙上抖了一下，又慢慢静下去。\n\n雨声一直没停，屋檐下的水线连成一片，把后院的石阶泡得发亮。\n\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人，又低头把那一行数目重抄了一遍，墨迹在纸面上洇开一小团，迟迟没有干。\n\n屋里的灯芯爆了个小小的火花，影子在墙上抖了一下，又慢慢静下去。\n\n雨声一直没停，屋檐下的水线连成一片，把后院的石阶泡得发亮。",
+          "expect_hit": true,
+          "why": "同一节拍文字远距复现 3 次 ⇒ 章级命中（命中数 ≥2 且密度 > 1.0/千字）⇒ 应命中；本探针钉住最小子串长度 6 / 双侧覆盖率 0.6 / 间隔 200 字 / 章级双门。"
+        },
+        {
+          "text": "雨声一直没停，屋檐下的水线连成一片，把后院的石阶泡得发亮。\n\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人，又低头把那一行数目重抄了一遍，墨迹在纸面上洇开一小团，迟迟没有干。\n\n屋里的灯芯爆了个小小的火花，影子在墙上抖了一下，又慢慢静下去。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": false,
+          "why": "只有一次出现、其余各段互不相同 ⇒ 不应命中（守护章级命中数下限没被改成 1）。"
+        }
+      ],
+      "description_numbers": [
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "DEFAULT_BEAT_MIN_CHARS",
+          "value": 6.0,
+          "in_description": "6"
+        },
+        {
+          "kind": "table_text",
+          "value": 60.0,
+          "in_description": "60"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "DEFAULT_BEAT_MIN_GAP_CHARS",
+          "value": 200,
+          "note": "「两处相距 ≥200 字」",
+          "in_description": "200"
+        },
+        {
+          "kind": "external",
+          "value": 0.003,
+          "note": "**对照算子的读数**：shingle/trigram 重复率在事故章上的读数 0.0030，用于说明「shingle 判为干净」——不是本算子的阈值。",
+          "in_description": "0.0030"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.chapters_total",
+          "value": 92.0,
+          "in_description": "92"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.hits",
+          "value": 307.0,
+          "in_description": "307"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.rate_per_1k",
+          "value": 1.17,
+          "in_description": "1.17"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.chapters_total",
+          "value": 19.0,
+          "in_description": "19"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.beat_repeat",
+          "attr": "DEFAULT_BEAT_MIN_COUNT",
+          "value": 2.0,
+          "in_description": "2"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.rate_per_1k",
+          "value": 0.05,
+          "in_description": "0.05"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.precision_sampling.sampled",
+          "value": 52.0,
+          "in_description": "52"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.precision_sampling.true_positive",
+          "value": 43.0,
+          "in_description": "43"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.precision_sampling.false_positive",
+          "value": 9.0,
+          "in_description": "9"
+        }
+      ]
     },
     {
       "rule_id": "CONT-CLOCK-DAYBREAK",
@@ -1252,7 +1838,63 @@
       ],
       "known_dead_rules": [],
       "conflicts": [],
-      "probes": []
+      "probes": [
+        {
+          "text": "夜半三点，他还坐在灯下，手里那卷书翻来覆去也没翻到头。\n\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n天快亮的时候，窗纸上的颜色才从黑里透出一点灰白。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": true,
+          "why": "深夜档钟点（夜半三点）之后近距离出现天亮标记且中间无时间推进交代 ⇒ 应命中；本探针钉住钟点正则 / 天亮正则 / 间隔上限 / 「有推进就不判」这条守卫。"
+        },
+        {
+          "text": "夜半三点，他还坐在灯下，手里那卷书翻来覆去也没翻到头。\n\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n熬到了天亮，窗纸上的颜色才从黑里透出一点灰白。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": false,
+          "why": "同样两个标记但中间**有**「熬到了」这类推进交代 ⇒ 不应命中（守护「作者交代了时间过去」这条豁免没被拆掉）。"
+        }
+      ],
+      "description_numbers": [
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "DEFAULT_MAX_GAP_CHARS",
+          "value": 3000.0,
+          "in_description": "3000"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.hits",
+          "value": 1.0,
+          "in_description": "1"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.chapters_total",
+          "value": 92.0,
+          "in_description": "92"
+        },
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "DEFAULT_MIN_BACKSTEP_HOURS",
+          "value": 2.0,
+          "in_description": "2"
+        },
+        {
+          "kind": "table_text",
+          "value": 57090.0,
+          "in_description": "57090"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.chapters_total",
+          "value": 19.0,
+          "in_description": "19"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.hits",
+          "value": 0.0,
+          "in_description": "0"
+        }
+      ]
     },
     {
       "rule_id": "CONT-TIME-BACKSTEP",
@@ -1354,7 +1996,59 @@
         "**候选数与精确率冲突（2026-10-19 批次十三已裁决并修复）**：模块 docstring 写「原始 8 条候选里只有 1 条真（precision 12.5%）」，而 AI_PATTERN_RULES 的 description 写「原始 6 条候选中 5 条是误报」（6 候选 ⇒ 1/6 ≈ 16.7%，与 12.5% 不符）。**裁决依据 = 算术自洽 + 仓内已登记的逐条实例可数**：12.5% = 1/8，且模块 docstring 逐条列出的误报为「段首戳 5 条 + 右邻期限语 + 跨午夜顺行」= **7 条误报** ⇒ 7 + 1 = 8，与 12.5% 逐位吻合 ⇒ **8 是真值，description 里的 6 是笔误**（已改为「原始 8 条候选中 7 条是误报」）。⚠️ 该裁决**未依赖任何复算**——AGENTS §一 硬约束 1 禁止指向 dev 库既有项目复算，故只能靠仓内已登记的逐条判档表定案。",
         "另一条候选检查（「白天标记 → 夜晚标记」，14 条候选 14 条误报）已整体废弃、未进代码。"
       ],
-      "probes": []
+      "probes": [
+        {
+          "text": "下午五点，他收了铺子，把门板一块一块插好。\n\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n上午九点，他还在床上翻着那本旧账。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": true,
+          "why": "相邻两个段首时点戳后者早 8 小时 ⇒ 应命中；本探针钉住「独占段首」守卫 / 回退小时下限 / 跨午夜顺行豁免。"
+        },
+        {
+          "text": "上午九点，他还在床上翻着那本旧账。\n\n院墙外头那条巷子窄，两个人并肩走要侧着身，墙根下常年堆着碎砖和没人认领的破瓦，雨后砖缝里长出一层薄薄的青苔，踩上去滑得很。\n\n下午五点，他收了铺子，把门板一块一块插好。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。\n\n柜台后的算盘珠子被推得乱响，老账房把笔搁下，抬头看了看来人。\n\n又低头把那一行数目重抄了一遍，墨迹洇开一小团，迟迟没有干。\n\n窗外巷子里有人挑着担子走过去，扁担吱呀吱呀响个不停。",
+          "expect_hit": false,
+          "why": "同样两个时点戳但后者**更晚**（顺行）⇒ 不应命中（守护回退方向判反了）。"
+        }
+      ],
+      "description_numbers": [
+        {
+          "kind": "code_ref",
+          "module": "packages.core.quality.continuity_time",
+          "attr": "DEFAULT_MIN_BACKSTEP_HOURS",
+          "value": 2.0,
+          "in_description": "2"
+        },
+        {
+          "kind": "table_text",
+          "value": 8.0,
+          "in_description": "8"
+        },
+        {
+          "kind": "table_text",
+          "value": 7.0,
+          "in_description": "7"
+        },
+        {
+          "kind": "table_field",
+          "path": "generated_side.hits",
+          "value": 1.0,
+          "in_description": "1"
+        },
+        {
+          "kind": "table_text",
+          "value": 5.0,
+          "in_description": "5"
+        },
+        {
+          "kind": "table_text",
+          "value": 9256.0,
+          "in_description": "9256"
+        },
+        {
+          "kind": "table_field",
+          "path": "human_side.hits",
+          "value": 0.0,
+          "in_description": "0"
+        }
+      ]
     },
     {
       "rule_id": "RULE_STYLE_REPETITION_TRIGRAM",

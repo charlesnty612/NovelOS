@@ -178,3 +178,46 @@ python scripts/readability_audit.py
   `AGENTS.md` 与 `CHANGELOG.md` 同步登记。
 - 任何**新的**人类基线数字入库前，先用 §4.3 的入口复算，并把复算命令写进
   该数字的注释里。
+
+## 8. 九份语料的**可达性登记**（2026-10-23 task-16 Q-5）
+
+证据表 `packages/core/quality/detector_evidence.json` 的 `corpora` 段现在每条都带
+`in_version_control` 与 `reproducible_by` 两个**机器可判**字段——本节是它们的
+人类可读版本。
+
+⚠️ **口径声明（2026-10-23 批次二十六审查订正）**：本节是**副本、无机器看守**——权威值在
+JSON 的 `corpora` 段（受 `tests/unit/quality/test_detector_evidence.py` 的对应用例看守）。
+改 JSON 的 `corpora` 时必须**人工同步本节**；本节漂移不会有任何测试变红。
+（原文写「两处**必须一致**，由……用例看守」是**不成立的声称**：全仓没有任何用例读本文件。）
+
+**实测结论：9/9 份语料都不在「任何人 clone 后能拿到」的位置。**
+
+| corpus_id | 种类 | 章数 | 实际位置 | `in_version_control` | `reproducible_by` |
+|---|---|---|---|---|---|
+| `houfu_human_19ch` | human | 19 | 内容仓 `NovelOS-Content` 的 `reference-books/` | `false` | `本机` |
+| `dev_db_92ch` | generated | 92 | 本机 dev 库 `data/novelos.db` | `false` | `本机` |
+| `dev_db_97ch` | generated | 97 | 同上 | `false` | `本机` |
+| `book01_48ch` | generated | 48 | 同上 | `false` | `本机` |
+| `book01_short_para_48ch` | generated | 48 | 同上 | `false` | `本机` |
+| `book01_arc_48ch` | generated | 48 | 同上 | `false` | `本机` |
+| `external_batch_33ch` | generated | 33 | 同上 | `false` | `本机` |
+| `human_sample_4` | human | 4 | 同上 | `false` | `本机` |
+| `human_sample_1_batch` | human | 1 | 同上 | `false` | `本机` |
+
+**为什么 9/9 都是 `false`**（实测，2026-10-23）：
+
+1. **8 份生成侧/样章语料在 `data/novelos.db`**——`.gitignore` 含 `data/`
+   ⇒ `git ls-files --error-unmatch data/novelos.db` 退出码 1（**未被追踪**）。
+2. **人类锚点书在内容仓**——按 2026-09-14 用户裁决「内容仓不推 GitHub」，
+   内容仓 `origin` 上 `reference-books` 命名空间**命中 0 个文件**（实测）⇒
+   连内容仓的 clone 也拿不到这 19 章。
+
+**因此（这条是本节存在的理由）**：证据表里两侧的**全部**实测数字、以及 15 条规则
+description 里的 83 个数字，**对第三方一律不可复算**——它们依赖的语料不在任何
+可分发位置。⇒ 本仓能主张的只有「**表内自洽**」，不是「**数字为真**」。
+复算只能在本机做（入口见各条目的 `source.recompute_entry`）。
+
+**可分发的替代**：`packages/core/quality/detector_evidence_corpus/` 下的 3 份
+**合成**语料**在版本控制内** ⇒ 它们能验「阈值口径自洽」（阈值与算子对不对得上），
+但**不能**验「阈值定得对不对」（分布结论需要真语料，见 §4）。
+

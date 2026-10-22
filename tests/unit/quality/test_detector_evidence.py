@@ -357,3 +357,244 @@ def test_cli_json_output_is_machine_readable(guard, table: dict, tmp_path: Path,
     assert payload["drifts"] == []
     assert payload["checked"]["code_refs"] > 0
     assert payload["checked"]["probes"] > 0
+
+
+# ---------------------------------------------------------------------------
+# 5. 语义字段看守（2026-10-23 task-16 Q-1/Q-2/Q-4）
+# ---------------------------------------------------------------------------
+#
+# ⚠️ **这一节守的是什么**（审计 B 实测）：此前看守**只比代码派生值**
+# ⇒ 语义面（corpora / status_vocabulary / separation / evidence_status /
+# 两侧全部数字 / threshold_summary / basis_ref / conflicts）**改错了也不红**
+# （实测 28 项扰动里 **26 项**漏过）。
+# ⇒ 本节每条扰动都必须让守卫视红，且**点名**。
+
+
+def _entry(table: dict, rule_id: str) -> dict:
+    for entry in table["rules"]:
+        if entry.get("rule_id") == rule_id:
+            return entry
+    raise AssertionError(f"证据表里没有 {rule_id}")
+
+
+#: (用例名, 扰动函数, 必须被点名的关键词)
+_SEMANTIC_PERTURBATIONS = [
+    (
+        "corpus_id_typo",
+        lambda t: _entry(t, "AI-PUNCT-ABUSE")["human_side"].__setitem__(
+            "corpus", "houfu_human_19c"
+        ),
+        "corpus",
+    ),
+    (
+        "evidence_status_out_of_vocabulary",
+        lambda t: _entry(t, "AI-BEAT-REPEAT").__setitem__("evidence_status", "bogus"),
+        "evidence_status",
+    ),
+    (
+        "measured_but_corpus_is_null",
+        lambda t: _entry(t, "AI-BEAT-REPEAT")["human_side"].__setitem__("corpus", None),
+        "corpus",
+    ),
+    (
+        "measured_but_chapters_total_missing",
+        lambda t: _entry(t, "AI-BEAT-REPEAT")["generated_side"].pop("chapters_total"),
+        "chapters_total",
+    ),
+    (
+        "chapters_total_contradicts_corpora_registry",
+        lambda t: _entry(t, "AI-BEAT-REPEAT")["generated_side"].__setitem__(
+            "chapters_total", 999
+        ),
+        "chapters_total",
+    ),
+    (
+        "separation_outside_the_rounding_envelope",
+        lambda t: _entry(t, "AI-CONTRAST-PAIR").__setitem__("separation", 6.63),
+        "separation",
+    ),
+    (
+        "basis_ref_points_at_a_missing_file",
+        lambda t: _entry(t, "AI-BEAT-REPEAT")["source"].__setitem__(
+            "basis_ref", "packages/core/quality/no_such_file.py:1-2"
+        ),
+        "basis_ref",
+    ),
+    (
+        "severity_escalation_registration_removed",
+        lambda t: _entry(t, "AI-PUNCT-ABUSE").pop("severity_escalation"),
+        "severity_escalation",
+    ),
+    (
+        "severity_escalation_threshold_wrong",
+        lambda t: _entry(t, "AI-PUNCT-ABUSE")["severity_escalation"].__setitem__(
+            "value", 3
+        ),
+        "severity_escalation",
+    ),
+    (
+        "probes_of_one_rule_emptied",
+        lambda t: _entry(t, "AI-TRIPLET-OPENING").__setitem__("probes", []),
+        "未成对",
+    ),
+    (
+        "probes_of_one_rule_left_one_sided",
+        lambda t: _entry(t, "AI-PRONOUN-PILE").__setitem__(
+            "probes", _entry(t, "AI-PRONOUN-PILE")["probes"][:1]
+        ),
+        "未成对",
+    ),
+    (
+        "description_number_registration_removed",
+        lambda t: _entry(t, "AI-SHORT-PARA")["description_numbers"].pop(),
+        "description",
+    ),
+    (
+        "description_number_registration_points_at_wrong_constant",
+        lambda t: _entry(t, "AI-TRIPLET-OPENING")["description_numbers"][0].__setitem__(
+            "value", 4
+        ),
+        "description",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("perturb", "keyword"),
+    [(p[1], p[2]) for p in _SEMANTIC_PERTURBATIONS],
+    ids=[p[0] for p in _SEMANTIC_PERTURBATIONS],
+)
+def test_guard_is_red_when_a_semantic_field_is_perturbed(
+    guard, table: dict, perturb, keyword
+):
+    """语义字段扰动 ⇒ 守卫视红**并点名**。
+
+    ⚠️ **这是审计 B 的 critical 缺口**的判别点：这些字段此前**完全没被看守**
+    ⇒ 扰动它们守卫视仍然绿 ⇒ 证据表的语义面可以随便改。
+    """
+    broken = json.loads(json.dumps(table))
+    perturb(broken)
+
+    result = guard.check_table(broken)
+    assert not result.consistent, (
+        f"扰动语义字段后守卫视仍然一致 ⇒ 该字段**没有看守**（缺 keyword={keyword!r}）"
+    )
+    messages = result.errors + [f"{d.kind} {d.rule_id} {d.expected} {d.actual} {d.detail}" for d in result.drifts]
+    assert any(keyword in m for m in messages), (
+        f"守卫视红了但没点名 {keyword!r}（诊断不可定位）⇒ 实际消息：{messages}"
+    )
+
+
+def test_guard_is_green_on_the_shipped_table_with_the_new_checks(guard, table: dict):
+    """正向：加了语义看守后，**仓内这份表**必须仍然一致。
+
+    ⚠️ 这条是「守卫不是空壳」的反面证据：若新增的 13 类语义判据在仓内表上就红，
+    说明判据写错了（而不是表错了）。
+    """
+    result = guard.check_table(table)
+    assert not result.errors, f"语义看守在仓内表上报错：{result.errors}"
+    assert not result.drifts, f"语义看守在仓内表上报漂移：{result.drifts}"
+
+
+def test_every_ai_pattern_rule_has_paired_probes(guard, table: dict):
+    """**名单从活代码派生**（``AI_PATTERN_RULES``）⇒ 每条规则探针成对。
+
+    ⚠️ **为什么不能从表里派生**：从表里派生 = 删空某条规则的探针后就没人要求它了
+    ⇒ 空壳（审计 B 的 major-2 实测：删空任一条规则的探针，守卫视仍一致）。
+    """
+    from packages.core.quality.ai_patterns import AI_PATTERN_RULES
+
+    live = {rule.rule_id for rule in AI_PATTERN_RULES}
+    for rule_id in sorted(live):
+        entry = _entry(table, rule_id)
+        probes = entry.get("probes", [])
+        trues = sum(1 for p in probes if p.get("expect_hit") is True)
+        falses = sum(1 for p in probes if p.get("expect_hit") is False)
+        assert trues >= 1 and falses >= 1, (
+            f"{rule_id} 的探针未成对（true={trues} / false={falses}）"
+            "⇒ 阈值或正则被改时无守卫"
+        )
+
+
+def test_severity_escalation_registrations_match_the_code(guard, table: dict):
+    """6 条升级路径必须**逐条**登记，且与代码派生的判据一致。
+
+    升级路径的**权威在代码**：``_SEVERITY_UPGRADE_LIMITS``（4 条）+
+    破折号乘数（1 条）+ 长段 error 字符阈值（1 条）。
+    """
+    from packages.core.quality.ai_patterns_paragraph import DEFAULT_LONG_PARA_ERROR_CHARS
+    from packages.core.quality.ai_patterns_sentence import (
+        _SEVERITY_UPGRADE_LIMITS,
+        DEFAULT_DASH_ERROR_MULTIPLIER,
+    )
+
+    expected = {
+        rule_id: {"to": "error", "kind": "count", "value": value}
+        for rule_id, value in _SEVERITY_UPGRADE_LIMITS.items()
+    }
+    expected["AI-PUNCT-ABUSE"] = {
+        "to": "error",
+        "kind": "rate_multiplier",
+        "value": DEFAULT_DASH_ERROR_MULTIPLIER,
+    }
+    expected["AI-LONG-PARA"] = {
+        "to": "error",
+        "kind": "chars",
+        "value": DEFAULT_LONG_PARA_ERROR_CHARS,
+    }
+    assert len(expected) == 6, f"升级路径数变了（{len(expected)}），登记与判据都要更新"
+
+    for rule_id, want in expected.items():
+        got = _entry(table, rule_id).get("severity_escalation")
+        assert got is not None, f"{rule_id} 的 severity_escalation 没登记"
+        assert got["to"] == want["to"], f"{rule_id} 的升级目标档不符：{got}"
+        assert got["kind"] == want["kind"], f"{rule_id} 的升级判据类型不符：{got}"
+        assert float(got["value"]) == float(want["value"]), (
+            f"{rule_id} 的升级阈值与代码不符：表 {got['value']} vs 代码 {want['value']}"
+        )
+
+
+def test_corpora_reachability_is_registered(guard, table: dict):
+    """Q-5：9 份语料每条都要登记可达性，且**都**不在版本控制内。
+
+    ⚠️ 这条守的是**事实登记**（不是「语料应该可达」）：本仓实测 9/9 份语料都在
+    版本控制之外 ⇒ 表里必须这么写 ⇒ 将来哪天有一份进了版本控制，本用例会红
+    ⇒ 提醒同步改可达性登记（而不是让「不可复现」的说法悄悄过期）。
+    """
+    corpora = table["corpora"]
+    assert len(corpora) == 9, f"语料份数变了（{len(corpora)}），可达性登记要同步"
+    for corpus_id, corpus in corpora.items():
+        assert "in_version_control" in corpus, f"{corpus_id} 没登记 in_version_control"
+        assert "reproducible_by" in corpus, f"{corpus_id} 没登记 reproducible_by"
+        assert corpus["in_version_control"] is False, (
+            f"{corpus_id} 的 in_version_control 变了 ⇒ 可达性登记要同步"
+        )
+        assert corpus["reproducible_by"] == "本机", (
+            f"{corpus_id} 的 reproducible_by 变了 ⇒ 可达性登记要同步"
+        )
+
+
+def test_description_numbers_are_all_registered(guard, table: dict):
+    """Q-4：description 里的每个数字都必须**具名**登记来源。
+
+    ⚠️ **为什么不能按值全域匹配**（审计 B 实测）：那会把 ``AI-TRIPLET-OPENING``
+    的「3」误配到 ``_WEAK_WORD_PER_WORD_LIMIT``（同值不同常量）⇒ 阈值真改成 4 时
+    守卫仍绿 ⇒ 空壳。
+    ⇒ 本用例钉的是**登记的具名来源**：``code_ref`` 指向的常量现值必须等于登记值。
+    """
+    result = guard.check_table(table)
+    assert not result.errors, f"description 数字登记有缺口：{result.errors}"
+
+    total = 0
+    for entry in table["rules"]:
+        rows = entry.get("description_numbers")
+        if not rows:
+            continue
+        for row in rows:
+            total += 1
+            assert row.get("kind"), f"{entry['rule_id']} 的登记缺 kind"
+            if row["kind"] == "code_ref":
+                assert row.get("module") and row.get("attr"), (
+                    f"{entry['rule_id']} 的 code_ref 登记缺 module/attr"
+                )
+    assert total >= 80, f"登记的数字数异常偏少（{total}）⇒ 登记被清掉了？"

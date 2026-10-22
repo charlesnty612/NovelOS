@@ -19,8 +19,10 @@
 
 四层断言（逐层都有可复算的断言，不是恒真断言）
 --------------------------------------------
-1. **模块清单**：``packages/core/quality/`` 下的 ``.py`` 文件名集合 **==** 钉住的
-   字面集合 ⇒ **新增 / 删除 / 改名 / 合并必红**（集合相等，不是子集）。
+1. **模块清单**：``packages/core/quality/`` 下的 ``.py`` 文件名集合 **==**
+   ``README.md`` §1 模块树的 ``.py`` 清单 ⇒ **新增 / 删除 / 改名 / 合并未同步
+   README 必红**（集合相等，不是子集）。⚠️ 权威清单由目录 **glob 现场派生**
+   （不手挑名册）；README 只是**待比对副本**（批次二十四审查：该副本曾漂到 11/23）。
 2. **逐模块可直接导入**：不经过门面，逐个 ``importlib.import_module`` 成功；
    并为**每个**模块钉 1–3 个它自己的公开符号（含机制单点
    ``ai_patterns_text._split_paragraphs``、
@@ -50,6 +52,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import re
 from pathlib import Path
 
 from packages.core import quality as _pkg
@@ -59,35 +62,29 @@ from packages.core.quality import __all__ as _FACADE_ALL
 # 第 1 层：模块清单（字面集合，集合相等）
 # ============================================================================
 
-#: ``packages/core/quality/`` 下的 ``.py`` 文件名全集（**现场 glob 数出来的 23 个**，
-#: 2026-10-22 于 HEAD=43258dd 复核）。集合相等 ⇒ 增 / 删 / 改名 / 合并必红。
-_EXPECTED_MODULE_FILES = frozenset(
-    {
-        "__init__.py",
-        "aggregate.py",
-        "ai_flavor.py",
-        "ai_patterns.py",
-        "ai_patterns_dialogue.py",
-        "ai_patterns_paragraph.py",
-        "ai_patterns_sentence.py",
-        "ai_patterns_text.py",
-        "ai_trace.py",
-        "beat_repeat.py",
-        "continuity_taxonomy.py",
-        "continuity_time.py",
-        "engine.py",
-        "guardrails.py",
-        "issues.py",
-        "models.py",
-        "normalize.py",
-        "outline_check.py",
-        "payoff.py",
-        "scoring.py",
-        "service.py",
-        "style_trend.py",
-        "wordcount.py",
-    }
-)
+#: README §1 的模块树（**副本**）——只作为「待比对集合」，**不是**权威清单。
+_README_PATH = Path(_pkg.__file__).parent / "README.md"
+
+
+def _module_files() -> frozenset[str]:
+    """权威清单：``packages/core/quality/*.py`` **现场 glob**（不手挑、不写死）。"""
+    return frozenset(p.name for p in Path(_pkg.__file__).parent.glob("*.py"))
+
+
+def _readme_module_files() -> frozenset[str]:
+    """解析 README §1 代码树里的 ``.py`` 条目（README 副本 ⇒ 与目录双向核对）。
+
+    只认 ``├──`` / ``└──`` 树条目行里的 ``*.py``；``detector_evidence.json`` 与
+    非 ``.py`` 目录条目自然排除。解析面为空 ⇒ 由下面断言直接红
+    （防「解析器坏掉后 空 == 空」假绿）。
+    """
+    text = _README_PATH.read_text(encoding="utf-8")
+    section = text.split("## 1. 模块结构", 1)[1].split("\n## ", 1)[0]
+    code = section.split("```", 2)[1]
+    return frozenset(
+        m.group(1)
+        for m in re.finditer(r"[├└]──\s+([A-Za-z0-9_]+\.py)\b", code)
+    )
 
 
 def _module_name(file_name: str) -> str:
@@ -118,17 +115,18 @@ def _defined_names(mod) -> frozenset[str]:
 
 
 def test_quality_module_inventory_is_exact():
-    """第 1 层：模块清单集合**相等**（不是子集）⇒ 增 / 删 / 改名 / 合并必红。
+    """第 1 层：目录清单 **==** README §1 树清单（**双向**；README 多列 / 少列都红）。
 
-    口径：``glob("*.py")`` **现场数**（本文件不写死数量，只写死集合）⇒
-    数量由集合相等隐含保证（多一个或少一个都会让集合不相等）。
+    口径：权威清单由目录 ``glob("*.py")`` **现场派生**（不手挑名册）；README 只是
+    待比对副本。⇒ 模块新增 / 删除 / 改名而 README 未同步 ⇒ 必红；反之 README
+    多写一个不存在的模块 ⇒ 也必红（批次二十四实测该副本曾漂到 11/23）。
     """
-    pkg_dir = Path(_pkg.__file__).parent
-    actual = frozenset(p.name for p in pkg_dir.glob("*.py"))
-    assert actual == _EXPECTED_MODULE_FILES, (
-        "质量域模块清单变了："
-        f"多出 {sorted(actual - _EXPECTED_MODULE_FILES)} / "
-        f"少了 {sorted(_EXPECTED_MODULE_FILES - actual)}"
+    actual = _module_files()
+    documented = _readme_module_files()
+    assert documented == actual, (
+        "README §1 模块树与目录不一致（双向核对）："
+        f"README 多列 {sorted(documented - actual)} / "
+        f"README 少列 {sorted(actual - documented)}"
     )
 
 
@@ -187,7 +185,7 @@ def test_every_quality_module_is_directly_importable():
     门面的存在正是「这 6 个模块零直接 import」的成因 ⇒ 若某模块只能经门面
     触达（被合并进别的模块 / 被删），本条必红。
     """
-    for file_name in sorted(_EXPECTED_MODULE_FILES):
+    for file_name in sorted(_module_files()):
         mod = importlib.import_module(_module_name(file_name))
         assert mod is not None, file_name
 
@@ -274,7 +272,7 @@ def test_key_public_symbols_are_defined_on_their_own_module():
     ⇒ 公开符号被「悄悄挪到别的模块」时，**原模块**这条必红。
     用「源码里定义」判定 ⇒ 合法地 import 别人的单点来用**不算**违规。
     """
-    for file_name in sorted(_EXPECTED_MODULE_FILES):
+    for file_name in sorted(_module_files()):
         stem = file_name[:-3]
         expected = _EXPECTED_PUBLIC_SYMBOLS.get(stem)
         if expected is None:

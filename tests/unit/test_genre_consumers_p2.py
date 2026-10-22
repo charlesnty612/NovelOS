@@ -168,6 +168,23 @@ def test_critic_rubric_truncates_and_marks_within_budget():
     assert rubric.get("taboo_notes")
     assert len(rubric.get("payoff_focus", [])) < 80
 
+    # 2026-10-23 批次二十六（GM-CONSUMERS-1 存活诊断）：
+    # ⚠️ 上面的夹具**文本自身只有 838 字符 < 1000 预算** ⇒ `_fit_text` 的截断分支
+    # 根本没被走到（触发 marker 的是 payoff_focus 条目循环，标记随后又被尾部
+    # 「保预算」段补上）⇒ 把 `_fit_text` 改成「永不截断」时该用例仍全绿（SURVIVED）。
+    # ⇒ 补一段**纯文本超预算**（无 focus 条目）载荷：未截断时 JSON 长度必然超限；
+    # 判据 = ① 截断标记在 ② 输出装进预算（非等值突变）。
+    oversized = critic_rubric({"critic_rubric": {"taboo_notes": "禁" * 1100}})
+    assert oversized is not None
+    assert oversized.get(CRITIC_RUBRIC_TRUNCATED_KEY) is True, (
+        "纯文本超预算必须带截断标记——撤掉 _fit_text 截断（GM-CONSUMERS-1）时这里红"
+    )
+    oversized_len = len(json.dumps(oversized, ensure_ascii=False))
+    assert oversized_len <= CRITIC_RUBRIC_MAX_CHARS, (
+        f"输出 {oversized_len} 字符超出预算 {CRITIC_RUBRIC_MAX_CHARS}"
+        "（截断被撤掉时必红）"
+    )
+
 
 def test_critic_rubric_small_budget_keeps_marker():
     """预算极小时仍带截断标记（标记优先于内容）。"""

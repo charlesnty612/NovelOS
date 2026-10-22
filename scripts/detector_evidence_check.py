@@ -53,9 +53,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import importlib
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -184,6 +186,35 @@ def default_scan(prose: str) -> set[str]:
     return {hit["rule_id"] for hit in scan_ai_patterns(prose)}
 
 
+def default_descriptions() -> dict[str, str]:
+    """``AI_PATTERN_RULES`` 的 ``{rule_id: description}``（活代码里的说明文字）。"""
+    from packages.core.quality.ai_patterns import AI_PATTERN_RULES
+
+    return {rule.rule_id: (rule.description or "") for rule in AI_PATTERN_RULES}
+
+
+# --- description 里的数字（剥日期 / 时刻 / 章 id 噪声）----------------------
+_DESC_DATE_RE = re.compile(r"20\d{2}[-/年]\d{1,2}[-/月]\d{1,2}")
+_DESC_TIME_RE = re.compile(r"\d{1,2}:\d{2}")
+_DESC_CHAPNO_RE = re.compile(r"ch\d+|\d+ch\b|第\s*\d+\s*章")
+_DESC_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def description_numbers(text: str) -> list[str]:
+    """description 里出现的**数字**（去掉日期 / 时刻 / 章 id 这类噪声）。"""
+    out: list[str] = []
+    for m in _DESC_NUMBER_RE.finditer(text):
+        span = text[max(0, m.start() - 8) : m.end() + 8]
+        if (
+            _DESC_DATE_RE.search(span)
+            or _DESC_TIME_RE.search(span)
+            or _DESC_CHAPNO_RE.search(span)
+        ):
+            continue
+        out.append(m.group(0))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 主检查
 # ---------------------------------------------------------------------------
@@ -195,6 +226,7 @@ def check_table(
     resolver: Callable[[str, str], Any] = default_resolver,
     rule_table: Callable[[], list[tuple[str, str]]] = default_rule_table,
     scan: Callable[[str], set[str]] = default_scan,
+    descriptions: Callable[[], dict[str, str]] = default_descriptions,
 ) -> CheckResult:
     """把证据表与代码实际值逐条比对，返回全部漂移。
 
@@ -308,6 +340,17 @@ def check_table(
                 )
             )
 
+    # --- 表内语义字段自洽（2026-10-23 task-16 Q-1）--------------------------
+    _check_semantics(result, table, rules, deprecated)
+
+    # --- description 数字的来源登记（2026-10-23 task-16 Q-4）----------------
+    try:
+        live_descriptions = descriptions()
+    except Exception as exc:  # pragma: no cover - 依赖 import 失败
+        result.errors.append(f"取 AI_PATTERN_RULES 的 description 失败：{exc}")
+        live_descriptions = {}
+    _check_descriptions(result, table, rules, live_descriptions, resolver)
+
     # --- 逐条规则：行为探针 ------------------------------------------------
     for entry in rules:
         rid = entry.get("rule_id", "<unknown>")
@@ -332,7 +375,484 @@ def check_table(
                     )
                 )
 
+    # --- 探针成对（2026-10-23 task-16 Q-2）---------------------------------
+    # ⚠️ **名单从活代码派生**（``AI_PATTERN_RULES`` 的 rule_id 集合）——**不手挑**、
+    # 也**不从表里派生**（从表里派生 = 删空某条规则的探针后就没人要求它了 ⇒ 空壳）。
+    for rid in sorted(live_ids):
+        entry = next((e for e in rules if e.get("rule_id") == rid), None)
+        if entry is None:
+            continue  # 缺整条规则由 rule_set 漂移点名，不在这里重复报
+        probes = entry.get("probes", [])
+        trues = sum(1 for p in probes if p.get("expect_hit") is True)
+        falses = sum(1 for p in probes if p.get("expect_hit") is False)
+        if trues < 1 or falses < 1:
+            result.errors.append(
+                f"{rid} 的行为探针**未成对**：expect_hit=true {trues} 条 / "
+                f"expect_hit=false {falses} 条（各须 ≥1）"
+                "⇒ 该规则的探针被删空或只剩单边 ⇒ 阈值/正则被改时无守卫"
+                "（名单由 AI_PATTERN_RULES 派生，不手挑）"
+            )
+
     return result
+
+
+# ---------------------------------------------------------------------------
+# 表内**语义**字段自洽（2026-10-23 task-16 Q-1）
+# ---------------------------------------------------------------------------
+
+#: ``separation`` 的判据是**舍入包络**而不是相等：表里的 rate 存到**两位小数**，
+#: 而分离度是拿**未舍入**的 rate 算的 ⇒ 直接比必然对不上。
+#: ⇒ 用「rate 的舍入半宽」构造比值的取值区间，separation 落在区间内即自洽。
+#: 实测（2026-10-23 task-16 Q-1④）：AI-PUNCT-ABUSE 的 9.34 落在
+#: [1.725/0.195, 1.735/0.185] = [8.846, 9.378] 内 ⇒ **自洽**（未舍入的 0.1852
+#: 算出来正是 9.34）；而 AI-CONTRAST-PAIR 的 6.63 落在
+#: [0.755/0.225, 0.765/0.215] = [3.356, 3.558] **之外** ⇒ 真正的口径分叉。
+
+
+def _rate_half_width(value: float) -> float:
+    """一个**已存进表**的 rate 的舍入半宽（按它实际存了几位小数算）。"""
+    if isinstance(value, int) or float(value).is_integer():
+        return 0.5
+    text = repr(float(value))
+    if "e" in text or "E" in text:  # pragma: no cover - 表内无科学计数法
+        return 0.005
+    decimals = len(text.split(".", 1)[1].rstrip("0"))
+    return 0.5 * (10 ** -decimals)
+
+
+def _separation_envelope(h_rate: float, g_rate: float) -> tuple[float, float] | None:
+    """给定两侧**已存**的 rate，比值的取值区间（含各自的舍入半宽）。"""
+    h_delta = _rate_half_width(h_rate)
+    g_delta = _rate_half_width(g_rate)
+    h_lo, h_hi = h_rate - h_delta, h_rate + h_delta
+    g_lo, g_hi = g_rate - g_delta, g_rate + g_delta
+    if h_lo <= 0:
+        return None
+    return (g_lo / h_hi, g_hi / h_lo)
+
+
+def _side_numbers(side: Any) -> list[tuple[str, float]]:
+    """一侧里的**实测数字**（键 + 值）；``note`` 这类说明字段不算。"""
+    if not isinstance(side, dict):
+        return []
+    out: list[tuple[str, float]] = []
+    for key, value in side.items():
+        if key == "note":
+            continue
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            out.append((key, float(value)))
+    return out
+
+
+def _basis_path(basis_ref: Any) -> str | None:
+    """从 ``"path/to/file.py:12-34"`` 里取**文件路径**部分（行号会漂，文件不会）。"""
+    if not isinstance(basis_ref, str) or not basis_ref.strip():
+        return None
+    head = basis_ref.split(":", 1)[0].strip()
+    return head or None
+
+
+def _check_semantics(
+    result: CheckResult,
+    table: dict,
+    rules: list[dict],
+    deprecated: list[dict],
+) -> None:
+    """**语义字段**看守：表内「说了什么」自不自洽。
+
+    ⚠️ **为什么必须单列一批**（2026-10-23 task-16 Q-1，critical）：本脚本此前
+    **只比代码派生值**（常量 / 词表 / 正则 / 探针）⇒ 证据表的**语义面**
+    ——``corpora`` / ``status_vocabulary`` / ``separation`` / ``evidence_status``
+    / 两侧**全部数字** / ``threshold_summary`` / ``basis_ref`` / ``conflicts``
+    ——**改错了也不红**（实测 28 项扰动中 **26 项**漏过）。⇒ 语义面必须自己看守。
+
+    判据（逐条可机判）：
+    ① 两侧 ``corpus`` ∈ ``corpora`` 键集（写错语料 id ⇒ 数字指不到任何语料）；
+    ② ``evidence_status`` ∈ ``status_vocabulary`` 键集；
+    ③ ``measured`` **由定义派生**：两侧各有实测数字、``corpus`` 非 null、
+       ``chapters_total`` 非 null（且与 ``corpora[corpus].chapters`` 相等）；
+    ④ ``separation`` **由同条目两侧 rate 派生**（不许裸数字 ⇒ 口径分叉无处藏）；
+    ⑤ ``basis_ref`` 所指**文件必须存在**（行号会漂，文件不会）；
+    ⑥ ``severity_escalation`` 与**代码派生**的升级路径逐条相符。
+    """
+    corpora = table.get("corpora")
+    if not isinstance(corpora, dict):
+        result.errors.append("证据表缺 'corpora' 段（语义字段无法核对）")
+        corpora = {}
+    status_vocab = table.get("status_vocabulary")
+    if not isinstance(status_vocab, dict):
+        result.errors.append("证据表缺 'status_vocabulary' 段")
+        status_vocab = {}
+
+    for entry in rules + deprecated:
+        rid = entry.get("rule_id", "<unknown>")
+
+        # ① corpus ∈ corpora 键集 -----------------------------------------
+        for side_name in ("human_side", "generated_side"):
+            side = entry.get(side_name)
+            if not isinstance(side, dict) or not side:
+                continue
+            corpus_id = side.get("corpus")
+            if corpus_id is None:
+                continue
+            if not isinstance(corpus_id, str) or corpus_id not in corpora:
+                result.errors.append(
+                    f"{rid} 的 {side_name}.corpus={corpus_id!r} 不在证据表 corpora 键集里"
+                    "⇒ 这两侧的数字指不到任何已登记语料"
+                )
+
+        # ② evidence_status ∈ status_vocabulary ----------------------------
+        status = entry.get("evidence_status")
+        if status is not None and status not in status_vocab:
+            result.errors.append(
+                f"{rid} 的 evidence_status={status!r} 不在 status_vocabulary 键集里"
+                f"（合法值：{sorted(status_vocab)}）"
+            )
+
+        # ③ measured 由定义派生 --------------------------------------------
+        if status == "measured":
+            for side_name in ("human_side", "generated_side"):
+                side = entry.get(side_name)
+                if not isinstance(side, dict) or not side:
+                    result.errors.append(
+                        f"{rid} 标 evidence_status=measured 但 {side_name} 无实测数字"
+                    )
+                    continue
+                if not _side_numbers(side):
+                    result.errors.append(
+                        f"{rid} 标 evidence_status=measured 但 {side_name} 里没有任何实测数字"
+                    )
+                if side.get("corpus") is None:
+                    result.errors.append(
+                        f"{rid} 标 evidence_status=measured 但 {side_name}.corpus 为 null"
+                        "⇒ 语料标识不全（按 status_vocabulary 只能算 partial）"
+                    )
+                total = side.get("chapters_total")
+                if total is None:
+                    result.errors.append(
+                        f"{rid} 标 evidence_status=measured 但 {side_name}.chapters_total 为 null"
+                        "⇒ 口径不全（按 status_vocabulary 只能算 partial）"
+                    )
+                else:
+                    corpus_id = side.get("corpus")
+                    known = corpora.get(corpus_id, {}).get("chapters") if corpus_id else None
+                    if known is not None and float(known) != float(total):
+                        result.errors.append(
+                            f"{rid} 的 {side_name}.chapters_total={total} 与 corpora"
+                            f"[{corpus_id!r}].chapters={known} 不一致"
+                        )
+
+        # ④ separation 由同条目两侧 rate 派生 -------------------------------
+        separation = entry.get("separation")
+        if separation is not None:
+            human = entry.get("human_side") or {}
+            generated = entry.get("generated_side") or {}
+            h_rate = human.get("rate_per_1k")
+            g_rate = generated.get("rate_per_1k")
+            if not isinstance(h_rate, (int, float)) or not isinstance(g_rate, (int, float)):
+                result.errors.append(
+                    f"{rid} 有 separation={separation} 但两侧缺 rate_per_1k"
+                    "⇒ 分离度无法由本条目派生（口径分叉无处藏）"
+                )
+            elif not h_rate:
+                result.errors.append(
+                    f"{rid} 有 separation={separation} 但人侧 rate_per_1k={h_rate}"
+                    "⇒ 比值为无穷，无法派生"
+                )
+            else:
+                derived = float(g_rate) / float(h_rate)
+                envelope = _separation_envelope(float(h_rate), float(g_rate))
+                if envelope is None:
+                    result.errors.append(
+                        f"{rid} 有 separation={separation} 但人侧 rate={h_rate} 的舍入半宽"
+                        "已覆盖 0 ⇒ 比值区间无界，无法判定自洽"
+                    )
+                elif not (envelope[0] - 1e-9 <= float(separation) <= envelope[1] + 1e-9):
+                    result.errors.append(
+                        f"{rid} 的 separation={separation} 落在两侧 rate"
+                        f"（{g_rate}/{h_rate}，未舍入比值 {derived:.4f}）的舍入包络"
+                        f" [{envelope[0]:.4f}, {envelope[1]:.4f}] 之外"
+                        "⇒ 分离度必须由本条目两侧 rate 派生"
+                        "（或把另一对数字登记进 conflicts 并改写本字段）"
+                    )
+
+        # ⑤ basis_ref 所指文件必须存在 -------------------------------------
+        for label, basis_ref in _iter_basis_refs(entry):
+            rel = _basis_path(basis_ref)
+            if rel is None:
+                result.errors.append(f"{rid} 的 {label} 为空")
+                continue
+            target = REPO_ROOT / rel
+            if not target.exists():
+                result.errors.append(
+                    f"{rid} 的 {label}={basis_ref!r} 指向的文件不存在：{rel}"
+                    "（行号会漂，文件不会 ⇒ 指向的文件必须存在）"
+                )
+
+    # ⑥ severity_escalation 与代码派生的升级路径逐条相符 -------------------
+    for entry in rules:
+        rid = entry.get("rule_id", "<unknown>")
+        expected = _expected_escalation(rid)
+        actual = entry.get("severity_escalation")
+        if expected is None:
+            if actual is not None:
+                result.drifts.append(
+                    Drift(
+                        kind="severity_escalation",
+                        rule_id=rid,
+                        name=rid,
+                        expected="无升级路径",
+                        actual=str(actual),
+                        detail="表里登记了升级路径，但代码里没有这条升级路径",
+                    )
+                )
+            continue
+        if actual is None:
+            result.drifts.append(
+                Drift(
+                    kind="severity_escalation",
+                    rule_id=rid,
+                    name=rid,
+                    expected=f"{expected['to']}（{expected['kind']}={expected['value']}）",
+                    actual="表里没登记升级路径",
+                    detail="代码里这条规则有 severity 升级路径，证据表没登记",
+                )
+            )
+            continue
+        if (
+            actual.get("to") != expected["to"]
+            or actual.get("kind") != expected["kind"]
+            or not _values_equal(actual.get("value"), expected["value"])
+        ):
+            result.drifts.append(
+                Drift(
+                    kind="severity_escalation",
+                    rule_id=rid,
+                    name=rid,
+                    expected=f"{expected['to']}（{expected['kind']}={expected['value']}）",
+                    actual=f"{actual.get('to')}（{actual.get('kind')}={actual.get('value')}）",
+                    detail="severity 升级路径与代码派生值不一致",
+                )
+            )
+
+
+def _iter_basis_refs(entry: dict) -> list[tuple[str, Any]]:
+    """列出这条规则里所有 ``basis_ref``（来源指针）及其位置标签。"""
+    out: list[tuple[str, Any]] = []
+    source = entry.get("source")
+    if isinstance(source, dict) and "basis_ref" in source:
+        out.append(("source.basis_ref", source["basis_ref"]))
+    for ref in entry.get("code_refs", []):
+        if isinstance(ref, dict) and "basis_ref" in ref:
+            out.append((f"code_refs[{ref.get('name', '?')}].basis_ref", ref["basis_ref"]))
+    return out
+
+
+def _expected_escalation(rule_id: str) -> dict | None:
+    """从**活代码**派生这条规则的 severity 升级路径。
+
+    ⚠️ **升级路径的权威在代码**，不在表里——表里的 ``severity_escalation`` 只是
+    登记，登记与代码不符才算漂移。
+    """
+    from packages.core.quality.ai_patterns_paragraph import DEFAULT_LONG_PARA_ERROR_CHARS
+    from packages.core.quality.ai_patterns_sentence import (
+        _SEVERITY_UPGRADE_LIMITS,
+        DEFAULT_DASH_ERROR_MULTIPLIER,
+    )
+
+    if rule_id in _SEVERITY_UPGRADE_LIMITS:
+        return {"to": "error", "kind": "count", "value": _SEVERITY_UPGRADE_LIMITS[rule_id]}
+    if rule_id == "AI-PUNCT-ABUSE":
+        return {"to": "error", "kind": "rate_multiplier", "value": DEFAULT_DASH_ERROR_MULTIPLIER}
+    if rule_id == "AI-LONG-PARA":
+        return {"to": "error", "kind": "chars", "value": DEFAULT_LONG_PARA_ERROR_CHARS}
+    return None
+
+
+def _check_descriptions(
+    result: CheckResult,
+    table: dict,
+    rules: list[dict],
+    descriptions: dict[str, str],
+    resolver: Callable[[str, str], Any],
+) -> None:
+    """**description 数字的派生式看守**（2026-10-23 task-16 Q-4）。
+
+    ⚠️ **口径纪律**：**同值 ≠ 同一常量**——按值全域匹配会把 ``AI-TRIPLET-OPENING``
+    的「3」误配到 ``_WEAK_WORD_PER_WORD_LIMIT``（同在 ``ai_patterns_sentence.py``）。
+    ⇒ 本表对每个 description 数字**具名**登记来源（常量名 / 内联字面量所在函数 /
+    表内 JSON 路径 / 表内文本 / 外部说明），看守按**名字**复核 ⇒ 值变了就红。
+
+    判据：
+    ① description 里每个数字都**必须**有登记（漏登 ⇒ 红，点名那个数字）；
+    ② 每条登记都**必须**复核通过（常量现值 / 字面量仍在 / 表内路径值 / 文本在 /
+       外部说明非空）；
+    ③ 登记的 ``in_description`` 必须仍出现在**活代码**的 description 里
+       （⇒ 改了 description 忘了同步登记 ⇒ 红）。
+    """
+    for entry in rules:
+        rid = entry.get("rule_id", "<unknown>")
+        live_desc = descriptions.get(rid)
+        if live_desc is None:
+            continue  # 不在 AI_PATTERN_RULES 里（style_subscore / 废弃条目）⇒ 无活 description
+        registrations = entry.get("description_numbers")
+        if not isinstance(registrations, list):
+            result.errors.append(
+                f"{rid} 的 description 里有数字，但表里没有 description_numbers 登记"
+                "⇒ 每个数字都必须登记来源（常量 / 内联字面量 / 表内路径 / 外部值）"
+            )
+            continue
+
+        registered: dict[str, dict] = {}
+        for reg in registrations:
+            if not isinstance(reg, dict):
+                result.errors.append(f"{rid} 的 description_numbers 里有一条不是对象")
+                continue
+            raw = reg.get("in_description")
+            if not isinstance(raw, str):
+                result.errors.append(f"{rid} 的 description_numbers 缺 in_description")
+                continue
+            key = f"{float(raw):g}"
+            if key in registered:
+                result.errors.append(
+                    f"{rid} 的数字 {raw} 登记了多次（每个数字只登记一次）"
+                )
+                continue
+            registered[key] = reg
+            _verify_description_registration(result, rid, reg, entry, resolver)
+
+        for number in description_numbers(live_desc):
+            key = f"{float(number):g}"
+            if key not in registered:
+                result.errors.append(
+                    f"{rid} 的 description 里的数字 {number} **没有登记来源**"
+                    "⇒ 每个数字要么指向一个具名常量 / 内联字面量 / 表内路径，"
+                    "要么显式登记为外部值或历史值"
+                )
+
+
+def _verify_description_registration(
+    result: CheckResult,
+    rid: str,
+    reg: dict,
+    entry: dict,
+    resolver: Callable[[str, str], Any],
+) -> None:
+    """复核一条 description 数字登记（按**名字**，不是按值）。"""
+    kind = reg.get("kind")
+    raw = reg.get("in_description")
+    label = f"{rid} 的 description 数字 {raw}"
+
+    if kind == "code_ref":
+        module, attr = reg.get("module"), reg.get("attr")
+        if not module or not attr:
+            result.errors.append(f"{label} 的 code_ref 缺 module/attr")
+            return
+        try:
+            actual = resolver(module, attr)
+        except Exception as exc:  # pragma: no cover - 常量缺失
+            result.errors.append(f"{label} 的 code_ref 解析失败：{module}.{attr}（{exc}）")
+            return
+        if not isinstance(actual, (int, float)) or isinstance(actual, bool):
+            result.errors.append(f"{label} 的 code_ref 指向的不是数值：{actual!r}")
+            return
+        value = float(raw)
+        expected = float(actual) * 100 if reg.get("unit") == "percent" else float(actual)
+        if abs(expected - value) > 1e-9:
+            result.errors.append(
+                f"{label} 的 code_ref {module}.{attr} 现值 {actual}"
+                f"（换算后 {expected}）≠ 登记值 {value}"
+                "⇒ 常量改了但 description 没改"
+            )
+    elif kind == "inline_literal":
+        rel, func, value = reg.get("file"), reg.get("function"), reg.get("value")
+        if not rel or not func:
+            result.errors.append(f"{label} 的 inline_literal 缺 file/function")
+            return
+        path = REPO_ROOT / rel
+        if not path.exists():
+            result.errors.append(f"{label} 的 inline_literal 指向的文件不存在：{rel}")
+            return
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+        except SyntaxError as exc:  # pragma: no cover - 源文件坏了
+            result.errors.append(f"{label} 的 inline_literal 文件解析失败：{rel}（{exc}）")
+            return
+        target = next(
+            (
+                n
+                for n in tree.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == func
+            ),
+            None,
+        )
+        if target is None:
+            result.errors.append(f"{label} 的 inline_literal 找不到函数 {func}（{rel}）")
+            return
+        literals = {
+            float(node.value)
+            for node in ast.walk(target)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, (int, float))
+            and not isinstance(node.value, bool)
+        }
+        if float(value) not in literals:
+            result.errors.append(
+                f"{label} 的内联字面量 {value} 已不在 {func} 里"
+                "⇒ 阈值改了但 description 没改"
+            )
+    elif kind == "table_field":
+        path = reg.get("path")
+        if not isinstance(path, str):
+            result.errors.append(f"{label} 的 table_field 缺 path")
+            return
+        if "description_numbers" in path:
+            # ⚠️ **不许自指**：路径指回本登记自己 ⇒ 自指断言恒真（AGENTS 坑区同族）
+            result.errors.append(
+                f"{label} 的 table_field 路径 {path} 指回 description_numbers 自身"
+                "⇒ 自指断言恒真，不算证据"
+            )
+            return
+        node: Any = entry
+        try:
+            for part in path.split("."):
+                if part.endswith("]") and "[" in part:
+                    key, idx = part[:-1].split("[", 1)
+                    node = node[key][int(idx)]
+                else:
+                    node = node[part]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            # ⚠️ **不许崩**：路径解析失败**正是**「表里那个字段被改了/删了」的信号
+            # ⇒ 报成一条可定位的错误，而不是抛异常让整个看守挂掉。
+            result.errors.append(
+                f"{label} 的 table_field 路径 {path} 解析失败：{exc}"
+                "⇒ 指向的字段已被改动或删除（登记与表分叉了）"
+            )
+            return
+        if not isinstance(node, (int, float)) or isinstance(node, bool):
+            result.errors.append(f"{label} 的 table_field {path} 不是数值：{node!r}")
+            return
+        if abs(float(node) - float(raw)) > 1e-9:
+            result.errors.append(
+                f"{label} 的 table_field {path} 现值 {node} ≠ 登记值 {raw}"
+            )
+    elif kind == "table_text":
+        blob = json.dumps(entry, ensure_ascii=False)
+        if str(raw) not in blob:
+            result.errors.append(
+                f"{label} 的 table_text：数字 {raw} 已不出现在本规则条目里"
+            )
+    elif kind == "external":
+        note = reg.get("note")
+        if not isinstance(note, str) or not note.strip():
+            result.errors.append(
+                f"{label} 登记为 external 但 note 为空"
+                "⇒ 外部值 / 历史值必须写清来源或沿革"
+            )
+    else:
+        result.errors.append(f"{label} 的 kind 未知：{kind!r}")
 
 
 def _check_ref(

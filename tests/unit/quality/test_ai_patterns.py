@@ -7,6 +7,7 @@
 - 「他/她」主语排比堆砌。
 - 章尾总结/升华体套话。
 - 破折号/省略号滥用（默认阈值与自定义阈值）。
+- 破折号 **error 升级门**的 2× 边界（1.9× ⇒ warning、2.1× ⇒ error）。
 - 解释腔连接词高密度。
 - 命中数超阈值时 severity 升级为 error。
 - 空字符串/空白字符串安全返回空列表。
@@ -20,6 +21,10 @@ from packages.core.quality.ai_patterns import (
     DEFAULT_SHORT_PARA_RATE_PER_1K,
     scan_ai_patterns,
 )
+
+# ⚠️ 从**实现模块**直取升级乘数：它 2026-10-23 才提为命名常量（task-16 Q-3），
+# 门面 `ai_patterns` 尚未再导出 ⇒ 这里按「同模块」纪律直取实现处。
+from packages.core.quality.ai_patterns_sentence import DEFAULT_DASH_ERROR_MULTIPLIER
 
 # ---------------------------------------------------------------------------
 # 基础行为
@@ -227,6 +232,67 @@ def test_punct_abuse_no_hit():
     prose = "他走了，脚步很轻。她停在门口。"
     hits = scan_ai_patterns(prose)
     assert not any(h["rule_id"] == "AI-PUNCT-ABUSE" for h in hits)
+
+
+# ---------------------------------------------------------------------------
+# AI-PUNCT-ABUSE 的 **error 升级门**边界（2026-10-23 task-19）
+# ---------------------------------------------------------------------------
+# ⚠️ **为什么要有这一节**：升级门此前是 `_scan_punct_abuse` 里的**内联字面量**
+# ``threshold_per_1k * 2`` ⇒ 改 2→3 时**任何测试都不会红**（证据表也钉不到它）。
+# ⇒ 2026-10-23 task-16 把它提为命名常量 ``DEFAULT_DASH_ERROR_MULTIPLIER``；
+#   本节把「乘数 = 2」这条**行为**钉死（1.9× 阈值 ⇒ warning、2.1× ⇒ error）。
+# ⇒ 突变规格 ``l17_evidence_semantics.py::L17-M08`` 改的就是这个常量的值。
+
+#: 构造正文用的固定可见字数（10000 字 ⇒ 每处破折号 = 0.1/千字 ⇒ 密度可精确构造）
+_PUNCT_FIXED_VISIBLE_CHARS = 10000
+
+
+def _punct_prose_at_rate(rate_per_1k: float) -> tuple[str, int]:
+    """构造一个**恰好**给出目标密度（每千字 ``rate_per_1k`` 处）的正文。
+
+    每个 ``——`` 既是 1 处命中，也是 2 个可见字 ⇒ 补白长度要减掉这 2 个字。
+    """
+    matches = int(round(rate_per_1k * (_PUNCT_FIXED_VISIBLE_CHARS / 1000.0)))
+    filler = _PUNCT_FIXED_VISIBLE_CHARS - 2 * matches
+    assert filler > 0, "目标密度对应的命中数超过可见字上限"
+    return "他" * filler + "——" * matches, matches
+
+
+def test_punct_abuse_error_multiplier_is_two():
+    """升级乘数本身被钉死为 **2**（常量层，不只是行为层）。
+
+    ⚠️ 这是**常量钉**（与 ``test_prompt_label_key.py::DIRECTOR_KEY_LEN`` 同款）：
+    行为用例（下面两条）钉的是「1.9×/2.1× 的档位」，本条钉的是「乘数就是 2」
+    ⇒ 两层都变了才需要改本用例。
+    """
+    assert DEFAULT_DASH_ERROR_MULTIPLIER == 2, (
+        f"破折号 error 升级乘数被改成 {DEFAULT_DASH_ERROR_MULTIPLIER}（应为 2）"
+        "⇒ 升级门变了：证据表 severity_escalation 与本文件的边界用例都会失配"
+    )
+
+
+def test_punct_abuse_severity_stays_warning_below_two_times_threshold():
+    """1.9× 阈值 ⇒ 仍是 **warning**（升级门在 2×，不在 1.9×）。"""
+    prose, matches = _punct_prose_at_rate(1.9)
+    pa = [h for h in scan_ai_patterns(prose) if h["rule_id"] == "AI-PUNCT-ABUSE"]
+    assert len(pa) == 1, f"应恰好命中 1 条（命中数 {matches}），实际 {len(pa)}"
+    assert abs(pa[0]["rate"] - 1.9) < 1e-6, f"密度构造偏了：{pa[0]['rate']}"
+    assert pa[0]["severity"] == "warning", (
+        f"1.9× 阈值不该升级为 error（升级门 = {DEFAULT_DASH_ERROR_MULTIPLIER}× 阈值）"
+        f"，实际 severity={pa[0]['severity']}"
+    )
+
+
+def test_punct_abuse_severity_escalates_to_error_above_two_times_threshold():
+    """2.1× 阈值 ⇒ **error**（升级门 = 乘数 2 × 阈值）。"""
+    prose, matches = _punct_prose_at_rate(2.1)
+    pa = [h for h in scan_ai_patterns(prose) if h["rule_id"] == "AI-PUNCT-ABUSE"]
+    assert len(pa) == 1, f"应恰好命中 1 条（命中数 {matches}），实际 {len(pa)}"
+    assert abs(pa[0]["rate"] - 2.1) < 1e-6, f"密度构造偏了：{pa[0]['rate']}"
+    assert pa[0]["severity"] == "error", (
+        f"2.1× 阈值必须升级为 error（升级门 = {DEFAULT_DASH_ERROR_MULTIPLIER}× 阈值），"
+        f"实际 severity={pa[0]['severity']}"
+    )
 
 
 # ---------------------------------------------------------------------------

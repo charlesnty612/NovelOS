@@ -98,6 +98,14 @@ _AI_EXPLAIN_PATTERNS: list[tuple[str, str | None]] = [
 # 判别：tests/unit/quality/test_human_baseline_ai_thresholds.py（改回 3.5 必红）。
 # 语义为 float（本常量旧注解误写 int，2026-09-16 一并订正，与短段常量同款）。
 DEFAULT_DASH_THRESHOLD_PER_1K = 1.0
+
+# 破折号/省略号命中率的**升级乘数**：rate ≥ 阈值 × 本乘数 ⇒ severity 由 warning
+# 升级为 error。
+# ⚠️ **2026-10-23 task-16 Q-3**：此前这个「2」是 `_scan_punct_abuse` 里的**内联
+# 字面量** ⇒ 证据表 `detector_evidence.json` 的 code_refs 钉不到它 ⇒ 把 2 改成 3
+# 时**证据表仍显示一致**（实测：守卫视 consistent）⇒ 升级档静默漂移。
+# ⇒ 提为命名常量（可被证据表 `code_refs` 钉住、可被突变规格覆盖）。
+DEFAULT_DASH_ERROR_MULTIPLIER = 2
 # ---------------------------------------------------------------------------
 # 2026-09-15：外部对照研究移植的四条算子
 # ---------------------------------------------------------------------------
@@ -280,7 +288,9 @@ def _scan_punct_abuse(
     rate = len(matches) / (wc / 1000.0)
     if rate <= threshold_per_1k:
         return []
-    base_severity = "error" if rate >= threshold_per_1k * 2 else "warning"
+    base_severity = (
+        "error" if rate >= threshold_per_1k * DEFAULT_DASH_ERROR_MULTIPLIER else "warning"
+    )
     return [
         {
             "rule_id": "AI-PUNCT-ABUSE",

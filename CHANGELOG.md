@@ -5,6 +5,53 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-23 批次（二十六）：证据表语义看守（critical）+ genre 突变补盲 + 两条存活突变修复）
+
+> **来源**：全面 review 的三路审计中的 **B 路（质量/题材域）**：1 critical + 5 major + 7 minor；Lead 逐条复验后分两路由两名开发并行修（写域互斥）。零真实 LLM、零内容仓接触。
+
+#### 1. `detector_evidence.json` 语义字段整体裸奔（**critical**）⇒ 6 类机器判据 + 数据订正
+
+**审计实测**：29 项语义扰动中 **26 项无守卫**（`corpora` / `status_vocabulary` / `separation` / `evidence_status` / 两侧全部数字 / `threshold_summary` / `basis_ref` / `conflicts`）——看守只比代码派生值，人工维护的语义字段改了没人红。
+
+**做法（守卫先上、跑红、再修数据，顺序留痕）**：
+- 新增 6 类判据：① `corpora` 引用必须存在于 `corpora` 键集；② `evidence_status` ∈ `status_vocabulary`；③ **`measured` 由定义派生**（两侧 rate + corpus + chapters_total 全非 null）；④ `separation` 由同条目两侧 rate 派生（**舍入包络**，见下）；⑤ `basis_ref` 指向的**文件必须存在**；⑥ `severity_escalation` 与活代码 `_expected_escalation()` 比对。
+- **守卫先红**（旧数据 + 新守卫，`tmp/evidence_task16_guard_first_red.txt`）：**errors 31 / drifts 6** —— 正是审计点名的 **3 条 `measured` 冲突**（`AI-ANTHRO-VEHICLE` 4 项 · `AI-LONG-PARA` · `AI-DIALOGUE-LOW`）+ 2 条 separation 分叉 + 6 处 `severity_escalation` 未登记。
+- **数据订正（不编造）**：`AI-ANTHRO-VEHICLE` `measured → partial`（语料来源查不到，**不填 corpus**，note 写明）；`AI-LONG-PARA` / `AI-DIALOGUE-LOW` 的 `chapters_total ← corpora[book01_48ch].chapters = 48`（**推导** + 交叉校验 `chapters_total == corpora[corpus].chapters`）；`AI-CONTRAST-PAIR` `6.63 → 3.45`（可派生值，6.63 留在 `conflicts`）；`AI-PUNCT-ABUSE` 的 `9.34` **保留**并在 `conflicts` 具名（见下）。
+- **探针 12 → 30**（每条规则成对 `expect_hit` true/false，名单**派生**不手挑）；**description 数字登记 83 条**（code_ref 19 / table_field 38 / table_text 19 / inline_literal 2 / external 5），**具名**而非全域按值匹配（审计已证按值会误配）。
+
+**⚠️ `separation` 的「舍入包络」（Lead 裁决 + 对抗审查独立复核）**：表里 `rate` 存**两位小数**，严格相等会把真实比值判错 ⇒ 判据改为「用各 rate 自身**存储小数位**算 ±半宽，比值落在区间内即自洽」（**半宽按 rate 自身精度算，不是写死 0.005**）。实测：PUNCT 包络 `(8.8462, 9.3784)` 放过 9.34；CONTRAST 包络 `(3.3556, 3.5581)` **抓住 6.63**。
+⚠️ **已知结构性副作用（审查指出，登记）**：判据严格度是**存储精度的函数** ⇒ 存得更细则包络收紧（0.1852 时 9.11 会被拒）。正解是**登记未舍入 rate 对**让判据精确比，登记待办；在此之前「保留实测值 9.34 + conflicts 具名」是正确取舍（把 9.34 改成 9.11 = 用派生产物顶替实测值）。
+
+#### 2. genre 域补突变规格（6/8 模块零覆盖）+ quality README 副本看守
+
+- 新建 `tests/mutation_specs/l18_genre_modules.py` **9 条**，覆盖 `target_words`（2）/ `consumers`（2）/ `model`（2）/ `service`（2）/ `queries`（1），按「改错会静默」排序；缺承接面的 3 处补在 `tests/unit/genre/test_genre_module_contract_bits.py`。
+- `test_quality_module_inventory.py` 第 1 层改为**解析 `quality/README.md` §1 代码树**的 `.py` 清单 ↔ 目录 `glob("*.py")` **双向核对**（README 多列/少列都红）；**删掉手挑名册** `_EXPECTED_MODULE_FILES`，权威清单从目录派生。判别：删 README 树一行 ⇒ 恰好该断言 1 failed。
+
+#### 3. 两条 `[SURVIVED]` 突变的处置（Lead 串行实跑抓到）
+
+| 突变 | 判定 | 处置 |
+|---|---|---|
+| `L17-M08`（把 `* DEFAULT_DASH_ERROR_MULTIPLIER` 退回 `* 2`） | **等价突变**：常量就是 2 ⇒ 行为逐位不变，任何测试都不可能抓到 | 改为**行为突变**：常量 `= 2` → `= 3`（锚点取常量定义行）⇒ 由证据表 `code_refs` + `severity_escalation` 两处抓；另补 **3 例**边界（1.9× ⇒ warning / 2.1× ⇒ error / 常量钉） |
+| `GM-CONSUMERS-1`（`if _json_len(...) <= max_chars` → `if True`） | **(b) 夹具没越界**：原夹具 838 字符 < 1000 预算 ⇒ 截断分支从未执行（**不是**锚点错支路、**不是**等价突变：纯文本 1100 字时未截断返回 1119 字符 + 零标记） | 在承接用例内补「纯文本超预算」段（1100 字 ⇒ 断言标记在 + 输出 ≤ 预算），**保持用例名不变**便于复跑定位 |
+
+#### 4. 闸门（Lead 亲跑）
+
+| 项 | 结果 |
+|---|---|
+| 全量 pytest `-n 20` | **4012 passed / 1 skipped / 1 xfailed / 0 failed**（174.02s；较批次二十五 3987 **+25**） |
+| 树指纹 | **716 文件 / `6d3ff743…`**，跑测前后**逐位一致** |
+| ruff | `All checks passed!` |
+| 突变实跑 | **l17 8/8 CAUGHT**、**l18 9/9 CAUGHT**、`--changed` **0 存活**（此前两条 SURVIVED 已修） |
+| 残留 | `.mutbak` **0**；`packages/`+`scripts/` 的 `# MUTATION` 标记 **0** |
+| 双轴审查 | **0 critical / 0 major / 4 minor**；13/13 冻结 SHA 逐位一致；旧表快照喂新守卫 ⇒ 31 errors + 6 drifts（证明判据在「判别」而非复读现状） |
+
+#### 5. 审查抓出的 4 条 minor（不拦提交，登记）
+
+1. `tests/unit/quality/test_ai_rule_description_consistency.py` 未进冻结清单（已补核：`83A81449…`）。
+2. `detector_evidence_check.py::_check_descriptions` 在 `descriptions` 取不到值时**静默 `continue`** ⇒ Q-4 判据整体失效且零提示（对照 `resolver`/`rule_table`/`scan` 失效时都响亮）。
+3. `HUMAN_BASELINE.md` §8 原写「两处必须一致，由……用例看守」——**该声称不成立**（全仓无用例读该文件）⇒ 已当场改为「本节是副本、无机器看守、改 JSON 须人工同步」（**同批次二十四 quality README 副本同一形状的第二次**）。
+4. `kind="regex"` 而实际值不是 Pattern ⇒ `_fingerprint_regex` 抛 AttributeError（CLI 被 `main()` 收口为 exit 2，但库调用方会崩）。
+
 ### Changed（2026-10-23 批次（二十五）：章名自动生成 + 备份白名单补全 + 全量偶发 5 红根因修复 + 看守补强）
 
 > **来源**：用户「继续干你的活，期间由你自行裁决」+「新增章节后生成计划章节名不会自动生成，加入排期修复」+「测试太臃肿，简化一下，由你自行裁决」⇒ 先做全面 review（三路只读审计）再修复。
