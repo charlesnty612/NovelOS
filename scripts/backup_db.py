@@ -30,6 +30,23 @@
     python scripts/backup_db.py --list                # 只看会写到哪里（先校验源库）
     python scripts/backup_db.py --keep-plaintext-on-failure  # 自检失败时保留明文副本（含密钥！）
 
+落盘约束（D-19 / 写路径守卫）
+---------------------------
+备份落点由 ``--out`` / ``NOVELOS_BACKUP_DIR`` / 同步盘探测决定（**默认在同步盘，
+不在软件仓** ⇒ 默认路径不受影响）。但**软件仓内只允许写 ``data/`` 与 ``tmp/``
+两个子树**（均已被 ``.gitignore`` 覆盖）：``--out`` 指到软件仓内其它位置
+（仓库根、``docs/`` …）⇒ **明确拒绝**（退出码 2，不产出任何备份）——
+脚本不得把产物写回软件仓（落进去 = 进 GitHub 历史，**不可撤回**），
+也**不得**静默改写到别处。逃生口 ``--allow-software-repo-out``（默认关）
+须由用户显式承担风险。
+
+⚠️ **密钥文件同样受这条约束**（2026-10-23 对抗审查 F-3）：``--key-file`` 指向
+软件仓内（仓库根、``docs/`` …）⇒ **明确拒绝**（退出码 2，**不写密钥文件**、
+**不建目标目录**）——那个文件是「**能解开所有备份的密钥**」，``.gitignore`` 此前
+也不覆盖 ``backup.key`` ⇒ ``git add -A`` 就会把它提交进 GitHub 历史，**不可撤回**。
+逃生口 ``--allow-software-repo-key``（默认关，**与 ``--allow-software-repo-out``
+分开**）：「允许备份落仓」与「允许密钥落仓」是两件不同的事。
+
 ⚠️ **CLI 行为变更（2026-10-23，D-4 / D-5，详见 CHANGELOG）**：
 1. ``--encrypt`` 由 opt-in 改为**默认开**；明文备份须显式 ``--plaintext``；
 2. 密钥文件**不再静默生成**——缺失时**报错退出**，只有 ``--init-key`` 才创建
@@ -64,6 +81,22 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from scripts.guard_repo_write_path import (
+        EXIT_WRITE_PATH_REJECTED,
+        RepoWritePathError,
+        check_write_path,
+        is_inside_repo,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/backup_db.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from guard_repo_write_path import (  # type: ignore[no-redef]
+        EXIT_WRITE_PATH_REJECTED,
+        RepoWritePathError,
+        check_write_path,
+        is_inside_repo,
+    )
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / "data" / "novelos.db"
@@ -108,6 +141,8 @@ def find_openssl() -> Path:
 
 
 #: CLI 退出码：0 = 成功；2 = 前置条件不满足（中止，**未产出任何备份**）。
+#: ⚠️ 与守卫的 ``EXIT_WRITE_PATH_REJECTED`` **同值（2）**：落点被拒也是「前置条件不满足」，
+#: 语义一致（中止 ⇒ 仓内零产物），不新增退出码含义。
 EXIT_ABORT = 2
 
 
@@ -404,6 +439,18 @@ def main(argv: list[str] | None = None) -> int:
              "另存一份到**私有**网盘 —— 两处 SHA256 应一致；密钥丢失 = 备份不可恢复）",
     )
     ap.add_argument("--list", action="store_true", help="只打印将要写到哪里，不执行")
+    ap.add_argument(
+        "--allow-software-repo-out",
+        action="store_true",
+        help="逃生口：允许把备份写回软件仓（默认关；风险自负——可能被误提交 ⇒ 进 GitHub 历史不可撤回）",
+    )
+    ap.add_argument(
+        "--allow-software-repo-key",
+        action="store_true",
+        help="逃生口：允许把**备份加密密钥**写进软件仓（默认关；风险自负——"
+             "该密钥能解开**所有**备份，提交进 GitHub 历史不可撤回）。"
+             "与 --allow-software-repo-out **分开**：允许备份落仓 ≠ 允许密钥落仓",
+    )
     args = ap.parse_args(argv)
     # ⚠️ 2026-10-23 CLI 行为变更（D-4）：``--encrypt`` 由 opt-in 改为**默认开**，
     # 明文备份必须显式 ``--plaintext``。
@@ -419,6 +466,38 @@ def main(argv: list[str] | None = None) -> int:
     if not src.is_file():
         raise SystemExit(f"[ABORT] 源库不存在：{src}")
     out_dir = resolve_out_dir(args.out)
+
+    # 守卫（D-19）：待写路径不得落在软件仓根下非 data/tmp 处。
+    # 默认落点（同步盘）在仓外 ⇒ 不受影响；显式 --out 指到仓内非法位置 ⇒ 拒绝。
+    allow_repo_out = bool(args.allow_software_repo_out)
+    try:
+        check_write_path(out_dir, allow_repo_root=allow_repo_out)
+    except RepoWritePathError as exc:
+        _abort(f"[拒绝写入] {exc}", code=EXIT_WRITE_PATH_REJECTED)
+    if allow_repo_out and is_inside_repo(out_dir):
+        print(
+            f"[警告] --allow-software-repo-out 已开启：本次备份将落软件仓 {out_dir}"
+            "（可能被误提交 ⇒ 进 GitHub 历史不可撤回）。",
+            file=sys.stderr,
+        )
+
+    # 守卫（D-19 / F-3）：**密钥文件**同样不得落在软件仓内的非允许位置。
+    # ⚠️ `--key-file` 指到仓内 ⇒ 「能解开所有备份的密钥」进版本库 ⇒ 提交即不可撤回。
+    #    逃生口**单独**给（--allow-software-repo-key）：允许「备份落仓」与允许
+    #    「密钥落仓」是**两件不同的事**，共用一个开关会让只想把备份放回仓里的用户
+    #    顺带授权提交密钥。
+    key_file_path = Path(args.key_file).expanduser()
+    allow_repo_key = bool(args.allow_software_repo_key)
+    try:
+        check_write_path(key_file_path, allow_repo_root=allow_repo_key)
+    except RepoWritePathError as exc:
+        _abort(f"[拒绝写入] {exc}", code=EXIT_WRITE_PATH_REJECTED)
+    if allow_repo_key and is_inside_repo(key_file_path):
+        print(
+            f"[警告] --allow-software-repo-key 已开启：备份加密密钥将落软件仓 {key_file_path}"
+            "（⚠️ 该密钥能解开**所有**备份；提交进 GitHub 历史不可撤回）。",
+            file=sys.stderr,
+        )
 
     print(f"[源库]   {src}")
     print(f"[输出]   {out_dir}")

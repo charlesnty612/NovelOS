@@ -28,12 +28,34 @@
 只读：不连库、不写任何仓库文件。输出默认只到 stdout；``--out`` 的路径由调用方
 指定（**默认不进仓库**）。
 
+落盘约束（D-19 / 写路径守卫）
+---------------------------
+
+本脚本的产物是**评估/校准报告**（语料统计 + 逐算子命中数）：
+
+- ``--out <path>``：显式落盘路径 ⇒ 落盘前过守卫。**软件仓内只允许写 ``data/``
+  与 ``tmp/`` 两个子树**（均已被 ``.gitignore`` 覆盖）；指到软件仓内其它位置
+  （仓库根、``docs/`` …）⇒ **明确拒绝**（退出码 2，不产生文件）——
+  脚本不得把产物写回软件仓（落进去 = 进 GitHub 历史，**不可撤回**），
+  也**不得**静默改写到别处。
+- ``--write-docs``：把报告副本落**痕迹仓** ``docs/evaluation/``（``--artifacts-dir``
+  可显式指定痕迹仓根）。痕迹仓不可用 ⇒ **明确失败**（退出码 3 + 说明），
+  **绝不回落软件仓**；逃生口 ``--allow-software-repo-out``（默认关）须由用户显式承担。
+
+退出码：``0`` 成功；``2`` 待写路径被守卫拒绝；``3`` 痕迹仓不可用
+（其余失败沿用原行为，如语料路径不存在 ⇒ 1）。
+
+⚠️ ``--out`` 与 ``--write-docs`` **同时**给出 ⇒ **两份副本都落**（并打告警），
+不再是一个静默吞掉另一个（2026-10-23 对抗审查 F-6：旧实现 ``--out`` 吞掉
+``--write-docs`` ⇒ 痕迹仓副本没落且零告警）。
+
 用法::
 
     python scripts/human_baseline_synthetic.py                       # 内置合成语料
     python scripts/human_baseline_synthetic.py --format json
     python scripts/human_baseline_synthetic.py --out D:/report.json --format json
     python scripts/human_baseline_synthetic.py --corpus D:/texts/xiyouji   # 公版语料
+    python scripts/human_baseline_synthetic.py --write-docs --format json  # 落痕迹仓
 """
 
 from __future__ import annotations
@@ -53,6 +75,35 @@ from packages.core.quality.ai_patterns import (  # noqa: E402
     scan_ai_patterns,
 )
 from packages.core.quality.wordcount import visible_chars  # noqa: E402
+
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from scripts.guard_repo_write_path import (
+        ARTIFACTS_EVALUATION_RELPATH,
+        EXIT_ARTIFACTS_UNAVAILABLE,
+        EXIT_WRITE_PATH_REJECTED,
+        ArtifactsUnavailableError,
+        RepoWritePathError,
+        check_write_path,
+        format_artifacts_unavailable,
+        resolve_artifacts_root,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/human_baseline_synthetic.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from guard_repo_write_path import (  # type: ignore[no-redef]
+        ARTIFACTS_EVALUATION_RELPATH,
+        EXIT_ARTIFACTS_UNAVAILABLE,
+        EXIT_WRITE_PATH_REJECTED,
+        ArtifactsUnavailableError,
+        RepoWritePathError,
+        check_write_path,
+        format_artifacts_unavailable,
+        resolve_artifacts_root,
+    )
+
+ROOT = Path(__file__).resolve().parents[1]
+
+#: ``--write-docs`` 的落点：**痕迹仓** ``docs/evaluation/human-baseline-synthetic.*``。
+ARTIFACTS_RELPATH = ARTIFACTS_EVALUATION_RELPATH
 
 # ---------------------------------------------------------------------------
 # 语料（**本仓库原创**：下面两段文字均为本文件新写，不抄任何受版权保护的文本）
@@ -336,6 +387,39 @@ def render_json(report: dict[str, Any]) -> str:
     return json.dumps(report, ensure_ascii=False, indent=2)
 
 
+def resolve_artifacts_landing(
+    *,
+    artifacts_dir: str | None = None,
+    allow_software_repo_out: bool = False,
+    filename: str,
+) -> Path:
+    """``--write-docs`` 的落点：**痕迹仓** ``docs/evaluation/<filename>``。
+
+    ⚠️ 痕迹仓不可用时抛 :class:`ArtifactsUnavailableError`（**不回落到软件仓**）；
+    只有显式 ``--allow-software-repo-out`` 才回落到软件仓并打告警（风险自负）。
+    """
+    res = resolve_artifacts_root(artifacts_dir, repo_root=ROOT)
+    if res.ok:
+        return res.root / ARTIFACTS_RELPATH / filename
+    if allow_software_repo_out:
+        fallback = ROOT / ARTIFACTS_RELPATH / filename
+        print(
+            "[警告] --allow-software-repo-out 已开启：报告副本将落软件仓 "
+            f"{fallback}（可能被误提交 ⇒ 进 GitHub 历史不可撤回）。",
+            file=sys.stderr,
+        )
+        return fallback
+    raise ArtifactsUnavailableError(
+        format_artifacts_unavailable(
+            res,
+            subject=(
+                "该报告是算子校准的评估产物（语料统计 + 逐算子命中数）⇒ 必须落痕迹仓，"
+                "不能落软件仓（落进软件仓 = 进 GitHub 历史，不可撤回）。"
+            ),
+        )
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="自造语料的 AI 味算子校准（人类基线的可分发替代物）"
@@ -346,8 +430,64 @@ def main(argv: list[str] | None = None) -> int:
         help="人类侧语料（文件或目录下的 *.txt），如公版《西游记》文本；缺省用内置合成语料",
     )
     ap.add_argument("--format", choices=["text", "json"], default="text", help="stdout 格式")
-    ap.add_argument("--out", default=None, help="报告副本写到哪（默认只输出到 stdout）")
+    ap.add_argument(
+        "--out",
+        default=None,
+        help="报告副本写到哪（默认只输出到 stdout）；受仓库守卫约束——软件仓内只允许 data/ 与 tmp/",
+    )
+    ap.add_argument(
+        "--write-docs",
+        action="store_true",
+        help="把报告副本写**痕迹仓** docs/evaluation/（默认只输出到 stdout，不落任何文件）",
+    )
+    ap.add_argument(
+        "--artifacts-dir",
+        default=None,
+        help="显式指定痕迹仓根目录（覆盖 NOVELOS_ARTIFACTS_DIR 与同级目录探测）",
+    )
+    ap.add_argument(
+        "--allow-software-repo-out",
+        action="store_true",
+        help="逃生口：痕迹仓不可用时接受把产物写回软件仓（默认关；风险自负）",
+    )
     args = ap.parse_args(argv)
+
+    # 落点判定**先于**任何测量与输出（落点不合法就别白跑一遍、也别先喷一屏报告）
+    # ⚠️ F-6（2026-10-23 对抗审查）：``--out`` 与 ``--write-docs`` **同时**给出时，
+    #    旧实现是 ``if args.out: ... elif args.write_docs:`` ⇒ **--out 静默吞掉
+    #    --write-docs**（痕迹仓副本没落、零告警）⇒ 用户以为两份都落了。
+    #    现在的语义：**两份都落 + 明确告警**（给了两个开关通常就是想要两份；
+    #    报错退出会打断既有自动化）。
+    allow_repo_out = bool(args.allow_software_repo_out)
+    out_path: Path | None = None
+    docs_path: Path | None = None
+    if args.out:
+        out_path = Path(args.out)
+    if args.write_docs:
+        suffix = "json" if args.format == "json" else "md"
+        try:
+            docs_path = resolve_artifacts_landing(
+                artifacts_dir=args.artifacts_dir,
+                allow_software_repo_out=allow_repo_out,
+                filename=f"human-baseline-synthetic.{suffix}",
+            )
+        except ArtifactsUnavailableError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_ARTIFACTS_UNAVAILABLE
+
+    if out_path is not None and docs_path is not None:
+        print(
+            "[警告] --out 与 --write-docs 同时给出 ⇒ **两份副本都会落**"
+            f"（--out: {out_path}；痕迹仓: {docs_path}）。",
+            file=sys.stderr,
+        )
+
+    for path in (p for p in (out_path, docs_path) if p is not None):
+        try:
+            check_write_path(path, allow_repo_root=allow_repo_out)
+        except RepoWritePathError as exc:
+            print(f"[拒绝写入] {exc}", file=sys.stderr)
+            return EXIT_WRITE_PATH_REJECTED
 
     if args.corpus:
         human_text = load_corpus(args.corpus)
@@ -362,11 +502,14 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print(rendered)
 
-    if args.out:
-        out_path = Path(args.out)
+    if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(rendered, encoding="utf-8")
         print(f"\n（报告副本已写到 {out_path}）")
+    if docs_path is not None:
+        docs_path.parent.mkdir(parents=True, exist_ok=True)
+        docs_path.write_text(rendered, encoding="utf-8")
+        print(f"\n（报告副本已写到 {docs_path}）")
     return 0
 
 

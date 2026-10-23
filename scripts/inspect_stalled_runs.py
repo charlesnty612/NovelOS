@@ -43,6 +43,20 @@ PAUSED 的唯一出口是 resume 后走驳回/批准决议，或由主会话在�
 ``--export`` 落盘内容含完整 ``checkpoint_json``（正文草稿、角色卡、评审意见）。
 导出文件属运行期产物，**不得提交进版本库**；若确需入库须先按项目纪律脱敏。
 
+落盘约束（D-19 / 写路径守卫）
+---------------------------
+
+- ``--export <path>``：显式留档路径 ⇒ 落盘前过守卫。**软件仓内只允许写
+  ``data/`` 与 ``tmp/`` 两个子树**（均已被 ``.gitignore`` 覆盖）；指到软件仓内
+  其它位置（仓库根、``docs/`` …）⇒ **明确拒绝**（退出码 2，不产生导出文件）——
+  脚本不得把产物写回软件仓（落进去 = 进 GitHub 历史，**不可撤回**），
+  也**不得**静默改写到别处。``--export tmp/stalled_runs_export.json`` 仍然合法
+  （``tmp/`` 是允许子树）。
+- ``--write-docs``：把留档落**痕迹仓** ``docs/evaluation/stalled-runs-export.json``
+  （``--artifacts-dir`` 可显式指定痕迹仓根）。痕迹仓不可用 ⇒ **明确失败**
+  （退出码 3 + 说明），**绝不回落软件仓**；逃生口 ``--allow-software-repo-out``
+  （默认关）须由用户显式承担。
+
 用法示例
 --------
 
@@ -51,12 +65,19 @@ PAUSED 的唯一出口是 resume 后走驳回/批准决议，或由主会话在�
     python scripts/inspect_stalled_runs.py
     python scripts/inspect_stalled_runs.py --db data/novelos.db --json
     python scripts/inspect_stalled_runs.py --export tmp/stalled_runs_export.json
+    python scripts/inspect_stalled_runs.py --write-docs --json  # 留档落痕迹仓
+
+⚠️ ``--export`` 与 ``--write-docs`` **同时**给出 ⇒ **两份留档都落**（并打告警），
+不再是一个静默吞掉另一个（2026-10-23 对抗审查 F-6：旧实现 ``--export`` 吞掉
+``--write-docs`` ⇒ 痕迹仓副本没落且零告警）。
 
 退出码
 ------
 
 * ``0`` —— 巡检完成（无论是否发现卡死 run）；
-* ``2`` —— 参数错误 / DB 不存在 / 非法 SQLite。
+* ``2`` —— 参数错误 / DB 不存在 / 非法 SQLite / **待写路径被守卫拒绝**；
+* ``3`` —— **痕迹仓不可用**（``--write-docs`` 且拿不到痕迹仓 ⇒ 明确失败，不回落
+  软件仓）；同样用于 ``--apply`` 被拒（取消/删除本工具不实现）。
 """
 
 from __future__ import annotations
@@ -70,6 +91,35 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from scripts.guard_repo_write_path import (
+        ARTIFACTS_EVALUATION_RELPATH,
+        EXIT_ARTIFACTS_UNAVAILABLE,
+        EXIT_WRITE_PATH_REJECTED,
+        ArtifactsUnavailableError,
+        RepoWritePathError,
+        check_write_path,
+        format_artifacts_unavailable,
+        resolve_artifacts_root,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/inspect_stalled_runs.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from guard_repo_write_path import (  # type: ignore[no-redef]
+        ARTIFACTS_EVALUATION_RELPATH,
+        EXIT_ARTIFACTS_UNAVAILABLE,
+        EXIT_WRITE_PATH_REJECTED,
+        ArtifactsUnavailableError,
+        RepoWritePathError,
+        check_write_path,
+        format_artifacts_unavailable,
+        resolve_artifacts_root,
+    )
+
+ROOT = Path(__file__).resolve().parents[1]
+
+#: ``--write-docs`` 的落点：**痕迹仓** ``docs/evaluation/stalled-runs-export.json``。
+ARTIFACTS_RELPATH = ARTIFACTS_EVALUATION_RELPATH / "stalled-runs-export.json"
 
 # 「活动」= 未达终态。COMPLETED / FAILED / CANCELLED 是终态，不在巡检范围。
 ACTIVE_STATUSES = ("PAUSED", "RUNNING", "PENDING")
@@ -733,9 +783,10 @@ def render_markdown(report: dict[str, Any]) -> str:
 def export_rows(report: dict[str, Any], path: Path) -> Path:
     """把活动 run 完整行（含完整 checkpoint_json）导出成 JSON 留档。
 
-    导出内容含正文草稿 / 角色卡 / 评审意见原文。落盘到版本库工作区内且未被
-    ``.gitignore`` 覆盖时向 stderr 报警——这不是阻断（留档是正当用途），但必须
-    让操作者看见，避免下次 ``git add -A`` 把草稿一起收进去。
+    导出内容含正文草稿 / 角色卡 / 评审意见原文。落盘到版本库工作区内时向 stderr
+    报警——**非** ``data/``/``tmp/`` 的仓内路径**已被守卫拒掉**（D-19，见
+    ``main``），走到这里的只剩已被 ``.gitignore`` 覆盖的 ``data/``/``tmp/``；
+    提醒保留是为了让操作者看见，避免下次 ``git add -A`` 把草稿一起收进去。
     """
     payload = {
         "db_path": report["db_path"],
@@ -772,10 +823,14 @@ def export_rows(report: dict[str, Any], path: Path) -> Path:
 
 
 def warn_if_inside_repo(path: Path) -> None:
-    """导出路径落在 git 工作区内且未被忽略时，向 stderr 提醒。
+    """导出路径落在 git 工作区内时，向 stderr 提醒。
 
     只提醒不阻断：留档是正当用途，位置由主会话定。但内容是正文草稿与角色卡，
     进版本库就等于内容资产与软件仓混流（违反三仓分离），必须让它在终端露一次脸。
+
+    ⚠️ 守卫（D-19）已把软件仓内**非** ``data/``/``tmp/`` 的路径**拒掉** ⇒ 走到
+    这里的只有 ``data/`` 与 ``tmp/``（两者都已被 ``.gitignore`` 覆盖）；提醒
+    保留是为了「用完即清」这条纪律仍然可见。
     """
     try:
         resolved = path.resolve()
@@ -815,6 +870,39 @@ def apply_cleanup(rows: list[RunRow], *, confirmed_by: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+def resolve_artifacts_landing(
+    *,
+    artifacts_dir: str | None = None,
+    allow_software_repo_out: bool = False,
+) -> Path:
+    """``--write-docs`` 的落点：**痕迹仓** ``docs/evaluation/stalled-runs-export.json``。
+
+    ⚠️ 痕迹仓不可用时抛 :class:`ArtifactsUnavailableError`（**不回落到软件仓**）；
+    只有显式 ``--allow-software-repo-out`` 才回落到软件仓并打告警（风险自负：
+    该留档含正文草稿与角色卡原文）。
+    """
+    res = resolve_artifacts_root(artifacts_dir, repo_root=ROOT)
+    if res.ok:
+        return res.root / ARTIFACTS_RELPATH
+    if allow_software_repo_out:
+        fallback = ROOT / ARTIFACTS_RELPATH
+        print(
+            "[警告] --allow-software-repo-out 已开启：留档将落软件仓 "
+            f"{fallback}（含正文草稿 / 角色卡 ⇒ 被误提交 = 进 GitHub 历史不可撤回）。",
+            file=sys.stderr,
+        )
+        return fallback
+    raise ArtifactsUnavailableError(
+        format_artifacts_unavailable(
+            res,
+            subject=(
+                "该留档含完整 checkpoint_json（正文草稿、角色卡、评审意见）⇒ 必须落痕迹仓，"
+                "不能落软件仓（落进软件仓 = 进 GitHub 历史，不可撤回）。"
+            ),
+        )
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="只读巡检卡死（PAUSED/RUNNING/PENDING）workflow run（不实现任何取消/删除）",
@@ -823,10 +911,66 @@ def main(argv: list[str] | None = None) -> int:
         "--db", type=Path, default=Path("data/novelos.db"), help="SQLite 库路径（默认 data/novelos.db）"
     )
     parser.add_argument("--json", action="store_true", dest="as_json", help="输出机器可读 JSON")
-    parser.add_argument("--export", type=Path, default=None, help="把活动 run 完整行（含 checkpoint_json）导出到该路径")
+    parser.add_argument(
+        "--export",
+        type=Path,
+        default=None,
+        help="把活动 run 完整行（含 checkpoint_json）导出到该路径；受仓库守卫约束——"
+             "软件仓内只允许 data/ 与 tmp/",
+    )
+    parser.add_argument(
+        "--write-docs",
+        action="store_true",
+        help="把留档写**痕迹仓** docs/evaluation/stalled-runs-export.json（默认不落盘）",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        default=None,
+        help="显式指定痕迹仓根目录（覆盖 NOVELOS_ARTIFACTS_DIR 与同级目录探测）",
+    )
+    parser.add_argument(
+        "--allow-software-repo-out",
+        action="store_true",
+        help="逃生口：痕迹仓不可用时接受把留档写回软件仓（默认关；风险自负）",
+    )
     parser.add_argument("--apply", action="store_true", help="保留开关：取消/删除由主会话另行决策，本工具不实现")
     parser.add_argument("--confirmed-by", default=None, help="配合 --apply 的裁决留痕字段（本工具不使用）")
     args = parser.parse_args(argv)
+
+    # 落点判定**先于**读库（落点不合法就别白读一遍；DB 也不必打开）
+    # ⚠️ F-6（2026-10-23 对抗审查）：``--export`` 与 ``--write-docs`` **同时**给出时，
+    #    旧实现是 ``if args.export: ... elif args.write_docs:`` ⇒ **--export 静默吞掉
+    #    --write-docs**（痕迹仓副本没落、零告警）⇒ 用户以为两份都落了。
+    #    现在的语义：**两份都落 + 明确告警**（给了两个开关通常就是想要两份；
+    #    报错退出会打断既有自动化）。
+    allow_repo_out = bool(args.allow_software_repo_out)
+    export_path: Path | None = None
+    docs_path: Path | None = None
+    if args.export:
+        export_path = args.export
+    if args.write_docs:
+        try:
+            docs_path = resolve_artifacts_landing(
+                artifacts_dir=args.artifacts_dir,
+                allow_software_repo_out=allow_repo_out,
+            )
+        except ArtifactsUnavailableError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_ARTIFACTS_UNAVAILABLE
+
+    if export_path is not None and docs_path is not None:
+        print(
+            "[警告] --export 与 --write-docs 同时给出 ⇒ **两份留档都会落**"
+            f"（--export: {export_path}；痕迹仓: {docs_path}）。",
+            file=sys.stderr,
+        )
+
+    for path in (p for p in (export_path, docs_path) if p is not None):
+        try:
+            check_write_path(path, allow_repo_root=allow_repo_out)
+        except RepoWritePathError as exc:
+            print(f"[拒绝写入] {exc}", file=sys.stderr)
+            return EXIT_WRITE_PATH_REJECTED
 
     if not args.db.exists():
         print(f"ERROR: DB 不存在：{args.db}", file=sys.stderr)
@@ -848,8 +992,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"REFUSED: {exc}", file=sys.stderr)
             return 3
 
-    if args.export:
-        path = export_rows(report, args.export)
+    if export_path is not None:
+        path = export_rows(report, export_path)
+        print(f"导出完成（只读留档）：{path}  共 {report['total_active_runs']} 条", file=sys.stderr)
+    if docs_path is not None:
+        path = export_rows(report, docs_path)
         print(f"导出完成（只读留档）：{path}  共 {report['total_active_runs']} 条", file=sys.stderr)
 
     if args.as_json:

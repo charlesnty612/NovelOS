@@ -373,3 +373,408 @@ def test_secrets_migrate_apply_keeps_existing_entries(mod, tmp_path, capsys) -> 
     assert payload["api_keys"]["minimax"] == "sk-existing"
     assert payload["other"] == "keep"
     assert payload["api_keys"]["mprof_live01"] == "sk-plain"
+
+
+# ---------------------------------------------------------------------------
+# 悬空条目清理（--prune-dangling）
+#
+# 为什么要它：守卫**检测**悬空条目并判「不合规」，但原先只给了「把库内明文搬进
+# 文件」的迁移命令，没有给「清掉悬空条目」的出路 ⇒ 一次档案删除之后，
+# secrets.json 里会永久留下一条指向**已删档案**的死密钥，巡检从此永远报不合规
+# （红灯常亮 ⇒ 守卫被忽略）。
+# ---------------------------------------------------------------------------
+
+
+def test_prune_dangling_defaults_to_dry_run(mod, tmp_path, capsys) -> None:
+    """``--prune-dangling`` 不加 ``--apply`` ⇒ **不写任何文件**。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
+    secrets = tmp_path / "secrets.json"
+    original = json.dumps(
+        {"api_keys": {"mprof_dead000000": "sk-x", "mprof_live01": "sk-y"}, "other": "keep"},
+        ensure_ascii=False,
+    )
+    secrets.write_text(original, encoding="utf-8")
+
+    code = mod.main(
+        ["secrets", "--db", str(db), "--secrets-file", str(secrets), "--prune-dangling"]
+    )
+    out = capsys.readouterr().out
+
+    assert secrets.read_text(encoding="utf-8") == original, "dry-run 不得改文件"
+    assert "未执行" in out, "dry-run 必须明说「未执行」"
+    assert code == 1, "悬空条目未被清理 ⇒ 仍不合规"
+
+
+def test_prune_dangling_apply_removes_only_dangling_keys(mod, tmp_path, capsys) -> None:
+    """``--prune-dangling --apply`` ⇒ 只删悬空键；有效键与其它段**原样保留**。
+
+    ⚠️ **只动 secrets.json**：库内明文**不动** ⇒ 巡检仍判「不合规」（明文还在）
+    ⇒ 退出码 **1**。这是「一个开关只管一件事」的直接后果，也是刻意的：
+    清理死密钥不该顺手把库内明文搬走（那会覆盖同名文件条目，用户看到的东西会变）。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps(
+            {"api_keys": {"mprof_dead000000": "sk-x", "mprof_live01": "sk-y"}, "other": "keep"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    capsys.readouterr()
+
+    payload = json.loads(secrets.read_text(encoding="utf-8"))
+    assert "mprof_dead000000" not in payload["api_keys"], "悬空键必须被删"
+    assert payload["api_keys"]["mprof_live01"] == "sk-y", "有效键不得被动（清理不得触发迁移）"
+    assert payload["other"] == "keep", "api_keys 以外的段不得丢"
+    assert code == 1, "库内明文还在 ⇒ 仍不合规（退出码 1）"
+
+
+def test_migrate_and_prune_together_reach_compliance(mod, tmp_path, capsys) -> None:
+    """``--migrate --prune-dangling --apply`` ⇒ 两个动作都做 ⇒ 巡检转合规（退出码 0）。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"mprof_dead000000": "sk-x"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--migrate", "--prune-dangling", "--apply",
+        ]
+    )
+    capsys.readouterr()
+
+    payload = json.loads(secrets.read_text(encoding="utf-8"))
+    assert "mprof_dead000000" not in payload["api_keys"], "悬空键必须被删"
+    assert payload["api_keys"]["mprof_live01"] == "sk-plain", "库内明文必须已搬进文件"
+
+    conn = sqlite3.connect(str(db))
+    try:
+        params = conn.execute(
+            "SELECT params_json FROM model_profiles WHERE profile_id = 'mprof_live01'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert "api_key" not in params, "迁移后库内不应再有明文 api_key"
+    assert code == 0, "悬空清零 + 明文清零 ⇒ 合规（退出码 0）"
+
+
+def test_prune_dangling_apply_keeps_db_plaintext_untouched(mod, tmp_path, capsys) -> None:
+    """清理悬空条目**不动库**（它只管 secrets.json；清库内明文是 --migrate 的事）。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"mprof_dead000000": "sk-x"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    capsys.readouterr()
+
+    conn = sqlite3.connect(str(db))
+    try:
+        params = conn.execute(
+            "SELECT params_json FROM model_profiles WHERE profile_id = 'mprof_live01'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert "sk-plain" in params, "清理悬空条目不得顺手动库内明文"
+
+
+def test_prune_dangling_rejects_malformed_secrets_file(mod, tmp_path, capsys) -> None:
+    """secrets.json 坏掉 ⇒ **中止并报错**（不得把文件写成空/半截）。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text("{ not json", encoding="utf-8")
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    capsys.readouterr()
+
+    assert code == 2, "结构性异常 ⇒ 退出码 2（巡检自身出错），不是 0/1"
+    assert secrets.read_text(encoding="utf-8") == "{ not json", "坏文件不得被改写"
+
+
+# ---------------------------------------------------------------------------
+# F-1（CRITICAL，2026-10-23 对抗审查）：--prune-dangling 不得把
+# 「诊断不可信」当成「全部悬空」
+#
+# 缺陷形状：--db 指向的库**存在但没有** model_profiles / model_connections 表
+# （或表存在但 0 行）⇒ 「已知集合」为空 ⇒ **每个键都被判成悬空** ⇒ 落盘后
+# api_keys = {}，退出码 0 = 「合规」（绿）⇒ 一次误指 --db（打错路径 /
+# 未迁移的库 / 另一个项目库 / 空库）就可能**清空用户全部凭据**，且无备份、无确认。
+#
+# 修法：读表失败 / 已知集合为空 ⇒ **拒绝清理**（退出码 2，不写任何文件）；
+# 真正落盘前**先备份**（secrets.json.bak-<时间戳>，同目录、原子）。
+# ---------------------------------------------------------------------------
+
+
+def _seed_db_without_model_tables(db_path: Path) -> None:
+    """造一个**存在但没有** model_profiles / model_connections 表的库（合成夹具）。"""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE unrelated (x TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _seed_model_db_empty_tables(db_path: Path) -> None:
+    """造一个**有表但 0 行**的库（合成夹具）。"""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE model_profiles ("
+            "profile_id TEXT PRIMARY KEY, provider TEXT NOT NULL,"
+            "params_json TEXT NOT NULL DEFAULT '{}')"
+        )
+        conn.execute(
+            "CREATE TABLE model_connections ("
+            "connection_id TEXT PRIMARY KEY, provider TEXT NOT NULL,"
+            "params_json TEXT NOT NULL DEFAULT '{}')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_prune_dangling_refuses_when_model_tables_missing(mod, tmp_path, capsys) -> None:
+    """库存在但**没有 model_profiles 表** ⇒ 拒绝清理（退出码 2）+ 文件**逐字未改**。"""
+    db = tmp_path / "novelos.db"
+    _seed_db_without_model_tables(db)
+    secrets = tmp_path / "secrets.json"
+    original = json.dumps(
+        {"api_keys": {"sk-user-1": "v1", "sk-user-2": "v2"}}, ensure_ascii=False
+    )
+    secrets.write_text(original, encoding="utf-8")
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    err = capsys.readouterr().err
+
+    assert code == 2, (
+        f"诊断不可信 ⇒ 必须拒绝清理（退出码 2），实际 {code}\nstderr={err}"
+    )
+    assert "已中止清理" in err, f"必须**明确拒绝**（而不是「没什么可删」）：{err}"
+    assert "model_profiles" in err, f"必须说清为什么拒绝：{err}"
+    assert secrets.read_text(encoding="utf-8") == original, "secrets.json 必须**逐字未改**"
+    payload = json.loads(secrets.read_text(encoding="utf-8"))
+    assert payload["api_keys"], "api_keys 不得被清空"
+    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝清理 ⇒ 不得产生备份文件"
+
+
+def test_prune_dangling_refuses_when_model_tables_are_empty(mod, tmp_path, capsys) -> None:
+    """库存在但表**0 行** ⇒ 同样拒绝清理（「全是死键」与「没有引用数据」不可区分）。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db_empty_tables(db)
+    secrets = tmp_path / "secrets.json"
+    original = json.dumps({"api_keys": {"sk-user-1": "v1"}}, ensure_ascii=False)
+    secrets.write_text(original, encoding="utf-8")
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    err = capsys.readouterr().err
+
+    assert code == 2, f"0 行 ⇒ 已知集合为空 ⇒ 必须拒绝（退出码 2），实际 {code}\n{err}"
+    assert "已中止清理" in err, f"必须**明确拒绝**：{err}"
+    assert secrets.read_text(encoding="utf-8") == original, "secrets.json 必须**逐字未改**"
+    assert json.loads(secrets.read_text(encoding="utf-8"))["api_keys"], "api_keys 不得被清空"
+    assert "已知集合为空" in err, f"必须说清为什么拒绝：{err}"
+
+
+def test_prune_dangling_with_missing_db_deletes_nothing(mod, tmp_path, capsys) -> None:
+    """库**不存在** ⇒ 不删任何键（现有安全行为必须保持）。"""
+    db = tmp_path / "nope.db"
+    assert not db.exists(), "前提：库不得已存在"
+    secrets = tmp_path / "secrets.json"
+    original = json.dumps({"api_keys": {"sk-user-1": "v1"}}, ensure_ascii=False)
+    secrets.write_text(original, encoding="utf-8")
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    err = capsys.readouterr().err
+
+    assert secrets.read_text(encoding="utf-8") == original, "库不存在 ⇒ 不得删任何键"
+    assert json.loads(secrets.read_text(encoding="utf-8"))["api_keys"] == {"sk-user-1": "v1"}
+    assert code == 2, "库读不到 ⇒ 「无法判定」⇒ 退出码 2（不得报绿）"
+    assert "已中止清理" in err, f"必须**明确拒绝**：{err}"
+    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝清理 ⇒ 不得产生备份文件"
+
+
+def test_prune_dangling_apply_removes_dead_key_and_leaves_backup(mod, tmp_path, capsys) -> None:
+    """反向对照：库正常 + 确有死键 ⇒ 清理**真的执行** + 备份已生成 + 活键仍在。"""
+    db = tmp_path / "novelos.db"
+    # 无明文 api_key ⇒ 清理后巡检应当合规（退出码 0）
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", None)])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps(
+            {"api_keys": {"mprof_dead000000": "sk-x", "mprof_live01": "sk-y"}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    err = capsys.readouterr().err
+
+    payload = json.loads(secrets.read_text(encoding="utf-8"))
+    assert "mprof_dead000000" not in payload["api_keys"], "死键必须被删"
+    assert payload["api_keys"]["mprof_live01"] == "sk-y", "活键必须仍在"
+
+    backups = list(tmp_path.glob("secrets.json.bak-*"))
+    assert len(backups) == 1, f"清理前必须留**恰好一份**备份：{backups}"
+    backup_payload = json.loads(backups[0].read_text(encoding="utf-8"))
+    assert "mprof_dead000000" in backup_payload["api_keys"], "备份必须含清理前的全部键"
+    assert backups[0].name in err, f"备份路径必须在 stderr 可见：{err}"
+    assert code == 0, "清理后无悬空、库内无明文 ⇒ 合规（退出码 0）"
+
+
+def test_secrets_mode_reports_unknown_when_db_unreadable(mod, tmp_path, capsys) -> None:
+    """库读不到 ⇒ 判「**无法判定**」（退出码 2），**不得**报绿（假合规）。"""
+    db = tmp_path / "novelos.db"
+    _seed_db_without_model_tables(db)
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(json.dumps({"api_keys": {"sk-user-1": "v1"}}, ensure_ascii=False), encoding="utf-8")
+
+    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    out = capsys.readouterr().out
+
+    assert code == 2, f"读不到运行库 ⇒ 退出码 2（巡检自身出错），实际 {code}\n{out}"
+    assert "无法判定" in out, out
+    assert "合规（无悬空条目" not in out, "读不到运行库时**不得**报「合规」"
+
+
+def test_read_failure_and_empty_known_set_are_distinguished(mod, tmp_path) -> None:
+    """「读表失败」与「已知集合为空」是**两件事** ⇒ 必须能区分开。"""
+    missing = tmp_path / "missing.db"
+    _seed_db_without_model_tables(missing)
+    state_missing = mod.collect_secrets_state(missing, tmp_path / "secrets.json")
+    assert state_missing.read_errors, "缺表 ⇒ 必须记为**读表失败**"
+    assert any("model_profiles" in r for r in state_missing.read_errors)
+    assert state_missing.known_keys == set(), "读表失败 ⇒ 已知集合为空"
+
+    empty = tmp_path / "empty.db"
+    _seed_model_db_empty_tables(empty)
+    state_empty = mod.collect_secrets_state(empty, tmp_path / "secrets.json")
+    assert not state_empty.read_errors, "表在但 0 行 ⇒ **不是**读表失败"
+    assert state_empty.known_keys == set(), "0 行 ⇒ 已知集合为空"
+    assert state_empty.blocked_reasons, "0 行 ⇒ 必须判「无法判定」"
+    assert "已知集合为空" in state_empty.blocked_reasons[0], state_empty.blocked_reasons
+
+
+# ---------------------------------------------------------------------------
+# F-2（MAJOR，2026-10-23 对抗审查）：悬空判据漏了运行期第 3 优先级
+# ``secrets[<env_name>]``
+#
+# 缺陷形状：判据只认 profile_id ∪ connection_id ∪ provider ⇒ 形如
+# ``NOVELOS_API_KEY_KIMI`` 的键被判成悬空 ⇒ 跑 prune 后该 provider 的**文件级
+# 密钥失效**，且 ``--migrate`` 永远造不回来（它只写 profile_id / connection_id）。
+# 修法（双保险）：① known 集合补上 env_name 形态；② prune 前对每个候选键做
+# 「**是否仍可解析**」复核（**走生产函数** ``resolve_profile_api_key``）。
+# ---------------------------------------------------------------------------
+
+
+def test_env_name_key_is_not_reported_as_dangling(mod, tmp_path, capsys) -> None:
+    """env_name 形态的键**不是悬空条目**（已知集合必须含 env_name 形态）。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "kimi", None)])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"NOVELOS_API_KEY_KIMI": "sk-live-kimi"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    out = capsys.readouterr().out
+
+    assert "悬空条目数: 0" in out, out
+    assert code == 0, f"env_name 键仍被引用 ⇒ 不算悬空 ⇒ 合规（退出码 0），实际 {code}\n{out}"
+
+
+def test_prune_dangling_keeps_env_name_key_still_resolvable(mod, tmp_path, capsys) -> None:
+    """**仍在使用**的 env_name 键 ⇒ 不许删；确无引用的键照删。"""
+    from packages.core.secrets_store import resolve_profile_api_key
+
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "kimi", None)])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps(
+            {
+                "api_keys": {
+                    "NOVELOS_API_KEY_KIMI": "sk-live-kimi",
+                    "mprof_dead000000": "sk-dead",
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    # 前提（真实值）：**生产解析函数**确实在用这个键 ⇒ 它不是死键。
+    resolved = resolve_profile_api_key(
+        None,
+        "kimi",
+        ["NOVELOS_API_KEY_KIMI"],
+        None,
+        secrets={"NOVELOS_API_KEY_KIMI": "sk-live-kimi"},
+    )
+    assert resolved == "sk-live-kimi", "前提：运行期确实在用这个 env_name 键"
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    capsys.readouterr()
+
+    payload = json.loads(secrets.read_text(encoding="utf-8"))
+    assert payload["api_keys"].get("NOVELOS_API_KEY_KIMI") == "sk-live-kimi", (
+        "仍被运行期解析的 env_name 键**不得**被删"
+    )
+    assert "mprof_dead000000" not in payload["api_keys"], "确无引用的键必须被删"
+    assert code == 0, "清理后合规（退出码 0）"
+

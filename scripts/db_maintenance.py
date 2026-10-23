@@ -47,7 +47,17 @@
 ------
 
 * ``0`` —— 成功（list 或 fix 都视为成功）。
-* ``2`` —— 参数错误 / DB 文件不存在 / 内部异常。
+* ``2`` —— 参数错误 / DB 文件不存在 / 内部异常 / **待写路径被守卫拒绝**。
+
+落盘约束（D-19 / 写路径守卫）
+---------------------------
+
+``prune-logs --export PATH`` 是本脚本唯一的落盘口（把将删的 ``ai_call_logs``
+全列行导出为 JSON 归档）。**软件仓内只允许写 ``data/`` 与 ``tmp/`` 两个子树**
+（均已被 ``.gitignore`` 覆盖）：``--export`` 指到软件仓内其它位置（仓库根、
+``docs/`` …）⇒ **明确拒绝**（退出码 2，不产生导出文件）——脚本不得把产物写回
+软件仓（落进去 = 进 GitHub 历史，**不可撤回**），也**不得**静默改写到别处。
+逃生口 ``--allow-software-repo-out``（默认关）须由用户显式承担风险。
 
 设计要点
 --------
@@ -77,6 +87,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from packages.core.db import get_connection, is_missing_schema_error  # noqa: E402
 from packages.core.ids import now_iso  # noqa: E402
+
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from scripts.guard_repo_write_path import (
+        EXIT_WRITE_PATH_REJECTED,
+        RepoWritePathError,
+        check_write_path,
+        is_inside_repo,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/db_maintenance.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from guard_repo_write_path import (  # type: ignore[no-redef]
+        EXIT_WRITE_PATH_REJECTED,
+        RepoWritePathError,
+        check_write_path,
+        is_inside_repo,
+    )
 
 STALE_ERROR_MARKER = "stale cleanup: process died mid-run (db_maintenance)"
 """UPDATE 时写入 ``workflow_runs.error`` 的固定标记，便于事后审计识别。"""
@@ -275,6 +301,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="SQLite 文件路径（必填）。",
     )
+    parser.add_argument(
+        "--allow-software-repo-out",
+        action="store_true",
+        help="逃生口：允许把导出产物写回软件仓（默认关；风险自负——可能被误提交 ⇒ "
+             "进 GitHub 历史不可撤回）。**放在子命令之前**。",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     list_p = sub.add_parser(
@@ -345,6 +377,23 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"error: DB file not found: {db_path}", file=sys.stderr)
         return 2
 
+    # 守卫（D-19）：待写路径不得落在软件仓根下非 data/tmp 处。
+    # ⚠️ ``--export`` 只存在于 ``prune-logs`` 子命令 ⇒ 用 getattr 兜底其它子命令。
+    allow_repo_out = bool(getattr(args, "allow_software_repo_out", False))
+    export_path = getattr(args, "export", None)
+    if export_path is not None:
+        try:
+            check_write_path(export_path, allow_repo_root=allow_repo_out)
+        except RepoWritePathError as exc:
+            print(f"[拒绝写入] {exc}", file=sys.stderr)
+            return EXIT_WRITE_PATH_REJECTED
+        if allow_repo_out and is_inside_repo(export_path):
+            print(
+                f"[警告] --allow-software-repo-out 已开启：导出产物将落软件仓 {export_path}"
+                "（可能被误提交 ⇒ 进 GitHub 历史不可撤回）。",
+                file=sys.stderr,
+            )
+
     conn = get_connection(db_path)
     try:
         if args.command == "list":
@@ -385,9 +434,9 @@ def _main(argv: list[str] | None = None) -> int:
                     raise
                 print(f"[skip] ai_call_logs unavailable ({exc}); nothing to prune")
                 return 0
-            if args.export:
-                exported = _export_old_logs(conn, days=days, export_path=args.export)
-                print(f"[export] wrote {exported} rows -> {args.export}")
+            if export_path is not None:
+                exported = _export_old_logs(conn, days=days, export_path=export_path)
+                print(f"[export] wrote {exported} rows -> {export_path}")
             if args.apply:
                 deleted = _prune_logs(conn, days=days)
                 print(f"[apply] deleted {deleted} ai_call_logs rows older than {days}d")

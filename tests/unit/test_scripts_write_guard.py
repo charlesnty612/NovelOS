@@ -49,6 +49,10 @@ M1_SCRIPT = SCRIPTS_DIR / "m1_report.py"
 M2_JUDGE_SCRIPT = SCRIPTS_DIR / "m2_judge.py"
 REAL_LLM_SCRIPT = SCRIPTS_DIR / "real_llm_e2e.py"
 GUARD_SCRIPT = SCRIPTS_DIR / "guard_repo_write_path.py"
+BACKUP_SCRIPT = SCRIPTS_DIR / "backup_db.py"
+DB_MAINT_SCRIPT = SCRIPTS_DIR / "db_maintenance.py"
+HBS_SCRIPT = SCRIPTS_DIR / "human_baseline_synthetic.py"
+ISR_SCRIPT = SCRIPTS_DIR / "inspect_stalled_runs.py"
 
 EXIT_WRITE_PATH_REJECTED = 2
 EXIT_ARTIFACTS_UNAVAILABLE = 3
@@ -66,7 +70,11 @@ def guard():
 
 
 def _snapshot(root: Path) -> set[str]:
-    """目录内**全部文件**的相对路径集合（用于「零新增文件」断言）。
+    """目录内**全部文件与目录**的相对路径集合（用于「零新增产物」断言）。
+
+    ⚠️ **目录也要收**（F-8）：只收文件时，「只建了一个空目录」这种残留**看不见**
+    ⇒ 「连目录都不该被建出来」这条性质全仓无断言。目录用 ``dir/`` 前缀与文件名
+    区分（同名文件与同名目录不会混）。
 
     排除 ``__pycache__``/``*.pyc``：那是解释器导入字节码的产物，**不是**脚本产物
     （要判的是「脚本有没有把东西写进仓里」）。
@@ -75,12 +83,32 @@ def _snapshot(root: Path) -> set[str]:
         return set()
     out: set[str] = set()
     for p in root.rglob("*"):
-        if not p.is_file():
-            continue
         if "__pycache__" in p.parts or p.suffix == ".pyc":
             continue
-        out.add(str(p.relative_to(root)))
+        rel = str(p.relative_to(root))
+        out.add(rel if p.is_file() else f"dir/{rel}")
     return out
+
+
+@pytest.fixture(autouse=True)
+def _sweep_guard_probe_leftovers():
+    """清掉**历史遗留**的守卫探针产物（``REPO_ROOT/docs/_guard_probe_*``）。
+
+    ⚠️ 为什么需要（F-7）：探针产物曾经落在**受版本跟踪的** ``docs/`` 下且**没有**
+    清理 fixture ⇒ 一次中断的变异实验就在仓里留下**明文 DB 备份**，紧接着的
+    还原后重跑变成「前提：目标不得已存在」失败 ⇒ **掩盖真实断言**。
+    现在探针落点已迁到 ``tmp_path``（见 :func:`_fake_repo`），本 fixture 是**兜底**：
+    清掉任何来源的残留（旧版本测试 / 变异执行器中断 / 手工排查）。
+    """
+    yield
+    docs = REPO_ROOT / "docs"
+    if not docs.is_dir():
+        return
+    for p in docs.glob("_guard_probe_*"):
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
 
 
 def _run_script(
@@ -89,18 +117,20 @@ def _run_script(
     *,
     cwd: Path | None = None,
     unset_env: list[str] | None = None,
+    pythonpath: str | None = None,
 ) -> subprocess.CompletedProcess:
     """跑脚本 CLI（真实 subprocess）⇒ 返回 ``CompletedProcess``。
 
     环境：``PYTHONPATH`` 指向本仓（子进程要 import ``tests.evals.*``），
     且**清掉** ``NOVELOS_ARTIFACTS_DIR``（否则本机的痕迹仓会掩盖「找不到痕迹仓」这条路径）。
     ``unset_env`` 额外清掉的变量（如 ``MINIMAX_API_KEY``，保证子进程不可能发起真实调用）。
+    ``pythonpath`` 可覆盖 ``PYTHONPATH``（见 :func:`_fake_pythonpath`）。
     """
     env = dict(os.environ)
     env.pop("NOVELOS_ARTIFACTS_DIR", None)
     for name in unset_env or []:
         env.pop(name, None)
-    env["PYTHONPATH"] = str(REPO_ROOT)
+    env["PYTHONPATH"] = pythonpath or str(REPO_ROOT)
     env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [sys.executable, str(script), *args],
@@ -113,6 +143,34 @@ def _run_script(
         timeout=600,
         check=False,
     )
+
+
+def _fake_repo(tmp_path: Path, names: list[str]) -> Path:
+    """造一个「假软件仓」``<tmp>/fake_repo/NovelOS``（脚本 + 守卫都在里面）。
+
+    ⚠️ 为什么不用真仓库当探针落点（F-7）：守卫的 ``REPO_ROOT`` 由 ``__file__``
+    上溯两级得到 ⇒ 脚本与守卫**必须同处**这个假仓，守卫才会把「仓内路径」判成
+    非法位置。探针产物因此落在 ``tmp_path`` 里，**不再落进真仓库的 ``docs/``**
+    （那里曾经留下过明文 DB 备份）。
+    """
+    iso = tmp_path / "fake_repo" / "NovelOS"
+    (iso / "scripts").mkdir(parents=True)
+    for name in names:
+        shutil.copy2(SCRIPTS_DIR / name, iso / "scripts" / name)
+    return iso
+
+
+def _fake_pythonpath(iso: Path) -> str:
+    """子进程的 ``PYTHONPATH``：**假仓优先**、真仓兜底。
+
+    ⚠️ 顺序很关键：``scripts`` 是**命名空间包** ⇒ 多个 ``sys.path`` 位置会被合并
+    成多个 portion ⇒ 真仓在前时 ``scripts.guard_repo_write_path`` 会解析到**真仓**
+    那份（``REPO_ROOT`` = 真仓）⇒ 假仓里的探针路径根本不会被判成「仓内非法」。
+    假仓在前 ⇒ 守卫取假仓那份（``REPO_ROOT`` = 假仓）⇒ 判定落在假仓上。
+    真仓留在后面 ⇒ ``packages.*``（hbs / db_maintenance 需要）照常可导入。
+    """
+    return str(iso) + os.pathsep + str(REPO_ROOT)
+
 
 
 def _isolated_copy(tmp_path: Path, names: list[str]) -> Path:
@@ -601,3 +659,619 @@ def test_real_llm_e2e_escape_hatch_falls_back_to_software_repo(tmp_path: Path, m
     out = mod.resolve_report_path(allow_software_repo_out=True)
 
     assert out == fake_repo / "docs" / "evaluation" / "runs" / mod.REPORT_FILENAME
+
+
+# ---------------------------------------------------------------------------
+# 第三批（D-19 另一半）：另外 4 个落盘脚本也必须接守卫
+#   backup_db / db_maintenance / human_baseline_synthetic / inspect_stalled_runs
+#
+# 缺陷形状与前两批**同族**：这 4 个脚本都能把产物写进软件仓里任意位置
+# （backup_db --out / db_maintenance --export / human_baseline_synthetic --out /
+# inspect_stalled_runs --export）⇒ 落进软件仓 = 进 GitHub 历史，**不可撤回**。
+#
+# 本批钉住（每个脚本两条：仓内非法位置 ⇒ 拒绝；允许位置 ⇒ 真的落盘）：
+# - 拒绝：退出码 == 2（EXIT_WRITE_PATH_REJECTED）、stderr 含「拒绝写入」与目标名、
+#   **目标文件/目录未被创建**、软件仓内零新增文件；
+# - 允许：退出码 0、产物**真的存在**且内容可解析（断言打在真实值上）；
+# - 痕迹/评估类产物（hbs --write-docs / isr --write-docs）在**拿不到痕迹仓**时
+#   ⇒ 退出码 3（EXIT_ARTIFACTS_UNAVAILABLE）+ format_artifacts_unavailable 文案，
+#   **零文件落盘**、绝不回落软件仓。
+#
+# ⚠️ 隔离测试用**真实 subprocess**跑脚本；DB 全部是**合成夹具**（tmp_path 内），
+# **零真实 LLM 调用、零活库接触（不碰 data/novelos.db）、零内容仓接触、零 git 写操作**。
+# ---------------------------------------------------------------------------
+
+
+def _seed_backup_source_db(path: Path) -> None:
+    """造一个最小 SQLite 库当备份**源**（合成夹具，不碰活库）。"""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE probe (x TEXT)")
+        conn.execute("INSERT INTO probe VALUES ('synthetic')")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _seed_maint_db(path: Path) -> None:
+    """造一个最小 ``ai_call_logs`` 表（合成夹具，不碰活库）。"""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            "CREATE TABLE ai_call_logs ("
+            "call_id TEXT, run_id TEXT, node_run_id TEXT, agent_id TEXT, model_id TEXT, "
+            "prompt_version TEXT, latency_ms INTEGER, error TEXT, retry_count INTEGER, "
+            "created_at TEXT, output_json TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO ai_call_logs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "call_synth01",
+                "run_synth01",
+                None,
+                "agent_synth",
+                "model_synth",
+                "v1",
+                12,
+                None,
+                0,
+                "2020-01-01T00:00:00+00:00",
+                '{"synthetic": true}',
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _seed_stalled_db(path: Path) -> None:
+    """造一个含 1 条 PAUSED run 的最小库（合成夹具，不碰活库）。"""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE projects (project_id TEXT, name TEXT)")
+        conn.execute(
+            "CREATE TABLE chapters ("
+            "chapter_id TEXT, number INTEGER, title TEXT, status TEXT, project_id TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE workflow_runs ("
+            "run_id TEXT, workflow_id TEXT, chapter_id TEXT, status TEXT, current_node TEXT, "
+            "started_at TEXT, ended_at TEXT, retry_count INTEGER, error TEXT, instance_id TEXT, "
+            "checkpoint_json TEXT)"
+        )
+        conn.execute("INSERT INTO projects VALUES ('prj_synth01', '合成项目')")
+        conn.execute(
+            "INSERT INTO chapters VALUES ('ch_synth01', 1, '合成章', 'COMMITTED', 'prj_synth01')"
+        )
+        conn.execute(
+            "INSERT INTO workflow_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "run_synth01",
+                "wf_synth01",
+                "ch_synth01",
+                "PAUSED",
+                "chapter-review",
+                "2026-10-01T00:00:00+00:00",
+                None,
+                0,
+                None,
+                "inst_synth01",
+                '{"__pause_payload__": {"review_report": {"word_count": 123}}}',
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_backup_db_out_inside_software_repo_is_rejected(tmp_path: Path) -> None:
+    """``--out`` 指向软件仓内非法位置 ⇒ 拒绝（退出码 2）+ 目录未被创建。
+
+    ⚠️ 探针落点在**假软件仓**（``tmp_path`` 内）⇒ 真仓库的 ``docs/`` 零污染（F-7）。
+    """
+    fake = _fake_repo(tmp_path, ["backup_db.py", "guard_repo_write_path.py"])
+    src = tmp_path / "src.db"
+    _seed_backup_source_db(src)
+    target = fake / "docs" / "_guard_probe_backup"
+    assert not target.exists(), "前提：目标不得已存在"
+    before = _snapshot(fake)
+
+    proc = _run_script(
+        fake / "scripts" / "backup_db.py",
+        ["--db", str(src), "--out", str(target), "--plaintext"],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == EXIT_WRITE_PATH_REJECTED, (
+        f"软件仓内的备份落点必须被拒，实际退出码 {proc.returncode}\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "拒绝写入" in proc.stderr, proc.stderr
+    assert "_guard_probe_backup" in proc.stderr, proc.stderr
+    assert not target.exists(), "拒绝 ⇒ 不得在软件仓内创建备份目录"
+    assert not (fake / "docs").exists(), "拒绝 ⇒ 连**父目录**都不该被建出来（F-8）"
+    assert _snapshot(fake) == before, "假软件仓内不得产生任何文件"
+
+
+def test_backup_db_out_outside_repo_succeeds(tmp_path: Path) -> None:
+    """``--out`` 指向仓外允许位置 ⇒ 成功，备份**真的落盘**。"""
+    src = tmp_path / "src.db"
+    _seed_backup_source_db(src)
+    out_dir = tmp_path / "backups"
+
+    proc = _run_script(
+        BACKUP_SCRIPT,
+        ["--db", str(src), "--out", str(out_dir), "--plaintext"],
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    produced = sorted(out_dir.glob("novelos_*.db"))
+    assert produced, f"备份应当真的落盘：{out_dir}"
+    conn = sqlite3.connect(str(produced[0]))
+    try:
+        rows = conn.execute("SELECT x FROM probe").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("synthetic",)], "备份内容应是源库的逐字节副本"
+
+
+def test_backup_db_default_landing_is_not_rejected_by_guard(guard, monkeypatch) -> None:
+    """默认落点（同步盘）在仓外 ⇒ 守卫**不得**把它判成非法（不得误伤正常默认）。"""
+    mod = importlib.import_module("scripts.backup_db")
+    monkeypatch.delenv("NOVELOS_BACKUP_DIR", raising=False)
+    try:
+        resolved = mod.resolve_out_dir(None)
+    except SystemExit as exc:
+        # 本机没有同步盘候选 ⇒ 脚本按**既有**契约中止（与守卫无关）
+        assert "同步盘" in str(exc), str(exc)
+        return
+    assert not guard.is_inside_repo(resolved), f"默认落点必须在仓外：{resolved}"
+    assert guard.check_write_path(resolved) == resolved.resolve(), "守卫必须放行默认落点"
+
+
+def test_db_maintenance_export_inside_software_repo_is_rejected(tmp_path: Path) -> None:
+    """``--export`` 指向软件仓内 ⇒ 拒绝（退出码 2）+ 导出文件未被创建。
+
+    ⚠️ 探针落点在**假软件仓**（``tmp_path`` 内）⇒ 真仓库的 ``docs/`` 零污染（F-7）。
+    """
+    fake = _fake_repo(tmp_path, ["db_maintenance.py", "guard_repo_write_path.py"])
+    db = tmp_path / "maint.db"
+    _seed_maint_db(db)
+    target = fake / "docs" / "_guard_probe_maint.json"
+    assert not target.exists(), "前提：目标不得已存在"
+    before = _snapshot(fake)
+
+    proc = _run_script(
+        fake / "scripts" / "db_maintenance.py",
+        ["--db", str(db), "prune-logs", "--export", str(target)],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == EXIT_WRITE_PATH_REJECTED, (
+        f"软件仓内的导出路径必须被拒，实际退出码 {proc.returncode}\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "拒绝写入" in proc.stderr, proc.stderr
+    assert "_guard_probe_maint.json" in proc.stderr, proc.stderr
+    assert not target.exists(), "拒绝 ⇒ 不得在软件仓内产生导出文件"
+    assert not (fake / "docs").exists(), "拒绝 ⇒ 连**父目录**都不该被建出来（F-8）"
+    assert _snapshot(fake) == before, "假软件仓内不得产生任何文件"
+
+
+def test_db_maintenance_export_outside_repo_succeeds(tmp_path: Path) -> None:
+    """``--export`` 指向仓外允许位置 ⇒ 成功，导出**真的落盘**且内容可解析。"""
+    db = tmp_path / "maint.db"
+    _seed_maint_db(db)
+    out = tmp_path / "exported_logs.json"
+
+    proc = _run_script(
+        DB_MAINT_SCRIPT,
+        ["--db", str(db), "prune-logs", "--export", str(out)],
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert out.is_file(), f"导出应当真的落盘：{out}"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["count"] == 1, payload["count"]
+    assert payload["rows"][0]["call_id"] == "call_synth01"
+    assert payload["days"] == 90
+
+
+def test_human_baseline_synthetic_out_inside_software_repo_is_rejected(tmp_path: Path) -> None:
+    """``--out`` 指向软件仓内 ⇒ 拒绝（退出码 2）+ 报告未被创建。
+
+    ⚠️ 探针落点在**假软件仓**（``tmp_path`` 内）⇒ 真仓库的 ``docs/`` 零污染（F-7）。
+    """
+    fake = _fake_repo(tmp_path, ["human_baseline_synthetic.py", "guard_repo_write_path.py"])
+    target = fake / "docs" / "_guard_probe_hbs.md"
+    assert not target.exists(), "前提：目标不得已存在"
+    before = _snapshot(fake)
+
+    proc = _run_script(
+        fake / "scripts" / "human_baseline_synthetic.py",
+        ["--out", str(target)],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == EXIT_WRITE_PATH_REJECTED, (
+        f"软件仓内的报告落点必须被拒，实际退出码 {proc.returncode}\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "拒绝写入" in proc.stderr, proc.stderr
+    assert "_guard_probe_hbs.md" in proc.stderr, proc.stderr
+    assert not target.exists(), "拒绝 ⇒ 不得在软件仓内产生报告"
+    assert not (fake / "docs").exists(), "拒绝 ⇒ 连**父目录**都不该被建出来（F-8）"
+    assert _snapshot(fake) == before, "假软件仓内不得产生任何文件"
+
+
+def test_human_baseline_synthetic_out_outside_repo_succeeds(tmp_path: Path) -> None:
+    """``--out`` 指向仓外允许位置 ⇒ 成功，报告**真的落盘**且是合法 JSON。"""
+    out = tmp_path / "hbs-report.json"
+
+    proc = _run_script(HBS_SCRIPT, ["--out", str(out), "--format", "json"])
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert out.is_file(), f"报告应当真的落盘：{out}"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["schema"] == "human-baseline-synthetic/v1"
+    assert payload["metrics"], "报告必须含逐算子对照行"
+    assert payload["human_side"]["visible_chars"] > 0
+
+
+def test_human_baseline_synthetic_write_docs_refused_without_artifacts(tmp_path: Path) -> None:
+    """隔离目录（无痕迹仓）跑 ``--write-docs`` ⇒ 退出码 3 + 零文件落盘。"""
+    iso = _isolated_copy(tmp_path, ["human_baseline_synthetic.py", "guard_repo_write_path.py"])
+    before = _snapshot(iso)
+
+    proc = _run_script(
+        iso / "scripts" / "human_baseline_synthetic.py",
+        ["--write-docs", "--format", "json"],
+    )
+
+    assert proc.returncode == EXIT_ARTIFACTS_UNAVAILABLE, (
+        f"痕迹仓缺失时必须明确失败，实际退出码 {proc.returncode}\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "痕迹仓" in proc.stderr, proc.stderr
+    assert "拒绝写入" in proc.stderr, proc.stderr
+    assert proc.stdout.strip() == "", "落点判定必须先于产出（不得先喷一屏报告再失败）"
+    assert _snapshot(iso) == before, "隔离目录（模拟软件仓）内不得产生任何文件"
+
+
+def test_human_baseline_synthetic_write_docs_lands_in_artifacts_root(tmp_path: Path) -> None:
+    """``--write-docs --artifacts-dir`` ⇒ 报告落在该痕迹仓根下（内容非空）。"""
+    artifacts = tmp_path / "artifacts"
+
+    proc = _run_script(
+        HBS_SCRIPT,
+        ["--write-docs", "--artifacts-dir", str(artifacts), "--format", "json"],
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    out = artifacts / "docs" / "evaluation" / "human-baseline-synthetic.json"
+    assert out.is_file(), f"报告应落在痕迹仓根下：{out}"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["schema"] == "human-baseline-synthetic/v1"
+    assert payload["metrics"], "落盘内容不得为空"
+
+
+def test_inspect_stalled_runs_export_inside_software_repo_is_rejected(tmp_path: Path) -> None:
+    """``--export`` 指向软件仓内 ⇒ 拒绝（退出码 2）+ 留档未被创建。
+
+    ⚠️ 探针落点在**假软件仓**（``tmp_path`` 内）⇒ 真仓库的 ``docs/`` 零污染（F-7）。
+    """
+    fake = _fake_repo(tmp_path, ["inspect_stalled_runs.py", "guard_repo_write_path.py"])
+    db = tmp_path / "stalled.db"
+    _seed_stalled_db(db)
+    target = fake / "docs" / "_guard_probe_isr.json"
+    assert not target.exists(), "前提：目标不得已存在"
+    before = _snapshot(fake)
+
+    proc = _run_script(
+        fake / "scripts" / "inspect_stalled_runs.py",
+        ["--db", str(db), "--export", str(target)],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == EXIT_WRITE_PATH_REJECTED, (
+        f"软件仓内的留档路径必须被拒，实际退出码 {proc.returncode}\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "拒绝写入" in proc.stderr, proc.stderr
+    assert "_guard_probe_isr.json" in proc.stderr, proc.stderr
+    assert not target.exists(), "拒绝 ⇒ 不得在软件仓内产生留档"
+    assert not (fake / "docs").exists(), "拒绝 ⇒ 连**父目录**都不该被建出来（F-8）"
+    assert _snapshot(fake) == before, "假软件仓内不得产生任何文件"
+
+
+def test_inspect_stalled_runs_export_outside_repo_succeeds(tmp_path: Path) -> None:
+    """``--export`` 指向仓外允许位置 ⇒ 成功，留档**真的落盘**且含 checkpoint_json。"""
+    db = tmp_path / "stalled.db"
+    _seed_stalled_db(db)
+    out = tmp_path / "stalled_export.json"
+
+    proc = _run_script(
+        ISR_SCRIPT,
+        ["--db", str(db), "--export", str(out)],
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert out.is_file(), f"留档应当真的落盘：{out}"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["read_only"] is True
+    assert payload["total_active_runs"] == 1
+    assert payload["runs"][0]["run_id"] == "run_synth01"
+    assert "checkpoint_json" in payload["runs"][0]
+
+
+def test_inspect_stalled_runs_write_docs_refused_without_artifacts(tmp_path: Path) -> None:
+    """隔离目录（无痕迹仓）跑 ``--write-docs`` ⇒ 退出码 3 + 零文件落盘。"""
+    iso = _isolated_copy(tmp_path, ["inspect_stalled_runs.py", "guard_repo_write_path.py"])
+    db = tmp_path / "stalled.db"
+    _seed_stalled_db(db)
+    before = _snapshot(iso)
+
+    proc = _run_script(
+        iso / "scripts" / "inspect_stalled_runs.py",
+        ["--db", str(db), "--write-docs"],
+    )
+
+    assert proc.returncode == EXIT_ARTIFACTS_UNAVAILABLE, (
+        f"痕迹仓缺失时必须明确失败，实际退出码 {proc.returncode}\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "痕迹仓" in proc.stderr, proc.stderr
+    assert "拒绝写入" in proc.stderr, proc.stderr
+    assert proc.stdout.strip() == "", "落点判定必须先于读库与产出"
+    assert _snapshot(iso) == before, "隔离目录（模拟软件仓）内不得产生任何文件"
+
+
+def test_inspect_stalled_runs_write_docs_lands_in_artifacts_root(tmp_path: Path) -> None:
+    """``--write-docs --artifacts-dir`` ⇒ 留档落在该痕迹仓根下（含 checkpoint_json）。"""
+    artifacts = tmp_path / "artifacts"
+    db = tmp_path / "stalled.db"
+    _seed_stalled_db(db)
+
+    proc = _run_script(
+        ISR_SCRIPT,
+        ["--db", str(db), "--write-docs", "--artifacts-dir", str(artifacts)],
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    out = artifacts / "docs" / "evaluation" / "stalled-runs-export.json"
+    assert out.is_file(), f"留档应落在痕迹仓根下：{out}"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["runs"][0]["run_id"] == "run_synth01"
+
+
+# ---------------------------------------------------------------------------
+# 第四批（2026-10-23 对抗审查 F-3 / F-6 / F-9）：
+#
+# - **F-3**：``backup_db.py --key-file`` 指向软件仓内 ⇒ 「能解开所有备份的密钥」
+#   落进版本库（``.gitignore`` 此前也不覆盖 ``backup.key`` ⇒ ``git add -A`` 就提交）
+#   ⇒ 密钥文件也必须过写路径守卫；
+# - **F-6**：``--out`` / ``--export`` 与 ``--write-docs`` **同时**给出 ⇒ 旧实现
+#   静默吞掉后者（痕迹仓副本没落、零告警）⇒ 现在**两份都落 + 明确告警**；
+# - **F-9**：4 个新脚本的 ``--allow-software-repo-out`` **一例测试都没有** ⇒ 逐个补上
+#   （落点真落 + stderr 告警文本）。
+#
+# ⚠️ 全部在**假软件仓**（``tmp_path`` 内）里跑 ⇒ 真仓库零污染。
+# ---------------------------------------------------------------------------
+
+
+def test_backup_db_key_file_inside_software_repo_is_rejected(tmp_path: Path) -> None:
+    """``--key-file`` 指向软件仓内 ⇒ 拒绝（退出码 2）+ 密钥文件与目标目录都未被创建。"""
+    fake = _fake_repo(tmp_path, ["backup_db.py", "guard_repo_write_path.py"])
+    src = tmp_path / "src.db"
+    _seed_backup_source_db(src)
+    key_file = fake / "docs" / "backup.key"
+    assert not key_file.exists(), "前提：密钥文件不得已存在"
+
+    proc = _run_script(
+        fake / "scripts" / "backup_db.py",
+        [
+            "--db", str(src),
+            "--out", str(tmp_path / "bk"),
+            "--key-file", str(key_file),
+            "--init-key",
+        ],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == EXIT_WRITE_PATH_REJECTED, (
+        f"仓内密钥文件必须被拒，实际退出码 {proc.returncode}\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "拒绝写入" in proc.stderr, proc.stderr
+    assert "backup.key" in proc.stderr, proc.stderr
+    assert not key_file.exists(), "拒绝 ⇒ 不得写入密钥文件"
+    assert not (fake / "docs").exists(), "拒绝 ⇒ 连密钥文件的**目标目录**都不该被创建"
+
+
+def test_backup_db_key_file_escape_hatch_allows_software_repo(tmp_path: Path) -> None:
+    """``--allow-software-repo-key`` 显式开启 ⇒ 密钥文件才允许落软件仓（并打告警）。"""
+    fake = _fake_repo(tmp_path, ["backup_db.py", "guard_repo_write_path.py"])
+    src = tmp_path / "src.db"
+    _seed_backup_source_db(src)
+    key_file = fake / "backup" / "backup.key"
+
+    proc = _run_script(
+        fake / "scripts" / "backup_db.py",
+        [
+            "--db", str(src),
+            "--out", str(tmp_path / "bk"),
+            "--key-file", str(key_file),
+            "--init-key",
+            "--allow-software-repo-key",
+        ],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "--allow-software-repo-key" in proc.stderr, proc.stderr
+    assert key_file.is_file(), f"逃生口开启后密钥文件应真的落盘：{key_file}"
+    assert key_file.read_text(encoding="utf-8").strip(), "密钥文件不得为空"
+
+
+def test_backup_db_escape_hatch_allows_writing_into_software_repo(tmp_path: Path) -> None:
+    """F-9：``--allow-software-repo-out`` ⇒ 备份落进软件仓 + stderr 告警。"""
+    fake = _fake_repo(tmp_path, ["backup_db.py", "guard_repo_write_path.py"])
+    src = tmp_path / "src.db"
+    _seed_backup_source_db(src)
+    out_dir = fake / "backups"
+
+    proc = _run_script(
+        fake / "scripts" / "backup_db.py",
+        [
+            "--db", str(src),
+            "--out", str(out_dir),
+            "--plaintext",
+            "--allow-software-repo-out",
+        ],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "--allow-software-repo-out" in proc.stderr, proc.stderr
+    produced = sorted(out_dir.glob("novelos_*.db"))
+    assert produced, f"逃生口开启后备份应真的落进软件仓：{out_dir}"
+    conn = sqlite3.connect(str(produced[0]))
+    try:
+        rows = conn.execute("SELECT x FROM probe").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("synthetic",)], "落进仓内的备份内容应是源库的逐字节副本"
+
+
+def test_db_maintenance_escape_hatch_allows_writing_into_software_repo(tmp_path: Path) -> None:
+    """F-9：``--allow-software-repo-out`` ⇒ 导出落进软件仓 + stderr 告警。"""
+    fake = _fake_repo(tmp_path, ["db_maintenance.py", "guard_repo_write_path.py"])
+    db = tmp_path / "maint.db"
+    _seed_maint_db(db)
+    out = fake / "docs" / "exported_logs.json"
+
+    proc = _run_script(
+        fake / "scripts" / "db_maintenance.py",
+        [
+            "--db", str(db),
+            # ⚠️ db_maintenance 的 --allow-software-repo-out 是**顶层**开关
+            #（必须排在子命令之前）。
+            "--allow-software-repo-out",
+            "prune-logs",
+            "--export", str(out),
+        ],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "--allow-software-repo-out" in proc.stderr, proc.stderr
+    assert out.is_file(), f"逃生口开启后导出应真的落进软件仓：{out}"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["count"] == 1
+    assert payload["rows"][0]["call_id"] == "call_synth01"
+
+
+def test_human_baseline_synthetic_escape_hatch_allows_writing_into_software_repo(
+    tmp_path: Path,
+) -> None:
+    """F-9：``--allow-software-repo-out`` ⇒ 报告落进软件仓 + stderr 告警。"""
+    fake = _fake_repo(tmp_path, ["human_baseline_synthetic.py", "guard_repo_write_path.py"])
+
+    proc = _run_script(
+        fake / "scripts" / "human_baseline_synthetic.py",
+        ["--write-docs", "--allow-software-repo-out", "--format", "json"],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "--allow-software-repo-out" in proc.stderr, proc.stderr
+    out = fake / "docs" / "evaluation" / "human-baseline-synthetic.json"
+    assert out.is_file(), f"逃生口开启后报告应真的落进软件仓：{out}"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["schema"] == "human-baseline-synthetic/v1"
+    assert payload["metrics"], "落进仓内的报告不得为空"
+
+
+def test_inspect_stalled_runs_escape_hatch_allows_writing_into_software_repo(
+    tmp_path: Path,
+) -> None:
+    """F-9：``--allow-software-repo-out`` ⇒ 留档落进软件仓 + stderr 告警。"""
+    fake = _fake_repo(tmp_path, ["inspect_stalled_runs.py", "guard_repo_write_path.py"])
+    db = tmp_path / "stalled.db"
+    _seed_stalled_db(db)
+
+    proc = _run_script(
+        fake / "scripts" / "inspect_stalled_runs.py",
+        ["--db", str(db), "--write-docs", "--allow-software-repo-out"],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "--allow-software-repo-out" in proc.stderr, proc.stderr
+    out = fake / "docs" / "evaluation" / "stalled-runs-export.json"
+    assert out.is_file(), f"逃生口开启后留档应真的落进软件仓：{out}"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["runs"][0]["run_id"] == "run_synth01"
+
+
+def test_human_baseline_synthetic_out_and_write_docs_both_land(tmp_path: Path) -> None:
+    """F-6：``--out`` 与 ``--write-docs`` 同时给 ⇒ **两份都落** + 明确告警。
+
+    旧实现是 ``if args.out: ... elif args.write_docs:`` ⇒ ``--out`` **静默吞掉**
+    ``--write-docs``（痕迹仓副本没落、零告警）。
+    """
+    fake = _fake_repo(tmp_path, ["human_baseline_synthetic.py", "guard_repo_write_path.py"])
+    artifacts = tmp_path / "artifacts"
+    out = tmp_path / "hbs-report.json"
+
+    proc = _run_script(
+        fake / "scripts" / "human_baseline_synthetic.py",
+        [
+            "--out", str(out),
+            "--write-docs",
+            "--artifacts-dir", str(artifacts),
+            "--format", "json",
+        ],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "--out" in proc.stderr and "--write-docs" in proc.stderr, (
+        f"两个开关同时给出必须有明确告警：{proc.stderr}"
+    )
+    assert out.is_file(), f"--out 那份必须落：{out}"
+    docs_copy = artifacts / "docs" / "evaluation" / "human-baseline-synthetic.json"
+    assert docs_copy.is_file(), f"痕迹仓那份也必须落（旧实现被 --out 静默吞掉）：{docs_copy}"
+    assert json.loads(out.read_text(encoding="utf-8"))["schema"] == "human-baseline-synthetic/v1"
+    assert json.loads(docs_copy.read_text(encoding="utf-8"))["schema"] == "human-baseline-synthetic/v1"
+
+
+def test_inspect_stalled_runs_export_and_write_docs_both_land(tmp_path: Path) -> None:
+    """F-6：``--export`` 与 ``--write-docs`` 同时给 ⇒ **两份都落** + 明确告警。"""
+    fake = _fake_repo(tmp_path, ["inspect_stalled_runs.py", "guard_repo_write_path.py"])
+    db = tmp_path / "stalled.db"
+    _seed_stalled_db(db)
+    artifacts = tmp_path / "artifacts"
+    export = tmp_path / "stalled_export.json"
+
+    proc = _run_script(
+        fake / "scripts" / "inspect_stalled_runs.py",
+        [
+            "--db", str(db),
+            "--export", str(export),
+            "--write-docs",
+            "--artifacts-dir", str(artifacts),
+        ],
+        pythonpath=_fake_pythonpath(fake),
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "--export" in proc.stderr and "--write-docs" in proc.stderr, (
+        f"两个开关同时给出必须有明确告警：{proc.stderr}"
+    )
+    assert export.is_file(), f"--export 那份必须落：{export}"
+    docs_copy = artifacts / "docs" / "evaluation" / "stalled-runs-export.json"
+    assert docs_copy.is_file(), f"痕迹仓那份也必须落（旧实现被 --export 静默吞掉）：{docs_copy}"
+    payload = json.loads(docs_copy.read_text(encoding="utf-8"))
+    assert payload["runs"][0]["run_id"] == "run_synth01"
+

@@ -24,8 +24,26 @@ AGENTS.md 硬规则 5「内容仓不推 GitHub」此前**只有纪律、没有�
     # 模式二：凭据收敛（D-18）—— 悬空 secrets 条目 + 库内明文 api_key
     python scripts/check_content_repo_guard.py secrets --db data/novelos.db
     python scripts/check_content_repo_guard.py secrets --json
-    # 迁移命令：**默认 dry-run**（不写文件、不改库）；--apply 才真的执行
-    python scripts/check_content_repo_guard.py secrets --db data/novelos.db
+    # **两个动作各自独立**（默认全是 dry-run；--apply 是写权限总闸）：
+    #   迁移（库内明文 → secrets.json，并清空库内明文）
+    python scripts/check_content_repo_guard.py secrets --db data/novelos.db --migrate --apply
+    #   清理悬空条目（只动 secrets.json，不动库内明文）
+    python scripts/check_content_repo_guard.py secrets --db data/novelos.db --prune-dangling --apply
+
+⚠️ **清理悬空条目的两道保险**（2026-10-23 对抗审查 F-1 / F-2）
+-----------------------------------------------------------
+1. **诊断不可信 ⇒ 拒绝执行**（退出码 2，**不写任何文件**）：运行库不存在 /
+   缺表 / 读表失败，**或**「已知集合为空」⇒ 一律**拒绝清理**。
+   「已知集合为空」**绝不可**被解读为「全部悬空」——否则一次误指 ``--db``
+   （打错路径 / 未迁移的库 / 另一个项目库 / 空库）就会**清空用户全部凭据**，
+   且无备份、无确认、还返回「合规」（绿）。
+2. **删前复核 + 写前备份**：每个候选键都过一遍**生产解析函数**
+   ``packages.core.secrets_store.resolve_profile_api_key`` ⇒ **仍能解析出非空
+   密钥 ⇒ 不许删**（覆盖运行期第 3 优先级 ``secrets[<env_name>]``）；
+   真正落盘前先备份成 ``secrets.json.bak-<时间戳>``（同目录、原子、失败即中止）。
+    #   两件一起做
+    python scripts/check_content_repo_guard.py secrets --db data/novelos.db --migrate --prune-dangling --apply
+    #   向后兼容：**单独 --apply** = 「迁移 + 执行」
     python scripts/check_content_repo_guard.py secrets --db data/novelos.db --apply
 
 检查项（全部只读）
@@ -35,8 +53,8 @@ AGENTS.md 硬规则 5「内容仓不推 GitHub」此前**只有纪律、没有�
    且非空；``.sample`` 结尾不算）；
 3. 本地**领先**上游多少提交（``git rev-list --count @{u}..HEAD``；无上游 ⇒ 0）；
 4. （``secrets`` 模式）``secrets.json`` 的条目是否**悬空**（对不上任何档案 / 连接 /
-   provider）、运行库里 ``model_profiles`` / ``model_connections`` 的 ``params_json``
-   是否仍有**明文 api_key**。
+   provider / **env_name 形态**）、运行库里 ``model_profiles`` / ``model_connections``
+   的 ``params_json`` 是否仍有**明文 api_key**。
 
 结论口径
 --------
@@ -68,11 +86,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    # ⚠️ F-2：**只调用**生产解析函数，不改它、也不另写一套「名字匹配」口径。
+    from packages.core.secrets_store import resolve_profile_api_key
+except ImportError:  # pragma: no cover —— 直接 `python scripts/check_content_repo_guard.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.secrets_store import resolve_profile_api_key
 
 DEFAULT_CONTENT_DIR = Path("D:/zcodeproject/NovelOS-Content")
 
@@ -344,6 +371,23 @@ def _resolve_secrets_path(explicit: str | None = None) -> Path:
     return REPO_ROOT / "secrets.json"
 
 
+@dataclass(frozen=True)
+class KeySlot:
+    """一个「密钥查找槽位」——运行期解析链会查到的**名字集合**。
+
+    ⚠️ 槽位里的名字必须与**生产解析链**一致（``packages.core.secrets_store.
+    resolve_profile_api_key`` 的 5 级 + ``providers.resolve_api_key`` 的 env_name
+    派生）⇒ 本脚本只**调用**生产函数判定「这个键还在不在用」，不另写一套规则
+    （F-2 的原始缺陷正是「两套口径」：巡检只认 profile / connection / provider，
+    运行期还认 ``secrets[<env_name>]``）。
+    """
+
+    profile_id: str | None = None
+    connection_id: str | None = None
+    provider: str | None = None
+    env_names: tuple[str, ...] = ()
+
+
 @dataclass
 class SecretsState:
     """凭据收敛巡检采集到的事实（**绝不包含密钥值**）。"""
@@ -359,6 +403,15 @@ class SecretsState:
     plaintext_profiles: list[str] = field(default_factory=list)
     plaintext_connections: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: 「已知集合」（**键名的小写形态**）——档案 id ∪ 连接 id ∪ provider ∪ env_name 形态。
+    known_keys: set[str] = field(default_factory=set)
+    #: **真正的读取失败**（库不存在 / 缺表 / sqlite 错误）——与「集合为空」**分开记**。
+    read_errors: list[str] = field(default_factory=list)
+    #: 「无法判定」的原因（读表失败 **或** 已知集合为空）⇒ 清理动作必须拒绝执行。
+    blocked_reasons: list[str] = field(default_factory=list)
+    #: 运行期的查找槽位（供**生产解析函数**复核「这个键还在不在用」）。
+    profile_slots: list[KeySlot] = field(default_factory=list)
+    connection_slots: list[KeySlot] = field(default_factory=list)
 
 
 def _open_readonly(db_path: Path) -> sqlite3.Connection:
@@ -384,8 +437,114 @@ def _params_api_key(params_json: str | None) -> str | None:
     return None
 
 
+def _params_dict(params_json: str | None) -> dict:
+    """把 ``params_json`` 解析成 dict（坏 JSON / 非对象 ⇒ 空 dict）。"""
+    if not params_json:
+        return {}
+    try:
+        data = json.loads(params_json)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """表的列名集合（表不存在 ⇒ 空集；**不抛异常**）。"""
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(r[1]) for r in rows}
+
+
+def _row_opt(row: sqlite3.Row, key: str) -> str | None:
+    """取一列的值；该列不存在 / 为 NULL / 空串 ⇒ ``None``。"""
+    try:
+        value = row[key]
+    except (IndexError, KeyError):
+        return None
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _env_names(provider: str | None, params: dict | None) -> tuple[str, ...]:
+    """env_name 槽位——与 ``packages.core.model_router.providers.resolve_api_key`` **同口径**：
+    显式 ``params["api_key_env"]``（若配了）+ 默认 ``NOVELOS_API_KEY_<PROVIDER 大写>``。
+
+    ⚠️ 本函数只负责**把名字收集出来**；「这个名字有没有被用上」由**生产解析函数**
+    :func:`packages.core.secrets_store.resolve_profile_api_key` 判定（F-2 双保险第二道）
+    ⇒ 不另写一套匹配规则。
+    """
+    names: list[str] = []
+    if isinstance(params, dict):
+        explicit = params.get("api_key_env")
+        if isinstance(explicit, str) and explicit.strip():
+            names.append(explicit.strip())
+    if provider:
+        names.append(f"NOVELOS_API_KEY_{provider.upper()}")
+    return tuple(names)
+
+
+def _slot_names(slot: KeySlot) -> set[str]:
+    """该槽位在**生产解析链**里会被查到的全部名字（含 provider 的小写形态）。
+
+    与 :func:`packages.core.secrets_store.resolve_profile_api_key` 的查找槽位对齐：
+    ``connection_id`` → ``profile_id`` → ``provider``（含小写形态）→ ``env_name``。
+    """
+    names: set[str] = set()
+    if slot.connection_id:
+        names.add(slot.connection_id)
+    if slot.profile_id:
+        names.add(slot.profile_id)
+    if slot.provider:
+        names.add(slot.provider)
+        names.add(slot.provider.lower())
+    names.update(n for n in slot.env_names if n)
+    return names
+
+
+def _is_still_resolvable(state: SecretsState, key: str, value: str) -> bool:
+    """这个键**现在还能不能被运行期解析出来**（**走生产解析函数**，F-2）。
+
+    做法：把 ``secrets`` 换成**只含这一个键**的字典，交给生产函数
+    :func:`packages.core.secrets_store.resolve_profile_api_key` 解析 ⇒ 返回非空
+    ⇒ 该名字确实是某个档案 / 连接的查找槽位（**仍被引用**）⇒ **不许删**。
+
+    ⚠️ 复用生产函数是这条的关键：另写一套「名字匹配」规则就会与运行期口径漂移
+    （F-2 的原始缺陷正是「两套口径」）。
+    """
+    if not value:
+        return False
+    probe = {key: value}
+    for slot in list(state.profile_slots) + list(state.connection_slots):
+        resolved = resolve_profile_api_key(
+            profile_id=slot.profile_id,
+            provider=slot.provider,
+            env_names=list(slot.env_names),
+            params_api_key=None,
+            secrets=probe,
+            connection_id=slot.connection_id,
+        )
+        if resolved:
+            return True
+    return False
+
+
 def collect_secrets_state(db_path: Path, secrets_path: Path) -> SecretsState:
-    """采集「悬空 secrets 条目」与「库内明文 api_key」（**只读**）。"""
+    """采集「悬空 secrets 条目」与「库内明文 api_key」（**只读**）。
+
+    ⚠️ **「已知集合」必须可信**（F-1 / 2026-10-23 对抗审查 CRITICAL）：
+    ``--prune-dangling`` 会**删掉**被判为悬空的键 ⇒ 若读库失败（库不存在 / 缺表 /
+    sqlite 错误）或已知集合为空，「每个键都悬空」是**误判** ⇒ 一次误指 ``--db``
+    （打错路径 / 未迁移的库 / 另一个项目库 / 空库）就可能**清空用户全部凭据**，
+    且无备份、无确认、还返回「合规」（绿）。
+
+    ⇒ 「读表失败」与「已知集合为空」**分别记录**（``read_errors`` / ``known_keys``），
+    两者任一成立 ⇒ 判为「**无法判定**」（``blocked_reasons`` 非空）⇒ 悬空条目
+    **不判**（宁可不判，不可全判）、清理动作**拒绝执行**（退出码 2，不写任何文件）。
+    """
     state = SecretsState(db_path=str(db_path), secrets_path=str(secrets_path))
 
     # --- secrets.json 的键（只读键名，**不读值**）---
@@ -407,19 +566,26 @@ def collect_secrets_state(db_path: Path, secrets_path: Path) -> SecretsState:
     # --- 运行库（只读 URI）---
     if not db_path.exists():
         state.notes.append(f"运行库不存在：{db_path}")
+        state.read_errors.append(f"运行库不存在：{db_path}")
+        state.blocked_reasons = list(state.read_errors)
         return state
     try:
         conn = _open_readonly(db_path)
     except sqlite3.Error as exc:
         state.notes.append(f"运行库打开失败：{exc}")
+        state.read_errors.append(f"运行库打开失败：{exc}")
+        state.blocked_reasons = list(state.read_errors)
         return state
     try:
+        prof_sql = "SELECT profile_id, provider, params_json"
+        if "connection_id" in _table_columns(conn, "model_profiles"):
+            prof_sql += ", connection_id"
+        prof_sql += " FROM model_profiles"
         try:
-            profiles = conn.execute(
-                "SELECT profile_id, provider, params_json FROM model_profiles"
-            ).fetchall()
+            profiles = conn.execute(prof_sql).fetchall()
         except sqlite3.Error as exc:
             state.notes.append(f"读 model_profiles 失败：{exc}")
+            state.read_errors.append(f"读 model_profiles 失败：{exc}")
             profiles = []
         try:
             connections = conn.execute(
@@ -427,6 +593,7 @@ def collect_secrets_state(db_path: Path, secrets_path: Path) -> SecretsState:
             ).fetchall()
         except sqlite3.Error as exc:
             state.notes.append(f"读 model_connections 失败：{exc}")
+            state.read_errors.append(f"读 model_connections 失败：{exc}")
             connections = []
 
         for row in profiles:
@@ -435,42 +602,95 @@ def collect_secrets_state(db_path: Path, secrets_path: Path) -> SecretsState:
             provider = str(row["provider"] or "")
             if provider:
                 state.providers.append(provider)
+            params = _params_dict(row["params_json"])
             if _params_api_key(row["params_json"]) is not None:
                 state.plaintext_profiles.append(pid)
+            state.profile_slots.append(
+                KeySlot(
+                    profile_id=pid,
+                    connection_id=_row_opt(row, "connection_id"),
+                    provider=provider or None,
+                    env_names=_env_names(provider, params),
+                )
+            )
         for row in connections:
             cid = str(row["connection_id"])
             state.connection_ids.append(cid)
             provider = str(row["provider"] or "")
             if provider:
                 state.providers.append(provider)
+            params = _params_dict(row["params_json"])
             if _params_api_key(row["params_json"]) is not None:
                 state.plaintext_connections.append(cid)
+            state.connection_slots.append(
+                KeySlot(
+                    profile_id=None,
+                    connection_id=cid,
+                    provider=provider or None,
+                    env_names=_env_names(provider, params),
+                )
+            )
     finally:
         conn.close()
 
-    # --- 悬空条目：secrets.json 的键对不上任何 profile / connection / provider ---
-    known = {pid.lower() for pid in state.profile_ids}
-    known |= {cid.lower() for cid in state.connection_ids}
-    known |= {p.lower() for p in state.providers}
+    # --- 已知集合（**键名的小写形态**；含 env_name 形态 ⇒ F-2 第一道保险）---
+    known: set[str] = set()
+    for slot in list(state.profile_slots) + list(state.connection_slots):
+        known |= {n.lower() for n in _slot_names(slot)}
+    state.known_keys = known
+
+    # --- 悬空条目 ---
+    if state.read_errors:
+        # 读库失败 ⇒ 「已知集合」**不完整** ⇒ **不判悬空**（宁可不判，不可全判）。
+        state.blocked_reasons = list(state.read_errors)
+        return state
+    if not known:
+        # 已知集合为空 ⇒ 「全是死键」与「根本没有引用数据」**不可区分** ⇒ 不判。
+        state.blocked_reasons = [
+            "运行库已知集合为空（没有任何档案 / 连接 / provider 引用）——"
+            "无法区分「全部是死键」与「根本没有引用数据」"
+        ]
+        return state
     state.dangling_keys = [k for k in state.secrets_keys if k.lower() not in known]
     return state
 
 
 def decide_secrets(state: SecretsState) -> dict:
-    """由采集到的事实推导凭据收敛结论（**纯函数**）。"""
+    """由采集到的事实推导凭据收敛结论（**纯函数**）。
+
+    ⚠️ **「无法判定」是独立结论**（F-1）：读库失败 / 已知集合为空 ⇒ 悬空条目
+    **不可判** ⇒ 退出码 **2**（巡检自身出错），**不是** 0（合规）也不是 1（不合规）。
+    「合规」在这里意味着「已判定且没有悬空条目」；判不出来时不得报绿。
+    """
     issues: list[str] = []
     if state.dangling_keys:
         issues.append(f"悬空 secrets 条目 {len(state.dangling_keys)} 条")
     n_plain = len(state.plaintext_profiles) + len(state.plaintext_connections)
     if n_plain:
         issues.append(f"库内明文 api_key {n_plain} 行")
+    blocked = list(state.blocked_reasons)
+    if blocked:
+        return {
+            "ok": False,
+            "verdict": "unknown",
+            "exit_code": EXIT_ERROR,
+            "issues": issues + [f"无法判定悬空条目：{r}" for r in blocked],
+            "dangling_keys": state.dangling_keys,
+            "plaintext_profiles": state.plaintext_profiles,
+            "plaintext_connections": state.plaintext_connections,
+            "blocked": True,
+            "blocked_reasons": blocked,
+        }
     return {
         "ok": not issues,
+        "verdict": "ok" if not issues else "unsafe",
         "exit_code": EXIT_OK if not issues else EXIT_UNSAFE,
         "issues": issues,
         "dangling_keys": state.dangling_keys,
         "plaintext_profiles": state.plaintext_profiles,
         "plaintext_connections": state.plaintext_connections,
+        "blocked": False,
+        "blocked_reasons": [],
     }
 
 
@@ -489,8 +709,13 @@ def render_secrets_text(state: SecretsState, verdict: dict) -> str:
     ]
     if verdict["ok"]:
         lines.append("结论: 合规（无悬空条目、库内无明文 api_key）")
+    elif verdict.get("blocked"):
+        lines.append("结论: 无法判定（读不到运行库 ⇒ 不判定悬空条目）")
     else:
         lines.append("结论: 不合规（" + "；".join(verdict["issues"]) + "）")
+    if verdict.get("blocked"):
+        for r in verdict.get("blocked_reasons") or []:
+            lines.append(f"无法判定: {r}")
     if state.dangling_keys:
         lines.append("悬空条目（secrets.json 里的键对不上任何档案 / 连接 / provider）:")
         for k in state.dangling_keys:
@@ -598,6 +823,141 @@ def migrate_secrets(state: SecretsState, apply: bool) -> dict:
     return {"applied": True, "actions": actions, "note": "已写入 secrets.json 并清空库内明文"}
 
 
+def _backup_secrets_file(secrets_path: Path) -> Path:
+    """落盘前把现有 ``secrets.json`` 复制成 ``<name>.bak-<时间戳>``（**同目录、原子**）。
+
+    ⚠️ **失败即中止**（抛异常）⇒ **不落盘**任何删除（凭据丢了不可逆）。
+    原子做法：先写 ``.tmp`` 再 ``os.replace`` ⇒ 不会留下半截备份文件。
+    """
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = secrets_path.with_name(f"{secrets_path.name}.bak-{stamp}")
+    tmp = backup.with_name(backup.name + ".tmp")
+    try:
+        shutil.copy2(secrets_path, tmp)
+        os.replace(tmp, backup)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"备份 secrets.json 失败（{backup}），已中止清理（**未写任何文件**）：{exc}"
+        ) from exc
+    return backup
+
+
+def prune_dangling_secrets(state: SecretsState, apply: bool) -> dict:
+    """把 ``secrets.json`` 里**悬空**的条目删掉（**默认 dry-run**）。
+
+    为什么需要这个动作
+    ------------------
+    本脚本**检测**「悬空条目」（键对不上任何档案 / 连接 / provider）并把它算作
+    「不合规」，但原先**只给了迁移命令**（把库内明文搬进文件），没有给「清掉
+    悬空条目」的出路 ⇒ 一次档案删除之后，``secrets.json`` 里会永久留下一条
+    指向**已删档案**的死密钥，巡检从此永远报不合规（红灯常亮 ⇒ 守卫被忽略）。
+
+    口径
+    ----
+    - 「悬空」= 与 :func:`decide_secrets` **同一判据**（键对不上任何档案 / 连接 /
+      provider / **env_name 形态**）⇒ 守卫报的悬空，就是这里要删的（不会出现两套口径）；
+    - dry-run（默认）：只报「将要删哪些键」，**不写任何文件**；
+    - ``apply=True``：**先备份**（``secrets.json.bak-<时间戳>``，同目录、原子），
+      再**原子写**（先写 ``.tmp`` 再 ``os.replace``），
+      **只删 ``api_keys`` 段里被点名的键**，其余段原样保留（不丢任何配置）。
+
+    ⚠️ **两道保险**（F-1 / F-2，2026-10-23 对抗审查）：
+    1. **诊断不可信 ⇒ 拒绝执行**：读库失败（库不存在 / 缺表 / sqlite 错误）或
+       「已知集合为空」⇒ 抛错中止（CLI ⇒ 退出码 2），**不写任何文件**。
+       「已知集合为空」**绝不可**被解读为「全部悬空」——那会让一次误指 ``--db``
+       直接清空用户全部凭据且返回「合规」（绿）。
+    2. **删前复核**：每个候选键都过一遍**生产解析函数**
+       :func:`packages.core.secrets_store.resolve_profile_api_key` ⇒
+       **仍能解析出非空密钥 ⇒ 不许删**（覆盖 env_name 形态的运行期第 3 优先级）。
+
+    ⚠️ 被删的是**已删档案的死密钥**：那个档案若将来被恢复，其密钥需重新提供。
+    这是刻意的取舍——「一个对不上任何东西的密钥」与「一个有用的密钥」不可兼得，
+    而密钥留在文件里还多一份可被误用的副本。
+
+    ⚠️ **坏文件必须响亮失败**：``secrets.json`` 解析不了 ⇒ **抛错中止**（CLI ⇒ 退出码 2），
+    **不得**当成「没有悬空条目，什么都不用做」——那会让用户以为清理已做、实际文件
+    仍坏着（且坏文件里的密钥状态无人知晓）。
+    """
+    # --- 0) 先判「诊断是否可信」：读表失败 / 已知集合为空 ⇒ **拒绝清理** ---
+    if state.blocked_reasons:
+        raise RuntimeError(
+            "无法判定悬空条目，已中止清理（**未写任何文件**）："
+            + "；".join(state.blocked_reasons)
+            + "。⚠️ 「已知集合为空」**绝不可**被解读为「全部悬空」"
+            "（否则一次误指 --db 就会清空用户全部凭据）。"
+        )
+    secrets_path = Path(state.secrets_path)
+    if not secrets_path.exists():
+        raise RuntimeError("secrets.json 不存在，无需清理")
+    try:
+        payload = json.loads(secrets_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"secrets.json 解析失败，已中止清理：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("secrets.json 顶层不是对象，已中止清理")
+    api_keys = payload.get("api_keys")
+    if not isinstance(api_keys, dict):
+        raise RuntimeError("secrets.json 无 api_keys 段，已中止清理")
+
+    if not state.dangling_keys:
+        return {"applied": False, "actions": [], "note": "没有悬空条目"}
+    # --- 1) 候选键复核（**走生产解析函数** ⇒ 仍被引用的键不许删，F-2） ---
+    removable: list[str] = []
+    kept: list[str] = []
+    for k in state.dangling_keys:
+        value = api_keys.get(k)
+        if isinstance(value, str) and value and _is_still_resolvable(state, k, value):
+            kept.append(k)
+        else:
+            removable.append(k)
+    actions = [f"secrets.json[api_keys] 删除键 {k}" for k in removable]
+    kept_note = (
+        f"（{len(kept)} 条经生产解析函数复核判定**仍被引用** ⇒ 保留：{', '.join(kept)}）"
+        if kept
+        else ""
+    )
+    if not removable:
+        return {
+            "applied": False,
+            "actions": [],
+            "kept": kept,
+            "note": f"没有可清理的悬空条目{kept_note}",
+        }
+    if not apply:
+        return {
+            "applied": False,
+            "actions": actions,
+            "kept": kept,
+            "note": f"dry-run（未加 --apply ⇒ 未写任何文件）{kept_note}",
+        }
+
+    # --- 2) 写前强制备份（同目录、原子；失败即中止 ⇒ 不落盘） ---
+    backup_path = _backup_secrets_file(secrets_path)
+
+    removed = [k for k in removable if k in api_keys]
+    for k in removed:
+        api_keys.pop(k, None)
+    payload["api_keys"] = api_keys
+    secrets_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = secrets_path.with_name(secrets_path.name + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    os.replace(tmp, secrets_path)
+    return {
+        "applied": True,
+        "actions": actions,
+        "removed": removed,
+        "kept": kept,
+        "backup_path": str(backup_path),
+        "note": (
+            f"已从 secrets.json 删除 {len(removed)} 条悬空条目"
+            f"（清理前已备份到 {backup_path.name}）{kept_note}"
+        ),
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="check_content_repo_guard",
@@ -636,7 +996,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--apply",
         action="store_true",
-        help="secrets 模式：真正执行迁移（**默认 dry-run**，不写文件、不改库）",
+        help=(
+            "写权限总闸：让**本次请求的**写动作真的执行"
+            "（默认全是 dry-run：只报「将要做什么」，不写文件、不改库）"
+        ),
+    )
+    p.add_argument(
+        "--migrate",
+        action="store_true",
+        help=(
+            "secrets 模式：请求「凭据迁移」动作（把库内明文 api_key 搬进 secrets.json "
+            "并清空库内明文）——默认 dry-run"
+        ),
+    )
+    p.add_argument(
+        "--prune-dangling",
+        action="store_true",
+        help=(
+            "secrets 模式：请求「清理悬空条目」动作（删掉 secrets.json 里对不上任何"
+            "档案/连接/provider 的死密钥）——默认 dry-run。"
+            "⚠️ **只动 secrets.json，不动库内明文**"
+        ),
     )
     p.add_argument(
         "--json",
@@ -683,13 +1063,47 @@ def _run_secrets_mode(args: argparse.Namespace) -> int:
     state = collect_secrets_state(db_path, secrets_path)
     verdict = decide_secrets(state)
 
-    migration: dict | None = None
-    if args.apply:
+    # 动作选择（**一个开关只管一件事**）：
+    #   --migrate          ⇒ 请求「迁移」（库内明文 → secrets.json）
+    #   --prune-dangling   ⇒ 请求「清理悬空条目」（只动 secrets.json）
+    #   --apply            ⇒ 写权限总闸（让本次请求的动作真的执行）
+    # 向后兼容：**单独给 --apply**（没写 --migrate 也没写 --prune-dangling）等价于
+    # 「迁移 + 执行」——这是本脚本自 2026-10-23 起就有的 CLI 口径，不得改。
+    # ⚠️ **不要**把「迁移」与「清理」绑成一个动作：二者会互相干扰——迁移会用**库内明文**
+    # 覆盖同名文件条目 ⇒ 若「--prune-dangling --apply」顺带触发迁移，用户看到的
+    # 文件条目会变（而他只想删一条死密钥）⇒ 动作必须可独立选择。
+    want_prune = bool(args.prune_dangling)
+    want_migrate = bool(args.migrate) or (bool(args.apply) and not want_prune)
+
+    prune: dict | None = None
+    if want_prune:
         try:
-            migration = migrate_secrets(state, apply=True)
+            prune = prune_dangling_secrets(state, apply=args.apply)
+        except Exception as exc:  # noqa: BLE001 —— CLI 边界：异常 → 诊断 + 退出码 2
+            print(f"ERROR: 悬空条目清理失败：{exc}", file=sys.stderr)
+            return EXIT_ERROR
+        if prune.get("applied"):
+            # 清理后**重新采集并重新判定** ⇒ 输出的结论反映**清理后**的真实状态，
+            # 而不是清理前的旧快照（否则用户看到「已清理」却仍是「不合规」）。
+            state = collect_secrets_state(db_path, secrets_path)
+            verdict = decide_secrets(state)
+        if prune.get("backup_path"):
+            # ⚠️ 备份路径必须**看得见**（用户要知道凭据的旧版本在哪）。
+            print(
+                f"[备份] 清理前已备份 secrets.json -> {prune['backup_path']}",
+                file=sys.stderr,
+            )
+
+    migration: dict | None = None
+    if want_migrate:
+        try:
+            migration = migrate_secrets(state, apply=args.apply)
         except Exception as exc:  # noqa: BLE001 —— CLI 边界：异常 → 诊断 + 退出码 2
             print(f"ERROR: 凭据迁移失败：{exc}", file=sys.stderr)
             return EXIT_ERROR
+        if migration.get("applied"):
+            state = collect_secrets_state(db_path, secrets_path)
+            verdict = decide_secrets(state)
 
     if args.as_json:
         payload = {
@@ -703,6 +1117,8 @@ def _run_secrets_mode(args: argparse.Namespace) -> int:
             "ok": verdict["ok"],
             "issues": verdict["issues"],
             "notes": state.notes,
+            "blocked": verdict.get("blocked", False),
+            "blocked_reasons": verdict.get("blocked_reasons", []),
         }
         if migration is not None:
             payload["migration"] = {
@@ -710,11 +1126,22 @@ def _run_secrets_mode(args: argparse.Namespace) -> int:
                 "action_count": len(migration["actions"]),
                 "note": migration["note"],
             }
+        if prune is not None:
+            payload["prune"] = {
+                "applied": prune["applied"],
+                "action_count": len(prune["actions"]),
+                "removed": prune.get("removed", []),
+                "kept": prune.get("kept", []),
+                "backup_path": prune.get("backup_path"),
+                "note": prune["note"],
+            }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(render_secrets_text(state, verdict))
         if migration is not None:
             print(f"迁移: {'已执行' if migration['applied'] else '未执行'}（{migration['note']}）")
+        if prune is not None:
+            print(f"清理悬空条目: {'已执行' if prune['applied'] else '未执行'}（{prune['note']}）")
 
     return int(verdict["exit_code"])
 

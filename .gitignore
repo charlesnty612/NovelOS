@@ -88,3 +88,8 @@ provider_dumps/
 /docs/evaluation/m1-long-run-report.md
 /docs/evaluation/m2-verification.md
 /docs/evaluation/real-llm-*.md
+# ④ 备份加密密钥（2026-10-23 对抗审查 F-3）：`backup_db.py --key-file` 指向仓内
+#    时，守卫会拒绝（退出码 2）⇒ 正常路径不该出现仓内密钥文件；但 `.gitignore`
+#    此前**不覆盖** `backup.key` ⇒ 一次手滑的 `--key-file` 就能让
+#    「能解开所有备份的密钥」进 GitHub 历史（**不可撤回**）。此处兜底。
+*.key
