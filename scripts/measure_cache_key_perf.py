@@ -1162,6 +1162,17 @@ def main(argv: list[str] | None = None) -> int:
 
     base = Path(args.db) if args.db else _default_base_db()
     assert_not_live_db(base)  # SystemExit ⇒ 退出码 3
+    # ⚠️ **父目录不存在 ⇒ 明确报错**（对抗审查 F-6，2026-10-23）：
+    # 早先直接往下建库 ⇒ 抛未捕获的 ``sqlite3.OperationalError: unable to open
+    # database file`` 栈 ⇒ 用户看不懂（这与「跑挂了」不是一回事）。
+    if not base.parent.exists():
+        print(
+            f"[错误] --db 的父目录不存在：{base.parent}\n"
+            "       请先创建该目录，或换一个已存在的路径（本脚本不会替你建目录，"
+            "免得打错路径时留下空目录）。",
+            file=sys.stderr,
+        )
+        return 2
 
     # ---- 「每个装配器一个进程」：同进程连测两个装配器会互相污染（实测命中 p50
     #      从 ~3.1ms 抬到 ~3.7~4.1ms——进程级状态：分配器/GC/模块缓存），
