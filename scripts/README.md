@@ -1,7 +1,7 @@
 # scripts（运维脚本）
 
-> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 31 个脚本：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke、卷纲体检与开卷、章节量产等），均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
-> 状态：现行入口 31 个（`ls scripts/*.py`，2026-10-22 实测）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
+> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 **37 个 `scripts/*.py` = 35 个 CLI 入口 + 2 个共用模块**：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke、卷纲体检与开卷、章节量产、凭据收敛、备份恢复、缓存键性能实测等），CLI 入口均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
+> 状态：现行 `scripts/*.py` 共 **37** 个（2026-10-23 实测 `ls scripts/*.py` + 逐个判是否含 `main()`/`__main__`）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
 
 ## 职责与边界
 
@@ -24,7 +24,7 @@
 | `scripts/migrate.py` | `scripts/migrate.py:16` | `main() -> int` | 执行 SQLite 迁移并打印 `applied / skipped / tables / db` |
 | `scripts/serve.py` | `scripts/serve.py:31` | `main() -> int` | 启动 uvicorn，host/port 取自 `Settings` |
 
-### 脚本总览（现行 31 个）
+### 脚本总览（现行 35 个 CLI 入口 + 2 个共用模块）
 
 | 类别 | 脚本 |
 |---|---|
@@ -44,6 +44,10 @@
 | delta 源锚定阈值校准 | `delta_anchoring_calibrate.py`（只读 `mode=ro` 打开；实测 `DELTA_BIGRAM_COVERAGE_MIN` 的 bigram 覆盖率分布 + ≤20 条低覆盖样本供人工判别「真捏造」还是「正常概括」；不写库） |
 | revise 保真阈值校准 | `revise_fidelity_calibrate.py`（只读 `mode=ro` 打开；从 `workflow_runs.checkpoint_json` 还原历史 revise 轮次实测 `REVISE_MIN_PRESERVED_RATIO` 的 `preserved_ratio` 分布，另出相邻 drafts 版本对照与 ≤20 条低比值抽样；不写库） |
 | 章节量产 | `produce_chapters.py`（见下文专节） |
+| 凭据 / 仓库防护 | `check_content_repo_guard.py`（**只读**巡检：模式一 = 内容仓 push 防护；模式二 `secrets` = 凭据收敛 D-18，库内明文 api_key → `secrets.json` + 清理悬空条目，**两个动作各自独立**、`--apply` 是写权限总闸）、`check_orphan_relationships.py`（**只读**诊断孤儿 `relationships` 行——端点 FK 已被迁移 0022 摘掉 ⇒ `PRAGMA foreign_key_check` **查不出来**） |
+| 备份恢复 | `restore_db.py`（从**加密备份**恢复主库：原子替换 + 恢复后校验 + 残留 `-wal`/`-shm` 检出——手工拼 openssl 曾实测出「恢复静默失效而 `integrity_check` 仍报 ok」） |
+| 性能实测 | `measure_cache_key_perf.py`（装配缓存键的命中/未命中耗时 + 键构造/查缓存/装配三段开销；**只用临时库 + 合成夹具**，传活库路径直接拒绝并非 0 退出） |
+| 共用模块（非 CLI） | `guard_repo_write_path.py`（**写盘守卫**：软件仓内只允许写 `data/` 与 `tmp/`；痕迹仓根解析）、`_codegen_check.py`（codegen 产物漂移校验共用件：换行归一 + 首个差异摘要 + 产物比对） |
 
 ### `scripts/migrate.py` 输出格式
 
@@ -438,5 +442,63 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 
 - 上游：无（纯标准库，不 import `packages.*`，故不随业务代码漂移）；
 - 标准库：`argparse` / `json` / `sqlite3` / `pathlib` / `dataclasses` / `datetime`；
-- 测试：`tests/unit/test_inspect_stalled_runs.py`（59 例：只读拒写 / 审批内容三形态 /
+- 测试：`tests/unit/test_inspect_stalled_runs.py`（56 例：只读拒写 / 审批内容三形态 /
   守卫口径形状 / 导出留档 / apply 闸；全部夹具在 `tmp_path`，不碰 `data/novelos.db`）。
+
+---
+
+## 脚本落盘守卫与新增 CLI flag（2026-10-23 D-19 + 对抗审查 A/B 批）
+
+### 一句话规则
+
+**脚本不得把产物写回软件仓**（软件仓进了 GitHub 历史 ⇒ 不可撤回）。软件仓内**只允许**写
+`data/` 与 `tmp/` 两个子树（均已被 `.gitignore` 覆盖）；`docs/`、`foo.md` 等一律拒绝。
+拒绝对抛 `RepoWritePathError`（CLI ⇒ **退出码 2**），**不得静默改写到别处**。
+
+守卫实现：`scripts/guard_repo_write_path.py`（`check_write_path` / `resolve_artifacts_root` /
+`format_artifacts_unavailable`）。四个落盘脚本共用**同一份**判定——口径分叉正是本仓反复
+出现的「两套实现给出不同答案」形状，故收敛到单点而非各脚本各写一遍。
+
+### 新增 flag 清单（7 个 flag 名 / 11 处出现；逐处与 `HEAD` 对比得出，非转述）
+
+| flag | 出现于 | 作用 |
+|---|---|---|
+| `--allow-software-repo-out` | `backup_db.py`、`db_maintenance.py`、`human_baseline_synthetic.py`、`inspect_stalled_runs.py`（×4） | **逃生口（默认关）**：显式接受「把产物写回软件仓」的风险；开启时打 `[警告]` |
+| `--allow-software-repo-key` | `backup_db.py`（×1） | **逃生口（默认关，与上面**分开**）**：允许「备份加密密钥」落软件仓。允许*备份*落仓 ≠ 允许*密钥*落仓 ⇒ 两个口不合并（`.gitignore` 另补 `*.key`） |
+| `--write-docs` | `human_baseline_synthetic.py`、`inspect_stalled_runs.py`（×2） | 把报告 / 留档副本落**痕迹仓** `docs/evaluation/`；痕迹仓不可用 ⇒ **明确失败**（退出码 3），**绝不回落软件仓** |
+| `--artifacts-dir` | 同上 2 个（×2） | 显式指定痕迹仓根（优先级：`--artifacts-dir` > `NOVELOS_ARTIFACTS_DIR` > 软件仓**同级目录** `../NovelOS-Artifacts`） |
+| `--migrate` | `check_content_repo_guard.py secrets`（×1） | 动作开关：库内明文 api_key → `secrets.json`，并清空库内明文（**默认 dry-run**） |
+| `--prune-dangling` | 同上（×1） | 动作开关：清理 `secrets.json` 里的悬空条目（**默认 dry-run**） |
+
+⚠️ **`--apply` 不是新 flag**（既有），但它在 `secrets` 模式里的**角色变了**：那里它是**写权限总闸**
+——无 `--apply` ⇒ **零写入**（两个动作各自默认 dry-run）；**单独 `--apply` = 迁移**（向后兼容）。
+
+⚠️ **`--out` / `--export` 与 `--write-docs` 同时给出 ⇒ 两份副本都落**（并打告警）。
+此前 `--out` 会**静默吞掉** `--write-docs` ⇒ 痕迹仓副本没落且**零告警** ⇒ 用户以为两份都落了。
+
+### 退出码语义
+
+| 码 | 含义 |
+|---|---|
+| `0` | 合规 / 写入完成 |
+| `1` | 不合规（内容仓仍能被误推 / 校验不通过） |
+| `2` | **巡检自身出错**：读不到表、**已知集合为空**、待写路径被守卫拒绝、坏 `secrets.json` |
+| `3` | 痕迹仓不可用（`--write-docs` 且拿不到痕迹仓 ⇒ 明确失败，不回落软件仓） |
+
+⚠️ **CLI 行为变更（本批）**：`check_content_repo_guard.py secrets` 的**纯巡检**（无 `--apply`）
+在「读不到 / 已知集合为空」时，退出码由 **0/1 → 2**。理由：**判不出来时不得报绿**——
+「没读到」≠「全部多余」。该缺陷即对抗审查 F-1（critical）：旧实现会把整个凭据库清空还报合规。
+⚠️ 改退出码会让已验过的 CI 判据失效，故**必须单列留痕**（CHANGELOG 已单列）。
+
+### 逃逸口（默认全关）
+
+1. `--artifacts-dir <path>`（推荐）或 `NOVELOS_ARTIFACTS_DIR` env ⇒ 指定痕迹仓根；
+2. `--allow-software-repo-out` ⇒ 明确接受落软件仓的风险（打 `[警告]`）；
+3. `--allow-software-repo-key` ⇒ 仅 `backup_db.py`：允许**密钥**落软件仓（独立口）。
+
+### 测试
+
+- `tests/unit/test_scripts_write_guard.py`（47 例：4 个脚本的守卫——仓内路径 ⇒ 退出码 2 +
+  **零文件落盘**；守卫**早于** `mkdir` 生效）；
+- `tests/unit/test_check_content_repo_guard.py`（28 例：F-1 / F-2 / F-3 的绿→红→绿自证）；
+- `tests/unit/test_mutation_harness_judgment.py`（33 例：突变**判定函数**的判别力自证）。

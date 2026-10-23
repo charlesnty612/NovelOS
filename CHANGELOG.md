@@ -5,6 +5,97 @@
 
 ## [Unreleased]
 
+### Fix（2026-10-23 晚 · 用户授权执行批：凭据收敛 / 前端横幅 / 题材开篇静默 / 量具失真 / 缓存键性能实测 + 服务化）
+
+> **来源**：用户「这些也做了吧」（⇒ 授权执行 Lead 列出的「未做（等你定）」清单）+
+> 「我现在没在用，你直接改，改完拉起服务，我来用一下」+「你改完也让一个审查员审查一下你的改动」。
+> **零真实 LLM 调用、零内容仓接触、活库业务数据未改**（唯一库变更 = 迁移 0034 只加可空列 + D-18 清掉的明文 api_key）。
+> 逐条 finding 与 Lead 裁决：台账 `docs/impl/reviews/remaining-debt-2026-10-23.md` 的「**四之五**」小节。
+
+#### 1. D-18 凭据收敛（活库明文清零 + 悬空条目清理）
+
+- `scripts/check_content_repo_guard.py` 新增 `--migrate` / `--prune-dangling` 两个**动作开关** + `--apply` 作**写权限总闸**（**单独 `--apply` = 迁移**，向后兼容；无 `--apply` ⇒ 零写入）；`prune_dangling_secrets()`；**坏文件必须抛错退出 2** 且文件不被改写（不得当「没有悬空条目」）。
+- **已执行**：`--migrate --apply` ⇒ 库内明文 api_key **2 行 → 0 行**，`secrets.json` 存 2 个档案键；**走生产读路径** `resolve_profile_api_key` 复核 ⇒ 两个档案仍解析出非空密钥（sha256 与迁移前逐位一致）⇒ 软件照常能调模型。`--prune-dangling --apply` ⇒ 删 1 条死键（`mprof_f95e3c7b4127`）。巡检复跑「合规」（悬空 0 / 明文 0 / exit 0）。
+- ⚠️ **本轮对抗审查抓出该工具的 2 个洞并已修**（见 §6）：F-1「已知集合为空 ⇒ 清空整个凭据库还报绿」、F-2「漏 `secrets[<env_name>]` 形态 ⇒ 误删仍在用的密钥」。
+
+#### 2. 运行中横幅显示上一个 run（前端，用户可见）
+
+- **根因三环**：`usePoll` 的 effect 依赖**不含被轮询对象的身份** ⇒ 目标换了不清旧数据、不立即重拉；**await 之后只检查 `aliveRef`、不复查 `stopped`** ⇒ 上一轮在途请求 resolve 后**照样把旧目标的结果写进来**；消费端 `poll.data ?? activeRun` **无条件优先**用它 ⇒ 横幅显示上一个 run 的动作名 / 节点 / **按上一个 run `started_at` 起算的「已运行 N 分」**。
+- **修**：`usePoll` 增 `targetKey`（身份变了 ⇒ 清数据 + 立即重拉）、await 后复查 `stopped`、在途占位**用 token 不用 boolean**（旧轮 `finally` 不得清新轮占位）；`useChapterRunOrchestration` 传 `targetKey: pollTargetId ?? ''`；消费端改走纯函数 `pickBannerDetail`（`utils/chapterState.ts`）按**归属**选。
+- **判别力**：新用例「旧 tick 在 await 之后 resolve 时不得写入 data」「targetKey 变化 ⇒ 立即重拉新目标（不等 interval）、旧数据不残留」⇒ **改动前红、修复后绿**；撤 `stopped` 复查 / 撤 `targetKey` 依赖 ⇒ 必红。
+
+#### 3. D-13 形态②：题材包行缺失（悬空引用）⇒ 题材开篇整段静默
+
+- 此前 `pack = binding.get("pack") or {}` 把「项目**已绑定**题材包、但该题材包行在库中不存在」降级成空 pack ⇒ 与「压根没绑题材包」**不可区分** ⇒ 体检报告外观「全部通过」而实际**未检**。
+- **修**：`pack is None` 单独成支 ⇒ 复用**已有的**显式不可检标记路径（`genre_opening_unavailable` + `genre_opening_error` + `info` 级检查项）⇒ **不新增第二套语义、不改 severity 矩阵、不动 `formula_hash`**。
+- **判别力**：16 例（新文件 `tests/unit/test_signing_check_genre_unavailable.py`），**四情形两两可区分**（①读库异常 ②包行缺失 ③未绑定 ④包可读）；变异退回 `or {}` ⇒ **4 red / 12 形态① 仍绿**（外科手术式）；端到端一例证明「不修则交付判定会把『没检』判成 `deliverable`」。
+
+#### 4. 突变量具失真（harness / probe）：「环境炸了」被报成「突变被抓住」
+
+- `scripts/mutation_harness.py` / `scripts/mutation_probe.py` 起 pytest **不给 `--basetemp`** ⇒ 用到 `tmp_path` 的用例 **ERROR**（不是 FAIL）⇒ 而 harness 的判定只看输出含 `" passed"` ⇒ **exit 1 + errors 被静默记成 `[CAUGHT]`**（假阳性）。实测旧版在 `arc` 契约文件上 1 passed / 3 errors ⇒ 报 `[CAUGHT]`。
+- **修**：两处 spawn 加**独立、仓库外、父目录先建**的 `--basetemp`（照 `tests/mutation_specs/run_spec.py` 既有写法，跑完清理）；判定改为**按退出码分流**（0 ⇒ `[SURVIVED]`；1 且摘要含 ` failed` ⇒ `[CAUGHT]`；**1 但无 ` failed` ⇒ `[INVALID]`**；2/3/4/5 ⇒ `[INVALID]`；含 `no tests ran` ⇒ `[INVALID]`）⇒ 与 `run_spec.py` 同形。**量具失真 ⇒ 闸门结论不可信，故本项优先级高于其表面严重度。**
+- ⚠️ **第二层失真（Lead 复核时抓出）**：probe 的「临时改一处 → 跑定向测试 → 还原」原用 `read_text`/`write_text` ⇒ Windows 上 `write_text` 会把 `\n` 翻成 `\r\n` ⇒ **还原后文件字节与开工前不一致**（SHA256 漂移）⇒ 量具自己污染被测物。⇒ 改**字节通道**（`read_bytes` / `write_bytes`）写入与还原 ⇒ sha256 逐位一致（实测）；`l12_mutation_probe.py` 的 MP-1 锚点随之更新为字节通道形态（**只改锚点字符串，条目数不变**），MP-1 实跑仍 `[CAUGHT]`。
+- **判别力自证**：新增 `tests/unit/test_mutation_harness_judgment.py`（33 例）——把**旧版判定逻辑**（只看 `" passed"`）放进仓外副本跑 ⇒ **4 failed** ⇒ 证明新用例真能抓住旧缺陷，而不是恒真断言。⚠️ harness / probe 的判定函数**刻意各写一份**（不建共享模块：探针须能在**任何**目录独立运行），靠仓内「不许分叉」用例保证同口径。
+
+#### 5. CLI 进程退出码看守（D-8 最后一环）
+
+- 既有 15 条用例**只断言进程内 `main()` 的返回值** ⇒ CLI 的对外契约（**进程退出码**，CI / pre-commit 只看这个）**从未被断言**；中间隔着 `raise SystemExit(main())` 包装，那一层坏掉时进程内断言照样绿。
+- **修**：新增 4 条**真起 CLI 子进程**的用例（漂移 ⇒ `returncode != 0`；已同步 ⇒ `returncode == 0` 的**反向对照**，且故意在非仓库 CWD 下执行以一并钉住路径与 CWD 无关）。突变（`return 0 if ok else 1` ⇒ `return 0`）⇒ **5 failed**。
+
+#### 6. 对抗审查员 A 的 findings（1 critical + 2 major + 8 minor）
+
+- **F-1（critical，已修）**：`--prune-dangling --apply` 在「已知集合为空」时（库存在但**无 `model_profiles` 表**或表 0 行）⇒ **每个键都判成悬空** ⇒ `api_keys` 整段清空且**退出码 0 = 合规（绿）**；「读表失败」与「集合为空」在原实现里是**同一个信号**。⇒ 修：已知集合为空 / 读表失败 ⇒ **拒绝并退出 2**（绝不把「没读到」当「全部多余」）+ 落盘前**强制备份** `secrets.json.bak-<ts>`（同目录 + 原子）。
+- **F-2（major，已修）**：悬空判据**漏了运行期第 3 优先级 `secrets[<env_name>]`**（如 `NOVELOS_API_KEY_KIMI`）⇒ 仍在用的密钥被误删、且 `--migrate` 永远造不回来。⇒ 修：known 集合补 env_name 派生形态 + **prune 前用生产解析函数 `resolve_profile_api_key` 复核**（能解析出非空 ⇒ 不许删）⇒ 不另造第二套「已知集合」。
+- **F-3（major，已修）**：`backup_db --key-file` 的写路径**完全没接守卫** ⇒ 可把「能解开所有备份的密钥」写进仓内，且 `.gitignore` **不覆盖** `backup.key` ⇒ 进 GitHub 历史**不可撤回**。⇒ 修：密钥文件也过 `check_write_path` + `.gitignore` 补 `*.key`。
+- **F-4~F-10（minor）**：F-4 `db_maintenance` 的退出码 2 有 4 种含义 ⇒ **本轮只修 flag 位置**（`--allow-software-repo-out` 改可放在子命令后），**退出码独立化留待下一批**（改契约会让已验的守卫结论作废）；F-6 `--out` 静默吞 `--write-docs` ⇒ 修；F-7 测试探针产物落在受版本跟踪的 `docs/` 且无清理 ⇒ 修（改落点到 `tmp_path`）；F-8 `_snapshot` 不收目录 ⇒ 「连目录都不该被建出来」无断言 ⇒ 修；F-9 4 个新脚本的 `--allow-software-repo-out` 无测试 ⇒ 修；F-10 新增 8 个 CLI flag 未进 `scripts/README.md` ⇒ 修。
+- ⚠️ 审查员用**隔离副本**做变异实验（真实软件仓全程零写入），受审文件 SHA256 开工/收尾逐位一致。
+
+#### 7. 缓存键性能真实规模实测（台账「缺真实数字」项已补齐）
+
+- 新增 `scripts/measure_cache_key_perf.py`（可复跑）+ `tests/unit/test_cache_key_perf.py`（9 例，**守机制不守数值**：默认不写 `data/` / 传活库路径被拒 / 夹具章号连续 / 命中与未命中两条路径都跑通且 payload 内容不同 / 自报计数自洽）。测量一律用**临时库 + 合成夹具**（**全程未读 `data/novelos.db`**；脚本前后 `data/` 逐文件 `(mtime_ns,size)` 快照逐位相同，已由测试固化）。
+- **数字**（48 章合成规模，3 次独立进程 × 40 迭代，`time.perf_counter_ns`）：**命中 p50 = 3.69ms（director）/ 3.05ms（writer）**、未命中 **8.36 / 8.58ms** ⇒ **命中比未命中快 2.3~2.8 倍** ⇒ 坑区「命中比 uncached 还慢」的**方向性担忧不成立**。⚠️ 但「命中应 ~2ms 级」**偏乐观 1.5~1.8 倍**：命中路径 **81~85% 花在重算缓存键**（11 个内容指纹 0.55ms + 2 次 SQLite 建连），**纯缓存查找仅 0.12~0.25ms**。**耗时对章数 O(1)**、**对项目级实体数敏感**（角色 4→48 ⇒ director hit +66%）。
+- **量具有效性自查**（5 个已规避的陷阱）：惰性初始化被当成「缓存很慢」（⇒ warm-up + prime）、首次必 miss 被记进命中统计、同进程连测两个装配器致进程状态污染、FTS5 内部语句污染「SQL 条数」致反向结论（不拆分会得出「规模越大越快」）、按代码推算的 SQL 次数当证据。
+
+#### 8. 文档漂移订正（2 处，均会掩盖缺陷）
+
+- `packages/core/context_engine/director_input.py` 的 `build_director_input` docstring 把缓存键写成 **15 元**，实际 **23 元**（`DIRECTOR_KEY_LEN = 23` 钉住）⇒ 漏掉的 8 元里**正好含 D-7 的 5 个内容指纹** ⇒ 这份漂移**掩盖了缺陷内容**；已订正并注明权威源（键 = 代码里的 `cache_key = (...)`），并加「别在这里手抄键清单」。
+- `packages/workflows/chapter_commit/pipeline_common.py` 的「既有规则**没有任何一条**设置 suggestion（生产侧恒为 None）」与**紧邻的上一段自相矛盾**（那段自己说 `suggestion` 由产出侧写死）⇒ 会诱导后人把**生产承重**的分流 `iss.suggestion or …` 当死代码删掉；已订正。
+
+#### 9. 台账核销与先验推翻（4 条，全部留痕）
+
+- **核销（复算后判定已实现/已过期 ⇒ 移入 CHANGELOG）**：**A-3 / D-2 / D-3 / D-4 / D-7 / D-10 / D-11 / D-13(形态②本批补) / D-16 / D-17(口径订正)**。
+- **先验被推翻 4 条**：① 「`formula_hash` 不变成立」**错**（它吃 `severity_config_fingerprint()` ⇒ 含 `BLOCKING_RULES` ⇒ 新增 blocking id **必改 hash**，与本仓自己的测试冲突）；② 「无消费方依赖 rule_id 判别」**错**（`pipeline_common.py:484` **确实**按 `suggestion` 分流 ⇒ 判别器**生产承重**）；③ 「260 个泄漏目录已过期（仓库根 0 个）」**错，我查错了范围** ⇒ **系统 Temp 实测 447 个**，其中 **40 个 `novelos_backup*` 含 `.db`/`.db.enc` 对** ⇒ 属**凭据残留**；④ 「D-10 未做」**错**（迁移 0034 + exporter 早已实现）。
+- **流程坑**：派子代理做「基于台账条目」的活之前，**必须自己读码核实该条目今天是否仍成立**——不能采信另一份子代理报告的「已过期」结论。本轮我据此**停掉了一个正在做正确修复的 worker**、又差点让另一个 worker **删掉 4 条有价值的新用例**。
+
+#### 10. 服务化（用户「改完拉起服务」）
+
+- 后端 **18081** 已在跑：`/api/health` ⇒ `{"status":"ok","version":"3.10.0","tables":42}`；SPA 托管 `/` ⇒ 200；28 个路由被发现；启动时 `migrations applied=1 skipped=33`（**0034 = `commits` 加可空 `draft_version`，只加列、不回填 ⇒ 业务数据逐字不变**）。
+- 前端 `dist` 已重建（`tsc -b` 零错 + `vite build` 通过，`index-CsjtWQQj.js`）；`dist/` 被 `apps/web/.gitignore` 忽略 ⇒ 不污染工作树。**后端从磁盘托管 `dist` ⇒ 重建后无需重启后端。**
+
+#### 11. ⚠️ **CLI 契约变更（单列留痕）**：`check_content_repo_guard.py secrets` 纯巡检退出码 0/1 → 2
+
+- **变更内容**：纯巡检（**无 `--apply`**）在「读不到 `model_profiles` 表」或「已知集合为空」时，退出码由 **0（合规）/ 1（不合规）** 改为 **2（巡检自身出错 / 不可判）**。写动作（`--migrate` / `--prune-dangling --apply`）在同样条件下**拒绝执行、退出 2、不写任何文件**。
+- **理由**：**判不出来时不得报绿**。「没读到」≠「全部多余」——这正是 F-1（critical）的真身：旧实现把「已知集合为空」当成「每个键都多余」⇒ **整个凭据库被清空还报合规（退出码 0）**。
+- **为什么必须单列**：改的是**进程退出码**（CI / pre-commit 只看这个）⇒ 已验过的判据会作废。**不改则「读不到」与「合规」同形**，两者不可区分。
+- **同步落点**：`scripts/README.md` 新增「脚本落盘守卫与新增 CLI flag」专节（退出码语义表 + 9 个新 flag + 逃逸口 + 行为变更说明）。
+- **未变**：push 防护模式的 0/1/2 语义、其余脚本的退出码契约**一律不动**。
+
+#### 12. 脚本文档补齐（F-10）+ `scripts/README.md` 计数订正
+
+- **新增 CLI flag 全部进文档**（此前一个都没进，脚本 README 与实际 CLI 脱节）。逐处与 `HEAD` 对比实测：**7 个 flag 名 / 11 处出现** ⇒ `--allow-software-repo-out`（×4 脚本）、`--allow-software-repo-key`（×1）、`--write-docs`（×2）、`--artifacts-dir`（×2）、`--migrate` / `--prune-dangling`（×1）。⚠️ `--apply` **不是新增**（既有 flag），但在 `secrets` 模式里的角色变为**写权限总闸**（无它 ⇒ 零写入；单独给 ⇒ 迁移，向后兼容）⇒ 一并写明。
+- **同步补**：写盘守卫（软件仓内只允许写 `data/` 与 `tmp/`）的规则、痕迹仓根解析优先级、退出码语义表（0/1/2/3）、逃逸口清单与测试落点。
+- **顺带订正两处既有漂移**：① 脚本计数「现行 31 个」**错** ⇒ 实测 `scripts/*.py` = **37** 个（**35 个 CLI 入口 + 2 个共用模块** `_codegen_check.py` / `guard_repo_write_path.py`），且 **5 个脚本此前从未登记**（`check_content_repo_guard.py` / `check_orphan_relationships.py` / `restore_db.py` / `measure_cache_key_perf.py` / `guard_repo_write_path.py`）⇒ 已补进总览表；② `test_inspect_stalled_runs.py` 的例数「59」**过期** ⇒ 实测收集 **56** 例。
+
+#### 13. 清理临时目录时挖出的**真泄漏**（测试侧）：每次全量回归都在系统 Temp 留垃圾
+
+- **症状**：清理系统 Temp 时实测到 —— 全量回归**期间** `novelos_openapi_env_*` 的计数在**涨**（151 → 153）⇒ 不是「一次性历史残留」，是**仍在发生**。
+- **两个源头（逐个溯源，不是猜）**：① `tests/api/test_spa_hosting.py` 用 `tempfile.mkdtemp(prefix="novelos_openapi_env_")` 造 app 的临时 data 目录、**从不删**（`finally` 只 reset settings）；② `tests/unit/test_backup_db.py::test_keep_plaintext_on_failure_flag_keeps_the_copy` —— 该用例**故意**让脚本保留明文副本（那正是被断言的行为），却**不回收** ⇒ 每跑一次回归，系统 Temp 就多一个 `novelos_backup_*`，里面躺着**明文 DB 副本**（历史上曾积到 40 个）。
+- **修**：两处都补清理（`shutil.rmtree(..., ignore_errors=True)`，删不掉时保留证据不静默吞）；新增 `test_openapi_env_probe_leaves_no_temp_dir_behind` 作**守卫**。
+- **判别力双向自证**：撤掉清理 ⇒ 两条守卫**同时变红**（"临时目录泄漏" / "测试自身泄漏了明文副本目录"）⇒ 恢复 ⇒ 绿。
+- ⚠️ 守卫**不用**「扫全局 Temp 前后差」⇒ `pytest -n 20` 下别的 worker 会同时建目录 ⇒ 偶发假红；改用**间谍 `tempfile.mkdtemp` + 只盯自己建的那一个**。
+- **生产侧复核结论**：`export_openapi.py` **早已修好**（实测单次 `build_schema()` ⇒ 计数 153 → 153，**泄漏 0**）⇒ 那 295 个历史目录全是修复前的存量 ⇒ **只清存量就以为「问题解决了」是错的**。
+- **存量清理结果（如实报）**：系统 Temp `novelos_*` **447 → 171**；其中**含凭据的 40 个 `novelos_backup*` 已全部清零**；**残留 154 个 `novelos_openapi_*` 删不掉**——实测它们**不是** junction，而是 **ACL 拒绝访问**（`icacls`/`takeown` 均「拒绝访问」⇒ 需管理员；可恢复删除通道走 VB `DeleteDirectory` 须**先枚举目录** ⇒ 枚举被拒 ⇒ 报 "This function is not supported on this system"）⇒ 危害低（不含凭据）、**不再增长**，管理员 `takeown` + `icacls` 后可清。
+
 ### Fix（2026-10-23 第二轮审查修复批 + 对抗审查 A/B + 打回环）
 
 > **来源**：用户指令「@superpowers 全量修复，并发时能复用 subagent 就复用，让其中两个 subagent 做专职审查，

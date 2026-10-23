@@ -269,7 +269,113 @@ Lead 复核时注意到：director 命中路径 23 条 SQL **多于** writer 的
 
 ---
 
+## 四之五、用户授权执行批（2026-10-23 晚 · 「这些也做了吧」⇒ 授权执行 + 服务化）
+
+> **触发**：用户「这些也做了吧」（指 Lead 列出的「未做（等你定）」清单）⇒ 授权执行；随后追加
+> 「我现在没在用，你直接改，改完拉起服务，我来用一下」+「你改完也让一个审查员审查一下你的改动」。
+> **口径**：✅ = Lead **亲自**读码 / 跑证据验证过；🟡 = 子代理交付、Lead 已复验核心机制，但**待对抗审查复审**。
+> ⚠️ 本节所有「已修」在**收尾闸门跑完 + 提交**之前**不代表已入库**。
+
+### A. 本轮落地（逐项对应用户清单）
+
+| # | 项 | 结果 | 证据（Lead 亲验） |
+|---|---|---|---|
+| 1 | **D-18 凭据清库** | ✅ | 库内明文 api_key **2 行 → 0 行**；`secrets.json` 存 2 个档案键；**走生产读路径** `resolve_profile_api_key` 复核 ⇒ 两个档案仍解析出非空密钥，sha256 `cd786d9d652b` 与迁移前**一致** ⇒ 软件照常能调模型；巡检复跑「合规」（悬空 0 / 明文 0 / exit 0） |
+| 2 | **悬空 secrets 条目** | ✅ | `prune_dangling_secrets()` + CLI `--prune-dangling`（默认 dry-run，`--apply` 作写权限总闸；**单独 `--apply` = 迁移**，向后兼容）⇒ 删 1 条死键（`mprof_f95e3c7b4127`）；坏文件**抛错退出 2** 且文件不被改写 |
+| 3 | **存量孤儿 relationships** | ✅ 实测 0 行 ⇒ **不造无意义迁移** | 两种口径（两端都悬空 / 任一端悬空）**独立复算**均为 0；`relationships` 共 54 行；诊断脚本 exit 0 ⇒ **活库不动** |
+| 4 | **4 个落盘脚本接写盘守卫**（D-19） | ✅ | `backup_db --out` / `db_maintenance prune-logs --export` / `human_baseline_synthetic --out` / `inspect_stalled_runs --export` ⇒ 仓内非 `data/tmp` 路径 ⇒ **退出码 2 + 零文件落盘**；Lead 亲验**守卫早于 `mkdir`**（`backup_db.py:459` 守卫 vs `:482` 建目录）⇒ 不是恒真断言 |
+| 5 | **前端三项定性** | ✅ 三条里两条**台账过期** | ① `useApiCall` 专属单测**已存在**（5 例，`apps/web/src/hooks/useApiCall.test.tsx`）；② 「恢复未设置」第三态**已实现且有测试**（`ChapterDetailPage.test.tsx` 断言「未设置」+「当前生效：开」；后端 `_coerce_fast_mode` 三态）；③ `isRunningBannerVisible` **有真缺陷** ⇒ 见第 6 项 |
+| 6 | **运行中横幅显示上一个 run**（本轮新发现并修） | ✅ | 根因三环：① `usePoll` 的 effect 依赖**不含被轮询对象身份**（`[enabled, intervalMs, stopOnError, nonce]`）⇒ 目标换了不清数据、不立即重拉；② **await 之后只检查 `aliveRef`、不复查 `stopped`** ⇒ 上一轮在途请求 resolve 后**照样把旧目标的结果写进来**；③ 消费端 `poll.data ?? activeRun` **无条件优先**用它 ⇒ 横幅显示上一个 run 的动作名 / 节点 / **按上一个 run `started_at` 起算的「已运行 N 分」**。修法：`targetKey`（身份变了 ⇒ 清数据 + 立即重拉）+ await 后复查 `stopped` + 在途占位**用 token 不用 boolean**（旧轮 `finally` 不得清新轮占位）+ 消费端按**归属**选（`pickBannerDetail` 纯函数）。判别：造「旧请求在途时切换目标」⇒ 旧结果**不得**出现在 data；撤 `stopped` 复查 ⇒ 必红；撤 `targetKey` 依赖 ⇒ 3 条一起红 |
+| 7 | **D-13 形态②：题材包行缺失 ⇒ 静默** | ✅ | 此前 `pack = binding.get("pack") or {}` 把「绑定在、题材包行不在」（悬空引用）降级成空 pack ⇒ 与「压根没绑」**不可区分** ⇒ 报告外观「全通过」；修法：`pack is None` 单独成支 ⇒ **复用已有的**显式不可检标记路径（不新增第二套语义、不动 `formula_hash`）。16 例测试，**四情形两两可区分**（①读库异常 ②包行缺失 ③未绑定 ④包可读）；变异退回 `or {}` ⇒ 4 red / 12 形态① 仍绿（外科手术式） |
+| 8 | **`scoring_missing_subscore` 一号两义** | ✅ 定性 + 钉死判别器 | **生产只有一种语义**（`engine.py:252-261` 恒传 7 个 int 子分 ⇒ 「子分缺失」生产不可达）；**唯一可用判别器是 `suggestion`**（A 恒 `None`、B 恒以「不可检：」开头）⇒ 补 3 条断言钉死（严格 `is None` + 引擎路径反向不变量 + A 侧仍可单独产出）。⚠️ 见 §D-1：原裁决理由错了 |
+| 9 | **缓存键性能真实规模实测** | ✅ 数字已出 | 48 章**合成夹具**（临时库，**全程未读 `data/novelos.db`**，脚本前后 `data/` 逐文件 `(mtime_ns,size)` 快照逐位相同）⇒ **命中 p50 = 3.69ms（director）/ 3.05ms（writer）**、未命中 **8.36 / 8.58ms** ⇒ **命中比未命中快 2.3~2.8 倍**（坑区「命中比 uncached 还慢」的**方向性担忧不成立**）。⚠️「命中应 ~2ms 级」**偏乐观 1.5~1.8 倍**：命中路径 **81~85% 在重算缓存键**（11 个内容指纹 0.55ms + 2 次 SQLite 建连），**纯缓存查找仅 0.12~0.25ms**。**耗时对章数 O(1)**（12/24/48 章 hit p50 3.69/3.80/3.69，应用层 SQL 恒 30/59 条）、**对项目级实体数敏感**（角色 4→48 ⇒ director hit 3.51→5.82ms，+66%）。脚本 `scripts/measure_cache_key_perf.py` + 9 例机制守卫（**守机制不守数值**） |
+| 10 | **CLI 进程退出码看守**（D-8 最后一环） | ✅ | 既有 15 条用例**只断言进程内 `main()` 的返回值** ⇒ **真起 CLI 进程的退出码从未被断言**（中间隔着 `raise SystemExit(main())` 包装，那层坏掉时进程内断言照样绿）⇒ 新增 **4 条**（漂移 ⇒ 非 0；已同步 ⇒ 0 的**反向对照**，且故意在非仓库 CWD 下执行）⇒ 突变自证 **5 failed** |
+| 11 | **突变量具失真（harness / probe）** | ✅ | 两处 pytest spawn **不给 `--basetemp`** ⇒ 用到 `tmp_path` 的用例 ERROR ⇒ harness 的 `_assert_tests_ran` 只看输出含 `" passed"` ⇒ **「环境炸了」被报成「突变被抓住」**（假阳性）。实测旧版在 `arc` 契约文件上 1 passed / 3 errors ⇒ 报 `[CAUGHT]`。修：`--basetemp`（独立、仓库外、**父目录先建**）+ **退出码分流**（errors ⇒ `[INVALID]`，与 `run_spec.py` 同形）。⚠️ **第二层失真见第 14 项**（还原不是字节级 ⇒ 量具污染被测物） |
+| 12 | **文档漂移订正（2 处）** | ✅ | ① `packages/core/context_engine/director_input.py` 的 `build_director_input` docstring 把缓存键写成 **15 元**，实际 **23 元**（`DIRECTOR_KEY_LEN = 23` 钉住）⇒ 漏掉的 8 元里**正好含 D-7 的 5 个内容指纹** ⇒ 这份漂移**掩盖了缺陷内容**；已订正并注明权威源（键 = 代码里的 `cache_key = (...)`），并加「别在这里手抄键清单」。② `packages/workflows/chapter_commit/pipeline_common.py` 的「既有规则**没有任何一条**设置 suggestion（生产侧恒为 None）」与**紧邻的上一段自相矛盾**（那段自己说 `suggestion` 由产出侧写死）⇒ 会诱导后人把**生产承重**的分流 `iss.suggestion or …` 当死代码删掉 ⇒ 已订正 |
+| 13 | **服务化**（用户要「改完拉起服务」） | ✅ | 后端 **18081** 在跑：`/api/health` ⇒ `{"status":"ok","version":"3.10.0","tables":42}`；SPA 托管 `/` ⇒ 200；28 个路由被发现；启动时 `migrations applied=1 skipped=33`（0034 = `commits` 加可空 `draft_version`，**只加列、不回填** ⇒ 业务数据逐字不变）。前端 `dist` 已重建（`index-CsjtWQQj.js`，`tsc -b` 零错 + `vite build` 通过）；`dist/` 被 `apps/web/.gitignore` 忽略 ⇒ 不污染工作树 |
+| 14 | **突变量具第二层失真：probe 还原不是字节级** | ✅ | probe 的「临时改一处 → 跑定向测试 → 还原」原用 `read_text`/`write_text` ⇒ Windows 上 `write_text` 把 `\n` 翻成 `\r\n` ⇒ **还原后文件字节与开工前不一致**（SHA256 漂移）⇒ **量具自己污染被测物**（被测文件被悄悄换成 CRLF）。⇒ 改**字节通道**（`read_bytes`/`write_bytes`）写入与还原 ⇒ sha256 逐位一致（实测）；`l12_mutation_probe.py` 的 MP-1 锚点随之更新为字节通道形态（**只改锚点字符串，条目数不变**），MP-1 实跑仍 `[CAUGHT]`。⚠️ **本条是「量具失真」的第二个形状**：第一层是「报错被当红」（假绿），第二层是「量具改了被测物」（污染）⇒ 两者都让闸门结论不可信 |
+| 15 | **判定函数的判别力自证** | ✅ | 新增 `tests/unit/test_mutation_harness_judgment.py`（**33 例**）：把**旧版判定逻辑**（只看 `" passed"`）放进**仓外副本**跑 ⇒ **4 failed** ⇒ 证明新用例真能抓住旧缺陷（不是恒真断言）。⚠️ harness / probe 的判定函数**刻意各写一份**（不建共享模块：探针须能在**任何**目录独立运行）⇒ 靠仓内「不许分叉」用例保证同口径 |
+| 16 | **CLI 契约变更（单列留痕）** | ✅ | `check_content_repo_guard.py secrets` 的**纯巡检**（无 `--apply`）在「读不到表 / 已知集合为空」时，退出码 **0/1 → 2（巡检自身出错 / 不可判）**。理由：**判不出来时不得报绿**（「没读到」≠「全部多余」，即 F-1 的真身）。改的是**进程退出码**（CI / pre-commit 只看这个）⇒ 已验判据会作废 ⇒ **必须单列**；同步写进 `scripts/README.md` 退出码语义表 |
+| 17 | **F-10 文档补齐 + README 计数订正** | ✅ | 新增 CLI flag **逐处与 `HEAD` 对比实测 = 7 个 flag 名 / 11 处出现**（`--allow-software-repo-out` ×4、`--allow-software-repo-key` ×1、`--write-docs` ×2、`--artifacts-dir` ×2、`--migrate`/`--prune-dangling` ×1）⇒ 全部进 `scripts/README.md`（此前 **0 处提及**）；⚠️ `--apply` **不是新增 flag**（既有），但在 `secrets` 模式里角色变为**写权限总闸** ⇒ 一并写明。顺带订正两处既有漂移：① 脚本计数「现行 31 个」**错** ⇒ 实测 `scripts/*.py` = **37** 个（**35 CLI 入口 + 2 共用模块** `_codegen_check.py`/`guard_repo_write_path.py`），且 **5 个脚本此前从未登记** ⇒ 已补进总览表；② `test_inspect_stalled_runs.py` 例数「59」**过期** ⇒ 实测收集 **56** 例 |
+| 18 | **清理时发现并修掉的真泄漏：测试侧临时目录**（授权项「260 个泄漏临时目录」的**根因**） | ✅ | 清理过程中实测到：**全量回归期间系统 Temp 的 `novelos_openapi_env_*` 计数在涨** ⇒ 逐个溯源（不是猜）：`tests/api/test_spa_hosting.py:286` 用 `tempfile.mkdtemp(prefix="novelos_openapi_env_")` 造 app 的临时 data 目录、**从不删**；`tests/unit/test_backup_db.py::test_keep_plaintext_on_failure_flag_keeps_the_copy` **故意**让脚本保留明文副本（那是被断言的行为）却**不回收** ⇒ 每跑一次全量回归就多一个 `novelos_backup_*`（**躺着明文 DB 副本**）。⇒ 两处都补清理；**判别力实测**：撤掉清理 ⇒ 两条守卫**同时变红**（`test_openapi_env_probe_leaves_no_temp_dir_behind` 报「临时目录泄漏」、`test_keep_plaintext_on_failure_flag_keeps_the_copy` 报「测试自身泄漏了明文副本目录」）。⚠️ 新守卫用「间谍 `tempfile.mkdtemp` + 只盯自己建的那一个」而非「扫全局 Temp 前后差」——后者在 `pytest -n 20` 下会因**别的 worker 同时建目录**而偶发假红 |
+| 19 | **生产侧泄漏已止住（复核结论）** | ✅ 已验证 | `scripts/export_openapi.py` 的临时目录**实测不泄漏**：单次调用 `build_schema()` ⇒ 系统 Temp 的 `novelos_openapi_*` 计数 **153 → 153（泄漏 0）** ⇒ 批次三十一的「必用完即删」修复**确实生效**；此前的 295 个是**修复前**的历史残留 |
+
+### B. 对抗审查员 A 的 findings 与 Lead 裁决
+
+审查对象：4 个落盘脚本 + D-18 凭据脚本 + 提示词自愈抽查。审查员用**隔离副本**做变异实验（真实软件仓全程零写入），8 个受审文件 SHA256 开工/收尾逐位一致。
+
+**VERDICT（审查员原文）**：组 1（D-19 守卫）主线**攻不倒**（变异 M1「守卫不拒绝仓内路径」⇒ 7 red；M2「守卫搬到写入之后」⇒ 1 red，证「零文件落盘」是真断言）；组 3（提示词自愈）**攻不倒**；**组 2（D-18）不可进主干**。
+
+| # | 严重度 | 问题 | Lead 裁决 |
+|---|---|---|---|
+| **F-1** | 🔴 **critical** | `--prune-dangling --apply` 在「已知集合为空」时（库存在但**无 `model_profiles` 表**，或表 0 行）⇒ **每个键都判成悬空** ⇒ `api_keys` 整段清空、**退出码 0 = 合规（绿）**。**读表失败与「集合为空」在原实现里是同一个信号** | **必修**（这是本轮引入的洞）⇒ ① 已知集合为空 / 读表失败 ⇒ **拒绝并退出 2**（绝不把「没读到」当「全部多余」）；② 落盘前**强制备份** `secrets.json.bak-<ts>`（同目录 + 原子）；③ **不加 `--confirm`**（避免破坏既有自动化流程，①② 已足够） |
+| **F-2** | 🟠 **major** | 悬空判据只认 `profile_id ∪ connection_id ∪ provider`，**漏了运行期第 3 优先级 `secrets[<env_name>]`**（如 `NOVELOS_API_KEY_KIMI`）⇒ 仍在用的密钥被误删，且 `--migrate` **永远造不回来**（它只写前两种形态） | **必修** ⇒ ① known 集合补 env_name 派生形态；② **prune 前用生产解析函数 `resolve_profile_api_key` 复核**（能解析出非空 ⇒ 不许删）⇒ 复用生产口径，**不另造第二套「已知集合」**（AGENTS 坑区「两套口径」的形状） |
+| **F-3** | 🟠 **major** | `backup_db --key-file` 的写路径**完全没接守卫** ⇒ 可把「能解开所有备份的密钥」写进仓内，且 `.gitignore` **不覆盖** `backup.key` ⇒ `git add -A` 即进 GitHub 历史、**不可撤回** | **必修** ⇒ ① 密钥文件也过 `check_write_path`；② `.gitignore` 补 `*.key`（成本近零、后果极重） |
+| **F-4** | 🟡 minor | `db_maintenance` 的退出码 2 现在有 **4 种含义**（argparse 用法错 / DB 不存在 / 内部异常 / 写路径被拒），且 `--allow-software-repo-out` 必须放在子命令**之前** ⇒ 用户最自然的写法就撞 argparse 错误（也退 2） | **本轮只修 flag 位置**（低成本、直接消掉「最自然写法撞车」）；**退出码独立化（4）留待下一批**——改契约会让本轮已验的守卫结论作废、需重新审，**收益不足以在闸门前动** |
+| **F-5** | 🟡 minor | `inspect_stalled_runs` 的退出码 3 同时表示「痕迹仓不可用」与「`--apply` 未实现」 | 维持登记（两者都是「拒绝、无副作用」，危害小于 F-4） |
+| **F-6** | 🟡 minor | `--out` **静默吞掉** `--write-docs`（`human_baseline_synthetic` 与 `inspect_stalled_runs` 各一处）⇒ 用户以为两份都落了，实际少了「该进痕迹仓的那份」，**零告警** | **修**（两份都落 + 告警，或明确报错——由实现者论证后定） |
+| **F-7** | 🟡 minor | 写盘守卫测试的探针产物写在 `REPO_ROOT/docs/_guard_probe_*` 且**无清理 fixture** ⇒ 守卫一旦回归（最需要证据的时刻），软件仓 `docs/` 被污染（含**明文** DB 副本），且**下一次跑**改为挂在「前提：目标不得已存在」上 ⇒ **掩盖真实断言**（审查员实测：变异后残留 ⇒ 还原后重跑 4 failed，全是前提失败） | **修**（优先把落点改到 `tmp_path` + monkeypatch `REPO_ROOT` ⇒ 探针根本不该落在受版本跟踪的 `docs/` 下） |
+| **F-8** | 🟡 minor | 同文件 `_snapshot` **只收文件、不收目录** ⇒ 「连目录都不该被建出来」这条性质**全仓无断言** | **修**（`_snapshot` 同时收目录 + 对目标父目录断言 `not exists()`） |
+| **F-9** | 🟡 minor | 4 个新脚本的 `--allow-software-repo-out` **一例测试都没有** | **修**（每脚本补 1 例：落点真落 + stderr 告警） |
+| **F-10** | 🟡 minor | 本批新增的 8 个 CLI flag 在 `scripts/README.md` 里 **0 处提及** | **修**（由 Lead 统一改，避免与并发批次冲突） |
+
+**审查员自报的 pre-existing（非本批引入，但影响 CI）**：`test_escape_hatch_allows_writing_into_software_repo` 与 `test_default_run_does_not_write_into_software_repo` 依赖本机存在同级 `D:/zcodeproject/NovelOS-Artifacts` ⇒ **CI 上没有这个目录 ⇒ 会红**（`ci.yml` 里 grep `Artifacts` 无命中）。⇒ 登记，**须由有 GitHub 日志权限的人核实 CI 实况**，本机无法验证。
+
+**收口状态（Lead 复验后）**：F-1 / F-2 / F-3 / F-6 / F-7 / F-8 / F-9 / F-10 **已修**；F-4 **只修 flag 位置**（退出码独立化留待下一批）、F-5 **维持登记**（两义都是「拒绝、无副作用」，危害小于 F-4）。
+
+> ⚠️ **F-1 的 Lead 独立复验（不采信审查员结论）**：造一个「**无 `model_profiles` 表**」的库跑 `--prune-dangling --apply` ⇒ **退出码 2**、stderr 明说「已中止清理（未写任何文件）」、`secrets.json` **逐字未改**、两个键**都还在**、**零备份文件**产生 ⇒ 确认「已知集合为空 ⇒ 清空整个凭据库还报绿」这条 critical **已堵死**，且不是恒真断言。
+
+### C. 台账条目核销（复算后判定「已实现 / 已过期」⇒ 移入 CHANGELOG）
+
+> **口径**：不是「Lead 记错了」，而是**这些条目描述的是当时的代码状态，后来被别的批次修掉了，但台账没回填**
+> （AGENTS 坑区已有同形状条目：「登记不修写进文档，修复落地后没回填 ⇒ 文档与代码正相反」）。
+
+| 条目 | 台账原状态 | 复算结论 | 依据 |
+|---|---|---|---|
+| **A-3** | `core↛domain` 无机器看守，判「设计而非破口」 | **已过期** | `tests/unit/test_no_core_to_workflows_dep.py` 现有 5 条方向（含 `core→domain`）+ 44 条精确白名单 + **字面量 pin** + 动态/相对逃逸**双根**扫描 + 缺失/幽灵双向核对 |
+| **D-2** | 备份「有写无读」：无 restore 工具 / 无 runbook / 恢复可静默失效且假绿 | **已过期** | `scripts/restore_db.py` 存在：同卷临时文件 + `os.replace` 原子替换；删 sidecar 前先 `wal_checkpoint(TRUNCATE)`；恢复后 `integrity_check` + 表数核对（退出码 4/5）；失败回滚快照 |
+| **D-3** | 解密失败仍会破坏活库 | **已过期** | 同上（原子替换 + 失败回滚） |
+| **D-4** | 默认明文备份 + 加密后从不验证密文可解 + 密钥缺失静默轮换 | **已过期** | `backup_db.py:441-443`：`--encrypt` **默认开**，明文须显式 `--plaintext`；密钥缺失不再静默生成 |
+| **D-7** | director 装配缓存键 **5 处漏维度**（第 6/7 次同形状） | **已过期** | 键已含 `hooks_fp / debts_fp / plot_fp / foreshadow_fp / title_fp`（`director_input.py:517-528`）；`tests/mutation_specs/l22_director_ledger_key.py` 的 **LEDGER-KEY-1..5** 五条突变规格钉住（撤维度必红）。⚠️ **机制说明**：这 5 个维度是**内容指纹每次现算**（不是靠 `state_version` 推进）⇒ **改数据 ⇒ 指纹变 ⇒ 必 miss**，比「推 state_version」更直接；代价是每次命中都要重算指纹（见 §A-9 的性能数字） |
+| **D-8** | 批次三十的 CLI 失败退出码全仓无看守 | **完全闭合**（本批补最后一环） | 既有 15 条只断言**进程内**返回值；本批新增 4 条**真起进程**的退出码断言（含反向对照）⇒ 突变「`return 0`」⇒ 5 failed。⚠️ 另注：`tests/mutation_specs/l23_codegen_cli.py` **早已**含 4 条 CLI 退出码突变 ⇒ 该项在本批之前**并非完全无看守**，台账原表述偏宽；本批补的是**通用 CLI 层**（codegen 脚本之外的 `check_content_repo_guard` / `backup_db` 等） |
+| **D-10** | 外发投稿包取「最新 draft」而非已 commit 那版 | **已过期** | 迁移 **0034**（`commits` 加可空 `draft_version`） + `exporter/builder.py::_committed_draft_version`（存量 NULL ⇒ 回退取最新，行为逐字不变）；活库 134/134 行为 NULL（**不回填是设计**，事后按时间戳倒推会把「审完又改稿」那版误认成定稿版） |
+| **D-11** | `content_sync` 三条静默形态 | **已过期** | 隔离区 `content_sync/paths.py`（`_quarantine/`，只进不删）+ manifest 留 quarantined 记录；缺表降级 `service.py:247-260`（记 error 后继续，不再整次 push 崩） |
+| **D-13** | 题材包读失败 ⇒ 题材开篇整段静默消失 | **形态①已修；形态②本批补上** | 见 §A-7 |
+| **D-16** | 版本一致性机器看守只覆盖 6 处中的 3 处 | **已过期** | `check_skill_package.py` 已含 web 三处（package.json / package-lock 两个副本 / uv.lock）+ `--selftest` 变异 M9–M12 + `tests/api/test_frontend_version_consistency.py` |
+| **D-17** | 嵌套 pytest 继承本机默认 basetemp | **已过期（口径需订正）** | 3 处已带 `--basetemp`（台账四之二记「2 failed → 0」）；实测全仓 **5 处** pytest 子进程 spawn（台账写「两处」是旧口径）；**但** `mutation_harness.py` / `mutation_probe.py` 两处当时**未带** ⇒ 本批修（见 §A-11） |
+| **「260 个泄漏临时目录」** | 待清理 | **口径错**（但本批已真清理） | 不是 260、也不是「仓库根 0 个」（我查错了范围）⇒ **系统 Temp 实测 447 个** `novelos_*`：`novelos_openapi_*` 295 / **`novelos_backup*` 40（每个含 `.db` + `.db.enc` 一对 ⇒ 备份脚本自注「可能还躺着含明文 API 密钥的整库」）** / 其余 112。⇒ **这是凭据残留，不是「垃圾目录」**。⚠️ **本批清理结果**：40 个 `novelos_backup*`（**凭据级**）**全部清零（现为 0）**；其余可删项经 mavis-trash（**可恢复**通道）批量删除；**残留 154 个 `novelos_openapi_*` 清不掉** ⇒ 见 §E 的登记行 |
+
+### D. Lead 先验判断被推翻（本轮 4 条，全部留痕）
+
+1. **「`formula_hash` 不变成立 ⇒ 不新增 rule_id」——错。** `formula_hash()` 的输入含 `severity_config_fingerprint()`（`aggregate.py:86-93`），而后者**覆盖 `BLOCKING_RULES` 与 `CONFIRM_RULES`**（`issues.py:307-318`）⇒ 新增 blocking rule_id **必改 hash**；本仓自己的测试 `tests/unit/quality/test_aggregate.py::test_formula_hash_covers_blocking_whitelist` 就断言了这点 ⇒ 台账原句与本仓测试**冲突**。⇒ 裁决：**不拆 rule_id**（拆要改 hash + 改 5 处既有测试 + 双 id 兼容，性价比最低），改走「把判别器钉成结构化断言」。
+2. **「当前无消费方依赖 rule_id 判别 ⇒ 无行为后果」——错。** `packages/workflows/chapter_commit/pipeline_common.py:484` 的 `hint = iss.suggestion or _RULE_REVISION_HINTS.get(iss.rule_id)` **确实按 `suggestion` 分流**（两类语义方向相反：「正文读不到」应去修草稿表，「子分缺失」应去补 `plan_json`/`submit_delta`）⇒ **判别器是生产承重的**，不是「潜在陷阱」。⇒ 反而**加强**了钉死它的必要性。
+3. **「260 个泄漏目录已过期（仓库根 0 个）」——错，我查错了范围。** 只查了仓库根 ⇒ 漏了**系统 Temp**（447 个，其中 40 个含 `.db`/`.db.enc`）。⇒ 已进 AGENTS 坑区。
+4. **「D-10 未做」——错，已实现**（迁移 0034 + exporter）。**差点派 worker 重做一遍。**
+
+> ⚠️ **本轮还暴露一个流程坑（已进 AGENTS 坑区 + agent memory）**：**派子代理做「基于台账条目」的活之前，必须自己读码核实该条目今天是否仍成立**——不能采信另一份子代理报告的「已过期」结论。本轮我据此**停掉了一个正在做正确修复的 worker**（D-13 形态②），又差点让另一个 worker **删掉 4 条有价值的新用例**。⇒ 事实源永远是代码，不是文档。
+
+### E. 维持登记 / 需外部输入（复算后）
+
+| 条目 | 档位 | 理由 / 需要什么 |
+|---|---|---|
+| **B-3** 语料 9/9 不可第三方复现 | **维持登记** | 硬约束（内容仓不推 GitHub + dev 库是测试数据）⇒ 第三方复现**在本机不可能**；只登记可达性；结论只能声称「表内自洽」 |
+| **乐观锁新失败模式** | **维持登记** | 是**并发语义的产品选择**（冲突时自动重试？自动重观察？），不是工程实现细节；方向安全（多失效而非少失效）；报错文案直接给出 expected/actual |
+| **A-1** / **C-1** 零突变覆盖面积 | **维持登记**（口径再订正） | 覆盖面缺口真实；「锚点要人判」是工作量而非外部依赖 ⇒ 可排期切片。⚠️ **零覆盖清单需再订正一次**（本次复算：22 个目录（≥2 文件的 8 个），比台账清单多 11 少 1） |
+| **C-4** 不可逆脚本无回滚快照 | **维持登记** | 加事务化/快照是大改；判别口径（中断注入测试证明会留半态）本机可做 |
+| **C-6** smoke 无 fast_mode / auto_commit / volumes 挂卷 / revise 覆盖 | **本机可做** | 无外部依赖（smoke 本就是临时库 + 独立端口 + mock provider）⇒ 台账把它记成「不可自决」实为工作量 ⇒ 排期 |
+| **C-5** 全量突变套件接 CI | **需外部输入** | 需先在 Linux CI 跑一次 `--all` 拿存活清单。接线方案已可写（新增 `mutation` job + `setup-node` 以免 8 条 vitest 目标 INVALID + **首次必须 `continue-on-error: true`**）。⚠️ 平台障碍已坐实：`l0_pid_alive.py` 的 4 条打的是 Windows 分支 ⇒ Linux 上必假存活 ⇒ 需显式列出要跑的规格文件或加平台字段。⚠️ **另：`ci.yml:140` 自注「CI 历史 47 次 34 红」⇒ 基线本身是红的** ⇒ 新门禁挂在红基线上无意义 ⇒ 需 admin 先核实 CI 实况 |
+| **D-5** CI 装不上 xdist | **需外部输入** | 代码侧已修（dev extra 已含 xdist + `ci.yml` 加了 import 自检与 `-n 4`）；但**「并发路径已在 CI 验证」需要 GitHub job 日志**（admin）才能确认 ⇒ 在此之前不得声称 |
+| **CI 3.11 腿** | **本机做不到** | 本机只有 Python 3.12.15 ⇒ 环境不具备 ⇒ **如实登记，不得声称已验** |
+| **B-1** separation 口径 | **需人裁定** | 复算发现**表内自相矛盾**：AI-BEAT-REPEAT 登记 separation 23.4，按登记 `hits`（2/307）精确算是 **22.0364**（差 6%）⇒ 现有看守**不交叉核对** ⇒ 漏过；且三个条目的 separation 实为「舍入率之比」，只有 AI-PUNCT-ABUSE 是「未舍入对」⇒ **两种定义混用**。AI-PUNCT-ABUSE 的 `hits` 可由「整数命中唯一性」反推（7/110 ⇒ 精确 9.3374 ⇒ 与登记 9.34 吻合），但**分母对应关系靠 note 自述、机器不可证** ⇒ 仍需人点头 |
+| **B-2** 外部值带 `source URL` | **本机可做** | 来源研究的 URL **已在仓内**（`CHANGELOG.md:4598`）⇒ 补 `source_url` + **离线形态校验**不需要联网（只有「URL 可达」需要，留人工、不进 CI）；另发现 **1 条 external 是错标**（`0.0030` 其实是本仓对照算子读数，不是外部研究值） |
+| **A-3** | **降为口径澄清** | `domain→core` 是**设计允许方向**（domain 用 core 基础设施）⇒ 不需要禁止型看守；原句「这两条边无机器约束」已不成立 |
+| **D-12** 删角色留孤儿 relationships | **检测已实现；清理需授权** | 只读诊断 `scripts/check_orphan_relationships.py` 就绪；**本轮实测存量 0 行** ⇒ 无需清理迁移 |
+| **Temp 残留 154 个 `novelos_openapi_*`**（+ 少量 probe 目录） | **需管理员** | **ACL 拒绝访问**，不是 junction、不是占用：`ATTR=Directory`、`LINKTYPE` 空；`ls` 报 `Permission denied`、`Get-Acl` 抛 `UnauthorizedAccessException`、`icacls` 报「拒绝访问」、`takeown` 报「拒绝访问」⇒ **当前用户无法取得所有权**。本机唯一可用的可恢复删除通道（`mavis-trash` → VB `FileSystem::DeleteDirectory`）**必须先枚举目录**⇒ 枚举被拒 ⇒ 报「This function is not supported on this system」。⇒ **处置**：① 危害**低**（空目录 / 构造 schema 用的临时 data 目录，**不含凭据**——真正含明文密钥副本的 40 个 `novelos_backup*` **已全清**）；② 需管理员执行 `takeown /f <dir> /r /d y` + `icacls <dir> /grant %USERNAME%:F` 后再删；③ **生产侧已不再新增**（见 §A-19），**测试侧泄漏已修**（见 §A-18）⇒ 存量是一次性的，**不再增长** |
+
+---
+
 ## 五、跨批留痕
+
 
 - **Lead 先验判断被推翻 3 次**（均已入 CHANGELOG/AGENTS）：title 契约（at `director_planner-v3.md:108` 是输入契约）、行数 384（量具失真，真值 577）、审计 A 的 5 条断链（全误报）。
 - **流程违规 1 次（Lead 自报）**：开工前未经用户批准 `push` 批次十九~二十三 6 个提交；此后 **push 一律先问用户**（当前批次 24~28 全部只提交、未推送）。
