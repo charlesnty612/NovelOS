@@ -7,7 +7,7 @@
 
 ### Fixed（2026-10-23 批次（二十九）：突变闸门盲区修复 + 台账 C-1 切片与 C-3）
 
-> **来源**：批次二十八发现的「`--changed` 不看新规格」盲区 + `docs/reviews/remaining-debt-2026-10-23.md` 的 C-1（切片）/ C-3。零真实 LLM、零内容仓接触。
+> **来源**：批次二十八发现的「`--changed` 不看新规格」盲区 + `docs/impl/reviews/remaining-debt-2026-10-23.md` 的 C-1（切片）/ C-3。零真实 LLM、零内容仓接触。
 
 #### 1. 门禁盲区修复：`run_spec --changed` 改为**并集**口径
 
@@ -174,7 +174,7 @@
 ### Changed（2026-10-23 批次（二十五）：章名自动生成 + 备份白名单补全 + 全量偶发 5 红根因修复 + 看守补强）
 
 > **来源**：用户「继续干你的活，期间由你自行裁决」+「新增章节后生成计划章节名不会自动生成，加入排期修复」+「测试太臃肿，简化一下，由你自行裁决」⇒ 先做全面 review（三路只读审计）再修复。
-> **3 名成员（ops-dev / quality-dev / reviewer）+ Lead**；零真实 LLM 调用、零内容仓接触。三路审计结论见 `docs/reviews/`（A/C 已回填，B 见下）。
+> **3 名成员（ops-dev / quality-dev / reviewer）+ Lead**；零真实 LLM 调用、零内容仓接触。三路审计结论见 `docs/impl/reviews/`（A/C 已回填，B 见下）。
 
 #### 1. 章名自动生成（用户报障；⚠️ Lead 先验判断被推翻并留痕）
 
@@ -285,7 +285,7 @@
 | 「真吞（不重抛、不记日志）**16 处**」 | A 组（quality+domain）28 个 handler：**不重抛 = 16**；**不重抛 ∧ 不记日志 = 7**（16 是 B 类 9 处加 `log.warning` 之前的旧态） | 16 → 写明「**修前**不重抛 16 / 修后不重抛且无日志 **7**」 |
 | 「其余 **59 处**（core/api / core/story_state / workflows / scripts）未分诊」 | 四层 407 handler：**不重抛 = 236**；**不重抛 ∧ 不记日志 = 180**。**59 只在「去掉 scripts ∧ 不重抛 ∧ 不记日志 ∧ 排除 `except Exception`」下成立**（69−10）——文字点名了 scripts、数字却不含 ⇒ **自相矛盾** | 59 → 改为如实三档：**236 / 180**（并写明口径）；59 作废 |
 
-口径与逐目录明细：`docs/reviews/swallow-exceptions-census-2026-10-23.md`（含 `utf-8-sig` 要求——仓内 3 个 BOM 文件用 naive `utf-8` 会**静默丢 6 个 handler**）。
+口径与逐目录明细：`docs/impl/reviews/swallow-exceptions-census-2026-10-23.md`（含 `utf-8-sig` 要求——仓内 3 个 BOM 文件用 naive `utf-8` 会**静默丢 6 个 handler**）。
 
 #### 6. 闸门（Lead 亲跑，`-n 20`）
 
