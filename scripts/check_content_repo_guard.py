@@ -553,7 +553,12 @@ def collect_secrets_state(db_path: Path, secrets_path: Path) -> SecretsState:
         try:
             raw = json.loads(secrets_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
+            # ⚠️ **解析失败 = 不可判**（对抗审查 F-4，2026-10-23）：
+            # 「文件读不出来」与「文件不存在」是**两件事**——后者是合法状态（还没迁过），
+            # 前者是**巡检自身出错** ⇒ 必须计入 ``read_errors`` ⇒ 退出码 2，
+            # **不得**降级成一条 note 后照报「合规」（那正是 F-1 的同族形状）。
             state.notes.append(f"secrets.json 解析失败：{exc}")
+            state.read_errors.append(f"secrets.json 解析失败：{exc}")
             raw = {}
         api_keys = raw.get("api_keys") if isinstance(raw, dict) else None
         if isinstance(api_keys, dict):
@@ -771,22 +776,44 @@ def migrate_secrets(state: SecretsState, apply: bool) -> dict:
     api_keys = payload.get("api_keys")
     if not isinstance(api_keys, dict):
         api_keys = {}
+    # ⚠️ **写前强制备份**（对抗审查 F-3，2026-10-23）：迁移要**重写整个** secrets.json
+    # ⇒ 旧版本必须可回退（与 ``--prune-dangling`` 的纪律一致）。
+    backup_path: Path | None = None
+    if secrets_path.exists():
+        backup_path = _backup_secrets_file(secrets_path)
     conn = _open_readonly(Path(state.db_path))
+    conflicts: list[str] = []
     try:
         rows = conn.execute(
             "SELECT profile_id, params_json FROM model_profiles"
         ).fetchall()
         for row in rows:
             key = _params_api_key(row["params_json"])
-            if key is not None:
-                api_keys[str(row["profile_id"])] = key
+            if key is None:
+                continue
+            rid = str(row["profile_id"])
+            existing = api_keys.get(rid)
+            if isinstance(existing, str) and existing and existing != key:
+                # ⚠️ **同名条目不静默覆盖**（对抗审查 F-3）：文件里已有**不同的**值 ⇒
+                # 运行期本来就用**文件里的**那个（``secrets[profile_id]`` 的优先级
+                # 高于 ``params_json.api_key``）⇒ 保留文件里的值，**库内明文照常清掉**
+                # （解析结果不变）⇒ 绝不拿旧明文顶掉用户更新的 key。
+                conflicts.append(f"{rid}（secrets.json 里的值与库内明文不同 ⇒ 保留文件里的值）")
+                continue
+            api_keys[rid] = key
         rows = conn.execute(
             "SELECT connection_id, params_json FROM model_connections"
         ).fetchall()
         for row in rows:
             key = _params_api_key(row["params_json"])
-            if key is not None:
-                api_keys[str(row["connection_id"])] = key
+            if key is None:
+                continue
+            cid = str(row["connection_id"])
+            existing = api_keys.get(cid)
+            if isinstance(existing, str) and existing and existing != key:
+                conflicts.append(f"{cid}（secrets.json 里的值与库内明文不同 ⇒ 保留文件里的值）")
+                continue
+            api_keys[cid] = key
     finally:
         conn.close()
     payload["api_keys"] = api_keys
@@ -820,7 +847,20 @@ def migrate_secrets(state: SecretsState, apply: bool) -> dict:
         conn.commit()
     finally:
         conn.close()
-    return {"applied": True, "actions": actions, "note": "已写入 secrets.json 并清空库内明文"}
+    result: dict = {
+        "applied": True,
+        "actions": actions,
+        "note": "已写入 secrets.json 并清空库内明文",
+    }
+    if backup_path is not None:
+        result["backup_path"] = str(backup_path)
+    if conflicts:
+        result["conflicts"] = conflicts
+        result["note"] = (
+            "已写入 secrets.json 并清空库内明文；⚠️ 有同名条目与库内明文**不一致** ⇒ "
+            "已**保留 secrets.json 里的值**（运行期本来就用它，解析结果不变）"
+        )
+    return result
 
 
 def _backup_secrets_file(secrets_path: Path) -> Path:
@@ -1104,6 +1144,14 @@ def _run_secrets_mode(args: argparse.Namespace) -> int:
         if migration.get("applied"):
             state = collect_secrets_state(db_path, secrets_path)
             verdict = decide_secrets(state)
+        if migration.get("backup_path"):
+            # ⚠️ 备份路径必须**看得见**（用户要知道凭据的旧版本在哪；对抗审查 F-3）。
+            print(
+                f"[备份] 迁移前已备份 secrets.json -> {migration['backup_path']}",
+                file=sys.stderr,
+            )
+        for conflict in migration.get("conflicts", []):
+            print(f"[冲突] {conflict}", file=sys.stderr)
 
     if args.as_json:
         payload = {

@@ -778,3 +778,118 @@ def test_prune_dangling_keeps_env_name_key_still_resolvable(mod, tmp_path, capsy
     assert "mprof_dead000000" not in payload["api_keys"], "确无引用的键必须被删"
     assert code == 0, "清理后合规（退出码 0）"
 
+
+# ---------------------------------------------------------------------------
+# 对抗审查 B 的 F-3 / F-4（2026-10-23）
+# ---------------------------------------------------------------------------
+
+
+def test_patrol_with_unreadable_secrets_file_is_unknown_not_compliant(mod, tmp_path, capsys) -> None:
+    """**secrets.json 读不出来** ⇒ 判「不可判」⇒ 退出码 2，**不得**报「合规」。
+
+    ⚠️ 「文件读不出来」与「文件不存在」是**两件事**：后者是合法状态（还没迁过），
+    前者是**巡检自身出错** ⇒ 与本轮 F-1 的纪律同一条线（判不出来时不得报绿）。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text("{ this is not json ", encoding="utf-8")
+
+    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 2, f"读不出 secrets.json ⇒ 不可判 ⇒ 退出码 2，实际 {code}\n{out}"
+    assert "解析失败" in out, out
+
+
+def test_patrol_with_missing_secrets_file_is_still_compliant(mod, tmp_path, capsys) -> None:
+    """**secrets.json 不存在** ⇒ 合法状态 ⇒ 仍报合规（退出码 0）。
+
+    ⚠️ 反向不变量：修 F-4 时**不得**把「文件不存在」也误判成不可判（那是过修）。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", None)])
+    secrets = tmp_path / "secrets.json"  # 故意不存在
+
+    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    out = capsys.readouterr().out
+
+    assert code == 0, f"没有 secrets.json 是合法状态（退出码 0），实际 {code}\n{out}"
+
+
+def test_migrate_backs_up_secrets_file_before_rewriting_it(mod, tmp_path, capsys) -> None:
+    """``--migrate --apply`` 写盘前**必须**留备份（旧版本可回退）。
+
+    ⚠️ 迁移要**重写整个** secrets.json ⇒ 旧版本必须可回退（与 ``--prune-dangling`` 同纪律）。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"mprof_live01": "sk-OLD-FILE"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    before = secrets.read_text(encoding="utf-8")
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--migrate", "--apply",
+        ]
+    )
+    capsys.readouterr()
+    assert code == 0
+
+    backups = sorted(tmp_path.glob("secrets.json.bak-*"))
+    assert backups, "迁移前必须留下 secrets.json 的备份（对抗审查 F-3）"
+    assert backups[0].read_text(encoding="utf-8") == before, "备份必须是**迁移前**的逐字内容"
+
+
+def test_migrate_does_not_overwrite_a_newer_value_in_secrets_file(mod, tmp_path, capsys) -> None:
+    """同名条目且**值不同** ⇒ 保留 secrets.json 里的值（运行期本来就用它）+ 报冲突。
+
+    ⚠️ 运行期优先级：``secrets[<profile_id>]`` **高于** ``params_json.api_key``
+    ⇒ 文件里的值才是**生效**的那个 ⇒ 迁移拿**旧明文**顶掉它 = 用旧值覆盖新值。
+    """
+    from packages.core.secrets_store import resolve_profile_api_key
+
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-DB-OLDER")])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"mprof_live01": "sk-FILE-NEWER"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--migrate", "--apply",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert code == 0, out
+
+    payload = json.loads(secrets.read_text(encoding="utf-8"))
+    assert payload["api_keys"]["mprof_live01"] == "sk-FILE-NEWER", (
+        "同名且值不同 ⇒ 必须保留 secrets.json 里的值（不得被旧明文顶掉）"
+    )
+    assert "冲突" in out, f"必须把冲突**说出来**（不得静默）\n{out}"
+
+    # 库内明文照常清掉（解析结果不变：运行期用的是文件里的值）
+    conn = sqlite3.connect(str(db))
+    try:
+        params = conn.execute(
+            "SELECT params_json FROM model_profiles WHERE profile_id = 'mprof_live01'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert "api_key" not in json.loads(params), "库内明文必须被清掉"
+
+    resolved = resolve_profile_api_key(
+        "mprof_live01", "minimax", [], None, secrets=dict(payload["api_keys"])
+    )
+    assert resolved == "sk-FILE-NEWER", "生效的密钥必须与迁移前一致（不得被旧明文改变）"
+
