@@ -53,3 +53,23 @@ def test_list_ok_for_existing_source(tmp_path: Path):
     rc = bdb.main(["--db", str(src), "--out", str(out), "--list"])
     assert rc == 0
     assert not out.exists(), "--list 不得创建输出目录"
+
+
+def test_prune_keeps_exactly_the_newest_n(tmp_path: Path):
+    """``prune(keep=N)`` 必须**恰好保留 N 份最新备份**（撤边界/off-by-one 必红）。
+
+    2026-10-23 批次二十九 task-26：l20 的 ``SC-BACKUP-KEEP`` 把切片
+    ``backups[:-keep]`` 改成 ``backups[:-(keep + 1)]`` ⇒ 少删一份（磁盘泄漏）；
+    本用例同时钉「删了几份」与「剩下哪几份」。
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    for day in range(1, 6):
+        (out / f"novelos_2026010{day}_000000.db").write_bytes(b"x")
+    removed = bdb.prune(out, 2)
+    assert len(removed) == 3, f"应删 3 份，实际删了 {len(removed)} 份"
+    remaining = sorted(p.name for p in out.glob("novelos_*.db*"))
+    assert remaining == [
+        "novelos_20260104_000000.db",
+        "novelos_20260105_000000.db",
+    ], remaining

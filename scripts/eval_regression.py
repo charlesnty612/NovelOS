@@ -2,7 +2,14 @@
 
 调用 :func:`tests.evals.runner.run_all` 跑 ``tests/evals/golden`` 下全部 case，
 逐项打印断言明细；再按 ``tests/evals/regression_baseline.run_regression`` 做
-§6 基线判定（结构签名比对），并落盘 ``docs/evaluation/runs/<run_id>.json``。
+§6 基线判定（结构签名比对），并落盘 ``<runs_dir>/<run_id>.json``。
+
+⚠️ **默认不写仓库**（2026-10-23 批次二十九 task-26 / 台账 C-3）：``--runs-dir`` 缺省时
+报告写**系统临时目录**（``<tempdir>/novelos_eval_runs``），只有显式
+``--write-docs`` 才写回仓库 ``docs/evaluation/runs``。旧默认直接写仓库 ``docs/``，
+只读环境跑一次就脏工作树。基线是**读取**输入（默认仍是仓库
+``docs/evaluation/baseline/last_passing_run.json``），只有显式 ``--update-baseline``
+或首跑建基线时才会写它——测试请用 ``--baseline`` 指到临时路径。
 
 判定与基线更新语义（详见 ``tests/evals/README.md`` §5）：
 
@@ -17,13 +24,19 @@
     python scripts/eval_regression.py --update-baseline
     python scripts/eval_regression.py --check  # 显式 check（默认即 check）
     python scripts/eval_regression.py --run-id run_manual_20260823
+    python scripts/eval_regression.py --write-docs  # 显式写回仓库 docs/evaluation/runs
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_RUNS_DIR = Path(tempfile.gettempdir()) / "novelos_eval_runs"
+DOCS_RUNS_DIR = REPO_ROOT / "docs" / "evaluation" / "runs"
 
 
 def _print_results(results) -> None:
@@ -65,8 +78,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--runs-dir",
-        default="docs/evaluation/runs",
-        help="报告落盘目录（默认 docs/evaluation/runs）",
+        default=None,
+        help="报告落盘目录（默认系统临时目录 <tempdir>/novelos_eval_runs；"
+        "显式 --write-docs 时写仓库 docs/evaluation/runs）",
+    )
+    parser.add_argument(
+        "--write-docs",
+        action="store_true",
+        help="把报告写回仓库 docs/evaluation/runs（默认写系统临时目录，避免脏工作树）",
     )
     parser.add_argument(
         "--update-baseline",
@@ -85,8 +104,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # 落盘目录解析（台账 C-3）：显式 --runs-dir > --write-docs（仓库） > 系统临时目录。
+    if args.runs_dir:
+        runs_dir = Path(args.runs_dir)
+    elif args.write_docs:
+        runs_dir = DOCS_RUNS_DIR
+    else:
+        runs_dir = DEFAULT_RUNS_DIR
+
     # 让 runner 可被 import（scripts/ 在 repo 根，与 tests 同级）
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = REPO_ROOT
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
@@ -108,7 +135,7 @@ def main() -> int:
     report = run_regression(
         results,
         baseline_path,
-        Path(args.runs_dir),
+        runs_dir,
         update_baseline=args.update_baseline,
         run_id=args.run_id,
         trigger="cli",
@@ -128,7 +155,7 @@ def main() -> int:
     for d in report["drift"]:
         print(f"  drift: case={d['case']} field={d['field']} "
               f"baseline={d['baseline']} actual={d['actual']} — {d['reason']}")
-    print(f"report: {Path(args.runs_dir) / (report['run_id'] + '.json')}")
+    print(f"report: {runs_dir / (report['run_id'] + '.json')}")
     print("-" * 72)
 
     return 0 if report["decision"] == "PASS" else 1

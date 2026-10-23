@@ -44,7 +44,23 @@
 replacement 有语法），秒级可做完，而且**比跑全量更灵敏**（锚点一断立刻报，不必等到
 某条突变 `[ABORT]`）。② 与「本批改了什么」无关，是**周期性健康检查**，不需要每批付
 53 分钟。**只有 ① 与「本批新增/修改的规格」必须每批验**，而它们天然只涉及本批改过的
-文件 ⇒ `--changed` 正好覆盖。
+文件 ⇒ `--changed` 应当覆盖。
+
+⚠️ **`--changed` 的选中集是并集（2026-10-23 批次二十九 task-24 修的真实门禁盲区）**：
+
+1. **目标源文件** ∈ 改动集（原口径）；
+2. **规格文件本身** ∈ 改动集（新增/修改的规格一律实跑）。
+
+反例实证：``l16_structured_output.py`` 于批次二十五新建，但其目标
+``structured_output.py`` 之后三批未改 ⇒ **旧口径下三批门禁都没跑过它**，直到批次
+二十八由一条 `[SURVIVED]` 暴露。⇒ 只筛目标文件是**漏筛**，不是省时。
+
+⚠️ 但**不许**退化成「规格文件一改就全跑 428 条」：并集只选**被改动规格文件自己的突变**
+（外加目标文件命中的突变），其它规格一条都不牵连——否则这个省时开关就废了。判别：
+`tests/unit/test_mutation_specs_runner.py::test_changed_spec_file_does_not_pull_in_unrelated_specs`。
+
+覆盖清单必须可见：`--changed` 打印「目标文件命中 N 条 / 规格文件命中 M 条 ⇒ 合计 U 条」
+（与 `--all` 必打印发现的规格文件数同一条纪律：看不见执行域的闸门等于没有闸门）。
 
 ⚠️ **不要**为了省时间把多条突变塞进同一个 pytest 进程（例如 `pytest.main()` 复跑）：
 已 import 的模块会缓存旧字节 ⇒ **突变根本不生效** ⇒ 静默假绿。每条突变必须落在
@@ -331,6 +347,15 @@ def _git_changed_paths(rev: str) -> set[str]:
     return changed
 
 
+def _spec_rel(spec_name: str) -> str:
+    """规格文件名 → 仓库相对路径（``--changed`` 的「规格文件命中」口径）。
+
+    ``entries`` 里存的是 ``spec_file.name``（裸文件名，规格目录扁平且名字唯一）；
+    git 的改动路径是**仓库相对路径** ⇒ 必须补 ``tests/mutation_specs/`` 前缀再比。
+    """
+    return f"tests/mutation_specs/{spec_name}"
+
+
 def precheck(entries: list[tuple[str, str, str, str, str, str]]) -> tuple[list[str], int]:
     """**只读预检**：不改任何源码，秒级验完「突变是否还能被施加」。
 
@@ -416,7 +441,7 @@ def main(argv: list[str]) -> int:
             precheck_only = True
         elif arg in ("-h", "--help"):
             print("用法: run_spec.py <规格文件...> | --all  [--jobs N] [--changed] [--precheck]")
-            print("      --changed [--changed-since REV]  只跑「改动命中目标文件」的突变")
+            print("      --changed [--changed-since REV]  只跑「目标源文件或规格文件命中改动集」的突变")
             print("      --precheck                       只做只读预检（秒级，不改源码）")
             print("      --jobs N                         按目标文件分片并行（默认 1=串行）")
             print("      --fail-fast                      pytest 加 -x（首红即停）")
@@ -453,14 +478,31 @@ def main(argv: list[str]) -> int:
         except LaunchFailure as exc:
             print(f"[INVALID]  {exc}")
             return 2
-        before_n = len(entries)
-        entries = [e for e in entries if e[2] in changed]
+        # 并集口径（2026-10-23 批次二十九 task-24）：目标源文件命中 ∪ 规格文件命中。
+        # 只筛目标文件是**漏筛**——新增规格若目标文件未改，旧口径永远不会选中它。
+        target_hits = sum(1 for e in entries if e[2] in changed)
+        spec_hits = sum(1 for e in entries if _spec_rel(e[0]) in changed)
+        selected: list[tuple[str, str, str, str, str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for e in entries:
+            if e[2] in changed or _spec_rel(e[0]) in changed:
+                key = (e[0], e[1])
+                if key not in seen:
+                    seen.add(key)
+                    selected.append(e)
+        overlap = target_hits + spec_hits - len(selected)
+        entries = selected
         print(
-            f"[增量] 改动文件 {len(changed)} 个；突变 {before_n} → {len(entries)} 条"
-            f"（口径：git diff --name-only {changed_since} ∪ 未跟踪文件）"
+            f"[增量] 目标文件命中 {target_hits} 条 / 规格文件命中 {spec_hits} 条"
+            f" ⇒ 合计 {len(entries)} 条"
+            + (f"（重叠 {overlap} 条，已去重）" if overlap else "")
+            + f"；口径：目标源文件或规格文件 ∈ 改动集"
+            f"（git diff --name-only {changed_since} ∪ 未跟踪文件，改动文件 {len(changed)} 个）"
         )
         if not entries:
-            print("✅ 本批没有任何突变的目标文件被改动 ⇒ 增量闸门无事可做（exit 0）")
+            print(
+                "✅ 本批没有任何突变的目标源文件或规格文件被改动 ⇒ 增量闸门无事可做（exit 0）"
+            )
             return 0
 
     # ---- 只读预检（在 --changed 过滤之后 ⇒ 可组合成「本批秒级闸门」）----

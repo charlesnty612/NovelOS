@@ -6,9 +6,14 @@
 
 用法：
     python scripts/m1_report.py --data-dir data/m1_run
-    python scripts/m1_report.py --data-dir data/m1_run --db data/m1_run/novelos.db --out docs/evaluation/m1-data.md
+    python scripts/m1_report.py --data-dir data/m1_run --db data/m1_run/novelos.db --out /tmp/m1-data.md
+    python scripts/m1_report.py --data-dir data/m1_run --write-docs   # 显式写回仓库 docs/evaluation/m1-data.md
 
-输出：stdout 打印 Markdown，同时写入 --out 指定的文件。
+输出：stdout 打印 Markdown，同时写入 ``--out`` 指定的文件。
+⚠️ **默认不写仓库**（2026-10-23 批次二十九 task-26 / 台账 C-3）：``--out`` 缺省时写
+**系统临时目录**（``<tempdir>/novelos_m1_report/m1-data.md``），只有显式
+``--write-docs`` 才写回仓库 ``docs/evaluation/m1-data.md``。旧默认直接写仓库 docs/，
+只读环境跑一次就脏工作树。
 """
 
 from __future__ import annotations
@@ -17,9 +22,14 @@ import argparse
 import json
 import sqlite3
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OUT_PATH = Path(tempfile.gettempdir()) / "novelos_m1_report" / "m1-data.md"
+DOCS_OUT_PATH = REPO_ROOT / "docs" / "evaluation" / "m1-data.md"
 
 # ---------------------------------------------------------------------------
 # 数据加载（纯读取 + 容错）
@@ -766,14 +776,27 @@ def main() -> int:
     )
     parser.add_argument(
         "--out",
-        default="docs/evaluation/m1-data.md",
-        help="报告输出文件（默认 docs/evaluation/m1-data.md）",
+        default=None,
+        help="报告输出文件（默认系统临时目录 <tempdir>/novelos_m1_report/m1-data.md；"
+        "显式 --write-docs 时写仓库 docs/evaluation/m1-data.md）",
+    )
+    parser.add_argument(
+        "--write-docs",
+        action="store_true",
+        help="把报告写回仓库 docs/evaluation/m1-data.md（默认写系统临时目录，避免脏工作树）",
     )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir).resolve()
     db_path = Path(args.db).resolve() if args.db else None
-    out_path = Path(args.out).resolve()
+    # 落盘路径解析（台账 C-3）：显式 --out > --write-docs（仓库） > 系统临时目录。
+    if args.out:
+        out_path = Path(args.out)
+    elif args.write_docs:
+        out_path = DOCS_OUT_PATH
+    else:
+        out_path = DEFAULT_OUT_PATH
+    out_path = out_path.resolve()
 
     text, diag = build_report(data_dir, db_path)
 

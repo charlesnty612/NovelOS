@@ -5,7 +5,52 @@
 
 ## [Unreleased]
 
-### Changed（2026-10-23 批次（二十八）：测试体系阶段二（删冗余用例，全量突变零存活）+ 修一条从未被跑到的存活突变）
+### Fixed（2026-10-23 批次（二十九）：突变闸门盲区修复 + 台账 C-1 切片与 C-3）
+
+> **来源**：批次二十八发现的「`--changed` 不看新规格」盲区 + `docs/reviews/remaining-debt-2026-10-23.md` 的 C-1（切片）/ C-3。零真实 LLM、零内容仓接触。
+
+#### 1. 门禁盲区修复：`run_spec --changed` 改为**并集**口径
+
+**缺陷**：旧口径只按「**突变目标源文件**是否改动」筛选 ⇒ **新增规格文件若其目标源文件未改，永远不会被选中**。实证：`l16_structured_output.py` 批次二十五新建、目标 `structured_output.py` 之后未改 ⇒ **三批门禁（25/26/27）都没跑过它**，直到批次二十八出一条 `[SURVIVED]` 才暴露。
+
+做法：`--changed` = ① 目标源文件 ∈ 改动集 **∪** ② **规格文件本身 ∈ 改动集**（按 `(spec, mid)` 去重）；`--all` / 不传 `--changed` 的行为逐字不变；输出必须**可见覆盖清单**：`[增量] 目标文件命中 N 条 / 规格文件命中 M 条 ⇒ 合计 U 条（重叠 K 条，已去重）`。
+判别：`tests/unit/test_mutation_specs_runner.py` **5 例**（新规格必被选中 / 目标命中旧场景 / 无 `--changed` 兼容 / 干净时 0 条 / **不得退化成「改一个规格跑全量」**）；撤并集逻辑 ⇒ 2 failed（留证）。
+**本批实测**：`目标文件命中 3 条 / 规格文件命中 5 条 ⇒ 合计 6 条（重叠 2 条）` —— 新口径把本轮新建的 `l20` 5 条**真的跑了**（旧口径下 1 条都不会有）。
+
+#### 2. 台账 C-1 切片：三个高风险脚本补突变规格（`l20_scripts_coverage.py` 5 条）
+
+| 突变 | 内容 | 承接用例 |
+|---|---|---|
+| `SC-BACKUP-KEEP` | `prune` 切片 `backups[:-keep]` → `[:-(keep+1)]`（**少删一份 ⇒ 磁盘泄漏**） | `test_prune_keeps_exactly_the_newest_n` |
+| `SC-CONTENT-WARN` | `genre-pull` 反向漂移**告警不落 stderr**（静默丢弃） | `TestPullReverseDriftWarning::test_cli_pull_writes_warning_to_stderr` |
+| `SC-OPENVOLUME-GAP` | 章号**连续性校验短路**（跳号 brief 被放行） | `test_gap_chapter_numbers_rejected` |
+| `SC-EVAL-DOCS` / `SC-M1-DOCS` | `--write-docs` 分支失效 | 各自 `test_script_eval_outputs.py` 用例 |
+
+⚠️ 原计划的「content_sync 退出码」突变经实测**不可判**（未知 pack 时 service 抛 `ValueError`，`main()` 统一 `return 1`，走不到 `_cmd_genre_push` 的 errors 分支）⇒ 换成可判的「告警静默丢弃」（同属静默风险面，spec 内留痕）。判别：**5/5 RED**（逐条施加 → 单用例红 → 逐字节恢复 SHA 一致）。
+
+#### 3. 台账 C-3：两个评估脚本默认不再写仓库 `docs/`
+
+`scripts/eval_regression.py` 的 `--runs-dir` 与 `scripts/m1_report.py` 的 `--out` 默认改**系统临时目录**（`<tempdir>/novelos_eval_runs`、`<tempdir>/novelos_m1_report/m1-data.md`），新增 **`--write-docs`** 才写回仓库；docstring 写清新默认。判别：`tests/unit/test_script_eval_outputs.py` 4 例（默认模式 `docs/` 无新增/无改写 + `--write-docs`（假 repo root）才写）。
+
+#### 4. ⚠️ 未完成（已列入交接，代码已回退到绿）
+
+**A-2「`_COUNTER_MODULES` 改派生」只做了半成品，已回退**——但回退前暴露了一个**真发现**（成员原话 + 我的复核）：
+> 把清单改为从源码派生后，`test_writer_cache_hit_uses_single_connection` / `test_director_cache_hit_uses_single_connection` **变红**，实测 **director `conns=2 / sql=11`** ⇒ **旧的「1 连接」断言是在量具盲区里成立的**（与批次二十三「`_COUNTER_MODULES` 漏 `cache.py`」同族、第二次出现）。
+
+⇒ 这不是测试变严，是**之前测不到**。要做的是**先查清第 2 条连接从哪来**（可能是 `agent_runtime/prompts.active_prompt_label` 那条已登记残留），再决定「改断言为如实口径」还是「消除第 2 条连接」。**该半成品已回退，工作树为绿**（3893 passed）。
+**codegen `--check`（台账 C-2 / W-1）未开工**——`export_openapi.py` / `gen_frontend_types.py` 已有 `--out` 参数但无 `--check`，`tests/api/test_codegen_artifacts.py` 不存在。
+
+#### 5. 闸门（Lead 亲跑）
+
+| 项 | 结果 |
+|---|---|
+| 全量 pytest `-n 20` | **3893 passed / 1 skipped / 1 xfailed / 0 failed**（187.64s；较批次二十八 3883 **+10** = 5 runner + 4 eval + 1 backup_keep） |
+| 树指纹 | **725 文件 / `6d2561b7…`**，跑测前后**逐位一致** |
+| ruff | `All checks passed!` |
+| 突变 | `--changed`（新并集）**6 条全 CAUGHT / 0 存活**；`l20` 5/5 |
+| 残留 | `.mutbak*` **0** |
+
+### Fixed（2026-10-23 批次（二十八）：测试体系阶段二（删冗余用例，全量突变零存活）+ 修一条从未被跑到的存活突变）
 
 > **来源**：用户「测试太臃肿，简化」阶段二 + Lead 验收时发现的门禁盲区。零真实 LLM、零内容仓接触。
 
