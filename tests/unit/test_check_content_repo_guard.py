@@ -440,7 +440,13 @@ def test_prune_dangling_apply_removes_only_dangling_keys(mod, tmp_path, capsys) 
 
 
 def test_migrate_and_prune_together_reach_compliance(mod, tmp_path, capsys) -> None:
-    """``--migrate --prune-dangling --apply`` ⇒ 两个动作都做 ⇒ 巡检转合规（退出码 0）。"""
+    """``--migrate --prune-dangling --apply`` ⇒ 两个动作都做 ⇒ 巡检转合规（退出码 0）。
+
+    ⚠️ ``--force-all-dangling``（2026-10-23 交集闸门）：本夹具的 secrets 文件里
+    **只有一个死键**、库里另有一个活档案 ⇒ secrets 的键与已知集合**零交集**
+    ⇒ 「全部键都死」与「--db 指错了库」在数据上**不可区分** ⇒ 闸门默认**拒绝**
+    （退出码 2）⇒ 本用例显式声明「我知道这个库是对的」。
+    """
     db = tmp_path / "novelos.db"
     _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
     secrets = tmp_path / "secrets.json"
@@ -452,7 +458,7 @@ def test_migrate_and_prune_together_reach_compliance(mod, tmp_path, capsys) -> N
     code = mod.main(
         [
             "secrets", "--db", str(db), "--secrets-file", str(secrets),
-            "--migrate", "--prune-dangling", "--apply",
+            "--migrate", "--prune-dangling", "--apply", "--force-all-dangling",
         ]
     )
     capsys.readouterr()
@@ -893,3 +899,579 @@ def test_migrate_does_not_overwrite_a_newer_value_in_secrets_file(mod, tmp_path,
     )
     assert resolved == "sk-FILE-NEWER", "生效的密钥必须与迁移前一致（不得被旧明文改变）"
 
+
+# ---------------------------------------------------------------------------
+# F-3（major，2026-10-23 对抗审查 C）：``secrets.json`` **结构非法** ⇒ 不可判
+#
+# 缺陷形状：生产侧 ``packages/core/secrets_store._read_file_fresh()`` 对
+# 「顶层不是对象」/「``api_keys`` 段不是对象」会 log warning 并**返回 {}**
+# ⇒ 运行期**拿不到凭据**；而巡检只把「JSON 解析失败」计入 ``read_errors``
+# ⇒ 结构非法时仍报「合规」（exit 0）⇒ **真出问题却报绿**，且三条路径口径分裂：
+#   巡检 ⇒ 报绿；``--prune-dangling`` ⇒ 拿「空 api_keys」当基线去判定；
+#   ``--migrate`` ⇒ **静默把用户原有键重置为 {}**。
+#
+# 修法：结构非法 = **不可判** = **退出码 2**；两条写路径**一律拒绝执行**
+# （不写文件、不写备份、不清库）⇒ 三条路径同口径。
+# ⚠️ **反向不变量（不得过修）**：``secrets.json`` 不存在 / 无 ``api_keys`` 段 /
+# ``api_keys`` 为 ``null`` ⇒ 运行期 ``_read_file_fresh()`` **不报 warning**
+# ⇒ **合法空状态** ⇒ **仍然 exit 0**。
+# ---------------------------------------------------------------------------
+
+
+def _seed_clean_db(db_path: Path) -> None:
+    """造一个「已知集合非空、库内无明文」的库（合成夹具）。
+
+    ⚠️ 已知集合必须**非空**：否则「已知集合为空」会**先于**结构问题成为不可判原因
+    ⇒ 测的就不是「结构非法」这一条了。
+    """
+    _seed_model_db(db_path, profiles=[("mprof_live01", "minimax", None)])
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        json.dumps({"api_keys": "sk-xxx"}),
+        json.dumps({"api_keys": ["a"]}),
+        json.dumps({"api_keys": 123}),
+    ],
+    ids=["api_keys_is_string", "api_keys_is_list", "api_keys_is_number"],
+)
+def test_patrol_with_non_dict_api_keys_is_unknown_not_compliant(
+    mod, tmp_path, capsys, raw_text
+) -> None:
+    """``api_keys`` 段不是对象 ⇒ **不可判** ⇒ 退出码 2（**不得**报「合规」）。
+
+    ⚠️ 真缺陷：运行期 ``_read_file_fresh()`` 会 log warning 并返回 ``{}``
+    ⇒ **运行期拿不到凭据**；旧实现只记一条 note ⇒ 巡检报绿 ⇒ 真出问题却报绿。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_clean_db(db)
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(raw_text, encoding="utf-8")
+
+    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 2, f"结构非法 ⇒ 不可判 ⇒ 退出码 2，实际 {code}\n{out}"
+    assert "api_keys 段必须是对象" in out, f"必须说清为什么不可判：{out}"
+    assert "合规（无悬空条目" not in out, "结构非法时**不得**报「合规」"
+
+
+def test_patrol_with_non_dict_root_is_unknown_not_compliant(mod, tmp_path, capsys) -> None:
+    """顶层不是对象（``["a"]``）⇒ **不可判** ⇒ 退出码 2。
+
+    ⚠️ 生产侧 ``_read_file_fresh()`` 对「根不是 dict」同样 log warning + 返回 ``{}``
+    ⇒ 与「api_keys 段不是对象」是**同一类**不可判。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_clean_db(db)
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(json.dumps(["a"]), encoding="utf-8")
+
+    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 2, f"根不是对象 ⇒ 不可判 ⇒ 退出码 2，实际 {code}\n{out}"
+    assert "顶层必须是对象" in out, f"必须说清为什么不可判：{out}"
+    assert "合规（无悬空条目" not in out, "结构非法时**不得**报「合规」"
+
+
+def test_missing_api_keys_section_is_legal_empty_state(mod, tmp_path, capsys) -> None:
+    """``api_keys`` **键不存在**（``{}``）⇒ 合法空状态 ⇒ **仍然 exit 0**。
+
+    ⚠️ **反向不变量（防过修）**：运行期 ``if api_keys is None: return {}`` **不报
+    warning** ⇒ 那是「没有凭据」而非「凭据读不出来」⇒ **不得**判不可判。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_clean_db(db)
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text("{}", encoding="utf-8")
+
+    state = mod.collect_secrets_state(db, secrets)
+    assert state.read_errors == [], f"合法空状态不得记读错误：{state.read_errors}"
+    assert state.blocked_reasons == [], f"合法空状态不得判不可判：{state.blocked_reasons}"
+
+    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    out = capsys.readouterr().out
+
+    assert code == 0, f"合法空状态 ⇒ 仍然合规（退出码 0），实际 {code}\n{out}"
+    assert "合规" in out
+
+
+def test_null_api_keys_section_is_legal_empty_state(mod, tmp_path, capsys) -> None:
+    """``{"api_keys": null}`` ⇒ 运行期与「键不存在」**不可区分** ⇒ 合法 ⇒ exit 0。
+
+    ⚠️ 生产侧 ``data.get("api_keys") is None`` 时**直接返回 {} 且不报 warning**
+    ⇒ ``null`` 与「键不存在」在运行期是**同一种**合法状态 ⇒ 巡检不得把它判成不可判。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_clean_db(db)
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(json.dumps({"api_keys": None}), encoding="utf-8")
+
+    state = mod.collect_secrets_state(db, secrets)
+    assert state.read_errors == [], f"null 段不得记读错误：{state.read_errors}"
+
+    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    out = capsys.readouterr().out
+
+    assert code == 0, f"``api_keys: null`` ⇒ 仍然合规（退出码 0），实际 {code}\n{out}"
+
+
+def test_absent_secrets_file_is_legal_empty_state(mod, tmp_path, capsys) -> None:
+    """``secrets.json`` **不存在** ⇒ 合法状态（还没迁过）⇒ **仍然 exit 0**。"""
+    db = tmp_path / "novelos.db"
+    _seed_clean_db(db)
+    secrets = tmp_path / "secrets.json"  # 故意不存在
+    assert not secrets.exists(), "前提：文件不得已存在"
+
+    state = mod.collect_secrets_state(db, secrets)
+    assert state.read_errors == [], f"文件不存在不得记读错误：{state.read_errors}"
+
+    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    out = capsys.readouterr().out
+
+    assert code == 0, f"文件不存在 ⇒ 仍然合规（退出码 0），实际 {code}\n{out}"
+
+
+def test_prune_dangling_refuses_when_api_keys_section_is_not_object(
+    mod, tmp_path, capsys
+) -> None:
+    """``--prune-dangling --apply`` 遇结构非法 ⇒ **拒绝执行**（不写文件、不写备份）。
+
+    ⚠️ 三条路径同口径：结构非法 ⇒ 不可判 ⇒ 清理**必须**拒绝（退出码 2），
+    且**文件逐字节不变**、**零备份文件**。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_clean_db(db)
+    secrets = tmp_path / "secrets.json"
+    original = json.dumps({"api_keys": "sk-legacy", "other": "keep"}, ensure_ascii=False)
+    secrets.write_text(original, encoding="utf-8")
+    before = secrets.read_bytes()
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 2, f"结构非法 ⇒ 必须拒绝执行（退出码 2），实际 {code}\n{out}"
+    assert "已中止清理" in out, f"必须**明确拒绝**（而不是「没什么可删」）：{out}"
+    assert "api_keys 段必须是对象" in out, f"必须说清为什么拒绝：{out}"
+    assert secrets.read_bytes() == before, "secrets.json 必须**逐字节未改**"
+    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝执行 ⇒ 不得产生备份文件"
+
+
+def test_prune_dangling_refuses_when_root_is_not_object(mod, tmp_path, capsys) -> None:
+    """``--prune-dangling --apply`` 遇「顶层不是对象」⇒ 同样拒绝执行。"""
+    db = tmp_path / "novelos.db"
+    _seed_clean_db(db)
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(json.dumps(["a"]), encoding="utf-8")
+    before = secrets.read_bytes()
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 2, f"根不是对象 ⇒ 必须拒绝执行（退出码 2），实际 {code}\n{out}"
+    assert "已中止清理" in out, out
+    assert "顶层必须是对象" in out, out
+    assert secrets.read_bytes() == before, "secrets.json 必须**逐字节未改**"
+    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝执行 ⇒ 不得产生备份文件"
+
+
+def test_migrate_refuses_when_api_keys_section_is_not_object(mod, tmp_path, capsys) -> None:
+    """``--migrate --apply`` 遇结构非法 ⇒ **拒绝执行**（绝不静默重置为 ``{}``）。
+
+    ⚠️ 这是 F-3 最危险的一侧：旧实现把「读不出来的 api_keys」当成**空基线**
+    ⇒ 落盘即**静默抹掉用户原有键**，而用户毫无察觉。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
+    secrets = tmp_path / "secrets.json"
+    original = json.dumps({"api_keys": "sk-legacy", "other": "keep"}, ensure_ascii=False)
+    secrets.write_text(original, encoding="utf-8")
+    before = secrets.read_bytes()
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--migrate", "--apply",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 2, f"结构非法 ⇒ 必须拒绝执行（退出码 2），实际 {code}\n{out}"
+    assert "已中止迁移" in out, f"必须**明确拒绝**：{out}"
+    assert "api_keys 段必须是对象" in out, f"必须说清为什么拒绝：{out}"
+    assert secrets.read_bytes() == before, "secrets.json 必须**逐字节未改**（不得被重置）"
+    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝执行 ⇒ 不得产生备份文件"
+
+    conn = sqlite3.connect(str(db))
+    try:
+        params = conn.execute(
+            "SELECT params_json FROM model_profiles WHERE profile_id = 'mprof_live01'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert "api_key" in params, "拒绝执行 ⇒ 不得清库内明文"
+
+
+def test_migrate_refuses_when_root_is_not_object(mod, tmp_path, capsys) -> None:
+    """``--migrate --apply`` 遇「顶层不是对象」⇒ 拒绝执行（不得把文件整体替换）。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(json.dumps(["a"]), encoding="utf-8")
+    before = secrets.read_bytes()
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--migrate", "--apply",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 2, f"根不是对象 ⇒ 必须拒绝执行（退出码 2），实际 {code}\n{out}"
+    assert "已中止迁移" in out, out
+    assert "顶层必须是对象" in out, out
+    assert secrets.read_bytes() == before, "secrets.json 必须**逐字节未改**"
+    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝执行 ⇒ 不得产生备份文件"
+
+
+# ---------------------------------------------------------------------------
+# F-6（minor，2026-10-23 对抗审查 C）：``--json`` 丢字段 + ``action_count`` 口径错
+#
+# 缺陷形状：① ``payload["migration"]`` 段**丢了** ``conflicts`` 与 ``backup_path``
+# （文本模式其实有打印 ⇒ 两种输出模式口径不一致）；② ``action_count`` 用的是
+# **候选**动作数 ⇒ dry-run（实际写入 0 条）却报候选数 ⇒ 机器消费方会把 dry-run
+# 读成「已写入 N 条」。
+# ---------------------------------------------------------------------------
+
+
+def test_json_migration_reports_conflicts_and_backup_path(mod, tmp_path, capsys) -> None:
+    """``--json`` 的 migration 段必须带 ``conflicts`` 与 ``backup_path``（文本模式同口径）。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-DB-OLDER")])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"mprof_live01": "sk-FILE-NEWER"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--migrate", "--apply", "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0, payload
+    migration = payload["migration"]
+    assert migration["conflicts"], "冲突必须进 --json（文本模式已打印，机器模式不得丢）"
+    assert any("mprof_live01" in c for c in migration["conflicts"]), migration["conflicts"]
+    assert migration["backup_path"], "备份位置必须进 --json"
+    assert Path(migration["backup_path"]).is_file(), "备份路径必须指向真实文件"
+
+
+def test_json_action_count_is_zero_on_dry_run_and_candidate_count_is_n(
+    mod, tmp_path, capsys
+) -> None:
+    """dry-run ⇒ ``action_count == 0``（实际写入 0 条）而 ``candidate_count == N``。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(
+        db,
+        profiles=[
+            ("mprof_live01", "minimax", "sk-plain1"),
+            ("mprof_live02", "minimax", "sk-plain2"),
+        ],
+    )
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(json.dumps({"api_keys": {}}, ensure_ascii=False), encoding="utf-8")
+
+    code = mod.main(
+        ["secrets", "--db", str(db), "--secrets-file", str(secrets), "--migrate", "--json"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 1, "库内明文还在 ⇒ 仍不合规（退出码 1）"
+    migration = payload["migration"]
+    assert migration["applied"] is False
+    assert migration["action_count"] == 0, "dry-run 实际写入 0 条（不得报候选数）"
+    assert migration["candidate_count"] == 2, "候选动作 2 条"
+    assert migration["conflicts"] == []
+    assert migration["backup_path"] is None, "dry-run 不写文件 ⇒ 不得有备份路径"
+
+
+def test_json_action_count_equals_written_count_after_apply(mod, tmp_path, capsys) -> None:
+    """``--apply`` 后 ``action_count`` = **实际写入**条数（不再是候选数）。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(
+        db,
+        profiles=[
+            ("mprof_live01", "minimax", "sk-plain1"),
+            ("mprof_live02", "minimax", "sk-plain2"),
+        ],
+    )
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(json.dumps({"api_keys": {}}, ensure_ascii=False), encoding="utf-8")
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--migrate", "--apply", "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0, payload
+    migration = payload["migration"]
+    assert migration["applied"] is True
+    assert migration["action_count"] == 2, "实际写入 2 条"
+    assert migration["candidate_count"] == 2
+    assert migration["backup_path"], "落盘前必须有备份"
+
+    # 断言打在**真实落盘内容**上（不只是 payload 里的数字）
+    written = json.loads(secrets.read_text(encoding="utf-8"))
+    assert written["api_keys"]["mprof_live01"] == "sk-plain1"
+    assert written["api_keys"]["mprof_live02"] == "sk-plain2"
+
+
+def test_json_prune_action_count_is_zero_on_dry_run_and_n_after_apply(
+    mod, tmp_path, capsys
+) -> None:
+    """``prune`` 段同样：dry-run ⇒ ``action_count == 0``；``--apply`` 后 = 实际删除条数。
+
+    ⚠️ ``--force-all-dangling``（2026-10-23 交集闸门）：本夹具的 secrets 文件里
+    **只有一个死键** ⇒ 与已知集合**零交集** ⇒ 闸门默认拒绝（退出码 2）
+    ⇒ 本用例显式声明「我知道这个库是对的」。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_clean_db(db)
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"mprof_dead000000": "sk-x"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--json", "--force-all-dangling",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    prune = payload["prune"]
+
+    assert code == 1, "悬空条目未清理 ⇒ 仍不合规（退出码 1）"
+    assert prune["applied"] is False
+    assert prune["action_count"] == 0, "dry-run 实际删除 0 条"
+    assert prune["candidate_count"] == 1, "候选删除 1 条"
+    assert prune["removed"] == []
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply", "--json", "--force-all-dangling",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    prune = payload["prune"]
+
+    assert code == 0, payload
+    assert prune["applied"] is True
+    assert prune["action_count"] == 1, "实际删除 1 条"
+    assert prune["candidate_count"] == 1
+    assert prune["removed"] == ["mprof_dead000000"]
+    assert prune["backup_path"], "清理前必须有备份"
+    assert prune["conflicts"] == []
+
+
+# ---------------------------------------------------------------------------
+# 交集闸门（2026-10-23 Lead 自踩事故暴露的 critical）
+#
+# ⚠️ **事故经过**：Lead 跑 F-3 复验探针时，`--db` 指向了**合成夹具库**、而
+#    secrets 文件是**仓库真实的那一份**（探针忘了传 `--secrets-file`）⇒
+#    夹具库的已知集合（mprof_x / conn_x）与真实 secrets 的 4 个键**一个都对不上**
+#    ⇒ 4 个键**全部被判悬空** ⇒ `--prune-dangling --apply` **一次清空整个凭据库**，
+#    而退出码仍是 0（报「合规」）⇒ 靠**写前备份**才救回来。
+#
+# ⚠️ **根因**：上一轮的 F-1 修复只挡住了「已知集合**为空**」与「读表失败」两种形态，
+#    **漏了第三种**：「已知集合**非空**但与 secrets 的键**零交集**」。
+#    ⇒ 「已知集合非空」**不等于**「这个库属于这个 secrets 文件」。
+#
+# ⇒ 修法：**交集闸门** —— secrets 的键与已知集合**零交集** ⇒ 悬空条目
+#    **不可判**（**不是**「全悬空」）⇒ 巡检 exit 2、清理**拒绝执行**（零落盘）。
+#    ⚠️ `--migrate` **不受**它拦截：迁移是**加法**动作（不删任何东西）、
+#    且它不依赖「悬空」判断 ⇒ 一条手写的 secrets 文件不该把迁移也堵死。
+# ---------------------------------------------------------------------------
+
+
+def test_patrol_with_disjoint_known_set_is_unknown_not_compliant(mod, tmp_path, capsys) -> None:
+    """secrets 的键与运行库已知集合**零交集** ⇒ 不可判 ⇒ 退出码 2（**不得**报合规）。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_other_project", "minimax", None)])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"mprof_aaaaaaaaaa": "sk-x", "mconn_bbbbbbbbbb": "sk-y"}}),
+        encoding="utf-8",
+    )
+
+    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 2, f"零交集 ⇒ 不可判 ⇒ 退出码 2，实际 {code}\n{out}"
+    assert "不可判" in out, f"必须说清为什么不可判：{out}"
+    assert "合规（无悬空条目" not in out, "零交集时**不得**报「合规」"
+
+
+def test_prune_dangling_refuses_when_known_set_is_disjoint(mod, tmp_path, capsys) -> None:
+    """零交集 ⇒ `--prune-dangling --apply` **拒绝执行**（文件逐字节不变、零备份）。"""
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_other_project", "minimax", None)])
+    secrets = tmp_path / "secrets.json"
+    original = json.dumps({"api_keys": {"mprof_aaaaaaaaaa": "sk-x"}}, ensure_ascii=False)
+    secrets.write_text(original, encoding="utf-8")
+    before = secrets.read_bytes()
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 2, f"零交集 ⇒ 必须拒绝执行（退出码 2），实际 {code}\n{out}"
+    assert "已中止清理" in out, f"必须**明确拒绝**（而不是「没什么可删」）：{out}"
+    assert secrets.read_bytes() == before, "secrets.json 必须**逐字节未改**"
+    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝执行 ⇒ 不得产生备份文件"
+
+
+def test_prune_dangling_refuses_when_db_is_a_different_project(mod, tmp_path, capsys) -> None:
+    """**事故复现**：``--db`` 指向别的项目的库 ⇒ 清理**必须**被拒（而不是清空凭据库）。
+
+    ⚠️ 这是 2026-10-23 Lead 自踩事故的**直接回归**：事故里 4 个真实凭据被一次
+    prune 清空（靠写前备份救回）⇒ 本条钉住「指错库 ⇒ 一个键都不许删」。
+    """
+    db = tmp_path / "other_project.db"
+    _seed_model_db(db, profiles=[("mprof_x", "openai", None)])
+    secrets = tmp_path / "secrets.json"
+    original = json.dumps(
+        {"api_keys": {"mprof_bae369541c72": "sk-real-1", "mconn_0e1e79327d9c": "sk-real-2"}},
+        ensure_ascii=False,
+    )
+    secrets.write_text(original, encoding="utf-8")
+    before = secrets.read_bytes()
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 2, f"指错库 ⇒ 必须拒绝执行（退出码 2），实际 {code}\n{out}"
+    assert secrets.read_bytes() == before, "真实凭据**一个都不许删**"
+    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝执行 ⇒ 不得产生备份文件"
+
+
+def test_partial_overlap_still_judges_dangling(mod, tmp_path, capsys) -> None:
+    """**部分**对得上 ⇒ 照常判悬空（反向不变量：防「交集闸门」把正常清理也堵死）。
+
+    ⚠️ 闸门只在**零交集**时拦；只要有一个键对得上 ⇒ 正常判定 + 正常清理。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", None)])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"mprof_live01": "sk-live", "mprof_dead000000": "sk-dead"}}),
+        encoding="utf-8",
+    )
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 0, f"部分对得上 ⇒ 正常清理 ⇒ 退出码 0，实际 {code}\n{out}"
+    data = json.loads(secrets.read_text(encoding="utf-8"))
+    assert sorted(data["api_keys"]) == ["mprof_live01"], "只该删死键，活键必须留下"
+
+
+def test_migrate_is_not_blocked_by_disjoint_known_set(mod, tmp_path, capsys) -> None:
+    """``--migrate`` **不受**交集闸门拦截（迁移是**加法**动作，不删任何东西）。
+
+    ⚠️ 刻意的**不对称**：闸门只否证「悬空」这一个判断；迁移不依赖它。
+    ⇒ 一条手写的 secrets 文件（键名对不上任何 profile_id）**不该**把迁移堵死。
+    ⚠️ 迁移后那把手写键**会**变成悬空 ⇒ 退出码 1（不合规），但**迁移本身没被拦**。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-db-plain")])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(json.dumps({"api_keys": {"sk-handwritten": "sk-x"}}), encoding="utf-8")
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--migrate", "--apply",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code != 2, f"迁移是加法动作 ⇒ 不该被闸门拦（不该是 2），实际 {code}\n{out}"
+    data = json.loads(secrets.read_text(encoding="utf-8"))
+    assert "mprof_live01" in data["api_keys"], "库内明文应被搬进 secrets"
+    assert "sk-handwritten" in data["api_keys"], "原有键不得被抹掉"
+
+def test_force_all_dangling_allows_cleaning_when_known_set_is_disjoint(
+    mod, tmp_path, capsys
+) -> None:
+    """显式 ``--force-all-dangling`` ⇒ 零交集时**放行**（用户已确认 --db 是对的）。
+
+    ⚠️ 这条钉住「闸门有出口」：**拒绝**必须是**可解除**的，否则「secrets 里
+    只有死键」这种合法场景就永远清不掉。
+    """
+    db = tmp_path / "novelos.db"
+    _seed_model_db(db, profiles=[("mprof_other_project", "minimax", None)])
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"mprof_aaaaaaaaaa": "sk-x"}}), encoding="utf-8"
+    )
+
+    code = mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--prune-dangling", "--apply", "--force-all-dangling",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert code == 0, f"显式确认后应放行（退出码 0），实际 {code}\n{out}"
+    data = json.loads(secrets.read_text(encoding="utf-8"))
+    assert data["api_keys"] == {}, "确认后照常清理"

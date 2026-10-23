@@ -46,6 +46,23 @@ AGENTS.md 硬规则 5「内容仓不推 GitHub」此前**只有纪律、没有�
     #   向后兼容：**单独 --apply** = 「迁移 + 执行」
     python scripts/check_content_repo_guard.py secrets --db data/novelos.db --apply
 
+⚠️ **``secrets.json`` 结构非法 ⇒ 不可判（退出码 2）**（2026-10-23 对抗审查 F-3）
+--------------------------------------------------------------------------
+``secrets.json`` **存在但结构非法**（顶层不是对象 / ``api_keys`` 段不是对象）
+⇒ 生产侧 ``packages.core.secrets_store._read_file_fresh()`` 会 log warning 并
+**返回空凭据**（运行期拿不到 key）⇒ 那不是「没有凭据」，是「**凭据读不出来**」
+⇒ 巡检必须判「**不可判**」⇒ **退出码 2**（否则真出问题却报绿）；``--migrate`` /
+``--prune-dangling`` **一律拒绝执行**（不写任何文件、不写备份、不清库）
+⇒ **三条路径同口径**。
+
+⚠️ **反向不变量（不得过修）**：``secrets.json`` **不存在**、**没有 ``api_keys``
+段**、或该段为 ``null`` ⇒ 运行期 ``_read_file_fresh()`` **不报 warning**、返回
+``{}`` ⇒ **合法的空凭据状态** ⇒ 巡检**仍然报合规（退出码 0）**。
+
+⚠️ **``--json`` 的计数口径**（2026-10-23 对抗审查 F-6）：``action_count`` =
+**实际落地的条数**（dry-run ⇒ ``0``），「打算做 N 条」用 ``candidate_count`` 表达；
+``migration`` / ``prune`` 两段都带 ``conflicts`` 与 ``backup_path``（与文本模式同口径）。
+
 检查项（全部只读）
 ------------------
 1. ``origin`` 的 **fetch / push URL** 是什么（``git remote -v``）；
@@ -409,6 +426,13 @@ class SecretsState:
     read_errors: list[str] = field(default_factory=list)
     #: 「无法判定」的原因（读表失败 **或** 已知集合为空）⇒ 清理动作必须拒绝执行。
     blocked_reasons: list[str] = field(default_factory=list)
+    #: 「悬空条目**不可判**」的原因（见 :func:`collect_secrets_state` 的**交集闸门**）。
+    #:
+    #: ⚠️ 与 ``blocked_reasons`` **刻意分开**：它只否证「悬空」这一个判断，
+    #: **不**否证「库内明文」——``--migrate`` 是**加法**动作（把库内明文搬进文件），
+    #: 不依赖「悬空」判断 ⇒ **不受**它拦截（否则一条手写的 secrets 文件会把
+    #: 迁移也堵死，而迁移本来不破坏任何东西）。
+    dangling_undecidable: str | None = None
     #: 运行期的查找槽位（供**生产解析函数**复核「这个键还在不在用」）。
     profile_slots: list[KeySlot] = field(default_factory=list)
     connection_slots: list[KeySlot] = field(default_factory=list)
@@ -532,7 +556,35 @@ def _is_still_resolvable(state: SecretsState, key: str, value: str) -> bool:
     return False
 
 
-def collect_secrets_state(db_path: Path, secrets_path: Path) -> SecretsState:
+def _json_type_name(value: object) -> str:
+    """给 JSON 值一个人类可读的**类型名**（用于错误信息）。
+
+    ⚠️ 用 **JSON 语汇**（``null`` / ``bool`` / ``int`` / ``float`` / ``str`` /
+    ``list`` / ``dict``）而不是 Python 类名 ⇒ 错误信息与用户看到的 JSON 文本对得上。
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):  # ⚠️ bool 是 int 的子类 ⇒ 必须先判
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, dict):
+        return "dict"
+    return type(value).__name__
+
+
+def collect_secrets_state(
+    db_path: Path,
+    secrets_path: Path,
+    *,
+    force_all_dangling: bool = False,
+) -> SecretsState:
     """采集「悬空 secrets 条目」与「库内明文 api_key」（**只读**）。
 
     ⚠️ **「已知集合」必须可信**（F-1 / 2026-10-23 对抗审查 CRITICAL）：
@@ -544,6 +596,15 @@ def collect_secrets_state(db_path: Path, secrets_path: Path) -> SecretsState:
     ⇒ 「读表失败」与「已知集合为空」**分别记录**（``read_errors`` / ``known_keys``），
     两者任一成立 ⇒ 判为「**无法判定**」（``blocked_reasons`` 非空）⇒ 悬空条目
     **不判**（宁可不判，不可全判）、清理动作**拒绝执行**（退出码 2，不写任何文件）。
+
+    ⚠️ **``secrets.json`` 结构非法 = 不可判**（F-3 / 2026-10-23 对抗审查 major）：
+    「顶层不是对象」/「``api_keys`` 段不是对象」⇒ 运行期
+    ``packages.core.secrets_store._read_file_fresh()`` 会 log warning 并返回 ``{}``
+    ⇒ 那是「**凭据读不出来**」，不是「没有凭据」⇒ 计入 ``read_errors`` ⇒ 退出码 2
+    （否则**真出问题却报绿**：巡检说合规、运行期拿不到 key）。
+    ⚠️ **反向不变量（不得过修）**：``secrets.json`` **不存在**、**无 ``api_keys``
+    段**、或该段为 ``null`` ⇒ 运行期 ``if api_keys is None: return {}`` **不报
+    warning** ⇒ **合法空状态** ⇒ **不得**判不可判（仍走常规口径）。
     """
     state = SecretsState(db_path=str(db_path), secrets_path=str(secrets_path))
 
@@ -559,12 +620,38 @@ def collect_secrets_state(db_path: Path, secrets_path: Path) -> SecretsState:
             # **不得**降级成一条 note 后照报「合规」（那正是 F-1 的同族形状）。
             state.notes.append(f"secrets.json 解析失败：{exc}")
             state.read_errors.append(f"secrets.json 解析失败：{exc}")
-            raw = {}
-        api_keys = raw.get("api_keys") if isinstance(raw, dict) else None
-        if isinstance(api_keys, dict):
-            state.secrets_keys = sorted(str(k) for k in api_keys)
         else:
-            state.notes.append("secrets.json 无 api_keys 段")
+            # ⚠️ **结构非法 = 不可判**（对抗审查 F-3，2026-10-23）：
+            # 运行侧 ``packages.core.secrets_store._read_file_fresh()`` 对
+            # 「顶层不是对象」/「api_keys 段不是对象」会 log warning 并**返回 {}**
+            # ⇒ 运行期**拿不到凭据**。那不是「没有凭据」，是「**凭据读不出来**」
+            # ⇒ 若只记一条 note 就照报「合规」（exit 0）⇒ **真出问题却报绿**，
+            # 且三条路径口径分裂（巡检报绿 / prune 拿「空 api_keys」当基线 /
+            # migrate 静默把用户原有键重置为 {}）⇒ 一律计入 ``read_errors``。
+            if not isinstance(raw, dict):
+                reason = (
+                    f"secrets.json 顶层必须是对象，实际是 {_json_type_name(raw)}"
+                    "（运行期会打 warning 并按「无凭据」处理 ⇒ 不可判）"
+                )
+                state.notes.append(reason)
+                state.read_errors.append(reason)
+            else:
+                api_keys = raw.get("api_keys")
+                if api_keys is None:
+                    # ✅ **合法空状态**（反向不变量，不得过修）：运行期
+                    # ``if api_keys is None: return {}`` **不报 warning**
+                    # （键不存在与值为 ``null`` 在运行期**不可区分**）⇒ 合法。
+                    state.notes.append("secrets.json 无 api_keys 段")
+                elif not isinstance(api_keys, dict):
+                    reason = (
+                        "secrets.json 的 api_keys 段必须是对象，实际是 "
+                        f"{_json_type_name(api_keys)}"
+                        "（运行期会打 warning 并按「无凭据」处理 ⇒ 不可判）"
+                    )
+                    state.notes.append(reason)
+                    state.read_errors.append(reason)
+                else:
+                    state.secrets_keys = sorted(str(k) for k in api_keys)
     else:
         state.notes.append("secrets.json 不存在")
 
@@ -656,6 +743,22 @@ def collect_secrets_state(db_path: Path, secrets_path: Path) -> SecretsState:
             "无法区分「全部是死键」与「根本没有引用数据」"
         ]
         return state
+    # ⚠️ **交集闸门**（2026-10-23 Lead 自踩事故暴露的 critical）：
+    # 「已知集合**非空**」**不等于**「这个库属于这个 secrets 文件」。
+    # 误把 ``--db`` 指到**另一个库**（打错路径 / 别的项目 / 合成夹具）时，
+    # 已知集合照样非空，但**与 secrets 的键一个都对不上** ⇒ 每个键都被判悬空
+    # ⇒ ``--prune-dangling --apply`` 会**清空整个凭据库**，而退出码仍是 0（报「合规」）。
+    # ⇒ **交集为空 ⇒ 悬空条目不可判**（**不是**「全悬空」）⇒ 清理动作必须拒绝执行。
+    if state.secrets_keys and not force_all_dangling:
+        secrets_lower = {k.lower() for k in state.secrets_keys}
+        if not (secrets_lower & known):
+            state.dangling_undecidable = (
+                f"secrets.json 里的 {len(state.secrets_keys)} 个键**一个都**对不上运行库里的"
+                "任何档案 / 连接 / provider ⇒ 这个运行库很可能**不是**本 secrets 文件所属项目的库"
+                "（或 secrets 存的是别的形态的键）⇒ 悬空条目**不可判**"
+            )
+            state.notes.append(state.dangling_undecidable)
+            return state
     state.dangling_keys = [k for k in state.secrets_keys if k.lower() not in known]
     return state
 
@@ -674,6 +777,11 @@ def decide_secrets(state: SecretsState) -> dict:
     if n_plain:
         issues.append(f"库内明文 api_key {n_plain} 行")
     blocked = list(state.blocked_reasons)
+    if state.dangling_undecidable:
+        # ⚠️ 「悬空**不可判**」也是一种不可判 ⇒ 退出码 2（**不得**报「合规」）。
+        # ⚠️ 与「读表失败」分开记：读表失败时**连库内明文都数不清**；
+        # 本条只否证「悬空」这一个判断（库内明文那部分照样可信、照样报）。
+        blocked.append(state.dangling_undecidable)
     if blocked:
         return {
             "ok": False,
@@ -715,7 +823,10 @@ def render_secrets_text(state: SecretsState, verdict: dict) -> str:
     if verdict["ok"]:
         lines.append("结论: 合规（无悬空条目、库内无明文 api_key）")
     elif verdict.get("blocked"):
-        lines.append("结论: 无法判定（读不到运行库 ⇒ 不判定悬空条目）")
+        # ⚠️ **不可判的原因不止一种**：读不到运行库 / 已知集合为空 /
+        # ``secrets.json`` 结构非法（F-3）⇒ 结论行**不预设**具体原因，
+        # 逐条原因在下方「无法判定:」明细里给出（**文本模式必须说清**）。
+        lines.append("结论: 无法判定（诊断不可信 ⇒ 不判定悬空条目；原因见下方明细）")
     else:
         lines.append("结论: 不合规（" + "；".join(verdict["issues"]) + "）")
     if verdict.get("blocked"):
@@ -748,7 +859,20 @@ def migrate_secrets(state: SecretsState, apply: bool) -> dict:
       **再**清库内明文 ⇒ 顺序保证「key 已落盘」先于「明文被清」。
 
     ⚠️ 这是**改用户凭据数据**的动作：执行前必须由用户明确授权。
+
+    ⚠️ **不可判 ⇒ 一律拒绝执行**（对抗审查 F-3，2026-10-23）：
+    ``secrets.json`` **结构非法**（顶层 / ``api_keys`` 段不是对象）或「读不到运行库」
+    ⇒ 运行期本来就只能解析出**空凭据** ⇒ 若拿它当**空基线**落盘，
+    就是**静默把用户原有键重置为 {}** ⇒ 必须**响亮失败**（退出码 2），
+    且**不写任何文件、不写备份、不清任何库内明文**。
     """
+    if state.blocked_reasons:
+        raise RuntimeError(
+            "无法判定凭据状态，已中止迁移（**未写任何文件、未清任何库内明文**）："
+            + "；".join(state.blocked_reasons)
+            + "。⚠️ 结构非法时**绝不可**把「读不出来的空凭据」当成空基线落盘"
+            "（那会静默抹掉用户原有键）。"
+        )
     actions: list[str] = []
     for pid in state.plaintext_profiles:
         actions.append(f"secrets.json[api_keys][{pid}] = <当前 params_json.api_key>；清空该行明文")
@@ -769,13 +893,25 @@ def migrate_secrets(state: SecretsState, apply: bool) -> dict:
     if secrets_path.exists():
         try:
             loaded = json.loads(secrets_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                payload = loaded
         except (OSError, ValueError) as exc:
             raise RuntimeError(f"secrets.json 解析失败，已中止迁移：{exc}") from exc
+        # ⚠️ **顶层不是对象 ⇒ 拒绝**（F-3）：原先 ``payload = {}`` 会把用户的整个文件
+        # 替换成 ``{"api_keys": ...}`` ⇒ 静默抹掉原有内容。
+        if not isinstance(loaded, dict):
+            raise RuntimeError(
+                "secrets.json 顶层不是对象，已中止迁移（**未写任何文件**）"
+            )
+        payload = loaded
     api_keys = payload.get("api_keys")
-    if not isinstance(api_keys, dict):
+    if api_keys is None:
+        # ✅ 合法空状态（首次迁移：文件里还没有 api_keys 段）
         api_keys = {}
+    elif not isinstance(api_keys, dict):
+        # ⚠️ **api_keys 段不是对象 ⇒ 拒绝**（F-3）：原先一律重置为 ``{}``
+        # ⇒ **静默抹掉用户原有键**（且用户毫无察觉）。
+        raise RuntimeError(
+            "secrets.json 的 api_keys 段不是对象，已中止迁移（**未写任何文件**）"
+        )
     # ⚠️ **写前强制备份**（对抗审查 F-3，2026-10-23）：迁移要**重写整个** secrets.json
     # ⇒ 旧版本必须可回退（与 ``--prune-dangling`` 的纪律一致）。
     backup_path: Path | None = None
@@ -918,6 +1054,13 @@ def prune_dangling_secrets(state: SecretsState, apply: bool) -> dict:
     ⚠️ **坏文件必须响亮失败**：``secrets.json`` 解析不了 ⇒ **抛错中止**（CLI ⇒ 退出码 2），
     **不得**当成「没有悬空条目，什么都不用做」——那会让用户以为清理已做、实际文件
     仍坏着（且坏文件里的密钥状态无人知晓）。
+
+    ⚠️ **第三道保险：交集闸门**（2026-10-23 Lead 自踩事故暴露的 critical）：
+    「已知集合**非空**」**不等于**「这个库属于这个 secrets 文件」。把 ``--db``
+    指到**另一个库**（打错路径 / 别的项目 / 合成夹具）时，已知集合照样非空，
+    却与 secrets 的键**一个都对不上** ⇒ 每个键都被判悬空 ⇒ **一次清理清空整个
+    凭据库**，而退出码仍是 0（报「合规」）。
+    ⇒ 交集为空 ⇒ 悬空条目**不可判** ⇒ **拒绝执行**（退出码 2，零落盘）。
     """
     # --- 0) 先判「诊断是否可信」：读表失败 / 已知集合为空 ⇒ **拒绝清理** ---
     if state.blocked_reasons:
@@ -927,18 +1070,50 @@ def prune_dangling_secrets(state: SecretsState, apply: bool) -> dict:
             + "。⚠️ 「已知集合为空」**绝不可**被解读为「全部悬空」"
             "（否则一次误指 --db 就会清空用户全部凭据）。"
         )
+    # ⚠️ **交集闸门**（2026-10-23 Lead 自踩事故暴露的 critical）：
+    # 「已知集合**非空**」**不等于**「这个库属于这个 secrets 文件」——
+    # 把 ``--db`` 指到另一个库时，已知集合照样非空，却与 secrets 的键**一个都对不上**
+    # ⇒ 每个键都被判悬空 ⇒ **一次清理清空整个凭据库**，而退出码仍是 0（报「合规」）。
+    # ⇒ 交集为空 ⇒ 悬空条目**不可判** ⇒ **拒绝执行**（零落盘、退出码 2）。
+    if state.dangling_undecidable:
+        raise RuntimeError(
+            "secrets.json 的键与运行库的已知集合**零交集** ⇒ 悬空条目不可判，"
+            "已中止清理（**未写任何文件**）：" + state.dangling_undecidable
+            + "。⚠️ 请确认 --db 指的是**本项目**的运行库"
+            "（指错库会把好端端的凭据判成悬空并清空）。"
+        )
     secrets_path = Path(state.secrets_path)
     if not secrets_path.exists():
-        raise RuntimeError("secrets.json 不存在，无需清理")
+        # ✅ **文件不存在 = 合法状态**（还没迁过；运行期 ``load_api_keys`` 返回 {}
+        # 且**不报 warning**）⇒ 一个键都没有 ⇒ **没有可清理的条目**（不是错误）。
+        return {
+            "applied": False,
+            "actions": [],
+            "kept": [],
+            "note": "secrets.json 不存在（没有可清理的条目）",
+        }
     try:
         payload = json.loads(secrets_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"secrets.json 解析失败，已中止清理：{exc}") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError("secrets.json 顶层不是对象，已中止清理")
+        raise RuntimeError("secrets.json 顶层不是对象，已中止清理（**未写任何文件**）")
     api_keys = payload.get("api_keys")
+    if api_keys is None:
+        # ✅ **合法空状态**（运行期 ``if api_keys is None: return {}`` **不报 warning**）
+        # ⇒ 文件里一个键都没有 ⇒ **没有可清理的条目**（不是错误，也不是不可判）。
+        return {
+            "applied": False,
+            "actions": [],
+            "kept": [],
+            "note": "secrets.json 无 api_keys 段（没有可清理的条目）",
+        }
     if not isinstance(api_keys, dict):
-        raise RuntimeError("secrets.json 无 api_keys 段，已中止清理")
+        # ⚠️ **结构非法 ⇒ 拒绝**（F-3）：不得把「读不出来的 api_keys」当成
+        # 「没有悬空条目」照报合规，更不得拿它当基线落盘。
+        raise RuntimeError(
+            "secrets.json 的 api_keys 段不是对象，已中止清理（**未写任何文件**）"
+        )
 
     if not state.dangling_keys:
         return {"applied": False, "actions": [], "note": "没有悬空条目"}
@@ -1059,6 +1234,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--force-all-dangling",
+        action="store_true",
+        help=(
+            "**危险**：确认「secrets.json 的键与运行库的已知集合零交集」时**仍**按常规"
+            "判定悬空并执行清理。默认**拒绝**（退出码 2，零落盘）——因为「全部键都死」"
+            "与「--db 指到了别的项目的库」在数据上**不可区分**，而后者会**一次清空"
+            "整个凭据库**却仍报「合规」。只有确信 --db 指向的就是本项目的库、"
+            "且确实要清掉全部键时才用。"
+        ),
+    )
+    p.add_argument(
         "--json",
         action="store_true",
         dest="as_json",
@@ -1100,7 +1286,9 @@ def _run_push_mode(args: argparse.Namespace) -> int:
 def _run_secrets_mode(args: argparse.Namespace) -> int:
     db_path = Path(args.db)
     secrets_path = _resolve_secrets_path(args.secrets_file)
-    state = collect_secrets_state(db_path, secrets_path)
+    state = collect_secrets_state(
+        db_path, secrets_path, force_all_dangling=args.force_all_dangling
+    )
     verdict = decide_secrets(state)
 
     # 动作选择（**一个开关只管一件事**）：
@@ -1125,7 +1313,9 @@ def _run_secrets_mode(args: argparse.Namespace) -> int:
         if prune.get("applied"):
             # 清理后**重新采集并重新判定** ⇒ 输出的结论反映**清理后**的真实状态，
             # 而不是清理前的旧快照（否则用户看到「已清理」却仍是「不合规」）。
-            state = collect_secrets_state(db_path, secrets_path)
+            state = collect_secrets_state(
+                db_path, secrets_path, force_all_dangling=args.force_all_dangling
+            )
             verdict = decide_secrets(state)
         if prune.get("backup_path"):
             # ⚠️ 备份路径必须**看得见**（用户要知道凭据的旧版本在哪）。
@@ -1142,7 +1332,9 @@ def _run_secrets_mode(args: argparse.Namespace) -> int:
             print(f"ERROR: 凭据迁移失败：{exc}", file=sys.stderr)
             return EXIT_ERROR
         if migration.get("applied"):
-            state = collect_secrets_state(db_path, secrets_path)
+            state = collect_secrets_state(
+                db_path, secrets_path, force_all_dangling=args.force_all_dangling
+            )
             verdict = decide_secrets(state)
         if migration.get("backup_path"):
             # ⚠️ 备份路径必须**看得见**（用户要知道凭据的旧版本在哪；对抗审查 F-3）。
@@ -1171,15 +1363,27 @@ def _run_secrets_mode(args: argparse.Namespace) -> int:
         if migration is not None:
             payload["migration"] = {
                 "applied": migration["applied"],
-                "action_count": len(migration["actions"]),
+                # ⚠️ **``action_count`` = 实际落地的条数**（F-6）：dry-run 实际写入 **0** 条
+                # ⇒ 旧实现报的是**候选**数 ⇒ 机器消费方会把 dry-run 读成「已写入 N 条」。
+                # 「打算做 N 条」改用 ``candidate_count`` 表达 ⇒ 两个口径**同时可读**。
+                "action_count": len(migration["actions"]) if migration["applied"] else 0,
+                "candidate_count": len(migration["actions"]),
+                # ⚠️ **与文本模式同口径**（F-6）：冲突与备份位置**不得**只出现在文本里
+                # （机器消费方拿不到冲突信息、也不知道备份在哪）。
+                "conflicts": migration.get("conflicts", []),
+                "backup_path": migration.get("backup_path"),
                 "note": migration["note"],
             }
         if prune is not None:
             payload["prune"] = {
                 "applied": prune["applied"],
-                "action_count": len(prune["actions"]),
+                "action_count": (
+                    len(prune.get("removed", [])) if prune["applied"] else 0
+                ),
+                "candidate_count": len(prune["actions"]),
                 "removed": prune.get("removed", []),
                 "kept": prune.get("kept", []),
+                "conflicts": prune.get("conflicts", []),
                 "backup_path": prune.get("backup_path"),
                 "note": prune["note"],
             }
