@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+## [3.10.1] - 2026-10-23
+
+> **⚠️ 发版状态（2026-10-23 20:56 记录）：本版本「已归档、未发布」。**
+> **已做**：CHANGELOG 归档、六处版本号对齐（pyproject / package.json / package-lock.json / uv.lock / plugin.json / `skills/novelos/SKILL.md`）、`uv sync --extra dev` 刷新 editable 元数据、`openapi.json` 重导出、全量 pytest **4359 passed / 0 failed**、ruff 全过。
+> **未做**：**发版前全量突变闸门（档③ 476 条串行）被手动中止**（用户判断耗时过长）⇒ 实测跑到 **CAUGHT 169 / SURVIVED 0 / ABORT 0 / INVALID 0**（约 35%，剩余约 307 条未跑）⇒ **不得声称「476/476 已验」**；**未打 tag**（应为轻量 `v3.10.1`）；**未推远端**。
+> **中止后的残留已处置**：kill 时进程停在 `packages/core/api/routers/model_configs.py` 的突变态 ⇒ 写回 `git show HEAD:<path>` 的 blob 字节后 sha256 与突变日志记录的「还原校验 OK」值**逐位一致**（`64c2433ffa1d1624…`）；`.mutbak*` 归零（含一个 2026-10-15 的历史残留）；生产源码 `MUTATION-` 标记 0。
+> ⚠️ **本次踩到一个真实陷阱**：本仓 `core.autocrlf=true` **且无 `.gitattributes`** ⇒ `git checkout --` 会把 LF 工作树文件**翻成 CRLF**（sha 变、指纹变）⇒ **还原突变态不要用 `git checkout --`**，要用执行器自己的 `.mutbak` 备份或写回 blob 字节并**用 sha256 对账**。
+> **完整交接**：`docs/impl/reviews/handoff-2026-10-23-release-3.10.1.md`。
+
 ### Fix（2026-10-23 晚 · 对抗审查 B **第三轮复审**修复批（1 major + 5 minor）+ 用户报的「删除旧模型档案 409」死结）
 
 > **来源**：① 对抗审查员 B 对 `945d74d` 的**第三轮复审**（**VERDICT: FAIL**）⇒ **1 条 major**（归属闸门可被「别名型键」伪造 ⇒ 一次 prune 删掉真凭据还报「合规」）+ **5 条 minor**；② **用户实测报 bug**：「添加了新模型并绑定后，想删除老的模型档案就报错 409」。

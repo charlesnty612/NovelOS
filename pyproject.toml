@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "novelos"
-version = "3.10.0"
+version = "3.10.1"
 description = "NovelOS - local-first novel writing operating system"
 requires-python = ">=3.11"
 # 授权：AGPL-3.0-only（2026-10-19 裁决，见 README「授权状态」）。

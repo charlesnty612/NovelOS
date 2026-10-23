@@ -19,7 +19,7 @@
   ],
   "metadata": {
     "version": "0.1.0",
-    "novelosVersion": "3.10.0"
+    "novelosVersion": "3.10.1"
   },
   "skills": [
     "./skills/"
