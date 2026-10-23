@@ -5,6 +5,136 @@
 
 ## [Unreleased]
 
+### Review（2026-10-23 全面审查·第二轮）：报告 + 台账 + AGENTS 事实订正（+ 批次三十工作树入库）
+
+> **来源**：用户指令「全面审查本项目」→「新增几个未涉及的角度去审查」→ 再「新增 2 个 subagent」。
+> 报告全文：`docs/impl/reviews/full-review-round2-2026-10-23.md`；未修项台账：`docs/impl/reviews/remaining-debt-2026-10-23.md`（新增「四、第二轮新增项」D-0~D-19）。
+> **零真实 LLM 调用、零内容仓接触、未改真实 dev 库业务内容**；本轮未做任何 git 写操作，直到本条提交。
+
+#### 1. 审查口径（与第一轮的区别）
+
+第一轮（A/B/C 三路）已覆盖架构/契约/文档/量具、质量/题材、脚本/运维/数据。
+**第二轮换了方法**：不是再扫一遍面，而是①对第一轮的**声称本身**做复算（声称 ≠ 实测）；
+②补 6 个**第一轮明确没碰过的面**（安全隐私 / 备份恢复往返 / CI 供应链 / 测试判别力 / 缓存键与参数 / 三仓边界）；
+③补今天**明写「未摸」**的 `packages/domain`（6196 行）+ 33 个迁移。
+**9 个只读子代理铺广度，critical 与 major 全部由 Lead 亲自读码 + 探针复算后才入册**；子代理给的数字一律自己复算，分歧处两边都写。
+
+#### 2. 结论（1 critical / 16 major / 若干 minor）
+
+- **🔴 critical — 质量门 fail-open（Lead 已端到端复现）**
+  `packages/domain/chapter/draft_resolver.py:88-91`（库打不开）与 `:108-109`（表缺失/查询异常）都 `return None`，
+  **其 docstring:83 明写「读库失败 ⇒ None」——设计上把 DB 故障与「该章无草稿」列为同一件事**；
+  ⇒ `quality/service.py:811` 的 `(resolved or {}).get("content") or ""` 得空串 ⇒ `scoring.py:439-441` `if not draft: return 100, issues`
+  ⇒ **该章从未被评估却拿到满分 0 issue**，门禁消费点 `chapter_commit/gate.py:473` 放行。
+  **Lead 实测**（临时库 + `DROP TABLE drafts`）：`resolve_draft → None`（不抛错）⇒ `score_style → score=100 issues=0`。
+  ⚠️ 触发面不是「DB 整体不可用」（那样前面的读会先抛错），而是 **`drafts` 表不可用**（部分迁移 / 缺该表的备份 / 表损坏）。
+
+- **🔴 major — 装配缓存键第 6/7 次漏维度（Lead 已复现）**
+  director 侧缺 **5 个维度**：`hooks`（伏笔台账）/ `narrative_debts` / `plot_events`+`branches` /
+  `projects.foreshadow_overdue_chapters` / **director 侧** `chapters.title`（writer 侧有 `title_fp`，director 没有）。
+  **Lead 实测**：改伏笔台账 / 改章标题 ⇒ **不重装、payload 不变**；对照组「改项目前提」正确 miss（证明装置有效）。
+  **更关键的是共因**：这些表与列的**写路径一律只 `commit()`、不推 `state_version`** ⇒ **光补维度仍会脏命中**。
+
+- **🔴 major — 备份「有写无读」**：真实 openssl 往返实测**跑通**（49 表逐表 sha256 全等），但仓内**无 restore 工具 / 无 runbook**；
+  带 `-wal`/`-shm` 残留时恢复**静默失效**（49 表→1 表）而 **`integrity_check` 报绿**；解密失败**仍会破坏活库**（无原子写）；
+  `backup_db.py` **默认明文**备份（`--encrypt` 是 opt-in）、加密后**从不验证密文可解**、密钥缺失**静默生成新密钥**。
+
+- **🔴 major — 两条隐私事实（已不可撤回 / 一次误操作即发布）**
+  ① 内容仓**仍挂 GitHub remote**（`charlesnty612/NovelOS-Content.git`）且**本地领先 17 个提交** ⇒ 硬规则 5「内容仓不推 GitHub」**无技术守卫**；
+  ② 操作痕迹落在**软件仓 `docs/evaluation/`** 且**已随 `origin/master` 上 GitHub**（含真实 chapter_id / project_id 与逐章评分）⇒ 硬规则 5「操作痕迹在 NovelOS-Artifacts」**不成立**（规定的痕迹仓全仓零写入）。
+
+- **🔴 major — CI 从未真正跑过 Windows 并发路径**：`pytest-xdist` 只在 `[dependency-groups]`，而 CI 装的是 `pip install -e ".[dev]"`
+  （只含 `[project.optional-dependencies]`）⇒ `-n 4` 那步必然不认 ⇒ CI 历史 47 次 **34 红**。
+- **🔴 major — 密钥仍在库里明文**：活库 2 行 `model_profiles` 带真值 api_key，而 `secrets.json` 唯一条目**已悬空** ⇒「密钥进文件不进库」**未生效**。
+- **🔴 major — 批次三十的 CLI 闸门无看守**：把 `main` 换成恒返回 0 ⇒ **8 条用例全绿**（helper 层有守、CLI 层没有）。
+- **🔴 major — 风控门两条子句零可区分**：`_has_high_risk_change`（`pipeline_common.py:518`）的 `facet=="definition"` / `world_kind=="rule"`。
+  **Lead 插桩量化**：`tests/workflow`+`tests/api` 全量跑完该函数被调用 **41 次**，其中 `facet=='definition'` **0 次**、`world_kind=='rule'` **0 次**
+  ⇒ 删掉两条子句，**41 次调用的判定结果一次都不会变** ⇒ **没有任何测试会红**；且该文件**无突变规格**。
+  ⚠️ 插桩坑留痕：`commit.py` 是 `from .pipeline_common import _has_high_risk_change`（**导入时绑定**）⇒ 只补 `pipeline_common` 的模块属性**拦不到调用**（首次插桩记录 0 条即此因），必须同时补调用方模块里的名字。
+- **🔴 major — 外发投稿包取错稿**：`exporter/builder.py:122-123` 取「最新 draft」，而 `commits` 表**没有 `draft_version` 列** ⇒ reopen 后外发带未过审稿。
+- **其余 major**：删角色留孤儿 `relationships` 行（0022 移除 FK ⇒ `foreign_key_check` 看不见）；核心机制层 5 文件 import domain 且**零机器看守**；
+  版本一致性机器看守只覆盖 6 处中的 3 处；`content_sync` 三条静默形态；快通道在**章节页是第二个写入口**且与项目弹窗**语义相反**；
+  `useChapterRunOrchestration` 状态机 hook 零专属测试。
+
+#### 3. 台账 14 条「现状证据」复算结果（**5 条不成立**）
+
+| 条目 | 原声称 | 实测 |
+|---|---|---|
+| A-1 | 227 个 .py 中 **72** 个有自身规格；25 个包目录零规格 | 规格 76 / 突变 436 / 覆盖目标 123；packages **98 有 / 129 零**；零规格目录 **23** 个 ⇒ **数字口径过期** |
+| A-3 | `domain→core = 72`、`core→domain = 136` | **41 / 47**（行级）；`core→domain` 非 API 层 = **5 文件 / 8 条 import** ⇒ **数字不成立**（「无环」「无机器看守」成立） |
+| C-1 | scripts **12 有 / 19 零** | 实测 **18 有 / 14 零**（共 32）⇒ **数字需订正** |
+| C-3 | `eval_regression` / `m1_report` 默认写仓库 `docs/` | **已修**（批次二十九）⇒ **台账 stale（已修未销）** |
+| C-7 | 「真实 openssl 往返从未实跑」（证据：测试用 fake openssl） | **本条当天即写错**：fake 只用于 `migrate_backups_to_sync.py`；`backup_db.py` 自 `e467cf3` 起就用真实 openssl ⇒ **应改为「缺的是恢复侧」** |
+
+#### 4. AGENTS.md 事实订正（3 处）+ 硬规则深化（1 处）+ 坑区新增（1 条）
+
+- **订正**：「本地 23 个 tag 一个都没推过 ⇒ 远端零 tag」→ 远端现已有全部 23 个、与本地逐位一致（§四 段原句与 §六 矩阵口径不一致，已加括注）。
+- **订正**：「存量挂账已于 2026-09-13 V4.0 批次全部清零」→ 只对当日成立；之后又长出 `types.ts`（1352→1861）与 `AiSettingsPage.tsx`（1384→1648）两个**事后新增违规**，另两个超大测试文件从未拆过。
+- **订正**：`packages/domain/` 的子包列表里的 `hooks` 是 1 行空壳，真实实现在 `domain/ledger/`。
+- **深化硬规则 2（装配缓存键）**：补「**只补键维度是治标**」——根治是「键维度齐全 **且** 写路径推 `state_version`」两条同时满足。
+- **坑区新增 1 条**：「把『读不到』折叠成『没有』，门禁就会给从未评估的对象发满分」——凡返回空结果的读取函数必须能区分「失败」与「空」，且上游要 **fail-closed**；这类缺陷**正向测试抓不到**，只有**故障注入**能抓。
+
+#### 5. 本批收尾闸门（实测）
+
+`ruff` 全绿；全量 `pytest -n 20 -q` → **3900 passed / 2 failed / 1 skipped / 1 xfailed**（186.33s）；
+⚠️ **两条红是同一根因且属环境 + 测试非自足**：本机 `%TEMP%\pytest-of-AiStation` 一旦被创建即**连 owner 都拒绝访问**
+（`icacls` 拒绝列举），而本仓有**两处测试会再起一个 pytest 子进程**且**不隔离临时目录** ⇒ 子进程 exit 1 ⇒ 外层断言红；
+**换 `--basetemp` 后仍红**（子进程不受外层参数影响）⇒ 故 CHANGELOG 批次三十声称的「3902 passed / 0 failed」**今日不可复现**。
+⚠️ CI 在 Linux 上 `/tmp` 正常 ⇒ **该故障模式 CI 永远看不见**（已登记为台账 D-17）。
+本次改动为**文档 + 台账**（外加批次三十的既有工作树入库），未触碰任何被测代码路径 ⇒ 上述 2 红**不是本批引入**。
+
+### Fixed（2026-10-23 批次（三十）：量具盲区第二次 + codegen 全文级漂移闸门）
+
+> **来源**：批次二十九 §4 的未完成项（A-2 半成品已回退）+ 台账 A-2 / C-2。零真实 LLM、零内容仓接触。
+> 本批由 Lead 亲自落地并复算（两名执行成员在 T1 只读诊断阶段给出**独立同数**后，实改由主会话串行完成，避免与突变实跑抢源码）。
+
+#### 1. A-2 收口：`_COUNTER_MODULES` 改为**派生** + 断言改为如实口径
+
+**先验判断被推翻（留痕）**：本仓自批次二十三起相信「缓存命中路径 = **1 条**连接」。本批用**三套互不依赖的量具**证明真值是 **2 条**：
+
+| 量具 | director | writer |
+|---|---|---|
+| **A 地面真值**（patch `sqlite3.connect`，任何模块绑定方式都拦得住） | conns=**2** / sql=17 | conns=**2** / sql=21 |
+| **B 旧手挑 10 项清单**（= 当时仓库现状） | conns=1 / sql=10 | conns=1 / sql=14 |
+| **C 10 项 + `agent_runtime.prompts`**（= 交接单里的 2 / 11） | conns=**2** / sql=11 | conns=**2** / sql=15 |
+
+（A 的 sql 含每连接 3 条 PRAGMA 固定成本 ⇒ 17 = 13 + 4；B/C 在真实连接建立之后才挂 trace，只含业务查询 ⇒ 11 = 10 + 1。两口径差额可**逐条对账**，不是估算。）
+
+**第 2 条连接归属（逐帧）**：`director_input.py:446` / `writer_input.py:479` → `prompts.py:330::active_prompt_label` → `prompts.py:141::get_active_prompt` → `db.py:90::get_connection`。它读 `prompts` 表取 `prompt_label`，而 **`prompt_label` 本身就是缓存键维度** ⇒ 必须在查缓存**之前**算出来 ⇒ **每次装配必开一条连接：这是结构性要求，不是夹具噪声，也不是可顺手省掉的开销**。
+
+**同一清单上的第二个独立缺陷（新发现）**：旧 10 项里另有 **3 项是空转项** —— `context_engine/canon.py`、`context_engine/relevance.py`、`story_state/service.py` 三个文件**没有任何 `get_connection` 出现**（grep 0 命中），旧 `_count_db_access` 的 `if real is None: continue` 把它们静默跳过 ⇒ **从未拦截过任何东西**。即「清单看起来齐全」是假的：既漏了 1 个真开点，又有 3 个摆设项。
+
+做法：
+- `_COUNTER_MODULES` 改为 `_derive_counter_modules()`：AST 扫 `packages/` 下**模块级** `from packages.core.db import ... get_connection` 的模块（含 `__init__` 门面归一为包名；排除局部 `def get_connection` 的 `builders_common/common.py` 与 `packages.core.db` 自身，否则重复计数）。
+- 断言改 `conns == 2` / `sql == 11`（director）、`15`（writer），并**钉住夹具状态依赖**：本文件不往 `agents` 表插行 ⇒ `get_active_prompt` 走 fallback ⇒ prompts 段 1 条 SELECT；若将来夹具插了 `agents` 行，则变 **12 / 16**（须同步改断言）。
+- 新增看守 `test_counter_modules_are_derived_and_cover_both_connection_points`：派生须**超出手挑**、须含 `agent_runtime.prompts`、3 个空转项**仍须无绑定**、`packages.core.db` 与局部 def 门面**不得入清单**。
+
+判别：全量 **3902 passed / 1 skipped / 1 xfailed**（+9 用例，**零删减**）；**突变验证**（内存注入，零磁盘改动）：把清单换回旧手挑 10 项 ⇒ 两条 cache_hit 用例 `assert counters["conns"] == 2` 变红 + 看守用例「疑似被改回手挑」变红（**3 failed**）。
+
+⚠️ **突变第一版静默打空（必须留痕）**：改完清单后用例仍 **2 passed**，看着像「突变存活 / 新断言无判别力」。真因：`tests/__init__.py` **不存在**而 `tests/unit/__init__.py` **存在** ⇒ pytest 的 prepend importmode 把该文件导入为 `unit.test_context_peek_convergence`，而突变插件 import 的是 `tests.unit.*` ⇒ **两个不同的模块对象**，赋值改的是没人在用的那份。**「突变被跳过」≠「突变存活」**——判「突变存活」之前必须先证明突变真的作用到了被测模块上（改法：在 `sys.modules` 里按后缀找 pytest 实际使用的那个对象）。
+
+#### 2. C-2 收口：codegen 产物**全文级**漂移闸门（`--check`）
+
+**既有覆盖的精确边界（不夸大「零看守」，也不缩小）**：`tests/api/test_openapi_contract.py` 已有**集合级**看守（`info.version` 一致 / `paths` 集合相等 / `components.schemas` **名集合**相等）。实测其判别力边界：把 `AdoptRequest.content` 的 `type` 由 `string` 改成 `number`（**名字集合完全不变**）⇒ 那三条集合断言**全部通过** ⇒ **字段级漂移（已有 schema 内部的类型 / 可选性 / enum / 描述变化）此前无任何机器看守**。
+
+做法：
+- `scripts/export_openapi.py` / `scripts/gen_frontend_types.py` 各加 `--check`：一致 → 退出码 0；漂移或产物缺失 → 非 0；**绝不写盘**（`--out` 只作被校验对象）。失败信息给出**首个差异行 + 两侧原文**，并打出 `info.version` 与解释器路径，便于一眼区分「真漂移」与「解释器不对（系统 python 读成 `dev`）」。
+- 生成逻辑抽成 `render()` 纯函数 ⇒ 写盘与校验**逐字同源**（不会出现「生成用一套、校验用另一套」）。
+- 比对实现收敛到**单点** `scripts/_codegen_check.py`：两处若各写一套，等于同一个闸门对两份产物给不同判定（本仓坑区「两套实现口径分叉」形状）。
+- 配套 `tests/api/test_codegen_artifacts.py` **8 例**（干净树两份产物一致 / 漂移必被抓 / 换行差异不算漂移 / 缺失算漂移 / `--check` 不写盘 / **字段级漂移必被抓**）。
+
+**⚠️ 比对必须换行归一，且必须按「字节」读（踩坑留痕）**：本仓无 `.gitattributes`，且本机 `core.autocrlf=true` ⇒ git blob 存 **LF**（实测 `git show` blob CRLF=0）、Windows 工作树 **CRLF**（实测全量 CRLF）、`Path.write_text` 也会把 `\n` 翻成 `\r\n`。若逐字节比对，这道闸门会在「不同平台 / 不同 `core.autocrlf` 设置」下给出**不同答案**——那是环境假信号，不是 schema 漂移。
+第二层坑：第一版用 `Path.read_text()` 读产物 —— 它走 text mode、universal-newline 会**在读入时就把 CRLF 翻成 LF** ⇒ 换行归一成了**死代码**，而行为上一切正常；实证是「把归一改成恒等」这个等价突变下看守用例**仍然全绿**（说明它在测的不是它声称的东西）。改为 `read_bytes().decode("utf-8")` 后才让归一**真正承重**（撤掉它 ⇒ 4 条用例红）。
+
+**当前产物状态（本批实测）**：两份生成物与重新生成结果**逐字节一致**（`apps/web/openapi.json` 524586 B / 109 paths / 145 schemas；`apps/web/src/api/types.generated.ts` 96925 B / 145 interfaces）⇒ 干净树上 `--check` 为**绿**，是真闸门而非一上线就红的假警报。
+
+判别：`tests/api/test_codegen_artifacts.py` 8 例；新增 `tests/mutation_specs/l21_codegen_check.py` **3 条**突变，`run_spec --all --changed` 实跑 **3/3 CAUGHT**（`CG-ALWAYS-OK` 闸门恒真 / `CG-NO-NEWLINE-NORM` 去掉换行归一 / `CG-NO-MISSING` 产物缺失不判漂移）。
+⚠️ 刻意**不**收 `read_bytes` → `read_text` 这一条：它是**等价突变**（universal-newline 恰好也把 CRLF 归一，行为不可观测）——按纪律「突变 `[SURVIVED]` 先判等价，再判缺守门测试」，不为一个不可观测的差异去补一条写不出来的用例。
+
+#### 3. 本批收尾闸门（实测）
+
+`tree_fingerprint` **728 文件 / `d53dc4d8693f384a84989829f394a5bb7b94436e8c863ccf217d47e9893dd73e`**（基线 725/`6d2561b7…`；+3 = `scripts/_codegen_check.py`、`tests/api/test_codegen_artifacts.py`、`tests/mutation_specs/l21_codegen_check.py`）→ `ruff` 全绿 → `pytest -n 20 -q` **3902 passed / 1 skipped / 1 xfailed**（176.59s）→ `run_spec --all --changed --precheck` **3 条 / 0 问题** → 实跑 **3/3 CAUGHT** → 残留清点：`.mutbak*` **0**、`MUTATION-` 标记 **0**、三处源文件关键行已逐字恢复。
+
 ### Fixed（2026-10-23 批次（二十九）：突变闸门盲区修复 + 台账 C-1 切片与 C-3）
 
 > **来源**：批次二十八发现的「`--changed` 不看新规格」盲区 + `docs/impl/reviews/remaining-debt-2026-10-23.md` 的 C-1（切片）/ C-3。零真实 LLM、零内容仓接触。

@@ -4,6 +4,7 @@
 
     python scripts/export_openapi.py
     python scripts/gen_frontend_types.py
+    python scripts/gen_frontend_types.py --check   # 只校验漂移，不写盘（漂移 → 退出码 1）
     # 或一键：npm run gen:types （apps/web 下）
 
 职责：
@@ -18,12 +19,22 @@
   ``endpoints.ts`` 仍是运行时权威；本文件仅作为「后端 schema 漂移」的
   机器可读对照面（契约测试断言关键字段集）。
 - 再生成完全确定性（schema 顺序稳定），可安全入库、可 diff 审查。
+
+⚠️ ``--check`` 的比对口径与 ``scripts/export_openapi.py`` **共用同一实现**
+（``scripts/_codegen_check.py``）：换行归一后比较。本仓无 ``.gitattributes`` 且
+``core.autocrlf=true``，git blob 存 LF、Windows 工作树是 CRLF ⇒ 不归一会让闸门
+在不同平台/不同 git 配置下给出不同答案，那是假信号不是漂移。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts._codegen_check import check_artifact  # noqa: E402
 
 
 def _ts_type(schema: dict, schemas: dict) -> str:
@@ -74,25 +85,12 @@ def _interface(name: str, schema: dict, schemas: dict) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="生成 types.generated.ts")
-    parser.add_argument(
-        "--openapi",
-        type=Path,
-        default=Path("apps/web/openapi.json"),
-        help="openapi.json 路径",
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=Path("apps/web/src/api/types.generated.ts"),
-        help="生成文件路径",
-    )
-    args = parser.parse_args()
+def render(schema: dict) -> str:
+    """把 OpenAPI schema 渲染成 ``types.generated.ts`` 文本。
 
-    schema = json.loads(args.openapi.read_text(encoding="utf-8"))
+    写盘与 ``--check`` 共用本函数 ⇒ 两条路径逐字同源（不会出现「生成用一套、校验用另一套」）。
+    """
     schemas = schema.get("components", {}).get("schemas", {})
-
     out = [
         "/* eslint-disable */",
         "/**",
@@ -106,8 +104,49 @@ def main() -> int:
     for name in sorted(schemas):
         out.append(_interface(name, schemas[name], schemas))
         out.append("")
-    args.out.write_text("\n".join(out), encoding="utf-8")
-    print(f"types.generated.ts written: {args.out} ({len(schemas)} interfaces)")
+    return "\n".join(out)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="生成 / 校验 types.generated.ts")
+    parser.add_argument(
+        "--openapi",
+        type=Path,
+        default=Path("apps/web/openapi.json"),
+        help="openapi.json 路径",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=Path("apps/web/src/api/types.generated.ts"),
+        help="生成文件路径",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="只校验漂移、不写盘：一致 → 0，漂移或缺失 → 非 0",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.openapi.exists():
+        print(f"MISSING：openapi 输入不存在：{args.openapi}", file=sys.stderr)
+        return 2
+
+    schema = json.loads(args.openapi.read_text(encoding="utf-8"))
+    n_ifaces = len(schema.get("components", {}).get("schemas", {}))
+    rendered = render(schema)
+
+    if args.check:
+        ok, msg = check_artifact(args.out, rendered)
+        print(
+            f"{msg}\n    (source={args.openapi}, interfaces={n_ifaces})",
+            file=sys.stdout if ok else sys.stderr,
+        )
+        return 0 if ok else 1
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(rendered, encoding="utf-8")
+    print(f"types.generated.ts written: {args.out} ({n_ifaces} interfaces)")
     return 0
 
 
