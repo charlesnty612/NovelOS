@@ -356,7 +356,11 @@ def test_secrets_migrate_apply_moves_key_to_file(mod, tmp_path, capsys) -> None:
 
 
 def test_secrets_migrate_apply_keeps_existing_entries(mod, tmp_path, capsys) -> None:
-    """``--apply`` 不得丢掉 secrets.json 里已有的其它条目。"""
+    """``--apply`` 不得丢掉 secrets.json 里已有的其它条目。
+
+    ⚠️ **行为变更（修法 C）**：``--migrate`` 也要过归属闸门 ⇒ 本夹具只有 provider
+    级别名键（无实体 id 键）⇒ 显式声明归属（``--force-all-dangling``）。
+    """
     db = tmp_path / "novelos.db"
     _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
     secrets = tmp_path / "secrets.json"
@@ -366,7 +370,12 @@ def test_secrets_migrate_apply_keeps_existing_entries(mod, tmp_path, capsys) -> 
         encoding="utf-8",
     )
 
-    mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets), "--apply"])
+    mod.main(
+        [
+            "secrets", "--db", str(db), "--secrets-file", str(secrets),
+            "--apply", "--force-all-dangling",
+        ]
+    )
     capsys.readouterr()
 
     payload = json.loads(secrets.read_text(encoding="utf-8"))
@@ -479,12 +488,18 @@ def test_migrate_and_prune_together_reach_compliance(mod, tmp_path, capsys) -> N
 
 
 def test_prune_dangling_apply_keeps_db_plaintext_untouched(mod, tmp_path, capsys) -> None:
-    """清理悬空条目**不动库**（它只管 secrets.json；清库内明文是 --migrate 的事）。"""
+    """清理悬空条目**不动库**（它只管 secrets.json；清库内明文是 --migrate 的事）。
+
+    ⚠️ **行为变更（修法 A）**：归属闸门只认实体身份 ⇒ 补一个实体 id 键（否则空转）。
+    """
     db = tmp_path / "novelos.db"
     _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
     secrets = tmp_path / "secrets.json"
     secrets.write_text(
-        json.dumps({"api_keys": {"mprof_dead000000": "sk-x"}}, ensure_ascii=False),
+        json.dumps(
+            {"api_keys": {"mprof_live01": "sk-y", "mprof_dead000000": "sk-x"}},
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -693,21 +708,32 @@ def test_secrets_mode_reports_unknown_when_db_unreadable(mod, tmp_path, capsys) 
 
 
 def test_read_failure_and_empty_known_set_are_distinguished(mod, tmp_path) -> None:
-    """「读表失败」与「已知集合为空」是**两件事** ⇒ 必须能区分开。"""
+    """「读表失败」与「已知集合为空」是**两件事** ⇒ 必须能区分开。
+
+    ⚠️ **行为变更（修法 B）**：``blocked_reasons`` 现在**只装读表失败** ⇒
+    「已知集合为空」改由**归属闸门**承载 ⇒ 断言位置随之改变。
+    """
     missing = tmp_path / "missing.db"
     _seed_db_without_model_tables(missing)
     state_missing = mod.collect_secrets_state(missing, tmp_path / "secrets.json")
     assert state_missing.read_errors, "缺表 ⇒ 必须记为**读表失败**"
     assert any("model_profiles" in r for r in state_missing.read_errors)
     assert state_missing.known_keys == set(), "读表失败 ⇒ 已知集合为空"
+    assert state_missing.blocked_reasons, "读表失败 ⇒ 进 blocked_reasons（阻断整个巡检）"
 
     empty = tmp_path / "empty.db"
     _seed_model_db_empty_tables(empty)
-    state_empty = mod.collect_secrets_state(empty, tmp_path / "secrets.json")
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps({"api_keys": {"mprof_x": "sk-x"}}, ensure_ascii=False), encoding="utf-8"
+    )
+    state_empty = mod.collect_secrets_state(empty, secrets)
     assert not state_empty.read_errors, "表在但 0 行 ⇒ **不是**读表失败"
     assert state_empty.known_keys == set(), "0 行 ⇒ 已知集合为空"
-    assert state_empty.blocked_reasons, "0 行 ⇒ 必须判「无法判定」"
-    assert "已知集合为空" in state_empty.blocked_reasons[0], state_empty.blocked_reasons
+    assert state_empty.entity_keys == set(), "0 行 ⇒ 实体身份集合为空"
+    assert state_empty.blocked_reasons == [], "空库**不是**读表失败 ⇒ 不进 blocked_reasons"
+    assert state_empty.dangling_undecidable, "归属无据 ⇒ 悬空条目**不可判**"
+    assert "已知集合为空" in state_empty.dangling_undecidable, state_empty.dangling_undecidable
 
 
 # ---------------------------------------------------------------------------
@@ -723,12 +749,23 @@ def test_read_failure_and_empty_known_set_are_distinguished(mod, tmp_path) -> No
 
 
 def test_env_name_key_is_not_reported_as_dangling(mod, tmp_path, capsys) -> None:
-    """env_name 形态的键**不是悬空条目**（已知集合必须含 env_name 形态）。"""
+    """env_name 形态的键**不是悬空条目**（已知集合必须含 env_name 形态）。
+
+    ⚠️ **行为变更（修法 A）**：归属闸门只认**实体身份** ⇒ 本夹具补一个实体 id 键。
+    """
     db = tmp_path / "novelos.db"
     _seed_model_db(db, profiles=[("mprof_live01", "kimi", None)])
     secrets = tmp_path / "secrets.json"
     secrets.write_text(
-        json.dumps({"api_keys": {"NOVELOS_API_KEY_KIMI": "sk-live-kimi"}}, ensure_ascii=False),
+        json.dumps(
+            {
+                "api_keys": {
+                    "NOVELOS_API_KEY_KIMI": "sk-live-kimi",
+                    "mprof_live01": "sk-profile",
+                }
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -751,6 +788,8 @@ def test_prune_dangling_keeps_env_name_key_still_resolvable(mod, tmp_path, capsy
             {
                 "api_keys": {
                     "NOVELOS_API_KEY_KIMI": "sk-live-kimi",
+                    # ⚠️ 行为变更（修法 A）：归属闸门只认实体身份 ⇒ 补一个实体 id 键。
+                    "mprof_live01": "sk-profile",
                     "mprof_dead000000": "sk-dead",
                 }
             },
@@ -1421,32 +1460,6 @@ def test_partial_overlap_still_judges_dangling(mod, tmp_path, capsys) -> None:
     data = json.loads(secrets.read_text(encoding="utf-8"))
     assert sorted(data["api_keys"]) == ["mprof_live01"], "只该删死键，活键必须留下"
 
-
-def test_migrate_is_not_blocked_by_disjoint_known_set(mod, tmp_path, capsys) -> None:
-    """``--migrate`` **不受**交集闸门拦截（迁移是**加法**动作，不删任何东西）。
-
-    ⚠️ 刻意的**不对称**：闸门只否证「悬空」这一个判断；迁移不依赖它。
-    ⇒ 一条手写的 secrets 文件（键名对不上任何 profile_id）**不该**把迁移堵死。
-    ⚠️ 迁移后那把手写键**会**变成悬空 ⇒ 退出码 1（不合规），但**迁移本身没被拦**。
-    """
-    db = tmp_path / "novelos.db"
-    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-db-plain")])
-    secrets = tmp_path / "secrets.json"
-    secrets.write_text(json.dumps({"api_keys": {"sk-handwritten": "sk-x"}}), encoding="utf-8")
-
-    code = mod.main(
-        [
-            "secrets", "--db", str(db), "--secrets-file", str(secrets),
-            "--migrate", "--apply",
-        ]
-    )
-    captured = capsys.readouterr()
-    out = captured.out + captured.err
-
-    assert code != 2, f"迁移是加法动作 ⇒ 不该被闸门拦（不该是 2），实际 {code}\n{out}"
-    data = json.loads(secrets.read_text(encoding="utf-8"))
-    assert "mprof_live01" in data["api_keys"], "库内明文应被搬进 secrets"
-    assert "sk-handwritten" in data["api_keys"], "原有键不得被抹掉"
 
 def test_force_all_dangling_allows_cleaning_when_known_set_is_disjoint(
     mod, tmp_path, capsys
