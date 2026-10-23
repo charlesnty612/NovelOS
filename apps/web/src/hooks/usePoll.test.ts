@@ -1,4 +1,4 @@
-import { renderHook } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { usePoll } from './usePoll';
 
@@ -216,3 +216,101 @@ describe('usePoll', () => {
 
 // 静音 act 警告：在异步回调中 setState 会触发；用 act 包一层避免 React 18 警告
 // （不强制：上面所有测试已用 setTimeout 推进，足够释放微任务）
+
+// ===========================================================================
+// 失败语义（补口：此前「遇一次错即永久停摆」没有任何恢复路径）。
+//
+// 口径：**出错 ⇒ 停止 + 把 error 交给调用方；由调用方决定要不要重试**。
+// 刻意**不做自动重试**（无限重试会烧额度、也会把真实故障刷成噪音）；
+// 恢复入口沿用仓内既有模式（useApiCall.reload 那种「手动 reload」）——
+// 本 hook 提供 retry()，调用方点一下才重新拉。
+// ===========================================================================
+describe('usePoll - 失败语义与手动恢复', () => {
+  it('出错后停摆（不再自动重试）并把 error 交给调用方', async () => {
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue({ status: 'RUNNING' });
+
+    const { result } = renderHook(() =>
+      usePoll({
+        fn,
+        intervalMs: 50,
+        enabled: true,
+        stopWhen: (r) => ((r as { status: string })?.status) !== 'RUNNING',
+      }),
+    );
+
+    const t0 = Date.now();
+    while (result.current.error !== 'boom' && Date.now() - t0 < 500) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(result.current.error).toBe('boom');
+    expect(result.current.running).toBe(false);
+
+    const callsAfterError = fn.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 250));
+    // 关键不变量：**不自动重试**（烧额度 + 掩盖真实故障）
+    expect(fn.mock.calls.length).toBe(callsAfterError);
+  });
+
+  it('retry() 让轮询恢复：错误清空、fn 再次被调用、running 回到 true', async () => {
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue({ status: 'RUNNING' });
+
+    const { result } = renderHook(() =>
+      usePoll({
+        fn,
+        intervalMs: 50,
+        enabled: true,
+        stopWhen: () => false,
+      }),
+    );
+
+    const t0 = Date.now();
+    while (result.current.error !== 'boom' && Date.now() - t0 < 500) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(result.current.error).toBe('boom');
+    const callsAfterError = fn.mock.calls.length;
+
+    act(() => {
+      result.current.retry();
+    });
+
+    // 立即再拉一次（不是等下一个 interval）
+    await waitFor(() => expect(fn.mock.calls.length).toBeGreaterThan(callsAfterError));
+    await waitFor(() => expect(result.current.error).toBeNull());
+    expect(result.current.running).toBe(true);
+    expect(result.current.data).toEqual({ status: 'RUNNING' });
+  });
+
+  it('retry() 后再次出错 ⇒ 错误重新交回调用方（不会静默吞掉）', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('still broken'));
+
+    const { result } = renderHook(() =>
+      usePoll({
+        fn,
+        intervalMs: 50,
+        enabled: true,
+        stopWhen: () => false,
+      }),
+    );
+
+    const t0 = Date.now();
+    while (result.current.error !== 'still broken' && Date.now() - t0 < 500) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(result.current.error).toBe('still broken');
+
+    act(() => {
+      result.current.retry();
+    });
+
+    await waitFor(() => expect(result.current.error).toBe('still broken'));
+    expect(result.current.running).toBe(false);
+  });
+});
+

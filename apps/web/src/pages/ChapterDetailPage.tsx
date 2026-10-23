@@ -19,6 +19,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { chaptersApi, projectsApi, qualityApi, workflowsApi } from '../api/endpoints';
+import { fetchProjectEffectiveSettings } from '../api/projectSettings';
+import type { ProjectEffectiveSettings } from '../api/types.generated';
 import type {
   Chapter,
   Draft,
@@ -152,7 +154,7 @@ export function ChapterDetailPage() {
   const orch = useChapterRunOrchestration({ projectId, chapterId, onPollTick: handlePollTick });
   const {
     chapterRuns, selectedRunId, setSelectedRunId, selectedRunSummary,
-    activeRun, poll, detail, detailRun, pausePayload, qualityGateCheckpoint,
+    activeRun, poll, pollRetry, detail, detailRun, pausePayload, qualityGateCheckpoint,
     runsReload, detailReload,
   } = orch;
 
@@ -238,27 +240,72 @@ export function ChapterDetailPage() {
   const [deepReview, setDeepReview] = useState(false);
 
   // 快通道（项目级 projects.fast_mode，迁移 0031）：写完直接提交，跳过人工闸门。
-  // 初值取项目的 fast_mode（null/undefined = 未设置 = 关）；开关即刻 PATCH 落库。
-  const [fastMode, setFastMode] = useState(false);
+  //
+  // **三态列值**（后端 projects.fast_mode 的 NULL/1/0 逐字对齐）：
+  //   null = 未设置 → 后端 resolve_fast_mode 回落 env，再回落「关」
+  //   true = 开 / false = 作者显式关
+  //
+  // **有效值**（后端解析后的真值：项目列 > env > 默认关）由
+  // `GET /projects/{pid}/effective-settings` 给（后端权威，前端不另写解析）。
+  // 判定与显示一律用**有效值**：项目列为 NULL 且 env 开启时，后端**实际在快通道**
+  // （跳过审校闸门），前端若显示成「关」就是在撒谎——作者无从得知闸门正在被跳过。
+  //
+  // **写入一律显式布尔**：勾选 ⇒ `true`、取消 ⇒ `false`（**显式关**，绝不发 `null`）。
+  // 「提交值 ≠ 当前值才下发」这条规则两个入口同款（项目弹窗同款实现）：
+  // 章节页每次点击都是**显式选择** ⇒ 写目标布尔；仅当目标值与**有效值**相同
+  // （UI 上不可达：勾选态本身就是有效值）时才跳过，避免无谓写。
   const [autoCommit, setAutoCommit] = useState(false);
   const projectCall = useApiCall<Project>(() => projectsApi.get(projectId), [projectId]);
-  useEffect(() => {
-    const v = projectCall.data?.fast_mode;
-    if (v !== undefined && v !== null) setFastMode(v === true);
-  }, [projectCall.data]);
+  const effectiveCall = useApiCall<ProjectEffectiveSettings>(
+    () => fetchProjectEffectiveSettings(projectId),
+    [projectId],
+  );
+  // 本地乐观值：undefined = 未被本地改过（跟随服务端）。
+  const [fastModeLocal, setFastModeLocal] = useState<boolean | undefined>(undefined);
+  const [fastModeColumnLocal, setFastModeColumnLocal] = useState<boolean | null | undefined>(undefined);
+  const [fastModeError, setFastModeError] = useState<string | null>(null);
+  const fastModeColumn =
+    fastModeColumnLocal !== undefined ? fastModeColumnLocal : projectCall.data?.fast_mode;
+  const fastModeEffectiveServer = effectiveCall.data?.fast_mode_effective;
+  const fastModeEffectiveFailed = effectiveCall.error != null;
+  // 有效值：优先用后端解析结果；端点还没回 ⇒ 退回列值（列值为 null 时按 false，
+  // 但那时文案会说「有效值未知」，不谎报）。
+  const fastMode =
+    fastModeLocal !== undefined
+      ? fastModeLocal
+      : (fastModeEffectiveServer ?? fastModeColumn === true);
+  // 三态文案：项目列值 + 有效值 + 是否已知，三者分开说，绝不把「未设置」说成「已关闭」。
+  const fastModeLabel = fastModeEffectiveFailed
+    ? '有效值未知（无法确认后端是否在快通道）'
+    : fastModeColumn === undefined
+    ? undefined // 项目还没加载 ⇒ 不渲染，不谎报
+    : fastModeColumn === true
+    ? '已开启'
+    : fastModeColumn === false
+    ? '已关闭'
+    : `未设置（当前生效：${fastMode ? '开' : '关'}）`;
   const handleFastModeChange = useCallback(
     async (v: boolean) => {
-      // 乐观更新 + 失败回滚：开关是高频点击，回滚必须跟得上。
-      setFastMode(v);
-      if (v && !autoCommit) setAutoCommit(true);
+      setFastModeError(null);
+      // 乐观更新：勾选态立刻反映作者的选择（写失败再回滚）。
+      setFastModeLocal(v);
+      setFastModeColumnLocal(v);
       try {
+        // 显式布尔（true / false）：「取消勾选」= **显式关**，不是「恢复未设置」。
         await projectsApi.update(projectId, { fast_mode: v });
+        // 快通道关掉 ⇒ 「写完直接提交」一并取消（不留「已勾选 + 禁用」的误导态）。
+        if (!v) setAutoCommit(false);
+        // 项目列与有效值都变了 ⇒ 重新取权威值。
+        projectCall.reload();
+        effectiveCall.reload();
       } catch (e: unknown) {
-        setFastMode(!v);
-        setActionErr(e instanceof Error ? e.message : '快通道开关保存失败');
+        // 回滚：清掉本地乐观值 ⇒ 回到服务端真值（本次写入没生效）。
+        setFastModeLocal(undefined);
+        setFastModeColumnLocal(undefined);
+        setFastModeError(e instanceof Error ? e.message : '快通道开关保存失败');
       }
     },
-    [projectId, autoCommit],
+    [projectId, projectCall, effectiveCall],
   );
   const handleStartWorkflow = useCallback(
     async (action: WorkflowAction, payload?: WorkflowStartArgs, opts?: { confirmed?: boolean }) => {
@@ -552,6 +599,24 @@ export function ChapterDetailPage() {
 
       <ErrorBanner>{chapterCall.error || actionErr}</ErrorBanner>
 
+      {/* 轮询停摆的可恢复入口（2026-10-23 补口）：usePoll 遇一次错误即停止并把
+          error 交出来（不自动重试——自动/无限重试会烧额度）。此前这个 error 只
+          出现在「运行记录」分区里（默认不挂载）⇒ 作者看不到、也以为页面死了。
+          这里放在页面顶部，任何分区都看得见，并给出一次手动重试。 */}
+      {poll.error ? (
+        <div className="alert alert--error" role="alert" data-testid="poll-error-banner">
+          <span>运行状态轮询已中断：{poll.error}</span>{' '}
+          <button
+            type="button"
+            className="btn btn--sm"
+            data-testid="poll-retry-btn"
+            onClick={() => pollRetry()}
+          >
+            重试
+          </button>
+        </div>
+      ) : null}
+
       {chapter ? (
         <ChapterPipelineHeader
           chapter={chapter}
@@ -563,6 +628,8 @@ export function ChapterDetailPage() {
           onDeepReviewChange={setDeepReview}
           onTitleSaved={() => chapterCall.reload()}
           fastMode={fastMode}
+          fastModeLabel={fastModeLabel}
+          fastModeError={fastModeError}
           onFastModeChange={handleFastModeChange}
           autoCommit={autoCommit}
           onAutoCommitChange={setAutoCommit}

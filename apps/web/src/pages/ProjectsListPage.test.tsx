@@ -33,6 +33,20 @@ vi.mock('../api/endpoints', async () => {
   };
 });
 
+// 「已解析有效值」端点（2026-10-23 返工新增）：每个用例自己设有效值。
+// ⚠️ 用 vi.hoisted：mock 工厂会被提升到 import 之前，普通变量还在 TDZ。
+const { effectiveState } = vi.hoisted(() => ({
+  effectiveState: {
+    value: {
+      fast_mode_effective: false as boolean,
+      fast_mode_source: 'off' as 'project' | 'env' | 'off',
+    },
+  },
+}));
+vi.mock('../api/projectSettings', () => ({
+  fetchProjectEffectiveSettings: vi.fn(async () => effectiveState.value),
+}));
+
 // ---- fixtures ----
 const baseProject = (overrides: Partial<Project> = {}): Project => ({
   project_id: 'prj_001',
@@ -66,6 +80,8 @@ describe('ProjectsListPage - 关键流', () => {
     vi.mocked(projectsApi.list).mockResolvedValue([]);
     vi.mocked(projectsApi.create).mockResolvedValue(baseProject({ project_id: 'prj_new' }));
     vi.mocked(projectsApi.update).mockResolvedValue(baseProject());
+    // 「已解析有效值」端点：默认「未设置 + 回落 env 为关」。
+    effectiveState.value = { fast_mode_effective: false, fast_mode_source: 'off' };
   });
 
   it('a) 列表加载：渲染项目卡 + 状态徽标 + 编辑按钮', async () => {
@@ -263,8 +279,11 @@ describe('ProjectsListPage · 失败反馈与弹窗键盘（V3.10）', () => {
   // 审查批次 2026-10-15：此前**整个弹窗没有任何 fast_mode 用例**，导致一个
   // 静默空操作长期无人察觉——取消勾选时键缺失 ⇒ 后端 model_fields_set 不含
   // 它 ⇒ UPDATE 不带此列 ⇒ DB 仍是 1，而复选框已显示未勾选，保存还提示成功。
-  // 「关掉快通道」这个动作在项目弹窗上 100% 不可达（三态的「显式关」不可达），
-  // 且与章节页开关（发 `{fast_mode: v}`，能关）语义相反。
+  //
+  // **2026-10-23 返工**：两个入口都要能发**显式关**（false）。
+  // 弹窗侧此前对 NULL 项目**写不出** false（表单值 === 当前值 ⇒ 省略键）
+  // ⇒ 三态里的「显式关」在弹窗上不可达；现在用「作者显式碰过开关就写下」
+  // 补上这个能力（章节页侧已同步）。
 
   it('快通道-创建：勾选才下发 true；未勾选省略键（=未设置）', async () => {
     const user = userEvent.setup();
@@ -307,6 +326,7 @@ describe('ProjectsListPage · 失败反馈与弹窗键盘（V3.10）', () => {
     vi.mocked(projectsApi.list).mockResolvedValue([
       baseProject({ project_id: 'prj_001', name: '已开快通道', fast_mode: true }),
     ]);
+    effectiveState.value = { fast_mode_effective: true, fast_mode_source: 'project' };
 
     const user = userEvent.setup();
     renderPage();
@@ -314,7 +334,7 @@ describe('ProjectsListPage · 失败反馈与弹窗键盘（V3.10）', () => {
     await user.click(card.querySelector('button.btn--sm') as HTMLButtonElement);
 
     const box = (await screen.findByTestId('project-fast-mode-checkbox')) as HTMLInputElement;
-    expect(box.checked).toBe(true); // 初值取自项目
+    expect(box.checked).toBe(true); // 初值取自有效值
 
     await user.click(box);
     expect(box.checked).toBe(false);
@@ -330,6 +350,7 @@ describe('ProjectsListPage · 失败反馈与弹窗键盘（V3.10）', () => {
     vi.mocked(projectsApi.list).mockResolvedValue([
       baseProject({ project_id: 'prj_001', name: '未设置快通道', fast_mode: null }),
     ]);
+    effectiveState.value = { fast_mode_effective: false, fast_mode_source: 'off' };
 
     const user = userEvent.setup();
     renderPage();
@@ -343,6 +364,52 @@ describe('ProjectsListPage · 失败反馈与弹窗键盘（V3.10）', () => {
 
     const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
     expect('fast_mode' in payload).toBe(false); // 原样保留，不擅自改语义
+  });
+
+  it('快通道-编辑：项目未设置时「勾选→取消」必须下发 false（显式关能力）', async () => {
+    // 返工前：NULL 项目上表单值回到 false === 当前值 ⇒ 省略键 ⇒ **写不出显式关**
+    // （三态里的「显式关」在弹窗上 100% 不可达，与章节页能力不对等）。
+    // 判别：把「作者显式碰过就写下」这半句删掉 ⇒ 本用例即红（键缺失）。
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      baseProject({ project_id: 'prj_001', name: '未设置快通道', fast_mode: null }),
+    ]);
+    effectiveState.value = { fast_mode_effective: false, fast_mode_source: 'off' };
+
+    const user = userEvent.setup();
+    renderPage();
+    const card = await waitFor(() => screen.getByTestId('project-card-prj_001'));
+    await user.click(card.querySelector('button.btn--sm') as HTMLButtonElement);
+
+    const box = (await screen.findByTestId('project-fast-mode-checkbox')) as HTMLInputElement;
+    await user.click(box); // 勾选
+    expect(box.checked).toBe(true);
+    await user.click(box); // 取消 ⇒ 作者显式选择了「关」
+    expect(box.checked).toBe(false);
+
+    await user.click(screen.getByTestId('project-save'));
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+
+    const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect(payload.fast_mode).toBe(false); // 显式关，不是「省略」（省略 = 仍是未设置）
+  });
+
+  it('快通道-编辑：项目列未设置但 env 开启 ⇒ 复选框显示为勾选 + 文案说「当前生效：开」', async () => {
+    // T3：后端实际在快通道（跳过审校闸门），弹窗必须如实显示，不能说成「关」。
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      baseProject({ project_id: 'prj_001', name: 'env 开启', fast_mode: null }),
+    ]);
+    effectiveState.value = { fast_mode_effective: true, fast_mode_source: 'env' };
+
+    const user = userEvent.setup();
+    renderPage();
+    const card = await waitFor(() => screen.getByTestId('project-card-prj_001'));
+    await user.click(card.querySelector('button.btn--sm') as HTMLButtonElement);
+
+    const box = (await screen.findByTestId('project-fast-mode-checkbox')) as HTMLInputElement;
+    await waitFor(() => expect(box.checked).toBe(true)); // 勾选态 = 有效值
+    const state = screen.getByTestId('project-fast-mode-state');
+    expect(state).toHaveTextContent('未设置');
+    expect(state).toHaveTextContent('当前生效：开');
   });
 });
 

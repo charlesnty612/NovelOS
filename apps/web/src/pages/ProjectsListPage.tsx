@@ -8,6 +8,8 @@ import { Loading } from '../components/Loading';
 import { Modal } from '../components/Modal';
 import { useApiCall } from '../hooks/useApiCall';
 import { backupApi, projectsApi } from '../api/endpoints';
+import { fetchProjectEffectiveSettings } from '../api/projectSettings';
+import type { ProjectEffectiveSettings } from '../api/types.generated';
 import type {
   BackupPackage,
   Project,
@@ -379,8 +381,31 @@ function ProjectFormModal({
   // （创建场景无覆盖；编辑场景保留原值）。编辑模式下显示「清除」按钮可显式传 null。
   // 初始值来自 initial.word_band；undefined/null（无覆盖）→ 留空（与「全空=默认」语义一致）。
   const initBand = initial?.word_band ?? undefined;
-  // 快通道（2026-10-14）：初值取项目 fast_mode；null/undefined = 未设置 = 关。
-  const [fastMode, setFastMode] = useState(initial?.fast_mode === true);
+  // 快通道（2026-10-14 项目级 projects.fast_mode；2026-10-15 修复关闭语义；
+  // **2026-10-23 返工**：能写「显式关」+ 按**有效值**显示）。
+  //
+  // - 勾选态 = **有效值**（后端解析：项目列 > env > 默认关）。项目列为 NULL 且
+  //   env 开启时后端**实际在快通道**，弹窗必须显示为「开」，否则作者会以为
+  //   审校闸门还在（那正是「不知情的闸门跳过」）。
+  // - 下发规则（与章节页同款）：「提交值 ≠ 当前值才下发」**且**「作者显式碰过
+  //   就写下」。第二半句是「显式关」能力的关键：NULL 项目上「勾选→取消」
+  //   也能写出 `fast_mode: false`（此前写不出 ⇒ 三态里的「显式关」不可达）。
+  //   未碰过时省略该键 ⇒ 保留原值（不把「未设置」偷换成「显式关」）。
+  const [fastMode, setFastMode] = useState<boolean>(initial?.fast_mode === true);
+  const [fastModeTouched, setFastModeTouched] = useState(false);
+  const effectiveCall = useApiCall<ProjectEffectiveSettings>(
+    () => fetchProjectEffectiveSettings(initial?.project_id as string),
+    [initial?.project_id],
+    !!initial?.project_id, // 新建项目没有 id ⇒ 不请求
+  );
+  // 有效值到达后同步勾选态（作者没碰过才同步——碰过就以作者的选择为准）。
+  // ⚠️ 这是「显示按有效值」的关键：项目列为 NULL 且 env 开启时，后端实际在快通道，
+  // 弹窗必须显示为「开」。
+  useEffect(() => {
+    if (fastModeTouched) return;
+    const v = effectiveCall.data?.fast_mode_effective;
+    if (v !== undefined) setFastMode(v);
+  }, [effectiveCall.data, fastModeTouched]);
   // 写作圣经（迁移 0029，2026-10-15 补 UI 入口）：初值取项目 writing_bible；
   // null/undefined 归一为空串（空白 ≡ 无圣经，后端两侧都落 NULL，口径一致）。
   const [writingBible, setWritingBible] = useState(initial?.writing_bible ?? '');
@@ -454,20 +479,28 @@ function ProjectFormModal({
       if (fl !== null) band.floor = fl;
       payload.word_band = band;
     }
-    // 快通道（2026-10-14 项目级 projects.fast_mode；2026-10-15 修复关闭语义）。
+    // 快通道（2026-10-14 项目级 projects.fast_mode；2026-10-15 修复关闭语义；
+    // 2026-10-23 返工：能写显式关 + 按有效值判定）。
     //
-    // 规则：**只在提交值与当前值不同的时候才下发该键**。
+    // 规则：**只在提交值与当前值不同的时候才下发该键**；**且**作者显式碰过
+    // 开关就写下（这是「显式关」能力的关键）。
     // - 创建 + 勾选        → true（新建即开）
     // - 创建 + 未勾选      → 省略（落 NULL = 未设置）
     // - 编辑 + 由开改关    → false（原实现省略 ⇒ 键缺失 ⇒ UPDATE 不带此列
     //                       ⇒ DB 仍是 1，而复选框已显示未勾选——**静默空操作
     //                       + 假承诺**。三态里的「显式关」在此界面原本 100%
     //                       不可达，且与章节页开关语义相反）
+    // - 编辑 + 由未设置改关 → false（**本次新增能力**：NULL 项目上
+    //                       「勾选→取消」也能写出显式关；此前只能停在未设置）
     // - 编辑 + 未动过它    → 省略（不得把 NULL 擅自改写成 0）
     //
     // 「未动过就省略」是刻意的：编辑一个 null 的项目哪怕只是改个名字，
     // 也不该把它的快通道状态从「未设置」偷换成「显式关」。
-    if (fastMode !== (initial?.fast_mode === true)) {
+    //
+    // 「当前值」= **有效值**（后端解析结果：项目列 > env > 默认关）——
+    // 与章节页同一个口径，避免同一开关在两个入口判出不同结果。
+    const fastModeCurrent = effectiveCall.data?.fast_mode_effective ?? (initial?.fast_mode === true);
+    if (fastModeTouched || fastMode !== fastModeCurrent) {
       payload.fast_mode = fastMode;
     }
     setSubmitting(true);
@@ -608,11 +641,25 @@ function ProjectFormModal({
             <input
               type="checkbox"
               checked={fastMode}
-              onChange={(e) => setFastMode(e.target.checked)}
+              onChange={(e) => {
+                setFastModeTouched(true);
+                setFastMode(e.target.checked);
+              }}
               data-testid="project-fast-mode-checkbox"
             />
             开启快通道
           </label>
+          {/* 三态文案：项目未设置 ≠ 显式关。NULL 且 env 开启时后端**实际在快通道**，
+              这里必须说清「当前生效：开」，不能让作者以为闸门还在。 */}
+          {initial ? (
+            <p className="muted small" style={{ margin: '6px 0 0' }} data-testid="project-fast-mode-state">
+              {initial.fast_mode === true
+                ? '项目已设为开启'
+                : initial.fast_mode === false
+                ? '项目已设为关闭'
+                : `未设置（当前生效：${fastMode ? '开' : '关'}）`}
+            </p>
+          ) : null}
         </div>
 
         {/* V3.7：字数带覆盖（可选）——留空=不覆盖；与后端 resolve_band_config 校验对齐。

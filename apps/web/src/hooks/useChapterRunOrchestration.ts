@@ -30,6 +30,13 @@ export interface ChapterRunOrchestration {
   selectedRunSummary: WorkflowRun | null;
   activeRun: WorkflowRun | null;
   poll: ReturnType<typeof usePoll<WorkflowRun>>;
+  /**
+   * 轮询停摆后的**手动恢复入口**（2026-10-23 补口）。
+   *
+   * usePoll 的失败语义是「出错 ⇒ 停止 + 把 error 交给调用方」；恢复由调用方
+   * 决定（**不自动重试**：自动/无限重试会烧额度）。页面用它渲染「重试」按钮。
+   */
+  pollRetry: () => void;
   detail: ReturnType<typeof useApiCall<WorkflowRun>>;
   detailRun: WorkflowRun | null;
   pausePayload: Record<string, unknown> | undefined;
@@ -80,9 +87,15 @@ export function useChapterRunOrchestration(
   // 详情（节点时间线）只在选中 run 后再拉
   // （声明在 poll 之前：poll.onResult 闭包经 usePoll 的 ref 转发，取到的
   // 永远是最新一次渲染的 detail.reload，与原页面内先 poll 后 detail 的写法等价。）
+  //
+  // ⚠️ `enabled = selectedRunId !== null`：还没选中任何 run 时**不请求**。
+  // 此前没有这个开关 ⇒ 挂载即用 `null as string` 去拉 ⇒ 后端收到一次
+  // `GET /api/runs/null`（必然 404），而且那个 404 会落进 detailError，
+  // 在「轮询错误」横幅旁边冒出一条误导性的详情错误。
   const detail = useApiCall<WorkflowRun>(
     () => workflowsApi.get(selectedRunId as string),
     [selectedRunId],
+    selectedRunId !== null,
   );
 
   // ---- 轮询选中 run：RUNNING 时 2s 拉一次，PAUSED/终态停 ----
@@ -138,6 +151,7 @@ export function useChapterRunOrchestration(
     selectedRunSummary,
     activeRun,
     poll,
+    pollRetry: poll.retry,
     detail,
     detailRun,
     pausePayload,

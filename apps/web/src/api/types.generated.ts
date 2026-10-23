@@ -584,30 +584,32 @@ export interface CharacterUpdate {
 }
 
 export interface CommitListItem {
-  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 13 键）。 */
   commit_id: string;
-  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 13 键）。 */
   project_id: string;
   /** NOT NULL；main commit 与分支 commit 各指向自己的分支 */
   branch_id: string;
-  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 13 键）。 */
   chapter_id: string;
-  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 13 键）。 */
   previous_state_version: number;
   /** 本 commit 产生的版本；回滚 commit 同样占一个版本号 */
   resulting_state_version: number;
-  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 13 键）。 */
   delta_id: string;
   /** NOT NULL 列；解析失败时为 null */
   validation_json: Record<string, unknown> | null;
   /** NOT NULL 列；解析失败时为 null */
   author_approval_json: Record<string, unknown> | null;
-  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 13 键）。 */
   timestamp: string;
-  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。 */
+  /** ``GET /projects/{pid}/commits`` 的**行**（实测恒 13 键）。 */
   workflow_run_id: string;
   /** 只有回滚产生的 commit 非 null；其余恒为 null */
   rollback_of: string | null;
+  /** 本次 commit 定稿的草稿版本号；存量行与未指定该参数的提交恒为 null */
+  draft_version: number | null;
 }
 
 export interface CommitResponse {
@@ -1413,6 +1415,13 @@ export interface ProjectCreate {
   fast_mode?: boolean | null;
 }
 
+export interface ProjectEffectiveSettings {
+  /** 快通道有效值（后端权威解析结果：项目列 > env > 默认关）。 */
+  fast_mode_effective: boolean;
+  /** 有效值来源：project=项目列有值 / env=项目列为 NULL 且回落环境变量 / off=项目列为 NULL 且 env 未设置（默认关）。 */
+  fast_mode_source: "project" | "env" | "off";
+}
+
 export interface ProjectInitRequest {
   /** project-init 触发请求体。 */
   brief: Record<string, unknown>;
@@ -1685,24 +1694,28 @@ export interface SigningCheckItem {
 }
 
 export interface SigningCheckResult {
-  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
   project_id: string;
-  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
   project_name: string;
-  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
   total_chars: number;
-  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
   generated_at: string;
-  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
   items: Array<SigningCheckItem>;
-  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
   summary: SigningCheckSummary;
-  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
   word_band_source: string;
-  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
   word_band_rejected?: boolean | null;
-  /** ``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。 */
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
   genre_opening?: GenreOpeningSection | null;
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
+  genre_opening_unavailable?: boolean | null;
+  /** ``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。 */
+  genre_opening_error?: string | null;
 }
 
 export interface SigningCheckSummary {

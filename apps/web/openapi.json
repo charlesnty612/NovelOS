@@ -4116,6 +4116,49 @@
         }
       }
     },
+    "/api/projects/{project_id}/effective-settings": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Get Project Effective Settings",
+        "description": "返回该项目**当前真正生效**的快通道设置（只读）。\n\n与 ``GET /projects/{pid}`` 的区别：那个返回**列值**（三态，可能是 NULL），\n这个返回**解析后的有效值 + 来源**——前端用它显示勾选态、判定 ``auto_commit``\n可用性，避免「后端在快通道、前端显示关」这种**不知情的闸门跳过**。",
+        "operationId": "get_project_effective_settings_api_projects__project_id__effective_settings_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectEffectiveSettings"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/chapters/{chapter_id}/quality": {
       "get": {
         "tags": [
@@ -5714,7 +5757,7 @@
           "story_state"
         ],
         "summary": "List Commits",
-        "description": "列本项目的 commit（每行恒 12 键，实测）。\n\n行是**裸 DB 行**，与 ``POST /commits`` 的 ``CommitResponse``（4 键动作摘要）不同形，\n故另建 ``CommitListItem``——**不按单体端点的形状推列表行**。\n本端点没有条件键 ⇒ **不加**任何 ``response_model_exclude_*`` 开关。",
+        "description": "列本项目的 commit（每行恒 13 键，实测）。\n\n行是**裸 DB 行**，与 ``POST /commits`` 的 ``CommitResponse``（4 键动作摘要）不同形，\n故另建 ``CommitListItem``——**不按单体端点的形状推列表行**。\n本端点没有条件键 ⇒ **不加**任何 ``response_model_exclude_*`` 开关。",
         "operationId": "list_commits_api_projects__project_id__commits_get",
         "parameters": [
           {
@@ -9979,6 +10022,18 @@
             ],
             "title": "Rollback Of",
             "description": "只有回滚产生的 commit 非 null；其余恒为 null"
+          },
+          "draft_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Version",
+            "description": "本次 commit 定稿的草稿版本号；存量行与未指定该参数的提交恒为 null"
           }
         },
         "additionalProperties": true,
@@ -9995,10 +10050,11 @@
           "author_approval_json",
           "timestamp",
           "workflow_run_id",
-          "rollback_of"
+          "rollback_of",
+          "draft_version"
         ],
         "title": "CommitListItem",
-        "description": "``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。\n\n⚠️ **与 :class:`CommitResponse` 不同形，必须另建**：``POST /commits`` 返回的是\n「提交动作的结果摘要」（4 键：``commit_id`` / ``delta_id`` / ``state_version`` /\n``snapshot_ref``），本端点返回的是**裸 DB 行**——``SELECT * FROM commits`` 加上两个\nJSON 列的解析结果。两者唯一的交集是 ``commit_id`` 与 ``delta_id``，\n``state_version`` 在这里是**拆成两个列**（``previous_state_version`` /\n``resulting_state_version``）。**「应该和单体一样」是本轮实测推翻的先验**。\n\n⚠️ ``rollback_of`` 恒可空：实测四条行里三条为 ``null``、只有回滚产生的那条是\n字符串；声明成 ``str`` ⇒ 普通 commit 的整条列表 500（**不是**单行失败，是整页）。\n``validation_json`` / ``author_approval_json`` 同理声明成 ``Optional``——它们经\n``snapshots._parse_json`` 解析，那函数对空串 / 非法 JSON 返回 ``None`` 而非 ``{}``。\n实测四条行都是 dict，但**键恒在** ⇒ 不给默认值（进了 OpenAPI ``required``）。\n\n``extra=\"allow\"``：行来自 ``SELECT *``，迁移给 ``commits`` 加列就会多一个键\n（本表 12 列自 0001 建表起未变，但 ``workflow_runs`` 的 ``instance_id`` 是 0026\n加的同款先例）。代价见模块 docstring。"
+        "description": "``GET /projects/{pid}/commits`` 的**行**（实测恒 13 键）。\n\n⚠️ **与 :class:`CommitResponse` 不同形，必须另建**：``POST /commits`` 返回的是\n「提交动作的结果摘要」（4 键：``commit_id`` / ``delta_id`` / ``state_version`` /\n``snapshot_ref``），本端点返回的是**裸 DB 行**——``SELECT * FROM commits`` 加上两个\nJSON 列的解析结果。两者唯一的交集是 ``commit_id`` 与 ``delta_id``，\n``state_version`` 在这里是**拆成两个列**（``previous_state_version`` /\n``resulting_state_version``）。**「应该和单体一样」是本轮实测推翻的先验**。\n\n⚠️ ``rollback_of`` 恒可空：实测四条行里三条为 ``null``、只有回滚产生的那条是\n字符串；声明成 ``str`` ⇒ 普通 commit 的整条列表 500（**不是**单行失败，是整页）。\n``validation_json`` / ``author_approval_json`` 同理声明成 ``Optional``——它们经\n``snapshots._parse_json`` 解析，那函数对空串 / 非法 JSON 返回 ``None`` 而非 ``{}``。\n实测四条行都是 dict，但**键恒在** ⇒ 不给默认值（进了 OpenAPI ``required``）。\n\n⚠️ ``draft_version``（2026-10-23 · 迁移 0034 · D-10）：「本次 commit 定稿的是哪一版\n草稿」。**键恒在、值恒可为 null**（存量 commit 行没有这一列的取值，且刻意**不回填**\n——按时间戳倒推会把「审完又改稿」的那一版误认成定稿版 = 回填即造假）。\n声明成 ``Optional[int]`` 且**不给默认值** ⇒ 键恒在且进 OpenAPI ``required``。\n\n``extra=\"allow\"``：行来自 ``SELECT *``，迁移给 ``commits`` 加列就会多一个键\n——``0034`` 加的 ``draft_version`` 就是**已发生的先例**（本表 13 列）；\n``workflow_runs`` 的 ``instance_id`` 是 0026 加的同款。代价见模块 docstring。"
       },
       "CommitResponse": {
         "properties": {
@@ -13091,6 +13147,32 @@
         "title": "ProjectCreate",
         "description": "创建项目请求体。\n\n``name`` 必填；``premise / genre / target_words`` 可选。\n状态在创建时默认 ``ACTIVE``，不暴露给客户端指定。"
       },
+      "ProjectEffectiveSettings": {
+        "properties": {
+          "fast_mode_effective": {
+            "type": "boolean",
+            "title": "Fast Mode Effective",
+            "description": "快通道有效值（后端权威解析结果：项目列 > env > 默认关）。"
+          },
+          "fast_mode_source": {
+            "type": "string",
+            "enum": [
+              "project",
+              "env",
+              "off"
+            ],
+            "title": "Fast Mode Source",
+            "description": "有效值来源：project=项目列有值 / env=项目列为 NULL 且回落环境变量 / off=项目列为 NULL 且 env 未设置（默认关）。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "fast_mode_effective",
+          "fast_mode_source"
+        ],
+        "title": "ProjectEffectiveSettings",
+        "description": "项目「**已解析**」的设置（只读出口，2026-10-23 批次三十二）。\n\n为什么要有它：``projects.fast_mode`` 列是**三态**（NULL 未设置 / 1 开 / 0 显式关），\n而 NULL 会被后端解析成「回落 env，再回落默认关」\n（见 :func:`packages.core.api.routers.workflows.fast_mode.resolve_fast_mode`）。\n前端若只拿到列值，就只能把 NULL 显示成「关」——**在 env 开启时那是在撒谎**\n（后端实际在快通道、跳过审校闸门，而作者以为闸门还在）。\n\n⚠️ 解析**不在本文件另写一份**：直接复用权威单点\n:func:`resolve_fast_mode_with_source`（含 env 词表），本文件只做 HTTP 出口。"
+      },
       "ProjectInitRequest": {
         "properties": {
           "brief": {
@@ -14307,6 +14389,28 @@
                 "type": "null"
               }
             ]
+          },
+          "genre_opening_unavailable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genre Opening Unavailable"
+          },
+          "genre_opening_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genre Opening Error"
           }
         },
         "type": "object",
@@ -14320,7 +14424,7 @@
           "word_band_source"
         ],
         "title": "SigningCheckResult",
-        "description": "``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。"
+        "description": "``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。"
       },
       "SigningCheckSummary": {
         "properties": {

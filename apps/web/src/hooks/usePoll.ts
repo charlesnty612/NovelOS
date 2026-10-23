@@ -5,8 +5,12 @@
 // - 用 setInterval + 显式 clearInterval 卸载，避免 React StrictMode 双调用导致旧 timer 残留。
 // - 暴露最新一次 fn 结果与错误；fn 抛错时停止轮询并把错误透出（UI 用 ErrorBanner 展示）。
 // - 启动条件通过 enabled 控制：enabled=false 时不跑、不挂 timer。
+//
+// 失败语义（2026-10-23 补口）：**出错 ⇒ 停止 + 把 error 交给调用方**；
+// 恢复靠调用方显式调 `retry()`（沿用仓内 `useApiCall.reload()` 那种「手动 reload」
+// 模式）。**刻意不做自动重试**——自动/无限重试会烧额度、也会把真实故障刷成噪音。
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export interface UsePollOptions<T> {
   /** 拉取函数 */
@@ -22,6 +26,8 @@ export interface UsePollOptions<T> {
   stopWhen?: (latest: T | null) => boolean;
   /**
    * 出错时是否停止；默认 true（一次失败就停，避免后台无限刷错误）。
+   *
+   * 停摆后**不是**死局：调用方拿到 error 后可显式调 `retry()` 恢复轮询。
    */
   stopOnError?: boolean;
   /**
@@ -36,6 +42,13 @@ export interface UsePollResult<T> {
   error: string | null;
   /** 当前是否正在轮询 */
   running: boolean;
+  /**
+   * 手动重启轮询（出错停摆后的恢复入口）。
+   *
+   * 语义：清空 error 并**立即**再拉一次（不等下一个 interval）。
+   * 由调用方决定何时调——本 hook 不做自动重试。
+   */
+  retry: () => void;
 }
 
 export function usePoll<T>(opts: UsePollOptions<T>): UsePollResult<T> {
@@ -44,6 +57,8 @@ export function usePoll<T>(opts: UsePollOptions<T>): UsePollResult<T> {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  // 重试用：retry() 递增它 ⇒ 下面那个 effect 重跑 ⇒ 立刻再拉一次 + 重启 interval。
+  const [nonce, setNonce] = useState(0);
 
   // 用 ref 持有 fn / 回调，避免它们变化时重启 timer 时丢失上下文。
   const fnRef = useRef(fn);
@@ -67,6 +82,12 @@ export function usePoll<T>(opts: UsePollOptions<T>): UsePollResult<T> {
         intervalRef.current = null;
       }
     };
+  }, []);
+
+  // 手动重试入口：清错误 + 递增 nonce（下面的 effect 依赖它 ⇒ 重跑 ⇒ 立即再拉一次）。
+  const retry = useCallback(() => {
+    setError(null);
+    setNonce((n) => n + 1);
   }, []);
 
   useEffect(() => {
@@ -134,7 +155,7 @@ export function usePoll<T>(opts: UsePollOptions<T>): UsePollResult<T> {
         intervalRef.current = null;
       }
     };
-  }, [enabled, intervalMs, stopOnError]);
+  }, [enabled, intervalMs, stopOnError, nonce]);
 
-  return { data, loading, error, running };
+  return { data, loading, error, running, retry };
 }

@@ -55,6 +55,8 @@ export function ChapterPipelineHeader({
   onDeepReviewChange,
   onTitleSaved,
   fastMode,
+  fastModeLabel,
+  fastModeError,
   onFastModeChange,
   autoCommit,
   onAutoCommitChange,
@@ -75,7 +77,23 @@ export function ChapterPipelineHeader({
    * 快通道（项目级 projects.fast_mode，迁移 0031）：写完直接提交，跳过人工闸门。
    * 只拆闸门，**不拆状态更新**——observer 照跑，story_state 照推进。
    */
+  /**
+   * 快通道**有效值**（后端权威解析结果：项目列 > env > 默认关）。
+   *
+   * 勾选态、commit 按钮的快通道旁路、auto_commit 的可用性一律按**它**判定——
+   * 项目列为 NULL 时后端会按 env 回落，前端若按列值判「关」就是在撒谎
+   * （闸门正在被跳过而作者不知情）。
+   */
   fastMode: boolean;
+  /**
+   * 快通道**三态文案**（页面算好传进来）：
+   * 「已开启」/「已关闭」/「未设置（当前生效：开，后端按环境变量回落）」/
+   * 「有效值未知（无法确认后端是否在快通道）」。
+   * undefined ⇒ 不渲染（项目还没加载，不谎报）。
+   */
+  fastModeLabel?: string;
+  /** 快通道开关保存失败的错误（就地展示在开关旁边） */
+  fastModeError?: string | null;
   onFastModeChange: (v: boolean) => void;
   /** 「写正文」专属：写完自动衔接提交（需快通道已开启） */
   autoCommit: boolean;
@@ -271,6 +289,17 @@ export function ChapterPipelineHeader({
           />
           快通道：写完直接提交（跳过审校 / 人工审批；质量判定仍会跑，只是不拦住）
         </label>
+        {/* 三态状态文案：项目未设置时**不谎报「已关闭」**——后端会按 env 回落。 */}
+        {fastModeLabel ? (
+          <span className="muted small" data-testid="wf-fast-mode-state">
+            {fastModeLabel}
+          </span>
+        ) : null}
+        {fastModeError ? (
+          <div className="wf-step__extra" data-testid="wf-fast-mode-error">
+            <ErrorBanner>{fastModeError}</ErrorBanner>
+          </div>
+        ) : null}
         <div className="wf-pipeline" data-testid="wf-pipeline">
           {stepOrder.map((action, idx) => {
             const b = buttonByAction.get(action)!;

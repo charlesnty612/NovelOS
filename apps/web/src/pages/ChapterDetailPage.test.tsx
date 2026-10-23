@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ChapterDetailPage } from './ChapterDetailPage';
 import {
@@ -10,16 +11,26 @@ import {
   qualityApi,
   workflowsApi,
 } from '../api/endpoints';
+import { fetchProjectEffectiveSettings } from '../api/projectSettings';
 import { ApiError } from '../api/client';
 import type {
   Chapter,
   Draft,
   ModelProfile,
+  Project,
   WorkflowRun,
   WorkflowStartResponse,
 } from '../api/types';
 
 // ---- API mock ----
+vi.mock('../api/projectSettings', () => ({
+  // 「已解析有效值」端点（2026-10-23 返工新增）：每个用例自己设有效值。
+  fetchProjectEffectiveSettings: vi.fn(async () => ({
+    fast_mode_effective: false,
+    fast_mode_source: 'off' as 'project' | 'env' | 'off',
+  })),
+}));
+
 vi.mock('../api/endpoints', () => ({
   chaptersApi: {
     get: vi.fn(),
@@ -611,33 +622,34 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
         workflow_name: 'chapter-write',
       } as WorkflowRun,
     ];
-    // 首轮 list 显示 RUNNING（横幅应显示），随后 list 变 COMPLETED（横幅应消失）
-    let listCallCount = 0;
-    vi.mocked(workflowsApi.listByProject).mockImplementation(async () => {
-      listCallCount += 1;
-      if (listCallCount >= 2) {
-        return [
-          {
-            ...runningList[0],
+    // 首轮 list 显示 RUNNING（横幅应显示），随后 run 到达终态（横幅应消失）。
+    //
+    // ⚠️ 夹具必须**自洽**：列表与详情说的是**同一个 run** 的状态 ⇒ 用同一个
+    // 时钟驱动。此前两条 mock 各用各的调用计数，靠「挂载时那次 GET /runs/null」
+    // 把计数错开一格才碰巧对上 —— 那正是「把已知 bug 写进夹具」的形状
+    // （T7 修掉 null-id 首拉后立刻暴露：poll 只拿到 RUNNING、列表却报终态，
+    //  横幅永远不消失）。
+    const runStartedAt = Date.now();
+    const runFinished = () => Date.now() - runStartedAt > 1000;
+    vi.mocked(workflowsApi.get).mockImplementation(async () =>
+      runFinished()
+        ? buildRunningDetail({
             status: 'COMPLETED',
             ended_at: new Date().toISOString(),
-          } as WorkflowRun,
-        ];
-      }
-      return runningList;
-    });
-    // poll 第一轮返回 RUNNING详情，第二轮返回 COMPLETED详情
-    let getCallCount = 0;
-    vi.mocked(workflowsApi.get).mockImplementation(async () => {
-      getCallCount += 1;
-      if (getCallCount >= 2) {
-        return buildRunningDetail({
-          status: 'COMPLETED',
-          ended_at: new Date().toISOString(),
-        });
-      }
-      return buildRunningDetail();
-    });
+          })
+        : buildRunningDetail(),
+    );
+    vi.mocked(workflowsApi.listByProject).mockImplementation(async () =>
+      runFinished()
+        ? [
+            {
+              ...runningList[0],
+              status: 'COMPLETED',
+              ended_at: new Date().toISOString(),
+            } as WorkflowRun,
+          ]
+        : runningList,
+    );
 
     renderPage();
 
@@ -645,7 +657,7 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
     await waitFor(() => {
       expect(screen.getByTestId('workflow-running-banner')).toBeInTheDocument();
     });
-    // 第二阶段：经过至少 2 轮 poll 后（2s 间隔），横幅应消失
+    // 第二阶段：poll 拿到终态后（2s 间隔），横幅应消失
     await waitFor(
       () => {
         expect(screen.queryByTestId('workflow-running-banner')).toBeNull();
@@ -716,31 +728,31 @@ describe('ChapterDetailPage - 工作流运行中横幅', () => {
       nodes: [],
       workflow_name: 'chapter-write',
     };
-    let listCallCount = 0;
-    vi.mocked(workflowsApi.listByProject).mockImplementation(async () => {
-      listCallCount += 1;
-      // 第一次返回 RUNNING 行；之后切到 FAILED（让 activeRun 消失、横幅也消失）
-      if (listCallCount === 1) return [runningRow];
-      return [
-        {
-          ...runningRow,
-          status: 'FAILED',
-          ended_at: new Date().toISOString(),
-          error: '节点失败',
-        },
-      ];
-    });
-    let getCallCount = 0;
-    vi.mocked(workflowsApi.get).mockImplementation(async () => {
-      getCallCount += 1;
-      if (getCallCount === 1) return buildRunningDetail(); // RUNNING
-      // 第二轮：FAILED（poll 命中 stopWhen 停止）
-      return buildRunningDetail({
-        status: 'FAILED',
-        ended_at: new Date().toISOString(),
-        error: '节点失败',
-      });
-    });
+    // 夹具自洽（2026-10-23 返工）：列表与详情用**同一个时钟**驱动
+    // （此前各用各的调用计数，靠挂载时那次 GET /runs/null 错开一格才碰巧对上）。
+    const runStartedAt = Date.now();
+    const runFinished = () => Date.now() - runStartedAt > 1000;
+    vi.mocked(workflowsApi.listByProject).mockImplementation(async () =>
+      runFinished()
+        ? [
+            {
+              ...runningRow,
+              status: 'FAILED',
+              ended_at: new Date().toISOString(),
+              error: '节点失败',
+            },
+          ]
+        : [runningRow],
+    );
+    vi.mocked(workflowsApi.get).mockImplementation(async () =>
+      runFinished()
+        ? buildRunningDetail({
+            status: 'FAILED',
+            ended_at: new Date().toISOString(),
+            error: '节点失败',
+          })
+        : buildRunningDetail(),
+    );
 
     renderPage();
 
@@ -3416,3 +3428,349 @@ describe('ChapterDetailPage - G6 挂账批次（四）接线', () => {
     expect(pace).toBeDisabled();
   });
 });
+
+// ===========================================================================
+// M-20：快通道双写入口（章节页）+ auto_commit 载荷链。
+//
+// 补口事实：此前 `wf-fast-mode` 在前端测试中 **0 命中**、`auto_commit` 全前端
+// **0 命中** ⇒ 同一个项目级开关有两条写路径（项目弹窗 / 章节页），只测了一条。
+//
+// **返工后的统一语义**（2026-10-23 批次三十二）：
+//   - 判定与显示按**有效值**（后端 `GET /projects/{pid}/effective-settings` 给的
+//     权威解析结果：项目列 > env > 默认关）——项目列为 NULL 且 env 开启时，
+//     后端**实际在快通道**，前端显示「关」就是在撒谎。
+//   - 写入一律**显式布尔**：勾选 ⇒ true、取消 ⇒ false（**显式关**，绝不发 null）。
+//   - 「提交值 ≠ 当前值才下发」两个入口同款（项目弹窗同款实现）。
+// ===========================================================================
+
+describe('ChapterDetailPage - 快通道（双入口统一语义，M-20）', () => {
+  const baseProject = (over: Partial<Project> = {}): Project => ({
+    project_id: 'prj_001',
+    name: '测试项目',
+    premise: null,
+    genre: null,
+    target_words: null,
+    status: 'ACTIVE',
+    created_at: '',
+    updated_at: '',
+    fast_mode: null,
+    ...over,
+  });
+
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(workflowsApi.startWrite).mockReset();
+    vi.mocked(projectsApi.get).mockReset();
+    vi.mocked(projectsApi.update).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+    vi.mocked(fetchProjectEffectiveSettings).mockReset();
+    vi.mocked(fetchProjectEffectiveSettings).mockResolvedValue({
+      fast_mode_effective: false,
+      fast_mode_source: 'off',
+    });
+
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter());
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([] as WorkflowRun[]);
+    vi.mocked(workflowsApi.get).mockResolvedValue({
+      run_id: 'wfr_default',
+      status: 'COMPLETED',
+      checkpoint_json: null,
+      nodes: [],
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: '2026-08-24T10:01:00+00:00',
+    } as unknown as WorkflowRun);
+    vi.mocked(workflowsApi.startWrite).mockResolvedValue(planResponse('wfr_write'));
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw new ApiError(404, 'no quality report');
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([] as ModelProfile[]);
+    vi.mocked(projectsApi.get).mockResolvedValue(baseProject());
+    vi.mocked(projectsApi.update).mockResolvedValue(baseProject());
+  });
+
+  /** 等项目数据落地（状态文案只在项目值已知时渲染 ⇒ 它就是「已加载」的屏障） */
+  async function waitProjectLoaded() {
+    return screen.findByTestId('wf-fast-mode-state');
+  }
+
+  function fastModeBox(): HTMLInputElement {
+    return screen.getByTestId('wf-fast-mode-checkbox') as HTMLInputElement;
+  }
+
+  it('勾选 ⇒ projectsApi.update 收到 {fast_mode: true}', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitProjectLoaded();
+
+    await user.click(fastModeBox());
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+
+    const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect(payload.fast_mode).toBe(true);
+  });
+
+  it('项目已开启时取消勾选 ⇒ 收到 {fast_mode: false}（核心判别：不得静默空操作）', async () => {
+    vi.mocked(projectsApi.get).mockResolvedValue(baseProject({ fast_mode: true }));
+    vi.mocked(fetchProjectEffectiveSettings).mockResolvedValue({
+      fast_mode_effective: true,
+      fast_mode_source: 'project',
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await waitProjectLoaded();
+
+    expect(fastModeBox().checked).toBe(true); // 初值 = 有效值（项目列 = 开）
+    await user.click(fastModeBox());
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+
+    const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect(payload.fast_mode).toBe(false); // 显式关，必须真的下发
+  });
+
+  it('项目未设置时：勾选 ⇒ true；再取消 ⇒ **显式关**（fast_mode: false，不发 null）', async () => {
+    // 返工前的实现把「取消」写成 fast_mode: null ⇒ NULL 项目上**永远写不出显式关**
+    // （能力回归）。Lead 裁决：用户点「关」= 显式关 ⇒ 发 false。
+    const user = userEvent.setup();
+    renderPage();
+    await waitProjectLoaded();
+    expect(fastModeBox().checked).toBe(false);
+
+    await user.click(fastModeBox()); // 勾选
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+    const first = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect(first.fast_mode).toBe(true);
+
+    await user.click(fastModeBox()); // 取消 ⇒ 显式关
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(2));
+    const second = vi.mocked(projectsApi.update).mock.calls[1][1] as unknown as Record<string, unknown>;
+    expect(second.fast_mode).toBe(false); // 显式关，不是 null（null = 未设置）
+  });
+
+  it('PATCH 失败 ⇒ 复选框回滚 + 错误提示出现', async () => {
+    vi.mocked(projectsApi.get).mockResolvedValue(baseProject({ fast_mode: true }));
+    vi.mocked(fetchProjectEffectiveSettings).mockResolvedValue({
+      fast_mode_effective: true,
+      fast_mode_source: 'project',
+    });
+    vi.mocked(projectsApi.update).mockRejectedValue(new Error('后端不可用'));
+    const user = userEvent.setup();
+    renderPage();
+    await waitProjectLoaded();
+
+    await user.click(fastModeBox());
+    const errBox = await screen.findByTestId('wf-fast-mode-error');
+    expect(errBox).toHaveTextContent('后端不可用');
+    // 回滚：复选框恢复勾选（不得停在错误的未勾选态）
+    await waitFor(() => expect(fastModeBox().checked).toBe(true));
+  });
+
+  it('项目值为 null ⇒ 显示「未设置（当前生效：关）」而不是谎报「已关闭」', async () => {
+    vi.mocked(projectsApi.get).mockResolvedValue(baseProject({ fast_mode: null }));
+    renderPage();
+
+    const state = await waitProjectLoaded();
+    expect(state).toHaveTextContent('未设置');
+    expect(state).toHaveTextContent('当前生效：关');
+    expect(fastModeBox().checked).toBe(false);
+  });
+
+  it('项目列为 null 且 env 开启（有效值=开）⇒ 开关显示为勾选 + 文案说「当前生效：开」', async () => {
+    // T3 核心：项目列 NULL 时后端会按 env 回落 ⇒ 后端**实际在快通道**（跳过审校闸门）。
+    // 前端若显示成「关」，作者就无从得知闸门正在被跳过（不知情的闸门跳过）。
+    vi.mocked(projectsApi.get).mockResolvedValue(baseProject({ fast_mode: null }));
+    vi.mocked(fetchProjectEffectiveSettings).mockResolvedValue({
+      fast_mode_effective: true,
+      fast_mode_source: 'env',
+    });
+    renderPage();
+
+    const state = await waitProjectLoaded();
+    expect(state).toHaveTextContent('未设置');
+    expect(state).toHaveTextContent('当前生效：开');
+    expect(fastModeBox().checked).toBe(true); // 勾选态 = 有效值
+  });
+
+  it('有效值端点失败 ⇒ 文案说「有效值未知」，不谎报「已关闭」', async () => {
+    vi.mocked(projectsApi.get).mockResolvedValue(baseProject({ fast_mode: null }));
+    vi.mocked(fetchProjectEffectiveSettings).mockRejectedValue(new Error('端点挂了'));
+    renderPage();
+
+    const state = await waitProjectLoaded();
+    expect(state).toHaveTextContent('有效值未知');
+    expect(state).not.toHaveTextContent('已关闭');
+  });
+
+  it('项目值为 true / false ⇒ 分别显示「已开启」/「已关闭」', async () => {
+    vi.mocked(projectsApi.get).mockResolvedValue(baseProject({ fast_mode: true }));
+    vi.mocked(fetchProjectEffectiveSettings).mockResolvedValue({
+      fast_mode_effective: true,
+      fast_mode_source: 'project',
+    });
+    const { unmount } = renderPage();
+    expect(await waitProjectLoaded()).toHaveTextContent('已开启');
+    unmount();
+
+    vi.mocked(projectsApi.get).mockResolvedValue(baseProject({ fast_mode: false }));
+    vi.mocked(fetchProjectEffectiveSettings).mockResolvedValue({
+      fast_mode_effective: false,
+      fast_mode_source: 'project',
+    });
+    renderPage();
+    expect(await waitProjectLoaded()).toHaveTextContent('已关闭');
+  });
+
+  it('auto_commit 载荷链：快通道关 ⇒ startWrite 载荷不含 auto_commit', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitProjectLoaded();
+
+    const writeBtn = await waitFor(() => screen.getByTestId('wf-btn-write'));
+    await user.click(writeBtn);
+    await waitFor(() => expect(workflowsApi.startWrite).toHaveBeenCalledTimes(1));
+
+    const payload = vi.mocked(workflowsApi.startWrite).mock.calls[0][2] as unknown as Record<string, unknown>;
+    expect('auto_commit' in payload).toBe(false);
+  });
+
+  it('auto_commit 载荷链：快通道开过再关 ⇒ startWrite 载荷仍不含 auto_commit', async () => {
+    // 快通道关着时后端会忽略 auto_commit，但发出去等于把「作者没同意的自动提交」
+    // 写进请求（AGENTS §二 硬规则 10：两个开关是**串联**关系）。
+    const user = userEvent.setup();
+    renderPage();
+    await waitProjectLoaded();
+
+    await user.click(fastModeBox()); // 开
+    await waitFor(() => expect(fastModeBox().checked).toBe(true));
+    await user.click(fastModeBox()); // 关
+    await waitFor(() => expect(fastModeBox().checked).toBe(false));
+
+    await user.click(screen.getByTestId('wf-btn-write'));
+    await waitFor(() => expect(workflowsApi.startWrite).toHaveBeenCalledTimes(1));
+
+    const payload = vi.mocked(workflowsApi.startWrite).mock.calls[0][2] as unknown as Record<string, unknown>;
+    expect('auto_commit' in payload).toBe(false);
+  });
+
+  it('auto_commit 载荷链：快通道开且 auto_commit 勾 ⇒ startWrite 载荷含 auto_commit: true', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitProjectLoaded();
+
+    await user.click(fastModeBox()); // 开快通道
+    // 返工后**不再自动勾上**「写完直接提交」——跳过审校与审批必须由作者显式勾选。
+    const autoBox = screen.getByTestId('wf-auto-commit-checkbox') as HTMLInputElement;
+    expect(autoBox.checked).toBe(false);
+
+    await user.click(autoBox); // 作者显式勾选
+    await waitFor(() => expect(autoBox.checked).toBe(true));
+
+    await user.click(screen.getByTestId('wf-btn-write'));
+    await waitFor(() => expect(workflowsApi.startWrite).toHaveBeenCalledTimes(1));
+
+    const payload = vi.mocked(workflowsApi.startWrite).mock.calls[0][2] as unknown as Record<string, unknown>;
+    expect(payload.auto_commit).toBe(true);
+  });
+
+  it('打开快通道**不会**自动勾上「写完直接提交」（跳过审批必须显式勾选）', async () => {
+    // 返工前的行为：一个开关顺带打开了另一个「跳过审校与审批」的开关，且无任何提示。
+    const user = userEvent.setup();
+    renderPage();
+    await waitProjectLoaded();
+
+    await user.click(fastModeBox());
+    await waitFor(() => expect(fastModeBox().checked).toBe(true));
+
+    const autoBox = screen.getByTestId('wf-auto-commit-checkbox') as HTMLInputElement;
+    expect(autoBox.checked).toBe(false);
+  });
+
+  it('关掉快通道 ⇒ 「写完直接提交」的勾选态一并清掉（不留「已勾选+禁用」的误导态）', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitProjectLoaded();
+
+    await user.click(fastModeBox()); // 开
+    const autoBox = screen.getByTestId('wf-auto-commit-checkbox') as HTMLInputElement;
+    await user.click(autoBox); // 显式勾上
+    await waitFor(() => expect(autoBox.checked).toBe(true));
+
+    await user.click(fastModeBox()); // 关
+    await waitFor(() => expect(fastModeBox().checked).toBe(false));
+    await waitFor(() => expect(autoBox.checked).toBe(false));
+  });
+});
+
+// ===========================================================================
+// 轮询失败可恢复：usePoll 遇一次错误即永久停摆 ⇒ 页面必须把错误交出来 +
+// 给一个手动重试入口（不自动重试：自动重试会烧额度）。
+// ===========================================================================
+
+describe('ChapterDetailPage - 轮询失败可恢复', () => {
+  beforeEach(() => {
+    vi.mocked(chaptersApi.get).mockReset();
+    vi.mocked(chaptersApi.listDrafts).mockReset();
+    vi.mocked(qualityApi.latest).mockReset();
+    vi.mocked(workflowsApi.listByProject).mockReset();
+    vi.mocked(workflowsApi.get).mockReset();
+    vi.mocked(projectsApi.get).mockReset();
+    vi.mocked(modelProfilesApi.list).mockReset();
+
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter());
+    vi.mocked(chaptersApi.listDrafts).mockResolvedValue([] as Draft[]);
+    vi.mocked(qualityApi.latest).mockImplementation(async () => {
+      throw new ApiError(404, 'no quality report');
+    });
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([] as ModelProfile[]);
+    vi.mocked(projectsApi.get).mockResolvedValue({
+      project_id: 'prj_001',
+      name: '测试项目',
+      premise: null,
+      genre: null,
+      target_words: null,
+      status: 'ACTIVE',
+      created_at: '',
+      updated_at: '',
+      fast_mode: null,
+    });
+  });
+
+  it('轮询出错时显示错误与「重试」入口；点重试后错误消失、轮询恢复', async () => {
+    const runningRun = {
+      run_id: 'wfr_running',
+      workflow_id: 'wf_opaque',
+      workflow_name: 'chapter-write',
+      chapter_id: 'ch_001',
+      status: 'RUNNING',
+      current_node: 'writer',
+      checkpoint_json: null,
+      nodes: [],
+      error: null,
+      retry_count: 0,
+      started_at: '2026-08-24T10:00:00+00:00',
+      ended_at: null,
+    } as unknown as WorkflowRun;
+    vi.mocked(workflowsApi.listByProject).mockResolvedValue([runningRun]);
+
+    let shouldFail = true;
+    vi.mocked(workflowsApi.get).mockImplementation(async (id: string) => {
+      if (id === 'wfr_running' && shouldFail) throw new Error('轮询炸了');
+      return runningRun;
+    });
+
+    const user = userEvent.setup();
+    renderPage();
+
+    const banner = await screen.findByTestId('poll-error-banner');
+    expect(banner).toHaveTextContent('轮询炸了');
+
+    shouldFail = false;
+    await user.click(screen.getByTestId('poll-retry-btn'));
+    await waitFor(() => expect(screen.queryByTestId('poll-error-banner')).toBeNull());
+  });
+});
+
