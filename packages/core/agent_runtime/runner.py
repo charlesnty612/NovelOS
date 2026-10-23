@@ -74,6 +74,17 @@ _RETRY_HINT_EXTRA: dict[str, str] = {
     )
 }
 _MAX_CONTEXT_IDS = 100
+
+
+def _prompt_selfheal_enabled() -> bool:
+    """提示词自愈开关：``NOVELOS_PROMPT_SYNC=off`` ⇒ 关（与启动 sync 同一个开关）。
+
+    为什么复用同一个开关：启动时同步与运行期自愈是**同一件事的两端**（把仓内提示词
+    源码推进到运行时）。用户关掉它就是「我不想让运行时跟着仓内提示词变」，
+    只关启动同步、却让运行期偷偷改提示词，属于半吊子 ⇒ 两端一起关。
+    """
+    return os.environ.get("NOVELOS_PROMPT_SYNC", "on").strip().lower() != "off"
+
 # 可观测性：成功落库时把「首次失败原因」以 warn 前缀写入 ai_call_logs.error，
 # 便于事后回溯首次失败类别（JSON 解析失败 / 缺字段 / schema_version 不符等）。
 # 文本截断上限防止超长堆栈进库。
@@ -327,6 +338,28 @@ def run_agent(
     try:
         registry = PromptRegistry(db_path)
         prompt_id, prompt_version, prompt_content = registry.get_active_prompt(agent_name)
+        # 自愈（2026-10-23）：DB 里的提示词镜像落后于仓内源码时，先推进再取用。
+        # 背景：prompts 表只在**服务启动时**同步一次，长驻服务不重启 ⇒ 仓内新增的
+        # 提示词版本永远到不了运行时（实测：活库 director_planner 停在 v2，而仓内已到
+        # v4；v2 的输出契约没有顶层 ``title`` ⇒ 模型产不出章名 ⇒ 回填静默不生效）。
+        # 守卫在 PromptRegistry.ensure_agent_prompt_current 内：DB 当前 ACTIVE 行必须
+        # 与仓内同名同版本文件逐字一致才推进 ⇒ 测试库/人工改过的库一律不动。
+        # 失败不阻断本次调用（提示词取用本身已有降级路径）。
+        if _prompt_selfheal_enabled():
+            try:
+                refreshed = registry.ensure_agent_prompt_current(agent_name)
+            except Exception as exc:  # noqa: BLE001 —— 自愈失败绝不阻断模型调用
+                log.warning(
+                    "prompt self-heal failed for %s (non-fatal): %s", agent_name, exc
+                )
+                refreshed = None
+            if refreshed is not None:
+                log.info(
+                    "prompt self-heal: %s advanced to %s", agent_name, refreshed
+                )
+                prompt_id, prompt_version, prompt_content = registry.get_active_prompt(
+                    agent_name
+                )
 
         # 决定 provider
         if mock_script is not None:

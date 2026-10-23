@@ -34,6 +34,11 @@ from packages.core.ids import new_id, now_iso
 
 from .exceptions import PromptNotFoundError
 
+# 仓内提示词目录（**源码唯一权威**）：<repo>/docs/agents/prompts
+# 本文件位于 <repo>/packages/core/agent_runtime/prompts.py ⇒ parents[3] == <repo>
+# （与 packages/core/api/main.py 的 _REPO_ROOT 取法一致）。
+_DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parents[3] / "docs" / "agents" / "prompts"
+
 # agents 表 status / role 列无 CHECK；capability 来自 agents.config_json
 _FILE_RE = re.compile(r"^(?P<agent>[a-zA-Z][a-zA-Z_-]*)-v(?P<n>\d+)\.md$")
 
@@ -75,6 +80,15 @@ def _normalize_agent_name(raw: str) -> str:
     ``deconstructor-aggregate`` → ``deconstructor_aggregate``。
     """
     return raw.replace("-", "_")
+
+
+def _version_number(version_label: str) -> int:
+    """``"v4"`` → ``4``；非 ``v<N>`` 形态 → ``0``（视作不可比 ⇒ 绝不推进）。
+
+    只认纯数字版本号：``v10`` → 10（数字序，不是字典序）。
+    """
+    m = re.fullmatch(r"v(\d+)", version_label.strip())
+    return int(m.group(1)) if m else 0
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +209,90 @@ class PromptRegistry:
         finally:
             conn.close()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------- ensure_agent_prompt_current
+    def ensure_agent_prompt_current(
+        self, agent_name: str, docs_dir: Path | str | None = None
+    ) -> str | None:
+        """自愈「DB 提示词镜像落后于仓内源码」：把该 agent 的 ACTIVE 行推进到仓内最新版本。
+
+        为什么需要（2026-10-23 实证，缺陷形状＝「长驻服务的提示词镜像会陈旧」）：
+        ``prompts`` 表是 ``docs/agents/prompts/*.md`` 的**运行时镜像**，但它只在
+        **服务启动时**同步一次（``packages/core/api/main.py`` lifespan）。长驻服务不重启
+        ⇒ 仓内新增的提示词版本**永远到不了运行时**。
+
+        实测事故（用户报「新增章节 → 生成计划 → 章名不生成」）：
+        仓内已有 ``director_planner-v4.md``（§7 输出契约新增顶层 ``title``），落库侧
+        回填代码也已就位；但活库 ``prompts`` 表里 director_planner 只到 **v2**，
+        而 v2/v3 的 §7 **都没有**顶层 ``title`` ⇒ 模型不可能产出该键 ⇒
+        ``director_output.get("title")`` 恒 None ⇒ **回填的 UPDATE 根本不执行**
+        ⇒ 章名永远为空，且**全程零告警**。
+
+        返回值：新版本标签（如 ``"director_planner:v4"``）；**没有推进则返回 None**
+        （含「推进后 ACTIVE 版本实际未变」的情形，见下）。调用方据此决定是否重新取提示词。
+
+        推进条件（全部满足才动手，否则一律不动）：
+        1. DB 里该 agent **有** ACTIVE 行（没有 ⇒ 交由启动 sync 建库，本方法不越权建库）；
+        2. 仓内存在**同名同版本**的文件，且其内容与 DB 当前 ACTIVE 行**逐字一致**
+           —— 这是「忠实镜像」守卫：一旦不一致，说明这一行被人改过或换过
+           （测试库的自造提示词、作者手改的提示词），**一律不覆盖**；
+        3. 仓内存在**版本号更高**的文件（单调推进：绝不降级，绝不把高版本换回低版本）。
+        """
+        docs_path = Path(docs_dir) if docs_dir is not None else _DEFAULT_PROMPTS_DIR
+        if not docs_path.is_dir():
+            return None
+        try:
+            _, before_label, before_content = self.get_active_prompt(agent_name)
+        except PromptNotFoundError:
+            return None
+        cur_n = _version_number(before_label.rsplit(":", 1)[-1])
+        if cur_n <= 0:
+            return None
+
+        current_file: Path | None = None
+        newer: list[tuple[int, Path]] = []
+        try:
+            entries = sorted(docs_path.iterdir())
+        except OSError:
+            return None
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            m = _FILE_RE.match(entry.name)
+            if not m:
+                continue
+            # 文件名里的 agent 名可能是连字符形态（deconstructor-chapter）⇒ 归一后再比
+            if _normalize_agent_name(m.group("agent")) != agent_name:
+                continue
+            n = int(m.group("n"))
+            if n == cur_n:
+                current_file = entry
+            elif n > cur_n:
+                newer.append((n, entry))
+        if current_file is None or not newer:
+            return None
+        try:
+            if current_file.read_text(encoding="utf-8") != before_content:
+                # 忠实镜像守卫：当前行不是仓内文件的忠实拷贝 ⇒ 不动
+                return None
+        except OSError:
+            return None
+
+        for n, entry in newer:
+            try:
+                text = entry.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            self._upsert_prompt(agent_name, n, text)
+
+        # 推进后**重新解析真实生效版本**：仓内该版本可能早已存在但被人工置为非 ACTIVE
+        # （_upsert_prompt 对内容相同的行完全跳过 UPDATE ⇒ 不强制改回 ACTIVE），
+        # 此时真实生效版本没变 ⇒ 必须如实返回「没推进」，不能谎报新标签。
+        try:
+            _, after_label, _ = self.get_active_prompt(agent_name)
+        except PromptNotFoundError:
+            return None
+        return after_label if after_label != before_label else None
 
     # -------------------------------------------------------------- helpers
     def _get_agent_id(self, conn: sqlite3.Connection, agent_name: str) -> str | None:

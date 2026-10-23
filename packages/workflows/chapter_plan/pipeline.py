@@ -149,13 +149,15 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     # 读取原 plan_json.expected_word_count（如有）——保字数用
     inherit_expected: int | None = None
+    current_title: str | None = None
     conn = get_connection(db_path)
     try:
         row = conn.execute(
-            "SELECT plan_json FROM chapters WHERE chapter_id = ?",
+            "SELECT plan_json, title FROM chapters WHERE chapter_id = ?",
             (chapter_id,),
         ).fetchone()
         if row is not None:
+            current_title = row["title"]
             existing_plan = _safe_load_json(row["plan_json"])
             if isinstance(existing_plan, dict):
                 raw = existing_plan.get("expected_word_count")
@@ -163,6 +165,12 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
                     inherit_expected = int(raw)
     finally:
         conn.close()
+
+    # 章名回填的**前置事实**：当前列是否为空标题。与下方 SQL 守卫逐字同口径
+    # （{空格, TAB, CR, LF} 为空白；NBSP 不算空白——它是正文可见字符）。
+    title_is_empty = current_title is None or (
+        isinstance(current_title, str) and not current_title.strip(" \t\r\n")
+    )
 
     director_word_count = director_output.get("expected_word_count")
     if isinstance(director_word_count, (int, float)) and director_word_count > 0:
@@ -235,13 +243,15 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
         # ⚠️ **SQLite 的 ``TRIM(x)`` 只吃 ASCII 空格**（批次二十七 S-1 实测：``"\t"`` 的
         # ``LENGTH(TRIM(x))`` 仍为 1）⇒ 显式给字符集 ``{空格, TAB, CR, LF}``，与上面的
         # Python ``strip(" \t\r\n")`` **逐字同口径**。NBSP 两边都不算空白（正文可见字符）。
+        title_applied = False
         if planner_title is not None:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE chapters SET title = ? "
                 "WHERE chapter_id = ? AND (title IS NULL OR "
                 "TRIM(title, ' ' || CHAR(9) || CHAR(10) || CHAR(13)) = '')",
                 (planner_title, chapter_id),
             )
+            title_applied = (cur.rowcount or 0) > 0
         if has_scene_plan and project_id:
             scene_plan_id = save_scene_plan(
                 conn,
@@ -264,11 +274,42 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
         conn.commit()
     finally:
         conn.close()
+
+    # 章名回填的**可观测结论**（2026-10-23 用户报「新增章节→生成计划→章名不生成」后补）：
+    # 此前这条路径**三种结局都不留痕**——作者名保留、模型名落库、模型没给名，
+    # 从节点输出与日志上**完全看不出区别** ⇒ 「章名没生成」是一个零告警的静默失败。
+    # 现在把结论写进节点输出（落 node_runs.output_json，作者可在运行详情里看到），
+    # 第三种（不可用）额外打 WARNING，且带上**本次实际用的提示词版本**——
+    # 该版本若在 §7 输出契约里没有顶层 ``title``，模型就不可能产出章名
+    # （该前提由 tests/unit/test_chapter_title_autofill.py 的契约用例看守）。
+    if not title_is_empty:
+        title_status = "author_kept"
+    elif planner_title is None:
+        title_status = "unavailable"
+    elif title_applied:
+        title_status = "planner"
+    else:
+        # 列当时为空、planner 也给了名，但 UPDATE 未命中行（并发写等）⇒ 不谎报成功
+        title_status = "not_applied"
+    title_backfill = {
+        "status": title_status,
+        "title": planner_title,
+        "prompt_version": planner_prompt_label,
+    }
+    if title_status == "unavailable":
+        _log.warning(
+            "chapter_plan.save_plan: chapter %s still has no title — planner gave no "
+            "usable name (prompt=%s). 章节名保持为空；检查该提示词版本的输出契约是否"
+            "声明顶层 title，或手工填写章名。",
+            chapter_id,
+            planner_prompt_label,
+        )
     return {
         "plan_saved": True,
         "plan_payload": plan_payload,
         "scene_plan_saved": bool(has_scene_plan and scene_plan_id),
         "scene_plan_id": scene_plan_id,
+        "title_backfill": title_backfill,
     }
 
 

@@ -308,3 +308,75 @@ def test_prompt_v4_declares_title_in_output_schema():
     v3_text = PROMPT_V3.read_text(encoding="utf-8")
     v3_output = v3_text.split("## 7. Output Schema", 1)[1].split("## 8.", 1)[0]
     assert '"title"' not in v3_output, "v3 不得被原地修改（历史证据必须保持原样）"
+
+
+# ---------------------------------------------------------------------------
+# 7：可观测——回填的**三种结局**必须各留痕迹（2026-10-23 用户报「章名不生成」后补）
+#
+# 缺陷形状：此前「模型没给名」与「作者名被保留」与「模型名已落库」三者在节点输出与
+# 日志上**完全看不出区别** ⇒ 「章名没生成」是零告警的静默失败（且叠加「活库提示词
+# 停在 v2、§7 无 title 契约」时，模型**根本不可能**给名）。
+# ---------------------------------------------------------------------------
+
+
+def test_title_backfill_status_is_planner_when_name_applied(tmp_path: Path):
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid, title=None)
+
+    result = _run_save(db_path, pid, cid, title="夜叩青石")
+
+    backfill = result["title_backfill"]
+    assert backfill["status"] == "planner"
+    assert backfill["title"] == "夜叩青石"
+    assert backfill["prompt_version"], "必须记下本次实际用的提示词版本"
+
+
+def test_title_backfill_status_is_author_kept(tmp_path: Path):
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid, title="作者自定")
+
+    result = _run_save(db_path, pid, cid, title="模型另起")
+
+    assert result["title_backfill"]["status"] == "author_kept"
+    assert _column(db_path, cid, "title") == "作者自定"
+
+
+def test_title_backfill_status_is_unavailable_and_warns(tmp_path: Path, caplog):
+    """模型没给名 + 列为空 ⇒ status=unavailable **且必须打 WARNING**（不许静默）。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid, title=None)
+
+    with caplog.at_level("WARNING"):
+        result = _run_save(db_path, pid, cid, title=None)
+
+    assert result["title_backfill"]["status"] == "unavailable"
+    assert _column(db_path, cid, "title") is None
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, "章名不可用必须留下 WARNING（静默失败是本次事故的核心形状）"
+    assert any("no title" in r.getMessage() for r in warnings), (
+        f"WARNING 文案须点明「章名仍为空」：{[r.getMessage() for r in warnings]}"
+    )
+
+
+def test_active_prompt_after_sync_declares_top_level_title(tmp_path: Path):
+    """**能力前提看守**：同步后真正生效的提示词，其 §7 必须声明顶层 ``title``。
+
+    为什么必须钉「**生效版**」而不是仓内文件：模型只输出契约里有的键 ⇒ 生效版的 §7
+    没有顶层 ``title`` ⇒ 章名自动生成**必然落空**（实测事故的根因：活库停在 v2，
+    而 v2 / v3 的 §7 都没有该键）。本用例在提示词升版丢掉该契约时变红。
+    """
+    from packages.core.agent_runtime.prompts import PromptRegistry
+
+    db_path = _fresh_db(tmp_path)
+    PromptRegistry(db_path).sync_from_docs(PROMPTS_DIR)
+
+    _, version_label, content = PromptRegistry(db_path).get_active_prompt(
+        "director_planner"
+    )
+    output_section = content.split("## 7. Output Schema", 1)[1].split("## 8.", 1)[0]
+    assert '"title"' in output_section, (
+        f"生效的提示词（{version_label}）§7 未声明顶层 title ⇒ 章名自动生成必然落空"
+    )
