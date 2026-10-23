@@ -88,12 +88,14 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import importlib.util
+import itertools
 import os
 import pathlib
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 # ⚠️ 本机 Windows stdout 默认 cp936（坑区「Windows 默认 cp936 吞中文」家族）。
 # **两侧都要钉**：本进程 stdout 重配 + 子进程 env——只给一边照样乱码。
@@ -117,6 +119,36 @@ VITEST = WEB / "node_modules" / ".bin" / ("vitest.cmd" if sys.platform == "win32
 SPEC_DIR = ROOT / "tests" / "mutation_specs"
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+#: 每条突变的 pytest ``--basetemp`` 根目录（每条突变再各带一个唯一子目录）。
+#:
+#: **为什么必须显式给**（2026-10-23 实测，本机专属环境问题）：
+#: pytest 的默认 basetemp 是 ``%TEMP%/pytest-of-<user>``。本机该目录一旦被创建，
+#: **连 owner 也拒绝访问**（``PermissionError: [WinError 5]``）⇒ 用到 ``tmp_path``
+#: 的用例在**准备阶段**就 PermissionError ⇒ 全部 **ERROR**（不是 FAIL）⇒
+#: 突变执行器读到的是「跑挂了」而不是「被抓住了」。
+#:
+#: 后果实测（本轮 40 条）：① 40 条突变被误判成 INVALID（**量具没测到被测物**）；
+#: ② 更糟的是**假阳性**——目标用例 ERROR，但同文件里另一个用例 ``passed``，
+#: 执行器看到 ``" passed"`` + 退出码 1 ⇒ 判成 ``[CAUGHT]`` ⇒ **把「没抓住」报成抓住了**。
+#:
+#: ⇒ 这不是被测代码的缺陷，是**量具的环境前提没满足**。修法是给每条突变一个
+#: **独立且可写**的 basetemp（不能用同一个：pytest 启动时会清空 basetemp 目录，
+#: 并发跑会互相踩）。
+_BASETEMP_ROOT = pathlib.Path(tempfile.gettempdir()) / "novelos-mutbasetemp"
+_basetemp_counter = itertools.count()
+
+
+def _basetemp_for(mid: str) -> pathlib.Path:
+    """给一条突变分配**唯一**的 basetemp 目录（并行跑也不撞）。
+
+    ⚠️ 根目录必须**先建出来**：pytest 内部用的是 ``Path.mkdir(mode=0o700)``（**不带
+    parents**）⇒ 父目录不存在时直接 ``FileNotFoundError``，表现为「10 errors」
+    （又一层假象：看起来像用例挂了，实际是量具自己没准备好路径）。
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", mid)[:60]
+    _BASETEMP_ROOT.mkdir(parents=True, exist_ok=True)
+    return _BASETEMP_ROOT / f"{safe}-{os.getpid()}-{next(_basetemp_counter)}"
 
 
 class LaunchFailure(RuntimeError):
@@ -250,9 +282,14 @@ def run_one(
             return f"[ABORT] {mid}: 写入后 SHA256 未变——**变异没生效**（等于没改）"
 
         is_py = test_file.startswith("tests/")
+        basetemp: pathlib.Path | None = None
         try:
             if is_py:
-                py_args = [PY, "-m", "pytest", test_file, "-q", "-p", "no:cacheprovider"]
+                basetemp = _basetemp_for(mid)
+                py_args = [
+                    PY, "-m", "pytest", test_file, "-q", "-p", "no:cacheprovider",
+                    f"--basetemp={basetemp}",
+                ]
                 if fail_fast:
                     py_args.append("-x")
                 ok, out = _run(py_args, ROOT)
@@ -261,8 +298,21 @@ def run_one(
                 ok, out = _run([str(VITEST), "run", test_file], WEB)
                 runner = "vitest"
             _assert_tests_ran(out, runner)
+            if runner == "pytest" and _last_exit_code == 1 and " failed" not in out:
+                # **用例 ERROR ≠ 用例 FAILED**（2026-10-23 实测的假阳性来源）：
+                # fixture / setup 阶段出错时 pytest 摘要行是「N errors」而非「N failed」，
+                # 退出码同样是 1 ⇒ 旧逻辑只看到同文件里另一个用例的 `` passed``
+                # 就会把它判成 ``[CAUGHT]``——**把「没抓住」报成抓住了**。
+                # 这里单独拦：没有真正的 failed ⇒ 突变没被断言抓住 ⇒ 归 INVALID（响亮失败）。
+                return (
+                    f"[INVALID]  {mid}: 用例是 ERROR 而非 FAIL（摘要里没有 ' failed'）"
+                    f"——突变把测试跑挂了，不是被断言抓住。输出尾部：{out[-300:]}"
+                )
         except LaunchFailure as exc:
             return f"[INVALID]  {mid}: {exc}"
+        finally:
+            if basetemp is not None:
+                shutil.rmtree(basetemp, ignore_errors=True)
 
         if ok:
             return f"[SURVIVED] {mid}: 突变后用例仍全绿 ⇒ 该测试测不到这个机制"
