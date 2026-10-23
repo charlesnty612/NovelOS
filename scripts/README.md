@@ -44,7 +44,7 @@
 | delta 源锚定阈值校准 | `delta_anchoring_calibrate.py`（只读 `mode=ro` 打开；实测 `DELTA_BIGRAM_COVERAGE_MIN` 的 bigram 覆盖率分布 + ≤20 条低覆盖样本供人工判别「真捏造」还是「正常概括」；不写库） |
 | revise 保真阈值校准 | `revise_fidelity_calibrate.py`（只读 `mode=ro` 打开；从 `workflow_runs.checkpoint_json` 还原历史 revise 轮次实测 `REVISE_MIN_PRESERVED_RATIO` 的 `preserved_ratio` 分布，另出相邻 drafts 版本对照与 ≤20 条低比值抽样；不写库） |
 | 章节量产 | `produce_chapters.py`（见下文专节） |
-| 凭据 / 仓库防护 | `check_content_repo_guard.py`（**只读**巡检：模式一 = 内容仓 push 防护；模式二 `secrets` = 凭据收敛 D-18，库内明文 api_key → `secrets.json` + 清理悬空条目，**两个动作各自独立**、`--apply` 是写权限总闸）、`check_orphan_relationships.py`（**只读**诊断孤儿 `relationships` 行——端点 FK 已被迁移 0022 摘掉 ⇒ `PRAGMA foreign_key_check` **查不出来**） |
+| 凭据 / 仓库防护 | `check_content_repo_guard.py`（**只读**巡检：模式一 = 内容仓 push 防护；模式二 `secrets` = 凭据收敛 D-18，库内明文 api_key → `secrets.json` + 清理悬空条目，**两个动作各自独立**、`--apply` 是写权限总闸。⚠️ 2026-10-23 晚按「>1500 行要拆」拆成 **门面 644 行 + 实现 `scripts/_guard_secrets.py` 1040 行**；`scripts/` 不是包 ⇒ 门面把**本目录**塞进 `sys.path` 后 `import _guard_secrets` ⇒ **CLI 形状不变**）、`check_orphan_relationships.py`（**只读**诊断孤儿 `relationships` 行——端点 FK 已被迁移 0022 摘掉 ⇒ `PRAGMA foreign_key_check` **查不出来**） |
 | 备份恢复 | `restore_db.py`（从**加密备份**恢复主库：原子替换 + 恢复后校验 + 残留 `-wal`/`-shm` 检出——手工拼 openssl 曾实测出「恢复静默失效而 `integrity_check` 仍报 ok」） |
 | 性能实测 | `measure_cache_key_perf.py`（装配缓存键的命中/未命中耗时 + 键构造/查缓存/装配三段开销；**只用临时库 + 合成夹具**，传活库路径直接拒绝并非 0 退出） |
 | 共用模块（非 CLI） | `guard_repo_write_path.py`（**写盘守卫**：软件仓内只允许写 `data/` 与 `tmp/`；痕迹仓根解析）、`_codegen_check.py`（codegen 产物漂移校验共用件：换行归一 + 首个差异摘要 + 产物比对） |
@@ -469,7 +469,7 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 | `--artifacts-dir` | 同上 2 个（×2） | 显式指定痕迹仓根（优先级：`--artifacts-dir` > `NOVELOS_ARTIFACTS_DIR` > 软件仓**同级目录** `../NovelOS-Artifacts`） |
 | `--migrate` | `check_content_repo_guard.py secrets`（×1） | 动作开关：库内明文 api_key → `secrets.json`，并清空库内明文（**默认 dry-run**） |
 | `--prune-dangling` | 同上（×1） | 动作开关：清理 `secrets.json` 里的悬空条目（**默认 dry-run**） |
-| `--force-all-dangling` | 同上（×1） | **危险开关**：确认「secrets 的键与运行库已知集合**零交集**」时**仍**按常规判定悬空并执行清理。默认**拒绝**（退出码 2、零落盘）——「全部键都死」与「`--db` 指到了别的项目的库」在数据上**不可区分**，而后者会**一次清空整个凭据库**却仍报「合规」 |
+| `--force-all-dangling` | 同上（×1） | **归属确认**（2026-10-23 晚口径改写）：显式声明「`--db` 指向的就是**本项目**的运行库」⇒ **归属闸门一律放行**（既放行「secrets 的可用键与库内**实体身份**零交集」，也放行「库里没有任何档案 / 连接」）。默认**拒绝**（退出码 2、零落盘）——「全部键都死」与「`--db` 指到了别的项目的库」在数据上**不可区分**，而后者会**一次清空整个凭据库**却仍报「合规」。⚠️ 用过它 ⇒ 输出里会明确打「**归属未经自动验证**」 |
 
 ⚠️ **`--apply` 不是新 flag**（既有），但它在 `secrets` 模式里的**角色变了**：那里它是**写权限总闸**
 ——无 `--apply` ⇒ **零写入**（两个动作各自默认 dry-run）；**单独 `--apply` = 迁移**（向后兼容）。
@@ -482,9 +482,18 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 | 码 | 含义 |
 |---|---|
 | `0` | 合规 / 写入完成 |
-| `1` | 不合规（内容仓仍能被误推 / 校验不通过） |
-| `2` | **巡检自身出错 / 不可判**：读不到表、**已知集合为空**、待写路径被守卫拒绝、坏 `secrets.json`（**结构非法**：顶层或 `api_keys` 段不是对象）、**secrets 键与已知集合零交集**（⇒ `--db` 可能指错了库） |
+| `1` | 不合规（内容仓仍能被误推 / 校验不通过 / **`secrets` 里有值畸形条目**——空串或非字符串 ⇒ 运行期解析不出来） |
+| `2` | **巡检自身出错 / 不可判**：读不到表、**归属无据**（secrets 的可用键与库内**实体身份**`profile_id`/`connection_id` 零交集 ⇒ `--db` 可能指错了库；**provider 级 / env 级键不携带项目身份，不算归属证据**）、待写路径被守卫拒绝、坏 `secrets.json`（**结构非法**：顶层或 `api_keys` 段不是对象） |
 | `3` | 痕迹仓不可用（`--write-docs` 且拿不到痕迹仓 ⇒ 明确失败，不回落软件仓） |
+
+⚠️ **CLI 行为变更（2026-10-23 晚 · 对抗审查 B 第三轮批）**：
+① **归属闸门改用实体级身份**（`profile_id` / `connection_id`）⇒ **别名型键（provider 级 / env 级）不再能伪造归属**；
+② `--force-all-dangling` 语义**统一为「归属确认」**（原先只放行「零交集」，现在**连「库里没有任何档案 / 连接」也放行** ⇒ 「只剩死键」场景真能清）；
+③ `--migrate` **也**过归属闸门（`api_keys` 段非空且无实体级证据 ⇒ **拒绝执行**，exit 2、零落盘、零备份、不清库内明文；段为空 ⇒ 首次迁移放行）；
+④ **值畸形条目**（空串 / 非字符串）⇒ **判不合规（exit 1）且可见**，但**绝不**判悬空 ⇒ 绝不会被 prune 删掉；
+⑤ `secrets_key_count` 的 JSON 语义变为「**可用键**数」（与生产 `secrets_store._read_file_fresh` 同口径），总条目数改读新字段 `secrets_entry_count`，不可用条目读 `unusable_keys`；
+⑥ 文本输出新增「归属」行与「本次动作」小节（**动作结果在结论之前** ⇒ 一段文本讲完整件事）。
+⚠️ **反向不变量（不得过修）**：`api_keys` 段**不存在 / 为 `null` / 为空对象** ⇒ 合法空状态 ⇒ **exit 0**。
 
 ⚠️ **CLI 行为变更（本批）**：`check_content_repo_guard.py secrets` 的**纯巡检**（无 `--apply`）
 在「读不到 / 已知集合为空」时，退出码由 **0/1 → 2**。理由：**判不出来时不得报绿**——
@@ -503,11 +512,16 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
   **零文件落盘**；守卫**早于** `mkdir` 生效；**规范化层**六个子层（扩展长度前缀剥离 /
   尾随空格·点裁剪〔末分量 + 中间分量〕/ 大小写折叠 / dotdot 折叠 / UNC 根保真）各有
   返回值级用例；仓内外判定**单一事实源**（`is_inside_repo` 委托 `relative_in_repo`））；
-- `tests/unit/test_check_content_repo_guard.py`（**53 例**：F-1 / F-2 / F-3 的绿→红→绿自证 +
+- `tests/unit/test_check_content_repo_guard.py`（**52 例**：F-1 / F-2 / F-3 的绿→红→绿自证 +
   **结构非法 ⇒ 不可判**（三路径同口径 exit 2）+ **零交集闸门**（默认拒绝 /
   `--force-all-dangling` 放行 / 部分交集仍照常判悬空））；
+- `tests/unit/test_check_content_repo_guard_ownership.py`（**37 例**，2026-10-23 晚新增）：**归属闸门**
+  的 S1~S16 行为矩阵（退出码 + 落盘后 `api_keys` 逐键相等 + 拒绝场景逐字节不变 + 零备份）、
+  **别名键不得伪造归属**、**可用键口径 == 生产 `_read_file_fresh`**、**migrate 的归属闸门**、
+  以及 **force 提示的 sticky 语义**（动作后仍按**动作前**口径渲染）；
 - `tests/unit/test_mutation_harness_judgment.py`（33 例：突变**判定函数**的判别力自证）；
 - `tests/unit/test_cache_key_perf.py`（**13 例**：性能脚本——**守机制不守数值**，父目录不可用 ⇒
   退出码 2 且**零 traceback**）；
-- `tests/unit/test_mutation_run_spec_jobs_guard.py`（**12 例**：突变执行器**并发档位**的硬约束——
-  并发退出码恒为 3、汇总写明档位、默认串行、目标文件缺失记 `[INVALID]`）。
+- `tests/unit/test_mutation_run_spec_jobs_guard.py`（**19 例**：突变执行器**并发档位**的硬约束——
+  并发退出码恒为 3（**所有非用法错误的结束路径**都经统一出口，**含「改动集为空」与「只读预检」两条早退**）、
+  汇总写明档位、默认串行、目标文件缺失记 `[INVALID]`）。
