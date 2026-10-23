@@ -29,7 +29,8 @@
     python scripts/measure_cache_key_perf.py --db tmp/perf.db      # 指定临时库基路径
     python scripts/measure_cache_key_perf.py --json out.json       # 落原始结果
 
-退出码：0 正常；3 拒绝执行（活库路径 / 位置不合法）。
+退出码：0 正常；2 参数 / 父目录不合法（``--db`` 的父目录不存在或不是目录）；
+3 拒绝执行（活库路径 / 位置不合法）。
 """
 
 from __future__ import annotations
@@ -998,6 +999,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "临时库**基路径**（每个规模派生 <stem>_ch<N><suffix>）。"
             "必须是临时位置；指向活库 / 仓库 data/ / 内容仓 ⇒ 拒绝并退出码 3。"
+            "父目录必须**已存在且是目录**（不存在或是普通文件 ⇒ 退出码 2）。"
             "默认：仓库 tmp/ 下自动命名。"
         ),
     )
@@ -1162,13 +1164,18 @@ def main(argv: list[str] | None = None) -> int:
 
     base = Path(args.db) if args.db else _default_base_db()
     assert_not_live_db(base)  # SystemExit ⇒ 退出码 3
-    # ⚠️ **父目录不存在 ⇒ 明确报错**（对抗审查 F-6，2026-10-23）：
+    # ⚠️ **父目录不可用 ⇒ 明确报错**（对抗审查 F-6 / F-4，2026-10-23）：
     # 早先直接往下建库 ⇒ 抛未捕获的 ``sqlite3.OperationalError: unable to open
     # database file`` 栈 ⇒ 用户看不懂（这与「跑挂了」不是一回事）。
-    if not base.parent.exists():
+    # ⚠️ F-4：判据必须是「**存在且是目录**」——``exists()`` 对「父目录是个普通
+    # 文件」同样为真 ⇒ 放行 ⇒ 建库时炸出未捕获的栈 ⇒ 改用 ``is_dir()``；
+    # 「不存在」与「是文件」两种形态走**同一条**报错 + 退出码 2 的路径。
+    parent = base.parent
+    if not parent.is_dir():
+        why = "不是目录（是一个普通文件或其它非目录）" if parent.exists() else "不存在"
         print(
-            f"[错误] --db 的父目录不存在：{base.parent}\n"
-            "       请先创建该目录，或换一个已存在的路径（本脚本不会替你建目录，"
+            f"[错误] --db 的父目录{why}：{parent}\n"
+            "       请先创建该目录，或换一个已存在的目录路径（本脚本不会替你建目录，"
             "免得打错路径时留下空目录）。",
             file=sys.stderr,
         )

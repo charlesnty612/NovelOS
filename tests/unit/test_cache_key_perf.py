@@ -11,7 +11,10 @@
 3. 合成夹具确实造出 N 章、且**章号连续**（1..N）；
 4. **命中与未命中两条路径都跑通**，且两者返回的 payload **内容不同**
    —— 这是防「脚本其实每次都 miss 却报告成 hit」的自指断言；
-5. 脚本自报的命中/未命中**核对计数**与迭代数一致（量具自证）。
+5. 脚本自报的命中/未命中**核对计数**与迭代数一致（量具自证）；
+6. ``--db`` 的父路径**不可用**（不存在 / 是普通文件）⇒ 统一报错 + **退出码 2**
+   + **零 traceback**（F-4：早先判据 ``exists()`` 对「父路径是文件」也为真 ⇒
+   放行 ⇒ 建库时抛未捕获的 ``sqlite3.OperationalError`` ⇒ 栈甩到用户脸上）。
 
 判别力说明
 ----------
@@ -261,3 +264,138 @@ def test_script_reports_verified_hit_and_miss_counts(tmp_path: Path) -> None:
     assert miss["total"]["n"] == iterations
     param = result["miss_param_dim"]
     assert param["verified_misses"] == iterations
+
+
+# ---------------------------------------------------------------------------
+# 6. ``--db`` 父路径不可用 ⇒ 清晰报错 + 退出码 2 + 零 traceback（F-4）
+# ---------------------------------------------------------------------------
+
+#: 「父路径不可用」的统一报错前缀——两种形态（不存在 / 是普通文件）必须同前缀、同退出码。
+_ERR_PARENT_PREFIX = "[错误] --db 的父目录"
+
+
+def _db_artifacts_under(root: Path) -> list[Path]:
+    """递归找出 ``root`` 下所有临时库残留（``*.db`` / ``*-wal`` / ``*-shm``）。"""
+    if not root.exists():
+        return []
+    return sorted(
+        p
+        for p in root.rglob("*")
+        if p.is_file() and p.name.endswith((".db", "-wal", "-shm"))
+    )
+
+
+def test_db_parent_is_a_regular_file_fails_cleanly_without_traceback(
+    tmp_path: Path,
+) -> None:
+    """F-4 判别用例：``--db`` 的父路径是**普通文件** ⇒ 退出码 2 + 明确原因 + **零 traceback**。
+
+    缺陷版判据是 ``base.parent.exists()``——对「父路径是个普通文件」同样为真 ⇒ 放行
+    ⇒ 建库时抛未捕获的 ``sqlite3.OperationalError: unable to open database file``
+    ⇒ 退出码 1 + 栈甩到用户脸上（用户看到的是「跑挂了」，不是「路径写错了」）。
+
+    断言打在**真实行为**上：退出码 / 输出内容 / 落盘残留三头并查，
+    不是「只查存在不查值」，也不是恒真断言。
+    """
+    parent_file = tmp_path / "i_am_a_file.txt"
+    parent_file.write_text("not a directory\n", encoding="utf-8")
+    before = parent_file.stat()
+
+    proc = _run_script(
+        "--db", str(parent_file / "perf.db"),
+        "--chapters", "2", "--iterations", "1", "--warmup", "0",
+        "--assembly", "director",
+    )
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 2, (
+        f"父路径是普通文件时必须以退出码 2 收场，实际 {proc.returncode}\n{combined[-2000:]}"
+    )
+    assert "Traceback" not in combined, f"不得把 traceback 甩给用户：\n{combined[-2000:]}"
+    assert "OperationalError" not in combined, f"不得漏出底层 sqlite 异常：\n{combined[-2000:]}"
+    assert proc.stderr.startswith(_ERR_PARENT_PREFIX), (
+        f"stderr 应走统一的父目录报错路径：{proc.stderr[-500:]}"
+    )
+    assert "不是目录" in proc.stderr, f"stderr 应说清是哪种情况：{proc.stderr[-500:]}"
+    assert str(parent_file) in proc.stderr, (
+        f"stderr 应打印出问题的那个路径：{proc.stderr[-500:]}"
+    )
+    assert _db_artifacts_under(tmp_path) == [], "失败路径不得产出任何临时库残留"
+    after = parent_file.stat()
+    assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size), (
+        "被当作父路径的普通文件不得被改动"
+    )
+
+
+def test_db_parent_missing_fails_cleanly_with_exit_code_2(tmp_path: Path) -> None:
+    """反向不变量：父路径**不存在** ⇒ 同样退出码 2（防把这条判绿 / 改过头）。
+
+    与 F-4 用例成对：既证「是文件」被拦，也证「不存在」没被改坏。
+    """
+    missing = tmp_path / "no_such_dir"
+    proc = _run_script(
+        "--db", str(missing / "perf.db"),
+        "--chapters", "2", "--iterations", "1", "--warmup", "0",
+        "--assembly", "director",
+    )
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 2, (
+        f"父路径不存在时必须以退出码 2 收场，实际 {proc.returncode}\n{combined[-2000:]}"
+    )
+    assert "Traceback" not in combined, f"不得把 traceback 甩给用户：\n{combined[-2000:]}"
+    assert proc.stderr.startswith(_ERR_PARENT_PREFIX), (
+        f"stderr 应走与「是文件」同一条报错路径：{proc.stderr[-500:]}"
+    )
+    assert "不存在" in proc.stderr, f"stderr 应说清是哪种情况：{proc.stderr[-500:]}"
+    assert str(missing) in proc.stderr, (
+        f"stderr 应打印出问题的那个路径：{proc.stderr[-500:]}"
+    )
+    assert not missing.exists(), "失败路径不得替你把目录建出来"
+    assert _db_artifacts_under(tmp_path) == [], "失败路径不得产出任何临时库残留"
+
+
+def test_db_parent_file_rejected_under_default_both_assembly(tmp_path: Path) -> None:
+    """默认装配模式（``--assembly both`` ⇒ 父进程派生子进程测）下同样干净收场。
+
+    防的是「只在单装配器分支判了、``both`` 分支漏判」这种半修：
+    默认参数就是 ``both``，只测 ``--assembly director`` 等于没测默认路径。
+    """
+    parent_file = tmp_path / "i_am_a_file.txt"
+    parent_file.write_text("not a directory\n", encoding="utf-8")
+
+    proc = _run_script(
+        "--db", str(parent_file / "perf.db"),
+        "--chapters", "2", "--iterations", "1", "--warmup", "0",
+    )
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 2, (
+        f"默认装配模式下父路径是普通文件也必须退出码 2，实际 {proc.returncode}\n"
+        f"{combined[-2000:]}"
+    )
+    assert "Traceback" not in combined, f"不得把 traceback 甩给用户：\n{combined[-2000:]}"
+    assert proc.stderr.startswith(_ERR_PARENT_PREFIX), (
+        f"stderr 应走统一的父目录报错路径：{proc.stderr[-500:]}"
+    )
+    assert _db_artifacts_under(tmp_path) == [], "失败路径不得产出任何临时库残留"
+
+
+def test_db_parent_real_directory_still_runs_normally(tmp_path: Path) -> None:
+    """防「过度拦截」：父路径是正常目录时脚本照常跑出结果（不是一律拒绝）。
+
+    这里**完整跑一次**（2 章 / 1 次迭代 / 只测 director，实测约 0.7s），
+    不用「只验前置校验」的近似写法——近似写法证明不了「正常路径没被误伤」。
+    """
+    proc = _run_script(
+        "--db", str(tmp_path / "perf.db"),
+        "--chapters", "2", "--iterations", "1", "--warmup", "0",
+        "--assembly", "director", "--no-ablation",
+    )
+    assert proc.returncode == 0, (
+        f"父路径是正常目录时必须照常跑通：\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+    )
+    payload = json.loads(proc.stdout)
+    assert payload["results"][0]["chapters"] == 2, "正常路径的规模点应如实报出"
+    db_path = Path(payload["results"][0]["db_path"]).resolve()
+    assert db_path.parent == tmp_path.resolve(), "临时库必须落在指定目录内"
