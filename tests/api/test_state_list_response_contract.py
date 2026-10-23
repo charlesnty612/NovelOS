@@ -37,9 +37,10 @@
 
 禁自指断言（本轮最大的坑）
 ------------------------
-**本文件里 ``model_fields`` 只出现在 ``test_models_stay_in_sync_with_hardcoded_expectation``
-一条用例中**（可用 ``grep -n "model_fields" tests/api/test_state_list_response_contract.py``
-自查）。其余用例一律拿**硬编码常量**当模型之外的第三方基准：
+**本文件里 ``model_fields`` 只出现在「模型 vs 硬编码」这一条用例中**
+（该访问已收进 ``_contract_runner.assert_model_fields_match`` ⇒ **代码里 0 命中**，
+只剩 docstring 的说明文字；自查：``grep -n "model_fields" <本文件>`` ⇒ 命中的全是
+注释/docstring）。其余用例一律拿**硬编码常量**当模型之外的第三方基准：
 
 * ``test_*_row_keys_match_hardcoded_expectation``：响应行键集 vs 硬编码；
 * ``test_openapi_schema_properties_match_hardcoded_expectation``：OpenAPI 里
@@ -57,7 +58,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -68,7 +68,7 @@ from packages.core.api.routers import story_state as story_state_router
 from packages.core.api.routers.workflows.models import WorkflowRunSummary
 from packages.core.config import Settings
 from packages.core.db import apply_migrations, get_connection
-from packages.core.ids import new_id, now_iso
+from packages.core.ids import now_iso
 from packages.core.story_state.models import (
     BranchCreatedResponse,
     BranchSummary,
@@ -76,7 +76,14 @@ from packages.core.story_state.models import (
     StateDeltaListItem,
 )
 
-from ._shared import _create_app, _evidence
+from ._contract_runner import (
+    assert_keys_match,
+    assert_list_items_named_ref,
+    assert_model_fields_match,
+    assert_openapi_properties_and_required,
+)
+from ._rich_fixture import build_state_delta
+from ._shared import _create_app, _request
 
 # ---------------------------------------------------------------------------
 # 硬编码期望键集：**模型之外的第三方基准**，不得写成 set(Model.model_fields)
@@ -193,92 +200,24 @@ EXPECTED_REQUIRED: dict[str, set[str]] = dict(EXPECTED_PROPERTIES)
 
 
 
-def _make_client(app) -> httpx.AsyncClient:
-    """⚠️ **刻意不进入 lifespan**：迁移已由 ``apply_migrations`` 显式跑过，而 lifespan 的
-    startup 会跑 ``recover_interrupted_runs``。本文件的所有 run 行都是**直接 INSERT** 的
-    ``COMPLETED`` / ``PAUSED`` / ``FAILED`` 终态，不受自愈影响；但完全不进 lifespan
-    更省事也更确定（与 ``test_workflow_run_response_contract.py`` 的 ``_harvest``
-    需要进 lifespan 只是因为它真跑了 workflow）。
-    """
-    return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-    )
-
-
-@asynccontextmanager
-async def _client(app):
-    async with _make_client(app) as c:
-        yield c
-
-
-async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
-    async with _client(app) as c:
-        return await c.request(method, path, **kwargs)
+# 客户端与请求助手已收进 ``tests/api/_shared.py``（task-6 阶段一已存在的共用 helper：
+# ``_make_client`` = 每请求一个 ASGI 客户端、**不进 lifespan**；``_request`` = 同形的
+# 一次性请求）。本文件的所有 run 行都是**直接 INSERT** 的终态行 ⇒ 不进 lifespan
+# （lifespan 的 startup 会跑 ``recover_interrupted_runs``，对终态行是多余干扰）。
 
 
 
 
 def _delta(chapter_id: str, character_id: str, prev_version: int, location: str) -> dict:
-    """一条能过 ``validate_delta`` 的完整 state-delta（7 数组齐备）。"""
-    return {
-        "delta_id": new_id("dl"),
-        "delta_version": 1,
-        "schema_version": "state-delta-v0",
-        "chapter_id": chapter_id,
-        "workflow_run_id": new_id("wfr"),
-        "previous_state_version": prev_version,
-        "created_by": "l2-contract-test",
-        "created_at": now_iso(),
-        "supersedes": None,
-        "notes": None,
-        "character_changes": [
-            {
-                "change_id": new_id("cc"),
-                "op": "update",
-                "target_id": character_id,
-                "character_id": character_id,
-                "facet": "state",
-                "field": "state.location",
-                "before": "Unknown",
-                "after": location,
-                "confidence": 0.9,
-                "evidence": _evidence(chapter_id),
-                "risk_level": "LOW",
-            }
-        ],
-        "world_changes": [],
-        "relationship_changes": [],
-        "new_events": [],
-        "resolved_hooks": [],
-        "new_hooks": [
-            {
-                "change_id": new_id("nh"),
-                "op": "add",
-                "target_id": new_id("ht"),
-                "hook_id": new_id("hk"),
-                "name": "三年之约",
-                "importance": 0.8,
-                "description": "埋线",
-                "confidence": 0.8,
-                "evidence": _evidence(chapter_id),
-                "risk_level": "LOW",
-            }
-        ],
-        "debt_changes": [
-            {
-                "change_id": new_id("dc"),
-                "op": "add",
-                "target_id": new_id("dt"),
-                "debt_id": new_id("db"),
-                "description": "欠他一条命",
-                "status_after": "open",
-                "severity_after": 0.8,
-                "confidence": 0.8,
-                "evidence": _evidence(chapter_id),
-                "risk_level": "LOW",
-            }
-        ],
-    }
+    """一条能过 ``validate_delta`` 的完整 state-delta（7 数组齐备）。
+
+    构造器已收进 ``tests/api/_rich_fixture.py``（与写面契约文件**逐字同形** ⇒ 共用
+    一处）；本文件只保留自己的 ``created_by`` 字面量 ⇒ **产出逐字不变**（含键序：
+    这份 dict 是 ``POST .../deltas`` 的请求体）。
+    """
+    return build_state_delta(
+        chapter_id, character_id, prev_version, location, created_by="l2-contract-test"
+    )
 
 
 def _seed_runs(db_path: str, chapter_id: str) -> None:
@@ -425,14 +364,6 @@ def harvested(tmp_path_factory) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _list_items_schema(openapi: dict, path: str, method: str) -> dict:
-    op = openapi["paths"][path][method]
-    for code in ("200", "201"):
-        if code in op["responses"]:
-            return op["responses"][code]["content"]["application/json"]["schema"]
-    raise AssertionError(f"{method.upper()} {path} 没有 200/201 的 json schema")
-
-
 def test_openapi_list_items_have_named_ref(tmp_path: Path):
     """⭐ 本组的核心判别口径：``list[dict]`` 的 items 是匿名 object，前端拿到的就是
     ``Record<string, unknown>``。**只有 ``array`` + ``items.$ref`` 才算已建模。**
@@ -440,17 +371,8 @@ def test_openapi_list_items_have_named_ref(tmp_path: Path):
     撤掉任一 ``response_model=list[...]`` ⇒ ``$ref`` 消失 ⇒ 必红。
     """
     openapi = _create_app(tmp_path).openapi()
-    schemas = openapi["components"]["schemas"]
     for path, method, model_name in LIST_ENDPOINTS:
-        schema = _list_items_schema(openapi, path, method)
-        assert schema.get("type") == "array", f"{path} 的响应不是数组：{schema}"
-        items = schema.get("items") or {}
-        ref = items.get("$ref")
-        assert isinstance(ref, str) and ref.endswith(f"/{model_name}"), (
-            f"{method.upper()} {path} 的 items 不是具名 $ref ⇒ 前端仍拿到 "
-            f"Record<string, unknown>：{items}"
-        )
-        assert model_name in schemas, f"{model_name} 未进 components.schemas"
+        assert_list_items_named_ref(openapi, path, method, model_name)
 
 
 def test_openapi_schema_properties_match_hardcoded_expectation(tmp_path: Path):
@@ -465,16 +387,9 @@ def test_openapi_schema_properties_match_hardcoded_expectation(tmp_path: Path):
     schemas = _create_app(tmp_path).openapi()["components"]["schemas"]
     for name, keys in EXPECTED_PROPERTIES.items():
         assert name in schemas, f"{name} 未进 components.schemas"
-        props = set(schemas[name].get("properties") or {})
-        assert props == keys, (
-            f"{name} 的 schema properties 不符：多={props - keys} 少={keys - props}"
+        assert_openapi_properties_and_required(
+            schemas[name], keys, EXPECTED_REQUIRED[name], label=name
         )
-        required = set(schemas[name].get("required") or [])
-        assert required == EXPECTED_REQUIRED[name], (
-            f"{name} 的 schema required 不符：多={required - EXPECTED_REQUIRED[name]} "
-            f"少={EXPECTED_REQUIRED[name] - required}"
-        )
-        assert required <= props, f"{name} 的 required ⊄ properties"
 
 
 # ---------------------------------------------------------------------------
@@ -497,17 +412,16 @@ def test_commits_row_keys_match_hardcoded_expectation(harvested: dict):
     )
     assert any(r["rollback_of"] is None for r in rows), "普通 commit 行缺失"
     for row in rows:
-        assert set(row) == EXPECTED_COMMIT_ROW_KEYS, (
-            f"commit 行键不符：多={set(row) - EXPECTED_COMMIT_ROW_KEYS} "
-            f"少={EXPECTED_COMMIT_ROW_KEYS - set(row)}"
-        )
+        assert_keys_match(row, EXPECTED_COMMIT_ROW_KEYS, "commit 行")
         assert isinstance(row["validation_json"], dict), "JSON 列应被解析成 dict"
         assert isinstance(row["author_approval_json"], dict)
         assert row["previous_state_version"] < row["resulting_state_version"]
         assert "payload_json" not in row and "state_version" not in row
 
     # 并列断言：单体端点的形状**确实不同**（防止后人「统一」成同一个模型）
-    assert set(harvested["commit_response"]) == EXPECTED_COMMIT_RESPONSE_KEYS
+    assert_keys_match(
+        harvested["commit_response"], EXPECTED_COMMIT_RESPONSE_KEYS, "POST /commits 响应"
+    )
     assert EXPECTED_COMMIT_RESPONSE_KEYS != EXPECTED_COMMIT_ROW_KEYS
 
 
@@ -516,10 +430,7 @@ def test_deltas_row_keys_match_hardcoded_expectation(harvested: dict):
     rows = harvested["deltas"]
     assert len(rows) >= 3, f"夹具没造出足够的 delta 行：{len(rows)}（genesis + 2 delta + 逆 delta）"
     for row in rows:
-        assert set(row) == EXPECTED_DELTA_ROW_KEYS, (
-            f"delta 行键不符：多={set(row) - EXPECTED_DELTA_ROW_KEYS} "
-            f"少={EXPECTED_DELTA_ROW_KEYS - set(row)}"
-        )
+        assert_keys_match(row, EXPECTED_DELTA_ROW_KEYS, "delta 行")
         assert "payload_json" not in row, (
             "行里不该有 payload_json——restore_delta_from_row 已把 7 数组摊平"
         )
@@ -551,10 +462,7 @@ def test_branches_row_keys_match_hardcoded_expectation(harvested: dict):
     assert "main" in by_name, f"列表恒含 main，实际 {sorted(by_name)}"
     assert "alt" in by_name, f"夹具的子分支没建出来：{sorted(by_name)}"
     for row in rows:
-        assert set(row) == EXPECTED_BRANCH_ROW_KEYS, (
-            f"branch 行键不符：多={set(row) - EXPECTED_BRANCH_ROW_KEYS} "
-            f"少={EXPECTED_BRANCH_ROW_KEYS - set(row)}"
-        )
+        assert_keys_match(row, EXPECTED_BRANCH_ROW_KEYS, "branch 行")
     # main 先出（ORDER BY (name='main') DESC）
     assert rows[0]["name"] == "main", "实测 main 排第一（供 UI 默认选中）"
     assert by_name["main"]["parent_branch_id"] is None, (
@@ -570,10 +478,7 @@ def test_runs_row_keys_match_hardcoded_expectation(harvested: dict):
     rows = harvested["runs"]
     assert len(rows) >= 4, f"夹具没造出足够的 run 行：{len(rows)}"
     for row in rows:
-        assert set(row) == EXPECTED_RUN_ROW_KEYS, (
-            f"run 行键不符：多={set(row) - EXPECTED_RUN_ROW_KEYS} "
-            f"少={EXPECTED_RUN_ROW_KEYS - set(row)}"
-        )
+        assert_keys_match(row, EXPECTED_RUN_ROW_KEYS, "run 行")
         assert isinstance(row["checkpoint_json"], dict)
     by_id = {r["run_id"]: r for r in rows}
     assert by_id["wfr_l2_init"]["chapter_id"] is None, "project-init 的 chapter_id 恒为 null"
@@ -662,10 +567,10 @@ def test_models_stay_in_sync_with_hardcoded_expectation():
 
     比的是「模型 vs 硬编码」，不是「模型 vs 响应」——后者因 ``extra="allow"`` 恒等。
     """
-    assert set(CommitListItem.model_fields) == EXPECTED_COMMIT_ROW_KEYS
-    assert set(StateDeltaListItem.model_fields) == EXPECTED_DELTA_ROW_KEYS
-    assert set(BranchSummary.model_fields) == EXPECTED_BRANCH_ROW_KEYS
-    assert set(WorkflowRunSummary.model_fields) == EXPECTED_RUN_ROW_KEYS
+    assert_model_fields_match(CommitListItem, EXPECTED_COMMIT_ROW_KEYS)
+    assert_model_fields_match(StateDeltaListItem, EXPECTED_DELTA_ROW_KEYS)
+    assert_model_fields_match(BranchSummary, EXPECTED_BRANCH_ROW_KEYS)
+    assert_model_fields_match(WorkflowRunSummary, EXPECTED_RUN_ROW_KEYS)
 
 
 def test_extra_allow_keeps_undeclared_row_keys():

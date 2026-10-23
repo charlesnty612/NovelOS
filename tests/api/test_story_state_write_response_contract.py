@@ -44,8 +44,10 @@
 禁自指断言（本轮最大的坑）
 ------------------------
 
-**本文件里 ``model_fields`` 只出现在 ``test_models_stay_in_sync_with_hardcoded_expectation``
-一条用例中**（可用 ``grep -n "model_fields"`` 自查）。其余用例一律拿
+**本文件里 ``model_fields`` 只出现在「模型 vs 硬编码」这一条用例中**
+（该访问已收进 ``_contract_runner.assert_model_fields_match`` ⇒ **代码里 0 命中**，
+只剩 docstring 的说明文字；自查：``grep -n "model_fields" <本文件>`` ⇒ 命中的全是
+注释/docstring）。其余用例一律拿
 **硬编码常量**当模型之外的第三方基准：
 
 * ``test_*_keys_match_hardcoded_expectation``：响应键集 vs 硬编码；
@@ -53,22 +55,18 @@
   ``components.schemas`` 的 ``properties`` vs 硬编码——这一条是 ``extra="allow"`` 的必要
   配套（删掉字段声明时响应照样有该键，光断言响应键集抓不到，见坑区 M20）。
 
-判别用例：``tests/mutation_specs/g3_story_state.py``（11 条）。
+判别用例：``tests/mutation_specs/g3_story_state.py``（12 条）。
 """
 
 from __future__ import annotations
 
 import sqlite3
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.routing import APIRoute
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.ids import new_id, now_iso
 from packages.core.story_state.models import (
     BranchCreatedResponse,
     BranchPromoteResponse,
@@ -81,7 +79,13 @@ from packages.core.story_state.models import (
     SubmitDeltaResponse,
 )
 
-from ._shared import _evidence
+from ._contract_runner import (
+    assert_keys_match,
+    assert_model_fields_match,
+    client_ctx,
+    create_test_app,
+)
+from ._rich_fixture import build_state_delta
 
 # ---------------------------------------------------------------------------
 # 硬编码期望键集：**模型之外的第三方基准**，不得写成 set(Model.model_fields)
@@ -167,16 +171,17 @@ _ENDPOINTS = (
 
 
 def _create_app(tmp_path: Path):
-    return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
+    """本文件的 app **不**显式跑迁移（迁移在 lifespan 里跑 ⇒ 见 ``_client``）。
+
+    共享 runner 的 ``create_test_app`` 与本文件原实现**逐字同形**
+    （``create_app(Settings(data_dir=tmp_path, log_level="WARNING"))``）。
+    """
+    return create_test_app(tmp_path)
 
 
-@asynccontextmanager
-async def _client(app):
+def _client(app):
     """⚠️ 迁移只在 lifespan 里跑（`httpx.ASGITransport` 不触发 lifespan）。"""
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
-            yield c
+    return client_ctx(app, enter_lifespan=True)
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
@@ -209,79 +214,20 @@ async def _seeded(tmp_path: Path):
 
 
 def _rich_delta(chapter_id: str, character_id: str, prev_version: int, location: str) -> dict:
-    """一条能过校验、且能同时点亮 characters/hooks/debts/events_changed 四段的 delta。"""
-    return {
-        "delta_id": new_id("dl"),
-        "delta_version": 1,
-        "schema_version": "state-delta-v0",
-        "chapter_id": chapter_id,
-        "workflow_run_id": new_id("wfr"),
-        "previous_state_version": prev_version,
-        "created_by": "contract-test",
-        "created_at": now_iso(),
-        "supersedes": None,
-        "notes": None,
-        "character_changes": [
-            {
-                "change_id": new_id("cc"),
-                "op": "update",
-                "target_id": character_id,
-                "character_id": character_id,
-                "facet": "state",
-                "field": "state.location",
-                "before": "Unknown",
-                "after": location,
-                "confidence": 0.9,
-                "evidence": _evidence(chapter_id),
-                "risk_level": "LOW",
-            }
-        ],
-        "world_changes": [],
-        "relationship_changes": [],
-        "new_events": [
-            {
-                "change_id": new_id("ne"),
-                "op": "add",
-                "target_id": new_id("et"),
-                "event_id": new_id("evt"),
-                "type": "other",
-                "participants": [character_id],
-                "time": {"timeline_day": 1, "in_story_date": "辰时"},
-                "confidence": 0.8,
-                "evidence": _evidence(chapter_id),
-                "risk_level": "LOW",
-            }
-        ],
-        "resolved_hooks": [],
-        "new_hooks": [
-            {
-                "change_id": new_id("nh"),
-                "op": "add",
-                "target_id": new_id("ht"),
-                "hook_id": new_id("hk"),
-                "name": "三年之约",
-                "importance": 0.8,
-                "description": "埋线",
-                "confidence": 0.8,
-                "evidence": _evidence(chapter_id),
-                "risk_level": "LOW",
-            }
-        ],
-        "debt_changes": [
-            {
-                "change_id": new_id("dc"),
-                "op": "add",
-                "target_id": new_id("dt"),
-                "debt_id": new_id("db"),
-                "description": "欠他一条命",
-                "status_after": "open",
-                "severity_after": 0.8,
-                "confidence": 0.8,
-                "evidence": _evidence(chapter_id),
-                "risk_level": "LOW",
-            }
-        ],
-    }
+    """一条能过校验、且能同时点亮 characters/hooks/debts/events_changed 四段的 delta。
+
+    构造器已收进 ``tests/api/_rich_fixture.py``（与列表面契约文件**逐字同形** ⇒ 共用
+    一处）；本文件只保留自己的 ``created_by`` 字面量与「``new_events`` 非空」这一处
+    差异 ⇒ **产出逐字不变**（含键序：这份 dict 是 ``POST .../deltas`` 的请求体）。
+    """
+    return build_state_delta(
+        chapter_id,
+        character_id,
+        prev_version,
+        location,
+        created_by="contract-test",
+        with_events=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -364,15 +310,15 @@ def test_models_stay_in_sync_with_hardcoded_expectation():
     拿模型字段集与硬编码常量比——是「模型 vs 硬编码」，不是「响应 vs 模型」，
     因此删掉任一字段声明时它会红（响应侧因 ``extra="allow"`` 抓不到）。
     """
-    assert set(SnapshotResponse.model_fields) == EXPECTED_INIT_KEYS
-    assert set(SubmitDeltaResponse.model_fields) == EXPECTED_DELTA_KEYS
-    assert set(CommitResponse.model_fields) == EXPECTED_COMMIT_KEYS
-    assert set(RollbackResponse.model_fields) == EXPECTED_ROLLBACK_KEYS
-    assert set(BranchCreatedResponse.model_fields) == EXPECTED_BRANCH_KEYS
-    assert set(BranchPromoteResponse.model_fields) == EXPECTED_PROMOTE_KEYS
-    assert set(StateDiffResponse.model_fields) == EXPECTED_DIFF_EMPTY_KEYS | EXPECTED_DIFF_SECTIONS
-    assert set(ListDiffResponse.model_fields) == {"added", "removed", "changed"}
-    assert set(ChangedDiffItemResponse.model_fields) == {"id", "changes"}
+    assert_model_fields_match(SnapshotResponse, EXPECTED_INIT_KEYS)
+    assert_model_fields_match(SubmitDeltaResponse, EXPECTED_DELTA_KEYS)
+    assert_model_fields_match(CommitResponse, EXPECTED_COMMIT_KEYS)
+    assert_model_fields_match(RollbackResponse, EXPECTED_ROLLBACK_KEYS)
+    assert_model_fields_match(BranchCreatedResponse, EXPECTED_BRANCH_KEYS)
+    assert_model_fields_match(BranchPromoteResponse, EXPECTED_PROMOTE_KEYS)
+    assert_model_fields_match(StateDiffResponse, EXPECTED_DIFF_EMPTY_KEYS | EXPECTED_DIFF_SECTIONS)
+    assert_model_fields_match(ListDiffResponse, {"added", "removed", "changed"})
+    assert_model_fields_match(ChangedDiffItemResponse, {"id", "changes"})
 
 
 # ---------------------------------------------------------------------------
@@ -439,9 +385,7 @@ async def test_delta_and_commit_and_rollback_keys_match_hardcoded_expectation(tm
     )
     assert r.status_code == 201, r.text
     rb = r.json()
-    assert set(rb) == EXPECTED_ROLLBACK_KEYS, (
-        f"多={set(rb) - EXPECTED_ROLLBACK_KEYS} 少={EXPECTED_ROLLBACK_KEYS - set(rb)}"
-    )
+    assert_keys_match(rb, EXPECTED_ROLLBACK_KEYS, "回滚响应")
     assert rb["rollback_of"] == commit_body["commit_id"]
     assert rb["commit_id"] != commit_body["commit_id"], "回滚产生的是**新** commit"
 
@@ -476,7 +420,7 @@ async def test_branch_commit_keeps_null_snapshot_ref(tmp_path: Path):
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    assert set(body) == EXPECTED_COMMIT_KEYS
+    assert_keys_match(body, EXPECTED_COMMIT_KEYS, "分支 commit 响应")
     assert "snapshot_ref" in body, "分支 commit 的 snapshot_ref 键被抹掉了？"
     assert body["snapshot_ref"] is None, "分支 commit 不写 story_states，snapshot_ref 应为 null"
 
@@ -487,9 +431,7 @@ async def test_branch_create_keys_match_hardcoded_expectation(tmp_path: Path):
     r = await _request(app, "POST", f"/api/projects/{pid}/branches", json={"name": "alt"})
     assert r.status_code == 201, r.text
     body = r.json()
-    assert set(body) == EXPECTED_BRANCH_KEYS, (
-        f"多={set(body) - EXPECTED_BRANCH_KEYS} 少={EXPECTED_BRANCH_KEYS - set(body)}"
-    )
+    assert_keys_match(body, EXPECTED_BRANCH_KEYS, "分支创建响应")
     assert body["base_state_version"] == base
     assert body["status"] == "ACTIVE"
     assert body["parent_branch_id"] != body["branch_id"]

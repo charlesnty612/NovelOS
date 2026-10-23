@@ -23,7 +23,15 @@ project → character → model_config → chapter → 四工作流
    - GET /projects/{pid}/state 快照含 world_rules（创建的世界规则进入快照）
    - GET /chapters/{cid}/drafts 至少 1 条 AI 草稿
    - GET /chapters/{cid}/quality 200 + report（report 模式）
-10. 状态同步巡检：在临时 db 上跑 `python -m scripts.check_state_sync --db <tmp_db> --json`，
+10. **挂卷后再装配**（2026-10-23 C-6 补：``volume_scope`` 缓存键维度的 e2e，此前**零 e2e**）：
+    建第 2 章 → ``GET /api/chapters/{cid}/context-preview`` 断言 L1 里**有**「前章尾段」
+    （第 1 章有草稿且未挂卷 ⇒ 同卷过滤不过滤）→ 建卷并把第 2 章挂上去 →
+    再预览一次，断言 L1 里**没有**「前章尾段」（第 1 章不在同卷 ⇒ 被滤掉）。
+    ⇒ 若 ``volume_scope`` 没进装配缓存键，第二次预览会**命中挂卷前的旧装配**（尾段仍在）
+    ⇒ 必红；这正是批次二十四加该维度的目标形状（先装配、后挂卷 ⇒ 不得沿用旧卷窗口）。
+    另：挂卷后跑一次**生产装配**（第 2 章的 plan workflow，mock provider）⇒ 断言 COMPLETED
+    （覆盖生产命名空间下「非空 volume_scope」的装配路径本身不炸）。
+11. 状态同步巡检：在临时 db 上跑 `python -m scripts.check_state_sync --db <tmp_db> --json`，
     漂移（exit=1）或校验异常（exit=2）→ smoke 整体失败；OK → 打印 `[state-sync] SYNC OK`。
 
 执行：``python scripts/smoke_e2e.py``
@@ -557,12 +565,25 @@ def run_smoke() -> int:
             payloads = _build_mock_payloads(chapter_id, character_id)
             mocks = {agent: [json.dumps(p, ensure_ascii=False) for p in ps] for agent, ps in payloads.items()}
 
-        def _start(workflow: str) -> dict:
-            _assert(chapter_id and project_id, "chapter_id/project_id missing")
+        def _start(
+            workflow: str,
+            cid: str | None = None,
+            mock_providers: dict[str, list[str]] | None = None,
+        ) -> dict:
+            """启动某章的某阶段。
+
+            ``cid`` / ``mock_providers`` 可覆盖默认（第 1 章 + 它的 mock 脚本）——
+            C-6 的「挂卷后再装配」要给**第 2 章**跑一次生产装配，mock 脚本里的
+            ``chapter_id`` 必须与被装配的章一致（否则契约对不上）。
+            """
+            target = cid or chapter_id
+            _assert(target and project_id, "chapter_id/project_id missing")
             r = client.post(
-                f"/api/projects/{project_id}/chapters/{chapter_id}/{workflow}",
+                f"/api/projects/{project_id}/chapters/{target}/{workflow}",
                 json={
-                    "mock_providers": mocks,
+                    "mock_providers": (
+                        mocks if mock_providers is None else mock_providers
+                    ),
                     "quality_gate_mode": "report",
                     "target_word_count": 300,
                     "author_intent": "识海古镜觉醒",
@@ -595,15 +616,21 @@ def run_smoke() -> int:
                     )
                 time.sleep(RUN_POLL_INTERVAL_S)
 
-        def _run_step(workflow: str) -> tuple[dict, float]:
+        def _run_step(
+            workflow: str,
+            cid: str | None = None,
+            mock_providers: dict[str, list[str]] | None = None,
+        ) -> tuple[dict, float]:
             """start → 轮询终态（Human 节点 PAUSED 则 resume approved 后继续轮询）。
 
             返回 (终态 run dict, 耗时秒)；非 COMPLETED 终态抛 AssertionError 并带
             run.error / current_node——上一步不落到终态就 start 下一步会撞 409，
             故每步都在这里等干净。
+
+            ``cid`` / ``mock_providers`` 透传给 :func:`_start`（C-6 的第 2 章用）。
             """
             started = time.monotonic()
-            run_id = _start(workflow)["run_id"]
+            run_id = _start(workflow, cid, mock_providers)["run_id"]
             deadline = started + RUN_TIMEOUTS_S[workflow]
             resumes = 0
             while True:
@@ -729,8 +756,118 @@ def run_smoke() -> int:
             except AssertionError as e:
                 failures.append(f"quality: {e}")
 
-        # ---- (10) 状态同步巡检（DB 实体表 vs 快照 JSON 漂移）
-        # 时机点：全部章节 commit 完成、9 组断言已跑、服务仍运行、临时 db 尚未删除。
+        # ---- (9b) 挂卷后再装配（volume_scope 缓存键维度的 e2e · 2026-10-23 C-6）
+        #
+        # 缺陷形状（批次二十四给装配缓存键加 volume_scope 维度的目标）：
+        # 「先装配、后挂卷」⇒ 同 state_version / 同章号下命中**挂卷前**的旧装配
+        # ⇒ planner 拿着旧卷窗口排计划。该维度此前**只有单元 / 突变规格**，没有 e2e。
+        #
+        # 可观察面：「前章尾段」（previous_chapter_tail）是**同卷过滤**的
+        # （builders_common/summaries.py::_previous_chapter_tail：当前章挂了卷 ⇒
+        # 只取同 volume_id 的前章；当前章未挂卷 ⇒ 不过滤），
+        # 而 ``GET /api/chapters/{cid}/context-preview`` 的 L1 层**直接列出**该条目
+        # （preview._extract_l1，kind == "previous_chapter_tail"）⇒ 纯 HTTP 可观察。
+        #
+        # 断言（两个都断，缺一即假绿）：
+        #   ① 挂卷**前**：第 2 章预览**有**前章尾段（第 1 章有草稿、未挂卷 ⇒ 不过滤）；
+        #   ② 挂卷**后**：同一章预览**没有**前章尾段（第 1 章不在同卷 ⇒ 被滤掉）。
+        # ⇒ 若 volume_scope 没进键，② 会命中挂卷前的旧装配（尾段仍在）⇒ 必红。
+        #
+        # ⚠️ 诚实边界：预览走 **preview 命名空间**（与生产键空间分离）⇒ ② 证明的是
+        # 「该维度进了键（键构造同源）」+「同卷过滤生效」；生产命名空间下**载荷内容**
+        # 的差异本 smoke 不直接断言（run 的 checkpoint_json 键集随 workflow 演进，
+        # 拿它做断言太脆）⇒ 生产侧只断言「挂卷后装配不炸（plan run COMPLETED）」。
+        if project_id and chapter_id and character_id:
+            try:
+                # 第 2 章（同项目；此时第 1 章已有草稿 ⇒ 前章尾段可取）
+                r = client.post(
+                    f"/api/projects/{project_id}/chapters",
+                    json={"number": 2, "title": "smoke chapter 2"},
+                )
+                _assert(
+                    r.status_code == 201,
+                    f"create chapter2 status={r.status_code} body={r.text[:200]}",
+                )
+                chapter2_id = r.json()["chapter_id"]
+
+                def _preview_tail_ids(cid: str) -> list[str]:
+                    """预览 L1 层里「前章尾段」条目的 id 列表（空 = 没有前章尾段）。"""
+                    pr = client.get(f"/api/chapters/{cid}/context-preview")
+                    _assert(
+                        pr.status_code == 200,
+                        f"context-preview status={pr.status_code} body={pr.text[:200]}",
+                    )
+                    out: list[str] = []
+                    for layer in pr.json().get("layers") or []:
+                        for item in layer.get("items") or []:
+                            if item.get("kind") == "previous_chapter_tail":
+                                out.append(str(item.get("id")))
+                    return out
+
+                before_ids = _preview_tail_ids(chapter2_id)
+                _assert(
+                    before_ids,
+                    "挂卷前第 2 章的装配预览里没有前章尾段（第 1 章已有草稿 ⇒ 应有）"
+                    "——本次 e2e 的前提不成立，后面的断言会失去判别力",
+                )
+
+                # 建卷 + 把第 2 章挂上去（写路径只改 chapters.volume_id、不推 state_version
+                # ⇒ 正是「键缺维度 / 维度齐全但写路径不推 state_version」两种形状的现场）
+                r = client.post(
+                    f"/api/projects/{project_id}/volumes",
+                    json={"number": 1, "title": "smoke volume 1"},
+                )
+                _assert(
+                    r.status_code == 201,
+                    f"create volume status={r.status_code} body={r.text[:200]}",
+                )
+                volume_id = r.json()["volume_id"]
+                r = client.post(
+                    f"/api/projects/{project_id}/volumes/{volume_id}/assign",
+                    json={"chapter_id": chapter2_id},
+                )
+                _assert(
+                    r.status_code in (200, 201),
+                    f"assign volume status={r.status_code} body={r.text[:200]}",
+                )
+                # 挂卷确实生效（该卷下确有 1 章）
+                r = client.get(f"/api/projects/{project_id}/volumes")
+                _assert(r.status_code == 200, f"list volumes status={r.status_code}")
+                vols = {v.get("volume_id"): v for v in (r.json() or [])}
+                _assert(volume_id in vols, f"volume {volume_id!r} 不在列表里：{list(vols)}")
+                _assert(
+                    vols[volume_id].get("chapter_count") == 1,
+                    f"volume.chapter_count={vols[volume_id].get('chapter_count')!r} != 1（挂卷未生效）",
+                )
+
+                after_ids = _preview_tail_ids(chapter2_id)
+                _assert(
+                    not after_ids,
+                    f"挂卷后第 2 章的装配预览里仍有前章尾段 {after_ids} ⇒ "
+                    "同卷过滤未生效，或装配缓存键缺 volume_scope 维度（挂卷后命中了旧装配）",
+                )
+                print(
+                    f"[smoke] OK volume assign -> re-assembly  "
+                    f"(chapter2={chapter2_id}, volume={volume_id}, "
+                    f"tail before/after={len(before_ids)}/{len(after_ids)})"
+                )
+
+                # 生产装配（生产命名空间）：挂卷后再跑一次 plan ⇒ 必须 COMPLETED
+                payloads2 = _build_mock_payloads(chapter2_id, character_id)
+                mocks2 = {
+                    agent: [json.dumps(p, ensure_ascii=False) for p in ps]
+                    for agent, ps in payloads2.items()
+                }
+                run2, elapsed2 = _run_step("plan", chapter2_id, mocks2)
+                print(
+                    f"[smoke] OK POST .../plan on chapter2 after volume assign  "
+                    f"(run_id={run2['run_id']}, status={run2['status']}, {elapsed2:.1f}s)"
+                )
+            except (AssertionError, TimeoutError) as e:
+                failures.append(f"volume assign re-assembly: {e}")
+
+        # ---- (11) 状态同步巡检（DB 实体表 vs 快照 JSON 漂移）
+        # 时机点：全部章节 commit 完成、10 组断言已跑、服务仍运行、临时 db 尚未删除。
         # check_state_sync 走只读 URI 模式打开 SQLite，与服务的 WAL 写连接不冲突。
         try:
             sync_proc = subprocess.run(
@@ -778,7 +915,7 @@ def run_smoke() -> int:
             for f in failures:
                 print(f"  - {f}")
             return 1
-        print("\n[smoke] PASS  (PRD §110 全链路 9 组断言全绿 + 状态同步巡检 SYNC OK)")
+        print("\n[smoke] PASS  (PRD §110 全链路 10 组断言全绿 + 状态同步巡检 SYNC OK)")
         succeeded = True
         return 0
 

@@ -20,40 +20,75 @@
 另外两条钉住**行为**（防被未来的重构悄悄改掉）：
 - 越界分是**静默夹取**不是 422；
 - PATCH 传未知字段从「静默忽略」变成 422（`extra="forbid"` 的本意）。
+
+3. **剧透策略出参必须打「硬编码第三方基准」**（``EXPECTED_REVEAL_POLICY_KEYS``，11 键字面量）。
+   第 1 条用例原本比的是「dataclass ``to_dict()`` 键集 == ``set(RevealPolicyOut.model_fields)``」
+   ⇒ 这两侧是**两个独立来源**（router 返回的是 dataclass 的 ``p.to_dict()``；模型只是
+   ``response_model`` 的校验/序列化侧）⇒ **单侧收窄**（只改模型 **或** 只改 dataclass）
+   任一侧都会红。**但**它有两个盲格：
+   - **① 两侧同时删同一个键** ⇒ 11 → 10，契约静默缩水、零告警；
+   - **② 模型新增一个带默认值的可选字段** ⇒ ``extra="allow"`` 让 ``response_model``
+     校验时**回填 null** ⇒ 响应与 ``model_fields`` **同步变大** ⇒ 仍然绿。
+   ⇒ 本组在**响应侧**与**``model_fields`` 侧**都改打**硬编码**基线 ⇒ 两个盲格都变红。
+   （⚠️ 这是**加强**判别力：原断言**保留**，只是旁边多了一个独立基准。）
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.quality.models import QualityJudgeRecord
 from packages.domain.knowledge.models import RevealPolicy, RevealPolicyOut
 
+from ._contract_runner import (
+    assert_keys_match,
+    assert_model_fields_match,
+    client_ctx,
+    create_test_app,
+)
+
 
 def _create_app(tmp_path: Path):
-    return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
+    """共享 runner 的 ``create_test_app``（**不**显式跑迁移；迁移在 lifespan 里跑）。"""
+    return create_test_app(tmp_path)
 
 
-@asynccontextmanager
-async def _client(app):
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
-            yield c
+def _client(app):
+    """⚠️ 迁移只在 lifespan 里跑（`httpx.ASGITransport` 不触发 lifespan）。"""
+    return client_ctx(app, enter_lifespan=True)
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
     async with _client(app) as c:
         return await c.request(method, path, **kwargs)
+
+
+#: 剧透策略出参的**硬编码第三方基准**（11 键字面量；依据：dataclass ``to_dict()`` 的
+#: 键集 + 临时库实跑端点 dump 出的响应键集，二者实测一致）。
+#:
+#: ⚠️ 为什么必须硬编码（**不是**「原断言恒真」）：原断言比的是「dataclass 键集 ==
+#: ``set(Model.model_fields)``」⇒ 两侧是**独立来源** ⇒ **单侧收窄能红**；但
+#: **两侧同时删同一个键**、或**模型新增带默认值的可选字段**（``extra="allow"`` 会让
+#: 校验回填 null ⇒ 响应与模型同步变大）这两个盲格，**只有硬编码基线能抓**。
+EXPECTED_REVEAL_POLICY_KEYS = {
+    "policy_id",
+    "project_id",
+    "target_kind",
+    "target_id",
+    "reveal_by_chapter",
+    "audience",
+    "status",
+    "revealed_chapter",
+    "notes",
+    "created_at",
+    "updated_at",
+}
 
 
 def _seed(app) -> tuple[str, str]:
@@ -77,6 +112,10 @@ def test_reveal_out_matches_dataclass_to_dict_exactly():
     """两份模型逐字同形：Pydantic 出参字段集 == dataclass to_dict() 键集。
 
     撤任一字段声明、或 dataclass 加字段而忘了同步 ⇒ 必红。
+
+    ⚠️ 上面那一句比对**保留原样**（单侧收窄能红）；**另外**加两道**硬编码基线**
+    （``EXPECTED_REVEAL_POLICY_KEYS``）⇒ 抓住「两侧同时收窄」与「模型新增带默认值的
+    可选字段」这两个原断言抓不到的盲格（见模块 docstring 第 3 条）。
     """
     dc = RevealPolicy(
         policy_id="rp_1",
@@ -88,6 +127,9 @@ def test_reveal_out_matches_dataclass_to_dict_exactly():
         f"多={set(dc.to_dict()) - set(RevealPolicyOut.model_fields)} "
         f"少={set(RevealPolicyOut.model_fields) - set(dc.to_dict())}"
     )
+    # 硬编码第三方基准（两侧都打 ⇒ 「两侧同时删同一个键」必红）
+    assert_keys_match(dc.to_dict(), EXPECTED_REVEAL_POLICY_KEYS, "dataclass to_dict")
+    assert_model_fields_match(RevealPolicyOut, EXPECTED_REVEAL_POLICY_KEYS)
 
 
 def test_reveal_endpoints_return_all_eleven_keys(tmp_path: Path):
@@ -109,11 +151,14 @@ def test_reveal_endpoints_return_all_eleven_keys(tmp_path: Path):
         f"多={set(body) - set(RevealPolicyOut.model_fields)} "
         f"少={set(RevealPolicyOut.model_fields) - set(body)}"
     )
+    # 硬编码第三方基准（响应侧）⇒ 「两侧同时收窄」/「模型新增可选字段回填 null」必红
+    assert_keys_match(body, EXPECTED_REVEAL_POLICY_KEYS, "POST /reveal-policies 响应")
 
     listed = asyncio.run(_request(app, "GET", f"/api/projects/{pid}/reveal-policies"))
     assert listed.status_code == 200, listed.text
     assert len(listed.json()) == 1
     assert set(listed.json()[0]) == set(RevealPolicyOut.model_fields)
+    assert_keys_match(listed.json()[0], EXPECTED_REVEAL_POLICY_KEYS, "GET /reveal-policies 行")
 
     patched = asyncio.run(
         _request(
@@ -125,6 +170,7 @@ def test_reveal_endpoints_return_all_eleven_keys(tmp_path: Path):
     )
     assert patched.status_code == 200, patched.text
     assert set(patched.json()) == set(RevealPolicyOut.model_fields)
+    assert_keys_match(patched.json(), EXPECTED_REVEAL_POLICY_KEYS, "PATCH /reveal-policies 响应")
     assert patched.json()["status"] == "revealed"
     assert patched.json()["revealed_chapter"] == 2
 

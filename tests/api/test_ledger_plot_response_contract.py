@@ -49,6 +49,20 @@ from packages.core.config import Settings
 from packages.domain.ledger import Debt, Hook
 from packages.domain.plot.models import PlotEventOut, TimelineEventOut
 
+from ._contract_runner import (
+    assert_keys_match,
+    assert_keys_match_ddl,
+    assert_model_fields_match,
+    assert_openapi_properties_and_required,
+    assert_openapi_ref,
+    db_columns,
+)
+
+# 本文件原有的 ``_assert_keys(body, expected, label)`` 与共享 runner 的
+# ``assert_keys_match`` **同形**（同样的入参、同样的「多/少哪些键」报错）⇒ 直接别名
+# 复用，11 个调用点**一行未改**（口径仍是单点）。
+_assert_keys = assert_keys_match
+
 
 def _create_app(tmp_path: Path):
     return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
@@ -152,13 +166,6 @@ def _seeded(app) -> tuple[str, str]:
     return asyncio.run(run())
 
 
-def _assert_keys(body: dict, expected: set[str], label: str) -> None:
-    assert isinstance(body, dict), f"{label} 应是对象，实际 {type(body)}"
-    assert set(body) == expected, (
-        f"{label} 键集不符：多={sorted(set(body) - expected)} 少={sorted(expected - set(body))}"
-    )
-
-
 # ===========================================================================
 # 1) OpenAPI：schema 存在 + 被端点引用
 # ===========================================================================
@@ -170,12 +177,7 @@ def test_surgical_schemas_declared_and_referenced(tmp_path: Path):
     for name in ("Hook", "Debt", "PlotEventOut", "TimelineEventOut"):
         assert name in schema["components"]["schemas"], f"{name} 未进 OpenAPI"
     for path, method, code, name in _SURGICAL_ENDPOINTS:
-        ref = schema["paths"][path][method]["responses"][code]["content"]["application/json"][
-            "schema"
-        ].get("$ref")
-        assert ref is not None and ref.endswith(f"/{name}"), (
-            f"{method.upper()} {path} 的 {code} 响应未引用 {name}（实际 {ref!r}）"
-        )
+        assert_openapi_ref(schema, path, method, code, name)
 
 
 def test_openapi_schema_properties_and_required_match_expectation(tmp_path: Path):
@@ -195,15 +197,13 @@ def test_openapi_schema_properties_and_required_match_expectation(tmp_path: Path
         ("TimelineEventOut", EXPECTED_TIMELINE_EVENT_KEYS),
     ):
         sc = schema["components"]["schemas"][name]
-        assert set(sc["properties"]) == expected, (
-            f"{name} 的 schema.properties 不符："
-            f"多={sorted(set(sc['properties']) - expected)} 少={sorted(expected - set(sc['properties']))}"
-        )
         # 实测：可空列也是必填（声明成 X | None 且**不给默认值**）⇒ required ⊇ properties
-        assert set(sc["required"]) == expected, (
-            f"{name} 的 required 不符：多={sorted(set(sc['required']) - expected)} "
-            f"少={sorted(expected - set(sc['required']))}。"
-            f"⚠️ 若可空列被给了默认值，schema 会把它变成可选，前端得写 ?? 兜底（G10 病）"
+        assert_openapi_properties_and_required(
+            sc,
+            expected,
+            expected,
+            label=name,
+            hint="。⚠️ 若可空列被给了默认值，schema 会把它变成可选，前端得写 ?? 兜底（G10 病）",
         )
 
 
@@ -374,13 +374,14 @@ def test_timeline_endpoint_keys_match_hardcoded_expectation(tmp_path: Path):
 def test_model_fields_match_hardcoded_expectation():
     """模型字段集与硬编码期望一致——与响应断言构成两道独立闸门。
 
-    ⚠️ 本文件里 ``model_fields`` **只允许出现在这一条用例里**。出现在「响应 vs 模型」
-    的比对里就是自指断言（两侧同时变小 ⇒ 恒真）。
+    ⚠️ ``model_fields`` 的访问已收进 ``_contract_runner.assert_model_fields_match``
+    ⇒ 本文件**代码里 0 命中**（只剩 docstring 文字）。它出现在「响应 vs 模型」的
+    比对里就是自指断言（两侧同时变小 ⇒ 恒真）。
     """
-    assert set(Hook.model_fields) == EXPECTED_HOOK_KEYS
-    assert set(Debt.model_fields) == EXPECTED_DEBT_KEYS
-    assert set(PlotEventOut.model_fields) == EXPECTED_PLOT_EVENT_KEYS
-    assert set(TimelineEventOut.model_fields) == EXPECTED_TIMELINE_EVENT_KEYS
+    assert_model_fields_match(Hook, EXPECTED_HOOK_KEYS)
+    assert_model_fields_match(Debt, EXPECTED_DEBT_KEYS)
+    assert_model_fields_match(PlotEventOut, EXPECTED_PLOT_EVENT_KEYS)
+    assert_model_fields_match(TimelineEventOut, EXPECTED_TIMELINE_EVENT_KEYS)
 
 
 def test_models_permit_unknown_keys():
@@ -521,25 +522,16 @@ def test_ledger_expected_keys_match_ddl_columns(tmp_path: Path):
             conn = get_connection(app.state.settings.db_path)
             try:
                 return (
-                    {r["name"] for r in conn.execute("PRAGMA table_info(hooks)").fetchall()},
-                    {
-                        r["name"]
-                        for r in conn.execute("PRAGMA table_info(narrative_debts)").fetchall()
-                    },
+                    db_columns(conn, "hooks"),
+                    db_columns(conn, "narrative_debts"),
                 )
             finally:
                 conn.close()
 
     hook_cols, debt_cols = asyncio.run(run())
 
-    assert hook_cols == EXPECTED_HOOK_KEYS, (
-        f"hooks 列集与契约漂移：多={sorted(hook_cols - EXPECTED_HOOK_KEYS)} "
-        f"少={sorted(EXPECTED_HOOK_KEYS - hook_cols)}"
-    )
-    assert debt_cols == EXPECTED_DEBT_KEYS, (
-        f"narrative_debts 列集与契约漂移：多={sorted(debt_cols - EXPECTED_DEBT_KEYS)} "
-        f"少={sorted(EXPECTED_DEBT_KEYS - debt_cols)}"
-    )
+    assert_keys_match_ddl(EXPECTED_HOOK_KEYS, hook_cols, label="hooks")
+    assert_keys_match_ddl(EXPECTED_DEBT_KEYS, debt_cols, label="narrative_debts")
 
 
 def test_missing_entity_still_returns_404(tmp_path: Path):

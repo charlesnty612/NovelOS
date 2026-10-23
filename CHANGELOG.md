@@ -5,6 +5,113 @@
 
 ## [Unreleased]
 
+### Refactor（2026-10-23 深夜 · 批次三十三之一 · **测试瘦身落地**：contract 模板族收敛 5/16 + runner 看守 + 前端 ProjectInitPanel 拆 3 份）
+
+> **来源**：用户「测试太重了」审查（`docs/impl/reviews/test-slimming-review-2026-10-23.md`）后的执行批。**零真实 LLM 调用、零内容仓接触、活库未动**；两名执行成员写域互斥（dev-a `tests/api/**`、dev-b `apps/web/src/**`），Lead 串行跑全部闸门。
+> **本条为「之一」**：contract 族还剩 11/16 未转（移交 task-12）、前端 `ChapterDetailPage.test.tsx` 拆分在「之二」。
+
+#### 1. contract 模板族：建共享 runner + 给 runner 补看守（对抗审查抓出的 major）
+
+- 新增 `tests/api/_contract_runner.py`（313 行，6 个断言单点：键集 / `model_fields` / OpenAPI ref+properties+required / `extra` 透传 / DDL 列）；**刻意不提供**「从模型自动取期望」的入口（`assert_keys_match` 的 `expected` 是必填位置参数）——那扇门正是自指断言的来源。
+- 新增 `tests/api/_rich_fixture.py`（184 行，播种原语 + 共享 state-delta 构造器）。
+- **新增 `tests/api/test_contract_runner.py`（244 行 / 16 例）**：对抗审查 F-1 指出 runner **自身零测试**却承载 **42 条突变规格**的判别力（`l2_state_list` 18 / `g1_world` 12 / `g3_story_state` 12）⇒ 改一行可让 42 条同时 SURVIVED 且 `--precheck` 抓不到（AGENTS 坑区「看守自己被悄悄缩小了执行域」同形状）。看守含**哨兵模型**用例（另立一条证明「自指形态在哨兵上照样绿」）⇒ 把「不许从模型自动派生期望」钉死。
+- 已转换 **5/16** 文件（ReadAllLines 口径）：world 452→423 / state_list 1060→965 / story 775→717 / ledger_plot 557→549 / reveal 290→**336（+46，见下）**；16 文件合计 **9,777 → 9,635（-142）**；**用例数逐个不变**（13/21/15/11/7）。
+
+#### 2. `test_reveal_and_judge_response_contract.py`：补硬编码第三方基准（对抗审查 F-4 订正后的定性）
+
+- 4 处 `set(响应) == set(RevealPolicyOut.model_fields)` **不是恒真**（响应源自 dataclass `to_dict()`、模型是 `response_model` 侧 ⇒ **单侧收窄任一侧都会红**），但**两个盲格**无人看守：① **两侧同时删同一个键** ⇒ 11→10 静默缩水；② **模型新增带默认值的可选字段** ⇒ `extra="allow"` 校验回填 null ⇒ 响应与 `model_fields` 同步变大 ⇒ 仍绿。
+- 修法：新增 `EXPECTED_REVEAL_POLICY_KEYS`（**11 键字面量**，来源 = dataclass 键集 + 实跑端点 dump，二者实测一致），响应侧 3 处 + `model_fields` 侧 1 处都打它；**原断言全保留** ⇒ **判别力只增不减**（+46 行是这个成本，不是膨胀）。
+- ⚠️ **方法论留痕**：机械扫描里「`model_fields` 出现在期望侧」**只能**说明「期望来自模型」，**不能**推出「恒真」——还要看**响应键集的来源**与**模型 `extra` 配置**。本轮曾据扫描误判为「4 处自指」，由对抗审查自我订正、Lead 复核源码后更正。
+
+#### 3. 前端：`ProjectInitPanel.test.tsx` 2381 行 / 39 例 → 3 份
+
+`.submit`(613/14) + `.review`(1211/18) + `.cards`(565/7) + 共用夹具 `components/__fixtures__/projectInitMocks.ts`(192)；**原文件删除**。三份均 <1500 行（AGENTS §二 硬规则 1 的既有违规之一被消掉）。`vi.mock` 工厂按 vitest 语义**不能共用**（按调用方模块图生效）⇒ 三份各留 `vi.mock(...)`，工厂体与 beforeEach 设定委托给夹具模块。
+
+#### 4. 收尾闸门（Lead 串行实测，非采信成员汇报）
+
+| 闸门 | 结果 |
+|---|---|
+| 全量 `pytest -n 20 -q` | **4375 passed / 1 skipped / 1 xfailed / 176.84s**（= 4359 + 16 条新看守，逐位对得上） |
+| `pytest tests/api` | **723 passed**（原 707 逐位不变） |
+| `ruff check packages scripts tests` | All checks passed |
+| `run_spec --all --precheck` | **477 条 / 0 问题** |
+| **42 条指向被重构文件的规格串行实跑** | **0 存活 / 0 中止 / 0 无效 / exit 0** ⇒ 「改写测试文件是否削弱突变判别力」这一终极问题**已闭合** |
+| 突变残留 | `.mutbak*` **0**、`packages/`+`scripts/` 的 `MUTATION-` 标记 **0** |
+| 判别力抽检 3 条 | 删 1 个期望键 ⇒ world **4 红** / state_list **3 红** / story **5 红**（`12 failed, 37 passed`）⇒ 还原后 **723 passed** |
+| 前端 | `npx tsc -b` exit 0；`npx vitest run` **64 文件 / 853 例 / 12.70s**（用例守恒、文件 62→64） |
+
+#### 5. ⚠️ 目标三次订正（Lead 先验判断被推翻，全部留痕）
+
+① 「24 文件 11,639 → ≤3,000」——**分母口径错**（那 25 个是 `tests/**` 下所有含 `contract` 的文件）；② 真正模板族 **16 文件 9,777 行**，≤6,500 **不可达**（4 段模板已抽干净，剩余是域专属断言 + 证据 docstring，两者按红线不许删）；③ ≤8,800 亦偏高（实测外推 ≈9,000）⇒ **最终口径 ≤9,100**。
+
+#### 6. ⚠️ `tests/**` 总行数**未降**（158,537 → 159,200，+663），构成如实登记
+
+**+557 = 永久资产**（runner 313 + 看守 244），+184 = `_rich_fixture`（`build_state_delta` 已 2 文件共用＝真去重；`seed_*` 暂 1 文件用，下轮未用上则删），**16 文件侧净 -96**。⇒ 判定**可接受**：那 557 行把 42 条规格的判别力从「无人看守」变成「有看守」。
+
+#### 7. 未完成（移交任务板 task-12）
+
+contract 族剩余 **11 个文件 / 7,431 行**（genre_quality 954 / workflow_run 945 / misc_router 801 / ledger_plot_list 800 / model_config 782 / quality_reference_list 774 / config_list 743 / simulation 274 / arc 256 / snapshot 245 / health 69）；三档杠杆（doctrine 散文去重 ≈-120 / 样板点单行化 ≈-250 / app·client·播种复用 ≈-180）与「抽不出来清单」4 条已随任务描述移交。
+
+### Feat（2026-10-23 深夜 · 批次三十二 · task-3：`produce_chapters` 突变规格 + smoke「挂卷后装配」+ CI 突变接线盘点）
+
+> **来源**：台账 C-1 余项 / C-6 / C-5（`docs/impl/reviews/remaining-debt-2026-10-23.md`）。**零真实 LLM 调用**（smoke 走临时库 + 独立端口 18099 + mock provider）、零内容仓接触、`ci.yml` **未动**。
+> **Lead 独立复验（不采信执行成员汇报）**：`validate_specs` 85 文件 / 477 条 / 0 问题；`run_spec --all --precheck` 477 条 / 0 问题 / exit 0；**自己重跑那条定向突变 ⇒ `[CAUGHT]`**，随后核 `scripts/produce_chapters.py` sha256 `a7966741…3c846`、`.mutbak` 0、`MUTATION-` 标记 0、`git status` 该文件干净；**自己实机重跑 smoke ⇒ `PASS` / exit 0**（含新步骤 `tail before/after=1/0`）。
+
+#### 1. C-1 销 1 项：`scripts/produce_chapters.py` 补 1 条突变规格
+
+- 新建 `tests/mutation_specs/l25_scripts_produce_chapters.py`（1 条：`SC-PRODUCE-REPETITION`），锚点 = `produce_chapters.py:368` 的 `if ratio > repetition_threshold:`（全仓恰好命中 1），replacement 为 `if False:`（**真改行为**，不是插注释的等价变异）。
+- **为什么打这一处**：它是 `decide_review` 的**第 1 步**（重复率优先）＝本脚本存在的理由（docstring「不静默批准坏章」）。摘掉 ⇒ 重复文本的决议从 `stop/repetition_exceeds_threshold` 变成 `approve/no_review_errors` ⇒ **驱动自动批准重复稿、退出码仍 0、全程零告警**。
+- **为什么不打另外两处**（规格 docstring 已写明）：`is_confirm_tier_failure` 有双保险（`"gate=confirm" in text` **或** rule_id 命中）；`_error_rule_ids` 的 `missing` 分支摘掉后仍落 `unknown` ⇒ `stop`，**不是静默放行**。
+- 承接用例**已存在**（本批不新增测试）：`tests/unit/test_produce_chapters.py::test_decide_review_refuses_duplicated_draft_even_without_errors`（docstring 即写「本脚本存在的理由」）。
+- 全仓规格：**84 → 85 文件 / 476 → 477 条**。
+
+#### 2. C-6 部分完成：smoke 新增 (9b)「挂卷后再装配」
+
+`scripts/smoke_e2e.py`：docstring 新增第 10 条（原 10 顺延 11）；`_start`/`_run_step` 加**可选** `cid`/`mock_providers`（默认值不变 ⇒ 既有 4 步链路逐字不变）；新增步骤 = 建第 2 章 → `context-preview` 断言 L1 **有**「前章尾段」→ 建卷 + `POST .../volumes/{vid}/assign`（并断该卷 `chapter_count==1` 证明挂卷生效）→ 再预览断言 L1 **无**前章尾段 → 生产装配 `plan`(ch2, 专属 mock) 断 `COMPLETED`。
+**判别力实测**（不是「跑通了」就算）：进程内 monkeypatch 三段对照 —— 未挂卷=有尾段 → 挂卷后=无尾段 → **把「维度被摘掉」模拟成 peek 谎报 `volume_id=None` ⇒ 尾段复现** ⇒ 差异确由 `volume_scope` 键维度造成 ⇒ 维度缺失时断言②必红。
+**仍缺**：fast_mode / auto_commit / revise 三项；生产命名空间的「载荷内容」未断言（`checkpoint_json` 键集随 workflow 演进，太脆）。
+
+#### 3. C-5 只出盘点结论（`ci.yml` 未动）
+
+- 规模 **85 规格 / 477 条** = 目标测试 **pytest 469 + vitest 8**；ubuntu backend job 无 vitest ⇒ 那 8 条会 `INVALID`（响亮失败，不会假绿）。
+- ⚠️ **订正台账一处数字**：`l0_pid_alive.py` 的平台障碍是 **2 条不是 4 条**——只有 `L0-ALIVE-1/2` 锚在 `sys.platform == "win32"` 分支（Linux 上属等价突变 ⇒ 判 SURVIVED ⇒ CI 假红），`L0-ALIVE-3/4` 是 POSIX 侧可跑（**读码推断，未在 Linux 实测**）；另复核排除 `l22_backup_chain.py`（承重用例不在 `test_restore_db.py` 的 skipif 上）。
+- **接线前置缺口**：执行器**不支持按突变/按规格排除** ⇒ 先补排除能力（或给规格加平台字段），否则第一次跑必红且红的含义不明。接线建议：独立 job 只挂 `schedule` + `workflow_dispatch`、首次 `continue-on-error: true`、串行 `--jobs 1`；耗时 ≥53min（ubuntu 2 vCPU 更慢）⇒ 不挂 push。
+
+### Docs（2026-10-23 深夜 · **测试瘦身审查（只读）** + 突变闸门档位降级 + 两条过期数字订正）
+
+> **来源**：用户指令「现在项目的测试太重了，你先来 review 一下测试，看看哪些是没必要的」，随后追加「感觉现在测试比项目本身还庞大」。
+> **本批零代码变更、零测试文件改动**（审查只读）；落盘物 = 报告 + AGENTS 条目，执行任务在共享任务板（task-3 / task-8）。
+
+#### 1. 体积实测（本次新量，此前从无口径）
+
+| 口径 | 源 | 测试 | 比值 |
+|---|---|---|---|
+| Python（`packages/` + `scripts/` 94,638 行 / 265 文件） | — | **468 文件 / 149,989 行** | **1.58×** |
+| └ 其中突变规格 | — | 86 文件 / 8,548 行 | （再 +9%） |
+| 前端 `apps/web/src`（28,722 行 / 85 文件） | — | 62 文件 / 20,879 行 | **0.73×**（健康） |
+| **合计** | 123,360 行 | **170,868 行** | **1.39×** |
+
+结构化结论：**「废话用例」几乎没有**（无断言 1 例 / 全恒真 0 例 / 只断 mock 5 例且多为误报 / 函数体逐字重复 1 组）⇒ **可删项仅 7 条、并行墙钟只省 <2 秒**。体积真正的三处来源：① `*_response_contract*` 模板族 **24 文件 / 11,639 行**；② 测试 helper 样板 **50,220 行 = 33.5%**；③ 6 个巨型单文件 **10,922 行**。
+
+#### 2. 复杂度实测（「重」到底在哪）
+
+全量 `-n 20` = **4359 passed / 172.78s**；CPU 合计 **3,198s**（unit 39.5% / api 35.7% / workflow 16.2% / integration 8.2%），**无热点**（最贵单文件仅占 2.3%，Top 52 条用例仅占 9.3%）。真因：① 每例地板 `apply_migrations` **216ms** + `create_app().openapi()` **422ms**（复制预迁移库只需 **0.7ms**）；② 前端 `ChapterDetailPage.test.tsx` **96 例 / 9.58s = 前端 12.92s 的 74%**，其中 4 条用例真等 2 秒轮询吃 8.2s；③ 突变全量 476 条串行 **≈53 分钟**。
+
+#### 3. 裁决：突变全量**降级为非阻塞发版前档**（AGENTS §三 第 7 条 + §四 已改）
+
+- 日常/每批 = 档② `--changed`（1~3 分钟）；全量 = 发版前一次性、可后台、**失败拦发版不拦提交**。
+- 依据：规格本体经只读扫描（339/476 条可解析样本）**等价突变 0 / 注释型锚点 0 / 同锚点重复仅 14 组** ⇒ 删规格无收益；全量唯一不可替代的价值是抓「老规格腐化」（`--precheck` 抓不到）。
+
+#### 4. 两条过期事实订正（AGENTS §二 硬规则 1）
+
+- `ChapterDetailPage.test.tsx`：记 **3418** → 实测 **3776** 行；`ProjectInitPanel.test.tsx`：记 **2380** → 实测 **2381** 行。
+- `AiSettingsPage.tsx`：记 1648 → **现 1464**（已拆出 `AiSettingsCapabilityBindings.tsx` + `AiSettingsBindingMeta.ts` ⇒ **已回 1500 行标内**）。
+
+#### 5. 执行中（不在本批）
+
+task-3（dev-a：`produce_chapters` 补 1 条突变规格 + smoke 补「挂卷后装配」）、task-8（dev-b：前端两个超 1500 行测试文件拆 7 份 + 抽样板 + 4 条轮询改可控时钟）。
+报告全文：`docs/impl/reviews/test-slimming-review-2026-10-23.md`（含可删清单 D-1~D-7、承重墙 25 条、淘汰 SOP）。
+
 ## [3.10.1] - 2026-10-23
 
 > **⚠️ 发版状态（2026-10-23 20:56 记录）：本版本「已归档、未发布」。**

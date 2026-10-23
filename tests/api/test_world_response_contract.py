@@ -26,18 +26,19 @@
 
 判别：撤掉任一 ``response_model`` / 任一字段声明 / 挂上 ``exclude_none``，
 本组用例必红。
+
+模板说明（2026-10-23 task-9 收敛）：app / client / 四段断言已收进
+``tests/api/_contract_runner.py``（**第一铁律与自指危害的留痕在那个模块的
+docstring 里**），播种原语在 ``tests/api/_rich_fixture.py``。
+本文件只留**自己的硬编码基准 + 端点表 + 专属用例**；期望值一律是**写死的常量**，
+绝不改成 ``set(Model.model_fields)``（自指 ⇒ 恒真，M14 存活实证见 runner docstring）。
 """
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from pathlib import Path
 
-import httpx
-
-from packages.core.api.main import create_app
-from packages.core.config import Settings
 from packages.domain.world.models import (
     INJECT_MODES,
     VISIBILITY_VALUES,
@@ -47,6 +48,18 @@ from packages.domain.world.models import (
     WorldVisibilityLiteral,
 )
 
+from ._contract_runner import (
+    assert_extra_allowed,
+    assert_keys_match,
+    assert_list_items_named_ref,
+    assert_model_fields_match,
+    assert_openapi_properties_and_required,
+    assert_openapi_ref,
+    client_ctx,
+    create_test_app,
+)
+from ._rich_fixture import seed_project
+
 # ---------------------------------------------------------------------------
 # 硬编码基准（模型之外的第三方依据）
 # ---------------------------------------------------------------------------
@@ -54,9 +67,7 @@ from packages.domain.world.models import (
 #    那是**自指断言**——把字段从模型里删掉，响应与期望**同时**变小，仍然「相等」，
 #    断言恒真（坑区已登记，突变 M14 实测存活过这个形状）。
 #    下面所有比对都以本段常量为基准；`model_fields` 只出现在
-#    `test_model_matches_hardcoded_expectation` 等「模型 vs 硬编码」用例里，
-#    一处都不出现在「响应 vs 模型」的比对里。
-#    静态自查：`grep -n "model_fields" tests/api/test_world_response_contract.py`
+#    「模型 vs 硬编码」用例里，一处都不出现在「响应 vs 模型」的比对里。
 
 EXPECTED_ENTITY_KEYS = {
     "id",
@@ -95,22 +106,6 @@ LIST_ENDPOINTS = [
 ]
 
 
-def _create_app(tmp_path: Path):
-    return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
-
-
-@asynccontextmanager
-async def _client(app):
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
-            yield c
-
-
-async def _new_pid(c) -> str:
-    return (await c.post("/api/projects", json={"name": "世界契约"})).json()["project_id"]
-
-
 # ---------------------------------------------------------------------------
 # 1. OpenAPI 侧：schema 存在 + 12 个端点都引用它
 # ---------------------------------------------------------------------------
@@ -123,22 +118,14 @@ def test_world_entity_out_schema_declared_and_referenced(tmp_path: Path):
     ``{"type": "object", "additionalProperties": true}``——等于没有契约。
     撤掉任一 ``response_model=`` ⇒ 对应那条断言立刻变成匿名 schema ⇒ 必红。
     """
-    app = _create_app(tmp_path)
-    schema = app.openapi()
-    assert "WorldEntityOut" in schema["components"]["schemas"], "WorldEntityOut 未进 OpenAPI"
+    openapi = create_test_app(tmp_path).openapi()
+    assert "WorldEntityOut" in openapi["components"]["schemas"], "WorldEntityOut 未进 OpenAPI"
 
     for path, method, code in SINGLE_ENDPOINTS:
-        ref = schema["paths"][path][method]["responses"][code]["content"]["application/json"][
-            "schema"
-        ]["$ref"]
-        assert ref.endswith("/WorldEntityOut"), f"{method.upper()} {path} -> {ref}"
+        assert_openapi_ref(openapi, path, method, code, "WorldEntityOut")
 
     for path, method, code in LIST_ENDPOINTS:
-        sc = schema["paths"][path][method]["responses"][code]["content"]["application/json"][
-            "schema"
-        ]
-        assert sc["type"] == "array", sc
-        assert sc["items"]["$ref"].endswith("/WorldEntityOut"), sc
+        assert_list_items_named_ref(openapi, path, method, "WorldEntityOut")
 
 
 def test_openapi_schema_properties_and_required_match_expectation(tmp_path: Path):
@@ -148,22 +135,15 @@ def test_openapi_schema_properties_and_required_match_expectation(tmp_path: Path
     响应里那个键照样在**（extra 透出）——只断言响应键集抓不到这种改动。
     必须另断言 OpenAPI 里 schema 的 ``properties`` 与 ``required``，光看响应抓不到。
     """
-    s = _create_app(tmp_path).openapi()["components"]["schemas"]["WorldEntityOut"]
-    assert set(s["properties"]) == EXPECTED_ENTITY_KEYS, (
-        f"多={set(s['properties']) - EXPECTED_ENTITY_KEYS} "
-        f"少={EXPECTED_ENTITY_KEYS - set(s['properties'])}"
-    )
-    # 11 个键**恒在** ⇒ 全部必填（who_knows 可空但不可省略）。
-    # 给任何字段加 `= None` 默认值都会把它踢出 required ⇒ 本条必红。
-    assert set(s["required"]) == EXPECTED_ENTITY_KEYS, (
-        f"required 缺={EXPECTED_ENTITY_KEYS - set(s['required'])} "
-        f"多={set(s['required']) - EXPECTED_ENTITY_KEYS}"
+    s = create_test_app(tmp_path).openapi()["components"]["schemas"]["WorldEntityOut"]
+    assert_openapi_properties_and_required(
+        s, EXPECTED_ENTITY_KEYS, EXPECTED_ENTITY_KEYS, label="WorldEntityOut"
     )
 
 
 def test_openapi_enum_values_match_measured_visibility_and_inject_mode(tmp_path: Path):
     """``visibility`` / ``inject_mode`` 的 enum 与实测值逐字相符。"""
-    props = _create_app(tmp_path).openapi()["components"]["schemas"]["WorldEntityOut"][
+    props = create_test_app(tmp_path).openapi()["components"]["schemas"]["WorldEntityOut"][
         "properties"
     ]
     assert props["visibility"]["enum"] == EXPECTED_VISIBILITY_VALUES, props["visibility"]
@@ -177,11 +157,11 @@ def test_openapi_enum_values_match_measured_visibility_and_inject_mode(tmp_path:
 
 def test_all_world_endpoints_keys_match_hardcoded_expectation(tmp_path: Path):
     """把 9 个任务端点逐个跑一遍，实际返回的键集与**硬编码期望**逐字相等。"""
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
 
     async def run():
-        async with _client(app) as c:
-            pid = await _new_pid(c)
+        async with client_ctx(app) as c:
+            pid = await seed_project(c, "世界契约")
             checked: list[str] = []
 
             for kind, plural, single, id_key in (
@@ -192,23 +172,20 @@ def test_all_world_endpoints_keys_match_hardcoded_expectation(tmp_path: Path):
                 # POST
                 r = await c.post(f"/api/projects/{pid}/{plural}", json={"name": f"{kind}-新建"})
                 assert r.status_code == 201, f"POST {plural}: {r.text}"
-                assert set(r.json()) == EXPECTED_ENTITY_KEYS, (
-                    f"POST {plural}: 多={set(r.json()) - EXPECTED_ENTITY_KEYS} "
-                    f"少={EXPECTED_ENTITY_KEYS - set(r.json())}"
-                )
+                assert_keys_match(r.json(), EXPECTED_ENTITY_KEYS, f"POST {plural}")
                 eid = r.json()[id_key]
                 checked.append(f"POST /{plural}")
 
                 # GET by id
                 r = await c.get(f"/api/{single}/{eid}")
                 assert r.status_code == 200, f"GET {single}: {r.text}"
-                assert set(r.json()) == EXPECTED_ENTITY_KEYS, f"GET {single}"
+                assert_keys_match(r.json(), EXPECTED_ENTITY_KEYS, f"GET {single}")
                 checked.append(f"GET /{single}/{{id}}")
 
                 # PATCH
                 r = await c.patch(f"/api/{single}/{eid}", json={"statement": "改过了"})
                 assert r.status_code == 200, f"PATCH {single}: {r.text}"
-                assert set(r.json()) == EXPECTED_ENTITY_KEYS, f"PATCH {single}"
+                assert_keys_match(r.json(), EXPECTED_ENTITY_KEYS, f"PATCH {single}")
                 checked.append(f"PATCH /{single}/{{id}}")
 
                 # LIST
@@ -216,7 +193,7 @@ def test_all_world_endpoints_keys_match_hardcoded_expectation(tmp_path: Path):
                 assert r.status_code == 200, f"LIST {plural}: {r.text}"
                 rows = r.json()
                 assert len(rows) == 1, f"LIST {plural} 应有 1 行，实际 {len(rows)}"
-                assert set(rows[0]) == EXPECTED_ENTITY_KEYS, f"LIST {plural}"
+                assert_keys_match(rows[0], EXPECTED_ENTITY_KEYS, f"LIST {plural}")
                 checked.append(f"LIST /{plural}")
 
             return checked
@@ -232,7 +209,7 @@ def test_all_world_endpoints_keys_match_hardcoded_expectation(tmp_path: Path):
 
 def test_model_matches_hardcoded_expectation():
     """``WorldEntityOut`` 的字段集与硬编码期望一致（与响应断言构成两道）。"""
-    assert set(WorldEntityOut.model_fields) == EXPECTED_ENTITY_KEYS
+    assert_model_fields_match(WorldEntityOut, EXPECTED_ENTITY_KEYS)
 
 
 def test_dataclass_and_pydantic_models_stay_same_shape():
@@ -250,11 +227,8 @@ def test_dataclass_and_pydantic_models_stay_same_shape():
         project_id="prj_probe",
         name="云海城",
     )
-    assert set(ent.to_dict()) == EXPECTED_ENTITY_KEYS, (
-        f"dataclass 多={set(ent.to_dict()) - EXPECTED_ENTITY_KEYS} "
-        f"少={EXPECTED_ENTITY_KEYS - set(ent.to_dict())}"
-    )
-    assert set(WorldEntityOut.model_fields) == EXPECTED_ENTITY_KEYS
+    assert_keys_match(ent.to_dict(), EXPECTED_ENTITY_KEYS, "dataclass WorldEntity.to_dict")
+    assert_model_fields_match(WorldEntityOut, EXPECTED_ENTITY_KEYS)
 
 
 def test_literal_enums_stay_in_sync_with_domain_constants():
@@ -284,11 +258,8 @@ def test_extra_allow_lets_unknown_keys_through():
         "created_at": "2026-10-15T00:00:00+00:00",
         "updated_at": "2026-10-15T00:00:00+00:00",
     }
-    assert set(base) == EXPECTED_ENTITY_KEYS, "夹具自身与硬编码基准不符，先修夹具"
-    parsed = WorldEntityOut(**base, future_key="透出")
-    dumped = parsed.model_dump()
-    assert dumped["future_key"] == "透出", "extra='allow' 未透出未声明键——配置被改了？"
-    assert parsed.__pydantic_extra__ == {"future_key": "透出"}, parsed.__pydantic_extra__
+    assert_keys_match(base, EXPECTED_ENTITY_KEYS, "夹具自身")
+    assert_extra_allowed(WorldEntityOut, base)
 
 
 # ---------------------------------------------------------------------------
@@ -304,17 +275,17 @@ def test_who_knows_is_null_not_omitted(tmp_path: Path):
     响应凭空少一个键。world 这边实测 11 个键恒在，**不需要** exclude_none。
     判别：端点上多挂一个 ``response_model_exclude_none=True`` ⇒ 本条必红。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
 
     async def run():
-        async with _client(app) as c:
-            pid = await _new_pid(c)
+        async with client_ctx(app) as c:
+            pid = await seed_project(c, "世界契约")
             r = await c.post(f"/api/projects/{pid}/locations", json={"name": "云海城"})
             assert r.status_code == 201, r.text
             body = r.json()
             assert "who_knows" in body, (
                 f"who_knows 被省略了（实际键：{sorted(body)}）——"
-                f"多半是端点上多挂了 response_model_exclude_none"
+                "多半是端点上多挂了 response_model_exclude_none"
             )
             assert body["who_knows"] is None, body["who_knows"]
             # 其余「实测恒非 null」的三个字段也不能被 exclude_none 误伤
@@ -326,11 +297,11 @@ def test_who_knows_is_null_not_omitted(tmp_path: Path):
 
 def test_optional_but_present_fields_round_trip(tmp_path: Path):
     """``who_knows`` 有值时原样回显，PATCH 能改（实测 str 数组）。"""
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
 
     async def run():
-        async with _client(app) as c:
-            pid = await _new_pid(c)
+        async with client_ctx(app) as c:
+            pid = await seed_project(c, "世界契约")
             r = await c.post(
                 f"/api/projects/{pid}/locations",
                 json={"name": "破屋", "who_knows": ["char_a", "char_b"], "aliases": ["老家"]},
@@ -356,11 +327,11 @@ def test_data_accepts_both_object_and_array(tmp_path: Path):
     （``ResponseValidationError``），而实体在库里其实是建成的——
     一个「写得进去、读不出来」的洞。判别：``data`` 改成只容对象 ⇒ 本条必红。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
 
     async def run():
-        async with _client(app) as c:
-            pid = await _new_pid(c)
+        async with client_ctx(app) as c:
+            pid = await seed_project(c, "世界契约")
             for payload, want in (
                 ({"a": 1, "b": [2]}, {"a": 1, "b": [2]}),
                 ([1, "x"], [1, "x"]),
@@ -400,11 +371,11 @@ def test_world_rule_swallows_aliases_and_inject_mode(tmp_path: Path):
     改动会波及 ``WorldService.create_world_rule`` / ``update_world_rule`` 的签名，
     不在本任务的独占文件内。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
 
     async def run():
-        async with _client(app) as c:
-            pid = await _new_pid(c)
+        async with client_ctx(app) as c:
+            pid = await seed_project(c, "世界契约")
             r = await c.post(
                 f"/api/projects/{pid}/world-rules",
                 json={"name": "灵气稀薄", "aliases": ["X"], "inject_mode": "never"},
@@ -430,11 +401,11 @@ def test_world_rule_swallows_aliases_and_inject_mode(tmp_path: Path):
 
 def test_visibility_and_inject_mode_measured_values_survive_round_trip(tmp_path: Path):
     """实测过的枚举值逐个跑一遍（建模依据留证：四档 visibility + 三档 inject_mode）。"""
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
 
     async def run():
-        async with _client(app) as c:
-            pid = await _new_pid(c)
+        async with client_ctx(app) as c:
+            pid = await seed_project(c, "世界契约")
             for vis in EXPECTED_VISIBILITY_VALUES:
                 r = await c.post(f"/api/projects/{pid}/locations", json={"name": f"地{vis}", "visibility": vis})
                 assert r.status_code == 201, f"{vis}: {r.text}"
