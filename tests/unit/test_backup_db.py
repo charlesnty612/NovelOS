@@ -453,6 +453,12 @@ def test_keep_plaintext_on_failure_flag_keeps_the_copy(
     assert list(work_dir.glob("*.db")), message
     assert "已保留" in message
     assert "明文 API 密钥" in message
+    # ⚠️ **测试自己必须回收**（2026-10-23 补）：本用例**故意**让脚本保留明文副本
+    # （那正是被断言的行为）⇒ 但「保留」是**脚本的**决定，不是「让垃圾堆在系统 Temp」
+    # 的许可。旧实现跑完就把目录留在 Temp ⇒ 每跑一次全量回归多一个
+    # `novelos_backup_*`（实测曾躺着含明文 API 密钥的整库）⇒ 逐期累积成几十个。
+    shutil.rmtree(work_dir, ignore_errors=True)
+    assert not work_dir.exists(), f"测试自身泄漏了明文副本目录：{work_dir}"
 
 
 def test_cleanup_stale_work_dirs_only_removes_old_own_dirs(monkeypatch, tmp_path: Path):

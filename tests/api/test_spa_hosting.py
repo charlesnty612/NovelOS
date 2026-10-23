@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -282,12 +283,18 @@ def _openapi_paths(dist_env: str | None) -> set[str]:
 
     os.environ["NOVELOS_WEB_DIST"] = dist_env or ""
     config_mod.reset_settings()
+    # ⚠️ **用完即删**（2026-10-23 补）：旧实现建了这个临时 data 目录却**从不删**
+    # ⇒ 每跑一次本文件就在系统 Temp 留一个 `novelos_openapi_env_*` ⇒ 逐期累积
+    # ⇒ 与「几百个泄漏临时目录」是同一个形状（已修的 `export_openapi.py` 同款）。
+    # 删不掉时**保留证据**（Windows 上 SQLite 文件可能仍被占用）⇒ 不静默吞。
+    tmp_dir = Path(tempfile.mkdtemp(prefix="novelos_openapi_env_"))
     try:
-        settings = Settings(data_dir=Path(tempfile.mkdtemp(prefix="novelos_openapi_env_")), log_level="ERROR")
+        settings = Settings(data_dir=tmp_dir, log_level="ERROR")
         app = create_app(settings)
         return set(app.openapi()["paths"])
     finally:
         config_mod.reset_settings()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def test_openapi_paths_identical_with_and_without_dist(tmp_path: Path, monkeypatch):
@@ -314,4 +321,29 @@ def test_openapi_paths_identical_with_and_without_dist(tmp_path: Path, monkeypat
     assert "/" not in without_dist, (
         "纯后端模式下 GET / 也不该进 OpenAPI（root 端点缺 include_in_schema=False）"
     )
+
+
+def test_openapi_env_probe_leaves_no_temp_dir_behind(monkeypatch):
+    """``_openapi_paths`` 建的临时 data 目录必须**用完即删**（不留垃圾）。
+
+    断言打在**真实文件系统**上：把 ``tempfile.mkdtemp`` 换成间谍，记录实际建出来的
+    目录 ⇒ 调用结束后它必须**不存在**。
+
+    ⚠️ 为什么不扫全局 Temp 目录数「前后差」：``pytest -n 20`` 下别的 worker 会
+    同时建自己的临时目录 ⇒ 差值法会**偶发假红** ⇒ 改成「只盯自己建的那一个」。
+    """
+    created: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _spy(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        created.append(Path(path))
+        return path
+
+    monkeypatch.setattr(tempfile, "mkdtemp", _spy)
+    _openapi_paths(None)
+
+    assert created, "间谍没抓到任何目录 ⇒ 断言会恒真（探针没被调用）"
+    leaked = [p for p in created if p.exists()]
+    assert not leaked, f"临时目录泄漏：{[str(p) for p in leaked]}"
 
