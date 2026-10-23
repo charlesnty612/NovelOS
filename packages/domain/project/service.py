@@ -37,12 +37,113 @@ V3.7 字数带覆盖（word_band_json）：
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
-from packages.core.db import get_connection
+from packages.core.db import get_connection, is_missing_schema_error
 from packages.core.ids import new_id, now_iso
+from packages.core.story_state.snapshot import materialize_snapshot
 
 from .models import ProjectCreate, ProjectUpdate
+
+#: 这些 ``projects`` 列**进 director 装配 payload**：``name`` / ``genre`` / ``premise``
+#: → payload 的 ``project`` 段；``writing_bible`` → ``author_intent.raw``（经
+#: ``resolve_author_intent`` 拼接）；``genre_pack_id`` → payload 的 ``genre_pack`` 段；
+#: ``foreshadow_overdue_chapters`` → ``open_foreshadow_list`` 的 ``overdue`` 判定。
+#: ⇒ 改它们要推 ``story_states.state_version``（见 :func:`bump_project_state_version`）。
+#: **刻意不含** ``fast_mode`` / ``status`` / ``target_words`` / ``word_band_json``：
+#: 它们不进 director payload（``word_band_json`` 是 writer 侧的 ``wb_fp`` 维度）⇒
+#: 对它们推 version = 无谓的全局 miss（过度失效）。
+_PROJECT_PAYLOAD_COLUMNS: frozenset[str] = frozenset({
+    "name",
+    "genre",
+    "premise",
+    "writing_bible",
+    "genre_pack_id",
+    "foreshadow_overdue_chapters",
+})
+
+
+# ---------------------------------------------------------------------------
+# 写路径推 ``story_states.state_version``（装配缓存失效主线）
+# ---------------------------------------------------------------------------
+#
+# **为什么需要**（AGENTS 硬规则 2 的根治条件②，2026-10-23 第二轮审查 M-1 / D-7）
+# -------------------------------------------------------------------------
+# 装配缓存键以 ``story_states.state_version`` 为主线维度；而 ``hooks`` /
+# ``narrative_debts`` / ``plot_events`` / ``branches`` / ``projects`` 的部分列 /
+# ``chapters.title`` 这些**进 payload 的权威输入**，其写路径只 ``commit()``、**不推**
+# ``state_version`` ⇒ **只补键维度是治标**（键维度一旦漏了别的输入，照样脏命中）。
+# ⇒ 写路径必须同时推 ``state_version``：**改数据 ⇒ version 变 ⇒ 必然 miss**。
+#
+# **沿用仓内既有写法**（不自造机制）
+# ---------------------------------
+# 与 commit 流程（``packages/core/story_state/commits.py::commit_delta`` →
+# ``snapshot.materialize_snapshot``）**逐字同款**：读最新快照行 → 新版本 = 旧版本 + 1
+# → 用 :func:`materialize_snapshot` 落一行新快照。差别只有两点，且都是「不污染 commit
+# 审计表」的必要让步：
+# - **commit_id 复用上一行的 commit_id**（``story_states.commit_id`` 是 NOT NULL +
+#   FK → ``commits`` ⇒ 不能凭空造一个 commit 行污染审计表）；
+# - **snapshot_json 沿用上一份内容**（本函数只推进版本号，**不改** Canonical State；
+#   DB 实表 → 快照的权威重建仍归 commit 流程的
+#   ``rebuild_snapshot_collections_from_db``）。
+#
+# **边界**（如实登记）
+# ------------------
+# - 项目**还没有 story_states 行**（从未 commit 过）⇒ **不造快照行**，返回 ``None``
+#   （该路径下 ``state_version`` 保持不变；见任务报告「需要 Lead 协调」段）。
+# - 快照 JSON 损坏 ⇒ **不造行**（绝不拿空 dict 覆盖 Canonical State）。
+# - 必须在**写事务内**调用（与被改的行同一连接/同一事务）⇒ 写失败则 version 一起回滚。
+#
+# **归属说明**：本函数是**唯一实现**；ledger / plot / chapter 三个 service 在各自写
+# 事务内 import 并调用它。⚠️ 公共模块的正确归属地是
+# ``packages/core/story_state/``（域层服务已普遍从 ``story_state.write_helpers`` 取共享
+# 写助手）——但该包**不在本任务的文件所有权内** ⇒ 抽取公共模块需 Lead 协调。
+
+
+def bump_project_state_version(conn: sqlite3.Connection, project_id: str) -> int | None:
+    """在**当前事务内**推进该项目的 ``story_states.state_version``。
+
+    返回新的 ``state_version``；**不推进**时返回 ``None``（项目尚无快照行 /
+    快照 JSON 损坏 ⇒ 不造快照行）。
+
+    ⚠️ 调用方必须在**写事务内**调用（本函数不 commit、不开连接）⇒ 业务写失败时
+    版本推进一起回滚 ⇒ 不会出现「数据没改但版本涨了」。
+    """
+    if not project_id:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT state_version, snapshot_json, commit_id FROM story_states "
+            "WHERE project_id = ? ORDER BY state_version DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        # 极老库没有 story_states 表 ⇒ 本路径下 version 不变（不是静默失真：
+        # 没有快照行时 MAX(state_version) 本来就是 0）。
+        if not is_missing_schema_error(exc):
+            raise
+        return None
+    if row is None:
+        # 项目还没有快照 ⇒ **不造快照行**（简报要求）。
+        return None
+    try:
+        snapshot = json.loads(row["snapshot_json"])
+    except (TypeError, ValueError):
+        # 快照 JSON 损坏 ⇒ 不造行（拿空 dict 覆盖 Canonical State 是更坏的事）。
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    new_version = int(row["state_version"]) + 1
+    materialize_snapshot(
+        conn,
+        project_id=project_id,
+        state_version=new_version,
+        snapshot_json=snapshot,
+        commit_id=row["commit_id"],
+        created_at=now_iso(),
+    )
+    return new_version
 
 
 def _coerce_word_band(raw: object) -> dict | None:
@@ -288,6 +389,14 @@ class ProjectService:
 
         fields["updated_at"] = now_iso()
 
+        # 2026-10-23（M-1 / D-7）：本 PATCH 若改到**进 director 装配 payload 的列**
+        # ⇒ 同事务内推 ``story_states.state_version``（装配缓存失效主线，见
+        # :func:`bump_project_state_version`）。刻意**只**对 payload 消费列推：
+        # ``fast_mode`` / ``status`` / ``target_words`` / ``word_band_json`` 不进
+        # director payload（``word_band_json`` 是 writer 侧的 ``wb_fp`` 维度）⇒
+        # 对它们推 version 会造成无谓的全局 miss（过度失效）。
+        push_state_version = bool(_PROJECT_PAYLOAD_COLUMNS & set(fields))
+
         set_clause = ", ".join(f"{k} = :{k}" for k in fields)
         params: dict = dict(fields)
         params["project_id"] = project_id
@@ -302,6 +411,8 @@ class ProjectService:
                 conn.rollback()
                 conn.close()
                 return None
+            if push_state_version:
+                bump_project_state_version(conn, project_id)
             conn.commit()
             cur = conn.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,))
             row = cur.fetchone()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .draft_resolver import LATEST_DRAFT_ORDER, resolve_draft
+from .draft_resolver import LATEST_DRAFT_ORDER, DraftResolutionError, resolve_draft
 from .models import (
     ALLOWED_NEXT,
     Chapter,
@@ -33,6 +33,7 @@ __all__ = [
     "ChapterService",
     "Draft",
     "DraftCreate",
+    "DraftResolutionError",
     "DraftStatusNotAllowed",
     "LATEST_DRAFT_ORDER",
     "RevisionNoteStatusNotAllowed",

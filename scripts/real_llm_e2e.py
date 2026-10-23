@@ -2,9 +2,17 @@
 
 需要 MINIMAX_API_KEY；脚本只把密钥注入子进程环境，不写入数据库、文件或报告。
 使用临时 SQLite、临时端口，依次执行 chapter-plan/write/review/commit。
+
+⚠️ **报告落痕迹仓**（2026-10-23 批次三十 / 对抗审查 B1 同族 + 台账 D-19）：
+验证报告含**真实 project_id / chapter_id 与正文片段** ⇒ 必须落**痕迹仓**
+（``NovelOS-Artifacts``，无 remote），不能落软件仓（落进软件仓 = 进 GitHub 历史，
+不可撤回）。痕迹仓找不到就**明确失败**（退出码 3，零文件落盘，**不回落到软件仓**），
+且该判定发生在**任何 LLM 调用之前**（不烧额度）。逃生口（默认关）：
+``--artifacts-dir <path>`` / ``NOVELOS_ARTIFACTS_DIR`` / ``--allow-software-repo-out``。
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import socket
@@ -18,6 +26,68 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 HOST = "127.0.0.1"
+
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from scripts.guard_repo_write_path import (
+        ARTIFACTS_EVALUATION_RELPATH,
+        EXIT_ARTIFACTS_UNAVAILABLE,
+        EXIT_WRITE_PATH_REJECTED,
+        ArtifactsUnavailableError,
+        RepoWritePathError,
+        check_write_path,
+        format_artifacts_unavailable,
+        resolve_artifacts_root,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/real_llm_e2e.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from guard_repo_write_path import (  # type: ignore[no-redef]
+        ARTIFACTS_EVALUATION_RELPATH,
+        EXIT_ARTIFACTS_UNAVAILABLE,
+        EXIT_WRITE_PATH_REJECTED,
+        ArtifactsUnavailableError,
+        RepoWritePathError,
+        check_write_path,
+        format_artifacts_unavailable,
+        resolve_artifacts_root,
+    )
+
+#: 报告文件名（不变；只改**落点**）。
+REPORT_FILENAME = "real-llm-minimax-m3-2026-08-24.md"
+
+
+def resolve_report_path(
+    *,
+    artifacts_dir: str | None = None,
+    allow_software_repo_out: bool = False,
+) -> Path:
+    """报告落点：**痕迹仓** ``docs/evaluation/runs/<REPORT_FILENAME>``。
+
+    ⚠️ **必须在任何 LLM 调用之前调用**——痕迹仓不可用时要先明确失败（不烧额度）。
+    找不到痕迹仓时抛 :class:`ArtifactsUnavailableError`（**不回落到软件仓**）；
+    只有显式 ``--allow-software-repo-out`` 才回落到软件仓并打告警。
+    """
+    res = resolve_artifacts_root(artifacts_dir, repo_root=ROOT)
+    if res.ok:
+        out = res.root / ARTIFACTS_EVALUATION_RELPATH / "runs" / REPORT_FILENAME
+    elif allow_software_repo_out:
+        out = ROOT / ARTIFACTS_EVALUATION_RELPATH / "runs" / REPORT_FILENAME
+        print(
+            "[警告] --allow-software-repo-out 已开启：验证报告将落软件仓 "
+            f"{out}（可能被误提交 ⇒ 进 GitHub 历史不可撤回）。",
+            file=sys.stderr,
+        )
+    else:
+        raise ArtifactsUnavailableError(
+            format_artifacts_unavailable(
+                res,
+                subject=(
+                    "端到端验证报告含真实 project_id / chapter_id 与正文片段 ⇒ 必须落痕迹仓，"
+                    "不能落软件仓（落进软件仓 = 进 GitHub 历史，不可撤回）。"
+                ),
+            )
+        )
+    check_write_path(out, allow_repo_root=allow_software_repo_out)
+    return out
 
 
 def wait_port(port: int, timeout: float = 30) -> None:
@@ -55,7 +125,20 @@ def _busy(port):
         return False
 
 
-def run() -> int:
+def run(*, artifacts_dir: str | None = None, allow_software_repo_out: bool = False) -> int:
+    # 落点判定**先于**任何 LLM 调用（痕迹仓不可用 ⇒ 明确失败，不烧额度）
+    try:
+        out = resolve_report_path(
+            artifacts_dir=artifacts_dir,
+            allow_software_repo_out=allow_software_repo_out,
+        )
+    except ArtifactsUnavailableError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_ARTIFACTS_UNAVAILABLE
+    except RepoWritePathError as exc:
+        print(f"[拒绝写入] {exc}", file=sys.stderr)
+        return EXIT_WRITE_PATH_REJECTED
+
     api_key = os.environ.get("MINIMAX_API_KEY")
     if not api_key:
         print("[real-llm] FAIL：未设置 MINIMAX_API_KEY", flush=True)
@@ -192,7 +275,6 @@ def run() -> int:
             "timings": timings,
             "ai_call_logs": logs,
         }
-        out = ROOT / "docs/evaluation/runs/real-llm-minimax-m3-2026-08-24.md"
         out.parent.mkdir(parents=True, exist_ok=True)
         with out.open("w", encoding="utf-8") as f:
             f.write(
@@ -229,5 +311,24 @@ def run() -> int:
                     pass
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="真实 MiniMax-M3 HTTP 端到端验证")
+    parser.add_argument(
+        "--artifacts-dir",
+        default=None,
+        help="显式指定痕迹仓根目录（覆盖 NOVELOS_ARTIFACTS_DIR 与同级目录探测）",
+    )
+    parser.add_argument(
+        "--allow-software-repo-out",
+        action="store_true",
+        help="逃生口：痕迹仓不可用时接受把报告写回软件仓（默认关；风险自负）",
+    )
+    args = parser.parse_args(argv)
+    return run(
+        artifacts_dir=args.artifacts_dir,
+        allow_software_repo_out=args.allow_software_repo_out,
+    )
+
+
 if __name__ == "__main__":
-    raise SystemExit(run())
+    raise SystemExit(main())

@@ -45,13 +45,22 @@
   pack.json」的聚合留后续版本。
 - 题材包写路径复用 :mod:`packages.core.genre` 的 service / 校验器（单点真相），
   本模块只做「内容仓文件 ↔ DB 行」的搬运与目录约定。
-- 不重写 exporter / backup 的签名；只在 service 内做组装。
+- **不重写 exporter / backup 的签名**；只在 service 内做组装。
+- **旧正文绝不无条件删除**（2026-10-23 返工 · concern 4）：内容仓是**作者的编辑面**，
+  此前「改标题 / 删章」时的残留清理是 ``path.unlink()`` ⇒ 可能**删掉作者手写 /
+  作者改过的正文**（不可逆）。现在分两档：
+  ① manifest 的 ``novel_files`` 记着「本工具写过的正文 + 当时的内容 sha256」；
+  残留文件**既在凭证里、内容又没变** ⇒ 物理删除；**否则** ⇒ **移动**到
+  ``_quarantine/<slug>/``（**不删除**）+ manifest ``quarantined`` 留痕
+  （文件名 + 原路径 + 原因）。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,9 +80,11 @@ from . import drift, queries
 from .paths import (
     BOOK_DIRS,
     GENRES_DIR,
+    QUARANTINE_DIR,
     GenrePackDoc,
     Manifest,
     backup_filename,
+    chapter_number_from_filename,
     content_manifest_path,
     genre_pack_path,
     genres_dir,
@@ -81,7 +92,9 @@ from .paths import (
     novel_book_filename,
     novel_chapter_filename,
     novel_volume_filename,
+    quarantine_dir,
     story_state_filename,
+    volume_number_from_filename,
 )
 from .slug import derive_genre_slug, derive_slug, unique_slug
 
@@ -100,9 +113,32 @@ class SyncResult:
     canon_files_written: int = 0
     story_states_written: int = 0
     story_states_skipped: int = 0
+    story_states_merged: int = 0
+    """因**与上一版本内容相同**而未落盘的快照数（合并到上一版本的文件）。
+
+    2026-10-23 新增（Task 2 副作用）：台账写路径会为同一份 ``snapshot_json``
+    物化出只换版本号的新快照行 ⇒ 逐版落盘会在内容仓攒下一堆同内容快照文件。
+    """
     backup_files_written: int = 0
     manifest_written: bool = False
     errors: list[str] = field(default_factory=list)
+    stale_files_removed: int = 0
+    """本次 push **物理删除**掉的旧正文文件数（改标题 / 删章后的残留）。
+
+    2026-10-23 新增（D-11 ①）：此前旧正文文件**永久残留**（内容仓同章两份正文，
+    作者无从判断哪份权威）⇒ push 现在按「章节号 + 文件名映射」清理残留。
+
+    ⚠️ **收窄（2026-10-23 返工 · concern 4）**：只有「**本工具自己写出**且
+    **记录在 manifest 里**、且**此后未被改动**」的文件才允许被删；
+    判定不了归属的 ⇒ **不删**，改走 :attr:`quarantined_files`。
+    """
+    stale_files: list[str] = field(default_factory=list)
+    """被**物理删除**的旧正文文件名（**可审计**：删除是破坏性动作，文件名必须留痕）。"""
+    quarantined_files: list[dict[str, str]] = field(default_factory=list)
+    """被**移入隔离区**（**未删除**）的旧正文留痕。
+
+    每条：``{"file", "original_path", "reason", "quarantine_path", "quarantined_at"}``。
+    """
 
     @property
     def total_files(self) -> int:
@@ -194,6 +230,195 @@ def _timestamp_compact() -> str:
 
 
 # ---------------------------------------------------------------------------
+# 降级读库（缺表 / 读库失败 ⇒ 可观测降级，不中断整次 push）
+# ---------------------------------------------------------------------------
+
+
+def _fetch_or_degrade(
+    table: str,
+    fetch: Any,
+    args: tuple[Any, ...],
+    result: SyncResult,
+    default: Any,
+) -> Any:
+    """执行一次只读查询；**缺表 / 读库失败 ⇒ 不抛异常**，改记 ``errors`` 并返回 ``default``。
+
+    为什么需要它（D-11 ②）：此前 ``queries.fetch_*`` 直接冒泡
+    ``sqlite3.OperationalError: no such table: volumes`` ⇒ **整次 push 中断**
+    ⇒ 内容仓留下半成品、无 manifest、且**零告警**（作者看不出少了什么）。
+
+    降级口径（三条同时成立才算「可观测」）：
+    1. **不抛未捕获异常**（本次 push 走完，manifest 照写）；
+    2. ``SyncResult.errors`` 非空且**点名是哪张表**（CLI 据此返回退出码 2）；
+    3. 相关产物**跳过**（缺表 ⇒ 不写「看起来为空」的 canon 文件，避免把
+       「读不到」伪装成「没有数据」）。
+    """
+    try:
+        return fetch(*args)
+    except sqlite3.Error as exc:
+        msg = (
+            f"{table} skipped: 缺表或数据库不可用（{type(exc).__name__}: {exc}）"
+            "——本次 push 已降级，相关产物未写入"
+        )
+        result.errors.append(msg)
+        log.warning("%s", msg)
+        return default
+
+
+def _canonical_hash(payload: Any) -> str:
+    """内容的稳定哈希（键序无关）——判定「同 v 但内容是否改过」。"""
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _json_file_hash(path: Path) -> str | None:
+    """读 JSON 文件并算内容哈希；读不到 / 解析失败 ⇒ ``None``（⇒ 触发回灌）。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return _canonical_hash(data)
+
+
+def _file_sha256(path: Path) -> str | None:
+    """文件内容 sha256（十六进制）；读不到 ⇒ ``None``（⇒ 判定不了归属）。"""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def _quarantine_target(quarantine_dir: Path, name: str) -> Path:
+    """隔离区内的目标路径；同名已存在 ⇒ 追加 ``-1`` / ``-2`` …（**不覆盖**）。"""
+    target = quarantine_dir / name
+    if not target.exists():
+        return target
+    stem = target.stem
+    suffix = target.suffix
+    n = 1
+    while True:
+        candidate = quarantine_dir / f"{stem}-{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+def _reconcile_stale_novel_files(
+    novel_dir: Path,
+    expected_chapter_files: dict[int, str],
+    expected_volume_files: dict[int, str],
+    owned_files: dict[str, str],
+    quarantine_dir: Path,
+    result: SyncResult,
+) -> int:
+    """处理内容仓里**不再对应**当前章节 / 卷的旧正文文件（返回**物理删除**数量）。
+
+    口径（**按章节号 + 文件名映射**，**不**按内容哈希去重——那会把人工改过的正文
+    误判成重复文件而删掉；内容仓是人的编辑面）：
+
+    - 文件名形如 ``第N章-标题.txt`` / ``第N卷-标题.txt``；
+    - ``N`` 仍在当前集合里、但文件名与当前命名不一致 ⇒ **旧命名残留**（改标题）；
+    - ``N`` 已不在当前集合里 ⇒ 该章 / 卷已删除 ⇒ 残留文件；
+    - 其它形态的文件（``全书-<slug>.txt`` 等）**一律不动**。
+
+    ⚠️ **删除 vs 隔离（2026-10-23 返工 · concern 4）**——本函数此前对上述残留
+    **无条件 ``path.unlink()``** ⇒ 可能**删掉作者手写 / 作者改过的正文**
+    （内容仓是编辑面，删除不可逆）。现在分两档：
+
+    1. **可证明是本工具写的、且此后未被改动**（文件名在 ``owned_files``
+       （上一版 manifest 的归属凭证）里，且当前内容 sha256 **仍一致**）
+       ⇒ **物理删除**（残留必须消失，否则同章留两份正文、作者无从判断哪份权威）；
+    2. **判定不了归属**（不在凭证里 / 凭证在但内容已被改动 / 内容读不出）
+       ⇒ **移动到隔离区**（``_quarantine/<slug>/``），**绝不删除**，
+       并在 manifest 留 ``quarantined`` 记录（文件名 + 原路径 + 原因）。
+
+    幂等：清理完成后重复 push 不再命中任何残留（返回 0）。
+
+    保守分支：当前命名对应的文件**尚未写出来**（本章写盘失败）⇒ 保留旧文件，
+    宁可多留一份也不把内容弄丢（该失败已记进 ``errors``）。
+    """
+    removed = 0
+    if not novel_dir.exists():
+        return 0
+    for path in sorted(novel_dir.glob("*.txt")):
+        name = path.name
+        number = chapter_number_from_filename(name)
+        expected = expected_chapter_files
+        if number is None:
+            number = volume_number_from_filename(name)
+            expected = expected_volume_files
+        if number is None:
+            continue  # 非章节/卷形态的文件（整书 txt 等）：不动
+        want = expected.get(number)
+        if want is not None and want == name:
+            continue  # 当前应有的文件：不动
+        if want is not None and not (novel_dir / want).exists():
+            # 当前命名对应的文件还没写出来 ⇒ 保留旧文件（别把内容弄丢）
+            log.warning("stale novel file kept (current file missing): %s", name)
+            continue
+
+        recorded_hash = owned_files.get(name)
+        current_hash = _file_sha256(path)
+        if recorded_hash is not None and current_hash is not None and recorded_hash == current_hash:
+            # ① 可证明是本工具写的、且此后未被改动 ⇒ 物理删除
+            try:
+                path.unlink()
+            except OSError as exc:
+                result.errors.append(f"stale file remove failed: {name} ({exc})")
+                log.warning("stale novel file remove failed: %s (%s)", name, exc)
+                continue
+            removed += 1
+            result.stale_files.append(name)
+            log.info("stale novel file removed: %s", name)
+            continue
+
+        # ② 判定不了归属 ⇒ 移入隔离区（**不删除**）
+        if recorded_hash is None:
+            reason = (
+                "不在 manifest 归属记录中（作者手写文件，或旧版 manifest 未记录）"
+                "——判定不了归属，移入隔离区（未删除）"
+            )
+        elif current_hash is None:
+            reason = "文件内容读不出，无法校验归属——移入隔离区（未删除）"
+        else:
+            reason = (
+                "manifest 记录过但内容已被改动（哈希不一致，可能含作者编辑）"
+                "——判定不了归属，移入隔离区（未删除）"
+            )
+        try:
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
+            target = _quarantine_target(quarantine_dir, name)
+            path.replace(target)
+        except OSError as exc:
+            result.errors.append(f"stale file quarantine failed: {name} ({exc})")
+            log.warning("stale novel file quarantine failed: %s (%s)", name, exc)
+            continue
+        record = {
+            "file": name,
+            "original_path": str(path),
+            "reason": reason,
+            "quarantine_path": str(target),
+            "quarantined_at": _now_iso(),
+        }
+        result.quarantined_files.append(record)
+        log.warning("stale novel file quarantined (not deleted): %s -> %s", name, target)
+    if removed:
+        log.warning(
+            "removed %d stale novel file(s) in %s（改标题 / 删章后的旧正文残留）",
+            removed,
+            novel_dir,
+        )
+    if result.quarantined_files:
+        log.warning(
+            "quarantined %d stale novel file(s) in %s（判定不了归属 ⇒ 移动，未删除）",
+            len(result.quarantined_files),
+            novel_dir,
+        )
+    return removed
+
+
+# ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 
@@ -237,26 +462,53 @@ class ContentSyncService:
 
         流程：
         1. 取 project，决定 slug + book_dir（必要时去重追加 ``-2`` / ``-3``）；
-        2. 拉取 chapters / drafts / volumes / 五张 canon 表 / story_states；
-        3. 写入 ``novel/``：整书 txt + 每章 txt + 每卷合并 txt；
+        2. 拉取 chapters / drafts / volumes / 五张 canon 表 / story_states
+           （**缺表 / 读库失败 ⇒ 可观测降级**：不抛异常、记 ``errors``、跳过相关产物）；
+        3. 写入 ``novel/``：整书 txt + 每章 txt + 每卷合并 txt，
+           并**处理旧命名残留**（改标题 / 删章后的旧正文文件）——
+           ⚠️ **只有「本工具写的、且未被改动」的才物理删除；判定不了归属的移入
+           隔离区**（``_quarantine/<slug>/``，**不删除**）并留痕（2026-10-23 返工
+           · concern 4）；
         4. 写入 ``canon/``：五张 canon JSON；
-        5. 写入 ``story_state/``：按 ``state_version`` 命名，重复跳过；
+        5. 写入 ``story_state/``：按 ``state_version`` 命名；**同 v 但内容被原地改过
+           ⇒ 回灌**（否则运行面修好了、内容面还是旧的）；
         6. 写入 ``backup/``：调用 BackupService.export_project 生成 JSON 包；
-        7. 写入 ``manifest.json``（含本次产物统计 + synced_at）。
+        7. 写入 ``manifest.json``（含本次产物统计 + ``novel_files`` 归属凭证
+           + ``quarantined`` 隔离留痕 + synced_at）。
         """
-        project = queries.fetch_project(self.db_path, project_id)
+        try:
+            project = queries.fetch_project(self.db_path, project_id)
+        except sqlite3.Error as exc:
+            # 运行库连 ``projects`` 表都读不到 ⇒ 没有可同步的对象；抛**可读**的
+            # ValueError（而不是裸 OperationalError），由 CLI 转成退出码 1。
+            raise ValueError(
+                f"运行库不可读（projects 表缺失或损坏）：{exc}"
+            ) from exc
         if project is None:
             raise ValueError(f"project {project_id!r} not found")
 
         book_dir, base_manifest = self._prepare_book_dir(project, story_state_versions=[])
         result = SyncResult(project_id=project_id, slug=base_manifest.slug, book_dir=book_dir)
 
+        # --- 上一版 manifest（**归属凭证** + 隔离区留痕的累积）----------------
+        # ⚠️ 必须在写新 manifest **之前**读旧的那份：``novel_files`` 是
+        # 「哪些正文是本工具写的」的凭证 ⇒ 旧正文清理据此判断「能不能删」。
+        previous_manifest = self._read_manifest(book_dir)
+        owned_novel_files: dict[str, str] = dict(previous_manifest.novel_files)
+        quarantined_records: list[dict[str, str]] = list(previous_manifest.quarantined)
+
         # --- novel/ --------------------------------------------------------
         novel_dir = book_dir / "novel"
         novel_dir.mkdir(parents=True, exist_ok=True)
+        # 本次 push 写出的正文文件 → 内容 sha256（写进 manifest 当归属凭证）
+        written_novel_files: dict[str, str] = {}
 
-        chapters = queries.fetch_chapters(self.db_path, project_id)
-        drafts = queries.fetch_drafts(self.db_path, project_id)
+        chapters = _fetch_or_degrade(
+            "chapters", queries.fetch_chapters, (self.db_path, project_id), result, []
+        )
+        drafts = _fetch_or_degrade(
+            "drafts", queries.fetch_drafts, (self.db_path, project_id), result, []
+        )
 
         # 整书 txt：复用 build_txt
         try:
@@ -265,7 +517,11 @@ class ContentSyncService:
                 project_id,
                 ExportScope(kind="book"),
             )
-            (novel_dir / novel_book_filename(base_manifest.slug)).write_bytes(txt_bytes)
+            book_txt_name = novel_book_filename(base_manifest.slug)
+            (novel_dir / book_txt_name).write_bytes(txt_bytes)
+            book_txt_hash = _file_sha256(novel_dir / book_txt_name)
+            if book_txt_hash is not None:
+                written_novel_files[book_txt_name] = book_txt_hash
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"novel book txt: {exc}")
             log.warning("novel book txt failed: %s", exc)
@@ -276,6 +532,8 @@ class ContentSyncService:
         # chapter_id 与 number 原值，便于上游排查；同名 chapter_id 在同次 push 中只
         # 报一次（避免重复刷日志）。
         _skipped_chapter_ids: set[str] = set()
+        # 章号 → 期望文件名（**旧文件清理**的映射依据；不用内容哈希去重）
+        expected_chapter_files: dict[int, str] = {}
         for ch in chapters:
             cid = ch.get("chapter_id")
             num_raw = ch.get("number")
@@ -297,20 +555,32 @@ class ContentSyncService:
                     _skipped_chapter_ids.add(cid)
                     log.warning("chapter %s skipped: number=%r not int-castable", cid, num_raw)
                 continue
+            filename = novel_chapter_filename(num, ch.get("title"))
+            expected_chapter_files[num] = filename
             try:
                 txt_bytes = build_txt(
                     self.db_path,
                     project_id,
                     ExportScope(kind="chapter", chapter_no=num),
                 )
-                (novel_dir / novel_chapter_filename(num, ch.get("title"))).write_bytes(txt_bytes)
+                (novel_dir / filename).write_bytes(txt_bytes)
                 result.chapters_written += 1
+                chapter_hash = _file_sha256(novel_dir / filename)
+                if chapter_hash is not None:
+                    written_novel_files[filename] = chapter_hash
             except Exception as exc:  # noqa: BLE001
                 result.errors.append(f"chapter {cid} (number={num}) txt: {exc}")
                 log.warning("chapter %s (number=%s) txt failed: %s", cid, num, exc)
 
         # 每卷合并 txt：复用 build_txt 的拼装逻辑（按 chapter.volume_id 过滤）
-        volume_groups = queries.fetch_volumes_for_book_txt(self.db_path, project_id)
+        volume_groups = _fetch_or_degrade(
+            "volumes",
+            queries.fetch_volumes_for_book_txt,
+            (self.db_path, project_id),
+            result,
+            [],
+        )
+        expected_volume_files: dict[int, str] = {}
         for grp in volume_groups:
             v = grp["volume"]
             vchs = grp["chapters"]
@@ -332,55 +602,66 @@ class ContentSyncService:
                 )
                 log.warning("volume %s skipped: number=%r not int-castable", vid, num_raw)
                 continue
+            filename = novel_volume_filename(v_num, v.get("title"))
+            expected_volume_files[v_num] = filename
             try:
                 txt_bytes = build_volume_txt(self.db_path, project_id, v, vchs)
-                (novel_dir / novel_volume_filename(v_num, v.get("title"))).write_bytes(txt_bytes)
+                (novel_dir / filename).write_bytes(txt_bytes)
                 result.volumes_written += 1
+                volume_hash = _file_sha256(novel_dir / filename)
+                if volume_hash is not None:
+                    written_novel_files[filename] = volume_hash
             except Exception as exc:  # noqa: BLE001
                 result.errors.append(f"volume {vid} (number={v_num}) txt: {exc}")
                 log.warning("volume %s (number=%s) txt failed: %s", vid, v_num, exc)
 
+        # 旧正文文件处理（D-11 ① + 2026-10-23 返工 concern 4）：改标题 / 删章后的
+        # 旧文件必须从 ``novel/`` 消失（否则同章留两份正文、作者无从判断哪份权威），
+        # **但绝不无条件删除**——只有「能证明是本工具写的且未被改动」的才删，
+        # 判定不了归属的**移入隔离区**（不删除）。
+        result.stale_files_removed = _reconcile_stale_novel_files(
+            novel_dir,
+            expected_chapter_files,
+            expected_volume_files,
+            owned_novel_files,
+            quarantine_dir(self.content_dir, base_manifest.slug),
+            result,
+        )
+
         # --- canon/ --------------------------------------------------------
         canon_dir = book_dir / "canon"
         canon_dir.mkdir(parents=True, exist_ok=True)
-        canon_writes: list[tuple[str, list[dict[str, Any]]]] = [
-            (
-                "characters.json",
-                [
-                    _row_with_json_decoded(r, ("core_json",))
-                    for r in queries.fetch_characters(self.db_path, project_id)
-                ],
-            ),
-            (
-                "world_rules.json",
-                [
-                    _row_with_json_decoded(r, ("data_json",))
-                    for r in queries.fetch_world_rules(self.db_path, project_id)
-                ],
-            ),
+        # canon 五张表：逐张读，**缺表 ⇒ 跳过该文件**（不写「看起来为空」的
+        # canon 文件把「读不到」伪装成「没有数据」；errors 已记录）。
+        canon_specs: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+            ("characters.json", "characters", ("core_json",)),
+            ("world_rules.json", "world_rules", ("data_json",)),
             (
                 "plot_events.json",
-                [
-                    _row_with_json_decoded(
-                        r,
-                        ("cause_json", "effects_json", "participants_json", "time_json"),
-                    )
-                    for r in queries.fetch_plot_events(self.db_path, project_id)
-                ],
+                "plot_events",
+                ("cause_json", "effects_json", "participants_json", "time_json"),
             ),
-            (
-                "timeline_events.json",
-                list(queries.fetch_timeline_events(self.db_path, project_id)),
-            ),
-            (
-                "volumes.json",
-                [
-                    _row_with_json_decoded(r, ("terminal_snapshot_json",))
-                    for r in queries.fetch_volumes(self.db_path, project_id)
-                ],
-            ),
-        ]
-        for fname, payload in canon_writes:
+            ("timeline_events.json", "timeline_events", ()),
+            ("volumes.json", "volumes", ("terminal_snapshot_json",)),
+        )
+        canon_fetchers = {
+            "characters": queries.fetch_characters,
+            "world_rules": queries.fetch_world_rules,
+            "plot_events": queries.fetch_plot_events,
+            "timeline_events": queries.fetch_timeline_events,
+            "volumes": queries.fetch_volumes,
+        }
+        for fname, table, json_cols in canon_specs:
+            rows = _fetch_or_degrade(
+                table,
+                canon_fetchers[table],
+                (self.db_path, project_id),
+                result,
+                None,
+            )
+            if rows is None:
+                continue  # 缺表 ⇒ 该 canon 文件不写（原因已在 errors）
+            payload = [_row_with_json_decoded(r, json_cols) for r in rows]
             try:
                 _write_json(canon_dir / fname, payload)
                 result.canon_files_written += 1
@@ -392,30 +673,81 @@ class ContentSyncService:
         state_dir = book_dir / "story_state"
         state_dir.mkdir(parents=True, exist_ok=True)
         story_state_versions: list[int] = []
-        for ss in queries.fetch_story_states(self.db_path, project_id):
+        # 被合并的版本 → 它重复的那个（**实际有文件**的）版本。
+        # 合并规则（2026-10-23，Task 2 副作用）：台账写路径
+        # （``domain/project/service.py::bump_project_state_version`` → ``materialize_snapshot``）
+        # 会为**同一份 snapshot_json** 物化出**只换版本号**的新快照行 ⇒ 若逐版落盘，
+        # 内容仓会攒下一堆「只差版本号的同内容快照」文件（用户可见的垃圾）。
+        # ⇒ **与上一版本内容相同 ⇒ 不落盘**（合并到上一版本的文件）。
+        # ⚠️ 与 D-11 ③ 方向相反、两条同时成立：
+        #   · D-11 ③：**同 v 但内容被原地改过** ⇒ 必须回灌（写同一个文件名）；
+        #   · 本条：**不同 v 但内容相同** ⇒ 合并（不产生新文件）。
+        story_state_aliases: dict[str, int] = {}
+        prev_snapshot_hash: str | None = None
+        last_file_version: int | None = None
+        for ss in _fetch_or_degrade(
+            "story_states",
+            queries.fetch_story_states,
+            (self.db_path, project_id),
+            result,
+            [],
+        ):
             sv = ss.get("state_version")
             if sv is None:
                 continue
-            target = state_dir / story_state_filename(int(sv))
-            if target.exists():
-                # 幂等：同 state_version 已存在则跳过
-                result.story_states_skipped += 1
-                story_state_versions.append(int(sv))
-                continue
+            version = int(sv)
+            target = state_dir / story_state_filename(version)
             payload = {
                 "project_id": ss.get("project_id"),
-                "state_version": int(sv),
+                "state_version": version,
                 "commit_id": ss.get("commit_id"),
                 "created_at": ss.get("created_at"),
                 "snapshot": _safe_json_loads(ss.get("snapshot_json")),
             }
+            # 两个哈希各管一件事：
+            #   payload_hash  = 整个落盘 payload（判「文件是否已是最新」⇒ 幂等 / 回灌）
+            #   snapshot_hash = 只取 snapshot（判「是否与上一版本同内容」⇒ 合并）
+            payload_hash = _canonical_hash(payload)
+            snapshot_hash = _canonical_hash(payload["snapshot"])
+            if target.exists():
+                # 幂等 + 回灌（D-11 ③）：**同 v 但内容被原地改过**必须回灌
+                # （运行面 `story_state/snapshot.py` 同 v UPDATE 修好了，内容面还是旧的）。
+                # 判定按**内容哈希**（不是只比文件名 / 版本号）。
+                existing_hash = _json_file_hash(target)
+                if existing_hash is not None and existing_hash == payload_hash:
+                    result.story_states_skipped += 1
+                    story_state_versions.append(version)
+                    last_file_version = version
+                    prev_snapshot_hash = snapshot_hash
+                    continue
+                log.info(
+                    "story_state v%s 内容已变化（原地修复）→ 回灌内容仓", version
+                )
+            elif (
+                prev_snapshot_hash is not None
+                and snapshot_hash == prev_snapshot_hash
+                and last_file_version is not None
+            ):
+                # 与**上一版本**内容相同 ⇒ 合并：不落盘（避免同内容快照文件堆积），
+                # 但**记别名**（版本 → 它重复的那个版本），信息不丢。
+                story_state_aliases[str(version)] = last_file_version
+                result.story_states_merged += 1
+                log.info(
+                    "story_state v%s 与上一版本内容相同 → 合并到 v%s（不落盘）",
+                    version,
+                    last_file_version,
+                )
+                prev_snapshot_hash = snapshot_hash
+                continue
             try:
                 _write_json(target, payload)
                 result.story_states_written += 1
-                story_state_versions.append(int(sv))
+                story_state_versions.append(version)
+                last_file_version = version
             except Exception as exc:  # noqa: BLE001
-                result.errors.append(f"story_state v{sv}: {exc}")
-                log.warning("story_state v%s failed: %s", sv, exc)
+                result.errors.append(f"story_state v{version}: {exc}")
+                log.warning("story_state v%s failed: %s", version, exc)
+            prev_snapshot_hash = snapshot_hash
 
         # --- backup/ -------------------------------------------------------
         backup_dir = book_dir / "backup"
@@ -444,6 +776,8 @@ class ContentSyncService:
             log.warning("backup json failed: %s", exc)
 
         # --- manifest ------------------------------------------------------
+        # 隔离区留痕**累积**（隔离区里的文件不会被后续 push 再看到 ⇒ 不累积就丢记录）。
+        quarantined_records.extend(result.quarantined_files)
         manifest = Manifest(
             project_id=project_id,
             name=str(project.get("name") or ""),
@@ -455,6 +789,9 @@ class ContentSyncService:
             chapter_count=len(chapters),
             draft_count=len(drafts),
             story_state_versions=sorted(set(story_state_versions)),
+            story_state_aliases=dict(story_state_aliases),
+            novel_files=dict(written_novel_files),
+            quarantined=quarantined_records,
             content_dir=str(self.content_dir),
         )
         try:
@@ -480,13 +817,14 @@ class ContentSyncService:
         """列出内容仓下所有 book 子目录的基础信息。
 
         仅返回 ``{slug, project_id?, synced_at?}``，读不到 manifest 的子目录
-        仍返回，仅缺字段。``genres/`` 是题材包命名空间（非书），跳过。
+        仍返回，仅缺字段。``genres/`` 是题材包命名空间（非书），跳过；
+        ``_quarantine/`` 是隔离区（非书），同样跳过。
         """
         if not self.content_dir.exists():
             return []
         out: list[dict[str, Any]] = []
         for p in sorted(self.content_dir.iterdir()):
-            if not p.is_dir() or p.name == GENRES_DIR:
+            if not p.is_dir() or p.name in (GENRES_DIR, QUARANTINE_DIR):
                 continue
             slug = p.name
             entry: dict[str, Any] = {"slug": slug, "path": str(p)}
@@ -779,6 +1117,33 @@ class ContentSyncService:
     @staticmethod
     def _write_manifest(book_dir: Path, manifest: Manifest) -> None:
         _write_json(manifest_path(book_dir), manifest.to_dict())
+
+    @staticmethod
+    def _read_manifest(book_dir: Path) -> Manifest:
+        """读既有 manifest（**容错**：读不到 / 非法 ⇒ 空 manifest，不抛错）。
+
+        用途：**归属凭证**（``novel_files``）与隔离区留痕（``quarantined``）的
+        来源——两者都只存在于上一版 manifest 里。
+        """
+        mpath = manifest_path(book_dir)
+        if not mpath.exists():
+            return Manifest(
+                project_id="",
+                name="",
+                slug=book_dir.name,
+                genre=None,
+                status=None,
+                target_words=None,
+                synced_at="",
+                chapter_count=0,
+                draft_count=0,
+            )
+        try:
+            data = json.loads(mpath.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning("manifest read failed (%s): %s", mpath, exc)
+            data = {}
+        return Manifest.from_dict(data)
 
     # ---------------------------- 题材包内部 helper -------------------------
 

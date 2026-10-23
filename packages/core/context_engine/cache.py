@@ -588,6 +588,112 @@ def chapter_title_fingerprint(
 
 
 # ---------------------------------------------------------------------------
+# 台账 / 情节图 / 逾期阈值 内容指纹（2026-10-23 第二轮审查 M-1 / D-7）
+# ---------------------------------------------------------------------------
+#
+# **为什么必须补**（硬规则 2「凡进 payload 的装配参数必须入键」的同形状**第 6/7 次**）：
+# 第二轮审查实测抓到 **director 侧又缺 5 个维度**——伏笔台账（``hooks``）/ 叙事债务
+# （``narrative_debts``）/ 情节图（``plot_events`` + ``branches``）/ 项目级逾期阈值
+# （``projects.foreshadow_overdue_chapters``）/ **director 侧**章标题（``chapters.title``）。
+# 它们各自进 director payload（``hook_ledger_excerpt`` / ``narrative_debt_excerpt`` /
+# ``plot_graph_excerpt`` / ``open_foreshadow_list`` / ``chapter.title``），而它们的写路径
+# （LedgerService / PlotService / ProjectService / ChapterService）**只 commit()、不推
+# ``state_version``** ⇒ 改数据后重跑同一章**命中旧装配**，planner 拿着改动前的数据排计划，
+# **零告警**。
+#
+# **列集纪律**：与既有 ``world_fingerprint`` / ``author_style_samples_fingerprint`` 同款——
+# **PRAGMA 推导、不手挑**（业务列全集 − {project_id, created_at, updated_at}）。
+# 指纹覆盖面是 payload 消费面的**超集**（台账视图只取其中几列）⇒ 刻意不对称：
+# 多算 = 多一次重装（免费）；少算 = 静默的错计划（AGENTS 坑区「失效方向刻意不对称」）。
+#
+# **与 ``project_meta_fp`` 的分工**：``projects.foreshadow_overdue_chapters`` 是**项目级**
+# 输入，但它**不**进 ``project_meta_fp``（那一维显式收窄到 name/genre/premise，见
+# ``_PROJECT_META_COLUMNS``）⇒ 单独占一维 ``foreshadow_fp``：语义可读、失效可归因
+# （改阈值不会与「改 premise」混在同一个维度里）。
+#
+# **判别**：``tests/unit/test_ctx_c_ledger_key.py``（5 场景 + 反向不变量）+
+# 突变规格 ``tests/mutation_specs/l22_director_ledger_key.py``。
+_HOOKS_FINGERPRINT_TABLES: tuple[tuple[str, str], ...] = (("hooks", "hook_id"),)
+_DEBTS_FINGERPRINT_TABLES: tuple[tuple[str, str], ...] = (("narrative_debts", "debt_id"),)
+# 情节图 = ``plot_events``（planned/recorded 事件）+ ``branches``（ACTIVE 未解决分支）
+# —— 二者同进 payload 的 ``plot_graph_excerpt`` 段 ⇒ 合为一维（失效归因到「情节图」）。
+_PLOT_FINGERPRINT_TABLES: tuple[tuple[str, str], ...] = (
+    ("plot_events", "event_id"),
+    ("branches", "branch_id"),
+)
+#: 项目级逾期阈值列（``projects`` 表）；单列一维（不进 ``project_meta_fp``，见上段）。
+_FORESHADOW_THRESHOLD_COLUMN = "foreshadow_overdue_chapters"
+
+
+def hooks_fingerprint(
+    db_path: str | Path, project_id: str | None, *, conn: sqlite3.Connection | None = None,
+) -> str:
+    """``hooks``（伏笔台账）内容指纹（director 键用）。
+
+    进 payload 的 ``hook_ledger_excerpt``（台账视图）与 ``open_foreshadow_list``
+    （待核销视图）都读这张表 ⇒ 必须单列一维（否则改伏笔后同 state_version 命中旧装配）。
+    """
+    return _fingerprint_tables(db_path, project_id, _HOOKS_FINGERPRINT_TABLES, conn=conn)
+
+
+def debts_fingerprint(
+    db_path: str | Path, project_id: str | None, *, conn: sqlite3.Connection | None = None,
+) -> str:
+    """``narrative_debts``（叙事债务）内容指纹（director 键用）。"""
+    return _fingerprint_tables(db_path, project_id, _DEBTS_FINGERPRINT_TABLES, conn=conn)
+
+
+def plot_fingerprint(
+    db_path: str | Path, project_id: str | None, *, conn: sqlite3.Connection | None = None,
+) -> str:
+    """``plot_events`` + ``branches`` 内容指纹（director 键用）。
+
+    二者同进 payload 的 ``plot_graph_excerpt`` 段（事件 + ACTIVE 分支）⇒ 合为一维。
+    ⚠️ ``branches`` 行的写路径在 ``packages/core/story_state/branches.py``（**不在**
+    本次修复的文件所有权内）⇒ 该写路径的 ``state_version`` 推进见任务报告的
+    「需要 Lead 协调」段；键维度已在本批补齐（脏命中面已封）。
+    """
+    return _fingerprint_tables(db_path, project_id, _PLOT_FINGERPRINT_TABLES, conn=conn)
+
+
+def foreshadow_threshold_fingerprint(
+    db_path: str | Path, project_id: str | None, *, conn: sqlite3.Connection | None = None,
+) -> str:
+    """``projects.foreshadow_overdue_chapters``（项目级逾期阈值）单列指纹。
+
+    该阈值进 director payload 的 ``open_foreshadow_list``（``overdue`` 判定与排序），
+    而 ``ProjectService.update`` 改它时**不推** ``state_version`` ⇒ 必须单列一维。
+
+    口径：PRAGMA 推导 + 显式收窄到**这一列**（与 ``project_meta_fingerprint`` 同款
+    ``keep_columns`` 收窄法）。极老库（迁移 0008 未跑）缺该列 ⇒ 收窄后回落到
+    ``project_id`` 单列 ⇒ 指纹恒定 —— 与「阈值恒为 fallback 30」的有效输入一致
+    （**不是**静默失真：那一维本来就该是常量）。
+    """
+    if not project_id:
+        return _FINGERPRINT_NONE
+    if conn is not None:
+        rows = _fingerprint_table_rows(
+            conn, "projects", "project_id", project_id,
+            keep_columns=(_FORESHADOW_THRESHOLD_COLUMN,),
+        )
+        return _hash_snapshot([["projects.foreshadow_overdue_chapters", rows]])
+    try:
+        own = get_connection(db_path)
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return _FINGERPRINT_NONE
+    try:
+        rows = _fingerprint_table_rows(
+            own, "projects", "project_id", project_id,
+            keep_columns=(_FORESHADOW_THRESHOLD_COLUMN,),
+        )
+    finally:
+        own.close()
+    return _hash_snapshot([["projects.foreshadow_overdue_chapters", rows]])
+
+
+# ---------------------------------------------------------------------------
 # 装配指纹的**连接复用**（2026-10-22 批次二十三 · 热路径优化）
 # ---------------------------------------------------------------------------
 #

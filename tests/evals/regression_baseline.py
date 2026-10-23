@@ -26,9 +26,15 @@
   只有显式 ``--update-baseline`` 才把基线更新为本次 run；
 - 任一 case 失败或存在漂移 → 无论如何**不更新**基线。
 
-落盘（§6.4）：每次运行写 ``docs/evaluation/runs/<run_id>.json``，含 baseline 引用、
-各 case 结果、drift、decision；仅 PASS 且（bootstrap 或显式更新）时写
-``docs/evaluation/baseline/last_passing_run.json``。
+落盘（§6.4）：落点由**调用方**给定（``runs_dir`` / ``baseline_path`` 两个入参），本模块
+不自行决定写到哪个仓。CLI（``scripts/eval_regression.py``）的缺省落点随**痕迹仓**走：
+``<artifacts_root>/docs/evaluation/runs/<run_id>.json`` 与
+``<artifacts_root>/docs/evaluation/baseline/last_passing_run.json``。
+
+⚠️ **痕迹仓缺失 ⇒ 拒绝建基线**（CLI 层判定，退出码 3）：没有钉住的基线时，结构漂移闸门
+会退化为「与上一次自产基线比对」⇒ **首次出现的漂移被静默吸收**；且基线属运行痕迹，
+落进软件仓 = 进 GitHub 历史（不可撤回）。因此痕迹仓不可用时 CLI **明确失败**，
+既不建到软件仓、也不自产基线。
 """
 
 from __future__ import annotations
@@ -44,6 +50,8 @@ from tests.evals.runner import RunResult
 
 SCORING_VERSION = "quality-scoring-v0"
 BASELINE_SEMANTICS = "structural-signature-mvp"
+# ⚠️ 下面两个常量是**相对痕迹仓根**的相对路径（**不是**相对软件仓）：
+# 软件仓 ``docs/evaluation/baseline/`` 下只有 ``.gitkeep``，基线文件从未被跟踪。
 BASELINE_REL_PATH = "docs/evaluation/baseline/last_passing_run.json"
 RUNS_DIR_REL = "docs/evaluation/runs"
 

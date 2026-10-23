@@ -41,7 +41,7 @@
   「空则省略」改由模型侧**字段级** ``exclude_if`` 实现。
 - 2026-10-15 批次（六）L2 组把**列表端点**也补上 ``response_model``
   （commits / chapters·deltas / branches）。实测口径与结论：列表行的形状
-  **不能**从单体端点推——``commits`` 列表行是 12 键裸 DB 行（``POST /commits`` 只有 4 键），
+  **不能**从单体端点推——``commits`` 列表行是 13 键裸 DB 行（``POST /commits`` 只有 4 键），
   ``branches`` 列表行与 ``POST /branches`` 键集逐字相同却因 main 的
   ``parent_branch_id`` 为 null 而不可复用。三个端点都**没有条件键**，因此
   **一个都没加** ``response_model_exclude_none`` / ``exclude_unset``（那会把
@@ -217,6 +217,12 @@ def commit_delta(project_id: str, payload: dict, request: Request) -> dict:
     author_approval = payload.get("author_approval") or {}
     workflow_run_id = payload.get("workflow_run_id") or ""
     branch_id = payload.get("branch_id")
+    # D-10（2026-10-23）：手工提交路径也能记「定稿的是哪一版草稿」。
+    # 此前该路径恒为 NULL ⇒ 导出侧只能回退取最新 ⇒ 外发物不一定是人审过的那版。
+    # 语义与 workflow 侧一致：**不指定 = 未指定（NULL）**，不是「最新」。
+    draft_version = payload.get("draft_version")
+    if draft_version is not None and not isinstance(draft_version, int):
+        raise HTTPException(status_code=422, detail="draft_version must be an integer or null")
     if not isinstance(delta_id, str) or not delta_id:
         raise HTTPException(status_code=422, detail="delta_id required")
     if not isinstance(workflow_run_id, str) or not workflow_run_id:
@@ -224,6 +230,7 @@ def commit_delta(project_id: str, payload: dict, request: Request) -> dict:
     try:
         return _service(request).commit_delta(
             delta_id, author_approval, workflow_run_id, branch_id=branch_id,
+            draft_version=draft_version,
         )
     except BranchNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -301,7 +308,7 @@ def rollback_commit(commit_id: str, payload: dict, request: Request) -> dict:
 
 @router.get("/projects/{project_id}/commits", response_model=list[CommitListItem])
 def list_commits(project_id: str, request: Request) -> list[dict]:
-    """列本项目的 commit（每行恒 12 键，实测）。
+    """列本项目的 commit（每行恒 13 键，实测）。
 
     行是**裸 DB 行**，与 ``POST /commits`` 的 ``CommitResponse``（4 键动作摘要）不同形，
     故另建 ``CommitListItem``——**不按单体端点的形状推列表行**。

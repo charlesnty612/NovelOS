@@ -33,6 +33,41 @@ from .pipeline_common import (
 _log = logging.getLogger(__name__)
 
 
+def _reviewed_draft_version_of(ctx: dict[str, Any]) -> int | None:
+    """本次 commit 定的是**哪一版草稿**（被审 / 被质量门量过的那一版）。
+
+    来源：``quality_gate`` 节点返回值里的 ``quality_reviewed_draft_version``
+    ——由 ``gate.py`` 写入，经引擎 ``ctx.update(output)`` 顶层 merge 传给本节点。
+
+    ⚠️ 该键此前**只写不读**（全仓零消费点）——与「author_intent 死参数」同族：
+    「写进 ctx」不等于「生效」。本函数是它的**第一个**消费点，
+    也是迁移 0034 的 ``commits.draft_version`` 的唯一来源。
+
+    拿不到（无评审记录 / 直构 ctx 的测试 / 非正整数）⇒ 返回 ``None``
+    = **未记录** ⇒ 导出侧回退「取最新」，存量行为逐字不变。
+    刻意**不**用「取最新 draft」反推版本号——那是把「审完又改稿」的那一版
+    误认成定稿版，正是本次要修的缺陷本身。
+
+    ⚠️ **口径留痕（2026-10-23 · 对抗审查 A 的 B4，Lead 裁决：机制自洽，不改优先级）**：
+    本函数记的是**门禁实际量的那一版**（``gate.py:649`` 写 ``report.draft_version``
+    ⇒ 同一版）⇒ **导出物 == 被质量门量过的文本**（不是「被人审过的文本」）。
+    审查者指出 ``ctx["draft_version"]``（可由 start 请求体指定）优先于最近人审版本，
+    可能让「量到的版本」与「人审版本」不一致。Lead 复算结论：
+    ① 这条优先级**在 D-10 之前就存在**（那时导出恒取最新，门禁量的与导出的同样可能不一致）
+    ⇒ **不是 D-10 引入的**；
+    ② 改成「人审版本优先」会引入**新的不一致**：写→审→改稿→再提交时，
+    delta 是按**新稿**算的，改去量**旧稿**反而让「量的文本」与「delta 来源文本」脱节；
+    ③ 任何一侧单方面改动都会破坏「导出物 == 被量的文本」这条不变量。
+    ⇒ **保持现状**（显式 > 人审 > 最新），风险登记进台账。
+    """
+    raw = ctx.get("quality_reviewed_draft_version")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int) and raw > 0:
+        return raw
+    return None
+
+
 def _build_delta(
     observer_payload: dict[str, Any],
     *,
@@ -388,7 +423,9 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "approver": approver,
         "notes": notes,
     }
-    commit_result = svc.commit_delta(delta_id, author_approval, run_id)
+    commit_result = svc.commit_delta(
+        delta_id, author_approval, run_id, draft_version=_reviewed_draft_version_of(ctx)
+    )
 
     # chapters.status REVIEWED→COMMITTED
     conn = get_connection(db_path)

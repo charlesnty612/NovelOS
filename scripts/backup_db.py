@@ -9,8 +9,9 @@
 ``model_profiles.params_json.api_key`` / ``model_connections.params_json.api_key``
 是**明文密钥**（见 ``docs/adr/ADR-0002-model-provider-api-key-plaintext-sqlite.md``）
 ⇒ **备份文件同样含明文密钥**，写进同步盘 = 密钥上云。
-本脚本**默认照原样备份**（否则备份不可恢复，背离备份的用途），但会打印这条警告；
-需要不带密钥的副本时用 ``--redact-secrets``（那份**不可直接恢复**，只用于排障）。
+⇒ **2026-10-23 起默认加密落盘**（明文密钥不出本机）；确实需要明文副本时用
+``--plaintext``（会打印「密钥上云」警告）。``--redact-secrets`` 产出**不含明文密钥**
+的副本（那份**不可直接恢复**，只用于排障）。
 
 一致性
 ------
@@ -20,11 +21,28 @@
 
 用法
 ----
-    python scripts/backup_db.py                       # 备份到探测到的同步盘
+    python scripts/backup_db.py                       # 备份到探测到的同步盘（**默认加密**）
+    python scripts/backup_db.py --init-key            # 首次备份：显式创建密钥文件
     python scripts/backup_db.py --out D:\\BaiduSyncdisk\\NovelOS\\backups
+    python scripts/backup_db.py --plaintext           # 显式落明文（不推荐：密钥上云）
     python scripts/backup_db.py --redact-secrets      # 不含明文密钥（不可恢复）
     python scripts/backup_db.py --keep 20             # 保留最近 20 份（必须 ≥1）
     python scripts/backup_db.py --list                # 只看会写到哪里（先校验源库）
+    python scripts/backup_db.py --keep-plaintext-on-failure  # 自检失败时保留明文副本（含密钥！）
+
+⚠️ **CLI 行为变更（2026-10-23，D-4 / D-5，详见 CHANGELOG）**：
+1. ``--encrypt`` 由 opt-in 改为**默认开**；明文备份须显式 ``--plaintext``；
+2. 密钥文件**不再静默生成**——缺失时**报错退出**，只有 ``--init-key`` 才创建
+   （旧行为：新密钥解旧密文必然 ``bad decrypt`` ⇒ 旧备份永久不可恢复）；
+3. 加密后新增**密文解密往返自检**（解密回临时文件 → 比对 sha256），
+   不通过则**不落盘密文**；
+4. 自检失败时**默认删除**明文副本（2026-10-23 对抗审查 T3-2：留着它 = 把含
+   **明文 API 密钥**的整库无限期留在 ``%TEMP%``）。要留必须显式
+   ``--keep-plaintext-on-failure``（**默认关**）；
+5. 每次备份前会清理**陈旧的** ``novelos_backup_*`` 工作目录（只清本脚本前缀 +
+   超过 24 小时的；不碰别人的目录、不碰正在跑的实例）。
+
+恢复用 ``scripts/restore_db.py``（原子替换 + 删 ``-wal``/``-shm`` + 恢复后校验）。
 
 ⚠️ ``--keep`` 语义（2026-10-23 F-6 订正）：只接受 **≥1**。旧实现 ``keep=0`` 走
 「全保留」分支，与「保留最近 N 份」直觉相反、又容易被读成「全删」⇒ CLI 直接拒绝。
@@ -35,6 +53,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -42,6 +61,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -71,6 +91,11 @@ CIPHER = "aes-256-cbc"
 PBKDF2_ITER = "200000"
 DEFAULT_KEY_FILE = Path.home() / ".novelos" / "backup.key"
 
+#: 本脚本创建的工作目录前缀（清理陈旧目录时**只认这个前缀**，不碰别人的目录）。
+WORK_DIR_PREFIX = "novelos_backup_"
+#: 陈旧判定阈值（秒）：默认 24 小时。
+STALE_WORK_DIR_MAX_AGE = 24 * 3600
+
 
 def find_openssl() -> Path:
     for c in OPENSSL_CANDIDATES:
@@ -82,25 +107,130 @@ def find_openssl() -> Path:
     raise SystemExit("[ABORT] 找不到 openssl（Git for Windows 自带，通常在 C:\\Program Files\\Git\\mingw64\\bin）")
 
 
-def ensure_key_file(key_file: Path) -> Path:
-    """取（或生成）备份加密用的密钥文件。⚠️ 密钥**只存本机**，绝不进同步盘。"""
+#: CLI 退出码：0 = 成功；2 = 前置条件不满足（中止，**未产出任何备份**）。
+EXIT_ABORT = 2
+
+
+def _abort(message: str, code: int = EXIT_ABORT) -> None:
+    """打印诊断（stderr）并以**非 0 退出码**中止。
+
+    ⚠️ 用「打印 + ``SystemExit(code)``」而不是 ``SystemExit(整段消息)``：
+    后者的退出码恒为 1 且消息被当作退出码打印 ⇒ 调用方无法按类别区分失败原因。
+    """
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
+
+
+class SelfCheckFailed(RuntimeError):
+    """密文**解密往返自检**失败（解密失败 / 解密后 sha256 与待加密明文不一致）。"""
+
+
+def decrypt_file(src: Path, dest: Path, key_file: Path) -> None:
+    """openssl 解密（密码从**文件**读 ⇒ 不进命令行/进程列表）。"""
+    subprocess.run(
+        [
+            str(find_openssl()),
+            "enc",
+            "-d",
+            f"-{CIPHER}",
+            "-pbkdf2",
+            "-iter",
+            PBKDF2_ITER,
+            "-in",
+            str(src),
+            "-out",
+            str(dest),
+            "-pass",
+            f"file:{key_file}",
+        ],
+        check=True,
+    )
+
+
+def sha256_file(path: Path) -> str:
+    """文件 sha256（分块读 ⇒ 不把整库读进内存）。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def self_check_ciphertext(enc: Path, plain: Path, key_file: Path) -> str:
+    """**密文解密往返自检**：解密回临时文件 → 比对 sha256 与待加密明文逐字节一致。
+
+    ⚠️ 为什么必须有（旧实现只对**加密前**的明文副本做 ``integrity_check``
+    ⇒ 密文是否可解**从未被验证** ⇒ 可能产出永远解不开的 ``.enc`` 而无人知晓）。
+
+    失败抛 :class:`SelfCheckFailed`（由调用方转成 CLI 中止 + 保留明文副本）。
+    """
+    probe_dir = Path(tempfile.mkdtemp(prefix="novelos_selfcheck_"))
+    probe = probe_dir / "probe.db"
+    try:
+        try:
+            decrypt_file(enc, probe, key_file)
+        except subprocess.CalledProcessError as exc:
+            raise SelfCheckFailed(
+                f"密文自检失败：解密报错（openssl exit {exc.returncode}）"
+                "—— 密文可能损坏，或密钥与该密文不配对"
+            ) from exc
+        digest_cipher = sha256_file(probe)
+        digest_plain = sha256_file(plain)
+        if digest_cipher != digest_plain:
+            raise SelfCheckFailed(
+                "密文自检失败：解密后 sha256 与待加密明文不一致"
+                f"（密文={digest_cipher[:16]}… 明文={digest_plain[:16]}…）"
+            )
+        return digest_cipher
+    finally:
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+
+def ensure_key_file(key_file: Path, *, init: bool = False) -> Path:
+    """取备份加密用的密钥文件。⚠️ 密钥**只存本机**，绝不进同步盘。
+
+    ⚠️ **语义变更（2026-10-23，D-5）**：旧实现在密钥文件缺失时**静默生成新密钥**
+    （实测：旧 key 前 8 位 ``ab1d0551`` → 新 key ``c53b90f5``；用新 key 解旧密文
+    exit 1 ``bad decrypt``）⇒ **旧备份永久不可恢复**，且全程 exit 0 无告警。现在：
+
+    * 文件**存在** ⇒ 复用（**行为逐字不变**）；
+    * 文件**不存在** ⇒ **报错退出**（退出码 2），只有显式 ``init=True``
+      （CLI 的 ``--init-key``）才创建。
+    """
+    if key_file.exists():
+        print(f"[KEY] 复用既有密钥 {key_file}")
+        return key_file
+
     env = os.environ.get("NOVELOS_BACKUP_KEY")
-    if env and not key_file.exists():
+    if env:
+        # ⚠️ 唯一的例外：环境变量是**用户显式提供的密钥材料**（不是「静默生成」），
+        # 照旧落盘供 openssl ``-pass file:`` 读。
         key_file.parent.mkdir(parents=True, exist_ok=True)
         key_file.write_text(env.strip() + "\n", encoding="utf-8")
-    if not key_file.exists():
-        key_file.parent.mkdir(parents=True, exist_ok=True)
-        secret = subprocess.run(
-            [str(find_openssl()), "rand", "-base64", "32"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=True,
-        ).stdout.strip()
-        key_file.write_text(secret + "\n", encoding="utf-8")
-        print(f"[KEY] 已生成新密钥 -> {key_file}（⚠️ 机器坏掉会一起丢，请另存）")
-    else:
-        print(f"[KEY] 复用既有密钥 {key_file}")
+        print(f"[KEY] 已从 NOVELOS_BACKUP_KEY 环境变量写入密钥 -> {key_file}")
+        return key_file
+
+    if not init:
+        _abort(
+            f"[ABORT] 密钥文件不存在：{key_file}\n"
+            "        旧实现会在此处**静默生成新密钥** ⇒ 旧备份将永久不可解"
+            "（用新 key 解旧密文必然 bad decrypt）。现已改为报错退出。\n"
+            "        请二选一：\n"
+            "          ① 首次备份：加 --init-key 显式创建新密钥（并另存一份到私有网盘）；\n"
+            "          ② 已有备份：从私有网盘取回原密钥放到该路径"
+            "（或设 NOVELOS_BACKUP_KEY 环境变量）。"
+        )
+
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    secret = subprocess.run(
+        [str(find_openssl()), "rand", "-base64", "32"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+    key_file.write_text(secret + "\n", encoding="utf-8")
+    print(f"[KEY] 已按 --init-key 创建新密钥 -> {key_file}（⚠️ 机器坏掉会一起丢，请另存）")
     return key_file
 
 
@@ -194,6 +324,37 @@ def prune(out_dir: Path, keep: int) -> list[Path]:
     return removed
 
 
+def cleanup_stale_work_dirs(max_age_seconds: int = STALE_WORK_DIR_MAX_AGE) -> list[Path]:
+    """清理**陈旧的** ``novelos_backup_*`` 工作目录（只清本脚本自己建的）。
+
+    ⚠️ 为什么需要（2026-10-23 对抗审查 T3-2）：失败路径曾把**含明文 API 密钥的整库**
+    留在 ``%TEMP%`` 且**无限期保留** ⇒ 除本次失败外，历次失败留下的目录也会一直堆着。
+    这里做**兜底清理**。
+
+    ⚠️ **只按「前缀 + 年龄」判定**，不碰别人的目录：
+    * 前缀是本脚本独有的 ``novelos_backup_``；
+    * 年龄阈值（默认 24h）天然排除**正在跑的**本脚本实例（刚建的目录 mtime 是新的）。
+    """
+    root = Path(tempfile.gettempdir())
+    cutoff = time.time() - max_age_seconds
+    removed: list[Path] = []
+    try:
+        candidates = list(root.glob(f"{WORK_DIR_PREFIX}*"))
+    except OSError:
+        return removed
+    for path in candidates:
+        try:
+            if not path.is_dir():
+                continue
+            if path.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(path)
+        except OSError:
+            continue
+    return removed
+
+
 def main(argv: list[str] | None = None) -> int:
     # ⚠️ 本机控制台默认 cp936（AGENTS 坑区「Windows 默认 cp936 吞中文」）⇒ 改 utf-8。
     # ⚠️ **必须在函数里、且判 hasattr**：pytest 捕获期间 ``sys.stdout`` 被换成
@@ -213,10 +374,28 @@ def main(argv: list[str] | None = None) -> int:
              "语义歧义故直接拒绝）",
     )
     ap.add_argument("--redact-secrets", action="store_true", help="抹掉明文密钥（该副本不可恢复）")
-    ap.add_argument(
+    enc_group = ap.add_mutually_exclusive_group()
+    enc_group.add_argument(
         "--encrypt",
         action="store_true",
-        help="用 openssl 加密后再落盘（**推荐**：备份可恢复，且明文密钥不出本机）",
+        help="用 openssl 加密后再落盘（**默认已开启**；本 flag 仅作兼容，显式写出无副作用）",
+    )
+    enc_group.add_argument(
+        "--plaintext",
+        action="store_true",
+        help="**显式**落明文（不推荐：明文 API 密钥会进同步盘）",
+    )
+    ap.add_argument(
+        "--init-key",
+        action="store_true",
+        help="密钥文件不存在时**显式创建**（默认：报错退出，不静默生成——"
+             "静默生成的新密钥解不开旧备份）",
+    )
+    ap.add_argument(
+        "--keep-plaintext-on-failure",
+        action="store_true",
+        help="自检失败时**保留**明文副本（含明文 API 密钥！）——默认关闭："
+             "失败时明文副本会被删除（源库未被触碰，重跑即可）",
     )
     ap.add_argument(
         "--key-file",
@@ -226,6 +405,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--list", action="store_true", help="只打印将要写到哪里，不执行")
     args = ap.parse_args(argv)
+    # ⚠️ 2026-10-23 CLI 行为变更（D-4）：``--encrypt`` 由 opt-in 改为**默认开**，
+    # 明文备份必须显式 ``--plaintext``。
+    encrypt = not args.plaintext
     # --keep 0 旧语义是「全保留」（`if keep > 0 else []`），与「保留最近 N 份」直觉相反，
     # 且不同人读成「全删」；两种解释都危险 ⇒ 显式拒绝并要求 ≥1（F-6，2026-10-23）。
     if args.keep < 1:
@@ -245,7 +427,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.redact_secrets:
         print("[模式]   抹除明文密钥 ⇒ 该副本**不可直接恢复**")
-    elif args.encrypt:
+    if encrypt:
         print(f"[模式]   加密落盘（{CIPHER} + pbkdf2 x{PBKDF2_ITER}）⇒ 明文密钥不出本机")
     else:
         print(f"[警告]   {SECRET_HINT}")
@@ -254,10 +436,18 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dest = out_dir / f"novelos_{stamp}.db"
 
+    # ⚠️ 兜底清理**陈旧的**工作目录（T3-2）：历次失败留下的 `novelos_backup_*`
+    # 里可能还躺着**含明文 API 密钥的整库** ⇒ 只清「本脚本前缀 + 超过 24h」的。
+    stale = cleanup_stale_work_dirs()
+    if stale:
+        print(f"[清理]   陈旧工作目录 {len(stale)} 个已删除：{', '.join(p.name for p in stale)}")
+
     # ⚠️ **加密模式下明文 db 绝不能先落在同步盘里**（同步盘会立刻把它上传 ⇒
     # 明文密钥上云）。⇒ 先落到系统临时目录，加密后只把**密文**搬进同步盘。
-    work_dir = Path(tempfile.mkdtemp(prefix="novelos_backup_"))
+    work_dir = Path(tempfile.mkdtemp(prefix=WORK_DIR_PREFIX))
     plain = work_dir / f"novelos_{stamp}.db"
+    # 自检失败时**默认删除**明文副本（T3-2）；只有 --keep-plaintext-on-failure 才保留。
+    keep_work_dir = False
     try:
         # 在线一致性备份（WAL 模式下不会拷到不一致的半截状态）
         s = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
@@ -282,19 +472,42 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"[ABORT] 备份完整性校验未通过（{verdict}）⇒ 不留坏备份")
         size_mb = plain.stat().st_size / 1024 / 1024
 
-        if args.encrypt:
-            key_file = ensure_key_file(Path(args.key_file).expanduser())
-            enc_dest = out_dir / f"novelos_{stamp}.db.enc"
-            encrypt_file(plain, enc_dest, key_file)
+        if encrypt:
+            key_file = ensure_key_file(Path(args.key_file).expanduser(), init=args.init_key)
+            # ⚠️ 密文先落在**临时目录**（不是同步盘）：自检没过就不该让同步盘看见它。
+            enc_tmp = work_dir / f"novelos_{stamp}.db.enc"
+            encrypt_file(plain, enc_tmp, key_file)
+            try:
+                digest = self_check_ciphertext(enc_tmp, plain, key_file)
+            except SelfCheckFailed as exc:
+                # ⚠️ 2026-10-23 对抗审查 T3-2：**默认删除**含明文 API 密钥的明文副本。
+                #    源库未被触碰、备份可重跑 ⇒ 删副本不丢任何数据；而留着它 = 把整库
+                #    的明文密钥无限期留在 %TEMP%。要留必须**显式** --keep-plaintext-on-failure。
+                keep_work_dir = bool(args.keep_plaintext_on_failure)
+                tail = (
+                    f"        工作目录：{work_dir}\n"
+                    "        明文副本：**已保留**（⚠️ 该目录含明文 API 密钥，"
+                    "确认无用后请自行删除）。"
+                    if keep_work_dir
+                    else f"        工作目录：{work_dir}\n"
+                    "        明文副本：**已删除**（默认不留含明文密钥的副本；"
+                    "源库未被触碰，重跑即可重新备份）。"
+                )
+                _abort(f"[ABORT] {exc}\n        ⇒ **不落盘密文**。\n{tail}")
+            # 自检通过后才删明文副本 ⇒ 失败路径上明文由 finally 统一处理
             plain.unlink(missing_ok=True)
-            dest = enc_dest
+            dest = out_dir / f"novelos_{stamp}.db.enc"
+            shutil.move(str(enc_tmp), str(dest))
             print(f"[已备份] {dest}（{size_mb:.1f} MB 明文 → {dest.stat().st_size / 1024 / 1024:.1f} MB 密文）")
-            print("[校验]   integrity_check=ok（在加密前的明文副本上做的）")
+            print(f"[校验]   密文自检通过（解密往返 sha256 一致：{digest[:16]}…）+ integrity_check=ok")
         else:
             shutil.move(str(plain), str(dest))
             print(f"[已备份] {dest}（{size_mb:.1f} MB，integrity_check=ok）")
     finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+        if keep_work_dir:
+            print(f"[保留]   工作目录（**含明文 API 密钥**）保留在：{work_dir}")
+        else:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     removed = prune(out_dir, args.keep)
     for r in removed:

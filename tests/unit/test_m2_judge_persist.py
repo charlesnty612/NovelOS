@@ -69,6 +69,11 @@ def _run_main_dry_run(db_path: Path, *, persist_api: str | None, persist_calls) 
         max_content_chars=5000,
         persist_api=persist_api,
         persist_timeout=2.0,
+        # 2026-10-23（批次三十二 · 痕迹落点收口）：m2_judge 的落点改由痕迹仓决定，
+        # 这两个参数是「痕迹仓根」与「显式承担落软件仓风险的逃生口」。
+        # 本用例的 out_dir 指向临时目录（**不在软件仓内**）⇒ 无需逃生口。
+        artifacts_dir=None,
+        allow_software_repo_out=False,
     )
 
     with mock.patch.object(m2, "persist_judge_to_api", side_effect=persist_calls), \

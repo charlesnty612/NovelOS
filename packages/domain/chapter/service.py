@@ -44,6 +44,7 @@ from packages.core.story_state.write_helpers import (
     decode_json_field as _decode_json_field,
 )
 
+from ..project.service import bump_project_state_version
 from .models import (
     ALLOWED_NEXT,
     ChapterCreate,
@@ -260,6 +261,16 @@ class ChapterService:
 
         fields["updated_at"] = now_iso()
 
+        # 2026-10-23（M-1 / D-7）：改了 ``title`` ⇒ 同事务内推
+        # ``story_states.state_version``（装配缓存失效主线）——``chapters.title`` 进
+        # director payload 的 ``chapter.title`` 段，而本写路径**只 commit()、不推
+        # version** ⇒ 缺该推进时「改标题后重跑同一章」会命中旧装配（planner 被告知
+        # 旧标题，零告警）。
+        # ⚠️ **刻意只对 title 推**：``plan_json`` / ``outline_json`` 各有独立键维度
+        # （``plan_fp`` / ``outline_fp``）⇒ 推它们是重复失效；而 ``status`` 是高频
+        # 状态机迁移（每章若干次）⇒ 对它推 version = 每次都重装（过度失效）。
+        push_state_version = "title" in fields
+
         set_clause = ", ".join(f"{k} = :{k}" for k in fields)
         params: dict = dict(fields)
         params["chapter_id"] = chapter_id
@@ -274,6 +285,12 @@ class ChapterService:
                 conn.rollback()
                 conn.close()
                 return None
+            if push_state_version:
+                prow = conn.execute(
+                    "SELECT project_id FROM chapters WHERE chapter_id = ?", (chapter_id,)
+                ).fetchone()
+                if prow is not None:
+                    bump_project_state_version(conn, prow["project_id"])
             conn.commit()
             cur = conn.execute("SELECT * FROM chapters WHERE chapter_id = ?", (chapter_id,))
             row = cur.fetchone()

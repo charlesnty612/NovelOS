@@ -772,7 +772,9 @@ def test_chapter_commit_node_invalidates_cache_at_runtime(tmp_path: Path, monkey
         conn.close()
 
     # monkeypatch commit_delta 让其最小化写 story_states（FK 已通过预插行满足）
-    def fake_commit(self, delta_id_arg, author_approval, run_id_arg):
+    # ⚠️ **替身必须跟得上生产签名**（2026-10-23 · D-10）：生产侧还会传 ``draft_version=``，
+    # 替身漏了这个 kwarg ⇒ TypeError ⇒ **红的是替身过期，不是生产行为变了**。
+    def fake_commit(self, delta_id_arg, author_approval, run_id_arg, **kwargs):  # noqa: ANN001, ARG001
         c2 = get_connection(str(db_path))
         try:
             cur = c2.execute(

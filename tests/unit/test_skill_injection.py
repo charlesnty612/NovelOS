@@ -43,6 +43,15 @@ from .skill_fixtures import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
+#: director 装配缓存键的**长度**（维度数）。演进沿革：
+#: 12 → 13（prompt_label）→ 14（chars_fp）→ … → 18（volume_scope 所属卷）
+#: → **23**（2026-10-23 批次：director 侧补 5 个维度——伏笔台账 / 叙事债务 /
+#: 情节图+分支 / 项目逾期阈值 / 章标题）。
+#: ⚠️ 本仓**三处各有一份**这个常量（另两处：`tests/unit/test_prompt_label_key.py`、
+#: `tests/unit/test_volume_scope_cache_key.py`）——加维度必须三处同批更新，
+#: 否则「键长断言」会以**过期数字**的形式红/绿（见 AGENTS 硬规则 2 的装配缓存键纪律）。
+DIRECTOR_KEY_LEN = 23
+
 
 def _chapter_with_draft(db_path: Path, pid: str, prose: str = "正文。") -> str:
     """插章节 + 一条 draft（评审侧测试需要正文）。"""
@@ -237,7 +246,15 @@ def test_director_cache_key_has_skills_dimension(tmp_path):
     after = [k for k in cache_mod._assembly_cache if k[0] == pid and k[3] == "director"]
     assert len(after) == 1
     b, a = before[0], after[0]
-    assert len(b) == len(a) == 18, f"director 键应为 18 元（17 + volume_scope 所属卷维度），实得 {len(b)} / {len(a)}"
+    # 键长度常量随维度演进：12 → 13（prompt_label）→ 14（chars_fp）→ … → 18（volume_scope）
+    # → **23**（2026-10-23 批次：director 侧补 5 个维度：伏笔台账 / 叙事债务 /
+    # 情节图+分支 / 项目逾期阈值 / 章标题）。
+    # ⚠️ 改这个数字时**必须**同步 `tests/unit/test_prompt_label_key.py` 与
+    # `tests/unit/test_volume_scope_cache_key.py` 里的 `DIRECTOR_KEY_LEN`
+    # （三处各有一份，是「手写清单漂移」的复发点）。
+    assert len(b) == len(a) == DIRECTOR_KEY_LEN, (
+        f"director 键应为 {DIRECTOR_KEY_LEN} 元，实得 {len(b)} / {len(a)}"
+    )
     diff_positions = [i for i, (x, y) in enumerate(zip(b, a)) if x != y]
     assert len(diff_positions) == 1, (
         f"绑定 skill 后键应只变一个维度，实得 {diff_positions}：{b} → {a}"

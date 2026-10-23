@@ -24,6 +24,12 @@
 （``scripts/_codegen_check.py``）：换行归一后比较。本仓无 ``.gitattributes`` 且
 ``core.autocrlf=true``，git blob 存 LF、Windows 工作树是 CRLF ⇒ 不归一会让闸门
 在不同平台/不同 git 配置下给出不同答案，那是假信号不是漂移。
+
+⚠️ **默认路径锚定仓库根**（2026-10-23 批次三十一，3-3）：``--openapi`` / ``--out``
+不给时解析为 ``<仓库根>/apps/web/...``（仓库根由**脚本自身位置**推导 ⇒ 与 CWD 无关）。
+旧实现是 CWD 相对 ⇒ 在非仓库 CWD 执行会得到「输入不存在」的**假漂移**（exit 2），
+而本 CLI 的定位是「可复用于 CI / pre-commit」⇒ 假漂移 = CI 随机红。
+显式传 ``--openapi`` / ``--out`` 时仍是 CWD 相对（**行为不变**）。
 """
 from __future__ import annotations
 
@@ -34,7 +40,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts._codegen_check import check_artifact  # noqa: E402
+from scripts._codegen_check import (  # noqa: E402
+    RepoRootNotFound,
+    check_artifact,
+    default_openapi_path,
+    default_types_path,
+)
 
 
 def _ts_type(schema: dict, schemas: dict) -> str:
@@ -112,14 +123,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--openapi",
         type=Path,
-        default=Path("apps/web/openapi.json"),
-        help="openapi.json 路径",
+        default=None,
+        help="openapi.json 路径（默认 <仓库根>/apps/web/openapi.json；**相对仓库根**，与 CWD 无关）",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("apps/web/src/api/types.generated.ts"),
-        help="生成文件路径",
+        default=None,
+        help="生成文件路径（默认 <仓库根>/apps/web/src/api/types.generated.ts；**相对仓库根**）",
     )
     parser.add_argument(
         "--check",
@@ -128,25 +139,42 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not args.openapi.exists():
-        print(f"MISSING：openapi 输入不存在：{args.openapi}", file=sys.stderr)
+    # 默认路径**先**解析：解析不了要给出**明确文案**，而不是含糊的 MISSING 假漂移。
+    try:
+        openapi_path = args.openapi if args.openapi is not None else default_openapi_path()
+        out_path = args.out if args.out is not None else default_types_path()
+    except RepoRootNotFound as exc:
+        print(
+            f"[ABORT] 找不到仓库根（脚本位置推导：{exc.root}）"
+            "—— 无法解析默认输入 / 输出路径。\n"
+            "        请显式传 --openapi / --out。",
+            file=sys.stderr,
+        )
         return 2
 
-    schema = json.loads(args.openapi.read_text(encoding="utf-8"))
+    if not openapi_path.exists():
+        print(
+            f"[ABORT] 找不到 openapi 输入：{openapi_path}\n"
+            "        先跑 scripts/export_openapi.py 生成它。",
+            file=sys.stderr,
+        )
+        return 2
+
+    schema = json.loads(openapi_path.read_text(encoding="utf-8"))
     n_ifaces = len(schema.get("components", {}).get("schemas", {}))
     rendered = render(schema)
 
     if args.check:
-        ok, msg = check_artifact(args.out, rendered)
+        ok, msg = check_artifact(out_path, rendered)
         print(
-            f"{msg}\n    (source={args.openapi}, interfaces={n_ifaces})",
+            f"{msg}\n    (source={openapi_path}, interfaces={n_ifaces})",
             file=sys.stdout if ok else sys.stderr,
         )
         return 0 if ok else 1
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(rendered, encoding="utf-8")
-    print(f"types.generated.ts written: {args.out} ({n_ifaces} interfaces)")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(rendered, encoding="utf-8")
+    print(f"types.generated.ts written: {out_path} ({n_ifaces} interfaces)")
     return 0
 
 

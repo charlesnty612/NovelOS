@@ -51,8 +51,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -229,6 +231,14 @@ def _run_baselines(
         env.pop("NOVELOS_REQUIRE_HUMAN_BASELINE", None)
 
     cmd = [sys.executable, "-m", "pytest", "-v", "-p", "no:cacheprovider"]
+    # ⚠️ 子进程必须**自带** ``--basetemp``：外层的 ``--basetemp`` 对子进程无效
+    # （Lead 实测），而本机 ``%LOCALAPPDATA%\Temp\pytest-of-<user>`` 根目录一旦被
+    # 创建就**连 owner 都拒绝访问**（``PermissionError: [WinError 5]``）⇒ 内层运行
+    # 在 collection 期就整体 ERROR、退出码 1 ⇒ 「缺席不该把运行判红」那条断言红。
+    # 目录必须**每次唯一**（``mkdtemp``）——本函数在同一个用例里会被连跑多次
+    # （缺席 / 严格模式 / 故障注入 / 阳性对照）⇒ 共享目录会互撞。
+    child_basetemp = tempfile.mkdtemp(prefix="novelos_human_baseline_inner_")
+    cmd.append(f"--basetemp={child_basetemp}")
     if node_ids:
         cmd += list(node_ids)
     else:
@@ -256,6 +266,9 @@ def _run_baselines(
         errors="replace",
         timeout=300,
     )
+    # 子进程已退出 ⇒ 句柄已释放；``ignore_errors=True`` 保证 Windows 上残留句柄
+    # **不会**把清理失败升级成用例失败（清理不是判别点）。
+    shutil.rmtree(child_basetemp, ignore_errors=True)
     stdout = proc.stdout or ""
     return BaselineRun(
         exit_code=proc.returncode,

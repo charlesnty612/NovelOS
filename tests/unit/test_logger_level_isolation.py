@@ -44,7 +44,9 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -162,24 +164,37 @@ def test_openapi_contract_then_triage_is_green_in_a_fresh_process(tmp_path: Path
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
     }
-    proc = subprocess.run(
-        [
-            str(VENV_PYTHON),
-            "-m",
-            "pytest",
-            *REPRO_COMMAND,
-            "-q",
-            "-p",
-            "no:randomly",
-        ],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=600,
-    )
+    # ⚠️ 子进程必须**自带** ``--basetemp``：外层的 ``--basetemp`` 对子进程无效
+    # （Lead 实测），而本机 ``%LOCALAPPDATA%\Temp\pytest-of-<user>`` 根目录一旦被
+    # 创建就**连 owner 都拒绝访问**（``PermissionError: [WinError 5]``）
+    # ⇒ 不给 basetemp 时子进程在 **collection 期**就 8 个 ERROR、退出码 1
+    # ⇒ 外层断言「必须全绿」必然红（**本条此前在本机恒红**，2026-10-23 task-4）。
+    # 目录必须**每次唯一**（``mkdtemp``）⇒ 并发跑不会互撞。
+    child_basetemp = tempfile.mkdtemp(prefix="novelos_nested_pytest_")
+    try:
+        proc = subprocess.run(
+            [
+                str(VENV_PYTHON),
+                "-m",
+                "pytest",
+                *REPRO_COMMAND,
+                "-q",
+                "-p",
+                "no:randomly",
+                f"--basetemp={child_basetemp}",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+        )
+    finally:
+        # 子进程已退出 ⇒ 句柄已释放；``ignore_errors=True`` 保证 Windows 上
+        # 残留句柄**不会**把清理失败升级成用例失败（清理不是判别点）。
+        shutil.rmtree(child_basetemp, ignore_errors=True)
     assert proc.returncode == 0, (
         "先跑 test_openapi_contract.py（压根级别）再跑分诊断言 ⇒ 必须全绿，"
         f"实际 rc={proc.returncode}\n"

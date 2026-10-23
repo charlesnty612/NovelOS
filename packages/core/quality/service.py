@@ -41,10 +41,11 @@ from packages.core.db import get_connection
 from packages.core.ids import now_iso
 from packages.core.logging_config import get_logger
 from packages.core.quality.models import QualityContext, QualityReport
+from packages.core.quality.scoring import DRAFT_UNAVAILABLE
 from packages.core.story_state.write_helpers import (
     decode_json_field as _decode_json_field,
 )
-from packages.domain.chapter.draft_resolver import resolve_draft
+from packages.domain.chapter.draft_resolver import DraftResolutionError, resolve_draft
 
 #: 本模块日志（2026-10-22 批次二十三：吞异常分诊 → B 类留痕）。
 #: 说明：本层此前**没有**任何 logger；这里引入的是仓内**既有唯一**日志约定
@@ -667,8 +668,21 @@ def _read_latest_draft_version(db_path: str | Path, chapter_id: str) -> int | No
     （直接构造 ``QualityReport`` 的路径）时才允许用它补全版本；由
     ``build_quality_context`` 组装过的报告已在 ``QualityContext.draft_version``
     里带上与正文同源的版本，落库不再二次查询（两次读之间作者改稿会让标签与正文分叉）。
+
+    2026-10-23（critical C-1 / D-6）：**读失败**（``drafts`` 表不可用等）⇒ 抛
+    :class:`DraftResolutionError`；本函数把它降级成 ``None``（**版本未知**），
+    因为 ``draft_version`` 是**可空元数据**（列可空、语义 = 「本次评估量的是哪一版」），
+    而「正文能不能读到」这件事已由 :func:`build_quality_context` 显式标记为不可检。
     """
-    row = resolve_draft(db_path, chapter_id)
+    try:
+        row = resolve_draft(db_path, chapter_id)
+    except DraftResolutionError as exc:
+        log.warning(
+            "草稿版本读取失败（本次报告的 draft_version 记为未知）：chapter_id=%s err=%s",
+            chapter_id,
+            exc,
+        )
+        return None
     return int(row["version"]) if row is not None else None
 
 
@@ -804,16 +818,76 @@ def build_quality_context(
     V3.9 批次 3.3：Q8 字符数走 :func:`compute_char_stats_detail`，把「按 prompt_version
     推断为 AI / 未知 created_by」的口径 note 一并放进 :class:`QualityContext`，
     由 engine 透传给 ``req_q8`` 写进报告 issues。
+
+    2026-10-23（critical C-1 / D-6）：**「读不到草稿」与「该章没有草稿」分开**。
+    此前 ``resolve_draft`` 读库失败时返回 ``None``（与「无草稿」同值）⇒ 本函数
+    拿到**空正文** ⇒ ``scoring`` 的空正文分支给**满分 0 issue** ⇒ **该章从未被
+    评估却拿到满分**，提交门禁放行。现在：
+
+    - 读失败 ⇒ ``ctx.draft`` = :data:`~packages.core.quality.scoring.DRAFT_UNAVAILABLE`
+      （显式占位符）⇒ 子分 0 + 一条可见的阻断级 issue（``scoring_missing_subscore``）
+      ⇒ 报告**不是满分**、门禁**拦下**；
+    - 该章确实没有草稿 ⇒ ``ctx.draft`` = ``""`` ⇒ **既有行为逐字不变**
+      （空正文、style/pacing = 100、0 issue）。
     """
-    stats = compute_char_stats_detail(db_path, chapter_id)
+    # ── 读草稿（三处读点：Q8 字符统计 / 正文 / 跨章正文）────────────────────
+    # 任一处读失败 ⇒ 整个 ctx 标记为「不可检」，**绝不**退化成「空正文」。
+    draft_unavailable = False
+
+    try:
+        stats = compute_char_stats_detail(db_path, chapter_id)
+    except sqlite3.Error as exc:
+        log.error(
+            "草稿字符统计读取失败（本次评估不可检）：chapter_id=%s err=%s",
+            chapter_id,
+            exc,
+        )
+        stats = CharStats(
+            ai_chars=0,
+            human_chars=0,
+            inferred_ai_chars=0,
+            unknown_created_by=(),
+            versions=0,
+        )
+        draft_unavailable = True
+
     plan = _read_chapter_plan(db_path, chapter_id)
-    resolved = resolve_draft(db_path, chapter_id, draft_version)
-    draft = (resolved or {}).get("content") or ""
-    reviewed_version = int(resolved["version"]) if resolved is not None else None
+
+    try:
+        resolved = resolve_draft(db_path, chapter_id, draft_version)
+    except DraftResolutionError as exc:
+        log.error(
+            "草稿读取失败（本次评估不可检）：chapter_id=%s err=%s",
+            chapter_id,
+            exc,
+        )
+        resolved = None
+        draft_unavailable = True
+
+    draft = (
+        DRAFT_UNAVAILABLE
+        if draft_unavailable
+        else ((resolved or {}).get("content") or "")
+    )
+    reviewed_version = (
+        None
+        if draft_unavailable
+        else (int(resolved["version"]) if resolved is not None else None)
+    )
     reference_texts = load_reference_texts(db_path, project_id)
     payoff_history = compute_payoff_history(db_path, project_id, limit=5)
     chapter_number = _read_chapter_number(db_path, chapter_id)
-    previous_drafts = _read_previous_drafts(db_path, project_id, chapter_id, limit=3)
+    try:
+        previous_drafts = _read_previous_drafts(db_path, project_id, chapter_id, limit=3)
+    except sqlite3.Error as exc:
+        # 跨章正文只是 ai_trace 的辅助信号；读不到就当没有（**不**单独标记不可检），
+        # 但必须留痕——否则「跨章重复」会被当成「没有重复」。
+        log.warning(
+            "跨章正文读取失败（ai_trace 跨章信号为空）：chapter_id=%s err=%s",
+            chapter_id,
+            exc,
+        )
+        previous_drafts = []
 
     return QualityContext(
         chapter_id=chapter_id,

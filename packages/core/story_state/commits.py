@@ -68,6 +68,27 @@ def _looks_like_entry_dict(value) -> bool:
     return "name" in value or "statement" in value
 
 
+def _normalize_draft_version(value) -> int | None:
+    """把「本次 commit 定的是哪一版草稿」归一成 ``int | None``。
+
+    只接受**正整数**（drafts.version 从 1 起）。其余一律折成 ``None``（= 未记录）：
+    - ``None``：调用方没给 / 拿不到被审版本 ⇒ 落 NULL，消费方回退取最新；
+    - ``0`` / 负数：drafts 没有这种版本号 ⇒ 当未记录；
+    - ``bool``：Python 里 ``isinstance(True, int)`` 为真，但 ``True`` 不是版本号
+      （冒名顶替：写进去会变成 version=1，与真版本 1 混淆）⇒ 折成 None；
+    - ``str``：不在此处猜测解析（``"3"`` 与 ``3`` 谁对？版本号是整数列，
+      传字符串本身就是调用方出错）⇒ 折成 None，让导出侧走回退路径而不是猜。
+
+    刻意**不做**「传字符串就 int() 一下」的宽容：那会把上游的类型错误
+    静默转成一个看似正确的版本号，正是本仓反复修的「静默失败」形状。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
 def project_id_for_chapter(service_self, conn: sqlite3.Connection, chapter_id: str) -> str | None:
     row = conn.execute("SELECT project_id FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()
     return row["project_id"] if row else None
@@ -335,6 +356,7 @@ def commit_delta(
     workflow_run_id: str,
     *,
     branch_id: str | None = None,
+    draft_version: int | None = None,
     _inverse_cleanup: dict | None = None,
     _rollback_of: str | None = None,
     _skip_approval: bool = False,
@@ -372,6 +394,16 @@ def commit_delta(
         - 同步 mutate 当前 state（new_state 副本）：剔除 recent_events / events / hooks[]。
 
     ``_inverse_cleanup`` 是私有入参（仅 rollback_commit 使用）。
+
+    ``draft_version``（2026-10-23 新增，迁移 0034）：**本次 commit 所定的那一版
+    草稿**的 ``drafts.version``（= 质量门实际量过、且被放行的那一版）。
+    - None（默认）：存量行为逐字不变——``commits.draft_version`` 落 NULL，
+      导出侧按「未记录」回退取最新（见 ``exporter.builder.latest_draft_content``）。
+    - 消费方是产物面：章 COMMITTED 后又被 reopen 改稿时，导出必须仍是**已定稿
+      那一版**，否则「外发的内容」与「系统认定的定稿」不是同一份
+      （同一形状问题的第四处，0024 / gate._reviewed_draft_version 是前两处）。
+    - **不做回退推断**：调用方拿不到「被审版本」时传 None 即可，**不要**用
+      「取最新 draft」反推——那是把「审完又改稿」的那一版误认成定稿版。
 
     ``_skip_approval``（Sprint 10 新增，私有）：当 ``True`` 时绕过 HIGH 风险
     审批门（不抛 :class:`ApprovalRequiredError`）。**仅 What-if Simulation
@@ -540,9 +572,9 @@ def commit_delta(
                     (commit_id, project_id, branch_id, chapter_id,
                      previous_state_version, resulting_state_version,
                      delta_id, validation_json, author_approval_json,
-                     timestamp, workflow_run_id, rollback_of)
+                     timestamp, workflow_run_id, rollback_of, draft_version)
                 VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     commit_id,
@@ -557,6 +589,7 @@ def commit_delta(
                     now,
                     workflow_run_id,
                     _rollback_of,
+                    _normalize_draft_version(draft_version),
                 ),
             )
         except sqlite3.IntegrityError as exc:

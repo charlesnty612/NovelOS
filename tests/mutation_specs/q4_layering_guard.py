@@ -8,7 +8,7 @@ r"""分层看守（``core`` ↛ ``workflows``）的**判据本身**的突变规�
 ``tests/unit/test_no_core_to_workflows_dep.py`` 里（``_static_violations`` /
 ``_fold_str`` / ``_module_string_env`` / ``_import_bindings`` /
 ``_resolve_import_callee`` / ``scan_dynamic_workflow_imports`` /
-``ALLOWED_DYNAMIC_WORKFLOW_IMPORTS`` …）。
+``ALLOWED_DYNAMIC_IMPORTS`` …）。
 ⇒ 突变目标 = **该测试文件本身**（``rel``），验证对象 = **同文件里的判据**。
 这是「突变规格必须打在**判据**上」的直接应用；跑测时改的只是**判据代码**，
 模块仍可正常 import ⇒ 不会变成收集期错误（**假捕获**）。
@@ -25,7 +25,7 @@ r"""分层看守（``core`` ↛ ``workflows``）的**判据本身**的突变规�
   ``unfingerprintable`` 通道的那几条（字典取值 / 星号解包）**必红**。
   ⇒ 这条专打「callee 解析」这条判据（上一条打的是「折叠」）。
 
-* **Q4-WHITELIST-1**——给 ``ALLOWED_DYNAMIC_WORKFLOW_IMPORTS`` **多放一条** core 文件。
+* **Q4-WHITELIST-1**——给 ``ALLOWED_DYNAMIC_IMPORTS`` **多放一条** core 文件。
   ⇒ 白名单被悄悄放宽（一个库层文件从此可以动态 import 业务流程包而不报）
   ⇒ ④ 的**精确集合相等**断言必红。
   ⇒ ⚠️ 旧版只钉**条数** ⇒ 把唯一那条**换成另一个文件**（条数仍是 1）测试照绿
@@ -61,10 +61,10 @@ MUTATIONS = [
     (
         "Q4-WHITELIST-1-allowed-dynamic-imports-grows",
         "tests/unit/test_no_core_to_workflows_dep.py",
-        'ALLOWED_DYNAMIC_WORKFLOW_IMPORTS: frozenset[tuple[str, str]] = frozenset(\n'
+        'ALLOWED_DYNAMIC_IMPORTS: frozenset[tuple[str, str]] = frozenset(\n'
         '    {("packages/core/api/main.py", "packages.workflows")}\n'
         ')',
-        'ALLOWED_DYNAMIC_WORKFLOW_IMPORTS: frozenset[tuple[str, str]] = frozenset(\n'
+        'ALLOWED_DYNAMIC_IMPORTS: frozenset[tuple[str, str]] = frozenset(\n'
         '    {\n'
         '        ("packages/core/api/main.py", "packages.workflows"),\n'
         '        ("packages/core/quality/engine.py", "packages.workflows"),\n'

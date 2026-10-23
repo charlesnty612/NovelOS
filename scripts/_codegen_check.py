@@ -56,3 +56,45 @@ def check_artifact(path: Path, rendered: str) -> tuple[bool, str]:
     if normalize_newlines(actual) == normalize_newlines(rendered):
         return True, f"OK：{path} 与重新生成结果一致"
     return False, f"DRIFT：{path} 与重新生成结果不一致\n{diff_summary(rendered, actual)}"
+
+
+# ---------------------------------------------------------------------------
+# 仓库根与默认路径（3-3，2026-10-23 批次三十一）
+# ---------------------------------------------------------------------------
+
+
+class RepoRootNotFound(RuntimeError):
+    """找不到仓库根（脚本位置推导失败 ⇒ 默认路径无从解析）。"""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(f"找不到仓库根：{root}")
+        self.root = root
+
+
+def repo_root() -> Path:
+    """仓库根：由**脚本自身位置**推导（``<repo>/scripts/_codegen_check.py`` → ``parents[1]``）。
+
+    ⚠️ **不能**用 ``Path("apps/web/...")`` 这种 **CWD 相对**路径：旧实现那样写 ⇒
+    在非仓库 CWD 执行时得到「产物不存在」的**假漂移**（export → MISSING exit 1 /
+    gen → exit 2），而该 CLI 的定位是「可复用于 CI / pre-commit」
+    ⇒ 假漂移会把 CI 变成随机红。
+    """
+    return Path(__file__).resolve().parents[1]
+
+
+def require_repo_root() -> Path:
+    """仓库根；不像仓库则抛 :class:`RepoRootNotFound`（**明确文案**，不是含糊 MISSING）。"""
+    root = repo_root()
+    if not (root / "pyproject.toml").is_file():
+        raise RepoRootNotFound(root)
+    return root
+
+
+def default_openapi_path() -> Path:
+    """``openapi.json`` 的默认路径（**相对仓库根**）。"""
+    return require_repo_root() / "apps" / "web" / "openapi.json"
+
+
+def default_types_path() -> Path:
+    """``types.generated.ts`` 的默认路径（**相对仓库根**）。"""
+    return require_repo_root() / "apps" / "web" / "src" / "api" / "types.generated.ts"

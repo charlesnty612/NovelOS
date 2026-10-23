@@ -7,13 +7,23 @@
 用法：
     python scripts/m1_report.py --data-dir data/m1_run
     python scripts/m1_report.py --data-dir data/m1_run --db data/m1_run/novelos.db --out /tmp/m1-data.md
-    python scripts/m1_report.py --data-dir data/m1_run --write-docs   # 显式写回仓库 docs/evaluation/m1-data.md
+    python scripts/m1_report.py --data-dir data/m1_run --write-docs   # 显式写痕迹仓 docs/evaluation/m1-data.md
 
 输出：stdout 打印 Markdown，同时写入 ``--out`` 指定的文件。
 ⚠️ **默认不写仓库**（2026-10-23 批次二十九 task-26 / 台账 C-3）：``--out`` 缺省时写
 **系统临时目录**（``<tempdir>/novelos_m1_report/m1-data.md``），只有显式
-``--write-docs`` 才写回仓库 ``docs/evaluation/m1-data.md``。旧默认直接写仓库 docs/，
+``--write-docs`` 才写**痕迹仓** ``docs/evaluation/m1-data.md``（不是软件仓！见下）。旧默认直接写仓库 docs/，
 只读环境跑一次就脏工作树。
+
+⚠️ **痕迹仓缺失 ⇒ 拒绝写**（2026-10-23 批次三十 / 对抗审查 B1 + 台账 D-19）：
+
+- **痕迹仓根解析的最后一档不再是软件仓自身**：``--artifacts-dir`` >
+  ``NOVELOS_ARTIFACTS_DIR`` > 同级目录 ``<repo父目录>/NovelOS-Artifacts``；
+  **都找不到就明确失败**（退出码 3）并说明原因——旧行为（回落到软件仓）正是要防的落点
+  （新克隆 / CI / 换机拿不到痕迹仓 ⇒ 该报告含真实 project_id 与逐章 token/评分，
+  写回软件仓 = 进 GitHub 历史，不可撤回）。
+- **守卫（D-19）**：待写路径落在软件仓根下的非 ``data/``、非 ``tmp/`` 位置 ⇒ 拒绝
+  （退出码 2）；逃生口 ``--allow-software-repo-out``（默认关）须由用户显式承担。
 """
 
 from __future__ import annotations
@@ -29,7 +39,94 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT_PATH = Path(tempfile.gettempdir()) / "novelos_m1_report" / "m1-data.md"
-DOCS_OUT_PATH = REPO_ROOT / "docs" / "evaluation" / "m1-data.md"
+
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from scripts.guard_repo_write_path import (
+        ARTIFACTS_EVALUATION_RELPATH,
+        EXIT_ARTIFACTS_UNAVAILABLE,
+        EXIT_WRITE_PATH_REJECTED,
+        ArtifactsResolution,
+        RepoWritePathError,
+        check_write_path,
+        format_artifacts_unavailable,
+        resolve_artifacts_root,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/m1_report.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from guard_repo_write_path import (  # type: ignore[no-redef]
+        ARTIFACTS_EVALUATION_RELPATH,
+        EXIT_ARTIFACTS_UNAVAILABLE,
+        EXIT_WRITE_PATH_REJECTED,
+        ArtifactsResolution,
+        RepoWritePathError,
+        check_write_path,
+        format_artifacts_unavailable,
+        resolve_artifacts_root,
+    )
+
+#: ``--write-docs`` 的落点：**痕迹仓**，不是软件仓（``None`` = 痕迹仓不可用）。
+#: ⚠️ 2026-10-23 全面审查：该报告含真实 project_id 与逐章 token/评分，
+#: 写进软件仓就会进 GitHub 历史（**不可撤回**）⇒ 必须落痕迹仓。
+DOCS_OUT_PATH: Path | None = None
+
+
+def _root_from_out_path(out_path: Path | None) -> Path | None:
+    """由 ``<root>/docs/evaluation/m1-data.md`` 上溯出痕迹仓根；形态不符 ⇒ ``None``。
+
+    存在的理由：``DOCS_OUT_PATH`` 是**可被 monkeypatch 的常量**（既有测试用它替身
+    痕迹仓），而痕迹仓根必须与 ``--write-docs`` 的落点**同源**。
+    """
+    if out_path is None:
+        return None
+    parts = Path(out_path).parts
+    if len(parts) < 5:
+        return None
+    return Path(*parts[:-3])
+
+
+def _artifacts_root(explicit: str | None = None) -> ArtifactsResolution:
+    """痕迹仓根目录（AGENTS.md 硬规则 5：操作痕迹在 NovelOS-Artifacts）。
+
+    解析顺序：``--artifacts-dir`` → 环境变量 ``NOVELOS_ARTIFACTS_DIR`` → 软件仓的
+    **同级目录** ``<repo父目录>/NovelOS-Artifacts`` → 由 ``DOCS_OUT_PATH`` 反推的根
+    （导入期已解析；测试可 monkeypatch 该常量）。
+
+    ⚠️ **找不到就是找不到**（``root=None``）——**绝不**回落到软件仓自身。
+    """
+    res = resolve_artifacts_root(explicit, repo_root=REPO_ROOT)
+    if res.ok:
+        return res
+    const_root = _root_from_out_path(DOCS_OUT_PATH)
+    if const_root is not None:
+        return ArtifactsResolution(const_root, "constant", "由 DOCS_OUT_PATH 上溯得出")
+    return res
+
+
+#: 痕迹仓根（导入期解析；``None`` = 找不到痕迹仓 ⇒ **拒绝写**，不回落到软件仓）。
+ARTIFACTS_ROOT: Path | None = resolve_artifacts_root(repo_root=REPO_ROOT).root
+
+#: ``--write-docs`` 的落点：**痕迹仓**，不是软件仓（``None`` = 痕迹仓不可用）。
+DOCS_OUT_PATH = (
+    ARTIFACTS_ROOT / ARTIFACTS_EVALUATION_RELPATH / "m1-data.md"
+    if ARTIFACTS_ROOT is not None
+    else None
+)
+
+
+def _err(message: str) -> None:
+    """错误/告警一律走 stderr（stdout 只留报告正文）。"""
+    print(message, file=sys.stderr)
+
+
+def _artifacts_unavailable_message(res: ArtifactsResolution) -> str:
+    """痕迹仓不可用时的**明确**说明（含逃生口；四个落盘脚本共用同一措辞）。"""
+    return format_artifacts_unavailable(
+        res,
+        subject=(
+            "该报告含真实 project_id 与逐章 token/评分 ⇒ 必须落痕迹仓，"
+            "不能落软件仓（落进软件仓 = 进 GitHub 历史，不可撤回）。"
+        ),
+    )
 
 # ---------------------------------------------------------------------------
 # 数据加载（纯读取 + 容错）
@@ -778,25 +875,63 @@ def main() -> int:
         "--out",
         default=None,
         help="报告输出文件（默认系统临时目录 <tempdir>/novelos_m1_report/m1-data.md；"
-        "显式 --write-docs 时写仓库 docs/evaluation/m1-data.md）",
+        "显式 --write-docs 时写痕迹仓 docs/evaluation/m1-data.md）",
     )
     parser.add_argument(
         "--write-docs",
         action="store_true",
-        help="把报告写回仓库 docs/evaluation/m1-data.md（默认写系统临时目录，避免脏工作树）",
+        help="把报告写**痕迹仓** docs/evaluation/m1-data.md（默认写系统临时目录，避免脏工作树）",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        default=None,
+        help="显式指定痕迹仓根目录（覆盖 NOVELOS_ARTIFACTS_DIR 与同级目录探测）",
+    )
+    parser.add_argument(
+        "--allow-software-repo-out",
+        action="store_true",
+        help="逃生口：痕迹仓不可用时接受把痕迹写回软件仓（默认关；风险自负）",
     )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir).resolve()
     db_path = Path(args.db).resolve() if args.db else None
-    # 落盘路径解析（台账 C-3）：显式 --out > --write-docs（仓库） > 系统临时目录。
+
+    # 落盘路径解析（台账 C-3 + D-19 + 对抗审查 B1）：
+    # 显式 --out > --write-docs（痕迹仓） > 系统临时目录。
+    artifacts = _artifacts_root(args.artifacts_dir)
+    allow_repo_out = bool(args.allow_software_repo_out)
+
+    out_path: Path | None
     if args.out:
         out_path = Path(args.out)
     elif args.write_docs:
         out_path = DOCS_OUT_PATH
     else:
         out_path = DEFAULT_OUT_PATH
+
+    # 显式痕迹仓（--artifacts-dir / 环境变量 / 运行时才存在的同级目录）覆盖导入期常量
+    if args.write_docs and artifacts.source in ("cli", "env", "sibling"):
+        out_path = artifacts.root / ARTIFACTS_EVALUATION_RELPATH / "m1-data.md"
+
+    if args.write_docs and out_path is None:
+        if not allow_repo_out:
+            _err(_artifacts_unavailable_message(artifacts))
+            return EXIT_ARTIFACTS_UNAVAILABLE
+        out_path = REPO_ROOT / ARTIFACTS_EVALUATION_RELPATH / "m1-data.md"
+        _err(
+            "[警告] --allow-software-repo-out 已开启：本次报告将落软件仓 "
+            f"{out_path}（可能被误提交 ⇒ 进 GitHub 历史不可撤回）。"
+        )
+
     out_path = out_path.resolve()
+
+    # 守卫（D-19）：待写路径不得落在软件仓根下非 data/tmp 处
+    try:
+        check_write_path(out_path, allow_repo_root=allow_repo_out)
+    except RepoWritePathError as exc:
+        _err(f"[拒绝写入] {exc}")
+        return EXIT_WRITE_PATH_REJECTED
 
     text, diag = build_report(data_dir, db_path)
 

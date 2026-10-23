@@ -10,7 +10,7 @@ from .models import (
     CharacterUpdate,
     VisibilityLevel,
 )
-from .service import CharacterService
+from .service import CharacterService, ReferencedError
 
 __all__ = [
     "Character",
@@ -19,5 +19,6 @@ __all__ = [
     "CharacterState",
     "CharacterUpdate",
     "CharacterService",
+    "ReferencedError",
     "VisibilityLevel",
 ]

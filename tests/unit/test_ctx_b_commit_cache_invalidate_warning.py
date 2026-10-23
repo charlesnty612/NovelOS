@@ -72,8 +72,18 @@ def _insert_project_chapter_draft(db_path: Path) -> tuple[str, str]:
     return pid, cid
 
 
-def _fake_commit_delta(self, delta_id, author_approval, run_id):  # noqa: ANN001, ARG001
-    """把真实 commit 换成最小实现（本用例要测的是**失效失败**那条路径）。"""
+def _fake_commit_delta(
+    self, delta_id, author_approval, run_id, **kwargs  # noqa: ANN001, ARG001
+):
+    """把真实 commit 换成最小实现（本用例要测的是**失效失败**那条路径）。
+
+    ⚠️ **替身必须跟得上生产签名**（2026-10-23 · D-10）：生产侧 ``commit_delta``
+    现在还会被传 ``draft_version=``（``packages/workflows/chapter_commit/commit.py``
+    的 ``_reviewed_draft_version_of(ctx)``）。替身漏了这个 kwarg ⇒
+    ``TypeError: _fake_commit_delta() got an unexpected keyword argument 'draft_version'``
+    ⇒ **测试红的是替身过期，不是生产行为变了**。
+    ⇒ 这里用 ``**kwargs`` 吸收新增 kwarg（生产侧再加参数也不会让替身过期）。
+    """
     return {"commit_id": new_id("cmt"), "state_version": 2, "delta_id": delta_id}
 
 

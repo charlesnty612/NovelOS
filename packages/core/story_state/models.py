@@ -36,7 +36,7 @@
 
 **读面列表端点**（批次（六）L2 组追加，见文件末尾的三个 ``*ListItem`` / ``BranchSummary``）
 与之同款纪律，但多一条：列表行的形状**不能**从单体端点的形状推。
-实测推翻了两条这样的先验——``commits`` 列表行是裸 DB 行（12 键）而
+实测推翻了两条这样的先验——``commits`` 列表行是裸 DB 行（13 键）而
 ``POST /commits`` 是 4 键动作摘要；``branches`` 列表行与 ``POST /branches``
 **键集逐字相同**却因 main 的 ``parent_branch_id`` 为 null 而**不可复用**。
 """
@@ -293,7 +293,7 @@ class StateDiffResponse(BaseModel):
 
 
 class CommitListItem(BaseModel):
-    """``GET /projects/{pid}/commits`` 的**行**（实测恒 12 键）。
+    """``GET /projects/{pid}/commits`` 的**行**（实测恒 13 键）。
 
     ⚠️ **与 :class:`CommitResponse` 不同形，必须另建**：``POST /commits`` 返回的是
     「提交动作的结果摘要」（4 键：``commit_id`` / ``delta_id`` / ``state_version`` /
@@ -308,9 +308,14 @@ class CommitListItem(BaseModel):
     ``snapshots._parse_json`` 解析，那函数对空串 / 非法 JSON 返回 ``None`` 而非 ``{}``。
     实测四条行都是 dict，但**键恒在** ⇒ 不给默认值（进了 OpenAPI ``required``）。
 
+    ⚠️ ``draft_version``（2026-10-23 · 迁移 0034 · D-10）：「本次 commit 定稿的是哪一版
+    草稿」。**键恒在、值恒可为 null**（存量 commit 行没有这一列的取值，且刻意**不回填**
+    ——按时间戳倒推会把「审完又改稿」的那一版误认成定稿版 = 回填即造假）。
+    声明成 ``Optional[int]`` 且**不给默认值** ⇒ 键恒在且进 OpenAPI ``required``。
+
     ``extra="allow"``：行来自 ``SELECT *``，迁移给 ``commits`` 加列就会多一个键
-    （本表 12 列自 0001 建表起未变，但 ``workflow_runs`` 的 ``instance_id`` 是 0026
-    加的同款先例）。代价见模块 docstring。
+    ——``0034`` 加的 ``draft_version`` 就是**已发生的先例**（本表 13 列）；
+    ``workflow_runs`` 的 ``instance_id`` 是 0026 加的同款。代价见模块 docstring。
     """
 
     model_config = ConfigDict(extra="allow")
@@ -327,6 +332,9 @@ class CommitListItem(BaseModel):
     timestamp: str
     workflow_run_id: str
     rollback_of: Optional[str] = Field(description="只有回滚产生的 commit 非 null；其余恒为 null")
+    draft_version: Optional[int] = Field(
+        description="本次 commit 定稿的草稿版本号；存量行与未指定该参数的提交恒为 null"
+    )
 
 
 class StateDeltaListItem(BaseModel):

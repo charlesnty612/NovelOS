@@ -1,0 +1,47 @@
+-- =============================================================================
+-- NovelOS Database Migration 0034: commits 记录「这次定稿的是哪一版草稿」
+--   - commits 加可空列 draft_version INTEGER
+--
+-- 目标（修第二轮审查 D-10）：
+--   外发产物（投稿包 / 导出）此前一律取「该章最新 draft」，于是出现这个形状的漏洞：
+--   章 COMMITTED（已定稿）之后被 reopen 改稿 ⇒ 再导出的正文是**没审过的那版**，
+--   而系统里记录的定稿是另一版 ⇒ 「外发的内容」与「系统认定的定稿」不是同一份。
+--
+--   这与 0024（quality_reports.draft_version）**是同一形状**的第四处：
+--     - 0024 修的是「质量报告记录的是哪一版」；
+--     - gate.py 的 _reviewed_draft_version 修的是「门禁量的是不是被审那一版」；
+--     - 本迁移修的是「产物面导出的是不是已定稿那一版」。
+--   测量/消费对象 ≠ 被审对象 —— 该形状已在评审/核销/门禁三处修过，此处补齐第四处。
+--
+-- 语义定义（口径单一，不含糊）：
+--   draft_version = **本次 commit 所定的那一版草稿**的 drafts.version
+--   （即质量门实际量过、且被作者放行的那一版；来自 chapter_commit 节点 ctx 的
+--     `quality_reviewed_draft_version`——该键由 quality_gate 节点写入，
+--     经引擎 ctx.update(output) 顶层 merge 传给 commit 节点）。
+--
+-- 设计要点：
+--   - **只加不改**：ALTER TABLE ADD COLUMN，可空 ⇒ 存量 commits 行 draft_version=NULL，
+--     行为逐字不变（导出侧对 NULL 回退到「取最新」，与改造前一致）。
+--   - **不回填**：存量 commit 无法可靠推断「当时定的是哪一版」——
+--     drafts 表没有「被审/被定稿」标记位，事后按时间戳倒推会把
+--     「审完又改稿」的那一版误认成定稿版 ⇒ 回填即造假，**刻意不做**。
+--     存量数据以 NULL 表示「未记录」，消费方按回退语义处理。
+--   - **不加外键**：drafts.version 与 commits.draft_version 是**逻辑引用**
+--     （drafts 的唯一约束是 (chapter_id, version)，见 0002）；
+--     SQLite 不支持 ALTER TABLE ADD COLUMN 带 REFERENCES，且 drafts 行可能被清理，
+--     硬外键会把「清理草稿」变成「删不掉 commit」。⇒ 逻辑引用 + 读侧回退。
+--
+-- 消费方（exporter 侧）：
+--   packages/core/exporter/builder.py::latest_draft_content(prefer_committed=True)
+--   —— 章已 COMMITTED 时取本列记录的那一版；本列为 NULL（存量）⇒ 回退取最新。
+--
+-- 迁移幂等：ADD COLUMN 无 IF NOT EXISTS —— 迁移 runner 按文件粒度幂等记录
+--   （packages/core/db.py::apply_migrations），第二次跑不会重放本文件。
+-- =============================================================================
+
+ALTER TABLE commits
+    ADD COLUMN draft_version INTEGER;
+
+-- =============================================================================
+-- 迁移结束 (0034)
+-- =============================================================================

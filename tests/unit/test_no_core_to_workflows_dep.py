@@ -6,6 +6,29 @@ r"""架构依赖方向看守（V1.5 起；2026-10-22 批次二十二重写，同
 2. **`packages/domain` 不得 import `packages/workflows`**（领域层不得依赖流程组装层）。
 3. **`packages/**` 不得 import `apps`**（库层不得依赖应用层）。
 
+## 2026-10-23 task-7：第四条方向 —— **`core → domain` 是「受控例外」**
+
+**口径（Lead 裁决，别说过头）**：
+
+- ``core → domain`` **不是**「破口」——Lead 实测模块级图**无 2 环、无 3 环**；
+  且成文规则（``AGENTS.md`` §二）**只**写了「core 不得 import workflows」，
+  **并未**禁过 ``core → domain``。
+- 真实问题是「**边界没定义清楚 + 零机器约束**」⇒ 处置 = **受控例外 + 机器看守**：
+  - **允许** API 路由层（``packages/core/api/routers/**``）调领域服务
+    ——路由只做「参数校验 + 调用 + 错误映射」，业务规则一律在 domain
+    （``packages/domain/README.md`` 的「下游：``packages/core/api`` 路由」）；
+  - **允许** 5 个机制层文件按**精确白名单**调领域服务（见
+    ``ALLOWED_CORE_TO_DOMAIN_IMPORTS``）；
+  - **任何新增的 ``core → domain`` 依赖都必须让本看守变红** ⇒ 需要时**先登记再写**。
+
+**白名单粒度 = ``(文件相对路径, 被导入的模块路径)``**，精确到文件 + 具体导入；
+**不许**「整个 ``packages/core`` 放行」、**不许**「按目录放行」——那会让本看守退化成
+噪声源，且上面最后一条裁决就守不住了（判别见 ``test_core_to_domain_allowance_is_not_coarse``）。
+
+⚠️ 文档口径两处曾自相矛盾（``AGENTS.md`` §二 vs ``packages/domain/README.md`` 的
+「下游」段）：本文件是**机器约束**的落点；AGENTS.md 的措辞由 Lead 统一改
+（建议措辞见 task-7 报告）。
+
 ## 2026-10-22 批次二十二：重写 + 修复
 
 **背景**：旧实现（只看字面值）实测 7 种写法只拦 5 种——拆字符串的
@@ -69,7 +92,10 @@ _TARGET_PKG_PARENT = "packages"
 #: 唯一合法用途 = 装配入口的插件发现（V1.5 约定）。
 #: ⚠️ 目标必须**恰好**是 ``packages.workflows`` ⇒ 入口若改成
 #: ``packages.workflows.chapter_write`` 之类，**不在**白名单 ⇒ 判违规。
-ALLOWED_DYNAMIC_WORKFLOW_IMPORTS: frozenset[tuple[str, str]] = frozenset(
+#: ⚠️ 2026-10-23 task-7 A1：动态扫描已**泛化**到多目标前缀表（见
+#: ``_DYNAMIC_TARGET_RULES``）⇒ 本白名单的语义随之泛化为「合法的**动态目标串**」，
+#: 但**粒度不变**（精确匹配，不许前缀通配）。
+ALLOWED_DYNAMIC_IMPORTS: frozenset[tuple[str, str]] = frozenset(
     {("packages/core/api/main.py", "packages.workflows")}
 )
 
@@ -84,20 +110,187 @@ NON_FOLDABLE_DYNAMIC_IMPORTS: frozenset[tuple[str, str]] = frozenset(
 GUARDED_ROOTS: tuple[str, ...] = ("packages/core", "packages/domain")
 
 #: 依赖方向：(被扫描根, 禁止的模块前缀, 人类可读描述)。
+#:
+#: ⚠️ 2026-10-23 task-7 A7：新增**第五条** ``domain → domain``
+#: （首条 domain→域 依赖 = character/service.py 复用 world 域的 ``ReferencedError``
+#: 与共用守卫 ⇒ 方向表里必须有这条边，否则**任何**域间依赖都不受机器约束）。
 LAYERING_DIRECTIONS: tuple[tuple[str, str, str], ...] = (
     ("packages/core", "packages.workflows", "core 不得依赖业务流程包"),
     ("packages/domain", "packages.workflows", "domain 不得依赖业务流程包"),
     ("packages", "apps", "库层不得依赖应用层 apps"),
+    (
+        "packages/core",
+        "packages.domain",
+        "core 机制层不得依赖领域层（受控例外见 ALLOWED_CORE_TO_DOMAIN_IMPORTS）",
+    ),
+    (
+        "packages/domain",
+        "packages.domain",
+        "domain 域之间原则上不得互相依赖（受控例外见 ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS）",
+    ),
 )
+
+#: **受控例外**：`domain → domain` 的精确白名单。
+#:
+#: ⚠️ 2026-10-23 task-7 A7：首条 domain→domain 依赖 = **character 域复用 world 域的
+#:    「删除被引用」错误类型与共用守卫**（Lead 裁决：保留继承，不下沉错误类型）。
+#:    方向表里没有这条边 ⇒ 任何域间依赖都不受机器约束 ⇒ 这里补上。
+#: 粒度 = ``(文件相对路径, 被导入的模块路径)``，与其它白名单一致。
+ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # character/service.py → world/service.py：复用 ``ReferencedError``（错误语义
+        #   跨域同义：都是「被引用 ⇒ 409」）+ 共用「删实体前查 relationships 端点」守卫
+        #   （0022 之后 character 与 faction 是两类关系端点 ⇒ 同一道守卫，两域共用一份）。
+        ("packages/domain/character/service.py", "packages.domain.world.service"),
+    }
+)
+
+#: **受控例外**：`core → domain` 的精确白名单。
+#: 粒度 = ``(文件相对路径, 被导入的模块路径)`` —— 精确到**文件 + 具体导入**。
+#:
+#: ⚠️ **不许**「整个 ``packages/core`` 放行」、**不许**「按目录放行」：
+#:    那会让本看守退化成噪声源，且「任何新增的 ``core → domain`` 依赖必须变红」
+#:    这条裁决就守不住了（判别见 ``test_core_to_domain_allowance_is_not_coarse``）。
+#:
+#: 登记规则（Lead 裁决 + 本仓「规则宁少勿滥，每条挂实证依据」）：
+#:   ① 每条都要写清**为什么允许**；
+#:   ② 新增导入必须**先登记**（否则门禁红）；
+#:   ③ 删掉导入也要**同步删登记**（否则 ``..._matches_actual_imports`` 红）。
+#:
+#: 规模：**47 条 import 语句** = 机制层 5 文件 8 条 + API 路由层 19 文件 39 条
+#: （Lead 实测口径「8 条 import 语句 / 5 个文件」= 机制层那部分；API 路由层的
+#: 39 条由 Lead 的裁决「允许 API 路由层调领域服务」覆盖，同样逐条登记）。
+#: 去重后 = **44 条唯一 ``(文件, 模块)`` 对**（机制层 8 + API 路由层 36）——
+#: 同一文件里同一模块被 import 两次的（如 ``characters.py`` 的
+#: ``packages.domain.project.service``）在白名单里是**同一条**。
+ALLOWED_CORE_TO_DOMAIN_IMPORTS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # ============ 机制层（core 内、非 API 路由层）：5 文件 8 条 ============
+        # arc/service.py：弧线评审要按 project 取项目（项目归属/设定的唯一权威口径
+        #   在 domain；core 侧不再复刻一份）。
+        ("packages/core/arc/service.py", "packages.domain.project.service"),
+        # delivery/evidence.py：取证包要「取最新 draft」的**共享解析单点**
+        #   （draft_resolver 是全仓单点，避免各模块各写一份版本口径）。
+        ("packages/core/delivery/evidence.py", "packages.domain.chapter.draft_resolver"),
+        # delivery/evidence.py：取证包要列该项目的章节。
+        ("packages/core/delivery/evidence.py", "packages.domain.chapter.service"),
+        # delivery/evidence.py：取证包要读项目元信息。
+        ("packages/core/delivery/evidence.py", "packages.domain.project.service"),
+        # exporter/builder.py：外发投稿包要列章节（ChapterService.list_by_project）。
+        ("packages/core/exporter/builder.py", "packages.domain.chapter.service"),
+        # quality/service.py：质量评审要取「**被审的那一版** draft」⇒ 走共享解析单点，
+        #   否则版本口径会在 quality 与 delivery 之间分叉。
+        ("packages/core/quality/service.py", "packages.domain.chapter.draft_resolver"),
+        # signing_check/service.py：签章检查要列章节。
+        ("packages/core/signing_check/service.py", "packages.domain.chapter.service"),
+        # signing_check/service.py：签章检查要校验项目存在。
+        ("packages/core/signing_check/service.py", "packages.domain.project.service"),
+        # ============ API 路由层：19 文件 39 条 ================================
+        # 路由层是 core 内**唯一**被允许直接调领域服务的一层
+        # （依据：packages/domain/README.md「下游：packages/core/api 路由」）。
+        # 边界口径：路由只做「参数校验 + 调用 + 错误映射」，**业务规则一律在 domain**。
+        # characters：角色 CRUD + 路由内的 project 存在性校验。
+        ("packages/core/api/routers/characters.py", "packages.domain.character.models"),
+        ("packages/core/api/routers/characters.py", "packages.domain.character.service"),
+        ("packages/core/api/routers/characters.py", "packages.domain.project.service"),
+        # chapters：章节 CRUD + 路由内的 project 存在性校验。
+        ("packages/core/api/routers/chapters.py", "packages.domain.chapter.models"),
+        ("packages/core/api/routers/chapters.py", "packages.domain.chapter.service"),
+        ("packages/core/api/routers/chapters.py", "packages.domain.project.service"),
+        # continuation：续写端点要读章节 + 项目。
+        ("packages/core/api/routers/continuation.py", "packages.domain.chapter.service"),
+        ("packages/core/api/routers/continuation.py", "packages.domain.project.service"),
+        # export：外发端点要读项目（导出范围按 project 裁剪）。
+        ("packages/core/api/routers/export.py", "packages.domain.project.service"),
+        # genre：题材包端点要读项目（题材包按 project 绑定）。
+        ("packages/core/api/routers/genre.py", "packages.domain.project.service"),
+        # ledger：台账端点复用 domain.ledger 的领域服务。
+        ("packages/core/api/routers/ledger.py", "packages.domain.ledger"),
+        # plots：情节/关系端点复用 domain.plot 的领域服务与出参模型。
+        ("packages/core/api/routers/plots.py", "packages.domain.plot"),
+        ("packages/core/api/routers/plots.py", "packages.domain.plot.models"),
+        # projects：项目 CRUD 的出参模型与领域服务。
+        ("packages/core/api/routers/projects.py", "packages.domain.project.models"),
+        ("packages/core/api/routers/projects.py", "packages.domain.project.service"),
+        # quality：质量评审端点要读章节 + 项目。
+        ("packages/core/api/routers/quality.py", "packages.domain.chapter.service"),
+        ("packages/core/api/routers/quality.py", "packages.domain.project.service"),
+        # reference：参考资料端点复用 domain.reference 的领域服务与模型。
+        ("packages/core/api/routers/reference.py", "packages.domain.project.service"),
+        ("packages/core/api/routers/reference.py", "packages.domain.reference"),
+        ("packages/core/api/routers/reference.py", "packages.domain.reference.models"),
+        # reveal_policies：揭示策略端点复用 domain.knowledge 的领域服务与模型。
+        ("packages/core/api/routers/reveal_policies.py", "packages.domain.knowledge"),
+        ("packages/core/api/routers/reveal_policies.py", "packages.domain.knowledge.models"),
+        # simulation：模拟端点要读项目。
+        ("packages/core/api/routers/simulation.py", "packages.domain.project.service"),
+        # skill：技能端点要读项目。
+        ("packages/core/api/routers/skill.py", "packages.domain.project.service"),
+        # story_state：故事状态端点要读项目。
+        ("packages/core/api/routers/story_state.py", "packages.domain.project.service"),
+        # volumes：分卷端点复用 domain.volume 的领域服务。
+        ("packages/core/api/routers/volumes.py", "packages.domain.volume"),
+        # workflows/common：run 详情要读章节。
+        ("packages/core/api/routers/workflows/common.py", "packages.domain.chapter.service"),
+        # workflows/control：run 控制（启动/暂停/恢复）要读章节 + 项目。
+        ("packages/core/api/routers/workflows/control.py", "packages.domain.chapter.service"),
+        ("packages/core/api/routers/workflows/control.py", "packages.domain.project.service"),
+        # workflows/runs：run 列表/详情要读章节 + 项目 + 分卷（+ 角色/世界的完成度统计）。
+        ("packages/core/api/routers/workflows/runs.py", "packages.domain.chapter.service"),
+        ("packages/core/api/routers/workflows/runs.py", "packages.domain.project.service"),
+        ("packages/core/api/routers/workflows/runs.py", "packages.domain.volume.service"),
+        ("packages/core/api/routers/workflows/runs.py", "packages.domain.character.service"),
+        ("packages/core/api/routers/workflows/runs.py", "packages.domain.world.service"),
+        # worlds：世界实体端点复用 domain.world 的领域服务与出参模型。
+        ("packages/core/api/routers/worlds.py", "packages.domain.world"),
+        ("packages/core/api/routers/worlds.py", "packages.domain.world.models"),
+    }
+)
+
+#: ``core → domain`` 方向的禁止前缀（与 ``LAYERING_DIRECTIONS`` 第四行一致）。
+_TARGET_PKG_DOMAIN = "packages.domain"
+
+#: **受控例外白名单的索引**：``(扫描根, 禁止前缀)`` → 允许的 ``(文件, 模块)`` 集合。
+#:
+#: ⚠️ 键**必须带扫描根**：``packages.domain`` 这个禁止前缀在两条方向上各出现一次
+#:    （core → domain 与 domain → domain）⇒ 只按前缀索引会把两条方向的例外混在一起。
+ALLOWED_STATIC_IMPORTS: dict[tuple[str, str], frozenset[tuple[str, str]]] = {
+    ("packages/core", _TARGET_PKG_DOMAIN): ALLOWED_CORE_TO_DOMAIN_IMPORTS,
+    ("packages/domain", _TARGET_PKG_DOMAIN): ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS,
+}
 
 #: 「字符串里出现了 ``packages.workflows``」的点分路径感知判据。
 #: ``packages.workflows.chapter_write`` 命中；``notpackages.workflows`` 不命中。
 _WORKFLOWS_TOKEN_RE = re.compile(r"(?<![\w.])packages\.workflows(?![\w])")
 
+#: 「字符串里出现了 ``packages.domain``」的点分路径感知判据（与 workflows 同款）。
+_DOMAIN_TOKEN_RE = re.compile(r"(?<![\w.])packages\.domain(?![\w])")
 
-def _mentions_workflows(text: str) -> bool:
-    """字符串是否**提到**业务流程包（点分路径感知）。"""
-    return bool(_WORKFLOWS_TOKEN_RE.search(text))
+#: ``apps`` 目标的判据：**整串就是模块路径**（``apps`` / ``apps.web.x``）。
+#:
+#: ⚠️ 为什么 ``apps`` 不能用 workflows 那套「包含」语义：``apps`` 是**普通英文词**，
+#:    「包含」语义在当前树上就**实测误报 2 处**
+#:    （``packages/core/api/version_check.py`` 的两条提示文案里出现了 ``apps/web/dist``）
+#:    ⇒ 纯文案会被当成「动态 import 应用层」⇒ 规则退化成噪声源。
+#:    而「整串就是模块路径」既抓得住 ``import_module("apps")`` / ``("apps.web.x")``，
+#:    又不会误伤文案。
+_APPS_MODULE_PATH_RE = re.compile(r"apps(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+
+#: **动态 import 目标前缀表**（2026-10-23 task-7 A1）：
+#: ``(目标前缀, 判据类型, 正则)``。
+#:
+#: - ``contains`` = 点分路径感知的「**包含**」（workflows / domain：这两个串足够独特，
+#:   「包含」语义既抓得住 ``importlib.import_module("packages" + "." + "domain.x")``
+#:   这种拆串形态，又不会误伤普通文案）；
+#: - ``module_path`` = **整串**必须是一个模块路径（``apps``：普通英文词 ⇒ 见上）。
+#:
+#: ⚠️ 这张表是**动态**扫描的目标集合；静态扫描的目标集合 = ``LAYERING_DIRECTIONS``
+#:    的「禁止前缀」列 ⇒ 两条扫描线覆盖的目标**同一个来源**，不许各写一份。
+_DYNAMIC_TARGET_RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+    (_TARGET_PKG_TOP, "contains", _WORKFLOWS_TOKEN_RE),
+    (_TARGET_PKG_DOMAIN, "contains", _DOMAIN_TOKEN_RE),
+    ("apps", "module_path", _APPS_MODULE_PATH_RE),
+)
 
 
 def _iter_py_files(root: Path) -> list[Path]:
@@ -141,8 +334,11 @@ def _matches_prefix(module: str, prefix: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _static_violations(tree: ast.AST, forbidden: str) -> list[tuple[int, str]]:
-    """AST 扫静态 import：``import x`` / ``from x import y``（含任意嵌套层级）。
+def _static_import_targets(tree: ast.AST, forbidden: str) -> list[tuple[int, str, str]]:
+    """静态 import 命中：``(行号, 被导入的模块路径, 描述)``。
+
+    与旧版 ``_static_violations`` 的唯一差别：**多返回「被导入的模块路径」**——
+    受控例外白名单的键需要它（粒度 = ``(文件相对路径, 模块路径)``）。
 
     **外加「import 父包 + 取子包」形态**（2026-10-22 批次二十二修复）：
     ``from packages import workflows`` 会真的执行 ``packages/workflows/__init__.py``
@@ -150,16 +346,16 @@ def _static_violations(tree: ast.AST, forbidden: str) -> list[tuple[int, str]]:
     完全看不见它 ⇒ 静态判据一度形同虚设。
     ⇒ 判据：``from X import Y`` 时，``"X.Y"`` 也可能是一条模块路径 ⇒ 一并检查。
     """
-    out: list[tuple[int, str]] = []
+    out: list[tuple[int, str, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if _matches_prefix(alias.name, forbidden):
-                    out.append((node.lineno, f"import {alias.name}"))
+                    out.append((node.lineno, alias.name, f"import {alias.name}"))
         elif isinstance(node, ast.ImportFrom) and node.level == 0:
             module = node.module or ""
             if _matches_prefix(module, forbidden):
-                out.append((node.lineno, f"from {module} import ..."))
+                out.append((node.lineno, module, f"from {module} import ..."))
                 continue
             for alias in node.names:
                 if alias.name == "*":
@@ -168,11 +364,74 @@ def _static_violations(tree: ast.AST, forbidden: str) -> list[tuple[int, str]]:
                     out.append(
                         (
                             node.lineno,
+                            f"{module}.{alias.name}",
                             f"from {module} import {alias.name}（经父包取子包 "
                             f"⇒ 等价于 import {module}.{alias.name}）",
                         )
                     )
     return out
+
+
+def _static_violations(tree: ast.AST, forbidden: str) -> list[tuple[int, str]]:
+    """静态 import 命中：``(行号, 描述)``（``_static_import_targets`` 的兼容视图）。"""
+    return [(lineno, desc) for lineno, _module, desc in _static_import_targets(tree, forbidden)]
+
+
+def _is_allowed_core_to_domain(rel_path: str, module: str) -> bool:
+    """``core → domain`` 的受控例外判定：**精确**命中 ``(文件, 模块)`` 才允许。
+
+    ⚠️ 口径：这里**只**认「精确登记」这一种放行形式。
+    「整个 ``packages/core`` 放行」「按目录放行」都会让
+    ``test_core_to_domain_allowance_is_not_coarse`` 红 ⇒ 粗放行在本仓**不可表达**。
+    """
+    return (rel_path, module) in ALLOWED_CORE_TO_DOMAIN_IMPORTS
+
+
+def _is_allowed_domain_to_domain(rel_path: str, module: str) -> bool:
+    """``domain → domain`` 的受控例外判定：**精确**命中 ``(文件, 模块)`` 才允许。
+
+    ⚠️ 口径与 ``core → domain`` 同款：**只**认精确登记，不许目录级/整层放行。
+    """
+    return (rel_path, module) in ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS
+
+
+def _is_allowed_static_import(
+    root_rel: str, forbidden: str, rel_path: str, module: str
+) -> bool:
+    """该 ``(文件, 模块)`` 是否命中**这条方向**的受控例外白名单。
+
+    ⚠️ **必须带扫描根**（``root_rel``）：``packages.domain`` 这个禁止前缀在两条方向上
+    各出现一次（core → domain 与 domain → domain）⇒ 只按前缀判会把两条方向的
+    例外混在一起（domain→domain 的例外会顺带放过 core→domain）。
+
+    只有 ``core → domain`` 与 ``domain → domain`` 两个方向有受控例外；
+    其余方向一律不放行（``core ↛ workflows`` / ``domain ↛ workflows`` / ``packages ↛ apps``）。
+    """
+    if forbidden == _TARGET_PKG_DOMAIN:
+        if root_rel == "packages/core":
+            return _is_allowed_core_to_domain(rel_path, module)
+        if root_rel == "packages/domain":
+            return _is_allowed_domain_to_domain(rel_path, module)
+    return False
+
+
+def scan_static_layering_violations(root_rel: str, forbidden: str, desc: str) -> list[str]:
+    """扫 ``root_rel`` 下指向 ``forbidden`` 的**未登记**静态 import（违规列表）。
+
+    「登记」= 命中 ``ALLOWED_STATIC_IMPORTS[(root_rel, forbidden)]`` 受控例外白名单。
+    ⚠️ 判据逻辑一行不动，只在**判定是否放行**这一步引入白名单。
+    """
+    violations: list[str] = []
+    for path in _iter_py_files(REPO_ROOT / root_rel):
+        tree = _parse(path)
+        if tree is None:
+            continue
+        rel = _rel(path)
+        for lineno, module, what in _static_import_targets(tree, forbidden):
+            if _is_allowed_static_import(root_rel, forbidden, rel, module):
+                continue
+            violations.append(f"{rel}:{lineno}: {what} ⇒ {desc}")
+    return violations
 
 
 def _is_relative_import(node: ast.AST) -> bool:
@@ -365,19 +624,79 @@ def _call_args(call: ast.Call) -> list[ast.AST]:
     return args
 
 
-def scan_dynamic_workflow_imports(
-    root_rel: str = "packages/core",
+def _dynamic_target_hit(folded: str, prefix: str) -> bool:
+    """折叠出的串是否**指向** ``prefix``（动态 import 目标）。
+
+    判据来自 ``_DYNAMIC_TARGET_RULES``（目标前缀表）：
+    - ``contains``：点分路径感知的「包含」（workflows / domain）；
+    - ``module_path``：**整串**必须是一个模块路径（apps —— 普通英文词，
+      「包含」语义实测会误伤 ``packages/core/api/version_check.py`` 的提示文案）。
+    """
+    for pfx, kind, rx in _DYNAMIC_TARGET_RULES:
+        if pfx != prefix:
+            continue
+        if kind == "contains":
+            return bool(rx.search(folded))
+        return bool(rx.fullmatch(folded))
+    return False
+
+
+def _is_allowed_dynamic_import(
+    root_rel: str, forbidden: str, rel_path: str, folded: str
+) -> bool:
+    """动态 import 是否被登记放行。
+
+    ① ``ALLOWED_DYNAMIC_IMPORTS``（(文件, 折叠出的目标串) 粒度）；
+    ② **静态白名单里登记过的同一条依赖** ⇒ 静态/动态两种形态同放行
+       （同一条 (文件, 模块) 依赖，换个写法不算新依赖）。
+    """
+    if (rel_path, folded) in ALLOWED_DYNAMIC_IMPORTS:
+        return True
+    return _is_allowed_static_import(root_rel, forbidden, rel_path, folded)
+
+
+def _directions_for_root(root_rel: str) -> tuple[tuple[str, str], ...]:
+    """某个扫描根下的**全部**依赖方向（``(禁止前缀, 描述)``）。
+
+    ⚠️ 单一来源 = ``LAYERING_DIRECTIONS`` ⇒ 静态线与动态线覆盖的目标**不会分叉**。
+
+    ⚠️ **祖先规则**：扫描根 ``packages/core`` 也要吃 ``("packages", "apps")`` 这条
+    方向（``packages`` 是 ``packages/core`` 的祖先 ⇒ 该方向覆盖整棵库层）
+    ⇒ 否则动态扫描会漏掉 core 里的「动态 import 应用层」。
+    """
+    return tuple(
+        (forbidden, desc)
+        for root, forbidden, desc in LAYERING_DIRECTIONS
+        if root == root_rel or root_rel.startswith(root + "/")
+    )
+
+
+#: 需要做**动态** import 扫描的根 = ``LAYERING_DIRECTIONS`` 里出现过的全部根。
+DYNAMIC_SCANNED_ROOTS: tuple[str, ...] = tuple(
+    sorted({root for root, _forbidden, _desc in LAYERING_DIRECTIONS})
+)
+
+
+def scan_dynamic_imports(
+    root_rel: str,
+    directions: tuple[tuple[str, str], ...],
 ) -> tuple[list[str], list[str]]:
-    """扫 ``root_rel`` 下的动态 import，返回 ``(违规列表, 须登记但未登记的不可判定列表)``。
+    """扫 ``root_rel`` 下指向 ``directions`` 各禁止前缀的**动态** import。
+
+    返回 ``(违规列表, 须登记但未登记的不可判定列表)``。
 
     两条判据：
 
-    ① **规则 R（callee 无关）**：任何 ``ast.Call`` 的任一实参若可常量折叠为**包含**
-       ``packages.workflows`` 的字符串 ⇒ 违规（除非命中白名单）。
+    ① **规则 R（callee 无关）**：任何 ``ast.Call`` 的任一实参若可常量折叠为
+       **指向某个禁止前缀**的字符串 ⇒ 违规（除非该依赖已登记）。
        ⇒ ``getattr`` / 别名 / from-import / partial / ``exec`` **一次堵死**。
+       ⚠️ 目标集合来自 ``directions``（= ``LAYERING_DIRECTIONS`` 派生）⇒
+       **不再只有 ``packages.workflows`` 一个目标**（2026-10-23 task-7 A1：
+       core → domain 的**动态** import 此前完全没设防）。
     ② **不可判定**：仅当被调用者可解析为**已知 import callee** 且实参折不出时
        ⇒ 须登记在 ``NON_FOLDABLE_DYNAMIC_IMPORTS``（**调用级**：(rel, callee)）。
        ⇒ 不会把 ``log.warning(<不可折叠>)`` 这类普通调用误判。
+       ⚠️ 这一条与**目标无关**（折不出 ⇒ 无法证明目标不是禁用的）⇒ 一次扫描只报一遍。
     """
     violations: list[str] = []
     unfingerprintable: list[str] = []
@@ -396,13 +715,20 @@ def scan_dynamic_workflow_imports(
             # ① 规则 R
             for arg in args:
                 folded = _fold_str(arg, env)
-                if folded is not None and _mentions_workflows(folded):
-                    if (rel, folded) not in ALLOWED_DYNAMIC_WORKFLOW_IMPORTS:
+                if folded is None:
+                    continue
+                for forbidden, desc in directions:
+                    if not _dynamic_target_hit(folded, forbidden):
+                        continue
+                    if not _is_allowed_dynamic_import(root_rel, forbidden, rel, folded):
                         violations.append(
-                            f"{rel}:{line}: 调用实参折叠出 {folded!r}（含 packages.workflows）"
-                            "——库层禁止依赖业务流程包；如属装配入口请登记白名单"
+                            f"{rel}:{line}: 调用实参折叠出 {folded!r}（指向 {forbidden}）"
+                            f"——{desc}；如属受控例外请登记白名单"
                         )
                     break
+                else:
+                    continue
+                break
             # ② 不可判定（**仅**已知 import callee）
             callee = _resolve_import_callee(node.func, modules, callables)
             if callee is None or not args:
@@ -411,11 +737,24 @@ def scan_dynamic_workflow_imports(
                 if (rel, callee) not in NON_FOLDABLE_DYNAMIC_IMPORTS:
                     unfingerprintable.append(
                         f"{rel}:{line}: {callee} 的实参**不可常量折叠**"
-                        "（无法证明目标不是 packages.workflows）；"
+                        "（无法证明目标不是受禁前缀）；"
                         "要么改成可折叠写法，要么登记进 "
                         "NON_FOLDABLE_DYNAMIC_IMPORTS（(rel, callee) 粒度）"
                     )
     return violations, unfingerprintable
+
+
+def scan_dynamic_workflow_imports(
+    root_rel: str = "packages/core",
+) -> tuple[list[str], list[str]]:
+    """（兼容层）旧口径：只盯 ``packages.workflows`` 一个目标。
+
+    ⚠️ 新代码请用 ``scan_dynamic_imports`` + ``_directions_for_root``
+    （**全部**方向一起扫 ⇒ core → domain 的动态 import 也在内）。
+    """
+    return scan_dynamic_imports(
+        root_rel, ((_TARGET_PKG_TOP, "库层禁止依赖业务流程包"),)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -435,26 +774,41 @@ def test_no_business_import_of_workflows_in_core() -> None:
     assert not hits, "core 不得 import 业务流程包：\n" + "\n".join(hits)
 
 
-def test_core_has_no_escaping_relative_imports() -> None:
-    """② core 内禁止逃出本包的相对 import（封住静态断言的盲区）。"""
-    hits = scan_escaping_relative_imports("packages/core")
+@pytest.mark.parametrize("root_rel", GUARDED_ROOTS)
+def test_no_escaping_relative_imports(root_rel: str) -> None:
+    """② core **与 domain** 都禁止逃出本包的相对 import（封住静态断言的盲区）。
+
+    ⚠️ 2026-10-23 task-7 A2：此前**只有** core 根调用了逃逸扫描器
+    ⇒ ``domain → workflows`` 可以用相对 import 绕过
+    （``packages/domain/character/service.py`` 里写 ``from ...workflows.chapter_write
+    import pipeline`` ⇒ level=3 ⇒ 从 ``packages.domain.character`` 上溯 3 级
+    ⇒ **真实解析到** ``packages.workflows.chapter_write``），
+    而静态判据只看 ``node.level == 0`` ⇒ 对相对 import **不可见**。
+    ⇒ 现在**两个根都扫**（``GUARDED_ROOTS``）。
+    """
+    hits = scan_escaping_relative_imports(root_rel)
     assert not hits, (
-        "packages/core/ 下出现逃出本包的相对 import；命中:\n"
+        f"{root_rel} 下出现逃出本包的相对 import；命中:\n"
         + "\n".join(f"{rel}:{ln}: {desc}" for rel, ln, desc in hits)
     )
 
 
 def test_no_dynamic_workflow_import_outside_whitelist() -> None:
-    """③ **动态 import 也要守**（core 与 domain 各一遍）：拆字符串不再能绕过。
+    """③ **动态 import 也要守**（**每个方向**各一遍）：拆字符串不再能绕过。
 
     判别（撤销本修复的写法会让本用例红）：在 ``packages/core/quality/engine.py`` 里加
     ``importlib.import_module("packages" + "." + "workflows")`` ⇒ 折叠出
     ``packages.workflows`` ⇒ 不在白名单 ⇒ 违规。
+
+    ⚠️ 2026-10-23 task-7 A1：扫描目标**不再是**只有 ``packages.workflows``
+    ⇒ 目标集合由 ``LAYERING_DIRECTIONS`` 派生（``_directions_for_root``），
+    **core → domain 的动态 import 现在也在守**。
     """
-    for root_rel in GUARDED_ROOTS:
-        violations, unfingerprintable = scan_dynamic_workflow_imports(root_rel)
+    for root_rel in DYNAMIC_SCANNED_ROOTS:
+        directions = _directions_for_root(root_rel)
+        violations, unfingerprintable = scan_dynamic_imports(root_rel, directions)
         assert not violations, (
-            f"{root_rel} 出现指向业务流程包的动态 import（常量折叠后可判定）；命中:\n"
+            f"{root_rel} 出现指向受禁前缀的动态 import（常量折叠后可判定）；命中:\n"
             + "\n".join(violations)
         )
         assert not unfingerprintable, (
@@ -469,11 +823,11 @@ def test_dynamic_import_allowlists_are_pinned() -> None:
     ⚠️ 旧版只钉条数 ⇒ 把唯一那条**换成另一个文件**（条数仍是 1）测试照绿
     ⇒ 白名单可以被悄悄换掉而不被发现（2026-10-22 批次二十二实测的 minor）。
     """
-    assert ALLOWED_DYNAMIC_WORKFLOW_IMPORTS == frozenset(
+    assert ALLOWED_DYNAMIC_IMPORTS == frozenset(
         {("packages/core/api/main.py", "packages.workflows")}
     ), (
-        "ALLOWED_DYNAMIC_WORKFLOW_IMPORTS 必须逐条登记（加一条 / 换一条都要改这里）；"
-        f"实得 {sorted(ALLOWED_DYNAMIC_WORKFLOW_IMPORTS)}"
+        "ALLOWED_DYNAMIC_IMPORTS 必须逐条登记（加一条 / 换一条都要改这里）；"
+        f"实得 {sorted(ALLOWED_DYNAMIC_IMPORTS)}"
     )
     assert NON_FOLDABLE_DYNAMIC_IMPORTS == frozenset(
         {("packages/core/api/routers/__init__.py", "importlib.import_module")}
@@ -535,22 +889,21 @@ def test_grep_packages_workflows_in_library_layer_is_zero() -> None:
 
 
 def test_layering_directions_are_clean() -> None:
-    """⑦ 另外两个方向也不许破（此前只有 core↛workflows 一个看守）。
+    """⑦ 四条方向边都不许破（此前只有 core↛workflows 一个看守）。
 
-    - `packages/domain` ↔ `packages/workflows`：领域层不得依赖流程组装层；
-    - `packages/**` ↔ `apps`：库层不得依赖应用层。
+    - `packages/core` ↛ `packages/workflows`：core 不得依赖流程组装层；
+    - `packages/domain` ↛ `packages/workflows`：领域层不得依赖流程组装层；
+    - `packages/**` ↛ `apps`：库层不得依赖应用层；
+    - `packages/core` ↛ `packages.domain`：**受控例外**——只有
+      `ALLOWED_CORE_TO_DOMAIN_IMPORTS` 里**精确登记**的那些 (文件, 模块) 放行，
+      其余一律违规（逐条清单见 task-7 报告）。
 
-    实测基线（2026-10-22）：三条方向边均为 0。
+    实测基线（2026-10-22）：前三条方向边均为 0；
+    第四条（2026-10-23 task-7）：44 条唯一 (文件, 模块) 已登记、0 条未登记。
     """
     hits: list[str] = []
     for root_rel, forbidden, desc in LAYERING_DIRECTIONS:
-        root = REPO_ROOT / root_rel
-        for path in _iter_py_files(root):
-            tree = _parse(path)
-            if tree is None:
-                continue
-            for lineno, what in _static_violations(tree, forbidden):
-                hits.append(f"{_rel(path)}:{lineno}: {what} ⇒ {desc}")
+        hits.extend(scan_static_layering_violations(root_rel, forbidden, desc))
     assert not hits, "分层方向被破坏：\n" + "\n".join(hits)
 
 
@@ -726,7 +1079,7 @@ def test_whitelisted_entry_form_is_not_flagged(monkeypatch):
     """⑥ 反向用例：白名单登记的那一处（``main.py`` 指向 ``packages.workflows``）
     ⇒ 不得判违规。
 
-    喂的是**模块级**常量形态（与 ``ALLOWED_DYNAMIC_WORKFLOW_IMPORTS`` 的登记语义
+    喂的是**模块级**常量形态（与 ``ALLOWED_DYNAMIC_IMPORTS`` 的登记语义
     一致：折叠后的目标必须**恰好**是 ``packages.workflows``，精确匹配、不许前缀通配）。
     """
     source = (
@@ -823,3 +1176,415 @@ def test_parse_handles_a_utf8_bom_file(tmp_path: Path) -> None:
     assert any(
         isinstance(node, ast.FunctionDef) and node.name == "f" for node in ast.walk(tree)
     ), "解析出的 AST 里没有那个函数 ⇒ 解析结果不是这份源码的"
+
+
+# ===========================================================================
+# 2026-10-23 task-7（M-11）：`core → domain` = **受控例外** + 机器看守
+# ===========================================================================
+#
+# Lead 裁决（2026-10-23，勿说过头）：
+#   - `core → domain` **不是**「破口」——模块级图无 2 环、无 3 环，
+#     且成文规则只禁过「core 不得 import workflows」；
+#   - 真实问题是「边界没定义清楚 + 零机器约束」
+#     ⇒ 允许 API 路由层调领域服务 + 允许 5 个机制层文件按**精确白名单**调，
+#       **但任何新增的 `core → domain` 依赖都必须让本看守变红**。
+
+
+def _actual_core_to_domain_imports() -> set[tuple[str, str]]:
+    """仓内**实际**的 ``core → domain`` 静态导入集合（``(文件, 模块)``）。"""
+    out: set[tuple[str, str]] = set()
+    for path in _iter_py_files(CORE_ROOT):
+        tree = _parse(path)
+        if tree is None:
+            continue
+        rel = _rel(path)
+        for _lineno, module, _what in _static_import_targets(tree, _TARGET_PKG_DOMAIN):
+            out.add((rel, module))
+    return out
+
+
+def test_layering_directions_include_core_to_domain() -> None:
+    """④ ``core → domain`` 必须登记成一条方向边（Lead 裁决 2026-10-23）。
+
+    ⚠️ 判别点：方向边**在册**但白名单**没登记** ⇒ 门禁红（受控例外的另一半）。
+    """
+    pairs = {(root, forbidden) for root, forbidden, _desc in LAYERING_DIRECTIONS}
+    assert ("packages/core", "packages.domain") in pairs, (
+        f"分层方向里没有 core↛domain：{sorted(pairs)}"
+    )
+
+
+def test_core_to_domain_allowlist_matches_actual_imports() -> None:
+    """白名单必须**恰好**等于仓内实际的 ``core → domain`` 导入集合。
+
+    - 少登记 ⇒ 门禁红（新增依赖没登记）；
+    - 多登记 ⇒ 本用例红（幽灵条目 = 粗放行的后门）。
+
+    ⚠️ 这条让白名单**自维护**：改了导入写法（模块路径变了）必须同步改白名单。
+    """
+    actual = _actual_core_to_domain_imports()
+    assert actual, "仓内应有 core→domain 导入（否则本看守形同虚设）"
+    missing = actual - ALLOWED_CORE_TO_DOMAIN_IMPORTS
+    assert not missing, (
+        f"这些 core→domain 导入未在白名单登记（门禁会红）：{sorted(missing)}"
+    )
+    ghost = ALLOWED_CORE_TO_DOMAIN_IMPORTS - actual
+    assert not ghost, f"白名单里有仓内不存在的条目（幽灵条目）：{sorted(ghost)}"
+
+
+def test_core_to_domain_allowance_is_not_coarse() -> None:
+    """白名单**不许**被放宽成「整个 ``packages/core`` 放行」或「按目录放行」。
+
+    ⚠️ 判别点：下面这些 ``(文件, 模块)`` 组合**都不在**白名单里 ⇒ 必须一律被拒。
+    放宽实现（改成 ``rel.startswith("packages/core")`` 之类）⇒ 本用例必红。
+    """
+    for rel, module in (
+        ("packages/core/arc/service.py", "packages.domain.world.service"),
+        ("packages/core/quality/service.py", "packages.domain.ledger"),
+        ("packages/core/exporter/builder.py", "packages.domain.project.service"),
+        ("packages/core/api/routers/chapters.py", "packages.domain.world.service"),
+        ("packages/core/api/routers/brand_new.py", "packages.domain.project.service"),
+        ("packages/core/brand_new_module.py", "packages.domain.project.service"),
+    ):
+        assert not _is_allowed_core_to_domain(rel, module), (
+            f"{rel} → {module} 不在白名单里却被放行 ⇒ 白名单被放宽了"
+        )
+
+
+def test_core_to_domain_allowlist_entries_are_concrete() -> None:
+    """白名单条目必须是**具体文件 + 具体模块**，不许通配 / 目录粒度。"""
+    for rel, module in ALLOWED_CORE_TO_DOMAIN_IMPORTS:
+        assert rel.startswith("packages/core/"), f"白名单文件不在 core 下：{rel}"
+        assert rel.endswith(".py"), f"白名单条目不是具体 .py 文件：{rel}"
+        assert not rel.endswith("/"), f"白名单条目是目录粒度：{rel}"
+        assert "*" not in rel and "?" not in rel, f"白名单条目含通配符：{rel}"
+        assert module.startswith("packages.domain"), f"白名单模块不在 domain 下：{module}"
+        assert "*" not in module, f"白名单模块含通配符：{module}"
+        assert (REPO_ROOT / rel).exists(), f"白名单指向的文件不存在：{rel}"
+
+
+def test_new_core_to_domain_dependency_is_rejected(monkeypatch) -> None:
+    """**DoD 判别**：在 ``packages/core/arc/service.py`` 里新增一行
+    ``from packages.domain.world.service import WorldService`` ⇒ 守卫**必须红**。
+
+    手法：把**合成源码**装进扫描入口（monkeypatch 两个入口）⇒ **不落盘、
+    不改任何生产文件**。
+    """
+    source = "from packages.domain.world.service import WorldService"
+    _with_synthetic_source(monkeypatch, source, "packages/core/arc/service.py")
+    hits = scan_static_layering_violations(
+        "packages/core", _TARGET_PKG_DOMAIN, "core 机制层不得依赖领域层"
+    )
+    assert hits, "新增的 core→domain 依赖未被拦下（守卫失效）"
+
+
+def test_new_core_to_domain_dependency_in_a_new_file_is_rejected(monkeypatch) -> None:
+    """新文件里的 ``core → domain`` 依赖同样必须红（白名单不是「目录级通行证」）。"""
+    source = "from packages.domain.project.service import ProjectService"
+    _with_synthetic_source(monkeypatch, source, "packages/core/brand_new/thing.py")
+    hits = scan_static_layering_violations(
+        "packages/core", _TARGET_PKG_DOMAIN, "core 机制层不得依赖领域层"
+    )
+    assert hits, "新文件里的 core→domain 依赖未被拦下（守卫失效）"
+
+
+def test_registered_core_to_domain_import_is_not_flagged(monkeypatch) -> None:
+    """反向用例：白名单里**已登记**的那一条 ⇒ 不得误报（否则守看会变成噪声源）。"""
+    source = "from packages.domain.project.service import ProjectService"
+    _with_synthetic_source(monkeypatch, source, "packages/core/arc/service.py")
+    hits = scan_static_layering_violations(
+        "packages/core", _TARGET_PKG_DOMAIN, "core 机制层不得依赖领域层"
+    )
+    assert not hits, f"已登记的导入被判违规：{hits}"
+
+
+# ===========================================================================
+# 2026-10-23 task-7 返工（对抗审查 B）：A1 动态目标泛化 / A2 相对逃逸双根 /
+# A6 白名单字面量 pin / A7 domain→domain 方向边
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# A1：动态 import 的目标**不再只有** packages.workflows
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [
+        pytest.param(
+            'import importlib\nimportlib.import_module("packages.domain.world.service")\n',
+            "packages.domain",
+            id="plain-domain",
+        ),
+        pytest.param(
+            'import importlib\nimportlib.import_module("packages" + "." + "domain.world")\n',
+            "packages.domain",
+            id="split-domain",
+        ),
+        pytest.param(
+            "import importlib\n"
+            "from importlib import import_module\n"
+            'import_module("packages.domain.chapter.service")\n',
+            "packages.domain",
+            id="from-import-domain",
+        ),
+        pytest.param(
+            "import functools\n"
+            "import importlib\n"
+            'functools.partial(importlib.import_module)("packages.domain.chapter.service")\n',
+            "packages.domain",
+            id="partial-domain",
+        ),
+        pytest.param(
+            'import importlib\nimportlib.import_module("apps.web.src")\n',
+            "apps",
+            id="plain-apps",
+        ),
+        pytest.param(
+            'import importlib\nimportlib.import_module("apps")\n',
+            "apps",
+            id="bare-apps",
+        ),
+    ],
+)
+def test_dynamic_import_of_forbidden_target_is_detected(monkeypatch, source, target):
+    """**A1 判别**：动态 import 指向受禁前缀 ⇒ 扫描器**必须报出违规**。
+
+    ⚠️ 2026-10-23 task-7 A1：此前动态扫描的目标写死 ``packages.workflows``
+    ⇒ ``importlib.import_module("packages.domain.world.service")`` 在 core 下
+    **四个扫描器全部放行**（静态 / 动态 / 相对逃逸 / 字面量兜底）⇒
+    「任何新增的 core→domain 依赖必须变红」**只对静态 import 成立**。
+    ⇒ 现在目标集合由 ``LAYERING_DIRECTIONS`` 派生（``packages.workflows`` +
+    ``packages.domain`` + ``apps``）。
+    """
+    _with_synthetic_source(monkeypatch, source, _PROBE_REL)
+    violations, _unfingerprintable = scan_dynamic_imports(
+        "packages/core", _directions_for_root("packages/core")
+    )
+    assert violations, f"漏过（未判违规）：{source!r}（目标 {target}）"
+    assert any(target in v for v in violations), (
+        f"违规列表里没有点名目标 {target}：{violations}"
+    )
+
+
+def test_dynamic_apps_prose_is_not_flagged(monkeypatch) -> None:
+    """**A1 反向用例**：提示文案里出现 ``apps/web/dist`` ⇒ **不得**误报。
+
+    ⚠️ 这就是 ``apps`` 目标**不能**用 workflows 那套「包含」语义的实证
+    （仓内真实文案就有这种：``packages/core/api/version_check.py``）。
+    """
+    source = (
+        'log = "cd apps/web && npm run build"\n'
+        "print(log)\n"
+    )
+    _with_synthetic_source(monkeypatch, source, _PROBE_REL)
+    violations, _unfingerprintable = scan_dynamic_imports(
+        "packages/core", _directions_for_root("packages/core")
+    )
+    assert not violations, f"误报（判违规）：{violations}"
+
+
+# ---------------------------------------------------------------------------
+# A2：相对 import 逃逸 —— domain 根也要能报出
+# ---------------------------------------------------------------------------
+
+
+def test_domain_root_relative_escape_is_detected(monkeypatch) -> None:
+    """**A2 判别**：以 **domain** 为根调用逃逸扫描器 ⇒ 必须报出 level=3 的逃逸。
+
+    ``packages/domain/character/service.py``（包深度 3）里写
+    ``from ...workflows.chapter_write import pipeline`` ⇒ level=3 >= 3
+    ⇒ **真实解析到** ``packages.workflows.chapter_write``
+    ⇒ 而静态判据只看 ``node.level == 0`` ⇒ 对相对 import 不可见
+    ⇒ 只有逃逸扫描器能抓住它。
+    """
+    source = "from ...workflows.chapter_write import pipeline"
+    _with_synthetic_source(monkeypatch, source, "packages/domain/character/service.py")
+    hits = scan_escaping_relative_imports("packages/domain")
+    assert hits, "漏过：domain 根下的相对逃逸（level=3 → packages.workflows.*）"
+    assert hits[0][0] == "packages/domain/character/service.py", (
+        f"逃逸报告没点名源文件：{hits[0]}"
+    )
+    assert "level=3" in hits[0][2], f"逃逸报告里没有 level：{hits[0]}"
+    assert "workflows" in hits[0][2], f"逃逸报告里没有点名目标包：{hits[0]}"
+
+
+def test_domain_root_relative_escape_scan_covers_real_domain_files() -> None:
+    """**A2 反向用例**：domain 域**真实**文件里没有逃逸 ⇒ 扫描器必须报 0 条。
+
+    ⚠️ 这条钉住「扫描域根被接上」这件事：若有人把 domain 根从扫描范围里去掉，
+    合成用例仍会绿（它自己喂了合成源码）⇒ 必须另有一条**走真实文件**的判定。
+    """
+    hits = scan_escaping_relative_imports("packages/domain")
+    assert hits == [], f"packages/domain 下出现逃出本包的相对 import：{hits}"
+
+
+def test_guarded_roots_include_domain() -> None:
+    """**A2 接线钉**：扫描根必须**同时**覆盖 core 与 domain。
+
+    ⚠️ 2026-10-23 task-7 A2：逃逸扫描器此前**只**以 core 为根调用 ⇒
+    「domain → workflows 可用相对 import 绕过」而**无人看守**。
+    ⚠️ 这条是**接线**判定：合成用例自己喂源码、自己指定根 ⇒ 它们**测不出**
+    「domain 根根本没被接进扫描范围」⇒ 必须另有一条把扫描根集合钉住。
+    """
+    assert "packages/domain" in GUARDED_ROOTS, (
+        f"扫描根漏了 packages/domain：{GUARDED_ROOTS} ⇒ domain 层无人看守"
+    )
+    assert "packages/core" in GUARDED_ROOTS, (
+        f"扫描根漏了 packages/core：{GUARDED_ROOTS}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A6：白名单**内容**必须被字面量钉住
+# ---------------------------------------------------------------------------
+
+
+def test_core_to_domain_allowlist_is_pinned() -> None:
+    """**A6 判别**：`ALLOWED_CORE_TO_DOMAIN_IMPORTS` 的**内容**逐条钉住。
+
+    ⚠️ 2026-10-23 task-7 A6：此前只有「白名单 == 仓内实际导入集合」这条
+    （**只强制声明、不强制许可**）⇒ 白名单内容可被**悄悄换掉**而审查看不见
+    （换掉后若那处 import 仍在，集合相等仍成立 ⇒ 门禁照绿）。
+    ⇒ 照 ``test_dynamic_import_allowlists_are_pinned`` 的写法加**字面量 pin**。
+    """
+    assert ALLOWED_CORE_TO_DOMAIN_IMPORTS == frozenset(
+        {
+            ("packages/core/arc/service.py", "packages.domain.project.service"),
+            ("packages/core/delivery/evidence.py", "packages.domain.chapter.draft_resolver"),
+            ("packages/core/delivery/evidence.py", "packages.domain.chapter.service"),
+            ("packages/core/delivery/evidence.py", "packages.domain.project.service"),
+            ("packages/core/exporter/builder.py", "packages.domain.chapter.service"),
+            ("packages/core/quality/service.py", "packages.domain.chapter.draft_resolver"),
+            ("packages/core/signing_check/service.py", "packages.domain.chapter.service"),
+            ("packages/core/signing_check/service.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/chapters.py", "packages.domain.chapter.models"),
+            ("packages/core/api/routers/chapters.py", "packages.domain.chapter.service"),
+            ("packages/core/api/routers/chapters.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/characters.py", "packages.domain.character.models"),
+            ("packages/core/api/routers/characters.py", "packages.domain.character.service"),
+            ("packages/core/api/routers/characters.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/continuation.py", "packages.domain.chapter.service"),
+            ("packages/core/api/routers/continuation.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/export.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/genre.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/ledger.py", "packages.domain.ledger"),
+            ("packages/core/api/routers/plots.py", "packages.domain.plot"),
+            ("packages/core/api/routers/plots.py", "packages.domain.plot.models"),
+            ("packages/core/api/routers/projects.py", "packages.domain.project.models"),
+            ("packages/core/api/routers/projects.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/quality.py", "packages.domain.chapter.service"),
+            ("packages/core/api/routers/quality.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/reference.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/reference.py", "packages.domain.reference"),
+            ("packages/core/api/routers/reference.py", "packages.domain.reference.models"),
+            ("packages/core/api/routers/reveal_policies.py", "packages.domain.knowledge"),
+            ("packages/core/api/routers/reveal_policies.py", "packages.domain.knowledge.models"),
+            ("packages/core/api/routers/simulation.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/skill.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/story_state.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/volumes.py", "packages.domain.volume"),
+            ("packages/core/api/routers/workflows/common.py", "packages.domain.chapter.service"),
+            ("packages/core/api/routers/workflows/control.py", "packages.domain.chapter.service"),
+            ("packages/core/api/routers/workflows/control.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/workflows/runs.py", "packages.domain.chapter.service"),
+            ("packages/core/api/routers/workflows/runs.py", "packages.domain.character.service"),
+            ("packages/core/api/routers/workflows/runs.py", "packages.domain.project.service"),
+            ("packages/core/api/routers/workflows/runs.py", "packages.domain.volume.service"),
+            ("packages/core/api/routers/workflows/runs.py", "packages.domain.world.service"),
+            ("packages/core/api/routers/worlds.py", "packages.domain.world"),
+            ("packages/core/api/routers/worlds.py", "packages.domain.world.models"),
+        }
+    ), (
+        "ALLOWED_CORE_TO_DOMAIN_IMPORTS 必须逐条登记（加一条 / 换一条都要改这里）；"
+        f"实得 {sorted(ALLOWED_CORE_TO_DOMAIN_IMPORTS)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A7：domain → domain 方向边 + 精确白名单
+# ---------------------------------------------------------------------------
+
+
+def _actual_domain_to_domain_imports() -> set[tuple[str, str]]:
+    """仓内**实际**的 ``domain → domain`` 绝对 import 集合（``(文件, 模块)``）。"""
+    out: set[tuple[str, str]] = set()
+    for path in _iter_py_files(DOMAIN_ROOT):
+        tree = _parse(path)
+        if tree is None:
+            continue
+        rel = _rel(path)
+        for _lineno, module, _what in _static_import_targets(tree, _TARGET_PKG_DOMAIN):
+            out.add((rel, module))
+    return out
+
+
+def test_layering_directions_include_domain_to_domain() -> None:
+    """**A7 判别**：``domain → domain`` 必须登记成一条方向边。
+
+    ⚠️ 2026-10-23 task-7 A7：首条 domain→domain 依赖已存在（character 域复用
+    world 域的错误类型与共用守卫）⇒ 方向表里没有这条边 ⇒ **任何**域间依赖都不受
+    机器约束。
+    """
+    pairs = {(root, forbidden) for root, forbidden, _desc in LAYERING_DIRECTIONS}
+    assert ("packages/domain", "packages.domain") in pairs, (
+        f"分层方向里没有 domain→domain：{sorted(pairs)}"
+    )
+
+
+def test_domain_to_domain_allowlist_matches_actual_imports() -> None:
+    """``domain → domain`` 白名单必须**恰好**等于仓内实际导入集合。"""
+    actual = _actual_domain_to_domain_imports()
+    assert actual, "仓内应有 domain→domain 导入（否则这条方向边形同虚设）"
+    missing = actual - ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS
+    assert not missing, f"这些 domain→domain 导入未登记：{sorted(missing)}"
+    ghost = ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS - actual
+    assert not ghost, f"白名单里有仓内不存在的条目（幽灵条目）：{sorted(ghost)}"
+
+
+def test_domain_to_domain_allowlist_is_pinned() -> None:
+    """**A7**：``domain → domain`` 白名单的内容**逐条钉住**（A6 同款要求）。"""
+    assert ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS == frozenset(
+        {
+            ("packages/domain/character/service.py", "packages.domain.world.service"),
+        }
+    ), (
+        "ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS 必须逐条登记（加一条 / 换一条都要改这里）；"
+        f"实得 {sorted(ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS)}"
+    )
+
+
+def test_domain_to_domain_allowance_is_not_coarse() -> None:
+    """``domain → domain`` 白名单**不许**被放宽成「整个 packages/domain 放行」。"""
+    for rel, module in (
+        ("packages/domain/character/service.py", "packages.domain.plot.service"),
+        ("packages/domain/world/service.py", "packages.domain.character.service"),
+        ("packages/domain/chapter/service.py", "packages.domain.world.service"),
+        ("packages/domain/brand_new/module.py", "packages.domain.world.service"),
+    ):
+        assert not _is_allowed_domain_to_domain(rel, module), (
+            f"{rel} → {module} 不在白名单里却被放行 ⇒ 白名单被放宽了"
+        )
+
+
+def test_new_domain_to_domain_dependency_is_rejected(monkeypatch) -> None:
+    """**A7 判别**：新增一条 domain→domain 依赖 ⇒ 守卫**必须红**。"""
+    source = "from packages.domain.chapter.service import ChapterService"
+    _with_synthetic_source(monkeypatch, source, "packages/domain/character/service.py")
+    hits = scan_static_layering_violations(
+        "packages/domain", _TARGET_PKG_DOMAIN, "domain 域之间原则上不得互相依赖"
+    )
+    assert hits, "新增的 domain→domain 依赖未被拦下（守卫失效）"
+
+
+def test_registered_domain_to_domain_import_is_not_flagged(monkeypatch) -> None:
+    """反向用例：已登记的那一条 ⇒ 不得误报。"""
+    source = "from packages.domain.world.service import ReferencedError"
+    _with_synthetic_source(monkeypatch, source, "packages/domain/character/service.py")
+    hits = scan_static_layering_violations(
+        "packages/domain", _TARGET_PKG_DOMAIN, "domain 域之间原则上不得互相依赖"
+    )
+    assert not hits, f"已登记的导入被判违规：{hits}"
+
+

@@ -24,7 +24,7 @@
    端点的 ``response_model`` 照样全绿（坑区「断言了结果 ≠ 判别了机制」的同族）。
    ⇒ 每条端点都断言 ``path → array → items.$ref`` 的**逐跳**指向。
 
-4. **「应该和单体一样」不是证据。** 同一批实测到反例：``GET /commits`` 列表行 12 键
+4. **「应该和单体一样」不是证据。** 同一批实测到反例：``GET /commits`` 列表行 13 键
    而 ``POST /commits`` 响应只有 4 键。本文件里唯一「碰巧同形」的一对（评审列表 vs
    评审单体）是用**实测 + 差集断言**钉住的，另有一对**不同形**的（canon 列表 vs
    canon 单体，两边都是 9 键但键名不同）专门用反例钉住。
@@ -327,7 +327,7 @@ def test_quality_list_rows_and_single_row_are_actually_the_same_shape(tmp_path: 
 
     复用 ``QualityReportResponse`` 的前提是「``list_reports`` 与 ``latest_report``
     走同一个 ``SELECT *`` ＋ 同一个 ``_attach_judge``」。这个前提是**可被破坏**的
-    （``GET /commits`` 列表 12 键 / ``POST /commits`` 响应 4 键就是同批的反例）。
+    （``GET /commits`` 列表 13 键 / ``POST /commits`` 响应 4 键就是同批的反例）。
 
     ⇒ 这里断言两条响应的**对称差为空集**。一旦有人改了列表的投影而不改模型，本条
     必红——而如果只断言「列表行 == 硬编码基准」，单侧改了投影会先被基准抓到，

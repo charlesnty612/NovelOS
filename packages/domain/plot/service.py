@@ -35,6 +35,7 @@ from packages.core.story_state.write_helpers import (
     decode_who_knows as _decode_who_knows,
 )
 
+from ..project.service import bump_project_state_version
 from .models import (
     PLOT_EVENT_STATUSES,
     PLOT_EVENT_TYPES,
@@ -247,6 +248,12 @@ class PlotService:
                     who_knows_json=who_knows_json,
                 )
 
+            # 2026-10-23（M-1 / D-7）：同事务内推 ``story_states.state_version``
+            # （装配缓存失效主线，见 project.service.bump_project_state_version）——
+            # ``plot_events`` 进 director payload 的 ``plot_graph_excerpt``，而本写
+            # 路径只 commit()、不推 version ⇒ 缺该推进时「新增情节事件后重跑同一章」
+            # 会命中旧装配（planner 拿到改动前的情节图，零告警）。
+            bump_project_state_version(conn, project_id)
             conn.commit()
         except sqlite3.IntegrityError as exc:
             conn.rollback()
@@ -404,6 +411,9 @@ class PlotService:
                     f"UPDATE plot_events SET {', '.join(sets)} WHERE event_id = ?",
                     params,
                 )
+                # 2026-10-23（M-1 / D-7）：同事务内推 ``story_states.state_version``
+                # （装配缓存失效主线）——情节图进 director payload。
+                bump_project_state_version(conn, existing.project_id)
                 conn.commit()
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
@@ -418,6 +428,11 @@ class PlotService:
     def delete_event(self, event_id: str) -> None:
         conn = get_connection(self.db_path)
         try:
+            # 先取 project_id（删完就没了）——用于同事务内推 state_version。
+            owner = conn.execute(
+                "SELECT project_id FROM plot_events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            event_project_id = owner["project_id"] if owner is not None else None
             # 引用检查：被其他事件的 cause / effects 引用？
             in_cause = conn.execute(
                 """
@@ -465,6 +480,10 @@ class PlotService:
             )
             if cur.rowcount == 0:
                 raise NotFoundError(f"event#{event_id} 不存在")
+            # 2026-10-23（M-1 / D-7）：同事务内推 ``story_states.state_version``
+            # （装配缓存失效主线）——情节图进 director payload。
+            if event_project_id:
+                bump_project_state_version(conn, event_project_id)
             conn.commit()
         finally:
             conn.close()

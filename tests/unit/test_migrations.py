@@ -53,6 +53,9 @@ def test_apply_migrations_creates_43_tables_total(tmp_path: Path):
     #   → 业务表 39，总表 40。
     # 内部消费外部 skill（0032）：0024 之后… 0032_skills.sql 加 skills +
     #   project_skills 两张业务表 → 业务表 41，总表 42。
+    # 0034_commits_draft_version（2026-10-23 · D-10）：仅 ALTER TABLE commits 加
+    #   draft_version 可空列（记录「这次定稿的是哪一版草稿」）→ **不增表**，
+    #   业务表仍 42，总表仍 43；存量 commits 行该列为 NULL ⇒ 导出侧回退取最新。
     assert result["tables"] == 43, f"expected 43 (42+_migrations), got {result['tables']}"
     assert "0001_init.sql" in result["applied"]
     assert "0001_init.sql" not in result["skipped"]
@@ -153,6 +156,11 @@ def test_apply_migrations_creates_43_tables_total(tmp_path: Path):
     # - **不回填**（回填必须按「生效 key」分组，而生效 key 只有运行期的解析函数算得出来
     #   ——见 database/migrations/0033_model_connections.sql 文件头的留痕）。
     assert "0033_model_connections.sql" in result["applied"]
+    # commits 记「定稿的是哪一版草稿」（2026-10-23 · D-10）：0034_commits_draft_version.sql
+    # - 仅 ALTER TABLE commits 加 draft_version INTEGER 可空列；**不增表**（业务表 42 / 总表 43）；
+    # - **不回填**：存量 commit 无法可靠推断「当时定的是哪一版」（drafts 无「被定稿」标记位，
+    #   按时间戳倒推会把「审完又改稿」的那一版误认成定稿版）⇒ 回填即造假，刻意不做。
+    assert "0034_commits_draft_version.sql" in result["applied"]
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +208,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0031_project_fast_mode.sql",
         "0032_skills.sql",
         "0033_model_connections.sql",
+        "0034_commits_draft_version.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -281,41 +290,20 @@ def test_migrations_table_records_filename(tmp_path: Path):
     # 0018 V3.9.3 observer 独立 capability 绑定（profile_ids 继承 reasoning）
     # 0019 V3.1 P1-1.1 B3 回填 timeline_events 索引
     filenames = {r["filename"] for r in rows}
-    assert filenames == {
-        "0001_init.sql",
-        "0002_drafts_unique.sql",
-        "0003_quality_reports.sql",
-        "0004_reference_canon.sql",
-        "0005_branches_archived_status.sql",
-        "0006_quality_reports_project_idx.sql",
-        "0007_chapter_summaries.sql",
-        "0008_author_style_samples_and_overdue.sql",
-        "0009_branch_snapshots.sql",
-        "0010_trigger_keys.sql",
-        "0011_fts_index.sql",
-        "0012_judge_scores.sql",
-        "0013_plot_events_description.sql",
-        "0014_knowledge_reveal.sql",
-        "0015_volumes.sql",
-        "0016_model_profiles.sql",
-        "0017_unique_constraints.sql",
-        "0018_observer_capability_binding.sql",
-        "0019_backfill_timeline_events.sql",
-        "0020_backfill_init_plot_event_description.sql",
-        "0021_repair_ch2_status_after_double_rollback.sql",
-        "0022_faction_relationship_endpoints.sql",
-        "0023_project_word_band.sql",
-        "0024_quality_reports_draft_version.sql",
-        "0025_genre_packs.sql",
-        "0026_workflow_runs_instance_id.sql",
-        "0027_chapter_scene_plans.sql",
-        "0028_chapter_outline_json.sql",
-        "0029_project_writing_bible.sql",
-        "0030_commits_rollback_of_project_scope.sql",
-        "0031_project_fast_mode.sql",
-        "0032_skills.sql",
-        "0033_model_connections.sql",
-    }
+    # 动态断言（2026-10-23 改 · 对抗审查A B1）：_migrations 登记的 filename 集合
+    # 必须与 database/migrations/ 下实际存在的 *.sql 集合**逐位相同**——
+    # 既不缺登（漏登记 ⇒ 该迁移下次会被重跑，半迁移状态静默）也不多登。
+    #
+    # 原为手写硬编码集合，与 test_apply_migrations_is_idempotent 的 `applied`
+    # 清单构成**两处**人工注册表 ⇒ 每加一个迁移要手改两处，漏改即红。
+    # 本仓已因此漏改过两次（0033 改表数那轮、0034 加列这轮）。
+    # 现在：人工注册表只保留 `applied` 那一份（顺序 + 显式名单），
+    # 本断言改为与磁盘目录对账 ⇒ 加迁移只需改一处，且漏改会被 `applied` 断言抓住。
+    on_disk = {p.name for p in MIGRATIONS_DIR.glob("*.sql") if p.is_file()}
+    assert filenames == on_disk, (
+        f"_migrations 登记集合与磁盘不一致：缺登={sorted(on_disk - filenames)} "
+        f"多登={sorted(filenames - on_disk)}"
+    )
     for r in rows:
         assert r["applied_at"]
 

@@ -27,8 +27,15 @@
                 pack.json              # 运行时 payload + 元信息（genre-push 写出）
             manifest.json ?            # 不写：pack 清单在内容仓根 manifest.json 的 genres 段
         manifest.json                  # 内容仓根清单：genres 段 = {synced_at, packs[]}
+        _quarantine/                   # 隔离区（2026-10-23 新增，concern 4）
+            <book-slug>/
+                第1章-旧标题.txt        # 判定不了归属的旧正文 —— **移动**到这儿，**不删除**
         <book-slug>/
             ...                        # 书目录结构同上
+
+隔离区（``_quarantine/``）的语义：**只进不删**。旧正文清理只有在「能证明是本工具
+写的、且此后没被改过」时才物理删除；否则**移动**到这儿，并在书 manifest 的
+``quarantined`` 段留痕（文件名 + 原路径 + 原因）。作者可随时取回。
 
 设计要点：
 
@@ -57,12 +64,16 @@ __all__ = [
     "DEFAULT_CONTENT_DIR",
     "GENRES_DIR",
     "GENRE_PACK_FILENAME",
+    "QUARANTINE_DIR",
     "GenrePackDoc",
     "Manifest",
+    "chapter_number_from_filename",
     "content_manifest_path",
     "genre_pack_path",
     "genres_dir",
     "manifest_path",
+    "quarantine_dir",
+    "volume_number_from_filename",
 ]
 
 
@@ -125,6 +136,27 @@ def novel_volume_filename(number: int, title: str | None) -> str:
     return f"第{number}卷{suffix}.txt"
 
 
+# 正文文件名里的**章节号 / 卷号**（用于「旧文件残留」判定）。
+#
+# ⚠️ 口径：**按章节号 + 文件名映射**处理，**不**按内容哈希去重——后者会把
+# 「人工改过的正文」误判成重复文件而删掉（内容仓是人的编辑面）。
+# 整书 txt（``全书-<slug>.txt``）与任何不匹配这两种前缀的文件**一律不动**。
+_CHAPTER_TXT_PATTERN = re.compile(r"^第(\d+)章")
+_VOLUME_TXT_PATTERN = re.compile(r"^第(\d+)卷")
+
+
+def chapter_number_from_filename(filename: str) -> int | None:
+    """从正文文件名解析**章号**：「第N章-标题.txt」→ ``N``；不是章文件 → ``None``。"""
+    m = _CHAPTER_TXT_PATTERN.match(filename)
+    return int(m.group(1)) if m else None
+
+
+def volume_number_from_filename(filename: str) -> int | None:
+    """从卷合并文件名解析**卷号**：「第N卷-标题.txt」→ ``N``；不是卷文件 → ``None``。"""
+    m = _VOLUME_TXT_PATTERN.match(filename)
+    return int(m.group(1)) if m else None
+
+
 def backup_filename(slug: str, timestamp_compact: str) -> str:
     """JSON 备份包文件名：``<slug>-backup-<YYYYmmdd-HHMMSS>.json``。
 
@@ -157,6 +189,25 @@ GENRE_PACK_FILENAME = "pack.json"
 
 # 内容仓根清单文件名（书清单 + ``genres`` 段：同步时间 / pack 清单）。
 CONTENT_MANIFEST_FILENAME = "manifest.json"
+
+# 隔离区目录名（内容仓根下，与 ``genres/`` 同级）。
+#:
+#: **为什么需要它**（2026-10-23 返工 · concern 4）：旧正文清理此前是
+#: ``path.unlink()`` ——**无条件物理删除**内容仓里任何形如 ``第N章-*.txt`` 的文件。
+#: 但内容仓是**作者的编辑面**：作者手写的正文、作者改过的正文都长这个样子 ⇒
+#: 一次「改标题」就可能**删掉作者写的东西**（不可逆）。
+#: ⇒ 收窄为：**只有「本工具自己写出且记录在 manifest 里、且此后未被改动」的文件**
+#: 才允许删除；**判定不了归属的一律移动到隔离区**（**不删除**），
+#: 并在 manifest 留 ``quarantined`` 记录（文件名 + 原路径 + 原因）。
+#:
+#: 落点选**内容仓根下**（而不是书目录内）：① 一处集中、作者一眼能找到；
+#: ② 不污染书目录的固定布局（``novel/ canon/ story_state/ backup/ manifest.json``）。
+QUARANTINE_DIR = "_quarantine"
+
+
+def quarantine_dir(content_dir: Path | str, slug: str) -> Path:
+    """``<content-dir>/_quarantine/<book-slug>`` —— 隔离区（**不删除**的文件放这儿）。"""
+    return Path(content_dir) / QUARANTINE_DIR / slug
 
 
 def genres_dir(content_dir: Path | str) -> Path:
@@ -250,6 +301,27 @@ class Manifest:
     chapter_count: int
     draft_count: int
     story_state_versions: list[int] = field(default_factory=list)
+    story_state_aliases: dict[str, int] = field(default_factory=dict)
+    """被合并的快照版本 → 它重复的那个版本（**实际有文件**的版本）。
+
+    2026-10-23 新增：台账写路径会为同一份 ``snapshot_json`` 物化出只换版本号的
+    新快照行 ⇒ ``story_state/`` 里只落**一份**（与上一版本内容相同的不重复落盘），
+    被合并的版本记在这里 ⇒ **版本信息不丢**。
+    """
+    novel_files: dict[str, str] = field(default_factory=dict)
+    """**归属凭证**：本工具写出过的正文文件名 → 写出时的内容 sha256。
+
+    2026-10-23 新增（concern 4）：旧正文清理此前**无条件 ``unlink``** ⇒ 可能删掉
+    作者手写 / 作者改过的正文（内容仓是**编辑面**，不可逆删除是事故）。
+    ⇒ 现在只有「**记录在这里** + **当前内容哈希仍一致**」的文件才允许删除；
+    判定不了归属的文件一律**移入隔离区**（不删除）。
+    """
+    quarantined: list[dict[str, str]] = field(default_factory=list)
+    """被**移入隔离区**（**未删除**）的文件留痕。
+
+    每条：``{"file", "original_path", "reason", "quarantine_path", "quarantined_at"}``。
+    破坏性动作（哪怕只是移动）必须留痕——作者要能查到「我的文件去哪了」。
+    """
     content_dir: str | None = None  # 冗余写，便于离线查看内容仓时定位软件仓
 
     def to_dict(self) -> dict[str, Any]:
@@ -312,6 +384,40 @@ class Manifest:
                     continue
             return out
 
+        def _opt_alias_map(v: Any) -> dict[str, int]:
+            """可空别名表：``{"被合并版本": "重复的版本"}``（值转 int；不合法则丢弃）。"""
+            if not isinstance(v, dict):
+                return {}
+            out: dict[str, int] = {}
+            for key, value in v.items():
+                try:
+                    out[str(key)] = int(value)
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        def _opt_str_map(v: Any) -> dict[str, str]:
+            """可空字符串表（归属凭证 ``novel_files``）：键值都转 str；不合法则丢弃该项。"""
+            if not isinstance(v, dict):
+                return {}
+            out: dict[str, str] = {}
+            for key, value in v.items():
+                if value is None:
+                    continue
+                out[str(key)] = str(value)
+            return out
+
+        def _opt_records(v: Any) -> list[dict[str, str]]:
+            """可空记录列表（隔离区留痕 ``quarantined``）：只留 dict 形态的项，值转 str。"""
+            if not isinstance(v, list):
+                return []
+            out: list[dict[str, str]] = []
+            for item in v:
+                if not isinstance(item, dict):
+                    continue
+                out.append({str(k): ("" if val is None else str(val)) for k, val in item.items()})
+            return out
+
         return cls(
             project_id=str(data.get("project_id", "") or ""),
             name=str(data.get("name", "") or ""),
@@ -323,5 +429,8 @@ class Manifest:
             chapter_count=int(data.get("chapter_count", 0) or 0),
             draft_count=int(data.get("draft_count", 0) or 0),
             story_state_versions=_opt_list_int(data.get("story_state_versions")),
+            story_state_aliases=_opt_alias_map(data.get("story_state_aliases")),
+            novel_files=_opt_str_map(data.get("novel_files")),
+            quarantined=_opt_records(data.get("quarantined")),
             content_dir=_opt_str(data.get("content_dir")),
         )

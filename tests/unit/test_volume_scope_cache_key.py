@@ -20,7 +20,9 @@
   「挂卷后一律空」这种把 bug 挪位置的修法）；
 * ③ **哨兵同形**：未挂卷（真实章）与空态 peek（``_empty_chapter_peek``）两处，
   ``volume_scope`` 都必须是 ``"__none__"`` 且落在**同一位置**；同时钉住
-  director 键 18 元 / writer 键 23 元。
+  director 键 23 元 / writer 键 23 元（director 键 18 → 23：2026-10-23 第二轮审查
+  M-1 / D-7 新增 5 个台账维度——hooks_fp / debts_fp / plot_fp / foreshadow_fp /
+  title_fp）。
 
 每用例的项目 / 章 id 逐用例唯一（``uuid4`` 后缀）：装配缓存是**进程级 dict**，
 跨用例同 id 会读到别的用例的条目（AGENTS 坑区「跨用例共享进程级缓存」）。
@@ -50,7 +52,7 @@ from packages.domain.volume.service import VolumeService
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
-DIRECTOR_KEY_LEN = 18
+DIRECTOR_KEY_LEN = 23
 WRITER_KEY_LEN = 23
 SENTINEL = "__none__"
 
@@ -306,9 +308,9 @@ def test_unassigned_and_empty_peek_share_sentinel_shape(tmp_path: Path, monkeypa
     assert d_keys, "空态 peek 也必须产出 director 键（volume_scope 落哨兵）"
     assert w_keys, "空态 peek 也必须产出 writer 键（volume_scope 落哨兵）"
     for key in d_keys:
-        assert len(key) == DIRECTOR_KEY_LEN, f"director 键应 18 元，实得 {len(key)}"
+        assert len(key) == DIRECTOR_KEY_LEN, f"director 键应 {DIRECTOR_KEY_LEN} 元，实得 {len(key)}"
     for key in w_keys:
-        assert len(key) == WRITER_KEY_LEN, f"writer 键应 23 元，实得 {len(key)}"
+        assert len(key) == WRITER_KEY_LEN, f"writer 键应 {WRITER_KEY_LEN} 元，实得 {len(key)}"
 
 
 # ---------------------------------------------------------------------------

@@ -45,7 +45,12 @@ from .cache import (
     _fingerprint_plan_json,
     _fingerprint_skills,
     _fingerprint_writing_bible,
+    chapter_title_fingerprint,
     characters_fingerprint,
+    debts_fingerprint,
+    foreshadow_threshold_fingerprint,
+    hooks_fingerprint,
+    plot_fingerprint,
     project_meta_fingerprint,
     with_fingerprint_conn,
     world_fingerprint,
@@ -490,10 +495,34 @@ def build_director_input(
     # ⚠️ 位置：单独成行、落在身份行之后——既有突变规格 ``E1-2`` / ``SKILL-KEY-1``
     # 的锚点原文就在 ``chars_fp, world_fp, skills_fp, prompt_label,`` 那一行。
     volume_scope = peek.get("volume_id") or "__none__"
+    # 2026-10-23（第二轮审查 M-1 / D-7）：键再补 **5 个维度**——伏笔台账（hooks）/
+    # 叙事债务（narrative_debts）/ 情节图（plot_events + branches）/ 项目级逾期阈值
+    # （projects.foreshadow_overdue_chapters）/ **director 侧**章标题（chapters.title）。
+    # 这 5 个输入各自进 director payload（hook_ledger_excerpt / narrative_debt_excerpt /
+    # plot_graph_excerpt / open_foreshadow_list / chapter.title），而它们的写路径
+    # （LedgerService / PlotService / ProjectService / ChapterService）**只 commit()、
+    # 不推 state_version** ⇒ 缺维度时改数据后重跑同一章**命中旧装配**，planner 拿着
+    # 改动前的数据排计划，**零告警**（硬规则 2「凡进 payload 的装配参数必须入键」的
+    # 同形状第 6/7 次；Lead 探针实测：改伏笔台账 / 改章标题 ⇒ payload 不变）。
+    # ⚠️ 章标题维度与 writer 侧 ``title_fp`` **同一套指纹算法**
+    # （:func:`...cache.chapter_title_fingerprint`）——同一张表同一列，两侧必须同源同值。
+    # ⚠️ 位置：5 个维度**各自单独成行**、落在 ``project_meta_fp,`` 之后——既有突变规格
+    # ``E1-1`` / ``E1-2`` / ``SKILL-KEY-1`` / ``SKILL-KEY-2`` / ``STYLE-KEY-1`` /
+    # ``META-KEY-1`` / ``VOL-1`` 的锚点原文都在别的行上，不得改动。
+    hooks_fp = hooks_fingerprint(db_path, project_id, conn=_conn)
+    debts_fp = debts_fingerprint(db_path, project_id, conn=_conn)
+    plot_fp = plot_fingerprint(db_path, project_id, conn=_conn)
+    foreshadow_fp = foreshadow_threshold_fingerprint(db_path, project_id, conn=_conn)
+    title_fp = chapter_title_fingerprint(db_path, chapter_id, conn=_conn)
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
         volume_scope,
         project_meta_fp,
+        hooks_fp,
+        debts_fp,
+        plot_fp,
+        foreshadow_fp,
+        title_fp,
         active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
         chars_fp, world_fp, skills_fp, prompt_label,
         _cache_namespace_tag(namespace),
@@ -506,6 +535,11 @@ def build_director_input(
         and world_fp != _FINGERPRINT_UNCACHED
         and skills_fp != _FINGERPRINT_UNCACHED
         and project_meta_fp != _FINGERPRINT_UNCACHED
+        and hooks_fp != _FINGERPRINT_UNCACHED
+        and debts_fp != _FINGERPRINT_UNCACHED
+        and plot_fp != _FINGERPRINT_UNCACHED
+        and foreshadow_fp != _FINGERPRINT_UNCACHED
+        and title_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)

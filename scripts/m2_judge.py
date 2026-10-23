@@ -15,6 +15,14 @@
 - 输出：``<out-dir>/judge_results.json``（逐章明细 + 元数据）与
   ``<out-dir>/judge_summary.md``（汇总表 + 分段趋势 + top_issues 词频）。
 
+⚠️ **产物落痕迹仓**（2026-10-23 批次三十 / 对抗审查 B1 同族 + 台账 D-19）：
+评审产物含**真实 chapter_id 与逐章评审 verdict** ⇒ 必须落**痕迹仓**
+（``NovelOS-Artifacts``，无 remote），不能落软件仓（落进软件仓 = 进 GitHub 历史，
+不可撤回）。``--out-dir`` 缺省时落 ``<痕迹仓>/docs/evaluation/m2-judge``；
+**痕迹仓找不到就明确失败**（退出码 3，零文件落盘，**不回落到软件仓**），
+且该判定发生在**任何 LLM 调用之前**（不烧额度）。逃生口（默认关）：
+``--artifacts-dir <path>`` / ``NOVELOS_ARTIFACTS_DIR`` / ``--allow-software-repo-out``。
+
 V3.1 P1-2 新增：``--persist-api URL`` 可选参数。评审成功（无 ``error`` 字段）的章
 会通过 ``POST {URL}/api/chapters/<chapter_id>/quality/judge`` 落库到
 ``quality_reports.judge_json`` 列；与七子分公式双轨并存。失败/缺四维分/网络错误仅
@@ -27,7 +35,10 @@ log warning，不阻断主流程（评审结果仍写到 ``judge_results.json``�
 
     # 真实评审：需要设置 MINIMAX_API_KEY
     export MINIMAX_API_KEY=sk-...
-    python scripts/m2_judge.py --chapters 1-5,8,11-20 --out-dir docs/evaluation/m2-judge
+    python scripts/m2_judge.py --chapters 1-5,8,11-20
+
+    # 指定痕迹仓（缺省时用同级 NovelOS-Artifacts / NOVELOS_ARTIFACTS_DIR）
+    python scripts/m2_judge.py --chapters 1-5 --artifacts-dir D:/zcodeproject/NovelOS-Artifacts
 
     # 限定章号 + 自定义端点
     python scripts/m2_judge.py --chapters 1-3 --base-url https://api.minimaxi.com/v1 \\
@@ -69,6 +80,30 @@ from packages.core.agent_runtime.structured_output import (  # noqa: E402
     strip_think_blocks,
 )
 
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from scripts.guard_repo_write_path import (
+        ARTIFACTS_EVALUATION_RELPATH,
+        EXIT_ARTIFACTS_UNAVAILABLE,
+        EXIT_WRITE_PATH_REJECTED,
+        ArtifactsUnavailableError,
+        RepoWritePathError,
+        check_write_path,
+        format_artifacts_unavailable,
+        resolve_artifacts_root,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/m2_judge.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from guard_repo_write_path import (  # type: ignore[no-redef]
+        ARTIFACTS_EVALUATION_RELPATH,
+        EXIT_ARTIFACTS_UNAVAILABLE,
+        EXIT_WRITE_PATH_REJECTED,
+        ArtifactsUnavailableError,
+        RepoWritePathError,
+        check_write_path,
+        format_artifacts_unavailable,
+        resolve_artifacts_root,
+    )
+
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
@@ -79,7 +114,9 @@ DEFAULT_TIMEOUT_S = 600.0
 DEFAULT_PERSIST_TIMEOUT_S = 10.0  # POST /quality/judge 落库请求超时
 DEFAULT_MAX_CONTENT_CHARS = 60_000  # 单章正文超过则截断到该上限，避免 prompt 爆炸
 DEFAULT_DB = "data/m1_run/novelos.db"
-DEFAULT_OUT_DIR = "docs/evaluation/m2-judge"
+
+#: 评审产物**相对痕迹仓根**的路径（缺省落点；不再落软件仓）。
+DEFAULT_OUT_RELPATH = ARTIFACTS_EVALUATION_RELPATH / "m2-judge"
 
 SYSTEM_PROMPT = (
     "你是一位资深的网文编辑评审。请基于标题与正文，对这一章做严格、客观、可量化的"
@@ -659,6 +696,46 @@ def build_summary_markdown(
 # ---------------------------------------------------------------------------
 
 
+def resolve_out_dir(
+    *,
+    out_dir: str | None = None,
+    artifacts_dir: str | None = None,
+    allow_software_repo_out: bool = False,
+) -> Path:
+    """决定评审产物落点（**痕迹仓**，不是软件仓）。
+
+    顺序：显式 ``--out-dir`` > ``--artifacts-dir`` / ``NOVELOS_ARTIFACTS_DIR`` /
+    同级目录 ``<repo父目录>/NovelOS-Artifacts``（落 ``<痕迹仓>/docs/evaluation/m2-judge``）。
+
+    ⚠️ **必须在任何 LLM 调用之前调用**——痕迹仓不可用时要先明确失败（不烧额度）。
+    找不到痕迹仓时抛 :class:`ArtifactsUnavailableError`（**不回落到软件仓**）；
+    只有显式 ``--allow-software-repo-out`` 才回落到软件仓并打告警。
+    """
+    if out_dir:
+        return Path(out_dir).expanduser().resolve()
+
+    res = resolve_artifacts_root(artifacts_dir, repo_root=ROOT)
+    if res.ok:
+        return res.root / DEFAULT_OUT_RELPATH
+    if allow_software_repo_out:
+        fallback = ROOT / DEFAULT_OUT_RELPATH
+        print(
+            "[警告] --allow-software-repo-out 已开启：评审产物将落软件仓 "
+            f"{fallback}（可能被误提交 ⇒ 进 GitHub 历史不可撤回）。",
+            file=sys.stderr,
+        )
+        return fallback
+    raise ArtifactsUnavailableError(
+        format_artifacts_unavailable(
+            res,
+            subject=(
+                "评审产物含真实 chapter_id 与逐章评审 verdict ⇒ 必须落痕迹仓，"
+                "不能落软件仓（落进软件仓 = 进 GitHub 历史，不可撤回）。"
+            ),
+        )
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="M2 章质量评审探针 —— 真实 LLM 四维量化评分",
@@ -675,8 +752,21 @@ def main() -> int:
     )
     parser.add_argument(
         "--out-dir",
-        default=DEFAULT_OUT_DIR,
-        help=f"产物目录（默认 {DEFAULT_OUT_DIR}）",
+        default=None,
+        help=(
+            f"产物目录（默认**痕迹仓** {DEFAULT_OUT_RELPATH}；"
+            "显式给出时按该路径写，仍受仓库守卫约束）"
+        ),
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        default=None,
+        help="显式指定痕迹仓根目录（覆盖 NOVELOS_ARTIFACTS_DIR 与同级目录探测）",
+    )
+    parser.add_argument(
+        "--allow-software-repo-out",
+        action="store_true",
+        help="逃生口：痕迹仓不可用时接受把产物写回软件仓（默认关；风险自负）",
     )
     parser.add_argument(
         "--dry-run",
@@ -727,8 +817,28 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # 落点判定**先于**任何 LLM 调用（痕迹仓不可用就别烧额度）
+    # ⚠️ ``getattr`` 兜底：既有测试 ``tests/unit/test_m2_judge_persist.py`` 用
+    # ``SimpleNamespace`` 顶替 ``parse_args`` 的返回值（只列了 V3.1 时点的字段），
+    # 那里不归本成员所有 ⇒ 用默认值兜住，别让新增开关把老契约打断。
+    artifacts_dir = getattr(args, "artifacts_dir", None)
+    allow_software_repo_out = bool(getattr(args, "allow_software_repo_out", False))
+    try:
+        out_dir = resolve_out_dir(
+            out_dir=args.out_dir,
+            artifacts_dir=artifacts_dir,
+            allow_software_repo_out=allow_software_repo_out,
+        )
+    except ArtifactsUnavailableError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_ARTIFACTS_UNAVAILABLE
+    try:
+        check_write_path(out_dir, allow_repo_root=allow_software_repo_out)
+    except RepoWritePathError as exc:
+        print(f"[拒绝写入] {exc}", file=sys.stderr)
+        return EXIT_WRITE_PATH_REJECTED
+
     db_path = Path(args.db).resolve()
-    out_dir = Path(args.out_dir).resolve()
 
     if not db_path.exists():
         print(f"[m2-judge] FAIL：数据库不存在 {db_path}", flush=True)

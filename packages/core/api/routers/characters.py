@@ -25,7 +25,7 @@ from packages.domain.character.models import (
     CharacterState,
     CharacterUpdate,
 )
-from packages.domain.character.service import CharacterService
+from packages.domain.character.service import CharacterService, ReferencedError
 
 log = get_logger("novelos.routers.characters")
 
@@ -91,7 +91,13 @@ def update_character(character_id: str, payload: CharacterUpdate, request: Reque
 
 @router.delete("/characters/{character_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_character(character_id: str, request: Request) -> None:
-    ok = _service(request).delete(character_id)
+    try:
+        ok = _service(request).delete(character_id)
+    except ReferencedError as exc:
+        # 角色被 relationships 引用 ⇒ 409（同 world 域口径，见 worlds.py::_handle_world_error）。
+        # ⚠️ 漏掉它会变成 **500**：把「可解释的引用冲突」报成「服务器炸了」，
+        # 客户端无法区分「重试有用」与「永久失败」。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not ok:
         raise HTTPException(status_code=404, detail=f"character {character_id!r} not found")
     return None

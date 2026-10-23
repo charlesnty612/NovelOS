@@ -473,7 +473,15 @@ def _build_revision_guidance(report: _QualityReport, issues: list[Issue]) -> lis
             key = (iss.rule_id, iss.category or "")
             if key in seen_keys:
                 continue
-            hint = _RULE_REVISION_HINTS.get(iss.rule_id)
+            # ⚠️ 2026-10-23（对抗审查 A · T1-3/T1-4）：**issue 自带的 ``suggestion`` 优先**
+            # ——它是**产出侧**给的最贴近该条的可执行出路。
+            # 典型场景：「正文读不到」与「子分缺失」共用 rule_id=``scoring_missing_subscore``，
+            # 但方向完全相反：前者是**基础设施故障**（去修草稿表），后者是输入不全
+            # （去补 plan_json / submit_delta）。issue.suggestion 由产出侧写死（见
+            # ``packages/core/quality/scoring.py::_draft_unavailable_issue``）⇒ 分流准确。
+            # ⚠️ 存量零影响：既有规则**没有任何一条**设置 suggestion（生产侧恒为 None）
+            # ⇒ 下面两行对存量报告的 rule_hint **逐字不变**。
+            hint = iss.suggestion or _RULE_REVISION_HINTS.get(iss.rule_id)
             if hint is None:
                 hint = _CATEGORY_REVISION_HINTS.get(iss.category or "")
             if hint is None:

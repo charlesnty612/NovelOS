@@ -22,10 +22,20 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          # pip 钉版（2026-10-23 task-4 / 对抗审查 A1）：此前是裸 `pip install --upgrade pip`
+          # ⇒ 每次 CI 用的 pip 版本都随 PyPI 漂移，失败时无法复现。
+          # 钉版口径 = **钉「当前无已知公告」的版本**（不是钉任意一个旧版）：
+          #   pip 25.3 经 OSV.dev 实查有 5 条已知公告（GHSA-58qw-9mgm-455v /
+          #   GHSA-6vgw-5pg2-w6jp / GHSA-jp4c-xjxw-mgf9 / GHSA-qwm4-qh6w-59xr /
+          #   GHSA-wf93-45jw-7689，各带 PYSEC 别名）⇒ **不再使用**。
+          #   pip 26.2.2 = 2026-10-20 发布，OSV.dev 实查 **0 条公告**；
+          #   requires-python >=3.10 ⇒ backend/smoke 的 3.11 与 windows 的 3.12 都可用。
+          #   （核对日期 2026-10-23；PyPI JSON + OSV.dev API 实查，非凭记忆。）
+          python -m pip install --upgrade "pip==26.2.2"
           # 单一依赖源：pyproject.toml（[project].dependencies 含 json-repair /
-          # python-multipart，[dev] 含 pytest / ruff）。此前手写清单缺 json-repair
-          # 与 python-multipart，收集期 ModuleNotFoundError 导致 CI 必红（R3 实证）。
+          # python-multipart，[dev] 含 pytest / ruff / pytest-cov / pytest-xdist）。
+          # 此前手写清单缺 json-repair 与 python-multipart，收集期 ModuleNotFoundError
+          # 导致 CI 必红（R3 实证）。
           pip install -e ".[dev]"
       - name: Ruff check
         run: ruff check packages tests scripts
@@ -38,8 +48,11 @@ jobs:
           #   ① 证据表（packages/core/quality/detector_evidence.json）与**代码实际值**
           #      逐条相符（66 条代码引用 + 12 条行为探针；退出码 0/1/2）；
           #   ② 对外 skill 包的三平台清单 / frontmatter / 引用完整性合规
-          #      （**49 项检查 + 8 条变异自检**；2026-10-22 批次十九起新增
-          #        app-version-consistency 三条 + 变异 M8，此前写的 46+7 已过期）。
+          #      （**52 项检查 + 12 条变异自检**；2026-10-22 批次十九起新增
+          #        app-version-consistency 三条 + 变异 M8，此前写的 46+7 已过期；
+          #        2026-10-23 task-4 起再补 web 三处版本副本 ⇒ 49 → 52，
+          #        并补 M9–M12 让 web 三处**进脚本自己的变异矩阵** ⇒ 8 → 12
+          #        （否则 CI 上该看守是「跑而不验」——对抗审查 A2 实测过这个缺口））。
           python scripts/detector_evidence_check.py
           python skills/novelos/scripts/check_skill_package.py --selftest
       - name: Mutation-spec precheck (read-only, ~1s)
@@ -64,7 +77,10 @@ jobs:
           python scripts/human_baseline_synthetic.py
       - name: Dependency audit (pip-audit)
         run: |
-          python -m pip install pip-audit
+          # pip-audit 钉版（2026-10-23 task-4 / 对抗审查 A1）：此前是裸 `pip install pip-audit`
+          # ⇒ 工具版本随 PyPI 漂移。2.10.1 = 2026-10-23 实查的 **latest**（PyPI JSON），
+          # OSV.dev 实查 **0 条公告**，requires-python >=3.10 ⇒ 两个 Python 版本都可用。
+          python -m pip install "pip-audit==2.10.1"
           # 显式接受告警不阻断：方法论 05「不可用 = 显式拒绝或签字跳过」——`|| true`
           # 是签字跳过而非漏写；覆盖范围 fastapi / uvicorn / pydantic / jsonschema /
           # httpx / starlette / python-multipart / json-repair。告警定期人工复核后收紧。
@@ -111,8 +127,18 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          # pip 钉版（2026-10-23 task-4 / 对抗审查 A1）：同 backend job
+          # （pip==26.2.2，2026-10-23 实查 latest 且 0 条公告）。
+          python -m pip install --upgrade "pip==26.2.2"
           pip install -e ".[dev]"
+      - name: Self-check (pytest-xdist importable)
+        # 「闸门存在 ≠ 闸门在门框上」的同款：下面那步的 `-n 4` 在 xdist **没装**时
+        # 只会报一句 `unrecognized arguments: -n` ⇒ 报错**不指向根因**（依赖没装），
+        # 修法是「早失败 + 说清楚」：这里显式 import 一次。
+        # ⚠️ 这条之所以必要：xdist 原先只在 `[dependency-groups]`（PEP 735 分组不进
+        # wheel 元数据）⇒ `pip install -e ".[dev]"` **装不上** ⇒ 这个 job 的并发路径
+        # **从未真正跑过**（2026-10-23 task-4 实测：CI 历史 47 次 34 红）。
+        run: python -c "import xdist; print('pytest-xdist', xdist.__version__)"
       - name: Windows-only tests (skipped on Linux CI)
         # 这两个文件在 ubuntu 上整片 `skipif(not WIN)` / 走不到 → 只有这里真跑。
         run: python -m pytest tests/unit/test_pid_alive_windows_probe.py tests/unit/test_m1_lock.py -q
@@ -133,7 +159,9 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          # pip 钉版（2026-10-23 task-4 / 对抗审查 A1）：同 backend job
+          # （pip==26.2.2，2026-10-23 实查 latest 且 0 条公告）。
+          python -m pip install --upgrade "pip==26.2.2"
           pip install -e ".[dev]"
       - name: Run e2e smoke
         run: python scripts/smoke_e2e.py

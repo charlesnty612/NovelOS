@@ -14,7 +14,7 @@
 
 | 端点 | 实测行键数 | 行模型 |
 |---|---|---|
-| ``GET /projects/{pid}/commits`` | **12** | ``CommitListItem`` |
+| ``GET /projects/{pid}/commits`` | **13** | ``CommitListItem`` |
 | ``GET /projects/{pid}/chapters/{cid}/deltas`` | **18** | ``StateDeltaListItem`` |
 | ``GET /projects/{pid}/branches`` | **7** | ``BranchSummary`` |
 | ``GET /projects/{pid}/runs`` | **13** | ``WorkflowRunSummary`` |
@@ -24,7 +24,7 @@
 
 1. **``commits`` 列表行不是 ``POST /commits`` 的形状。** 后者是 4 键动作摘要
    （``commit_id`` / ``delta_id`` / ``state_version`` / ``snapshot_ref``）；前者是
-   ``SELECT * FROM commits`` 的**裸 DB 行**（12 键），``state_version`` 在那里
+   ``SELECT * FROM commits`` 的**裸 DB 行**（13 键），``state_version`` 在那里
    拆成 ``previous_state_version`` / ``resulting_state_version``。⇒ 必须新建模型。
 2. **``branches`` 列表行与 ``POST /branches`` 的 ``BranchCreatedResponse``
    键集逐字相同，却不可复用。** 列表恒含 ``main``，而 main 的
@@ -83,9 +83,9 @@ from ._shared import _create_app, _evidence
 # （依据：DB 实际列 + 本文件用临时库实测 dump 出的响应，二者独立于模型）
 # ---------------------------------------------------------------------------
 
-#: ``GET /projects/{pid}/commits`` 的行。依据：``commits`` 表 12 列（0001 建表起即
-#: 12 列，含 ``rollback_of``；0022/0030 只动它的索引不添列），其中两个 JSON 列经
-#: ``snapshots._parse_json`` 解析成 dict。
+#: ``GET /projects/{pid}/commits`` 的行。依据：``commits`` 表 **13** 列（0001 建表起即
+#: 12 列，含 ``rollback_of``；0022/0030 只动它的索引不添列；**0034 加了
+#: ``draft_version``** ⇒ 13 列），其中两个 JSON 列经 ``snapshots._parse_json`` 解析成 dict。
 EXPECTED_COMMIT_ROW_KEYS = {
     "commit_id",
     "project_id",
@@ -99,6 +99,7 @@ EXPECTED_COMMIT_ROW_KEYS = {
     "timestamp",
     "workflow_run_id",
     "rollback_of",
+    "draft_version",
 }
 #: ``POST /projects/{pid}/commits`` 的响应——**故意并列在此**，用来钉住「两者不同形」。
 EXPECTED_COMMIT_RESPONSE_KEYS = {"commit_id", "delta_id", "state_version", "snapshot_ref"}
@@ -482,7 +483,7 @@ def test_openapi_schema_properties_match_hardcoded_expectation(tmp_path: Path):
 
 
 def test_commits_row_keys_match_hardcoded_expectation(harvested: dict):
-    """commits 列表行恒 **12 键**，且**与 ``POST /commits`` 的 4 键响应不同形**。
+    """commits 列表行恒 **13 键**，且**与 ``POST /commits`` 的 4 键响应不同形**。
 
     ⚠️ 后半句是本组的第一条实测结论：列表行是裸 DB 行，``state_version`` 在那里拆成
     ``previous_state_version`` / ``resulting_state_version``。若谁把它「简化」成复用
@@ -678,7 +679,8 @@ def test_extra_allow_keeps_undeclared_row_keys():
         commit_id="c", project_id="p", branch_id="b", chapter_id="ch",
         previous_state_version=0, resulting_state_version=1, delta_id="d",
         validation_json={}, author_approval_json={}, timestamp="t", workflow_run_id="r",
-        rollback_of=None, brand_new_column_from_migration_0033={"x": 1},
+        rollback_of=None, draft_version=None,
+        brand_new_column_from_migration_0033={"x": 1},
     ).model_dump()
     assert dumped["brand_new_column_from_migration_0033"] == {"x": 1}, "extra 被关掉了"
 

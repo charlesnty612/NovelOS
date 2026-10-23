@@ -127,7 +127,15 @@ EXPECTED_SIGNING_CHECK_KEYS = {
     "summary",
     "word_band_source",
 }
-EXPECTED_SIGNING_CHECK_CONDITIONAL_KEYS = {"genre_opening", "word_band_rejected"}
+EXPECTED_SIGNING_CHECK_CONDITIONAL_KEYS = {
+    "genre_opening",
+    "word_band_rejected",
+    # D-13（2026-10-23 批次三十二）：题材开篇**不可检**（读题材包失败）时的标记。
+    # 与前两个键同款：**未绑定题材包 / 未触发不可检时整个键缺席**
+    # （`response_model_exclude_unset=True` ⇒ 没 set 就没键）。
+    "genre_opening_unavailable",
+    "genre_opening_error",
+}
 EXPECTED_SIGNING_ITEM_KEYS = {"key", "level", "detail", "advice"}
 EXPECTED_SIGNING_SUMMARY_KEYS = {"pass_count", "warn_count", "fail_count", "info_count"}
 # 实测 genre_opening 恒 9 键

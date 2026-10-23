@@ -14,7 +14,11 @@
   :mod:`packages.core.genre.target_words` 的 ``pack_chapter_words_target``）。
 
 边界：除上述 IO 例外，本模块只做「结构化消费子集 → 消费形态」的投影，不写 payload、
-不做题材内容判断——题材正文与审核禁忌清单只进内容仓。
+不做题材内容判断——**题材正文与平台审核清单只进内容仓**；软件层只承载
+**机制可消费子集**（条目化的 ``forbidden_words`` / ``pacing.redlines``，
+以及文本化的 ``critic_rubric.taboo_notes`` 要点）。
+⚠️ 本模块**确实消费** ``forbidden_words`` 与 ``taboo_notes`` ⇒「审核红线只进内容仓」
+是**字面绝对**口径，与实现不符（D-15 口径订正，2026-10-23；只改措辞不改实现）。
 """
 
 from __future__ import annotations

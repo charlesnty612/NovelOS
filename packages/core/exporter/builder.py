@@ -19,6 +19,8 @@
 - 章节列表：``ChapterService.list_by_project(project_id)``（number ASC）；
 - 单章正文：``SELECT content FROM drafts WHERE chapter_id = ? ORDER BY version DESC LIMIT 1``；
   无 draft（仅 PLANNED 状态）则用空串；
+  **外发面**（番茄投稿包）另有「取定稿那一版」的分支，见 :func:`latest_draft_content`
+  的 ``prefer_committed=True``；
 - 大纲：``chapters.plan_json``（chapter-plan 工作流写回），用 :func:`plan_to_outline` 渲染。
 
 口径（V3.9 批次 4.1 裁决落地：此前实现 / 文档 / m2_judge 三方分裂，此处为唯一裁决）：
@@ -28,6 +30,26 @@
   与 README / m2_judge 的 COMMITTED-only 口径一致。
 - 番茄投稿包正文：从 chapter_no=1 起累加章节正文到目标字数附近；超过则在最近章节边界截断；
   本函数目标字数固定 10000（README 注明口径）。
+
+外发面的「取稿」口径（2026-10-23 批次二十 / D-10 裁决，权威列 = 迁移 0034 新增的
+``commits.draft_version``，含义 = **本次 commit 所定的那一版草稿**）::
+
+    若 该章 chapters.status == 'COMMITTED':
+        v = SELECT draft_version FROM commits
+            WHERE chapter_id = ? AND draft_version IS NOT NULL
+            ORDER BY timestamp DESC, commit_id DESC LIMIT 1
+        若 v 命中 且 drafts 里存在 (chapter_id, version=v) ⇒ 取该版正文
+        否则 ⇒ 兜底：取最新草稿（存量行为逐字不变）
+    否则（章非 COMMITTED，WIP/返修中）:
+        取最新草稿（章节头照旧带 ``【未定稿】`` 标记）
+
+**存量零退化**是硬要求：存量 ``commits`` 行 ``draft_version`` 恒 NULL（迁移 0034
+**不回填**——事后按时间戳倒推会把「审完又改稿」的那一版误认成定稿版，回填即造假）
+⇒ 一律走兜底分支 ⇒ 行为与改造前逐字一致。
+
+**刻意不做**的两件事（各有理由，均为显式决策，勿「顺手加上」）：
+- 不按 ``commits.timestamp`` 回溯推版本号（猜「提交时刻的最新稿 = 被定的那一版」）；
+- 不读 ``workflow_runs`` 的 run 级快照（与 commits 行不是一一对应 ⇒ 语义更弱）。
 """
 
 from __future__ import annotations
@@ -105,16 +127,84 @@ def _export_heading(chapter: Mapping[str, Any]) -> str:
     return heading if _is_committed(chapter) else UNCOMMITTED_MARKER + heading
 
 
-def latest_draft_content(db_path: str, chapter_id: str) -> str:
-    """该章最新 draft（``version DESC``）正文；无 draft → 空串。公开 API（V3.9 批次 5.14）。
+COMMITTED_STATUS = "COMMITTED"
+"""章「已定稿」状态值（``chapters.status``）。"""
 
-    有意取最新（P1-1）：本函数服务 txt / docx / 番茄投稿包等**产物面**——导出的是
-    「这一章现在的正文」，不存在「被审版本」这一说。需要「被审 / 被核那一版」的
-    读者不要复用本函数，走
+
+def _chapter_status(conn: Any, chapter_id: str) -> str:
+    """读章状态（读不到行 ⇒ 空串）。"""
+    row = conn.execute(
+        "SELECT status FROM chapters WHERE chapter_id = ?",
+        (chapter_id,),
+    ).fetchone()
+    return (row["status"] or "") if row is not None else ""
+
+
+def _committed_draft_version(conn: Any, chapter_id: str) -> int | None:
+    """该章**最近一次记录了定稿版本**的提交所定的草稿版本；无 ⇒ ``None``。
+
+    取数形态（与迁移 ``0034_commits_draft_version.sql`` 的口径逐字一致）::
+
+        SELECT draft_version FROM commits
+        WHERE chapter_id = ? AND draft_version IS NOT NULL
+        ORDER BY timestamp DESC, commit_id DESC
+        LIMIT 1
+
+    ⚠️ 存量行 ``draft_version`` 恒 NULL（迁移**不回填**）⇒ 本函数对存量返回
+    ``None`` ⇒ 调用方走「兜底取最新」，存量行为逐字不变。
+    """
+    row = conn.execute(
+        """
+        SELECT draft_version FROM commits
+        WHERE chapter_id = ? AND draft_version IS NOT NULL
+        ORDER BY timestamp DESC, commit_id DESC
+        LIMIT 1
+        """,
+        (chapter_id,),
+    ).fetchone()
+    if row is None or row["draft_version"] is None:
+        return None
+    try:
+        return int(row["draft_version"])
+    except (TypeError, ValueError):
+        return None
+
+
+def latest_draft_content(
+    db_path: str, chapter_id: str, *, prefer_committed: bool = False
+) -> str:
+    """该章草稿正文；无 draft → 空串。公开 API（V3.9 批次 5.14）。
+
+    ``prefer_committed=False``（**默认，既有语义逐字不变**）：取最新 draft
+    （``version DESC``）——服务 txt / docx / content_sync 等**作者 WIP 面**
+    （「这一章现在的正文」）。需要「被审 / 被核那一版」的读者不要复用本函数，走
     :func:`packages.domain.chapter.draft_resolver.resolve_draft` 并按版本取。
+
+    ``prefer_committed=True``（**外发面**专用：番茄投稿包）：章已 ``COMMITTED``
+    时取「**本次 commit 所定的那一版**」（权威列 = 迁移 0034 的
+    ``commits.draft_version``）——避免章定稿后再改稿时外发**没审过的那一版**。
+
+    兜底（**存量零退化**）：``draft_version`` 为 NULL（存量行，迁移不回填）或
+    指向的草稿行已不存在 ⇒ 取最新 draft，与改造前逐字一致。章非 ``COMMITTED``
+    ⇒ 取最新 draft（外发面此时根本不收该章）。
     """
     conn = get_connection(db_path)
     try:
+        if prefer_committed and _chapter_status(conn, chapter_id).strip().upper() == COMMITTED_STATUS:
+            version = _committed_draft_version(conn, chapter_id)
+            if version is not None:
+                draft_row = conn.execute(
+                    "SELECT content FROM drafts WHERE chapter_id = ? AND version = ?",
+                    (chapter_id, version),
+                ).fetchone()
+                if draft_row is not None:
+                    return draft_row["content"]
+                # 定稿版本指向的草稿行已不存在 ⇒ 兜底取最新（不得外发空正文）
+                log.warning(
+                    "committed draft version %s missing for chapter %s → fallback to latest",
+                    version,
+                    chapter_id,
+                )
         row = conn.execute(
             """
             SELECT content FROM drafts
@@ -282,6 +372,9 @@ def build_fanqie_package(db_path: str, project_id: str) -> bytes:
     - 只取 ``status='COMMITTED'`` 的章节——正文与故事大纲都过滤，与 README /
       ``scripts/m2_judge.py`` 的 COMMITTED-only 口径一致；
     - 非 COMMITTED 章节不出现（作者 WIP 标注 ``【未定稿】`` 只属于 txt/docx 面）；
+    - **正文取「本次 commit 所定的那一版」**（``commits.draft_version``，迁移 0034）
+      ——章定稿后再改稿时，外发不得带没审过的那一版；该列 NULL（存量）/ 指向的草稿
+      行已不存在 ⇒ 兜底取最新（存量零退化，见模块 docstring）；
     - 按 chapter_no ASC 累加章节正文长度（按字符数）到 ``FANQIE_TARGET_CHARS`` 附近；
     - 一旦超阈值就在「最近章节边界」截断（不切到章中间），不再追加后续章节；
     - 若所有章节总字数仍 < 阈值，则全量输出。
@@ -300,7 +393,7 @@ def build_fanqie_package(db_path: str, project_id: str) -> bytes:
     running = 0
     included_chapters: list[dict[str, Any]] = []
     for ch in chapters:
-        content = _latest_draft_content(db_path, ch["chapter_id"])
+        content = _latest_draft_content(db_path, ch["chapter_id"], prefer_committed=True)
         heading = _export_heading(ch)
         block = heading + "\n" + "-" * max(len(heading), 8) + "\n" + (content or "（本章尚无正文）")
         new_running = running + len(content or "")

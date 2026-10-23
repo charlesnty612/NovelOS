@@ -688,12 +688,61 @@ def _check_signing_window(total_chars: int) -> CheckItem:
 # 入口
 # ---------------------------------------------------------------------------
 
+#: 「题材开篇检查**不可检**」检查项的 key（**唯一声明处**）。
+#:
+#: 消费方（``packages.core.delivery.evidence`` / ``packages.core.delivery.verdict``）
+#: 判定「不可检」的**唯一口径**——它们 import :func:`is_genre_opening_unavailable_item`
+#: 而**不**复制这个字符串、也**不**另造一套检测。
+#:
+#: 形态与 ``packages.core.quality.scoring.DRAFT_UNAVAILABLE`` /
+#: ``is_draft_unavailable`` **同款**：常量 + 谓词住在**拥有该概念**的模块里，
+#: 消费方只 import（2026-10-23 返工 · concern 2：「不可检」识别口径统一）。
+GENRE_OPENING_UNAVAILABLE_KEY: Final[str] = "genre_opening_unavailable"
+
+
+def is_genre_opening_unavailable_item(item: Any) -> bool:
+    """该检查项是否是「题材开篇**不可检**」标记（D-13）。
+
+    参数：``run_checks`` 产出的 item dict（或其 dict 投影）。
+
+    返回：``True`` 当且仅当该项的 ``key`` 是 :data:`GENRE_OPENING_UNAVAILABLE_KEY`。
+
+    ⚠️ **为什么要有这个谓词**：交付判定层（``delivery``）需要区分
+    「体检跑了且通过」与「**有一段根本没跑**」。此前「不可检」只以
+    ``info`` 级条目的形态存在 ⇒ 交付层按「info 不进理由」处理 ⇒
+    「没检」在交付判定里**与「检过且没问题」不可区分**。
+    ⇒ 识别口径由**拥有该概念的模块**（本模块）单点提供，消费方不复制字符串。
+    """
+    if not isinstance(item, dict):
+        return False
+    return str(item.get("key") or "") == GENRE_OPENING_UNAVAILABLE_KEY
+
+
+def _genre_opening_unavailable_item(reason: str) -> CheckItem:
+    """「题材开篇检查**不可检**」条目（题材包读取失败时）。
+
+    为什么要显式条目（D-13）：此前读题材包失败 ⇒ 题材开篇整段**静默消失**、无告警
+    ⇒ 体检报告外观「全部通过」而实际**未检**。同文件 ``word_band_rejected`` 已有
+    显式标记 ⇒ 处置不一致 ⇒ 此处补一条**非 pass**（``info`` 级）的可见条目，
+    让「没检」与「检过且通过」在报告外观上**可区分**。
+    """
+    return CheckItem(
+        key=GENRE_OPENING_UNAVAILABLE_KEY,
+        level="info",
+        detail=(
+            "题材开篇规则**不可检**：题材包读取失败（"
+            f"{reason}）——本次体检未执行题材开篇检查，不代表已通过"
+        ),
+        advice="检查题材包绑定与运行库 genre_packs 表是否可用，再重新体检",
+    )
+
 
 def run_checks(
     chapters: list[dict],
     protagonist_names: list[str],
     opening_rules: list[dict] | None = None,
     word_band: dict[str, Any] | None = None,
+    genre_opening_unavailable: str | None = None,
 ) -> list[CheckItem]:
     """对一组章节执行全部签约体检检查。
 
@@ -708,14 +757,17 @@ def run_checks(
             ``{"low", "high", "floor", "source"}``）。提供且形态合法 → 单章字数按
             校准带三档判定（pass / warn / fail）；``None`` / 形态非法 → 平台默认
             口径（1200-2600 pass、区间外 warn，行为与文案逐字不变）。
+        genre_opening_unavailable: 题材开篇检查**不可检**的原因（可选；读题材包失败时
+            由调用方传入）。非空 → 追加一条 ``info`` 级的 ``genre_opening_unavailable``
+            条目，让报告**不得**看起来「全部通过」（D-13）。``None`` → 零行为变化。
 
     返回：``list[CheckItem]``，按平台规则顺序排列（开篇 → 黄金三章 → 节奏 → 签约窗口
-    → 题材开篇）。
+    → 题材开篇 → 不可检标记）。
     少于 1 章时返回单条 ``info``「暂无正文」。
     """
 
     if not chapters:
-        return [
+        items = [
             CheckItem(
                 key="empty",
                 level="info",
@@ -723,6 +775,9 @@ def run_checks(
                 advice="写作后再次体检",
             )
         ]
+        if genre_opening_unavailable:
+            items.append(_genre_opening_unavailable_item(genre_opening_unavailable))
+        return items
 
     chapters_by_n = _chapter_by_number(chapters)
     ch1_text = chapters_by_n.get(1, "")
@@ -748,6 +803,10 @@ def run_checks(
     for verdict in evaluate_genre_opening(chapters, opening_rules):
         items.append(_opening_rule_item(verdict))
 
+    # 题材开篇**不可检**标记（D-13）：读题材包失败 ⇒ 整段检查没跑 ⇒ 必须显式可见。
+    if genre_opening_unavailable:
+        items.append(_genre_opening_unavailable_item(genre_opening_unavailable))
+
     return items
 
 
@@ -755,6 +814,8 @@ __all__ = [
     "CheckItem",
     "evaluate_genre_opening",
     "run_checks",
+    "is_genre_opening_unavailable_item",
+    "GENRE_OPENING_UNAVAILABLE_KEY",
     "CONFLICT_WORDS",
     "GOLDEN_FINGER_WORDS",
     "FACE_SLAP_WORDS",

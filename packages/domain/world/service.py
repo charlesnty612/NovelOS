@@ -121,6 +121,47 @@ class ValidationError(WorldServiceError):
 
 
 # ---------------------------------------------------------------------------
+# 共用守卫：删实体前查 relationships 端点
+# ---------------------------------------------------------------------------
+
+
+def assert_not_relationship_endpoint(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    label: str,
+    error_cls: type[ReferencedError] = ReferencedError,
+) -> None:
+    """实体被 ``relationships`` 任一端点引用 ⇒ 抛错（**调用方须保证零删除**）。
+
+    背景（2026-10-23 task-7 · D-12/M-10 + 对抗审查 A3）：
+    迁移 0022 摘掉了 ``relationships.from_character_id`` / ``to_character_id``
+    的外键（端点可以是 character **或** faction，FK 语义不再成立）
+    ⇒ 删任一端点实体都会留**孤儿关系行**，而 ``PRAGMA foreign_key_check``
+    **报不出来**（FK 已不存在 ⇒ 检查无对象）
+    ⇒ 必须在 Service 层**显式查引用**。
+
+    ⚠️ **两个端点列都要查**（只查 ``from_character_id`` 是半修：角色作为
+    ``to_character_id`` 时照样删得掉 ⇒ 孤儿照旧产生）。
+
+    ⚠️ **宿主说明**：本函数服务**两个域**（character 删角色、world 删 faction）
+    ⇒ 放在 world 域，避免出现 ``character ⇄ world`` 的 2 环；
+    概念上更合适的位置是 ``packages/domain/relationship/``（该包目前无 service）
+    ⇒ 待 Lead 裁决下沉。
+
+    ⚠️ ``error_cls`` 让**调用域抛自己的**错误类型（路由层按域窄捕获）：
+    character 域传它自己的子类 ⇒ ``except character.ReferencedError``
+    **不会**误吞 world 域的其它异常（见 task-7 报告 D1）。
+    """
+    in_use = conn.execute(
+        "SELECT 1 FROM relationships "
+        "WHERE from_character_id = ? OR to_character_id = ? LIMIT 1",
+        (entity_id, entity_id),
+    ).fetchone()
+    if in_use is not None:
+        raise error_cls(f"{label}#{entity_id} 被 relationships 引用，无法删除")
+
+
+# ---------------------------------------------------------------------------
 # 实体配置（表名、PK 列名、ID 前缀、默认 visibility）
 # ---------------------------------------------------------------------------
 
@@ -544,6 +585,11 @@ class WorldService:
                     raise ReferencedError(
                         f"location#{eid} 被 plot_events 引用，无法删除"
                     )
+            # 引用检查：factions 是 relationships 的**端点**（0022 起端点可以是 faction）
+            # ⇒ 删 faction 会留孤儿关系行，而 foreign_key_check 报不出来（FK 已摘）
+            # ⇒ 与 character 域共用同一个守卫（见 assert_not_relationship_endpoint）。
+            if cfg.table == "factions":
+                assert_not_relationship_endpoint(conn, eid, "faction")
 
             cur = conn.execute(
                 f"DELETE FROM {cfg.table} WHERE {cfg.id_field} = ?", (eid,)

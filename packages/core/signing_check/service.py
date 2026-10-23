@@ -118,32 +118,39 @@ def _filter_chapters(chapters: Iterable[dict[str, Any]]) -> list[dict[str, Any]]
 # ---------------------------------------------------------------------------
 
 
-def _load_project_opening_rules(db_path: str, project_id: str) -> dict[str, Any] | None:
+def _load_project_opening_rules(
+    db_path: str, project_id: str
+) -> tuple[dict[str, Any] | None, str | None]:
     """读项目绑定题材包的 ``opening_rules``（题材库 P2）。
 
-    返回 ``{"pack_id", "pack_name", "rules": [...]}``；以下情形 → ``None``（整段缺席，
-    与无题材包行为零差异）：
-    - 未绑定题材包 / 绑定行已被删除；
-    - payload 未声明 ``opening_rules`` 或声明为空 / 全为非法条目；
-    - 读库异常（含迁移未跑的极老库无 ``genre_packs`` 表）——体检绝不因题材包读失败而失败。
+    返回 ``(rules, error)``：
+
+    - ``rules`` = ``{"pack_id", "pack_name", "rules": [...]}``；``None`` = 本次**没有**
+      题材开篇规则可查（未绑定 / 未声明 / 全为非法条目）——与无题材包行为零差异；
+    - ``error`` = **读取失败**的原因（非空 ⇒ 题材开篇检查**没跑**）。
+
+    ⚠️ **「没绑定」与「读失败」必须分开**（D-13）：此前两者都返回 ``None`` ⇒
+    读失败时题材开篇整段**静默消失**、无告警 ⇒ 体检报告外观「全部通过」而实际
+    **未检**。现在读失败会带上原因，由调用方产出**显式不可检标记**
+    （同文件 ``word_band_rejected`` 的既有风格）。
     """
 
     try:
         binding = GenrePackService(db_path).get_project_binding(project_id)
-    except Exception:  # noqa: BLE001 —— 题材包读失败不阻断体检
-        return None
+    except Exception as exc:  # noqa: BLE001 —— 题材包读失败不阻断体检，但**必须可见**
+        return None, f"{type(exc).__name__}: {exc}"
     if not binding or not binding.get("bound"):
-        return None
+        return None, None
     pack = binding.get("pack") or {}
     payload = pack.get("payload") or {}
     rules = project_opening_rules(payload)
     if not rules:
-        return None
+        return None, None
     return {
         "pack_id": binding.get("pack_id"),
         "pack_name": pack.get("name") or "",
         "rules": rules,
-    }
+    }, None
 
 
 def _genre_opening_section(
@@ -210,6 +217,12 @@ def run_signing_check(db_path: str | "Path", project_id: str) -> dict[str, Any]:
     ``word_band_source="default"`` 并额外置 ``word_band_rejected: True``——让
     「包声明了却按不了」对策展人显性化（合法带或未声明时该键缺席）。
 
+    2026-10-23 批次（D-13）：**读题材包失败**时（``genre_opening_unavailable: True``
+    + ``genre_opening_error: <原因>``，并追加一条 ``info`` 级的
+    ``genre_opening_unavailable`` 检查项）——此前该情形让题材开篇整段**静默消失**、
+    报告外观「全部通过」而实际**未检**；现在「没检」与「检过且通过」在结果里**可区分**
+    （未绑定题材包 / 包未声明规则时该键**缺席**，行为零变化）。
+
     异常：
         ``ValueError`` — project 不存在（router 转 404）。
     """
@@ -235,8 +248,9 @@ def run_signing_check(db_path: str | "Path", project_id: str) -> dict[str, Any]:
 
     protagonist_names = _fetch_protagonist_names(db_path, project_id)
 
-    # 题材库 P2：题材开篇规则（未绑定 / 未声明 → None，行为与题材库前一致）。
-    genre_opening = _load_project_opening_rules(db_path, project_id)
+    # 题材库 P2：题材开篇规则（未绑定 / 未声明 → (None, None)，行为与题材库前一致；
+    # **读失败 → (None, error)**：整段检查没跑，必须显式可见，见 D-13）。
+    genre_opening, genre_opening_error = _load_project_opening_rules(db_path, project_id)
 
     # 章字数带单点来源（修法 A）：有包声明三键齐全 → 校准带口径；否则 None → 平台默认。
     # 声明了但被 normalize 拒绝（脏带）→ word_band_rejected 置位（策展人显性化）。
@@ -252,6 +266,7 @@ def run_signing_check(db_path: str | "Path", project_id: str) -> dict[str, Any]:
         protagonist_names,
         opening_rules=(genre_opening or {}).get("rules"),
         word_band=word_band,
+        genre_opening_unavailable=genre_opening_error,
     )
 
     summary = {
@@ -277,6 +292,11 @@ def run_signing_check(db_path: str | "Path", project_id: str) -> dict[str, Any]:
         result["word_band_rejected"] = True
     if genre_opening is not None:
         result["genre_opening"] = _genre_opening_section(genre_opening, chapters_payload)
+    if genre_opening_error:
+        # 题材开篇检查**没跑**（不是「跑了且通过」）——必须显式标记（D-13）。
+        # 风格沿用同文件 ``word_band_rejected``：布尔标记 + 原因串。
+        result["genre_opening_unavailable"] = True
+        result["genre_opening_error"] = genre_opening_error
     return result
 
 

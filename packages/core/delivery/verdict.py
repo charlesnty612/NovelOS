@@ -30,13 +30,25 @@ status          后果              依据
 ``length_out_of_band`` 待办        出带（±15% 带边缘）
 ``signing_fail`` 待办              番茄硬规则 fail 档（开篇冲突 / 主角出场 / 金手指）
 ``not_committed`` 待办             章状态未到 COMMITTED / RELEASED
-``not_evaluated`` 待办             证据源不可得（无报告 / 无草稿 / 无正文无法量字数）
+``not_evaluated`` 待办             证据源不可得（无报告 / 无草稿 / **正文读不到** /
+                                  **体检某段没跑**）
 ``warn``        仅展示             severity=warning 且 gate=auto（可静默通过）
 ``accepted``    仅展示             confirm 档已有显式接受留痕
 ``out_of_scope`` 仅展示            该证据源按设计不适用于本章（见 signing_check 段）
 ``not_a_candidate`` 仅展示         章节未写正文（判定已是 not_a_candidate）
 ``project_*``   不参与章级阶梯     项目级汇总陈述（只在 ``project_reasons`` 里出现）
 =============== ================== ==================================================
+
+**「不可检」一律按 ``not_evaluated`` 处理**（2026-10-23 返工 · concern 2）：
+「**没检**」与「**检过且通过**」必须可区分——不可检的证据面**不得**让判定落在
+``deliverable``。当前有两类不可检，各自一条规则 id：
+
+- :data:`RULE_LENGTH_UNAVAILABLE` —— 正文**读不到**（草稿表不可用 / 查询异常；
+  Task 1 的 ``DraftResolutionError`` 机制）。与「该章**没有**草稿」
+  （:data:`RULE_LENGTH_UNMEASURED`）**严格区分**：后果档相同，理由文本不同。
+- :data:`RULE_SIGNING_SEGMENT_UNAVAILABLE` —— 签约体检**跑起来了，但题材开篇
+  那一段没跑**（读题材包失败）。与「体检**整段**没跑」
+  （:data:`RULE_SIGNING_UNMEASURED`）**严格区分**。
 
 **为什么不按 severity 降级**：``gate`` 与 ``severity`` 正交是仓内既有裁决
 （``quality/issues.py`` 的 ``Gate`` 注释：severity 答「多严重」，gate 答「谁能说
@@ -51,6 +63,13 @@ status          后果              依据
 本模块零 IO（证据由 :mod:`packages.core.delivery.evidence` 取），因此每条分支都能
 在单测里直接构造输入验证；``gate`` 分档一律走 :func:`quality.issues.issue_gate`
 （唯一权威），不读落库的 ``gate`` 字段值做判断。
+
+⚠️ **唯一的跨模块依赖**：:func:`packages.core.signing_check.checks.is_genre_opening_unavailable_item`
+——「某项是不是**不可检**」的识别口径由**拥有该概念的模块**单点提供（常量 +
+谓词住在 ``signing_check.checks``，与 ``quality.scoring.DRAFT_UNAVAILABLE`` /
+``is_draft_unavailable`` **同款形态**）。本模块 import 它而**不**复制字符串、
+**不**另造一套检测（2026-10-23 返工 · concern 2）。该模块是**纯规则**、无 IO ⇒
+本模块仍然零 IO。
 """
 
 from __future__ import annotations
@@ -59,6 +78,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Iterable, Literal
 
 from packages.core.quality.issues import issue_gate
+from packages.core.signing_check.checks import is_genre_opening_unavailable_item
 
 __all__ = [
     "Verdict",
@@ -86,10 +106,12 @@ __all__ = [
     "RULE_QUALITY_REPORT_MISSING",
     "RULE_QUALITY_REPORT_STALE",
     "RULE_LENGTH_UNMEASURED",
+    "RULE_LENGTH_UNAVAILABLE",
     "RULE_LENGTH_OUT_OF_BAND",
     "RULE_LENGTH_BEYOND_BAND_EDGE",
     "RULE_SIGNING_OUT_OF_SCOPE",
     "RULE_SIGNING_UNMEASURED",
+    "RULE_SIGNING_SEGMENT_UNAVAILABLE",
     "RULE_PROJECT_EMPTY",
     "RULE_PROJECT_INCOMPLETE",
     "RULE_PROJECT_NOT_DELIVERABLE",
@@ -157,6 +179,13 @@ RULE_QUALITY_REPORT_MISSING: Final[str] = "DELIVERY_QUALITY_REPORT_MISSING"
 RULE_QUALITY_REPORT_STALE: Final[str] = "DELIVERY_QUALITY_REPORT_STALE"
 #: 字数无法测量（无草稿 / 目标字数无法解析）。
 RULE_LENGTH_UNMEASURED: Final[str] = "DELIVERY_LENGTH_UNMEASURED"
+#: 字数**不可检**（正文**读不到**：草稿表不可用 / 查询异常）。
+#:
+#: ⚠️ 与 :data:`RULE_LENGTH_UNMEASURED` **严格区分**（2026-10-23 返工 · concern 2）：
+#: 前者 = 「**该章没有草稿**」（正常业务状态），后者 = 「**读不到**」（故障）。
+#: 两者后果档都是 ``not_evaluated``（都阻止 ``deliverable``），但**理由文本不同**
+#: ——后者必须让作者看到「草稿表不可用」这个真因，而不是「量不到」。
+RULE_LENGTH_UNAVAILABLE: Final[str] = "DELIVERY_LENGTH_UNAVAILABLE"
 #: 字数出带（未超带边缘距离）。
 RULE_LENGTH_OUT_OF_BAND: Final[str] = "DELIVERY_LENGTH_OUT_OF_BAND"
 #: 字数偏离超过「带边缘到目标的距离」（与 chapter_review error 级同式）。
@@ -165,6 +194,13 @@ RULE_LENGTH_BEYOND_BAND_EDGE: Final[str] = "DELIVERY_LENGTH_BEYOND_BAND_EDGE"
 RULE_SIGNING_OUT_OF_SCOPE: Final[str] = "DELIVERY_SIGNING_CHECK_OUT_OF_SCOPE"
 #: 签约体检在范围内但没有本章的检查项（体检本身不可得）。
 RULE_SIGNING_UNMEASURED: Final[str] = "DELIVERY_SIGNING_CHECK_UNMEASURED"
+#: 签约体检**跑起来了，但其中一段没跑**（题材开篇检查不可检）。
+#:
+#: ⚠️ 与 :data:`RULE_SIGNING_UNMEASURED` **严格区分**：后者 = 「**体检整段没跑**」，
+#: 本条 = 「体检跑了、但题材开篇那一段**没检**」（2026-10-23 返工 · concern 2）。
+#: 此前「不可检」项是 ``info`` 级且不进理由 ⇒ 「没检」与「检过且通过」不可区分
+#: ⇒ 交付判定可能给出 ``deliverable``（**把「没检」当成「没问题」**）。
+RULE_SIGNING_SEGMENT_UNAVAILABLE: Final[str] = "DELIVERY_SIGNING_CHECK_SEGMENT_UNAVAILABLE"
 #: 项目级：没有任何章节。
 RULE_PROJECT_EMPTY: Final[str] = "DELIVERY_PROJECT_EMPTY"
 #: 项目级：仍有章未写（书没写完）。
@@ -261,6 +297,14 @@ class ChapterEvidence:
     draft_version: int | None = None
     quality: QualityEvidence | None = None
     length: LengthEvidence | None = None
+    length_unavailable_reason: str | None = None
+    """正文**读不到**的原因（草稿表不可用 / 查询异常）。
+
+    ⚠️ 与「该章没有草稿」**严格区分**（Task 1 的 ``DraftResolutionError`` 机制）：
+    ``None`` ⇒ 要么量到了（``length`` 有值）、要么**确实没有草稿**；
+    非空 ⇒ **故障**（不可检）——判定侧据此产出带真因的 ``not_evaluated`` 理由
+    （``DELIVERY_LENGTH_UNAVAILABLE``），而不是笼统的「量不到」。
+    """
     signing: SigningEvidence = SigningEvidence(scope="unavailable")
 
 
@@ -464,7 +508,17 @@ def _length_reason(length: LengthEvidence) -> Reason | None:
 
 
 def _signing_reasons(signing: SigningEvidence) -> list[Reason]:
-    """签约体检 → 理由（fail 档降级；warn 档仅展示；info 档不进理由）。"""
+    """签约体检 → 理由（fail 档降级；warn 档仅展示；**不可检**档降级为未评估）。
+
+    ⚠️ **「不可检」必须降级**（2026-10-23 返工 · concern 2）：
+    「题材开篇检查不可检」项是 ``info`` 级——此前 ``info`` 级**不进理由**
+    ⇒ 「**没检**」与「检过且通过」在交付判定里**不可区分**
+    ⇒ 一章可能拿到 ``deliverable``（把「没检」当成「没问题」）。
+    ⇒ 现在它产出 ``not_evaluated`` 理由 ⇒ **阻止 ``deliverable``**。
+
+    识别口径**不在本模块自造**：由拥有该概念的模块单点提供
+    （:func:`packages.core.signing_check.checks.is_genre_opening_unavailable_item`）。
+    """
     if signing.scope == "out_of_scope":
         return [
             Reason(
@@ -496,7 +550,22 @@ def _signing_reasons(signing: SigningEvidence) -> list[Reason]:
         key = str(item.get("key") or "")
         detail = str(item.get("detail") or "")
         advice = str(item.get("advice") or "")
-        if level == "fail":
+        if is_genre_opening_unavailable_item(item):
+            # 「没检」≠「检过且通过」——必须落一条**降级**理由。
+            reasons.append(
+                Reason(
+                    rule_id=RULE_SIGNING_SEGMENT_UNAVAILABLE,
+                    source="signing_check",
+                    severity="info",
+                    status="not_evaluated",
+                    message=(
+                        "题材开篇检查**不可检**：本次体检未执行题材开篇检查"
+                        "（不代表已通过）——按未评估处理，不计为通过"
+                    ),
+                    evidence=detail or advice or None,
+                )
+            )
+        elif level == "fail":
             reasons.append(
                 Reason(
                     rule_id=key,
@@ -589,16 +658,34 @@ def derive_chapter_verdict(evidence: ChapterEvidence) -> VerdictResult:
 
     # ---- 证据源 2：字数带 ----
     if evidence.length is None:
-        reasons.append(
-            Reason(
-                rule_id=RULE_LENGTH_UNMEASURED,
-                source="evidence",
-                severity="info",
-                status="not_evaluated",
-                message="正文或目标字数无法测量，字数带未评估——按未评估处理，不计为通过",
-                evidence=None,
+        if evidence.length_unavailable_reason:
+            # 正文**读不到**（草稿表不可用 / 查询异常）——**不是**「该章没有草稿」。
+            # 两者后果档都是 ``not_evaluated``，但理由文本必须区分开：
+            # 前者要让作者看到「草稿表不可用」这个真因（Task 1 需求 3(b)）。
+            reasons.append(
+                Reason(
+                    rule_id=RULE_LENGTH_UNAVAILABLE,
+                    source="evidence",
+                    severity="info",
+                    status="not_evaluated",
+                    message=(
+                        "正文**读不到**（草稿表不可用）：字数带本次未评估"
+                        "——按未评估处理，不计为通过"
+                    ),
+                    evidence=evidence.length_unavailable_reason,
+                )
             )
-        )
+        else:
+            reasons.append(
+                Reason(
+                    rule_id=RULE_LENGTH_UNMEASURED,
+                    source="evidence",
+                    severity="info",
+                    status="not_evaluated",
+                    message="正文或目标字数无法测量，字数带未评估——按未评估处理，不计为通过",
+                    evidence=None,
+                )
+            )
     else:
         length_reason = _length_reason(evidence.length)
         if length_reason is not None:

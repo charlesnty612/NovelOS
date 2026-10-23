@@ -66,3 +66,25 @@ secrets*.json*
 /tmp/
 # 本地工具配置（Claude Code 会话设置），非项目内容
 .claude/
+
+# ── 2026-10-23 全面审查第二轮新增（防回流；依据 AGENTS.md 硬规则 5）──────────
+# ① 加密备份产物：`.gitignore` 上文只有 `*.db`，`.enc` 后缀不匹配
+#    ⇒ `backup_db.py --out` 若指向仓内目录，加密备份可被误提交（含全部正文）。
+#    注：`data/` 目录下的同名文件由上文**既有 `data/` 规则**覆盖（`git check-ignore -v
+#    data/novelos.db.enc` 命中的是 `data/` 那一行）⇒ `*.db.enc` 是**仓外路径的兜底**
+#    （例如 `--out` 指向仓根或别的目录时）。两处重叠是**有意保留**（规则宁少勿滥），
+#    删掉任一条都会让另一类路径漏网。
+*.db.enc
+*.tar.enc
+# ② LLM 响应全文落盘目录（NOVELOS_DEBUG_PROVIDER_DUMP_DIR）
+#    ⇒ 章节正文会逐次落盘；该目录若不在 data/ 或 tmp/ 下就会进版本库。
+provider_dumps/
+# ③ 评测/评审**运行痕迹**：含真实 prj_/ch_ id 与书籍正文片段 ⇒ 属痕迹仓，不进软件仓。
+#    机制文档（quality-scoring-v0.md、README.md）保留，见 docs/evaluation/README.md。
+/docs/evaluation/runs/*
+!/docs/evaluation/runs/.gitkeep
+/docs/evaluation/m2-judge/
+/docs/evaluation/m1-data.md
+/docs/evaluation/m1-long-run-report.md
+/docs/evaluation/m2-verification.md
+/docs/evaluation/real-llm-*.md

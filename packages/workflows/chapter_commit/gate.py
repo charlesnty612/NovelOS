@@ -39,6 +39,7 @@ from packages.core.ids import now_iso
 from packages.core.quality.aggregate import GateSummary, summarize_gates
 from packages.core.quality.engine import QualityEngine
 from packages.core.quality.issues import is_blocking_issue
+from packages.core.quality.scoring import DRAFT_UNAVAILABLE
 from packages.core.quality.service import QualityService, build_quality_context, capture_reference_consumption
 from packages.core.story_state.service import StoryStateService
 from packages.core.workflow_runtime.engine import PauseRequested
@@ -511,6 +512,16 @@ def _quality_gate_node(ctx: dict[str, Any]) -> dict[str, Any]:
         run_id=ctx.get("run_id"),
     )
 
+    # 2026-10-23（critical C-1 / D-6）：**「正文读不到」⇒ 一律硬停**（与 mode 无关）。
+    # report 模式（含快通道）放行的是「**评估过**、但有质量意见」的章；而正文读不到时
+    # 本次**根本没评估**，放行 = 给从未被评估的章节发通行证 ⇒ 不可检状态必须拦下。
+    # ⚠️ 「不可检」是**基础设施故障**（草稿表读不到），**不是**质量意见 ⇒
+    #   - 不产出改稿建议（``revision_guidance``）：那条建议会指向「补 plan_json /
+    #     submit_delta」——**完全错误的方向**（2026-10-23 对抗审查 A · T1-3）；
+    #   - 不写 ``plan_json.revision_note`` / ``gate_blocked``：那是「质量不合格」的出路，
+    #     「没量到」没有改稿出路，只有「把草稿表修好」这一条。
+    draft_unavailable = quality_ctx.draft == DRAFT_UNAVAILABLE
+
     # Sprint V1.4：enforce 模式阻断时，把每低分维度的可执行改稿建议结构化带上。
     # revision_guidance 写进 ctx['quality_gate']（checkpoint_json 会自动收录），
     # 同时把整段结构化 payload JSON 化追加到 ValueError 信息里——run FAILED 时
@@ -519,12 +530,14 @@ def _quality_gate_node(ctx: dict[str, Any]) -> dict[str, Any]:
     # P0-1：confirm 档命中时同样带上 guidance——作者要么改稿，要么显式接受，
     # 两条出路都要有可执行建议。
     revision_guidance: list[dict[str, Any]] = []
-    if error_issues or gate_summary.confirm_issues:
+    if not draft_unavailable and (error_issues or gate_summary.confirm_issues):
         revision_guidance = _build_revision_guidance(report, report.issues)
 
     # P0-1：confirm 档在 enforce 模式下未获有效声明 ⇒ 与 blocking 同级阻断。
     confirm_unresolved = bool(gate_summary.confirm_issues) and accepted_override is None
-    should_block = mode == "enforce" and (bool(blocking_issues) or confirm_unresolved)
+    should_block = (
+        mode == "enforce" and (bool(blocking_issues) or confirm_unresolved)
+    ) or draft_unavailable
 
     ctx["quality_gate"] = {
         "blocked": should_block,
@@ -536,6 +549,18 @@ def _quality_gate_node(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
     if should_block:
+        # ── 「不可检」单独一类（2026-10-23 对抗审查 A · T1-3）────────────────
+        # 「正文读不到（草稿表不可用）」是**基础设施故障**，不是质量意见：
+        # - **不写** plan_json.revision_note / gate_blocked（那是「质量不合格」的出路；
+        #   「没量到」没有改稿出路，作者照着改稿建议去改 plan/正文是**白费功夫**）；
+        # - **不带**改稿建议（``guidance=`` 段）：那条建议会指向「补 plan_json /
+        #   submit_delta」——错误方向；
+        # - 但**硬停照旧**：不可检 ≠ 判定不合格 ⇒ 快通道（report 模式）同样停。
+        if draft_unavailable:
+            raise ValueError(
+                "quality gate unavailable: 不可检 —— 草稿读不到（草稿表不可用），"
+                "本次评估未进行；这不是质量意见，请修复草稿表（drafts）后重跑"
+            )
         # V3.9 批次 4.1：先把改稿出路写进 chapter（plan_json.revision_note +
         # gate_blocked 标记），再抛错阻断。作者可在章节详情页一键「按门禁建议改稿」
         # 复用既有写正文（revise）→ 审校回路，不必手工改稿。

@@ -292,9 +292,17 @@ def test_writer_cache_hit_uses_single_connection(tmp_path: Path, monkeypatch):
 
 
 def test_director_cache_hit_uses_single_connection(tmp_path: Path, monkeypatch):
-    """director 缓存命中路径：**2 条连接**、业务 SQL = peek 1 + 指纹探测 9 + prompt_label 1。
+    """director 缓存命中路径：**2 条连接**、业务 SQL = peek 1 + 指纹探测 21 + prompt_label 1。
 
-    连接构成同 writer；director 无 style/title 两个指纹维度，故比 writer 少 4 条 SQL。
+    连接构成同 writer（``with_fingerprint_conn`` 1 条 + ``active_prompt_label`` 1 条）。
+    ⚠️ **2026-10-23 批次三十二订正**：director 的 SQL 数（23）现已**多于** writer（15），
+    原文写的「director 比 writer 少 4 条」**已失效**。原因（Lead 核过，**不是缺陷**）：
+    两侧取数**来源不同**——
+    · **director 直读表**（伏笔台账 / 叙事债务 / 情节图 / 分支 / 项目逾期阈值 / 章标题）
+      ⇒ 每个来源都要自己的存在性探测 + 查询 ⇒ SQL 多；
+    · **writer 读快照**（伏笔/情节内容来自 story state 快照）⇒ 靠键里的 ``state_version``
+      感知变化（且台账/情节**写路径已推 state_version**）⇒ 不必逐表探测。
+    ⇒ 两侧的键都完整（director 补了 5 个维度，writer 早有），**没有一侧漏维度**。
     """
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
@@ -307,9 +315,26 @@ def test_director_cache_hit_uses_single_connection(tmp_path: Path, monkeypatch):
     payload = build_director_input(db_path, pid, cid, "意图")
 
     assert counters["conns"] == 2, counters
-    # conn#1: peek 1 + 指纹探测 9（chars/world×3表/reveal/project_meta —— director 无 style/title 维度）
-    # conn#2: prompt_label 1（同上，agents 表空 ⇒ fallback）
-    assert counters["sql"] == 11, counters
+    # ⚠️ **2026-10-23 批次三十二订正：11 → 23**（director 侧补 5 个指纹维度：
+    # 伏笔台账 hooks / 叙事债务 narrative_debts / 情节图 plot_events + 分支 branches /
+    # 项目逾期阈值 foreshadow_overdue_chapters / 章标题 chapters.title）。
+    # 实测构成（Lead 用 sqlite3 trace 逐条量过，29 条含 6 条 get_connection 的 PRAGMA 固定成本
+    # ⇒ 业务 SQL 23 条）：
+    #   · peek 1（chapters.plan_json）
+    #   · prompt_label 1（agents 表空 ⇒ fallback）
+    #   · 指纹 SELECT 11（characters / locations / factions / world_rules / projects /
+    #     hooks / narrative_debts / plot_events / branches / projects(逾期阈值) / chapters.title）
+    #   · **PRAGMA table_info 存在性探测 10**（每个指纹维度先问「这张表在不在」）
+    # ⇒ **连接数不变（仍 2 条）**，变的是每条连接上的语句数。
+    # ⚠️ 这**不是性能承诺，是「装配输入变化要可见」的钉子**（见上方注释）：
+    # 改装配器 / 指纹表集合 / prompt 解析方式时同步改它。
+    # 💡 **为什么不做进程级「表存在性」缓存**（能省掉那 10 条）：
+    # 指纹函数**先探测表是否存在再查**（表缺失 ⇒ 该维度记「不可用」而非崩），
+    # 而表集合由迁移链固定 ⇒ 缓存「表在不在」在正常路径上是对的；
+    # 但**「表后来才出现」**（测试里换夹具、运维手工建表）会让缓存里的「不在」
+    # 继续生效 ⇒ 指纹陈旧 ⇒ **脏命中**——正是本仓反复登记的那个形状。
+    # ⇒ 本批**不做**这个优化（方向安全 > 省 10 条 SELECT）。
+    assert counters["sql"] == 23, counters
     assert payload["agent"] == "director"
 
 

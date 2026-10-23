@@ -34,12 +34,20 @@ router = APIRouter(tags=["signing-check"])
 # 形状来源：临时库 + 合成夹具跑通端点后 dump 实际键集。实测结论：
 #   恒在 7 键：project_id / project_name / total_chars / generated_at /
 #              items / summary / word_band_source
-#   条件键 2 个：word_band_rejected（包声明了 chapter_word_band 但被 normalize
+#   条件键 4 个：word_band_rejected（包声明了 chapter_word_band 但被 normalize
 #                拒绝时置位）、genre_opening（绑定题材包且 payload 声明了
-#                opening_rules 时整段出现）——两者缺席时**键不存在**，不是 null。
+#                opening_rules 时整段出现）、genre_opening_unavailable +
+#                genre_opening_error（读题材包失败 ⇒ **不可检**标记，D-13）——
+#                缺席时**键不存在**，不是 null。
 #   items[] 恒 4 键；summary 恒 4 键；genre_opening 恒 9 键；
 #   genre_opening.rules[] 恒 6 键，keywords_source 仅在抽出/自带词表时出现
 #   （实测：「必须出现」这类纯噪声要求抽不出词 ⇒ 缺席；「…倒计时」⇒ 出现）。
+#
+# ⚠️ **2026-10-23 返工（concern 3）**：``genre_opening_unavailable`` /
+# ``genre_opening_error`` 此前**只在 service 返回的 dict 里**存在，**没进本模型**
+# ⇒ ``response_model_exclude_unset=True`` 把它们**过滤掉** ⇒ API 消费者永远看不到
+# 「题材开篇检查没跑」这个事实（报告外观仍是「全部通过」）。
+# ⇒ 两个键必须**进模型**，且**顶层可见**（不是塞进 items 里当普通条目）。
 #
 # ⇒ 端点配 ``response_model_exclude_unset=True``：否则缺席的条件键会被渲染成
 #   凭空的 null，「未绑定题材包」与「绑定了但包没写 opening_rules」就再也分不开
@@ -95,7 +103,7 @@ class GenreOpeningSection(BaseModel):
 
 
 class SigningCheckResult(BaseModel):
-    """``run_signing_check`` 的返回结构（恒 7 键 + 2 个条件键）。"""
+    """``run_signing_check`` 的返回结构（恒 7 键 + 4 个条件键）。"""
 
     project_id: str
     project_name: str
@@ -107,6 +115,10 @@ class SigningCheckResult(BaseModel):
     word_band_source: str
     word_band_rejected: bool | None = None
     genre_opening: GenreOpeningSection | None = None
+    # 题材开篇检查**不可检**（读题材包失败）：布尔标记 + 原因串（D-13）。
+    # 未绑定题材包 / 包未声明规则时**两个键都缺席**（行为零变化）。
+    genre_opening_unavailable: bool | None = None
+    genre_opening_error: str | None = None
 
 
 @router.get(

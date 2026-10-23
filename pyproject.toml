@@ -37,6 +37,15 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
+    # ⚠️ pytest-xdist / pytest-cov 原先只在 [dependency-groups]（PEP 735 的「开发期分组」）
+    # ⇒ **`pip install -e ".[dev]"` 装不上**（wheel 元数据里没有它们）
+    # ⇒ CI windows job 的 `pytest -n 4` 那步**从未真正跑过**（2026-10-23 task-4 实测：
+    # 已装 METADATA 的 Requires-Dist 只有 pytest / ruff）。
+    # ⇒ 发版纪律与 tests/README.md 都写「xdist 在 dev extra 里」⇒ 此处按同一口径对齐，
+    # 并且**删掉 [dependency-groups]**（见文件末尾的说明）⇒ 全仓只剩这一处声明，
+    # 两处不会漂移。
+    "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -63,8 +72,15 @@ select = ["E", "F", "W", "I"]
 testpaths = ["tests"]
 pythonpath = ["."]
 
-[dependency-groups]
-dev = [
-    "pytest-cov>=7.1.0",
-    "pytest-xdist>=3.8.0",
-]
+# ⚠️ 2026-10-23（task-4）：原 `[dependency-groups] dev = [pytest-cov, pytest-xdist]` 已
+# **删除** ⇒ 全部开发期依赖统一进 `[project.optional-dependencies].dev`。
+# 理由（两条）：
+#   ① **单一源**：PEP 735 分组不进 wheel 元数据 ⇒ `pip install -e ".[dev]"` 装不上
+#      ⇒ 同一个包在两处声明（可选依赖 + 分组）必然会漂移。
+#   ② **工具链口径一致**：`uv sync --extra dev`（本仓铁律 8 的唯一命令）现在就是
+#      「装齐 pytest / ruff / xdist / cov」的唯一入口；裸 `uv sync` 仍会剪掉全部
+#      开发期工具（与 README「不是裸 uv sync」同款）。
+# ⚠️ 代价（如实记账）：**裸 `uv sync` 现在连 pytest-xdist / pytest-cov 一起剪掉**
+#    （此前它们在分组里，裸 sync 会保留）⇒ 跑 `pytest -n 4` 前必须 `uv sync --extra dev`。
+#    这与 AGENTS.md 铁律 8 既有的口径（「裸 uv sync 会 pruning 掉 ruff」）一致。
+#    本仓是**本地优先的个人自用工具**，不发布 wheel ⇒ 分组不进元数据没有下游代价。

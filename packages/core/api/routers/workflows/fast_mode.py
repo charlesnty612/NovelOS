@@ -84,14 +84,40 @@ def read_project_fast_mode(db_path: str, project_id: str) -> bool | None:
     return bool(raw)
 
 
+def resolve_fast_mode_with_source(*, db_path: str, project_id: str) -> tuple[bool, str]:
+    """解析快通道的**有效值 + 来源**（项目列 > env > 默认关）。
+
+    与 :func:`resolve_fast_mode` **同源同口径**：优先级与 env 词表都只在这一处
+    （env 词表在 :func:`_env_fast_mode`），**不重复实现**。
+
+    返回 ``(effective, source)``：
+
+    - ``source='project'``：``projects.fast_mode`` 列有值（1 开 / 0 显式关）；
+    - ``source='env'``：列为 NULL ⇒ 回落 env ``NOVELOS_FAST_MODE``；
+    - ``source='off'``：列为 NULL 且 env 未设置 ⇒ 默认关。
+
+    **为什么需要「来源」**：项目列为 NULL 时，前端若只知道「有效值是 True」，
+    就会把「作者显式关」与「作者从未设置、后端按 env 回落」混成同一件事——
+    而这两件事的**可撤销性不同**（后者只能靠项目列被写实才能消解）。
+    """
+    project_value = read_project_fast_mode(db_path, project_id)
+    if project_value is not None:
+        return project_value, "project"
+    env_value = _env_fast_mode()
+    if env_value is not None:
+        return env_value, "env"
+    return False, "off"
+
+
 def resolve_fast_mode(
     *,
     db_path: str,
     project_id: str,
     request_value: bool | None,
 ) -> bool:
-    """解析本次运行是否走快通道。**唯一权威口径**，两个消费方都调它
-    （``control.py`` 的 ctx 注入处 + auto-commit 前的二次确认；
+    """解析本次运行是否走快通道。**唯一权威口径**，三个消费方都调它
+    （``control.py`` 的 ctx 注入处 + auto-commit 前的二次确认 +
+    ``projects.py`` 的 ``GET /projects/{pid}/effective-settings`` 只读出口；
     数量写死在这里——新增消费方时同步改这一行，别让它再次变成不可核的数字）。
 
     参数 ``request_value`` 取 ``StartWorkflowRequest.fast_mode``；
@@ -99,17 +125,13 @@ def resolve_fast_mode(
     """
     if request_value is not None:
         return bool(request_value)
-    project_value = read_project_fast_mode(db_path, project_id)
-    if project_value is not None:
-        return project_value
-    env_value = _env_fast_mode()
-    if env_value is not None:
-        return env_value
-    return False
+    effective, _source = resolve_fast_mode_with_source(db_path=db_path, project_id=project_id)
+    return effective
 
 
 __all__ = [
     "ENV_FAST_MODE",
     "read_project_fast_mode",
     "resolve_fast_mode",
+    "resolve_fast_mode_with_source",
 ]

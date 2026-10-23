@@ -33,6 +33,54 @@ AI_MARKERS: tuple[str, ...] = AI_FLAVOR_MARKERS
 # 常量（建议值待校准）
 # ============================================================================
 
+#: 正文**读不到**（草稿表不可用 / 查询异常）时的占位正文。
+#:
+#: ⚠️ 与「该章确实没有草稿」（正文 = **空串** ``""``）**严格区分**：
+#:
+#: - 空正文 = 「没有可评估的内容」⇒ 既有行为（子分 100、0 issue）——**逐字不变**；
+#: - 本占位符 = 「有正文但读不到」⇒ **不可检**：子分 0 + 一条可见的阻断级 issue。
+#:
+#: 2026-10-23 critical C-1 / D-6：此前「读不到」被折叠成「空正文」⇒ 质量门给
+#: **从未被评估**的章节发满分 0 issue。
+DRAFT_UNAVAILABLE = "[novelos:draft-unavailable]"
+"""正文不可读时的占位符（消费方：:func:`score_style` / :func:`score_pacing`）。"""
+
+
+def is_draft_unavailable(draft: str) -> bool:
+    """``draft`` 是否为「正文读不到」的占位符（见 :data:`DRAFT_UNAVAILABLE`）。"""
+    return (draft or "") == DRAFT_UNAVAILABLE
+
+
+def _draft_unavailable_issue(subscore: str) -> Issue:
+    """正文读不到 ⇒ 该子分**不可得**（沿用 aggregate 的「子分缺失」口径与 rule_id）。
+
+    ⚠️ **复用** ``scoring_missing_subscore``（``issues.BLOCKING_RULES`` 成员）而不新增
+    rule_id 的理由：新增 rule_id = 评分口径变更（``scoring_formula_hash`` 变 + README §4
+    与 spec §3.7/§4 三处文档同步），超出本任务范围；而「正文读不到 ⇒ 无法给出有效评分」
+    与该 id 的既有语义（「子分缺失（无法给出有效评分，系统级）」）**完全一致**。
+
+    ⚠️ **同一 rule_id 现覆盖两类语义**（2026-10-23 对抗审查 A 登记，客户端须知）：
+
+    - aggregate 侧（子分为 ``None``）：message = 「{name} 子分缺失」；
+    - 本模块侧（正文读不到）：message **一律以「正文读不到」开头**，
+      ``suggestion`` **一律以「不可检：」开头**。
+
+    ⇒ **客户端请按 message / suggestion 判别**，别只看 rule_id。
+    """
+    return make_issue(
+        severity="error",
+        category=subscore,  # type: ignore[arg-type]
+        rule_id="scoring_missing_subscore",
+        message=(
+            f"正文读不到（草稿表不可用）：{subscore} 子分不可得，"
+            "本次评估未进行，无法给出有效评分"
+        ),
+        suggestion=(
+            "不可检：草稿表（drafts）不可用，本次评估未进行 —— "
+            "这不是质量意见，请修复草稿表后重跑（不要去补 plan_json / submit_delta）"
+        ),
+    )
+
 
 # ---- plot (§3.1) -----
 PLOT_BEAT_MISSING_DEDUCTION: int = 5
@@ -373,6 +421,11 @@ def score_style(draft: str) -> tuple[int, list[Issue]]:
     issues: list[Issue] = []
     score = 100
 
+    # ⚠️ 「正文读不到」≠「正文为空」：前者**不可检**（0 分 + 可见的阻断级 issue），
+    # 后者是「该章确实没有草稿」⇒ 走既有的空正文分支（逐字不变，见下）。
+    if is_draft_unavailable(draft):
+        return 0, [_draft_unavailable_issue("style")]
+
     avg = _avg_sentence_length(draft or "")
     if avg > 0 and not (
         STYLE_SENTENCE_LEN_RANGE[0] <= avg <= STYLE_SENTENCE_LEN_RANGE[1]
@@ -437,6 +490,10 @@ def score_pacing(draft: str) -> tuple[int, list[Issue]]:
     - 段数 < 1 时不扣分（视为空文本）。
     """
     issues: list[Issue] = []
+    # ⚠️ 「正文读不到」≠「正文为空」：前者**不可检**（0 分 + 可见的阻断级 issue），
+    # 后者是「该章确实没有草稿」⇒ 走下面的空正文分支（100 分 / 0 issue，逐字不变）。
+    if is_draft_unavailable(draft):
+        return 0, [_draft_unavailable_issue("pacing")]
     if not draft:
         return 100, issues
 

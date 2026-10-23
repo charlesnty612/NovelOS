@@ -16,7 +16,9 @@
 - ``get``：JOIN 取最大 state_version 的 state_json 一起返回。
 - ``update``：只允许改 name/role/core_json/visibility/who_knows；
   core_json 更新 = Definition 变更，注释说明 S2 起应走 Delta。
-- ``delete``：同一事务级联删除 ``character_states`` 行后删除 ``characters`` 行。
+- ``delete``：同一事务级联删除 ``character_states`` 行后删除 ``characters`` 行；
+  **删前查引用**——被 ``relationships``（任一端点）引用 ⇒ 抛 ``ReferencedError``
+  （409），不删任何东西（0022 摘掉那两条 FK ⇒ 孤儿行 DB 层查不出来）。
 - 列表端点按 project_id 过滤；查询不存在 → 返回 None，由 router 转 404。
 - V2.0 Wave B 双写面统一：本 service 的 JSON 列序列化、who_knows 三态语义
   全部走 ``packages.core.story_state.write_helpers`` 共享助手，与 canon
@@ -49,6 +51,21 @@ from packages.core.story_state.write_helpers import (
     dump_json_or_null as _dump_json_or_null,
 )
 
+# ⚠️ **跨域引用（character → world）**：① **复用** world 域的「删除被引用」错误类型
+# （``packages/domain/world/service.py``；那份文件是**只读参照**给本任务用的，
+# 本任务**只**在其中加共用守卫、不改它的错误族）；
+# ② **共用** world 域的「删实体前查 relationships 端点」守卫
+# （``assert_not_relationship_endpoint``）——character 与 faction 是 0022 之后的
+# 两类关系端点 ⇒ 同一道守卫，两域各抛自己的错误类型（路由层按域窄捕获）。
+# ⚠️ 域→域 import 在本仓**无成文禁令**（成文的只有 core 不得 import workflows、
+# core↛domain）⇒ 这条依赖已被分层看守登记为**受控例外**（``ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS``）。
+from packages.domain.world.service import (
+    ReferencedError as _WorldReferencedError,
+)
+from packages.domain.world.service import (
+    assert_not_relationship_endpoint,
+)
+
 from .models import (
     CharacterCreate,
     CharacterUpdate,
@@ -62,6 +79,24 @@ log = get_logger("novelos.domain.character.service")
 # 与 packages/core/context_engine/builders._load_aliases / _load_inject_mode 同源语义，
 # 但此处独立实现，避免 context_engine 被 domain 反向依赖。
 _VALID_INJECT_MODES = ("auto", "always", "never")
+
+
+class ReferencedError(_WorldReferencedError):
+    """删除被引用 → 409（错误类型沿用 world 域同款，见类上方 import 处的说明）。
+
+    ⚠️ 本仓域内错误族是「每个域自带一套」（world / plot / ledger / volume / knowledge /
+    chapter 各有一套），而 ``ReferencedError`` 语义上**跨域同义**（都是「被引用 ⇒ 409」）
+    ⇒ 这里**继承** world 域那个类而不是另起炉灶：
+    - ``isinstance(exc, world.ReferencedError)`` 恒真 ⇒ 两域的「删除被引用」是**同一语义同一类型**；
+    - 本仓**不会**出现第三个同名不同类的 ``ReferencedError``（plot 侧已有一个分叉）。
+
+    ⚠️ **路由层按域窄捕获**：``except character.ReferencedError`` **不会**捕到
+    world 域的基类实例（那是反过来：子类实例才会被基类的 ``except`` 捕到）
+    ⇒ 路由层各自捕获本域的错误类型即可，**不要**为了「一个 except 覆盖两域」而改成
+    捕基类——那会把 world 域的其它异常也吞成 409。
+    """
+
+    http_status = 409
 
 
 def _dump_aliases(value: list[str] | None) -> str:
@@ -310,9 +345,22 @@ class CharacterService:
 
         不存在返回 False。SQLite 默认未启用 ON DELETE CASCADE（DDL 未声明），
         必须 Service 显式级联——任务书给死。
+
+        ⚠️ **引用检查**（2026-10-23 task-7 · D-12/M-10）：迁移 0022 摘掉了
+        ``relationships.from_character_id`` / ``to_character_id`` 的外键
+        （关系端点可以是 faction，FK 语义不再成立）⇒ 删角色会留**孤儿关系行**，
+        而 ``PRAGMA foreign_key_check`` **报不出来**（FK 已不存在 ⇒ 检查无对象）
+        ⇒ 与 world 域对齐：删之前显式查引用；被引用 ⇒ 抛 ``ReferencedError``（409）
+        且**不删任何东西**。
+        ⚠️ 守卫本体与 faction 侧**共用一份**（world 域的
+        ``assert_not_relationship_endpoint``）⇒ 两端点列都查，不会再漏第二次。
         """
         conn = get_connection(self.db_path)
         try:
+            # 引用检查：relationships 的**两个端点列都要查**（只查 from 是半修）
+            assert_not_relationship_endpoint(
+                conn, character_id, "character", ReferencedError
+            )
             conn.execute("DELETE FROM character_states WHERE character_id = ?", (character_id,))
             cur = conn.execute("DELETE FROM characters WHERE character_id = ?", (character_id,))
             conn.commit()
@@ -346,4 +394,4 @@ class CharacterService:
         return [self._row_to_state(r) for r in rows]
 
 
-__all__ = ["CharacterService"]
+__all__ = ["CharacterService", "ReferencedError"]

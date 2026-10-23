@@ -18,6 +18,17 @@ chapter-write run 的 checkpoint）。这不是某一处代码写错，而是一
   + 1`` 的发布序（单调、与作者看到的「v13」同一口径），``created_at`` 只是墙钟戳，
   同秒并列时序不稳。
 
+**读失败 vs 没有草稿（2026-10-23 critical C-1 / D-6 修复）**：
+
+- **没有草稿**（正常业务状态）→ 返回 ``None``；
+- **读失败**（打不开库 / 缺 ``drafts`` 表 / 查询异常）→ 抛 :class:`DraftResolutionError`。
+
+⚠️ 此前两者都返回 ``None``，且本模块 docstring 明写「读侧全容错」——**设计上**把
+DB 故障与「该章无草稿」列为同一件事 ⇒ 上游把「没量到」当成「量过了、没问题」
+⇒ 质量门给**从未被评估**的章节发**满分 0 issue**（见
+``docs/impl/reviews/full-review-round2-2026-10-23.md`` §3.1）。现在两者**必须**分开：
+调用方要么显式处理异常（fail-closed），要么显式降级并**留下可见信号**。
+
 调用方纪律（P1-1）：
 
 - 手里有一版「被审 / 被核 / 被评」的对象（评审 run 的 ``ctx['draft_version']``、
@@ -26,8 +37,9 @@ chapter-write run 的 checkpoint）。这不是某一处代码写错，而是一
   提交后摘要）→ 传 ``None``，并在调用点写一行注释说明「有意取最新」，
   免得下一个读者把它当成本模块要修的漏传好心「修」错。
 
-读侧全容错：打不开库 / 缺 ``drafts`` 表 / 查询异常 → ``None``（与核销层、评审侧
-读路径同款，靠调用方兜底，不抛错）。
+读侧**不再全容错**：打不开库 / 缺 ``drafts`` 表 / 查询异常 → 抛
+:class:`DraftResolutionError`（**故障**），与「该章无草稿」（返回 ``None``，
+**正常业务状态**）严格区分——见下文「读失败 vs 没有草稿」。
 
 与「评审侧默认取最新」的分工：``chapter-review`` 的 ``basic_checks`` 无显式版本时
 取最新，经本模块语义应等价（``version DESC``）。**2026-09-18 已收敛**：该节点此前
@@ -43,11 +55,24 @@ from typing import Any
 
 from packages.core.db import get_connection
 
-__all__ = ["resolve_draft", "LATEST_DRAFT_ORDER"]
+__all__ = ["resolve_draft", "LATEST_DRAFT_ORDER", "DraftResolutionError"]
 
 
 LATEST_DRAFT_ORDER = "version DESC"
 """``draft_version=None`` 时的排序口径（全仓唯一声明处：``version`` 单调发布序）。"""
+
+
+class DraftResolutionError(RuntimeError):
+    """读草稿失败（库打不开 / ``drafts`` 表缺失或损坏 / 查询异常）。
+
+    ⚠️ 与「该章没有草稿」**严格区分**（2026-10-23 critical C-1 / D-6 修复）：
+
+    - **没有草稿**（正常业务状态）⇒ :func:`resolve_draft` 返回 ``None``；
+    - **读不到**（故障状态）⇒ 抛本异常。
+
+    此前两者都返回 ``None`` ⇒ 上游把「没量到」与「量过了、没问题」混为一谈 ⇒
+    质量门给**从未被评估**的章节发满分 0 issue。
+    """
 
 
 def _coerce_version(raw: Any) -> int | None:
@@ -75,20 +100,22 @@ def resolve_draft(
     返回：完整 ``drafts`` 行 dict（``draft_id`` / ``chapter_id`` / ``version`` /
     ``content`` / ``created_by`` / ``prompt_version`` / ``model_id`` / ``created_at``，
     字段集 = ``SELECT *``，与 ``ChapterService.list_drafts`` 的行形态一致）；
-    以下情形 → ``None``（调用方各自决定语义）：
+    以下情形 → ``None``（**正常业务状态**，调用方各自决定语义）：
 
     - 该章无草稿；
     - ``draft_version`` 指定的版本不存在；
-    - ``draft_version`` 不是正整数（含 ``bool``）；
-    - 读库失败（库不可打开 / 缺表 / 查询异常）。
+    - ``draft_version`` 不是正整数（含 ``bool``）。
+
+    **读失败**（库打不开 / 缺 ``drafts`` 表 / 查询异常）→ 抛
+    :class:`DraftResolutionError`（**故障状态**，与上面三种**不可混淆**）。
 
     ``row["version"]`` 即本次解析到的版本——调用方回报「我在量哪一版」时必须用它，
     不要另行再查一次（两次查询之间作者可能又改稿出新版本，标签与正文就会分叉）。
     """
     try:
         conn = get_connection(db_path)
-    except Exception:  # noqa: BLE001 —— 打不开库 → 读侧全容错，视为无草稿
-        return None
+    except Exception as exc:  # noqa: BLE001 —— 打不开库 = **故障**，不是「无草稿」
+        raise DraftResolutionError(f"无法打开数据库 {db_path}：{exc}") from exc
     try:
         try:
             if draft_version is None:
@@ -105,8 +132,13 @@ def resolve_draft(
                     "SELECT * FROM drafts WHERE chapter_id = ? AND version = ?",
                     (chapter_id, version),
                 ).fetchone()
-        except sqlite3.Error:
-            return None
+        except sqlite3.Error as exc:
+            # 缺表 / 表损坏 / 查询异常 = **故障**：2026-10-23 critical C-1 / D-6——
+            # 此前这里返回 None（与「该章无草稿」同值）⇒ 上游把「没量到」当成
+            # 「量过了、没问题」⇒ 质量门给从未被评估的章节发满分 0 issue。
+            raise DraftResolutionError(
+                f"读取草稿失败（chapter_id={chapter_id!r}）：{exc}"
+            ) from exc
     finally:
         conn.close()
     return dict(row) if row is not None else None

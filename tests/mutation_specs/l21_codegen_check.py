@@ -9,7 +9,7 @@
 ------------------
 | id | 撤掉的修复 / 改动 | 必红用例 |
 |---|---|---|
-| CG-ALWAYS-OK | ``check_artifact`` 恒返回一致（= 「闸门永远放行」这种最危险的假实现） | ``test_drift_is_detected`` / ``test_missing_artifact_is_drift`` |
+| CG-ALWAYS-OK | ``check_artifact`` 恒返回一致（= 「闸门永远放行」这种最危险的假实现） | ``test_drift_is_detected``（**实测**：``test_missing_artifact_is_drift`` **不变红**——MISSING 早返回在突变行之上；2026-10-23 批次三十一 task-3 订正此行，原表误列） |
 | CG-NO-NEWLINE-NORM | ``normalize_newlines`` 退化为恒等（= 去掉换行归一 ⇒ 闸门随平台 / ``core.autocrlf`` 变脸） | 实测首个红在 ``test_repo_openapi_artifact_matches_regeneration``（仓库产物是 CRLF、重新生成是 LF）；``test_line_ending_difference_is_not_drift`` 同批也红 |
 | CG-NO-MISSING | 产物缺失不再判不一致（删掉产物可蒙混过关） | ``test_missing_artifact_is_drift`` |
 

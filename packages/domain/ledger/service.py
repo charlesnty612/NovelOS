@@ -44,6 +44,7 @@ from packages.core.story_state.write_helpers import (
     dump_json_or_null as _dump_json_or_null,
 )
 
+from ..project.service import bump_project_state_version
 from .models import (
     DEBT_ALLOWED_NEXT,
     HOOK_ALLOWED_NEXT,
@@ -154,6 +155,13 @@ class LedgerService:
                         now,
                     ),
                 )
+                # 2026-10-23（M-1 / D-7）：同事务内推 ``story_states.state_version``
+                # （装配缓存失效主线，见 project.service.bump_project_state_version）——
+                # ``hooks`` 进 director payload 的 ``hook_ledger_excerpt`` /
+                # ``open_foreshadow_list``，而本写路径只 commit()、不推 version ⇒
+                # 缺该推进时「新增伏笔后重跑同一章」会命中旧装配（planner 拿到改动前
+                # 的伏笔台账，零告警）。
+                bump_project_state_version(conn, project_id)
                 conn.commit()
             except sqlite3.IntegrityError as exc:
                 raise ValidationError(f"hook insert failed: {exc}") from exc
@@ -265,6 +273,9 @@ class LedgerService:
                 conn.rollback()
                 conn.close()
                 return None
+            # 2026-10-23（M-1 / D-7）：同事务内推 ``story_states.state_version``
+            # （装配缓存失效主线）——伏笔台账进 director payload。
+            bump_project_state_version(conn, existing["project_id"])
             conn.commit()
         finally:
             conn.close()
@@ -276,9 +287,16 @@ class LedgerService:
     def delete_hook(self, hook_id: str) -> bool:
         conn = get_connection(self.db_path)
         try:
+            # 先取 project_id（删完就没了）——用于同事务内推 state_version。
+            owner = conn.execute(
+                "SELECT project_id FROM hooks WHERE hook_id = ?", (hook_id,)
+            ).fetchone()
             cur = conn.execute(
                 "DELETE FROM hooks WHERE hook_id = ?", (hook_id,)
             )
+            if cur.rowcount > 0 and owner is not None:
+                # 2026-10-23（M-1 / D-7）：同事务内推 ``story_states.state_version``。
+                bump_project_state_version(conn, owner["project_id"])
             conn.commit()
             return cur.rowcount > 0
         finally:
@@ -331,6 +349,10 @@ class LedgerService:
                         now,
                     ),
                 )
+                # 2026-10-23（M-1 / D-7）：同事务内推 ``story_states.state_version``
+                # （装配缓存失效主线）——``narrative_debts`` 进 director payload 的
+                # ``narrative_debt_excerpt``，而本写路径只 commit()、不推 version。
+                bump_project_state_version(conn, project_id)
                 conn.commit()
             except sqlite3.IntegrityError as exc:
                 raise ValidationError(f"debt insert failed: {exc}") from exc
@@ -434,6 +456,9 @@ class LedgerService:
                 conn.rollback()
                 conn.close()
                 return None
+            # 2026-10-23（M-1 / D-7）：同事务内推 ``story_states.state_version``
+            # （装配缓存失效主线）——叙事债务进 director payload。
+            bump_project_state_version(conn, existing["project_id"])
             conn.commit()
         finally:
             conn.close()
@@ -445,9 +470,16 @@ class LedgerService:
     def delete_debt(self, debt_id: str) -> bool:
         conn = get_connection(self.db_path)
         try:
+            # 先取 project_id（删完就没了）——用于同事务内推 state_version。
+            owner = conn.execute(
+                "SELECT project_id FROM narrative_debts WHERE debt_id = ?", (debt_id,)
+            ).fetchone()
             cur = conn.execute(
                 "DELETE FROM narrative_debts WHERE debt_id = ?", (debt_id,)
             )
+            if cur.rowcount > 0 and owner is not None:
+                # 2026-10-23（M-1 / D-7）：同事务内推 ``story_states.state_version``。
+                bump_project_state_version(conn, owner["project_id"])
             conn.commit()
             return cur.rowcount > 0
         finally:

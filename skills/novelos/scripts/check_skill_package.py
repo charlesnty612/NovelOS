@@ -14,7 +14,12 @@
    并**反查**：``references/`` 与 ``scripts/`` 里没有**孤儿文件**（未被 SKILL.md 引用）。
 5. ``scripts/novelos.py --help`` 能在**离线**状态退出码 0
    （用 ``sitecustomize.py`` 把 ``socket`` 打掉 ⇒ 真连网就会炸）。
-6. ``--selftest``：造一份**坏副本**，断言本脚本对它**报红**（并断言原树报绿）。
+6. **应用版本六处一致**：``pyproject.toml`` 是**单一源**，其余五处
+   （``.claude-plugin/plugin.json`` 的 ``metadata.novelosVersion`` /
+   ``skills/novelos/SKILL.md`` 的 ``metadata.novelosVersion`` /
+   ``apps/web/package.json`` / ``apps/web/package-lock.json`` / ``uv.lock``）
+   必须与它**逐字一致**——任一处漏同步即报红。
+7. ``--selftest``：造一份**坏副本**，断言本脚本对它**报红**（并断言原树报绿）。
 
 用法::
 
@@ -788,6 +793,158 @@ def _read_pyproject_version(repo_root: Path) -> str | None:
     return vm.group(1) if vm else None
 
 
+# ---------------------------------------------------------------------------
+# web 三处版本副本（发版纪律「六处」里的后三处）
+# ---------------------------------------------------------------------------
+
+#: web 侧三处版本副本相对仓库根的路径。
+WEB_PACKAGE_JSON = Path("apps/web") / "package.json"
+WEB_PACKAGE_LOCK = Path("apps/web") / "package-lock.json"
+UV_LOCK = Path("uv.lock")
+
+#: ``uv.lock`` 的包段头（``[[package]]``）。
+_UVLOCK_PACKAGE_HEADER_RE = re.compile(r"^\[\[package\]\]\s*$", re.MULTILINE)
+#: TOML 的字符串标量（``name = "..."`` / ``version = "..."``）。
+_TOML_NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]*)"', re.MULTILINE)
+_TOML_VERSION_RE = re.compile(r'^\s*version\s*=\s*"([^"]*)"', re.MULTILINE)
+
+
+def _read_uvlock_version(repo_root: Path) -> str | None:
+    """读 ``uv.lock`` 里 ``name = "novelos"`` 那个包的 ``version``。
+
+    不用 ``tomllib``：与 :func:`_read_pyproject_version` 同款理由（本脚本声明
+    「Python 3.9+ 标准库」而 ``tomllib`` 是 3.11 才进标准库）。这里只需要一个
+    扁平键 ⇒ 按 ``[[package]]`` 段切开，再在**段头**（第一个子表 ``[package.*]``
+    之前）里取 ``name`` / ``version``。
+    """
+    path = repo_root / UV_LOCK
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8")
+    starts = [m.end() for m in _UVLOCK_PACKAGE_HEADER_RE.finditer(text)]
+    starts.append(len(text))
+    for begin, end in zip(starts, starts[1:]):
+        segment = text[begin:end]
+        name_match = _TOML_NAME_RE.search(segment)
+        if name_match is None or name_match.group(1) != "novelos":
+            continue
+        head = segment.split("\n[", 1)[0]  # 只看段头，别撞上 [package.*] 子表
+        version_match = _TOML_VERSION_RE.search(head)
+        return version_match.group(1) if version_match else None
+    return None
+
+
+def _web_version_check(
+    check_id: str,
+    rel: Path,
+    app_version: str,
+    declared: list[tuple[str, str | None]],
+) -> Check:
+    """一处版本副本的比对结果（**逐字段**列出实测值）。"""
+    mismatched = [(label, value) for label, value in declared if value != app_version]
+    if not mismatched:
+        detail = "、".join(f"{label}={value!r}" for label, value in declared)
+        return Check(
+            check_id,
+            True,
+            f"{rel} {detail} 与 pyproject [project].version={app_version!r} 一致",
+        )
+    detail = "、".join(
+        f"{label}={value!r}" + ("（字段缺失或非字符串）" if value is None else "")
+        for label, value in mismatched
+    )
+    return Check(
+        check_id,
+        False,
+        f"{rel} {detail} ≠ pyproject [project].version={app_version!r}（发版漏同步）",
+    )
+
+
+def _check_web_version_copies(repo_root: Path) -> list[Check]:
+    """web 三处版本副本必须与 ``pyproject`` 的 ``[project].version`` **逐字一致**。
+
+    为什么补这三处
+    --------------
+    2026-10-23 实测（task-4 / D-16）：发版纪律要求**六处**版本同步
+    （``pyproject`` / ``apps/web/package.json`` / ``apps/web/package-lock.json`` /
+    ``uv.lock`` / ``.claude-plugin/plugin.json`` / ``skills/novelos/SKILL.md``
+    的 ``metadata.novelosVersion``），而本脚本此前只校其中**三处**
+    ⇒ **web 三处零看守**：任一处漏同步都没有任何机器拦它。
+
+    口径
+    ----
+    - **参照系 = ``pyproject`` 的 ``[project].version``**（发版纪律的**单一源**，
+      AGENTS.md「版本纪律」明写）⇒ 与 SKILL.md 同键副本那条互为交叉验证。
+    - **文件不存在 ⇒ 跳过**（不制造假红）：纯分发上下文（skill 包单独抽出）里
+      根本没有 ``apps/web`` 与 ``uv.lock``，与既有「清单缺失就 continue」同款。
+    - **文件在、但版本字段缺失/非字符串 ⇒ 判红**（副本存在却没声明版本 = 漏同步）。
+    """
+    app_version = _read_pyproject_version(repo_root)
+    if app_version is None:
+        # 没有 pyproject ⇒ 没有「单一源」可比 ⇒ 跳过（与既有 pyproject 比对同款口径）。
+        return []
+
+    checks: list[Check] = []
+
+    # ① apps/web/package.json —— 顶层 version
+    rel = WEB_PACKAGE_JSON
+    path = repo_root / rel
+    if path.is_file():
+        try:
+            data = _load_json(path)
+        except (OSError, json.JSONDecodeError) as exc:
+            checks.append(
+                Check("app-version-consistency/web-package-json", False, f"{rel} 读取失败：{exc}")
+            )
+        else:
+            raw = data.get("version") if isinstance(data, dict) else None
+            declared = [("version", raw if isinstance(raw, str) else None)]
+            checks.append(
+                _web_version_check(
+                    "app-version-consistency/web-package-json", rel, app_version, declared
+                )
+            )
+
+    # ② apps/web/package-lock.json —— 顶层 version + packages[""].version（两个副本）
+    rel = WEB_PACKAGE_LOCK
+    path = repo_root / rel
+    if path.is_file():
+        try:
+            data = _load_json(path)
+        except (OSError, json.JSONDecodeError) as exc:
+            checks.append(
+                Check("app-version-consistency/web-package-lock", False, f"{rel} 读取失败：{exc}")
+            )
+        else:
+            top = data.get("version") if isinstance(data, dict) else None
+            packages = data.get("packages") if isinstance(data, dict) else None
+            root_pkg = packages.get("") if isinstance(packages, dict) else None
+            root_version = root_pkg.get("version") if isinstance(root_pkg, dict) else None
+            declared = [
+                ("version", top if isinstance(top, str) else None),
+                ('packages[""].version', root_version if isinstance(root_version, str) else None),
+            ]
+            checks.append(
+                _web_version_check(
+                    "app-version-consistency/web-package-lock", rel, app_version, declared
+                )
+            )
+
+    # ③ uv.lock —— name = "novelos" 段的 version
+    rel = UV_LOCK
+    if (repo_root / rel).is_file():
+        checks.append(
+            _web_version_check(
+                "app-version-consistency/uv-lock",
+                rel,
+                app_version,
+                [('name = "novelos" 段的 version', _read_uvlock_version(repo_root))],
+            )
+        )
+
+    return checks
+
+
 def check_app_version_consistency(skill_dir: Path, repo_root: Path) -> list[Check]:
     """``metadata.novelosVersion`` 必须与 app 版本、各平台清单里的同键副本一致。
 
@@ -809,33 +966,44 @@ def check_app_version_consistency(skill_dir: Path, repo_root: Path) -> list[Chec
     - 与 ``pyproject.toml`` 的 ``[project].version`` 比对：**仓库里有 pyproject 时才查**；
       纯分发上下文没有 pyproject ⇒ 跳过，不当失败（与 ``check_version_consistency``
       「清单缺失就 continue」同款，不制造假红）。
+    - **web 三处**（``apps/web/package.json`` / ``apps/web/package-lock.json`` /
+      ``uv.lock``）同样以 ``pyproject`` 的 ``[project].version`` 为**单一源**比对
+      （见 :func:`_check_web_version_copies` 的口径说明）。
     """
+    checks: list[Check] = []
+    # web 三处版本副本：与 SKILL.md 无关（SKILL.md 缺失时也要查得到它们）。
+    checks.extend(_check_web_version_copies(repo_root))
+
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.is_file():
-        return [
+        checks.append(
             Check(
                 "app-version-consistency/skill",
                 False,
                 "缺少 SKILL.md，无法比对 metadata.novelosVersion",
             )
-        ]
+        )
+        return checks
     try:
         front, _ = parse_frontmatter(skill_md.read_text(encoding="utf-8"))
     except ValueError as exc:
-        return [Check("app-version-consistency/skill", False, f"frontmatter 解析失败：{exc}")]
+        checks.append(Check("app-version-consistency/skill", False, f"frontmatter 解析失败：{exc}"))
+        return checks
     metadata = front.get("metadata")
     declared = metadata.get("novelosVersion") if isinstance(metadata, dict) else None
-    checks: list[Check] = [
-        Check(
-            "app-version-consistency/skill",
-            isinstance(declared, str) and bool(declared),
-            (
-                f"SKILL.md metadata.novelosVersion = {declared!r}"
-                if isinstance(declared, str)
-                else f"SKILL.md metadata.novelosVersion 缺失或非字符串：{declared!r}"
-            ),
-        )
-    ]
+    checks.extend(
+        [
+            Check(
+                "app-version-consistency/skill",
+                isinstance(declared, str) and bool(declared),
+                (
+                    f"SKILL.md metadata.novelosVersion = {declared!r}"
+                    if isinstance(declared, str)
+                    else f"SKILL.md metadata.novelosVersion 缺失或非字符串：{declared!r}"
+                ),
+            )
+        ]
+    )
 
     for platform, rel in PLUGIN_MANIFESTS.items():
         path = repo_root / rel
@@ -1005,11 +1173,22 @@ def _copy_tree(src: Path, dst: Path) -> None:
 
 
 def _build_bad_copy(repo_root: Path, skill_dir: Path, dest: Path) -> None:
-    """把 skill 包与三平台清单复制到 ``dest``，制造一个**结构相同**的副本。"""
+    """把 skill 包与三平台清单复制到 ``dest``，制造一个**结构相同**的副本。
+
+    ⚠️ 2026-10-23（task-4 / 对抗审查 A2）：**web 三处版本副本 + 单一源 pyproject
+    也必须复制进来**。理由：
+      ① 不复制 ⇒ ``_check_web_version_copies`` 命中「文件不存在 ⇒ 跳过」的口径
+         ⇒ **整条 web 检查在坏副本里不跑** ⇒ ``--selftest`` 变成「跑而不验」
+         （CI 的「Contract self-checks」那一步**只跑本脚本** ⇒ 新看守在 CI 上失守）。
+      ② ``pyproject.toml`` 还是 web 三处的**参照系**（单一源）⇒ 没有它就没法比。
+    """
     _copy_tree(skill_dir, dest / "skills" / skill_dir.name)
     for rel in PLUGIN_MANIFESTS.values():
         _copy_tree(repo_root / rel, dest / rel)
     for rel in MARKETPLACE_MANIFESTS.values():
+        _copy_tree(repo_root / rel, dest / rel)
+    # web 三处版本副本 + 单一源（pyproject）
+    for rel in (Path("pyproject.toml"), WEB_PACKAGE_JSON, WEB_PACKAGE_LOCK, UV_LOCK):
         _copy_tree(repo_root / rel, dest / rel)
 
 
@@ -1026,8 +1205,11 @@ def _mutate_skill_md(path: Path, mutation: str) -> None:
     elif mutation == "bad-name":
         text = text.replace("name: novelos", "name: Novel_OS", 1)
     elif mutation == "novelos-version-mismatch":
-        # 第 6 处版本副本：--selftest 的坏副本里不复制 pyproject.toml ⇒ 该变异由
-        # 「SKILL.md ↔ plugin.json 同键比对」那条抓（app-version-consistency/claude）。
+        # 第 6 处版本副本：这个变异由「SKILL.md ↔ plugin.json 同键比对」那条抓
+        # （app-version-consistency/claude）。
+        # ⚠️ 2026-10-23（task-4 / 审查 A2）起，坏副本**也复制 pyproject.toml** ⇒
+        # 「SKILL.md ↔ pyproject」那条（app-version-consistency/pyproject）会**同时**报红
+        # ——两条都红是预期的（本变异确实漏同步了两处），selftest 只要求**预期那条**红。
         text = re.sub(
             r'novelosVersion:\s*"[^"]*"',
             'novelosVersion: "9.9.9"',
@@ -1049,6 +1231,43 @@ def _mutate_claude_marketplace(path: Path) -> None:
     if isinstance(entries, list) and entries:
         entries[0]["source"] = "skills/novelos"  # 少了 './' 前缀
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+#: web 三处版本副本的**假版本**（刻意与单一源不同 ⇒ 比对必须报红）。
+_FAKE_APP_VERSION = "9.9.9"
+
+
+def _mutate_web_package_json(path: Path) -> None:
+    """把 ``apps/web/package.json`` 的顶层 ``version`` 改成假版本。"""
+    data = _load_json(path)
+    data["version"] = _FAKE_APP_VERSION
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _mutate_web_package_lock(path: Path, *, where: str) -> None:
+    """把 ``apps/web/package-lock.json`` 的某个 ``version`` 改成假版本。
+
+    ``where="top"`` ⇒ 顶层 ``version``；``where="root"`` ⇒ ``packages[""].version``。
+    两个副本**各自单测**：只测其一时，另一处若漏检就抓不到。
+    """
+    data = _load_json(path)
+    if where == "top":
+        data["version"] = _FAKE_APP_VERSION
+    elif where == "root":
+        data["packages"][""]["version"] = _FAKE_APP_VERSION
+    else:
+        raise ValueError(f"未知的 where：{where!r}")
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _mutate_uv_lock(path: Path) -> None:
+    """把 ``uv.lock`` 里 ``name = "novelos"`` 段的 ``version`` 改成假版本。"""
+    text = path.read_text(encoding="utf-8")
+    m = re.search(r'(name = "novelos"\s*\nversion = )"[^"]*"', text)
+    if m is None:
+        raise AssertionError('uv.lock 里找不到 name = "novelos" 段（变异锚点失效）')
+    text = text[: m.start(1)] + m.group(1) + f'"{_FAKE_APP_VERSION}"' + text[m.end() :]
+    path.write_text(text, encoding="utf-8")
 
 
 def run_selftest(skill_dir: Path, repo_root: Path) -> tuple[bool, list[str]]:
@@ -1109,6 +1328,26 @@ def run_selftest(skill_dir: Path, repo_root: Path) -> tuple[bool, list[str]]:
             "app-version-consistency/claude",
             "skill-md:novelos-version-mismatch",
         ),
+        (
+            "M9 web 版 package.json 的 version 与单一源不一致",
+            "app-version-consistency/web-package-json",
+            "web-package-json",
+        ),
+        (
+            "M10 web 版 package-lock.json 顶层 version 与单一源不一致",
+            "app-version-consistency/web-package-lock",
+            "web-package-lock-top",
+        ),
+        (
+            "M11 web 版 package-lock.json packages[\"\"].version 与单一源不一致",
+            "app-version-consistency/web-package-lock",
+            "web-package-lock-root",
+        ),
+        (
+            "M12 uv.lock 里 novelos 段的 version 与单一源不一致",
+            "app-version-consistency/uv-lock",
+            "uv-lock",
+        ),
     ]
 
     for title, expected_id, kind in mutations:
@@ -1128,6 +1367,14 @@ def run_selftest(skill_dir: Path, repo_root: Path) -> tuple[bool, list[str]]:
                 )
             elif kind == "missing-reference":
                 (bad_skill / "references" / "quality.md").unlink()
+            elif kind == "web-package-json":
+                _mutate_web_package_json(dest / WEB_PACKAGE_JSON)
+            elif kind == "web-package-lock-top":
+                _mutate_web_package_lock(dest / WEB_PACKAGE_LOCK, where="top")
+            elif kind == "web-package-lock-root":
+                _mutate_web_package_lock(dest / WEB_PACKAGE_LOCK, where="root")
+            elif kind == "uv-lock":
+                _mutate_uv_lock(dest / UV_LOCK)
             checks = run_all_checks(bad_skill, dest)
             hit = [c for c in checks if c.check_id == expected_id and not c.ok]
             if hit:
