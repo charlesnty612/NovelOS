@@ -68,7 +68,7 @@
 
 | 严重级 | # | 一句话 | 复算方式 |
 |---|---|---|---|
-| **critical** | C-1 | 质量门 fail-open：`drafts` 表读不出来 ⇒ 该章被判「满分 0 issue」并放行 commit | 见 §3.1 |
+| **critical → ⚠️ 已订正为 major** | C-1 | 质量门 fail-open：`drafts` 表读不出来 ⇒ 该章被判「满分 0 issue」并放行 commit | **⚠️ 订正（2026-10-23 修复批，Lead 用 `git archive HEAD` 副本复算）**：**门禁路径本已 fail-closed**（`build_quality_context` 在 `drafts` 表不可用时先抛 `OperationalError`）⇒ 真实 fail-open 范围收窄为**两处独立调用 `resolve_draft`** 的路径（`core/delivery/evidence.py:181`、`workflows/chapter_review/pipeline.py:386`）⇒ 严重级 **critical → major**。机制缺陷与修法不变。见 §3.1 订正块 |
 | major | M-1 | director 装配缓存键 **5 处漏维度**（伏笔台账/叙事债务/情节图/逾期阈值/章标题），第 6/7 次同形状 | §3.2 |
 | major | M-2 | 备份**有写无读**：无 restore 工具、无 runbook；带 `-wal` 残留时恢复**静默失效**且 `integrity_check` 假绿 | §3.3 |
 | major | M-3 | 解密失败**仍会破坏活库**：openssl 先截断目标再报错，无原子写 | §3.3 |
@@ -96,6 +96,45 @@
 ## 3. 逐条证据
 
 ### 3.1 C-1（critical）质量门 fail-open —— Lead 已端到端复现
+
+> ## ⚠️ 订正（2026-10-23 修复批 · Lead 亲自复算）：**严重级由 critical 降为 major**，失效链的**后半段不成立**
+>
+> **订正依据**：用 `git archive HEAD` 导出**修复前**的代码副本（`C:/Users/aistation/AppData/Local/Temp/novelos_head_copy/`，
+> 只读导出，不动仓库），在副本上跑**门禁的真实消费路径** `build_quality_context`：
+>
+> ```
+> --- 正常态 build_quality_context ---
+> 正常态 overall = None
+> --- DROP TABLE drafts（部分迁移 / 错误备份恢复 / 库损坏）---
+> --- 故障态 build_quality_context（门禁的真实消费路径）---
+> 故障态 RAISED: OperationalError no such table: drafts
+>   ⇒ 该路径**已 fail-closed**（抛错 ⇒ 上游拿不到报告 ⇒ 门禁不会放行）
+> ```
+>
+> ⇒ **原证据链的前半段成立、后半段不成立**：
+> - ✅ 成立：`resolve_draft` 把 DB 故障与「无草稿」折叠成同一个 `None`（`:88-91` / `:108-109`）——**机制缺陷真实存在**，且 docstring:83 把它写成了刻意设计；
+> - ❌ **不成立**：「该章从未被评估，却拿到满分 0 issue，门禁放行」——
+>   `build_quality_context` 内的 `compute_char_stats_detail` **同样先读 `drafts` 表**，
+>   ⇒ `drafts` 表不可用时它**先抛 `OperationalError`** ⇒ **到不了** `score_style` 的 `if not draft: return 100`
+>   ⇒ 质量路径**本来就 fail-closed**。
+> - ⚠️ 本节原文自己就写了「不是『DB 整体不可用』——那样前面的 `compute_char_stats_detail` 会先抛错」，
+>   **但推论错了**：既然 `compute_char_stats_detail` 读的也是 `drafts` 表，
+>   `drafts` 表不可用时它**同样**先抛错 ⇒ 原文据以推出 critical 的那句「于是该章从未被评估，却拿到满分」不成立。
+>   （**教训**：我当时的探针只调了 `resolve_draft` + `score_style` **两段**，没走 `build_quality_context` **全链**
+>   ⇒ 「端到端复现」这个措辞当时是**过度声称**。）
+>
+> ⇒ **真实 fail-open 范围收窄为两处绕过 `build_quality_context`、独立调用 `resolve_draft` 的路径**：
+> `packages/core/delivery/evidence.py:181` 与 `packages/workflows/chapter_review/pipeline.py:386`
+> （这两处把 `None` 当「无草稿」⇒ 证据/评审链在 DB 故障时误判「本章无内容」）。
+>
+> ⇒ **修复方向不变但更准确**：`resolve_draft` 必须区分「读失败」与「无草稿」（Task 1 已实施：
+> 新增域异常 `DraftResolutionError` + 上游 fail-closed + 可见的「不可检」信号）；
+> **门禁路径本已安全**，真正受益的是那两处独立调用点（属 Task 6 所有权）。
+>
+> **判别建议（订正后）**：临时库 `DROP TABLE drafts` ⇒ ① 调 `POST /api/quality/evaluate`
+> ⇒ 期望**不是** `score=100` 的报告（现状已是 5xx ⇒ 修后为「可见的不可检信号」）；
+> ② **新增**：对 `delivery/evidence.py` / `chapter_review/pipeline.py` 两处**独立**注入故障 ⇒
+> 期望**不**产出「本章无内容」的空结论。
 
 **失效链**（全部 Lead 亲验）：
 
@@ -525,7 +564,7 @@ world(world_kind, risk_level) 分布: {('location', 'LOW'): 3, ('location', 'HIG
 | 序 | 项 | 规模 | 说明 |
 |---|---|---|---|
 | 0 | **M-15 内容仓 GitHub remote**（摘 remote 或加 pre-push 守卫）+ **M-14 痕迹迁出**（`docs/evaluation/` 迁痕迹仓并补 ignore；GitHub 上那部分**只能记录、不可撤回**） | 极小 | **隐私优先于一切**：一次误 push = 全书发布 |
-| 1 | **C-1 质量门 fail-open** | 小 | `resolve_draft` 区分「读失败」与「无草稿」；期望 5xx 而非 100 分报告 |
+| 1 | **C-1 质量门 fail-open**（⚠️ **已订正为 major**，见 §3.1） | 小 | `resolve_draft` 区分「读失败」与「无草稿」；**门禁路径本已 fail-closed** ⇒ 受益点是 `delivery/evidence.py` / `chapter_review/pipeline.py` 两处独立调用 |
 | 2 | **M-2/M-3/M-4/M-5 备份链**（restore 工具 + 默认加密 + 密文自检 + 密钥缺失报错） | 中 | 数据不可逆；且与既有「密钥进私有网盘」策略直接冲突 |
 | 3 | **M-1 缓存键 5 处漏维度 + 写路径推 `state_version`** | 中 | 同形状已复发 6~7 次；只补键维度是治标，**写路径推 version 才是根治** |
 | 4 | **M-6 CI xdist 缺口**（把 xdist 挪进 `[project.optional-dependencies].dev`） | 极小 | 一行依赖；解锁 windows 并发路径的唯一覆盖 |
@@ -549,3 +588,89 @@ world(world_kind, risk_level) 分布: {('location', 'LOW'): 3, ('location', 'HIG
 - 子代理实跑证据目录：`C:/Users/aistation/AppData/Local/Temp/novelos_verify_c7_20261023/`（备份往返）、
   `novelos_verify/`（批次三十）、`novelos_failopen_*/`（域层 fail-open 机制）。
 - 台账与交接单：`docs/impl/reviews/remaining-debt-2026-10-23.md`、`docs/impl/reviews/handoff-2026-10-23.md`。
+
+---
+
+## 8. 修复批 + 对抗审查 A/B（2026-10-23 晚 · 同一批）
+
+> 本节记录**从「审查完成」到「修复 + 复核」**的过程。逐条 finding 与 Lead 裁决见
+> 台账 `docs/impl/reviews/remaining-debt-2026-10-23.md` 的「**四之三、第二轮对抗审查 findings**」；
+> 审查者 B 的 864 行全文见 `docs/impl/reviews/adversarial-review-b-2026-10-23.md`。
+
+### 8.1 流程：打回环（本批新增的纪律）
+
+```
+实现者产出完成
+   └─▶ 立即分发对抗审查（不等其余产出）──┐
+                                        │
+   ┌────────────────────────────────────┘
+   ▼
+审查者 findings（只读、独立复算）
+   ▼
+Lead 逐条裁决（不裁决不外发）—— 裁决依据只有一条：自己复算，不看是谁说的
+   ▼
+按文件所有权路由 ──▶ 打回给【原实现者】（task_append，保上下文 + 保所有权）
+   │                     └─ 失败改 mavis session send；禁止新开 agent
+   ▼
+Lead 复验 critical/major（读码 / 探针 / 复算）
+   ▼
+追加给【同一审查者】复审 ──▶ 闭合
+```
+
+**为什么按所有权打回**：审查者若越界改别人的文件，会与并发成员互相覆盖；
+原实现者手里有这份文件的完整上下文，重开 agent 等于让它从零复现。
+
+### 8.2 两条专职审查者的结论
+
+| 审查者 | 覆盖 | 结论 | 驳倒项 |
+|---|---|---|---|
+| **A**（机制层 + CI） | 33 文件（Task 4 / D-9 / D-10 / D-12 / Task 1 / Task 2 / Task 3） | **未驳倒** Task 4 核心声称（`pip install -e ".[dev]"` 真装得上 xdist，wheel 元数据核实）；**驳倒** 4 major + 10 minor | 备份链 2 major（占用态崩溃 / 明文密钥副本留存）、API 契约弱断言 1 major、测试错述 1 major |
+| **B**（域层 + 三仓 + 前端） | Task 7 / D-0 / D-1 / D-14 / D-15 / Task 5 | **攻不倒**删角色引用守卫本身；**驳倒** 9 major + 15 minor | 分层看守 4 major（动态 import / 相对逃逸 / world 孤儿 / domain→domain 无边）、痕迹落点 2 major、内容仓钩子 1 major、前端快通道 2 major |
+
+### 8.3 审查过程本身的教训（比 finding 更值钱）
+
+1. **「据子代理报告」不可信**——审查者实测与子代理自报**对不上**三处：
+   泄漏目录 240（实测 **260**）、缓存键性能「+4ms/+64%」（**未实测**，实测小库 +1.05ms/+13.7%）、
+   突变「各红 1 条」（实测**各红 2~3 条**）。⇒ 子代理的**数字**一律自己复算。
+2. **错误的「正当性依据」比没有依据更危险**——D-9 的测试文件写着「core 侧**不认** `world_kind=="rule"`、
+   覆盖不对称」（**实测证伪：core 侧也认，两份实现对称**）。照这句话去「对齐」core 侧，
+   **恰好造出真的门禁缺口**（`commits.py` 的 HIGH 风险门不再拦世界规则变更 ⇒ 走 API 可绕过人工审批）。
+   ⇒ 「理由写错」会**指导后人做出相反的错误动作**，这类错必须改措辞而不是删测试。
+3. **覆盖叙述 ≠ 覆盖事实**——D-9 的 L3 用例把 ctx 标志**手写成 True** ⇒ 撤掉 payload 相关子句它仍绿
+   ⇒ **零判别力**。已改成由 payload 现场推导。
+4. **同一形状复发第 2 次**：手写「迁移清单」漂移（0034 漏改）⇒ 改为**与磁盘目录动态对账**，
+   并把人工注册表收敛为**一份**（加迁移只改一处，漏改会被它抓住）。
+5. **加列会静默打破响应契约**——0034 给 `commits` 加列 ⇒ `SELECT *` 的列表行从 12 键变 13 键 ⇒
+   「恒 12 键」的契约测试红了（Lead 自修时**实测发现**的第二处红，第一处是 `test_migrations`）。
+   ⇒ 「加列」必须同步查：响应模型 / 契约测试 / 全仓文案口径。
+6. **子代理被 TPM 限流打断 ≠ 结论作废**——中断前它手里往往已握有最值钱的证据；
+   本批已把「发消息让它继续，不要重开 agent」写进 agent memory（打回环依赖这一点）。
+
+---
+
+## 9. 追加批次（2026-10-23 深夜）：用户报「新增章节 → 生成计划 → 章名不生成」
+
+> 起因：用户原话「原计划只有 10 章，结果后面需要新增章节，按软件的『新增章节』后，再进去『生成计划』，
+> 此章节的章节名不会自动生成，这个问题也安排修复一下。」
+> 详细根因五环与裁决见台账 `docs/impl/reviews/remaining-debt-2026-10-23.md` 的「**四之四**」；
+> 交接单见 `handoff-2026-10-23.md` §9。
+
+### 9.1 一句话结论
+
+**不是章名逻辑的缺陷，是「运行时用的提示词是旧版」的缺陷。**
+`prompts` 表是仓内 `docs/agents/prompts/*.md` 的运行时镜像，**只在服务启动时同步一次**；
+长驻服务不重启 ⇒ 仓内新增的提示词版本**永远到不了运行时**。实测活库 `director_planner` 只到 **v2**，
+而 **v2 / v3 的 §7 输出契约都没有顶层 `title`** ⇒ 模型**结构上**产不出章名 ⇒
+落库侧的回填 UPDATE **根本不执行** ⇒ 章节名永远为空，**且全程零告警**。
+⇒ 批次二十五的 v4 提示词与回填代码**早已在仓内，却从未到达运行时**。
+
+### 9.2 这一批对审查方法本身的三条补充
+
+1. **「能力已实现」≠「能力已生效」**——仓库里有代码、有测试、有提示词文件，只说明**源码侧齐了**；
+   从仓内到运行时还有一段**镜像**（DB 里的提示词表），那段会陈旧且无声。
+   ⇒ 凡是「仓内 X ⇒ 运行时 Y」的链，**必须有一条测试断言镜像与源码一致**。
+2. **失败的默认状态是静默的**——回填的取值恒 `None` 时，「什么都不做」与「成功回填」在输出上无法区分。
+   ⇒ 机制必须自带**结局可观测**，否则用户只能来报 bug。
+3. **闸门量具本身会被环境悄悄废掉**——上轮「40 条 INVALID」与本轮新出现的**假 CAUGHT**，
+   都是执行器自身的前提没满足（`--basetemp`）或判断有洞（把 ERROR 当 FAIL）。
+   ⇒ 量具的结论必须先经「它测的是被测物还是它自己」这一问。

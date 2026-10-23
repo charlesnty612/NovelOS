@@ -70,7 +70,7 @@ packages/domain/         领域服务（project / character / chapter / world / 
                          relationship / hooks / ledger）
 packages/workflows/      工作流（chapter_plan / chapter_write / chapter_review / chapter_commit /
                          deconstruct_book / project_init / simulation）
-database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0033_model_connections.sql，共 33 个迁移，42 张业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包 / 0026 run 实例归属 / 0027 场景计划 / 0028 大纲槽 / 0029 写作圣经 / 0030 回滚索引项目内收窄 / 0031 项目级快通道 / 0032 内部消费外部 skill / 0033 模型连接层）
+database/migrations/     唯一 DDL 来源（0001_init.sql ~ 0034_commits_draft_version.sql，共 34 个迁移，42 张业务表 + 1 张虚表 chapter_fts；关键迁移：0009 分支快照 / 0011 FTS5 / 0015 多卷 / 0016 模型档案 / 0017 唯一约束 / 0023 字数带覆盖 / 0025 题材包 / 0026 run 实例归属 / 0027 场景计划 / 0028 大纲槽 / 0029 写作圣经 / 0030 回滚索引项目内收窄 / 0031 项目级快通道 / 0032 内部消费外部 skill / 0033 模型连接层 / 0034 commits 记定稿草稿版本）
 skills/novelos/           对外可分发的 Agent Skill 包（SKILL.md + 5 份 references + stdlib 薄客户端
                          + 契约自检 49 项；三平台清单见 .claude-plugin/ / .codex-plugin/ /
                          .cursor-plugin/ / .agents/）

@@ -68,7 +68,7 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
    ⇒ 判别（比"键不等"更硬）：**改数据 ⇒ `state_version` 变 ⇒ 必然 miss**，不依赖任何具体维度；断言打在 **payload 实际内容**上 + 配「未改必命中」反向不变量防过度失效。
 3. **新资源类型范式**（genre_pack 先例）：自有表 + 自有 schema 版本线（`^<name>.v1.\d+\.\d+$`，minor 兼容）+ `additionalProperties:false` 守「软件层只承载消费子集」+ CRUD router + 项目绑定 + builder 注入 + 缓存键指纹；内容资产正文一律不进软件仓（三仓分离）。
 4. **质量口径**：error 分 blocking/informational（白名单 `quality/issues.py:BLOCKING_RULES`）；**severity 矩阵变更必须同步三处文档 + formula_hash 变 + 回归测试**；评审类约束（题材核销/GENRE-*）恒 warning 不进白名单。
-5. **软件/内容/痕迹三仓分离**：运行 payload 存 DB；人编辑面在 NovelOS-Content（10 维文件=编辑面，pack.json=运行面，双轨不自动聚合）；操作痕迹在 NovelOS-Artifacts。审核红线只进内容仓。**内容仓不推 GitHub**（2026-09-14 用户裁决：本地 git 历史照留作审计迹，push 停止；已上云历史不动）。
+5. **软件/内容/痕迹三仓分离**：运行 payload 存 DB；人编辑面在 NovelOS-Content（10 维文件=编辑面，pack.json=运行面，双轨不自动聚合）；操作痕迹在 NovelOS-Artifacts。**审核红线正文（题材正文 / 平台审核清单）只进内容仓**；软件层只承载**机制可消费子集**（条目化的 `forbidden_words` / `pacing.redlines`（均为 string 数组），+ **文本化的** `critic_rubric.taboo_notes`（≤2000 字的自由文本，**不是数组**））——schema 自带这句边界（`docs/state-model/schemas/genre-pack.schema.json` 的 `taboo_notes.description`：「只承载机制可呈现的要点，题材正文/平台审核清单留在内容仓」）。⚠️ **口径订正 2026-10-23（D-15）**：原文写「审核红线只进内容仓」，那是**字面绝对**口径，与实现不符（`genre_packs.payload_json` 实际含这三个段）；**只改措辞不改实现**。⚠️ **口径订正 2026-10-23 补面（对抗审查 B · C3/C4）**：D-15 第一次只改了本条，**实际消费方** `packages/core/genre/consumers.py` 的 docstring 仍是绝对口径 ⇒ 本批已一并订正；另 `docs/roadmap/题材库-评估与落地计划-2026-09-13.md` 的两处旧表述按硬规则 7 加了「历史注记」横幅。**内容仓不推 GitHub**（2026-09-14 用户裁决：本地 git 历史照留作审计迹，push 停止；已上云历史不动）。
 6. **迁移**：只加不改；新列可空兼容存量；迁移清单测试（test_migrations）随新增同步。
 7. **文档引用纪律**（R5 检修根因：38ec703 三仓迁移未回填引用造成 ≥14 处断链——反引号路径引用 markdown checker 查不出，只能靠人工/代理抽查）：引用 NovelOS-Content / NovelOS-Artifacts 的文件必须写清仓库名；引 docs/ 内文件前先确认未被迁空（迁移残留空目录：2026-09 记 9 个，2026-10-15 实测 6 个，**2026-10-21 实测递归 6 个（顶层 4 个：architecture / data-model / deconstruct / testing；嵌套 2 个：evals/patches、evaluation/smoke_runs）——逐期会变，引用时现查现数**，且**须标明「递归」还是「顶层」口径**）；旧计划/旧报告类文档必须带「历史注记」横幅（日期+状态+被什么取代）。
 8. **环境同步纪律**：改 `pyproject.toml`（尤其 version）后必须 `uv sync --extra dev`（ruff/pytest/xdist 在 dev extra 里，裸 `uv sync` 会 pruning 掉 ruff）——editable 元数据不刷新时 `/api/health` 的 version 腿对外报旧值，且自洽断言抓不住（R5 实证）。
@@ -108,6 +108,13 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
     - 快通道是**关闸门不是关判定**：`quality_gate` 照算、报告照落库，只是 `should_block` 恒假
       （走既有 `quality_gate_mode="report"` 语义）；`observer` / `inject_validate` /
       `commit_delta` 全部照跑。
+      ⚠️ **例外（2026-10-23 · Task 1 / D-6 修复）**：**质量不可检**时（读不到草稿 = DB 故障，
+      见 `packages/domain/chapter/draft_resolver.py::DraftResolutionError`）`should_block`
+      **恒为真**，快通道也不例外 ⇒ 不可自动提交。理由：「关判定」指的是**不因质量不合格而拦**，
+      而「不可检」**不是判定结果，是判定不可用** ⇒ 在故障上自动提交 = 把未知当合格。
+      ⚠️ **行为变更留痕**：质量不可检时 API 由「抛未捕获 `OperationalError` ⇒ 5xx」
+      改为「**201 + `overall=0` + 一条阻断级可见 issue**（`scoring_missing_subscore`）」——
+      更可控（客户端拿到结构化原因而非裸 500），门禁仍硬停。
     - 唯一改判定的一处是 `chapter_commit/commit.py` 的 `status != "REVIEWED"` 校验
       （快通道下放行 `DRAFTED`）。**关掉开关时逐字走原逻辑**，存量项目零行为突变。
     - **`ctx["human_input"]` 的预置批准必须按 `workflow_name == "chapter-commit"` 收口**
@@ -136,7 +143,7 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
 继承方法论 `~/.agents/methodology/`（三条元规则凌驾一切）：
 
 1. **主会话不采信子代理结论**：critical/major 逐条亲验（读码/探针/复算）后才入册。
-2. **声称与实测分离**：「已修/恒/永不」要么有测试看守要么标注为声称；新测试必须**突变验证**（撤修复必红）；零变更重构以**测试数零增减**为硬验收。
+2. **声称与实测分离**：「已修/恒/永不」要么有测试看守要么标注为声称；**新测试必须有判别力**（断言打在**真实值**上：payload 实际内容 / DB 实际列 / 实际退出码；**突变规格不再是强制项**，仅关键机制按需补——见第 7 条）；零变更重构以**测试数零增减**为硬验收。
 3. **缺陷形状升格**：同一形状抓到第二次 → 沉淀为清单/硬规则/本文件条目（F-1~F-8 先例在 v3.9 计划文档 §六）。
 4. **并行开发按文件路径互斥分组**；子代理任务书写死专属文件/铁律/测试命令/汇报格式；子代理禁做任何版本控制写操作。
 5. **先验判断被推翻必须留痕**（项目铁律：roadmap 评估表 + 「两处主会话先验判断被推翻」先例）。
@@ -145,6 +152,27 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
    **主会话独立复算后确认三处均为开发正确**。反面先例同轮：运维成员「纠正」主会话
    「8 章是 9 章」实为它自己算错（把 `chapter_id IS NULL` 当章节）——**照单全收就会把假事实刻进
    CHANGELOG**。⇒ 裁决依据只有一条：**自己复算**，不看是谁说的。
+7. **突变规格不再是新测试的强制项**（2026-10-23 修复批裁决 · **项目层覆盖**权威方法论
+   「突变验证是新测试的投名状」）：
+   - **突变规格是什么**：**人工写的变异清单**（`tests/mutation_specs/*.py` 的 `MUTATIONS` 元组），
+     每条 = （某源文件某段原文 → 另一种写法）+ 期望红掉的目标测试文件。
+     它**不是测试**（不产生任何 pytest 用例），执行器临时改源码 → 跑目标测试 → 判红绿 → 恢复。
+     本仓现状：**85 个规格文件 / 468 条**。
+   - **为什么改**：① 成本全在「**写**」——每条要设计锚点、还要保证锚点在源码里**恰好命中 1 次**
+     （本轮各实现者为此反复返工）；② **CI 本来就不跑突变实跑**（只跑 0.2 秒只读预检）⇒
+     它的日常成本不是「跑」而是「写与维护」；③ 突变验证的**目的**（证明测试不是恒真断言）
+     **可以由测试断言本身的强度直接承担**——断言打在真实值上，天然依赖被测机制。
+   - **新规则**：新测试**默认不写**突变规格；**仅在命中以下三条之一时补**：
+     ① 该机制是**门禁/闸门**（失效会让错误内容被放行）；
+     ② 该机制**跨域/跨层**且极易被「好心改错」；
+     ③ 该路径**不可逆 / 涉隐私 / 会损坏数据**。
+   - **判别力的主担子改为测试断言本身**：断言必须打在**真实值**上，不许恒真断言、
+     不许「只查存在不查值」、不许用 mock 掩盖真实行为。
+   - **已有 468 条保留**：作为**发版前闸门**（`run_spec.py --all --jobs 16` ⇒ 实测 12.7 分钟）
+     +「哪些机制被机械验证过」的审计记录；**不新增**（除非命中上面三条）。
+     ⚠️ **删除不可逆** ⇒ 不做批量清理；确要清理由 Lead 单独裁决。
+   - ⚠️ **与权威源的差异**：权威源 `C:/Users/aistation/.agents/methodology/` 写「突变验证是新测试的
+     投名状」；本仓**只覆盖「强制配套」这一点**，**不改「新测试必须有判别力」的要求**。
 
 ### 固定子代理团队（2026-09-27 用户指令建立，跨会话复用）
 
@@ -187,16 +215,16 @@ python scripts/migrate.py            # 迁移（新库全链 0001~0033）
 python -m ruff check packages scripts tests   # lint（测试文件豁免 E501）
 python -m pytest -n 20 -q            # 全量（**按核数取 `min(核数/2, 20)`**：本机 32 逻辑核实测 `-n 4` 7:34 → `-n 12` 4:09 → **`-n 20` 2:55**，用例数逐位相同 3892/1/1；xdist 需在 venv）
 .venv/Scripts/python.exe scripts/mutation_harness.py   # 突变验证（**21 条**硬编码变异，退出码 0=全捕获/1=有存活或中止；2026-10-15 批次（三）建、（四）扩到 13、批次（五）扩到 21，⚠️ 会临时改源码 ⇒ **禁与任何读/写源码的操作并发**，含 git add/commit）
-.venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --changed --precheck   # **每批收尾档①**：只读预检本批改动命中的突变（锚点==1 / 目标与测试文件存在 / replacement 真变了）——实测 **0.2 秒**
-.venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --changed             # **每批收尾档②**：增量突变（典型 20~40 条 × ~2s ≈ **1~3 分钟**）
-.venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --jobs 16             # **发版前/周期性档③**：全量（378 条；串行 53min → 16 路并行 **12.7 分钟**实测）
+.venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --changed --precheck   # **每批收尾档①（仍必跑）**：只读预检本批改动命中的突变（锚点==1 / 目标与测试文件存在 / replacement 真变了）——实测 **0.2 秒**，顺带挡住「锚点写错 / 目标文件不存在」；**不临时改源码** ⇒ 无并发风险
+.venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --changed             # **每批收尾档②（改为可选）**：增量突变（典型 20~40 条 × ~2s ≈ **1~3 分钟**）——⚠️ 会**临时改源码** ⇒ **禁与任何读/写源码的操作并发**，含 git add/commit；**新规格不再强制新增**（见 §三 第 7 条）⇒ 本档按需跑
+.venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --jobs 16             # **发版前/周期性档③**：全量（**468 条**；串行 ≈ 53min → 16 路并行 **12.7 分钟**实测）——已有规格的**发版前闸门**
 cd apps/web && npx tsc -b && npx vitest run && npm run build
 python scripts/export_openapi.py && python scripts/gen_frontend_types.py   # schema 漂移后 regen（必须用项目 .venv 解释器跑；系统 python 因 editable 元数据缺失会把 version 读成 `dev`，误判为 schema 漂移——2026-09-27 dev-b 实证）
 python scripts/smoke_e2e.py          # 端到端（临时库+独立端口，自动清理）
 python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂移核查（只读）
 ```
 
-版本纪律（方法论 05）：**pyproject 为单源**，`main.py` 经 importlib 读取，`/api/health` 对外报它，**前端侧栏的版本号也从 `/api/health` 读**（2026-10-22 批次十八改：此前 `Layout.tsx` 写死 `NovelOS v3.9.0` 常量 ⇒ 那是**第 5 处**要同步的副本，且原测试断言的是那个常量本身 ⇒ **自指断言**（AGENTS 坑区「自指断言恒真」同族）⇒ 改为动态读后，发版只需改 pyproject 一处）；`apps/web/package.json` 随发版对齐；`apps/web/package-lock.json` 一并对齐（2026-09-30 补登记，此前未入纪律）；`.claude-plugin/plugin.json` 的 `novelosVersion` 一并对齐（2026-10-22 补登记，此前漏了第 5 处）；`skills/novelos/SKILL.md` 的 `metadata.novelosVersion` 一并对齐（**2026-10-22 批次十九补登记 = 第 6 处**：此前它静默停在 `3.9.0` 而 app 已 `3.10.0`，因为 `check_skill_package.py` 只校 `metadata.version`（skill 包自身版本，另一条线）而从不看这个键 ⇒ 已加 `check_app_version_consistency` 三条检查 + `--selftest` 变异 M8 看守，实测变异被抓）；uv.lock 升版后 `uv lock`；改 pyproject 后必须 `uv sync --extra dev` 刷新 editable 元数据（否则 `/api/health` 报旧版）；发版前「版本一致」核对（现为**六处**：pyproject / package.json / package-lock.json / uv.lock / plugin.json / skills/novelos/SKILL.md 的 `metadata.novelosVersion`）。**发版动作清单**（2026-10-22 批次十八实测补全，此前纪律里缺这**三**步）：① CHANGELOG 的 `## [Unreleased]` 归档为 `## [X.Y.Z] - 日期`（文件头部早就写着这条，**40 天没执行**）；② **打轻量 tag**（判据 = **「该版本号已对齐 + CHANGELOG 版本段已写好」之后**那个 commit，照 v3.5.0 既有惯例；⚠️ 「同窗发版」的两个版本**同点打 tag**，如 v3.7.0/v3.8.0 都在 `f3a994c`——因为 `version = "3.7.0"` 全历史 0 命中，pyproject 从 3.6.0 **直接跳到 3.8.0**；⚠️ 全仓 tag 类型**混合**（7 annotated / 16 轻量），**新 tag 一律轻量**，历史 tag 不回改）；③ **把 tag 推到远端**（⚠️ **本批实测发现：本地 23 个 tag 一个都没推过 ⇒ 远端零 tag** ⇒ clone 的人看不到任何历史版本标记。⇒ 推之前逐个验证 tag 指向的 commit 在 `origin/master` **可达**（`merge-base --is-ancestor`，本次 23/23）⇒ 推送不会产生孤立 tag。⚠️ **2026-10-23 复测订正：本句前半已过期**——远端现已有全部 **23** 个 tag、与本地**逐位一致**（含 v3.10.0）；「远端零 tag」只描述 2026-10-22 批次十八**之前**的状态。§六 矩阵里已是订正后口径，**两处不一致，本句以本括注为准**）。⚠️ **发版纪律此前 40 天没执行**（CHANGELOG 的 `## [Unreleased]` 堆了 3423 行、版本停在 3.9.0，而文件头部自己写着该怎么做）⇒ 纪律写在文件里 ≠ 纪律被执行，**须有当次执行的留痕**。
+版本纪律（方法论 05）：**pyproject 为单源**，`main.py` 经 importlib 读取，`/api/health` 对外报它，**前端侧栏的版本号也从 `/api/health` 读**（2026-10-22 批次十八改：此前 `Layout.tsx` 写死 `NovelOS v3.9.0` 常量 ⇒ 那是**第 5 处**要同步的副本，且原测试断言的是那个常量本身 ⇒ **自指断言**（AGENTS 坑区「自指断言恒真」同族）⇒ 改为动态读后，发版只需改 pyproject 一处）；`apps/web/package.json` 随发版对齐；`apps/web/package-lock.json` 一并对齐（2026-09-30 补登记，此前未入纪律）；`.claude-plugin/plugin.json` 的 `novelosVersion` 一并对齐（2026-10-22 补登记，此前漏了第 5 处）；`skills/novelos/SKILL.md` 的 `metadata.novelosVersion` 一并对齐（**2026-10-22 批次十九补登记 = 第 6 处**：此前它静默停在 `3.9.0` 而 app 已 `3.10.0`，因为 `check_skill_package.py` 只校 `metadata.version`（skill 包自身版本，另一条线）而从不看这个键 ⇒ 已加 `check_app_version_consistency` **六条**检查（web-package-json / web-package-lock / uv-lock / SKILL.md / 两份插件清单）+ `--selftest` 变异 **M1–M12** 看守（2026-10-23 对抗审查 A 指出 web 三处**没进 selftest** ⇒ CI 只跑 selftest ⇒ 新看守「跑而不验」⇒ 已补 **M9–M12** 覆盖 web 三处的全部 4 个版本值 + uv.lock，并加 pytest 守卫 `test_selftest_covers_the_web_version_checks`；实测把 M9 变异改成空操作 ⇒ selftest exit 1 + pytest 红（`1 failed, 3 passed`）⇒ 变异有效）；uv.lock 升版后 `uv lock`；改 pyproject 后必须 `uv sync --extra dev` 刷新 editable 元数据（否则 `/api/health` 报旧版）；发版前「版本一致」核对（现为**六处**：pyproject / package.json / package-lock.json / uv.lock / plugin.json / skills/novelos/SKILL.md 的 `metadata.novelosVersion`）。**发版动作清单**（2026-10-22 批次十八实测补全，此前纪律里缺这**三**步）：① CHANGELOG 的 `## [Unreleased]` 归档为 `## [X.Y.Z] - 日期`（文件头部早就写着这条，**40 天没执行**）；② **打轻量 tag**（判据 = **「该版本号已对齐 + CHANGELOG 版本段已写好」之后**那个 commit，照 v3.5.0 既有惯例；⚠️ 「同窗发版」的两个版本**同点打 tag**，如 v3.7.0/v3.8.0 都在 `f3a994c`——因为 `version = "3.7.0"` 全历史 0 命中，pyproject 从 3.6.0 **直接跳到 3.8.0**；⚠️ 全仓 tag 类型**混合**（7 annotated / 16 轻量），**新 tag 一律轻量**，历史 tag 不回改）；③ **把 tag 推到远端**（⚠️ **本批实测发现：本地 23 个 tag 一个都没推过 ⇒ 远端零 tag** ⇒ clone 的人看不到任何历史版本标记。⇒ 推之前逐个验证 tag 指向的 commit 在 `origin/master` **可达**（`merge-base --is-ancestor`，本次 23/23）⇒ 推送不会产生孤立 tag。⚠️ **2026-10-23 复测订正：本句前半已过期**——远端现已有全部 **23** 个 tag、与本地**逐位一致**（含 v3.10.0）；「远端零 tag」只描述 2026-10-22 批次十八**之前**的状态。§六 矩阵里已是订正后口径，**两处不一致，本句以本括注为准**）。⚠️ **发版纪律此前 40 天没执行**（CHANGELOG 的 `## [Unreleased]` 堆了 3423 行、版本停在 3.9.0，而文件头部自己写着该怎么做）⇒ 纪律写在文件里 ≠ 纪律被执行，**须有当次执行的留痕**。
 
 ## 五、坑区（症状 → 真因 → 对策）
 
@@ -346,6 +374,9 @@ python scripts/check_state_sync.py --db data/novelos.db   # 快照↔集合漂�
 | **突变规格把「提为命名常量」写成本地退回字面量 ⇒ 等价突变，`[SURVIVED]` 是必然的**（2026-10-23 批次二十六，Lead 串行实跑抓到） | `l17` 的 `L17-M08` 把 `threshold_per_1k * DEFAULT_DASH_ERROR_MULTIPLIER` 还原成 `* 2`，而常量正是 `2` ⇒ **行为逐位不变** ⇒ 任何测试都不可能红。这是**量具（规格）缺陷**，不是判别力缺口 | `SURVIVED` 时**先判等价、再判缺守门测试**（同族：批次十九的 `\n\s*\n`→`\n\n`）。判别动作：把 replacement 对着 anchor 读一遍——**替换前后若语义等价，该条规格必须重写**（本例改成改常量值 `= 2` → `= 3`，由证据表 `code_refs` + 边界用例两处抓）。⚠️ 「提常量」类重构的规格应锚在**常量值**上，不要锚在**使用处退回字面量** |
 | **文档里写「由 X 用例看守」是一句待验证断言，而它可能根本不成立**（2026-10-23：批次二十四 quality README 副本 + 批次二十六 HUMAN_BASELINE §8 —— **同形状第二次，故升格为硬规则**） | 两处文档都在「副本」旁边写了「与源码/JSON 两处必须一致，由某用例看守」，而**该用例根本不读这个文件**（quality README：`test_quality_module_inventory.py` 只比名册↔目录；HUMAN_BASELINE §8：全仓无用例读 `.md`）⇒ 读者会**停止追问**，副本可静默漂移（quality README 已漂到 11/23 才被发现） | **凡文档自称「由 X 看守」，必须能被一条 grep 证伪/证实**：`grep -n "文件名" <那个 X 用例文件>` 命中才算数；不命中 ⇒ 要么**补真看守**（首选：让测试解析文档并与权威源双向比对），要么把措辞改成「本节是副本、无机器看守、改动须人工同步」。判别：撤掉看守后该文档句仍「看着对」⇒ 就是这条。同族：坑区「skip 理由不是元数据，它是对覆盖率的断言」 |
 | **把「读不到」折叠成「没有」，门禁就会给从未评估的对象发满分**（2026-10-23 第二轮审查实证，critical） | `packages/domain/chapter/draft_resolver.py:88-91` 把「库打不开」`except Exception → return None`，`:108-109` 把「表缺失/查询异常」`except sqlite3.Error → return None`；**其 docstring:83 明写「读库失败 ⇒ None」——即设计上把 DB 故障与「该章无草稿」列为同一件事** ⇒ `quality/service.py:811` 的 `(resolved or {}).get("content") or ""` 得到空串 ⇒ `scoring.py:439-441` `if not draft: return 100, issues` ⇒ **该章从未被评估却拿到满分 0 issue**，`chapter_commit/gate.py:473` 的门禁放行 | Lead 端到端复现（临时库 + `DROP TABLE drafts`）：`resolve_draft → None`（不抛错）⇒ `score_style → score=100 issues=0`。⚠️ 触发面**不是「DB 整体不可用」**（那样前面的读会先抛错），而是 **`drafts` 表不可用**：部分迁移 / 缺该表的备份 / 表损坏 ⇒ 其余读正常，于是「未评估」被当成「无问题」 | **凡是「读取可能失败」的函数，返回值必须能区分「失败」与「空」**——空结果用 `None`/空容器是**语义重载**，必须另设哨兵或抛域异常，且上游要 **fail-closed**（宁可不产出报告，也不产出「满分」）。判别：**注入故障**（临时库 `DROP TABLE`）⇒ 期望 5xx / 显式「不可检」标记，**不是** `score=100`；且新用例必须突变验证（把 `return None` 改回吞掉必红）。⚠️ 这类缺陷**正向测试抓不到**（每一步单独看都「正确」），只有故障注入能抓 |
+| **新建章节后「生成计划」跑完，章节名仍是「（未命名）」，且全程零告警**（2026-10-23 用户报，Lead 复算确认） | `prompts` 表是 `docs/agents/prompts/*.md` 的**运行时镜像**，但它**只在服务启动时**同步一次（`api/main.py` lifespan）⇒ **长驻服务不重启 ⇒ 仓内新增的提示词版本永远到不了运行时**。实测：活库 `director_planner` 只到 **v2**，而 **v2 / v3 的 §7 都没有**顶层 `title` ⇒ 模型不可能产出该键 ⇒ `director_output.get("title")` 恒 None ⇒ **回填的 UPDATE 根本不执行** ⇒ 章节名永远为空（批次二十五的 v4 提示词 + 回填代码**早已在仓内，从未到达运行时**） | **运行时依赖仓内源码 ⇒ 镜像必须自愈**：`PromptRegistry.ensure_agent_prompt_current()` 在每次取提示词时检查「DB 当前 ACTIVE 行是否与仓内**同名同版本**文件**逐字一致**」，是则推进到仓内最新版本（`runner.run_agent` 调用）；**不一致（人工改过 / 测试库自造）⇒ 一律不动**（绝不覆盖作者改写）；`NOVELOS_PROMPT_SYNC=off` 与启动 sync **两端同关**。**外加可观测**：章名回填的三种结局（模型起名 / 作者名保留 / 不可用）必须写进节点输出 `title_backfill`，第三种打 WARNING。判别：`tests/unit/test_prompt_selfheal.py`（10 例）+ `tests/unit/test_chapter_title_autofill.py`（19 例，含「**生效版**提示词 §7 必须声明顶层 title」的能力前提看守） |
+| **突变执行器报大批 INVALID、另有若干条假 CAUGHT——不是被测代码坏了，是量具的环境前提没满足**（2026-10-23 Lead 实测 40 条） | 本机 `%TEMP%\pytest-of-<user>` 一旦被创建就**连 owner 也拒绝访问**（`PermissionError: [WinError 5]`）⇒ 执行器调 pytest 时**没传 `--basetemp`** ⇒ 用到 `tmp_path` 的用例在**准备阶段**就 PermissionError ⇒ 全部 **ERROR**（不是 FAIL）⇒ 退出码 1/4 ⇒ 被判 INVALID。**更隐蔽的一层**：pytest 摘要是「N errors」而非「N failed」，而执行器只要看到同文件里另一个用例的 ` passed` 就判 `[CAUGHT]` ⇒ **把「没抓住」报成抓住了**（本轮 SH-3 即是一例） | **凡是量具，先问「它测的是被测物还是它自己」**：① pytest 子进程必须传**独立且可写**的 `--basetemp`（并行跑还不撞）；② 退出码 1 时**必须**在输出里看到 ` failed` 才算 CAUGHT，只有 errors ⇒ 归 INVALID（响亮失败，不许假绿）；③ basetemp 的**父目录要先建出来**（pytest 内部 `mkdir` 不带 parents）。判别：抽掉 basetemp ⇒ 用例全 ERROR；抽掉 ` failed` 检查 ⇒ 假 CAUGHT 复现。⚠️ AGENTS §三 第 7 条「减量不清零」讲的是**规格要不要写**，不覆盖**量具本身坏了**——量具坏了先修量具，再谈结论 |
+
 
 ## 六、一致性矩阵（当前核销）
 

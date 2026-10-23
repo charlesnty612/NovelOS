@@ -5,6 +5,136 @@
 
 ## [Unreleased]
 
+### Fix（2026-10-23 第二轮审查修复批 + 对抗审查 A/B + 打回环）
+
+> **来源**：用户指令「@superpowers 全量修复，并发时能复用 subagent 就复用，让其中两个 subagent 做专职审查，
+> 对其它 subagent 的产出做对抗性只读审查」，并追加三条流程指令（限流中断⇒发消息续跑 / 产出即分发审查 /
+> 突变的来源与合并）。
+> **零真实 LLM 调用、零内容仓接触、未改真实 dev 库业务内容**；本批**未推送**（push 一律先问用户）。
+> 逐条 finding 与 Lead 裁决：台账 `docs/impl/reviews/remaining-debt-2026-10-23.md` 的「**四之三**」小节；
+> 审查者 B 全文：`docs/impl/reviews/adversarial-review-b-2026-10-23.md`（864 行）。
+
+#### 1. 流程：打回环（本批新增纪律，见审查报告 §8.1）
+
+findings ⇒ **Lead 逐条裁决**（不裁决不外发；依据只有一条：**自己复算**，不看是谁说的）
+⇒ 按**文件所有权**路由打回给**原实现者**（`task_append` 保上下文 + 保所有权；失败改 `mavis session send`；
+**禁止新开 agent**）⇒ Lead 复验 critical/major ⇒ 追加给**同一审查者**复审 ⇒ 闭合。
+审查**流水线化**：实现者产出完成即分发，不等其余产出。
+
+#### 2. Lead 亲自修（8 项）
+
+| 项 | 内容 |
+|---|---|
+| **测试迁移清单漂移**（本批发现的红 #1） | `tests/unit/test_migrations.py::test_migrations_table_records_filename` 漏加 `0034` ⇒ 红。**改为与 `database/migrations/` 磁盘目录动态对账**，人工注册表收敛为 `applied` 那**一份** ⇒ 加迁移只改一处，漏改会被它抓住（硬编码清单漂移在本仓已复发 2 次） |
+| **commits 列表契约破裂**（本批发现的红 #2） | 0034 加列 ⇒ `SELECT *` 的列表行 **12 键 → 13 键** ⇒「恒 12 键」契约测试红。`CommitListItem` 补 `draft_version`（`Optional[int]`，**不给默认值** ⇒ 键恒在且进 OpenAPI `required`）+ 契约测试与全仓 9 处文案同步 |
+| **D-9 测试的正当性依据是错的** | `test_commit_high_risk_facets.py` 与 `d9` 规格称「core 侧 `deltas.py` **不认** `world_kind=="rule"`、覆盖不对称」——**实测证伪**（core 侧也认，两份实现对称）。照错描述「对齐」core 侧**恰好造出真门禁缺口**（HIGH 风险门不再拦世界规则变更 ⇒ 走 API 可绕过人工审批）。已改事实陈述 + **补 core 侧断言**（L4 层） |
+| **D-9 的 L3 零判别力** | L3 的 ctx 标志原为**手写 True** ⇒ 撤掉 payload 相关子句仍绿 ⇒ 改为**由 payload 现场推导** |
+| **D-10 的 API 手工提交路径** | `POST /projects/{pid}/commits` 此前**不传** `draft_version` ⇒ 该路径恒 NULL ⇒ 导出侧只能回退取最新。端点现收下可选 `draft_version`（非整数 ⇒ 422），并配**端点级测试**（AGENTS 硬规则 9：「端点收下的参数必须有消费方测试」） |
+| **B4 口径裁决** | `commits.draft_version` 记的就是**门禁实际量的那一版**（`gate.py:649` 写 `report.draft_version`）⇒ **导出物 == 被门禁量过的文本**，不变量成立；`ctx["draft_version"]` 的优先级**在 D-10 之前就存在** ⇒ 非本批引入 ⇒ **不改优先级**，登记 + docstring 留痕 |
+| **D-15 措辞补面** | D-15 第一次只改了 AGENTS.md，实际消费方 `packages/core/genre/consumers.py` 仍是绝对口径 ⇒ 同步订正；roadmap 两处按硬规则 7 加「历史注记」横幅；AGENTS.md 里 `taboo_notes`「条目化」**不准确**（实测是 ≤2000 字**自由文本**）⇒ 改口径；`check_app_version_consistency` 实为**六条**（原写三条） |
+| **内容仓 push 护栏** | 解除命令第 2 步（`set-url --delete --push` 不带 URL 参数）是**无效命令**（exit 129）⇒ 照跑停在「钩子已删、pushurl 还在」的**半开状态**（比原状更危险）⇒ **删掉该步**；注释里「`--no-verify` 也推不出去」**不准确**（实测 `--no-verify` + 显式 URL ⇒ 两层同时绕过）⇒ 改为「**防误操作护栏，不是安全边界**」 |
+
+#### 3. 七个实现者的产出（全部经对抗审查 + Lead 复验）
+
+| 任务 | 产出 | 对抗审查结论 |
+|---|---|---|
+| **Task 1** 质量门 fail-closed | 不可检 ⇒ 硬停（快通道 report 模式也停）；**不可检单独错误类别**（**不写** `revision_note`/`gate_blocked`，不再给「补全 plan_json」这种误导建议）；API 契约从弱断言 `in (201, 500)` 改为**强断言** | A 驳倒 1 major（弱断言）→ 已改；A 另指出「201+overall=0」**不是新信号**（该端点 `overall` 因 `delta={}` 恒为 0，改造前即如此）⇒ 登记 |
+| **Task 2** 缓存键 + state_version | director 侧补 5 个维度 + 键长 18→23；台账/债务/情节/标题**写路径推 `state_version`** | A **未驳倒**（9 条突变每条只红 1 条）。A 实测证伪「`branches` 漏推 version」——`plot_fp` 已覆盖该表 ⇒ 加推进是**纯过度失效** ⇒ **不补**，登记 |
+| **Task 3** 备份链 | 备份默认加密 + 密文解密自检 + 密钥缺失报错；**新建** `scripts/restore_db.py`（原子替换 + 复核回滚） | A 驳倒 2 major（占用态崩溃 rc=1+traceback / 自检失败把**含明文 API 密钥**的整库留在 `%TEMP%`）→ 已改（占用 ⇒ **rc=2 + 明确文案 + 无 traceback**；失败**默认删**明文副本，保留须显式 flag） |
+| **Task 4** CI + 版本看守 | xdist/cov 进 `[project.optional-dependencies].dev` + **删 `[dependency-groups]`**；pip/pip-audit 钉版；windows job xdist 自检；web 三处版本检查 | A **未驳倒**核心声称；驳倒 2 minor（pip 钉在带公告的旧版 / 新看守**没进 `--selftest`** ⇒ CI 上「跑而不验」）→ 已改（pip 钉 **26.2.2**，PyPI + **OSV.dev** 双源核实 + 端到端装 pip 实跑；selftest 补 **M9–M12** + pytest 守卫） |
+| **Task 5** 前端 | 快通道三态 + 轮询手动重试 + PAUSED 重拉 | B 驳倒 2 major（章节页「取消勾选」发 `null` ⇒ **UI 永远写不出「显式关」**、env 生效时「关掉」不生效 ⇒ **不安全方向的假承诺**；前后端口径不一致 = **安全闸门被跳过而作者不知情**）→ 已改（点「关」= 显式关 ⇒ 发 `false`，两入口都要能发；新增**只读「已解析有效值」出口**） |
+| **Task 6** 三仓边界 | exporter 取稿口径 / content_sync 同内容合并 / signing_check 不可检降级 / 新建 `scripts/check_content_repo_guard.py` | B 验过护栏**有判别力**（6 个临时仓逐格喂 ⇒ 撤屏障必红）。Task 6 自陈 4 条 concern ⇒ Lead 裁决全部落地，其中「旧正文清理会删**作者手写文件**」是**破坏性** ⇒ 收窄为「**无法证明是工具产出的文件一律不删**，判定不了的移入 quarantine」 |
+| **Task 7** 引用完整性 + 分层守卫 | 删角色前查 `relationships` **两端点** ⇒ 抛错且**零删除**；分层方向表加 `core→domain` 边 + **44 条精确白名单** | B **攻不倒**引用守卫本身，但驳倒 4 major（动态 import 不设防 / 相对 import 逃逸扫描器只跑 core / world 域删 faction 留孤儿 / 存量孤儿无诊断）→ 已打回 |
+
+#### 4. 先验判断被推翻（6 次，全部留痕）
+
+1. 「core 侧不认 `world_kind=="rule"`」——**错的** ⇒ 照做会造出真门禁缺口。
+2. 「`branches` 漏推 `state_version` 是缺口」——**不是缺口**（`plot_fp` 已覆盖）⇒ 不补。
+3. 「C-1 质量门 fail-open 是 critical」——上一轮已订正为 **major**（门禁路径**本已 fail-closed`）。
+4. 「子代理自报数字可直接入册」——**不可信**（240 vs 实测 260；「+4ms/+64%」未实测；「各红 1 条」实为各红 2~3 条）。
+5. 「加列只影响迁移」——**加列会静默打破响应契约**（12 键 → 13 键，Lead 自修时实测发现）。
+6. 「改 `ctx["draft_version"]` 优先级能消除风险」——**不能**：改过去反而让「量的文本」与「delta 来源文本」脱节。
+
+#### 5. 未修 / 需用户裁决（登记，不假装已修）
+
+- **D-18 凭据清库**：机制已做（悬空条目体检 + 迁移命令，默认 dry-run），**真实清库未做**（活库 `model_profiles` 2 行明文 api_key）⇒ 需用户授权。
+- **存量孤儿 relationships**：只读诊断已做；**清理迁移涉及活库数据** ⇒ 未做。
+- **`pip-audit ... || true` 永不阻断**：保留（避免依赖公告把个人仓卡死），发版清单加一条「重查依赖公告」。
+- **版本空洞**（台账类写路径推 `state_version` ⇒ `story_states` 同内容新版本行 ⇒ 版本号与 commits 不再一一对应）、**乐观锁新失败模式**、**`scoring_missing_subscore` 一号两义**、**缓存键性能真实规模未测**、**`ChapterDetailPage.test.tsx` 已 3689 行**（测试文件拆分另立项）。
+- **CI 的 3.11 腿未实跑**（本机只有 3.12.15）；**CI job 日志需 admin** 才能直接观测。
+
+### Fix（2026-10-23 用户报「新增章节 → 生成计划 → 章节名不自动生成」+ 突变量具的环境前提修复）
+
+> **来源**：用户原话「原计划只有 10 章，结果后面需要新增章节，按软件的『新增章节』后，再进去『生成计划』，
+> 此章节的章节名不会自动生成，这个问题也安排修复一下。」
+> **零真实 LLM 调用、零内容仓接触**；活库只写了两张**机制表**（`agents` / `prompts`）——把仓内提示词源码
+> 镜像进库，等价于「服务启动时本来就会做的 sync」，**未碰任何章节/人物/设定正文**。
+
+#### 1. 根因（Lead 实测链，不是推测）
+
+| 环节 | 实测事实 |
+|---|---|
+| ① 运行时取哪份提示词 | `agent_runtime/runner.py::run_agent` → `PromptRegistry.get_active_prompt()` → **读 `prompts` 表**（不是读 `docs/agents/prompts/*.md`） |
+| ② 活库里有什么 | `prompts` 表中 `director_planner` **只有 v1 / v2**；**v2 是 ACTIVE**（content 与仓内 `director_planner-v2.md` 逐字一致） |
+| ③ v2 契约有没有章名 | **没有**：`v2`/`v3` 的 §7 输出契约里**没有**顶层 `title`（只有 v4 才有）⇒ 模型**不可能**产出该键 |
+| ④ 落库侧写了什么 | `chapter_plan/pipeline.py::_save_plan_node` 有回填代码，但取值是 `director_output.get("title")` ⇒ 恒 `None` ⇒ **回填的 UPDATE 根本不执行**（`planner_title is None` 直接跳过） |
+| ⑤ 为什么库停在 v2 | `prompts` 表是仓内提示词源码的**运行时镜像**，而镜像**只在服务启动时同步一次**（`api/main.py` lifespan）⇒ **长驻服务不重启 ⇒ 仓内新增的提示词版本永远到不了运行时** |
+
+⇒ **批次二十五的 v4 提示词 + 章名回填代码早已在仓内，却从未到达运行时**。
+用户看到的现象（章节名空白）= 上述 ⑤→③→④ 的合成，且**全程零告警**。
+
+#### 2. 修了三处
+
+1. **提示词自愈**（`packages/core/agent_runtime/prompts.py` 新增 `PromptRegistry.ensure_agent_prompt_current()`，
+   由 `runner.run_agent` 在取提示词时调用）：
+   * 推进条件**全部**满足才动手——① 该 agent **有** ACTIVE 行（没有 ⇒ 不越权建库，建库归启动 sync）；
+     ② 仓内存在**同名同版本**文件且其内容与 DB 当前 ACTIVE 行**逐字一致**（**忠实镜像守卫**：不一致 ⇒
+     说明这行被人改过/换过 ⇒ **一律不覆盖**）；③ 仓内存在**版本号更高**的文件（**单调**：绝不降级）。
+   * 推进后**重新解析真实生效版本**再返回——若该版本早已存在但被人工置为非 ACTIVE，**如实返回「没推进」**
+     （不谎报新标签、不偷偷启用人工停用的提示词）。
+   * `NOVELOS_PROMPT_SYNC=off` 与启动 sync **两端同关**（半吊子只关一端会让用户失去预期控制）。
+2. **章名回填可观测**（`packages/workflows/chapter_plan/pipeline.py`）：此前「模型起名 / 作者名保留 /
+   模型没给名」三种结局**在节点输出与日志上完全看不出区别** ⇒ 现在写进节点输出 `title_backfill`
+   （`status` = `planner` / `author_kept` / `unavailable` / `not_applied` + `title` + **本次实际用的提示词版本**），
+   `unavailable` 额外打 **WARNING**（含章 id 与提示词版本）。
+3. **能力前提看守**（测试）：「**生效版**提示词的 §7 必须声明顶层 `title`」——提示词升版若丢掉该契约，
+   测试变红，而不是等用户发现章名又空了。
+
+#### 3. 活库已推进（用户当下即可用）
+
+已对活库 `data/novelos.db` 执行一次 `PromptRegistry.sync_from_docs`（**只写 `agents` / `prompts` 两张机制表**，
+内容 = 仓内提示词源码）：`director_planner` 现为 **v1~v4，ACTIVE = v4**，v4 的 §7 已确认声明顶层 `title`。
+⇒ **用户下一次点「生成计划」即可拿到章名**（提示词是每次调用现读 DB 的，**不需要重启服务**）。
+⚠️ 已经跑过计划的那一章（第 11 章）**需重跑一次「生成计划」**才会有名字。
+
+#### 4. 附带发现并修掉的**两处突变量具缺陷**（本轮闸门卡住的 40 条 INVALID 的真因）
+
+上一轮闸门报「突变存活: 无，但 40 条中止/无效」。本轮归因结论：**不是被测代码的缺陷，是量具的环境前提没满足**。
+
+| 量具缺陷 | 后果 | 修法 |
+|---|---|---|
+| 执行器调 pytest **没传 `--basetemp`** | 本机 `%TEMP%\pytest-of-<user>` 一旦创建就**连 owner 也拒绝访问**（`PermissionError: [WinError 5]`）⇒ 用到 `tmp_path` 的用例在**准备阶段**就 ERROR（不是 FAIL）⇒ 40 条突变被判 INVALID | 每条突变分配**独立且可写**的 `--basetemp`（`%TEMP%/novelos-mutbasetemp/<mid>-<pid>-<n>`，并行不撞；父目录先建出来——pytest 内部 `mkdir` **不带 parents**） |
+| 执行器把「用例 ERROR」当成「用例 FAIL」 | pytest 摘要是「N errors」而非「N failed」，但只要同文件里**另一个**用例 ` passed`，执行器就判 `[CAUGHT]` ⇒ **把「没抓住」报成抓住了**（本轮 SH-3 即是一例假阳性） | 退出码 1 时**必须**在输出里看到 ` failed` 才算 CAUGHT；只有 errors ⇒ 归 **INVALID**（响亮失败，不许假绿） |
+
+⇒ 修完后同一批 **129 条增量突变**：**129 CAUGHT / 0 存活 / 0 中止 / 0 无效**（exit 0），
+且**每条红的就是它该红的那条**（摘要行打出目标用例 id）。
+新增 3 条规格 `l24_prompt_selfheal.py`（SH-1 撤忠实镜像守卫 / SH-2 撤自愈后的重新取用 / SH-3 把「没给名」谎报成成功）。
+
+#### 5. 闸门实测
+
+* 全量 pytest **4161 passed / 1 skipped / 1 xfailed / 0 failed**（156.63s，`.venv`，`-n 20`），较上轮 4147 **+14**
+  （= 新增自愈 10 例 + 回填可观测 4 例，**逐项对得上**）；
+* `ruff` **All checks passed!**；
+* 树指纹 **759 文件 / `944e54c04d8f580a20a89c200be80584a95841b7fd1ae0e39439bc5863c9f77a`** 跑测前后**逐位一致**；
+* `validate_specs` **84 个规格 / 476 条 / 问题 0 处**；`run_spec --all --changed --precheck` **129 条 / 问题 0 处**；
+* 突变实跑 **129 CAUGHT / 0 存活 / 0 中止 / 0 无效**；残留清点：`.mutbak*` **0**、生产源码 `MUTATION-` 标记 **0**。
+
+#### 6. 未做 / 需用户裁决
+
+- **不做「占位名兜底」**：既有设计决策（已被测试钉住）是「planner 没给名 ⇒ **不碰列**」，
+  且章节列表页已有「第 N 章」列 ⇒ 兜底写成「第 11 章」会**视觉重复**。⇒ 改为**保证提示词新鲜 + 失败可见**。
+- 推送授权、D-18 凭据清库、存量孤儿 relationships 清理：**仍未取得授权**（见上一节的登记项）。
+
 ### Review（2026-10-23 全面审查·第二轮）：报告 + 台账 + AGENTS 事实订正（+ 批次三十工作树入库）
 
 > **来源**：用户指令「全面审查本项目」→「新增几个未涉及的角度去审查」→ 再「新增 2 个 subagent」。
