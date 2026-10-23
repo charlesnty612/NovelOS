@@ -479,8 +479,17 @@ def _build_revision_guidance(report: _QualityReport, issues: list[Issue]) -> lis
             # 但方向完全相反：前者是**基础设施故障**（去修草稿表），后者是输入不全
             # （去补 plan_json / submit_delta）。issue.suggestion 由产出侧写死（见
             # ``packages/core/quality/scoring.py::_draft_unavailable_issue``）⇒ 分流准确。
-            # ⚠️ 存量零影响：既有规则**没有任何一条**设置 suggestion（生产侧恒为 None）
-            # ⇒ 下面两行对存量报告的 rule_hint **逐字不变**。
+            # ⚠️ **不要**把下面这行当成「永远走不到 suggestion 分支」的死代码：
+            #   ``scoring.py::_draft_unavailable_issue``（2026-10-23 D-13 批次）**确实**
+            #   设置 suggestion ⇒ 这条分流是**生产承重**的，不是冗余。
+            #   若把它「简化」掉，两类语义会拿到同一条方向相反的建议
+            #   （「正文读不到」应去修草稿表，「子分缺失」应去补 plan_json / submit_delta）。
+            #   判别契约由 ``tests/unit/quality/test_missing_subscore_reachability.py`` 钉住
+            #   （语义 A 的 suggestion 恒为 None、语义 B 恒以「不可检：」开头）。
+            #
+            # 「存量零影响」的正确表述：``_RULE_REVISION_HINTS`` 里的存量条目**仍按原样**
+            # 命中（它们的 issue 不带 suggestion ⇒ 走 rule_id 分支 ⇒ rule_hint 逐字不变）；
+            # **只有** 2026-10-23 之后新增的、**自带 suggestion** 的 issue 才走第一分支。
             hint = iss.suggestion or _RULE_REVISION_HINTS.get(iss.rule_id)
             if hint is None:
                 hint = _CATEGORY_REVISION_HINTS.get(iss.category or "")

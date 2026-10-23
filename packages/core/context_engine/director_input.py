@@ -364,12 +364,23 @@ def build_director_input(
 
     缓存（V2.0 Wave C 任务二）：L0/L1 装配结果按
     ``(project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
-    active_canon_id, intent_fp, bible_fp, target_word_count, genre_pack_ref,
-    chars_fp, skills_fp, prompt_label, ns)``
-    键做进程内缓存；同一 (project, state_version, chapter, plan_json 内容, 大纲内容,
-    canon, 作者意图, 项目写作圣经, 目标字数, 题材包, 角色内容, 绑定 skill 集合,
-    提示词版本, 命名空间)
+    volume_scope, project_meta_fp, hooks_fp, debts_fp, plot_fp, foreshadow_fp,
+    title_fp, active_canon_id, intent_fp, bible_fp, target_word_count,
+    genre_pack_ref, chars_fp, world_fp, skills_fp, prompt_label, ns)``
+    ——**共 23 元**——键做进程内缓存；同一 (project, state_version, chapter,
+    plan_json 内容, 大纲内容, 挂卷范围, 项目元信息, 伏笔台账, 叙事债务,
+    情节图, 伏笔阈值, 章节标题, canon, 作者意图, 项目写作圣经, 目标字数,
+    题材包, 角色内容, 世界观内容, 绑定 skill 集合, 提示词版本, 命名空间)
     第二次调用直接返回缓存条目。
+
+    ⚠️ **本段键清单此前是 15 元的旧版**（漏 ``volume_scope`` / ``project_meta_fp`` /
+    ``hooks_fp`` / ``debts_fp`` / ``plot_fp`` / ``foreshadow_fp`` / ``title_fp`` /
+    ``world_fp`` 共 8 元）⇒ **文档漂移掩盖了 D-7「5 处漏维度」的内容**
+    （漏掉的正是其中 5 个内容指纹）。**键的权威构成 = 本函数下方的 ``cache_key = (...)``**，
+    长度由 ``tests/unit/test_prompt_label_key.py`` 的 ``DIRECTOR_KEY_LEN = 23`` 钉住；
+    每个内容指纹维度的 load-bearing 性由 ``tests/mutation_specs/l22_director_ledger_key.py``
+    （LEDGER-KEY-1..5，撤维度必红）钉住。
+    ⚠️ **别在这里手抄键清单**：改文档时先读代码，且断言只引用上面的权威源。
 
     V2.0 Wave C P1-1 修复：键追加 ``plan_fp``（chapters.plan_json 原文 sha256[:16]），
     解决 plan_json UPDATE 后 state_version 不变时的脏命中。``plan_fp == 'uncached'``

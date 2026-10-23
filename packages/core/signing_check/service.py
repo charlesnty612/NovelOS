@@ -133,6 +133,16 @@ def _load_project_opening_rules(
     读失败时题材开篇整段**静默消失**、无告警 ⇒ 体检报告外观「全部通过」而实际
     **未检**。现在读失败会带上原因，由调用方产出**显式不可检标记**
     （同文件 ``word_band_rejected`` 的既有风格）。
+
+    ⚠️ **「读失败」有两种形态，都得算「没检」**（D-13 同族，实测补）：
+
+    ① **读库异常**（``get_project_binding`` 抛错）⇒ 走 ``except`` 分支；
+    ② **绑定在、题材包行不在**（``bound=true`` 但 ``pack is None``）——悬空引用：
+       FK-off 旁路删除 / 老库遗留 / 备份恢复残留 ⇒ **题材开篇这一段同样没跑**。
+       此前形态 ② 落进「未绑定 ⇒ (None, None)」⇒ 与「压根没绑题材包」**不可区分**
+       ⇒ 报告外观又是「全通过」（实测证据见
+       ``tests/unit/test_signing_check_genre_unavailable.py``）。
+       ⇒ 形态 ② 也必须产出**显式不可检标记**，不能当「没有可查的规则」。
     """
 
     try:
@@ -141,7 +151,15 @@ def _load_project_opening_rules(
         return None, f"{type(exc).__name__}: {exc}"
     if not binding or not binding.get("bound"):
         return None, None
-    pack = binding.get("pack") or {}
+    pack = binding.get("pack")
+    if pack is None:
+        # 绑定存在但题材包行缺失（悬空引用）⇒ 题材开篇**没跑**（不是「没绑定」）
+        # ⇒ 必须显式标记，否则「没检」与「检过且通过」在报告里不可区分（D-13）。
+        pack_id = binding.get("pack_id")
+        return None, (
+            f"题材包行缺失（pack_id={pack_id!r}）：项目已绑定题材包，"
+            "但该题材包在库中不存在"
+        )
     payload = pack.get("payload") or {}
     rules = project_opening_rules(payload)
     if not rules:
@@ -222,6 +240,11 @@ def run_signing_check(db_path: str | "Path", project_id: str) -> dict[str, Any]:
     ``genre_opening_unavailable`` 检查项）——此前该情形让题材开篇整段**静默消失**、
     报告外观「全部通过」而实际**未检**；现在「没检」与「检过且通过」在结果里**可区分**
     （未绑定题材包 / 包未声明规则时该键**缺席**，行为零变化）。
+
+    「读失败」含**两种形态**，都走同一条显式标记路径：① 读库异常（抛错）；
+    ② **绑定在但题材包行缺失**（悬空引用：`bound=true` 且 `pack is None`）。
+    形态 ② 此前与「没绑定题材包」不可区分（同样静默缺席）⇒ 报告外观仍是「全通过」，
+    现已一并显式标注不可检。
 
     异常：
         ``ValueError`` — project 不存在（router 转 404）。
