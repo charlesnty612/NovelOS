@@ -27,9 +27,15 @@ import { PROVIDER_OPTIONS, PROVIDER_SHORT_LABEL } from '../components/providerOp
 import { useApiCall } from '../hooks/useApiCall';
 import { formatDateTime } from '../utils/format';
 import { ApiError } from '../api/client';
+import { CapabilityBindingsPanel } from './AiSettingsCapabilityBindings';
+import { BINDING_LABELS_FALLBACK, describeProfileInUse } from './AiSettingsBindingMeta';
 
 export function AiSettingsPage() {
   const { pid } = useParams();
+  // 档案卡「设为默认」与「环节分配」是同一条 capability_bindings 的两个写入口：
+  // 档案卡改完链后 +1 ⇒ 环节分配面板重新拉取，否则它显示的还是旧链（用户按旧链
+  // 移除成员会把整条链解绑，死结重现）。
+  const [bindingsVersion, setBindingsVersion] = useState(0);
   return (
     <div>
       <h1 className="section-title">AI 设置</h1>
@@ -50,8 +56,8 @@ export function AiSettingsPage() {
           四个面板按 2×2 排布 ⇒ 无需改 CSS，窄屏折行由既有 media query 兜住。 */}
       <div className="panel-grid">
         <ConnectionsPanel />
-        <ModelProfilesPanel />
-        <CapabilityBindingsPanel />
+        <ModelProfilesPanel onBindingsChanged={() => setBindingsVersion((v) => v + 1)} />
+        <CapabilityBindingsPanel bindingsVersion={bindingsVersion} />
         <AgentsPanel />
       </div>
     </div>
@@ -62,14 +68,20 @@ export function AiSettingsPage() {
 // ModelProfilesPanel —— 档案列表
 // =============================================================================
 
-function ModelProfilesPanel() {
+function ModelProfilesPanel({
+  onBindingsChanged,
+}: {
+  /** 档案卡改了候选链后回调（通知「环节分配」面板重新拉取）。 */
+  onBindingsChanged?: () => void;
+}) {
   const list = useApiCall<ModelProfile[]>(
     () => modelProfilesApi.list(),
     [],
   );
   // 档案卡「设为默认」按钮需要读到当前 capability_bindings（哪个环节首选了哪个档案）。
-  // 这里独立拉一份，与 CapabilityBindingsPanel 互不共享——后者维护 selectedMap 编辑态，
+  // 这里独立拉一份，与 CapabilityBindingsPanel 互不共享——后者维护自己的候选链编辑态，
   // 由它上调会增加耦合；本面板只要最新 GET 结果即可。
+  // ⚠️ 本面板改链后会回调 onBindingsChanged，让「环节分配」面板重新拉取（否则它显示旧链）。
   const bindings = useApiCall<CapabilityBinding[]>(
     () => capabilityBindingsApi.list(),
     [],
@@ -319,6 +331,9 @@ function ModelProfilesPanel() {
                             try {
                               await capabilityBindingsApi.bind(b.capability, next);
                               await bindings.reload();
+                              // 同一份 capability_bindings 的另一个视图（「环节分配」面板）
+                              // 也要跟着刷新，否则它显示的还是旧链。
+                              onBindingsChanged?.();
                             } catch (e: unknown) {
                               const msg =
                                 e instanceof ApiError
@@ -448,14 +463,22 @@ function ModelProfilesPanel() {
               void list.reload();
               setSavedNotice('已删除');
             } catch (e: unknown) {
-              // 后端删除遇 409 时按 wire 契约 detail 列出 capability；
-              // 若 detail 已给出明确指引，直接透传；否则附前端兜底文案。
+              // 409 profile_in_use：后端给的是**真实状态**（档案仍被某环节的候选链引用），
+              // 不做静默解绑。前端只负责把 detail 讲成人话 + 指向真做得到的动作：
+              // 去「环节分配」把这些环节上的该档案移除。
+              // ⚠️ e.detail 可能是对象，也可能是 api/client.ts JSON.stringify 后的字符串；
+              //    两种都由 describeProfileInUse 归一化（不甩原始 JSON 串给用户）。
               if (e instanceof ApiError && e.status === 409) {
                 setTestResult({
                   profile_id: id,
                   ok: false,
                   latency_ms: 0,
-                  detail: `${e.detail}（请先在「环节分配」中解除绑定）`,
+                  detail: describeProfileInUse(e.detail, (cap) =>
+                    // 后端 GET 给的 label 优先，退到静态兜底表。
+                    (bindings.data ?? []).find((b) => b.capability === cap)?.label ||
+                    BINDING_LABELS_FALLBACK[cap] ||
+                    cap,
+                  ),
                   status_code: e.status,
                 });
               } else {
@@ -477,22 +500,6 @@ function ModelProfilesPanel() {
   );
 }
 
-// =============================================================================
-// CapabilityBindingsPanel —— 8 项固定清单，PUT 即绑 / DELETE 即解绑
-// =============================================================================
-
-const BINDING_LABELS_FALLBACK: Record<string, string> = {
-  premise_design: '题材定位',
-  world_building: '世界观',
-  character_design: '角色设计',
-  volume_outline: '卷纲',
-  creative_writing: '正文写作',
-  reasoning: '推理规划',
-  // V3.9.3：observer 拆为独立 capability；前端 AI 设置页能单独给 observer 分配模型。
-  observer: '状态提取',
-  light: '轻量评审',
-};
-
 // 提示词版本状态（prompts.status，DDL 枚举 DRAFT/ACTIVE/DEPRECATED）→ 中文标签。
 // 未知值原样透出，避免后端新增枚举时前端显示空。
 const PROMPT_STATUS_LABEL: Record<string, string> = {
@@ -500,198 +507,6 @@ const PROMPT_STATUS_LABEL: Record<string, string> = {
   ACTIVE: '启用',
   DEPRECATED: '已弃用',
 };
-
-type SaveState =
-  | { kind: 'idle' }
-  | { kind: 'saving' }
-  | { kind: 'saved' }
-  | { kind: 'error'; message: string };
-
-function CapabilityBindingsPanel() {
-  const list = useApiCall<CapabilityBinding[]>(
-    () => capabilityBindingsApi.list(),
-    [],
-  );
-  // profiles 用于下拉选项：enabled=1 的档案集合
-  const profiles = useApiCall<ModelProfile[]>(
-    () => modelProfilesApi.list(),
-    [],
-  );
-
-  // 本地缓存 profile_ids → 提交成功后立即回写，失败时回滚到 GET 状态。
-  const [selectedMap, setSelectedMap] = useState<
-    Record<string, string>
-  >({});
-  const [saveMap, setSaveMap] = useState<Record<string, SaveState>>({});
-
-  // GET bindings 拉到数据时，把每项的 profile_ids 用 , 拼成单值（多档选一个，按下拉语义）。
-  useEffect(() => {
-    if (!list.data) return;
-    const rows = list.data;
-    setSelectedMap((prev) => {
-      const next: Record<string, string> = {};
-      for (const b of rows) {
-        // 若本地已编辑过且不等于原值，保留本地值；否则用后端值（取第一项；后端允许数组）
-        next[b.capability] = prev[b.capability] ?? b.profile_ids[0] ?? '';
-      }
-      return next;
-    });
-  }, [list.data]);
-
-  const enabledProfiles = useMemo(
-    () => (profiles.data ?? []).filter((p) => Number(p.enabled) === 1),
-    [profiles.data],
-  );
-
-  const handleChange = async (
-    capability: string,
-    profileId: string,
-  ): Promise<void> => {
-    const prev = selectedMap[capability] ?? '';
-    setSelectedMap((m) => ({ ...m, [capability]: profileId }));
-    setSaveMap((m) => ({ ...m, [capability]: { kind: 'saving' } }));
-    try {
-      if (profileId === '') {
-        await capabilityBindingsApi.unbind(capability);
-      } else {
-        await capabilityBindingsApi.bind(capability, [profileId]);
-      }
-      setSaveMap((m) => ({ ...m, [capability]: { kind: 'saved' } }));
-      void list.reload();
-    } catch (e: unknown) {
-      // 失败回滚
-      setSelectedMap((m) => ({ ...m, [capability]: prev }));
-      const msg = e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
-      setSaveMap((m) => ({ ...m, [capability]: { kind: 'error', message: msg } }));
-    }
-  };
-
-  return (
-    <div className="panel" data-testid="capability-bindings-panel">
-      <div className="panel__title">环节分配</div>
-      <div className="muted small" style={{ marginBottom: 6 }}>
-        把模型档案指派到 8 个生产环节（题材定位、正文写作、状态提取等）；解绑表示该环节改用旧版默认配置。
-      </div>
-
-      <ErrorBanner>{list.error}</ErrorBanner>
-      <ErrorBanner>{profiles.error}</ErrorBanner>
-
-      {list.loading ? (
-        <Loading />
-      ) : !list.data || list.data.length === 0 ? (
-        <EmptyState
-          title="尚未获取到环节清单"
-          hint="接口返回为空或请求失败，请稍后重试。"
-        />
-      ) : (
-        <div className="kv-list" data-testid="capability-bindings-list">
-          {list.data.map((b) => (
-            <CapabilityBindingRow
-              key={b.capability}
-              binding={b}
-              profiles={enabledProfiles}
-              selected={selectedMap[b.capability] ?? b.profile_ids[0] ?? ''}
-              state={saveMap[b.capability] ?? { kind: 'idle' }}
-              onChange={(id) => void handleChange(b.capability, id)}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CapabilityBindingRow({
-  binding,
-  profiles,
-  selected,
-  state,
-  onChange,
-}: {
-  binding: CapabilityBinding;
-  profiles: ModelProfile[];
-  selected: string;
-  state: SaveState;
-  onChange: (profileId: string) => void;
-}) {
-  const isUnbound = selected === '';
-  const showLegacyHint = isUnbound && binding.legacy_available;
-  return (
-    <div
-      className="kv-list__row"
-      data-testid={`cap-binding-${binding.capability}`}
-    >
-      <span className="kv-list__title">
-        {binding.label ||
-          BINDING_LABELS_FALLBACK[binding.capability] ||
-          binding.capability}
-      </span>
-      <span className="muted small">
-        {binding.agents && binding.agents.length > 0
-          ? `关联 Agent：${binding.agents.join('、')}`
-          : ''}
-      </span>
-      <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
-        <select
-          value={selected}
-          onChange={(e) => onChange(e.target.value)}
-          disabled={state.kind === 'saving'}
-          data-testid={`cap-binding-select-${binding.capability}`}
-        >
-          <option value="">未绑定（使用旧版默认配置）</option>
-          {profiles.map((p: ModelProfile) => (
-            <option key={p.profile_id} value={p.profile_id}>
-              {p.name}（{p.model}）
-            </option>
-          ))}
-        </select>
-        <SaveIndicator state={state} />
-      </span>
-      {showLegacyHint ? (
-        <span
-          className="muted small"
-          style={{ display: 'block', width: '100%' }}
-          data-testid={`cap-binding-legacy-hint-${binding.capability}`}
-        >
-          检测到旧版配置仍可用
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-function SaveIndicator({ state }: { state: SaveState }) {
-  if (state.kind === 'saving')
-    return (
-      <span
-        className="muted small"
-        data-testid="cap-binding-saving"
-      >
-        保存中…
-      </span>
-    );
-  if (state.kind === 'saved')
-    return (
-      <span
-        className="muted small"
-        data-testid="cap-binding-saved"
-        style={{ color: 'var(--color-success)' }}
-      >
-        已保存 ✓
-      </span>
-    );
-  if (state.kind === 'error')
-    return (
-      <span
-        className="small"
-        style={{ color: 'var(--color-error)' }}
-        data-testid="cap-binding-error"
-      >
-        失败：{state.message}
-      </span>
-    );
-  return null;
-}
 
 // =============================================================================
 // AgentsPanel —— 与上一轮不变

@@ -14,6 +14,7 @@ import type {
   ModelConnectionOut,
   ModelProfile,
 } from '../api/types';
+import { ApiError } from '../api/client';
 
 vi.mock('../api/endpoints', async () => {
   const actual =
@@ -1007,5 +1008,158 @@ describe('AiSettingsPage · 模型连接（连接层）', () => {
     expect(screen.getByTestId('profile-api-key')).toBeInTheDocument();
     expect(screen.getByTestId('profile-provider')).toBeInTheDocument();
     expect(screen.queryByTestId('profile-connection')).toBeNull();
+  });
+});
+
+// =============================================================================
+// 2026-10-23 修复「删除档案撞 409 死结」：候选链可见 / 可移除 / 改选保留 / 409 可读
+//   背景：capability_bindings.profile_ids 是有序数组（顺序即 fallback 序，后端运行期
+//   真会用后备位）。旧实现只渲染 profile_ids[0] ⇒ 后备成员看不见；改写下拉 = 整链
+//   替换成单个 ⇒ 后备成员被静默丢弃 ⇒ 旧档案删不掉（后端 409 是真实状态）。
+// =============================================================================
+
+/** 后备档案：名字可辨识，便于断言「DOM 里出现的是档案名而不是裸 id」。 */
+const fallbackProfile: ModelProfile = {
+  ...baseProfile,
+  profile_id: 'mpf_002',
+  name: 'backup-writer',
+  model: 'gpt-4o-mini',
+};
+
+/** 候选链夹具：正文写作 = [首选 mpf_001, 后备 mpf_002]；题材定位 = 单成员链。 */
+const chainBindingsFixture: CapabilityBinding[] = [
+  {
+    capability: 'creative_writing',
+    label: '正文写作',
+    agents: ['writer'],
+    profile_ids: ['mpf_001', 'mpf_002'],
+    profiles: [
+      { profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' },
+      { profile_id: 'mpf_002', name: 'backup-writer', model: 'gpt-4o-mini' },
+    ],
+    legacy_available: false,
+  },
+  {
+    capability: 'premise_design',
+    label: '题材定位',
+    agents: ['premise_designer'],
+    profile_ids: ['mpf_001'],
+    profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
+    legacy_available: false,
+  },
+];
+
+describe('AiSettingsPage · 候选链（fallback 链）可见 / 可移除 / 409 可读', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(agentsApi.list).mockResolvedValue([baseAgent]);
+    vi.mocked(agentsApi.listPrompts).mockResolvedValue([]);
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([baseProfile, fallbackProfile]);
+    vi.mocked(capabilityBindingsApi.list).mockResolvedValue(chainBindingsFixture);
+    vi.mocked(connectionsApi.list).mockResolvedValue([connFixture]);
+  });
+
+  it('T1 候选链可见：后备成员 mpf_002 连同档案名一起渲染（不是只渲染首选）', async () => {
+    renderPage();
+    await screen.findByTestId('capability-bindings-list');
+
+    // 后备成员在 DOM 里可见，且显示的是档案名（不是裸 id）。
+    const name = screen.getByTestId('cap-binding-chain-name-creative_writing-mpf_002');
+    expect(name).toHaveTextContent('backup-writer');
+    expect(name).toHaveTextContent('gpt-4o-mini');
+
+    // 顺序即 fallback 序：首选在前、后备在后。
+    const chain = screen.getByTestId('cap-binding-chain-creative_writing');
+    const order = Array.from(
+      chain.querySelectorAll('[data-testid^="cap-binding-chain-item-"]'),
+    ).map((el) => el.getAttribute('data-testid'));
+    expect(order).toEqual([
+      'cap-binding-chain-item-creative_writing-mpf_001',
+      'cap-binding-chain-item-creative_writing-mpf_002',
+    ]);
+  });
+
+  it('T2 移除后备成员：提交「去掉该成员后的有序剩余列表」，不是整链原样提交', async () => {
+    vi.mocked(capabilityBindingsApi.bind).mockResolvedValue(chainBindingsFixture[0]!);
+
+    renderPage();
+    await screen.findByTestId('capability-bindings-list');
+
+    fireEvent.click(
+      screen.getByTestId('cap-binding-chain-remove-creative_writing-mpf_002'),
+    );
+
+    await waitFor(() => {
+      expect(capabilityBindingsApi.bind).toHaveBeenCalledTimes(1);
+    });
+    const [capability, profileIds] = vi.mocked(capabilityBindingsApi.bind).mock.calls[0]!;
+    expect(capability).toBe('creative_writing');
+    // 逐位相等：只剩首选（不能把 ['mpf_001','mpf_002'] 原样提交回去）。
+    expect(profileIds).toEqual(['mpf_001']);
+  });
+
+  it('T3 移除最后一个成员：链空 ⇒ 走 unbind，不发 bind（后端 PUT 对空数组返 422）', async () => {
+    vi.mocked(capabilityBindingsApi.unbind).mockResolvedValue(undefined as never);
+
+    renderPage();
+    await screen.findByTestId('capability-bindings-list');
+
+    fireEvent.click(
+      screen.getByTestId('cap-binding-chain-remove-premise_design-mpf_001'),
+    );
+
+    await waitFor(() => {
+      expect(capabilityBindingsApi.unbind).toHaveBeenCalledTimes(1);
+    });
+    expect(capabilityBindingsApi.unbind).toHaveBeenCalledWith('premise_design');
+    expect(capabilityBindingsApi.bind).not.toHaveBeenCalled();
+  });
+
+  it('T4 下拉改选 = 设为首选 + 其余成员按原相对顺序保留', async () => {
+    vi.mocked(capabilityBindingsApi.bind).mockResolvedValue(chainBindingsFixture[0]!);
+
+    renderPage();
+    await screen.findByTestId('capability-bindings-list');
+
+    const sel = screen.getByTestId(
+      'cap-binding-select-creative_writing',
+    ) as HTMLSelectElement;
+    // 原首选是 mpf_001；改成 mpf_002 ⇒ 新首选在前，原首选退到第 2 位（不丢成员）。
+    fireEvent.change(sel, { target: { value: 'mpf_002' } });
+
+    await waitFor(() => {
+      expect(capabilityBindingsApi.bind).toHaveBeenCalledTimes(1);
+    });
+    const [capability, profileIds] = vi.mocked(capabilityBindingsApi.bind).mock.calls[0]!;
+    expect(capability).toBe('creative_writing');
+    expect(profileIds).toEqual(['mpf_002', 'mpf_001']);
+  });
+
+  it('T5 删除档案撞 409：显示 message 原文 + 环节中文名，不甩原始 JSON 串', async () => {
+    vi.mocked(modelProfilesApi.remove).mockRejectedValue(
+      new ApiError(
+        409,
+        JSON.stringify({
+          error: 'profile_in_use',
+          message: "profile 'x' 被 1 个 binding 引用",
+          referenced_by: ['creative_writing'],
+        }),
+      ),
+    );
+
+    renderPage();
+    fireEvent.click(await screen.findByTestId('model-profile-delete-mpf_001'));
+    fireEvent.click(await screen.findByTestId('model-profile-delete-confirm-confirm'));
+
+    const err = await screen.findByTestId('model-profile-test-result');
+    // 后端 message 原文可见。
+    expect(err).toHaveTextContent("profile 'x' 被 1 个 binding 引用");
+    // capability 映射成中文 label（不是 creative_writing 裸串）。
+    expect(err).toHaveTextContent('正文写作');
+    // 不能是原始 JSON 串，也不能是 [object Object]。
+    expect(err.textContent).not.toContain('"referenced_by"');
+    expect(err.textContent).not.toContain('[object Object]');
+    // 指引必须指向用户真做得到的动作。
+    expect(err).toHaveTextContent('环节分配');
   });
 });
