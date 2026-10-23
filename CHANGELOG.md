@@ -116,7 +116,9 @@ task-3（dev-a：`produce_chapters` 补 1 条突变规格 + smoke 补「挂卷�
 
 > **⚠️ 发版状态（2026-10-23 20:56 记录）：本版本「已归档、未发布」。**
 > **已做**：CHANGELOG 归档、六处版本号对齐（pyproject / package.json / package-lock.json / uv.lock / plugin.json / `skills/novelos/SKILL.md`）、`uv sync --extra dev` 刷新 editable 元数据、`openapi.json` 重导出、全量 pytest **4359 passed / 0 failed**、ruff 全过。
-> **未做**：**发版前全量突变闸门（档③ 476 条串行）被手动中止**（用户判断耗时过长）⇒ 实测跑到 **CAUGHT 169 / SURVIVED 0 / ABORT 0 / INVALID 0**（约 35%，剩余约 307 条未跑）⇒ **不得声称「476/476 已验」**；**未打 tag**（应为轻量 `v3.10.1`）；**未推远端**。
+> **未做**：**发版前全量突变闸门（档③ 476 条串行）被手动中止**（用户判断耗时过长）⇒ 实测跑到 **CAUGHT 169 / SURVIVED 0 / ABORT 0 / INVALID 0**（约 35%，剩余约 307 条未跑）⇒ **不得声称「476/476 已验」**。
+> **✅ 2026-10-23 23:5x 补记（发版动作已闭环）**：**轻量 tag `v3.10.1` 已打在 `50a556e`**（= 版本号六处对齐 + 本段归档的那个提交）**并已推远端**（远端 `refs/tags/v3.10.1 = 50a556e885a…`，与本地逐位一致；推前已核该提交是 `origin/master` 祖先）；**master 已推至 `e94e742`**（含批次三十三之一），`ahead 0 / behind 0`。⇒ 上句「未打 tag；未推远端」**已作废**，以本补记为准。
+> ⚠️ 仍未闭合的一项：**档③ 全量 476 条突变未跑**（按 2026-10-23 晚裁决，档③ 已降级为「发版前一次性、非阻塞」，见 AGENTS §三 第 7 条）⇒ 本次 tag **不代表「发版前突变闸门已过」**，只代表「版本归档 + tag 已打 + 已推」。另：本版改动涉及的 42 条规格（指向 contract 族被重构的 5 个文件）**已由 Lead 串行实跑 0 存活**，这部分是实测的。
 > **中止后的残留已处置**：kill 时进程停在 `packages/core/api/routers/model_configs.py` 的突变态 ⇒ 写回 `git show HEAD:<path>` 的 blob 字节后 sha256 与突变日志记录的「还原校验 OK」值**逐位一致**（`64c2433ffa1d1624…`）；`.mutbak*` 归零（含一个 2026-10-15 的历史残留）；生产源码 `MUTATION-` 标记 0。
 > ⚠️ **本次踩到一个真实陷阱**：本仓 `core.autocrlf=true` **且无 `.gitattributes`** ⇒ `git checkout --` 会把 LF 工作树文件**翻成 CRLF**（sha 变、指纹变）⇒ **还原突变态不要用 `git checkout --`**，要用执行器自己的 `.mutbak` 备份或写回 blob 字节并**用 sha256 对账**。
 > **完整交接**：`docs/impl/reviews/handoff-2026-10-23-release-3.10.1.md`。
