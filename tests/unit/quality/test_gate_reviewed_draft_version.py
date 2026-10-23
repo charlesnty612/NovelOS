@@ -22,12 +22,12 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.quality.service import QualityService
 from packages.workflows.chapter_commit import gate as gate_mod
 from packages.workflows.chapter_commit.gate import _quality_gate_node, _reviewed_draft_version
+from tests._db_fixtures import migrated_db
 from tests.unit.quality.test_engine import _full_delta
 
 # 触发 ``AI-BEAT-REPEAT``（CONFIRM_RULES 成员）的正文：同一段素材隔 ~200 字写两次。
@@ -53,9 +53,7 @@ _CLEAN_DRAFT = "他把窗子推开，风灌进来，桌上的纸角翻了两下�
 
 
 def _db(tmp_path: Path) -> str:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return str(settings.db_path)
+    return str(migrated_db(tmp_path))
 
 
 def _project(db_path: str) -> str:

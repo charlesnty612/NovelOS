@@ -65,15 +65,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 
-from packages.core.api.main import create_app
 from packages.core.api.routers.ai_call_logs import AiCallLogSummary
-from packages.core.config import Settings
 from packages.core.db import get_connection
 from packages.core.model_router.models import (
     AgentListRowOut,
@@ -85,6 +82,13 @@ from packages.core.model_router.models import (
 
 # ============================================================ 实测基准（第三方来源）
 # ⚠️ 写死自 2026-10-15 临时库实测，**不是**从 model_fields 抄的。
+from ._contract_runner import (
+    app_table_columns,
+    assert_list_items_named_ref,
+    assert_openapi_properties_and_required,
+    create_test_app,
+    one_shot,
+)
 
 EXPECTED_CONFIG_KEYS = frozenset(
     {"config_id", "capability", "provider", "model", "params_json", "enabled", "has_api_key"}
@@ -198,23 +202,13 @@ SECRET = "sk-do-not-leak-list-abc123"
 
 
 def _create_app(tmp_path: Path):
-    return create_app(Settings(data_dir=tmp_path, log_level="ERROR"))
-
-
-@asynccontextmanager
-async def _client(app):
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
-            yield c
+    """共享 runner 的 ``create_test_app``（本文件原用 ``log_level="ERROR"`` ⇒ 保留）。"""
+    return create_test_app(tmp_path, log_level="ERROR")
 
 
 def _req(app, method: str, path: str, **kwargs) -> httpx.Response:
-    async def run():
-        async with _client(app) as c:
-            return await c.request(method, path, **kwargs)
-
-    return asyncio.run(run())
+    """每请求一个客户端、**进 lifespan**（迁移在 app 启动时跑 ⇒ 见 runner 说明）。"""
+    return asyncio.run(one_shot(app, method, path, enter_lifespan=True, **kwargs))
 
 
 def _seed_config(app, **overrides) -> dict:
@@ -275,45 +269,11 @@ def _rows(app, path: str) -> list[dict]:
     return body
 
 
-def _db_columns(app, table: str) -> set[str]:
-    """真实表列名（第三方基准）——不是端点输出，也不是模型字段。
-
-    ⚠️ 必须先进 lifespan：迁移是 app 启动时跑的，不进 lifespan 的临时库是空表，
-    ``PRAGMA table_info`` 会返回空集——**那正是「量具没量到目标却报告量过了」**
-    （坑区「守卫自己被悄悄缩小了执行域」的同族）。故这里显式断言非空。
-    """
-
-    async def run() -> set[str]:
-        async with app.router.lifespan_context(app):
-            conn = get_connection(app.state.settings.db_path)
-            try:
-                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-            finally:
-                conn.close()
-            return {r["name"] for r in rows}
-
-    cols = asyncio.run(run())
-    assert cols, f"{table} 在临时库里没有列——迁移没跑？量具失效，本用例结论不可信"
-    return cols
-
-
-def _items_ref(schema: dict, path: str, method: str) -> str | None:
-    """取响应 schema 顶层的 ``$ref``，或 array items 上的 ``$ref``。"""
-    op = schema["paths"][path][method]["responses"].get("200")
-    if not op:
-        return None
-    sch = op["content"]["application/json"]["schema"]
-    if "$ref" in sch:
-        return sch["$ref"].rsplit("/", 1)[-1]
-    ref = (sch.get("items") or {}).get("$ref")
-    return ref.rsplit("/", 1)[-1] if ref else None
-
-
 # ============================================================ ① 响应键集（实测基准）
 
 
 def test_model_configs_list_returns_the_measured_seven_keys(tmp_path: Path):
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     _seed_config(app)
     _seed_config(app, capability="reasoning", model="mock-model-1")
     # 无 params 的行：params_json 是 {}（不是 null、也不是省略）
@@ -338,7 +298,7 @@ def test_model_configs_list_returns_the_measured_seven_keys(tmp_path: Path):
 
 
 def test_model_profiles_list_returns_the_measured_ten_keys(tmp_path: Path):
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     _seed_profile(app)
     _seed_profile(app, name="第二档案", params_json=None, enabled=0)
 
@@ -365,7 +325,7 @@ def test_capability_bindings_list_rows_are_key_for_key_identical_to_the_put_resp
     **已绑定**行（``updated_at`` 有值、``profiles`` 有 4 键子项）与
     **未绑定**行（``updated_at`` 为 ``null`` 而非省略、两个数组为空）都是 7 键。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     pid = _seed_profile(app)["profile_id"]
     put = _req(app, "PUT", "/api/capability-bindings/reasoning", json={"profile_ids": [pid]})
     assert put.status_code == 200, put.text
@@ -391,7 +351,7 @@ def test_capability_bindings_list_rows_are_key_for_key_identical_to_the_put_resp
 
 
 def test_agents_list_returns_the_measured_six_keys(tmp_path: Path):
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     _seed_agents(app)
 
     rows = _rows(app, "/api/agents")
@@ -404,7 +364,7 @@ def test_agents_list_returns_the_measured_six_keys(tmp_path: Path):
 
 
 def test_agent_prompts_list_returns_the_measured_seven_keys(tmp_path: Path):
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     _seed_agents(app)
 
     rows = _rows(app, "/api/agents/writer/prompts")
@@ -430,7 +390,7 @@ def test_agent_prompts_list_returns_the_measured_seven_keys(tmp_path: Path):
 
 
 def test_ai_call_logs_list_returns_the_measured_twelve_keys(tmp_path: Path):
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     _seed_agents(app)
     _seed_one_ai_call_log(app)
 
@@ -464,7 +424,7 @@ def test_list_rows_match_the_detail_row_shape_where_they_share_a_source(tmp_path
     反向护栏：若将来有人把 ``input_context_ids`` / ``output`` 塞进列表摘要，
     列表端点会把 prompt 全文推给前端 ⇒ 本用例的「少两键」断言立刻红。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     _seed_agents(app)
     _seed_one_ai_call_log(app)
     row = _rows(app, "/api/ai-call-logs")[0]
@@ -510,13 +470,13 @@ def test_new_row_models_declare_exactly_the_real_database_columns(tmp_path: Path
     三个新模型都不是 ``SELECT *`` 而是**显式列清单**——但凡少声明一列，
     ``response_model`` 都会把它**静默过滤掉**（症状：后端返回了、API 取不到、零报错）。
     """
-    app = _create_app(tmp_path)
-    assert set(AgentListRowOut.model_fields) == _db_columns(app, "agents")
-    assert set(AgentPromptRowOut.model_fields) == _db_columns(app, "prompts")
+    app = create_test_app(tmp_path, log_level="ERROR")
+    assert set(AgentListRowOut.model_fields) == app_table_columns(app, "agents")
+    assert set(AgentPromptRowOut.model_fields) == app_table_columns(app, "prompts")
 
     # 摘要模型 = 全表 − 两列（只有详情端点读全文）+ token_usage_json 改名为 token_usage
     expected_summary = (
-        _db_columns(app, "ai_call_logs")
+        app_table_columns(app, "ai_call_logs")
         - {"input_context_ids_json", "output_json"}
         - {"token_usage_json"}
     ) | {"token_usage"}
@@ -536,16 +496,12 @@ def test_every_list_endpoint_declares_a_typed_items_ref(tmp_path: Path):
     ``{"type": "object"}`` ⇒ 必红。⚠️ 断言**不是**「有没有 $ref」这种宽判——
     还要求顶层必须是 array（防有人把列表包成 ``{"items": [...]}`` 的对象）。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     schema = app.openapi()
     for (path, method), expected in EXPECTED_ITEM_REFS.items():
-        op = schema["paths"][path][method]["responses"]["200"]
-        sch = op["content"]["application/json"]["schema"]
-        assert sch.get("type") == "array", f"{method.upper()} {path} 顶层不是 array：{sch}"
-        assert _items_ref(schema, path, method) == expected, (
-            f"{method.upper()} {path} 的 items 应 $ref {expected}，"
-            f"实得 {_items_ref(schema, path, method)!r}"
-        )
+        # 口径单点：顶层必须是 array + items 是**具名** $ref（防「把列表包成
+        # {"items": [...]} 的对象」）；裸 list[dict] ⇒ 前端拿到 Record<string, unknown>。
+        assert_list_items_named_ref(schema, path, method, expected)
 
 
 @pytest.mark.parametrize("model_name", sorted(EXPECTED_DECLARED_PROPERTIES))
@@ -557,21 +513,15 @@ def test_openapi_declares_every_measured_key(model_name: str, tmp_path: Path):
     必须另断言 OpenAPI 的 ``properties`` / ``required``。两个方向都用**相等**：
     多声明一个键同样是契约漂移（前端会以为后端保证它）。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     components = app.openapi()["components"]["schemas"]
     assert model_name in components, f"schema 缺 {model_name}"
     spec = components[model_name]
-    props = set(spec.get("properties", {}))
-    expected_props = set(EXPECTED_DECLARED_PROPERTIES[model_name])
-    assert props == expected_props, (
-        f"{model_name} properties 多={sorted(props - expected_props)} "
-        f"少={sorted(expected_props - props)}"
-    )
-    required = set(spec.get("required", []))
-    expected_required = set(EXPECTED_REQUIRED[model_name])
-    assert required == expected_required, (
-        f"{model_name} required 多={sorted(required - expected_required)} "
-        f"少={sorted(expected_required - required)}"
+    assert_openapi_properties_and_required(
+        spec,
+        EXPECTED_DECLARED_PROPERTIES[model_name],
+        EXPECTED_REQUIRED[model_name],
+        label=model_name,
     )
 
 
@@ -585,7 +535,7 @@ def test_nullable_but_always_present_log_keys_are_declared_nullable_and_required
     这八项的实测值全是 ``null``（mock 路径不写 token_usage_json 之外的列），
     所以「键恒在」是真的——见 test_ai_call_logs_list_returns_the_measured_twelve_keys。
     """
-    spec = _create_app(tmp_path).openapi()["components"]["schemas"]["AiCallLogSummary"]
+    spec = create_test_app(tmp_path, log_level="ERROR").openapi()["components"]["schemas"]["AiCallLogSummary"]
     for key in NULLABLE_BUT_ALWAYS_PRESENT:
         prop = spec["properties"][key]
         assert {"type": "null"} in prop.get("anyOf", []), (
@@ -603,7 +553,7 @@ def test_agents_config_json_is_declared_as_a_string_not_an_object(tmp_path: Path
     字符串解析成对象，而是**直接校验失败**（``Input should be a valid dictionary``）
     ⇒ 端点 500。所以这条断言守的不是「形状漂移」，是「一条会 500 的契约」。
     """
-    props = _create_app(tmp_path).openapi()["components"]["schemas"]["AgentListRowOut"]["properties"]
+    props = create_test_app(tmp_path, log_level="ERROR").openapi()["components"]["schemas"]["AgentListRowOut"]["properties"]
     assert props["config_json"].get("type") == "string", (
         f"config_json 应声明为 string（端点未解析）：{props['config_json']}"
     )
@@ -614,7 +564,7 @@ def test_agents_rows_keep_config_json_as_a_json_string_at_runtime(tmp_path: Path
 
     与上面那条（schema 侧）构成一对：schema 说 string、运行时也得真是 string。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     _seed_agents(app)
     row = _rows(app, "/api/agents")[0]
     assert isinstance(row["config_json"], str), (
@@ -637,7 +587,7 @@ def test_list_rows_never_leak_the_plaintext_api_key(tmp_path: Path):
 
     突变对应：把列表端点里的 ``_mask_response(...)`` 摘掉 ⇒ 本用例红。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path, log_level="ERROR")
     profile = _seed_profile(app)
     config = _seed_config(app)
 

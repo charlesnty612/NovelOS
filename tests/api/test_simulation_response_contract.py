@@ -19,13 +19,10 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
 from packages.core.ids import new_id, now_iso
 from packages.core.simulation.models import (
     ChangedItem,
@@ -34,21 +31,21 @@ from packages.core.simulation.models import (
     StateDiff,
 )
 
+from ._contract_runner import (
+    assert_keys_match,
+    assert_model_fields_match,
+    client_ctx,
+    create_test_app,
+)
+
 
 def _create_app(tmp_path: Path):
-    return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
-
-
-@asynccontextmanager
-async def _client(app):
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
-            yield c
+    """共享 runner 的 ``create_test_app``（**不**显式跑迁移；迁移在 lifespan 里跑）。"""
+    return create_test_app(tmp_path)
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
-    async with _client(app) as c:
+    async with client_ctx(app) as c:
         return await c.request(method, path, **kwargs)
 
 
@@ -57,7 +54,7 @@ def _seeded_pid(app) -> str:
     import asyncio
 
     async def run() -> str:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             pid = (await c.post("/api/projects", json={"name": "推演契约"})).json()["project_id"]
             cid = (
                 await c.post(
@@ -158,7 +155,7 @@ def test_simulation_result_keys_match_hardcoded_expectation(tmp_path: Path):
     pid = _seeded_pid(app)
 
     async def run():
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             cid = (
                 await c.get(f"/api/projects/{pid}/chapters")
             ).json()[0]["chapter_id"]
@@ -170,9 +167,7 @@ def test_simulation_result_keys_match_hardcoded_expectation(tmp_path: Path):
             sid = r.json()["simulation_id"]
 
             body = r.json()
-            assert set(body) == EXPECTED_RESULT_KEYS, (
-                f"多={set(body) - EXPECTED_RESULT_KEYS} 少={EXPECTED_RESULT_KEYS - set(body)}"
-            )
+            assert_keys_match(body, EXPECTED_RESULT_KEYS, "POST /simulate 响应")
 
             got = (await c.get(f"/api/projects/{pid}/simulations/{sid}")).json()
             assert set(got) == EXPECTED_RESULT_KEYS
@@ -180,10 +175,7 @@ def test_simulation_result_keys_match_hardcoded_expectation(tmp_path: Path):
             rows = (await c.get(f"/api/projects/{pid}/simulations")).json()
             assert rows, "推演历史不应为空"
             for row in rows:
-                assert set(row) == EXPECTED_SUMMARY_KEYS, (
-                    f"多={set(row) - EXPECTED_SUMMARY_KEYS} "
-                    f"少={EXPECTED_SUMMARY_KEYS - set(row)}"
-                )
+                assert_keys_match(row, EXPECTED_SUMMARY_KEYS, "GET /simulations 行")
             return body
 
     body = asyncio.run(run())
@@ -193,8 +185,8 @@ def test_simulation_result_keys_match_hardcoded_expectation(tmp_path: Path):
 
 def test_simulation_models_stay_in_sync_with_expectation():
     """模型字段集与硬编码期望一致（与上面的响应断言构成两道）。"""
-    assert set(SimulationResult.model_fields) == EXPECTED_RESULT_KEYS
-    assert set(SimulationSummary.model_fields) == EXPECTED_SUMMARY_KEYS
+    assert_model_fields_match(SimulationResult, EXPECTED_RESULT_KEYS)
+    assert_model_fields_match(SimulationSummary, EXPECTED_SUMMARY_KEYS)
 
 
 def test_empty_diff_omits_entity_sections_not_nulls(tmp_path: Path):
@@ -208,7 +200,7 @@ def test_empty_diff_omits_entity_sections_not_nulls(tmp_path: Path):
     pid = _seeded_pid(app)
 
     async def run():
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             cid = (
                 await c.get(f"/api/projects/{pid}/chapters")
             ).json()[0]["chapter_id"]
@@ -221,9 +213,11 @@ def test_empty_diff_omits_entity_sections_not_nulls(tmp_path: Path):
 
     diff = asyncio.run(run())
 
-    assert set(diff) == {"version_a", "version_b", "branch_id"}, (
-        f"diff 的键应恰好 3 个，实际 {sorted(diff)}——"
-        f"多出来的多半是 exclude_none 被撤掉后序列化成 null 的实体段"
+    assert_keys_match(
+        diff,
+        {"version_a", "version_b", "branch_id"},
+        "diff 的键应恰好 3 个",
+        hint="——多出来的多半是 exclude_none 被撤掉后序列化成 null 的实体段",
     )
     # 模型侧声明的六个条件段此刻应全为 None（与「序列化时被 exclude_none 抹掉」一致）
     for field in ("characters", "world", "hooks", "debts", "events_changed", "recent_events"):

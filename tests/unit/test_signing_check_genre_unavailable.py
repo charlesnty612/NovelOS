@@ -32,8 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.delivery.evidence import collect_project_evidence
 from packages.core.delivery.verdict import (
     DELIVERABLE,
@@ -42,6 +41,7 @@ from packages.core.delivery.verdict import (
 )
 from packages.core.ids import new_id, now_iso
 from packages.core.signing_check.service import format_summary, run_signing_check
+from tests._db_fixtures import migrated_db
 
 #: 「题材开篇不可检」标记的键（与 ``packages.core.signing_check.checks``
 #: 的 ``GENRE_OPENING_UNAVAILABLE_KEY`` 同值；此处独立写出，避免测试只跟着常量跑）。
@@ -83,9 +83,7 @@ PACK_WITHOUT_RULES: dict = {"schema_version": "genre-pack.v1.0.0"}
 
 @pytest.fixture()
 def db_path(tmp_path: Path) -> Path:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return settings.db_path
+    return migrated_db(tmp_path)
 
 
 def _seed_project(db_path: Path, *, name: str = "体检书") -> str:

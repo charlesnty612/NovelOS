@@ -19,12 +19,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from packages.core.db import get_connection
+
 from ._contract_runner import (
+    app_table_columns,
     assert_extra_allowed,
     assert_keys_match,
     assert_keys_match_ddl,
@@ -32,6 +36,7 @@ from ._contract_runner import (
     assert_model_fields_match,
     assert_openapi_properties_and_required,
     assert_openapi_ref,
+    create_test_app,
     db_columns,
 )
 
@@ -242,3 +247,63 @@ def test_db_columns_reads_real_columns(tmp_path: Any):
         assert db_columns(conn, "probe") == {"id", "name"}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# runner **新增能力**的看守（N-1 的延伸：每加一个能力，先补看守例）
+# ---------------------------------------------------------------------------
+
+
+def test_assert_keys_match_includes_hint_in_failure_message():
+    """``hint`` 必须**真的出现在失败消息里**（不是「存了个参数却没显示」）。
+
+    用途：各域的事故说明（≤1 行短标记）随失败一起显示 ⇒ 详细留痕仍留在各文件。
+    """
+    with pytest.raises(AssertionError) as exc:
+        assert_keys_match(
+            {"alpha": 1},
+            {"alpha", "beta"},
+            "哨兵",
+            hint="——多出来的多半是 exclude_none 被撤掉",
+        )
+    msg = str(exc.value)
+    assert "exclude_none" in msg, msg
+    assert "哨兵" in msg, msg
+
+
+def test_assert_keys_match_without_hint_still_reports_keys():
+    """不传 hint 时消息仍点名多/少哪些键（hint 是可选附加，不是替代）。"""
+    with pytest.raises(AssertionError) as exc:
+        assert_keys_match({"alpha": 1}, {"alpha", "beta"}, "哨兵")
+    msg = str(exc.value)
+    assert "多=" in msg and "少=" in msg, msg
+
+
+def test_create_test_app_keeps_log_level(tmp_path: Any):
+    """``log_level`` 是**行为等价**的关键：各文件原本用 WARNING / ERROR 不同 ⇒
+    抽到共享模块后必须逐字保留（不然就是悄悄改了被测行为）。"""
+    assert create_test_app(tmp_path).state.settings.log_level == "WARNING"
+    assert create_test_app(tmp_path, log_level="ERROR").state.settings.log_level == "ERROR"
+
+
+def test_app_table_columns_matches_pragmas_exactly(tmp_path: Any):
+    """真实列名集合必须与 ``PRAGMA table_info`` **逐位一致**（防「列名被悄悄改写」）。
+
+    ⚠️ 这条同时钉住「必须先进 lifespan」：不进 lifespan 的临时库是空表 ⇒ 列集为空
+    ⇒ 与 PRAGMA 的读数对不上（量具失效即红）。
+    """
+    app = create_test_app(tmp_path)
+    cols = app_table_columns(app, "projects")
+    assert "project_id" in cols, cols
+
+    async def _read() -> set[str]:
+        async with app.router.lifespan_context(app):
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                return {
+                    r["name"] for r in conn.execute("PRAGMA table_info(projects)").fetchall()
+                }
+            finally:
+                conn.close()
+
+    assert cols == asyncio.run(_read())

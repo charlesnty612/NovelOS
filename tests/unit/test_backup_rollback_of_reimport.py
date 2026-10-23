@@ -26,16 +26,14 @@ from pathlib import Path
 import pytest
 
 from packages.core.backup import BackupService
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
+from tests._db_fixtures import migrated_db
 
 
 @pytest.fixture()
 def db_path(tmp_path: Path) -> str:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return str(settings.db_path)
+    return str(migrated_db(tmp_path))
 
 
 def _seed_project_with_rollback_commits(db_path: str) -> str:

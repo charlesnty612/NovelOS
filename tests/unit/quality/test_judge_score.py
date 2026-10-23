@@ -19,19 +19,19 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.quality.models import QualityReport
 from packages.core.quality.service import (
     JUDGE_REQUIRED_SCORE_KEYS,
     QualityService,
 )
+from tests._db_fixtures import migrated_db
 
 
 def _bootstrap_db(tmp_path: Path) -> tuple[Path, str, str]:
     """建库 + 插一个 project + 一个 chapter；返回 (db_path, project_id, chapter_id)。"""
-    db_path = tmp_path / "test.db"
-    apply_migrations(db_path)
+    db_path = migrated_db(tmp_path, db_name="test.db")
     pid = new_id("prj")
     cid = new_id("ch")
     now = now_iso()

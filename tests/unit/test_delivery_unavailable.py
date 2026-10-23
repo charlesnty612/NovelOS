@@ -34,8 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.delivery.evidence import (
     collect_project_evidence,
     signing_items_by_chapter,
@@ -55,6 +54,7 @@ from packages.core.delivery.verdict import (
 from packages.core.ids import new_id, now_iso
 from packages.core.quality.wordcount import classify_prose_length
 from packages.core.signing_check.checks import GENRE_OPENING_UNAVAILABLE_KEY
+from tests._db_fixtures import migrated_db
 
 #: 干净章的开篇：冲突词 + 对话句 + 主角名 + 金手指词（黄金三章三项都不落 fail）。
 _CLEAN_HEAD = "李晨被人当面羞辱，全场震惊。「你算什么？」他咬牙立誓。系统绑定，面板浮现。"
@@ -272,9 +272,7 @@ class TestLengthUnavailableIsDistinctFromNoDraft:
 
 @pytest.fixture()
 def db_path(tmp_path: Path) -> Path:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return settings.db_path
+    return migrated_db(tmp_path)
 
 
 def _seed_clean_project(db_path: Path) -> str:

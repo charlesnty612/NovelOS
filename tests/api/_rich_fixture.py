@@ -13,6 +13,9 @@
 * **只搬真正通用的**：各文件**特有**的播种（state_list 的 commit/delta/branch/run
   直插、workflow_run 的 mock 脚本、genre_quality 的 canon/报告直插）**留在原文件**
   —— 那些不是「富夹具」，是各域自己的数据形状。
+* **失败语义逐字一致**：本模块用 ``assert r.status_code == 201, r.text``
+  （**不是** ``raise_for_status()``）⇒ 与各文件本地助手的失败形态相同 ⇒ 换用本模块
+  不会改变「出错时看到什么」。
 * 本模块**零真实 LLM 调用**：只发管理类端点（项目 / 章 / 角色 / 地点）。
 """
 from __future__ import annotations
@@ -38,7 +41,7 @@ __all__ = [
 async def seed_project(c: httpx.AsyncClient, name: str) -> str:
     """建项目，返回 ``project_id``。"""
     r = await c.post("/api/projects", json={"name": name})
-    r.raise_for_status()
+    assert r.status_code == 201, r.text
     return r.json()["project_id"]
 
 
@@ -49,21 +52,21 @@ async def seed_chapter(
     r = await c.post(
         f"/api/projects/{project_id}/chapters", json={"number": number, "title": title}
     )
-    r.raise_for_status()
+    assert r.status_code == 201, r.text
     return r.json()["chapter_id"]
 
 
 async def seed_character(c: httpx.AsyncClient, project_id: str, name: str) -> str:
     """建角色，返回 ``character_id``。"""
     r = await c.post(f"/api/projects/{project_id}/characters", json={"name": name})
-    r.raise_for_status()
+    assert r.status_code == 201, r.text
     return r.json()["character_id"]
 
 
 async def seed_location(c: httpx.AsyncClient, project_id: str, name: str) -> str:
     """建地点，返回地点 id（世界三实体的出参键是 ``id``，不是 ``location_id``）。"""
     r = await c.post(f"/api/projects/{project_id}/locations", json={"name": name})
-    r.raise_for_status()
+    assert r.status_code == 201, r.text
     return r.json()["id"]
 
 

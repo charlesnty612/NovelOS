@@ -23,7 +23,7 @@ import json
 from pathlib import Path
 
 from packages.core.agent_runtime.prompts import PromptRegistry
-from packages.core.db import apply_migrations
+from tests._db_fixtures import migrated_db
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPTS_DIR = REPO_ROOT / "docs" / "agents" / "prompts"
@@ -47,9 +47,7 @@ _PROMPT_MARKERS: tuple[str, ...] = (
 
 
 def _fresh_db(tmp_path: Path) -> Path:
-    db_path = tmp_path / "prompt_registry.db"
-    apply_migrations(db_path)
-    return db_path
+    return migrated_db(tmp_path, db_name="prompt_registry.db")
 
 
 def test_sync_from_docs_registers_writer_v2(tmp_path: Path):

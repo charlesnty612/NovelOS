@@ -21,32 +21,24 @@
 from __future__ import annotations
 
 import json
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 
-from packages.core.api.main import create_app
 from packages.core.arc.models import ArcView
-from packages.core.config import Settings
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 
-
-def _create_app(tmp_path: Path):
-    return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
-
-
-@asynccontextmanager
-async def _client(app):
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
-            yield c
+from ._contract_runner import (
+    assert_keys_match,
+    assert_model_fields_match,
+    client_ctx,
+    create_test_app,
+)
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
-    async with _client(app) as c:
+    async with client_ctx(app) as c:
         return await c.request(method, path, **kwargs)
 
 
@@ -56,7 +48,7 @@ def _rich_project(app) -> str:
     import asyncio
 
     async def run() -> str:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             pid = (
                 await c.post("/api/projects", json={"name": "弧光契约"})
             ).json()["project_id"]
@@ -129,7 +121,7 @@ def _rich_project(app) -> str:
 
 def test_arc_view_schema_declared_and_referenced(tmp_path: Path):
     """1) OpenAPI 里有 ArcView schema，且被 GET /arc 引用。"""
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     schema = app.openapi()
     assert "ArcView" in schema["components"]["schemas"], "ArcView 未进 OpenAPI"
     ref = schema["paths"]["/api/projects/{project_id}/arc"]["get"]["responses"]["200"][
@@ -187,23 +179,18 @@ def test_arc_response_keys_match_hardcoded_expectation(tmp_path: Path):
 
     两侧都对：撤模型字段（M14）会让响应少键 ⇒ 红；响应侧漂移也会红。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _rich_project(app)
     r = asyncio_run(_request(app, "GET", f"/api/projects/{pid}/arc"))
     assert r.status_code == 200, r.text
     body = r.json()
 
-    assert set(body) == EXPECTED_ARC_KEYS, (
-        f"顶层键不符：多={set(body) - EXPECTED_ARC_KEYS} 少={EXPECTED_ARC_KEYS - set(body)}"
-    )
+    assert_keys_match(body, EXPECTED_ARC_KEYS, "GET /api/projects/{pid}/arc 顶层")
 
     # 章节行：逐字相等，且**不得**出现 chapter_id（后端刻意脱敏）
     assert body["chapters"], "夹具应至少产出一章"
     for row in body["chapters"]:
-        assert set(row) == EXPECTED_ARC_CHAPTER_KEYS, (
-            f"章节行键不符：多={set(row) - EXPECTED_ARC_CHAPTER_KEYS} "
-            f"少={EXPECTED_ARC_CHAPTER_KEYS - set(row)}"
-        )
+        assert_keys_match(row, EXPECTED_ARC_CHAPTER_KEYS, "arc 章节行")
         assert "chapter_id" not in row, "后端刻意不暴露 chapter_id，出现即契约漂移"
 
     assert set(body["payoff"]) == EXPECTED_PAYOFF_KEYS
@@ -220,10 +207,10 @@ def test_arc_response_keys_match_hardcoded_expectation(tmp_path: Path):
 
 def test_arc_model_fields_stay_in_sync_with_expectation():
     """2b) 模型字段集与硬编码期望一致（两侧都变不算漂移，这里再钉一道）。"""
-    assert set(ArcView.model_fields) == EXPECTED_ARC_KEYS
     from packages.core.arc.models import ArcChapterRow
 
-    assert set(ArcChapterRow.model_fields) == EXPECTED_ARC_CHAPTER_KEYS
+    assert_model_fields_match(ArcView, EXPECTED_ARC_KEYS)
+    assert_model_fields_match(ArcChapterRow, EXPECTED_ARC_CHAPTER_KEYS)
 
 
 def test_arc_extra_top_level_key_is_not_stripped(tmp_path: Path):

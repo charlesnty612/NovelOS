@@ -12,19 +12,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from packages.core.config import Settings
 from packages.core.context_engine.builders import (
     _DEFAULT_RECENT_EVENT_IDS_LIMIT,
     _load_recent_event_ids,
     build_observer_input,
 )
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
+from tests._db_fixtures import migrated_db
 
 
 def _create_db(tmp_path: Path) -> str:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return settings.db_path
+    return migrated_db(tmp_path)
 
 
 def _make_project_and_chapter(db_path: str) -> tuple[str, str]:

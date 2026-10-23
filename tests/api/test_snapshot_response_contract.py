@@ -21,55 +21,35 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
+from ._contract_runner import client_ctx, create_test_app
+from ._rich_fixture import seed_chapter, seed_project
 
 
 def _create_app(tmp_path: Path):
-    return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
-
-
-@asynccontextmanager
-async def _client(app):
-    """进 lifespan 再发请求。
-
-    ⚠️ **迁移只在 lifespan 里跑**（`api/main.py::lifespan` → `apply_migrations`），
-    而 `httpx.ASGITransport` **不触发 lifespan**——不显式进就会撞
-    `no such table: projects`。本仓既有 api 测试统一用
-    `app.router.lifespan_context(app)`（见 `tests/api/test_arc_api.py`）。
-    """
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
-            yield c
+    """共享 runner 的 ``create_test_app``（**不**显式跑迁移；迁移在 lifespan 里跑）。"""
+    return create_test_app(tmp_path)
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
-    async with _client(app) as c:
+    async with client_ctx(app) as c:
         return await c.request(method, path, **kwargs)
 
 
 async def _make_project(app, name: str = "snap_proj") -> str:
-    r = await _request(app, "POST", "/api/projects", json={"name": name})
-    assert r.status_code == 201, r.text
-    return r.json()["project_id"]
+    """共享播种原语（请求体与本文件原实现**逐字相同**：``{"name": name}``）。"""
+    async with client_ctx(app) as c:
+        return await seed_project(c, name)
 
 
 async def _make_chapter(app, pid: str, number: int = 1) -> str:
-    r = await _request(
-        app,
-        "POST",
-        f"/api/projects/{pid}/chapters",
-        json={"number": number, "title": f"第{number}章"},
-    )
-    assert r.status_code == 201, r.text
-    return r.json()["chapter_id"]
+    """共享播种原语（请求体与本文件原实现**逐字相同**：``number`` + ``title``）。"""
+    async with client_ctx(app) as c:
+        return await seed_chapter(c, pid, number=number, title=f"第{number}章")
 
 
 # --------------------------------------------------------------------------- OpenAPI

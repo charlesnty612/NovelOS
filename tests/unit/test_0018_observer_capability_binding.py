@@ -26,6 +26,7 @@ from packages.core.model_router.router import (
     CAPABILITY_LABELS,
     capability_for,
 )
+from tests._db_fixtures import migrated_db
 
 # ---------------------------------------------------------------------------
 # 1. 迁移注册
@@ -34,8 +35,7 @@ from packages.core.model_router.router import (
 
 def test_migration_0018_is_registered(tmp_path: Path):
     """apply_migrations 后 0018 在 _migrations 表已登记（注册机制正确）。"""
-    db_path = str(tmp_path / "test.db")
-    apply_migrations(db_path)
+    db_path = str(migrated_db(tmp_path, db_name="test.db"))
     conn = get_connection(db_path)
     try:
         rows = conn.execute(
@@ -128,8 +128,7 @@ def test_migration_0018_inherits_observer_from_reasoning(tmp_path: Path):
 
 def test_migration_0018_is_idempotent(tmp_path: Path):
     """apply 第二次：0018 不在 applied 列表（已注册），observer 行不变。"""
-    db_path = str(tmp_path / "test.db")
-    apply_migrations(db_path)
+    db_path = str(migrated_db(tmp_path, db_name="test.db"))
     # 预置 reasoning + 派生 observer
     pid = "mprof_a"
     conn = get_connection(db_path)
@@ -168,8 +167,7 @@ def test_migration_0018_preserves_existing_observer_binding(tmp_path: Path):
     设计动机：运维可能直接 PUT observer 绑定（不依赖 0018 派生），0018 必须
     用 INSERT OR IGNORE 保留已有值，不强行覆盖。
     """
-    db_path = str(tmp_path / "test.db")
-    apply_migrations(db_path)
+    db_path = str(migrated_db(tmp_path, db_name="test.db"))
     pid_obs = "mprof_observer"
     pid_reasoning = "mprof_reasoning"
     conn = get_connection(db_path)

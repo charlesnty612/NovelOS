@@ -33,6 +33,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Mapping
@@ -41,6 +42,7 @@ import httpx
 
 from packages.core.api.main import create_app
 from packages.core.config import Settings
+from packages.core.db import get_connection
 
 __all__ = [
     "assert_extra_allowed",
@@ -51,6 +53,7 @@ __all__ = [
     "assert_openapi_properties_and_required",
     "assert_openapi_ref",
     "assert_response_keys",
+    "app_table_columns",
     "client_ctx",
     "create_test_app",
     "db_columns",
@@ -63,32 +66,42 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-def create_test_app(tmp_path: Path):
-    """建一个指向临时库的 app（迁移由各文件自己的夹具负责，**不**在此跑）。"""
-    return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
+def create_test_app(tmp_path: Path, *, log_level: str = "WARNING"):
+    """建一个指向临时库的 app（迁移由各文件自己的夹具负责，**不**在此跑）。
+
+    ``log_level`` 允许调用方保留**自己原本**的日志级别（有的文件用 ``ERROR``）⇒
+    迁移后行为逐字不变。
+    """
+    return create_app(Settings(data_dir=tmp_path, log_level=log_level))
 
 
 @asynccontextmanager
-async def client_ctx(app, *, enter_lifespan: bool = True) -> AsyncIterator[httpx.AsyncClient]:
+async def client_ctx(
+    app, *, enter_lifespan: bool = True, base_url: str = "http://testserver"
+) -> AsyncIterator[httpx.AsyncClient]:
     """产出一个 ASGI 客户端。
 
     ``enter_lifespan=False`` ⇒ **刻意不进 lifespan**：迁移已由夹具显式跑过，而
     lifespan 的 startup 会跑 ``recover_interrupted_runs``（自愈）⇒ 对「直接 INSERT
     终态行」的夹具是多余的干扰（``test_state_list_response_contract.py`` 的选择）。
     ``enter_lifespan=True`` ⇒ 进 lifespan（需要 prompt sync / 启动自愈的夹具用）。
+
+    ⚠️ **为什么多数文件必须进 lifespan**（留痕）：迁移只在 lifespan 里跑
+    （``api/main.py::lifespan`` → ``apply_migrations``），而 ``httpx.ASGITransport``
+    **不触发 lifespan**——不显式进就会撞 ``no such table: projects``。本仓既有 api
+    测试统一用 ``app.router.lifespan_context(app)``。
+
+    ``base_url`` 允许调用方保留**自己原本**的基址（有的文件用 ``http://t``）⇒
+    迁移后行为逐字不变。
     """
     if enter_lifespan:
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver"
-            ) as c:
+            async with httpx.AsyncClient(transport=transport, base_url=base_url) as c:
                 yield c
     else:
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as c:
+        async with httpx.AsyncClient(transport=transport, base_url=base_url) as c:
             yield c
 
 
@@ -106,16 +119,25 @@ async def one_shot(
 
 
 def assert_keys_match(
-    body: Mapping[str, Any], expected: Iterable[str], label: str
+    body: Mapping[str, Any],
+    expected: Iterable[str],
+    label: str,
+    hint: str = "",
 ) -> None:
     """``body`` 的键集必须与**硬编码** ``expected`` 逐字相等。
 
     失败信息必须点名多/少哪些键（复核者要能一眼看出差在哪）。
+
+    ``hint``：失败时附带的**留痕文字**（各域自己的事故说明）⇒ 抽到共享模块后
+    **不许丢**（例：simulation 的「多出来的多半是 exclude_none 被撤掉后序列化成
+    null 的实体段」）。
     """
     assert isinstance(body, Mapping), f"{label} 应是对象，实际 {type(body)}"
     want = set(expected)
     got = set(body)
-    assert got == want, f"{label} 键集不符：多={sorted(got - want)} 少={sorted(want - got)}"
+    assert got == want, (
+        f"{label} 键集不符：多={sorted(got - want)} 少={sorted(want - got)}{hint}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +279,28 @@ def db_columns(conn: Any, table: str) -> set[str]:
     """读一张表的列名集合（``PRAGMA table_info``）。"""
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return {r[1] for r in rows}
+
+
+def app_table_columns(app: Any, table: str) -> set[str]:
+    """从**临时库**读一张表的真实列名（第三方基准：不是端点输出，也不是模型字段）。
+
+    ⚠️ 必须先进 lifespan：迁移是 app 启动时跑的，不进 lifespan 的临时库是空表，
+    ``PRAGMA table_info`` 会返回空集——**那正是「量具没量到目标却报告量过了」**
+    （坑区「守卫自己被悄悄缩小了执行域」的同族）。故这里显式断言非空。
+    """
+
+    async def run() -> set[str]:
+        async with app.router.lifespan_context(app):
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            finally:
+                conn.close()
+            return {r["name"] for r in rows}
+
+    cols = asyncio.run(run())
+    assert cols, f"{table} 在临时库里没有列——迁移没跑？量具失效，本用例结论不可信"
+    return cols
 
 
 def assert_keys_match_ddl(

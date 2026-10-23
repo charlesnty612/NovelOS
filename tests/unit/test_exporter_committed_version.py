@@ -34,10 +34,10 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.exporter import ExportScope, build_fanqie_package, build_txt
 from packages.core.ids import new_id, now_iso
+from tests._db_fixtures import migrated_db
 
 _T1 = "2026-01-01T00:00:00+00:00"
 _T2 = "2026-02-01T00:00:00+00:00"
@@ -46,9 +46,7 @@ _T_MID = "2026-01-15T00:00:00+00:00"
 
 @pytest.fixture()
 def db_path(tmp_path: Path) -> Path:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return settings.db_path
+    return migrated_db(tmp_path)
 
 
 def _seed_project(db_path: Path, name: str = "外发测试书") -> str:

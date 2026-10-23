@@ -9,17 +9,16 @@
 （**不发起任何真实模型调用**），并额外用「不可达 base_url + monkeypatch provider」
 补齐了真实 provider 分支的错误形状。
 
-⚠️ 本文件刻意**不与被测物比对**（AGENTS 坑区「断言里只有被测物和它自己 ⇒ 自指断言恒真」
-以及 2026-10-15 M14/M15/M20 三条同族实测）。三条基准各自独立：
-
+⚠️ 本文件刻意**不与被测物比对**（AGENTS 坑区「断言里只有被测物和它自己 ⇒ 自指断言恒真」，
+M14/M15/M20 三条同族实测）。三条**互相独立**的基准（通用口径与理由见
+``_contract_runner`` 的模块 docstring；本文件守的是「模型档案 / 配置 / 环节绑定 /
+agent 通道」这条线的 13 个端点）：
 1. **实测硬编码基准** ``EXPECTED_*``：写死的是 2026-10-15 量到的键集，**不是**从
-   ``Model.model_fields`` 抄来的；断言写成 ``set(body) == EXPECTED_PROFILE_KEYS``。
-2. **DB 实表列基准**：``ModelProfileOut`` / ``ModelConfigOut`` 的字段集直接与
-   ``PRAGMA table_info`` 的**真实列名**比对（再加 ``has_api_key``）——基准来自
-   迁移文件，与端点、与模型都无关，从根上排除「夹具抄实现」（坑区「夹具从被测代码的
-   实际输出里抄形状」）。
-3. **模型 vs 硬编码** 双保险：``set(M.model_fields) == EXPECTED_*``，与第 1 条互补
-   （防「模型声明了但端点没出」与「端点出了但模型没声明」两个方向）。
+   ``Model.model_fields`` 抄来的；
+2. **DB 实表列基准**：``PRAGMA table_info`` 的**真实列名**（再加 ``has_api_key``）
+   ——基准来自迁移文件，与端点、与模型都无关，从根上排除「夹具抄实现」；
+3. **模型 vs 硬编码**双保险：与第 1 条互补（防「模型声明了但端点没出」与
+   「端点出了但模型没声明」两个方向）。
 
 🔑 密钥面（实测结论，见 ``test_api_key_is_masked_and_never_leaves_the_server``）：
 ``params_json.api_key`` 在**读路径**恒被替换为 ``"***"``，顶层另有 ``has_api_key``；
@@ -29,15 +28,11 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
-from packages.core.db import get_connection
 from packages.core.model_router import ModelRouter, ProviderError
 from packages.core.model_router.models import (
     AgentPromptSyncResult,
@@ -50,6 +45,14 @@ from packages.core.model_router.models import (
     ModelConfigOut,
     ModelProfileOut,
     ProfileTestResult,
+)
+
+from ._contract_runner import (
+    app_table_columns,
+    assert_keys_match,
+    assert_model_fields_match,
+    create_test_app,
+    one_shot,
 )
 
 # ============================================================ 实测基准（第三方来源）
@@ -163,45 +166,13 @@ SECRET = "sk-do-not-leak-abc123"
 
 
 def _create_app(tmp_path: Path):
-    return create_app(Settings(data_dir=tmp_path, log_level="ERROR"))
-
-
-@asynccontextmanager
-async def _client(app):
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
-            yield c
+    """共享 runner 的 ``create_test_app``（本文件原用 ``log_level="ERROR"`` ⇒ 保留）。"""
+    return create_test_app(tmp_path, log_level="ERROR")
 
 
 def _req(app, method: str, path: str, **kwargs) -> httpx.Response:
-    async def run():
-        async with _client(app) as c:
-            return await c.request(method, path, **kwargs)
-
-    return asyncio.run(run())
-
-
-def _db_columns(app, table: str) -> set[str]:
-    """真实表列名（第三方基准）——不是端点输出，也不是模型字段。
-
-    ⚠️ 必须先进 lifespan：迁移是 app 启动时跑的，不进 lifespan 的临时库是空表，
-    ``PRAGMA table_info`` 会返回空集——**那正是「量具没量到目标却报告量过了」**
-    （坑区「守卫自己被悄悄缩小了执行域」的同族）。故这里显式断言非空。
-    """
-
-    async def run() -> set[str]:
-        async with app.router.lifespan_context(app):
-            conn = get_connection(app.state.settings.db_path)
-            try:
-                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-            finally:
-                conn.close()
-            return {r["name"] for r in rows}
-
-    cols = asyncio.run(run())
-    assert cols, f"{table} 在临时库里没有列——迁移没跑？量具失效，本用例结论不可信"
-    return cols
+    """每请求一个客户端、**进 lifespan**（迁移在 app 启动时跑 ⇒ 见 runner 说明）。"""
+    return asyncio.run(one_shot(app, method, path, enter_lifespan=True, **kwargs))
 
 
 def _seed_profile(app, **overrides) -> dict:
@@ -250,10 +221,7 @@ def test_profile_write_and_read_paths_return_the_measured_ten_keys(tmp_path: Pat
     """
     app = _create_app(tmp_path)
     created = _seed_profile(app)
-    assert set(created) == set(EXPECTED_PROFILE_KEYS), (
-        f"POST 多={sorted(set(created) - EXPECTED_PROFILE_KEYS)} "
-        f"少={sorted(EXPECTED_PROFILE_KEYS - set(created))}"
-    )
+    assert_keys_match(created, EXPECTED_PROFILE_KEYS, "POST /api/model-profiles")
 
     # 空 params 的档案：params_json 是 {}（不是 null、也不是省略）
     bare = _seed_profile(app, name="无参", params_json=None)
@@ -282,10 +250,7 @@ def test_config_write_and_read_paths_return_the_measured_seven_keys(tmp_path: Pa
     """model_configs 恰好 7 键——比档案少 created_at/updated_at（表里就没这两列）。"""
     app = _create_app(tmp_path)
     created = _seed_config(app)
-    assert set(created) == set(EXPECTED_CONFIG_KEYS), (
-        f"POST 多={sorted(set(created) - EXPECTED_CONFIG_KEYS)} "
-        f"少={sorted(EXPECTED_CONFIG_KEYS - set(created))}"
-    )
+    assert_keys_match(created, EXPECTED_CONFIG_KEYS, "POST /api/model-configs")
 
     got = _req(app, "GET", f"/api/model-configs/{created['config_id']}")
     assert got.status_code == 200, got.text
@@ -336,11 +301,7 @@ def test_model_field_set_matches_the_hardcoded_baseline(model, expected):
     与 test_*_return_*the_measured_*keys 互补——那几条抓「端点少出/多出键」，
     这条抓「模型少声明/多声明键」。任一侧单独改都会红。
     """
-    declared = set(model.model_fields)
-    assert declared == set(expected), (
-        f"{model.__name__} 多={sorted(declared - set(expected))} "
-        f"少={sorted(set(expected) - declared)}"
-    )
+    assert_model_fields_match(model, expected)
 
 
 def test_row_models_declare_exactly_the_real_database_columns(tmp_path: Path):
@@ -352,16 +313,16 @@ def test_row_models_declare_exactly_the_real_database_columns(tmp_path: Path):
     **既不抄端点输出也不抄模型**，故不可能与缺陷同源。
     """
     app = _create_app(tmp_path)
-    assert set(ModelProfileOut.model_fields) == _db_columns(app, "model_profiles") | {
+    assert set(ModelProfileOut.model_fields) == app_table_columns(app, "model_profiles") | {
         "has_api_key"
     }
-    assert set(ModelConfigOut.model_fields) == _db_columns(app, "model_configs") | {
+    assert set(ModelConfigOut.model_fields) == app_table_columns(app, "model_configs") | {
         "has_api_key"
     }
     # 反向护栏：这两张表**没有**时间戳列——若将来加了，模型必须跟着加，
     # 否则新列会被静默丢弃（上面的断言届时会红，这里只是把原因写明）。
-    assert "created_at" not in _db_columns(app, "model_configs")
-    assert "updated_at" not in _db_columns(app, "model_configs")
+    assert "created_at" not in app_table_columns(app, "model_configs")
+    assert "updated_at" not in app_table_columns(app, "model_configs")
 
 
 # ============================================================ ③ response_model 确已声明

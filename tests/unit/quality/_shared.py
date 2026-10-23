@@ -11,11 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations
+from tests._db_fixtures import migrated_db
 
 
 def _make_db(tmp_path: Path) -> str:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return str(settings.db_path)
+    return str(migrated_db(tmp_path))

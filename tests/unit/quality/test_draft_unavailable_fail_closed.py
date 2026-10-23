@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.quality.aggregate import compute_overall
 from packages.core.quality.engine import QualityEngine
@@ -43,6 +43,7 @@ from packages.core.quality.scoring import DRAFT_UNAVAILABLE
 from packages.core.quality.service import build_quality_context
 from packages.domain.chapter.draft_resolver import DraftResolutionError, resolve_draft
 from packages.workflows.chapter_commit.gate import _quality_gate_node
+from tests._db_fixtures import migrated_db
 from tests.unit.quality.test_engine import _full_delta
 
 # 「不可检」标记在 issues 里的 rule_id：与 aggregate.compute_overall 的
@@ -65,9 +66,7 @@ _DRAFT_TEXT = "他把窗子推开，风灌进来，桌上的纸角翻了两下�
 
 
 def _db(tmp_path: Path) -> str:
-    db_path = tmp_path / "test.db"
-    apply_migrations(db_path)
-    return str(db_path)
+    return str(migrated_db(tmp_path, db_name="test.db"))
 
 
 def _project(db_path: str) -> str:

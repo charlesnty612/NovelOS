@@ -5,6 +5,58 @@
 
 ## [Unreleased]
 
+### Refactor（2026-10-24 凌晨 · 批次三十三之二 · 测试瘦身续：contract 族再收敛 8 个 + **测试建库样板收敛**）
+
+> **来源**：批次三十三之一的续做（用户「板上没做的做一下」）。**零真实 LLM 调用、零内容仓接触、活库未动**；两名执行成员写域互斥（dev-a `tests/api/**`、dev-b `tests/unit|integration/**`），Lead 串行跑全部闸门。
+
+#### 1. contract 模板族：8 完整转换 + 1 部分 + 2 未动（16 文件 9,635 → **9,429**）
+
+| 文件 | before | after |
+|---|---|---|
+| `test_ledger_plot_list_response_contract.py` | 800 | 742（-58） |
+| `test_config_list_response_contract.py` | 743 | 693（-50） |
+| `test_model_config_response_contract.py` | 782 | 743（-39） |
+| `test_snapshot_response_contract.py` | 245 | 225（-20） |
+| `test_genre_quality_reference_response_contract.py` | 954 | 939（-15） |
+| `test_arc_response_contract.py` | 258 | 245（-13） |
+| `test_simulation_response_contract.py` | 274 | 268（-6） |
+| `test_health_response_contract.py` | 69 | 69（0） |
+| `test_workflow_run_response_contract.py` | 945 | 940（**仅 helper 层**，四段断言未改） |
+| `test_misc_router_response_contract.py` / `test_quality_reference_list_response_contract.py` | 801 / 774 | **原样未动** |
+
+- **目标口径第三次订正（留痕）**：≤9,100 → **≤9,400**（实测：剩余可动的只有 workflow_run 的 11 处多行样板 -22 + misc_router -18 + quality_reference_list -35 ⇒ 预计 9,300~9,360；缺口来自「域专属夹具 + 专属用例体 + 证据 docstring」三类，按红线不许删）。
+- 「抽不出来清单」6 条（本批新增）已随任务登记：`simulation._minimal_delta` 与共享构造器**不同形**（共享会改请求体）、`genre_quality` 本地 `status_code in (200,201)` 与共享 `==201` 失败语义不同、`workflow_run._make_client` 带事故留痕、`config_list` 的 5 个播种助手请求体不同、各域专属大夹具只用 1 文件、**约 60 处单行 `set(body)==set(EXPECTED_X)` 改调 runner 是 1:1（零行数收益）⇒ 只改了多行形态**。
+
+#### 2. runner 新增 3 个能力，每个都配了看守（16 例 → **20 例**）
+
+- `create_test_app(tmp_path, *, log_level="WARNING")`（保留调用方原日志级别 ⇒ 行为等价）、`client_ctx(base_url=)`、`assert_keys_match(..., hint="")`（失败消息里带各域留痕短标记）、`app_table_columns()`（读真表列）。
+- 新增 4 条看守：hint **真的出现在失败消息里**、无 hint 时仍报多/少键明细、`create_test_app` 保留 `log_level`、`app_table_columns` **与 `PRAGMA table_info` 逐位一致**。
+- ⇒ 纪律：**runner 每新增一个能力，必须先在 `test_contract_runner.py` 补看守**（它承载 42+ 条规格的判别力，不能自己裸奔）。
+
+#### 3. task-10 第一刀 + 第二刀：`tests/_db_fixtures.py::migrated_db` 收敛「建库 + 跑迁移」样板
+
+- 新建 `tests/_db_fixtures.py`（72 行）：`migrated_db(tmp_path, *, db_name="novelos.db", migrations_dir=None)` —— **仍是每例新库**（只接收 pytest 用例级 `tmp_path`，不共享、不做 session 级复用），只建库+迁移，**不写业务数据**。
+- 两刀共 **14 个文件 / 18 处替换**（第一刀 4 处 `tests/unit/quality`；第二刀 10 文件 14 处 `tests/unit` 顶层 + 2 个 `tests/integration`）。
+- **等价性由批量探针证明**：每个替换点比「db 路径字符串 / 返回值类型 / 迁移后表集合」三项 ⇒ **18/18 PASS**；库名逐位保持（`novelos.db` / `test.db` / `prompt_registry.db`）、返回类型逐位保持（str/Path）。
+- **行数账（如实）**：第一刀 `tests/**` **+66**（新 helper 72 行抵掉省下的 6 行）⇒ 第二刀 **-23** ⇒ 累计 **+43**；helper 成本已付完，此后每个调用点净赚 1~2 行。
+- **跳过 141 处**（如实登记）：135 处 `apply_migrations(db_path, <显式迁移目录>)`（其中 52 处在专门测 `apply_migrations` 本身的 `test_migrations.py`）、6 处形态不同（含一处**自定义 fixture 就叫 `migrated_db`** 的同名冲突）。
+
+#### 4. 收尾闸门（Lead 串行实测）
+
+| 闸门 | 结果 |
+|---|---|
+| 全量 `pytest -n 20 -q` | **4379 passed / 1 skipped / 1 xfailed / 188.70s**（= 4375 + 4 条新看守） |
+| `pytest tests/api` | **727 passed**（723 原有逐位不变 + 4 新看守） |
+| `pytest tests/unit -n 20` | 3219 passed / 1 skipped / 1 xfailed |
+| `pytest tests/integration` | 133 passed |
+| `pytest tests --collect-only` | **4381**（= 4379 + 1 skipped + 1 xfailed，逐位对齐） |
+| `ruff check packages scripts tests` | All checks passed |
+| `run_spec --all --precheck` | **477 条 / 0 问题** |
+| 判别力抽检 3 条（dev-a） | 删 1 个期望键 ⇒ 6 failed（arc 1 / model_config 2 / config_list 3）⇒ 还原后 727 绿 |
+
+#### 5. 未完成（下一轮）
+contract：`workflow_run` 11 处多行样板、`misc_router`、`quality_reference_list`（做完即到 ≤9,400）；task-10 的档②（`_app`/`_client` 收敛）与档③（`_seed_*` 同域合并）**未开** —— 那两档才是「helper 行数 50,220 → ≤35,000」的大头。
+
 ### Refactor（2026-10-23 深夜 · 批次三十三之一 · **测试瘦身落地**：contract 模板族收敛 5/16 + runner 看守 + 前端 ProjectInitPanel 拆 3 份）
 
 > **来源**：用户「测试太重了」审查（`docs/impl/reviews/test-slimming-review-2026-10-23.md`）后的执行批。**零真实 LLM 调用、零内容仓接触、活库未动**；两名执行成员写域互斥（dev-a `tests/api/**`、dev-b `apps/web/src/**`），Lead 串行跑全部闸门。

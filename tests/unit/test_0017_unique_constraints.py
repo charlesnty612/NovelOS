@@ -33,6 +33,7 @@ from packages.core.workflow_runtime.engine import (
     WorkflowNode,
     WorkflowRunConflict,
 )
+from tests._db_fixtures import migrated_db
 
 # ---------------------------------------------------------------------------
 # 共享 DDL fixture（白盒验证 write_through / engine 配套，不走 migrations）
@@ -366,9 +367,7 @@ def test_migration_0017_relationships_unique_index_enforced(tmp_path: Path) -> N
     修复前断言（红）：重复 INSERT 成功（无唯一索引）。
     修复后断言（绿）：第二次 INSERT 同 (project,from,to,type) 报 IntegrityError。
     """
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    db_path = settings.db_path
-    apply_migrations(db_path)
+    db_path = migrated_db(tmp_path)
 
     conn = get_connection(db_path)
     now = now_iso()
@@ -406,9 +405,7 @@ def test_migration_0017_workflow_runs_active_unique_index(tmp_path: Path) -> Non
     修复后断言（绿）：第二条 RUNNING 行报 IntegrityError；
     但 COMPLETED 终态可共存（部分索引不覆盖终态）。
     """
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    db_path = settings.db_path
-    apply_migrations(db_path)
+    db_path = migrated_db(tmp_path)
 
     conn = get_connection(db_path)
     now = now_iso()
@@ -457,9 +454,7 @@ def test_migration_0017_workflow_runs_active_unique_index(tmp_path: Path) -> Non
 
 def test_migration_0017_registered_in_migrations_table(tmp_path: Path) -> None:
     """apply_migrations 后 0017 在 _migrations 表已登记（注册机制正确）。"""
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    db_path = settings.db_path
-    apply_migrations(db_path)
+    db_path = migrated_db(tmp_path)
 
     conn = get_connection(db_path)
     try:

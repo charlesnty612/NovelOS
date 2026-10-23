@@ -19,17 +19,15 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.config import Settings
-from packages.core.db import apply_migrations, get_connection
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.signing_check.service import format_summary, run_signing_check
+from tests._db_fixtures import migrated_db
 
 
 @pytest.fixture()
 def db_path(tmp_path: Path) -> Path:
-    settings = Settings(data_dir=tmp_path, log_level="WARNING")
-    apply_migrations(settings.db_path)
-    return settings.db_path
+    return migrated_db(tmp_path)
 
 
 def _seed_project(db_path: Path, *, name: str = "体检书", genre_pack_id: str | None = None) -> str:

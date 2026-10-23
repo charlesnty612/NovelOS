@@ -23,14 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 
-from packages.core.api.main import create_app
-from packages.core.config import Settings
 from packages.core.db import get_connection
 from packages.core.ids import now_iso
 from packages.core.quality.issues import is_blocking_issue, issue_gate
@@ -38,6 +35,8 @@ from packages.core.quality.models import (
     QualityReportIssue,
     QualityReportResponse,
 )
+
+from ._contract_runner import client_ctx, create_test_app, one_shot
 
 # ---------------------------------------------------------------------------
 # 第三方基准（硬编码）：每个键的出处写在注释里。
@@ -130,32 +129,18 @@ EXPECTED_DECONSTRUCT_CONDITIONAL_KEYS = frozenset(
 
 
 def _create_app(tmp_path: Path):
-    return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
-
-
-@asynccontextmanager
-async def _client(app):
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as c:
-            yield c
+    """共享 runner 的 ``create_test_app``（**不**显式跑迁移；迁移在 lifespan 里跑）。"""
+    return create_test_app(tmp_path)
 
 
 def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
     """同步用例里发一次请求（端点是 async 的，用例是同步的）。"""
-
-    async def run():
-        async with _client(app) as c:
-            return await c.request(method, path, **kwargs)
-
-    return asyncio.run(run())
+    return asyncio.run(one_shot(app, method, path, enter_lifespan=True, **kwargs))
 
 
 def _project(app, name: str = "G7") -> str:
     async def run():
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             r = await c.post("/api/projects", json={"name": name})
             assert r.status_code in (200, 201), r.text
             return r.json()["project_id"]
@@ -165,7 +150,7 @@ def _project(app, name: str = "G7") -> str:
 
 def _chapter(app, pid: str, number: int = 1) -> str:
     async def run():
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             r = await c.post(
                 f"/api/projects/{pid}/chapters", json={"number": number, "title": "一"}
             )
@@ -254,7 +239,7 @@ def test_quality_evaluate_returns_every_table_column_plus_judge(tmp_path: Path):
     判别点：断言对象是 ``EXPECTED_QUALITY_REPORT_KEYS``（DDL 推出来的），
     **不是** ``QualityReportResponse.model_fields``——后者是自指断言（坑区已登记）。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     cid = _chapter(app, pid)
 
@@ -297,7 +282,7 @@ def test_quality_openapi_declares_issue_fields_despite_extra_allow(tmp_path: Pat
     响应**照样**有 ``gate``（它以 extra 身份透出），只有 schema 会变。
     （批次（五）突变 M20 实测存活的就是这一条。）
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     schema = app.openapi()
     issue_props = schema["components"]["schemas"]["QualityReportIssue"]["properties"]
     assert set(issue_props) == {
@@ -360,7 +345,7 @@ def test_quality_issue_gate_is_not_a_function_of_severity(tmp_path: Path):
     assert issue_gate(QualityReportIssue(**confirmed_info)) == "confirm"
 
     # 端到端：两份 issue 落库后原样读回，gate 不被 severity 吞掉
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     cid = _chapter(app, pid)
     _insert_report(app, pid, cid, issues=[informational_error, confirmed_info])
@@ -380,7 +365,7 @@ def test_quality_report_response_passes_through_unknown_issue_keys(tmp_path: Pat
     声明成严格模型 ⇒ ``response_model`` 把它裁掉 ⇒ **数据在库里、API 读不到、零报错**
     （与 ``QualityJudgeRecord`` 守的是同一族形状）。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     cid = _chapter(app, pid)
     _insert_report(
@@ -414,7 +399,7 @@ def test_quality_report_response_passes_through_future_db_columns(tmp_path: Path
     ALTER 出一列，验证它能透出——这是 ``extra="allow"`` 唯一的可见症状，
     也是撤掉 ``extra="allow"`` 必红的那条。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     cid = _chapter(app, pid)
     _insert_report(app, pid, cid)
@@ -434,7 +419,7 @@ def test_quality_report_response_passes_through_future_db_columns(tmp_path: Path
 
 def test_quality_judge_is_nullable_but_declared(tmp_path: Path):
     """有 judge 时原样透出（含 service 存下的扩展键），无 judge 时键仍在、值为 null。"""
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     cid = _chapter(app, pid)
     _insert_report(
@@ -459,7 +444,7 @@ def test_q8_export_is_a_csv_file_and_declares_no_json_model(tmp_path: Path):
     硬套 JSON 模型只会给 OpenAPI 写进一条与实际 ``Content-Type`` 相矛盾的契约。
     本用例把这个决定**钉住**：一旦有人给它加了 ``response_model``，本条必红。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     _chapter(app, pid)
 
@@ -512,7 +497,7 @@ def test_genre_binding_endpoints_all_return_the_same_four_keys(tmp_path: Path):
 
     未绑定时 ``pack_id`` 与 ``pack`` 为 ``null``，``bound=false``——**键不缺席**。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     _create_pack(app, pid)
 
@@ -560,7 +545,7 @@ def test_genre_binding_model_declares_baseline_keys_and_openapi(tmp_path: Path):
         f"少={EXPECTED_GENRE_BINDING_KEYS - set(GenrePackBinding.model_fields)}"
     )
 
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     schema = app.openapi()
     props = schema["components"]["schemas"]["GenrePackBinding"]["properties"]
     assert set(props) == set(EXPECTED_GENRE_BINDING_KEYS), sorted(props)
@@ -621,7 +606,7 @@ def test_genre_binding_passes_through_unknown_keys(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(genre_router, "GenrePackService", _Svc)
 
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     r = _request(app, "GET", f"/api/projects/{pid}/genre-pack")
     assert r.status_code == 200, r.text
@@ -638,7 +623,7 @@ def test_canon_detail_returns_nine_keys_with_extracts(tmp_path: Path):
 
     ``canon_json`` 是**存什么吐什么**的存储载荷（不校验），故出参允许 null。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     _seed_canon(app, pid)
 
@@ -666,7 +651,7 @@ def test_canon_detail_models_match_baseline_and_openapi(tmp_path: Path):
     assert set(CanonDetailOut.model_fields) == set(EXPECTED_CANON_KEYS)
     assert set(CanonExtractOut.model_fields) == set(EXPECTED_EXTRACT_KEYS)
 
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     schema = app.openapi()
     assert set(
         schema["components"]["schemas"]["CanonDetailOut"]["properties"]
@@ -705,7 +690,7 @@ def test_canon_detail_passes_through_unknown_keys(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(ref_router, "ReferenceService", _Svc)
 
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     _seed_canon(app, pid)
     r = _request(app, "GET", "/api/canons/can_g7")
@@ -721,7 +706,7 @@ def test_canon_detail_tolerates_null_canon_json(tmp_path: Path):
 
     出参声明成 ``dict`` 会把这种情况打成 500 ⇒ 必须允许 null。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     conn = get_connection(app.state.settings.db_path)
     try:
@@ -747,7 +732,7 @@ def test_to_style_sample_returns_the_six_sample_columns(tmp_path: Path):
     该端点复用 ``author_style_samples`` 的 ``create_style_sample``（直接函数调用），
     所以响应形状 = 那张表的全部列。第二次调用按标题判重 → 409（行为一并钉住）。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     _seed_canon(app, pid)
 
@@ -827,7 +812,7 @@ def test_deconstruct_response_keys_per_status(fake_deconstruct_engine, tmp_path:
 
     判别点：断言对象是 ``EXPECTED_DECONSTRUCT_*`` 常量，不是模型字段集。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
 
     # COMPLETED：canon_id / extracts_count 有值，error 为 null
@@ -874,7 +859,7 @@ def test_deconstruct_response_keys_per_status(fake_deconstruct_engine, tmp_path:
 
 def test_deconstruct_validation_errors_still_422(tmp_path: Path):
     """入参校验分支：不经工作流，直接 422（book_title / text 空、超长）。"""
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     for payload in (
         {"book_title": "", "text": "x"},
@@ -893,7 +878,7 @@ def test_deconstruct_upload_rejects_unsupported_extension(tmp_path: Path):
     启用模型 ⇒ 它必然在 ModelRouter 前置检查处 422。成功路径与纯文本端点共用
     ``_start_deconstruct_internal``，由上一条用例覆盖。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     pid = _project(app)
     r = _request(
         app,
@@ -922,7 +907,7 @@ def test_deconstruct_both_endpoints_share_one_declared_schema(tmp_path: Path):
         f"少={expected - set(DeconstructStartResponse.model_fields)}"
     )
 
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     schema = app.openapi()
     assert set(
         schema["components"]["schemas"]["DeconstructStartResponse"]["properties"]
@@ -943,7 +928,7 @@ def test_deconstruct_both_endpoints_share_one_declared_schema(tmp_path: Path):
 
 def test_genre_and_quality_endpoints_keep_their_404_semantics(tmp_path: Path):
     """加 ``response_model`` 不得改动错误路径（404 仍是 404，且 detail 不变）。"""
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     for method, path in (
         ("GET", "/api/projects/prj_nope/genre-pack"),
         ("POST", "/api/projects/prj_nope/genre-pack/unbind"),

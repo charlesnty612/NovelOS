@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -370,15 +369,11 @@ def _make_client(app) -> httpx.AsyncClient:
     且日志里紧跟一条 ``startup recovered interrupted runs``）。
 
     所以 lifespan 只在 :func:`_harvest` 里进入**一次**，其余请求走裸 ASGITransport。
+    ⇒ 实现收进共享 runner 的 ``client_ctx(enter_lifespan=False)``（同形）。
     """
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
-
-
-@asynccontextmanager
-async def _client(app):
-    async with _make_client(app) as c:
-        yield c
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    )
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:

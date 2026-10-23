@@ -71,16 +71,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
-import httpx
-
-from packages.core.api.main import create_app
-from packages.core.config import Settings
 from packages.domain.ledger import Debt, Hook
 from packages.domain.plot.models import PlotEventOut, RelationshipOut, TimelineEventOut
+
+from ._contract_runner import (
+    app_table_columns,
+    assert_keys_match,
+    assert_list_items_named_ref,
+    client_ctx,
+    create_test_app,
+)
 
 # ===========================================================================
 # 期望键集 —— 硬编码的第三方基准（**不是** model_fields，见模块 docstring）
@@ -162,48 +164,10 @@ _LIST_ENDPOINTS = [
 ]
 
 
-def _create_app(tmp_path: Path):
-    return create_app(Settings(data_dir=tmp_path, log_level="WARNING"))
-
-
-@asynccontextmanager
-async def _client(app):
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
-            yield c
-
-
-def _item_ref(node: dict[str, Any]) -> str | None:
-    """从 200 响应的 schema 节点取出 ``items.$ref``。
-
-    已建模的口径：``array`` 且 ``items`` 是 ``$ref``。裸 ``list[dict]`` 会走成
-    ``{"items": {"type": "object"}, "type": "array"}`` ⇒ 这里返回 ``None``。
-    ``allOf`` 包装（FastAPI 某些版本对 response_model 的处理）一并穿透。
-    """
-    if "$ref" in node:
-        return node["$ref"]
-    items = node.get("items")
-    if isinstance(items, dict):
-        return items.get("$ref")
-    for sub in node.get("allOf", []):
-        got = _item_ref(sub)
-        if got is not None:
-            return got
-    return None
-
-
-def _assert_keys(body: dict, expected: set[str], label: str) -> None:
-    assert isinstance(body, dict), f"{label} 应是对象，实际 {type(body)}"
-    assert set(body) == expected, (
-        f"{label} 键集不符：多={sorted(set(body) - expected)} 少={sorted(expected - set(body))}"
-    )
-
-
 async def _seed(app) -> dict[str, str]:
     """造一个带章节 / 角色 / 地点的项目，返回 id 包（无任何 LLM 调用）。"""
 
-    async with _client(app) as c:
+    async with client_ctx(app) as c:
         pid = (await c.post("/api/projects", json={"name": "L1 列表契约"})).json()["project_id"]
         cid = (
             await c.post(f"/api/projects/{pid}/chapters", json={"number": 1, "title": "第一章"})
@@ -226,7 +190,7 @@ def _seed_ledger(app, ids: dict[str, str]) -> None:
     """每个列表端点造 **2 行**：一行全空、一行全字段带值（证明「键恒在」而非「有时在」）。"""
 
     async def run() -> None:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             pid, cid = ids["pid"], ids["cid"]
             r = await c.post(f"/api/projects/{pid}/hooks", json={"name": "三年之约"})
             assert r.status_code == 201, r.text
@@ -266,7 +230,7 @@ def _seed_plot(app, ids: dict[str, str]) -> None:
     """造 1 个空事件 + 1 个全字段事件（cause 须指向已存在事件）。建事件会自动同步 timeline 行。"""
 
     async def run() -> None:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             pid, cid = ids["pid"], ids["cid"]
             first = await c.post(f"/api/projects/{pid}/events", json={"type": "revelation"})
             assert first.status_code == 201, first.text
@@ -336,22 +300,6 @@ def _seed_relationships(app, ids: dict[str, str]) -> None:
     asyncio.run(run())
 
 
-def _table_columns(app, table: str) -> set[str]:
-    """读临时库的 ``PRAGMA table_info``（模型之外的独立事实源）。"""
-
-    async def run() -> set[str]:
-        from packages.core.db import get_connection
-
-        async with app.router.lifespan_context(app):
-            conn = get_connection(app.state.settings.db_path)
-            try:
-                return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-            finally:
-                conn.close()
-
-    return asyncio.run(run())
-
-
 # ===========================================================================
 # 1) OpenAPI：列表响应必须是 array + items.$ref（撤掉 response_model 即红）
 # ===========================================================================
@@ -362,19 +310,13 @@ def test_list_endpoints_declare_typed_items(tmp_path: Path):
 
     撤掉任一端点的 ``response_model`` ⇒ 这里 ``$ref`` 变 ``None`` ⇒ 必红。
     """
-    schema = _create_app(tmp_path).openapi()
+    schema = create_test_app(tmp_path).openapi()
     for name in ("Hook", "Debt", "PlotEventOut", "TimelineEventOut", "RelationshipOut"):
         assert name in schema["components"]["schemas"], f"{name} 未进 OpenAPI"
     for path, name in _LIST_ENDPOINTS:
-        node = schema["paths"][path]["get"]["responses"]["200"]["content"]["application/json"][
-            "schema"
-        ]
-        ref = _item_ref(node)
-        assert ref is not None, (
-            f"GET {path} 的响应不是「array + items.$ref」（实际 {node!r}）—— "
-            f"前端拿到的仍是 Record<string, unknown>"
-        )
-        assert ref.endswith(f"/{name}"), f"GET {path} 的 items 应引用 {name}，实际 {ref!r}"
+        # 口径单点：``array`` + ``items.$ref`` 才是「已建模」（裸 list[dict] ⇒ 前端
+        # 拿到的仍是 Record<string, unknown>）⇒ 撤掉 response_model 必红。
+        assert_list_items_named_ref(schema, path, "get", name)
 
 
 def test_openapi_item_schema_properties_and_required_match_expectation(tmp_path: Path):
@@ -385,7 +327,7 @@ def test_openapi_item_schema_properties_and_required_match_expectation(tmp_path:
 
     基准是硬编码常量，**不是** ``model_fields``——否则两侧同减又恒真。
     """
-    schema = _create_app(tmp_path).openapi()
+    schema = create_test_app(tmp_path).openapi()
     for name, expected in (
         ("Hook", EXPECTED_HOOK_KEYS),
         ("Debt", EXPECTED_DEBT_KEYS),
@@ -413,16 +355,16 @@ def test_openapi_item_schema_properties_and_required_match_expectation(tmp_path:
 
 
 def test_hooks_list_row_keys_match_hardcoded_expectation(tmp_path: Path):
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     ids = _seeded(app)
     _seed_ledger(app, ids)
 
     async def run() -> None:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             rows = (await c.get(f"/api/projects/{ids['pid']}/hooks")).json()
             assert len(rows) == 2, f"夹具没造出 2 行（实际 {len(rows)}）——空数组的断言是恒真的"
             for i, row in enumerate(rows):
-                _assert_keys(row, EXPECTED_HOOK_KEYS, f"GET hooks row[{i}]")
+                assert_keys_match(row, EXPECTED_HOOK_KEYS, f"GET hooks row[{i}]")
             by_name = {r["name"]: r for r in rows}
             # 空值行：键在、值为 null（不是省略）
             empty = by_name["三年之约"]
@@ -444,7 +386,7 @@ def test_hooks_list_row_keys_match_hardcoded_expectation(tmp_path: Path):
                 await c.get(f"/api/projects/{ids['pid']}/hooks", params={"status": "ACTIVE"})
             ).json()
             assert len(filtered) == 1, filtered
-            _assert_keys(filtered[0], EXPECTED_HOOK_KEYS, "GET hooks ?status=ACTIVE")
+            assert_keys_match(filtered[0], EXPECTED_HOOK_KEYS, "GET hooks ?status=ACTIVE")
             assert (
                 await c.get(f"/api/projects/{ids['pid']}/hooks", params={"status": "RESOLVED"})
             ).json() == [], "过滤到空集时应返回 [] 而不是报错"
@@ -453,16 +395,16 @@ def test_hooks_list_row_keys_match_hardcoded_expectation(tmp_path: Path):
 
 
 def test_debts_list_row_keys_match_hardcoded_expectation(tmp_path: Path):
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     ids = _seeded(app)
     _seed_ledger(app, ids)
 
     async def run() -> None:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             rows = (await c.get(f"/api/projects/{ids['pid']}/debts")).json()
             assert len(rows) == 2, f"夹具没造出 2 行（实际 {len(rows)}）"
             for i, row in enumerate(rows):
-                _assert_keys(row, EXPECTED_DEBT_KEYS, f"GET debts row[{i}]")
+                assert_keys_match(row, EXPECTED_DEBT_KEYS, f"GET debts row[{i}]")
             by_desc = {r["description"]: r for r in rows}
             empty = by_desc["欠下的交代"]
             assert empty["status"] == "open" and empty["severity"] == 0.5
@@ -486,16 +428,16 @@ def test_debts_list_row_keys_match_hardcoded_expectation(tmp_path: Path):
 
 def test_events_list_row_keys_match_hardcoded_expectation(tmp_path: Path):
     """事件：响应键名 ≠ 表列名（``id``/``cause``/``time``），本用例正是那道闸门。"""
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     ids = _seeded(app)
     _seed_plot(app, ids)
 
     async def run() -> None:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             rows = (await c.get(f"/api/projects/{ids['pid']}/events")).json()
             assert len(rows) == 2, f"夹具没造出 2 行（实际 {len(rows)}）"
             for i, row in enumerate(rows):
-                _assert_keys(row, EXPECTED_PLOT_EVENT_KEYS, f"GET events row[{i}]")
+                assert_keys_match(row, EXPECTED_PLOT_EVENT_KEYS, f"GET events row[{i}]")
                 assert "event_id" not in row, "响应主键键名是 id，不是 event_id"
                 assert not any(k.endswith("_json") for k in row), (
                     "cause/effects/participants/time 已是解码后的键，_json 后缀不该出现"
@@ -524,23 +466,23 @@ def test_events_list_row_keys_match_hardcoded_expectation(tmp_path: Path):
                     await c.get(f"/api/projects/{ids['pid']}/events", params=params)
                 ).json()
                 assert len(filtered) == 1, f"?{label}= 过滤后应有 1 行，实际 {len(filtered)}"
-                _assert_keys(filtered[0], EXPECTED_PLOT_EVENT_KEYS, f"GET events ?{label}")
+                assert_keys_match(filtered[0], EXPECTED_PLOT_EVENT_KEYS, f"GET events ?{label}")
 
     asyncio.run(run())
 
 
 def test_timeline_list_row_keys_match_hardcoded_expectation(tmp_path: Path):
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     ids = _seeded(app)
     _seed_plot(app, ids)
 
     async def run() -> None:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             rows = (await c.get(f"/api/projects/{ids['pid']}/timeline")).json()
             # 2 个事件各自动同步 1 条（day 1 / day 5）+ 1 条手工行（day 9）
             assert len(rows) == 3, f"应有 3 行（实际 {len(rows)}）"
             for i, row in enumerate(rows):
-                _assert_keys(row, EXPECTED_TIMELINE_KEYS, f"GET timeline row[{i}]")
+                assert_keys_match(row, EXPECTED_TIMELINE_KEYS, f"GET timeline row[{i}]")
                 assert "timeline_event_id" not in row, "响应主键键名是 id"
             assert [r["day_index"] for r in rows] == [1, 5, 9], [r["day_index"] for r in rows]
 
@@ -563,16 +505,16 @@ def test_timeline_list_row_keys_match_hardcoded_expectation(tmp_path: Path):
 
 
 def test_relationships_list_row_keys_match_hardcoded_expectation(tmp_path: Path):
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     ids = _seeded(app)
     _seed_relationships(app, ids)
 
     async def run() -> None:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             rows = (await c.get(f"/api/projects/{ids['pid']}/relationships")).json()
             assert len(rows) == 2, f"夹具没造出 2 行（实际 {len(rows)}）"
             for i, row in enumerate(rows):
-                _assert_keys(row, EXPECTED_RELATIONSHIP_KEYS, f"GET relationships row[{i}]")
+                assert_keys_match(row, EXPECTED_RELATIONSHIP_KEYS, f"GET relationships row[{i}]")
                 assert "relationship_id" not in row, "响应主键键名是 id"
             by_type = {r["relation_type"]: r for r in rows}
             ally = by_type["ally"]
@@ -617,11 +559,11 @@ def test_relationships_list_covers_every_column(tmp_path: Path):
     ``state_json`` → ``state``（已解码）两处改名/解码**没有**消失，故映射关系是
     「列 − 改名 = 直呼键」。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     ids = _seeded(app)
     _seed_relationships(app, ids)
 
-    cols = _table_columns(app, "relationships")
+    cols = app_table_columns(app, "relationships")
     # 两列是**改名/解码**（relationship_id→id、state_json→state），其余应当直呼透出
     renamed = {"relationship_id": "id", "state_json": "state"}
     assert cols - set(renamed) - EXPECTED_RELATIONSHIP_KEYS == set(), (
@@ -634,7 +576,7 @@ def test_relationships_list_covers_every_column(tmp_path: Path):
     )
 
     async def run() -> set[str]:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             rows = (await c.get(f"/api/projects/{ids['pid']}/relationships")).json()
             assert len(rows) == 2, rows
             return {k for r in rows for k in r}
@@ -657,13 +599,13 @@ def test_list_nullable_columns_are_present_as_null_not_omitted(tmp_path: Path):
     这五类实体的可空列实测是**键恒在、值为 null**；加了那个开关，FastAPI 会把每个
     ``None`` 抹掉，列表响应凭空少 1~6 个键。
     """
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     ids = _seeded(app)
     _seed_ledger(app, ids)
     _seed_plot(app, ids)
 
     async def run() -> None:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             pid = ids["pid"]
             # ⚠️ **按业务键取行，不按下标**：`list_events` 是 ``ORDER BY event_id``，
             # 而 event_id 带随机十六进制 ⇒ 「哪一行排在第 0 位」每次运行都不同。
@@ -707,11 +649,11 @@ def test_list_nullable_columns_are_present_as_null_not_omitted(tmp_path: Path):
 
 def test_empty_project_returns_empty_list_not_error(tmp_path: Path):
     """空项目必须仍是 200 + ``[]``（挂 ``response_model`` 不许把空集变成 422/500）。"""
-    app = _create_app(tmp_path)
+    app = create_test_app(tmp_path)
     ids = _seeded(app)  # 只建项目 + 章节，不造任何 hook/debt/event/relationship
 
     async def run() -> None:
-        async with _client(app) as c:
+        async with client_ctx(app) as c:
             for path in ("hooks", "debts", "events", "timeline", "relationships"):
                 r = await c.get(f"/api/projects/{ids['pid']}/{path}")
                 assert r.status_code == 200, f"{path}: {r.status_code} {r.text}"
@@ -731,9 +673,9 @@ def test_ledger_list_keys_match_table_columns(tmp_path: Path):
     这条同时是**漂移告警**：将来某个迁移给 ``hooks`` 加一列，本用例会红，提示契约要更新。
     **该红的时候就红**——这正是它存在的意义。
     """
-    app = _create_app(tmp_path)
-    assert _table_columns(app, "hooks") == EXPECTED_HOOK_KEYS, "hooks 列集与契约漂移"
-    assert _table_columns(app, "narrative_debts") == EXPECTED_DEBT_KEYS, (
+    app = create_test_app(tmp_path)
+    assert app_table_columns(app, "hooks") == EXPECTED_HOOK_KEYS, "hooks 列集与契约漂移"
+    assert app_table_columns(app, "narrative_debts") == EXPECTED_DEBT_KEYS, (
         "narrative_debts 列集与契约漂移"
     )
 
@@ -745,8 +687,8 @@ def test_plot_list_keys_are_not_table_columns(tmp_path: Path):
     ``participants_json`` / ``time_json``）外加错的主键名，并让真正的键静默缺席。
     本用例把这条「不是列集」钉成可执行事实——它是本组三个模型复用判断的依据。
     """
-    app = _create_app(tmp_path)
-    event_cols = _table_columns(app, "plot_events")
+    app = create_test_app(tmp_path)
+    event_cols = app_table_columns(app, "plot_events")
     assert event_cols - EXPECTED_PLOT_EVENT_KEYS == {
         "cause_json",
         "effects_json",
@@ -756,7 +698,7 @@ def test_plot_list_keys_are_not_table_columns(tmp_path: Path):
     }, f"plot_events 列集漂移：{sorted(event_cols)}"
     assert EXPECTED_PLOT_EVENT_KEYS - event_cols == {"id", "cause", "effects", "participants", "time"}
 
-    tl_cols = _table_columns(app, "timeline_events")
+    tl_cols = app_table_columns(app, "timeline_events")
     assert tl_cols - EXPECTED_TIMELINE_KEYS == {"timeline_event_id"}, sorted(tl_cols)
     assert EXPECTED_TIMELINE_KEYS - tl_cols == {"id"}
 
