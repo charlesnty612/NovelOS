@@ -226,3 +226,97 @@ def test_missing_target_file_is_invalid_not_crash(runner):
     )
     assert rc.startswith("[INVALID]"), f"目标文件缺失却没记 INVALID，返回：{rc!r}"
     assert "读不出来" in rc, f"INVALID 没说明原因：{rc!r}"
+
+
+# ---------------------------------------------------------------------------
+# F. 「退出码恒为 3」不许有旁路（2026-10-23 对抗审查 B 第三轮 minor#4）
+# ---------------------------------------------------------------------------
+#
+# 缺陷形状：**早退**发生在档位判定之前 ⇒ 并发档位的「退出码恒为 3」被绕过。
+# 复现（Lead 独立复算）：`--all --changed --jobs 2` 且改动集为空
+#   ⇒ 退出码 **0**、**无「档位:」行**、**无并发警告**。
+# ⇒ 闸门脚本会把「并发档位跑出来的 0」当成绿灯（量具自己造假绿灯）。
+#
+# 修法：`run_spec._tier_exit()` 统一收口 + `run_spec._tier_lines()` 保证
+# 每条结束路径都打印档位行。本组用例钉住这两件事。
+
+
+def _run_main_with_empty_changed_set(runner, monkeypatch, argv: list[str]) -> tuple[int, str]:
+    """跑一次「改动集为空」的 main（改动集被替身成空集 ⇒ 命中早退路径）。"""
+    monkeypatch.setattr(runner, "discover_specs", lambda: [Path(FAKE_SPEC)])
+    monkeypatch.setattr(runner, "load_spec", lambda _sf: [FAKE_ENTRY])
+    monkeypatch.setattr(runner, "_git_changed_paths", lambda rev: set())
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = runner.main(argv)
+    return rc, buf.getvalue()
+
+
+def test_concurrent_empty_changed_set_does_not_return_zero(runner, monkeypatch):
+    """并发档位 + 改动集为空 ⇒ **退出码不得为 0**（必须是 3）。"""
+    rc, out = _run_main_with_empty_changed_set(
+        runner, monkeypatch, ["--all", "--changed", "--jobs", "2"]
+    )
+    assert rc == 3, (
+        f"并发档位在「改动集为空」的早退路径上退出码竟为 {rc} ⇒ "
+        "「退出码恒为 3」的契约被绕过（闸门会把不可信的并发结果当成绿灯）"
+    )
+    assert "档位: 并发" in out, "早退路径没有打印档位行 ⇒ 日志看不出这次是哪个档位"
+
+
+def test_concurrent_empty_changed_set_still_prints_warning(runner, monkeypatch):
+    """并发档位的早退路径**也必须**打并发警告。"""
+    _rc, out = _run_main_with_empty_changed_set(
+        runner, monkeypatch, ["--all", "--changed", "--jobs", "2"]
+    )
+    assert "不得作为闸门结论" in out, "并发早退路径没有打并发警告"
+    assert "假 CAUGHT" in out, "并发早退路径的警告被截断"
+
+
+def test_concurrent_empty_changed_set_with_accept_concurrent_returns_zero(
+    runner, monkeypatch
+):
+    """显式 ``--accept-concurrent``（承认「只作降噪参考」）⇒ 允许退出码 0。"""
+    rc, out = _run_main_with_empty_changed_set(
+        runner, monkeypatch, ["--all", "--changed", "--jobs", "2", "--accept-concurrent"]
+    )
+    assert rc == 0, f"已承认并发只作参考时退出码应为 0，实得 {rc}"
+    assert "档位: 并发" in out, "即使承认并发，也必须打印档位行"
+
+
+def test_serial_empty_changed_set_still_returns_zero(runner, monkeypatch):
+    """**串行**档位的空集早退仍是 0（防我把闸门自己堵死）+ 必须有档位行。"""
+    rc, out = _run_main_with_empty_changed_set(
+        runner, monkeypatch, ["--all", "--changed"]
+    )
+    assert rc == 0, f"串行空集早退的退出码应仍为 0，实得 {rc}"
+    assert "档位: 串行" in out, "串行空集早退没有打印档位行"
+    assert "不得作为闸门结论" not in out, "串行档位不该打并发警告"
+
+
+def test_concurrent_precheck_does_not_return_zero(runner, monkeypatch):
+    """并发档位的**只读预检**结束路径同样不许退出 0（早退旁路的另一个形状）。
+
+    只读预检本身的结果是可信的（不执行任何突变 ⇒ 不会造假 CAUGHT），
+    但**档位标签**必须一致：并发档位的退出码统一为 3（除非显式承认），
+    否则「并发 ⇒ 恒为 3」这条契约就有了第二个旁路。
+    """
+    rc, out = _run_main(runner, monkeypatch, ["--all", "--precheck", "--jobs", "2"])
+    assert rc == 3, f"并发档位在只读预检路径上退出码竟为 {rc} ⇒ 契约有旁路"
+    assert "档位: 并发" in out, "只读预检路径没有打印档位行"
+
+
+def test_serial_precheck_keeps_its_own_exit_code(runner, monkeypatch):
+    """**串行**只读预检的退出码语义不变（0/1），且必须打档位行。"""
+    rc, out = _run_main(runner, monkeypatch, ["--all", "--precheck"])
+    assert rc in (0, 1), f"串行预检的退出码应是 0/1（替身目标文件不存在 ⇒ 1），实得 {rc}"
+    assert "档位: 串行" in out, "串行预检没有打印档位行"
+
+
+def test_help_states_the_exit3_rule_has_no_bypass(runner):
+    """``--help`` 必须写明「退出码 3 适用于所有非用法错误的结束路径」。"""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        runner.main(["--help"])
+    out = buf.getvalue()
+    assert "所有非用法错误的结束路径" in out, "--help 没写明 exit 3 覆盖所有结束路径"

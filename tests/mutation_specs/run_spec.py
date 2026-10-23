@@ -46,6 +46,15 @@
 **退出码恒为 3**（除非显式 `--accept-concurrent` 承认「我只要看个大概」）⇒
 CI / 闸门脚本不可能把它误当成绿的结论。
 
+⚠️ **「退出码恒为 3」不许有旁路**（2026-10-23 对抗审查 B 第三轮 minor#4，Lead 复算）：
+原先只有「跑完突变后的汇总」那条路守 exit 3 ⇒ **任何早退**都能绕开——实测
+``--all --changed --jobs 2`` 且改动集为空 ⇒ 早退直接 ``return 0`` ⇒
+**退出码 0、无「档位:」行、无并发警告** ⇒ 闸门脚本会把「并发档位跑出来的 0」
+当成绿灯。⇒ 现由 :func:`_tier_exit` 统一收口：**一切非用法错误（≠2）的结束路径**
+（改动集为空 / 只读预检结束 / 跑完全部突变）都经它；:func:`_tier_lines` 保证
+**每条结束路径都打印「档位:」行** ⇒ 日志永远看得出这次是哪个档位。
+（CI 侧 ``ci.yml`` 跑的是串行 ``--all --precheck`` ⇒ 不受影响。）
+
 为什么可以这样拆：全量跑的**真正目的**有两个 —— ①「本批改动没打断既有锚点」②
 「既有的 370 条判别力还在」。① 是**纯只读计算**（`count(anchor) == 1` + 测试文件存在 +
 replacement 有语法），秒级可做完，而且**比跑全量更灵敏**（锚点一断立刻报，不必等到
@@ -200,6 +209,45 @@ def _parallel_warning(jobs: int) -> str:
         "   ⇒ 本次退出码恒为 **3**（除非显式加 --accept-concurrent 承认「只看个大概」）"
         " ⇒ 闸门脚本不可能把它当成绿的结论。"
     )
+
+
+def _tier_lines(jobs: int, accept_concurrent: bool) -> list[str]:
+    """档位说明行（**每条非用法错误的结束路径都要打** ⇒ 日志永远看得出这次是哪个档位）。
+
+    ⚠️ 为什么要抽成函数：原先这段只出现在「跑完突变后的汇总」里 ⇒ **任何早退**
+    （改动集为空 / 只读预检结束）都打不出档位 ⇒ 只看日志的人无法判断这次跑的是
+    哪个档位（2026-10-23 对抗审查 B 第三轮 minor#4）。
+    """
+    if jobs <= 1:
+        lines = ["档位: 串行（结论可信 ⇒ 可作闸门结论）"]
+        if accept_concurrent:
+            lines.append("（--accept-concurrent 在串行档位无意义，已忽略）")
+        return lines
+    lines = [f"档位: 并发（{jobs} 路）"]
+    if accept_concurrent:
+        lines.append("  ⇒ 已用 --accept-concurrent 承认「本结果只作降噪参考」")
+    else:
+        lines.append(
+            "  ⇒ **本结果不可作闸门结论**（并发会造假 CAUGHT / 判定不可复现 / "
+            "归因错配）⇒ 退出码恒为 3"
+        )
+    return lines
+
+
+def _tier_exit(base_code: int, jobs: int, accept_concurrent: bool) -> int:
+    """并发档位的**统一退出码出口**：未经 ``--accept-concurrent`` 承认 ⇒ 恒为 **3**。
+
+    ⚠️ 为什么必须「所有路径都过这里」（2026-10-23 对抗审查 B 第三轮 minor#4）：
+    只守住「跑完突变」那一条路 ⇒ 任何**早退**都能绕开契约（实测：
+    ``--all --changed --jobs 2`` 且改动集为空 ⇒ 早退直接 ``return 0`` ⇒
+    **退出码 0、无档位行、无并发警告**）⇒ 闸门脚本 / CI 就会把「并发档位跑出来的 0」
+    当成「闸门通过」的绿灯。
+    ⇒ 用法错误（退出码 2）**不走这里**（它发生在任何执行之前，更精确）；
+    其余**一切**结束路径都经由本函数。
+    """
+    if jobs > 1 and not accept_concurrent:
+        return 3
+    return base_code
 
 
 class LaunchFailure(RuntimeError):
@@ -564,6 +612,9 @@ def main(argv: list[str]) -> int:
             print("退出码：0=全通过 / 1=有存活或无效 / 2=用法错误或不可判 /"
                   " 3=并发档位未经 --accept-concurrent 确认（结果不可作闸门结论；"
                   "存活清单仍见上方汇总）")
+            print("      ⚠️ 退出码 3 适用于**所有非用法错误的结束路径**"
+                  "（改动集为空 / 只读预检结束 / 跑完全部突变）"
+                  "⇒ 并发档位没有旁路；每条结束路径都会打印「档位:」行")
             return 0
         elif arg.startswith("-"):
             print(f"[INVALID]  未知选项：{arg}")
@@ -620,9 +671,16 @@ def main(argv: list[str]) -> int:
         )
         if not entries:
             print(
-                "✅ 本批没有任何突变的目标源文件或规格文件被改动 ⇒ 增量闸门无事可做（exit 0）"
+                "✅ 本批没有任何突变的目标源文件或规格文件被改动 ⇒ 增量闸门无事可做"
             )
-            return 0
+            # ⚠️ 早退**也要打档位**并走统一出口（2026-10-23 对抗审查 B 第三轮 minor#4）：
+            # 原先这里直接 ``return 0`` ⇒ 并发档位下退出码 0、无档位行、无并发警告
+            # ⇒ 「并发档位退出码恒为 3」的契约被绕过。
+            for line in _tier_lines(jobs, accept_concurrent):
+                print(line)
+            if jobs > 1:
+                print(_parallel_warning(jobs))
+            return _tier_exit(0, jobs, accept_concurrent)
 
     # ---- 只读预检（在 --changed 过滤之后 ⇒ 可组合成「本批秒级闸门」）----
     if precheck_only:
@@ -632,7 +690,12 @@ def main(argv: list[str]) -> int:
         for p in problems:
             print(f"  ✗ {p}")
         print("✅ 全部可安全交给 run_spec.py 执行" if not problems else "❌ 预检未通过")
-        return 1 if problems else 0
+        # ⚠️ 只读档位同样要打档位行 + 走统一出口（与上面的早退同一条纪律）。
+        for line in _tier_lines(jobs, accept_concurrent):
+            print(line)
+        if jobs > 1:
+            print(_parallel_warning(jobs))
+        return _tier_exit(1 if problems else 0, jobs, accept_concurrent)
 
     survived: list[str] = []
     aborted: list[str] = []
@@ -671,30 +734,19 @@ def main(argv: list[str]) -> int:
             list(pool.map(_work, [b for b in bins if b]))
 
     print("=" * 78)
-    if jobs <= 1:
-        print("档位: 串行（结论可信 ⇒ 可作闸门结论）")
-        if accept_concurrent:
-            print("（--accept-concurrent 在串行档位无意义，已忽略）")
-    else:
-        print(f"档位: 并发（{jobs} 路）")
-        if accept_concurrent:
-            print("  ⇒ 已用 --accept-concurrent 承认「本结果只作降噪参考」")
-        else:
-            print("  ⇒ **本结果不可作闸门结论**（并发会造假 CAUGHT / 判定不可复现 / "
-                  "归因错配）⇒ 退出码恒为 3")
+    for line in _tier_lines(jobs, accept_concurrent):
+        print(line)
     print(f"突变存活: {survived or '无'}")
     print(f"脚本中止/无效: {aborted or '无'}")
     if jobs > 1:
         # 末尾再打一次：只看结论尾部的人（CI 日志、grep「突变存活」）不得错过。
         print(_parallel_warning(jobs))
-    if jobs > 1 and not accept_concurrent:
-        # ⚠️ **并发档位的退出码恒为 3**（哪怕一条存活都没有）——
-        # 2026-10-23 对抗审查 B 的 F-1：并发会产出**假 CAUGHT**（虚报绿）⇒
-        # 若这里允许 exit 0，闸门/CI 就会把「不可信的并发结果」当成
-        # 「全量突变通过」⇒ 那正是量具自己造假绿灯的形状。
-        # 存活/无效清单仍在上面的汇总里（人看得到），但**退出码不冒充绿**。
-        return 3
-    return 1 if (survived or aborted) else 0
+    # ⚠️ **并发档位的退出码恒为 3**（哪怕一条存活都没有）——
+    # 2026-10-23 对抗审查 B 的 F-1：并发会产出**假 CAUGHT**（虚报绿）⇒
+    # 若这里允许 exit 0，闸门/CI 就会把「不可信的并发结果」当成
+    # 「全量突变通过」⇒ 那正是量具自己造假绿灯的形状。
+    # 存活/无效清单仍在上面的汇总里（人看得到），但**退出码不冒充绿**。
+    return _tier_exit(1 if (survived or aborted) else 0, jobs, accept_concurrent)
 
 
 if __name__ == "__main__":
