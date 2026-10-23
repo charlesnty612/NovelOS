@@ -243,6 +243,135 @@ def test_guard_is_inside_repo_helper(guard, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 守卫的**绕过面**（2026-10-23 对抗审查实证 + Lead 独立复算）
+# ---------------------------------------------------------------------------
+#
+# ⚠️ 这组用例的判据是「**守卫必须拒绝**」+「**该写法在 Windows 上真的会落进仓内**」
+# 两条**同时**成立 ⇒ 撤掉规范化（退回旧的 ``relative_to`` 判定）时**必红**。
+
+
+def test_guard_rejects_extended_length_prefix_path_inside_repo(
+    guard, tmp_path: Path, monkeypatch
+) -> None:
+    """``\\\\?\\`` 扩展长度前缀**不得**成为绕过。
+
+    实证链：
+    - Windows **认** ``\\\\?\\C:\\...\\docs\\x.db`` 这个写法 ⇒ 文件**真的**落在仓内；
+    - 而 ``Path.resolve()`` **不剥扩展长度前缀** ⇒ 旧判定（``relative_to``）因前缀
+      不同而抛 ``ValueError`` ⇒ 被判成「仓外」⇒ **守卫放行**（= 绕过）。
+    ⇒ 守卫必须按**规范化后**的路径判定。
+    """
+    fake_repo = tmp_path / "fake_repo"
+    (fake_repo / "docs").mkdir(parents=True)
+    monkeypatch.setattr(guard, "REPO_ROOT", fake_repo)
+
+    raw = "\\\\?\\" + str(fake_repo / "docs" / "probe.txt")
+
+    # 前置证据（防恒真断言）：这个写法在 Windows 上**真的**落进仓内
+    Path(raw).parent.mkdir(parents=True, exist_ok=True)
+    Path(raw).write_text("x", encoding="utf-8")
+    assert (fake_repo / "docs" / "probe.txt").exists(), (
+        "前提失效：该路径写法在本机并没有落进仓内 ⇒ 本用例会变成恒真断言"
+    )
+
+    with pytest.raises(guard.RepoWritePathError):
+        guard.check_write_path(raw)
+
+    assert guard.is_inside_repo(raw) is True, "仓内外判定也必须按规范化口径"
+
+
+def test_guard_rejects_trailing_space_component_inside_repo(
+    guard, tmp_path: Path, monkeypatch
+) -> None:
+    """路径分量带**尾随空格**时，守卫必须**从严**（Win32 打开文件时会裁掉尾随空格）。
+
+    ⚠️ 实测：在本机用这种路径**写不进文件**（``FileNotFoundError``）⇒ 危害为零；
+    但守卫仍须从严判定 ⇒ 免得哪天换一个**会裁尾随空格**的写入通道就变成真绕过。
+    """
+    fake_repo = tmp_path / "fake_repo"
+    (fake_repo / "docs").mkdir(parents=True)
+    monkeypatch.setattr(guard, "REPO_ROOT", fake_repo)
+
+    with pytest.raises(guard.RepoWritePathError):
+        guard.check_write_path(str(fake_repo / "docs " / "probe.txt"))
+
+
+def test_guard_still_allows_outside_repo_with_odd_spellings(
+    guard, tmp_path: Path, monkeypatch
+) -> None:
+    """规范化**不得**把仓外路径误判成仓内（过严同样是缺陷）。
+
+    覆盖：仓外路径 + 尾随空格分量 / 扩展长度前缀 / 大小写差异 ⇒ 一律**放行**。
+    """
+    fake_repo = tmp_path / "fake_repo"
+    (fake_repo / "docs").mkdir(parents=True)
+    monkeypatch.setattr(guard, "REPO_ROOT", fake_repo)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    assert guard.check_write_path(outside / "a.txt") == (outside / "a.txt").resolve()
+    assert guard.check_write_path(str(outside / "b " / "c.txt")).name == "c.txt"
+    assert guard.check_write_path("\\\\?\\" + str(outside / "d.txt")).name == "d.txt"
+    assert guard.check_write_path(str(fake_repo.parent / "fake_repo2" / "e.txt")).name == "e.txt"
+
+
+def _same_inode(a: Path | str, b: Path | str) -> bool:
+    """两个路径是否指向**同一个底层位置**（``(st_dev, st_ino)``）。"""
+    sa = os.stat(a)
+    sb = os.stat(b)
+    return (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
+
+
+def _admin_share_alias(repo_root: Path) -> str | None:
+    """本机能否用 UNC 管理共享指到同一目录？不能 ⇒ ``None``。
+
+    ⚠️ 管理共享的拼法：``D:\\x\\y`` ⇒ ``\\\\localhost\\D$\\x\\y``（**盘符的冒号换成 ``$``**，
+    盘符本身要去掉）⇒ 直接拼 ``share + str(path)`` 会得到 ``\\\\localhost\\D$D:\\x`` 这种非法路径。
+    """
+    drive = repo_root.drive
+    if not drive or len(drive) < 2:
+        return None
+    rest = repo_root.as_posix()[len(drive):].replace("/", "\\")
+    for host in ("localhost", "127.0.0.1"):
+        probe = f"\\\\{host}\\{drive[0]}$" + rest
+        try:
+            os.stat(probe)
+        except OSError:
+            continue
+        return probe
+    return None
+
+
+def test_normalize_for_compare_preserves_unc_root(guard) -> None:
+    """UNC 根（``\\\\server\\share``）必须**原样保留**（对抗审查 F-2 的回归看守）。
+
+    ⚠️ 旧实现把它压成 ``\\.\\server\\share``（**换了一条路径**）⇒ 仓内 UNC 路径
+    会被判成「仓外」⇒ 绕过。
+    """
+    assert guard.normalize_for_compare("\\\\server\\share\\docs\\x.json") == (
+        "\\\\server\\share\\docs\\x.json"
+    )
+
+
+def test_guard_rejects_unc_admin_share_alias_of_repo(guard) -> None:
+    """同一目录的**别名拼写**（UNC 管理共享）不得成为绕过。
+
+    ``\\\\localhost\\D$\\<repo>\\docs\\x.db`` 与 ``D:\\<repo>\\docs\\x.db`` 是同一个
+    目录的两种拼写 ⇒ 字符串比较（哪怕规范化后）判不出「在仓内」⇒ 守卫必须**按底层
+    身份**（``(st_dev, st_ino)``）再核一次。
+
+    ⚠️ 依赖本机有可用的管理共享 ⇒ 不可用时**跳过**（并说明），不假装验过。
+    """
+    alias_root = _admin_share_alias(REPO_ROOT)
+    if alias_root is None:
+        pytest.skip("本机没有可用的管理共享（\\\\localhost\\D$）⇒ 跳过「别名拼写」这条")
+    # 前置证据：两种拼写指向**同一个**底层位置
+    assert _same_inode(alias_root, REPO_ROOT), "前提：别名拼写必须与仓根同 inode"
+    with pytest.raises(guard.RepoWritePathError):
+        guard.check_write_path(alias_root + "\\docs" + "\\probe_alias.txt")
+
+
+# ---------------------------------------------------------------------------
 # B1：痕迹仓根解析**绝不回落到软件仓**
 # ---------------------------------------------------------------------------
 
