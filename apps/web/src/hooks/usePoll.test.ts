@@ -390,5 +390,38 @@ describe('usePoll - 目标身份切换（targetKey）', () => {
     // 立即重拉：interval 是 1000ms，300ms 内拿到就说明没在等 interval
     await waitFor(() => expect(result.current.data).toEqual({ id: 'B' }), { timeout: 300 });
   });
+
+  it('targetKey 变化 ⇒ 旧目标的错误必须被清掉（不得挂到新目标上）', async () => {
+    // ⚠️ 与「旧数据残留」同形状，只是维度是 error：旧实现只在**成功路径**与
+    // retry() 里 setError(null) ⇒ 旧目标的报错文案会一直挂到新目标首次成功。
+    const fn = vi.fn().mockImplementation(async (id: string) => {
+      if (id === 'A') throw new Error('旧目标的错误');
+      return { id };
+    });
+
+    const { result, rerender } = renderHook(
+      ({ tk }: { tk: string }) =>
+        usePoll({
+          fn: () => fn(tk),
+          intervalMs: 1000,
+          enabled: true,
+          targetKey: tk,
+          stopWhen: () => false,
+        }),
+      { initialProps: { tk: 'A' } },
+    );
+
+    // 前提：旧目标确实报过错
+    const t0 = Date.now();
+    while (result.current.error === null && Date.now() - t0 < 500) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(result.current.error).toBe('旧目标的错误');
+
+    rerender({ tk: 'B' });
+
+    // 旧目标的错误不得挂到新目标上
+    expect(result.current.error).toBeNull();
+  });
 });
 

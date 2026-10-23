@@ -121,6 +121,10 @@ export function usePoll<T>(opts: UsePollOptions<T>): UsePollResult<T> {
       // 旧目标的数据不得继续显示：否则页面横幅会显示上一个 run 的
       // 动作名 / 节点 / 已运行时长（新 run 可能显示「已运行 12 分」）。
       setData(null);
+      // ⚠️ **错误也要一起清**（对抗审查 B · F-7，2026-10-23）：
+      // 旧目标的报错文案会一直挂到新目标首次成功为止（setError(null) 只在
+      // 成功路径与 retry() 里）⇒ 与「旧数据残留」同形状，只是维度是 error。
+      setError(null);
     }
     // 解除上一轮的在途占位：新的一轮必须能**立即**拉一次，而不是
     // 「等上一个回来」再等一个 interval。
