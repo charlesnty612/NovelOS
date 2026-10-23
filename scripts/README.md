@@ -469,6 +469,7 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 | `--artifacts-dir` | 同上 2 个（×2） | 显式指定痕迹仓根（优先级：`--artifacts-dir` > `NOVELOS_ARTIFACTS_DIR` > 软件仓**同级目录** `../NovelOS-Artifacts`） |
 | `--migrate` | `check_content_repo_guard.py secrets`（×1） | 动作开关：库内明文 api_key → `secrets.json`，并清空库内明文（**默认 dry-run**） |
 | `--prune-dangling` | 同上（×1） | 动作开关：清理 `secrets.json` 里的悬空条目（**默认 dry-run**） |
+| `--force-all-dangling` | 同上（×1） | **危险开关**：确认「secrets 的键与运行库已知集合**零交集**」时**仍**按常规判定悬空并执行清理。默认**拒绝**（退出码 2、零落盘）——「全部键都死」与「`--db` 指到了别的项目的库」在数据上**不可区分**，而后者会**一次清空整个凭据库**却仍报「合规」 |
 
 ⚠️ **`--apply` 不是新 flag**（既有），但它在 `secrets` 模式里的**角色变了**：那里它是**写权限总闸**
 ——无 `--apply` ⇒ **零写入**（两个动作各自默认 dry-run）；**单独 `--apply` = 迁移**（向后兼容）。
@@ -482,7 +483,7 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 |---|---|
 | `0` | 合规 / 写入完成 |
 | `1` | 不合规（内容仓仍能被误推 / 校验不通过） |
-| `2` | **巡检自身出错**：读不到表、**已知集合为空**、待写路径被守卫拒绝、坏 `secrets.json` |
+| `2` | **巡检自身出错 / 不可判**：读不到表、**已知集合为空**、待写路径被守卫拒绝、坏 `secrets.json`（**结构非法**：顶层或 `api_keys` 段不是对象）、**secrets 键与已知集合零交集**（⇒ `--db` 可能指错了库） |
 | `3` | 痕迹仓不可用（`--write-docs` 且拿不到痕迹仓 ⇒ 明确失败，不回落软件仓） |
 
 ⚠️ **CLI 行为变更（本批）**：`check_content_repo_guard.py secrets` 的**纯巡检**（无 `--apply`）
@@ -498,7 +499,15 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 
 ### 测试
 
-- `tests/unit/test_scripts_write_guard.py`（47 例：4 个脚本的守卫——仓内路径 ⇒ 退出码 2 +
-  **零文件落盘**；守卫**早于** `mkdir` 生效）；
-- `tests/unit/test_check_content_repo_guard.py`（28 例：F-1 / F-2 / F-3 的绿→红→绿自证）；
-- `tests/unit/test_mutation_harness_judgment.py`（33 例：突变**判定函数**的判别力自证）。
+- `tests/unit/test_scripts_write_guard.py`（**60 例**：4 个脚本的守卫——仓内路径 ⇒ 退出码 2 +
+  **零文件落盘**；守卫**早于** `mkdir` 生效；**规范化层**六个子层（扩展长度前缀剥离 /
+  尾随空格·点裁剪〔末分量 + 中间分量〕/ 大小写折叠 / dotdot 折叠 / UNC 根保真）各有
+  返回值级用例；仓内外判定**单一事实源**（`is_inside_repo` 委托 `relative_in_repo`））；
+- `tests/unit/test_check_content_repo_guard.py`（**53 例**：F-1 / F-2 / F-3 的绿→红→绿自证 +
+  **结构非法 ⇒ 不可判**（三路径同口径 exit 2）+ **零交集闸门**（默认拒绝 /
+  `--force-all-dangling` 放行 / 部分交集仍照常判悬空））；
+- `tests/unit/test_mutation_harness_judgment.py`（33 例：突变**判定函数**的判别力自证）；
+- `tests/unit/test_cache_key_perf.py`（**13 例**：性能脚本——**守机制不守数值**，父目录不可用 ⇒
+  退出码 2 且**零 traceback**）；
+- `tests/unit/test_mutation_run_spec_jobs_guard.py`（**12 例**：突变执行器**并发档位**的硬约束——
+  并发退出码恒为 3、汇总写明档位、默认串行、目标文件缺失记 `[INVALID]`）。
