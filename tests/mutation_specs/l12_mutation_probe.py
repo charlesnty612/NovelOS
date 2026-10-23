@@ -25,7 +25,7 @@ MUTATIONS = [
     (
         "MP-1",
         "scripts/mutation_probe.py",
-        "        target.write_text(original, encoding=\"utf-8\")\n        restored = sha256(target)\n",
+        "        target.write_bytes(original_bytes)\n        restored = sha256(target)\n",
         "        # MUTATION-MP-1: 撤掉还原\n        restored = sha256(target)\n",
         "tests/unit/test_mutation_probe.py",
     ),

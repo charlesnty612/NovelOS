@@ -14,12 +14,16 @@
 替换不是 anchor 的超集（否则等于没改）、.py 目标变异后仍可解析」这几件事
 变成**常规跑测就会响**的断言。
 
-⚠️ **为什么用 AST 而不是 import**：``scripts/mutation_harness.py`` 在**模块级**调了
-``sys.stdout.reconfigure(...)``（:53）⇒ pytest 捕获期的 ``sys.stdout`` 没有
-``reconfigure`` 方法 ⇒ import 即崩（AGENTS 坑区「模块级 ``sys.stdout.reconfigure``
-⇒ pytest 里 import 就炸」）。
-⇒ 本文件**不 import 它**，而是用 ``ast`` 解析出 ``MUTATIONS`` 的字面量
-（``ast.literal_eval``）—— **只读、零副作用**。
+⚠️ **为什么用 AST 而不是 import**（历史原因，**现状已变**）：``scripts/mutation_harness.py``
+原先在**模块级**调 ``sys.stdout.reconfigure(...)`` ⇒ pytest 捕获期的 ``sys.stdout``
+可能没有 ``reconfigure`` 方法 ⇒ import 即崩（AGENTS 坑区「模块级
+``sys.stdout.reconfigure`` ⇒ pytest 里 import 就炸」）。
+**2026-10-23 已修**：该重配移进 ``main()`` 的 ``_reconfigure_stdio()``
+（函数内 + 判 hasattr，照 ``scripts/backup_db.py`` 既有写法）⇒ 模块现在**可以**被 import
+（新的判定看守 ``tests/unit/test_mutation_harness_judgment.py`` 就是直接
+``from scripts import mutation_harness``）。
+⇒ 但本文件**仍保留** AST 取值：它要的是**零副作用**地读 ``MUTATIONS`` 字面量
+（import 会执行整个模块），AST 更贴这个用途。
 
 零真实 LLM、零内容仓接触、零 dev 库：本文件**只读仓库文件**（不 stat 之外读写，
 不改一个字节）。

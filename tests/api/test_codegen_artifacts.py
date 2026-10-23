@@ -35,6 +35,9 @@ CI / pre-commit 的 CLI 闸门（``--check``）。
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -254,3 +257,114 @@ def test_field_level_drift_is_detected_where_set_based_guard_is_blind(tmp_path: 
 
     assert ok is False
     assert "DRIFT" in msg
+
+
+# ---------------------------------------------------------------------------
+# D-8 续（2026-10-23 批次三十一 · 进程级）：**CLI 的进程退出码**此前从未被断言
+# ---------------------------------------------------------------------------
+#
+# ⚠️ **为什么还要进程级**：本文件上文的退出码用例调的是 ``export_main([...])``
+# ——那是**进程内**的 ``main(argv)`` 返回值（``if __name__ == "__main__"`` 那层
+# ``raise SystemExit(main())`` 之外的内部值）。**CLI 的契约是「进程退出码」**
+# （CI / pre-commit 只看这个）⇒ 两者之间隔着 ``SystemExit`` 包装，
+# 而那一层一旦坏掉（漏了 ``raise SystemExit`` / 包装成 ``except: pass``），
+# 进程内断言**照样绿**。
+#
+# ⚠️ **反向对照是硬要求**：只断言「漂移 ⇒ 非 0」而不断言「已同步 ⇒ 0」，
+# 那条用例可能是「**永远非 0**」的恒真断言（例如把 CLI 改成无条件 ``exit 2``）。
+
+
+def _run_cli(script: str, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """真跑一次 CLI **进程**，断言的是**进程退出码**（不是 ``main()`` 的返回值）。
+
+    ⚠️ **env + encoding 两侧都要钉**（坑区「子进程输出编码」条，本仓已中三次）：
+    子进程 stdout 的**编码**跟随继承的环境变量，而 ``text=True`` 的**解码器**
+    跟随 locale（本机 = cp936）⇒ 只给一边照样中招（且错位是**静默**的）。
+    ⚠️ **必须用 ``sys.executable``**（跑 pytest 的那个解释器）⇒ ``info.version``
+    读的是真实 pyproject 版本；系统 python 会读成 ``dev`` ⇒ **假漂移**。
+    """
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / script), *args],
+        cwd=str(cwd or REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
+
+
+def _assert_cli_output(proc: subprocess.CompletedProcess) -> str:
+    """失败时把子进程输出摊开（否则「退出码非 0」看不出是真漂移还是脚本崩了）。"""
+    return (
+        f"--- stdout ---\n{(proc.stdout or '')[-2000:]}\n"
+        f"--- stderr ---\n{(proc.stderr or '')[-2000:]}"
+    )
+
+
+def test_export_cli_process_exit_code_is_nonzero_on_drift(tmp_path: Path):
+    """漂移 ⇒ **进程退出码**非 0（CI / pre-commit 消费的就是这一层）。"""
+    drifted = tmp_path / "openapi.json"
+    drifted.write_text(OPENAPI.read_text(encoding="utf-8") + "\n// drift\n", encoding="utf-8")
+
+    proc = _run_cli("export_openapi.py", "--check", "--out", str(drifted))
+
+    assert proc.returncode != 0, (
+        "漂移时 CLI 进程竟退出 0 ⇒ 闸门在 CI 层形同虚设\n" + _assert_cli_output(proc)
+    )
+
+
+def test_export_cli_process_exit_code_is_zero_when_artifact_in_sync(tmp_path: Path):
+    """**反向对照**：产物已同步 ⇒ 进程退出码 **0**。
+
+    ⚠️ 同时在**非仓库 CWD** 下执行 ⇒ 一并钉住「默认/显式路径与 CWD 无关」
+    （旧实现是 CWD 相对 ⇒ 在别处执行会得到「产物不存在」的假漂移）。
+    """
+    proc = _run_cli("export_openapi.py", "--check", "--out", str(OPENAPI), cwd=tmp_path)
+
+    assert proc.returncode == 0, (
+        "产物已同步时 CLI 进程却非 0 ⇒ 退出码判定恒非 0（恒真断言）\n"
+        + _assert_cli_output(proc)
+    )
+
+
+def test_gen_types_cli_process_exit_code_is_nonzero_on_drift(tmp_path: Path):
+    """同上（``gen_frontend_types.py`` 那一侧）：漂移 ⇒ 进程退出码非 0。"""
+    drifted = tmp_path / "types.generated.ts"
+    drifted.write_text(TYPES.read_text(encoding="utf-8") + "\n// drift\n", encoding="utf-8")
+
+    proc = _run_cli(
+        "gen_frontend_types.py",
+        "--check",
+        "--openapi",
+        str(OPENAPI),
+        "--out",
+        str(drifted),
+    )
+
+    assert proc.returncode != 0, (
+        "漂移时 CLI 进程竟退出 0 ⇒ 闸门在 CI 层形同虚设\n" + _assert_cli_output(proc)
+    )
+
+
+def test_gen_types_cli_process_exit_code_is_zero_when_artifact_in_sync(tmp_path: Path):
+    """**反向对照**（``gen_frontend_types.py`` 那一侧）：已同步 ⇒ 退出码 **0**。
+
+    ⚠️ 同样在**非仓库 CWD** 下执行。
+    """
+    proc = _run_cli(
+        "gen_frontend_types.py",
+        "--check",
+        "--openapi",
+        str(OPENAPI),
+        "--out",
+        str(TYPES),
+        cwd=tmp_path,
+    )
+
+    assert proc.returncode == 0, (
+        "产物已同步时 CLI 进程却非 0 ⇒ 退出码判定恒非 0（恒真断言）\n"
+        + _assert_cli_output(proc)
+    )

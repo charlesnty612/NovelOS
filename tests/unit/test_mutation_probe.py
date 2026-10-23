@@ -23,6 +23,8 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "mutation_probe.py"
 
 TARGET_BODY = "VALUE = 1\n"
+#: 故意用**字节通道**造的 LF 文件（``write_text`` 在 Windows 上会写成 CRLF ⇒ 测不出漂移）。
+TARGET_BODY_LF = b"VALUE = 1\n"
 TEST_BODY = (
     "from target import VALUE\n"
     "\n"
@@ -35,6 +37,17 @@ TEST_BODY = (
 def _mini_repo(tmp_path: Path) -> Path:
     """造一个微型仓库：一个待改源文件 + 一个会因它变动的 pytest 用例。"""
     (tmp_path / "target.py").write_text(TARGET_BODY, encoding="utf-8")
+    (tmp_path / "test_probe_target.py").write_text(TEST_BODY, encoding="utf-8")
+    return tmp_path
+
+
+def _mini_repo_lf(tmp_path: Path) -> Path:
+    """造一个「**LF 行尾**」的微型仓库（其余同 :func:`_mini_repo`）。
+
+    ⚠️ 必须用 ``write_bytes``：``write_text`` 在 Windows 上会把 LF 翻成 CRLF
+    ⇒ 那样造出来的文件**测不出**行尾漂移。
+    """
+    (tmp_path / "target.py").write_bytes(TARGET_BODY_LF)
     (tmp_path / "test_probe_target.py").write_text(TEST_BODY, encoding="utf-8")
     return tmp_path
 
@@ -151,3 +164,35 @@ def test_probe_reports_zero_failures_when_the_change_is_harmless(tmp_path):
     assert "共 0 条" in out, out
     assert proc.returncode == 1  # 「没抓到红」= 探针的失败语义
     assert (root / "target.py").read_text(encoding="utf-8") == TARGET_BODY
+
+
+def test_probe_restores_the_file_byte_for_byte(tmp_path):
+    """还原必须**字节级**：``read_bytes()`` 逐位一致（**含行尾**）。
+
+    ⚠️ 既有断言用 ``read_text`` 比较 ⇒ universal-newline 归一 ⇒ **行尾漂移看不见**。
+    而旧实现的还原走 ``read_text`` / ``write_text`` 文本通道 ⇒ Windows 上
+    ``write_text`` 把 LF 翻成 CRLF ⇒ ①「[还原] SHA == 前值」报 False（还原校验形同虚设），
+    ② 被测文件的行尾被**静默污染**（git 归一后连 git 都看不见）。
+
+    ⇒ 本用例故意造一个 **LF** 文件（``write_bytes``，绕开 ``write_text`` 的 CRLF 翻译）
+    并把断言**钉在字节上** ⇒ 谁再把字节通道改回文本通道，本用例必红。
+    """
+    root = _mini_repo_lf(tmp_path)
+    proc = _run(
+        root,
+        "--target",
+        "target.py",
+        "--anchor",
+        "VALUE = 1",
+        "--replacement",
+        "VALUE = 2",
+        "--test",
+        "test_probe_target.py",
+        "--runner",
+        "pytest",
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "[还原] SHA" in out and "? True" in out, out
+    # ⚠️ 钉在**字节**上（``read_text`` 会把 CRLF 归一成 LF ⇒ 看不见漂移）
+    assert (root / "target.py").read_bytes() == TARGET_BODY_LF

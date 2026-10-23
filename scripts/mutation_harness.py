@@ -40,17 +40,22 @@ AGENTS 坑区已经记了两条同族事故：
 from __future__ import annotations
 
 import hashlib
+import itertools
 import os
 import pathlib
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 # ⚠️ 本机 Windows stdout 默认 cp936（坑区「Windows 默认 cp936 吞中文」家族）。
 # **两侧都要钉**：本进程 stdout 重配 + 子进程 env——只给一边照样乱码。
-# 放在 import 之后：reconfigure 是运行期动作，不是导入期。
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+# ⚠️ **重配必须放进函数、且判 hasattr**（2026-10-23 实测修）：模块级副作用会让
+# ``import scripts.mutation_harness`` 在 pytest 捕获期**当场崩**（捕获期的
+# ``sys.stdout`` 可能没有 ``reconfigure`` 方法）⇒ 该脚本从此「不可测」，
+# 而它恰好是**收尾闸门的一环**⇒ 不可测的闸门最危险。
+# 形状照 ``scripts/backup_db.py`` 的既有正确写法（函数内 + 判 hasattr）。
 
 # 本文件在 scripts/ 下 ⇒ 仓库根是 parent.parent。写死 `.` 会在从子目录调用时错位
 # （本脚本 2026-10-15 搬到 scripts/ 后当场踩到：路径拼成 scripts/apps/web，
@@ -70,7 +75,109 @@ class LaunchFailure(RuntimeError):
     """测试命令**没能启动**——与「用例红」是两回事，必须分开报。"""
 
 
-def _run(cmd, cwd) -> tuple[bool, str]:
+def _reconfigure_stdio() -> None:
+    """把 stdout/stderr 重配成 UTF-8（**函数内 + 判 hasattr**，见模块顶部注释）。"""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+#: 判定标签（三桶，与 harness 主循环的 survived / caught / aborted 一一对应）。
+JUDGE_SURVIVED = "SURVIVED"
+JUDGE_CAUGHT = "CAUGHT"
+JUDGE_INVALID = "INVALID"
+
+
+def judge_pytest_run(code: int, out: str) -> tuple[str, str]:
+    """判定一次 pytest 子进程跑的结论 ⇒ ``(标签, 理由)``。**纯函数**（不碰文件、不起进程）。
+
+    判定表（每格都有**仓内**看守，见 ``tests/unit/test_mutation_harness_judgment.py``）::
+
+        退出码 0                       ⇒ SURVIVED（真全过）
+        退出码 1 且摘要含 " failed"     ⇒ CAUGHT（真红了）
+        退出码 1 但摘要**无** " failed" ⇒ INVALID（用例是 ERROR 而非 FAIL ⇒ 环境/收集层炸了）
+        退出码 2/3/4/5                 ⇒ INVALID（压根没跑过）
+        输出含 "no tests ran"          ⇒ INVALID（零测试被收集）
+
+    ⚠️ **"1 + 既有 passed 又有 errors" 必须判 INVALID**：那正是本机
+    ``%LOCALAPPDATA%\\Temp\\pytest-of-<user>`` 属主拒绝访问时的真实输出形态
+    （``1 passed, 3 errors``）⇒ 旧实现只看 ``" passed"`` 子串 ⇒ **误报成 CAUGHT**。
+
+    ⚠️ **本函数与 ``scripts/mutation_probe.py`` 的同名函数是「刻意复制」**：两套突变
+    执行器各自独立运行（probe 可被复制到别处单跑）⇒ 抽共享模块会扩依赖面
+    ⇒ **改一处必须同步改另一处**；同口径由
+    ``tests/unit/test_mutation_harness_judgment.py`` 的「两者不许分叉」用例**机器保证**
+    （AGENTS 坑区「两套实现口径分叉」的既有对策形状：用机器看守钉住，而不是靠结构）。
+    """
+    if code not in (0, 1):
+        return JUDGE_INVALID, (
+            f"pytest 退出码 {code}（2=中断 / 3=内部错误 / 4=用法或收集错误 / 5=零测试被收集）"
+            f"——都不是「跑过了」"
+        )
+    if "no tests ran" in out:
+        return JUDGE_INVALID, "pytest 报告「no tests ran」⇒ 目标文件没收集到任何用例"
+    if code == 1:
+        if " failed" in out:
+            return JUDGE_CAUGHT, "pytest 退出码 1 且摘要含「 failed」⇒ 有用例断言失败（真被抓住）"
+        return JUDGE_INVALID, (
+            "pytest 退出码 1 但摘要里没有「 failed」⇒ 用例是 **ERROR** 而非 FAIL"
+            "（环境 / 收集层炸了，一个断言都没跑到）⇒ 不算「被抓住」"
+        )
+    if " passed" not in out:
+        return JUDGE_INVALID, "pytest 退出码 0 但输出里没有「 passed」⇒ 没有任何执行痕迹"
+    return JUDGE_SURVIVED, "pytest 退出码 0 且有用例通过数 ⇒ 全过"
+
+
+def judge_vitest_run(code: int, out: str) -> tuple[str, str]:
+    """判定一次 vitest 子进程跑的结论 ⇒ ``(标签, 理由)``。**纯函数**。
+
+    ⚠️ 口径**来自实测**（2026-10-23，vitest 2.1.9），**不是**照搬 pytest：
+
+    ===========================  ====  ==========================================
+    情形                          退出码  输出关键行
+    ===========================  ====  ==========================================
+    全过                          0     ``Test Files 1 passed`` / ``Tests 13 passed``
+    断言失败                      1     ``Test Files 1 failed`` / ``Tests 1 failed``
+    收集期错误（模块解析失败）      1     ``Test Files 1 failed`` / ``Tests  no tests``
+    零测试收集                    1     ``No test files found``（**无** Test Files 行）
+    环境炸了（config 加载失败）    1     错误栈（**无** Test Files 行）
+    ===========================  ====  ==========================================
+
+    ⇒ **判别点**有两个：①「``Test Files``」行（有没有真的跑起测试文件）；
+    ②「``Tests  no tests``」（套件在收集期就炸了 ⇒ **一个用例都没跑到**）。
+    ①②合起来才能把「环境炸了」与「断言失败」分开——只看 ① 的话，
+    「收集期错误」与「断言失败」的摘要**逐字同形**。
+
+    ⚠️ **已知未覆盖面（2026-10-23 登记）**：vitest 的「Unhandled Error」形态**未**纳入
+    实测（已实测 6 种：全绿 / 断言失败 / 收集期错误 / 零测试收集 / 环境炸了 /
+    ``--passWithNoTests``）⇒ 若 vitest 改版输出形态变化，本判定表需**重新实测**。
+
+    ⚠️ **本函数与 ``scripts/mutation_probe.py`` 的同名函数是「刻意复制」**
+    ⇒ 改一处必须同步改另一处（机器保证见
+    ``tests/unit/test_mutation_harness_judgment.py`` 的「两者不许分叉」用例）。
+    """
+    text = _ANSI.sub("", out)
+    if "Test Files" not in text:
+        return JUDGE_INVALID, (
+            "vitest 输出里没有「Test Files」计数行 ⇒ 环境炸了 / 零测试收集（一个用例都没跑到）"
+        )
+    if "no tests" in text:
+        return JUDGE_INVALID, (
+            "vitest 报「Tests  no tests」⇒ 套件在收集期就炸了（Failed Suites），"
+            "一个用例都没跑到 ⇒ 不算「被抓住」"
+        )
+    if code == 0:
+        return JUDGE_SURVIVED, "vitest 退出码 0 且有测试计数 ⇒ 全过"
+    return JUDGE_CAUGHT, "vitest 退出码非 0 且有「failed」用例 ⇒ 真失败"
+
+
+def _run(cmd, cwd) -> tuple[int, str]:
+    """跑一次命令，返回 **(原始退出码, 输出)**。
+
+    ⚠️ **必须回传原始退出码**（2026-10-23 实测修）：本仓坑区已登记多次「非零退出码
+    同时承载『跑过了且红』与『压根没跑』」⇒ 只回传 ``bool`` 会把两者压平成同一个
+    False，而 :func:`_assert_tests_ran` 需要靠退出码把「用例真红」与「环境炸了」分开。
+    """
     try:
         r = subprocess.run(
             cmd,
@@ -83,17 +190,19 @@ def _run(cmd, cwd) -> tuple[bool, str]:
         )
     except FileNotFoundError as exc:  # 命令不存在 / 路径错
         raise LaunchFailure(f"{cmd[0]} 启动失败: {exc}") from exc
-    return r.returncode == 0, (r.stdout + r.stderr)
+    return r.returncode, (r.stdout + r.stderr)
 
 
-def _assert_tests_ran(out: str, runner: str) -> None:
-    """必须有「跑过了」的证据，否则一律按启动/收集失败处理。"""
-    if runner == "vitest":
-        markers = ("Test Files", "Tests  ")
-    else:
-        markers = (" passed", " failed", "no tests ran")
-    if not any(m in out for m in markers):
-        raise LaunchFailure(f"输出里没有任何测试执行痕迹（可能被上游杀掉）：{out[-400:]}")
+def _assert_tests_ran(out: str, runner: str, code: int) -> None:
+    """判定失败 ⇒ **响亮抛错**（``LaunchFailure``），绝不静默当成「捕获」。
+
+    ⚠️ 口径全部收在 :func:`judge_pytest_run` / :func:`judge_vitest_run` 两个**纯函数**里
+    ⇒ 本函数只是把它们的结果翻译成异常 ⇒ 同一张判定表只有一个出处
+    （本仓坑区「两套实现口径分叉」形状的防线）。
+    """
+    label, reason = judge_pytest_run(code, out) if runner == "pytest" else judge_vitest_run(code, out)
+    if label == JUDGE_INVALID:
+        raise LaunchFailure(reason)
 
 # (编号, 目标文件, 锚点(原文), 替换(变异), 定向 vitest 用例过滤)
 MUTATIONS: list[tuple[str, str, str, str, str]] = [
@@ -300,15 +409,45 @@ def sha(p: pathlib.Path) -> str:
 
 
 def run_web(test_file: str) -> tuple[bool, str]:
-    ok, out = _run([str(VITEST), "run", test_file], WEB)
-    _assert_tests_ran(out, "vitest")
-    return ok, out
+    code, out = _run([str(VITEST), "run", test_file], WEB)
+    _assert_tests_ran(out, "vitest", code)
+    return code == 0, out
 
 
-def run_py(test_file: str) -> tuple[bool, str]:
-    ok, out = _run([PY, "-m", "pytest", test_file, "-q"], ROOT)
-    _assert_tests_ran(out, "pytest")
-    return ok, out
+#: pytest 子进程的 basetemp 根目录（**仓库外** ⇒ 不污染工作树，也不撞「某个既有
+#: 测试假设了仓库内无临时目录」这类既有约定）。
+#: ⚠️ pytest 内部是 ``Path.mkdir(mode=0o700)``（**不带 parents**）⇒ 父目录必须先建好，
+#: 否则表现为 ``FileNotFoundError``（看起来像用例挂了，其实是用例压根没跑起来）。
+_BASETEMP_ROOT = pathlib.Path(tempfile.gettempdir()) / "novelos-mutbasetemp"
+_basetemp_counter = itertools.count()
+
+
+def _basetemp_for(mid: str) -> pathlib.Path:
+    """给一次 pytest 子进程分配**唯一**的 basetemp（并发 / 连续跑都不撞）。
+
+    ⚠️ **为什么必须给**（2026-10-23 实测）：本机 ``%LOCALAPPDATA%\\Temp\\pytest-of-<user>``
+    一旦被创建就**连 owner 都拒绝访问**（``PermissionError: [WinError 5]``）⇒ 用到
+    ``tmp_path`` 的用例在**准备阶段**就 ERROR ⇒ 子进程退出码 1 ⇒ 与「用例红」**同形**
+    ⇒ 量具失真（判定口径见 :func:`_assert_tests_ran`）。
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", mid)[:60]
+    _BASETEMP_ROOT.mkdir(parents=True, exist_ok=True)
+    return _BASETEMP_ROOT / f"{safe}-{os.getpid()}-{next(_basetemp_counter)}"
+
+
+def run_py(test_file: str, mid: str = "") -> tuple[bool, str]:
+    """跑一次 pytest 子进程（**自带唯一 basetemp**）⇒ 返回 ``(是否全绿, 输出)``。"""
+    basetemp = _basetemp_for(mid or test_file)
+    try:
+        code, out = _run(
+            [PY, "-m", "pytest", test_file, "-q", f"--basetemp={basetemp}"], ROOT
+        )
+        _assert_tests_ran(out, "pytest", code)
+        return code == 0, out
+    finally:
+        # 子进程已退出 ⇒ 句柄已释放；``ignore_errors=True`` 保证 Windows 上残留句柄
+        # **不会**把清理失败升级成「本条突变无效」（清理不是判别点）。
+        shutil.rmtree(basetemp, ignore_errors=True)
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -342,6 +481,8 @@ def summary_line(out: str) -> str:
 
 
 def main() -> int:
+    # ⚠️ stdout 重配必须在**函数内**（模块级会让 import 即崩，见模块顶部注释）。
+    _reconfigure_stdio()
     survived: list[str] = []
     aborted: list[str] = []
     print("=" * 78)
@@ -369,7 +510,7 @@ def main() -> int:
 
             try:
                 ok, out = (
-                    run_py(test_file) if test_file.startswith("tests/") else run_web(test_file)
+                    run_py(test_file, mid) if test_file.startswith("tests/") else run_web(test_file)
                 )
             except LaunchFailure as exc:
                 # 启动失败 ≠ 用例红。记成「本次无效」并中止该条，
