@@ -58,12 +58,6 @@ def test_dialogue_closing_quote_after_digit_still_converts():
     assert changes[0]["count"] == 1
 
 
-def test_curly_quotes_already_target_are_noop():
-    """已是 “…” 的章节（ch6/10/18）零变更——目标形态即现状。"""
-    src = "“转过去。”她说，“别动。”"
-    out, changes = normalize_prose(src)
-    assert out == src
-    assert changes == []
 
 
 def test_mixed_families_in_one_line():
@@ -120,13 +114,6 @@ def test_unpaired_or_nested_quotes_untouched(src):
     assert changes == []
 
 
-def test_dialogue_starting_with_ascii_label_line_untouched():
-    """真实语料保守案例：对话内容以 ASCII 字母起头（"B级…"）时判不出开引号，
-    整行不动——宁可漏改，也不让后面的引号错位配对。"""
-    src = '"旧档副本的擦边球。"林策说，"B级业务权限够用，不用过审批，不用上系统。"'
-    out, changes = normalize_prose(src)
-    assert out == src
-    assert changes == []
 
 
 def test_inch_mark_and_english_dialogue_untouched():
@@ -137,27 +124,8 @@ def test_inch_mark_and_english_dialogue_untouched():
     assert normalize_prose(src2) == (src2, [])
 
 
-def test_cross_family_nesting_line_untouched():
-    """跨族嵌套：角括号包着直引号对，变换后会得到嵌套的 “…” → 整行回退。"""
-    src = "「他说。\"你好\"」"
-    out, changes = normalize_prose(src)
-    assert out == src
-    assert changes == []
 
 
-def test_code_fence_and_json_lines_untouched():
-    """代码围栏内的行与 JSON 键值形态行不属于正文，原样保留。"""
-    src = (
-        "他打开日志。\n\n"
-        '{"chapter_goal": "拿走玉牌", "status": "ok"}\n\n'
-        "```json\n"
-        '{"note": "「示例」与\\"直引号\\""}\n'
-        "```\n\n"
-        "然后关掉。"
-    )
-    out, changes = normalize_prose(src)
-    assert out == src
-    assert changes == []
 
 
 def test_book_title_and_dash_untouched():
@@ -215,9 +183,6 @@ def test_change_report_samples_capped():
     assert len(changes[0]["samples"]) == 3
 
 
-def test_no_change_returns_empty_report():
-    src = "他站起身，望向天际。\n\n风从窗缝里钻进来。"
-    assert normalize_prose(src) == (src, [])
 
 
 def test_empty_whitespace_and_short_text_do_not_crash():

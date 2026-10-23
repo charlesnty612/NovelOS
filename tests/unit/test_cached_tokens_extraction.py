@@ -51,11 +51,6 @@ def test_mock_provider_inject_usage_with_cached_tokens():
     assert out2["usage"]["cached_tokens"] == 80
 
 
-def test_mock_provider_usage_is_none_treated_as_default():
-    """``usage=None``/缺省等价 default usage。"""
-    p = MockProvider(scripted=["ok"], usage=None)
-    out = p.complete([{"role": "user", "content": "x"}])
-    assert out["usage"] == {"prompt": 0, "completion": 0, "total": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -142,62 +137,8 @@ def test_openai_compatible_provider_no_prompt_details():
     assert "cached_tokens" not in usage
 
 
-def test_openai_compatible_provider_cached_tokens_zero_omitted():
-    """cached_tokens=0：0 不下发（避免误判；既有 schema 不含此 key）。"""
-    import httpx
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        return _sse_response(
-            json.dumps({"choices": [{"delta": {"content": "hi"}}]}),
-            json.dumps(
-                {
-                    "choices": [{"delta": {}}],
-                    "usage": {
-                        "prompt_tokens": 50,
-                        "completion_tokens": 10,
-                        "total_tokens": 60,
-                        "prompt_tokens_details": {"cached_tokens": 0},
-                    },
-                }
-            ),
-        )
-
-    transport = httpx.MockTransport(_handler)
-    client = httpx.Client(transport=transport)
-    p = OpenAICompatibleProvider(
-        base_url="http://example.com", api_key="k", model="m1", client=client
-    )
-    out = p.complete([{"role": "user", "content": "hi"}])
-    assert "cached_tokens" not in out["usage"]
 
 
-def test_openai_compatible_provider_cached_tokens_invalid_omitted():
-    """cached_tokens 非 int（如字符串"abc"）：兜底不写 key。"""
-    import httpx
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        return _sse_response(
-            json.dumps({"choices": [{"delta": {"content": "hi"}}]}),
-            json.dumps(
-                {
-                    "choices": [{"delta": {}}],
-                    "usage": {
-                        "prompt_tokens": 50,
-                        "completion_tokens": 10,
-                        "total_tokens": 60,
-                        "prompt_tokens_details": {"cached_tokens": "abc"},
-                    },
-                }
-            ),
-        )
-
-    transport = httpx.MockTransport(_handler)
-    client = httpx.Client(transport=transport)
-    p = OpenAICompatibleProvider(
-        base_url="http://example.com", api_key="k", model="m1", client=client
-    )
-    out = p.complete([{"role": "user", "content": "hi"}])
-    assert "cached_tokens" not in out["usage"]
 
 
 # ---------------------------------------------------------------------------

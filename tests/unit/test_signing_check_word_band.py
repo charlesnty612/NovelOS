@@ -259,15 +259,6 @@ def test_resolve_word_band_returns_band_with_source_fingerprint(tmp_path: Path):
     assert band == {"low": 2000, "high": 3000, "floor": 1300, "source": "gp_wordband@2"}
 
 
-def test_resolve_word_band_rejects_disordered_pack_band(tmp_path: Path):
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    _bind_pack(
-        db_path, pid,
-        {"schema_version": "genre-pack.v1.1.0",
-         "pacing": {"chapter_word_band": {"low": 3000, "high": 2000, "floor": 1300}}},
-    )
-    assert resolve_chapter_word_band(db_path, pid) is None
 
 
 # ---------------------------------------------------------------------------

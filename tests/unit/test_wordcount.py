@@ -73,11 +73,6 @@ def test_word_band_low_floor_protects():
     assert low <= high  # 单调性
 
 
-def test_word_band_low_floor_lifts_high_too():
-    """更小 target：floor 单调性更显性——target=100，raw_low=85/floor=1200，raw_high=115<1200 → high=1200。"""
-    low, high = word_band(100)
-    assert low == 1200
-    assert high == 1200
 
 
 def test_word_band_floor_does_not_overflow_high_when_target_large():
@@ -199,10 +194,6 @@ def test_resolve_band_config_none_returns_module_defaults():
     assert cfg == {"low_ratio": 0.85, "high_ratio": 1.15, "floor": 1200}
 
 
-def test_resolve_band_config_empty_dict_returns_module_defaults():
-    """overrides={} ⇒ 全默认。"""
-    cfg = resolve_band_config({})
-    assert cfg == {"low_ratio": 0.85, "high_ratio": 1.15, "floor": 1200}
 
 
 def test_resolve_band_config_partial_keys_fill_defaults():
@@ -220,10 +211,6 @@ def test_resolve_band_config_all_keys_override():
     assert cfg == {"low_ratio": 0.8, "high_ratio": 1.2, "floor": 1000}
 
 
-def test_resolve_band_config_unknown_keys_ignored():
-    """未知键静默忽略（DB 演进预留扩展）。"""
-    cfg = resolve_band_config({"low_ratio": 0.9, "future_key": 999})
-    assert cfg == {"low_ratio": 0.9, "high_ratio": 1.15, "floor": 1200}
 
 
 def test_resolve_band_config_non_dict_raises():

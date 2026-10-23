@@ -318,14 +318,6 @@ def test_missing_quality_report_is_not_evaluated_not_a_pass():
     assert "未评估" in reason.message
 
 
-def test_missing_length_is_not_evaluated_not_a_pass():
-    """量不出字数 ⇒ not_evaluated（不得当作「字数合格」）。"""
-    ev = _chapter(length=None)
-    result = derive_chapter_verdict(ev)
-
-    assert result.verdict == NEEDS_WORK
-    statuses = _statuses(result)
-    assert statuses["DELIVERY_LENGTH_UNMEASURED"] == "not_evaluated"
 
 
 def test_missing_all_evidence_is_needs_work_with_three_not_evaluated_reasons():

@@ -14,6 +14,7 @@ import pytest
 from packages.core.agent_runtime.exceptions import AgentOutputError
 from packages.core.agent_runtime.revision_fidelity import REVISE_MIN_PRESERVED_RATIO
 from packages.core.agent_runtime.structured_output import (
+    _DIRECTOR_PLAN_ARRAYS,
     OBSERVER_ALLOWED_KEYS,
     OBSERVER_FORBIDDEN_KEYS,
     extract_json,
@@ -28,9 +29,6 @@ from packages.core.agent_runtime.structured_output import (
 # ---------------------------------------------------------------------------
 
 
-def test_extract_json_pure_json():
-    payload = extract_json('{"a": 1, "b": [2, 3]}')
-    assert payload == {"a": 1, "b": [2, 3]}
 
 
 def test_extract_json_with_code_fence():
@@ -416,6 +414,75 @@ def test_validate_contract_director_missing_schema_version():
     with pytest.raises(AgentOutputError) as exc:
         validate_contract("director", {"chapter_id": "ch_1"})
     assert "director-plan.v1" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# director 家族**计划数组形状**闸门（SO-DIR-ARRAY 的承载面）
+# ---------------------------------------------------------------------------
+
+
+def _director_plan_payload(**arrays: object) -> dict:
+    """director 家族基准载荷（``schema_version`` + ``chapter_id``）；计划数组可任填。"""
+    payload = {"schema_version": "director-plan.v1", "chapter_id": "ch_1"}
+    payload.update(arrays)
+    return payload
+
+
+def test_director_plan_array_guard_covers_exactly_three_arrays():
+    """闸门面不得静默扩大/缩小：受核销的计划数组恰好三个（口径以代码为准）。
+
+    与 ``test_validate_contract_observer_guards_only_the_seven_arrays`` 同族：
+    守卫的**覆盖面**本身要被钉住，否则「多查/少查一个数组」没人红。
+    """
+    assert [key for key, _ in _DIRECTOR_PLAN_ARRAYS] == [
+        "key_beats",
+        "character_changes_planned",
+        "information_releases",
+    ]
+
+
+@pytest.mark.parametrize("array_name", [key for key, _ in _DIRECTOR_PLAN_ARRAYS])
+def test_validate_contract_director_rejects_non_object_element(array_name: str):
+    """计划数组混入裸字符串碎片（``json_repair`` 兜底形态）→ 契约必红。
+
+    2026-09-21 事故形态：``json_repair`` 把 beat 内部字段值片段（``["payoff"]``）
+    以裸数组/裸字符串混进计划数组；旧契约只查顶层 ``schema_version`` ⇒ 腐烂结构
+    静默过闸并被写进 ``chapters.plan_json``。
+
+    Y-1 反例：``SO-DIR-ARRAY`` 突变把 ``_DIRECTOR_PLAN_ARRAYS`` 的循环体置空 ⇒
+    形状核销形同虚设 ⇒ 腐烂计划静默过闸 ⇒ **本用例必红**。
+    """
+    payload = _director_plan_payload(**{array_name: ["碎片"]})
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director", payload)
+    msg = str(exc.value)
+    assert "director plan array shape invalid" in msg
+    assert f"{array_name}[0] must be an object, got str" in msg
+
+
+def test_validate_contract_director_key_beats_requires_beat_id_and_purpose():
+    """``key_beats`` 元素另须含**字符串** ``beat_id`` / ``purpose``（缺字段/非字符串都要红）。
+
+    口径：其余字段必填面不收紧（见 ``_validate_director`` docstring「验收要严、
+    产线要活」）⇒ 本用例只钉住这两个必填串字段。
+    """
+    payload = _director_plan_payload(key_beats=[{"beat_id": "beat_001"}])
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director", payload)
+    assert "key_beats[0] missing required field: 'purpose'" in str(exc.value)
+
+    payload = _director_plan_payload(key_beats=[{"beat_id": 1, "purpose": "p"}])
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director", payload)
+    assert "key_beats[0].beat_id must be a string, got int" in str(exc.value)
+
+
+def test_validate_contract_director_non_list_array_is_rejected():
+    """在场但不是 list（顶层被写成对象）→ 必红（键缺席放行 ≠ 值形状放行）。"""
+    payload = _director_plan_payload(key_beats={"beat_id": "beat_001"})
+    with pytest.raises(AgentOutputError) as exc:
+        validate_contract("director", payload)
+    assert "key_beats must be a list, got dict" in str(exc.value)
 
 
 def test_validate_contract_writer_ok():

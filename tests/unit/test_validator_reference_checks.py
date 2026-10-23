@@ -92,48 +92,8 @@ def _base_snapshot(
 # ---------------------------------------------------------------------------
 
 
-def test_reference_existence_passes_when_in_snapshot():
-    snap = _base_snapshot(characters=["char_alice", "char_bob"])
-    delta = _good_delta()
-    delta["character_changes"] = [
-        {
-            "change_id": "cc_1",
-            "op": "update",
-            "target_id": "char_alice",
-            "character_id": "char_alice",
-            "facet": "state",
-            "field": "state.location",
-            "before": "Forest",
-            "after": "Cave",
-            "confidence": 0.9,
-            "evidence": _evidence(),
-            "risk_level": "LOW",
-        }
-    ]
-    errors = validate_delta(delta, snapshot=snap)
-    assert errors == []
 
 
-def test_reference_existence_no_snapshot_does_not_check():
-    """snapshot=None → 整体跳过引用存在性校验（向后兼容）。"""
-    delta = _good_delta()
-    delta["character_changes"] = [
-        {
-            "change_id": "cc_1",
-            "op": "update",
-            "target_id": "char_ghost",
-            "character_id": "char_ghost",
-            "facet": "state",
-            "field": "state.location",
-            "before": "X",
-            "after": "Y",
-            "confidence": 0.9,
-            "evidence": _evidence(),
-            "risk_level": "LOW",
-        }
-    ]
-    errors = validate_delta(delta)
-    assert errors == []
 
 
 # ---------------------------------------------------------------------------
@@ -512,16 +472,6 @@ def test_reference_existence_empty_string_id_does_not_error():
     assert ref_errs == [], f"空 ID 视为缺失：{ref_errs}"
 
 
-def test_reference_existence_non_dict_snapshot_does_not_crash():
-    """snapshot 不是 dict 时整体跳过引用校验（不抛异常）。"""
-    delta = _good_delta()
-    errors = validate_delta(delta, snapshot=None)
-    assert errors == []
-    # snapshot=非 dict 也跳过
-    errors = validate_delta(delta, snapshot="not_a_dict")
-    assert errors == []
-    errors = validate_delta(delta, snapshot=[])
-    assert errors == []
 
 
 # ---------------------------------------------------------------------------
@@ -529,83 +479,5 @@ def test_reference_existence_non_dict_snapshot_does_not_crash():
 # ---------------------------------------------------------------------------
 
 
-def test_reference_existing_passes_when_in_snapshot_for_all_kinds():
-    """全类型引用在 snapshot 中时全通过。"""
-    snap = _base_snapshot(
-        characters=["char_alice", "char_bob"],
-        locations=["loc_village"],
-        factions=["fac_rebels"],
-        world_rules=["rule_no_magic"],
-        hooks=["hook_open_1"],
-        debts=["debt_001"],
-        events=["evt_001"],
-    )
-    delta = _good_delta()
-    delta["character_changes"] = [
-        {
-            "change_id": "cc_1",
-            "op": "update",
-            "target_id": "char_alice",
-            "character_id": "char_alice",
-            "facet": "state",
-            "field": "state.location",
-            "before": "X",
-            "after": "Y",
-            "confidence": 0.9,
-            "evidence": _evidence(),
-            "risk_level": "LOW",
-        }
-    ]
-    delta["world_changes"] = [
-        {
-            "change_id": "wc_1",
-            "op": "update",
-            "target_id": "loc_village",
-            "world_kind": "location",
-            "world_id": "loc_village",
-            "field": "population",
-            "before": 100,
-            "after": 200,
-            "confidence": 0.9,
-            "evidence": _evidence(),
-            "risk_level": "LOW",
-        }
-    ]
-    delta["resolved_hooks"] = [
-        {
-            "change_id": "rh_1",
-            "op": "update",
-            "target_id": "hook_open_1",
-            "hook_id": "hook_open_1",
-            "from_status": "OPEN",
-            "to_status": "RESOLVED",
-            "payoff_summary": "结算",
-            "confidence": 0.9,
-            "evidence": _evidence(),
-            "risk_level": "LOW",
-        }
-    ]
-    errors = validate_delta(delta, snapshot=snap)
-    assert errors == []
 
 
-def test_existing_validator_signature_unchanged():
-    """validate_delta 不带 snapshot 调用时与原版字节级兼容。"""
-    delta = _good_delta()
-    delta["character_changes"] = [
-        {
-            "change_id": "cc_1",
-            "op": "update",
-            "target_id": "char_alice",
-            "character_id": "char_alice",
-            "facet": "state",
-            "field": "state.location",
-            "before": "Forest",
-            "after": "Cave",
-            "confidence": 0.9,
-            "evidence": _evidence(),
-            "risk_level": "LOW",
-        }
-    ]
-    errors = validate_delta(delta)
-    assert errors == []

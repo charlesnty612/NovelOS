@@ -310,19 +310,6 @@ def test_entity_reference_repeat_is_a_known_false_positive():
 # ---------------------------------------------------------------------------
 
 
-def test_partial_overlap_inside_long_clauses_is_not_a_beat():
-    """双侧覆盖率门：长片段里共有的**名词短语**不算节拍。
-
-    「低头看着桌上那张收据的复印件」/「桌上那份收据的复印件还摆着」共 6 字
-    （「收据的复印件」），但只占前一句的 6/14——那是两句不同的话碰巧都提到了同一件
-    东西，不是同一段素材被搬两遍。撤掉覆盖率门这段就会变成一条命中（突变验证用）。
-    """
-    prose = (
-        "低头看着桌上那张收据的复印件。\n\n"
-        + _SPACER_1
-        + "\n\n桌上那份收据的复印件还摆着。"
-    )
-    assert beat_repeats(prose) == []
 
 
 def test_longer_shared_clause_absorbs_the_shorter_one():

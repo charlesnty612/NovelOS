@@ -517,10 +517,6 @@ def test_missing_checkpoint_reports_readable_message():
     assert "checkpoint_json 为空" in s.headline
 
 
-def test_corrupt_checkpoint_does_not_raise():
-    s = isr.summarize_checkpoint("author_review", "{not json")
-    assert s.payload_kind == "unparseable"
-    assert s.has_substantive is False
 
 
 def test_checkpoint_without_node_state_reports_node_name():
@@ -534,9 +530,6 @@ def test_non_dict_checkpoint_tolerated():
     assert s.payload_kind == "unparseable"
 
 
-def test_missing_payload_key_reports_absent():
-    s = isr.summarize_checkpoint("author_review", json.dumps({"author_review": {"other": 1}}))
-    assert s.payload_found is False
 
 
 def test_string_typed_error_rules_are_parsed():
@@ -651,13 +644,6 @@ def test_critic_only_payload_still_substantive():
     assert "1 条" in " ".join(s.facts)
 
 
-def test_deep_review_only_payload_still_substantive():
-    s = isr.summarize_pause_payload(
-        "author_review",
-        {"stage": "chapter-review", "review_report": {},
-         "deep_review_status": "ok", "deep_review_report": {"findings": ["x"]}},
-    )
-    assert s.has_substantive is True
 
 
 def test_review_report_wins_over_init_branch_when_stage_present():

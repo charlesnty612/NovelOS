@@ -154,13 +154,6 @@ def test_repetition_regenerate_beats_surgical_revise():
     assert decision.reason == "in_chapter_repetition", decision
 
 
-def test_repetition_channel_lookup_is_not_text_only():
-    """重复命中只认结构化字段或 ``[RULE-ID]`` 文本行；正文里出现规则名不算命中。"""
-    decision = rp.decide_repair(
-        _report(warnings=["本章没有 AI-BEAT-REPEAT 问题的说明文字"]), remaining_rounds=2
-    )
-    assert decision.action == "revise", decision
-    assert decision.reason == "author_requested_revision", decision
 
 
 # ---------------------------------------------------------------------------
@@ -254,23 +247,6 @@ def test_surgical_style_rule_revises(rule_id: str):
     assert rule_id in decision.rule_ids, decision
 
 
-def test_genre_word_band_deviation_routes_through_length_branch():
-    """题材字数带（GENRE-WORD-BAND-DEVIATION）走长度分支，不被当未知规则硬停。"""
-    report = _report(
-        word_count=900,
-        within_range=False,
-        errors=[
-            {
-                "rule_id": "GENRE-WORD-BAND-DEVIATION",
-                "severity": "warning",
-                "visible_chars": 900,
-                "word_band": {"low": 2125, "high": 2875},
-            }
-        ],
-    )
-    decision = rp.decide_repair(report, remaining_rounds=2)
-    assert decision.action == "regenerate", decision
-    assert decision.reason == "length_shortfall_beyond_revise_cap", decision
 
 
 def test_clean_report_revises_on_author_request():

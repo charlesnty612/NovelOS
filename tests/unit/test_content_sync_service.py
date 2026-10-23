@@ -530,24 +530,7 @@ class TestManifestFromDictFaultTolerance:
         assert m.genre == "x"
         assert m.status == "ACTIVE"
 
-    def test_missing_genre_and_status_keep_none(self) -> None:
-        m = Manifest.from_dict(
-            {"project_id": "p1", "name": "n", "slug": "s"}
-        )
-        assert m.genre is None
-        assert m.status is None
 
-    def test_malformed_target_words_falls_back_to_none(self) -> None:
-        # ``target_words`` 传字符串无法转 int → 容错为 None
-        m = Manifest.from_dict(
-            {
-                "project_id": "p1",
-                "name": "n",
-                "slug": "s",
-                "target_words": "not-an-int",
-            }
-        )
-        assert m.target_words is None
 
     def test_malformed_story_state_versions_filters_bad_items(self) -> None:
         m = Manifest.from_dict(

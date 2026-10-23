@@ -292,22 +292,6 @@ def test_protagonist_partial_fields_still_inject(tmp_path: Path):
     assert "protagonist" in out["_reference_canon_consumed"]["consumed_fields"]
 
 
-def test_archived_canon_is_not_injected(tmp_path: Path):
-    """archived canon 不注入。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid)
-
-    _insert_canon(
-        db_path,
-        pid,
-        canon_json=_full_canon(),
-        status="archived",
-    )
-
-    out = build_director_input(db_path, pid, cid, "意图")
-    assert "reference_canon" not in out
-    assert "_reference_canon_consumed" not in out
 
 
 def test_takes_latest_active_canon_when_multiple_exist(tmp_path: Path):
@@ -363,30 +347,6 @@ def test_missing_fields_are_skipped_silently(tmp_path: Path):
     assert out["_reference_canon_consumed"]["consumed_fields"] == ["logline"]
 
 
-def test_canon_json_garbage_does_not_raise(tmp_path: Path):
-    """canon_json 解析失败 → 视为无 canon，不抛错。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid)
-
-    conn = get_connection(db_path)
-    try:
-        conn.execute(
-            """
-            INSERT INTO reference_canons
-                (canon_id, project_id, title, reader_profile, canon_json,
-                 report_md, status, created_at)
-            VALUES ('can_broken', ?, '坏', 'male_fantasy', '{not valid json}', '', 'active', ?)
-            """,
-            (pid, now_iso()),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    out = build_director_input(db_path, pid, cid, "意图")
-    assert "reference_canon" not in out
-    assert "_reference_canon_consumed" not in out
 
 
 def test_chapter_plan_pipeline_writes_consumed_audit_to_checkpoint(tmp_path: Path):

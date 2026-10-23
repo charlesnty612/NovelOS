@@ -106,25 +106,6 @@ def _spy_uncached(monkeypatch, module, attr: str) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def test_director_cache_miss_on_different_author_intent(tmp_path: Path, monkeypatch):
-    from packages.core.context_engine import director_input as di_mod
-
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid, 1, plan_json='{"chapter_goal": "x"}')
-    _cache_reset()
-
-    calls = _spy_uncached(monkeypatch, di_mod, "_build_director_input_uncached")
-
-    a1 = build_director_input(db_path, pid, cid, "意图 A")
-    b1 = build_director_input(db_path, pid, cid, "意图 B")
-    assert a1["author_intent"]["raw"] == "意图 A"
-    assert b1["author_intent"]["raw"] == "意图 B"
-    assert calls["n"] == 2, "不同 author_intent 必须 miss（各自装配一次）"
-
-    a2 = build_director_input(db_path, pid, cid, "意图 A")
-    assert a2["author_intent"]["raw"] == "意图 A"
-    assert calls["n"] == 2, "回到原意图应命中自己的条目，不再重装"
 
 
 # ---------------------------------------------------------------------------

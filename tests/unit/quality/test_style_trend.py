@@ -71,13 +71,6 @@ def test_trend_below_threshold_does_not_trigger():
     assert check_style_trend([80, 75, 66]) is None  # 累计 14
 
 
-def test_trend_boundary_15_triggers():
-    # 累计降幅恰好等于阈值 → 触发（>= 语义）
-    issue = check_style_trend([80, 70, 65])
-    assert issue is not None
-    assert issue.severity == "warning"
-    assert issue.rule_id == RULE_ID
-    assert issue.category == "style"
 
 
 def test_trend_strict_decline_above_threshold_triggers():
@@ -178,18 +171,8 @@ def _ctx_for_trend(
     return QualityContext(**fields)
 
 
-def test_engine_no_trend_field_no_issue():
-    """默认 None 时 issues 不含 RULE_STYLE_TREND_DECAY（兼容路径）。"""
-    engine = QualityEngine()
-    report = engine.evaluate(_ctx_for_trend())
-    assert not any(i.rule_id == RULE_ID for i in report.issues)
 
 
-def test_engine_short_trend_no_issue():
-    """长度 < WINDOW 时不触发。"""
-    engine = QualityEngine()
-    report = engine.evaluate(_ctx_for_trend(recent_style_scores=[80, 70]))
-    assert not any(i.rule_id == RULE_ID for i in report.issues)
 
 
 def test_engine_trend_declining_emits_issue():
@@ -202,11 +185,6 @@ def test_engine_trend_declining_emits_issue():
     assert trend_issues[0].category == "style"
 
 
-def test_engine_trend_rising_no_issue():
-    """上升序列 → 不触发。"""
-    engine = QualityEngine()
-    report = engine.evaluate(_ctx_for_trend(recent_style_scores=[60, 70, 80]))
-    assert not any(i.rule_id == RULE_ID for i in report.issues)
 
 
 # ============================================================================

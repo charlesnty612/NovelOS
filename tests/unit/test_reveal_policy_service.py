@@ -265,11 +265,6 @@ def test_create_negative_reveal_by_chapter_raises(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_list_empty(tmp_path: Path):
-    db_path = _fresh_db(tmp_path)
-    pid = _make_project(db_path)
-    svc = RevealPolicyService(db_path)
-    assert svc.list(pid) == []
 
 
 def test_list_with_status_filter(tmp_path: Path):

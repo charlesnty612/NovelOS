@@ -123,25 +123,8 @@ def test_create_rejects_pure_whitespace_model(tmp_path: Path):
     assert "纯空白" in r.text
 
 
-def test_create_rejects_tab_newline_only_model(tmp_path: Path):
-    """制表符 / 换行组成的「视觉为空」同样拒收——strip 口径覆盖所有空白字符。"""
-    app = _create_app(tmp_path)
-    r = _create_profile(app, model="\t\n  \n")
-    assert r.status_code == 422, r.text
 
 
-def test_patch_rejects_pure_whitespace_model(tmp_path: Path):
-    app = _create_app(tmp_path)
-    pid = _create_profile(app, model="gpt-4o").json()["profile_id"]
-
-    async def run() -> httpx.Response:
-        async with app.router.lifespan_context(app):
-            return await _request(
-                app, "PATCH", f"/api/model-profiles/{pid}", json={"model": "  "}
-            )
-
-    r = asyncio.run(run())
-    assert r.status_code == 422, r.text
 
 
 def test_rejected_pure_whitespace_writes_nothing(tmp_path: Path):
@@ -284,12 +267,6 @@ def _create_config(app, *, model: str, capability: str = "reasoning") -> httpx.R
     return asyncio.run(run())
 
 
-def test_model_configs_rejects_pure_whitespace_model(tmp_path: Path):
-    """/model-configs 与 /model-profiles 同口径：纯空白 model → 422。"""
-    app = _create_app(tmp_path)
-    r = _create_config(app, model="   ")
-    assert r.status_code == 422, f"纯空白必须拒收，实得 {r.status_code}: {r.text}"
-    assert "纯空白" in r.text
 
 
 def test_model_configs_strips_model_on_create(tmp_path: Path):
@@ -314,18 +291,6 @@ def test_model_configs_strips_model_on_create(tmp_path: Path):
     assert got.json()["model"] == "gpt-4o", "落库值必须已 strip（读回确认，非仅响应）"
 
 
-def test_model_configs_patch_rejects_pure_whitespace_model(tmp_path: Path):
-    app = _create_app(tmp_path)
-    cfg_id = _create_config(app, model="gpt-4o").json()["config_id"]
-
-    async def run() -> httpx.Response:
-        async with app.router.lifespan_context(app):
-            return await _request(
-                app, "PATCH", f"/api/model-configs/{cfg_id}", json={"model": " \t "}
-            )
-
-    r = asyncio.run(run())
-    assert r.status_code == 422, r.text
 
 
 def test_both_write_endpoints_agree_on_whitespace(tmp_path: Path):

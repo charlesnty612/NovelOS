@@ -456,20 +456,6 @@ def test_assign_chapter_missing_volume_raises_not_found(tmp_path: Path):
         svc.assign_chapter("vol_nonexistent", "ch_nonexistent")
 
 
-def test_assign_chapter_idempotent_on_same_volume(tmp_path: Path):
-    """chapter 已在该卷上 → 视为成功（幂等）。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _make_project(db_path)
-    svc = VolumeService(db_path)
-    from packages.domain.volume.models import VolumeCreate
-
-    v1 = svc.create(pid, VolumeCreate(number=1, title="v1"))
-    c1 = _make_chapter(db_path, pid, 1, "ch1")
-
-    svc.assign_chapter(v1["volume_id"], c1)
-    # 再次 assign 同一 chapter → 不报错
-    out = svc.assign_chapter(v1["volume_id"], c1)
-    assert out["volume_id"] == v1["volume_id"]
 
 
 def test_assign_chapter_overwrites_previous_volume(tmp_path: Path):

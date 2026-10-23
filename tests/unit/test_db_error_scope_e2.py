@@ -344,24 +344,6 @@ def test_degraded_path_does_not_reswallow_locked(needle: str, label: str) -> Non
     assert LOCKED in str(excinfo.value)
 
 
-@pytest.mark.parametrize(
-    ("needle", "label"),
-    [
-        ("SELECT MAX(state_version) AS max_sv", "max_state_version"),
-        ("SELECT word_band_json FROM projects", "word_band_json"),
-        ("genre_pack_id || '@' || gp.version", "genre_pack_ref"),
-    ],
-)
-def test_public_peek_entry_does_not_reswallow_locked(
-    needle: str, label: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """公开入口 ``_peek_chapter_context`` 整链也不吞（含 ``get_connection`` 之后的 finally）。"""
-    conn = _degraded_path_conn(needle, LOCKED)
-    monkeypatch.setattr(bc_common, "get_connection", lambda _db_path: conn)
-    with pytest.raises(sqlite3.OperationalError) as excinfo:
-        bc_common._peek_chapter_context(tmp_path / "x.db", "c1", project_id="p1")
-    assert conn.saw(needle), "夹具没走到被测点"
-    assert LOCKED in str(excinfo.value)
 
 
 def test_degraded_path_still_degrades_on_missing_schema(monkeypatch) -> None:

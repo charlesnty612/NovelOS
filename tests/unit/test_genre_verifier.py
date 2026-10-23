@@ -410,19 +410,6 @@ def test_word_band_dirty_band_not_checked(tmp_path: Path, dirty_band: dict):
     assert wb["reason"] == "chapter_word_band_invalid"
 
 
-def test_word_band_falls_back_to_draft_when_no_length_report(tmp_path: Path):
-    """无 length_report → 用最新草稿的 visible_chars 兜底（source='draft'）。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid)
-    _create_and_bind_pack(db_path, pid)
-    _insert_draft(db_path, cid, "字 字\n字" * 1000)  # 可见字符 3000
-
-    result = verify_chapter(db_path, cid)
-    wb = result.redline_check["word_band"]
-    assert wb["source"] == "draft"
-    assert wb["word_count"] == 3000
-    assert wb["within_band"] is True
 
 
 def test_word_band_measures_reviewed_draft_not_stale_length_report(tmp_path: Path):

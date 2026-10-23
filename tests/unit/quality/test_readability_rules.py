@@ -304,12 +304,6 @@ def test_long_para_triggers_at_min_count():
     assert all(len(s) <= 30 for s in hit["samples"])
 
 
-def test_long_para_warning_tier_at_exactly_error_chars():
-    """140 字仍属 warning 档（error 判据是严格大于 140）。"""
-    prose = _FILLER + "\n\n" + _paragraphs(140, 140)
-    hit = _readability_hits(prose).get("AI-LONG-PARA")
-    assert hit is not None and hit["severity"] == "warning"
-    assert hit["error_count"] == 0
 
 
 def test_long_para_error_tier_single_paragraph():

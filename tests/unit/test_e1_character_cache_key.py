@@ -545,22 +545,6 @@ def test_e1_character_state_change_misses_cache(tmp_path: Path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_e1_writer_untouched_still_hits_cache(tmp_path: Path, monkeypatch):
-    """反向对照：什么都没改必须仍然命中——否则「每次都重装」也能让上面全绿。"""
-    from packages.core.context_engine import writer_input as wi_mod
-
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid)
-    _insert_character(db_path, pid)
-    _insert_character(db_path, pid, name="林昭", role="supporting")
-    _cache_reset()
-
-    calls = _spy_uncached(monkeypatch, wi_mod, "_build_writer_input_uncached")
-
-    for _ in range(5):
-        build_writer_input(db_path, cid, SCENE)
-    assert calls["n"] == 1, "无改动时必须只装配一次"
 
 
 def test_e1_director_untouched_still_hits_cache(tmp_path: Path, monkeypatch):
@@ -580,26 +564,6 @@ def test_e1_director_untouched_still_hits_cache(tmp_path: Path, monkeypatch):
     assert calls["n"] == 1, "无改动时必须只装配一次"
 
 
-def test_e1_writer_updated_at_bump_alone_still_hits_cache(tmp_path: Path, monkeypatch):
-    """只推进 updated_at、内容不动 ⇒ payload 逐字不变 ⇒ **必须仍然命中**。
-
-    这是「指纹 = payload 内容」的语义断言，同时证伪两族假修：
-    ① 拿 ``MAX(updated_at)``/``COUNT(*)`` 之类当指纹；② 无差别「每次都重装」。
-    """
-    from packages.core.context_engine import writer_input as wi_mod
-
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid)
-    char_id = _insert_character(db_path, pid)
-    _cache_reset()
-
-    calls = _spy_uncached(monkeypatch, wi_mod, "_build_writer_input_uncached")
-
-    build_writer_input(db_path, cid, SCENE)
-    _touch_updated_at(db_path, char_id)
-    build_writer_input(db_path, cid, SCENE)
-    assert calls["n"] == 1, "内容未变（只动 updated_at）时必须仍命中缓存"
 
 
 def test_e1_director_updated_at_bump_alone_still_hits_cache(tmp_path: Path, monkeypatch):

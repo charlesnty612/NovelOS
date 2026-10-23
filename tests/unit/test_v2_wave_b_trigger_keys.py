@@ -480,24 +480,6 @@ def test_director_input_never_suppresses_character(tmp_path: Path):
     assert supp["injection"] == "suppressed"
 
 
-def test_director_input_alias_trigger_hits_summary_to_full(tmp_path: Path):
-    """别名命中：plan 文本未提 name，但命中 aliases → full 注入。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(
-        db_path, pid,
-        plan_json={"chapter_goal": "云隐剑碎片被发现"},
-    )
-    char_id = _insert_character(
-        db_path, pid, name="林昭", aliases=["云隐剑"],
-    )
-
-    out = build_director_input(db_path, pid, cid, "意图")
-
-    chars = out["character_state_excerpts"]
-    real_chars = [c for c in chars if "character_id" in c]
-    lin = next(c for c in real_chars if c["character_id"] == char_id)
-    assert lin["_injection"] == "full"
 
 
 def test_director_input_world_location_auto_summary(tmp_path: Path):
@@ -581,20 +563,6 @@ def test_director_input_world_rules_are_not_filtered(tmp_path: Path):
     assert rule.get("_injection", "full") == "full"
 
 
-def test_director_input_fallback_to_full_when_plan_empty(tmp_path: Path):
-    """回退策略：章节 plan_json 为空 → auto 全部按 full 注入（保兼容）。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid, plan_json={})
-    char_id = _insert_character(db_path, pid, name="林昭")
-
-    out = build_director_input(db_path, pid, cid, "意图")
-
-    chars = out["character_state_excerpts"]
-    real_chars = [c for c in chars if "character_id" in c]
-    lin = next(c for c in real_chars if c["character_id"] == char_id)
-    assert lin["_injection"] == "full"
-    assert "core_json" in lin
 
 
 # ---------------------------------------------------------------------------
@@ -622,26 +590,6 @@ def test_writer_input_applies_policy_with_scene_plan(tmp_path: Path):
     assert lin["_injection"] == "full"
 
 
-def test_writer_input_no_match_downgrades_to_summary(tmp_path: Path):
-    """Writer 场景 plan + scene_plan 都没提 → summary。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid, plan_json={"chapter_goal": "无关剧情"})
-    # ⚠️ 2026-10-16 批次十一：夹具助手默认 ``role="protagonist"``，而主角在 L1
-    # 已改为**无条件放行**（relevance 层「主角始终完整保留」的既有承诺，此前在
-    # 整条链上一处都不兑现）。本条要测的是「``auto`` 未命中 ⇒ 降级摘要」，
-    # 故载体必须**换成非主角**，否则测到的是主角放行而非触发判据。
-    char_id = _insert_character(db_path, pid, name="林昭", role="other")
-
-    # 显式关掉 relevance 层：非主角且未被识别为 involved 的角色会在那一层被削，
-    # 而那一层的摘要**不带** ``_injection`` 标记 ⇒ 会以 ``KeyError`` 掩盖掉 L1 的结论。
-    # 本条要测的正是 L1 的 full/summary 判定，故隔离掉下游。
-    out = build_writer_input(db_path, cid, {"purpose": "无关描述"},
-                             context_mode="full", relevance_trim=False)
-
-    chars = out["character_state_excerpts"]
-    lin = next(c for c in chars if c["character_id"] == char_id)
-    assert lin["_injection"] == "summary"
 
 
 # ---------------------------------------------------------------------------

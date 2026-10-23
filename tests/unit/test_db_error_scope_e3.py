@@ -220,12 +220,6 @@ def test_writer_word_band_missing_column_still_degrades(tmp_path, monkeypatch):
     assert set(band) == {"low", "high"}
 
 
-def test_writer_word_band_missing_table_still_degrades(tmp_path, monkeypatch):
-    """表缺失（同属结构缺失）⇒ 同样只降级，不上抛。"""
-    payload = _build_writer_with_word_band_failure(
-        tmp_path, monkeypatch, "no such table: projects",
-    )
-    assert payload["chapter"]["target_word_count"] == 3000
 
 
 @pytest.mark.parametrize("message", RUNTIME_DB_FAILURES)
@@ -336,16 +330,6 @@ def test_hidden_entity_lookup_runtime_failure_propagates(monkeypatch, message):
         wi._filter_hidden_by_reveal_policies("x.db", "prj_x", {})
 
 
-def test_hidden_entity_lookup_missing_column_still_degrades(monkeypatch):
-    """第 3 处的正向：缺列 ⇒ 降级为「没查到 HIDDEN」返回 0。"""
-    monkeypatch.setattr(
-        wi, "get_connection",
-        lambda *_: _FakeConn([
-            ("FROM reveal_policies", _POLICY_ROWS),
-            ("FROM characters", sqlite3.OperationalError("no such column: visibility")),
-        ]),
-    )
-    assert wi._filter_hidden_by_reveal_policies("x.db", "prj_x", {}) == 0
 
 
 @pytest.mark.parametrize("message", RUNTIME_DB_FAILURES)

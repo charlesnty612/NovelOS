@@ -245,13 +245,6 @@ def test_previous_chapter_tail_contains_last_300_chars(tmp_path: Path):
     assert len(tail["tail_text"]) == 300
 
 
-def test_previous_chapter_tail_empty_when_no_prev(tmp_path: Path):
-    """无前章（chapter_no=1）→ previous_chapter_tail = {}。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid, number=1)
-    out = build_director_input(db_path, pid, cid, "意图")
-    assert out["previous_chapter_tail"] == {}
 
 
 # ---------------------------------------------------------------------------

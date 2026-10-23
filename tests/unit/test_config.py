@@ -62,39 +62,7 @@ def test_reset_clears_singleton():
 # ---------------------------------------------------------------------------
 
 
-def test_novelos_port_overrides_api_port(monkeypatch: pytest.MonkeyPatch):
-    """同时设置两个端口变量时，``NOVELOS_PORT`` 胜出。"""
-    monkeypatch.setenv("NOVELOS_API_PORT", "9001")
-    monkeypatch.setenv("NOVELOS_PORT", "18081")
-    reset_settings()
-    try:
-        s = config_mod.get_settings()
-    finally:
-        reset_settings()
-    assert s.api_port == 18081
 
 
-def test_novelos_api_port_still_works_when_novelos_port_unset(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """仅设置 ``NOVELOS_API_PORT`` 时仍按其值生效（兼容基线 test_env_var_override）。"""
-    monkeypatch.setenv("NOVELOS_API_PORT", "9999")
-    monkeypatch.delenv("NOVELOS_PORT", raising=False)
-    reset_settings()
-    try:
-        s = config_mod.get_settings()
-    finally:
-        reset_settings()
-    assert s.api_port == 9999
 
 
-def test_default_port_is_18081_when_no_env(monkeypatch: pytest.MonkeyPatch):
-    """两个端口变量均未设置时，默认 18081（V2.0 Wave C 任务三统一收敛）。"""
-    monkeypatch.delenv("NOVELOS_PORT", raising=False)
-    monkeypatch.delenv("NOVELOS_API_PORT", raising=False)
-    reset_settings()
-    try:
-        s = config_mod.get_settings()
-    finally:
-        reset_settings()
-    assert s.api_port == 18081

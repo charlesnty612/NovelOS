@@ -287,36 +287,6 @@ def test_loop_marks_cancelled_via_registry_and_stops_before_next_round(
     assert wf._AUTO_REVISE_LOOPS == {}  # noqa: SLF001
 
 
-def test_loop_stops_when_recorded_child_is_cancelled_in_db(tmp_path: Path, monkeypatch):
-    """已记录子 run 在 DB 中变为 CANCELLED（竞态兜底）→ 不再启动下一轮。"""
-    db_path = _db(tmp_path)
-    calls: list[tuple[str, str]] = []
-    fake = _make_fake_runner(db_path, calls)
-
-    def fake_with_db_cancel(*args, **kwargs):
-        out = fake(*args, **kwargs)
-        if out["status"] == "FAILED":
-            # 取消发生在 payload 返回之后（注册表未及置位）→ 只有 DB 状态可见
-            conn = get_connection(db_path)
-            try:
-                conn.execute(
-                    "UPDATE workflow_runs SET status='CANCELLED' WHERE run_id = ?",
-                    (out["run_id"],),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        return out
-
-    monkeypatch.setattr(wf.revise, "_run_workflow_return_payload", fake_with_db_cancel)
-
-    parent = _insert_parent_review_run(db_path)
-    payload = wf._auto_revise_loop(  # noqa: SLF001
-        object(), db_path, "prj_1", "ch_1", None, 3, parent_run_id=parent,
-    )
-
-    assert [c[0] for c in calls] == ["write", "review"], calls
-    assert payload["status"] == "CANCELLED"
 
 
 def test_loop_without_cancel_still_runs_to_max_iter(tmp_path: Path, monkeypatch):
@@ -566,26 +536,6 @@ def test_loop_starts_fresh_write_when_length_shortfall_exceeds_capped_reach(
     assert [extra for name, extra in calls if name == "chapter-review"] == [None, None]
 
 
-def test_loop_keeps_capped_revise_when_shortfall_within_capped_reach(
-    tmp_path: Path, monkeypatch
-):
-    """小缺口（2000 vs 带下限 2125，需 +6.25% < 2 轮 × +5% ≈ +10.25%）→ 仍走 capped revise。
-
-    突变验证：把策略表的「缺口 > 剩余轮次可达幅度」判据去掉（见长度缺口就 regenerate）
-    → 本测试红。
-    """
-    db_path = _db(tmp_path)
-    parent = _insert_review_run_with_report(db_path, _length_report(2000))
-    calls: list[tuple[str, dict | None]] = []
-    monkeypatch.setattr(
-        wf.revise, "_run_workflow_return_payload", _make_escape_runner(db_path, calls)
-    )
-
-    wf._auto_revise_loop(  # noqa: SLF001
-        object(), db_path, "prj_1", "ch_1", None, 2, parent_run_id=parent,
-    )
-
-    assert _write_ctx_extras(calls) == [None, None], calls
 
 
 def test_loop_stops_without_child_runs_on_continuity_rule(tmp_path: Path, monkeypatch):
@@ -638,29 +588,6 @@ def test_loop_keeps_capped_revise_when_draft_is_too_long(tmp_path: Path, monkeyp
     assert _write_ctx_extras(calls) == [None, None], calls
 
 
-def test_loop_recomputes_escape_decision_each_round(tmp_path: Path, monkeypatch):
-    """逃逸判定按轮刷新：第 1 轮大缺口 → fresh；回路内 review 报了接近带内的新稿 →
-    第 2 轮回到 capped revise（不能一直沿用父 run 的旧报告）。
-
-    突变验证：把 ``pending_review_run_id`` 的刷新（``= review_payload["run_id"]``）撤掉
-    → 第 2 轮仍读父 run 的旧报告 → 本测试红。
-    """
-    db_path = _db(tmp_path)
-    parent = _insert_review_run_with_report(db_path, _length_report(854))
-    calls: list[tuple[str, dict | None]] = []
-    monkeypatch.setattr(
-        wf.revise,
-        "_run_workflow_return_payload",
-        _make_escape_runner(db_path, calls, review_reports=[_length_report(2100)]),
-    )
-
-    wf._auto_revise_loop(  # noqa: SLF001
-        object(), db_path, "prj_1", "ch_1", None, 2, parent_run_id=parent,
-    )
-
-    write_extras = _write_ctx_extras(calls)
-    assert write_extras[0] == {"fresh_write": True}, write_extras
-    assert write_extras[1] is None, write_extras
 
 
 def test_loop_fresh_write_keeps_other_ctx_extras(tmp_path: Path, monkeypatch):

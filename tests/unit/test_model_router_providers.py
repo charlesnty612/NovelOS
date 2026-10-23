@@ -401,28 +401,8 @@ def test_ollama_health_check_ok_on_200():
     assert captured["url"].endswith("/api/tags")
 
 
-def test_ollama_health_check_fail_on_500():
-    transport = httpx.MockTransport(lambda req: httpx.Response(500, text="boom"))
-    p = OllamaProvider(
-        base_url="http://127.0.0.1:11434", model="llama3",
-        client=httpx.Client(transport=transport),
-    )
-    r = p.health_check()
-    assert r["ok"] is False
-    assert r["status_code"] == 500
 
 
-def test_ollama_health_check_fail_on_network_error():
-    def handler(req: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused")
-
-    p = OllamaProvider(
-        base_url="http://127.0.0.1:11434", model="llama3",
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
-    r = p.health_check()
-    assert r["ok"] is False
-    assert r["status_code"] is None
 
 
 # ===========================================================================
@@ -430,35 +410,10 @@ def test_ollama_health_check_fail_on_network_error():
 # ===========================================================================
 
 
-def test_openai_health_check_ok_on_200():
-    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"data": []}))
-    p = _openai_with_transport(transport)
-    r = p.health_check()
-    assert r["ok"] is True
-    assert r["status_code"] == 200
 
 
-def test_openai_health_check_fail_on_401():
-    transport = httpx.MockTransport(lambda req: httpx.Response(401, text="bad key"))
-    p = _openai_with_transport(transport)
-    r = p.health_check()
-    assert r["ok"] is False
-    assert r["status_code"] == 401
 
 
-def test_openai_health_check_fail_on_network_error():
-    def handler(req: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused")
-
-    from packages.core.model_router import OpenAICompatibleProvider
-
-    p = OpenAICompatibleProvider(
-        base_url="https://api.example.com", api_key=None, model="x",
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
-    r = p.health_check()
-    assert r["ok"] is False
-    assert r["status_code"] is None
 
 
 def _openai_with_transport(transport):

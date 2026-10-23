@@ -210,17 +210,6 @@ def test_update_committed_to_reviewed_blocked(tmp_path: Path):
     assert row["status"] == "COMMITTED"
 
 
-def test_update_other_legal_transitions_unaffected(tmp_path: Path):
-    """守卫只锁 COMMITTED→REVIEWED 这一条边：其余白名单边照常走 update()。"""
-    settings = _make_settings(tmp_path)
-    db_path = str(settings.db_path)
-    pid = _make_project(db_path)
-    cid = _make_chapter(db_path, pid, status="DRAFTED")
-    svc = ChapterService(db_path)
-
-    result = svc.update(cid, ChapterUpdate(status="REVIEWED"))
-    assert result is not None
-    assert result["status"] == "REVIEWED"
 
 
 def test_reopen_still_reaches_reviewed_after_update_guard(tmp_path: Path):

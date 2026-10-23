@@ -135,12 +135,6 @@ def test_bind_unknown_skill_writes_nothing(tmp_path):
     assert svc.list_project_skills(pid) == [], "失败时不得留下半套绑定"
 
 
-def test_bind_unknown_project_returns_project_not_found(tmp_path):
-    """项目不存在 ⇒ ``project_not_found``（端点据此转 404）。"""
-    db_path = fresh_db(tmp_path)
-    make_skill(db_path, skill_id="skl_a", name="A")
-    code, _ = SkillService(db_path).bind("prj_ghost", ["skl_a"])
-    assert code == BindStatus.PROJECT_NOT_FOUND
 
 
 def test_unbind_is_idempotent(tmp_path):

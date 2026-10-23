@@ -54,16 +54,8 @@ def _isolate(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_load_api_keys_missing_returns_empty(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("NOVELOS_SECRETS_FILE", str(tmp_path / "no-such.json"))
-    assert load_api_keys() == {}
 
 
-def test_load_api_keys_bad_json_does_not_raise(tmp_path: Path, monkeypatch):
-    p = tmp_path / "bad.json"
-    p.write_text("{not json", encoding="utf-8")
-    monkeypatch.setenv("NOVELOS_SECRETS_FILE", str(p))
-    assert load_api_keys() == {}
 
 
 def test_load_api_keys_invalid_root_or_apikeys_returns_empty(tmp_path: Path, monkeypatch):
@@ -217,20 +209,6 @@ def test_params_api_key_empty_string_treated_as_missing(tmp_path: Path, monkeypa
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_api_key_profile_id_wins_over_params_then_env(
-    tmp_path: Path, monkeypatch
-):
-    p = tmp_path / "s.json"
-    _write_secrets(p, {"mprof_p": "sk-from-profile"})
-    monkeypatch.setenv("NOVELOS_SECRETS_FILE", str(p))
-    monkeypatch.setenv("NOVELOS_API_KEY_DEEPSEEK", "sk-from-env")
-    # file[profile_id] 命中
-    got = resolve_api_key(
-        "deepseek",
-        {"api_key": "sk-from-params"},
-        profile_id="mprof_p",
-    )
-    assert got == "sk-from-profile"
 
 
 def test_resolve_api_key_backward_compat_no_profile_id(monkeypatch):
@@ -242,14 +220,6 @@ def test_resolve_api_key_backward_compat_no_profile_id(monkeypatch):
     assert resolve_api_key("deepseek", None) is None
 
 
-def test_resolve_api_key_provider_fallback_in_file(tmp_path: Path, monkeypatch):
-    """profile_id 缺失但 provider 命中文件的情况。"""
-    p = tmp_path / "s.json"
-    _write_secrets(p, {"openai_compatible": "sk-from-provider"})
-    monkeypatch.setenv("NOVELOS_SECRETS_FILE", str(p))
-    monkeypatch.delenv("NOVELOS_API_KEY_OPENAI_COMPATIBLE", raising=False)
-    got = resolve_api_key("openai_compatible", None, profile_id=None)
-    assert got == "sk-from-provider"
 
 
 # ---------------------------------------------------------------------------

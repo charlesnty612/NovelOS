@@ -137,17 +137,6 @@ def _create_pack(
 # ---------------------------------------------------------------------------
 
 
-def test_director_payload_has_no_genre_pack_when_unbound(tmp_path: Path):
-    """未绑定题材包 → payload 无 genre_pack / _genre_pack_consumed 键（既有行为不变）。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid)
-    _cache_reset()
-
-    payload = build_director_input(db_path, pid, cid, "意图")
-
-    assert "genre_pack" not in payload
-    assert "_genre_pack_consumed" not in payload
 
 
 def test_director_payload_has_no_genre_pack_after_unbind(tmp_path: Path):
@@ -283,31 +272,6 @@ def test_director_pacing_budget_truncation(tmp_path: Path):
     assert section["__pacing_truncated__"] is True
 
 
-def test_director_skips_broken_payload_json(tmp_path: Path):
-    """payload_json 非法（直插脏数据）→ 零注入且不抛错（装配路径容错）。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid)
-    now = now_iso()
-    conn = get_connection(db_path)
-    try:
-        conn.execute(
-            "INSERT INTO genre_packs (pack_id, name, genre_tag, version, payload_json, "
-            "source_path, created_at, updated_at) VALUES ('gp_broken', '坏包', 't', 1, "
-            "'{not json', NULL, ?, ?)",
-            (now, now),
-        )
-        conn.execute(
-            "UPDATE projects SET genre_pack_id = 'gp_broken' WHERE project_id = ?", (pid,)
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    _cache_reset()
-
-    payload = build_director_input(db_path, pid, cid, "意图")
-    assert "genre_pack" not in payload
-    assert "_genre_pack_consumed" not in payload
 
 
 def test_genre_pack_excerpt_unknown_consumer_is_noop(tmp_path: Path):

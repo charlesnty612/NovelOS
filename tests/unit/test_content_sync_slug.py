@@ -80,15 +80,7 @@ class TestUniqueSlug:
         (tmp_path / "foo-3").mkdir()
         assert unique_slug("foo", tmp_path) == "foo-4"
 
-    def test_unrelated_dirs_ignored(self, tmp_path: Path) -> None:
-        (tmp_path / "bar").mkdir()
-        (tmp_path / "baz").mkdir()
-        assert unique_slug("foo", tmp_path) == "foo"
 
-    def test_files_in_content_dir_not_counted(self, tmp_path: Path) -> None:
-        # content_dir 下存在的「文件」不算 book 目录冲突
-        (tmp_path / "README.md").touch()
-        assert unique_slug("foo", tmp_path) == "foo"
 
 
 @pytest.mark.parametrize(

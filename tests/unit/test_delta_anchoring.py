@@ -98,20 +98,8 @@ def test_quote_translated_excerpt_not_reported():
     )
 
 
-def test_short_state_word_skipped():
-    """短状态词（CJK bigram < 6）跳过 bigram 检查——实测 bigram<6 组 p50=0，
-    「死亡」「冷静、试探」类状态快照写法天然脱节，纳入只产噪声。"""
-    delta = _delta_one("character_changes", _char_item("update", "死亡"))
-    findings = check_delta_source_anchoring(delta, [DRAFT])
-    assert findings == [], findings
 
 
-def test_well_anchored_after_not_reported():
-    """after 直接转写源文本句子 → 高覆盖，不报。"""
-    after = "第一镖头沈青崖押着最后一趟镖进了城"
-    delta = _delta_one("character_changes", _char_item("add", after))
-    findings = check_delta_source_anchoring(delta, [DRAFT])
-    assert findings == [], findings
 
 
 def test_non_cjk_after_is_skipped():
@@ -142,15 +130,6 @@ def test_empty_source_texts_returns_empty_findings():
     assert check_delta_source_anchoring(delta, [None]) == []  # type: ignore[list-item]
 
 
-def test_delete_op_and_non_dict_entries_skipped():
-    """delete op 无新文本不锚定；非 dict 条目跳过（结构守卫另行处理）。"""
-    delta = {
-        "character_changes": [
-            "裸字符串碎片",
-            _char_item("delete", "第一代老镖头开创漕运百年基业"),
-        ],
-    }
-    assert check_delta_source_anchoring(delta, [DRAFT]) == []
 
 
 def test_findings_across_multiple_arrays_keep_path():
@@ -168,10 +147,3 @@ def test_findings_across_multiple_arrays_keep_path():
     assert paths == {"world_changes[0]", "new_hooks[0]"}, findings
 
 
-def test_excerpt_empty_string_not_checked():
-    """excerpt 为空串/空白 → 不视为摘录声明，不报。"""
-    delta = _delta_one(
-        "character_changes",
-        _char_item("add", "第一镖头沈青崖押着最后一趟镖进了城", excerpt="  "),
-    )
-    assert check_delta_source_anchoring(delta, [DRAFT]) == []

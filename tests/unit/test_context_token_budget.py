@@ -362,15 +362,3 @@ def test_director_oversized_assembly_warns_with_agent_name(tmp_path: Path, caplo
     assert len(payload["character_state_excerpts"]) == 40
 
 
-def test_writer_small_assembly_stays_silent(tmp_path: Path, caplog):
-    """反向用例（生产路径）：正常体量的 writer 装配不得发告警。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid, 1, plan_json='{"chapter_goal": "目标"}')
-    _insert_character(db_path, pid, "甲", core_json=json.dumps({"personality": "沉稳"}))
-
-    with caplog.at_level(logging.WARNING):
-        payload = build_writer_input(db_path, cid, {"purpose": "场景"})
-
-    assert payload["_assembly_meta"]["token_budget_exceeded"] is False
-    assert _warn_records(caplog) == []

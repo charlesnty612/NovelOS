@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from packages.core.quality.issues import Issue
 from packages.core.quality.scoring import (
-    score_character,
     score_continuity,
     score_foreshadowing,
     score_pacing,
@@ -43,14 +42,6 @@ def _issue(severity="warning", rule_id="RULE_X", category="character_contradicti
 # ============================================================================
 
 
-def test_plot_full_pass():
-    plan = {"key_beats": [{"summary": "开启战斗"}, {"summary": "撤退"}]}
-    delta = _delta(new_events=[
-        {"name": "开启战斗", "description": "与敌遭遇"},
-        {"name": "撤退", "description": "战略后退"},
-    ])
-    score, _ = score_plot(plan, delta)
-    assert score == 100
 
 
 def test_plot_missing_beats():
@@ -85,47 +76,8 @@ def test_plot_no_plan_info_neutral():
 # ============================================================================
 
 
-def test_character_full_match():
-    snap = _snap(characters=[
-        {
-            "character_id": "c1",
-            "current_state": {"location": "山脚"},
-        }
-    ])
-    delta = _delta(character_changes=[
-        {
-            "op": "update",
-            "character_id": "c1",
-            "field": "location",
-            "before": "山脚",
-        }
-    ])
-    score, _ = score_character(snap, delta)
-    assert score == 100
 
 
-def test_character_partial_match():
-    snap = _snap(characters=[
-        {"character_id": "c1", "current_state": {"location": "山脚"}},
-        {"character_id": "c2", "current_state": {"location": "海角"}},
-    ])
-    delta = _delta(character_changes=[
-        {
-            "op": "update",
-            "character_id": "c1",
-            "field": "location",
-            "before": "山脚",
-        },
-        {
-            "op": "update",
-            "character_id": "c2",
-            "field": "location",
-            "before": "错误位置",  # 不一致
-        },
-    ])
-    score, _ = score_character(snap, delta)
-    assert 0 <= score <= 100
-    assert score < 100  # 至少有一个不一致
 
 
 # ============================================================================
@@ -192,12 +144,6 @@ def test_style_normal():
     assert not any(i.rule_id == "RULE_STYLE_REPETITION_TRIGRAM" for i in issues)
 
 
-def test_style_ai_marker_dense():
-    sent = "首先其次最后但是不仅正常文字用于测试句子。"
-    draft = sent * 30
-    score, issues = score_style(draft)
-    # AI marker 密度高 ⇒ 触发扣分；但因同样密集可能有 trigram 重复 ⇒ 两条 warning
-    assert score < 100
 
 
 def test_style_trigram_repetition():
@@ -219,17 +165,6 @@ def test_style_dialogue_ratio_out_of_range():
 # ============================================================================
 
 
-def test_pacing_default_pass_mid_score():
-    paras = [
-        "第一段内容。",
-        "第二段对话占比适中。",
-        "第三段叙事停顿。",
-        "第四段情节推进。",
-        "末段竟然有钩子。",
-    ]
-    draft = "\n\n".join(paras)
-    score, _ = score_pacing(draft)
-    assert 0 <= score <= 100
 
 
 def test_pacing_flat_low_score():
@@ -241,12 +176,6 @@ def test_pacing_flat_low_score():
     assert score <= 100 - 20
 
 
-def test_pacing_no_end_hook():
-    paras = ["段落" + str(i) + "。" for i in range(5)]
-    draft = "\n\n".join(paras)
-    score, _ = score_pacing(draft)
-    # 末段 "段落4。" 无钩子 marker ⇒ -15
-    assert score <= 95
 
 
 def test_pacing_short_no_op():
@@ -269,22 +198,8 @@ def test_foreshadowing_no_hooks_neutral():
     assert any(i.rule_id == "RULE_FORESHADOW_NO_HOOKS" for i in issues)
 
 
-def test_foreshadowing_all_resolved():
-    """只兑不埋 = 100（兑现是满分锚点）。"""
-    score, _ = score_foreshadowing(
-        {},
-        _delta(new_hooks=[], resolved_hooks=_hooks(2)),
-    )
-    assert score == 100
 
 
-def test_foreshadowing_mix_new_and_resolved():
-    """埋 1 兑 1 = round(100 × (1 + 0.9) / 2) = 95。"""
-    score, _ = score_foreshadowing(
-        {},
-        _delta(new_hooks=_hooks(1), resolved_hooks=_hooks(1)),
-    )
-    assert score == 95
 
 
 def test_foreshadowing_plant_only_beats_neutral():

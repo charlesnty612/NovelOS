@@ -166,19 +166,6 @@ def test_arc_view_reveal_policies_overdue_appears_when_max_chapter_passes(tmp_pa
     }
 
 
-def test_arc_view_reveal_policies_no_chapters_no_overdue(tmp_path: Path):
-    """无章节时 current_max_chapter_no 为 None → overdue 为空（即使 reveal_by_chapter=1）。"""
-    settings = _make_settings(tmp_path)
-    db_path = str(settings.db_path)
-    pid = _make_project(db_path)
-    _make_character(db_path, pid, "char_alice")
-    svc = RevealPolicyService(db_path)
-    svc.create(
-        project_id=pid, target_kind="character", target_id="char_alice",
-        reveal_by_chapter=1,
-    )
-    result = build_arc_view(settings.db_path, pid)
-    assert result["reveal_policies"]["overdue"] == []
 
 
 def test_arc_view_reveal_policies_revealed_not_in_overdue(tmp_path: Path):

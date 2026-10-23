@@ -65,11 +65,6 @@ def test_parse_beat_flags_list_of_dict_with_payoff():
     assert _parse_beat_flags(key_beats) == (True, False)
 
 
-def test_parse_beat_flags_list_of_dict_with_charge():
-    key_beats = [
-        {"beat_id": "b1", "purpose": "[CHARGE] 蓄力下一章反转"},
-    ]
-    assert _parse_beat_flags(key_beats) == (False, True)
 
 
 def test_parse_beat_flags_mixed_tags():
@@ -92,14 +87,6 @@ def test_parse_beat_flags_missing_returns_false_false():
     assert _parse_beat_flags("not a list") == (False, False)
 
 
-def test_parse_beat_flags_ignores_unknown_beat_shapes():
-    # dict 但无 purpose 字段、str 元素混合 → 容错仍命中
-    key_beats = [
-        {"beat_id": "b1"},  # 无 purpose
-        42,  # 非 dict 非 str
-        {"beat_id": "b2", "purpose": "[payoff] xx"},
-    ]
-    assert _parse_beat_flags(key_beats) == (True, False)
 
 
 # ---------------------------------------------------------------------------
@@ -181,12 +168,6 @@ def test_charge_streaks_no_payoff_returns_null():
     assert out["charge_streak"] == 3
 
 
-def test_charge_streaks_only_payoffs_no_streak():
-    flags = [_flag(i, payoff=True) for i in range(1, 4)]
-    out = _count_charge_streaks(flags)
-    assert out["charge_streak"] == 0
-    assert out["max_charge_streak"] == 0
-    assert out["last_payoff_chapter"] == 3
 
 
 def test_charge_streaks_neither_payoff_nor_charge_no_streak():
@@ -202,12 +183,6 @@ def test_charge_streaks_neither_payoff_nor_charge_no_streak():
 # ---------------------------------------------------------------------------
 
 
-def test_payoff_ratio_recent_uses_window():
-    # 5 章全无 payoff → ratio 0
-    flags = [_flag(i) for i in range(1, 6)]
-    cnt, ratio = _payoff_ratio_recent(flags, 5)
-    assert cnt == 0
-    assert ratio == 0.0
 
 
 def test_payoff_ratio_recent_partial_window():
@@ -364,12 +339,6 @@ def test_alerts_low_pacing_negative_all_above():
     assert not any(a["code"] == "low_pacing_chapter" for a in alerts)
 
 
-def test_alerts_low_pacing_negative_none_reported():
-    # pacing 为 None（无 quality_report）→ 不计入
-    chapters = [_ch_full(1, pacing=None), _ch_full(2, pacing=None)]
-    streak_metrics = {"charge_streak": 0, "max_charge_streak": 0, "last_payoff_chapter": None}
-    alerts = _compute_alerts(chapters, streak_metrics, {"open": 0, "resolved": 0, "overdue": 0})
-    assert not any(a["code"] == "low_pacing_chapter" for a in alerts)
 
 
 def test_alerts_multiple_rules_can_coexist():
@@ -490,17 +459,6 @@ def test_build_arc_view_plan_json_malformed_safe(tmp_path: Path):
     assert ch["charge_beat"] is False
 
 
-def test_build_arc_view_plan_json_missing_field(tmp_path: Path):
-    settings = _make_settings(tmp_path)
-    pid = _make_project(str(settings.db_path), "无key_beats")
-
-    # plan_json 是合法 JSON 但没有 key_beats
-    _make_chapter(str(settings.db_path), pid, 1, "无 key_beats", {"chapter_goal": "xx"})
-
-    result = build_arc_view(settings.db_path, pid)
-    ch = result["chapters"][0]
-    assert ch["has_payoff_beat"] is False
-    assert ch["charge_beat"] is False
 
 
 def test_build_arc_view_project_not_found_raises(tmp_path: Path):

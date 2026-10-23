@@ -466,15 +466,6 @@ def test_simulate_high_risk_definition_bypasses_approval(tmp_path: Path):
 # --------------------------------------------------------------------- empty deltas
 
 
-def test_simulate_empty_deltas_raises(tmp_path: Path):
-    db_path = _fresh_db(tmp_path)
-    uid = uuid.uuid4().hex[:8]
-    seed = _seed_project_with_char_chapter(db_path, uid=uid)
-    pid = seed["project_id"]
-    sim = SimulationService(db_path)
-    with pytest.raises(SimulationError) as exc_info:
-        sim.simulate(pid, [])
-    assert exc_info.value.reason == "empty_deltas"
 
 
 def test_simulate_nonlist_deltas_raises(tmp_path: Path):

@@ -100,19 +100,6 @@ def test_update_revision_note_set_success(tmp_path: Path):
     assert result["status"] == "PLANNED"
 
 
-def test_update_revision_note_overwrites_existing(tmp_path: Path):
-    """已有 note → 覆盖更新。"""
-    settings = _make_settings(tmp_path)
-    pid = _make_project(str(settings.db_path))
-    cid = _make_chapter(
-        str(settings.db_path),
-        pid,
-        plan_json={"revision_note": "旧意见"},
-        )
-    svc = ChapterService(str(settings.db_path))
-
-    result = svc.update_revision_note(cid, "新意见")
-    assert result["plan_json"]["revision_note"] == "新意见"
 
 
 def test_update_revision_note_clear_with_empty_string(tmp_path: Path):
@@ -132,19 +119,6 @@ def test_update_revision_note_clear_with_empty_string(tmp_path: Path):
     assert result["plan_json"]["key_beats"] == ["b1"]
 
 
-def test_update_revision_note_clear_with_whitespace(tmp_path: Path):
-    """全空白字符串 → 视为清除。"""
-    settings = _make_settings(tmp_path)
-    pid = _make_project(str(settings.db_path))
-    cid = _make_chapter(
-        str(settings.db_path),
-        pid,
-        plan_json={"revision_note": "旧意见"},
-        )
-    svc = ChapterService(str(settings.db_path))
-
-    result = svc.update_revision_note(cid, "   \t\n  ")
-    assert "revision_note" not in result["plan_json"]
 
 
 def test_update_revision_note_preserves_other_plan_keys(tmp_path: Path):

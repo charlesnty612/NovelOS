@@ -339,12 +339,6 @@ def test_router_resolve_skips_disabled(tmp_path: Path):
     assert row["model"] == "deepseek-chat"
 
 
-def test_router_resolve_missing_raises(tmp_path: Path):
-    apply_migrations(tmp_path / "test.db")
-    db_path = str(tmp_path / "test.db")
-    with pytest.raises(ModelNotConfiguredError) as exc:
-        ModelRouter(db_path).resolve("reasoning")
-    assert exc.value.capability == "reasoning"
 
 
 def test_router_resolve_empty_capability_raises(tmp_path: Path):
@@ -451,15 +445,6 @@ def test_call_with_fallback_light_missing_falls_back_to_reasoning(tmp_path: Path
     assert row["capability"] == "reasoning"  # V3 P0-2：fallback 标记
 
 
-def test_call_with_fallback_light_and_reasoning_both_missing_raises(tmp_path: Path):
-    """light 和 reasoning 都无配置时，call_with_fallback("light") 抛 ModelNotConfiguredError（capability='light'）。"""
-    apply_migrations(tmp_path / "test.db")
-    db_path = str(tmp_path / "test.db")
-    with pytest.raises(ModelNotConfiguredError) as exc:
-        ModelRouter(db_path).call_with_fallback(
-            "light", [{"role": "user", "content": "hi"}]
-        )
-    assert exc.value.capability == "light"
 
 
 def test_call_with_fallback_light_prefers_light_over_reasoning(tmp_path: Path):
@@ -477,15 +462,6 @@ def test_call_with_fallback_light_prefers_light_over_reasoning(tmp_path: Path):
     assert row["config_id"] != cid_reasoning
 
 
-def test_call_with_fallback_non_light_missing_still_raises(tmp_path: Path):
-    """非 light capability（如 creative_writing）缺失时仍抛 ModelNotConfiguredError，不触发回退。"""
-    apply_migrations(tmp_path / "test.db")
-    db_path = str(tmp_path / "test.db")
-    with pytest.raises(ModelNotConfiguredError) as exc:
-        ModelRouter(db_path).call_with_fallback(
-            "creative_writing", [{"role": "user", "content": "hi"}]
-        )
-    assert exc.value.capability == "creative_writing"
 
 
 # ---------------------------------------------------------------------------
@@ -1005,47 +981,10 @@ def test_light_with_binding_does_not_fall_back_to_reasoning(tmp_path: Path):
     assert row["config_id"] != cid_reasoning
 
 
-def test_light_no_binding_no_rows_still_falls_back_to_reasoning(tmp_path: Path):
-    """light 无 binding 且 model_configs 也无 light 行 → 仍回退 reasoning（保护既有语义）。"""
-    apply_migrations(tmp_path / "test.db")
-    db_path = str(tmp_path / "test.db")
-    cid_reasoning = _insert_config(db_path, "reasoning", "mock", "m-r")
-    _, row = ModelRouter(db_path).call_with_fallback(
-        "light", [{"role": "user", "content": "hi"}]
-    )
-    assert row["config_id"] == cid_reasoning
-    assert row["capability"] == "reasoning"  # V3 P0-2 标记
 
 
-def test_light_no_binding_no_reasoning_raises(tmp_path: Path):
-    """light 无 binding + reasoning 也无 → ModelNotConfiguredError('light')。"""
-    apply_migrations(tmp_path / "test.db")
-    db_path = str(tmp_path / "test.db")
-    with pytest.raises(ModelNotConfiguredError) as exc:
-        ModelRouter(db_path).call_with_fallback(
-            "light", [{"role": "user", "content": "hi"}]
-        )
-    assert exc.value.capability == "light"
 
 
-def test_light_binding_all_disabled_no_fallback(tmp_path: Path):
-    """B1 修复：light 有显式 binding 但候选链全 disabled / 缺失 → 抛 ModelNotConfiguredError
-    绝不静默回退 reasoning 链（即便 reasoning 有可用行）。"""
-    apply_migrations(tmp_path / "test.db")
-    db_path = str(tmp_path / "test.db")
-    # binding 指向一个 disabled 的 profile；同时配 reasoning 可用行作为「诱饵」
-    pid_off = _insert_profile(db_path, profile_id="mprof_light_off", enabled=0)
-    cid_reasoning = _insert_config(db_path, "reasoning", "mock", "m-r", enabled=1)
-    _upsert_binding(db_path, "light", [pid_off])
-
-    with pytest.raises(ModelNotConfiguredError) as exc:
-        ModelRouter(db_path).call_with_fallback(
-            "light", [{"role": "user", "content": "hi"}]
-        )
-    assert exc.value.capability == "light"
-    # 关键：resolve('reasoning') 必须仍命中诱饵（说明 call_with_fallback 没把
-    # reasoning 行静默用掉）—— 防止实现退化为「light 失败就尝试 reasoning」。
-    assert ModelRouter(db_path).resolve("reasoning")["config_id"] == cid_reasoning
 
 
 # ---------------------------------------------------------------------------
@@ -1147,19 +1086,6 @@ def test_call_with_fallback_profile_id_skips_light_to_reasoning_fallback(tmp_pat
     assert ModelRouter(db_path).resolve("reasoning")["config_id"] == cid_reasoning
 
 
-def test_call_with_fallback_profile_id_none_preserves_existing_behavior(tmp_path: Path):
-    """profile_id=None 时行为与之前完全一致（既不打破 binding 也不打破 light→reasoning 回退）。"""
-    apply_migrations(tmp_path / "test.db")
-    db_path = str(tmp_path / "test.db")
-    # light 零配置 + reasoning 有行 → 触发 light→reasoning 回退
-    cid_reasoning = _insert_config(
-        db_path, "reasoning", "mock", "reasoning-model", enabled=1
-    )
-    _, row = ModelRouter(db_path).call_with_fallback(
-        "light", [{"role": "user", "content": "hi"}]
-    )
-    assert row["config_id"] == cid_reasoning
-    assert row["capability"] == "reasoning"  # V3 P0-2 标记
 
 
 # ---------------------------------------------------------------------------

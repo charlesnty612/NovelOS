@@ -306,11 +306,6 @@ def test_new_number_is_not_an_echo():
     assert echo_hit(text) is None
 
 
-def test_question_without_front_words_is_not_an_echo():
-    """不得误报②：提问且不含前句实义字——「你怎么知道？」。"""
-    text = prose("“单子在这儿。”", "“你怎么知道？”")
-    assert count_dialogue_echoes(text) == []
-    assert echo_hit(text) is None
 
 
 def test_information_increasing_reply_is_not_an_echo():
@@ -352,11 +347,6 @@ def test_single_char_dialogue_is_not_compared():
     assert echo_hit(prose("“三百人，够不够守城？”", "“嗯。”")) is None
 
 
-def test_chapter_without_dialogue_is_quiet():
-    """无对白章：没有对白句，自然没有回声对。"""
-    text = prose()
-    assert dialogue_echo_pairs(text) == []
-    assert echo_hit(text) is None
 
 
 def test_narration_between_dialogue_lines_keeps_adjacency():

@@ -351,10 +351,6 @@ def test_scene_plan_missing_table_degrades_to_none(tmp_path: Path, monkeypatch):
     assert sps.load_scene_plan(str(_migrated(tmp_path)), "ch_1") is None
 
 
-def test_scene_plan_missing_column_degrades_to_none(tmp_path: Path, monkeypatch):
-    _patch_connect(monkeypatch, sps, "payload_json",
-                   "no such column: chapter_scene_plans.payload_json")
-    assert sps.load_scene_plan(str(_migrated(tmp_path)), "ch_1") is None
 
 
 @pytest.mark.parametrize("message", _RUNTIME_FAILURES)

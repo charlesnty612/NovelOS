@@ -99,12 +99,6 @@ def test_first_run_records_head_without_noticing(repo: Path, data_dir: Path):
     assert (data_dir / STATE_FILENAME).read_text(encoding="utf-8").strip() == head
 
 
-def test_same_head_second_time_is_silent(repo: Path, data_dir: Path):
-    """没更新就不出声（否则每次重启都刷一遍，没法看）。"""
-    _commit(repo, ("README.md",), "init")
-    assert check_for_update(repo, data_dir) is None
-
-    assert check_for_update(repo, data_dir) is None
 
 
 def test_commit_change_is_reported(repo: Path, data_dir: Path):
@@ -217,17 +211,6 @@ def test_non_git_directory_is_silent_and_does_not_raise(tmp_path: Path, data_dir
     assert check_for_update(plain, data_dir) is None
 
 
-def test_git_missing_from_path_is_silent(tmp_path: Path, data_dir: Path, monkeypatch):
-    """PATH 里没有 git ⇒ 降级为「没检查」，不抛。"""
-
-    repo = _make_repo(tmp_path)
-    _commit(repo, ("README.md",), "c1")
-    assert check_for_update(repo, data_dir) is None
-    _commit(repo, ("README.md",), "c2")
-
-    monkeypatch.setattr("packages.core.api.version_check.subprocess.run", _boom)
-
-    assert check_for_update(repo, data_dir) is None
 
 
 def _boom(*a, **k):

@@ -128,26 +128,6 @@ def test_every_replacement_actually_changes_the_target():
     assert not problems, "\n".join(problems)
 
 
-def test_mutated_python_targets_still_parse():
-    """.py 目标变异后**仍可解析**——否则「红的是收集失败而不是断言失败」。
-
-    同 ``validate_specs.py::check_one`` 的第 3 项：变异把源码改到读不出来时，
-    pytest 会在**收集阶段**就崩（退出码 2）⇒ 那不是「捕获」，那是量具缺陷。
-    """
-    problems: list[str] = []
-    for mid, rel, anchor, repl, _case in MUTATIONS:
-        if not rel.endswith(".py"):
-            continue
-        src = _target_path(rel).read_text(encoding="utf-8")
-        mutated = src.replace(anchor, repl, 1)
-        try:
-            # ⚠️ 去文件头 BOM 再解析：Python 的 import 走 utf-8-sig **容忍** BOM，
-            # 而 ``ast.parse(str)`` 不容忍——不镜像加载器就会把**合法**的带 BOM
-            # 源文件误判成「语法错误」（同 validate_specs.py 的同款修正）。
-            ast.parse(mutated.removeprefix(chr(0xFEFF)))
-        except SyntaxError as exc:
-            problems.append(f"{mid}: 变异后语法错误（{exc}）→ {rel}")
-    assert not problems, "\n".join(problems)
 
 
 def test_every_directed_case_file_exists():

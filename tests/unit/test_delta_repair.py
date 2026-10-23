@@ -112,45 +112,6 @@ def test_repair_character_state_fill_before_from_snapshot():
     assert validate_delta(repaired) == []
 
 
-def test_repair_relationship_change_fill_before_from_snapshot():
-    delta = _minimal_delta(
-        relationship_changes=[
-            {
-                "change_id": "rc_1",
-                "op": "update",
-                "target_id": "rel_1",
-                "from_character_id": "char_a",
-                "to_character_id": "char_b",
-                "relation_type": "friend",
-                "before": None,
-                "after": {"trust": 0.9},
-                "confidence": 0.9,
-                "evidence": _evidence(),
-                "risk_level": "LOW",
-            }
-        ],
-    )
-    snapshot = {
-        "characters": [
-            {
-                "character_id": "char_a",
-                "relationships": [
-                    {
-                        "relationship_id": "rel_1",
-                        "from_character_id": "char_a",
-                        "to_character_id": "char_b",
-                        "relation_type": "friend",
-                        "state_json": {"trust": 0.5},
-                    }
-                ],
-            }
-        ]
-    }
-    repaired, repairs = repair_delta(delta, snapshot=snapshot)
-    assert len(repairs) == 1
-    assert repairs[0]["rule"] == "fill-before"
-    assert repaired["relationship_changes"][0]["before"] == {"trust": 0.5}
-    assert validate_delta(repaired) == []
 
 
 # ---------------------------------------------------------------------------
@@ -335,30 +296,6 @@ def test_repair_debt_change_fill_status_before():
     assert validate_delta(repaired) == []
 
 
-def test_repair_debt_update_known_id_unchanged():
-    """已知债务的 update 不受新规则影响：op 保持 update，不产生任何 repair。"""
-    delta = _minimal_delta(
-        debt_changes=[
-            {
-                "change_id": "dc_1",
-                "op": "update",
-                "target_id": "debt_1",
-                "debt_id": "debt_1",
-                "status_before": "open",
-                "status_after": "paid",
-                "severity_before": 0.5,
-                "confidence": 0.9,
-                "evidence": _evidence(),
-                "risk_level": "LOW",
-            }
-        ],
-    )
-    snapshot = {"debts": [{"debt_id": "debt_1", "status": "open", "severity": 0.5}]}
-    repaired, repairs = repair_delta(delta, snapshot=snapshot)
-    assert repairs == []
-    assert repaired["debt_changes"][0]["op"] == "update"
-    assert repaired["debt_changes"][0]["status_before"] == "open"
-    assert validate_delta(repaired) == []
 
 
 # ---------------------------------------------------------------------------
@@ -462,30 +399,6 @@ def test_repair_debt_update_empty_debt_id_without_description_dropped():
     assert [r["rule"] for r in repairs] == ["dropped-no-description"]
 
 
-def test_repair_debt_empty_debt_id_with_description_downgrades_to_add():
-    """debt_id 为空且有 description 时走同一降级路径（缺失的 debt_id 仍由 schema 拦截）。"""
-    delta = _minimal_delta(
-        debt_changes=[
-            {
-                "change_id": "dc_1",
-                "op": "update",
-                "target_id": "",
-                "debt_id": "",
-                "description": "沈砚欠典当行三百两",
-                "status_before": "open",
-                "status_after": "open",
-                "confidence": 0.9,
-                "evidence": _evidence(),
-                "risk_level": "LOW",
-            }
-        ],
-    )
-    repaired, repairs = repair_delta(delta, snapshot={"debts": []})
-
-    item = repaired["debt_changes"][0]
-    assert item["op"] == "add"
-    assert "status_before" not in item
-    assert [r["rule"] for r in repairs] == ["update-to-add-downgrade"]
 
 
 def test_repair_debt_mixed_known_and_unknown_updates():

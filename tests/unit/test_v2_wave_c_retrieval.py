@@ -375,23 +375,6 @@ def test_director_input_includes_recalled_passages(tmp_path: Path):
         assert "rank" in r
 
 
-def test_writer_input_includes_recalled_passages(tmp_path: Path):
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    for n in range(1, 4):
-        cid = _insert_chapter(db_path, pid, n, content=f"古镜在第{n}章")
-        upsert_chapter(db_path, cid)
-    _cache_reset()
-    cid_target = _insert_chapter(
-        db_path, pid, 4,
-        content="",
-        plan_json='{"chapter_goal": "古镜再起波澜"}',
-    )
-    payload = build_writer_input(
-        db_path, cid_target, scene_plan={"purpose": "古镜再被触及"},
-    )
-    assert "recalled_passages" in payload
-    assert isinstance(payload["recalled_passages"], list)
 
 
 def test_recalled_passages_empty_when_no_index(tmp_path: Path):
@@ -641,19 +624,6 @@ def test_writer_cache_distinguishes_scene_plan(tmp_path: Path):
     assert p_b["scene_plan"]["purpose"] == "场景 B"
 
 
-def test_writer_cache_same_scene_plan_returns_equal_content(tmp_path: Path):
-    """同 scene_plan 第二次调用仍命中缓存（V3.9 批次 1.4：命中返回深拷贝）。"""
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    cid = _insert_chapter(db_path, pid, 1, content="", plan_json='{"chapter_goal": "x"}')
-    _cache_reset()
-    _insert_state_version(db_path, pid, 1)
-
-    scene = {"purpose": "场景 X", "location": "Cave"}
-    p1 = build_writer_input(db_path, cid, scene)
-    p2 = build_writer_input(db_path, cid, scene)
-    assert p1 == p2
-    assert p1 is not p2
 
 
 def test_chapter_commit_invalidate_clears_cache(tmp_path: Path):

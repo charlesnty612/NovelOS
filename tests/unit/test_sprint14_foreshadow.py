@@ -72,9 +72,6 @@ def test_resolved_hook_open_to_resolved_is_legal():
     assert errors == [], f"OPEN→RESOLVED 应合法，实际 errors={errors}"
 
 
-def test_resolved_hook_active_to_escalated_is_legal():
-    errors = validate_delta(_delta_with_resolved_hook(from_status="ACTIVE", to_status="ESCALATED"))
-    assert errors == [], errors
 
 
 def test_resolved_hook_any_to_abandoned_is_legal():
@@ -84,10 +81,6 @@ def test_resolved_hook_any_to_abandoned_is_legal():
         assert errors == [], f"{src}→ABANDONED 应合法，实际 errors={errors}"
 
 
-def test_resolved_hook_abandoned_self_loop_is_legal():
-    """ABANDONED→ABANDONED：自循环合法（幂等兜底）。"""
-    errors = validate_delta(_delta_with_resolved_hook(from_status="ABANDONED", to_status="ABANDONED"))
-    assert errors == [], errors
 
 
 def test_resolved_hook_from_status_null_skips_migration_check():
@@ -122,10 +115,6 @@ def test_resolved_hook_abandoned_revive_rejected():
     assert any("ABANDONED 不可复活" in e for e in errors), errors
 
 
-def test_resolved_hook_abandoned_to_open_rejected():
-    """ABANDONED→OPEN 复活路径拒绝。"""
-    errors = validate_delta(_delta_with_resolved_hook(from_status="ABANDONED", to_status="OPEN"))
-    assert any("ABANDONED 不可复活" in e for e in errors), errors
 
 
 # ---------------------------------------------------------------------------

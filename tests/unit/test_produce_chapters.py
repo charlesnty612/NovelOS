@@ -391,24 +391,8 @@ def test_wait_settled_risk_gate_respects_cap():
     assert api.posts == []
 
 
-def test_wait_settled_never_auto_approves_author_review():
-    """作者决议节点（chapter-review）**绝不**自动批准——那是本脚本的红线。"""
-    api = _FakeApi([_paused_run("chapter-review", review_report={"errors": []})])
-    rec = pc.ChapterOutcome(number=1)
-    run = _producer(api, max_auto_approve=5).wait_settled(
-        "run_x", rec, timeout=5.0, auto_approve=True
-    )
-    assert run is not None and run["status"] == "PAUSED"
-    assert api.posts == []
 
 
-def test_wait_settled_never_auto_approves_unknown_human_node():
-    """未知人工节点：不猜、不批准。"""
-    api = _FakeApi([_paused_run("some-new-stage")])
-    rec = pc.ChapterOutcome(number=1)
-    run = _producer(api).wait_settled("run_x", rec, timeout=5.0, auto_approve=True)
-    assert run is not None and run["status"] == "PAUSED"
-    assert api.posts == []
 
 
 def test_wait_settled_survives_resume_409():

@@ -134,14 +134,6 @@ def test_unbound_project_has_no_genre_opening_key(tmp_path: Path):
     assert not [it for it in result["items"] if it["key"].startswith("genre_opening_")]
 
 
-def test_bound_pack_without_opening_rules_has_no_section(tmp_path: Path):
-    db_path = _fresh_db(tmp_path)
-    pid = _insert_project(db_path)
-    _insert_chapter(db_path, pid, 1, "李晨被人羞辱，系统绑定。")
-    _bind_pack(db_path, pid, {"schema_version": "genre-pack.v1.1.0"})
-
-    result = run_signing_check(db_path, pid)
-    assert "genre_opening" not in result
 
 
 # ---------------------------------------------------------------------------

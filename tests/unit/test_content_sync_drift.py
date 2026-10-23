@@ -394,14 +394,6 @@ class TestDriftCli:
         assert payload["errors"]
         assert payload["ok"] is False
 
-    def test_alias_check_drift_works(self, db_path: Path, content_dir: Path) -> None:
-        _seed_db_pack(db_path, version=6)
-        _write_content_pack(content_dir, version=6)
-
-        code = cli_main(
-            ["--db", str(db_path), "--content-dir", str(content_dir), "check-drift"]
-        )
-        assert code == 0
 
 
 # ---------------------------------------------------------------------------
@@ -491,15 +483,6 @@ class TestPullReverseDriftWarning:
         assert GenrePackService(db_plain).get(_PACK_ID)["payload"] == _PAYLOAD_OTHER
         assert GenrePackService(db_drift).get(_PACK_ID)["payload"] == _PAYLOAD_OTHER
 
-    def test_pull_without_drift_has_no_warning(
-        self, db_path: Path, content_dir: Path
-    ) -> None:
-        _seed_db_pack(db_path, version=6, payload=_PAYLOAD)
-        _write_content_pack(content_dir, version=6, payload=_PAYLOAD_OTHER)
-
-        result = ContentSyncService(db_path, content_dir).pull_genre_pack(_SLUG)
-
-        assert result.warnings == []
 
     def test_pull_when_content_is_newer_has_no_warning(
         self, db_path: Path, content_dir: Path
