@@ -254,12 +254,20 @@ def is_inside_repo(path: Path | str, repo_root: Path | str | None = None) -> boo
     ⚠️ 走**规范化后**的比较（见本节开头）⇒ ``\\\\?\\`` 前缀等写法**不得**成为绕过；
     规范化判「仓外」时**再按底层身份**核一次（``(st_dev, st_ino)``）⇒ 同一目录的
     **别名拼写**（如 ``\\\\localhost\\D$\\<repo>``）也不得成为绕过。
+
+    ⚠️ **单一事实源**（2026-10-23 对抗审查第二轮 F-7）：仓内外判定只实现**一次**
+    —— 本函数**委托** :func:`relative_in_repo`，不再自己抄一遍判定逻辑。
+    两条路径各判各的 ⇒ 某条判「仓外」、另一条判「仓内」时，**逃生口告警**
+    （``allow_repo_out`` / ``allow_software_repo_key``）会**静默丢失**：
+    写盘守卫会放过一个实际能逃逸的路径（或反过来误报）。
+    ⇒ 判定逻辑的**唯一**实现点是 :func:`relative_in_repo`
+    （返回 ``None`` = 仓外 / ``Path(".")`` = 仓根本身 / 其它 = 仓内子路径）。
+
+    ⚠️ 委托后**对外行为逐位不变**（已逐形态实测比对）：仓内 True / 仓外 False /
+    **仓根本身 True** —— ``relative_in_repo(仓根)`` 返回 ``Path(".")``（**不是** ``None``）
+    ⇒ ``is not None`` 成立 ⇒ 仓根本身仍判「仓内」。
     """
-    root = _abs(repo_root if repo_root is not None else REPO_ROOT)
-    target = _abs(path)
-    if _relative_normalized(target, root) is not None:
-        return True
-    return _relative_by_identity(target, root) is not None
+    return relative_in_repo(path, repo_root) is not None
 
 
 def relative_in_repo(path: Path | str, repo_root: Path | str | None = None) -> Path | None:

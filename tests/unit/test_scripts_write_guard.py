@@ -236,10 +236,15 @@ def test_guard_allow_repo_root_is_explicit_opt_in(guard) -> None:
     assert resolved == target.resolve()
 
 
-def test_guard_is_inside_repo_helper(guard, tmp_path: Path) -> None:
-    """``is_inside_repo`` 的真实判定（仓内 True / 仓外 False）。"""
+def test_guard_is_inside_repo_helper(guard) -> None:
+    """``is_inside_repo`` 的真实判定（仓内 True / 仓外 False）。
+
+    ⚠️ 仓外探针用**仓的同级**路径（``_outside_sentinel``）而不是 ``tmp_path``：
+    ``--basetemp`` 指向**仓内**时（``<repo>/tmp/...``），``tmp_path`` 反而是**仓内**
+    路径 ⇒ 「仓外」假设失效（2026-10-23 实测：该 basetemp 下本用例会**假红**）。
+    """
     assert guard.is_inside_repo(REPO_ROOT / "docs" / "x.md") is True
-    assert guard.is_inside_repo(tmp_path / "x.md") is False
+    assert guard.is_inside_repo(_outside_sentinel()) is False
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +374,149 @@ def test_guard_rejects_unc_admin_share_alias_of_repo(guard) -> None:
     assert _same_inode(alias_root, REPO_ROOT), "前提：别名拼写必须与仓根同 inode"
     with pytest.raises(guard.RepoWritePathError):
         guard.check_write_path(alias_root + "\\docs" + "\\probe_alias.txt")
+
+
+# ---------------------------------------------------------------------------
+# F-2（2026-10-23 对抗审查第二轮）：规范化层必须有**测试钉住**
+#
+# ⚠️ 缺陷形状：``normalize_for_compare()`` 是仓内外判定的**规范化层**，四个子层
+#   （扩展长度前缀剥离 / 尾随空格·点裁剪 / 大小写折叠 / dotdot 折叠）任一被
+#   「好心改坏」，闸门**一声不响**（审查员实测：四个子层逐个撤掉 ⇒ 测试 0 红）。
+# ⇒ 本组断言打在**返回值**上（具体字符串），不是「存在即过」、不是「只查不比较」。
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_for_compare_strips_extended_length_prefix(guard) -> None:
+    """扩展长度前缀 / 设备前缀必须被**剥掉**（否则前缀本身就是绕过面）。
+
+    ⚠️ Windows **认** ``\\?\\D:\\x\\y`` 这个写法（文件真的落在 ``D:\\x\\y``）
+    ⇒ 必须归一到**同一形态**，否则两种写法判定分叉 ⇒ 前缀写法会被放行。
+    """
+    plain = guard.normalize_for_compare("D:\\x\\y")
+    assert plain == "d:\\x\\y"
+    assert guard.normalize_for_compare("\\\\?\\D:\\x\\y") == plain
+    assert guard.normalize_for_compare("\\\\.\\D:\\x\\y") == plain
+    # UNC 的扩展前缀形态：剥掉前缀后**仍须保留** UNC 的两个前导反斜杠
+    assert guard.normalize_for_compare("\\\\?\\UNC\\server\\share\\x") == "\\\\server\\share\\x"
+
+
+def test_normalize_for_compare_trims_trailing_space_and_dot(guard) -> None:
+    """末分量的**尾随空格 / 点**必须裁掉（Win32 打开文件时会裁）。
+
+    ⚠️ 不裁 ⇒ ``D:\\repo\\docs `` 与 ``D:\\repo\\docs`` 判成两条路径 ⇒ 守卫放行。
+    """
+    clean = guard.normalize_for_compare("D:\\repo\\docs")
+    assert clean == "d:\\repo\\docs"
+    assert guard.normalize_for_compare("D:\\repo\\docs ") == clean
+    assert guard.normalize_for_compare("D:\\repo\\docs.") == clean
+
+
+def test_normalize_for_compare_trims_trailing_space_and_dot_in_middle_component(guard) -> None:
+    """**中间**分量的尾随空格 / 点同样要裁（Win32 是**逐分量**裁，不只末分量）。"""
+    clean = guard.normalize_for_compare("D:\\repo\\a\\b")
+    assert clean == "d:\\repo\\a\\b"
+    assert guard.normalize_for_compare("D:\\repo\\a . \\b") == clean
+
+
+def test_normalize_for_compare_folds_case(guard) -> None:
+    """Windows 路径比较**不区分大小写** ⇒ 规范化后必须同形（且返回小写）。"""
+    upper = guard.normalize_for_compare("D:\\Repo\\Docs")
+    lower = guard.normalize_for_compare("d:\\repo\\docs")
+    assert upper == lower
+    assert upper == "d:\\repo\\docs"
+
+
+def test_normalize_for_compare_folds_dotdot(guard) -> None:
+    """``..`` 必须折叠（否则 ``D:\\repo\\a\\..\\b`` 与 ``D:\\repo\\b`` 是两条路径）。"""
+    folded = guard.normalize_for_compare("D:\\repo\\a\\..\\b")
+    assert folded == "d:\\repo\\b"
+    assert folded == guard.normalize_for_compare("D:\\repo\\b")
+
+
+def test_normalize_for_compare_keeps_unc_root_shape(guard) -> None:
+    """UNC 根（``\\server\\share``）必须**原样保留**（F-2 旧缺陷的回归看守）。
+
+    ⚠️ 旧实现把它压成 ``\\.\\server\\share``（**换了一条路径**）⇒ 仓内 UNC 路径
+    会被判成「仓外」⇒ 绕过。
+    """
+    out = guard.normalize_for_compare("\\\\server\\share\\dir")
+    assert out == "\\\\server\\share\\dir"
+    # 旧缺陷形态（UNC 根被压成「单反斜杠 + 点」开头）不得出现
+    assert not out.startswith("\\.\\")
+    assert out.startswith("\\\\server\\share\\")
+    # 只有 UNC 根两段（无子路径）时同样保真
+    assert guard.normalize_for_compare("\\\\server\\share") == "\\\\server\\share"
+
+
+# ---------------------------------------------------------------------------
+# F-7（2026-10-23 对抗审查第二轮）：仓内外判定必须**单一事实源**
+#
+# ⚠️ 缺陷形状：``is_inside_repo()`` 与 ``relative_in_repo()`` 各自实现了一遍
+#   「仓内判定」⇒ 两者可能**分叉**（一条判仓外、另一条判仓内）⇒ **逃生口告警**
+#   静默丢失（写盘守卫放过一个实际能逃逸的路径，或反过来误报）。
+# ⇒ 修法：``is_inside_repo`` **委托** ``relative_in_repo``。
+#   下面两条用例分别钉住「**同结论**」与「**确实委托**」。
+# ---------------------------------------------------------------------------
+
+
+def _outside_sentinel() -> Path:
+    """仓**外**的探针路径（软件仓的**同级**目录 ⇒ 恒在仓外，与 ``tmp_path`` 无关）。
+
+    ⚠️ 为什么不用 ``tmp_path``：``--basetemp`` 可能被指到**仓内**
+    （如 ``<repo>/tmp/...``）⇒ 那样 ``tmp_path`` 反而是**仓内**路径 ⇒
+    「仓外」这个假设失效（已有用例 ``test_guard_is_inside_repo_helper`` 就栽在这上面）。
+    """
+    return REPO_ROOT.parent / "__guard_outside_probe__" / "x.md"
+
+
+def test_is_inside_repo_agrees_with_relative_in_repo_across_shapes(guard) -> None:
+    """两条仓内外判定路径对**同一批路径形态**必须同结论（F-7 的「不分叉」看守）。
+
+    ⚠️ 这条盯的是「**分叉**」：任何一边被单独改动（规范化层 / 身份核 / 显示回落）
+    而另一边没跟上 ⇒ 这里立刻红。
+    """
+    shapes: list[tuple[str, Path | str, bool]] = [
+        ("仓内普通路径", REPO_ROOT / "docs" / "x.md", True),
+        ("仓根本身", REPO_ROOT, True),
+        ("仓外路径", _outside_sentinel(), False),
+        ("扩展长度前缀变体", "\\\\?\\" + str(REPO_ROOT / "docs" / "x.md"), True),
+        ("大小写变体", str(REPO_ROOT).swapcase() + "\\docs\\x.md", True),
+    ]
+    alias = _admin_share_alias(REPO_ROOT)
+    if alias is not None:
+        shapes.append(("UNC 管理共享别名", alias + "\\docs\\x.md", True))
+
+    for name, path, expected in shapes:
+        inside = guard.is_inside_repo(path)
+        rel = guard.relative_in_repo(path)
+        assert inside == (rel is not None), (
+            f"{name}：两条判定路径分叉了（is_inside_repo={inside} vs relative_in_repo={rel}）"
+        )
+        assert inside is expected, f"{name}：仓内外判定错了（期望 {expected}，实际 {inside}）"
+
+
+def test_is_inside_repo_delegates_to_relative_in_repo(guard, monkeypatch) -> None:
+    """F-7：``is_inside_repo`` 必须**委托** ``relative_in_repo``（单一事实源）。
+
+    ⚠️ 为什么「两者同结论」那条**抓不到**本次缺陷：旧实现（各自判一遍）在**逻辑上
+    等价** ⇒ 撤掉委托后「同结论」**仍然成立** ⇒ 那条用例是绿的。
+    ⇒ 这里改成**证明派生关系**：把 ``relative_in_repo`` 的返回值改掉，
+    ``is_inside_repo`` 必须**跟着变**（旧实现不会 ⇒ 必红）。
+    """
+    inside_path = str(REPO_ROOT / "docs" / "x.md")
+    outside_path = str(_outside_sentinel())
+
+    # ① 仓内路径：把委托的返回值改成「仓外」⇒ is_inside_repo 必须跟着判仓外
+    monkeypatch.setattr(guard, "relative_in_repo", lambda *a, **k: None)
+    assert guard.is_inside_repo(inside_path) is False, (
+        "is_inside_repo 没有跟随 relative_in_repo ⇒ 仓内外判定存在两份实现（F-7）"
+    )
+
+    # ② 仓外路径：把委托的返回值改成「仓内」⇒ is_inside_repo 必须跟着判仓内
+    monkeypatch.setattr(guard, "relative_in_repo", lambda *a, **k: Path("."))
+    assert guard.is_inside_repo(outside_path) is True, (
+        "is_inside_repo 没有跟随 relative_in_repo ⇒ 仓内外判定存在两份实现（F-7）"
+    )
 
 
 # ---------------------------------------------------------------------------
