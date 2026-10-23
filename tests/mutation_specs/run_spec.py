@@ -23,8 +23,8 @@
     # 只读预检（秒级，不做任何突变）
     .venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --precheck
 
-    # 全量（发版前 / 周期性；并行 8 路）
-    .venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --jobs 8
+    # 全量（发版前 / 周期性；**串行**，≈ 53 分钟）
+    .venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all
 
 闸门的三个档位（2026-10-22 批次二十一修订，**这是纪律变更**）
 ------------------------------------------------------------------
@@ -37,7 +37,14 @@
 |---|---|---|---|
 | **只读预检** | `--all --precheck` | **秒级** | 每次改动后（可进 CI） |
 | **增量突变** | `--changed`（默认取 `git diff HEAD --name-only`） | **分钟级** | **每批收尾（新默认）** |
-| **全量突变** | `--all --jobs 8` | 十几分钟 | 发版前 / 每周 |
+| **全量突变** | `--all`（**串行**） | ≈ 53 分钟 | 发版前 / 每周 |
+
+⚠️ **`--jobs N`（并发档位）**已降级为「**降噪参考**」，**不得作为闸门结论**：
+并发分片只保证「同一目标**源文件**」不并发，**不保证**「被测文件 `import` 的**其它**
+源文件」不被另一个 worker 临时改坏 ⇒ 会产出**假 CAUGHT**、**判定不可复现**、
+**归因错配**三类失真（2026-10-23 对抗审查 B 在隔离副本上实测）。⇒ 并发档位的
+**退出码恒为 3**（除非显式 `--accept-concurrent` 承认「我只要看个大概」）⇒
+CI / 闸门脚本不可能把它误当成绿的结论。
 
 为什么可以这样拆：全量跑的**真正目的**有两个 —— ①「本批改动没打断既有锚点」②
 「既有的 370 条判别力还在」。① 是**纯只读计算**（`count(anchor) == 1` + 测试文件存在 +
@@ -149,6 +156,50 @@ def _basetemp_for(mid: str) -> pathlib.Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", mid)[:60]
     _BASETEMP_ROOT.mkdir(parents=True, exist_ok=True)
     return _BASETEMP_ROOT / f"{safe}-{os.getpid()}-{next(_basetemp_counter)}"
+
+
+#: 并发档位的警告文案（**闸门结论必须用串行**）。
+#:
+#: ⚠️ 为什么有它（2026-10-23 对抗审查 B 实证，Lead 复算）：
+#: ``--jobs N`` 的分片只保证「**同一目标源文件**」不并发，**不保证**「被测文件
+#: ``import`` 的**其它**源文件」不被另一个 worker 临时改坏 ⇒ 产出三类失真：
+#:
+#: 1. **假 CAUGHT**：一条「只改注释、单独跑必然 SURVIVED」的突变，在并发时被**另一条
+#:    突变临时改坏的源文件**污染——该源文件被本条的目标测试文件 ``import`` 并执行
+#:    ⇒ 被报成 ``[CAUGHT]``（实测 8/8 轮）。
+#:    ⚠️ **与两条突变是否共用同一目标测试文件无关**：实测**测试文件不同**照样被污染
+#:    ⇒ 「按测试文件分片」修不好这个洞。
+#: 2. **判定不可复现**：同一输入、同一代码，一次报 ``SURVIVED``、一次报
+#:    ``CAUGHT``（时序相关 ⇒ 结论不可重跑复现）；
+#: 3. **归因错配**：证据行报告的失败用例**不是该突变能影响的那条**
+#:    （⇒ 复核者「确认红的是预期那条」这一步拿到的是错的证据）。
+#:
+#: ⇒ **并发档位只能作「降噪参考」，其结果不得作为闸门结论。**
+#: ⇒ 闸门一律**串行**：``jobs`` 默认就是 1（不传 ``--jobs`` 即串行）；
+#:    增量档位（每批 20~40 条）串行只要 2~4 分钟 ⇒ 没有必要为省这点时间
+#:    拿「结论不可信」去换。
+#: ⇒ 待排期（未做）：「每 worker 一份独立树副本」的隔离方案 —— 已实测可行
+#:    （本仓 editable 是老式 ``.pth`` ⇒ ``PYTHONPATH`` 优先级更高 ⇒ 副本能接管
+#:    ``import packages.*``；拷 ``packages`` 仅 0.42s），可保留全量档位的速度，
+#:    但需先解决副本内的 ``data/`` 与 ``conftest`` 路径依赖。
+PARALLEL_WARNING_KEYWORDS = ("假 CAUGHT", "判定不可复现", "归因错配", "不得作为闸门结论")
+
+
+def _parallel_warning(jobs: int) -> str:
+    """并发档位的警告文案（抽成函数 ⇒ 仓内用例可直接断言其内容）。"""
+    return (
+        f"⚠️ [并发档位 · {jobs} 路 · **结果不得作为闸门结论**]\n"
+        "   并发分片只保证「同一目标源文件」不并发，**不保证**「被测文件 import 的"
+        "其它源文件」不被另一个 worker 临时改坏 ⇒ 已实测三类失真：\n"
+        "     ① **假 CAUGHT**：只改注释、单独跑必然 SURVIVED 的突变，被另一条突变"
+        "临时改坏的源文件污染 ⇒ 并发时被报成 [CAUGHT]（实测 8/8 轮；**测试文件不同"
+        "照样中招** ⇒ 按测试文件分片修不好）；\n"
+        "     ② **判定不可复现**：同一输入一次 SURVIVED、一次 CAUGHT（时序相关）；\n"
+        "     ③ **归因错配**：证据行报告的失败用例不是该突变能影响的那条。\n"
+        "   ⇒ 并发结果只能作「降噪参考」；**闸门一律串行**（不传 --jobs 即串行）。\n"
+        "   ⇒ 本次退出码恒为 **3**（除非显式加 --accept-concurrent 承认「只看个大概」）"
+        " ⇒ 闸门脚本不可能把它当成绿的结论。"
+    )
 
 
 class LaunchFailure(RuntimeError):
@@ -267,7 +318,14 @@ def run_one(
     由调用方显式开启。
     """
     path = ROOT / rel
-    original = path.read_text(encoding="utf-8")
+    try:
+        original = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # ⚠️ 目标文件读不出来 ⇒ **突变根本没被执行**（文件被删 / 改名 / 不是文件）
+        # ⇒ 不是「没被抓住」，也不是「用例红了」⇒ 归 INVALID（响亮失败）。
+        # 2026-10-23 对抗审查 B 的 F-8：原先这里直接抛 `FileNotFoundError`
+        # ⇒ **整轮崩溃**（后面所有规格一条都没跑，退出码也不是可判读的语义）。
+        return f"[INVALID]  {mid}: 目标文件读不出来：{rel}（{exc}）——突变未被执行"
     before = _sha(path)
 
     hits = original.count(anchor)
@@ -463,6 +521,7 @@ def main(argv: list[str]) -> int:
     spec_args: list[str] = []
     use_all = False
     jobs = 1
+    accept_concurrent = False
     use_changed = False
     changed_since = "HEAD"
     fail_fast = False
@@ -478,6 +537,8 @@ def main(argv: list[str]) -> int:
             i += 1
         elif arg.startswith("--jobs="):
             jobs = int(arg.split("=", 1)[1])
+        elif arg == "--accept-concurrent":
+            accept_concurrent = True
         elif arg == "--changed":
             use_changed = True
         elif arg == "--changed-since" and i + 1 < len(argv):
@@ -494,7 +555,15 @@ def main(argv: list[str]) -> int:
             print("      --changed [--changed-since REV]  只跑「目标源文件或规格文件命中改动集」的突变")
             print("      --precheck                       只做只读预检（秒级，不改源码）")
             print("      --jobs N                         按目标文件分片并行（默认 1=串行）")
+            print("                                      ⚠️ 并发结果**不得作为闸门结论**"
+                  "（会造假 CAUGHT / 判定不可复现 / 归因错配，已实证）⇒ 闸门一律串行")
+            print("      --accept-concurrent              承认「并发结果只作降噪参考」，"
+                  "才允许退出码 0（默认并发档位恒为 3）")
             print("      --fail-fast                      pytest 加 -x（首红即停）")
+            print("")
+            print("退出码：0=全通过 / 1=有存活或无效 / 2=用法错误或不可判 /"
+                  " 3=并发档位未经 --accept-concurrent 确认（结果不可作闸门结论；"
+                  "存活清单仍见上方汇总）")
             return 0
         elif arg.startswith("-"):
             print(f"[INVALID]  未知选项：{arg}")
@@ -597,12 +666,34 @@ def main(argv: list[str]) -> int:
                 )
 
         print(f"[并行] {jobs} 路（按目标文件分片；同一文件绝不并发）")
+        print(_parallel_warning(jobs))
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
             list(pool.map(_work, [b for b in bins if b]))
 
     print("=" * 78)
+    if jobs <= 1:
+        print("档位: 串行（结论可信 ⇒ 可作闸门结论）")
+        if accept_concurrent:
+            print("（--accept-concurrent 在串行档位无意义，已忽略）")
+    else:
+        print(f"档位: 并发（{jobs} 路）")
+        if accept_concurrent:
+            print("  ⇒ 已用 --accept-concurrent 承认「本结果只作降噪参考」")
+        else:
+            print("  ⇒ **本结果不可作闸门结论**（并发会造假 CAUGHT / 判定不可复现 / "
+                  "归因错配）⇒ 退出码恒为 3")
     print(f"突变存活: {survived or '无'}")
     print(f"脚本中止/无效: {aborted or '无'}")
+    if jobs > 1:
+        # 末尾再打一次：只看结论尾部的人（CI 日志、grep「突变存活」）不得错过。
+        print(_parallel_warning(jobs))
+    if jobs > 1 and not accept_concurrent:
+        # ⚠️ **并发档位的退出码恒为 3**（哪怕一条存活都没有）——
+        # 2026-10-23 对抗审查 B 的 F-1：并发会产出**假 CAUGHT**（虚报绿）⇒
+        # 若这里允许 exit 0，闸门/CI 就会把「不可信的并发结果」当成
+        # 「全量突变通过」⇒ 那正是量具自己造假绿灯的形状。
+        # 存活/无效清单仍在上面的汇总里（人看得到），但**退出码不冒充绿**。
+        return 3
     return 1 if (survived or aborted) else 0
 
 
