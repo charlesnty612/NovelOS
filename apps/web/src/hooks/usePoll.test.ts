@@ -314,3 +314,81 @@ describe('usePoll - 失败语义与手动恢复', () => {
   });
 });
 
+// ===========================================================================
+// 目标身份切换（targetKey，2026-10-23 修复）
+//
+// 根因（三条同源，缺一不可）：
+//   ① 轮询的 `fn` 是闭包（`fn: () => workflowsApi.get(pollTargetId)`），
+//      而 effect 的依赖只有 enabled/intervalMs/stopOnError/nonce ——
+//      **不含被轮询对象的身份** ⇒ 目标换了但 enabled 仍为 true 时 effect 不重跑。
+//   ② 于是旧 data 不被清空，也不立即重拉（要等下一个 interval，≤2s）。
+//   ③ 最隐蔽的一条：**上一次 tick 可能还在 await 中**。它 resolve 后只检查了
+//      `aliveRef`（组件还活着）而**没检查 `stopped`** ⇒ 旧目标的结果照样
+//      被 `setData` 写进来。
+// ⇒ 页面拿到的 poll.data 可能属于**上一个 run**：运行中横幅会显示上一个 run 的
+//   动作名 / 节点 / 已运行时长（新 run 可能显示「已运行 12 分」）。
+// ===========================================================================
+describe('usePoll - 目标身份切换（targetKey）', () => {
+  it('旧 tick 在 await 之后 resolve 时不得写入 data（竞态守卫）', async () => {
+    let resolveOld: ((v: unknown) => void) | null = null;
+    const fn = vi.fn().mockImplementation((id: string) => {
+      if (id === 'A') {
+        // A 的请求挂起不返回 ⇒ 制造「切换目标时旧 tick 仍在 await」的在途状态
+        return new Promise((r) => {
+          resolveOld = r;
+        });
+      }
+      return Promise.resolve({ id });
+    });
+
+    const { result, rerender } = renderHook(
+      ({ tk }: { tk: string }) =>
+        usePoll({
+          fn: () => fn(tk),
+          intervalMs: 1000,
+          enabled: true,
+          targetKey: tk,
+          stopWhen: () => false,
+        }),
+      { initialProps: { tk: 'A' } },
+    );
+
+    // A 的请求已发出、尚未 resolve
+    await waitFor(() => expect(fn).toHaveBeenCalledTimes(1));
+
+    // 目标切到 B（组件不卸载 ⇒ enabled 始终为 true）
+    rerender({ tk: 'B' });
+
+    // 让 A 的旧请求 resolve —— 它的结果**不得**写进 data
+    resolveOld!({ id: 'A' });
+    await new Promise((r) => setTimeout(r, 60));
+
+    expect(result.current.data).not.toEqual({ id: 'A' });
+    expect(result.current.data).toEqual({ id: 'B' });
+  });
+
+  it('targetKey 变化 ⇒ 立即重拉新目标（不等 interval），旧数据不残留', async () => {
+    const fn = vi.fn().mockImplementation(async (id: string) => ({ id }));
+    const { result, rerender } = renderHook(
+      ({ tk }: { tk: string }) =>
+        usePoll({
+          fn: () => fn(tk),
+          intervalMs: 1000,
+          enabled: true,
+          targetKey: tk,
+          stopWhen: () => false,
+        }),
+      { initialProps: { tk: 'A' } },
+    );
+
+    await waitFor(() => expect(result.current.data).toEqual({ id: 'A' }));
+
+    rerender({ tk: 'B' });
+
+    // 旧数据不残留（切目标先被清空，而不是继续显示上一个目标）
+    expect(result.current.data).toBeNull();
+    // 立即重拉：interval 是 1000ms，300ms 内拿到就说明没在等 interval
+    await waitFor(() => expect(result.current.data).toEqual({ id: 'B' }), { timeout: 300 });
+  });
+});
+

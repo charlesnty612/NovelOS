@@ -221,4 +221,59 @@ describe('useChapterRunOrchestration', () => {
       expect(result.current.qualityGateCheckpoint?.revision_guidance).toEqual([]);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // 4. 目标身份切换的接线（targetKey）
+  //
+  // 缺陷形状：usePoll 若不接收「被轮询对象的身份」（run_id），那么
+  // 「run 从 A 换成 B、但 enabled 仍是 true」时 effect 不重跑 ⇒
+  // poll.data 继续挂着 A 的结果 ⇒ 页面横幅显示上一个 run 的
+  // 动作名 / 节点 / 已运行时长。
+  //
+  // 判别方式：**不等 2s 的 interval** —— 用 <2s 的 waitFor 超时钉死
+  // 「切目标后立即重拉新目标」，而不是「等到下一个 interval 才拿到 B」。
+  // ---------------------------------------------------------------------------
+  describe('轮询目标身份切换（targetKey 接线）', () => {
+    it('active run 从 A 换成 B ⇒ poll.data 立即属于 B（不等 2s interval）', async () => {
+      const runA = makeRun({
+        run_id: 'wfr_A',
+        status: 'RUNNING',
+        workflow_name: 'chapter-write',
+        started_at: '2026-10-01T00:00:00+00:00',
+      });
+      const runB = makeRun({
+        run_id: 'wfr_B',
+        status: 'RUNNING',
+        workflow_name: 'chapter-plan',
+        started_at: '2026-10-02T00:00:00+00:00',
+      });
+
+      // 列表：第一次给 A（A 跑完、轮询 onResult 触发 reload）⇒ 之后给 B。
+      let listCalls = 0;
+      vi.mocked(workflowsApi.listByProject).mockImplementation(async () => {
+        listCalls += 1;
+        return listCalls === 1 ? [runA] : [runB];
+      });
+      // 详情按 id 返回对应 run（poll 与 detail 共用这个 API）
+      vi.mocked(workflowsApi.get).mockImplementation(async (id: string) =>
+        id === 'wfr_B' ? runB : runA,
+      );
+
+      const { result } = renderHookFor('ch_001');
+
+      // 列表确实从 A 切到了 B（否则本用例没意义）
+      await waitFor(() => expect(result.current.activeRun?.run_id).toBe('wfr_B'));
+
+      // poll.data 必须属于 B，且**不等 2s 的 interval**。
+      // ⚠️ 超时 1200ms < interval 2000ms：若「切目标不立即重拉」，
+      //    poll.data 会一直挂着 A，直到下一个 interval 才拿到 B ⇒ 必红。
+      // （A 那个中间态本身**观察不到**：切目标 ⇒ 旧数据立即作废 + 立即重拉。）
+      await waitFor(() => expect(result.current.poll.data?.run_id).toBe('wfr_B'), {
+        timeout: 1200,
+      });
+      // 钉在真实值上：不得还挂着上一个 run
+      expect(result.current.poll.data?.run_id).not.toBe('wfr_A');
+      expect(result.current.activeRun?.run_id).toBe('wfr_B');
+    });
+  });
 });

@@ -352,6 +352,35 @@ export function pickLatestRun<
 }
 
 /**
+ * 挑出「运行中横幅该显示哪一份 run 详情」。
+ *
+ * 两份来源：
+ *  - `pollData`：轮询 `GET /runs/{id}` 的结果，含 nodes / current_node / workflow_name /
+ *    started_at 等**完整**信息；
+ *  - `activeRun`：runs 列表里的那一行（list 不返回 nodes），但 run_id / workflow_name /
+ *    started_at / status 都是对的。
+ *
+ * 判定口径（缺一不可的守卫，2026-10-23 修复）：
+ *  - 两份是**同一个 run** ⇒ 用 `pollData`（信息更全）；
+ *  - 两份**不是同一个 run** ⇒ 用 `activeRun`：`pollData` 可能还挂着**上一个 run**的
+ *    结果（轮询目标切换的过渡窗口），拿它渲染横幅会让作者看到
+ *    「上一个 run 的动作名 + 上一个 run 的 started_at 算出来的已运行时长」；
+ *  - `activeRun` 为空（列表刷新滞后）⇒ 用 `pollData`；
+ *  - 其余（两者皆空 / 一方为 undefined）⇒ 兜底 `pollData ?? activeRun ?? null`。
+ *
+ * 纯函数（无副作用、无 IO）⇒ 判定口径可单测；页面只管调用。
+ */
+export function pickBannerDetail<T extends { run_id: string }>(
+  pollData: T | null | undefined,
+  activeRun: T | null | undefined,
+): T | null {
+  if (pollData && activeRun) {
+    return pollData.run_id === activeRun.run_id ? pollData : activeRun;
+  }
+  return pollData ?? activeRun ?? null;
+}
+
+/**
  * run 是否「人工纯驳回」：error 精确等于 'rejected'（review author_review 节点产生）。
  *
  * 后端两态口径（packages/workflows/chapter_review/pipeline.py:594-599）：

@@ -11,6 +11,7 @@ import {
   isRunForChapter,
   pickActiveRun,
   pickLatestRun,
+  pickBannerDetail,
   findUnreviewedDraft,
   type ReviewRunLike,
 } from './chapterState';
@@ -744,5 +745,87 @@ describe('G4 禁用理由要说「怎么办」', () => {
       expect(avail.enabled, `${action}@${status} 应可用`).toBe(true);
       expect(avail.reason, `${action}@${status} 不该有理由`).toBeNull();
     }
+  });
+});
+
+// ===========================================================================
+// 运行中横幅的详情归属（pickBannerDetail，2026-10-23 修复）
+//
+// 缺陷形状：poll.data 可能还挂着**上一个 run** 的结果（轮询目标切换的过渡窗口），
+// 页面无条件 `poll.data ?? activeRun` 优先用它 ⇒ 横幅显示上一个 run 的
+// 动作名 / 节点 / 按上一个 run 的 started_at 起算的「已运行 N 分」。
+//
+// 断言打在**返回值本体**上（哪一份 run_id / 哪一份 workflow_name），
+// 不是「函数被调用过」那种恒真断言。
+// ===========================================================================
+describe('pickBannerDetail（横幅该显示哪一份 run）', () => {
+  // 夹具统一类型：两份来源形状不同（poll 详情有 nodes / current_node，列表行没有），
+  // 但必须能作为同一个泛型 T 传进去。
+  type BannerFixture = {
+    run_id: string;
+    workflow_name: string;
+    started_at: string;
+    current_node: string | null;
+    nodes: { node_id: string }[];
+  };
+
+  // poll 详情：含 nodes / current_node 等完整信息
+  const pollDetail: BannerFixture = {
+    run_id: 'wfr_A',
+    workflow_name: 'chapter-write',
+    started_at: '2026-10-01T00:00:00+00:00',
+    current_node: 'writer',
+    nodes: [{ node_id: 'writer' }],
+  };
+  // 列表行：不含 nodes
+  const listRow: BannerFixture = {
+    run_id: 'wfr_A',
+    workflow_name: 'chapter-write',
+    started_at: '2026-10-01T00:00:00+00:00',
+    current_node: null,
+    nodes: [],
+  };
+
+  it('同一个 run ⇒ 用 poll.data（含 nodes / current_node 的完整那份）', () => {
+    const picked = pickBannerDetail(pollDetail, listRow);
+    expect(picked).not.toBeNull();
+    // 钉在真实值上：必须是带 nodes 的那份，且 run_id 正确
+    expect(picked?.run_id).toBe('wfr_A');
+    expect(picked?.nodes).toHaveLength(1);
+    expect(picked?.current_node).toBe('writer');
+  });
+
+  it('不是同一个 run ⇒ 用 activeRun（列表行），不用挂着上一个 run 的 poll.data', () => {
+    const otherRow = {
+      ...listRow,
+      run_id: 'wfr_B',
+      workflow_name: 'chapter-plan',
+      started_at: '2026-10-02T00:00:00+00:00',
+    };
+    const picked = pickBannerDetail(pollDetail, otherRow);
+    expect(picked?.run_id).toBe('wfr_B');
+    expect(picked?.workflow_name).toBe('chapter-plan');
+    // 不得是上一个 run 的那份
+    expect(picked?.workflow_name).not.toBe('chapter-write');
+  });
+
+  it('activeRun 为空（列表刷新滞后）⇒ 用 poll.data', () => {
+    expect(pickBannerDetail(pollDetail, null)?.run_id).toBe('wfr_A');
+    expect(pickBannerDetail(pollDetail, undefined)?.run_id).toBe('wfr_A');
+  });
+
+  it('poll.data 为空 ⇒ 用 activeRun', () => {
+    expect(pickBannerDetail(null, listRow)?.run_id).toBe('wfr_A');
+    expect(pickBannerDetail(undefined, listRow)?.run_id).toBe('wfr_A');
+  });
+
+  it('两者皆空 ⇒ null（横幅走兜底文案，不崩）', () => {
+    expect(pickBannerDetail(null, null)).toBeNull();
+    expect(pickBannerDetail(undefined, undefined)).toBeNull();
+  });
+
+  it('run_id 不同但 workflow_name 相同 ⇒ 仍按 activeRun（身份看 run_id，不看名字）', () => {
+    const sameNameOtherRun = { ...listRow, run_id: 'wfr_C' };
+    expect(pickBannerDetail(pollDetail, sameNameOtherRun)?.run_id).toBe('wfr_C');
   });
 });

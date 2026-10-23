@@ -48,7 +48,7 @@ import type {
   WorkflowStartArgs,
 } from './chapter/ChapterPipelineHeader';
 import { ChapterRunPanel } from './chapter/ChapterRunPanel';
-import { findUnreviewedDraft } from '../utils/chapterState';
+import { findUnreviewedDraft, pickBannerDetail } from '../utils/chapterState';
 import { ChapterRunBanner } from './chapter/ChapterRunBanner';
 import { ChapterDraftsSection } from './chapter/ChapterDraftsSection';
 import { ChapterPlanSection } from './chapter/ChapterPlanSection';
@@ -452,7 +452,11 @@ export function ChapterDetailPage() {
   // current_node / workflow_name / started_at），否则退化为 activeRun 的 list 行
   // （list 不返回 nodes，组件内做退化文案）。submitting=true 时允许显示（按钮已点
   // 下但 list 还没刷出 RUNNING 行的过渡窗口）。
-  const runningDetail: WorkflowRun | null = poll.data ?? activeRun ?? null;
+  //
+  // ⚠️ 归属判定抽在 utils/chapterState.ts 的 pickBannerDetail（纯函数，可单测）：
+  // poll.data 可能是**上一个 run** 的残留（轮询目标切换的过渡窗口），
+  // 无条件优先用它 ⇒ 横幅显示上一个 run 的动作名 / 节点 / 已运行时长。
+  const runningDetail: WorkflowRun | null = pickBannerDetail(poll.data, activeRun);
   const isRunningBannerVisible =
     !!activeRun ||
     (submitting && !poll.data) ||

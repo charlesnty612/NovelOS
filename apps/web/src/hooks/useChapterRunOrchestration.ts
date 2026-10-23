@@ -105,6 +105,10 @@ export function useChapterRunOrchestration(
     fn: () => workflowsApi.get(pollTargetId as string),
     intervalMs: 2000,
     enabled: !!pollTargetId,
+    // 目标身份 = run_id。**必须传**：不传的话「run 换了但 enabled 仍是 true」时
+    // usePoll 的 effect 不会重跑 ⇒ 旧 run 的详情会继续留在 poll.data 里，
+    // 页面横幅就会显示上一个 run 的动作名 / 节点 / 已运行时长。
+    targetKey: pollTargetId ?? '',
     stopWhen: (latest) => {
       if (!latest) return true;
       return latest.status !== 'RUNNING' && latest.status !== 'PENDING';
