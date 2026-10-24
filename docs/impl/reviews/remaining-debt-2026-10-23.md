@@ -538,3 +538,30 @@ probe 字节通道修复是真的；性能脚本不碰活库。
 - **Lead 先验判断被推翻 3 次**（均已入 CHANGELOG/AGENTS）：title 契约（at `director_planner-v3.md:108` 是输入契约）、行数 384（量具失真，真值 577）、审计 A 的 5 条断链（全误报）。
 - **流程违规 1 次（Lead 自报）**：开工前未经用户批准 `push` 批次十九~二十三 6 个提交；此后 **push 一律先问用户**（当前批次 24~28 全部只提交、未推送）。
 - **能力/口径边界（须持续遵守）**：零真实 LLM 调用（故 v4 起名质量、实时 prompt 行为均未验证）；零内容仓接触；突变实跑与全量 pytest 必须由 Lead 串行（成员只跑 precheck / 定向）。
+
+---
+
+## 六、测试瘦身遗留（2026-10-24 凌晨登记 · 批次三十三收尾时移交）
+
+> **来源**：用户「测试太重了」审查（`docs/impl/reviews/test-slimming-review-2026-10-23.md`）后分两批执行（三十三之一 / 之二，提交 `5b59d2e` / `e314833`，均已推远端）。
+> **本节是「已做 / 未做」的持久登记** —— 会话内的共享任务板（task-12/13/10）**不跨会话**，故此处落盘。
+
+### 6.1 已完成（有实测闸门）
+- contract 模板族 **13/16 已收敛**：16 文件 **9,777 → 9,429**；共享 `tests/api/_contract_runner.py`（6 个断言单点，**刻意不提供**从模型自动取期望的入口）+ `_rich_fixture.py` + **runner 自己的看守 20 例**；`reveal` 补 11 键硬编码基线（抓「两侧同时收窄」与「可选字段回填 null」两个盲格）。
+- 测试建库样板：`tests/_db_fixtures.py::migrated_db`（**每例新库、不共享**），**14 文件 / 18 处**替换，批量探针「路径/类型/表集合」18/18 PASS。
+- 前端 `ProjectInitPanel.test.tsx` 2381 行 / 39 例 → 3 份（613/1211/565），原文件删除、用例守恒。
+- 闸门：全量 pytest **4379/1/1**；`--all --precheck` 477/0；**指向被改 contract 文件的 12 份规格串行实跑 0 存活**；判别力抽检 6 failed→还原绿。
+
+### 6.2 未完成（下一轮直接接）
+| # | 项 | 位置 | 目标 / 判据 | 风险 |
+|---|---|---|---|---|
+| T-1 | contract 剩余 3 项 | `test_workflow_run_response_contract.py`（11 处多行键集样板，现仅 helper 层）/ `test_misc_router_response_contract.py`（801 行未动）/ `test_quality_reference_list_response_contract.py`（774 行未动） | 16 文件 **9,429 → ≤9,400**（差 29） | 低（协议已跑通 13 次） |
+| T-2 | helper 档② | `_app`/`_client`（`lifespan_context` + `ASGITransport`）⇒ 先吃 `tests/unit/_shared.py` 的 `_make_settings`/`_db` 族与 `tests/integration/_shared.py::_create_app` | 这是「helper 50,220 → ≤35,000」的大头 | **中**：新文件若照抄工厂默认 + `beforeEach` reset 集不成对，会出「静默夹具契约不等价」 |
+| T-3 | helper 档③ | `_seed_*` **同域**合并（backup / content_sync / genre 各归各；**跨域不合并**） | 同上 | 中：请求体逐字比对是红线 |
+| T-4 | 前端 `ChapterDetailPage.test.tsx`（3776 行 / 96 例）拆分 | 5 份按 describe 分组（plan 13 / runs 21 / pipeline 17 / gates.error 19 / gates.flow 23） | 每份 <1500 行；vitest 853 例守恒；Duration 目标 ≤7s | **高**：本仓已尝试**一次并回退**——切出 `runs` 21 例后 4 例红（横幅节点位缺席），真因是**原 21 例依赖 mock 工厂里的默认实现**，而新文件只搬了 `beforeEach` 的 reset 集 ⇒ **必须「工厂默认 + reset 集」成对搬**，且**先单跑新文件 21 passed 再删原文件的块** |
+| T-5 | 跳过清单（勿再尝试） | 141 处 `apply_migrations(db_path, <显式迁移目录>)`（含 52 处在 `test_migrations.py` 等专门测迁移的文件里）、6 处形态不同（含一处自定义 fixture 就叫 `migrated_db`） | — | — |
+
+### 6.3 三条可复用的教训（本轮新增）
+1. **体积指标一旦定成「某个文件子集的行数」，就会被「搬出行数」骗过去** —— 本轮靠「`tests/**` 总量」这条反制才发现 +663。今后定体积目标必须**同时**定「总量口径」与「永久资产口径」（新增守卫测试算资产、不算肥肉）。
+2. **抽共享断言/夹具时，被抽走的能力必须补看守** —— `_contract_runner.py` 一度零测试却承载 42 条规格的判别力（改一行可让 42 条同时 SURVIVED，而 `--precheck` 抓不到）。
+3. **测试文件拆分是「夹具契约搬运」而不是「文本搬运」** —— 拆 3776 行文件失败的那 4 例，全是因为只搬了代码、没搬「mock 工厂默认值」这层隐式契约。
