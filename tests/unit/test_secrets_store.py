@@ -40,7 +40,17 @@ def _write_secrets(path: Path, api_keys: dict[str, str]) -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
-    """每个用例前后清缓存并屏蔽 NOVELOS_SECRETS_FILE，避免相互污染。"""
+    """每个用例前后清缓存并屏蔽 NOVELOS_SECRETS_FILE，避免相互污染。
+
+    ⚠️ 这里的 delenv **不许删**：它测的正是「env 缺失时的默认解析路径」。
+    仓根真实 ``secrets.json`` 的隔离由 ``tests/conftest.py`` 完成
+    （回落基址被重定向到会话级沙箱）⇒ 「env 缺失」这条路仍然被走到，
+    但落点是沙箱而不是仓根 ⇒ 真实凭据进不了测试进程。
+
+    ⚠️ **fixture 只许做事、不许断言**（审查 2026-10-24）：断言写在 fixture 里，
+    真红时呈现为 **error 而非 FAIL** ⇒ 撞 ``AGENTS.md:418``「只有 errors ⇒ 判
+    INVALID」的坑 ⇒ 判别断言一律放 ``tests/unit/test_conftest_guards.py`` 的具体用例。
+    """
     monkeypatch.delenv("NOVELOS_SECRETS_FILE", raising=False)
     monkeypatch.delenv("NOVELOS_API_KEY_KIMI", raising=False)
     monkeypatch.delenv("NOVELOS_API_KEY_DEEPSEEK", raising=False)
