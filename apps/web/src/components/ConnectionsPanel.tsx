@@ -499,6 +499,22 @@ function ConnectionFormModal({
     }
   };
 
+  // 切接口类型：预设是「厂商组合」（provider 与地址 / 头配套），只改 provider
+  // 会留下错配的 base_url（如 openai 风格地址配 anthropic）⇒ 有选中预设且预设的
+  // provider 与新类型不一致时，**解除预设**（清掉预设带出的接口地址 / 模型列表
+  // 地址 / 预设头；名称、用户自己加的头等手填内容保留不动）。
+  // 即：切接口类型 = 放弃当前预设组合。前端不硬编码任何 URL（权威在后端
+  // presets.py）：地址清空后 anthropic / ollama / mock 走服务端默认端点，其余
+  // 类型由必填校验拦住。无预设时只切类型，不清任何字段（用户手填的自己负责）。
+  const handleProviderChange = (next: string) => {
+    setProvider(next);
+    if (next === provider) return;
+    if (presetId && selectedPreset?.provider !== next) {
+      setPresetId('');
+      clearAutoFilled();
+    }
+  };
+
   // 编辑时的「原有请求头键名」快照：被用户删掉的键要显式发 null（后端逐键删除语义）。
   const initialHeaderKeys = useMemo(
     () => Object.keys(readHeaders(initial ?? null)),
@@ -630,7 +646,7 @@ function ConnectionFormModal({
           <label>接口类型 *</label>
           <select
             value={provider}
-            onChange={(e) => setProvider(e.target.value)}
+            onChange={(e) => handleProviderChange(e.target.value)}
             data-testid="connection-provider"
           >
             {PROVIDER_OPTIONS.map((o) => (

@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-24 · 前端 · 连接表单：切接口类型联动解除预设，不再残留错配地址）
+
+- **症状（用户报）**：新建模型连接选「opencode Go」预设后把接口类型切到 Anthropic，接口地址仍停在 `…/openai/v1`——provider 与 base_url 错配。
+- **根因**：`ConnectionsPanel.tsx` 只有「预设→表单」单向填充（`handlePresetChange` 开头 `clearAutoFilled()`），provider 下拉的 onChange 仅 `setProvider`，零联动。
+- **修复**：新增 `handleProviderChange`——有选中预设且预设 provider 与新类型不一致 ⇒ 解除预设（`setPresetId('')` + `clearAutoFilled()`：清预设带出的地址/模型列表地址/预设头；**手填内容一律保留**）；无预设只切类型不清字段。前端不硬编码任何 URL（权威在后端 presets.py）：地址清空后 anthropic/ollama/mock 走服务端默认端点，其余类型由既有必填校验拦住。对所有厂商预设通用。
+- 判别：`ConnectionsPanel.test.tsx` +2（切类型⇒清预设地址+复位下拉+移除预设头；反向：无预设手填地址切类型⇒保留）。撤修复必红（模拟原态恰好只红新用例 1）。`npx vitest run ConnectionsPanel` **17 passed**；`tsc -b` 0 错误。
+
 ### Fixed（2026-10-24 · 批次三十四 · 全面审核修复批：缓存根治收尾 R-1/R-2/R-3 + 看守补洞 + 测试瘦身 + 文档回填）
 
 > **来源**：全面审查第三轮（`docs/impl/reviews/full-review-round3-2026-10-24.md`）+ 测试过度专项（`docs/impl/reviews/test-over-engineering-review-2026-10-24.md`）的发现全量按建议修复。6 个工作包并行执行 + 1 个 R-1 测试适配批，Lead 统一跑收尾闸门。**零真实 LLM 调用、零内容仓接触、活库未动**。

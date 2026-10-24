@@ -479,4 +479,65 @@ describe('ConnectionsPanel · 模型连接', () => {
       'oc_sk-user',
     );
   });
+
+  it('选预设后把接口类型切成不同类型 ⇒ 解除预设：清掉预设地址与头，预设下拉复位', async () => {
+    renderPanel();
+    fireEvent.click(await screen.findByTestId('new-model-connection'));
+
+    const presetSelect = (await screen.findByTestId(
+      'connection-preset',
+    )) as HTMLSelectElement;
+    await waitFor(() => {
+      const opts = Array.from(presetSelect.querySelectorAll('option')).map(
+        (o) => (o as HTMLOptionElement).value,
+      );
+      expect(opts).toContain('opencode_go');
+    });
+
+    // 选预设 ⇒ 地址 / 头 / 模型列表地址被填上（provider 跟随预设为 openai_compatible）
+    fireEvent.change(presetSelect, { target: { value: 'opencode_go' } });
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId('connection-base-url') as HTMLInputElement).value,
+      ).toBe('https://opencode.ai/inference/go/openai/v1');
+    });
+    expect(screen.getByTestId('connection-header-key-0')).not.toBeNull();
+
+    // 接口类型切到不同类型（anthropic）⇒ 预设组合被放弃：
+    // 预设带出的 openai 风格地址与预设头一并清掉，预设下拉复位
+    const providerSelect = screen.getByTestId(
+      'connection-provider',
+    ) as HTMLSelectElement;
+    fireEvent.change(providerSelect, { target: { value: 'anthropic' } });
+
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId('connection-base-url') as HTMLInputElement).value,
+      ).toBe('');
+    });
+    expect(providerSelect.value).toBe('anthropic');
+    expect((screen.getByTestId('connection-preset') as HTMLSelectElement).value).toBe('');
+    expect(screen.queryByTestId('connection-header-key-0')).toBeNull();
+  });
+
+  it('无预设时切接口类型 ⇒ 只切类型，手填的接口地址保留', async () => {
+    renderPanel();
+    fireEvent.click(await screen.findByTestId('new-model-connection'));
+
+    // 不选预设，直接手填接口地址
+    fireEvent.change(screen.getByTestId('connection-base-url'), {
+      target: { value: 'https://api.example.com/v1' },
+    });
+
+    // 切接口类型 ⇒ 地址保留（用户手填的配置自己负责，不清）
+    const providerSelect = screen.getByTestId(
+      'connection-provider',
+    ) as HTMLSelectElement;
+    fireEvent.change(providerSelect, { target: { value: 'anthropic' } });
+
+    expect(providerSelect.value).toBe('anthropic');
+    expect(
+      (screen.getByTestId('connection-base-url') as HTMLInputElement).value,
+    ).toBe('https://api.example.com/v1');
+  });
 });
