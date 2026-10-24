@@ -46,11 +46,12 @@ MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 #: director 装配缓存键的**长度**（维度数）。演进沿革：
 #: 12 → 13（prompt_label）→ 14（chars_fp）→ … → 18（volume_scope 所属卷）
 #: → **23**（2026-10-23 批次：director 侧补 5 个维度——伏笔台账 / 叙事债务 /
-#: 情节图+分支 / 项目逾期阈值 / 章标题）。
+#: 情节图+分支 / 项目逾期阈值 / 章标题）→ **24**（2026-10-24 R-2：新增 prev_draft_fp
+#: 前章草稿内容维度）。
 #: ⚠️ 本仓**三处各有一份**这个常量（另两处：`tests/unit/test_prompt_label_key.py`、
 #: `tests/unit/test_volume_scope_cache_key.py`）——加维度必须三处同批更新，
 #: 否则「键长断言」会以**过期数字**的形式红/绿（见 AGENTS 硬规则 2 的装配缓存键纪律）。
-DIRECTOR_KEY_LEN = 23
+DIRECTOR_KEY_LEN = 24
 
 
 def _chapter_with_draft(db_path: Path, pid: str, prose: str = "正文。") -> str:
@@ -359,8 +360,8 @@ def test_writer_cache_key_also_has_skills_dimension(tmp_path):
     keys_after = [k for k in cache_mod._assembly_cache if k[0] == pid and k[3] == "writer"]
     assert len(keys_after) == 1
     before, after = keys_before[0], keys_after[0]
-    assert len(before) == len(after) == 23, (
-        f"writer 键应为 23 元（22 + volume_scope 所属卷维度），实得 {len(before)} / {len(after)}"
+    assert len(before) == len(after) == 24, (
+        f"writer 键应为 24 元（23 + prev_draft_fp 前章草稿维度），实得 {len(before)} / {len(after)}"
     )
     diff_positions = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
     assert len(diff_positions) == 1, (

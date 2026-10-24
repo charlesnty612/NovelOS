@@ -31,6 +31,7 @@ from packages.core.genre.target_words import (
 from packages.core.model_router.router import capability_for
 from packages.core.quality.wordcount import DEFAULT_TARGET_WORD_COUNT
 from packages.core.workflow_runtime.engine import WorkflowNode
+from packages.domain.project.service import bump_project_state_version
 
 from .planner_input import (
     DIRECTOR_PLANNER_PROMPT_VERSION,
@@ -252,6 +253,16 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
                 (planner_title, chapter_id),
             )
             title_applied = (cur.rowcount or 0) > 0
+            if title_applied and project_id:
+                # 2026-10-24（R-3）：章标题进 director / writer 装配 payload 的
+                # ``chapter.title`` 段 ⇒ 回填后必须推 ``story_states.state_version``
+                # （同事务、同一连接 ⇒ 回填失败则版本一起回滚）。
+                # ⚠️ 只在**真的回填了**（rowcount > 0）时推进——「作者标题保留」
+                # 与「模型没给名」两种结局都没改数据 ⇒ 不该白付一次全局 miss
+                # （AGENTS 坑区「过度失效」反向纪律）。
+                # ⚠️ 项目尚无快照行（从未 commit）⇒ 推进函数返回 ``None``
+                # （**不造行**，与域层写路径逐字同口径）。
+                bump_project_state_version(conn, project_id)
         if has_scene_plan and project_id:
             scene_plan_id = save_scene_plan(
                 conn,

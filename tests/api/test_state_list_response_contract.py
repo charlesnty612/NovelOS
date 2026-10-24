@@ -298,7 +298,14 @@ async def _harvest(tmp_path: Path) -> dict:
     out["branch_created"] = r.json()
 
     # main commit
-    d1 = _delta(chapter_id, char_id, base, "破屋")
+    # ⚠️ 2026-10-24（R-1）：**建分支本身会推进 main 的 state_version**
+    # （``branches`` 行进 director 装配 payload ⇒ 写路径必须推版本）
+    # ⇒ 乐观锁基线必须**动态取当前值**，不许沿用 genesis 的 base
+    # （沿用会被乐观锁挡成 409 optimistic_lock）。
+    main_version = (
+        await _request(app, "GET", f"/api/projects/{pid}/state")
+    ).json()["state_version"]
+    d1 = _delta(chapter_id, char_id, main_version, "破屋")
     r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json=d1)
     assert r.status_code == 201, r.text
     r = await _request(
@@ -311,6 +318,9 @@ async def _harvest(tmp_path: Path) -> dict:
     out["commit_response"] = r.json()
 
     # 分支 commit + 回滚（回滚是唯一让 ``rollback_of`` 非空的路径）
+    # ⚠️ 这里 ``base`` 仍然正确：分支有**自己独立的版本序列**，
+    # 其起点是建分支那一刻的 ``branches.base_state_version``（= 1 = genesis），
+    # 不随 main 的版本推进而变（R-1 只推 main，不推分支序列）。
     d2 = _delta(chapter_id, char_id, base, "城门")
     r = await _request(app, "POST", f"/api/projects/{pid}/deltas", json={**d2, "branch_id": out["branch_id"]})
     assert r.status_code == 201, r.text
@@ -657,6 +667,9 @@ async def _harvest_ownership(tmp_path: Path) -> dict:
     # ⚠️ 顺序要紧：分支的 ``base_state_version`` 取自建分支那一刻的 main，
     # 所以**先建分支再在 main 上 commit**（否则分支基线是 v2，提交时
     # ``previous_state_version`` 仍给 v1 会被乐观锁挡成 409）。同 ``_harvest`` 的次序。
+    # ⚠️ 2026-10-24（R-1）：**建分支本身也推进 main 的 state_version**
+    # （每个分支一次）⇒ 下面 main 上那笔 commit 的乐观锁基线必须
+    # **动态取当前值**，不许沿用 genesis 的 ``base``。
     branch_ids = {}
     for name in ("alt", "alt2"):
         r = await _request(app, "POST", f"/api/projects/{pid_a}/branches", json={"name": name})
@@ -664,7 +677,10 @@ async def _harvest_ownership(tmp_path: Path) -> dict:
         branch_ids[name] = r.json()["branch_id"]
     out["branch_ids"] = branch_ids
 
-    d1 = _delta(chap_a, char_a, base, "破屋")
+    main_version = (
+        await _request(app, "GET", f"/api/projects/{pid_a}/state")
+    ).json()["state_version"]
+    d1 = _delta(chap_a, char_a, main_version, "破屋")
     r = await _request(app, "POST", f"/api/projects/{pid_a}/deltas", json=d1)
     assert r.status_code == 201, r.text
     r = await _request(
@@ -674,6 +690,8 @@ async def _harvest_ownership(tmp_path: Path) -> dict:
     assert r.status_code == 201, r.text
 
     # 分支 alt 上挂 1 个 commit（供 promote 的正向「确实写东西」与反向两用）
+    # ⚠️ ``base`` 仍正确：分支版本序列独立，起点 = 建分支时的 base_state_version
+    # （= genesis 的 1），不随 main 版本推进而变。
     d2 = _delta(chap_a, char_a, base, "城门")
     r = await _request(app, "POST", f"/api/projects/{pid_a}/deltas",
                        json={**d2, "branch_id": branch_ids["alt"]})

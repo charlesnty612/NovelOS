@@ -100,6 +100,11 @@ def test_branch_isolation_and_promote(tmp_path: Path):
             assert bs[0]["name"] == "main"
             assert bs[0]["status"] == "ACTIVE"
 
+            # 建分支前的 main 版本（建分支会推进它——见下方断言）
+            r = await _request(app, "GET", f"/api/projects/{pid}/state")
+            assert r.status_code == 200
+            main_v_before_branch = r.json()["state_version"]
+
             # 建分支 branch-A
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/branches",
@@ -112,6 +117,16 @@ def test_branch_isolation_and_promote(tmp_path: Path):
             assert branch["parent_branch_id"] == bs[0]["branch_id"]
             assert branch["base_state_version"] == 1
             bid_a = branch["branch_id"]
+
+            # ⚠️ 2026-10-24（R-1）：**建分支会推进 main 的 state_version**
+            # （``branches`` 行进 director 装配 payload ⇒ 写路径必须推版本）。
+            # 这是新契约：版本**递增**，不是「不变」。
+            r = await _request(app, "GET", f"/api/projects/{pid}/state")
+            assert r.status_code == 200
+            main_v_after_branch = r.json()["state_version"]
+            assert main_v_after_branch == main_v_before_branch + 1, (
+                "建分支必须推进 main 的 state_version（R-1）"
+            )
 
             # 列 branches：现在 2 个
             r = await _request(app, "GET", f"/api/projects/{pid}/branches")
@@ -188,21 +203,27 @@ def test_branch_isolation_and_promote(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             commit_branch = r.json()
-            assert commit_branch["state_version"] == 2  # 分支内独立计数（base=1, +1=2）
+            # 分支内独立计数：从 base_state_version 起 +1（不受 main 版本推进影响）
+            assert commit_branch["state_version"] == branch["base_state_version"] + 1
 
-            # main 不受影响：GET /state 仍返回 v1（不出现 event_branch_a / hook_branch_a）
+            # main 不受影响：**版本不动**（分支提交不推 main 版本），
+            # **内容也不动**（不出现 event_branch_a / hook_branch_a）。
+            # ⚠️ 2026-10-24（R-1）：main 的版本在建分支时已推进过（见上），
+            # 此处断言的是「分支提交本身不再推进 main」。
             r = await _request(app, "GET", f"/api/projects/{pid}/state")
             assert r.status_code == 200
             main_state = r.json()
-            assert main_state["state_version"] == 1
+            assert main_state["state_version"] == main_v_after_branch, (
+                "分支提交不应推进 main 的 state_version（隔离面）"
+            )
             assert "event_branch_a" not in main_state.get("recent_events", [])
             assert not any(h["hook_id"] == "hook_branch_a" for h in main_state["hooks"])
 
-            # 分支视角：GET state?branch_id=... 返回重放结果（v=2，location=Cave）
+            # 分支视角：GET state?branch_id=... 返回重放结果（location=Cave）
             r = await _request(app, "GET", f"/api/projects/{pid}/state?branch_id={bid_a}")
             assert r.status_code == 200
             branch_state = r.json()
-            assert branch_state["state_version"] == 2
+            assert branch_state["state_version"] == commit_branch["state_version"]
             char = next(c for c in branch_state["characters"] if c["character_id"] == cid)
             assert char["current_state"]["location"] == "Cave"
             assert "event_branch_a" in branch_state["recent_events"]
@@ -214,6 +235,11 @@ def test_branch_isolation_and_promote(tmp_path: Path):
             assert r.status_code == 409, r.text
 
             # promote: 分支全部 commits 合并到 main
+            # promote 前 main 的版本（重放会在其上 +N，promote 自身再 +1）
+            r = await _request(app, "GET", f"/api/projects/{pid}/state")
+            assert r.status_code == 200
+            main_v_before_promote = r.json()["state_version"]
+
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/branches/{bid_a}/promote",
                 json={"chapter_id": chap},
@@ -222,8 +248,11 @@ def test_branch_isolation_and_promote(tmp_path: Path):
             promote_result = r.json()
             assert promote_result["promoted_from"] == bid_a
             assert promote_result["promoted_commits"] == 1
-            # promote 产生一个 main 上的 commit（branch=main），state_version 在 main 上 +1
-            assert promote_result["state_version"] == 2  # main 之前 v1 → v2
+            # promote 产生 main 上的 commit（branch=main）：每个被重放的分支 commit
+            # 在 main 上 +1 ⇒ state_version = promote 前 main 版本 + 被重放条数
+            assert promote_result["state_version"] == (
+                main_v_before_promote + promote_result["promoted_commits"]
+            )
             assert promote_result["branch_id"] is not None  # = main branch_id
 
             # branch-A 状态变为 MERGED
@@ -232,21 +261,30 @@ def test_branch_isolation_and_promote(tmp_path: Path):
             branch_a_row = next(b for b in r.json() if b["branch_id"] == bid_a)
             assert branch_a_row["status"] == "MERGED"
 
-            # main 现在反映变更：GET state v2 含 location=Cave / event_branch_a / hook_branch_a
+            # main 现在反映变更：GET state 含 location=Cave / event_branch_a / hook_branch_a
             r = await _request(app, "GET", f"/api/projects/{pid}/state")
             assert r.status_code == 200
             main_after = r.json()
-            assert main_after["state_version"] == 2
+            # ⚠️ 2026-10-24（R-1）：promote 把分支状态改掉（ACTIVE→MERGED）⇒
+            # 合并**自身**再推一次 main 版本（内容不变）⇒ 比被重放的那一版 +1
+            assert main_after["state_version"] == promote_result["state_version"] + 1
             char_after = next(c for c in main_after["characters"] if c["character_id"] == cid)
             assert char_after["current_state"]["location"] == "Cave"
             assert "event_branch_a" in main_after["recent_events"]
             assert any(h["hook_id"] == "hook_branch_a" for h in main_after["hooks"])
 
-            # diff v1 vs v2（main）：同样应有 characters / hooks / events 改动
-            r = await _request(app, "GET", f"/api/projects/{pid}/state/diff?a=1&b=2")
-            assert r.status_code == 200
+            # diff（main）：promote 前的那一版 vs 被重放产出的那一版
+            # （⚠️ 不能用 a=1&b=2：建分支的 R-1 推进让 v2 与 v1 **内容相同** ⇒ 空 diff）
+            r = await _request(
+                app, "GET",
+                f"/api/projects/{pid}/state/diff"
+                f"?a={main_v_before_promote}&b={promote_result['state_version']}",
+            )
+            assert r.status_code == 200, r.text
             diff_main = r.json()
             assert diff_main["branch_id"] is None
+            assert diff_main["version_a"] == main_v_before_promote
+            assert diff_main["version_b"] == promote_result["state_version"]
             assert "characters" in diff_main
             assert "hooks" in diff_main or "events_changed" in diff_main or "recent_events" in diff_main
 
@@ -650,12 +688,18 @@ def test_promote_replay_resolves_hook_in_branch_order(tmp_path: Path):
                 conn.close()
 
             # promote：按序重放 2 个分支 commit → main 上产生 2 个新 commit
+            # ⚠️ 2026-10-24（R-1）：建分支已把 main 版本推过一次 ⇒ 这里动态取当前值
+            r = await _request(app, "GET", f"/api/projects/{pid}/state")
+            assert r.status_code == 200
+            main_v_before_promote = r.json()["state_version"]
+
             r = await _request(app, "POST", f"/api/projects/{pid}/branches/{bid}/promote",
                                json={"chapter_id": chap})
             assert r.status_code == 201, r.text
             result = r.json()
             assert result["promoted_commits"] == 2
-            assert result["state_version"] == 3  # main: v1 → +2 = v3
+            # 每个被重放的分支 commit 在 main 上 +1
+            assert result["state_version"] == main_v_before_promote + result["promoted_commits"]
             assert len(result["replayed_delta_ids"]) == 2
             # 重放产生新 delta_id，不复用原 delta_id
             assert "dlt_bh1" not in result["replayed_delta_ids"]
@@ -665,7 +709,9 @@ def test_promote_replay_resolves_hook_in_branch_order(tmp_path: Path):
             r = await _request(app, "GET", f"/api/projects/{pid}/state")
             assert r.status_code == 200
             main_state = r.json()
-            assert main_state["state_version"] == 3
+            # ⚠️ 2026-10-24（R-1）：promote 自身（ACTIVE→MERGED）再推一次 main 版本
+            # （内容不变）⇒ 比被重放的那一版 +1
+            assert main_state["state_version"] == result["state_version"] + 1
             h1_in_state = next((h for h in main_state["hooks"] if h["hook_id"] == "h1"), None)
             assert h1_in_state is not None
             assert h1_in_state["status"] == "RESOLVED"
@@ -732,6 +778,11 @@ def test_branch_commit_does_not_pollute_main_domain_tables(tmp_path: Path):
             finally:
                 conn.close()
 
+            # 建分支前的 main 版本（R-1：建分支会推一次）
+            r = await _request(app, "GET", f"/api/projects/{pid}/state")
+            assert r.status_code == 200
+            main_v_before_branch = r.json()["state_version"]
+
             # 建分支 + 分支 commit（character state.location）
             r = await _request(app, "POST", f"/api/projects/{pid}/branches", json={"name": "no-pollute"})
             bid = r.json()["branch_id"]
@@ -754,6 +805,8 @@ def test_branch_commit_does_not_pollute_main_domain_tables(tmp_path: Path):
             assert r.status_code == 201
 
             # 关键断言：分支 commit 后 main.character_states **无 state_version>=2 行**
+            # ⚠️ R-1 之后这条判别力**更强**：建分支把 main 推到了 v2，若版本推进
+            # 顺手写了域表行（character_states），这里就会命中 ⇒ 必红。
             conn = sqlite3.connect(str(tmp_path / "novelos.db"))
             conn.row_factory = sqlite3.Row
             try:
@@ -765,11 +818,14 @@ def test_branch_commit_does_not_pollute_main_domain_tables(tmp_path: Path):
             finally:
                 conn.close()
 
-            # main 状态：v1，location 仍为 Unknown
+            # main 状态：**版本递增**（R-1：建分支推版本）、**内容不变**
+            # （location 仍为 Unknown）——本用例的判别面是「内容不被污染」。
             r = await _request(app, "GET", f"/api/projects/{pid}/state")
             assert r.status_code == 200
             main_state = r.json()
-            assert main_state["state_version"] == 1
+            assert main_state["state_version"] == main_v_before_branch + 1, (
+                "建分支应推进 main 的 state_version（R-1）"
+            )
             char = next(c for c in main_state["characters"] if c["character_id"] == cid)
             assert char["current_state"].get("location") in (None, "Unknown")
 

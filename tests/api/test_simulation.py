@@ -87,7 +87,13 @@ def _state_delta_location(cid: str, chap: str, change_id: str, before: str, afte
 
 
 def test_simulate_endpoint_happy_path(tmp_path: Path):
-    """POST /simulate 两个 delta → 201 → main 不变 → GET /simulations 重放。"""
+    """POST /simulate 两个 delta → 201 → main **内容**不变（版本因分支写操作递增）
+    → GET /simulations 重放。
+
+    ⚠️ 2026-10-24（R-1）：「main 不变」的**版本**部分已不成立——推演建临时分支 +
+    归档临时分支各推一次 main 版本；本用例的判别面是**推演内容不落 main**
+    （事件 / 伏笔都不出现在 main 快照里）。
+    """
     app = _create_app(tmp_path)
 
     async def run():
@@ -175,11 +181,17 @@ def test_simulate_endpoint_happy_path(tmp_path: Path):
             assert result["simulation_id"] == result["branch_id"]
             assert "characters" in result["diff"] or "hooks" in result["diff"] or "events_changed" in result["diff"]
 
-            # main 不变：state_version 仍为 1
+            # main：推演**内容**不落 main（这才是本用例的判别面）
+            # ⚠️ 2026-10-24（R-1）：推演会建临时分支 + 归档临时分支，**各推一次**
+            # main 版本（``branches`` 行进 director 装配 payload ⇒ 写路径推版本）
+            # ⇒ 版本**递增**（不再是「仍为 1」），但推演内容仍不落 main。
+            BRANCH_WRITE_VERSION_PUSHES = 2  # 建临时分支 + 归档临时分支
             r = await _request(app, "GET", f"/api/projects/{pid}/state")
             assert r.status_code == 200
             main_state = r.json()
-            assert main_state["state_version"] == 1
+            assert main_state["state_version"] == (
+                result["base_version"] + BRANCH_WRITE_VERSION_PUSHES
+            ), "推演期间 main 版本应推进两次（建临时分支 + 归档临时分支）"
             assert "event_a1" not in main_state.get("recent_events", [])
             assert not any(h["hook_id"] == "hook_a1" for h in main_state["hooks"])
 

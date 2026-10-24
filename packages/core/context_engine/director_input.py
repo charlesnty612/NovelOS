@@ -51,6 +51,7 @@ from .cache import (
     foreshadow_threshold_fingerprint,
     hooks_fingerprint,
     plot_fingerprint,
+    previous_draft_fingerprint,
     project_meta_fingerprint,
     with_fingerprint_conn,
     world_fingerprint,
@@ -364,20 +365,21 @@ def build_director_input(
 
     缓存（V2.0 Wave C 任务二）：L0/L1 装配结果按
     ``(project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
-    volume_scope, project_meta_fp, hooks_fp, debts_fp, plot_fp, foreshadow_fp,
-    title_fp, active_canon_id, intent_fp, bible_fp, target_word_count,
-    genre_pack_ref, chars_fp, world_fp, skills_fp, prompt_label, ns)``
-    ——**共 23 元**——键做进程内缓存；同一 (project, state_version, chapter,
-    plan_json 内容, 大纲内容, 挂卷范围, 项目元信息, 伏笔台账, 叙事债务,
-    情节图, 伏笔阈值, 章节标题, canon, 作者意图, 项目写作圣经, 目标字数,
-    题材包, 角色内容, 世界观内容, 绑定 skill 集合, 提示词版本, 命名空间)
+    prev_draft_fp, volume_scope, project_meta_fp, hooks_fp, debts_fp, plot_fp,
+    foreshadow_fp, title_fp, active_canon_id, intent_fp, bible_fp,
+    target_word_count, genre_pack_ref, chars_fp, world_fp, skills_fp,
+    prompt_label, ns)``
+    ——**共 24 元**——键做进程内缓存；同一 (project, state_version, chapter,
+    plan_json 内容, 大纲内容, 前章草稿内容, 挂卷范围, 项目元信息, 伏笔台账,
+    叙事债务, 情节图, 伏笔阈值, 章节标题, canon, 作者意图, 项目写作圣经,
+    目标字数, 题材包, 角色内容, 世界观内容, 绑定 skill 集合, 提示词版本, 命名空间)
     第二次调用直接返回缓存条目。
 
     ⚠️ **本段键清单此前是 15 元的旧版**（漏 ``volume_scope`` / ``project_meta_fp`` /
     ``hooks_fp`` / ``debts_fp`` / ``plot_fp`` / ``foreshadow_fp`` / ``title_fp`` /
     ``world_fp`` 共 8 元）⇒ **文档漂移掩盖了 D-7「5 处漏维度」的内容**
     （漏掉的正是其中 5 个内容指纹）。**键的权威构成 = 本函数下方的 ``cache_key = (...)``**，
-    长度由 ``tests/unit/test_prompt_label_key.py`` 的 ``DIRECTOR_KEY_LEN = 23`` 钉住；
+    长度由 ``tests/unit/test_prompt_label_key.py`` 的 ``DIRECTOR_KEY_LEN = 24`` 钉住；
     每个内容指纹维度的 load-bearing 性由 ``tests/mutation_specs/l22_director_ledger_key.py``
     （LEDGER-KEY-1..5，撤维度必红）钉住。
     ⚠️ **别在这里手抄键清单**：改文档时先读代码，且断言只引用上面的权威源。
@@ -417,6 +419,16 @@ def build_director_input(
     否则 director 拿着改之前的旧手艺规划本章。口径与 ``genre_pack_ref`` /
     ``chars_fp`` 逐字同形。判别：突变规格 ``tests/mutation_specs/l7_skill_cache_key.py``
     （``SKILL-KEY-1/2`` 撤掉 ``skills_fp`` 维度 ⇒ 绑定 skill 前后键不变 ⇒ 必红）。
+
+    2026-10-24（R-2）：键再补 **前章草稿内容指纹** ``prev_draft_fp``。
+    ``previous_chapter_tail``（前章尾段 + 前章身份）进本 payload，而**草稿写路径不推
+    ``state_version``**（``drafts`` 表由 ``ChapterService.create_draft`` 写，commit 才推）
+    ⇒ 前章**重出稿但未 commit**时旧键里没有任何维度会变 ⇒ 同 ``state_version`` +
+    同 ``chapter_no`` 重跑该章**命中旧装配** ⇒ planner 拿着改动前的尾段排计划，零告警。
+    与 writer 侧 ``recent_prose.last_chapter_excerpt``（同一份前章最新草稿）
+    **同源同函数**（``cache.previous_draft_fingerprint``）⇒ 两侧指纹值逐字相同。
+    ⚠️ 位置：单独成行、落在身份行之后——既有突变规格 ``VOL-1`` 的锚点原文是
+    ``volume_scope,`` + ``project_meta_fp,`` 两行，**不得**打断。
 
     ``namespace``（关键词参数，默认 ``""``）：键尾命名空间标记。``preview_context``
     传 ``"preview"`` 拆开 dry-run 与生产的键空间，避免预览的空意图 / 默认 2200 字
@@ -525,8 +537,21 @@ def build_director_input(
     plot_fp = plot_fingerprint(db_path, project_id, conn=_conn)
     foreshadow_fp = foreshadow_threshold_fingerprint(db_path, project_id, conn=_conn)
     title_fp = chapter_title_fingerprint(db_path, chapter_id, conn=_conn)
+    # 2026-10-24（R-2）：键再补 **前章草稿内容指纹** ``prev_draft_fp``。
+    # ``previous_chapter_tail``（前章尾段 + 前章身份）进 director payload，而**草稿写
+    # 路径不推 state_version**（drafts 表由 ChapterService.create_draft 写，commit 才推）
+    # ⇒ 前章**重出稿但未 commit**时，旧键里没有任何维度会变 ⇒ 同 state_version +
+    # 同 chapter_no 重跑该章**命中旧装配** ⇒ planner 拿着改动前的前章尾段排计划，零告警。
+    # ⚠️ **不走「写路径推 version」**：草稿写频次极高（每次改稿都写一行）⇒ 推 version
+    # 会让整个项目所有章的装配缓存全部失效（命中率塌方）⇒ 本批拍板走**键维度**。
+    # 与 writer 侧 ``recent_prose.last_chapter_excerpt``（同一份前章最新草稿）
+    # **同源同函数**（``cache.previous_draft_fingerprint``）⇒ 两侧指纹值逐字相同。
+    prev_draft_fp = previous_draft_fingerprint(
+        db_path, project_id, chapter_no, conn=_conn,
+    )
     cache_key = (
         project_id, state_version, chapter_no, "director", plan_fp, outline_fp,
+        prev_draft_fp,
         volume_scope,
         project_meta_fp,
         hooks_fp,
@@ -551,6 +576,7 @@ def build_director_input(
         and plot_fp != _FINGERPRINT_UNCACHED
         and foreshadow_fp != _FINGERPRINT_UNCACHED
         and title_fp != _FINGERPRINT_UNCACHED
+        and prev_draft_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)

@@ -35,6 +35,7 @@ import pytest
 
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
+from packages.core.story_state.service import StoryStateService
 from packages.workflows.chapter_plan.pipeline import _save_plan_node
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -379,4 +380,57 @@ def test_active_prompt_after_sync_declares_top_level_title(tmp_path: Path):
     output_section = content.split("## 7. Output Schema", 1)[1].split("## 8.", 1)[0]
     assert '"title"' in output_section, (
         f"生效的提示词（{version_label}）§7 未声明顶层 title ⇒ 章名自动生成必然落空"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7（R-3，2026-10-24）：空标题回填后必须推 ``story_states.state_version``
+# ---------------------------------------------------------------------------
+#
+# 章标题进 director / writer 装配 payload 的 ``chapter.title`` 段 ⇒ 回填**改了权威
+# 输入** ⇒ 必须推 ``state_version``（AGENTS 硬规则 2 根治条件②：写路径推 version）。
+# ⚠️ **只在真回填时推进**：作者标题保留 / 模型没给名两种结局都**没改数据**
+# ⇒ 不该白付一次全局 miss（防「过度失效」）。
+
+
+def _max_state_version(db_path: Path, pid: str) -> int:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT MAX(state_version) AS sv FROM story_states WHERE project_id = ?",
+            (pid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row["sv"] or 0)
+
+
+def test_title_backfill_advances_state_version(tmp_path: Path):
+    """空标题回填 ⇒ 同事务推 ``story_states.state_version``（+1）。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid, title=None)
+    StoryStateService(db_path).init_genesis(pid, cid)
+    before = _max_state_version(db_path, pid)
+    assert before == 1, "夹具前提：genesis 落 v1"
+
+    _run_save(db_path, pid, cid, title="夜叩青石")
+
+    assert _max_state_version(db_path, pid) == before + 1, (
+        "回填改了章标题（进装配 payload 的 chapter.title 段）⇒ 必须推 state_version"
+    )
+
+
+def test_author_title_kept_does_not_advance_state_version(tmp_path: Path):
+    """作者标题保留（**没改数据**）⇒ 不得推进版本（防过度失效）。"""
+    db_path = _fresh_db(tmp_path)
+    pid = _insert_project(db_path)
+    cid = _insert_chapter(db_path, pid, title="作者自定的章名")
+    StoryStateService(db_path).init_genesis(pid, cid)
+    before = _max_state_version(db_path, pid)
+
+    _run_save(db_path, pid, cid, title="模型另起的名字")
+
+    assert _max_state_version(db_path, pid) == before, (
+        "作者标题一字未改 ⇒ 不该推进 state_version（白付一次全局 miss）"
     )

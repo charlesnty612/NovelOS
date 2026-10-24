@@ -28,7 +28,7 @@ from packages.core.ids import new_id, now_iso
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
-DIRECTOR_KEY_LEN = 23  # 12 → 13：新增 prompt_label 维度；13 → 14：新增 chars_fp 角色维度
+DIRECTOR_KEY_LEN = 24  # 12 → 13：新增 prompt_label 维度；13 → 14：新增 chars_fp 角色维度
 #                       （E1，2026-10-16）；14 → 15：新增 skills_fp 绑定 skill 集合维度
 #                       （0032 内部消费外部 skill）；15 → 16：新增 world_fp 世界观三表
 #                       内容指纹（P1-3，2026-10-21；键尾两元恒为 prompt_label + ns_tag）；
@@ -37,7 +37,9 @@ DIRECTOR_KEY_LEN = 23  # 12 → 13：新增 prompt_label 维度；13 → 14：�
 #                       所属卷维度（P0-1-C，2026-10-23：assign_chapter 不推 state_version）；
 #                       18 → 23：新增 5 个台账维度（hooks_fp / debts_fp / plot_fp /
 #                       foreshadow_fp / title_fp——2026-10-23 第二轮审查 M-1 / D-7：
-#                       伏笔台账 / 叙事债务 / 情节图 / 项目级逾期阈值 / director 侧章标题）
+#                       伏笔台账 / 叙事债务 / 情节图 / 项目级逾期阈值 / director 侧章标题）；
+#                       23 → 24：新增 prev_draft_fp 前章草稿内容维度（R-2，2026-10-24：
+#                       前章重出稿不推 state_version ⇒ 必须单列一维）
 
 
 def _fresh_db(tmp_path: Path) -> Path:

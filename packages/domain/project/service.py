@@ -40,9 +40,11 @@ import json
 import sqlite3
 from pathlib import Path
 
-from packages.core.db import get_connection, is_missing_schema_error
+from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
-from packages.core.story_state.snapshot import materialize_snapshot
+from packages.core.story_state.versioning import (
+    bump_project_state_version as _core_bump_project_state_version,
+)
 
 from .models import ProjectCreate, ProjectUpdate
 
@@ -91,14 +93,15 @@ _PROJECT_PAYLOAD_COLUMNS: frozenset[str] = frozenset({
 # **边界**（如实登记）
 # ------------------
 # - 项目**还没有 story_states 行**（从未 commit 过）⇒ **不造快照行**，返回 ``None``
-#   （该路径下 ``state_version`` 保持不变；见任务报告「需要 Lead 协调」段）。
+#   （该路径下 ``state_version`` 保持不变）。
 # - 快照 JSON 损坏 ⇒ **不造行**（绝不拿空 dict 覆盖 Canonical State）。
 # - 必须在**写事务内**调用（与被改的行同一连接/同一事务）⇒ 写失败则 version 一起回滚。
 #
-# **归属说明**：本函数是**唯一实现**；ledger / plot / chapter 三个 service 在各自写
-# 事务内 import 并调用它。⚠️ 公共模块的正确归属地是
-# ``packages/core/story_state/``（域层服务已普遍从 ``story_state.write_helpers`` 取共享
-# 写助手）——但该包**不在本任务的文件所有权内** ⇒ 抽取公共模块需 Lead 协调。
+# **归属说明**：本函数是**转发**——**唯一实现**已于 2026-10-24 迁至
+# ``packages/core/story_state/versioning.py::bump_project_state_version``
+# （core 层归属地：``branches`` / ``simulation`` 的写路径在 core 层，不得 import
+# domain ⇒ 唯一实现必须落在 core）。本函数保留同名公开 API，既有 import 与突变
+# 规格锚点（``LEDGER-SV-3`` 等）零变化。
 
 
 def bump_project_state_version(conn: sqlite3.Connection, project_id: str) -> int | None:
@@ -109,41 +112,11 @@ def bump_project_state_version(conn: sqlite3.Connection, project_id: str) -> int
 
     ⚠️ 调用方必须在**写事务内**调用（本函数不 commit、不开连接）⇒ 业务写失败时
     版本推进一起回滚 ⇒ 不会出现「数据没改但版本涨了」。
+
+    实现见 :func:`packages.core.story_state.versioning.bump_project_state_version`
+    （core 层唯一实现；本函数只做转发，行为逐字一致）。
     """
-    if not project_id:
-        return None
-    try:
-        row = conn.execute(
-            "SELECT state_version, snapshot_json, commit_id FROM story_states "
-            "WHERE project_id = ? ORDER BY state_version DESC LIMIT 1",
-            (project_id,),
-        ).fetchone()
-    except sqlite3.OperationalError as exc:
-        # 极老库没有 story_states 表 ⇒ 本路径下 version 不变（不是静默失真：
-        # 没有快照行时 MAX(state_version) 本来就是 0）。
-        if not is_missing_schema_error(exc):
-            raise
-        return None
-    if row is None:
-        # 项目还没有快照 ⇒ **不造快照行**（简报要求）。
-        return None
-    try:
-        snapshot = json.loads(row["snapshot_json"])
-    except (TypeError, ValueError):
-        # 快照 JSON 损坏 ⇒ 不造行（拿空 dict 覆盖 Canonical State 是更坏的事）。
-        return None
-    if not isinstance(snapshot, dict):
-        return None
-    new_version = int(row["state_version"]) + 1
-    materialize_snapshot(
-        conn,
-        project_id=project_id,
-        state_version=new_version,
-        snapshot_json=snapshot,
-        commit_id=row["commit_id"],
-        created_at=now_iso(),
-    )
-    return new_version
+    return _core_bump_project_state_version(conn, project_id)
 
 
 def _coerce_word_band(raw: object) -> dict | None:

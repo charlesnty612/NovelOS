@@ -33,8 +33,9 @@ MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 #: writer 缓存键元数。20 → 21 = 2026-10-22 批次十九新增「作者文风样例」维度
 #: （``style_fp``）；21 → 22 = 2026-10-22 批次二十一新增「本章标题」维度
 #: （``title_fp``，P0-1-B）；22 → 23 = 2026-10-23 新增「所属卷」维度
-#: （``volume_scope``，P0-1-C）。历史沿革：19 → 20 = world_fp + reveal_fp（2026-10-21）。
-WRITER_KEY_LEN = 23
+#: （``volume_scope``，P0-1-C）；23 → 24 = 2026-10-24 新增「前章草稿内容」维度
+#: （``prev_draft_fp``，R-2）。历史沿革：19 → 20 = world_fp + reveal_fp（2026-10-21）。
+WRITER_KEY_LEN = 24
 
 
 def _fresh_db(tmp_path: Path) -> Path:

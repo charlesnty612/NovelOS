@@ -213,22 +213,39 @@ def _insert_canon(db_path: Path, project_id: str, canon_id: str = "can_peek") ->
     return canon_id
 
 
-def _count_db_access(monkeypatch) -> dict[str, int]:
-    """包装各模块 ``get_connection``：统计连接数 + 装配代码发出的 SQL 语句数。
+def _count_db_access(monkeypatch) -> dict:
+    """包装各模块 ``get_connection``：统计连接数 + **每条连接**发出的 SQL 语句数。
 
     计 SQL 用 ``set_trace_callback``，且**在真实连接建立之后**挂上——这样
     ``get_connection`` 自身的 3 条 PRAGMA 固定成本不计入 sql（只统计业务查询，
     PRAGMA 固定成本体现在 conns 上）。
+
+    ⚠️ **按连接分列**（2026-10-24 订正，R-2 连带发现）：原来的「总条数」口径把
+    **两条来源不同**的连接混在一起数——
+
+    - conn#1 = **装配连接**（peek + 全部指纹探测）：**确定性**；
+    - conn#2 = ``prompt_label`` 连接（读 ``agents`` 表）：该查询失败时
+      ``active_prompt_label`` 会**吞掉** ``sqlite3.Error`` 并回退 ``fallback``
+      ⇒ 该连接**可能一条都不发** ⇒ **总数偶发抖动 ±1**（实测 2/40 次命中）
+      ⇒ 精确断言总数是 **flaky 断言**（CI 上表现为随机红）。
+
+    ⇒ 改按连接分列：**装配连接的条数精确断言**（这才是「装配输入变化要可见」的
+    钉子），prompt_label 连接只断言「**≤ 1 条**」（它失败时必须是 0 ⇒ 不许多发）。
     """
-    counters = {"conns": 0, "sql": 0}
+    counters: dict = {"conns": 0, "sql": 0, "per_conn": []}
 
     def make_wrapper(real):
         def wrapper(db_path):
             counters["conns"] += 1
             conn = real(db_path)
-            conn.set_trace_callback(
-                lambda _sql: counters.__setitem__("sql", counters["sql"] + 1)
-            )
+            slot = {"sql": 0}
+            counters["per_conn"].append(slot)
+
+            def _on_sql(_sql: str) -> None:
+                slot["sql"] += 1
+                counters["sql"] += 1
+
+            conn.set_trace_callback(_on_sql)
             return conn
 
         return wrapper
@@ -285,9 +302,14 @@ def test_writer_cache_hit_uses_single_connection(tmp_path: Path, monkeypatch):
     payload = build_writer_input(db_path, cid, {"purpose": "场景"})
 
     assert counters["conns"] == 2, counters
-    # conn#1: peek 1 + 指纹探测 13（chars/world×3表/reveal/style/project_meta/title 的 PRAGMA+SELECT）
-    # conn#2: prompt_label 1（agents 表空 ⇒ 走 fallback，仍发 1 条 SELECT）
-    assert counters["sql"] == 15, counters
+    # conn#1（**装配连接**）：peek 1 + 指纹探测 13（chars/world×3表/reveal/style/
+    #   project_meta/title 的 PRAGMA+SELECT）+ **前章草稿指纹 2**（R-2，2026-10-24：
+    #   卷定位 1 + 前章定位 1；本夹具是第 1 章 ⇒ 无前章 ⇒ 不再发草稿查询 ⇒ 共 2 条）
+    #   = **16 条（确定性）**
+    assert counters["per_conn"][0]["sql"] == 16, counters
+    # conn#2（prompt_label）：agents 表空 ⇒ 走 fallback，仍发 1 条 SELECT；
+    #   该查询失败会被 active_prompt_label 吞掉 ⇒ **允许 0 条**（不许 > 1）。
+    assert counters["per_conn"][1]["sql"] <= 1, counters
     assert payload["agent"] == "writer"
 
 
@@ -334,7 +356,13 @@ def test_director_cache_hit_uses_single_connection(tmp_path: Path, monkeypatch):
     # 但**「表后来才出现」**（测试里换夹具、运维手工建表）会让缓存里的「不在」
     # 继续生效 ⇒ 指纹陈旧 ⇒ **脏命中**——正是本仓反复登记的那个形状。
     # ⇒ 本批**不做**这个优化（方向安全 > 省 10 条 SELECT）。
-    assert counters["sql"] == 23, counters
+    # ⚠️ **2026-10-24 R-2 订正：23 → 25**（新增「前章草稿内容指纹」维度
+    # ``prev_draft_fp``：卷定位 1 + 前章定位 1；本夹具是第 1 章 ⇒ 无前章 ⇒
+    # 不再发草稿查询 ⇒ 共 2 条。连接数不变（仍 2 条），变的是每条连接上的语句数）。
+    # conn#1（**装配连接**）：peek 1 + 指纹探测 21 + **前章草稿指纹 2**（R-2）= 24（确定性）
+    assert counters["per_conn"][0]["sql"] == 24, counters
+    # conn#2（prompt_label）：≤ 1 条（失败时 active_prompt_label 回退 fallback ⇒ 0 条）
+    assert counters["per_conn"][1]["sql"] <= 1, counters
     assert payload["agent"] == "director"
 
 

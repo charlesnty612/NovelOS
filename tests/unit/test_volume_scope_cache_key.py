@@ -44,7 +44,7 @@ from packages.core.context_engine.builders_common import (
     _empty_chapter_peek,
     _peek_chapter_context,
 )
-from packages.core.context_engine.cache import _cache_reset
+from packages.core.context_engine.cache import _cache_reset, previous_draft_fingerprint
 from packages.core.db import apply_migrations, get_connection
 from packages.core.ids import new_id, now_iso
 from packages.domain.volume.service import VolumeService
@@ -52,8 +52,8 @@ from packages.domain.volume.service import VolumeService
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "database" / "migrations"
 
-DIRECTOR_KEY_LEN = 23
-WRITER_KEY_LEN = 23
+DIRECTOR_KEY_LEN = 24
+WRITER_KEY_LEN = 24
 SENTINEL = "__none__"
 
 _VOL1_PROSE = "上一世：林昭在临江县仓清点军粮，苏婉清送来账册。"
@@ -170,12 +170,26 @@ def _keys(pid: str, role: str) -> list[tuple]:
     return [k for k in cache_mod._assembly_cache if k[0] == pid and k[3] == role]
 
 
-def _single_diff_index(a: tuple, b: tuple) -> int:
-    """两个缓存键必须**只差一个位置**；返回该位置（同时断言长度相等）。"""
+def _diff_positions(a: tuple, b: tuple) -> list[int]:
+    """两个缓存键的差异位置（同时断言长度相等）。"""
     assert len(a) == len(b), f"键长不一致：{len(a)} vs {len(b)}"
-    diff = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
-    assert len(diff) == 1, f"换卷后应只变 volume_scope 一个位置，实得 {diff} 处：{a} → {b}"
-    return diff[0]
+    return [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+
+
+def _volume_position(a: tuple, b: tuple, before: str, after: str) -> int:
+    """键里「volume_scope 取值由 before 变成 after」的那个位置。
+
+    ⚠️ **「键只差一个位置」不再是判别口径**（2026-10-24 R-2 起）：换卷会**同时**改两个
+    维度——``volume_scope``（卷 id 本身）与 ``prev_draft_fp``（前章窗口换了 ⇒ 前章草稿
+    内容指纹随之变；两者都是**真实的输入变化**，不是过度失效）。
+    ⇒ 改按**取值**定位卷维度，其余差异位由调用方单独断言（并断言其取值确实等于
+    前章草稿指纹函数的输出）。
+    """
+    hits = [i for i, (x, y) in enumerate(zip(a, b)) if x == before and y == after]
+    assert len(hits) == 1, (
+        f"应恰有一处取值 {before!r} → {after!r}（volume_scope 维度），实得 {hits} 处"
+    )
+    return hits[0]
 
 
 def _director_window(payload: dict) -> tuple[list[int], int | None]:
@@ -207,8 +221,12 @@ def test_assigning_volume_misses_cache_and_empties_window(tmp_path: Path):
     assert len(dk0[0]) == DIRECTOR_KEY_LEN
     assert len(wk0[0]) == WRITER_KEY_LEN
 
+    # 换卷前的前章草稿指纹（用于断言差异位承载的就是它）
+    fp_before = previous_draft_fingerprint(db, pid, 4)
+
     # 真实生产路径：VolumeService.assign_chapter（只改 volume_id + updated_at，不推 sv）
     VolumeService(db).assign_chapter(ids["vol2"], ch4)
+    fp_after = previous_draft_fingerprint(db, pid, 4)
 
     d1 = build_director_input(db, pid, ch4, "")
     w1 = build_writer_input(db, ch4, {})
@@ -222,10 +240,28 @@ def test_assigning_volume_misses_cache_and_empties_window(tmp_path: Path):
     wk1 = [k for k in _keys(pid, "writer") if k != wk0[0]]
     assert len(dk1) == 1, f"挂卷后应多出一条 director 键（旧键仍在），实得 {len(dk1)}"
     assert len(wk1) == 1
-    d_idx = _single_diff_index(dk0[0], dk1[0])
-    w_idx = _single_diff_index(wk0[0], wk1[0])
-    assert dk0[0][d_idx] == SENTINEL and dk1[0][d_idx] == ids["vol2"]
-    assert wk0[0][w_idx] == SENTINEL and wk1[0][w_idx] == ids["vol2"]
+    d_vol_idx = _volume_position(dk0[0], dk1[0], SENTINEL, ids["vol2"])
+    w_vol_idx = _volume_position(wk0[0], wk1[0], SENTINEL, ids["vol2"])
+    # 换卷 ⇒ **两个**维度都变（都是真实输入变化）：
+    #   ① volume_scope：卷 id 本身（哨兵 → vol2）；
+    #   ② prev_draft_fp：同卷窗口换了 ⇒ 前章草稿内容指纹随之变
+    #      （未挂卷时前章 = 卷 1 的 ch3；挂到卷 2 后同卷内无前章 ⇒ 落 "none"）。
+    d_extra = [i for i in _diff_positions(dk0[0], dk1[0]) if i != d_vol_idx]
+    w_extra = [i for i in _diff_positions(wk0[0], wk1[0]) if i != w_vol_idx]
+    assert len(d_extra) == 1 and len(w_extra) == 1, (
+        f"换卷应恰好多变一个维度（前章草稿指纹），实得 director {d_extra} / writer {w_extra}"
+    )
+    # 该差异位**确实**承载前章草稿内容指纹（断言打在真实值上，不靠位置猜）。
+    assert dk0[0][d_extra[0]] == fp_before and dk1[0][d_extra[0]] == fp_after, (
+        "差异位必须承载前章草稿内容指纹（director 侧）"
+    )
+    assert wk0[0][w_extra[0]] == fp_before and wk1[0][w_extra[0]] == fp_after, (
+        "差异位必须承载前章草稿内容指纹（writer 侧）"
+    )
+    # 两侧同源同函数 ⇒ 指纹值逐字相同（director / writer 各一维、内容一致）。
+    assert dk0[0][d_extra[0]] == wk0[0][w_extra[0]], (
+        "director / writer 的前章草稿指纹必须同源同值"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -257,9 +293,10 @@ def test_reassigning_back_restores_window_and_misses_again(tmp_path: Path):
     assert len(keys) == 3, f"三次装配（null / vol2 / vol1）应各留一条键，实得 {len(keys)}"
     key_vol1 = [k for k in keys if k not in (key_null_d, key_vol2)]
     assert len(key_vol1) == 1
-    idx = _single_diff_index(key_vol2, key_vol1[0])
-    assert key_vol2[idx] == ids["vol2"] and key_vol1[0][idx] == ids["vol1"]
-    assert _single_diff_index(key_null_d, key_vol1[0]) == idx, "volume_scope 位置在三次装配中恒定"
+    idx = _volume_position(key_vol2, key_vol1[0], ids["vol2"], ids["vol1"])
+    assert _volume_position(key_null_d, key_vol1[0], SENTINEL, ids["vol1"]) == idx, (
+        "volume_scope 位置在三次装配中恒定"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -282,8 +319,8 @@ def test_unassigned_and_empty_peek_share_sentinel_shape(tmp_path: Path, monkeypa
     build_writer_input(db, ch4, {})
     d_vol = [k for k in _keys(pid, "director") if k != d_null][0]
     w_vol = [k for k in _keys(pid, "writer") if k != w_null][0]
-    d_idx = _single_diff_index(d_null, d_vol)
-    w_idx = _single_diff_index(w_null, w_vol)
+    d_idx = _volume_position(d_null, d_vol, SENTINEL, ids["vol1"])
+    w_idx = _volume_position(w_null, w_vol, SENTINEL, ids["vol1"])
     assert d_null[d_idx] == w_null[w_idx] == SENTINEL
     assert d_vol[d_idx] == w_vol[w_idx] == ids["vol1"]
 

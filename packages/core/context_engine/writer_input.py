@@ -49,6 +49,7 @@ from .cache import (
     author_style_samples_fingerprint,
     chapter_title_fingerprint,
     characters_fingerprint,
+    previous_draft_fingerprint,
     reveal_policies_fingerprint,
     with_fingerprint_conn,
     world_fingerprint,
@@ -447,6 +448,18 @@ def build_writer_input(
     ⚠️ 边界：写**新章**时 ``chapter_no`` 维度本就不同 ⇒ 旧实现也不脏命中。
     判别：``tests/unit/test_e1_character_cache_key.py``（含「只 bump updated_at
     必须仍命中」的反向不变量，防拿时间戳当指纹的假修）。
+
+    2026-10-24（R-2）：键再追加 **前章草稿内容指纹** ``prev_draft_fp``。
+    ``recent_prose.last_chapter_excerpt``（上一章正文尾段 500 字）进 writer payload，
+    而**草稿写路径不推** ``state_version``（``drafts`` 表由 ``ChapterService.create_draft``
+    写，commit 才推）⇒ 前章**重出稿但未 commit**时旧键里没有任何维度会变 ⇒
+    同 ``state_version`` + 同 ``chapter_no`` 重跑本章**命中旧装配** ⇒ 正文按改动前的
+    上一章尾段衔接，**零告警**。
+    与 director 侧 ``previous_chapter_tail``（同一份前章最新草稿）**同源同函数**
+    （:func:`...cache.previous_draft_fingerprint`）⇒ 两侧指纹值逐字相同。
+    ⚠️ **不走「写路径推 version」**：草稿写频次极高（每次改稿都写一行）⇒ 推 version
+    会让整个项目所有章的装配缓存全部失效（命中率塌方）⇒ 本批拍板走**键维度**。
+    判别：``tests/unit/test_ctx_d_prev_draft_key.py``。
     """
     if context_mode not in ("full", "paged"):
         raise ValueError(
@@ -563,18 +576,35 @@ def build_writer_input(
     # ⚠️ 位置：单独成行、落在身份行之后——既有突变规格 ``E1-1`` / ``SKILL-KEY-2`` /
     # ``STYLE-KEY-1`` / ``TITLE-KEY-1`` 的锚点原文在那几行，不得改动。
     volume_scope = peek.get("volume_id") or "__none__"
+    # 2026-10-24（R-2）：键追加**前章草稿内容指纹** ``prev_draft_fp``。
+    # ``recent_prose.last_chapter_excerpt``（上一章正文尾段 500 字）进 writer payload，
+    # 而**草稿写路径不推 state_version**（``drafts`` 表由 ``ChapterService.create_draft``
+    # 写，commit 才推）⇒ 前章**重出稿但未 commit**时旧键里没有任何维度会变 ⇒
+    # 同 state_version + 同 chapter_no 重跑本章**命中旧装配** ⇒ 正文按改动前的上一章
+    # 尾段衔接，零告警。
+    # ⚠️ **不走「写路径推 version」**：草稿写频次极高（每次改稿都写一行）⇒ 推 version
+    # 会让整个项目所有章的装配缓存全部失效（命中率塌方）⇒ 本批拍板走**键维度**。
+    # 与 director 侧 ``previous_chapter_tail``（同一份前章最新草稿）**同源同函数**
+    # （``cache.previous_draft_fingerprint``）⇒ 两侧指纹值逐字相同。
+    # ⚠️ 位置：单独成行、落在 ``title_fp,`` 之后——既有突变规格 ``VOL-2`` 的锚点原文是
+    # ``volume_scope,`` + ``title_fp,`` 两行、``TITLE-KEY-1`` 的锚点原文是 ``title_fp,``
+    # 单行 ⇒ **不得**打断（新增行落在其后，不改既有行）。
+    prev_draft_fp = previous_draft_fingerprint(
+        db_path, project_id, chapter_no, conn=_conn,
+    )
     cache_key = (
         project_id or "", state_version, chapter_no, "writer",
         volume_scope,
         title_fp,
+        prev_draft_fp,
         scene_fp, context_mode, relevance_flag, wb_fp, active_canon_id, style_fp,
         target_word_count, genre_pack_ref, intent_fp, bible_fp, chars_fp,
         world_fp, reveal_fp, plan_fp, skills_fp, prompt_label,
         _cache_namespace_tag(namespace),
     )
     # 不可序列化（scene_fp / intent_fp / bible_fp / chars_fp / world_fp / reveal_fp /
-    # style_fp / title_fp / skills_fp == 'uncached'）→ 跳过缓存，避免不同原文落在
-    # 同一占位键上互相脏命中（与 director 的 cacheable 判定同款）。
+    # style_fp / title_fp / skills_fp / prev_draft_fp == 'uncached'）→ 跳过缓存，避免不同
+    # 原文落在同一占位键上互相脏命中（与 director 的 cacheable 判定同款）。
     cacheable = (
         scene_fp != _FINGERPRINT_UNCACHED
         and intent_fp != _FINGERPRINT_UNCACHED
@@ -586,6 +616,7 @@ def build_writer_input(
         and plan_fp != _FINGERPRINT_UNCACHED
         and skills_fp != _FINGERPRINT_UNCACHED
         and title_fp != _FINGERPRINT_UNCACHED
+        and prev_draft_fp != _FINGERPRINT_UNCACHED
     )
     if cacheable:
         cached = _cache_get(cache_key)

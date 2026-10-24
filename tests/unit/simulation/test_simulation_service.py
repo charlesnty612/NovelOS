@@ -158,11 +158,31 @@ def _count_main_rows(db_path: Path) -> dict:
         conn.close()
 
 
+def _snapshot_content(state: dict) -> dict:
+    """快照的**内容**（去掉顶层 ``state_version``）。
+
+    ⚠️ 2026-10-24（R-1）：分支写操作（建临时分支 / 归档临时分支）会推进
+    ``story_states.state_version``，而推进写入的是**内容不变**的新版本快照
+    ⇒ 判「main 内容被污染」时必须排除顶层版本号，其余字段逐字比。
+    """
+    return {k: v for k, v in state.items() if k != "state_version"}
+
+
+#: 一次推演对 main 的**版本推进次数**（R-1）：建临时分支 + 归档临时分支，各一次。
+#: 两次推进写入的 story_states 行**内容与推进前逐字相同**（不是推演内容落到 main）。
+SIM_VERSION_PUSHES = 2
+
+
 # --------------------------------------------------------------------- happy path
 
 
 def test_simulate_happy_path_does_not_pollute_main(tmp_path: Path):
-    """主链路：simulate 两个 delta → 返回 diff → main 领域表/snapshot/commits 全程不变 → 分支 ARCHIVED。"""
+    """主链路：simulate 两个 delta → 返回 diff → main 领域表/snapshot/commits 全程不变 → 分支 ARCHIVED。
+
+    ⚠️ 2026-10-24（R-1）：「main 不变」的**版本**部分已不成立——建临时分支 +
+    归档临时分支各推一次 main 版本（``story_states`` 多 2 行**内容不变**的快照）。
+    判别面因此拆成：**领域表行数逐项不变** + **快照内容逐字不变**（排除版本号）。
+    """
     db_path = _fresh_db(tmp_path)
     uid = uuid.uuid4().hex[:8]
     seed = _seed_project_with_char_chapter(db_path, uid=uid)
@@ -270,14 +290,28 @@ def test_simulate_happy_path_does_not_pollute_main(tmp_path: Path):
     assert after["branches"] == before_main_branches + 1
     del after["branches"]
     before_no_br = {k: v for k, v in before.items() if k != "branches"}
-    assert after == before_no_br, f"main 领域表行数变化: {before_no_br} -> {after}"
+    # ⚠️ 2026-10-24（R-1）：建临时分支 + 归档临时分支各推一次 main 版本
+    # ⇒ story_states **多出 2 行内容不变的新版本快照**（版本推进，不是推演污染）。
+    # 判别面拆成两半：**版本行数**按推进次数钉死 + **领域表行数**逐项不变。
+    assert after["story_states"] == before_no_br["story_states"] + SIM_VERSION_PUSHES, (
+        f"main story_states 行数变化: {before_no_br['story_states']} -> {after['story_states']}"
+    )
+    for table in ("character_states", "plot_events", "hooks"):
+        assert after[table] == before_no_br[table], (
+            f"main 领域表 {table} 被推演污染: {before_no_br[table]} -> {after[table]}"
+        )
     after_main_commits = _count_main_commits(db_path, pid)
     assert after_main_commits == before_main_commits, (
         f"main commits 数变化: {before_main_commits} -> {after_main_commits}"
     )
-    # main 快照不变（version 仍为 1，location 仍为 Village）
+    # main 快照**内容**不变（版本因分支写操作递增；内容必须逐字相同）
     main_state_after = StoryStateService(db_path).get_current_state(pid)
-    assert main_state_after["state_version"] == 1
+    assert main_state_after["state_version"] == (
+        before_main_state["state_version"] + SIM_VERSION_PUSHES
+    )
+    assert _snapshot_content(main_state_after) == _snapshot_content(before_main_state), (
+        "main 快照内容被推演污染"
+    )
     char_after = next(c for c in main_state_after["characters"] if c["character_id"] == cid)
     assert char_after["current_state"]["location"] == "Village"
     # 推演事件 / 推演伏笔不应出现在 main
@@ -310,6 +344,9 @@ def test_simulate_validation_failure_archives_branch(tmp_path: Path):
     uid = uuid.uuid4().hex[:8]
     seed = _seed_project_with_char_chapter(db_path, uid=uid)
     pid, cid, chap = seed["project_id"], seed["character_id"], seed["chapter_id"]
+
+    # 推演前的 main 快照（R-1：推演会推版本，内容不变）
+    main_before = StoryStateService(db_path).get_current_state(pid)
 
     sim = SimulationService(db_path)
     # 第一个 delta 合法；第二个 delta 缺 change_id（业务规则不通过）
@@ -391,8 +428,13 @@ def test_simulate_validation_failure_archives_branch(tmp_path: Path):
         conn.close()
 
     # main 快照/commits/领域表不变
+    # ⚠️ 2026-10-24（R-1）：推演建临时分支 + 归档临时分支各推一次 main 版本
+    # ⇒ 版本递增（内容不变）
     main_state = StoryStateService(db_path).get_current_state(pid)
-    assert main_state["state_version"] == 1
+    assert main_state["state_version"] == main_before["state_version"] + SIM_VERSION_PUSHES
+    assert _snapshot_content(main_state) == _snapshot_content(main_before), (
+        "main 快照内容被推演污染"
+    )
 
 
 # --------------------------------------------------------------------- HIGH risk bypass
@@ -404,6 +446,9 @@ def test_simulate_high_risk_definition_bypasses_approval(tmp_path: Path):
     uid = uuid.uuid4().hex[:8]
     seed = _seed_project_with_char_chapter(db_path, uid=uid)
     pid, cid, chap = seed["project_id"], seed["character_id"], seed["chapter_id"]
+
+    # 推演前的 main 快照（R-1：推演会推版本，内容不变）
+    main_before = StoryStateService(db_path).get_current_state(pid)
 
     sim = SimulationService(db_path)
     deltas = [
@@ -454,9 +499,12 @@ def test_simulate_high_risk_definition_bypasses_approval(tmp_path: Path):
         ).fetchone()
         core = json.loads(cur["core_json"]) if cur["core_json"] else {}
         assert core.get("personality") == "calm"
-        # main 快照不变
+        # main 快照不变（⚠️ R-1：版本会因分支写操作递增，**内容**不变）
         main_state = StoryStateService(db_path).get_current_state(pid)
-        assert main_state["state_version"] == 1
+        assert main_state["state_version"] == main_before["state_version"] + SIM_VERSION_PUSHES
+        assert _snapshot_content(main_state) == _snapshot_content(main_before), (
+            "main 快照内容被推演污染"
+        )
         char = next(c for c in main_state["characters"] if c["character_id"] == cid)
         assert char["current_state"] == {"location": "Village", "emotion": "calm"}
     finally:
@@ -504,9 +552,15 @@ def test_list_and_get_simulations(tmp_path: Path):
     sim = SimulationService(db_path)
 
     def _deltas_for(tag: str) -> list[dict]:
+        # ⚠️ 2026-10-24（R-1）：推演建临时分支会推进 main 版本 ⇒ 临时分支的
+        # base_state_version = **调用那一刻**的 main 版本 ⇒ delta 的
+        # previous_state_version 必须动态取当前值（写死旧值会被乐观锁挡成 409）。
+        main_version = int(
+            StoryStateService(db_path).get_current_state(pid).get("state_version") or 0
+        )
         return [
             {
-                **_make_meta(f"dlt_{uid}_{tag}", chap, 1),
+                **_make_meta(f"dlt_{uid}_{tag}", chap, main_version),
                 "character_changes": [
                     {
                         "change_id": f"cc_{uid}_{tag}",
@@ -616,7 +670,8 @@ def test_get_simulation_replay_uses_base_snapshot_not_current_main(tmp_path: Pat
     1) 推演前 main version=1（genesis v1）。
     2) 跑 simulate(pid, [delta]) → base_version=1，分支 base_state = main v1。
     3) get_simulation(pid, sim_id) → 第一次读 base_state = main v1 快照。
-    4) main 再 commit 一次 → main version=2；当前 get_current_state 走 v2 快照。
+    4) main 再 commit 一次 → main version 再 +1（⚠️ R-1：推演自身已把 main 推了两次，
+       故此处基线动态取当前值）。
     5) 再次 get_simulation(pid, sim_id) → 与第 3 步完全一致（base_version=1 仍指向 v1）。
     """
     db_path = _fresh_db(tmp_path)
@@ -662,13 +717,18 @@ def test_get_simulation_replay_uses_base_snapshot_not_current_main(tmp_path: Pat
 
     # main 再 commit 一次（直接走 StoryStateService.commit_delta）
     state_svc = StoryStateService(db_path)
+    # ⚠️ 2026-10-24（R-1）：推演已把 main 版本推了两次（建临时分支 + 归档）
+    # ⇒ 这笔 main commit 的乐观锁基线必须**动态取当前值**
+    main_version_before_extra = int(
+        state_svc.get_current_state(pid).get("state_version") or 0
+    )
     new_delta_meta = {
         "delta_id": f"dlt_{uid}_F4_extra",
         "delta_version": 1,
         "schema_version": "state-delta-v0",
         "chapter_id": chap,
         "workflow_run_id": f"wfr_{uid}_F4_extra",
-        "previous_state_version": 1,
+        "previous_state_version": main_version_before_extra,
         "created_by": "observer:v1",
         "created_at": _now_iso(),
         "supersedes": None,
@@ -708,7 +768,7 @@ def test_get_simulation_replay_uses_base_snapshot_not_current_main(tmp_path: Pat
     )
     # 确认 main 已前进
     main_now = state_svc.get_current_state(pid)
-    assert int(main_now.get("state_version") or 0) == 2
+    assert int(main_now.get("state_version") or 0) == main_version_before_extra + 1
 
     # 重放应与推演时一致（base_version=1，base_state.version=1）
     second_replay = sim.get_simulation(pid, result.simulation_id)

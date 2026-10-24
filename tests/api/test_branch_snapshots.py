@@ -263,10 +263,15 @@ def test_branch_with_3_commits_matches_full_replay_bytewise(tmp_path: Path):
 
 def test_promote_materializes_main_snapshot_and_state_consistent(tmp_path: Path):
     """promote 完成后：
-    - main 分支在 branch_snapshots 中物化到新 latest version；
+    - main 分支在 branch_snapshots 中物化到「被重放产出」的那一版；
     - promote 后的 main 状态可从 branch_snapshots 走「最近物化 + 0 增量」快路径
-      读出，且与最新 story_states 一致；
+      读出，且**内容**与最新 story_states 一致；
     - GET /state?branch_id=<main> 返回的结果与 GET /state 一致（数值对比）。
+
+    ⚠️ 2026-10-24（R-1）：分支写操作（建分支 / 合并）会推进 ``story_states.state_version``。
+    promote 的顺序是「按序重放 → 物化 main 快照 → **再推一次版本**（内容不变）」，
+    ⇒ ``story_states`` 最新版比 ``branch_snapshots`` 物化版 **+1**，
+    两条读路径的**内容**逐字节一致、**顶层 state_version** 相差 1（本用例显式钉住）。
     """
     app = _create_app(tmp_path)
 
@@ -315,13 +320,21 @@ def test_promote_materializes_main_snapshot_and_state_consistent(tmp_path: Path)
             assert r.status_code == 201, r.text
 
             # promote
+            # ⚠️ 2026-10-24（R-1）：**建分支已把 main 版本推过一次**
+            # （分支表进装配 payload ⇒ 写路径推版本）⇒ 动态取 promote 前的值，
+            # 不许拿 genesis 的 base_version 当版本基线。
+            r = await _request(app, "GET", f"/api/projects/{pid}/state")
+            assert r.status_code == 200
+            main_v_before_promote = r.json()["state_version"]
+
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/branches/{bid}/promote",
                 json={"chapter_id": chap},
             )
             assert r.status_code == 201, r.text
             new_main_version = r.json()["state_version"]
-            assert new_main_version == base_version + 1
+            # 被重放的 1 个分支 commit 在 main 上 +1
+            assert new_main_version == main_v_before_promote + 1
 
             # 取 main 分支 ID
             r = await _request(app, "GET", f"/api/projects/{pid}/branches")
@@ -350,10 +363,28 @@ def test_promote_materializes_main_snapshot_and_state_consistent(tmp_path: Path)
             assert r_branch.status_code == 200
             main_via_branch_snapshot = r_branch.json()
 
-            assert main_via_story_states["state_version"] == new_main_version
+            assert main_via_story_states["state_version"] == new_main_version + 1
             assert main_via_branch_snapshot["state_version"] == new_main_version
-            assert _sorted_json(main_via_story_states) == _sorted_json(main_via_branch_snapshot), (
-                "promote 后 main 状态：story_states 路径 vs branch_snapshots 路径不一致"
+            # ⚠️ 2026-10-24（R-1）：promote 自身（分支 ACTIVE→MERGED）**在物化之后**
+            # 再推一次 main 版本（内容不变）⇒ story_states 最新版比物化版 +1，
+            # branch_snapshots 侧仍是物化时那一版。
+            # ⇒ 两条读路径**只允许 state_version 不同**，其余内容必须逐字节一致。
+            differing = {
+                key
+                for key in set(main_via_story_states) | set(main_via_branch_snapshot)
+                if main_via_story_states.get(key) != main_via_branch_snapshot.get(key)
+            }
+            assert differing == {"state_version"}, (
+                f"两条读路径只允许 state_version 不同，实际差异键：{sorted(differing)}"
+            )
+            stripped_states = {
+                k: v for k, v in main_via_story_states.items() if k != "state_version"
+            }
+            stripped_branch = {
+                k: v for k, v in main_via_branch_snapshot.items() if k != "state_version"
+            }
+            assert _sorted_json(stripped_states) == _sorted_json(stripped_branch), (
+                "promote 后 main 状态：story_states 路径 vs branch_snapshots 路径内容不一致"
             )
 
     asyncio.run(run())

@@ -49,6 +49,7 @@ from .applier import apply_delta
 from .exceptions import BranchClosed, BranchNotFound, StateConflictError, StateNotFoundError
 from .snapshot import build_initial_state
 from .snapshots import _parse_required_json, latest_snapshot_version
+from .versioning import bump_project_state_version
 
 
 def _dump(value: Any) -> str:
@@ -365,6 +366,12 @@ def create_branch(
             snapshot_json=initial_snap,
             created_at=now,
         )
+        # 2026-10-24（R-1）：``branches`` 行进 director 装配 payload 的
+        # ``plot_graph_excerpt`` 段 ⇒ 建分支后必须推 ``story_states.state_version``
+        # （同事务、同一连接 ⇒ 写失败则版本一起回滚）。
+        # ⚠️ 项目尚无快照行（从未 commit 过）⇒ 推进函数返回 ``None``（**不造行**，
+        # 与域层写路径逐字同口径）。
+        bump_project_state_version(conn, project_id)
         conn.commit()
     finally:
         conn.close()
@@ -489,6 +496,9 @@ def promote_branch(
                 "UPDATE branches SET status = 'MERGED' WHERE branch_id = ?",
                 (branch_id,),
             )
+            # 2026-10-24（R-1）：分支状态进 director payload（``plot_graph_excerpt``
+            # 只取 ACTIVE 未解决分支）⇒ 合并后必须推 state_version（同事务）。
+            bump_project_state_version(conn, project_id)
             conn.commit()
             return {
                 "branch_id": branch_id,
@@ -602,6 +612,11 @@ def promote_branch(
                 snapshot_json=main_snap,
                 created_at=now_iso(),
             )
+        # 2026-10-24（R-1）：分支状态进 director payload（``plot_graph_excerpt`` 只取
+        # ACTIVE 未解决分支）⇒ 合并后必须推 state_version（同事务、同一连接）。
+        # ⚠️ 与上面按序重放的 commit 各自的版本推进**互不覆盖**：重放已经把 main 推到
+        # 新版本，这里再 +1 落一行**内容不变**的新快照（版本推进 ≠ 改 Canonical State）。
+        bump_project_state_version(conn, project_id)
         conn.commit()
     finally:
         conn.close()

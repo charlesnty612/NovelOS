@@ -649,9 +649,10 @@ def plot_fingerprint(
     """``plot_events`` + ``branches`` 内容指纹（director 键用）。
 
     二者同进 payload 的 ``plot_graph_excerpt`` 段（事件 + ACTIVE 分支）⇒ 合为一维。
-    ⚠️ ``branches`` 行的写路径在 ``packages/core/story_state/branches.py``（**不在**
-    本次修复的文件所有权内）⇒ 该写路径的 ``state_version`` 推进见任务报告的
-    「需要 Lead 协调」段；键维度已在本批补齐（脏命中面已封）。
+    ✅ **``branches`` 写路径的 ``state_version`` 推进已于 2026-10-24 补齐**
+    （R-1：``packages/core/story_state/branches.py`` 的建分支 / 合并两处 +
+    ``packages/core/simulation/service.py`` 的临时分支归档，同事务推进
+    ``story_states.state_version``）⇒ 键维度与写路径推进**两条根治条件同时满足**。
     """
     return _fingerprint_tables(db_path, project_id, _PLOT_FINGERPRINT_TABLES, conn=conn)
 
@@ -691,6 +692,135 @@ def foreshadow_threshold_fingerprint(
     finally:
         own.close()
     return _hash_snapshot([["projects.foreshadow_overdue_chapters", rows]])
+
+
+# ---------------------------------------------------------------------------
+# 前一章草稿内容指纹（2026-10-24 R-2）——「前章重出稿」必须 miss 装配缓存
+# ---------------------------------------------------------------------------
+#
+# **为什么必须补**（硬规则 2「凡进 payload 的装配参数必须入键」的同形状第 8 次）：
+# 前一章的**最新草稿正文**进两条装配 payload：
+# - director：``previous_chapter_tail``（``_previous_chapter_tail``，尾 300 字 +
+#   前章 ``chapter_id`` / ``number``）——planner 用以规划下章衔接；
+# - writer：``recent_prose.last_chapter_excerpt``（``_recent_prose_tail``，尾 500 字）
+#   ——writer 用以衔接上一章正文。
+#
+# 而**草稿写路径不推** ``story_states.state_version``（``drafts`` 表由
+# ``ChapterService.create_draft`` 写；commit 才推版本）⇒ 前章**重出稿但未 commit**
+# 时（同 state_version + 同 chapter_no 重跑该章）旧键里**没有任何维度**会变
+# ⇒ **命中旧装配** ⇒ planner / writer 拿着**改动前的前章尾段**排计划、写正文，
+# **零告警**。
+#
+# **为什么走「键维度」而不是「写路径推 version」**（本批拍板）：
+# 草稿写频次极高（每次重写/改稿都写一行）⇒ 若 drafts 写路径推 ``state_version``，
+# 则**每一次改稿都会让整个项目的所有章装配缓存全部失效**（缓存命中率塌方）。
+# ⇒ 改为**单列一个内容指纹维度**：粒度 = 前章草稿内容，只有「前章正文真的变了」
+# 才 miss，其它章不受影响。
+#
+# **口径纪律（与消费方逐字同形）**
+# --------------------------------
+# 前章选取与最新草稿选取**必须**与消费方 ``builders_common/summaries.py`` 的
+# ``_previous_chapter_tail`` / ``_recent_prose_tail`` **同口径**，否则会出现
+# 「指纹看的是 A 稿、payload 拿的是 B 稿」⇒ 指纹恒定而 payload 变 ⇒ 脏命中。
+# ⇒ **实现方式：直接调用消费方函数**（``_previous_chapter_tail``，长度参数取全文
+# 上界）⇒ 三段选取逻辑（全项目 / 同卷过滤 / 最新草稿排序）**只有一份实现**，
+# 口径漂移在结构上不可能发生。
+#
+# **覆盖面刻意超集**：指纹吃**整篇**正文（消费方只取尾部 300 / 500 字）+
+# 前章身份（``chapter_id`` / ``number``，两者都进 payload）⇒ 多算 = 一次重装
+# （免费），少算 = 静默的错正文（AGENTS 坑区「失效方向刻意不对称」）。
+#
+# **判别**：``tests/unit/test_ctx_d_prev_draft_key.py``（director / writer 各一例 +
+# 「未改必命中」反向不变量）。
+
+#: 前章正文取全文的截断长度上界（消费方只取尾部 300 / 500 字 ⇒ 取全文即可全覆盖）。
+#: 远大于任何章节正文长度；即便正文超过此长度，也只是少覆盖**最前面**的部分，
+#: 而消费方只用尾部 ⇒ 不影响判别力。
+_PREV_DRAFT_FULL_TEXT_LENGTH = 1_000_000
+
+#: 「无前章 / 无草稿 / 空正文」的指纹占位（与 ``_FINGERPRINT_NONE`` 同值同义）。
+_PREV_DRAFT_NONE = _FINGERPRINT_NONE
+
+
+def _previous_draft_source(
+    conn: sqlite3.Connection, project_id: str, chapter_no: int,
+) -> dict[str, Any] | None:
+    """前一章的**最新草稿**（身份 + 整篇正文）；无前章 / 无草稿 / 空正文 → ``None``。
+
+    **直接复用消费方函数**（``builders_common/summaries.py::_previous_chapter_tail``）
+    ⇒ 前章选取与最新草稿选取的口径**零漂移**（同卷过滤 + ``number < ?`` 取最大号
+    + ``drafts ORDER BY created_at DESC LIMIT 1`` 三段逻辑只有一份实现）。
+
+    ⚠️ writer 侧的消费方是 ``_recent_prose_tail``（按 ``chapter_id`` 定位当前章的卷），
+    本函数走 director 侧的按 ``(project_id, number)`` 定位——**同项目内章号唯一**
+    （``ChapterService.create`` 预检重号 ⇒ 409）⇒ 两者等价。退化场景（裸 SQL 造出
+    重号行）不在本维度覆盖内（如实登记，非静默）。
+    """
+    # 局部 import：``builders_common`` 与本模块同属 context_engine 包，
+    # 模块级互相 import 有循环风险（沿用 ``branches.py`` 的同款做法）。
+    from .builders_common.summaries import _previous_chapter_tail
+
+    tail = _previous_chapter_tail(
+        conn,
+        project_id=project_id,
+        current_chapter_no=int(chapter_no),
+        length=_PREV_DRAFT_FULL_TEXT_LENGTH,
+    )
+    if not tail:
+        return None
+    return {
+        "chapter_id": tail["chapter_id"],
+        "number": int(tail["chapter_no"]),
+        "content": tail["tail_text"],
+    }
+
+
+def previous_draft_fingerprint(
+    db_path: str | Path,
+    project_id: str | None,
+    chapter_no: int | None,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> str:
+    """前章草稿内容指纹（sha256 前 16 字符）——director / writer 共用这一个维度。
+
+    - 无 project_id / 无章号 → ``"none"``；无前章 / 无草稿 / 空正文 → ``"none"``
+      （与消费方的空态逐字同形）；
+    - 指纹覆盖：前章 ``chapter_id`` + ``number`` + **整篇**最新草稿正文
+      （消费方只取尾部 ⇒ 刻意超集）；
+    - ``conn``：可选的已持有连接（与本模块其余指纹函数同款：传入则复用，
+      ``None`` ⇒ 自建连、用完即关）。⚠️ 连接的**关闭责任在调用方**。
+
+    判别：``tests/unit/test_ctx_d_prev_draft_key.py``。
+    """
+    if not project_id or not chapter_no:
+        return _PREV_DRAFT_NONE
+    if conn is not None:
+        return _previous_draft_fingerprint_conn(conn, project_id, int(chapter_no))
+    try:
+        own = get_connection(db_path)
+    except sqlite3.OperationalError as exc:
+        if not is_missing_schema_error(exc):
+            raise
+        return _PREV_DRAFT_NONE
+    try:
+        return _previous_draft_fingerprint_conn(own, project_id, int(chapter_no))
+    finally:
+        own.close()
+
+
+def _previous_draft_fingerprint_conn(
+    conn: sqlite3.Connection, project_id: str, chapter_no: int,
+) -> str:
+    """在**已持有连接**上算前章草稿指纹（连接的关闭责任在调用方）。"""
+    source = _previous_draft_source(conn, project_id, chapter_no)
+    if source is None:
+        return _PREV_DRAFT_NONE
+    try:
+        normalized = json.dumps(source, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:_FINGERPRINT_LEN]
+    except Exception:  # noqa: BLE001 —— 不可序列化时跳过缓存
+        return _FINGERPRINT_UNCACHED
 
 
 # ---------------------------------------------------------------------------

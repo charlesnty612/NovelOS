@@ -53,6 +53,7 @@ from packages.core.story_state.service import (
     diff_snapshots,
     strip_state_version,
 )
+from packages.core.story_state.versioning import bump_project_state_version
 
 log = get_logger("novelos.simulation")
 
@@ -162,12 +163,38 @@ def _ensure_project_exists(conn: sqlite3.Connection, project_id: str) -> None:
 
 
 def _archive_branch(conn: sqlite3.Connection, branch_id: str) -> None:
-    """把临时分支 status 设为 ARCHIVED；不存在则跳过（防御性）。"""
+    """把临时分支 status 设为 ARCHIVED；不存在则跳过（防御性）。
+
+    2026-10-24（R-1）：``branches.status`` 进 director 装配 payload 的
+    ``plot_graph_excerpt`` 段（该段只取 **ACTIVE 未解决分支**）⇒ 归档临时分支后
+    必须推 ``story_states.state_version``（同事务、同一连接）——否则同
+    ``state_version`` 下重跑同一章会命中「临时分支还在窗口里」的旧装配
+    （AGENTS 硬规则 2 根治条件②：写路径推 version）。
+
+    ⚠️ **归档优先于版本推进**：版本推进失败**不阻断归档**（临时分支清理是
+    「无论如何退出都要做」的事务语义）——失败记 WARNING（异常带栈，不吞）。
+    且即便版本推进失败，``branches`` 表内容变化仍会被键维度 ``plot_fp`` 捕获
+    ⇒ 不会因此产生脏命中。
+    """
+    row = conn.execute(
+        "SELECT project_id FROM branches WHERE branch_id = ?", (branch_id,)
+    ).fetchone()
+    if row is None:
+        return
     conn.execute(
         "UPDATE branches SET status = 'ARCHIVED' "
         "WHERE branch_id = ? AND status = 'ACTIVE'",
         (branch_id,),
     )
+    try:
+        bump_project_state_version(conn, row["project_id"])
+    except Exception as exc:  # noqa: BLE001 —— 归档优先；异常记录不吞
+        log.warning(
+            "simulation archive: failed to advance state_version for project %s "
+            "(branch %s): %s",
+            row["project_id"], branch_id, exc,
+            exc_info=True,
+        )
     conn.commit()
 
 
