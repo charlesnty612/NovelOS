@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-24 晚 · 审查修复批 · 4 条 critical——事后对抗审查抓出、Lead 亲验后修复）
+
+> **来源**：四批已提交改动（批次三十四 / 协议下放 / outline-batch / 强度覆盖）补做的四路只读对抗审查。
+> **流程教训（入册）**：此前把「闸门全绿」当成了「已审查」——测试绿 ≠ 实现与规格一致。开发后必派只读审查的纪律自本批起恢复执行。
+
+- **C-3 outline-batch 批次大纲实际被丢弃（critical）**：synopsis 落库形状无任何下游消费方（全仓 grep 亲验），director_planner「大纲优先」只认 `chapter_goal/key_beats` 等契约键 ⇒ planner 判「字段为空」走自主规划。修复：persist 侧把 synopsis 映射进 canonical 键（`outline_json = {chapter_goal: synopsis, synopsis, title}`，原文并存），不动共享的 planner prompt。判别：内容级用例断言 `resolve_chapter_outline` 读出 `chapter_goal == synopsis 原文`（撤映射必红，探针实证 CAUGHT）。
+- **C-1/C-2 outline-batch 并发守卫失效（critical，实测复现）**：守卫无项目过滤（workflow_runs 无 project_id 列，跨项目 409 且 detail 引用他项目 run_id）+ 查→起跑非原子（并发 8 POST ⇒ 8 个 201 + 重复章号）。修复：迁移 **0037** `workflow_runs.project_id`（回填自 checkpoint 的 json_extract）+ 引擎级 `project_level_guard`（守卫 SELECT 与 INSERT 同连接同 BEGIN IMMEDIATE 事务，构造性关闭 TOCTOU）+ 错误 detail 引用本项目 run_id。判别：并发 8 POST 恰 1 个 201 且章号零重复（DB 内容级）；跨项目 B ⇒ 201（撤 project_id 过滤必红，探针 CAUGHT）。chapter 级与 project-init 起跑顺带写 project_id 列（行为零变化）。
+- **协议下放 C1 改绑静默改写档案协议（critical，实测复现）**：PATCH 改绑不带 provider ⇒ 档案协议被无条件改回连接主协议——「协议是档案属性」的裁决被写路径推翻。修复：provider 回退**仅在首次绑定**（此前 connection_id IS NULL）时生效；改绑不动；显式传才改。判别：anthropic 档案改绑 openai 主协议连接 ⇒ provider 保持 anthropic（改前红）。
+- **协议下放 C2 apply_grouping 静默改写协议（critical，实测复现）**：归组写 `provider=连接主协议` ⇒ 同形状改写。修复：归组只写 connection_id 不写 provider。判别：`test_apply_grouping_keeps_profile_provider`（改前红）。连带核查确认全仓无第三处静默改写。
+- **顺带 M-1**：ChaptersPage 轮询失败后双按钮永久禁用——接 usePoll 的 error 通道，失败即清 runId 恢复按钮 + 错误横幅（错误快照进 batchNotice 防目标切换清空闪烁）。判别用例 g（撤恢复必红，探针 CAUGHT）。
+- **验收**：全量 pytest **4450 / 0 failed**（-n 20 仓外 basetemp）；vitest **877 全绿**；tsc/build 过；ruff 0；三处判别力突变探针全 CAUGHT 且源码 SHA 逐位还原；codegen 已 regen（0037 加列连带 WorkflowRun 契约 + 三份硬编码键清单同步）。
+- **遗留（major/minor 排期，未修）**：promote 返回值 off-by-one、池未命中错配静默、拉取模型不按档案协议取址、思考档收窄协议∧host、强度覆盖对异协议后备链相容性、前后端 8 档映射机器看守、run 列表跨项目可见、outline_batch_planner capability 登记、归组正交恒真断言修正等——见审查报告待入册。
+
 ### Added（2026-10-24 · 环节级强度覆盖：同一档案给不同环节配不同思考档）
 
 > **来源**：用户报「AI 设置·环节分配——可根据不同的环节来选择模型的强度」。此前强度（思考档）是档案级属性，

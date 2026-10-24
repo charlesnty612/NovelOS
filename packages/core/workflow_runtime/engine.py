@@ -371,6 +371,8 @@ class WorkflowEngine:
         nodes: list[WorkflowNode],
         *,
         chapter_id: str | None = None,
+        project_id: str | None = None,
+        project_level_guard: bool = False,
         initial_ctx: dict[str, Any] | None = None,
         mock_providers: dict[str, list[str]] | None = None,
         checkpoint_exclude: list[str] | None = None,
@@ -397,6 +399,8 @@ class WorkflowEngine:
         run_id = self._insert_run_row(
             workflow_name=workflow_name,
             chapter_id=chapter_id,
+            project_id=project_id,
+            project_level_guard=project_level_guard,
         )
 
         self._run_nodes(
@@ -414,6 +418,8 @@ class WorkflowEngine:
         nodes: list[WorkflowNode],
         *,
         chapter_id: str | None = None,
+        project_id: str | None = None,
+        project_level_guard: bool = False,
         initial_ctx: dict[str, Any] | None = None,
         mock_providers: dict[str, list[str]] | None = None,
         checkpoint_exclude: list[str] | None = None,
@@ -439,6 +445,8 @@ class WorkflowEngine:
         run_id = self._insert_run_row(
             workflow_name=workflow_name,
             chapter_id=chapter_id,
+            project_id=project_id,
+            project_level_guard=project_level_guard,
         )
 
         thread = threading.Thread(
@@ -461,11 +469,32 @@ class WorkflowEngine:
         *,
         workflow_name: str,
         chapter_id: str | None,
+        project_id: str | None = None,
+        project_level_guard: bool = False,
     ) -> str:
         """确保 workflows 行 + 插入 workflow_runs 行（status=RUNNING）；返回 run_id。
 
         供 :meth:`start_with_nodes`（同步）与 :meth:`start_with_nodes_async`（异步）
         共用，保持两者落库口径一致。
+
+        ``project_id``（0037 起）：写入 ``workflow_runs.project_id`` 可空列——run 的
+        项目归属。chapter 级工作流 / outline-batch / project-init（挂载模式）由
+        API 层传入；未传（adhoc 裸 run 等）⇒ NULL，零行为突变。
+
+        ``project_level_guard``（0037 起）：**项目级工作流的原子并发守卫**。
+        True 时在插入 run 行的**同一事务内**先查「同 workflow + 同 project_id +
+        chapter_id IS NULL + RUNNING/PENDING」是否已有活跃 run，命中则抛
+        :class:`WorkflowRunConflict`（API 层映射 409，detail 里的 run_id 必属本项目）。
+
+        为什么要在这个事务里查（C-2 修法）：项目级 run（chapter_id IS NULL）不受
+        0017 部分唯一索引 ``idx_workflow_runs_active`` 约束（该索引只覆盖
+        chapter_id 非空的行）⇒ API 层「先查后起」两步之间的 TOCTOU 没有兜底，
+        并发 N 个 POST 实测 N 个 201 + 重复章号。修法 = 查 + 写放进同一
+        ``BEGIN IMMEDIATE`` 事务：写锁在事务开始即持有，守卫 SELECT 读到的是
+        持锁后的最新已提交状态，且从 SELECT 到 INSERT 之间**任何其他写者都无法
+        提交**（SQLite 单写者）⇒ 竞态窗口在构造上关闭。守卫查询与 run INSERT
+        **同连接同事务**，不复刻「事务内另开连接写库 → database is locked」的坑
+        （AGENTS 坑区 M1-a）。
 
         ``retry_count``：建行置 0，之后由 agent 层累加——每次真实发生的 LLM 重试
         （``_RETRY_HINT`` 解析/契约重试、provider 空流重试）在
@@ -475,31 +504,78 @@ class WorkflowEngine:
 
         ``instance_id``：本引擎归属的进程实例 id（F6），启动自愈按此列过滤收尾范围。
         """
+        if project_level_guard and project_id is None:
+            # 防御：守卫开而归属缺失 = 调用方配错，fail fast 而非静默不守
+            # （静默不守会把「忘了传 project_id」退化回无守卫的事故形态）。
+            raise ValueError(
+                f"project_level_guard=True requires project_id (workflow={workflow_name!r})"
+            )
         conn = get_connection(self.db_path)
         try:
-            wf_id = _ensure_workflow(conn, workflow_name)
-            run_id = new_id("wfr")
-            now = now_iso()
+            # isolation_level=None：手动事务控制（autocommit），BEGIN/COMMIT/ROLLBACK
+            # 全显式——守卫原子性依赖本连接上的事务边界，不依赖 legacy 隐式行为。
+            conn.isolation_level = None
+            conn.execute("BEGIN IMMEDIATE")
             try:
-                conn.execute(
-                    """
-                    INSERT INTO workflow_runs
-                        (run_id, workflow_id, chapter_id, status, current_node,
-                         checkpoint_json, error, retry_count, started_at, ended_at, instance_id)
-                    VALUES (?, ?, ?, 'RUNNING', NULL, '{}', NULL, 0, ?, NULL, ?)
-                    """,
-                    (run_id, wf_id, chapter_id, now, self._instance_id),
-                )
-                conn.commit()
-            except sqlite3.IntegrityError as exc:
-                # 0017 部分唯一索引 ``idx_workflow_runs_active`` 兜底 TOCTOU：
-                # 双 start 窄窗口内第二个 INSERT 会被拒。转为业务异常供 API 层
-                # 映射为 409（与 ``_check_active_run_for_chapter`` 同语义）。
-                msg = str(exc)
-                if "idx_workflow_runs_active" in msg or "UNIQUE" in msg.upper():
-                    raise WorkflowRunConflict(
-                        f"chapter {chapter_id!r} already has an active workflow run"
-                    ) from exc
+                wf_id = _ensure_workflow(conn, workflow_name)
+                if project_level_guard:
+                    # 项目级守卫（带 project_id 过滤——跨项目互不拦截，C-1 修法）。
+                    # wf.name 过滤等价于 workflow_id = wf_id（_ensure_workflow 刚按
+                    # name 取/建的同一行），用 JOIN 写出语义便于对照守卫口径。
+                    active = conn.execute(
+                        """
+                        SELECT wr.run_id FROM workflow_runs wr
+                        JOIN workflows wf ON wf.workflow_id = wr.workflow_id
+                        WHERE wf.name = ?
+                          AND wr.chapter_id IS NULL
+                          AND wr.project_id = ?
+                          AND wr.status IN ('RUNNING', 'PENDING')
+                        ORDER BY wr.started_at DESC
+                        LIMIT 1
+                        """,
+                        (workflow_name, project_id),
+                    ).fetchone()
+                    if active is not None:
+                        conn.execute("ROLLBACK")
+                        raise WorkflowRunConflict(
+                            f"project {project_id!r} already has an active "
+                            f"{workflow_name} run "
+                            f"(run_id={active['run_id']!r}); "
+                            f"wait for it to reach a terminal state"
+                        )
+                run_id = new_id("wfr")
+                now = now_iso()
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO workflow_runs
+                            (run_id, workflow_id, chapter_id, project_id, status,
+                             current_node, checkpoint_json, error, retry_count,
+                             started_at, ended_at, instance_id)
+                        VALUES (?, ?, ?, ?, 'RUNNING', NULL, '{}', NULL, 0, ?, NULL, ?)
+                        """,
+                        (run_id, wf_id, chapter_id, project_id, now, self._instance_id),
+                    )
+                    conn.execute("COMMIT")
+                except sqlite3.IntegrityError as exc:
+                    # 0017 部分唯一索引 ``idx_workflow_runs_active`` 兜底 TOCTOU：
+                    # 双 start 窄窗口内第二个 INSERT 会被拒。转为业务异常供 API 层
+                    # 映射为 409（与项目级守卫同语义）。
+                    conn.execute("ROLLBACK")
+                    msg = str(exc)
+                    if "idx_workflow_runs_active" in msg or "UNIQUE" in msg.upper():
+                        raise WorkflowRunConflict(
+                            f"chapter {chapter_id!r} already has an active workflow run"
+                        ) from exc
+                    raise
+            except BaseException:
+                # 防御收尾：任何未提交路径（含守卫外的异常）先释放写锁再关连接，
+                # 避免带着 RESERVED 锁 close（close 会回滚，但显式释放语义更清晰）。
+                if conn.in_transaction:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
                 raise
         finally:
             conn.close()

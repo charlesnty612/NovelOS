@@ -393,4 +393,34 @@ describe('ChaptersPage · 续规划章节（outline-batch）', () => {
     expect(projectsApi.outlineBatch).not.toHaveBeenCalled();
     expect(workflowsApi.get).not.toHaveBeenCalled();
   });
+
+  it('g) 轮询请求失败（M-1）：错误横幅出现 + 两个按钮恢复可点', async () => {
+    await openBatchModal();
+    // 起跑成功后第一次轮询 get 就 reject（网络抖动 / 服务重启）。
+    vi.mocked(workflowsApi.get).mockRejectedValue(new Error('轮询连接中断'));
+
+    fireEvent.click(screen.getByTestId('outline-batch-submit'));
+
+    await waitFor(() => {
+      expect(projectsApi.outlineBatch).toHaveBeenCalledTimes(1);
+    });
+
+    // 错误横幅出现（usePoll 的 error 通道被页面消费并存进 batchNotice 快照——
+    // 不能直接渲染 pollError：清 batchRunId 会让 targetKey 回 undefined，usePoll
+    // 的「目标切换清 error」机制会立即把 error 清空，横幅会闪烁即逝）。
+    await waitFor(() => {
+      expect(screen.getByTestId('outline-batch-notice')).toHaveTextContent(
+        '规划进度查询失败',
+      );
+      expect(screen.getByTestId('outline-batch-notice')).toHaveTextContent(
+        '轮询连接中断',
+      );
+    });
+    // batchRunId 已被清空 ⇒ 双按钮恢复可点（现状缺陷：一次失败即永久禁用）。
+    await waitFor(() => {
+      expect(screen.getByTestId('outline-batch-btn')).toBeEnabled();
+      expect(screen.getByTestId('new-chapter-btn')).toBeEnabled();
+    });
+    expect(screen.getByTestId('outline-batch-btn')).toHaveTextContent('续规划章节');
+  });
 });

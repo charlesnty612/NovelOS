@@ -2130,6 +2130,8 @@ export interface WorkflowRunDetail {
   workflow_name: string | null;
   /** project-init 等非章节任务的 run 为 null */
   chapter_id: string | null;
+  /** 0037 新增的 run 归属列（outline-batch 项目级并发守卫的过滤依据）；checkpoint 无 project_id 的历史行（如 adhoc 裸 run）为 null */
+  project_id: string | null;
   /** PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED */
   status: string;
   /** ``GET /runs/{run_id}`` 的 200 响应。 */
@@ -2194,6 +2196,8 @@ export interface WorkflowRunSummary {
   workflow_name: string | null;
   /** 列表行专属：project-init 等非章节任务的 run 为 null（实测） */
   chapter_id: string | null;
+  /** 0037 新增的 run 归属列；checkpoint 无 project_id 的历史行为 null */
+  project_id: string | null;
   /** PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED */
   status: string;
   /** ``GET /projects/{pid}/runs`` 的**行**（实测恒 13 键）。 */

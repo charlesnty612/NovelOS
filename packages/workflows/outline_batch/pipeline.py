@@ -33,8 +33,11 @@
   该列是 chapter-plan 的**生成槽**——write 的 ``load_plan`` 校验
   ``plan_json.chapter_goal`` 非空，大纲层章在此塞 synopsis 会造出「收下了却
   过不了校验」的伪 plan（违反「一列不得两用」纪律，AGENTS 硬规则 9）；大纲
-  synopsis 只存 ``outline_json``（seed 原文结构）——写正文前必须先跑
-  chapter-plan（生成计划），planner 白名单覆盖写 plan_json。落库 ``prompt_version`` 走
+  synopsis 只存 ``outline_json``，且**映射进 canonical 键** ``chapter_goal``
+  （synopsis/title 原文并存）——planner 的「大纲优先」规则只认
+  ``chapter_goal`` 等键，原样存 seed 时批次大纲会被判「字段为空」而整批失效
+  （C-3 修复，2026-10-24）。写正文前必须先跑 chapter-plan（生成计划），
+  planner 白名单覆盖写 plan_json。落库 ``prompt_version`` 走
   ``active_prompt_label`` 现算（与 chapter_plan.save_plan 同款防「硬编码标签漂移」；
   fallback = ``outline_batch_planner:v1``）。
 
@@ -228,8 +231,26 @@ def _persist_node(ctx: dict[str, Any]) -> dict[str, Any]:
             # plan_json 不写（INSERT 不列该列 ⇒ DDL DEFAULT '{}'）：它是 chapter-plan
             # 的**生成槽**——write 的 load_plan 校验 plan_json.chapter_goal 非空，
             # 在此塞 synopsis 会造出「收下了却过不了校验」的伪 plan（「一列不得两用」，
-            # AGENTS 硬规则 9）。大纲 synopsis 只存 outline_json；用户须先在章节
+            # AGENTS 硬规则 9）。大纲内容只存 outline_json；用户须先在章节
             # 详情页跑 chapter-plan（生成计划），planner 白名单覆盖写 plan_json。
+            #
+            # outline_json 键映射（C-3 修复，2026-10-24）：planner「大纲优先」规则
+            # （docs/agents/prompts/director_planner-v4.md 规则 0）只绑定
+            # outline.chapter_goal / key_beats / turning_point / core_conflict——
+            # outline_json 原样存 seed（number/title/synopsis）时 ``chapter_goal``
+            # 判「字段为空」⇒ planner 无视批次大纲自主规划，批次大纲整批失效。
+            # 把 synopsis 原文映射进 canonical 键 ``chapter_goal``（经
+            # resolve_chapter_outline 原样进入 build_director_input 的
+            # chapter.outline 段）；synopsis/title 原文并存供前端/审计对回 seed。
+            # 判别：tests/workflow/test_outline_batch.py::
+            # test_outline_batch_synopsis_reaches_planner_outline_as_chapter_goal
+            # （撤映射 ⇒ outline_json 无 chapter_goal 键 ⇒ 该用例必红）。
+            synopsis = seed.get("synopsis")
+            outline_payload = {
+                "chapter_goal": synopsis,
+                "synopsis": synopsis,
+                "title": seed.get("title"),
+            }
             chapter_id = new_id("ch")
             now = now_iso()
             conn.execute(
@@ -248,7 +269,7 @@ def _persist_node(ctx: dict[str, Any]) -> dict[str, Any]:
                     "project_id": project_id,
                     "number": int(seed["number"]),
                     "title": seed.get("title"),
-                    "outline_json": json.dumps(seed, ensure_ascii=False),
+                    "outline_json": json.dumps(outline_payload, ensure_ascii=False),
                     "status": "PLANNED",
                     "visibility": "VISIBLE",
                     "who_knows": None,

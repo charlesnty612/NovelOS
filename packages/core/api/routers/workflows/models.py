@@ -245,6 +245,15 @@ class WorkflowRunDetail(BaseModel):
     workflow_id: str = Field(description="workflows 表主键；人类可读名见 workflow_name")
     workflow_name: Optional[str] = Field(description="反查 workflows.name；孤儿 run 为 null")
     chapter_id: Optional[str] = Field(description="project-init 等非章节任务的 run 为 null")
+    # 0037（2026-10-24）：**必填可空**（Optional 无默认值 = 键恒在、值可 null），
+    # 与 chapter_id / error 同款契约——真实响应由 SELECT * 直出，该列恒在场；
+    # null 仅出现在 0037 前历史行中 checkpoint 无 project_id 的（如 adhoc 裸 run）。
+    project_id: Optional[str] = Field(
+        description=(
+            "0037 新增的 run 归属列（outline-batch 项目级并发守卫的过滤依据）；"
+            "checkpoint 无 project_id 的历史行（如 adhoc 裸 run）为 null"
+        )
+    )
     status: str = Field(description="PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED")
     current_node: Optional[str]
     checkpoint_json: dict[str, Any] = Field(description="暂停/恢复持久化点；键集随 workflow 演进，不建模")
@@ -366,6 +375,11 @@ class WorkflowRunSummary(BaseModel):
     workflow_name: Optional[str] = Field(description="JOIN workflows 反查；孤儿 run 为 null")
     chapter_id: Optional[str] = Field(
         description="列表行专属：project-init 等非章节任务的 run 为 null（实测）"
+    )
+    # 0037（2026-10-24）：**必填可空**，与 WorkflowRunDetail.project_id 同款契约
+    # （行来自 SELECT wr.*，该列恒在场；checkpoint 无 project_id 的历史行为 null）。
+    project_id: Optional[str] = Field(
+        description="0037 新增的 run 归属列；checkpoint 无 project_id 的历史行为 null"
     )
     status: str = Field(description="PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED")
     current_node: Optional[str]

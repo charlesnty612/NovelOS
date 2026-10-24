@@ -332,6 +332,9 @@ def _start_workflow_core(
             workflow_name,
             workflow["nodes"],
             chapter_id=chapter_id,
+            # 0037（2026-10-24）：顺带写 run 归属列（chapter 级行为不变，
+            # 守卫仍走 0017 唯一索引 + 本函数的 chapter 级守卫）。
+            project_id=project_id,
             initial_ctx=initial_ctx,
             mock_providers=body.mock_providers,
             checkpoint_exclude=workflow.get("checkpoint_exclude"),
@@ -450,6 +453,9 @@ def _start_project_init(
         run_id = engine.start_with_nodes(
             "project-init",
             workflow["nodes"],
+            # 0037（2026-10-24）：挂载模式写归属列；新建项目场景 body.project_id
+            # 为 None ⇒ 列保持 NULL（项目在 persist 节点才创建），零行为突变。
+            project_id=body.project_id,
             initial_ctx=initial_ctx,
             mock_providers=body.mock_providers,
         )
@@ -483,8 +489,8 @@ def _start_outline_batch(
     项目级端点（无 chapter），形态照 :func:`_start_project_init`：
     - 校验项目存在（404）；
     - 校验 model_profile_id 存在（400，缺省跳过）；
-    - 项目级并发防护：已有 RUNNING 的 outline-batch run → 409（persist 会插章，
-      双跑会插出重复章号）；
+    - 项目级并发防护：**引擎侧原子守卫**——同项目已有 RUNNING/PENDING 的
+      outline-batch run → 409（persist 会插章，双跑会插出重复章号）；
     - 同步 start_with_nodes（与 project-init 一致），返回 run 行三键。
     """
     settings = request.app.state.settings
@@ -511,33 +517,14 @@ def _start_outline_batch(
                 ),
             )
 
-    # 项目级并发防护：同项目已有 RUNNING 的 outline-batch run → 409。
-    # （chapter 级工作流靠 workflow_runs.chapter_id 的部分唯一索引兜底；本项目级
-    # workflow chapter_id 为 NULL，不受该索引约束，须自行查守。）
-    conn = get_connection(str(db_path))
-    try:
-        active = conn.execute(
-            """
-            SELECT wr.run_id FROM workflow_runs wr
-            JOIN workflows wf ON wf.workflow_id = wr.workflow_id
-            WHERE wf.name = 'outline-batch'
-              AND wr.chapter_id IS NULL
-              AND wr.status IN ('RUNNING', 'PENDING')
-            ORDER BY wr.started_at DESC
-            LIMIT 1
-            """,
-        ).fetchone()
-    finally:
-        conn.close()
-    if active is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"project {project_id!r} already has an active outline-batch run "
-                f"(run_id={active['run_id']!r}); wait for it to reach a terminal state"
-            ),
-        )
-
+    # 项目级并发防护（C-1/C-2 修复，2026-10-24）：**下沉到引擎的原子守卫**。
+    # 原实现是本函数里一条无 project_id 过滤的 SELECT（查+起跑两个连接两步）：
+    # ① 无项目过滤 ⇒ 项目 A 有活跃 run 时项目 B 也被 409（workflow_runs 没有
+    #    project_id 列可查，0037 补上）；② check-then-act 非原子 ⇒ 并发 N 个 POST
+    #    实测 N 个 201 + 重复章号（项目级 run 不受 0017 部分唯一索引约束，无兜底）。
+    # 修法：engine._insert_run_row 在 BEGIN IMMEDIATE 同一事务里「守卫 SELECT +
+    # run INSERT」（见 engine 注释）；project_id 由引擎写入 0037 列，守卫按它
+    # 过滤 ⇒ detail 引用的 run_id 必属本项目。
     initial_ctx: dict[str, Any] = {
         "db_path": str(db_path),
         "project_id": project_id,
@@ -553,9 +540,15 @@ def _start_outline_batch(
         run_id = engine.start_with_nodes(
             "outline-batch",
             workflow["nodes"],
+            project_id=project_id,
+            project_level_guard=True,
             initial_ctx=initial_ctx,
             mock_providers=body.mock_providers,
         )
+    except WorkflowRunConflict as exc:
+        # 项目级原子守卫命中（同项目已有 RUNNING/PENDING outline-batch run）。
+        # detail 由引擎构造，run_id 必属本项目（守卫按 project_id 过滤）。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
     except ValueError as exc:

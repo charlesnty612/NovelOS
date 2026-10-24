@@ -155,13 +155,14 @@ EXPECTED_BRANCH_ROW_KEYS = {
     "created_at",
 }
 
-#: ``GET /projects/{pid}/runs`` 的行。依据：``workflow_runs`` 11 列（0001 建表 10 列 +
-#: 0026 加 ``instance_id``）+ 端点追加的 ``workflow_name`` 与 ``label``。
+#: ``GET /projects/{pid}/runs`` 的行。依据：``workflow_runs`` 12 列（0001 建表 10 列 +
+#: 0026 加 ``instance_id`` + 0037 加 ``project_id``）+ 端点追加的 ``workflow_name`` 与 ``label``。
 EXPECTED_RUN_ROW_KEYS = {
     "run_id",
     "workflow_id",
     "workflow_name",
     "chapter_id",
+    "project_id",
     "status",
     "current_node",
     "checkpoint_json",
@@ -600,7 +601,10 @@ def test_extra_allow_keeps_undeclared_row_keys():
     assert dumped["brand_new_column_from_migration_0033"] == {"x": 1}, "extra 被关掉了"
 
     dumped_run = WorkflowRunSummary(
-        run_id="r", workflow_id="w", workflow_name=None, chapter_id=None, status="RUNNING",
+        run_id="r", workflow_id="w", workflow_name=None, chapter_id=None,
+        # 0037 加列后为必填可空（键恒在、值可 null），构造点显式给 None。
+        project_id=None,
+        status="RUNNING",
         current_node=None, checkpoint_json={}, error=None, retry_count=0,
         started_at="t", ended_at=None, instance_id=None, label=None,
         future_key="v",

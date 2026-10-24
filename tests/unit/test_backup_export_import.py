@@ -376,6 +376,13 @@ _PROJECT_SCOPED_EXEMPTIONS: dict[str, str] = {
         "拆书参照系语料（v1.4 MVP 起就不导出，见 README「已知边界」）；"
         "体量大、属内容仓派生资产，且导出会与 canon_extracts 产生跨表引用。"
     ),
+    "workflow_runs": (
+        "运行时痕迹资产：``_FLAG_REQUIRED_ABSENT_TABLES['workflow_runs_excluded']`` "
+        "已声明 workflow_runs / workflow_run_nodes 整族不导出（run/checkpoint 属于"
+        "产生它的那台实例，跨库恢复既无意义也会撞 0017 唯一索引）。0037 给它加了"
+        "project_id 列（outline-batch 项目级并发守卫的归属列）⇒ 被本扫描器点名；"
+        "按既有「整族不导出」口径豁免，不因加列改变备份边界。"
+    ),
 }
 
 

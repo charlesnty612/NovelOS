@@ -171,6 +171,11 @@ def test_apply_migrations_creates_43_tables_total(tmp_path: Path):
     #   （NULL=跟随档案，8 档枚举见 effective.THINKING_MODES）；**不增表**（业务表 42 / 总表 43）；
     # - **不回填**：此前不存在环节级强度概念，无可回填的历史值。
     assert "0036_capability_thinking_override.sql" in result["applied"]
+    # run 归属列（2026-10-24 · C-1/C-2）：0037_workflow_runs_project_id.sql
+    # - 仅 ALTER TABLE workflow_runs 加 project_id TEXT 可空列 + 按
+    #   json_extract(checkpoint_json,'$.project_id') 回填存量行；**不增表**
+    #   （业务表 42 / 总表 43）；outline-batch 项目级原子并发守卫的归属列。
+    assert "0037_workflow_runs_project_id.sql" in result["applied"]
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +226,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0034_commits_draft_version.sql",
         "0035_connection_protocol_base_urls.sql",
         "0036_capability_thinking_override.sql",
+        "0037_workflow_runs_project_id.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -283,6 +289,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0033_model_connections.sql" in second["skipped"]
     # 协议地址池：0035 也应被幂等跳过（同 0029/0031，靠 _migrations 文件粒度追踪）
     assert "0035_connection_protocol_base_urls.sql" in second["skipped"]
+    # run 归属列：0037 也应被幂等跳过（同 0035，靠 _migrations 文件粒度追踪）
+    assert "0037_workflow_runs_project_id.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -307,8 +315,9 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0030_commits_rollback_of_project_scope.sql",
         "0031_project_fast_mode.sql",
         "0035_connection_protocol_base_urls.sql",
+        "0037_workflow_runs_project_id.sql",
     ],
-    ids=["0023", "0024", "0025", "0026", "0027", "0029", "0030", "0031", "0035"],
+    ids=["0023", "0024", "0025", "0026", "0027", "0029", "0030", "0031", "0035", "0037"],
 )
 def test_single_migration_is_idempotent(tmp_path: Path, migration_file: str) -> None:
     """单条迁移跑两遍不炸（幂等靠 ``_migrations`` 的**文件粒度**追踪）。
@@ -647,6 +656,83 @@ def test_0035_protocol_base_urls_column_exists_and_nullable(tmp_path: Path):
 # ⚠️ 2026-10-24 瘦身：原 ``test_0024_draft_version_migration_is_idempotent`` 已并入参数化的
 # ``test_single_migration_is_idempotent``（参数 id = ``0024``）
 # ⇒ 八条「单迁移幂等」共用一条断言（迁移号进参数 id ⇒ 失败仍能点名）。
+
+
+def test_0037_workflow_runs_project_id_column_and_backfill(tmp_path: Path):
+    """run 归属列（2026-10-24 · C-1/C-2）：0037 给 workflow_runs 加 project_id TEXT
+    可空列，并按 ``json_extract(checkpoint_json, '$.project_id')`` 回填存量行。
+
+    - 列存在 / 类型 TEXT / 可空 / 无默认值（与 0026/0031/0035 同款「只加可空列」）；
+    - 回填是**原文拷贝不是推断**：checkpoint_json 顶层带 project_id 的存量行
+      （chapter 级工作流 / outline-batch / project-init 挂载模式的 ctx 快照）⇒ 回填；
+    - checkpoint_json 无该键（adhoc 裸 run 的 ``'{}'``）或键为 JSON null ⇒ 保持 NULL
+      （不造假）；
+    - 回填不改其它列（checkpoint_json / status 逐位保留）。
+    """
+    db_path = _fresh_db(tmp_path)
+    # 模拟存量库：0037 前建好 workflows 行 + 三种形态的 run 行
+    migrations_dir = tmp_path / "mig_pre"
+    migrations_dir.mkdir()
+    for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if sql_file.name.startswith("0037"):
+            continue
+        (migrations_dir / sql_file.name).write_text(
+            sql_file.read_text(encoding="utf-8"), encoding="utf-8",
+        )
+    apply_migrations(db_path, migrations_dir)
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, name, version, definition_json, "
+            "created_at, updated_at) VALUES ('wf_pre0037', 'outline-batch', 'v1', "
+            "'{}', 't', 't')"
+        )
+        conn.execute(
+            "INSERT INTO workflow_runs (run_id, workflow_id, chapter_id, status, "
+            "current_node, checkpoint_json, error, retry_count, started_at, ended_at) "
+            "VALUES "
+            # ① checkpoint 顶层带 project_id（outline-batch / chapter 级 run 的 ctx 快照）
+            "('wfr_with_pid', 'wf_pre0037', NULL, 'COMPLETED', NULL, "
+            "'{\"project_id\":\"prj_a\",\"chapter_count\":3}', NULL, 0, 't', 't'), "
+            # ② checkpoint 空 dict（adhoc 裸 run）⇒ 无从归属，必须保持 NULL
+            "('wfr_no_pid', 'wf_pre0037', NULL, 'FAILED', NULL, '{}', 'boom', 0, 't', 't'), "
+            # ③ 键存在但 JSON null ⇒ json_extract 返回 NULL ⇒ 保持 NULL
+            "('wfr_null_pid', 'wf_pre0037', NULL, 'COMPLETED', NULL, "
+            "'{\"project_id\":null}', NULL, 0, 't', 't')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    apply_migrations(db_path, MIGRATIONS_DIR)
+
+    conn = get_connection(db_path)
+    try:
+        cols = {c["name"]: c for c in conn.execute("PRAGMA table_info(workflow_runs)").fetchall()}
+        rows = {
+            r["run_id"]: r
+            for r in conn.execute(
+                "SELECT run_id, project_id, checkpoint_json, status FROM workflow_runs"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert "project_id" in cols, f"0037 后缺 project_id 列; got={sorted(cols)}"
+    col = cols["project_id"]
+    assert col["type"].upper() == "TEXT", col
+    assert col["notnull"] == 0, col
+    assert col["dflt_value"] is None, col
+    # ① 原文拷贝回填
+    assert rows["wfr_with_pid"]["project_id"] == "prj_a", (
+        "0037 必须把 checkpoint 顶层 project_id 回填进归属列"
+    )
+    # ②/③ 无从归属的行保持 NULL（不造假）
+    assert rows["wfr_no_pid"]["project_id"] is None
+    assert rows["wfr_null_pid"]["project_id"] is None
+    # 回填不动其它列
+    assert rows["wfr_with_pid"]["checkpoint_json"] == '{"project_id":"prj_a","chapter_count":3}'
+    assert rows["wfr_with_pid"]["status"] == "COMPLETED"
+    assert rows["wfr_no_pid"]["checkpoint_json"] == "{}"
 
 
 def test_0025_genre_packs_table_and_project_binding_column(tmp_path: Path):

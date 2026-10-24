@@ -381,12 +381,19 @@ def patch_model_profile(profile_id: str, payload: dict, request: Request) -> dic
                 raise HTTPException(
                     status_code=422, detail=f"model_connection {connection_id!r} not found"
                 )
-            # 协议是模型级属性（2026-10-24 裁决）：provider 不再由服务端从连接强制继承，
-            # 也**不再**校验与连接一致（原 422「provider 与所选连接不一致」已删）。
-            # 请求体给了 provider 就用它（上方已做非空校验）；没给 ⇒ 回退为连接的
-            # 主 provider（兼容旧前端/脚本，且对存量行为无突变）。
+            # 协议是模型级属性（2026-10-24 裁决；同日审查修复 C1）：provider 由
+            # 档案自持，回退**仅在首次绑定**（该档案此前 connection_id IS NULL）
+            # 时生效——已绑定档案改绑/重绑且请求未带 provider ⇒ **不动 provider**
+            # （旧行为无条件回退，实测 anthropic 档案改绑到 openai 主协议连接上
+            # 一次改绑就被静默改写成 openai_compatible）；显式带 provider 才改
+            # （上方已做非空校验）。解绑（显式 null）后 DB 已是 NULL ⇒ 再绑视同
+            # 首次绑定。档案不存在时 existing is None ⇒ 不回退（落库前会被 404 拦）。
+            # 判别：tests/api/test_model_connections_api.py::
+            # test_rebinding_keeps_profile_provider_when_provider_not_given。
             if "provider" not in fields:
-                fields["provider"] = conn_row["provider"]
+                existing = svc.get(profile_id)
+                if existing is not None and not existing.get("connection_id"):
+                    fields["provider"] = conn_row["provider"]
 
     if not fields:
         row = svc.get(profile_id)
@@ -574,9 +581,10 @@ def apply_grouping(payload: dict, request: Request) -> dict:
     不同，该档案的密钥**会静默换掉**（⇒ 401 或计费到别人的号）。
     ⇒ 本端点**逐条校验**，不一致直接 422 并说明是哪一条、差在哪。
 
-    校验通过才写 ``connection_id``；``provider`` 按**回退**语义落库——
-    归组请求体不带 provider ⇒ 写连接的主 provider（协议是模型级属性、
-    档案自持的裁决下，本端点是回退路径；2026-10-24 裁决）。
+    校验通过才写 ``connection_id``；**不写 provider**（2026-10-24 审查修复 C2）：
+    协议是档案属性、归组只是物理归并——旧行为把 provider 一并写成连接主协议，
+    实测 anthropic 档案归组后被静默改成 openai_compatible（base_url 一致性
+    校验只拦「地址不同」，拦不住「地址相同、协议不同」的改写）。
     """
     settings = request.app.state.settings
     svc = ProfileService(settings.db_path)
@@ -646,12 +654,14 @@ def apply_grouping(payload: dict, request: Request) -> dict:
                         f"{connection_id!r}（{conn_base!r}）不一致 —— 归组会换掉地址。"
                     ),
                 )
-            # 协议下放档案（2026-10-24）：归组请求体不带 provider ⇒ 回退写连接的
-            # 主 provider（与 PATCH 绑定路径的「没给则回退」同一语义，存量行为不变）。
-            svc.update_partial(
-                str(pid),
-                {"connection_id": connection_id, "provider": conn_row["provider"]},
-            )
+            # 协议下放档案（2026-10-24 审查修复 C2）：归组**只写 connection_id**，
+            # 不写 provider——协议是档案属性，归组是物理归并。旧行为
+            # `{"connection_id": …, "provider": conn_row["provider"]}` 会把
+            # anthropic 档案静默改成连接主协议（base_url 一致性校验只拦「地址
+            # 不同」，拦不住「地址相同、协议不同」的改写 ⇒ 直接消灭写 provider）。
+            # 判别：tests/api/test_model_connections_api.py::
+            # test_apply_grouping_keeps_profile_provider。
+            svc.update_partial(str(pid), {"connection_id": connection_id})
             applied.append(str(pid))
     return {"applied": applied, "count": len(applied)}
 

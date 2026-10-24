@@ -7,8 +7,9 @@
    **协议地址池形状** ⇒ 422。
 3. DELETE 被档案引用 → 409（``detail.referenced_by``）。
 4. 档案绑定连接：**协议下放档案**（2026-10-24）——档案传与连接主协议**不同**的
-   provider ⇒ **201 成功**（原 422「不一致」校验已删）；不传 provider ⇒ 回退连接
-   主协议；``connection_id: null`` ⇒ 解绑。
+   provider ⇒ **201 成功**（原 422「不一致」校验已删）；**首次绑定**不传 provider ⇒
+   回退连接主协议（存量兼容），**改绑**不传 provider ⇒ 档案协议保持原值（2026-10-24
+   审查修复 C1）；``connection_id: null`` ⇒ 解绑。
 5. **备份红线**：``model_connections`` **不在**导出白名单里（ADR-0002 §4）。
 6. 归组：分组预览 + 应用（生效密钥不一致 ⇒ 422，归组**不改密钥**）。
 7. 协议地址池（``protocol_base_urls``）：合法落库往返 / 非法键 422 / PATCH 清空；
@@ -346,7 +347,12 @@ def test_profile_binding_accepts_provider_different_from_connection(tmp_path: Pa
 
 
 def test_profile_binding_without_provider_falls_back_to_connection(tmp_path: Path):
-    """★绑定连接时不传 provider ⇒ 回退连接主协议（兼容旧前端/脚本）。"""
+    """★**首次绑定**连接时不传 provider ⇒ 回退连接主协议（兼容旧前端/脚本）。
+
+    2026-10-24 审查修复 C1 后的语义界定：回退**只对未绑定档案**（此前
+    ``connection_id IS NULL``）生效；已绑定档案改绑不传 provider ⇒ 不动协议
+    （见 :func:`test_rebinding_keeps_profile_provider_when_provider_not_given`）。
+    """
     app = _create_app(tmp_path)
     created = _post_connection(app).json()
     conn_id = created["connection_id"]
@@ -374,6 +380,66 @@ def test_profile_binding_without_provider_falls_back_to_connection(tmp_path: Pat
     assert r.status_code == 200, r.text
     assert r.json()["provider"] == "openai_compatible", (
         "绑定请求体没给 provider ⇒ 回退为连接主协议"
+    )
+
+
+def test_rebinding_keeps_profile_provider_when_provider_not_given(tmp_path: Path):
+    """★改绑不动协议（2026-10-24 审查修复 C1，判别用例）。
+
+    已绑定档案 PATCH 改绑另一条连接且请求**不带** provider ⇒ 档案 provider
+    **保持原值**（协议是档案自持属性）。旧行为无条件回退连接主协议，实测：
+    anthropic 档案改绑到 openai 主协议连接上，一次改绑就被静默改写成
+    ``openai_compatible``。
+
+    反例（未绑定档案首次绑定不带 provider ⇒ 回退，存量兼容语义保留）由
+    :func:`test_profile_binding_without_provider_falls_back_to_connection` 钉住。
+    """
+    app = _create_app(tmp_path)
+    conn_a = _post_connection(app, name="conn-openai-1").json()
+    conn_b = _post_connection(
+        app,
+        name="conn-openai-2",
+        base_url="https://opencode.ai/inference/go/openai/v2",
+    ).json()
+
+    import asyncio
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            # 首建即绑定（POST 带 connection_id）：provider=anthropic 是档案自持协议
+            made = await _request(
+                app,
+                "POST",
+                "/api/model-profiles",
+                json={
+                    "name": "claude",
+                    "provider": "anthropic",
+                    "model": "claude-opus",
+                    "connection_id": conn_a["connection_id"],
+                },
+            )
+            pid = made.json()["profile_id"]
+            # 改绑到另一条连接，请求体不带 provider
+            return await _request(
+                app,
+                "PATCH",
+                f"/api/model-profiles/{pid}",
+                json={"connection_id": conn_b["connection_id"]},
+            )
+
+    r = asyncio.run(run())
+    assert r.status_code == 200, r.text
+    conn = get_connection(app.state.settings.db_path)
+    try:
+        row = conn.execute(
+            "SELECT provider, connection_id FROM model_profiles WHERE profile_id = ?",
+            (r.json()["profile_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["connection_id"] == conn_b["connection_id"], "改绑应落到新连接"
+    assert row["provider"] == "anthropic", (
+        "改绑不带 provider ⇒ 档案协议必须保持 anthropic（不得回退连接主协议）"
     )
 
 
@@ -763,3 +829,76 @@ def test_group_preview_and_apply_keeps_effective_key(tmp_path: Path):
 
     assert apply_ok.status_code == 200
     assert set(apply_ok.json()["applied"]) == set(made_ids)
+
+
+def test_apply_grouping_keeps_profile_provider(tmp_path: Path, monkeypatch):
+    """★归组不改协议（2026-10-24 审查修复 C2，判别用例）。
+
+    anthropic 档案归到 openai 主协议连接（base_url 与生效 key 一致 ⇒ 逐条校验
+    通过）⇒ 200 且档案 provider **保持 anthropic**。旧行为把 provider 一并写成
+    连接主协议——base_url 一致性校验只拦「地址不同」，拦不住「地址相同、协议
+    不同」的静默改写 ⇒ 修复直接消灭归组写 provider 这一分支。
+
+    ``load_api_keys`` 打空：量具不得依赖本机 secrets.json 的 provider 级条目
+    （若存在 ``anthropic`` 条目，档案侧生效 key 会命中它而与连接侧不一致 ⇒ 422，
+    红的原因变成夹具而非被测机制）。
+    """
+    monkeypatch.setattr("packages.core.secrets_store.load_api_keys", lambda: {})
+    app = _create_app(tmp_path)
+    created = _post_connection(
+        app,
+        name="gateway",
+        base_url="https://gateway.test/v1",
+    ).json()
+    conn_id = created["connection_id"]
+
+    import asyncio
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            made = await _request(
+                app,
+                "POST",
+                "/api/model-profiles",
+                json={
+                    "name": "claude",
+                    "provider": "anthropic",
+                    "model": "claude-opus",
+                    "params": {
+                        "base_url": "https://gateway.test/v1",
+                        "api_key": _SECRET,
+                    },
+                },
+            )
+            pid = made.json()["profile_id"]
+            apply_res = await _request(
+                app,
+                "POST",
+                "/api/model-profiles/apply-grouping",
+                json={
+                    "assignments": [
+                        {"connection_id": conn_id, "profile_ids": [pid]}
+                    ]
+                },
+            )
+            after = await _request(app, "GET", f"/api/model-profiles/{pid}")
+        return apply_res, after, pid
+
+    apply_res, after, pid = asyncio.run(run())
+    assert apply_res.status_code == 200, apply_res.text
+    assert after.status_code == 200
+    assert after.json()["connection_id"] == conn_id, "归组应写 connection_id"
+    assert after.json()["provider"] == "anthropic", (
+        "归组只做物理归并 ⇒ 档案协议必须保持 anthropic（不得改成连接主协议）"
+    )
+    # DB 实际列值（断言打在真实值上，不是只看响应）
+    conn = get_connection(app.state.settings.db_path)
+    try:
+        row = conn.execute(
+            "SELECT provider, connection_id FROM model_profiles WHERE profile_id = ?",
+            (pid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["connection_id"] == conn_id
+    assert row["provider"] == "anthropic"

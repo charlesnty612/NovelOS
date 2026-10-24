@@ -79,7 +79,16 @@ export function ChaptersPage() {
     [batchPlannedCount, reload],
   );
 
-  usePoll<WorkflowRun>({
+  // M-1（2026-10-24）：接住轮询的 error 通道。usePoll 出错即停（stopOnError 默认
+  // true），若不消费 error，batchRunId 残留 ⇒ 「续规划章节」「+ 新建章节」两按钮
+  // 永久禁用（一次网络抖动就死锁 UI）。
+  // - error 非空 ⇒ 清 batchRunId（按钮恢复；轮询 enabled 随之关闭），并把错误
+  //   **快照**存进 batchNotice 横幅——不能直接渲染 pollError：清 batchRunId 会
+  //   让 targetKey 回到 undefined，usePoll 的「目标切换清 error」机制立即把
+  //   error 清空 ⇒ 横幅闪烁即逝；batchNotice 是页面自有 state，不受其影响。
+  // - effect 依赖只放 batchPollError：新起跑换 run_id 时 usePoll 内部会先把 error
+  //   清回 null（targetKey 变化路径），本 effect 不会拿旧错误误清新 run。
+  const { error: batchPollError } = usePoll<WorkflowRun>({
     fn: useCallback(() => workflowsApi.get(batchRunId!), [batchRunId]),
     intervalMs: 2000,
     enabled: batchRunId !== null,
@@ -93,6 +102,16 @@ export function ChaptersPage() {
       }
     },
   });
+
+  useEffect(() => {
+    if (batchPollError !== null) {
+      setBatchRunId(null);
+      setBatchNotice(
+        `规划进度查询失败，已停止自动刷新：${batchPollError}` +
+          `（可在运行记录查看该次规划结果，或重新发起。）`,
+      );
+    }
+  }, [batchPollError]);
 
   const openChapter = (chapterId: string) => {
     navigate(`/projects/${projectId}/chapters/${chapterId}`);

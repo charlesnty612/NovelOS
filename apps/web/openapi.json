@@ -3384,7 +3384,7 @@
           "model_profiles"
         ],
         "summary": "Apply Grouping",
-        "description": "把档案归到连接上（``assignments``: ``[{connection_id, profile_ids}]``）。\n\n⚠️ **生效 key 必须不变** —— 绑定连接后档案不再查 ``secrets[profile_id]``，\n改用 ``secrets[connection_id]`` ⇒ 若连接的生效 key 与档案归组前的生效 key\n不同，该档案的密钥**会静默换掉**（⇒ 401 或计费到别人的号）。\n⇒ 本端点**逐条校验**，不一致直接 422 并说明是哪一条、差在哪。\n\n校验通过才写 ``connection_id``；``provider`` 按**回退**语义落库——\n归组请求体不带 provider ⇒ 写连接的主 provider（协议是模型级属性、\n档案自持的裁决下，本端点是回退路径；2026-10-24 裁决）。",
+        "description": "把档案归到连接上（``assignments``: ``[{connection_id, profile_ids}]``）。\n\n⚠️ **生效 key 必须不变** —— 绑定连接后档案不再查 ``secrets[profile_id]``，\n改用 ``secrets[connection_id]`` ⇒ 若连接的生效 key 与档案归组前的生效 key\n不同，该档案的密钥**会静默换掉**（⇒ 401 或计费到别人的号）。\n⇒ 本端点**逐条校验**，不一致直接 422 并说明是哪一条、差在哪。\n\n校验通过才写 ``connection_id``；**不写 provider**（2026-10-24 审查修复 C2）：\n协议是档案属性、归组只是物理归并——旧行为把 provider 一并写成连接主协议，\n实测 anthropic 档案归组后被静默改成 openai_compatible（base_url 一致性\n校验只拦「地址不同」，拦不住「地址相同、协议不同」的改写）。",
         "operationId": "apply_grouping_api_model_profiles_apply_grouping_post",
         "requestBody": {
           "content": {
@@ -16113,6 +16113,18 @@
             "title": "Chapter Id",
             "description": "project-init 等非章节任务的 run 为 null"
           },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id",
+            "description": "0037 新增的 run 归属列（outline-batch 项目级并发守卫的过滤依据）；checkpoint 无 project_id 的历史行（如 adhoc 裸 run）为 null"
+          },
           "status": {
             "type": "string",
             "title": "Status",
@@ -16223,6 +16235,7 @@
           "workflow_id",
           "workflow_name",
           "chapter_id",
+          "project_id",
           "status",
           "current_node",
           "checkpoint_json",
@@ -16426,6 +16439,18 @@
             "title": "Chapter Id",
             "description": "列表行专属：project-init 等非章节任务的 run 为 null（实测）"
           },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id",
+            "description": "0037 新增的 run 归属列；checkpoint 无 project_id 的历史行为 null"
+          },
           "status": {
             "type": "string",
             "title": "Status",
@@ -16512,6 +16537,7 @@
           "workflow_id",
           "workflow_name",
           "chapter_id",
+          "project_id",
           "status",
           "current_node",
           "checkpoint_json",

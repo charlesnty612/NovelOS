@@ -76,6 +76,9 @@ EXPECTED_RUN_DETAIL_KEYS = {
     "workflow_id",
     "workflow_name",
     "chapter_id",
+    # 0037（2026-10-24 · C-1/C-2）：run 归属列，SELECT * 直出（0026 instance_id
+    # 同款先例——WorkflowRunDetail extra="allow"，迁移加列响应就多一个键）。
+    "project_id",
     "status",
     "current_node",
     "checkpoint_json",
@@ -808,6 +811,8 @@ def test_extra_allow_keeps_undeclared_keys():
     """
     dumped = WorkflowRunDetail(
         run_id="r", workflow_id="w", workflow_name=None, chapter_id=None,
+        # 0037 加列后为必填可空（键恒在、值可 null），构造点显式给 None。
+        project_id=None,
         status="RUNNING", current_node=None, checkpoint_json={}, error=None,
         retry_count=0, started_at="t", ended_at=None, instance_id=None, nodes=[],
         brand_new_column_from_migration_0032={"x": 1},
