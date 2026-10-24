@@ -4,7 +4,9 @@
 
 覆盖：
 - 正常链：mock 合法 seeds ⇒ 章节表 +N、number 连续、status 全 PLANNED、
-  plan_json 的 source 标记正确、outline_json 存 seed 原文；
+  plan_json 为空 plan（不写该列 ⇒ DDL DEFAULT '{}'——留给 chapter-plan 生成槽，
+  write 的 load_plan 校验 chapter_goal，大纲层章须先跑计划）、
+  outline_json 存 seed 原文（synopsis/title/number）；
 - mock 回断号 seeds ⇒ AgentOutputError（run FAILED），章节表零新增；
 - mock 回数量不符 seeds ⇒ 同上；
 - 已有 10 章时 start_number=11；
@@ -164,7 +166,8 @@ def _start_outline_batch(
 
 
 def test_outline_batch_end_to_end_creates_planned_chapters(tmp_path: Path):
-    """正常链：空项目 mock 合法 seeds ⇒ +5 章、number 1..5、PLANNED、source 标记正确。"""
+    """正常链：空项目 mock 合法 seeds ⇒ +5 章、number 1..5、PLANNED、
+    plan_json 空（不写）且大纲只存 outline_json。"""
     engine = _make_engine(tmp_path)
     PromptRegistry(engine.db_path).sync_from_docs(_PROMPTS_DIR)
     pid = _make_project(engine.db_path)
@@ -180,15 +183,15 @@ def test_outline_batch_end_to_end_creates_planned_chapters(tmp_path: Path):
     assert [c["number"] for c in chapters] == [1, 2, 3, 4, 5]
     assert all(c["status"] == "PLANNED" for c in chapters)
     for c in chapters:
-        plan = json.loads(c["plan_json"])
-        assert plan["source"] == "outline-batch"
-        assert plan["synopsis"]
-        assert plan["prompt_version"] == "outline_batch_planner:v1"
+        # plan_json 不写 ⇒ INSERT 未列该列，DDL DEFAULT '{}' 生效 = 空 plan
+        # （「计划未生成」；load_plan 读到它会正确报「run chapter-plan first」，
+        # 不会再被伪 plan 骗过）。大纲内容只存 outline_json。
+        assert json.loads(c["plan_json"]) == {}
         # outline_json = seed 原文结构（number/title/synopsis 逐位可对回 mock 脚本）
         seed = json.loads(c["outline_json"])
         assert seed["number"] == c["number"]
         assert seed["title"] == c["title"]
-        assert seed["synopsis"] == plan["synopsis"]
+        assert seed["synopsis"]
     # checkpoint 带 created chapter_ids
     ckpt = run.get("checkpoint_json") or {}
     persist_out = ckpt.get("persist") or {}

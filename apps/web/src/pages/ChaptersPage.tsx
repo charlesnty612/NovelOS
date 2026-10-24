@@ -65,7 +65,7 @@ export function ChaptersPage() {
       setBatchRunId(null);
       if (run.status === 'COMPLETED') {
         setBatchNotice(
-          `已新增 ${batchPlannedCount} 章（状态为「已计划」），可在下方列表查看。`,
+          `已新增 ${batchPlannedCount} 章（状态为「已计划」），请在各章详情页先执行「生成计划」再写正文。`,
         );
         void reload();
       } else if (run.status === 'FAILED') {
@@ -317,7 +317,8 @@ function OutlineBatchModal({ onCancel, onSubmit }: OutlineBatchModalProps) {
         <ErrorBanner>{err}</ErrorBanner>
 
         <p className="section-subtitle" style={{ marginTop: 0 }}>
-          基于已写章节、未闭环伏笔与叙事债务，由 AI 规划下一批章节大纲（状态为「已计划」，写作流程照常走四步）。
+          基于已写章节、未闭环伏笔与叙事债务，由 AI 规划下一批章节大纲（状态为「已计划」）。
+          新章生成后为大纲状态——需在章节详情页先执行「生成计划」（AI 依据大纲产出本章详规），再写正文。
         </p>
 
         <div className="form-grid">

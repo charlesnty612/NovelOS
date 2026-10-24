@@ -27,10 +27,14 @@
   output-invalid 重试）。
 - ``persist`` (State) —— 复用**同一个**契约校验函数终检（写库前最后闸门，与
   runner 重试共用单点实现，不算两份逻辑）后逐条 INSERT INTO chapters
-  （建章 SQL 形态逐字参照 project_init pipeline 的建章段：status='PLANNED'、
+  （建章 SQL 形态参照 project_init pipeline 的建章段：status='PLANNED'、
   visibility/who_knows 缺省、volume_id 可空），单事务提交；
-  ``plan_json`` 存 ``{"synopsis", "source": "outline-batch", "prompt_version"}``、
-  ``outline_json`` 存 seed 原文结构。落库 ``prompt_version`` 走
+  ``plan_json`` **不写**（走 DDL ``DEFAULT '{}'``，即「计划未生成」的空 plan）：
+  该列是 chapter-plan 的**生成槽**——write 的 ``load_plan`` 校验
+  ``plan_json.chapter_goal`` 非空，大纲层章在此塞 synopsis 会造出「收下了却
+  过不了校验」的伪 plan（违反「一列不得两用」纪律，AGENTS 硬规则 9）；大纲
+  synopsis 只存 ``outline_json``（seed 原文结构）——写正文前必须先跑
+  chapter-plan（生成计划），planner 白名单覆盖写 plan_json。落库 ``prompt_version`` 走
   ``active_prompt_label`` 现算（与 chapter_plan.save_plan 同款防「硬编码标签漂移」；
   fallback = ``outline_batch_planner:v1``）。
 
@@ -221,22 +225,21 @@ def _persist_node(ctx: dict[str, Any]) -> dict[str, Any]:
     created_chapter_ids: list[str] = []
     try:
         for seed in seeds:
-            # plan_json：消费面只带 synopsis + 来源标记 + 落库时真实生效的 prompt 版本。
-            plan_payload = {
-                "synopsis": seed.get("synopsis"),
-                "source": WORKFLOW_NAME,
-                "prompt_version": planner_prompt_label,
-            }
+            # plan_json 不写（INSERT 不列该列 ⇒ DDL DEFAULT '{}'）：它是 chapter-plan
+            # 的**生成槽**——write 的 load_plan 校验 plan_json.chapter_goal 非空，
+            # 在此塞 synopsis 会造出「收下了却过不了校验」的伪 plan（「一列不得两用」，
+            # AGENTS 硬规则 9）。大纲 synopsis 只存 outline_json；用户须先在章节
+            # 详情页跑 chapter-plan（生成计划），planner 白名单覆盖写 plan_json。
             chapter_id = new_id("ch")
             now = now_iso()
             conn.execute(
                 """
                 INSERT INTO chapters
-                    (chapter_id, project_id, number, title, plan_json, outline_json,
+                    (chapter_id, project_id, number, title, outline_json,
                      status, visibility, who_knows,
                      created_at, updated_at, volume_id)
                 VALUES
-                    (:chapter_id, :project_id, :number, :title, :plan_json, :outline_json,
+                    (:chapter_id, :project_id, :number, :title, :outline_json,
                      :status, :visibility, :who_knows,
                      :created_at, :updated_at, :volume_id)
                 """,
@@ -245,7 +248,6 @@ def _persist_node(ctx: dict[str, Any]) -> dict[str, Any]:
                     "project_id": project_id,
                     "number": int(seed["number"]),
                     "title": seed.get("title"),
-                    "plan_json": json.dumps(plan_payload, ensure_ascii=False),
                     "outline_json": json.dumps(seed, ensure_ascii=False),
                     "status": "PLANNED",
                     "visibility": "VISIBLE",

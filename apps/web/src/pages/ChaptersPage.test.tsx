@@ -4,8 +4,8 @@
 // - 点击「进入」按钮 → 调 navigate 跳详情
 // - API 失败 → ErrorBanner 显示错误文本
 // - 新建 modal：number 已存在 → 拒绝提交（不调 create）
-// - 续规划章节（outline-batch）：开弹窗默认 10 / 请求体口径 / COMPLETED 刷新+提示 /
-//   FAILED 提示 / 409 专项文案 / 章数 0 前端拦截
+// - 续规划章节（outline-batch）：开弹窗默认 10 / 请求体口径 / COMPLETED 刷新+提示
+//   （含「先执行生成计划再写正文」引导）/ FAILED 提示 / 409 专项文案 / 章数 0 前端拦截
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -295,7 +295,7 @@ describe('ChaptersPage · 续规划章节（outline-batch）', () => {
     expect(screen.getByTestId('new-chapter-btn')).toBeDisabled();
   });
 
-  it('b) 轮询到 COMPLETED：刷新章节列表 + 顶部成功提示「已新增 10 章」', async () => {
+  it('b) 轮询到 COMPLETED：刷新章节列表 + 顶部成功提示「已新增 10 章」+ 先「生成计划」引导', async () => {
     await openBatchModal();
     fireEvent.click(screen.getByTestId('outline-batch-submit'));
 
@@ -306,6 +306,11 @@ describe('ChaptersPage · 续规划章节（outline-batch）', () => {
     await waitFor(() => {
       expect(screen.getByTestId('outline-batch-notice')).toHaveTextContent(
         '已新增 10 章',
+      );
+      // 引导文案：大纲状态章不能直接点「写正文」（load_plan 校验 chapter_goal），
+      // 必须先在详情页执行「生成计划」——文案缺失 = 用户再次撞错。
+      expect(screen.getByTestId('outline-batch-notice')).toHaveTextContent(
+        '先执行「生成计划」再写正文',
       );
     });
     // 轮询停了：run 拉取恰好 1 次（首次 tick 即终态，不挂 interval）。

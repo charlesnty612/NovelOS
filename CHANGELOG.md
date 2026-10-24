@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-24 · outline-batch 伪 plan_json：大纲层章直接写正文报错的定位与修复）
+
+- **症状（用户报）**：outline-batch 续规划建的章进详情页点「写正文」报 `has empty plan_json; run chapter-plan first`。
+- **定性**：报错**本身是正确引导**——write 的 load_plan（scene_planner.py:44）校验 `plan_json.chapter_goal`（chapter-plan 的产出）；outline-batch 产出的是**大纲层**（outline_json），本就该先跑「生成计划」。真缺陷是 outline-batch 往 plan_json 塞了 `{"synopsis","source",…}` **伪 plan**：过不了校验又违反「一列不得两用」（plan_json 是 chapter-plan 生成槽，AGENTS 硬规则 9）。
+- **修复**：persist 不再写 plan_json（落 DDL `DEFAULT '{}'`，NOT NULL 约束所致，与 NULL 行为逐位等价）；synopsis 只存 outline_json（seed 原文，`resolve_chapter_outline` 两级口径下原样进 planner 输入已核）。前端弹窗与成功提示补「新章为大纲状态——先在详情页**生成计划**再写正文」引导（测试断言子串钉住防静默删除）。
+- **存量不修**：已建章的伪 plan_json 无 chapter_goal、行为正确；跑「生成计划」时 planner 白名单覆盖写自动干净（内容层零接触纪律）。
+- 判别：workflow/api 测试断言反转为「plan_json 空 + outline_json 三字段」；全量 pytest **4422 / 0 failed**、vitest 866 全绿。
+
 ### Added（2026-10-24 · outline-batch 批量续规划：写完首批 N 章后的「续产下一批大纲」入口）
 
 > **来源**：用户报「10 章写完了，没有一个入口可以继续产生新 10 章的计划」——此前唯一入口「+ 新建章节」是单章手动建，

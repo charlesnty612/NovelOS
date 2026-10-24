@@ -4,6 +4,8 @@
 
 覆盖：
 - 起 run ⇒ 终态 COMPLETED ⇒ 章节列表 +10（默认 chapter_count=10）；
+  plan_json 为空 plan（不写该列 ⇒ DDL DEFAULT '{}'，留给 chapter-plan 生成槽）、
+  outline_json 存 seed 原文（synopsis/title/number）；
 - chapter_count=0 / 51 ⇒ 422（请求体约束）；
 - 项目不存在 ⇒ 404；model_profile_id 不存在 ⇒ 400。
 """
@@ -92,7 +94,7 @@ def test_outline_batch_api_end_to_end(tmp_path: Path):
             conn = get_connection(app.state.settings.db_path)
             try:
                 rows = conn.execute(
-                    "SELECT number, status, plan_json FROM chapters "
+                    "SELECT number, status, plan_json, outline_json FROM chapters "
                     "WHERE project_id = ? ORDER BY number ASC",
                     (pid,),
                 ).fetchall()
@@ -101,7 +103,14 @@ def test_outline_batch_api_end_to_end(tmp_path: Path):
             assert len(rows) == 10
             assert [row["number"] for row in rows] == list(range(1, 11))
             assert all(row["status"] == "PLANNED" for row in rows)
-            assert all(json.loads(row["plan_json"])["source"] == "outline-batch" for row in rows)
+            # plan_json 不写 ⇒ DDL DEFAULT '{}' = 空 plan（「计划未生成」；
+            # write 的 load_plan 会正确引导先跑 chapter-plan）。大纲只存 outline_json。
+            for row in rows:
+                assert json.loads(row["plan_json"]) == {}
+                seed = json.loads(row["outline_json"])
+                assert seed["number"] == row["number"]
+                assert seed["title"]
+                assert seed["synopsis"]
 
     asyncio.run(run())
 
