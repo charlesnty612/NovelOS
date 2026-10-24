@@ -240,7 +240,7 @@ cd apps/web && npm run test
 ## 版本与更新日志
 
 当前版本 **v3.10.0**（`pyproject.toml` 为版本单源；`apps/web/package.json`、`apps/web/package-lock.json`
-与 `uv.lock` 随发版对齐。当前基线：pytest **3800 passed / 1 skipped / 1 xfailed**（3802 collected；全量命令**不再带**任何 `--ignore`——含 `test_m1_lock.py`，见上文「测试」一节），vitest **781**（57 个测试文件））。自 V1.0 起，
+与 `uv.lock` 随发版对齐。当前基线：pytest **4379 passed / 1 skipped / 1 xfailed**（4381 collected；2026-10-24 批次三十三之二后口径；全量命令**不再带**任何 `--ignore`——含 `test_m1_lock.py`，见上文「测试」一节），vitest **781**（57 个测试文件））。自 V1.0 起，
 所有迭代必须在 `CHANGELOG.md` 追加条目（格式与分类见文件头部规矩）；已知问题与 V1.x/V2.x
 路线登记在同文件「Known Issues / 路线登记」一节。
 

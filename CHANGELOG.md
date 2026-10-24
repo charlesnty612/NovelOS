@@ -5,6 +5,43 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-24 · 批次三十四 · 全面审核修复批：缓存根治收尾 R-1/R-2/R-3 + 看守补洞 + 测试瘦身 + 文档回填）
+
+> **来源**：全面审查第三轮（`docs/impl/reviews/full-review-round3-2026-10-24.md`）+ 测试过度专项（`docs/impl/reviews/test-over-engineering-review-2026-10-24.md`）的发现全量按建议修复。6 个工作包并行执行 + 1 个 R-1 测试适配批，Lead 统一跑收尾闸门。**零真实 LLM 调用、零内容仓接触、活库未动**。
+
+#### 1. 缓存根治收尾（major R-1/R-2/R-3，硬规则 2 的根治条件②补齐）
+
+- **R-1 branches 全系写路径推 `state_version`**：新建 `packages/core/story_state/versioning.py::bump_project_state_version`（**core 层唯一实现**，`domain/project/service.py` 同名函数改为转发——避免双实现漂移，公开 API 与既有突变锚点零变化）；`branches.py` 的 create/promote 两处 + `simulation/service.py` 归档处同事务推进；`cache.py` plot_fingerprint 的挂账 docstring 更新为「已补齐」。判别：`tests/unit/test_ctx_e_branch_version_push.py`（建分支/归档 ⇒ 版本 +1，读真实 story_states 值断言）。
+- **R-2 前章草稿面入键（拍板：加键维度，不走写路径推进——drafts 每次 write/revise 都写，推版本会崩缓存命中率）**：`cache.py` 新增 `previous_draft_fingerprint`（前章最新 draft 的 sha256[:16]，排序口径与 summaries.py 逐字同形，无前章/无 draft 返 "none"，走 with_fingerprint_conn 共享连接）；director 键 23→24 元（`prev_draft_fp`）、writer 键同款追加，缓存/未缓存两路径键逐字同形。判别：`tests/unit/test_ctx_d_prev_draft_key.py`（裸 SQL 给 ch1 插新 draft ⇒ ch2 装配的 `previous_chapter_tail` 内容必变 + 重装 +1；反向未改必命中）+ 突变规格 `tests/mutation_specs/q2_prev_draft_key.py`。
+- **R-3 planner 空标题回填推版本**：`workflows/chapter_plan/pipeline.py` 回填 title 后同事务推进（`test_chapter_title_autofill.py` 更新）。
+- **R-1 连带的既有测试适配**（5 文件 20 用例，`optimistic_lock expected=1 actual=2/3` 根因 = 夹具按旧版本号发写请求）：修法基调「设计意图优先」——版本断言改为**动态读 + 递增断言**（`after == before + n`），「不污染主域」类测试的**内容断言全部保留**（污染检查判别面零削弱，部分还变强）；顺手发现并修复 `tests/unit/simulation/test_simulation_service.py` 5 条同根红（临时回退 R-1 复证归属后一并修）。已登记不改：`promote_branch` 物化版比最新版落后 1 版（内容相同，顺序为「重放→物化→再推版本」）——若日后要版本号也相等需把 bump 移到物化前，属实现变更另裁决。
+
+#### 2. 看守补洞（12 处空转中最重的 6 处 + 2 处声称失实订正）
+
+- 版本看守域改**全集推导**（`test_frontend_version_consistency.py`：新增「检查器产出的全部 `app-version-consistency/*` id 必须 ⊆ 已知集合」用例——原手挑 3 id 过滤会静默吞掉新增检查项，「跑而不验」从另一侧重开）。
+- `run_spec.py` 两条洞：`discover_specs` 补**真身**看守（真目录跑真函数，结果集与动态推导全集逐字相等——glob 退化回 `g*.py` 必红）；主循环替身补调用计数（「一条没跑却报绿」形状）。
+- `tree_fingerprint.py` 行格式钉子：合成树**精确 sha256** 硬编码断言（分隔符/mtime 整秒/无尾换行三类口径变更必红；`_write` 改 `write_bytes` 保跨平台一致）+ 惰性探针 `.pyc`→`__pycache__/x.py`（真被目录排除挡住的形态）。
+- `_contract_runner.py`：删 `assert_response_keys`（全仓零消费零看守）；补 3 条专属反例（$ref 模型名失配 / components 缺模型 / required 少键 ⇒ 各自必红）；纪律口径订正（「不许单独出现、须配硬编码基线」）；`app_table_columns` 加「仅限同步用例」警示；`test_config_list` 本地 model_fields 断言收敛到 runner 单点。
+- 声称失实订正：`test_script_mutation_harness.py` 补「变异后仍可解析」真用例（AST parse，docstring 此前声称有而实际无）+ replacement 判据措辞收窄为「字节级不等」（M15 类语义空变异明示不在射程）；`q3_scripts_mutation_harness.py` docstring 例数与过期声称订正。
+- 全部新看守经 `scripts/mutation_probe.py` 逐条判别力验证：6/6 CAUGHT 且每次只红预期那条。
+
+#### 3. 测试瘦身（零判别力损失）
+
+- **`test_chapter_pipelines.py` 拆分 + 清理**（1836 → 1021 + 601 两文件，用例 17 守恒）：删 62 条恒等重复 wait（`_async_helpers.py` 脚本叠加产物，脚本补幂等守卫防再叠）；4 处内联轮询块改用已有 helper（-97 行）；7 处 plan→write 样板抽 helper；3 个 writer 脚本合一（输出字节逐位不变）；model_overrides 正反对参数化（保留 author_intent 缺席分支）。自登记 TODO 的拆分触发条件（>1500 行）落地。
+- **三个巨型文件瘦身**：`test_no_core_to_workflows_dep.py`（删 2 条被蕴含用例 + 2 组参数化；18 条禁动行逐字未动）；`test_check_content_repo_guard.py`（删 1 条被蕴含用例 + 3 条蕴含断言；结构非法 6 函数→参数化矩阵 12 例且**补 migrate×坏JSON 全仓缺口**；5 条台账承重逐字未动）；`test_migrations.py`（8 个单迁移幂等用例参数化 + 3 个 PRAGMA 列断言参数化；双口径承重用例保留）。
+- **夹具跨套副本上移**：新建 `tests/_shared_common.py` 单点（`_create_app/_make_client/_make_meta/_evidence/_run` 五名，原 8 处跨套逐字副本），5 套 `_shared.py` 改再导出、96 处消费方 import 零改动；`_insert_chapter` 同名不同义（PLANNED vs COMMITTED，有意差异）与 `_make_meta` 日期分叉在双侧 docstring 标注「收敛时禁止静默统一」。私有副本（40+ 处）留 T-2 立项。
+- 用例数变化（有意，非守恒口径）：全量 4381 → **4404 collected**（新增看守/适配用例数 > 参数化合并减少数）。
+
+#### 4. 文档回填（8 项 stale + 6 条过期声称清零）
+
+- `AGENTS.md`：迁移链 0001~0034（两处）、突变规格 85/477、远端 tag 24、表数口径注明不含 FTS 族、`check_skill_package.py` 路径勘误（→ `skills/novelos/scripts/`）。
+- `remaining-debt-2026-10-23.md`：D-2/3/4/7/8/10/13 七行标「✅ 已修（2026-10-24 复测确认）」+ 回填说明段；D-18 标「现状已优（stale）」。
+- `README.md` / `tests/README.md` 基线数更新。
+
+#### 5. 收尾闸门（Lead 串行）
+
+全量 pytest `-n 20`（仓外 basetemp）⇒ **4403 passed / 1 skipped / 1 xfailed / 0 failed**（3:10）；ruff 0 违规；突变档① precheck 48 条 0 问题 + 档② `--changed` 实跑 **0 存活 0 中止**（含 Q4×3/T7×3 六条落点全 CAUGHT、`l2_state_list` 19/19 CAUGHT）；前端 tsc / vitest 853 / build 全过；树指纹跑测前后一致（跑测期间仅 Lead 已知动作：ruff --fix 1 处 + 清理仓内临时 basetemp 目录——**仓内 basetemp 会让 50 条 `test_scripts_write_guard`/`test_restore_db` 假红，全量必须用仓外临时目录**，已入坑区）。
+
 ### Refactor（2026-10-24 凌晨 · 批次三十三之二 · 测试瘦身续：contract 族再收敛 8 个 + **测试建库样板收敛**）
 
 > **来源**：批次三十三之一的续做（用户「板上没做的做一下」）。**零真实 LLM 调用、零内容仓接触、活库未动**；两名执行成员写域互斥（dev-a `tests/api/**`、dev-b `tests/unit|integration/**`），Lead 串行跑全部闸门。
