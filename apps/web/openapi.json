@@ -6473,6 +6473,59 @@
         }
       }
     },
+    "/api/projects/{project_id}/outline-batch": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Start Outline Batch",
+        "description": "outline-batch：基于已写内容批量规划下一批章节并建为 PLANNED 章。",
+        "operationId": "start_outline_batch_api_projects__project_id__outline_batch_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OutlineBatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowStartAccepted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/projects/init": {
       "post": {
         "tags": [
@@ -12749,6 +12802,48 @@
         ],
         "title": "ModelProfileOut",
         "description": "``model_profiles`` 单行 + ``has_api_key``（``POST`` / ``GET`` / ``PATCH`` 共用）。\n\n``extra=\"allow\"``：service 层是 ``SELECT * FROM model_profiles``。将来加一列\n（加列迁移），严格模型会把它**静默丢掉**——症状是「后端返回了、API 取不到、\n零报错」。故本模型宣称「已知这 9 个键」，不宣称封闭。"
+      },
+      "OutlineBatchRequest": {
+        "properties": {
+          "chapter_count": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Chapter Count",
+            "default": 10
+          },
+          "mock_providers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mock Providers"
+          },
+          "model_profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Profile Id"
+          }
+        },
+        "type": "object",
+        "title": "OutlineBatchRequest",
+        "description": "outline-batch（批量续规划下一批章节）触发请求体。\n\n- ``chapter_count``：本次要规划的章数，1~50（越界 422），默认 10。\n- ``mock_providers``：测试用脚本化 LLM 输出（键 = ``outline_batch_planner``）。\n- ``model_profile_id``：单次 run 级模型档案覆盖（照 project-init 注入链路：\n  后端校验该档案存在，不存在 → 400；None → 走全局 capability_bindings）。"
       },
       "PlotEventOut": {
         "properties": {

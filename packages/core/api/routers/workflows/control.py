@@ -30,6 +30,7 @@ from packages.core.workflow_runtime.runs import get_run, get_workflow_name_for_r
 from packages.domain.chapter.service import ChapterService
 
 from .common import (
+    OutlineBatchRequest,
     ProjectInitRequest,
     ResumeRequest,
     StartWorkflowRequest,
@@ -469,6 +470,119 @@ def _start_project_init(
     if run["status"] == "PAUSED":
         out["pause_payload"] = _extract_pause_payload(run)
     return out
+
+
+def _start_outline_batch(
+    *,
+    request: Request,
+    project_id: str,
+    body: OutlineBatchRequest,
+) -> dict[str, Any]:
+    """启动 outline-batch workflow（批量续规划下一批章节）。
+
+    项目级端点（无 chapter），形态照 :func:`_start_project_init`：
+    - 校验项目存在（404）；
+    - 校验 model_profile_id 存在（400，缺省跳过）；
+    - 项目级并发防护：已有 RUNNING 的 outline-batch run → 409（persist 会插章，
+      双跑会插出重复章号）；
+    - 同步 start_with_nodes（与 project-init 一致），返回 run 行三键。
+    """
+    settings = request.app.state.settings
+    db_path = settings.db_path
+
+    workflow = get_workflow("outline-batch")
+    if workflow is None:
+        raise HTTPException(status_code=500, detail="workflow 'outline-batch' not registered")
+
+    from packages.domain.project.service import ProjectService
+
+    if ProjectService(db_path).get(project_id) is None:
+        raise HTTPException(status_code=404, detail=f"project {project_id!r} not found")
+
+    # 单次 run 级模型档案覆盖：校验存在再塞 ctx（与 project-init 同款口径）。
+    if body.model_profile_id is not None:
+        if ProfileService(db_path).get(body.model_profile_id) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"model_profile_id {body.model_profile_id!r} not found in "
+                    f"model_profiles; create it first or omit the field to use "
+                    f"global capability_bindings"
+                ),
+            )
+
+    # 项目级并发防护：同项目已有 RUNNING 的 outline-batch run → 409。
+    # （chapter 级工作流靠 workflow_runs.chapter_id 的部分唯一索引兜底；本项目级
+    # workflow chapter_id 为 NULL，不受该索引约束，须自行查守。）
+    conn = get_connection(str(db_path))
+    try:
+        active = conn.execute(
+            """
+            SELECT wr.run_id FROM workflow_runs wr
+            JOIN workflows wf ON wf.workflow_id = wr.workflow_id
+            WHERE wf.name = 'outline-batch'
+              AND wr.chapter_id IS NULL
+              AND wr.status IN ('RUNNING', 'PENDING')
+            ORDER BY wr.started_at DESC
+            LIMIT 1
+            """,
+        ).fetchone()
+    finally:
+        conn.close()
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"project {project_id!r} already has an active outline-batch run "
+                f"(run_id={active['run_id']!r}); wait for it to reach a terminal state"
+            ),
+        )
+
+    initial_ctx: dict[str, Any] = {
+        "db_path": str(db_path),
+        "project_id": project_id,
+        "chapter_count": body.chapter_count,
+    }
+    if body.mock_providers:
+        initial_ctx["mock_providers"] = body.mock_providers
+    if body.model_profile_id is not None:
+        initial_ctx["model_profile_id"] = body.model_profile_id
+
+    engine = _engine(request)
+    try:
+        run_id = engine.start_with_nodes(
+            "outline-batch",
+            workflow["nodes"],
+            initial_ctx=initial_ctx,
+            mock_providers=body.mock_providers,
+        )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    run = get_run(db_path, run_id)
+    if run is None:
+        raise HTTPException(status_code=500, detail="run disappeared after start")
+    return {
+        "run_id": run_id,
+        "status": run["status"],
+        "current_node": run.get("current_node"),
+    }
+
+
+@router.post(
+    "/projects/{project_id}/outline-batch",
+    status_code=status.HTTP_201_CREATED,
+    response_model=WorkflowStartAccepted,
+)
+def start_outline_batch(
+    project_id: str,
+    body: OutlineBatchRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """outline-batch：基于已写内容批量规划下一批章节并建为 PLANNED 章。"""
+    return _start_outline_batch(request=request, project_id=project_id, body=body)
 
 
 def _guard_commit_draft_freshness(request: Request, chapter_id: str) -> None:

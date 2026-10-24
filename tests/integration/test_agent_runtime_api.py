@@ -72,6 +72,7 @@ def test_sync_registers_all_prompts_from_docs(tmp_path: Path):
                 "summarizer", "critic", "scene_planner", "polisher",
                 "premise_designer", "world_builder", "character_designer", "volume_outliner",
                 "deep_reviewer", "director_planner",
+                "outline_batch_planner",  # 2026-10-24 outline-batch 工作流
             }
             assert expected == set(payload["agents"]), (
                 f"agents mismatch: got {payload['agents']}"

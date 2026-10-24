@@ -33,6 +33,7 @@ from packages.workflows.chapter_plan import pipeline as _plan  # noqa: E402, F40
 from packages.workflows.chapter_review import pipeline as _review  # noqa: E402, F401
 from packages.workflows.chapter_write import pipeline as _write  # noqa: E402, F401
 from packages.workflows.deconstruct_book import pipeline as _deconstruct_book  # noqa: E402, F401
+from packages.workflows.outline_batch import pipeline as _outline_batch  # noqa: E402, F401
 from packages.workflows.project_init import pipeline as _project_init  # noqa: E402, F401
 
 

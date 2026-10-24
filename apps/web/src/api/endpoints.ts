@@ -59,6 +59,7 @@ import type {
   ModelProfileTestResult,
   ModelProfileUpdatePayload,
   ArcView,
+  OutlineBatchRequest,
   PlotEvent,
   PlotEventCreatePayload,
   Project,
@@ -93,6 +94,7 @@ import type {
   WorldEntity,
   WorldEntityPayload,
   WorkflowRun,
+  WorkflowStartAccepted,
   WorkflowStartPayload,
   WorkflowStartResponse,
 } from './types';
@@ -114,6 +116,13 @@ export const projectsApi = {
   // 对齐 packages/core/api/routers/projects.py GET /projects/{id}/init-status。
   initStatus: (projectId: string) =>
     api.get<InitStatusResponse>(`/projects/${projectId}/init-status`),
+  // outline-batch（批量续规划下一批章节）：项目级异步工作流（装配 → LLM 规划 →
+  // 落库建 PLANNED 章），201 返回 run 三键，真终态须轮询 GET /runs/{run_id}。
+  // 对齐 packages/core/api/routers/workflows/control.py POST /projects/{id}/outline-batch。
+  // 错误码：chapter_count 越界 422 / 项目不存在 404 / model_profile_id 无效 400 /
+  // 项目级并发（已有 RUNNING 的 outline-batch run）409。
+  outlineBatch: (projectId: string, payload: OutlineBatchRequest) =>
+    api.post<WorkflowStartAccepted>(`/projects/${projectId}/outline-batch`, payload),
 };
 
 // ------------------------------------------------------------- style samples

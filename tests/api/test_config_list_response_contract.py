@@ -360,7 +360,7 @@ def test_agents_list_returns_the_measured_six_keys(tmp_path: Path):
     _seed_agents(app)
 
     rows = _rows(app, "/api/agents")
-    assert len(rows) == 16, f"实测 16 个 agent，实得 {len(rows)}——播种口径变了需重估"
+    assert len(rows) == 17, f"实测 17 个 agent（2026-10-24 增 outline_batch_planner），实得 {len(rows)}——播种口径变了需重估"
     for row in rows:
         assert set(row) == set(EXPECTED_AGENT_KEYS), (
             f"{row.get('name')} 多={sorted(set(row) - EXPECTED_AGENT_KEYS)} "

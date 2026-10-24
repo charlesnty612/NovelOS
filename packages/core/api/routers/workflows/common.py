@@ -121,6 +121,20 @@ class ProjectInitRequest(BaseModel):
     model_profile_id: str | None = None
 
 
+class OutlineBatchRequest(BaseModel):
+    """outline-batch（批量续规划下一批章节）触发请求体。
+
+    - ``chapter_count``：本次要规划的章数，1~50（越界 422），默认 10。
+    - ``mock_providers``：测试用脚本化 LLM 输出（键 = ``outline_batch_planner``）。
+    - ``model_profile_id``：单次 run 级模型档案覆盖（照 project-init 注入链路：
+      后端校验该档案存在，不存在 → 400；None → 走全局 capability_bindings）。
+    """
+
+    chapter_count: int = Field(default=10, ge=1, le=50)
+    mock_providers: dict[str, list[str]] | None = None
+    model_profile_id: str | None = None
+
+
 class ResumeRequest(BaseModel):
     human_input: dict[str, Any] | None = None
     # P0 自动改稿回路：resume chapter-review 被 revise 驳回时，可自动重跑 write→review。

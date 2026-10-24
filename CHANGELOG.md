@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Added（2026-10-24 · outline-batch 批量续规划：写完首批 N 章后的「续产下一批大纲」入口）
+
+> **来源**：用户报「10 章写完了，没有一个入口可以继续产生新 10 章的计划」——此前唯一入口「+ 新建章节」是单章手动建，
+> project-init 是项目初始化语义（题材/设定/人物/大纲四关卡），均不承担「续批」。
+
+- **新工作流 `outline-batch`**（`packages/workflows/outline_batch/`，三节点线性）：`assemble`（直接 SQL 装配：项目前提/题材 + 最近 10 章标题与摘要链（更早只有摘要链，prompt 注明）+ 未闭环伏笔（含引入章号）+ 叙事债务 + start_number=max+1，不走装配缓存）→ `planner`（新 agent `outline_batch_planner`，prompt `docs/agents/prompts/outline_batch_planner-v1.md` 经既有 lifespan sync 入库；run 级 `model_profile_id` 覆盖照 project-init 模式）→ `persist`（与 planner 同一校验器终检：数量==chapter_count、number 恰为 start..start+N-1 连续、title/synopsis 非空，违规走 runner 重试；照 project-init 建章 SQL 形态 INSERT PLANNED 章，prompt_version 走 active_prompt_label 现算）。
+- **API**：`POST /api/projects/{project_id}/outline-batch`，body `{chapter_count?(默认10, 1~50), model_profile_id?}`；项目 404 / 无效档案 400 / **项目级并发 409**（插章双跑会重复章号，chapter_id 为 NULL 不受 0017 索引保护——按仓内并发守卫惯例补）。
+- **前端**：`ChaptersPage` 加「续规划章节」次级按钮 + Modal（章数默认 10、可选档案下拉默认「跟随项目默认」）；起跑后双按钮禁用防 409，`usePoll`（仓内现成 hook）轮询终态，COMPLETED ⇒ 刷新列表 + 「已新增 N 章」，FAILED ⇒ 带 run.error；类型从 types.generated.ts 重导出。
+- **判别**：后端 workflow 5 例 + API 4 例（断号/数量不符 ⇒ FAILED 且零新增、start_number=11、422/404/400）+ 契约校验器单点复用；前端 6 例（请求体无档案不带键、409 文案、轮询恰停、章数 0 前端拦）。全量 pytest **4422 passed / 0 failed**；vitest 64 文件 / **866 全绿**。
+- **agent 入册基线三处同步**（既有看守正确报警后更新）：agents sync 期望集合 + `config_list` agent 数 16→17 + types.ts 重导出注释移出 export 块（注释写在 `export {}` 内部会混进看守解析的名字）。
+- 边界留痕：capability 映射两表未登记 outline_batch_planner（走默认 reasoning 档）；成功提示的 N 取请求值（后端保证实际==请求，校验器兜底）。
+
 ### Changed（2026-10-24 · 架构 · 协议从「连接」下放到「模型档案」——厂商 ≠ 协议的概念订正）
 
 > **用户裁决 + 联网查证**：厂商（opencode/DeepSeek/MiniMax…）≠ 协议（openai_compatible/anthropic/ollama/mock）。

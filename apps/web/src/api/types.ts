@@ -1844,6 +1844,8 @@ export type {
   ConnectionTestResult,
   ConnectionPresetOut,
   ListDiff as SnapshotListDiff,
+  OutlineBatchRequest,
+  WorkflowStartAccepted,
   ModelConnectionOut,
   QualityJudgeRecord,
   QualityJudgeResponse,

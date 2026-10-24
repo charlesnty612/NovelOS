@@ -1325,6 +1325,15 @@ export interface ModelProfileOut {
   connection_id?: string | null;
 }
 
+export interface OutlineBatchRequest {
+  /** outline-batch（批量续规划下一批章节）触发请求体。 */
+  chapter_count?: number;
+  /** outline-batch（批量续规划下一批章节）触发请求体。 */
+  mock_providers?: Record<string, unknown> | null;
+  /** outline-batch（批量续规划下一批章节）触发请求体。 */
+  model_profile_id?: string | null;
+}
+
 export interface PlotEventOut {
   /** ``POST|GET|PATCH /api/events/{id}`` 的响应。 */
   id: string;

@@ -694,6 +694,67 @@ def _validate_volume_outliner(payload: dict[str, Any]) -> None:
         raise AgentOutputError("volume_outliner output missing required array 'chapter_seeds'")
 
 
+def validate_outline_batch_planner(
+    payload: dict[str, Any], *, input_payload: dict[str, Any] | None = None
+) -> None:
+    """outline_batch_planner（outline-batch 工作流）契约：schema_version + 章节种子形状 + 连续性核销。
+
+    契约口径（``docs/agents/prompts/outline_batch_planner-v1.md`` §3/§4）：
+
+    - ``schema_version`` 必须是整数 ``1``；
+    - ``chapter_seeds`` 必须是 list，每个元素必须是 object 且含非空字符串
+      ``title`` / ``synopsis`` 与 int ``number``；
+    - ``input_payload`` 非 None 时追加**数量与连续性核销**（形状同
+      :func:`_validate_director_planner` 的 input_payload 分支）：种子数必须等于
+      ``input_payload.chapter_count``，``number`` 必须恰为
+      ``start_number .. start_number+chapter_count-1`` 连续——违规抛
+      :class:`AgentOutputError`，由 runner 走既有 output-invalid 重试路径。
+    """
+    if payload.get("schema_version") != 1:
+        raise AgentOutputError(
+            f"outline_batch_planner schema_version must be 1, got {payload.get('schema_version')!r}"
+        )
+    seeds = payload.get("chapter_seeds")
+    if not isinstance(seeds, list):
+        raise AgentOutputError(
+            f"outline_batch_planner output missing required array 'chapter_seeds', "
+            f"got {type(seeds).__name__}"
+        )
+    for idx, seed in enumerate(seeds):
+        if not isinstance(seed, dict):
+            raise AgentOutputError(f"outline_batch_planner chapter_seeds[{idx}] must be an object")
+        number = seed.get("number")
+        if not isinstance(number, int) or isinstance(number, bool):
+            raise AgentOutputError(
+                f"outline_batch_planner chapter_seeds[{idx}].number must be int, got {number!r}"
+            )
+        for key in ("title", "synopsis"):
+            value = seed.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise AgentOutputError(
+                    f"outline_batch_planner chapter_seeds[{idx}].{key} must be a non-empty string"
+                )
+    if input_payload is None:
+        return
+    chapter_count = input_payload.get("chapter_count")
+    start_number = input_payload.get("start_number")
+    if not isinstance(chapter_count, int) or isinstance(chapter_count, bool):
+        return
+    if not isinstance(start_number, int) or isinstance(start_number, bool):
+        return
+    if len(seeds) != chapter_count:
+        raise AgentOutputError(
+            f"outline_batch_planner expected {chapter_count} chapter_seeds, got {len(seeds)}"
+        )
+    expected_numbers = list(range(start_number, start_number + chapter_count))
+    actual_numbers = [s["number"] for s in seeds]
+    if actual_numbers != expected_numbers:
+        raise AgentOutputError(
+            "outline_batch_planner chapter_seeds numbers must be consecutive from "
+            f"{start_number}: expected {expected_numbers}, got {actual_numbers}"
+        )
+
+
 def _validate_polisher(payload: dict[str, Any]) -> None:
     """Polisher（P1 文风润色）契约：schema_version + 关键字段。
 
@@ -979,6 +1040,11 @@ def validate_contract(
         _validate_writer(payload)
         _validate_writer_revision_fidelity(payload, input_payload=input_payload)
         return
+    if expected == "outline_batch_planner":
+        # 数量/连续性核销需要输入侧 chapter_count/start_number，
+        # 与 director_planner 同款走 input_payload 分支（不入 _VALIDATORS）。
+        validate_outline_batch_planner(payload, input_payload=input_payload)
+        return
     validator = _VALIDATORS.get(expected)
     if validator is None:
         # 未知 expected → 当成 None 处理；调用方应只传已登记档位之一
@@ -992,6 +1058,7 @@ __all__ = [
     "strip_think_blocks",
     "validate_contract",
     "strip_observer_violations",
+    "validate_outline_batch_planner",
     "OBSERVER_ALLOWED_KEYS",
     "OBSERVER_FORBIDDEN_KEYS",
 ]
