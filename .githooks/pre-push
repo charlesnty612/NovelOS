@@ -1,0 +1,30 @@
+#!/bin/sh
+# NovelOS pre-push hook —— 默认拒绝本仓一切 push。
+#
+# 行为：
+#   1) 默认拒绝：任何 push（普通分支 / tag / 删除 / --force / --mirror / --dry-run）一律拦下，
+#      退出码 1，并打印放行方法。
+#   2) 显式放行：仅当环境变量 NOVELOS_ALLOW_PUSH=1 时放行，且打印醒目警告一行。
+#   3) 本 hook 只做「拦 / 放」判定：不改被推内容、不读任何凭据、不依赖仓外脚本或依赖项。
+#
+# 启用方式（由仓库维护者执行；本 hook 内不改 git config）：
+#   git config core.hooksPath .githooks
+#
+# 放行用法（仅在确有需要时）：
+#   NOVELOS_ALLOW_PUSH=1 git push ...
+
+# git 会把待推的 ref 列表写进本 hook 的 stdin（每行：<本地 ref> <本地 sha> <远端 ref> <远端 sha>）。
+# 先读完，避免 git 侧写管道被打断（SIGPIPE 噪音）。
+ref_list=$(cat 2>/dev/null)
+
+if [ "${NOVELOS_ALLOW_PUSH:-}" = "1" ]; then
+  echo 'WARNING: ALLOW PUSH — 本次 push 未经任何护栏（NOVELOS_ALLOW_PUSH=1）'
+  exit 0
+fi
+
+echo '本仓禁止 push；确需放行请设 `NOVELOS_ALLOW_PUSH=1` 重新执行' >&2
+if [ -n "$ref_list" ]; then
+  echo '被拒绝的推送：' >&2
+  echo "$ref_list" | awk '{print "  " $1 " -> " $3}' >&2
+fi
+exit 1
