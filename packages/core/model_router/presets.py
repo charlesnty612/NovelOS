@@ -11,6 +11,15 @@
   ⇒ 新增服务商 = 往本清单加一条，**不改任何逻辑**。
 - 敏感信息（api_key）**不在预设里** —— 预设只给「连哪里、带什么头」。
 
+**协议地址池**（2026-10-24，协议下放模型档案）：同一网关各协议的 base_url 变体
+（``protocol_base_urls``：协议 → 地址）。厂商 ≠ 协议：同一网关下不同模型声明不同协议
+（opencode Go 网关 GLM/Kimi/DeepSeek 走 ``openai_compatible``、MiniMax/Qwen/Claude 系走
+``anthropic``，认证头也分平面），而各协议在该网关的路径不同 ⇒ 一条连接用一张覆盖表
+把「每个协议的 base_url」带上，绑定态解析按**档案的协议**取址（见
+:func:`packages.core.model_router.effective.resolve_effective`）。
+opencode Go 官方文档列明 openai / responses / anthropic / google 四协议路径；
+本仓协议实现暂无 responses / google 故不列。
+
 ⚠️ 权威值在**代码**里（本模块），前端只渲染清单 ⇒ 避免同一组 URL 在前后端各写一份
 （那是本仓登记过的「提示词里的阈值与代码常量分叉」同款问题）。
 """
@@ -26,6 +35,14 @@ CONNECTION_PRESETS: tuple[dict, ...] = (
         "label": "opencode Go（订阅制）",
         "provider": "openai_compatible",
         "base_url": "https://opencode.ai/inference/go/openai/v1",
+        # ⚠️ 协议地址池（2026-10-24）：同一条 opencode Go 连接上，Claude 系 / MiniMax /
+        #    Qwen 模型（档案 provider=anthropic）走 anthropic 平面（地址 + x-api-key 认证）。
+        #    AnthropicProvider 拼 base_url + "/v1/messages" ⇒ 池值到 /anthropic 为止，
+        #    完整路径 .../anthropic/v1/messages 与官方一致。
+        "protocol_base_urls": {
+            "openai_compatible": "https://opencode.ai/inference/go/openai/v1",
+            "anthropic": "https://opencode.ai/inference/go/anthropic",
+        },
         "params": {
             # opencode 要求每次请求带一个稳定的会话 id（Go 套餐**必需**）
             "headers": {"x-opencode-session": "{{session_id}}"},
@@ -160,6 +177,8 @@ CONNECTION_PRESETS: tuple[dict, ...] = (
 - ``preset_id`` —— 稳定标识；
 - ``label`` —— 前端显示名；
 - ``provider`` / ``base_url`` —— 一键填的接口类型与地址（``base_url`` 可为 ``None``）；
+- ``protocol_base_urls`` —— 可选的**协议地址池**（协议 → 该网关此协议 base_url；
+  只有多协议网关才带，如 opencode_go；缺席 = 无覆盖，全部走 ``base_url``）；
 - ``params`` —— 一键填的连接级参数（``headers`` / ``models_url``；**不含** api_key）；
 - ``note`` —— 给用户看的一句提示（可为 ``None``）。
 """

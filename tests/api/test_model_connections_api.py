@@ -3,11 +3,16 @@
 覆盖：
 1. CRUD 路径 + 读路径脱敏（``api_key`` → ``***``；``headers`` 里的**敏感头逐键**脱敏；
    ``x-opencode-session`` 这类非凭据头**不掩**）。
-2. 写时校验：参数白名单 / headers 形状 / **鉴权头与 api_key 撞车** ⇒ 422。
+2. 写时校验：参数白名单 / headers 形状 / **鉴权头与 api_key 撞车** /
+   **协议地址池形状** ⇒ 422。
 3. DELETE 被档案引用 → 409（``detail.referenced_by``）。
-4. 档案绑定连接：``provider`` 与连接不一致 → 422；``connection_id: null`` ⇒ 解绑。
+4. 档案绑定连接：**协议下放档案**（2026-10-24）——档案传与连接主协议**不同**的
+   provider ⇒ **201 成功**（原 422「不一致」校验已删）；不传 provider ⇒ 回退连接
+   主协议；``connection_id: null`` ⇒ 解绑。
 5. **备份红线**：``model_connections`` **不在**导出白名单里（ADR-0002 §4）。
 6. 归组：分组预览 + 应用（生效密钥不一致 ⇒ 422，归组**不改密钥**）。
+7. 协议地址池（``protocol_base_urls``）：合法落库往返 / 非法键 422 / PATCH 清空；
+   预设 opencode_go 自带双协议地址池（逐字断言）。
 """
 
 from __future__ import annotations
@@ -154,6 +159,102 @@ def test_openai_compatible_requires_base_url(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# 2b. 协议地址池（protocol_base_urls，2026-10-24）
+# ---------------------------------------------------------------------------
+
+
+_POOL = {
+    "openai_compatible": "https://opencode.ai/inference/go/openai/v1",
+    "anthropic": "https://opencode.ai/inference/go/anthropic",
+}
+
+
+def test_protocol_pool_roundtrips(tmp_path: Path):
+    """★合法协议池：POST 落库 → GET 读回**逐字**往返（出参是对象不是 JSON 串）。"""
+    app = _create_app(tmp_path)
+    created = _post_connection(app, protocol_base_urls=dict(_POOL)).json()
+    assert created["protocol_base_urls"] == _POOL
+    assert created["protocol_base_urls"]["anthropic"] == (
+        "https://opencode.ai/inference/go/anthropic"
+    )
+
+    import asyncio
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            return await _request(
+                app, "GET", f"/api/model-connections/{created['connection_id']}"
+            )
+
+    r = asyncio.run(run())
+    assert r.status_code == 200
+    assert r.json()["protocol_base_urls"] == _POOL
+
+
+def test_protocol_pool_rejects_unknown_key_and_empty_value(tmp_path: Path):
+    """★非法键（非四协议）/ 空串值 ⇒ 422（写时拦，不收下即忘）。"""
+    app = _create_app(tmp_path)
+    r1 = _post_connection(app, protocol_base_urls={"responses": "https://x.test/responses"})
+    assert r1.status_code == 422, r1.text
+    assert "协议" in r1.text
+    r2 = _post_connection(app, protocol_base_urls={"anthropic": "   "})
+    assert r2.status_code == 422, r2.text
+    # 非对象形状同样 422
+    r3 = _post_connection(app, protocol_base_urls="https://not-an-object")
+    assert r3.status_code == 422, r3.text
+
+
+def test_protocol_pool_patch_replace_and_clear(tmp_path: Path):
+    """★PATCH：dict = 整表替换；显式 null = 清空（落库 NULL，出参 null）。"""
+    app = _create_app(tmp_path)
+    created = _post_connection(app, protocol_base_urls=dict(_POOL)).json()
+    cid = created["connection_id"]
+
+    import asyncio
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            replaced = await _request(
+                app,
+                "PATCH",
+                f"/api/model-connections/{cid}",
+                json={"protocol_base_urls": {"anthropic": "https://other.test/anthropic"}},
+            )
+            cleared = await _request(
+                app, "PATCH", f"/api/model-connections/{cid}",
+                json={"protocol_base_urls": None},
+            )
+            reread = await _request(app, "GET", f"/api/model-connections/{cid}")
+        return replaced, cleared, reread
+
+    replaced, cleared, reread = asyncio.run(run())
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["protocol_base_urls"] == {
+        "anthropic": "https://other.test/anthropic"
+    }, "PATCH dict 必须整表替换（不是逐键合并）"
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["protocol_base_urls"] is None
+    assert reread.json()["protocol_base_urls"] is None
+    # DB 实际列值：清空后必须为 NULL
+    conn = get_connection(app.state.settings.db_path)
+    try:
+        row = conn.execute(
+            "SELECT protocol_base_urls FROM model_connections WHERE connection_id = ?",
+            (cid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["protocol_base_urls"] is None
+
+
+def test_connection_without_pool_returns_null(tmp_path: Path):
+    """不传协议池 ⇒ 出参恒为 null（不出 JSON 串 / 不出空 dict）。"""
+    app = _create_app(tmp_path)
+    created = _post_connection(app).json()
+    assert created["protocol_base_urls"] is None
+
+
+# ---------------------------------------------------------------------------
 # 3. 删除守卫
 # ---------------------------------------------------------------------------
 
@@ -197,10 +298,17 @@ def test_delete_connection_referenced_by_profiles_returns_409(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_profile_binding_requires_matching_provider(tmp_path: Path):
-    """绑定连接时 provider 必须等于连接的 provider ⇒ 不一致 422。"""
+def test_profile_binding_accepts_provider_different_from_connection(tmp_path: Path):
+    """★协议下放档案（2026-10-24）：绑定连接时档案传**不同于**连接主协议的
+    provider ⇒ **201 成功**（原 422「provider 与所选连接不一致」校验已删）。
+
+    判别：同厂商网关下不同模型声明不同协议（opencode Go：GLM 走 openai 平面、
+    Claude 系走 anthropic 平面）——旧校验把这种合法配置挡在 422。
+    落库值必须是请求体的 provider（不是连接的主协议）。
+    """
     app = _create_app(tmp_path)
     created = _post_connection(app).json()
+    conn_id = created["connection_id"]
 
     import asyncio
 
@@ -213,14 +321,60 @@ def test_profile_binding_requires_matching_provider(tmp_path: Path):
                 json={
                     "name": "p",
                     "provider": "anthropic",
-                    "model": "m",
-                    "connection_id": created["connection_id"],
+                    "model": "claude-opus",
+                    "connection_id": conn_id,
                 },
             )
 
     r = asyncio.run(run())
-    assert r.status_code == 422
-    assert "不一致" in r.text
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["provider"] == "anthropic", (
+        "档案 provider 必须原样落库（协议是模型级属性，不得被连接覆盖）"
+    )
+    assert body["connection_id"] == conn_id
+    # DB 实际列值（断言打在真实值上，不是只看响应）
+    conn = get_connection(app.state.settings.db_path)
+    try:
+        row = conn.execute(
+            "SELECT provider FROM model_profiles WHERE profile_id = ?",
+            (body["profile_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["provider"] == "anthropic"
+
+
+def test_profile_binding_without_provider_falls_back_to_connection(tmp_path: Path):
+    """★绑定连接时不传 provider ⇒ 回退连接主协议（兼容旧前端/脚本）。"""
+    app = _create_app(tmp_path)
+    created = _post_connection(app).json()
+    conn_id = created["connection_id"]
+
+    import asyncio
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            # PATCH 绑定一条先建的独立档案，请求体不带 provider
+            made = await _request(
+                app,
+                "POST",
+                "/api/model-profiles",
+                json={"name": "p", "provider": "mock", "model": "m1"},
+            )
+            pid = made.json()["profile_id"]
+            return await _request(
+                app,
+                "PATCH",
+                f"/api/model-profiles/{pid}",
+                json={"connection_id": conn_id},
+            )
+
+    r = asyncio.run(run())
+    assert r.status_code == 200, r.text
+    assert r.json()["provider"] == "openai_compatible", (
+        "绑定请求体没给 provider ⇒ 回退为连接主协议"
+    )
 
 
 def test_profile_binding_and_unbinding(tmp_path: Path):
@@ -371,7 +525,8 @@ def test_presets_endpoint_is_not_swallowed_by_path_param(tmp_path: Path):
 
 
 def test_opencode_go_preset_carries_its_conventions(tmp_path: Path):
-    """★opencode Go 预设必须自带「请求头 + 模型列表地址」——用户不该自己管这些。"""
+    """★opencode Go 预设必须自带「请求头 + 模型列表地址 + 双协议地址池」——
+    用户不该自己管这些。"""
     app = _create_app(tmp_path)
 
     import asyncio
@@ -386,6 +541,11 @@ def test_opencode_go_preset_carries_its_conventions(tmp_path: Path):
     p = presets["opencode_go"]
     assert p["provider"] == "openai_compatible"
     assert p["base_url"] == "https://opencode.ai/inference/go/openai/v1"
+    # ★协议地址池逐字断言（2026-10-24：协议下放模型档案——同一网关双协议路径）
+    assert p["protocol_base_urls"] == {
+        "openai_compatible": "https://opencode.ai/inference/go/openai/v1",
+        "anthropic": "https://opencode.ai/inference/go/anthropic",
+    }, "opencode Go 的协议地址池必须与官方两协议路径逐字一致"
     assert p["params"]["headers"]["x-opencode-session"] == "{{session_id}}"
     assert p["params"]["models_url"] == "https://opencode.ai/inference/go/v1/models"
     # 预设**不含**密钥

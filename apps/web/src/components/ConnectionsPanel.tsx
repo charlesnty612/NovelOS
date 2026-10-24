@@ -7,6 +7,11 @@
 // ⇒ 只填模型名就建出档案**；多个档案挂在同一条连接上 ⇒ 改一次 key / base_url /
 // headers，三条档案同时生效。
 //
+// **厂商 ≠ 协议**（2026-10-24，协议下放模型档案）：连接不再选协议——协议是
+// **模型级**属性（同一网关下不同模型支持的协议不同），由每个档案自己声明；
+// 连接上可选补充「各协议地址」池（protocol_base_urls），按档案的协议取址，
+// 池里没有的协议回退连接主 base_url。
+//
 // 设计要点（与 ModelProfilesPanel 同构）：
 // - `useApiCall` 拉列表；`.kv-list` 行；行内一行内联展示 + 一排按钮。
 // - 「+ 模型」是**主按钮**（直击痛点）；它开的弹窗**只填模型名**（档案名默认
@@ -74,6 +79,28 @@ function readPresetHeaders(preset: ConnectionPresetOut | null): Record<string, s
   return out;
 }
 
+/** 从连接行读出协议地址池（协议 → 地址；后端出参已反序列化为对象）。 */
+function readProtocolPool(row: ModelConnectionOut | null): Record<string, string> {
+  const raw = row?.protocol_base_urls;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v;
+  }
+  return out;
+}
+
+/** 从预设里读出协议地址池（只有多协议网关才带，如 opencode_go）。 */
+function readPresetProtocolPool(preset: ConnectionPresetOut | null): Record<string, string> {
+  const raw = preset?.protocol_base_urls;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v;
+  }
+  return out;
+}
+
 /** 从预设里读出模型列表地址。 */
 function readPresetModelsUrl(preset: ConnectionPresetOut | null): string {
   const v = preset?.params?.['models_url'];
@@ -129,8 +156,8 @@ export function ConnectionsPanel() {
       </div>
 
       <div className="muted small" style={{ marginBottom: 6 }}>
-        连接 = 连到哪里 / 怎么认证 / 带哪些头。一条连接上可以挂多个模型档案 ——
-        改一次密钥或地址，下面的档案同时生效。
+        连接 = 连到哪里 / 怎么认证 / 带哪些头（各协议入口地址可选补充）。一条连接上可以挂
+        多个模型档案 —— 改一次密钥或地址，下面的档案同时生效；协议由每个模型档案自己声明。
       </div>
 
       <ErrorBanner>{list.error}</ErrorBanner>
@@ -397,6 +424,24 @@ interface HeaderRow {
   value: string;
 }
 
+/** 「各协议地址」的一行：协议 + 该协议在此网关的入口地址。 */
+interface PoolRow {
+  protocol: string;
+  url: string;
+}
+
+function poolRowsToPayload(
+  rows: PoolRow[],
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const r of rows) {
+    const p = r.protocol.trim();
+    if (!p) continue;
+    out[p] = r.url.trim();
+  }
+  return out;
+}
+
 function ConnectionFormModal({
   title,
   initial,
@@ -404,6 +449,9 @@ function ConnectionFormModal({
   onSubmit,
 }: ConnectionFormModalProps) {
   const [name, setName] = useState<string>(initial?.name ?? '');
+  // 主协议（连接仍存一列主协议）：**不再是表单字段**——用户不在这里选协议
+  // （协议下放到模型档案层）。取值只来自预设带入 / 编辑回填，提交体继续携带
+  // （后端连接仍要求 provider，作为「连接主协议」供档案缺省回退）。
   const [provider, setProvider] = useState<string>(
     initial?.provider ?? PROVIDER_OPTIONS[0]!.value,
   );
@@ -414,6 +462,13 @@ function ConnectionFormModal({
   const [modelsUrl, setModelsUrl] = useState<string>(readModelsUrl(initial ?? null));
   const [headerRows, setHeaderRows] = useState<HeaderRow[]>(() =>
     Object.entries(readHeaders(initial ?? null)).map(([key, value]) => ({ key, value })),
+  );
+  // 协议地址池（2026-10-24，协议下放模型档案）：编辑态用连接回填的池初始化。
+  const [poolRows, setPoolRows] = useState<PoolRow[]>(() =>
+    Object.entries(readProtocolPool(initial ?? null)).map(([protocol, url]) => ({
+      protocol,
+      url,
+    })),
   );
   const [enabled, setEnabled] = useState<boolean>(
     initial ? Number(initial.enabled) === 1 : true,
@@ -441,6 +496,8 @@ function ConnectionFormModal({
   const [autoBaseUrl, setAutoBaseUrl] = useState(false);
   const [autoModelsUrl, setAutoModelsUrl] = useState(false);
   const [autoHeaderKeys, setAutoHeaderKeys] = useState<string[]>([]);
+  // 预设自动填进协议池的协议集合（按协议识别，行序变化不影响）。
+  const [autoPoolProtocols, setAutoPoolProtocols] = useState<string[]>([]);
 
   const selectedPreset = useMemo(
     () => (presets.data ?? []).find((p) => p.preset_id === presetId) ?? null,
@@ -456,14 +513,20 @@ function ConnectionFormModal({
         rows.filter((r) => !autoHeaderKeys.includes(r.key.trim())),
       );
     }
+    if (autoPoolProtocols.length > 0) {
+      setPoolRows((rows) =>
+        rows.filter((r) => !autoPoolProtocols.includes(r.protocol.trim())),
+      );
+    }
     setAutoBaseUrl(false);
     setAutoModelsUrl(false);
     setAutoHeaderKeys([]);
+    setAutoPoolProtocols([]);
   };
 
   const handlePresetChange = (nextId: string) => {
     setPresetId(nextId);
-    // 先撤掉上一个预设填的东西（换成新预设时不该留着旧预设的地址 / 头）。
+    // 先撤掉上一个预设填的东西（换成新预设时不该留着旧预设的地址 / 头 / 池）。
     clearAutoFilled();
     if (!nextId) return;
     const preset = (presets.data ?? []).find((p) => p.preset_id === nextId);
@@ -497,21 +560,21 @@ function ConnectionFormModal({
       });
       setAutoHeaderKeys(Object.keys(presetHeaders));
     }
-  };
 
-  // 切接口类型：预设是「厂商组合」（provider 与地址 / 头配套），只改 provider
-  // 会留下错配的 base_url（如 openai 风格地址配 anthropic）⇒ 有选中预设且预设的
-  // provider 与新类型不一致时，**解除预设**（清掉预设带出的接口地址 / 模型列表
-  // 地址 / 预设头；名称、用户自己加的头等手填内容保留不动）。
-  // 即：切接口类型 = 放弃当前预设组合。前端不硬编码任何 URL（权威在后端
-  // presets.py）：地址清空后 anthropic / ollama / mock 走服务端默认端点，其余
-  // 类型由必填校验拦住。无预设时只切类型，不清任何字段（用户手填的自己负责）。
-  const handleProviderChange = (next: string) => {
-    setProvider(next);
-    if (next === provider) return;
-    if (presetId && selectedPreset?.provider !== next) {
-      setPresetId('');
-      clearAutoFilled();
+    // 协议地址池：与头同一套合并语义——预设的池为基底（同协议覆盖），
+    // 用户手填的其它协议行保留。
+    const presetPool = readPresetProtocolPool(preset);
+    if (Object.keys(presetPool).length > 0) {
+      setPoolRows((rows) => {
+        const merged: Record<string, string> = { ...presetPool };
+        for (const r of rows) {
+          const p = r.protocol.trim();
+          if (!p || p in merged) continue;
+          merged[p] = r.url;
+        }
+        return Object.entries(merged).map(([protocol, url]) => ({ protocol, url }));
+      });
+      setAutoPoolProtocols(Object.keys(presetPool));
     }
   };
 
@@ -521,6 +584,11 @@ function ConnectionFormModal({
     [initial],
   );
   const initialModelsUrl = useMemo(() => readModelsUrl(initial ?? null), [initial]);
+  // 编辑时连接原有的协议地址池：行被清空 ⇒ 显式发 null（整表清空，全部走主地址）。
+  const initialHadPool = useMemo(
+    () => Object.keys(readProtocolPool(initial ?? null)).length > 0,
+    [initial],
+  );
 
   const hasApiKey = !!initial?.has_api_key;
   const canShowClearKeyButton = !!initial && hasApiKey;
@@ -538,16 +606,46 @@ function ConnectionFormModal({
       return;
     }
     const trimmedUrl = baseUrl.trim();
-    // anthropic / ollama / mock 可以不填地址；其余 provider 没有默认端点 ⇒ 必填。
-    if (
-      provider !== 'anthropic' &&
-      provider !== 'ollama' &&
-      provider !== 'mock' &&
-      !trimmedUrl
-    ) {
-      setErr('该接口类型需要填写接口地址');
+    // 主地址必填：连接必须知道默认连到哪（协议级地址在「各协议地址」里补充）。
+    if (!trimmedUrl) {
+      setErr('接口地址不能为空');
       return;
     }
+
+    // ---- 协议地址池校验（整表替换语义；违规禁保存） ----
+    // ⚠️ 重复检测必须逐行进行：汇总成 dict 会静默覆盖同协议行（后键吃前键），
+    // 再对 Object.keys 查重永远查不到。
+    const seenProtocols = new Set<string>();
+    let dupProtocol: string | null = null;
+    for (const row of poolRows) {
+      const p = row.protocol.trim();
+      if (!p && row.url.trim()) {
+        setErr('协议地址池：请为每一行选择协议');
+        return;
+      }
+      if (!p) continue;
+      if (!row.url.trim()) {
+        setErr(`协议地址池：${p} 的地址不能为空`);
+        return;
+      }
+      if (seenProtocols.has(p)) {
+        dupProtocol = p;
+        break;
+      }
+      seenProtocols.add(p);
+    }
+    if (dupProtocol) {
+      setErr(`协议地址池里有重复的协议：${dupProtocol}`);
+      return;
+    }
+    const poolPayload = poolRowsToPayload(poolRows);
+    // 空池：编辑态且原有池 ⇒ 显式发 null（清空）；否则不发该字段（缺省 = 不动）。
+    const protocolBaseUrls: Record<string, string> | null | undefined =
+      Object.keys(poolPayload).length > 0
+        ? poolPayload
+        : initialHadPool
+          ? null
+          : undefined;
 
     // ---- params 组装（PATCH 语义：缺键 = 保留原值；显式 null = 删除该键） ----
     const params: ConnectionParams = {};
@@ -588,6 +686,7 @@ function ConnectionFormModal({
         name: name.trim(),
         provider,
         base_url: trimmedUrl || null,
+        ...(protocolBaseUrls !== undefined ? { protocol_base_urls: protocolBaseUrls } : {}),
         params,
         enabled: enabled ? 1 : 0,
       });
@@ -643,30 +742,80 @@ function ConnectionFormModal({
         </div>
 
         <div className="form-row">
-          <label>接口类型 *</label>
-          <select
-            value={provider}
-            onChange={(e) => handleProviderChange(e.target.value)}
-            data-testid="connection-provider"
-          >
-            {PROVIDER_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="form-row">
-          <label>接口地址</label>
+          <label>接口地址 *</label>
           <input
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://opencode.ai/inference/go/v1"
+            placeholder="https://opencode.ai/inference/go/openai/v1"
             data-testid="connection-base-url"
           />
           <div className="muted small">
-            Anthropic / Ollama / Mock 可留空（用服务端默认端点）；其余类型必填。
+            厂商网关的默认接口地址；同网关多协议的地址在下面补充。
+          </div>
+        </div>
+
+        <div className="form-row">
+          <label>各协议地址（可选）</label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {poolRows.map((row, idx) => (
+              <div
+                key={idx}
+                style={{ display: 'flex', gap: 6, alignItems: 'center' }}
+              >
+                <select
+                  value={row.protocol}
+                  onChange={(e) =>
+                    setPoolRows((rows) =>
+                      rows.map((r, i) =>
+                        i === idx ? { ...r, protocol: e.target.value } : r,
+                      ),
+                    )
+                  }
+                  data-testid={`connection-pool-protocol-${idx}`}
+                >
+                  <option value="">选择协议…</option>
+                  {PROVIDER_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  value={row.url}
+                  onChange={(e) =>
+                    setPoolRows((rows) =>
+                      rows.map((r, i) => (i === idx ? { ...r, url: e.target.value } : r)),
+                    )
+                  }
+                  placeholder="https://opencode.ai/inference/go/anthropic"
+                  data-testid={`connection-pool-url-${idx}`}
+                  style={{ flex: 1 }}
+                />
+                <button
+                  type="button"
+                  className="btn btn--sm btn--danger"
+                  onClick={() => setPoolRows((rows) => rows.filter((_, i) => i !== idx))}
+                  data-testid={`connection-pool-remove-${idx}`}
+                  title="删除该协议地址"
+                >
+                  删除
+                </button>
+              </div>
+            ))}
+            <div>
+              <button
+                type="button"
+                className="btn btn--sm"
+                onClick={() => setPoolRows((rows) => [...rows, { protocol: '', url: '' }])}
+                data-testid="connection-pool-add"
+              >
+                + 添加协议地址
+              </button>
+            </div>
+            <div className="muted small">
+              连接不选协议——协议由每个模型档案自己声明；这里按协议补充各协议的入口地址
+              （如 opencode 网关的 Anthropic 平面）。配了的协议走池里的地址，没配的走上面的主地址。
+            </div>
           </div>
         </div>
 
@@ -844,7 +993,8 @@ function AddModelFromConnectionModal({
       await onSubmit({
         name: finalName,
         model: model.trim(),
-        // provider 由连接决定（连接是唯一权威；不一致后端会 422）。
+        // 档案协议初始取连接主协议（缺省回退语义）；协议已是档案级属性，
+        // 绑定连接时不再要求与连接一致，可在编辑档案时按模型改。
         provider: connection.provider,
         connection_id: connection.connection_id,
         // 连接接管地址 / 密钥 / 头 ⇒ 档案级不再带这些键。
@@ -897,8 +1047,8 @@ function AddModelFromConnectionModal({
         </div>
 
         <div className="muted small" style={{ marginBottom: 8 }}>
-          接口类型：{PROVIDER_SHORT_LABEL[connection.provider] ?? connection.provider}
-          （取自连接）
+          初始协议：{PROVIDER_SHORT_LABEL[connection.provider] ?? connection.provider}
+          （取自连接主协议；协议是档案级属性，可后续在档案编辑里按模型改）
         </div>
 
         <div style={{ display: 'flex', gap: 8, marginTop: 12, justifyContent: 'flex-end' }}>

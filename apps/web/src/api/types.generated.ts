@@ -645,6 +645,8 @@ export interface ConnectionPresetOut {
   provider: string;
   /** ``GET /model-connections/presets`` 的元素：一档「连接预设」。 */
   base_url?: string | null;
+  /** 协议地址池（2026-10-24）：协议 → 该网关此协议的 base_url；只有多协议网关才带（如 opencode_go），缺席 = 无覆盖，全部走 base_url */
+  protocol_base_urls?: Record<string, unknown> | null;
   /** ``GET /model-connections/presets`` 的元素：一档「连接预设」。 */
   params?: Record<string, unknown>;
   /** ``GET /model-connections/presets`` 的元素：一档「连接预设」。 */
@@ -1286,6 +1288,8 @@ export interface ModelConnectionOut {
   provider: string;
   /** 连接级 base_url；anthropic / ollama 可空（用 provider 默认值） */
   base_url?: string | null;
+  /** 协议地址池（2026-10-24）：协议 → 该网关此协议的 base_url；null/空 = 无覆盖，全部走 base_url。绑定态解析按**档案的协议**取址（provider 是模型级属性，连接不再选协议） */
+  protocol_base_urls?: Record<string, unknown> | null;
   /** 连接级调参（api_key / headers / models_url）解析后的对象；其中 api_key 恒被替换为 '***'，headers 里的敏感头逐键脱敏 */
   params_json?: Record<string, unknown>;
   /** 0/1 整数（非布尔）；0 的连接不可用于 /test */

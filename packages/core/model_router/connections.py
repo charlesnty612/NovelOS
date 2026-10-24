@@ -6,19 +6,29 @@
 
 **为什么要有这一层**（用户裁决 2026-10-21）：
 「同一厂商，想分配不同模型承担不同职责，需要要重新完全新建。」
-⇒ 连接信息（provider / base_url / api_key / headers / models_url）与模型名
-分离到两条记录：同一厂商的多个档案**共享一条连接**，改一次 key 全局生效。
+⇒ 连接信息（base_url / api_key / headers / models_url / protocol_base_urls）与
+模型名分离到两条记录：同一厂商的多个档案**共享一条连接**，改一次 key 全局生效。
+
+⚠️ **协议下放档案**（2026-10-24 裁决）：provider（协议）是**模型级属性**，由
+档案自持；连接只是厂商网关（地址池 + key + headers），不再选协议，
+也**不再向档案同步协议**（原 ``sync_provider_to_profiles`` 已随本裁决删除）。
+连接的 ``protocol_base_urls`` 是协议地址池（协议 → 该网关此协议的 base_url，
+JSON 覆盖表，迁移 0035），解析侧按档案的协议取址（见
+:func:`packages.core.model_router.effective.resolve_effective`）。
 
 写入语义（与档案 service 一致）：
-- ``create`` —— 必填 ``name / provider``；``base_url`` 可空（anthropic / ollama 用默认）；
+- ``create`` —— 必填 ``name / provider``（provider 为连接的**主协议**，供无协议池
+  场景与旧档案回退）；``base_url`` 可空（anthropic / ollama 用默认）；
+  ``protocol_base_urls`` 可空（None = 无覆盖，全部走 base_url）；
   ``params`` 由调用方预先过滤 mask/空 api_key（POST 路径剥离）后传入。
 - ``update_partial`` —— 按 ``fields`` dict 部分更新；空 dict 返回原行；
-  ``params_json`` 的合并由调用方处理（PATCH 路径的逐键语义）。
+  ``params_json`` / ``protocol_base_urls`` 的 JSON 序列化由调用方处理
+  （service 只收**已序列化**的字符串或 None）。
 - ``delete`` —— 不存在 → False。
 
-读路径统一返回 ``sqlite3.Row`` 转 dict；``_row_to_dict`` **不脱敏**——
-脱敏由 router 层 :func:`packages.core.model_router.security._mask_response` 处理
-（与档案 service 的分工一致）。
+读路径统一返回 ``sqlite3.Row`` 转 dict；``_row_to_dict`` **不脱敏**、**不解析
+JSON 列**——``params_json`` 的脱敏与 ``protocol_base_urls`` 的反序列化由 router 层
+（:func:`packages.core.api.routers.connections._mask_connection`）处理。
 
 异常：``IntegrityError`` 由调用方按业务映射（router 转 422）。
 """
@@ -95,13 +105,17 @@ class ConnectionService:
         base_url: str | None,
         params: dict,
         enabled: int,
+        protocol_base_urls: dict | None = None,
     ) -> dict:
         """插入一条连接，返回新行 dict。
 
         ``params`` 应是入参已剥离 mask/空 api_key 后的纯 dict；service 仅做 json 序列化。
+        ``protocol_base_urls`` 应是入参已校验过的「协议 → 地址」dict（None = 无覆盖）；
+        service 仅做 json 序列化。
         """
         connection_id = new_id("mconn")
         params_str = self._dump_params(params)
+        pool_str = self._dump_params(protocol_base_urls) if protocol_base_urls else None
         ts = self._now_iso()
         conn = get_connection(self.db_path)
         try:
@@ -109,10 +123,13 @@ class ConnectionService:
                 """
                 INSERT INTO model_connections
                     (connection_id, name, provider, base_url, params_json, enabled,
-                     created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     created_at, updated_at, protocol_base_urls)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (connection_id, name, provider, base_url, params_str, enabled, ts, ts),
+                (
+                    connection_id, name, provider, base_url, params_str, enabled,
+                    ts, ts, pool_str,
+                ),
             )
             conn.commit()
         finally:
@@ -181,28 +198,6 @@ class ConnectionService:
         finally:
             conn.close()
         return [r["profile_id"] for r in rows]
-
-    def sync_provider_to_profiles(self, connection_id: str, provider: str) -> int:
-        """把连接的 provider 同步到引用它的档案（返回受影响行数）。
-
-        ⚠️ 为什么需要：``model_profiles.provider`` 是**派生镜像**（连接的 provider
-        才是权威）⇒ 连接改了 provider，引用它的档案那一列必须跟着变，
-        否则档案列表会显示一个与实际生效不符的 provider。
-
-        （运行期永远以连接的 provider 为准 —— 见
-        :func:`packages.core.model_router.effective.resolve_effective`；
-        这一列只是给「列表展示」和「不绑连接的存量档案」用。）
-        """
-        conn = get_connection(self.db_path)
-        try:
-            cur = conn.execute(
-                "UPDATE model_profiles SET provider = ? WHERE connection_id = ?",
-                (provider, connection_id),
-            )
-            conn.commit()
-            return cur.rowcount
-        finally:
-            conn.close()
 
     def get_many(self, connection_ids: list[str]) -> list[dict]:
         if not connection_ids:

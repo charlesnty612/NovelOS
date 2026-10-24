@@ -187,10 +187,11 @@ def create_model_profile(payload: dict, request: Request) -> dict:
     - 其他字符串 → 原样落库（明文）。
 
     **连接绑定**（2026-10-21 批次十五）：可传 ``connection_id`` ⇒ 该档案的
-    provider / base_url / api_key / headers **全部取自连接**（档案自身的同名键被忽略）。
-    ⚠️ 传了与连接不一致的 provider → **422**（不静默采纳）——
-    连接的 provider 是唯一权威，两处分叉会让「同一连接挂不同 provider」这种
-    荒谬配置混进库。
+    base_url / api_key / headers **取自连接**（档案自身的同名键被忽略）。
+    ⚠️ **协议是模型级属性**（2026-10-24 裁决）：``provider`` 由档案自持——
+    传与连接主协议**不同**的 provider 是**合法**配置（同一条多协议网关连接上，
+    不同模型声明不同协议）；绑定态的 base_url 按档案协议从连接的协议地址池
+    （``protocol_base_urls``）取，池里没有 ⇒ 回退连接主 base_url。
     """
     settings = request.app.state.settings
     name = payload.get("name")
@@ -208,16 +209,8 @@ def create_model_profile(payload: dict, request: Request) -> dict:
             raise HTTPException(
                 status_code=422, detail=f"model_connection {connection_id!r} not found"
             )
-        conn_provider = conn_row["provider"]
-        if provider != conn_provider:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"provider 与所选连接不一致：连接是 {conn_provider!r}，"
-                    f"收到 {provider!r}（连接是 provider 的唯一权威）"
-                ),
-            )
-        provider = conn_provider
+        # 协议是模型级属性：provider 用请求体的（不再校验与连接一致、
+        # 也不再由连接覆盖——原 422「provider 与所选连接不一致」已随协议下放删除）。
     try:
         # 契约兼容：params_json（旧）优先；缺失则读 params（新契约，前端按约定发）。
         # 两者都无 → None → _normalize_params 返回空 dict（保留原行为）。
@@ -388,18 +381,12 @@ def patch_model_profile(profile_id: str, payload: dict, request: Request) -> dic
                 raise HTTPException(
                     status_code=422, detail=f"model_connection {connection_id!r} not found"
                 )
-            conn_provider = conn_row["provider"]
-            requested = payload.get("provider")
-            if requested is not None and requested != conn_provider:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"provider 与所选连接不一致：连接是 {conn_provider!r}，"
-                        f"收到 {requested!r}（连接是 provider 的唯一权威）"
-                    ),
-                )
-            # 连接是 provider 的唯一权威 ⇒ 档案的 provider 列由服务端写入
-            fields["provider"] = conn_provider
+            # 协议是模型级属性（2026-10-24 裁决）：provider 不再由服务端从连接强制继承，
+            # 也**不再**校验与连接一致（原 422「provider 与所选连接不一致」已删）。
+            # 请求体给了 provider 就用它（上方已做非空校验）；没给 ⇒ 回退为连接的
+            # 主 provider（兼容旧前端/脚本，且对存量行为无突变）。
+            if "provider" not in fields:
+                fields["provider"] = conn_row["provider"]
 
     if not fields:
         row = svc.get(profile_id)
@@ -587,7 +574,9 @@ def apply_grouping(payload: dict, request: Request) -> dict:
     不同，该档案的密钥**会静默换掉**（⇒ 401 或计费到别人的号）。
     ⇒ 本端点**逐条校验**，不一致直接 422 并说明是哪一条、差在哪。
 
-    校验通过才写 ``connection_id``（provider 列由服务端从连接继承）。
+    校验通过才写 ``connection_id``；``provider`` 按**回退**语义落库——
+    归组请求体不带 provider ⇒ 写连接的主 provider（协议是模型级属性、
+    档案自持的裁决下，本端点是回退路径；2026-10-24 裁决）。
     """
     settings = request.app.state.settings
     svc = ProfileService(settings.db_path)
@@ -657,6 +646,8 @@ def apply_grouping(payload: dict, request: Request) -> dict:
                         f"{connection_id!r}（{conn_base!r}）不一致 —— 归组会换掉地址。"
                     ),
                 )
+            # 协议下放档案（2026-10-24）：归组请求体不带 provider ⇒ 回退写连接的
+            # 主 provider（与 PATCH 绑定路径的「没给则回退」同一语义，存量行为不变）。
             svc.update_partial(
                 str(pid),
                 {"connection_id": connection_id, "provider": conn_row["provider"]},

@@ -3,11 +3,12 @@
 覆盖：
 1. **生效配置解析**（:func:`resolve_effective`）：
    - 未绑定连接的档案 ⇒ 生效配置与改造前**逐字相同**（存量零行为变化）；
-   - 已绑定 ⇒ provider / base_url / api_key / headers / models_url **全部取自连接**，
-     档案 params 里的同名键**被忽略**（防「一列两用」）；
+   - 已绑定 ⇒ base_url / api_key / headers / models_url **取自连接**，
+     档案 params 里的同名保留键**被忽略**（防「一列两用」）；
+   - **协议下放档案**（2026-10-24 裁决）：绑定态 **provider 取档案自身的**——
+     档案协议独立于连接主协议；base_url 按**档案协议**从连接的协议地址池
+     （``protocol_base_urls``）取，池里没有该协议 ⇒ 回退连接主 base_url；
    - 档案的**非**保留键（temperature / thinking）**仍然生效**；
-   - **连接的 provider 覆盖档案列** —— 直接 UPDATE 档案的 provider 列**不改变**生效
-     provider（★核心不变量：档案的 provider 列只是派生镜像）；
    - **悬空 connection_id ⇒ 抛配置错误**，不静默回落到档案自己的 base_url。
 2. **请求头**：
    - 合并顺序：provider 默认 < 连接级 < 运行级；
@@ -102,6 +103,7 @@ def _insert_connection(
     base_url: str | None = _BASE,
     params: dict | None = None,
     enabled: int = 1,
+    protocol_base_urls: dict | None = None,
 ) -> None:
     conn = get_connection(db_path)
     try:
@@ -109,10 +111,16 @@ def _insert_connection(
             """
             INSERT INTO model_connections
                 (connection_id, name, provider, base_url, params_json, enabled,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 't', 't')
+                 created_at, updated_at, protocol_base_urls)
+            VALUES (?, ?, ?, ?, ?, ?, 't', 't', ?)
             """,
-            (connection_id, name, provider, base_url, json.dumps(params or {}), enabled),
+            (
+                connection_id, name, provider, base_url, json.dumps(params or {}),
+                enabled,
+                json.dumps(protocol_base_urls, ensure_ascii=False)
+                if protocol_base_urls
+                else None,
+            ),
         )
         conn.commit()
     finally:
@@ -199,24 +207,77 @@ def test_bound_profile_keeps_non_reserved_params(db_path: str):
     assert eff.upstream_params == {"temperature": 0.7, "thinking": {"type": "enabled"}}
 
 
-def test_connection_provider_overrides_profile_column(db_path: str):
-    """★核心不变量：连接的 provider 是唯一权威。
+def test_profile_provider_wins_over_connection_under_binding(db_path: str):
+    """★核心不变量（2026-10-24 裁决「协议下放模型档案」）：绑定态 **provider 取档案自身的**。
 
-    档案的 provider 列只是派生镜像 ⇒ 直接 UPDATE 那一列**不改变**生效 provider。
+    档案协议独立于连接主协议——同一厂商网关下不同模型声明不同协议 ⇒
+    直接 UPDATE 档案的 provider 列**必须**改变生效 provider
+    （旧不变量「连接 provider 覆盖档案列」随协议下放裁决推翻）。
     """
-    _insert_connection(db_path, provider="anthropic", base_url=None)
-    _insert_profile(db_path, provider="mock", connection_id="mconn_x")
-    # 手工把档案的 provider 列改掉（模拟数据分叉）
+    _insert_connection(db_path, provider="openai_compatible", base_url=_BASE)
+    _insert_profile(db_path, provider="anthropic", connection_id="mconn_x")
+    eff = resolve_effective(_profile_row(db_path), _connection_row(db_path))
+    assert eff.provider == "anthropic", (
+        "绑定态生效 provider 必须是档案自己的（协议是模型级属性）"
+    )
+    assert eff.bound is True
+
+
+def test_bound_pool_hit_uses_protocol_url_verbatim(db_path: str):
+    """★档案协议在连接协议地址池里 ⇒ 生效 base_url == 池地址（**逐字**）。
+
+    opencode Go 场景：连接主协议 openai_compatible，Claude 系模型（档案
+    provider=anthropic）走 anthropic 平面地址。
+    """
+    pool = {
+        "openai_compatible": "https://opencode.ai/inference/go/openai/v1",
+        "anthropic": "https://opencode.ai/inference/go/anthropic",
+    }
+    _insert_connection(
+        db_path,
+        provider="openai_compatible",
+        base_url=pool["openai_compatible"],
+        protocol_base_urls=pool,
+    )
+    _insert_profile(db_path, provider="anthropic", connection_id="mconn_x")
+    eff = resolve_effective(_profile_row(db_path), _connection_row(db_path))
+    assert eff.provider == "anthropic"
+    assert eff.base_url == "https://opencode.ai/inference/go/anthropic", (
+        "协议池命中必须逐字取池地址（不得拼尾巴 / 不得回退主地址）"
+    )
+
+
+def test_bound_pool_miss_falls_back_to_connection_base_url(db_path: str):
+    """★池里没有该协议 ⇒ 回退连接主 base_url（存量连接无池 = 全走主地址的推广）。"""
+    _insert_connection(
+        db_path,
+        provider="openai_compatible",
+        base_url=_BASE,
+        protocol_base_urls={"anthropic": "https://pool.example.test/anthropic"},
+    )
+    _insert_profile(db_path, provider="ollama", connection_id="mconn_x")
+    eff = resolve_effective(_profile_row(db_path), _connection_row(db_path))
+    assert eff.provider == "ollama"
+    assert eff.base_url == _BASE, "池未命中必须回退连接 base_url"
+
+
+def test_bound_pool_dirty_json_tolerates_and_falls_back(db_path: str):
+    """脏 JSON 协议池 ⇒ 等价于无覆盖（读路径不炸，回退连接 base_url）。"""
     conn = get_connection(db_path)
     try:
         conn.execute(
-            "UPDATE model_profiles SET provider = 'mock' WHERE profile_id = 'mprof_a'"
+            "INSERT INTO model_connections (connection_id, name, provider, base_url, "
+            "params_json, enabled, created_at, updated_at, protocol_base_urls) VALUES "
+            "('mconn_dirty', '脏池', 'openai_compatible', ?, '{}', 1, 't', 't', ?)",
+            (_BASE, "{not json"),
         )
         conn.commit()
     finally:
         conn.close()
-    eff = resolve_effective(_profile_row(db_path), _connection_row(db_path))
-    assert eff.provider == "anthropic", "档案的 provider 列不得覆盖连接的 provider"
+    _insert_profile(db_path, provider="anthropic", connection_id="mconn_dirty")
+    eff = resolve_effective(_profile_row(db_path), _connection_row(db_path, "mconn_dirty"))
+    assert eff.provider == "anthropic"
+    assert eff.base_url == _BASE
 
 
 def test_dangling_connection_id_raises_instead_of_silent_fallback(db_path: str):

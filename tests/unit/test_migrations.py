@@ -161,6 +161,11 @@ def test_apply_migrations_creates_43_tables_total(tmp_path: Path):
     # - **不回填**：存量 commit 无法可靠推断「当时定的是哪一版」（drafts 无「被定稿」标记位，
     #   按时间戳倒推会把「审完又改稿」的那一版误认成定稿版）⇒ 回填即造假，刻意不做。
     assert "0034_commits_draft_version.sql" in result["applied"]
+    # 连接层「协议地址池」（2026-10-24）：0035_connection_protocol_base_urls.sql
+    # - 仅 ALTER TABLE model_connections 加 protocol_base_urls TEXT 可空列
+    #   （JSON 覆盖表：协议 → 该网关此协议的 base_url）；**不增表**（业务表 42 / 总表 43）；
+    # - **不回填**：存量连接 NULL ⇒ 无覆盖，绑定态全部走 base_url（存量零行为突变）。
+    assert "0035_connection_protocol_base_urls.sql" in result["applied"]
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +214,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0032_skills.sql",
         "0033_model_connections.sql",
         "0034_commits_draft_version.sql",
+        "0035_connection_protocol_base_urls.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -269,6 +275,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     # 内部消费外部 skill：0032 也应被幂等跳过（同 0029，靠 _migrations 文件粒度追踪）
     assert "0032_skills.sql" in second["skipped"]
     assert "0033_model_connections.sql" in second["skipped"]
+    # 协议地址池：0035 也应被幂等跳过（同 0029/0031，靠 _migrations 文件粒度追踪）
+    assert "0035_connection_protocol_base_urls.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -292,8 +300,9 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0029_project_writing_bible.sql",
         "0030_commits_rollback_of_project_scope.sql",
         "0031_project_fast_mode.sql",
+        "0035_connection_protocol_base_urls.sql",
     ],
-    ids=["0023", "0024", "0025", "0026", "0027", "0029", "0030", "0031"],
+    ids=["0023", "0024", "0025", "0026", "0027", "0029", "0030", "0031", "0035"],
 )
 def test_single_migration_is_idempotent(tmp_path: Path, migration_file: str) -> None:
     """单条迁移跑两遍不炸（幂等靠 ``_migrations`` 的**文件粒度**追踪）。
@@ -573,6 +582,60 @@ def test_0024_quality_reports_has_draft_version_column(tmp_path: Path):
     assert col["type"].upper() == "INTEGER", col
     assert col["notnull"] == 0, col
     assert col["dflt_value"] is None, col
+
+
+def test_0035_protocol_base_urls_column_exists_and_nullable(tmp_path: Path):
+    """连接层「协议地址池」（2026-10-24）：0035 给 model_connections 加
+    protocol_base_urls TEXT 可空列（JSON 覆盖表：协议 → 该网关此协议的 base_url）。
+
+    - 列存在 / 类型 TEXT / 可空 / 无默认值（与 0023/0029/0031 同款「只加可空列」范式）；
+    - NULL = 无覆盖 ⇒ 绑定态全部走连接 base_url（存量行零行为突变）；
+    - 存量连接行（0035 前建好）回读该列为 NULL（add-only、无回填）；
+    - provider / base_url 两列原样保留（协议地址池是**覆盖**不是替换）。
+    """
+    db_path = _fresh_db(tmp_path)
+    # 模拟存量库：0035 前建好一条连接
+    migrations_dir = tmp_path / "mig_pre"
+    migrations_dir.mkdir()
+    for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if sql_file.name.startswith("0035"):
+            continue
+        (migrations_dir / sql_file.name).write_text(
+            sql_file.read_text(encoding="utf-8"), encoding="utf-8",
+        )
+    apply_migrations(db_path, migrations_dir)
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO model_connections (connection_id, name, provider, base_url, "
+            "params_json, enabled, created_at, updated_at) VALUES "
+            "('mconn_pre0035', '存量连接', 'openai_compatible', "
+            "'https://opencode.ai/inference/go/openai/v1', '{}', 1, 't', 't')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    apply_migrations(db_path, MIGRATIONS_DIR)
+
+    conn = get_connection(db_path)
+    try:
+        cols = {c["name"]: c for c in conn.execute("PRAGMA table_info(model_connections)").fetchall()}
+        row = conn.execute(
+            "SELECT provider, base_url, protocol_base_urls FROM model_connections "
+            "WHERE connection_id = 'mconn_pre0035'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert "protocol_base_urls" in cols, f"0035 后缺 protocol_base_urls 列; got={sorted(cols)}"
+    col = cols["protocol_base_urls"]
+    assert col["type"].upper() == "TEXT", col
+    assert col["notnull"] == 0, col
+    assert col["dflt_value"] is None, col
+    # 存量行：地址池 NULL，原两列逐字保留
+    assert row["protocol_base_urls"] is None, "0035 不得回填：存量行协议池必须仍为 NULL"
+    assert row["provider"] == "openai_compatible"
+    assert row["base_url"] == "https://opencode.ai/inference/go/openai/v1"
 
 
 # ⚠️ 2026-10-24 瘦身：原 ``test_0024_draft_version_migration_is_idempotent`` 已并入参数化的

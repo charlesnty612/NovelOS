@@ -19,13 +19,23 @@
   api_key / headers / timeout / 传给上游的其余参数）。
 - :func:`resolve_effective` —— 从「档案行 + 连接行」解出 :class:`EffectiveConfig`。
 
-**连接与档案的职责划分**（本仓口径）：
+**连接与档案的职责划分**（2026-10-24 裁决后的本仓口径）：
 
 ============  ==========================================================
-连接级        provider / base_url / api_key / headers / models_url
-档案级        model / thinking / reasoning_effort / timeout_s /
+连接级        base_url（主地址）/ protocol_base_urls（协议地址池）/
+              api_key / headers / models_url
+档案级        **provider**（协议——模型级属性，档案自持）/ model /
+              thinking / reasoning_effort / timeout_s /
               temperature / max_tokens / seed …
 ============  ==========================================================
+
+⚠️ **协议下放档案**（2026-10-24 用户裁决）：厂商（opencode/DeepSeek/MiniMax…）
+≠ 协议（openai_compatible/anthropic/ollama/mock）——同一厂商网关下不同模型声明
+不同协议（opencode Go 网关 GLM/Kimi/DeepSeek 走 openai 平面、MiniMax/Qwen/Claude 系
+走 anthropic 平面，认证头也分平面）。⇒ 绑定态解析**provider 取档案自身的**；
+连接的 ``provider`` 列降级为「主协议」（仅给未声明协议的旧档案回退用）。
+连接的 ``protocol_base_urls`` 是协议地址池（协议 → 该网关此协议的 base_url）：
+生效 base_url = ``pool[档案.provider] or 连接.base_url``。
 
 ⚠️ ``timeout_s`` 归**档案**级：不同模型响应速度不同，允许不同 timeout；
 放连接级会在「同一厂商多模型」时产生「哪个档案的值算数」的歧义。
@@ -60,6 +70,7 @@ __all__ = [
     "CONNECTION_ONLY_PARAMS",
     "SENSITIVE_HEADER_NAMES",
     "HEADER_PLACEHOLDERS",
+    "PROTOCOL_IDS",
     "EffectiveConfig",
     "HeaderContext",
     "parse_params",
@@ -97,6 +108,15 @@ CONNECTION_ONLY_PARAMS: frozenset[str] = frozenset({"api_key", "headers", "model
 
 档案级出现这三个键 ⇒ 绑定连接时它们被忽略（连接是唯一权威）；
 未绑定连接时 ``api_key`` 仍按存量路径生效（``headers`` / ``models_url`` 亦然）。
+"""
+
+PROTOCOL_IDS: frozenset[str] = frozenset(
+    {"openai_compatible", "anthropic", "ollama", "mock"}
+)
+"""协议词汇表（**唯一权威**；与 router.py 工厂的四路 dispatch 一一对应）。
+
+协议（provider 字段的取值域）≠ 厂商（网关名）。``protocol_base_urls`` 的键
+必须是这里的一员（写时 422 拦别的值），解析侧按它取址。
 """
 
 SENSITIVE_HEADER_NAMES: frozenset[str] = frozenset(
@@ -290,13 +310,28 @@ class EffectiveConfig:
 
     connection_id: str | None = None
     bound: bool = False
-    """True = 该档案绑定了连接（此时连接是 provider / base_url / api_key /
-    headers / models_url 的**唯一权威**）。"""
+    """True = 该档案绑定了连接（此时连接是 base_url（含协议地址池）/ api_key /
+    headers / models_url 的**唯一权威**；provider 是**档案级**属性，由档案自持）."""
 
 
 def _norm_base_url(url: str | None) -> str:
     """base_url 归一化：去尾部斜杠（与 provider 构造时的 ``rstrip("/")`` 同口径）。"""
     return (url or "").rstrip("/")
+
+
+def _parse_protocol_pool(raw: Any) -> dict[str, str]:
+    """解析连接的 ``protocol_base_urls`` 列（JSON 字符串 / dict / None → 协议 → 地址）。
+
+    脏 JSON / 形状不符 → ``{}``（**不抛**——与既有读路径口径一致：脏值等价于
+    「无覆盖」，绑定态全部走连接 base_url，绝不因脏数据让装配 500）。
+    非字符串值 / 空串一律剔除（写时 422 已拦，这里只兜 DB 直改的脏行）。
+    """
+    pool = parse_params(raw)
+    return {
+        str(k): v
+        for k, v in pool.items()
+        if isinstance(v, str) and v.strip()
+    }
 
 
 def resolve_effective(
@@ -310,9 +345,12 @@ def resolve_effective(
 
     - **未绑定连接**（``connection_row is None``）⇒ 全部取自档案的
       ``params_json``，**与改造前逐字相同**（存量零行为变化）。
-    - **已绑定连接** ⇒ provider / base_url / api_key / headers / models_url
-      **全部取自连接**；档案的同名键**被忽略**（防「一列两用」）；
-      档案的**非**保留键（temperature / thinking …）仍然生效。
+    - **已绑定连接** ⇒ **provider 取档案自身的**（协议是模型级属性；2026-10-24 裁决——
+      连接不再选协议）；base_url 按**档案的协议**从连接的协议地址池取
+      （``pool[档案.provider]``），池里没有该协议（或池为空）⇒ 回退连接主 base_url；
+      api_key / headers / models_url **取自连接**；档案 params 里的同名保留键
+      **被忽略**（防「一列两用」）；档案的**非**保留键（temperature / thinking …）
+      仍然生效。
     - **悬空 connection_id**（指向不存在的连接）⇒ 抛 :class:`ValueError`
       ——**不静默回落**到档案自己的 base_url（那会掩盖配置错误）。
     """
@@ -330,8 +368,14 @@ def resolve_effective(
 
     bound = connection_row is not None
     if bound:
-        eff_provider = (connection_row or {}).get("provider") or profile_row.get("provider")
-        base_url = _norm_base_url((connection_row or {}).get("base_url")) or None
+        # 协议是模型级属性：档案自持 provider；连接的 provider 列降级为「主协议」，
+        # 只给极端脏行（档案 provider 列为空）兜底——正常写入路径档案 provider 必填。
+        eff_provider = profile_row.get("provider") or (connection_row or {}).get("provider")
+        # 协议地址池：同一条网关连接上，不同协议的模型各取各的 base_url
+        # （如 opencode Go：openai_compatible 走 /openai/v1，anthropic 走 /anthropic）。
+        pool = _parse_protocol_pool((connection_row or {}).get("protocol_base_urls"))
+        conn_base = _norm_base_url((connection_row or {}).get("base_url")) or None
+        base_url = _norm_base_url(pool.get(eff_provider)) or conn_base
         headers = render_headers(
             conn_params.get("headers"),
             HeaderContext(run_id=run_id, connection_id=connection_id),

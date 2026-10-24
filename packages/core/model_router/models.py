@@ -137,6 +137,13 @@ class ConnectionPresetOut(BaseModel):
     label: str
     provider: str
     base_url: Optional[str] = None
+    protocol_base_urls: Optional[dict[str, str]] = Field(
+        default=None,
+        description=(
+            "协议地址池（2026-10-24）：协议 → 该网关此协议的 base_url；"
+            "只有多协议网关才带（如 opencode_go），缺席 = 无覆盖，全部走 base_url"
+        ),
+    )
     params: dict[str, Any] = Field(default_factory=dict)
     note: Optional[str] = None
 
@@ -159,6 +166,14 @@ class ModelConnectionOut(BaseModel):
     base_url: Optional[str] = Field(
         default=None,
         description="连接级 base_url；anthropic / ollama 可空（用 provider 默认值）",
+    )
+    protocol_base_urls: Optional[dict[str, str]] = Field(
+        default=None,
+        description=(
+            "协议地址池（2026-10-24）：协议 → 该网关此协议的 base_url；"
+            "null/空 = 无覆盖，全部走 base_url。绑定态解析按**档案的协议**取址"
+            "（provider 是模型级属性，连接不再选协议）"
+        ),
     )
     params_json: dict[str, Any] = Field(
         default_factory=dict,

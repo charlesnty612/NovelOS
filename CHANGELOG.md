@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+### Changed（2026-10-24 · 架构 · 协议从「连接」下放到「模型档案」——厂商 ≠ 协议的概念订正）
+
+> **用户裁决 + 联网查证**：厂商（opencode/DeepSeek/MiniMax…）≠ 协议（openai_compatible/anthropic/ollama/mock）。
+> 同一厂商网关下**不同模型声明不同协议**（实证：opencode Go 网关 GLM/Kimi/DeepSeek 走 `openai/v1/chat/completions`，
+> **MiniMax/Qwen/Claude 系走 `anthropic/v1/messages`**，认证头也分平面——OpenAI 平面 Bearer、Anthropic 平面 x-api-key；
+> 多个独立来源交叉一致「Inference follows each model's declared protocol」）。
+> ⇒ 协议是**模型级属性**，由「模型档案」选择；「连接」只是厂商网关（地址池 + key + headers），不再选协议。
+
+- **迁移 0035**：`model_connections` 加可空列 `protocol_base_urls`（JSON：协议→该网关此协议的 base_url；NULL=无覆盖全部走 `base_url`）。存量零突变。
+- **连接**：POST/PATCH 接受协议池（键限四协议、值非空 URL，违规 422；dict=整表替换 / null=清空 / 缺省=不动）；**删除 `sync_provider_to_profiles`**（连接不再把 provider 灌给档案）；opencode_go 预设带池 `{openai_compatible: …/go/openai/v1, anthropic: …/go/anthropic}`（与官方路径逐字一致，AnthropicProvider 拼 `/v1/messages` 已核）。
+- **档案**：删除「provider 与连接不一致 ⇒ 422」校验——档案协议独立；不传则回退连接主协议（兼容存量）。
+- **resolve_effective**：绑定态 **provider 取档案自身**；**base_url 取 `池[档案协议] or 连接.base_url`**；api_key/headers/models_url 照旧取连接；归组键照旧按生效 key。Provider 工厂（router.py 四分支）零改动——喂对即对。
+- **前端**：连接表单**移除「接口类型」下拉**、主地址必填、新增「各协议地址」KV 编辑区（预设自动填池、重复协议禁保存、全删显式发 null 防静默空操作）；档案表单「接口类型」改为**可编辑下拉**（模型级属性，带按厂商网关选协议的提示文案）；思考档位按档案协议收窄。
+- **判别**：后端 122 passed（422 反转为 201、池取址逐字、池未命中回退、脏池容错、迁移存量兼容）+ 突变规格翻转 L10-MC-02/新增 02B（全 CAUGHT）；前端 vitest 全量 64 文件 / **860 全绿**（净 +2）。
+- **收尾闸门**：全量 pytest **4413 passed / 0 failed**（3:09，仓外 basetemp）；ruff 0；precheck 29 条 0 问题；树指纹前后逐位一致。
+- 边界留痕：apply_grouping 的 base_url 一致性校验未动——将来「anthropic 档案归组进带池 openai 连接」会被拦，属已知边界待后续裁决。
+
 ### Fixed（2026-10-24 · 前端 · 连接表单：切接口类型联动解除预设，不再残留错配地址）
 
 - **症状（用户报）**：新建模型连接选「opencode Go」预设后把接口类型切到 Anthropic，接口地址仍停在 `…/openai/v1`——provider 与 base_url 错配。

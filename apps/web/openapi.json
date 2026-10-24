@@ -1446,7 +1446,7 @@
     "/api/model-connections/presets": {
       "get": {
         "summary": "List Connection Presets",
-        "description": "列出连接预设（**一键填表**：provider / base_url / headers / models_url）。\n\n⚠️ **必须声明在 ``/model-connections/{connection_id}`` 之前**——否则\nFastAPI 会把 ``presets`` 当成 ``connection_id`` 匹配掉（路由按声明顺序）。\n\n权威清单在 :mod:`packages.core.model_router.presets`（**只此一处**）⇒\n前端只渲染、不硬编码任何 URL（避免同一组地址在前后端各写一份）。",
+        "description": "列出连接预设（**一键填表**：provider / base_url / protocol_base_urls /\nheaders / models_url）。\n\n⚠️ **必须声明在 ``/model-connections/{connection_id}`` 之前**——否则\nFastAPI 会把 ``presets`` 当成 ``connection_id`` 匹配掉（路由按声明顺序）。\n\n权威清单在 :mod:`packages.core.model_router.presets`（**只此一处**）⇒\n前端只渲染、不硬编码任何 URL（避免同一组地址在前后端各写一份）。",
         "operationId": "list_connection_presets_api_model_connections_presets_get",
         "responses": {
           "200": {
@@ -1469,7 +1469,7 @@
     "/api/model-connections": {
       "post": {
         "summary": "Create Model Connection",
-        "description": "创建一条连接。必填：``name / provider``。\n\n``openai_compatible`` 的 ``base_url`` 必填（与档案同口径）——\n该 provider 没有可用的默认端点。",
+        "description": "创建一条连接。必填：``name / provider``。\n\n``openai_compatible`` 的 ``base_url`` 必填（与档案同口径）——\n该 provider 没有可用的默认端点。\n可选 ``protocol_base_urls``：协议地址池（协议 → 该网关此协议的 base_url）；\n多协议网关（如 opencode Go）用它让同一条连接服务不同协议的模型档案。",
         "operationId": "create_model_connection_api_model_connections_post",
         "requestBody": {
           "required": true,
@@ -1591,7 +1591,7 @@
       },
       "patch": {
         "summary": "Update Model Connection",
-        "description": "部分更新（name / provider / base_url / params / enabled）。\n\n``params`` 走 PATCH 语义：**缺键 = 保留原值**、显式 ``null`` = 删除该键；\n``headers`` 是 dict ⇒ **逐键**语义（``***`` = 该键不改）。",
+        "description": "部分更新（name / provider / base_url / protocol_base_urls / params / enabled）。\n\n``params`` 走 PATCH 语义：**缺键 = 保留原值**、显式 ``null`` = 删除该键；\n``headers`` 是 dict ⇒ **逐键**语义（``***`` = 该键不改）。\n``protocol_base_urls``：dict = 整表替换、显式 ``null`` = 清空（全部走 base_url）、\n缺键 = 不动。\n\n⚠️ 连接改 ``provider``（主协议）**不再**同步到引用它的档案——协议是模型级\n属性，由档案自持（2026-10-24 裁决；原 ``sync_provider_to_profiles`` 已删）。",
         "operationId": "update_model_connection_api_model_connections__connection_id__patch",
         "parameters": [
           {
@@ -3093,7 +3093,7 @@
           "model_profiles"
         ],
         "summary": "Create Model Profile",
-        "description": "创建一条档案。必填字段：``name / provider / model``。\n\n入参 ``params_json.api_key`` 的特殊值与 ``/model-configs`` 同语义：\n- ``\"\"`` 或 ``\"***\"`` → 视为未设置，落库时不写 api_key。\n- 其他字符串 → 原样落库（明文）。\n\n**连接绑定**（2026-10-21 批次十五）：可传 ``connection_id`` ⇒ 该档案的\nprovider / base_url / api_key / headers **全部取自连接**（档案自身的同名键被忽略）。\n⚠️ 传了与连接不一致的 provider → **422**（不静默采纳）——\n连接的 provider 是唯一权威，两处分叉会让「同一连接挂不同 provider」这种\n荒谬配置混进库。",
+        "description": "创建一条档案。必填字段：``name / provider / model``。\n\n入参 ``params_json.api_key`` 的特殊值与 ``/model-configs`` 同语义：\n- ``\"\"`` 或 ``\"***\"`` → 视为未设置，落库时不写 api_key。\n- 其他字符串 → 原样落库（明文）。\n\n**连接绑定**（2026-10-21 批次十五）：可传 ``connection_id`` ⇒ 该档案的\nbase_url / api_key / headers **取自连接**（档案自身的同名键被忽略）。\n⚠️ **协议是模型级属性**（2026-10-24 裁决）：``provider`` 由档案自持——\n传与连接主协议**不同**的 provider 是**合法**配置（同一条多协议网关连接上，\n不同模型声明不同协议）；绑定态的 base_url 按档案协议从连接的协议地址池\n（``protocol_base_urls``）取，池里没有 ⇒ 回退连接主 base_url。",
         "operationId": "create_model_profile_api_model_profiles_post",
         "requestBody": {
           "required": true,
@@ -3384,7 +3384,7 @@
           "model_profiles"
         ],
         "summary": "Apply Grouping",
-        "description": "把档案归到连接上（``assignments``: ``[{connection_id, profile_ids}]``）。\n\n⚠️ **生效 key 必须不变** —— 绑定连接后档案不再查 ``secrets[profile_id]``，\n改用 ``secrets[connection_id]`` ⇒ 若连接的生效 key 与档案归组前的生效 key\n不同，该档案的密钥**会静默换掉**（⇒ 401 或计费到别人的号）。\n⇒ 本端点**逐条校验**，不一致直接 422 并说明是哪一条、差在哪。\n\n校验通过才写 ``connection_id``（provider 列由服务端从连接继承）。",
+        "description": "把档案归到连接上（``assignments``: ``[{connection_id, profile_ids}]``）。\n\n⚠️ **生效 key 必须不变** —— 绑定连接后档案不再查 ``secrets[profile_id]``，\n改用 ``secrets[connection_id]`` ⇒ 若连接的生效 key 与档案归组前的生效 key\n不同，该档案的密钥**会静默换掉**（⇒ 401 或计费到别人的号）。\n⇒ 本端点**逐条校验**，不一致直接 422 并说明是哪一条、差在哪。\n\n校验通过才写 ``connection_id``；``provider`` 按**回退**语义落库——\n归组请求体不带 provider ⇒ 写连接的主 provider（协议是模型级属性、\n档案自持的裁决下，本端点是回退路径；2026-10-24 裁决）。",
         "operationId": "apply_grouping_api_model_profiles_apply_grouping_post",
         "requestBody": {
           "content": {
@@ -10159,6 +10159,21 @@
             ],
             "title": "Base Url"
           },
+          "protocol_base_urls": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol Base Urls",
+            "description": "协议地址池（2026-10-24）：协议 → 该网关此协议的 base_url；只有多协议网关才带（如 opencode_go），缺席 = 无覆盖，全部走 base_url"
+          },
           "params": {
             "additionalProperties": true,
             "type": "object",
@@ -12609,6 +12624,21 @@
             ],
             "title": "Base Url",
             "description": "连接级 base_url；anthropic / ollama 可空（用 provider 默认值）"
+          },
+          "protocol_base_urls": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol Base Urls",
+            "description": "协议地址池（2026-10-24）：协议 → 该网关此协议的 base_url；null/空 = 无覆盖，全部走 base_url。绑定态解析按**档案的协议**取址（provider 是模型级属性，连接不再选协议）"
           },
           "params_json": {
             "additionalProperties": true,

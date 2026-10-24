@@ -1420,11 +1420,27 @@ export interface ConnectionParamsPayload {
   models_url?: string | null;
 }
 
+/**
+ * 协议地址池（2026-10-24，协议下放模型档案）：协议 → 该网关此协议的 base_url。
+ *
+ * 厂商 ≠ 协议：同一厂商网关下不同模型走不同协议（如 opencode 网关的
+ * GLM/Kimi 走 OpenAI 兼容、Claude/MiniMax/Qwen 系走 Anthropic），连接不再选协议
+ * ⇒ 各协议自己的入口地址在连接上按协议补充；绑定态解析按**档案的协议**取址
+ * （池里没有该协议 ⇒ 回退连接主 `base_url`）。
+ *
+ * - 键限四协议（openai_compatible / anthropic / ollama / mock），值非空 URL，
+ *   违规后端 422。
+ * - 提交语义：dict = **整表替换**、显式 `null` = 清空（全部走主地址）、缺省 = 不动。
+ * - 与 `ConnectionParamsPayload` 平级（body 顶层字段，**不**进 params）。
+ */
+export type ConnectionProtocolBaseUrls = Record<string, string>;
+
 /** `POST /model-connections` 请求体。`name` / `provider` 必填。 */
 export interface ConnectionCreatePayload {
   name: string;
   provider: string;
   base_url?: string | null;
+  protocol_base_urls?: ConnectionProtocolBaseUrls | null;
   params?: ConnectionParamsPayload | null;
   enabled?: 0 | 1 | boolean;
 }
@@ -1434,11 +1450,13 @@ export interface ConnectionCreatePayload {
  *
  * ⚠️ `params` 语义：**缺键 = 保留原值**、显式 `null` = 删除该键；
  * `headers` 是 dict ⇒ **逐键**语义（值 `"***"` = 该键不改）。
+ * ⚠️ `protocol_base_urls` 语义：dict = 整表替换、显式 `null` = 清空、缺省 = 不动。
  */
 export interface ConnectionUpdatePayload {
   name?: string;
   provider?: string;
   base_url?: string | null;
+  protocol_base_urls?: ConnectionProtocolBaseUrls | null;
   params?: ConnectionParamsPayload | null;
   enabled?: 0 | 1 | boolean;
 }

@@ -925,6 +925,52 @@ describe('AiSettingsPage · 模型连接（连接层）', () => {
     expect(Object.prototype.hasOwnProperty.call(paramsOut, 'api_key')).toBe(false);
   });
 
+  it('连接态「接口类型」可编辑：初值跟随所绑连接主协议，改成 anthropic 后提交体带所选协议（后端已放开一致性约束，mock 201）', async () => {
+    // 2026-10-24 协议下放模型档案：同一厂商网关下不同模型走不同协议
+    // （opencode 的 Claude/MiniMax/Qwen 系走 Anthropic，GLM/Kimi 走 OpenAI 兼容）。
+    vi.mocked(modelProfilesApi.create).mockResolvedValue({
+      ...boundProfile,
+      profile_id: 'mpf_new',
+      provider: 'anthropic',
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('new-model-profile'));
+    fireEvent.click(await screen.findByTestId('profile-mode-connection'));
+
+    const sel = (await screen.findByTestId('profile-connection')) as HTMLSelectElement;
+    fireEvent.change(sel, { target: { value: 'mcn_001' } });
+
+    // 接口类型是**可编辑下拉**（不再是只读跟随），初值 = 所绑连接的主协议
+    const providerSel = (await screen.findByTestId(
+      'profile-provider',
+    )) as HTMLSelectElement;
+    expect(providerSel.value).toBe('openai_compatible');
+    // 模型级提示横幅在（InfoBanner 风格）
+    expect(screen.getByTestId('profile-provider-hint')).toHaveTextContent('模型级');
+
+    // 按模型实际支持的协议改掉 ⇒ 提交体带**所选**协议，而不是连接的主协议
+    fireEvent.change(providerSel, { target: { value: 'anthropic' } });
+    expect(providerSel.value).toBe('anthropic');
+
+    fireEvent.change(screen.getByTestId('profile-name'), {
+      target: { value: 'claude-on-opencode' },
+    });
+    fireEvent.change(screen.getByTestId('profile-model'), {
+      target: { value: 'claude-sonnet-4' },
+    });
+    fireEvent.click(screen.getByTestId('profile-save'));
+
+    await waitFor(() => {
+      expect(modelProfilesApi.create).toHaveBeenCalledTimes(1);
+    });
+    const payload = vi.mocked(modelProfilesApi.create).mock
+      .calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.provider).toBe('anthropic');
+    expect(payload.connection_id).toBe('mcn_001');
+  });
+
   it('编辑存量档案（connection_id=null）：默认落在「自定义配置」态，提交**不含** connection_id 键', async () => {
     vi.mocked(modelProfilesApi.list).mockResolvedValue([baseProfile]);
     vi.mocked(modelProfilesApi.update).mockResolvedValue(baseProfile);

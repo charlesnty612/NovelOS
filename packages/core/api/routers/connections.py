@@ -22,6 +22,11 @@
 - **连接级只允许三个参数**：``api_key`` / ``headers`` / ``models_url``。
   其它键 → **422**（不静默忽略——「收下即忘」与「表里有值」是同一级缺陷）。
   ⚠️ ``timeout_s`` 归**档案**级（不同模型响应速度不同，允许不同 timeout）。
+- **协议地址池**（2026-10-24，协议下放模型档案）：可选 ``protocol_base_urls``
+  （协议 → 该网关此协议的 base_url）。键必须是 :data:`PROTOCOL_IDS` 四协议之一、
+  值非空 URL，违规 **422**；显式 ``null`` = 清空（全部走 base_url）。
+  连接的 ``provider`` 列是**主协议**（给无覆盖场景与旧档案回退用），
+  不再向档案同步协议（原 ``sync_provider_to_profiles`` 已随本裁决删除）。
 - **鉴权头撞车 → 422**：连接既有 ``api_key`` 又在 ``headers`` 里写鉴权头
   （authorization / x-api-key / …）时二选一——否则自定义头会**静默架空**密钥通道，
   而 ``has_api_key`` 仍显示 true（显示与实际失真）。
@@ -44,6 +49,7 @@ from packages.core.logging_config import get_logger
 from packages.core.model_router.connections import ConnectionService
 from packages.core.model_router.effective import (
     CONNECTION_ONLY_PARAMS,
+    PROTOCOL_IDS,
     SENSITIVE_HEADER_NAMES,
     parse_params,
     validate_headers,
@@ -75,7 +81,8 @@ _PROBE_TIMEOUT_S = 10.0
 
 
 def _mask_connection(row: dict[str, Any]) -> dict[str, Any]:
-    """连接行的读路径出口：``api_key`` → ``***``、``headers`` 敏感头逐键脱敏。
+    """连接行的读路径出口：``api_key`` → ``***``、``headers`` 敏感头逐键脱敏、
+    ``protocol_base_urls`` JSON 字符串反序列化为对象。
 
     与档案侧的 :func:`packages.core.model_router.security._mask_response` 同构，
     但 ``has_api_key`` 的判定**按 connection_id 查 secrets.json**
@@ -88,6 +95,9 @@ def _mask_connection(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
     out["params_json"] = masked
     out["has_api_key"] = has_key
+    # 协议地址池：DB 里是 JSON 字符串（或 NULL）⇒ 出参统一为 dict | null
+    # （脏 JSON 按 parse_params 容错为 {} ⇒ 出参 null，与「无覆盖」同语义）
+    out["protocol_base_urls"] = parse_params(row.get("protocol_base_urls")) or None
     return out
 
 
@@ -152,6 +162,39 @@ def _validate_connection_params(params: dict[str, Any]) -> None:
                 )
 
 
+def _validate_protocol_base_urls(value: Any) -> dict[str, str]:
+    """校验 ``protocol_base_urls``（协议地址池）形状；不合规抛 422。
+
+    三条：
+    1. 必须是对象（协议 → base_url）；
+    2. 键必须是 :data:`PROTOCOL_IDS` 四协议之一（与 router 工厂四路 dispatch 对齐；
+       未知协议的地址永远不会被解析消费——「收下即忘」同级缺陷，写时拦）；
+    3. 值必须是非空字符串（strip 后归一化；空串 = 没配，不允许混进表里）。
+    """
+    if not isinstance(value, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="protocol_base_urls 必须是对象（协议 → base_url）",
+        )
+    cleaned: dict[str, str] = {}
+    for k, v in value.items():
+        if not isinstance(k, str) or k not in PROTOCOL_IDS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"protocol_base_urls 的键必须是协议名"
+                    f"（{sorted(PROTOCOL_IDS)}），收到 {k!r}"
+                ),
+            )
+        if not isinstance(v, str) or not v.strip():
+            raise HTTPException(
+                status_code=422,
+                detail=f"protocol_base_urls[{k!r}] 必须是非空 URL 字符串",
+            )
+        cleaned[k] = v.strip()
+    return cleaned
+
+
 # ---------------------------------------------------------------------------
 # 预设清单
 # ---------------------------------------------------------------------------
@@ -159,7 +202,8 @@ def _validate_connection_params(params: dict[str, Any]) -> None:
 
 @router.get("/model-connections/presets", response_model=list[ConnectionPresetOut])
 def list_connection_presets():
-    """列出连接预设（**一键填表**：provider / base_url / headers / models_url）。
+    """列出连接预设（**一键填表**：provider / base_url / protocol_base_urls /
+    headers / models_url）。
 
     ⚠️ **必须声明在 ``/model-connections/{connection_id}`` 之前**——否则
     FastAPI 会把 ``presets`` 当成 ``connection_id`` 匹配掉（路由按声明顺序）。
@@ -173,6 +217,7 @@ def list_connection_presets():
             "label": p["label"],
             "provider": p["provider"],
             "base_url": p["base_url"],
+            "protocol_base_urls": p.get("protocol_base_urls"),
             "params": p["params"],
             "note": p.get("note"),
         }
@@ -195,6 +240,8 @@ def create_model_connection(payload: dict, request: Request) -> dict:
 
     ``openai_compatible`` 的 ``base_url`` 必填（与档案同口径）——
     该 provider 没有可用的默认端点。
+    可选 ``protocol_base_urls``：协议地址池（协议 → 该网关此协议的 base_url）；
+    多协议网关（如 opencode Go）用它让同一条连接服务不同协议的模型档案。
     """
     name = payload.get("name")
     provider = payload.get("provider")
@@ -214,6 +261,10 @@ def create_model_connection(payload: dict, request: Request) -> dict:
             status_code=422,
             detail=f"provider {provider!r} requires base_url（无默认端点）",
         )
+
+    protocol_base_urls = payload.get("protocol_base_urls")
+    if protocol_base_urls is not None:
+        protocol_base_urls = _validate_protocol_base_urls(protocol_base_urls)
 
     try:
         raw_params = _normalize_params(payload.get("params_json", payload.get("params")))
@@ -235,6 +286,7 @@ def create_model_connection(payload: dict, request: Request) -> dict:
         base_url=base_url,
         params=params_dict,
         enabled=enabled_int,
+        protocol_base_urls=protocol_base_urls,
     )
     return _mask_connection(row)
 
@@ -262,10 +314,15 @@ def get_model_connection(connection_id: str, request: Request):
 
 @router.patch("/model-connections/{connection_id}", response_model=ModelConnectionOut)
 def update_model_connection(connection_id: str, payload: dict, request: Request) -> dict:
-    """部分更新（name / provider / base_url / params / enabled）。
+    """部分更新（name / provider / base_url / protocol_base_urls / params / enabled）。
 
     ``params`` 走 PATCH 语义：**缺键 = 保留原值**、显式 ``null`` = 删除该键；
     ``headers`` 是 dict ⇒ **逐键**语义（``***`` = 该键不改）。
+    ``protocol_base_urls``：dict = 整表替换、显式 ``null`` = 清空（全部走 base_url）、
+    缺键 = 不动。
+
+    ⚠️ 连接改 ``provider``（主协议）**不再**同步到引用它的档案——协议是模型级
+    属性，由档案自持（2026-10-24 裁决；原 ``sync_provider_to_profiles`` 已删）。
     """
     settings = request.app.state.settings
     svc = ConnectionService(settings.db_path)
@@ -294,6 +351,15 @@ def update_model_connection(connection_id: str, payload: dict, request: Request)
             fields["base_url"] = base_url.strip() or None
         else:
             raise HTTPException(status_code=422, detail="base_url must be a string or null")
+    if "protocol_base_urls" in payload:
+        pool = payload["protocol_base_urls"]
+        if pool is None:
+            fields["protocol_base_urls"] = None
+        else:
+            cleaned = _validate_protocol_base_urls(pool)
+            fields["protocol_base_urls"] = (
+                _dump(cleaned) if cleaned else None
+            )
     if "enabled" in payload:
         enabled = payload["enabled"]
         if enabled not in (0, 1, True, False):
@@ -313,9 +379,6 @@ def update_model_connection(connection_id: str, payload: dict, request: Request)
 
     row = svc.update_partial(connection_id, fields)
     assert row is not None  # 上方已确认存在
-    # provider 变了 ⇒ 同步引用它的档案（档案的 provider 列是派生镜像）
-    if "provider" in fields:
-        svc.sync_provider_to_profiles(connection_id, fields["provider"])
     return _mask_connection(row)
 
 

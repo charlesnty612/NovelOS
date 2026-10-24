@@ -1,10 +1,16 @@
-"""连接层（model_connections）突变规格（2026-10-21 批次十五）。
+"""连接层（model_connections）突变规格（2026-10-21 批次十五；2026-10-24 随协议下放翻转）。
 
-六条，每条对应一个「撤掉修复 ⇒ 必红」的判别点：
+七条，每条对应一个「撤掉修复 ⇒ 必红」的判别点：
 
 - ``L10-MC-01`` 保留键集合去掉 ``headers`` ⇒ headers 进上游请求体 ⇒ **400**。
-- ``L10-MC-02`` 绑定态不覆写 provider ⇒ 档案的 provider 列能盖过连接 ⇒
-  「连接是 provider 唯一权威」这条不变量破。
+- ``L10-MC-02`` 绑定态 provider 改回取连接的 ⇒ 档案的 provider 列被连接盖过 ⇒
+  「协议是模型级属性（档案自持）」这条不变量破（2026-10-24 裁决后口径翻转：
+  原判别点是「连接 provider 覆盖档案列」，协议下放后判别点反转为「档案 provider
+  胜过连接」——旧锚点已随实现删除，规格同步翻转，锚点命中数仍须恰为 1）。
+- ``L10-MC-02B`` 撤掉协议地址池取址（base_url 恒取连接主地址）⇒
+  anthropic 档案绑在 opencode 连接上会被发往 openai 平面地址 ⇒
+  「按档案协议取池地址」破（跨层机制：装配层一处写错，所有 LLM 调用发错端点）。
+
 - ``L10-MC-03`` 读路径不掩 headers 里的敏感头 ⇒ **明文鉴权头回吐给前端**。
 - ``L10-MC-04`` PATCH 的 ``""`` 不当作删除 ⇒ 头删不掉（且与「``***`` 保留」混为一谈）。
 - ``L10-MC-05`` health_check 不在模型列表端点 404 时退化 ⇒ 「测试连接」假失败。
@@ -34,8 +40,15 @@ MUTATIONS = [
     (
         "L10-MC-02",
         "packages/core/model_router/effective.py",
+        '''        eff_provider = profile_row.get("provider") or (connection_row or {}).get("provider")''',
         '''        eff_provider = (connection_row or {}).get("provider") or profile_row.get("provider")''',
-        '''        eff_provider = profile_row.get("provider")''',
+        "tests/unit/test_model_connections.py",
+    ),
+    (
+        "L10-MC-02B",
+        "packages/core/model_router/effective.py",
+        '''        base_url = _norm_base_url(pool.get(eff_provider)) or conn_base''',
+        '''        base_url = conn_base''',
         "tests/unit/test_model_connections.py",
     ),
     (

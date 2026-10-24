@@ -48,8 +48,8 @@ docs/state-model/schemas/  运行时依赖的 JSON Schema（genre-pack v1.x / st
 
 | 表 / 模块 | 负责 |
 |---|---|
-| `model_profiles`（0016） | **档案** = 用什么模型（model / thinking / reasoning_effort / timeout_s …）+ 可空列 `connection_id` |
-| `model_connections`（0033） | **连接** = 连到哪里、怎么认证（provider / base_url / api_key / headers / models_url） |
+| `model_profiles`（0016） | **档案** = 用什么模型（model / thinking / reasoning_effort / timeout_s …）+ 可空列 `connection_id` + **协议（provider 列，2026-10-24 协议下放：档案级权威）**——同一网关不同模型协议不同（opencode 的 Claude/MiniMax/Qwen 系走 anthropic、GLM/Kimi 走 openai_compatible），绑定连接时**不再要求与连接一致**；resolve 取址 = `连接池[档案协议] or 连接.base_url` |
+| `model_connections`（0033+0035） | **连接** = 厂商网关：连到哪里、怎么认证（base_url / api_key / headers / models_url）+ `protocol_base_urls`（0035，协议→地址池 JSON，NULL=全走 base_url）；`provider` 列降级为**主协议**（base_url 对应的协议，仅测试连接/回退用，**不再同步给档案**）——**厂商 ≠ 协议**（2026-10-24 用户裁决，见 CHANGELOG 同日 Changed 段） |
 | `capability_bindings`（0016） | 环节 → 档案列表（顺序即 fallback 序） |
 | `model_router/effective.py` | **生效配置解析层**：保留键唯一权威 `RESERVED_PARAM_KEYS` / `resolve_effective`（连接是唯一权威）/ 请求头模板渲染 / 归组分组键（**按生效 key**，不是 params 里的 key） |
 | `model_router/connections.py` | 连接表 CRUD |

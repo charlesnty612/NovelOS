@@ -852,7 +852,9 @@ function ModelProfileFormModal({
   // 双模：使用连接 / 自定义配置（2026-10-21 批次十五）
   //
   // - **连接态**：地址 / 密钥 / 自定义头全归连接 ⇒ 表单里**不显示**这三个输入框，
-  //   只填模型名 + 思考模式；提交的 provider 取自所选连接。
+  //   只填模型名 + 思考模式；**协议是档案级属性**（2026-10-24 下放）⇒ 接口类型
+  //   可编辑，初值跟随所选连接的主协议，可按模型实际支持的协议改（后端不再
+  //   要求与连接一致）。
   // - **自定义态**：完全保持既有行为（自带 base_url / api_key）。
   // - **默认态**：编辑一个**存量**档案（connection_id 为 null）⇒ 落在「自定义配置」，
   //   存量档案的读写路径逐字不变。
@@ -871,10 +873,9 @@ function ModelProfileFormModal({
     () => connections.find((c) => c.connection_id === connectionId) ?? null,
     [connections, connectionId],
   );
-  // 连接态下 provider / base_url 都取自连接；自定义态取表单自身的。
-  const effectiveProvider = isConnectionMode
-    ? (selectedConnection?.provider ?? '')
-    : provider;
+  // 协议以**档案自己的选择**为准（两种模式同源，2026-10-24 协议下放后不再
+  // 跟随连接派生）；地址仍按模式取（连接态取连接主地址）。
+  const effectiveProvider = provider;
   const effectiveBaseUrl = isConnectionMode
     ? (selectedConnection?.base_url ?? '')
     : params.baseUrl;
@@ -1025,8 +1026,9 @@ function ModelProfileFormModal({
       try {
         await onSubmit({
           name: name.trim(),
-          // provider 由连接决定（连接是唯一权威；不一致后端会 422）。
-          provider: conn.provider,
+          // 协议是档案级属性（2026-10-24 下放）：提交表单里选的协议，后端不再
+          // 要求与连接一致；未改动时初值即连接主协议，存量语义不变。
+          provider,
           model: model.trim(),
           params: connParamsOut,
           enabled: enabled ? 1 : 0,
@@ -1174,7 +1176,13 @@ function ModelProfileFormModal({
             <label>连接 *</label>
             <select
               value={connectionId}
-              onChange={(e) => setConnectionId(e.target.value)}
+              onChange={(e) => {
+                setConnectionId(e.target.value);
+                // 切连接 ⇒ 协议初值跟随所绑连接的主协议（协议已是档案级属性，
+                // 下面的「接口类型」仍可按模型实际支持的协议改）。
+                const next = connections.find((c) => c.connection_id === e.target.value);
+                if (next) setProvider(next.provider);
+              }}
               data-testid="profile-connection"
             >
               <option value="">请选择一条连接…</option>
@@ -1202,32 +1210,26 @@ function ModelProfileFormModal({
           />
         </div>
 
-        {isConnectionMode ? (
-          <div className="form-row">
-            <label>接口类型</label>
-            <div className="muted small" data-testid="profile-provider-readonly">
-              {selectedConnection
-                ? (PROVIDER_SHORT_LABEL[selectedConnection.provider] ??
-                  selectedConnection.provider)
-                : '（先选一条连接）'}
-            </div>
+        <div className="form-row">
+          <label>接口类型 *</label>
+          <select
+            value={provider}
+            onChange={(e) => setProvider(e.target.value)}
+            data-testid="profile-provider"
+          >
+            {PROVIDER_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <div data-testid="profile-provider-hint">
+            <InfoBanner>
+              接口类型是模型级属性——同一厂商网关下不同模型支持的协议不同（如 opencode 的
+              Claude/MiniMax/Qwen 系走 Anthropic 协议，GLM/Kimi 走 OpenAI 兼容），按模型实际支持的协议选择。
+            </InfoBanner>
           </div>
-        ) : (
-          <div className="form-row">
-            <label>接口类型 *</label>
-            <select
-              value={provider}
-              onChange={(e) => setProvider(e.target.value)}
-              data-testid="profile-provider"
-            >
-              {PROVIDER_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
+        </div>
 
         {/* 已绑定的档案：显式解绑入口（PATCH connection_id: null）。 */}
         {initial?.connection_id ? (

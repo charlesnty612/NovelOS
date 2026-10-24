@@ -63,13 +63,17 @@ function renderPanel() {
   return render(<ConnectionsPanel />);
 }
 
-/** 厂商预设夹具（与后端 presets.py 的清单同形）。 */
+/** 厂商预设夹具（与后端 presets.py 的清单同形；opencode_go 带协议地址池）。 */
 const presetFixture: ConnectionPresetOut[] = [
   {
     preset_id: 'opencode_go',
     label: 'opencode Go（订阅制）',
     provider: 'openai_compatible',
     base_url: 'https://opencode.ai/inference/go/openai/v1',
+    protocol_base_urls: {
+      openai_compatible: 'https://opencode.ai/inference/go/openai/v1',
+      anthropic: 'https://opencode.ai/inference/go/anthropic',
+    },
     params: {
       headers: { 'x-opencode-session': '{{session_id}}' },
       models_url: 'https://opencode.ai/inference/go/v1/models',
@@ -313,6 +317,10 @@ describe('ConnectionsPanel · 模型连接', () => {
       'x-opencode-session': '{{session_id}}',
     });
     expect(paramsOut.models_url).toBe('https://api.example.com/v1/models');
+    // 空池（未添加任何协议地址行）⇒ 不发 protocol_base_urls 字段（缺省 = 不动）
+    expect(
+      Object.prototype.hasOwnProperty.call(payload, 'protocol_base_urls'),
+    ).toBe(false);
   });
 
   it('编辑连接：密钥输入框不回填 "***"；「清除已存密钥」显式发 api_key=""', async () => {
@@ -467,7 +475,7 @@ describe('ConnectionsPanel · 模型连接', () => {
       'oc_sk-user',
     );
 
-    // 切回「无预设 / 自定义」⇒ 自动填的地址与头被清掉，密钥保留
+    // 切回「无预设 / 自定义」⇒ 自动填的地址 / 头 / 协议池被清掉，密钥保留
     fireEvent.change(presetSelect, { target: { value: '' } });
     await waitFor(() => {
       expect(
@@ -475,12 +483,25 @@ describe('ConnectionsPanel · 模型连接', () => {
       ).toBe('');
     });
     expect(screen.queryByTestId('connection-header-key-0')).toBeNull();
+    expect(screen.queryByTestId('connection-pool-protocol-0')).toBeNull();
     expect((screen.getByTestId('connection-api-key') as HTMLInputElement).value).toBe(
       'oc_sk-user',
     );
   });
 
-  it('选预设后把接口类型切成不同类型 ⇒ 解除预设：清掉预设地址与头，预设下拉复位', async () => {
+  // -------------------- 协议地址池（2026-10-24，协议下放模型档案）--------------
+
+  it('连接表单不再有「接口类型」下拉（协议是档案级属性，判别：connection-provider 为 null）', async () => {
+    renderPanel();
+    fireEvent.click(await screen.findByTestId('new-model-connection'));
+
+    await screen.findByTestId('connection-name');
+    // ⚠️ 判别点：旧表单这里有「接口类型 *」下拉（data-testid="connection-provider"），
+    // 协议下放档案层后整个字段必须消失。
+    expect(screen.queryByTestId('connection-provider')).toBeNull();
+  });
+
+  it('选「opencode Go」预设 ⇒ 协议地址池自动出现两行（openai_compatible + anthropic 地址逐字）', async () => {
     renderPanel();
     fireEvent.click(await screen.findByTestId('new-model-connection'));
 
@@ -494,50 +515,140 @@ describe('ConnectionsPanel · 模型连接', () => {
       expect(opts).toContain('opencode_go');
     });
 
-    // 选预设 ⇒ 地址 / 头 / 模型列表地址被填上（provider 跟随预设为 openai_compatible）
     fireEvent.change(presetSelect, { target: { value: 'opencode_go' } });
-    await waitFor(() => {
-      expect(
-        (screen.getByTestId('connection-base-url') as HTMLInputElement).value,
-      ).toBe('https://opencode.ai/inference/go/openai/v1');
-    });
-    expect(screen.getByTestId('connection-header-key-0')).not.toBeNull();
 
-    // 接口类型切到不同类型（anthropic）⇒ 预设组合被放弃：
-    // 预设带出的 openai 风格地址与预设头一并清掉，预设下拉复位
-    const providerSelect = screen.getByTestId(
-      'connection-provider',
+    const proto0 = (await screen.findByTestId(
+      'connection-pool-protocol-0',
+    )) as HTMLSelectElement;
+    expect(proto0.value).toBe('openai_compatible');
+    expect(
+      (screen.getByTestId('connection-pool-url-0') as HTMLInputElement).value,
+    ).toBe('https://opencode.ai/inference/go/openai/v1');
+
+    const proto1 = screen.getByTestId(
+      'connection-pool-protocol-1',
     ) as HTMLSelectElement;
-    fireEvent.change(providerSelect, { target: { value: 'anthropic' } });
-
-    await waitFor(() => {
-      expect(
-        (screen.getByTestId('connection-base-url') as HTMLInputElement).value,
-      ).toBe('');
-    });
-    expect(providerSelect.value).toBe('anthropic');
-    expect((screen.getByTestId('connection-preset') as HTMLSelectElement).value).toBe('');
-    expect(screen.queryByTestId('connection-header-key-0')).toBeNull();
+    expect(proto1.value).toBe('anthropic');
+    expect(
+      (screen.getByTestId('connection-pool-url-1') as HTMLInputElement).value,
+    ).toBe('https://opencode.ai/inference/go/anthropic');
   });
 
-  it('无预设时切接口类型 ⇒ 只切类型，手填的接口地址保留', async () => {
+  it('手动添加协议地址行 ⇒ 汇总进提交体 protocol_base_urls（逐字）', async () => {
+    vi.mocked(connectionsApi.create).mockResolvedValue(conn);
+
     renderPanel();
     fireEvent.click(await screen.findByTestId('new-model-connection'));
 
-    // 不选预设，直接手填接口地址
+    fireEvent.change(screen.getByTestId('connection-name'), {
+      target: { value: '多协议网关' },
+    });
     fireEvent.change(screen.getByTestId('connection-base-url'), {
-      target: { value: 'https://api.example.com/v1' },
+      target: { value: 'https://gateway.example.com/v1' },
+    });
+    fireEvent.click(screen.getByTestId('connection-pool-add'));
+    fireEvent.change(screen.getByTestId('connection-pool-protocol-0'), {
+      target: { value: 'anthropic' },
+    });
+    fireEvent.change(screen.getByTestId('connection-pool-url-0'), {
+      target: { value: 'https://gateway.example.com/anthropic' },
     });
 
-    // 切接口类型 ⇒ 地址保留（用户手填的配置自己负责，不清）
-    const providerSelect = screen.getByTestId(
-      'connection-provider',
-    ) as HTMLSelectElement;
-    fireEvent.change(providerSelect, { target: { value: 'anthropic' } });
+    fireEvent.click(screen.getByTestId('connection-save'));
 
-    expect(providerSelect.value).toBe('anthropic');
+    await waitFor(() => {
+      expect(connectionsApi.create).toHaveBeenCalledTimes(1);
+    });
+    const payload = vi.mocked(connectionsApi.create).mock
+      .calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.protocol_base_urls).toEqual({
+      anthropic: 'https://gateway.example.com/anthropic',
+    });
+  });
+
+  it('协议地址池有重复协议 ⇒ 红色提示禁保存，不发请求', async () => {
+    renderPanel();
+    fireEvent.click(await screen.findByTestId('new-model-connection'));
+
+    fireEvent.change(screen.getByTestId('connection-name'), {
+      target: { value: '重复协议' },
+    });
+    fireEvent.change(screen.getByTestId('connection-base-url'), {
+      target: { value: 'https://gateway.example.com/v1' },
+    });
+    fireEvent.click(screen.getByTestId('connection-pool-add'));
+    fireEvent.change(screen.getByTestId('connection-pool-protocol-0'), {
+      target: { value: 'anthropic' },
+    });
+    fireEvent.change(screen.getByTestId('connection-pool-url-0'), {
+      target: { value: 'https://gateway.example.com/anthropic' },
+    });
+    fireEvent.click(screen.getByTestId('connection-pool-add'));
+    fireEvent.change(screen.getByTestId('connection-pool-protocol-1'), {
+      target: { value: 'anthropic' },
+    });
+    fireEvent.change(screen.getByTestId('connection-pool-url-1'), {
+      target: { value: 'https://gateway.example.com/anthropic2' },
+    });
+
+    fireEvent.click(screen.getByTestId('connection-save'));
+
+    const modal = await screen.findByTestId('model-connection-form-modal');
+    await waitFor(() => {
+      expect(modal).toHaveTextContent('协议地址池里有重复的协议：anthropic');
+    });
+    expect(connectionsApi.create).not.toHaveBeenCalled();
+  });
+
+  it('主接口地址为空 ⇒ 必填拦下，不发请求（连接必须知道默认连到哪）', async () => {
+    renderPanel();
+    fireEvent.click(await screen.findByTestId('new-model-connection'));
+
+    fireEvent.change(screen.getByTestId('connection-name'), {
+      target: { value: '没有地址' },
+    });
+    // 接口地址留空
+    fireEvent.click(screen.getByTestId('connection-save'));
+
+    const modal = await screen.findByTestId('model-connection-form-modal');
+    await waitFor(() => {
+      expect(modal).toHaveTextContent('接口地址不能为空');
+    });
+    expect(connectionsApi.create).not.toHaveBeenCalled();
+  });
+
+  it('编辑连接：协议池按连接回填；删掉行 ⇒ 整表替换语义（全删 ⇒ 显式发 null 清空）', async () => {
+    const connWithPool: ModelConnectionOut = {
+      ...conn,
+      protocol_base_urls: {
+        openai_compatible: 'https://opencode.ai/inference/go/openai/v1',
+        anthropic: 'https://opencode.ai/inference/go/anthropic',
+      },
+    };
+    vi.mocked(connectionsApi.list).mockResolvedValue([connWithPool]);
+    vi.mocked(connectionsApi.update).mockResolvedValue(connWithPool);
+
+    renderPanel();
+    fireEvent.click(await screen.findByTestId('connection-edit-mcn_001'));
+
+    // 池按连接回填（两行、地址逐字）
+    const proto0 = (await screen.findByTestId(
+      'connection-pool-protocol-0',
+    )) as HTMLSelectElement;
+    expect(proto0.value).toBe('openai_compatible');
     expect(
-      (screen.getByTestId('connection-base-url') as HTMLInputElement).value,
-    ).toBe('https://api.example.com/v1');
+      (screen.getByTestId('connection-pool-url-1') as HTMLInputElement).value,
+    ).toBe('https://opencode.ai/inference/go/anthropic');
+
+    // 全部删除 ⇒ 保存时显式发 protocol_base_urls: null（后端清空语义，全部走主地址）
+    fireEvent.click(screen.getByTestId('connection-pool-remove-0'));
+    fireEvent.click(screen.getByTestId('connection-pool-remove-0'));
+    fireEvent.click(screen.getByTestId('connection-save'));
+
+    await waitFor(() => {
+      expect(connectionsApi.update).toHaveBeenCalledTimes(1);
+    });
+    const [, payload] = vi.mocked(connectionsApi.update).mock.calls[0]!;
+    expect((payload as Record<string, unknown>).protocol_base_urls).toBeNull();
   });
 });
