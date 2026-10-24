@@ -217,17 +217,38 @@ def _parse_remotes_v(text: str) -> list[RemoteInfo]:
     ``None`` ⇒ 被 :func:`_is_disabled_push_url` 判成「push URL 已禁用」⇒
     判「不能被误推」exit 0 —— **假绿**（把「读不到」折叠成「没有」，给从未评估的
     对象发满分）。⇒ 这里返回**列表**（``origin`` 不作唯一识别，只作展示优先级）。
+
+    ⚠️ **URL 可能含空格**（major · 空格 URL 假绿 · OS项目经理裁决 2026-10-25）：
+    Windows 本地路径 ``D:/My Content/X.git``、UNC ``\\\\server\\share\\repo.git``
+    都含空格。``git remote -v`` 的行形态是 ``<name>\\t<url> (push)`` ⇒ **必须**
+    先按 ``\\t`` 切出 name 与余部，再对余部用 ``rpartition(' ')`` 取**最后一段**
+    作 ``(fetch)/(push)`` 后缀 ⇒ **URL 原样保留**（含空格）。
+    旧实现按任意空白 ``split()`` ⇒ ``parts[2]`` 变成 URL 的一段（``Content/X.git``）
+    而不是 ``(push)`` ⇒ 该远端**被整条丢弃** ⇒ 守卫只看见其余远端 ⇒ 仍判
+    「不能被误推」exit 0（**假绿**：把「读不到」折叠成「没有」）。
     """
     order: list[str] = []
     by_name: dict[str, RemoteInfo] = {}
-    for line in text.splitlines():
-        line = line.strip()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
         if not line:
             continue
-        parts = line.split()
-        if len(parts) < 3:
+        # ⚠️ 先按 ``\t`` 切（git 用 tab 分隔 name 与 URL）⇒ URL 里的空格不会被切开。
+        if "\t" in line:
+            name, rest = line.split("\t", 1)
+        else:
+            # 兜底：没有 tab 时按**第一个**空格切（name 不含空格），余部整体保留。
+            name, _, rest = line.partition(" ")
+        name = name.strip()
+        rest = rest.strip()
+        if not name or not rest:
             continue
-        name, url, kind = parts[0], parts[1], parts[2]
+        # ⚠️ 再用 ``rpartition(' ')`` 取**最后一段**作 ``(fetch)/(push)`` 后缀，
+        # 余下部分**原样**作为 URL（**含空格**）。
+        url, sep, kind = rest.rpartition(" ")
+        if not sep:
+            continue
+        kind = kind.strip()
         if kind not in ("(fetch)", "(push)"):
             continue
         info = by_name.get(name)

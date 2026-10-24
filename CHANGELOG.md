@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-25 · D 批 · 内容仓 push 守卫：远端 URL 含空格被整条丢弃的假绿）
+
+> **来源**：OS审查 门禁发现 → OS项目经理 独立复现并定级 **major**（裁决件 `门禁证据\NovelOS\A批-major裁决-空格URL假绿-2026-10-25.md`）→ 排 D 批修复。**缺陷形状与 C1 同型**：把「读不到」折叠成「没有」，给从未评估的对象发满分。
+> **验收**：红段**真实源码撤除**（改副本源码，非文本/行尾替换）⇒ D 批新增 **6 条**用例中 **4 failed / 2 passed**、0 error（**FAIL 非 ERROR**）；红名单 `:1601`/`:1620`/`:1652`/`:1669`，始终绿（不依赖本修复）`:1691`/`:1717`。**权威红段以 `OS审查` 的干净整函数撤除为准（4/2）；此前本文件记的 3/3 系撤除不干净（副本残留 `parts` 解析分支）导致少记一条红。** 绿段 6 条新用例逐条 PASSED，全文件定向 **69 passed**（exit 0），ruff clean。
+
+- **缺陷**：`git remote -v` 的行形态是 `<name>\t<url> (push)`，而旧解析按任意空白 `split()` ⇒ **URL 含空格**时（如 `C:/My Content/X.git`、`\\server\share\repo.git`）`parts[2]` 变成 URL 的一段（`Content/X.git`）而不是 `(push)` ⇒ 该远端**被整条丢弃** ⇒ 守卫只看见其余远端 ⇒ 混合场景（已禁用远端 + 含空格的可推远端）仍判「不能被误推」**exit 0 假绿**。
+- **修复**（`scripts/check_content_repo_guard.py:210-263`）：解析改为**按第一个 `\t` 切** name/余部 → 再对余部 **`rpartition(' ')` 去尾部 `(fetch)/(push)` 后缀** ⇒ **URL 原样保留（含空格，含 tab）**；无 tab 时按第一个空格切作兜底，name 不含空格故安全（git 拒绝含空格/tab 的远端名）。
+- **判别用例**（`tests/unit/test_check_content_repo_guard.py:1601-1717`，D 批新增 **6 条**，逐条对应验收判据）：① `test_remote_url_with_spaces_is_not_dropped`（`:1601`；**URL 含空格不被丢弃**：`remote_count == 1`、URL 原样含空格）；② `test_mixed_disabled_and_space_url_remote_is_unsafe`（`:1620`；混合场景 ⇒ `remotes` 含该远端、`remote_count == 2`、**exit≠0**、`verdict == "yes"`）；③ `test_single_space_url_pushable_remote_exits_1`（`:1652`；单远端 URL 含空格且可推 ⇒ **exit 1**）；④ `test_remote_url_containing_tab_is_preserved`（`:1669`；**URL 含 tab** ⇒ 只切第一个 tab、其余 tab 属 URL，**防改成 `split('\t')` 的二次返工**）；⑤ `test_origin_disabled_fetch_with_pushable_pushurl_is_unsafe`（`:1691`；fetch 已禁用 + **pushurl 可推** ⇒ **exit≠0**）；⑥ `test_remote_list_failure_is_unknown_exit_2`（`:1717`；`git remote -v` 真返非 0 ⇒ 走 `remote_list_error` ⇒ **exit 2** 不可判）。**不回归对照（A 批用例，不计入 D 批新增）**：`test_origin_with_no_push_scheme_still_passes`（`:1574`；`origin` + `no_push` ⇒ 仍 **exit 0**）。
+- **红段（真实源码撤除、非文本替换）**：仓外副本按**行号区间**把解析体换回 `parts = line.split()` 源码形态 ⇒ D 批新增 **6 条**用例中 **4 failed / 2 passed**、0 error（**FAIL 非 ERROR**）。**红名单四条**：`test_remote_url_with_spaces_is_not_dropped`（`:1601`）、`test_mixed_disabled_and_space_url_remote_is_unsafe`（`:1620`）、`test_single_space_url_pushable_remote_exits_1`（`:1652`）、`test_remote_url_containing_tab_is_preserved`（`:1669`）；**始终绿（不依赖本修复、修前修后都绿）**：`test_origin_disabled_fetch_with_pushable_pushurl_is_unsafe`（`:1691`）、`test_remote_list_failure_is_unknown_exit_2`（`:1717`）。**权威红段以 `OS审查` 的干净整函数撤除为准（4/2）；此前本文件记的 3/3 系撤除不干净（副本残留 `parts` 解析分支）导致少记一条红。**
+- **修后复现**（PM 原始复现命令）：`git remote add origin no-push://…` + `git remote add content "C:/My Content/X.git"` ⇒ `remote_count=2`、`content` 在 `remotes` 内、`push_disabled=false`、`verdict=yes`、**exit 1**（修前 exit 0 假绿）。全文件定向 **69 passed**（exit 0）、ruff clean。
+- **存量触发**：无（实际内容仓仅 `origin` 一个远端、URL 无空格）；触发条件为「含空格/含 tab URL 的可推远端 + 已禁用 push 的远端共存」。
+
 ### Fixed（2026-10-25 · A 批 C1 · 内容仓 push 守卫：远端识别与「不可判定」口径）
 
 > **来源**：OS审查 提出 MAJOR——`scripts/check_content_repo_guard.py` 旧实现只认 `origin` 远端，远端名不叫 `origin` 时 `push_url` 读成 `None` ⇒ 被当成「push URL 已禁用」⇒ 判「不能被误推」**exit 0 假绿**（把「读不到」折叠成「没有」，给从未评估的对象发满分）；Chief 裁定直接修，收进 C1 批次（同一文件、同一函数，不新开批）。

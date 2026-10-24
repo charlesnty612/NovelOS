@@ -1584,3 +1584,150 @@ def test_origin_with_no_push_scheme_still_passes(tmp_path) -> None:
     assert proc.returncode == 0, f"origin + no-push:// ⇒ 退出码 0，实际 {proc.returncode}\n{combined}"
     assert "不能被误推" in proc.stdout
     assert "Traceback" not in combined
+
+
+# ---------------------------------------------------------------------------
+# D 批（major · 空格 URL 假绿 · OS项目经理裁决 2026-10-25）
+#
+# ⚠️ 旧解析按任意空白 ``split()`` ⇒ ``git remote -v`` 的行形态
+# ``<name>\t<url> (push)`` 中，**URL 含空格**时 ``parts[2]`` 变成 URL 的一段
+# （如 ``Content/X.git``）而不是 ``(push)`` ⇒ 该远端**被整条丢弃** ⇒
+# 守卫只看见其余远端 ⇒ 仍判「不能被误推」**exit 0 假绿**。
+# ⇒ 改：先按 ``\t`` 切 name/余部，再 ``rpartition(' ')`` 取 ``(fetch)/(push)``
+# 后缀，**URL 原样保留（含空格）**。
+# ---------------------------------------------------------------------------
+
+
+def test_remote_url_with_spaces_is_not_dropped(tmp_path) -> None:
+    """分支④：**URL 含空格**的远端必须被完整采集（不得整条丢弃）。"""
+    repo = tmp_path / "content_repo_space_url"
+    repo.mkdir()
+    _git(["init", "-q", str(repo)], cwd=tmp_path)
+    url = "C:/My Content/X.git"
+    _git(["remote", "add", "content", url], cwd=repo)
+
+    proc = _run_cli("--content-dir", str(repo), "--json")
+    combined = proc.stdout + proc.stderr
+
+    assert "Traceback" not in combined
+    payload = json.loads(proc.stdout)
+    assert payload["remote_count"] == 1, f"含空格的远端被丢弃了：{payload['remotes']}"
+    assert payload["remotes"][0]["name"] == "content"
+    assert payload["remotes"][0]["fetch_url"] == url, "URL 必须原样保留（含空格）"
+    assert payload["remotes"][0]["push_url"] == url, "URL 必须原样保留（含空格）"
+
+
+def test_mixed_disabled_and_space_url_remote_is_unsafe(tmp_path) -> None:
+    """分支⑤（**假绿主线**）：已禁用远端 + URL 含空格的可推远端 ⇒ **必须 exit≠0**。
+
+    改前基线：``content``（含空格 URL）被整条丢弃 ⇒ 只剩 ``origin``（已禁用）⇒
+    判「不能被误推」**exit 0 假绿**。
+    """
+    repo = tmp_path / "content_repo_mixed_space"
+    repo.mkdir()
+    _git(["init", "-q", str(repo)], cwd=tmp_path)
+    _git(["remote", "add", "origin", "no-push://novelos-content-push-disabled"], cwd=repo)
+    space_url = "C:/My Content/X.git"
+    _git(["remote", "add", "content", space_url], cwd=repo)
+
+    proc = _run_cli("--content-dir", str(repo), "--json")
+    combined = proc.stdout + proc.stderr
+
+    assert "Traceback" not in combined
+    payload = json.loads(proc.stdout)
+    assert payload["remote_count"] == 2, f"含空格的远端被丢弃了：{payload['remotes']}"
+    names = [r["name"] for r in payload["remotes"]]
+    assert "content" in names, f"含空格的远端必须出现在 remotes 里：{names}"
+    space_remote = next(r for r in payload["remotes"] if r["name"] == "content")
+    assert space_remote["push_url"] == space_url, "URL 必须原样保留（含空格）"
+    assert "content" in payload["pushable_remotes"], f"含空格的远端可推：{payload}"
+    assert payload["push_disabled"] is False, "任一远端可推 ⇒ push_disabled 必为 False"
+    assert payload["can_be_pushed"] is True
+    assert payload["verdict"] != "no"
+    assert proc.returncode != 0, f"含空格的可推远端 ⇒ 退出码必须非 0，实际 {proc.returncode}\n{combined}"
+    # ⚠️ 本用例走 ``--json`` ⇒ stdout 是 JSON（不是人读文本）⇒ 结论字段查 payload。
+    assert payload["verdict"] == "yes", f"含空格的可推远端 ⇒ verdict 必须是 yes：{payload}"
+
+
+def test_single_space_url_pushable_remote_exits_1(tmp_path) -> None:
+    """判据①：**单远端** URL 含空格且可推 ⇒ **exit 1**（不得 exit 0，也不得 exit 2）。"""
+    repo = tmp_path / "content_repo_single_space"
+    repo.mkdir()
+    _git(["init", "-q", str(repo)], cwd=tmp_path)
+    _git(["remote", "add", "sp", "C:/My Content/B.git"], cwd=repo)
+
+    proc = _run_cli("--content-dir", str(repo))
+    combined = proc.stdout + proc.stderr
+
+    assert "Traceback" not in combined
+    assert proc.returncode == 1, (
+        f"单远端 URL 含空格且可推 ⇒ 必须 exit 1，实际 {proc.returncode}\n{combined}"
+    )
+    assert "能被误推" in proc.stdout
+
+
+def test_remote_url_containing_tab_is_preserved(tmp_path) -> None:
+    """判据②（**防二次返工**）：URL 里**还能含 tab** ⇒ 按**第一个** tab 切，其余 tab 属 URL。
+
+    ⚠️ 若实现写成 ``line.split("\\t")``（切全部 tab）⇒ URL 里的 tab 会把 URL 拆碎 ⇒
+    该远端又会被整条丢弃 ⇒ 二次返工。本用例钉住「**只切第一个 tab**」。
+    """
+    repo = tmp_path / "content_repo_tab_url"
+    repo.mkdir()
+    _git(["init", "-q", str(repo)], cwd=tmp_path)
+    tabbed = "C:/A\tB/C.git"
+    _git(["remote", "add", "tabbed", tabbed], cwd=repo)
+
+    proc = _run_cli("--content-dir", str(repo), "--json")
+    combined = proc.stdout + proc.stderr
+
+    assert "Traceback" not in combined
+    payload = json.loads(proc.stdout)
+    assert payload["remote_count"] == 1, f"URL 含 tab 的远端被丢弃了：{payload['remotes']}"
+    assert payload["remotes"][0]["name"] == "tabbed"
+    assert payload["remotes"][0]["push_url"] == tabbed, "URL 里的 tab 必须原样保留"
+
+
+def test_origin_disabled_fetch_with_pushable_pushurl_is_unsafe(tmp_path) -> None:
+    """判据④：``origin`` fetch=已禁用 + **pushurl 可推** ⇒ **必须 exit≠0**。
+
+    ⚠️ 这是「扫全部远端」判据的**另一入口**：`git remote set-url --push` 设的
+    pushurl 会出现在 ``remote -v`` 的 ``(push)`` 行 ⇒ 守卫必须据此判不安全。
+    """
+    repo = tmp_path / "content_repo_pushurl"
+    repo.mkdir()
+    _git(["init", "-q", str(repo)], cwd=tmp_path)
+    _git(["remote", "add", "origin", "no_push"], cwd=repo)
+    pushable = "https://github.com/charlesnty612/NovelOS-Content.git"
+    _git(["remote", "set-url", "--push", "origin", pushable], cwd=repo)
+
+    proc = _run_cli("--content-dir", str(repo), "--json")
+    combined = proc.stdout + proc.stderr
+
+    assert "Traceback" not in combined
+    payload = json.loads(proc.stdout)
+    assert payload["remote_count"] == 1
+    assert payload["remotes"][0]["push_url"] == pushable, "pushurl 必须被采集到"
+    assert payload["push_disabled"] is False, "pushurl 可推 ⇒ push_disabled 必为 False"
+    assert payload["can_be_pushed"] is True
+    assert payload["verdict"] == "yes"
+    assert proc.returncode != 0, f"pushurl 可推 ⇒ 退出码必须非 0，实际 {proc.returncode}\n{combined}"
+
+
+def test_remote_list_failure_is_unknown_exit_2(mod, monkeypatch, tmp_path, capsys) -> None:
+    """判据⑤：``git remote -v`` **真返回非 0** ⇒ 走 ``remote_list_error`` ⇒ **exit 2**（不可判）。"""
+
+    class _RemoteListFails(_FakeGit):
+        def __call__(self, args: list[str], cwd: Path) -> tuple[int, str, str]:
+            if "remote" in " ".join(args) and "-v" in args:
+                return (128, "", "fatal: unable to read remote list")
+            return super().__call__(args, cwd)
+
+    monkeypatch.setattr(mod, "_run_git", _RemoteListFails())
+    code = mod.main(["--content-dir", str(tmp_path)])
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+
+    assert code == 2, f"remote -v 失败 ⇒ 不可判 ⇒ 必须 exit 2，实际 {code}\n{combined}"
+    assert "远端" in combined, f"必须说明是远端列表读取失败：{combined}"
+    assert "Traceback" not in combined
