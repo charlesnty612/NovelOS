@@ -28,8 +28,17 @@
 ``properties`` 同步变小 ⇒ 必红），所以第①段断言也必须打它，
 不能只打响应键集（``extra="allow"`` 下响应照样带着那个键）。
 
-另外：``model_fields`` **只允许**出现在「模型 vs 硬编码」的用例里，
-**一处都不许**出现在「响应 vs 模型」的比对里。
+另外：``model_fields`` **不许单独出现**——不许在没有**硬编码基线**兜底的地方
+出现（那正是「自指断言」的门）。允许出现的形态只有一种：
+**「模型 vs 硬编码基线」的独立比对**（:func:`assert_model_fields_match`），
+或与它**同行/同用例**成对出现（如「响应 vs 模型字段集」旁边紧跟
+「响应 vs 硬编码基线」）。
+
+⚠️ **本条是 2026-10-24 的口径订正**（原写「**一处都不许**出现」——与现状不符：
+``tests/api/test_reveal_and_judge_response_contract.py`` 有三处
+「响应/字典 vs 模型字段集」的**配对**比对，每一处都在**同一用例内**紧跟
+硬编码基线比对 ⇒ 两处同时收窄时必红）。真正的禁令是
+「**不许单独出现**（不配硬编码基线）」，而不是「不许出现」。
 """
 from __future__ import annotations
 
@@ -52,7 +61,6 @@ __all__ = [
     "assert_model_fields_match",
     "assert_openapi_properties_and_required",
     "assert_openapi_ref",
-    "assert_response_keys",
     "app_table_columns",
     "client_ctx",
     "create_test_app",
@@ -169,13 +177,21 @@ def assert_model_fields_match(
 def assert_openapi_ref(
     openapi: dict, path: str, method: str, code: str, model_name: str, label: str = ""
 ) -> None:
-    """该端点该状态码的响应 schema 必须是**具名** ``$ref``（不是匿名 object）。"""
+    """该端点该状态码的响应 schema 必须是**具名** ``$ref``（不是匿名 object）。
+
+    ⚠️ 两道**互相独立**的检查（2026-10-24 补齐反例后固化）：
+    ① ``$ref`` 必须以 ``/{model_name}`` 结尾（指对了模型）；
+    ② ``model_name`` 必须**真的在** ``components.schemas`` 里（那个模型存在）。
+    ①错与②错是**两个**洞 ⇒ 失败信息各自点名（实际指向 / 缺哪个模型）。
+    """
     ref = (
         openapi["paths"][path][method]["responses"][code]["content"]["application/json"][
             "schema"
         ]["$ref"]
     )
-    assert ref.endswith(f"/{model_name}"), f"{method.upper()} {path} -> {ref}"
+    assert ref.endswith(f"/{model_name}"), (
+        f"{method.upper()} {path} 的 $ref 指向 {ref!r}，期望指向 /{model_name}"
+    )
     assert model_name in openapi["components"]["schemas"], (
         f"{model_name} 未进 components.schemas"
     )
@@ -245,32 +261,6 @@ def assert_openapi_properties_and_required(
 
 
 # ---------------------------------------------------------------------------
-# 端点键集（② 的循环形态：同一个期望集打一批端点）
-# ---------------------------------------------------------------------------
-
-
-async def assert_response_keys(
-    c: Any,
-    method: str,
-    path: str,
-    expected: Iterable[str],
-    *,
-    json: Any = None,
-    status: int = 200,
-    label: str = "",
-) -> dict:
-    """打一个端点并断言其响应键集 == **硬编码** ``expected``；返回响应体。
-
-    失败信息点名**多哪些键、少哪些键**（复核者要能一眼看出差在哪）。
-    """
-    r = await c.request(method, path, json=json)
-    assert r.status_code == status, f"{method.upper()} {path} status={r.status_code}: {r.text[:300]}"
-    body = r.json()
-    assert_keys_match(body, expected, label or f"{method.upper()} {path}")
-    return body
-
-
-# ---------------------------------------------------------------------------
 # DDL 列 vs 硬编码键集（① 的第四种形态：模型之外的第二个第三方基准）
 # ---------------------------------------------------------------------------
 
@@ -287,6 +277,11 @@ def app_table_columns(app: Any, table: str) -> set[str]:
     ⚠️ 必须先进 lifespan：迁移是 app 启动时跑的，不进 lifespan 的临时库是空表，
     ``PRAGMA table_info`` 会返回空集——**那正是「量具没量到目标却报告量过了」**
     （坑区「守卫自己被悄悄缩小了执行域」的同族）。故这里显式断言非空。
+
+    ⚠️ **仅限同步测试用例调用**（内部用 ``asyncio.run``）：在**已有事件循环**里
+    调用会抛 ``RuntimeError: asyncio.run() cannot be called from a running event loop``
+    ⇒ 异步用例请直接用 ``async with app.router.lifespan_context(app)`` 自己读
+    ``PRAGMA table_info``（写法见 ``tests/api/test_contract_runner.py``）。
     """
 
     async def run() -> set[str]:

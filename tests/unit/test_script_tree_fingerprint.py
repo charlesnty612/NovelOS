@@ -15,6 +15,11 @@
   ``apps/web``，前端批次的等价保证是 vitest 全量 + ``git status``」）；
 - 后缀只收 ``.py`` / ``.sql``；``__pycache__`` 一律跳过。
 
+另有一条**精确值**看守（2026-10-24 补）：合成树（固定 mtime + 逐字节确定的内容）
+的指纹必须**逐位等于**硬编码的 sha256 ⇒ 钉住**行格式口径本身**
+（三要素 / 分隔符 / 排序 / 无尾换行 / UTF-8）；口径改了而性质用例照旧绿的那个洞，
+由它挡住。
+
 ⚠️ **这些断言钉的是「性质」，不是「对错」**：若将来把口径改成内容哈希
 （AGENTS 登记过：需连带新增 ``.gitattributes`` 统一行尾，风险远大于收益，
 故已裁决不改），本文件会**故意变红** ⇒ 那时必须同批更新 AGENTS 坑区、
@@ -45,11 +50,33 @@ SCRIPT = REPO_ROOT / "scripts" / "tree_fingerprint.py"
 #: 固定 mtime（秒）——让「同 mtime」在测试里是**可构造**的，而不是碰运气。
 FIXED_MTIME = 1_700_000_000
 
+#: 合成树（:func:`_tree` 造的那棵）的**精确**指纹值。
+#:
+#: ⚠️ **这个哈希钉住的是「行格式口径」**：``{rel}|{size}|{int(mtime)}`` 三要素、
+#: 按行字典序排序、``"\n"`` 连接且**无尾换行**、UTF-8 编码后取 SHA256。
+#: 改其中任何一环（分隔符、多一个要素、排序键、尾换行、编码）⇒ 本用例必红。
+#:
+#: ⚠️ **历史哈希作废的规矩照旧**（AGENTS 坑区「闸门前取树指纹」条）：脚本 docstring
+#: 明写「口径改动 = 历史哈希全部作废，须在 CHANGELOG 登记」⇒ 改口径时必须同批
+#: 更新 AGENTS 坑区、CHANGELOG 与本常量，**不是把断言放宽**。
+#:
+#: ⚠️ **为什么合成树的文件必须用 ``write_bytes`` 写**（平台无关）：
+#: ``write_text`` 在 Windows 上会把 ``\n`` 翻译成 ``\r\n``（``open(newline=None)``
+#: 的写入侧换行翻译）⇒ 同样的源码在 Linux 与 Windows 上**字节数不同**
+#: ⇒ 哈希不同 ⇒ 硬编码的期望值只在写它的那个平台上成立（CI 跑 ubuntu-latest ⇒ 必红）。
+#: ⇒ 用 ``write_bytes`` 写**逐字节确定**的内容，期望值才跨平台成立。
+EXPECTED_SYNTHETIC_TREE_SHA256 = "328a9dd67bf6dc2ae4d9e11660813ddcf09a7d3a5cb42f756780c1b23228bba8"
+
 
 def _write(path: Path, content: str, *, mtime: int = FIXED_MTIME) -> Path:
-    """写文件并把 mtime 钉成确定值（内容不变、mtime 可控）。"""
+    """写文件并把 mtime 钉成确定值（内容不变、mtime 可控）。
+
+    ⚠️ 用 ``write_bytes``（**不是** ``write_text``）⇒ 内容**逐字节**确定
+    ⇒ 跨平台（Windows 的 ``\\r\\n`` 翻译会被绕开）⇒ 见
+    :data:`EXPECTED_SYNTHETIC_TREE_SHA256` 的说明。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    path.write_bytes(content.encode("utf-8"))
     os.utime(path, (mtime, mtime))
     return path
 
@@ -127,7 +154,7 @@ def test_content_is_not_part_of_the_hash_when_size_and_mtime_match(tmp_path):
     before = _digest(base)
     size_before = target.stat().st_size
 
-    target.write_text("x = 9\n", encoding="utf-8")  # 与 "x = 1\n" 等长
+    target.write_bytes(b"x = 9\n")  # 与 "x = 1\n" 等长
     os.utime(target, (FIXED_MTIME, FIXED_MTIME))
 
     assert target.stat().st_size == size_before, "本用例的前提是**等长**改写"
@@ -179,13 +206,48 @@ def test_only_py_and_sql_suffixes_are_counted(tmp_path):
 
 
 def test_pycache_directories_are_excluded(tmp_path):
-    """``__pycache__`` 一律跳过（编译产物不得进指纹）。"""
+    """``__pycache__`` 一律跳过（编译产物不得进指纹）。
+
+    ⚠️ **探针形态（V3-2）**：放进去的是 ``__pycache__/x.py``（**``.py`` 后缀**）
+    ⇒ 它**能过**后缀过滤 ⇒ 只有「目录排除」这条规则能挡住它。
+    （原先放的是 ``a.cpython-312.pyc`` ⇒ 后缀过滤**自己**就挡住了 ⇒
+    即便 ``EXCLUDED_DIRS`` 被清空，本用例**照样绿** ⇒ 它守的不是「目录排除」。）
+    """
     base = _tree(tmp_path)
     before = _digest(base)
 
-    _write(base / "packages" / "core" / "__pycache__" / "a.cpython-312.pyc", "bytecode\n")
+    _write(base / "packages" / "core" / "__pycache__" / "x.py", "bytecode\n")
     assert _digest(base) == before, "__pycache__ 不得进入指纹"
     assert "__pycache__" in EXCLUDED_DIRS
+
+
+def test_synthetic_tree_has_the_exact_expected_sha256(tmp_path):
+    """合成树的指纹必须**逐位等于**硬编码期望值（钉住「行格式口径」）。
+
+    为什么需要这条（V3-1：行格式无钉子）
+    -------------------------------------
+    上面几条用例钉的都是**性质**（mtime 是输入 / 等长改写看不见 / 目录被排除 /
+    后缀被过滤），**没有一条钉住「行格式本身」** ⇒ 把
+    ``f"{rel}|{st.st_size}|{int(st.st_mtime)}"`` 改成别的形态（换分隔符、去掉
+    mtime 那一维、排序键换成 ``str`` 默认排序、连接后多一个尾换行、编码改成
+    latin-1……）⇒ 那些**性质**用例**全部照旧绿**（它们只看「变没变」），
+    而闸门口径已经悄悄变了 ⇒ **历史哈希全部作废却无人知晓**。
+
+    ⇒ 本条断言**精确的 sha256 值** ⇒ 口径任何一环改动 ⇒ 本条必红。
+
+    ⚠️ **口径变更的处置规矩不变**（脚本 docstring + AGENTS 坑区）：真要改口径，
+    必须同批更新 AGENTS 坑区、CHANGELOG 与 :data:`EXPECTED_SYNTHETIC_TREE_SHA256`
+    ——**不是把本断言放宽**。
+    """
+    base = _tree(tmp_path)
+    result = compute(DEFAULT_ROOTS, base=base)
+    assert result["count"] == 4, f"合成树的文件数不对：{result}"
+    assert result["sha256"] == EXPECTED_SYNTHETIC_TREE_SHA256, (
+        "合成树的指纹与硬编码期望值**不一致** ⇒ 行的格式口径变了"
+        "（三要素 / 分隔符 / 排序 / 尾换行 / 编码 任一环被改动）⇒ "
+        "按 AGENTS 规矩，历史哈希已作废，须在 CHANGELOG 登记并同批更新本常量；"
+        f"实测 {result['sha256']}，期望 {EXPECTED_SYNTHETIC_TREE_SHA256}"
+    )
 
 
 def test_missing_root_is_skipped_instead_of_crashing(tmp_path):

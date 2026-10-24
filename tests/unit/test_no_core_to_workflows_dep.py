@@ -759,19 +759,11 @@ def scan_dynamic_workflow_imports(
 
 # ---------------------------------------------------------------------------
 # 用例
+#
+# ⚠️ 2026-10-24 瘦身：原「① core 静态 import 业务流程包 = 0」已删——被「⑦ 四条方向边」
+# **完全蕴含**（方向表第一条即 core↛workflows，静态扫描走同一判据）+ ⑥ 的字面量兜底
+# ⇒ 零判别力损失（下方编号**保留原样不重排** ⇒ 不动承重用例的 docstring）。
 # ---------------------------------------------------------------------------
-
-
-def test_no_business_import_of_workflows_in_core() -> None:
-    """① core 静态 import 业务流程包 = 0。"""
-    hits: list[str] = []
-    for path in _iter_py_files(CORE_ROOT):
-        tree = _parse(path)
-        if tree is None:
-            continue
-        for lineno, desc in _static_violations(tree, _TARGET_PKG_TOP):
-            hits.append(f"{_rel(path)}:{lineno}: {desc}")
-    assert not hits, "core 不得 import 业务流程包：\n" + "\n".join(hits)
 
 
 @pytest.mark.parametrize("root_rel", GUARDED_ROOTS)
@@ -1036,11 +1028,35 @@ def test_static_bypass_forms_are_detected(source):
     assert _static_violations(tree, _TARGET_PKG_TOP), f"漏过：{source!r}"
 
 
-def test_relative_escape_is_detected(monkeypatch):
-    """③ 相对逃逸：深度 ≥3 的包里 ``from ...workflows import Y`` ⇒ 必须被拦。"""
-    _with_synthetic_source(monkeypatch, "from ...workflows import Y\n", _PROBE_REL_DEEP)
-    hits = scan_escaping_relative_imports("packages/core")
-    assert hits, "漏过：相对逃逸的 from ...workflows import Y"
+@pytest.mark.parametrize(
+    ("source", "rel", "root_rel"),
+    [
+        ("from ...workflows import Y\n", _PROBE_REL_DEEP, "packages/core"),
+        (
+            "from ...workflows.chapter_write import pipeline",
+            "packages/domain/character/service.py",
+            "packages/domain",
+        ),
+    ],
+    ids=["core-deep", "domain-root"],
+)
+def test_relative_escape_is_detected(monkeypatch, source, rel, root_rel):
+    """③ 相对逃逸：能爬出本包的相对 import ⇒ 必须被拦（**两个根都扫**）。
+
+    ⚠️ **A2 判别**（``domain`` 根那条）：``packages/domain/character/service.py``
+    （包深度 3）里写 ``from ...workflows.chapter_write import pipeline`` ⇒ level=3
+    ⇒ 真实解析到 ``packages.workflows.chapter_write`` ⇒ 静态判据只看
+    ``node.level == 0`` ⇒ 对相对 import 不可见 ⇒ 只有逃逸扫描器能抓住它。
+
+    ⚠️ **报告内容**也必须可读（不只「有命中」）：点名**源文件** / **level** /
+    **目标包**三样 ⇒ 命中了也要能定位。
+    """
+    _with_synthetic_source(monkeypatch, source, rel)
+    hits = scan_escaping_relative_imports(root_rel)
+    assert hits, f"漏过：{root_rel} 下的相对逃逸（{source!r}）"
+    assert hits[0][0] == rel, f"逃逸报告没点名源文件：{hits[0]}"
+    assert "level=3" in hits[0][2], f"逃逸报告里没有 level：{hits[0]}"
+    assert "workflows" in hits[0][2], f"逃逸报告里没有点名目标包：{hits[0]}"
 
 
 def test_domain_root_is_guarded_too(monkeypatch):
@@ -1123,15 +1139,17 @@ def test_every_guarded_python_file_is_actually_parsed() -> None:
     ``if tree is None: continue`` ⇒ **解析失败的文件被静默跳过**，分层看守
     **看不见**它们 ⇒ 一条分层破口可以藏在里面而门禁全绿。
 
-    ⇒ 本条把「跳过」变成**红**并点名文件，并把**执行域**写成可复算的计数：
-    **解析到的文件数 == 遍历到的文件数**（逐个扫描根 + 合计）。
+    ⇒ 本条把「跳过」变成**红**并点名文件（逐个扫描根 ⇒ 执行域可见）。
 
     ⚠️ **判别点是真的**：本仓 ``packages/**`` 扫描根内有 **3 个带 BOM 的源文件**，
     用 ``utf-8`` 读它们 ⇒ ``ast.parse`` 抛 ``SyntaxError`` ⇒ 被跳过 ⇒ 本条红；
     改 ``utf-8-sig`` 后 ⇒ 全部解析成功 ⇒ 本条绿。
+
+    ⚠️ 2026-10-24 瘦身：原末尾还有一条 ``assert parsed_all == total_all``
+    （执行域计数对账）已删——它被上面那条 ``assert not skipped`` **完全蕴含**
+    （skipped 为空 ⇒ 解析到的 == 遍历到的）⇒ 零判别力损失；两个计数器随之成为
+    死代码，一并删除。
     """
-    total_all = 0
-    parsed_all = 0
     for root_rel, _forbidden, _desc in LAYERING_DIRECTIONS:
         files = _iter_py_files(REPO_ROOT / root_rel)
         skipped = [_rel(p) for p in files if _parse(p) is None]
@@ -1139,17 +1157,12 @@ def test_every_guarded_python_file_is_actually_parsed() -> None:
             f"{root_rel} 下这些 .py **解析失败被静默跳过**（分层看守看不见它们）：{skipped}"
             "（BOM 文件须用 utf-8-sig 读——Python import 容忍 BOM，ast.parse 不容忍）"
         )
-        total_all += len(files)
-        parsed_all += len(files) - len(skipped)
 
     # 扫描根必须覆盖**整个库层**（``packages/``）⇒ 「全仓 .py」在库层内无死角。
     scanned_roots = {root_rel for root_rel, _f, _d in LAYERING_DIRECTIONS}
     assert "packages" in scanned_roots, (
         f"扫描根没覆盖整个库层 packages/（当前 {sorted(scanned_roots)}）"
         "⇒ 「全仓 .py 无死角」这个前提不成立"
-    )
-    assert parsed_all == total_all, (
-        f"执行域有洞：解析到 {parsed_all} 个 / 遍历到 {total_all} 个 .py"
     )
 
 
@@ -1203,14 +1216,26 @@ def _actual_core_to_domain_imports() -> set[tuple[str, str]]:
     return out
 
 
-def test_layering_directions_include_core_to_domain() -> None:
-    """④ ``core → domain`` 必须登记成一条方向边（Lead 裁决 2026-10-23）。
+@pytest.mark.parametrize(
+    ("root", "forbidden"),
+    [
+        pytest.param("packages/core", "packages.domain", id="core-to-domain"),
+        pytest.param("packages/domain", "packages.domain", id="domain-to-domain"),
+    ],
+)
+def test_layering_directions_include_domain_to_domain(root: str, forbidden: str) -> None:
+    """④ **受控例外的两条方向边必须登记在册**（``core → domain`` / ``domain → domain``）。
 
     ⚠️ 判别点：方向边**在册**但白名单**没登记** ⇒ 门禁红（受控例外的另一半）。
+
+    ⚠️ **函数名沿用旧名**：T7-M5 突变规格（``tests/mutation_specs/
+    t7_character_delete_and_layering.py``）的注释点名本函数名 ⇒ 保留原名可让
+    「删掉 domain→domain 这条边 ⇒ 必红」这条指向保持可读；本函数现同时覆盖
+    ``core → domain`` 那条边（参数 id = ``core-to-domain``）。
     """
-    pairs = {(root, forbidden) for root, forbidden, _desc in LAYERING_DIRECTIONS}
-    assert ("packages/core", "packages.domain") in pairs, (
-        f"分层方向里没有 core↛domain：{sorted(pairs)}"
+    pairs = {(r, f) for r, f, _desc in LAYERING_DIRECTIONS}
+    assert (root, forbidden) in pairs, (
+        f"分层方向里没有 {root}↛{forbidden}：{sorted(pairs)}"
     )
 
 
@@ -1390,34 +1415,14 @@ def test_dynamic_apps_prose_is_not_flagged(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_domain_root_relative_escape_is_detected(monkeypatch) -> None:
-    """**A2 判别**：以 **domain** 为根调用逃逸扫描器 ⇒ 必须报出 level=3 的逃逸。
-
-    ``packages/domain/character/service.py``（包深度 3）里写
-    ``from ...workflows.chapter_write import pipeline`` ⇒ level=3 >= 3
-    ⇒ **真实解析到** ``packages.workflows.chapter_write``
-    ⇒ 而静态判据只看 ``node.level == 0`` ⇒ 对相对 import 不可见
-    ⇒ 只有逃逸扫描器能抓住它。
-    """
-    source = "from ...workflows.chapter_write import pipeline"
-    _with_synthetic_source(monkeypatch, source, "packages/domain/character/service.py")
-    hits = scan_escaping_relative_imports("packages/domain")
-    assert hits, "漏过：domain 根下的相对逃逸（level=3 → packages.workflows.*）"
-    assert hits[0][0] == "packages/domain/character/service.py", (
-        f"逃逸报告没点名源文件：{hits[0]}"
-    )
-    assert "level=3" in hits[0][2], f"逃逸报告里没有 level：{hits[0]}"
-    assert "workflows" in hits[0][2], f"逃逸报告里没有点名目标包：{hits[0]}"
-
-
-def test_domain_root_relative_escape_scan_covers_real_domain_files() -> None:
-    """**A2 反向用例**：domain 域**真实**文件里没有逃逸 ⇒ 扫描器必须报 0 条。
-
-    ⚠️ 这条钉住「扫描域根被接上」这件事：若有人把 domain 根从扫描范围里去掉，
-    合成用例仍会绿（它自己喂了合成源码）⇒ 必须另有一条**走真实文件**的判定。
-    """
-    hits = scan_escaping_relative_imports("packages/domain")
-    assert hits == [], f"packages/domain 下出现逃出本包的相对 import：{hits}"
+# ⚠️ 2026-10-24 瘦身：本节原两条用例已并入/删除——
+#   ① 「domain 根下的相对逃逸必须报出」⇒ 并入参数化的
+#      ``test_relative_escape_is_detected``（id = ``domain-root``），且**报告内容**
+#      三样（点名源文件 / level / 目标包）全部保留；
+#   ② 「domain 域**真实**文件里没有逃逸 ⇒ 报 0 条」⇒ 删除——被
+#      ``test_no_escaping_relative_imports``（参数化覆盖 ``GUARDED_ROOTS``，含
+#      ``packages/domain`` ⇒ 走**真实文件**断言 0 命中）+ ``test_guarded_roots_include_domain``
+#      （接线钉）**完全覆盖** ⇒ 零判别力损失。
 
 
 def test_guarded_roots_include_domain() -> None:
@@ -1520,17 +1525,9 @@ def _actual_domain_to_domain_imports() -> set[tuple[str, str]]:
     return out
 
 
-def test_layering_directions_include_domain_to_domain() -> None:
-    """**A7 判别**：``domain → domain`` 必须登记成一条方向边。
-
-    ⚠️ 2026-10-23 task-7 A7：首条 domain→domain 依赖已存在（character 域复用
-    world 域的错误类型与共用守卫）⇒ 方向表里没有这条边 ⇒ **任何**域间依赖都不受
-    机器约束。
-    """
-    pairs = {(root, forbidden) for root, forbidden, _desc in LAYERING_DIRECTIONS}
-    assert ("packages/domain", "packages.domain") in pairs, (
-        f"分层方向里没有 domain→domain：{sorted(pairs)}"
-    )
+# ⚠️ 2026-10-24 瘦身：「domain → domain 必须登记成一条方向边」已并入上方
+# ``test_layering_directions_include_domain_to_domain``（参数 id = ``domain-to-domain``）
+# ⇒ 与 core→domain 那条边共用一个参数化函数 ⇒ T7-M5 仍能命中（删掉这条边 ⇒ 该参数变红）。
 
 
 def test_domain_to_domain_allowlist_matches_actual_imports() -> None:

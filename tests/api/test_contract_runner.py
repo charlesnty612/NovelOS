@@ -172,6 +172,70 @@ def test_assert_openapi_ref_rejects_missing_ref():
         assert_openapi_ref(openapi, "/x", "get", "200", "XOut")
 
 
+def _openapi_with_ref(ref: str, schemas: dict[str, dict]) -> dict:
+    """造一份「某端点的 200 响应指向给定 ``$ref``」的最小 OpenAPI 片段。"""
+    return {
+        "paths": {
+            "/x": {
+                "get": {
+                    "responses": {
+                        "200": {"content": {"application/json": {"schema": {"$ref": ref}}}}
+                    }
+                }
+            }
+        },
+        "components": {"schemas": schemas},
+    }
+
+
+def test_assert_openapi_ref_rejects_ref_pointing_at_another_model() -> None:
+    """``$ref`` 存在，但**指向的不是要求的那个模型** ⇒ 必红（V1-1）。
+
+    ⚠️ 失效方向：``$ref`` 存在 ≠ ``$ref`` 指对了。撤掉 ``endswith(f"/{model_name}")``
+    那道检查 ⇒ 本条**全绿**（下面那条「模型没进 components」会挡住别的洞，但挡不住
+    这个：``OtherOut`` 明明在 components 里，只是名字不对）。
+    """
+    openapi = _openapi_with_ref(
+        "#/components/schemas/OtherOut", {"OtherOut": {"type": "object"}}
+    )
+    with pytest.raises(AssertionError) as exc:
+        assert_openapi_ref(openapi, "/x", "get", "200", "XOut")
+    msg = str(exc.value)
+    assert "OtherOut" in msg, msg
+    assert "XOut" in msg, msg
+
+
+def test_assert_openapi_ref_rejects_model_missing_from_components() -> None:
+    """``$ref`` 指向的模型**没进** ``components.schemas`` ⇒ 必红（V1-2）。
+
+    ⚠️ 这是**两个独立**的洞：``$ref`` 的名字对了（前一条的反面），但
+    ``components.schemas`` 里没有它 ⇒ 前端按名字取不到 ⇒ 契约是空的。
+    """
+    openapi = _openapi_with_ref("#/components/schemas/XOut", {})
+    with pytest.raises(AssertionError) as exc:
+        assert_openapi_ref(openapi, "/x", "get", "200", "XOut")
+    msg = str(exc.value)
+    assert "XOut" in msg, msg
+    assert "components.schemas" in msg, msg
+
+
+def test_openapi_properties_and_required_reports_missing_required_key() -> None:
+    """``required`` 集合比期望**少一键** ⇒ 必红，且消息点名缺失的键（V1-1/V1-2 的第三条）。
+
+    ⚠️ 失效方向：把 ``required`` 比对改成「只比个数」或「只判子集」⇒ 本条照旧绿
+    ⇒ 少一个必填键不会有人发现 ⇒ 前端会以为该键**保证存在**。
+    """
+    schema = {"properties": {"alpha": {}, "beta": {}}, "required": ["alpha"]}
+    with pytest.raises(AssertionError) as exc:
+        assert_openapi_properties_and_required(
+            schema, {"alpha", "beta"}, {"alpha", "beta"}, hint="——G10 病：必填键掉了"
+        )
+    msg = str(exc.value)
+    assert "required" in msg, msg
+    assert "beta" in msg, msg
+    assert "G10" in msg, msg
+
+
 def test_assert_list_items_named_ref_rejects_anonymous_items():
     """裸 ``list[dict]`` ⇒ items 是匿名 object ⇒ 前端拿到 ``Record<string, unknown>``
     ⇒ **等于没有契约** ⇒ 必红。"""

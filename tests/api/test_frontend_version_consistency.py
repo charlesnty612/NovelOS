@@ -20,6 +20,10 @@
 把 ``pyproject.toml``（单一源）改成**假版本** ⇒ **web 三处的检查必须同时报红**；
 恢复后必须**同时报绿**。
 
+另有一条**覆盖面**判别（V4-1）：``check_app_version_consistency`` 产出的**每一条**
+检查都必须已被本文件显式登记（``WEB_CHECK_IDS`` ∪ ``NON_WEB_CHECK_IDS``）
+⇒ 检查器新增第 4 处 web 版本副本时**必红**（原先按手挑的 3 个 id 过滤 ⇒ 被静默吞掉）。
+
 ⚠️ **不动仓库里的真文件**：变更只发生在 ``tmp_path`` 里的**副本**上
 （并发跑时真 pyproject 随时可能被别的实现者改）。
 ⚠️ **断言打在实际读取到的值上**（版本号本身），不是「函数被调用」。
@@ -68,6 +72,21 @@ def _load_checker():
 
 
 CHECKER = _load_checker()
+
+#: **非 web 侧**的 ``app-version-consistency/*`` 检查 id（skill 自身 + pyproject 交叉
+#: 验证 + 各平台插件清单侧）。
+#:
+#: ⚠️ 平台侧的名字**从检查器自己的 ``PLUGIN_MANIFESTS`` 推导**（不手挑）⇒
+#: 检查器新增一个平台清单时，这里自动跟着长；**新增一个「web 版本副本」检查
+#: （例如 ``app-version-consistency/web-vite-config``）时不在本集合里** ⇒
+#: 由 :func:`test_checker_produces_no_unclassified_version_check` 判红。
+NON_WEB_CHECK_IDS = frozenset(
+    {
+        "app-version-consistency/skill",
+        "app-version-consistency/pyproject",
+    }
+    | {f"app-version-consistency/{platform}" for platform in CHECKER.PLUGIN_MANIFESTS}
+)
 
 
 def _copy_version_files(dest: Path) -> Path:
@@ -187,6 +206,45 @@ def test_restoring_pyproject_version_makes_every_web_check_green(tmp_path: Path)
         assert repr(original_version) in check.message, (
             f"{check_id} 的诊断里没有恢复后的版本 {original_version!r}：{check.message}"
         )
+
+
+def test_checker_produces_no_unclassified_version_consistency_check() -> None:
+    """``check_app_version_consistency`` 产出的**每一条**检查都必须已被本文件分类。
+
+    为什么需要这条（V4-1：手挑域 → 全集推导）
+    -----------------------------------------
+    本文件原先只按 ``WEB_CHECK_IDS``（**手写的 3 个 id**）过滤检查器的输出
+    ⇒ 检查器**新增第 4 处 web 版本副本**时，它的 check_id 不在 ``WEB_CHECK_IDS`` 里
+    ⇒ 被 :func:`_web_checks` 的过滤**静默吞掉** ⇒ 上面三条用例照旧全绿
+    ⇒ 「新增了一处版本副本，却没有任何机器看守它」。
+
+    ⇒ 本条断言「**全集 ⊆ 已知集合**」：检查器产出任何**未登记**的检查 ⇒ 必红。
+    （登记 = 把 id 加进 ``WEB_CHECK_IDS`` 或 ``NON_WEB_CHECK_IDS``；两者都是
+    **显式**登记，不是自动放行。）
+
+    ⚠️ 这条**不是**「把 web 三处的断言重复一遍」：它守的是**覆盖面**——
+    「检查器新增了检查 ⇒ 必须有人显式决定这条新检查要不要被守」。
+    """
+    results = CHECKER.check_app_version_consistency(SKILL_DIR, REPO_ROOT)
+    produced = {c.check_id for c in results}
+    allowed = set(WEB_CHECK_IDS) | set(NON_WEB_CHECK_IDS)
+
+    unknown = sorted(produced - allowed)
+    assert not unknown, (
+        "check_app_version_consistency 产出了**未登记**的检查 id："
+        f"{unknown}\n"
+        "⇒ 它不属于 web 三处（WEB_CHECK_IDS），也不属于 skill/plugin 类"
+        "（NON_WEB_CHECK_IDS）⇒ 本文件对它**零看守**。\n"
+        "处置：把它登记进 WEB_CHECK_IDS / NON_WEB_CHECK_IDS（并补相应断言），"
+        "或确认它不需要被守后显式豁免（写清理由）。"
+    )
+
+    # 反向：登记在案的 web 三处必须**真的被产出**（防「登记了却没实现」）。
+    missing = sorted(set(WEB_CHECK_IDS) - produced)
+    assert not missing, (
+        f"WEB_CHECK_IDS 登记了 {missing}，但检查器**没有产出**它们 "
+        "⇒ 登记与实现已分叉"
+    )
 
 
 def test_selftest_covers_the_web_version_checks() -> None:

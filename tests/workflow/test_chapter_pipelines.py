@@ -4,6 +4,27 @@
 - project → character → chapter → init state
 - plan → write → review (approve) → commit (无 HIGH)
 - 断言 chapters.status=COMMITTED、state_version 递增、drafts/plan_json 落库
+
+【2026-10-24 拆分留痕 · 原自登记 TODO 的裁决落地】
+原文件 1836 行（>1500 红线），自登记 TODO（本文件历史 :1234-1248）要求「触发条件成立
+即必须先落裁决」。本次按 TODO 的**方案①**（两节并入同一模块，跨节搬运）落地：
+
+- 本文件 = 章节生命周期主簇（plan→write→review→commit + 草稿版本选择 + writer 落库规整）
+- ``tests/workflow/test_chapter_pipelines_auto_revise.py`` = 改稿回路簇（auto_revise
+  回路 + auto_revise · 模型档案覆盖，两节合并进同一模块 ⇒ TODO 的「劈成两段」问题
+  在拆分的同时被消解，不再需要「二选一」的二次搬运）
+
+用例数守恒：拆分前 17 ⇒ 拆分后 10 + 7 = 17（``--collect-only -q`` 实测）。
+共享的 mock 工厂 / 请求 helper **全部留在本文件**，由新文件 import（不复制第二份 ⇒
+两文件口径恒等；这是 T-4「拆分是夹具契约搬运，不是文本搬运」的落法）。
+
+【2026-10-24 样板清理留痕】
+- 62+ 条「同一 run 连续多次 ``_wait_run_terminal``」的恒等重复调用已删（第 1 条到达终态
+  后其余恒立即返回）；异 run 的调用（``first_review_run_id`` 等）一条未动。
+- 4 处逐字复制的「轮询 list 端点找回路子 run」块 → 复用文件内已有的
+  ``_wait_auto_revise_child_runs``（原只被 2 例用）。
+- 7 处 plan→write 样板 → ``_plan_and_write`` / ``_plan`` / ``_write``。
+- 3 个同骨架 writer mock → ``_writer_script(prose=..., deviations=...)`` 派生式。
 """
 
 from __future__ import annotations
@@ -20,7 +41,7 @@ from ._shared import _create_app, _get_run_via_http, _make_client
 
 # ---------------------------------------------------------------------------
 # 公共 helper：run 终态轮询 / app 与 client 构造 / 项目·角色·章节创建
-# + 各 agent 的脚本化 mock 响应（director / writer 三版 / observer）
+# + 各 agent 的脚本化 mock 响应（director / writer 派生式 / observer）
 # ---------------------------------------------------------------------------
 
 # 异步化适配（Sprint P0）：轮询 run 终态 + 重读 GET /runs 拿真实 status / pause_payload
@@ -45,8 +66,6 @@ async def _wait_run_terminal(app, run_id: str, *, expected=("COMPLETED", "PAUSED
             return run
         await asyncio.sleep(0.2)
     raise AssertionError(f"run {run_id} did not reach {expected} within {timeout}s (last={last_run['status']!r})")
-
-
 
 
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
@@ -83,6 +102,53 @@ async def _sync_prompts(app) -> None:
     docs_dir = Path.cwd().resolve() / "docs" / "agents" / "prompts"
     r = await _request(app, "POST", f"/api/agents/sync?docs_dir={docs_dir.as_posix()}")
     assert r.status_code == 200, r.text
+
+
+async def _plan(
+    app, pid: str, cid: str, *, mock_providers: dict, author_intent: str | None = None,
+) -> dict:
+    """起 chapter-plan 并等终态 + 等 COMPLETED；返回 plan run dict。
+
+    两等各有分工，缺一不可：
+    - 先等「终态」：同 chapter 的下一次 POST 不撞 409 并发闸门的前置
+      （该等待由 ``tests/workflow/_async_helpers.py`` 第 5 步自动插入）；
+    - 后等「COMPLETED」：这才是「这一步真的成功」的断言（PAUSED/FAILED 都不算数）。
+    """
+    plan_body: dict = {"mock_providers": mock_providers}
+    if author_intent is not None:
+        plan_body["author_intent"] = author_intent
+    r = await _request(
+        app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
+        json=plan_body,
+    )
+    assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    return await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+
+
+async def _write(app, pid: str, cid: str, *, mock_providers: dict) -> dict:
+    """起 chapter-write 并等终态 + 等 COMPLETED；返回 write run dict（分工同 ``_plan``）。"""
+    r = await _request(
+        app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
+        json={"mock_providers": mock_providers},
+    )
+    assert r.status_code == 201, r.text
+    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
+    return await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
+
+
+async def _plan_and_write(
+    app, pid: str, cid: str, *, mock_providers: dict, author_intent: str | None = None,
+) -> tuple[dict, dict]:
+    """plan → write 两步样板（7 处用例逐字重复的那一段）。
+
+    返回 ``(plan_run, write_run)`` 两个终态 run dict。
+    """
+    plan_run = await _plan(
+        app, pid, cid, mock_providers=mock_providers, author_intent=author_intent,
+    )
+    write_run = await _write(app, pid, cid, mock_providers=mock_providers)
+    return plan_run, write_run
 
 
 def _director_script() -> list[str]:
@@ -134,33 +200,65 @@ def _director_script() -> list[str]:
     ]
 
 
-def _writer_script() -> list[str]:
-    """合规 writer-output.v1 输出。"""
-    prose = (
-        "戌时的更鼓从街尾传过来。玉惜轩的窗半掩着，竹影斜斜地落在青石地砖上。"
-        "苏婉清坐在窗下，手里那只茶盏已温了许久，她却没喝。\n\n"
-        "林渊立在博古架前，背对着她，似乎在翻检什么。松烟墨香被夜风裹着送进来，"
-        "灯芯爆了一下花，啪地轻响。她开口问起父亲遗物。"
-    )
-    return [
-        json.dumps(
-            {
-                "schema_version": "writer-output.v1",
-                "prompt_version": "writer:v1",
-                "chapter_id": "ch_xxx",
-                "prose": prose,
-                "self_report": {
-                    "slots_filled": ["slot_001"],
-                    "word_count": len(prose),
-                    "scene_count": 1,
-                    "deviations": [],
-                    "forbidden_word_hits": [],
-                    "self_check_notes": "",
-                },
-            },
-            ensure_ascii=False,
-        )
-    ]
+# ---------------------------------------------------------------------------
+# writer mock：三个正文 + 一份「整章改写申报」，共用同一个 JSON 骨架构造器
+# ---------------------------------------------------------------------------
+
+_DEFAULT_WRITER_PROSE = (
+    "戌时的更鼓从街尾传过来。玉惜轩的窗半掩着，竹影斜斜地落在青石地砖上。"
+    "苏婉清坐在窗下，手里那只茶盏已温了许久，她却没喝。\n\n"
+    "林渊立在博古架前，背对着她，似乎在翻检什么。松烟墨香被夜风裹着送进来，"
+    "灯芯爆了一下花，啪地轻响。她开口问起父亲遗物。"
+)
+
+_REVISED_WRITER_PROSE = (
+    "戌时的更鼓从街尾传过来。苏婉清坐在窗下，手里那只茶盏已温了许久，她却没喝。\n\n"
+    "林渊闻言沉默良久，终是轻轻点头：\"令尊遗物，确有一件我尚未说清。\""
+)
+
+_QUOTES_LEAK_WRITER_PROSE = (
+    "戌时的更鼓从街尾传过来。\n\n"
+    "「你来晚了。」苏婉清把茶盏往他那边推了推，"
+    "「这盏茶温了三回。」\n\n"
+    "他忽然想起recalled_passages里自己的那句话，"
+    "喉头动了一下，终究没说出口。灯芯爆了个花，"
+    "啪地轻响，影子在青石地砖上晃了晃，又稳住了。"
+)
+
+# 契约合规路径②：整章改写必须申报（writer-v3.md §6.1「越界必申报」）。
+_REWRITE_DEVIATION = {
+    "kind": "other",
+    "from": "修订后的草稿内容：林渊闻言沉默良久，终是轻轻点头。",
+    "to": "整章按 mock 固定稿重写（与 25 字上游稿零逐字重合）",
+    "reason": "mock 输出与上游稿零逐字重合：整章改写，超出定向局部修改范围",
+}
+
+
+def _writer_script(*, prose: str = _DEFAULT_WRITER_PROSE, deviations: tuple[dict, ...] = ()) -> list[str]:
+    """合规 writer-output.v1 输出。
+
+    三个 writer mock 曾是逐字复制的三份骨架（只有正文不同），现收敛成一个构造器：
+    - ``prose`` 换正文；
+    - ``deviations`` 非空时写进 ``self_report.deviations``（契约合规路径②）。
+
+    输出字节与拆分前逐位一致（字段顺序不变：``self_report`` 内 deviations 仍在
+    ``word_count`` / ``scene_count`` 之后）。
+    """
+    payload = {
+        "schema_version": "writer-output.v1",
+        "prompt_version": "writer:v1",
+        "chapter_id": "ch_xxx",
+        "prose": prose,
+        "self_report": {
+            "slots_filled": ["slot_001"],
+            "word_count": len(prose),
+            "scene_count": 1,
+            "deviations": list(deviations),
+            "forbidden_word_hits": [],
+            "self_check_notes": "",
+        },
+    }
+    return [json.dumps(payload, ensure_ascii=False)]
 
 
 def _writer_declared_rewrite_script() -> list[str]:
@@ -173,43 +271,17 @@ def _writer_declared_rewrite_script() -> list[str]:
     必申报」申报该次改写即放行。不改其它测试共享的 _writer_script（保持零申报
     期望）。
     """
-    payload = json.loads(_writer_script()[0])
-    payload["self_report"]["deviations"] = [
-        {
-            "kind": "other",
-            "from": "修订后的草稿内容：林渊闻言沉默良久，终是轻轻点头。",
-            "to": "整章按 mock 固定稿重写（与 25 字上游稿零逐字重合）",
-            "reason": "mock 输出与上游稿零逐字重合：整章改写，超出定向局部修改范围",
-        }
-    ]
-    return [json.dumps(payload, ensure_ascii=False)]
+    return _writer_script(deviations=(_REWRITE_DEVIATION,))
 
 
 def _writer_revised_script() -> list[str]:
     """改稿后的 writer-output.v1 输出（用于 auto-revise 回路第二轮 write）。"""
-    prose = (
-        "戌时的更鼓从街尾传过来。苏婉清坐在窗下，手里那只茶盏已温了许久，她却没喝。\n\n"
-        "林渊闻言沉默良久，终是轻轻点头：\"令尊遗物，确有一件我尚未说清。\""
-    )
-    return [
-        json.dumps(
-            {
-                "schema_version": "writer-output.v1",
-                "prompt_version": "writer:v1",
-                "chapter_id": "ch_xxx",
-                "prose": prose,
-                "self_report": {
-                    "slots_filled": ["slot_001"],
-                    "word_count": len(prose),
-                    "scene_count": 1,
-                    "deviations": [],
-                    "forbidden_word_hits": [],
-                    "self_check_notes": "",
-                },
-            },
-            ensure_ascii=False,
-        )
-    ]
+    return _writer_script(prose=_REVISED_WRITER_PROSE)
+
+
+def _writer_script_with_quotes_and_leak() -> list[str]:
+    """含「」对话与内部标识的 writer 输出：用于断言落库前的确定性规整。"""
+    return _writer_script(prose=_QUOTES_LEAK_WRITER_PROSE)
 
 
 def _observer_noop_script() -> list[str]:
@@ -254,16 +326,11 @@ def test_chapter_pipelines_end_to_end(tmp_path: Path):
             }
 
             # 1) chapter-plan
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
-                json={"author_intent": "让女主第一次怀疑男主", "mock_providers": mock_providers},
+            plan_run = await _plan(
+                app, pid, cid,
+                mock_providers=mock_providers,
+                author_intent="让女主第一次怀疑男主",
             )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            plan_run = r.json()
-            plan_run = await _wait_run_terminal(app, plan_run["run_id"], expected=("COMPLETED",))
             assert plan_run["current_node"] is None
 
             # 断言 chapters.plan_json 已落库
@@ -274,16 +341,7 @@ def test_chapter_pipelines_end_to_end(tmp_path: Path):
             assert ch["status"] == "PLANNED"  # plan 不改 status
 
             # 2) chapter-write
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
-                json={"mock_providers": mock_providers},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            write_run = r.json()
-            write_run = await _wait_run_terminal(app, write_run["run_id"], expected=("COMPLETED",))
+            await _write(app, pid, cid, mock_providers=mock_providers)
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.status_code == 200
             ch = r.json()
@@ -307,10 +365,7 @@ def test_chapter_pipelines_end_to_end(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            review_resp = r.json()
-            review_resp = await _wait_run_terminal(app, review_resp["run_id"], expected=("PAUSED",))
+            review_resp = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
             assert "pause_payload" in review_resp
 
             # resume with approved=true
@@ -319,8 +374,7 @@ def test_chapter_pipelines_end_to_end(tmp_path: Path):
                 json={"human_input": {"approved": True}},
             )
             assert r.status_code == 200, r.text
-            final = r.json()
-            final = await _wait_run_terminal(app, final["run_id"], expected=("COMPLETED",))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.status_code == 200
             assert r.json()["status"] == "REVIEWED"
@@ -332,10 +386,7 @@ def test_chapter_pipelines_end_to_end(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            commit_resp = r.json()
-            commit_resp = await _wait_run_terminal(app, commit_resp["run_id"], expected=("COMPLETED",))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
 
             # 断言 chapters.status=COMMITTED + state_version 递增
             r = await _request(app, "GET", f"/api/chapters/{cid}")
@@ -382,34 +433,16 @@ def test_chapter_review_rejected_results_in_failed(tmp_path: Path):
             }
 
             # 先 plan + write
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
-                json={"author_intent": "意图", "mock_providers": mock_providers},
+            await _plan_and_write(
+                app, pid, cid, mock_providers=mock_providers, author_intent="意图",
             )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
-                json={"mock_providers": mock_providers},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-
-            # review
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
                 json={"mock_providers": mock_providers},
             )
             assert r.status_code == 201, r.text
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            paused = r.json()
-            paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
+            paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
 
             # resume with approved=false → mark_reviewed 抛错 → run FAILED
             r = await _request(
@@ -417,8 +450,7 @@ def test_chapter_review_rejected_results_in_failed(tmp_path: Path):
                 json={"human_input": {"approved": False}},
             )
             assert r.status_code == 200, r.text
-            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
-            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("FAILED",))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
 
             # chapters.status 保持 DRAFTED
             r = await _request(app, "GET", f"/api/chapters/{cid}")
@@ -464,22 +496,9 @@ def test_chapter_review_revise_loop_end_to_end(tmp_path: Path):
             }
 
             # 1) plan + write
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
-                json={"author_intent": "意图", "mock_providers": mock_providers},
+            await _plan_and_write(
+                app, pid, cid, mock_providers=mock_providers, author_intent="意图",
             )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
-                json={"mock_providers": mock_providers},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.json()["status"] == "DRAFTED"
 
@@ -490,10 +509,7 @@ def test_chapter_review_revise_loop_end_to_end(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            paused = r.json()
-            paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
+            paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
 
             # 3) resume revise:true + note → run FAILED(rejected-for-revision)
             # P0：auto_revise 默认开启，为验证原手动改稿闭环显式关闭。
@@ -505,8 +521,7 @@ def test_chapter_review_revise_loop_end_to_end(tmp_path: Path):
                 },
             )
             assert r.status_code == 200, r.text
-            final = r.json()
-            final = await _wait_run_terminal(app, final["run_id"], expected=("FAILED",))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
             # resume 响应不含 error 字段（router 只回 run_id/status/current_node），经 GET /runs/{id} 校验
             r = await _request(app, "GET", f"/api/runs/{paused['run_id']}")
             assert r.status_code == 200
@@ -527,16 +542,7 @@ def test_chapter_review_revise_loop_end_to_end(tmp_path: Path):
             assert r.status_code == 201, r.text
 
             # 5) 重跑 write（DRAFTED 允许）→ 新 draft 版本落库（v1=write、v2=人工改稿、v3=重跑 write）
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
-                json={"mock_providers": mock_providers},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            write_run = r.json()
-            write_run = await _wait_run_terminal(app, write_run["run_id"], expected=("COMPLETED",))
+            await _write(app, pid, cid, mock_providers=mock_providers)
             conn = get_connection(app.state.settings.db_path)
             try:
                 drafts = conn.execute(
@@ -554,17 +560,13 @@ def test_chapter_review_revise_loop_end_to_end(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            paused2 = r.json()
-            paused2 = await _wait_run_terminal(app, paused2["run_id"], expected=("PAUSED",))
+            paused2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
             r = await _request(
                 app, "POST", f"/api/runs/{paused2['run_id']}/resume",
                 json={"human_input": {"approved": True}},
             )
             assert r.status_code == 200, r.text
-            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
-            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.json()["status"] == "REVIEWED"
 
@@ -616,8 +618,7 @@ def test_chapter_review_revise_without_note_clears_revision_note(tmp_path: Path)
                 },
             )
             assert r.status_code == 200
-            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
-            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("FAILED",))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
             r = await _request(app, "GET", f"/api/runs/{paused['run_id']}")
             assert r.status_code == 200
             assert r.json()["error"] == "rejected-for-revision"
@@ -651,8 +652,7 @@ def test_chapter_commit_without_review_fails(tmp_path: Path):
                 json={"mock_providers": {"observer": _observer_noop_script()}},
             )
             assert r.status_code == 201, r.text
-            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
-            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("FAILED",))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
 
     asyncio.run(run())
 
@@ -685,23 +685,20 @@ def test_chapter_write_on_committed_chapter_fails(tmp_path: Path):
                         json={"mock_providers": mock_providers},
                     )
                     assert r.status_code == 201, r.text
-                    paused = r.json()
-                    paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
+                    paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
                     r = await _request(
                         app, "POST", f"/api/runs/{paused['run_id']}/resume",
                         json={"human_input": {"approved": True}},
                     )
                     assert r.status_code == 200, r.text
-                    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
-                    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
+                    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
                 else:
                     r = await _request(
                         app, "POST", f"/api/projects/{pid}/chapters/{cid}/{path}",
                         json={"mock_providers": mock_providers},
                     )
                     assert r.status_code == 201, r.text
-                    r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
-                    r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
+                    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
 
             r = await _request(app, "GET", f"/api/chapters/{cid}")
             assert r.json()["status"] == "COMMITTED"
@@ -723,10 +720,7 @@ def test_chapter_write_on_committed_chapter_fails(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            write_run = r.json()
-            write_run = await _wait_run_terminal(app, write_run["run_id"], expected=("FAILED",))
+            await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
 
             conn = get_connection(app.state.settings.db_path)
             try:
@@ -763,8 +757,6 @@ def test_list_runs_endpoint(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
 
             r = await _request(app, "GET", f"/api/projects/{pid}/runs")
             assert r.status_code == 200
@@ -774,324 +766,6 @@ def test_list_runs_endpoint(tmp_path: Path):
             # 每行必须带 label（人类可读中文名）；chapter-plan run 的 label 应为 "生成计划"
             assert all("label" in r for r in runs)
             assert any(r["workflow_name"] == "chapter-plan" and r["label"] == "生成计划" for r in runs)
-
-    asyncio.run(run())
-
-
-# ---------------------------------------------------------------------------
-# auto_revise 回路：跑一轮后批准 / 开关关闭保持 FAILED / resume 后 2s 内返回
-# ---------------------------------------------------------------------------
-
-
-def test_chapter_review_auto_revise_loop_once_then_approve(tmp_path: Path):
-    """P0 自动改稿回路：revise 一次后 approve。
-
-    review PAUSED → resume {revise:true, auto_revise_max:2} → 自动重跑 write→review
-    → 新 review PAUSED → resume {approved:true} → COMPLETED + REVIEWED。
-    验证 drafts 产生 v2（自动 write 追加新版本）。
-
-    异步化后适配：resume 端点立即返回 RUNNING，run_id 仍是原 review run；
-    auto_revise 在 daemon 线程里跑 → 实际写入的「第二次 review run」需要通过
-    GET /projects/{pid}/runs list 端点按时间序找到（status=PAUSED 且 != first_review_run_id）。
-    """
-    app = _create_app(tmp_path)
-
-    async def run():
-        async with app.router.lifespan_context(app):
-            await _sync_prompts(app)
-            pid = await _make_project(app)
-            await _make_character(app, pid)
-            cid = await _make_chapter(app, pid, 1, "第一章")
-
-            first_mock = {
-                "director": _director_script(),
-                "writer": _writer_script(),
-            }
-
-            # 1) plan + write v1
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
-                json={"author_intent": "意图", "mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
-                json={"mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-
-            # 2) review → PAUSED
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
-                json={"mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            paused = r.json()
-            paused = await _wait_run_terminal(app, paused["run_id"], expected=("PAUSED",))
-            first_review_run_id = paused["run_id"]
-
-            # 3) resume with revise + auto_revise_max=2：触发自动回路（daemon 线程执行）
-            revise_mock = {
-                "director": _director_script(),
-                "writer": _writer_revised_script(),  # 改稿后 prose
-            }
-            r = await _request(
-                app, "POST", f"/api/runs/{first_review_run_id}/resume",
-                json={
-                    "human_input": {"approved": False, "revise": True, "note": "节奏太散，重写"},
-                    "auto_revise_max": 2,
-                    "mock_providers": revise_mock,
-                },
-            )
-            assert r.status_code == 200, r.text
-            # 异步化：响应仍指向原 review run；等它进 FAILED 即 daemon 链路启动完成。
-            assert r.json()["run_id"] == first_review_run_id
-            assert r.json()["status"] == "RUNNING"
-            await _wait_run_terminal(app, first_review_run_id, expected=("FAILED",))
-
-            # 找 daemon 回路产生的「第二次 review run」：list 端点过滤 chapter_review + PAUSED
-            # 且 run_id != first_review_run_id 的最新一行。
-            second_review_run_id: str | None = None
-            import time as _list_t
-            _list_deadline = _list_t.monotonic() + 120.0
-            while _list_t.monotonic() < _list_deadline:
-                rr = await _request(app, "GET", f"/api/projects/{pid}/runs")
-                assert rr.status_code == 200, rr.text
-                candidates = [
-                    row for row in rr.json()
-                    if row.get("workflow_name") == "chapter-review"
-                    and row["status"] == "PAUSED"
-                    and row["run_id"] != first_review_run_id
-                ]
-                if candidates:
-                    # 取 started_at 最大的（最新一轮）
-                    candidates.sort(key=lambda r0: r0.get("started_at") or "", reverse=True)
-                    second_review_run_id = candidates[0]["run_id"]
-                    break
-                await asyncio.sleep(0.3)
-            assert second_review_run_id is not None, (
-                "daemon 回路未在 120s 内产出第二个 PAUSED review run"
-            )
-            assert second_review_run_id != first_review_run_id
-
-            # 4) 校验 chapter 仍为 DRAFTED，但 drafts 已有 v2
-            r = await _request(app, "GET", f"/api/chapters/{cid}")
-            assert r.status_code == 200
-            ch = r.json()
-            assert ch["status"] == "DRAFTED"
-            assert ch["plan_json"]["revision_note"] == "节奏太散，重写"
-
-            conn = get_connection(app.state.settings.db_path)
-            try:
-                drafts = conn.execute(
-                    "SELECT version, content FROM drafts WHERE chapter_id = ? ORDER BY version",
-                    (cid,),
-                ).fetchall()
-            finally:
-                conn.close()
-            assert len(drafts) == 2, drafts
-            assert "终是轻轻点头" in (drafts[1]["content"] or "")
-
-            # 5) 批准新 review → COMPLETED + REVIEWED
-            r = await _request(
-                app, "POST", f"/api/runs/{second_review_run_id}/resume",
-                json={"human_input": {"approved": True}},
-            )
-            assert r.status_code == 200, r.text
-            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
-            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("COMPLETED",))
-            r = await _request(app, "GET", f"/api/chapters/{cid}")
-            assert r.json()["status"] == "REVIEWED"
-
-    asyncio.run(run())
-
-
-def test_chapter_review_auto_revise_disabled_keeps_failed(tmp_path: Path):
-    """auto_revise_max=0（或默认 env=0）时，revise 后保持 FAILED，不自动重跑。"""
-    app = _create_app(tmp_path)
-
-    async def run():
-        async with app.router.lifespan_context(app):
-            await _sync_prompts(app)
-            pid = await _make_project(app)
-            await _make_character(app, pid)
-            cid = await _make_chapter(app, pid, 1, "第一章")
-
-            mock_providers = {
-                "director": _director_script(),
-                "writer": _writer_script(),
-            }
-            for path in ("plan", "write"):
-                r = await _request(
-                    app, "POST", f"/api/projects/{pid}/chapters/{cid}/{path}",
-                    json={"mock_providers": mock_providers},
-                )
-                assert r.status_code == 201, r.text
-                await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "FAILED"))
-
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
-                json={"mock_providers": mock_providers},
-            )
-            assert r.status_code == 201, r.text
-            paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
-            paused = {"run_id": paused["run_id"]}
-
-            r = await _request(
-                app, "POST", f"/api/runs/{paused['run_id']}/resume",
-                json={
-                    "human_input": {"approved": False, "revise": True, "note": "不改"},
-                    "auto_revise_max": 0,
-                },
-            )
-            assert r.status_code == 200, r.text
-            r2 = await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
-            r2 = await _wait_run_terminal(app, r2["run_id"], expected=("FAILED",))
-            assert r.json()["run_id"] == paused["run_id"]
-
-            # drafts 只有 v1
-            conn = get_connection(app.state.settings.db_path)
-            try:
-                n = conn.execute(
-                    "SELECT COUNT(*) AS n FROM drafts WHERE chapter_id = ?", (cid,)
-                ).fetchone()["n"]
-            finally:
-                conn.close()
-            assert n == 1
-
-    asyncio.run(run())
-
-
-def test_chapter_review_resume_with_auto_revise_returns_within_2s(tmp_path: Path):
-    """resume + auto_revise 触发时：POST ≤2s 即返回；轮询最终见到 daemon 回路新 write/review run。
-
-    验证点：
-    - POST /runs/{id}/resume 在 ≤2s 内拿到 200 响应（不再像旧实现那样阻塞到回路结束，
-      auto_revise_max=2 最长可跑两轮 write+review，几分钟量级）。
-    - 响应 status="RUNNING"，run_id 等于被 resume 的原 review run。
-    - daemon 线程最终在 list 端点可观察到 chapter-review 的新 PAUSED run 与
-      chapter-write 新 run（数量 ≥2 的 chapter-review run、≥1 的 chapter-write run
-      是在 daemon 链路里新建的）。
-    """
-    app = _create_app(tmp_path)
-
-    async def run():
-        async with app.router.lifespan_context(app):
-            await _sync_prompts(app)
-            pid = await _make_project(app)
-            await _make_character(app, pid)
-            cid = await _make_chapter(app, pid, 1, "第一章")
-
-            first_mock = {
-                "director": _director_script(),
-                "writer": _writer_script(),
-            }
-
-            # 1) plan + write v1
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
-                json={"author_intent": "意图", "mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
-                json={"mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-
-            # 2) review → PAUSED
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
-                json={"mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
-            first_review_run_id = paused["run_id"]
-
-            # 3) resume revise + auto_revise_max=2：必须 ≤2s 返回
-            revise_mock = {
-                "director": _director_script(),
-                "writer": _writer_revised_script(),
-            }
-            import time as _wall_t
-            _t0 = _wall_t.monotonic()
-            r = await _request(
-                app, "POST", f"/api/runs/{first_review_run_id}/resume",
-                json={
-                    "human_input": {"approved": False, "revise": True, "note": "改稿触发"},
-                    "auto_revise_max": 2,
-                    "mock_providers": revise_mock,
-                },
-            )
-            _t1 = _wall_t.monotonic()
-            assert r.status_code == 200, r.text
-            assert (_t1 - _t0) <= 2.0, (
-                f"resume + auto_revise 响应耗时 {_t1 - _t0:.2f}s 超 2s 上限"
-            )
-            assert r.json()["status"] == "RUNNING"
-            assert r.json()["run_id"] == first_review_run_id
-
-            # 4) 轮询 list 端点，直到见到 daemon 回路产生的新 write + 新 review run
-            import time as _list_t
-            _list_deadline = _list_t.monotonic() + 120.0
-            new_write_run_id: str | None = None
-            new_review_run_id: str | None = None
-            while _list_t.monotonic() < _list_deadline:
-                rr = await _request(app, "GET", f"/api/projects/{pid}/runs")
-                assert rr.status_code == 200, rr.text
-                rows = rr.json()
-                review_rows = [
-                    row for row in rows
-                    if row.get("workflow_name") == "chapter-review"
-                    and row["run_id"] != first_review_run_id
-                ]
-                write_rows = [row for row in rows if row.get("workflow_name") == "chapter-write"]
-                # 至少一个新 review PAUSED（回路最终态）+ 至少一个新 write（回路跑过）
-                paused_new = [row for row in review_rows if row["status"] == "PAUSED"]
-                if paused_new and write_rows:
-                    new_review_run_id = max(
-                        paused_new,
-                        key=lambda r0: r0.get("started_at") or "",
-                    )["run_id"]
-                    new_write_run_id = max(
-                        write_rows,
-                        key=lambda r0: r0.get("started_at") or "",
-                    )["run_id"]
-                    break
-                await asyncio.sleep(0.3)
-
-            assert new_write_run_id is not None, "daemon 未在 120s 内产出新 chapter-write run"
-            assert new_review_run_id is not None, "daemon 未在 120s 内产出新 PAUSED chapter-review run"
-            assert new_write_run_id != new_review_run_id
-
-            # 5) drafts 已含 v2（daemon 跑过 write）
-            conn = get_connection(app.state.settings.db_path)
-            try:
-                drafts = conn.execute(
-                    "SELECT version FROM drafts WHERE chapter_id = ? ORDER BY version",
-                    (cid,),
-                ).fetchall()
-            finally:
-                conn.close()
-            assert [d["version"] for d in drafts] == [1, 2], drafts
 
     asyncio.run(run())
 
@@ -1174,7 +848,6 @@ def test_chapter_review_with_draft_version_selects_specific_version(tmp_path: Pa
             )
             assert r.status_code == 200, r.text
             await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
 
             # 2) review 不带 draft_version → 审最新版 v2
             r = await _request(
@@ -1225,464 +898,7 @@ def test_chapter_review_with_nonexistent_draft_version_fails(tmp_path: Path):
             )
             assert r.status_code == 201, r.text
             failed = await _wait_run_terminal(app, r.json()["run_id"], expected=("FAILED",))
-            await _wait_run_terminal(app, failed["run_id"], expected=("FAILED",))
             assert "no draft version 99" in (failed.get("error") or ""), failed.get("error")
-
-    asyncio.run(run())
-
-
-# ---------------------------------------------------------------------------
-# auto_revise 回路 · 模型档案覆盖：显式 model_overrides 透传 / 缺省时从 review run 继承
-#
-# 【主题簇登记 · 2026-10-13 Lead 裁决 = (b) 下一批待办，本轮不拆】
-#   事实：auto_revise 主题在本文件被「草稿版本选择」簇劈成两段——「auto_revise 回路」
-#   簇在上一节，本节实为「auto_revise · 模型档案覆盖」簇，中间夹着两个 draft_version
-#   测试。拆分时须二选一：① 两节并入同一模块（跨节搬运）；② 保持两节各自独立、
-#   把本簇改记为「模型档案覆盖」而非 auto_revise。
-#   裁决归属：**batch4 拆分方案**（不在本轮收尾范围——本轮对该文件的改动已实证为
-#   纯注释增量、断言零改动，见下）。
-#   触发条件：本文件已达 1854 行（>1500 红线），或本轮结束后本文件继续增长、或任一
-#   簇迁出本文件时——三者任一发生即必须先落裁决，不许再以无主 TODO 形态留在工作区
-#   （AGENTS 坑区「登记比遗忘强」的前提是**登记写清状态与归属**，不是留半截 TODO）。
-#   本轮实证：HEAD 17 / 工作区 17（`--collect-only -q` 实测），用例数零增减。
-# ---------------------------------------------------------------------------
-
-
-def test_chapter_review_auto_revise_loop_propagates_model_overrides(tmp_path: Path):
-    """P0 自动改稿回路：resume body 带 ``model_overrides`` 时，回路重跑的 write 与 review
-    子 run 的 checkpoint_json 中必须原样携带同一份 overrides（首轮档案不丢失）。
-
-    验证点：
-    - 原 review run 的 checkpoint_json 含 ``model_overrides``（首轮即生效）；
-    - resume body 显式给 overrides → 回路内 write / review 子 run 的 checkpoint_json
-      也含**同一份** overrides（透传）；
-    - 第二轮 review PAUSED（回路跑成功一整轮）。
-    """
-    app = _create_app(tmp_path)
-
-    async def run():
-        async with app.router.lifespan_context(app):
-            await _sync_prompts(app)
-            pid = await _make_project(app)
-            await _make_character(app, pid)
-            cid = await _make_chapter(app, pid, 1, "第一章")
-
-            first_mock = {
-                "director": _director_script(),
-                "writer": _writer_script(),
-            }
-
-            # 1) plan + write v1（首轮不带 overrides，保持简单）
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
-                json={"author_intent": "意图", "mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
-                json={"mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-
-            # 2) 首轮 review → PAUSED（也不带 overrides）
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
-                json={"mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
-            first_review_run_id = paused["run_id"]
-
-            # 3) resume revise + model_overrides + auto_revise_max=2：触发回路
-            overrides = {"creative_writing": "mprof_auto_revise_passthrough"}
-            revise_mock = {
-                "director": _director_script(),
-                "writer": _writer_revised_script(),
-            }
-            r = await _request(
-                app, "POST", f"/api/runs/{first_review_run_id}/resume",
-                json={
-                    "human_input": {"approved": False, "revise": True, "note": "改稿"},
-                    "auto_revise_max": 2,
-                    "mock_providers": revise_mock,
-                    "model_overrides": overrides,
-                },
-            )
-            assert r.status_code == 200, r.text
-            assert r.json()["status"] == "RUNNING"
-            assert r.json()["run_id"] == first_review_run_id
-
-            # 等首轮 review 走到 FAILED(rejected-for-revision) → 回路启动
-            await _wait_run_terminal(app, first_review_run_id, expected=("FAILED",))
-
-            # 4) 轮询找回路产生的「新 chapter-write run」+「新 chapter-review PAUSED run」
-            import time as _list_t
-            _list_deadline = _list_t.monotonic() + 120.0
-            new_write_run_id: str | None = None
-            new_review_run_id: str | None = None
-            while _list_t.monotonic() < _list_deadline:
-                rr = await _request(app, "GET", f"/api/projects/{pid}/runs")
-                assert rr.status_code == 200, rr.text
-                rows = rr.json()
-                review_rows = [
-                    row for row in rows
-                    if row.get("workflow_name") == "chapter-review"
-                    and row["run_id"] != first_review_run_id
-                ]
-                write_rows = [
-                    row for row in rows
-                    if row.get("workflow_name") == "chapter-write"
-                ]
-                paused_new = [row for row in review_rows if row["status"] == "PAUSED"]
-                if paused_new and write_rows:
-                    new_review_run_id = max(
-                        paused_new,
-                        key=lambda r0: r0.get("started_at") or "",
-                    )["run_id"]
-                    new_write_run_id = max(
-                        write_rows,
-                        key=lambda r0: r0.get("started_at") or "",
-                    )["run_id"]
-                    break
-                await asyncio.sleep(0.3)
-
-            assert new_write_run_id is not None, "daemon 未在 120s 内产出新 chapter-write run"
-            assert new_review_run_id is not None, "daemon 未在 120s 内产出新 PAUSED chapter-review run"
-
-            # 5) 断言：回路内 write / review 子 run 的 checkpoint_json 中都携带 overrides
-            # （与首轮跑 test_write_model_overrides_passthrough_through_ctx 同口径：
-            # 在任意 node checkpoint 或合并 ctx 中匹配到即可。）
-            async def _ckpt_has_overrides(run_id: str) -> bool:
-                rr = await _request(app, "GET", f"/api/runs/{run_id}")
-                assert rr.status_code == 200, rr.text
-                ckpt = rr.json().get("checkpoint_json") or {}
-                for _node_id, node_ckpt in ckpt.items():
-                    if not isinstance(node_ckpt, dict):
-                        continue
-                    ctx_blob = node_ckpt.get("ctx")
-                    merged = (
-                        {**{k: v for k, v in ckpt.items() if k != "ctx"}, **(ctx_blob if isinstance(ctx_blob, dict) else {})}
-                        if isinstance(ckpt.get("ctx"), dict)
-                        else {**ckpt, **(ctx_blob if isinstance(ctx_blob, dict) else {})}
-                    )
-                    if isinstance(merged.get("model_overrides"), dict) and merged["model_overrides"] == overrides:
-                        return True
-                    if isinstance(node_ckpt.get("model_overrides"), dict) and node_ckpt["model_overrides"] == overrides:
-                        return True
-                return False
-
-            assert await _ckpt_has_overrides(new_write_run_id), (
-                f"回路内 chapter-write 子 run（{new_write_run_id}）未携带 model_overrides={overrides}"
-            )
-            assert await _ckpt_has_overrides(new_review_run_id), (
-                f"回路内 chapter-review 子 run（{new_review_run_id}）未携带 model_overrides={overrides}"
-            )
-
-    asyncio.run(run())
-
-
-def test_chapter_review_auto_revise_loop_without_overrides_inherits_from_review_run(tmp_path: Path):
-    """回归：resume body 不传 model_overrides 且原 review run checkpoint_json 内也无 overrides
-    时，回路子 run 的 checkpoint_json 中不应出现 model_overrides 键（保证缺省零行为变更）。
-    """
-    app = _create_app(tmp_path)
-
-    async def run():
-        async with app.router.lifespan_context(app):
-            await _sync_prompts(app)
-            pid = await _make_project(app)
-            await _make_character(app, pid)
-            cid = await _make_chapter(app, pid, 1, "第一章")
-
-            first_mock = {
-                "director": _director_script(),
-                "writer": _writer_script(),
-            }
-
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
-                json={"author_intent": "意图", "mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
-                json={"mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-
-            r = await _request(
-                app, "POST", f"/api/projects/{pid}/chapters/{cid}/review",
-                json={"mock_providers": first_mock},
-            )
-            assert r.status_code == 201, r.text
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))
-            paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
-            first_review_run_id = paused["run_id"]
-
-            revise_mock = {
-                "director": _director_script(),
-                "writer": _writer_revised_script(),
-            }
-            r = await _request(
-                app, "POST", f"/api/runs/{first_review_run_id}/resume",
-                json={
-                    "human_input": {"approved": False, "revise": True, "note": "改稿"},
-                    "auto_revise_max": 2,
-                    "mock_providers": revise_mock,
-                    # 故意不传 model_overrides
-                },
-            )
-            assert r.status_code == 200, r.text
-            await _wait_run_terminal(app, first_review_run_id, expected=("FAILED",))
-
-            import time as _list_t
-            _list_deadline = _list_t.monotonic() + 120.0
-            new_write_run_id: str | None = None
-            new_review_run_id: str | None = None
-            while _list_t.monotonic() < _list_deadline:
-                rr = await _request(app, "GET", f"/api/projects/{pid}/runs")
-                assert rr.status_code == 200, rr.text
-                rows = rr.json()
-                review_rows = [
-                    row for row in rows
-                    if row.get("workflow_name") == "chapter-review"
-                    and row["run_id"] != first_review_run_id
-                ]
-                write_rows = [
-                    row for row in rows
-                    if row.get("workflow_name") == "chapter-write"
-                ]
-                paused_new = [row for row in review_rows if row["status"] == "PAUSED"]
-                if paused_new and write_rows:
-                    new_review_run_id = max(
-                        paused_new,
-                        key=lambda r0: r0.get("started_at") or "",
-                    )["run_id"]
-                    new_write_run_id = max(
-                        write_rows,
-                        key=lambda r0: r0.get("started_at") or "",
-                    )["run_id"]
-                    break
-                await asyncio.sleep(0.3)
-
-            assert new_write_run_id is not None
-            assert new_review_run_id is not None
-
-            async def _ckpt_omits_loop_ctx_keys(run_id: str) -> None:
-                """未传的透传键（model_overrides / author_intent）不得出现在回路子 run 的 ctx 里。"""
-                rr = await _request(app, "GET", f"/api/runs/{run_id}")
-                assert rr.status_code == 200, rr.text
-                ckpt = rr.json().get("checkpoint_json") or {}
-                for key in ("model_overrides", "author_intent"):
-                    if key in ckpt:
-                        raise AssertionError(
-                            f"未传 {key}（父 ctx 也无）时回路子 run {run_id} 的 checkpoint "
-                            f"顶层不应携带该键；实际={ckpt.get(key)!r}"
-                        )
-                for node_id, node_ckpt in ckpt.items():
-                    if not isinstance(node_ckpt, dict):
-                        continue
-                    if "model_overrides" in node_ckpt:
-                        raise AssertionError(
-                            f"未传 model_overrides 时回路子 run {run_id} 的 {node_id} 不应携带该键；"
-                            f"实际={node_ckpt!r}"
-                        )
-
-            await _ckpt_omits_loop_ctx_keys(new_write_run_id)
-            await _ckpt_omits_loop_ctx_keys(new_review_run_id)
-
-    asyncio.run(run())
-
-
-# ---------------------------------------------------------------------------
-# F-11（2026-09-16 实证）：auto_revise 回路的 author_intent 透传 / 继承
-# ---------------------------------------------------------------------------
-
-
-async def _setup_paused_first_review(
-    app, pid: str, cid: str, *, review_author_intent: str | None = None,
-) -> str:
-    """plan → write → review 跑到 PAUSED，返回首轮 review run_id。
-
-    ``review_author_intent`` 非 None 时给首轮 review run 的 ctx 一并塞该键
-    （验证回路「请求体没给 → 从父 review run ctx 继承」路径的前置条件）。
-    """
-    first_mock = {
-        "director": _director_script(),
-        "writer": _writer_script(),
-    }
-    r = await _request(
-        app, "POST", f"/api/projects/{pid}/chapters/{cid}/plan",
-        json={"author_intent": "计划意图", "mock_providers": first_mock},
-    )
-    assert r.status_code == 201, r.text
-    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
-    r = await _request(
-        app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
-        json={"mock_providers": first_mock},
-    )
-    assert r.status_code == 201, r.text
-    await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED",))
-    review_body: dict = {"mock_providers": first_mock}
-    if review_author_intent is not None:
-        review_body["author_intent"] = review_author_intent
-    r = await _request(
-        app, "POST", f"/api/projects/{pid}/chapters/{cid}/review", json=review_body,
-    )
-    assert r.status_code == 201, r.text
-    paused = await _wait_run_terminal(app, r.json()["run_id"], expected=("PAUSED",))
-    return paused["run_id"]
-
-
-async def _wait_auto_revise_child_runs(
-    app, pid: str, first_review_run_id: str, *, timeout: float = 120.0,
-) -> tuple[str, str]:
-    """轮询到回路产出的新 write run 与新 PAUSED review run；返回 ``(write_run_id, review_run_id)``。"""
-    import time as _list_t
-    deadline = _list_t.monotonic() + timeout
-    while _list_t.monotonic() < deadline:
-        rr = await _request(app, "GET", f"/api/projects/{pid}/runs")
-        assert rr.status_code == 200, rr.text
-        rows = rr.json()
-        review_rows = [
-            row for row in rows
-            if row.get("workflow_name") == "chapter-review"
-            and row["run_id"] != first_review_run_id
-        ]
-        write_rows = [
-            row for row in rows if row.get("workflow_name") == "chapter-write"
-        ]
-        paused_new = [row for row in review_rows if row["status"] == "PAUSED"]
-        if paused_new and write_rows:
-            new_write = max(write_rows, key=lambda r0: r0.get("started_at") or "")
-            new_review = max(paused_new, key=lambda r0: r0.get("started_at") or "")
-            return new_write["run_id"], new_review["run_id"]
-        await asyncio.sleep(0.3)
-    raise AssertionError("daemon 未在 120s 内产出新的 write / PAUSED review 子 run")
-
-
-async def _ckpt_ctx(app, run_id: str) -> dict:
-    """取 ``run.checkpoint_json`` 顶层（引擎落盘的 ctx 就是这一层，扁平键值）。"""
-    rr = await _request(app, "GET", f"/api/runs/{run_id}")
-    assert rr.status_code == 200, rr.text
-    return rr.json().get("checkpoint_json") or {}
-
-
-def test_chapter_review_auto_revise_loop_propagates_author_intent(tmp_path: Path):
-    """F-11：resume body 带 ``author_intent`` 时，回路重跑的 write / review 子 run 的 ctx
-    必须原样携带同一份 author_intent——改稿轮不再在「无任何作者约束」状态下重写正文。
-
-    实证背景（2026-09-16 新书 01 ch2）：回路只透传 model_overrides，v1 正文干净、
-    改稿轮 v2 把内部字段名 ``recalled_passages`` 写进正文。
-    """
-    app = _create_app(tmp_path)
-
-    async def run():
-        async with app.router.lifespan_context(app):
-            await _sync_prompts(app)
-            pid = await _make_project(app)
-            await _make_character(app, pid)
-            cid = await _make_chapter(app, pid, 1, "第一章")
-
-            first_review_run_id = await _setup_paused_first_review(app, pid, cid)
-            # 前置条件：首轮 review run 的 ctx 里没有 author_intent（否则下面的断言可能靠继承蒙混过关）
-            assert "author_intent" not in await _ckpt_ctx(app, first_review_run_id)
-
-            intent = "本书铁律：无CP、字数 2200~2800、禁止内部标识入文"
-            revise_mock = {
-                "director": _director_script(),
-                "writer": _writer_revised_script(),
-            }
-            r = await _request(
-                app, "POST", f"/api/runs/{first_review_run_id}/resume",
-                json={
-                    "human_input": {"approved": False, "revise": True, "note": "改稿"},
-                    "auto_revise_max": 2,
-                    "mock_providers": revise_mock,
-                    "author_intent": intent,
-                },
-            )
-            assert r.status_code == 200, r.text
-            assert r.json()["status"] == "RUNNING"
-            await _wait_run_terminal(app, first_review_run_id, expected=("FAILED",))
-
-            new_write_run_id, new_review_run_id = await _wait_auto_revise_child_runs(
-                app, pid, first_review_run_id
-            )
-            for run_id in (new_write_run_id, new_review_run_id):
-                ckpt = await _ckpt_ctx(app, run_id)
-                assert ckpt.get("author_intent") == intent, (
-                    f"回路子 run {run_id} 的 ctx.author_intent={ckpt.get('author_intent')!r}，"
-                    f"期望 {intent!r}（resume 请求体显式给出的值）"
-                )
-
-    asyncio.run(run())
-
-
-def test_chapter_review_auto_revise_loop_inherits_author_intent_from_review_run(tmp_path: Path):
-    """F-11 核心断言：resume body 不给 ``author_intent`` 时，回路从父 review run 的
-    checkpoint_json（即其 ctx）继承首轮那份——「改稿轮不再丢作者约束」的正解路径。
-
-    突变验证：撤掉 ``control.py`` 的继承分支（``effective_author_intent`` 恒 None）→ 本测试红。
-    """
-    app = _create_app(tmp_path)
-
-    async def run():
-        async with app.router.lifespan_context(app):
-            await _sync_prompts(app)
-            pid = await _make_project(app)
-            await _make_character(app, pid)
-            cid = await _make_chapter(app, pid, 1, "第一章")
-
-            intent = "本书铁律：价签快照只给单一价格数字、对话引号统一 “”"
-            first_review_run_id = await _setup_paused_first_review(
-                app, pid, cid, review_author_intent=intent,
-            )
-            # 前置条件：父 review run 的 ctx 确实带这份 author_intent（继承的来源）
-            assert (await _ckpt_ctx(app, first_review_run_id)).get("author_intent") == intent
-
-            revise_mock = {
-                "director": _director_script(),
-                "writer": _writer_revised_script(),
-            }
-            r = await _request(
-                app, "POST", f"/api/runs/{first_review_run_id}/resume",
-                json={
-                    "human_input": {"approved": False, "revise": True, "note": "改稿"},
-                    "auto_revise_max": 2,
-                    "mock_providers": revise_mock,
-                    # 故意不传 author_intent → 期望从父 review run ctx 继承
-                },
-            )
-            assert r.status_code == 200, r.text
-            await _wait_run_terminal(app, first_review_run_id, expected=("FAILED",))
-
-            new_write_run_id, new_review_run_id = await _wait_auto_revise_child_runs(
-                app, pid, first_review_run_id
-            )
-            for run_id in (new_write_run_id, new_review_run_id):
-                ckpt = await _ckpt_ctx(app, run_id)
-                assert ckpt.get("author_intent") == intent, (
-                    f"回路子 run {run_id} 未从父 review run（{first_review_run_id}）继承 "
-                    f"author_intent；实际={ckpt.get('author_intent')!r}，期望 {intent!r}"
-                )
 
     asyncio.run(run())
 
@@ -1690,37 +906,6 @@ def test_chapter_review_auto_revise_loop_inherits_author_intent_from_review_run(
 # ---------------------------------------------------------------------------
 # writer 落库前确定性规整：「」对话标点归一 + 内部标识（recalled_passages 等）清除
 # ---------------------------------------------------------------------------
-
-
-def _writer_script_with_quotes_and_leak() -> list[str]:
-    """含「」对话与内部标识的 writer 输出：用于断言落库前的确定性规整。"""
-    prose = (
-        "戌时的更鼓从街尾传过来。\n\n"
-        "「你来晚了。」苏婉清把茶盏往他那边推了推，"
-        "「这盏茶温了三回。」\n\n"
-        "他忽然想起recalled_passages里自己的那句话，"
-        "喉头动了一下，终究没说出口。灯芯爆了个花，"
-        "啪地轻响，影子在青石地砖上晃了晃，又稳住了。"
-    )
-    return [
-        json.dumps(
-            {
-                "schema_version": "writer-output.v1",
-                "prompt_version": "writer:v1",
-                "chapter_id": "ch_xxx",
-                "prose": prose,
-                "self_report": {
-                    "slots_filled": ["slot_001"],
-                    "word_count": len(prose),
-                    "scene_count": 1,
-                    "deviations": [],
-                    "forbidden_word_hits": [],
-                    "self_check_notes": "",
-                },
-            },
-            ensure_ascii=False,
-        )
-    ]
 
 
 def test_write_threads_author_intent_into_writer_payload_and_normalizes_draft(

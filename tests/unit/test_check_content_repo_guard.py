@@ -521,23 +521,9 @@ def test_prune_dangling_apply_keeps_db_plaintext_untouched(mod, tmp_path, capsys
     assert "sk-plain" in params, "清理悬空条目不得顺手动库内明文"
 
 
-def test_prune_dangling_rejects_malformed_secrets_file(mod, tmp_path, capsys) -> None:
-    """secrets.json 坏掉 ⇒ **中止并报错**（不得把文件写成空/半截）。"""
-    db = tmp_path / "novelos.db"
-    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
-    secrets = tmp_path / "secrets.json"
-    secrets.write_text("{ not json", encoding="utf-8")
-
-    code = mod.main(
-        [
-            "secrets", "--db", str(db), "--secrets-file", str(secrets),
-            "--prune-dangling", "--apply",
-        ]
-    )
-    capsys.readouterr()
-
-    assert code == 2, "结构性异常 ⇒ 退出码 2（巡检自身出错），不是 0/1"
-    assert secrets.read_text(encoding="utf-8") == "{ not json", "坏文件不得被改写"
+# ⚠️ 2026-10-24 瘦身：本用例已并入参数化的
+# ``test_malformed_secrets_file_is_refused_by_every_command``（参数 id = ``prune``）
+# —— 「坏 JSON ⇒ 清理拒绝执行」在**三条命令**（巡检 / 清理 / 迁移）上同口径。
 
 
 # ---------------------------------------------------------------------------
@@ -607,8 +593,6 @@ def test_prune_dangling_refuses_when_model_tables_missing(mod, tmp_path, capsys)
     assert "已中止清理" in err, f"必须**明确拒绝**（而不是「没什么可删」）：{err}"
     assert "model_profiles" in err, f"必须说清为什么拒绝：{err}"
     assert secrets.read_text(encoding="utf-8") == original, "secrets.json 必须**逐字未改**"
-    payload = json.loads(secrets.read_text(encoding="utf-8"))
-    assert payload["api_keys"], "api_keys 不得被清空"
     assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝清理 ⇒ 不得产生备份文件"
 
 
@@ -631,7 +615,6 @@ def test_prune_dangling_refuses_when_model_tables_are_empty(mod, tmp_path, capsy
     assert code == 2, f"0 行 ⇒ 已知集合为空 ⇒ 必须拒绝（退出码 2），实际 {code}\n{err}"
     assert "已中止清理" in err, f"必须**明确拒绝**：{err}"
     assert secrets.read_text(encoding="utf-8") == original, "secrets.json 必须**逐字未改**"
-    assert json.loads(secrets.read_text(encoding="utf-8"))["api_keys"], "api_keys 不得被清空"
     assert "已知集合为空" in err, f"必须说清为什么拒绝：{err}"
 
 
@@ -652,7 +635,6 @@ def test_prune_dangling_with_missing_db_deletes_nothing(mod, tmp_path, capsys) -
     err = capsys.readouterr().err
 
     assert secrets.read_text(encoding="utf-8") == original, "库不存在 ⇒ 不得删任何键"
-    assert json.loads(secrets.read_text(encoding="utf-8"))["api_keys"] == {"sk-user-1": "v1"}
     assert code == 2, "库读不到 ⇒ 「无法判定」⇒ 退出码 2（不得报绿）"
     assert "已中止清理" in err, f"必须**明确拒绝**：{err}"
     assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝清理 ⇒ 不得产生备份文件"
@@ -829,38 +811,81 @@ def test_prune_dangling_keeps_env_name_key_still_resolvable(mod, tmp_path, capsy
 # ---------------------------------------------------------------------------
 
 
-def test_patrol_with_unreadable_secrets_file_is_unknown_not_compliant(mod, tmp_path, capsys) -> None:
-    """**secrets.json 读不出来** ⇒ 判「不可判」⇒ 退出码 2，**不得**报「合规」。
+#: 凭据模式的三条命令路径：``(命令名, 追加参数, 拒绝执行时的诊断词)``。
+#:
+#: - ``patrol``：只读巡检（无写动作 ⇒ 「拒绝执行」只体现在退出码与结论上）；
+#: - ``prune``：``--prune-dangling --apply``（只动 secrets.json）；
+#: - ``migrate``：``--migrate --apply``（搬库内明文进文件 + 清库内明文）。
+#:
+#: ⚠️ 三条路径**必须同口径**：同一个「不可判」形状 ⇒ 同一个退出码 2
+#: ⇒ 写路径一律**拒绝执行**（不写文件、不写备份、不清库内明文）。
+_COMMAND_PATROLS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("patrol", (), ""),
+    ("prune", ("--prune-dangling", "--apply"), "已中止清理"),
+    ("migrate", ("--migrate", "--apply"), "已中止迁移"),
+)
+
+
+def _db_plaintext_params(db_path: Path) -> str:
+    """读回某档案的 ``params_json``（用于断言「库内明文有没有被动」）。"""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT params_json FROM model_profiles WHERE profile_id = 'mprof_live01'"
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row is not None else ""
+
+
+@pytest.mark.parametrize(
+    ("command", "extra_args", "refusal_marker"),
+    _COMMAND_PATROLS,
+    ids=[name for name, _a, _m in _COMMAND_PATROLS],
+)
+def test_malformed_secrets_file_is_refused_by_every_command(
+    mod, tmp_path, capsys, command, extra_args, refusal_marker
+) -> None:
+    """**secrets.json 读不出来** ⇒ 三条命令**同口径**：不可判 ⇒ 退出码 2。
 
     ⚠️ 「文件读不出来」与「文件不存在」是**两件事**：后者是合法状态（还没迁过），
     前者是**巡检自身出错** ⇒ 与本轮 F-1 的纪律同一条线（判不出来时不得报绿）。
+
+    ⚠️ **写路径必须响亮拒绝**（F-3 同款纪律）：清理 / 迁移**不得**把坏文件写成
+    空/半截 ⇒ 文件**逐字节不变** + **零备份** + **不清库内明文**。
+
+    ⚠️ 2026-10-24 瘦身：原「巡检侧一条 + 清理侧一条」⇒ 合成本矩阵，
+    并**补上迁移侧一例**（原为全仓缺口：迁移遇坏 JSON 从未被钉住）。
     """
     db = tmp_path / "novelos.db"
     _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
     secrets = tmp_path / "secrets.json"
     secrets.write_text("{ this is not json ", encoding="utf-8")
+    before = secrets.read_bytes()
 
-    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    code = mod.main(
+        ["secrets", "--db", str(db), "--secrets-file", str(secrets), *extra_args]
+    )
     captured = capsys.readouterr()
     out = captured.out + captured.err
 
-    assert code == 2, f"读不出 secrets.json ⇒ 不可判 ⇒ 退出码 2，实际 {code}\n{out}"
+    assert code == 2, (
+        f"{command}：读不出 secrets.json ⇒ 不可判 ⇒ 退出码 2，实际 {code}\n{out}"
+    )
     assert "解析失败" in out, out
+    if refusal_marker:
+        assert refusal_marker in out, f"{command}：必须**明确拒绝**（而不是「没什么可做」）：{out}"
+    assert secrets.read_bytes() == before, f"{command}：坏文件不得被改写"
+    assert not list(tmp_path.glob("secrets.json.bak-*")), (
+        f"{command}：拒绝执行 ⇒ 不得产生备份文件"
+    )
+    assert "api_key" in _db_plaintext_params(db), f"{command}：拒绝执行 ⇒ 不得清库内明文"
 
 
-def test_patrol_with_missing_secrets_file_is_still_compliant(mod, tmp_path, capsys) -> None:
-    """**secrets.json 不存在** ⇒ 合法状态 ⇒ 仍报合规（退出码 0）。
-
-    ⚠️ 反向不变量：修 F-4 时**不得**把「文件不存在」也误判成不可判（那是过修）。
-    """
-    db = tmp_path / "novelos.db"
-    _seed_model_db(db, profiles=[("mprof_live01", "minimax", None)])
-    secrets = tmp_path / "secrets.json"  # 故意不存在
-
-    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
-    out = capsys.readouterr().out
-
-    assert code == 0, f"没有 secrets.json 是合法状态（退出码 0），实际 {code}\n{out}"
+# ⚠️ 2026-10-24 瘦身：原「secrets.json 不存在 ⇒ 仍报合规」已删——它被
+# ``test_legal_empty_state_is_still_compliant``（参数 id = ``absent-file``）
+# **严格更强**地蕴含（那里同时钉了 read_errors / blocked_reasons 为空）
+# ⇒ 零判别力损失。
 
 
 def test_migrate_backs_up_secrets_file_before_rewriting_it(mod, tmp_path, capsys) -> None:
@@ -966,59 +991,96 @@ def _seed_clean_db(db_path: Path) -> None:
     _seed_model_db(db_path, profiles=[("mprof_live01", "minimax", None)])
 
 
-@pytest.mark.parametrize(
-    "raw_text",
-    [
-        json.dumps({"api_keys": "sk-xxx"}),
-        json.dumps({"api_keys": ["a"]}),
-        json.dumps({"api_keys": 123}),
-    ],
-    ids=["api_keys_is_string", "api_keys_is_list", "api_keys_is_number"],
+#: 「结构非法」的形状矩阵：``(形状名, 文件原文, 诊断关键词)``。
+#:
+#: ⚠️ ``api_keys`` 段列**三种** JSON 类型（字符串 / 数组 / 数字）—— 运行期
+#: ``_read_file_fresh()`` 对三者一律 log warning 并返回 ``{}`` ⇒ 同属「凭据读不出来」；
+#: 但三种类型**互为对照**（判据若被误写成「只查字符串」⇒ 数组 / 数字两例变红）。
+_INVALID_STRUCTURE_SHAPES: tuple[tuple[str, str, str], ...] = (
+    ("api_keys_is_string", json.dumps({"api_keys": "sk-xxx"}), "api_keys 段必须是对象"),
+    ("api_keys_is_list", json.dumps({"api_keys": ["a"]}), "api_keys 段必须是对象"),
+    ("api_keys_is_number", json.dumps({"api_keys": 123}), "api_keys 段必须是对象"),
+    ("root_not_object", json.dumps(["a"]), "顶层必须是对象"),
 )
-def test_patrol_with_non_dict_api_keys_is_unknown_not_compliant(
-    mod, tmp_path, capsys, raw_text
+
+
+@pytest.mark.parametrize(
+    ("shape", "command"),
+    [
+        pytest.param(shape, cmd, id=f"{shape[0]}-{cmd[0]}")
+        for shape in _INVALID_STRUCTURE_SHAPES
+        for cmd in _COMMAND_PATROLS
+    ],
+)
+def test_structurally_invalid_secrets_file_is_refused_by_every_command(
+    mod, tmp_path, capsys, shape, command
 ) -> None:
-    """``api_keys`` 段不是对象 ⇒ **不可判** ⇒ 退出码 2（**不得**报「合规」）。
+    """``secrets.json`` **结构非法** ⇒ 三条命令**同口径**：不可判 ⇒ 退出码 2。
 
     ⚠️ 真缺陷：运行期 ``_read_file_fresh()`` 会 log warning 并返回 ``{}``
     ⇒ **运行期拿不到凭据**；旧实现只记一条 note ⇒ 巡检报绿 ⇒ 真出问题却报绿。
+
+    ⚠️ **写路径必须拒绝执行**：清理 / 迁移**不得**把「读不出来的空凭据」当成空基线
+    落盘（那会**静默抹掉用户原有键**）⇒ 文件**逐字节不变** + **零备份**
+    + **不清库内明文**。
+
+    ⚠️ 2026-10-24 瘦身：原 6 个函数（巡检 ×2 / 清理 ×2 / 迁移 ×2）⇒ 合成本矩阵；
+    并**补上「root 场景 ⇒ 拒绝执行 ⇒ 不得清库内明文」**（原先只有 api_keys 场景
+    有这条断言 ⇒ root 场景是个缺口）。
     """
+    shape_id, raw_text, reason = shape
+    command_id, extra_args, refusal_marker = command
     db = tmp_path / "novelos.db"
-    _seed_clean_db(db)
+    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
     secrets = tmp_path / "secrets.json"
     secrets.write_text(raw_text, encoding="utf-8")
+    before = secrets.read_bytes()
 
-    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
+    code = mod.main(
+        ["secrets", "--db", str(db), "--secrets-file", str(secrets), *extra_args]
+    )
     captured = capsys.readouterr()
     out = captured.out + captured.err
 
-    assert code == 2, f"结构非法 ⇒ 不可判 ⇒ 退出码 2，实际 {code}\n{out}"
-    assert "api_keys 段必须是对象" in out, f"必须说清为什么不可判：{out}"
-    assert "合规（无悬空条目" not in out, "结构非法时**不得**报「合规」"
+    assert code == 2, (
+        f"{command_id}/{shape_id}：结构非法 ⇒ 不可判 ⇒ 退出码 2，实际 {code}\n{out}"
+    )
+    assert reason in out, f"{command_id}/{shape_id}：必须说清为什么不可判：{out}"
+    if refusal_marker:
+        assert refusal_marker in out, (
+            f"{command_id}/{shape_id}：必须**明确拒绝**（而不是「没什么可做」）：{out}"
+        )
+    assert "合规（无悬空条目" not in out, (
+        f"{command_id}/{shape_id}：结构非法时**不得**报「合规」"
+    )
+    assert secrets.read_bytes() == before, (
+        f"{command_id}/{shape_id}：拒绝执行 ⇒ secrets.json 必须**逐字节未改**"
+    )
+    assert not list(tmp_path.glob("secrets.json.bak-*")), (
+        f"{command_id}/{shape_id}：拒绝执行 ⇒ 不得产生备份文件"
+    )
+    assert "api_key" in _db_plaintext_params(db), (
+        f"{command_id}/{shape_id}：拒绝执行 ⇒ 不得清库内明文"
+    )
 
 
-def test_patrol_with_non_dict_root_is_unknown_not_compliant(mod, tmp_path, capsys) -> None:
-    """顶层不是对象（``["a"]``）⇒ **不可判** ⇒ 退出码 2。
-
-    ⚠️ 生产侧 ``_read_file_fresh()`` 对「根不是 dict」同样 log warning + 返回 ``{}``
-    ⇒ 与「api_keys 段不是对象」是**同一类**不可判。
-    """
-    db = tmp_path / "novelos.db"
-    _seed_clean_db(db)
-    secrets = tmp_path / "secrets.json"
-    secrets.write_text(json.dumps(["a"]), encoding="utf-8")
-
-    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
-    captured = capsys.readouterr()
-    out = captured.out + captured.err
-
-    assert code == 2, f"根不是对象 ⇒ 不可判 ⇒ 退出码 2，实际 {code}\n{out}"
-    assert "顶层必须是对象" in out, f"必须说清为什么不可判：{out}"
-    assert "合规（无悬空条目" not in out, "结构非法时**不得**报「合规」"
-
-
-def test_missing_api_keys_section_is_legal_empty_state(mod, tmp_path, capsys) -> None:
-    """``api_keys`` **键不存在**（``{}``）⇒ 合法空状态 ⇒ **仍然 exit 0**。
+@pytest.mark.parametrize(
+    ("shape_id", "raw_text"),
+    [
+        pytest.param("missing_api_keys_section", "{}", id="missing-api-keys-section"),
+        pytest.param(
+            "null_api_keys_section",
+            json.dumps({"api_keys": None}),
+            id="null-api-keys-section",
+        ),
+        pytest.param("absent_file", None, id="absent-file"),
+    ],
+)
+def test_legal_empty_state_is_still_compliant(
+    mod, tmp_path, capsys, shape_id, raw_text
+) -> None:
+    """**合法空状态**（无 ``api_keys`` 段 / ``api_keys`` 为 ``null`` / 文件不存在）
+    ⇒ **仍然 exit 0**（不得判不可判）。
 
     ⚠️ **反向不变量（防过修）**：运行期 ``if api_keys is None: return {}`` **不报
     warning** ⇒ 那是「没有凭据」而非「凭据读不出来」⇒ **不得**判不可判。
@@ -1026,170 +1088,24 @@ def test_missing_api_keys_section_is_legal_empty_state(mod, tmp_path, capsys) ->
     db = tmp_path / "novelos.db"
     _seed_clean_db(db)
     secrets = tmp_path / "secrets.json"
-    secrets.write_text("{}", encoding="utf-8")
+    if raw_text is None:
+        assert not secrets.exists(), "前提：文件不得已存在"
+    else:
+        secrets.write_text(raw_text, encoding="utf-8")
 
     state = mod.collect_secrets_state(db, secrets)
-    assert state.read_errors == [], f"合法空状态不得记读错误：{state.read_errors}"
-    assert state.blocked_reasons == [], f"合法空状态不得判不可判：{state.blocked_reasons}"
+    assert state.read_errors == [], (
+        f"{shape_id}：合法空状态不得记读错误：{state.read_errors}"
+    )
+    assert state.blocked_reasons == [], (
+        f"{shape_id}：合法空状态不得判不可判：{state.blocked_reasons}"
+    )
 
     code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
     out = capsys.readouterr().out
 
-    assert code == 0, f"合法空状态 ⇒ 仍然合规（退出码 0），实际 {code}\n{out}"
-    assert "合规" in out
-
-
-def test_null_api_keys_section_is_legal_empty_state(mod, tmp_path, capsys) -> None:
-    """``{"api_keys": null}`` ⇒ 运行期与「键不存在」**不可区分** ⇒ 合法 ⇒ exit 0。
-
-    ⚠️ 生产侧 ``data.get("api_keys") is None`` 时**直接返回 {} 且不报 warning**
-    ⇒ ``null`` 与「键不存在」在运行期是**同一种**合法状态 ⇒ 巡检不得把它判成不可判。
-    """
-    db = tmp_path / "novelos.db"
-    _seed_clean_db(db)
-    secrets = tmp_path / "secrets.json"
-    secrets.write_text(json.dumps({"api_keys": None}), encoding="utf-8")
-
-    state = mod.collect_secrets_state(db, secrets)
-    assert state.read_errors == [], f"null 段不得记读错误：{state.read_errors}"
-
-    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
-    out = capsys.readouterr().out
-
-    assert code == 0, f"``api_keys: null`` ⇒ 仍然合规（退出码 0），实际 {code}\n{out}"
-
-
-def test_absent_secrets_file_is_legal_empty_state(mod, tmp_path, capsys) -> None:
-    """``secrets.json`` **不存在** ⇒ 合法状态（还没迁过）⇒ **仍然 exit 0**。"""
-    db = tmp_path / "novelos.db"
-    _seed_clean_db(db)
-    secrets = tmp_path / "secrets.json"  # 故意不存在
-    assert not secrets.exists(), "前提：文件不得已存在"
-
-    state = mod.collect_secrets_state(db, secrets)
-    assert state.read_errors == [], f"文件不存在不得记读错误：{state.read_errors}"
-
-    code = mod.main(["secrets", "--db", str(db), "--secrets-file", str(secrets)])
-    out = capsys.readouterr().out
-
-    assert code == 0, f"文件不存在 ⇒ 仍然合规（退出码 0），实际 {code}\n{out}"
-
-
-def test_prune_dangling_refuses_when_api_keys_section_is_not_object(
-    mod, tmp_path, capsys
-) -> None:
-    """``--prune-dangling --apply`` 遇结构非法 ⇒ **拒绝执行**（不写文件、不写备份）。
-
-    ⚠️ 三条路径同口径：结构非法 ⇒ 不可判 ⇒ 清理**必须**拒绝（退出码 2），
-    且**文件逐字节不变**、**零备份文件**。
-    """
-    db = tmp_path / "novelos.db"
-    _seed_clean_db(db)
-    secrets = tmp_path / "secrets.json"
-    original = json.dumps({"api_keys": "sk-legacy", "other": "keep"}, ensure_ascii=False)
-    secrets.write_text(original, encoding="utf-8")
-    before = secrets.read_bytes()
-
-    code = mod.main(
-        [
-            "secrets", "--db", str(db), "--secrets-file", str(secrets),
-            "--prune-dangling", "--apply",
-        ]
-    )
-    captured = capsys.readouterr()
-    out = captured.out + captured.err
-
-    assert code == 2, f"结构非法 ⇒ 必须拒绝执行（退出码 2），实际 {code}\n{out}"
-    assert "已中止清理" in out, f"必须**明确拒绝**（而不是「没什么可删」）：{out}"
-    assert "api_keys 段必须是对象" in out, f"必须说清为什么拒绝：{out}"
-    assert secrets.read_bytes() == before, "secrets.json 必须**逐字节未改**"
-    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝执行 ⇒ 不得产生备份文件"
-
-
-def test_prune_dangling_refuses_when_root_is_not_object(mod, tmp_path, capsys) -> None:
-    """``--prune-dangling --apply`` 遇「顶层不是对象」⇒ 同样拒绝执行。"""
-    db = tmp_path / "novelos.db"
-    _seed_clean_db(db)
-    secrets = tmp_path / "secrets.json"
-    secrets.write_text(json.dumps(["a"]), encoding="utf-8")
-    before = secrets.read_bytes()
-
-    code = mod.main(
-        [
-            "secrets", "--db", str(db), "--secrets-file", str(secrets),
-            "--prune-dangling", "--apply",
-        ]
-    )
-    captured = capsys.readouterr()
-    out = captured.out + captured.err
-
-    assert code == 2, f"根不是对象 ⇒ 必须拒绝执行（退出码 2），实际 {code}\n{out}"
-    assert "已中止清理" in out, out
-    assert "顶层必须是对象" in out, out
-    assert secrets.read_bytes() == before, "secrets.json 必须**逐字节未改**"
-    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝执行 ⇒ 不得产生备份文件"
-
-
-def test_migrate_refuses_when_api_keys_section_is_not_object(mod, tmp_path, capsys) -> None:
-    """``--migrate --apply`` 遇结构非法 ⇒ **拒绝执行**（绝不静默重置为 ``{}``）。
-
-    ⚠️ 这是 F-3 最危险的一侧：旧实现把「读不出来的 api_keys」当成**空基线**
-    ⇒ 落盘即**静默抹掉用户原有键**，而用户毫无察觉。
-    """
-    db = tmp_path / "novelos.db"
-    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
-    secrets = tmp_path / "secrets.json"
-    original = json.dumps({"api_keys": "sk-legacy", "other": "keep"}, ensure_ascii=False)
-    secrets.write_text(original, encoding="utf-8")
-    before = secrets.read_bytes()
-
-    code = mod.main(
-        [
-            "secrets", "--db", str(db), "--secrets-file", str(secrets),
-            "--migrate", "--apply",
-        ]
-    )
-    captured = capsys.readouterr()
-    out = captured.out + captured.err
-
-    assert code == 2, f"结构非法 ⇒ 必须拒绝执行（退出码 2），实际 {code}\n{out}"
-    assert "已中止迁移" in out, f"必须**明确拒绝**：{out}"
-    assert "api_keys 段必须是对象" in out, f"必须说清为什么拒绝：{out}"
-    assert secrets.read_bytes() == before, "secrets.json 必须**逐字节未改**（不得被重置）"
-    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝执行 ⇒ 不得产生备份文件"
-
-    conn = sqlite3.connect(str(db))
-    try:
-        params = conn.execute(
-            "SELECT params_json FROM model_profiles WHERE profile_id = 'mprof_live01'"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert "api_key" in params, "拒绝执行 ⇒ 不得清库内明文"
-
-
-def test_migrate_refuses_when_root_is_not_object(mod, tmp_path, capsys) -> None:
-    """``--migrate --apply`` 遇「顶层不是对象」⇒ 拒绝执行（不得把文件整体替换）。"""
-    db = tmp_path / "novelos.db"
-    _seed_model_db(db, profiles=[("mprof_live01", "minimax", "sk-plain")])
-    secrets = tmp_path / "secrets.json"
-    secrets.write_text(json.dumps(["a"]), encoding="utf-8")
-    before = secrets.read_bytes()
-
-    code = mod.main(
-        [
-            "secrets", "--db", str(db), "--secrets-file", str(secrets),
-            "--migrate", "--apply",
-        ]
-    )
-    captured = capsys.readouterr()
-    out = captured.out + captured.err
-
-    assert code == 2, f"根不是对象 ⇒ 必须拒绝执行（退出码 2），实际 {code}\n{out}"
-    assert "已中止迁移" in out, out
-    assert "顶层必须是对象" in out, out
-    assert secrets.read_bytes() == before, "secrets.json 必须**逐字节未改**"
-    assert not list(tmp_path.glob("secrets.json.bak-*")), "拒绝执行 ⇒ 不得产生备份文件"
+    assert code == 0, f"{shape_id}：合法空状态 ⇒ 仍然合规（退出码 0），实际 {code}\n{out}"
+    assert "合规" in out, out
 
 
 # ---------------------------------------------------------------------------

@@ -273,6 +273,56 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# 2b. 单迁移幂等：每条「只加列 / 建表」的迁移单独跑两遍都不炸
+#
+# ⚠️ 2026-10-24 瘦身：原 8 个同构用例（0023 / 0024 / 0025 / 0026 / 0027 /
+# 0029 / 0030 / 0031 的 ``*_migration_is_idempotent``）⇒ 合成本参数化
+# ⇒ **参数 id 用迁移号**（失败仍能点名是哪条迁移）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "migration_file",
+    [
+        "0023_project_word_band.sql",
+        "0024_quality_reports_draft_version.sql",
+        "0025_genre_packs.sql",
+        "0026_workflow_runs_instance_id.sql",
+        "0027_chapter_scene_plans.sql",
+        "0029_project_writing_bible.sql",
+        "0030_commits_rollback_of_project_scope.sql",
+        "0031_project_fast_mode.sql",
+    ],
+    ids=["0023", "0024", "0025", "0026", "0027", "0029", "0030", "0031"],
+)
+def test_single_migration_is_idempotent(tmp_path: Path, migration_file: str) -> None:
+    """单条迁移跑两遍不炸（幂等靠 ``_migrations`` 的**文件粒度**追踪）。
+
+    ⚠️ **断言口径**：第一遍**确实应用**了它；第二遍**不再应用**（落在 ``skipped`` 里）
+    且**表数不变** ⇒ 「重复执行不重跑已应用脚本」这条机制对**每一条**迁移都成立，
+    而不只是全链那一条（见 ``test_apply_migrations_is_idempotent``）。
+
+    ⚠️ **绝对表数（43）不在此断言**：它已由 ``test_apply_migrations_creates_43_tables_total``
+    （总表口径）与 ``test_business_table_count_is_42``（业务表口径）**双口径**钉住
+    ⇒ 此处再钉一次只是多一处「加表要改」的地方，零额外判别力。
+
+    ⚠️ 原 0023 用例还有一次「第三遍再跑也安全」：它与第二遍走**同一条代码路径**
+    （同一份 ``_migrations`` 状态、同一份库）⇒ 机械等价 ⇒ 不重复钉。
+    """
+    db_path = _fresh_db(tmp_path)
+    first = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert migration_file in first["applied"], f"{migration_file} 首跑应当被应用"
+
+    second = apply_migrations(db_path, MIGRATIONS_DIR)
+    assert migration_file not in second["applied"], f"{migration_file} 第二跑不得重跑"
+    assert migration_file in second["skipped"], f"{migration_file} 第二跑应当被幂等跳过"
+    # 表数不变（这些迁移要么不增表，要么增的表在首跑就已建好）。
+    assert second["tables"] == first["tables"], (
+        f"{migration_file}：表数不变（首跑 {first['tables']} / 第二跑 {second['tables']}）"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 3. 迁移登记表：`_migrations` 落 filename / applied_at
 # ---------------------------------------------------------------------------
 
@@ -324,15 +374,34 @@ def test_get_connection_enables_foreign_keys(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# V3.7：0023_project_word_band.sql 专项回归
+# 「只加可空列、不带 DEFAULT」范式：0023 / 0029 / 0031
 # ---------------------------------------------------------------------------
 
 
-def test_0023_word_band_column_exists_and_nullable(tmp_path: Path):
-    """0023 给 projects 加 word_band_json TEXT 可空列（NULL=无覆盖走默认）。
+@pytest.mark.parametrize(
+    ("migration_id", "column_name", "column_type"),
+    [
+        ("0023", "word_band_json", "TEXT"),
+        ("0029", "writing_bible", "TEXT"),
+        ("0031", "fast_mode", "INTEGER"),
+    ],
+    ids=["0023_word_band_json", "0029_writing_bible", "0031_fast_mode"],
+)
+def test_project_nullable_column_added_by_migration(
+    tmp_path: Path, migration_id: str, column_name: str, column_type: str
+) -> None:
+    """三条「只加**可空**列、**不带 DEFAULT**」的迁移 ⇒ 列存在 / 类型对 / 可空 / 无默认值。
 
-    与已有 0008（foreshadow_overdue_chapters NOT NULL DEFAULT 30）形成对照：
-    word_band_json 不带 DEFAULT，全靠 NULL 语义表达「无覆盖」。
+    - 0023 ``projects.word_band_json``（TEXT）：NULL = 无覆盖走模块默认；
+    - 0029 ``projects.writing_bible``（TEXT）：NULL = 项目无写作圣经；
+    - 0031 ``projects.fast_mode``（INTEGER）：NULL = **未设置**——必须能区分
+      「作者未设置」与「作者显式关闭」⇒ 刻意**不加 DEFAULT 0**（否则将来改默认值
+      时无法与作者既有选择区分）。
+
+    ⚠️ 与 0008（``foreshadow_overdue_chapters NOT NULL DEFAULT 30``）形成对照：
+    这三列不带 DEFAULT，全靠 NULL 语义表达「无此约束」。
+
+    ⚠️ 2026-10-24 瘦身：原三条同构用例（0023 / 0029 / 0031）⇒ 合成本参数化。
     """
     db_path = _fresh_db(tmp_path)
     apply_migrations(db_path, MIGRATIONS_DIR)
@@ -342,11 +411,11 @@ def test_0023_word_band_column_exists_and_nullable(tmp_path: Path):
     finally:
         conn.close()
     col_map = {c["name"]: c for c in cols}
-    assert "word_band_json" in col_map, "word_band_json column missing after 0023"
-    col = col_map["word_band_json"]
-    assert col["type"].upper() == "TEXT", f"expected TEXT, got {col['type']!r}"
-    assert col["notnull"] == 0, "word_band_json must be nullable"
-    assert col["dflt_value"] is None, "word_band_json has no DEFAULT (NULL=无覆盖)"
+    assert column_name in col_map, f"{column_name} column missing after {migration_id}"
+    col = col_map[column_name]
+    assert col["type"].upper() == column_type, f"expected {column_type}, got {col['type']!r}"
+    assert col["notnull"] == 0, f"{column_name} must be nullable"
+    assert col["dflt_value"] is None, f"{column_name} has no DEFAULT (NULL=无此约束)"
 
 
 # ---------------------------------------------------------------------------
@@ -354,38 +423,11 @@ def test_0023_word_band_column_exists_and_nullable(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_0029_writing_bible_column_exists_and_nullable(tmp_path: Path):
-    """0029 给 projects 加 writing_bible TEXT 可空列（NULL=项目无写作圣经）。
-
-    与 0023（word_band_json）同款：不带 DEFAULT，全靠 NULL 表达「无此约束」——
-    存量库升级后逐列为 NULL，装配侧只取运行期 author_intent，行为逐字不变。
-    """
-    db_path = _fresh_db(tmp_path)
-    apply_migrations(db_path, MIGRATIONS_DIR)
-    conn = get_connection(db_path)
-    try:
-        cols = conn.execute("PRAGMA table_info(projects)").fetchall()
-    finally:
-        conn.close()
-    col_map = {c["name"]: c for c in cols}
-    assert "writing_bible" in col_map, "writing_bible column missing after 0029"
-    col = col_map["writing_bible"]
-    assert col["type"].upper() == "TEXT", f"expected TEXT, got {col['type']!r}"
-    assert col["notnull"] == 0, "writing_bible must be nullable"
-    assert col["dflt_value"] is None, "writing_bible has no DEFAULT (NULL=无圣经)"
-
-
-def test_0029_writing_bible_migration_is_idempotent(tmp_path: Path):
-    """0029 跑两遍不炸（ALTER ADD COLUMN 不带 IF NOT EXISTS，靠 _migrations 追踪），
-    且不增表（业务表 39 不变）。"""
-    db_path = _fresh_db(tmp_path)
-    first = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0029_project_writing_bible.sql" in first["applied"]
-
-    second = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0029_project_writing_bible.sql" not in second["applied"]
-    assert "0029_project_writing_bible.sql" in second["skipped"]
-    assert second["tables"] == first["tables"]
+# ⚠️ 2026-10-24 瘦身：本节原两条用例已并入参数化——
+#   ① ``test_0029_writing_bible_column_exists_and_nullable`` ⇒
+#      ``test_project_nullable_column_added_by_migration``（参数 id = ``0029_writing_bible``）；
+#   ② ``test_0029_writing_bible_migration_is_idempotent`` ⇒
+#      ``test_single_migration_is_idempotent``（参数 id = ``0029``）。
 
 
 def test_0029_writing_bible_does_not_touch_existing_rows(tmp_path: Path):
@@ -425,22 +467,9 @@ def test_0029_writing_bible_does_not_touch_existing_rows(tmp_path: Path):
     assert row["writing_bible"] is None
 
 
-def test_0023_word_band_migration_is_idempotent(tmp_path: Path):
-    """0023 跑两遍不炸（ALTER ADD COLUMN 不带 IF NOT EXISTS，靠 _migrations 追踪）。"""
-    db_path = _fresh_db(tmp_path)
-    first = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0023_project_word_band.sql" in first["applied"]
-
-    second = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0023_project_word_band.sql" not in second["applied"]
-    assert "0023_project_word_band.sql" in second["skipped"]
-    # 表数不变（0023 不增表）。
-    assert second["tables"] == first["tables"]
-
-    # 第三次再跑也安全。
-    third = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0023_project_word_band.sql" not in third["applied"]
-    assert third["tables"] == first["tables"]
+# ⚠️ 2026-10-24 瘦身：原 ``test_0023_word_band_migration_is_idempotent`` 已并入参数化的
+# ``test_single_migration_is_idempotent``（参数 id = ``0023``）
+# ⇒ 八条「单迁移幂等」共用一条断言（迁移号进参数 id ⇒ 失败仍能点名）。
 
 
 def test_business_table_count_is_42(tmp_path: Path):
@@ -546,16 +575,9 @@ def test_0024_quality_reports_has_draft_version_column(tmp_path: Path):
     assert col["dflt_value"] is None, col
 
 
-def test_0024_draft_version_migration_is_idempotent(tmp_path: Path):
-    """0024 跑两遍不炸（ALTER ADD COLUMN 靠 _migrations 追踪幂等）；表数不变。"""
-    db_path = _fresh_db(tmp_path)
-    first = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0024_quality_reports_draft_version.sql" in first["applied"]
-
-    second = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0024_quality_reports_draft_version.sql" not in second["applied"]
-    assert "0024_quality_reports_draft_version.sql" in second["skipped"]
-    assert second["tables"] == first["tables"]
+# ⚠️ 2026-10-24 瘦身：原 ``test_0024_draft_version_migration_is_idempotent`` 已并入参数化的
+# ``test_single_migration_is_idempotent``（参数 id = ``0024``）
+# ⇒ 八条「单迁移幂等」共用一条断言（迁移号进参数 id ⇒ 失败仍能点名）。
 
 
 def test_0025_genre_packs_table_and_project_binding_column(tmp_path: Path):
@@ -644,17 +666,9 @@ def test_0025_project_binding_fk_enforced_and_set_null_on_pack_delete(tmp_path: 
     assert row["genre_pack_id"] is None, "删除 pack 后绑定列应被 SET NULL"
 
 
-def test_0025_genre_packs_migration_is_idempotent(tmp_path: Path):
-    """0025 跑两遍不炸（CREATE TABLE / ADD COLUMN 靠 _migrations 追踪幂等）；表数不变。"""
-    db_path = _fresh_db(tmp_path)
-    first = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0025_genre_packs.sql" in first["applied"]
-
-    second = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0025_genre_packs.sql" not in second["applied"]
-    assert "0025_genre_packs.sql" in second["skipped"]
-    assert second["tables"] == first["tables"]
-    assert first["tables"] == 43, f"expected 43 (42 business + _migrations), got {first['tables']}"
+# ⚠️ 2026-10-24 瘦身：原 ``test_0025_genre_packs_migration_is_idempotent`` 已并入参数化的
+# ``test_single_migration_is_idempotent``（参数 id = ``0025``）
+# ⇒ 八条「单迁移幂等」共用一条断言（迁移号进参数 id ⇒ 失败仍能点名）。
 
 
 def test_0026_workflow_runs_instance_id_column(tmp_path: Path):
@@ -679,16 +693,9 @@ def test_0026_workflow_runs_instance_id_column(tmp_path: Path):
     assert col["dflt_value"] is None, col
 
 
-def test_0026_instance_id_migration_is_idempotent(tmp_path: Path):
-    """0026 跑两遍不炸（ADD COLUMN 靠 _migrations 追踪幂等）；表数不变（仍 38 业务表）。"""
-    db_path = _fresh_db(tmp_path)
-    first = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0026_workflow_runs_instance_id.sql" in first["applied"]
-
-    second = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0026_workflow_runs_instance_id.sql" not in second["applied"]
-    assert "0026_workflow_runs_instance_id.sql" in second["skipped"]
-    assert second["tables"] == first["tables"] == 43, (first["tables"], second["tables"])
+# ⚠️ 2026-10-24 瘦身：原 ``test_0026_instance_id_migration_is_idempotent`` 已并入参数化的
+# ``test_single_migration_is_idempotent``（参数 id = ``0026``）
+# ⇒ 八条「单迁移幂等」共用一条断言（迁移号进参数 id ⇒ 失败仍能点名）。
 
 
 def test_0027_chapter_scene_plans_table(tmp_path: Path):
@@ -768,16 +775,9 @@ def test_0027_chapter_scene_plans_table(tmp_path: Path):
     assert left["n"] == 0, "删除章节后 scene_plan 行应级联清理"
 
 
-def test_0027_chapter_scene_plans_migration_is_idempotent(tmp_path: Path):
-    """0027 跑两遍不炸（CREATE TABLE IF NOT EXISTS 自幂等 + _migrations 追踪）；表数不变。"""
-    db_path = _fresh_db(tmp_path)
-    first = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0027_chapter_scene_plans.sql" in first["applied"]
-
-    second = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0027_chapter_scene_plans.sql" not in second["applied"]
-    assert "0027_chapter_scene_plans.sql" in second["skipped"]
-    assert second["tables"] == first["tables"] == 43, (first["tables"], second["tables"])
+# ⚠️ 2026-10-24 瘦身：原 ``test_0027_chapter_scene_plans_migration_is_idempotent`` 已并入参数化的
+# ``test_single_migration_is_idempotent``（参数 id = ``0027``）
+# ⇒ 八条「单迁移幂等」共用一条断言（迁移号进参数 id ⇒ 失败仍能点名）。
 
 
 def test_0013_plot_events_has_description_column(tmp_path: Path):
@@ -1777,16 +1777,9 @@ def test_0030_rollback_of_index_is_project_scoped(tmp_path: Path):
         conn.close()
 
 
-def test_0030_rollback_of_migration_is_idempotent(tmp_path: Path):
-    """0030 跑两遍不炸（DROP INDEX IF EXISTS + CREATE UNIQUE INDEX IF NOT EXISTS）。"""
-    db_path = _fresh_db(tmp_path)
-    first = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0030_commits_rollback_of_project_scope.sql" in first["applied"]
-
-    second = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0030_commits_rollback_of_project_scope.sql" not in second["applied"]
-    assert "0030_commits_rollback_of_project_scope.sql" in second["skipped"]
-    assert second["tables"] == first["tables"] == 43, (first["tables"], second["tables"])
+# ⚠️ 2026-10-24 瘦身：原 ``test_0030_rollback_of_migration_is_idempotent`` 已并入参数化的
+# ``test_single_migration_is_idempotent``（参数 id = ``0030``）
+# ⇒ 八条「单迁移幂等」共用一条断言（迁移号进参数 id ⇒ 失败仍能点名）。
 
 
 # ---------------------------------------------------------------------------
@@ -1794,41 +1787,14 @@ def test_0030_rollback_of_migration_is_idempotent(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_0031_fast_mode_column_exists_and_nullable(tmp_path: Path):
-    """0031 给 projects 加 fast_mode INTEGER 可空列（NULL=未设置→走默认关）。
-
-    刻意**不加 DEFAULT 0**：必须能区分「作者未设置」与「作者显式关闭」，
-    否则将来改默认值时无法与作者既有选择区分（同 0023/0029 的可空列范式）。
-    """
-    db_path = _fresh_db(tmp_path)
-    apply_migrations(db_path, MIGRATIONS_DIR)
-    conn = get_connection(db_path)
-    try:
-        cols = conn.execute("PRAGMA table_info(projects)").fetchall()
-    finally:
-        conn.close()
-    col_map = {c["name"]: c for c in cols}
-    assert "fast_mode" in col_map, "fast_mode column missing after 0031"
-    col = col_map["fast_mode"]
-    assert col["type"].upper() == "INTEGER", f"expected INTEGER, got {col['type']!r}"
-    assert col["notnull"] == 0, "fast_mode must be nullable"
-    assert col["dflt_value"] is None, "fast_mode has no DEFAULT (NULL=未设置)"
+# ⚠️ 2026-10-24 瘦身：原 ``test_0031_fast_mode_column_exists_and_nullable``
+# 已并入参数化的 ``test_project_nullable_column_added_by_migration``
+# （参数 id = ``0031_fast_mode``）⇒ 与 0023 / 0029 同款可空列范式共用一条断言。
 
 
-def test_0031_fast_mode_migration_is_idempotent(tmp_path: Path):
-    """0031 跑两遍不炸（ALTER ADD COLUMN 不带 IF NOT EXISTS，靠 _migrations 追踪），
-    且不增表（业务表 39 / 总表 40 不变）。"""
-    db_path = _fresh_db(tmp_path)
-    first = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0031_project_fast_mode.sql" in first["applied"]
-
-    second = apply_migrations(db_path, MIGRATIONS_DIR)
-    assert "0031_project_fast_mode.sql" not in second["applied"]
-    assert "0031_project_fast_mode.sql" in second["skipped"]
-    # 内部消费外部 skill：0032 也应被幂等跳过（同 0029，靠 _migrations 文件粒度追踪）
-    assert "0032_skills.sql" in second["skipped"]
-    assert "0033_model_connections.sql" in second["skipped"]
-    assert second["tables"] == first["tables"] == 43, (first["tables"], second["tables"])
+# ⚠️ 2026-10-24 瘦身：原 ``test_0031_fast_mode_migration_is_idempotent`` 已并入参数化的
+# ``test_single_migration_is_idempotent``（参数 id = ``0031``）
+# ⇒ 八条「单迁移幂等」共用一条断言（迁移号进参数 id ⇒ 失败仍能点名）。
 
 
 def test_0031_fast_mode_does_not_touch_existing_rows(tmp_path: Path):

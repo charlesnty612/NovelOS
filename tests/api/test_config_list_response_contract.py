@@ -40,12 +40,16 @@ object，前端拿到的仍是 ``Record<string, unknown>``。本组给 6 个列�
    ``AiCallLogSummary`` 的字段集直接与 ``PRAGMA table_info`` 的真实列名比对
    （后者要做「去掉两列 + 改一列名」的换算）——基准来自迁移文件，与端点、与模型都
    无关，从根上排除「夹具抄实现」（坑区「夹具从被测代码的实际输出里抄形状」）。
-3. **模型 vs 硬编码** 双保险：``set(M.model_fields) == EXPECTED_*``，与第 1 条互补
+3. **模型 vs 硬编码** 双保险：``M.model_fields == EXPECTED_*``，与第 1 条互补
    （一条抓「端点少出/多出键」，一条抓「模型少声明/多声明键」）。
+   ⚠️ 2026-10-24 **收敛**：这条比对现在走 runner 的单点
+   ``assert_model_fields_match(M, EXPECTED_*)`` ⇒ 本文件不再自己抄一遍
+   ``set(M.model_fields) == set(EXPECTED_*)``（复制粘贴的对比对逻辑迟早分叉）。
 
 ⚠️ **自指断言禁令的落实**（坑区「自指断言恒真」，M14/M15/M20 三条同族）：本文件**没有
-一处**「响应键集 == 模型字段集」的断言。``model_fields`` 只出现在两处，都是**独立**用途：
-第三基准（模型 vs 硬编码）与 ``extra="allow"`` 容忍度用例的**占位值生成**。静态自查：
+一处**「响应键集 == 模型字段集」的断言。``model_fields`` 在本文件里只剩**两类**用途，
+都是**独立**的：第四基准（模型 vs **DDL 实表列**，第三方基准 ⇒ 保留直比）与
+``extra="allow"`` 容忍度用例的**占位值生成**。静态自查：
 
     grep -n "model_fields" tests/api/test_config_list_response_contract.py
 
@@ -85,6 +89,7 @@ from packages.core.model_router.models import (
 from ._contract_runner import (
     app_table_columns,
     assert_list_items_named_ref,
+    assert_model_fields_match,
     assert_openapi_properties_and_required,
     create_test_app,
     one_shot,
@@ -455,12 +460,12 @@ def test_model_field_set_matches_the_hardcoded_measured_baseline(model, expected
 
     与第 ① 节的响应键集断言互补：那几条抓「端点少出/多出键」，这条抓「模型少声明/
     多声明键」。任一侧单独改都会红。
+
+    ⚠️ **走 runner 的单点**（:func:`assert_model_fields_match`，2026-10-24 收敛）：
+    「模型 vs 硬编码」的比对逻辑**只允许有一份实现** ⇒ 各域文件不再各写一遍
+    ``declared == set(expected)``（复制粘贴的对比对逻辑迟早分叉）。
     """
-    declared = set(model.model_fields)
-    assert declared == set(expected), (
-        f"{model.__name__} 多={sorted(declared - set(expected))} "
-        f"少={sorted(set(expected) - declared)}"
-    )
+    assert_model_fields_match(model, expected)
 
 
 def test_new_row_models_declare_exactly_the_real_database_columns(tmp_path: Path):
@@ -469,6 +474,11 @@ def test_new_row_models_declare_exactly_the_real_database_columns(tmp_path: Path
     基准取自 ``PRAGMA table_info``，**既不抄端点输出也不抄模型**，故不可能与缺陷同源。
     三个新模型都不是 ``SELECT *`` 而是**显式列清单**——但凡少声明一列，
     ``response_model`` 都会把它**静默过滤掉**（症状：后端返回了、API 取不到、零报错）。
+
+    ⚠️ **这里保留直比**（不走 runner 的 ``assert_model_fields_match``）：DDL 实表列是
+    **第三方基准**（不是硬编码期望），两边的**形状不同**（一侧是模型字段集、一侧是
+    实表列，可能差在列名换算上）⇒ 用直比 + 显式换算表达，比套一个「与硬编码期望比」
+    的 helper 更贴合语义；runner 的单点只覆盖「与硬编码期望比」这一种形态。
     """
     app = create_test_app(tmp_path, log_level="ERROR")
     assert set(AgentListRowOut.model_fields) == app_table_columns(app, "agents")

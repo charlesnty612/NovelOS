@@ -11,8 +11,14 @@
 执行器跑起来会判 ``[ABORT]``（锚点命中 0 次或 >1 次），但那已经是**跑的时候**
 才响 ⇒ 锚点漂移会一路静默到某天有人碰巧跑那个脚本为止。
 ⇒ 本文件把「21 条的锚点在**当前树**里恰好命中 1 次、目标文件与定向用例文件都存在、
-替换不是 anchor 的超集（否则等于没改）、.py 目标变异后仍可解析」这几件事
+替换不是 anchor 的超集（否则等于没改）、**.py 目标变异后仍可解析**」这几件事
 变成**常规跑测就会响**的断言。
+
+⚠️ **2026-10-24 订正（V3-6）**：上面那句「.py 目标变异后仍可解析」此前只是**声称**
+——文件里**没有任何一条用例**真的做过 AST 解析 ⇒ 声称与实测分离。
+现已补上真用例（:func:`test_every_python_target_stays_parseable_after_the_mutation`）。
+⚠️ 同批把「替换必须真的改变内容」的措辞**收窄**为**字节级不等**：它挡不住
+「字节变了但语义没变」的形态（插注释等）⇒ 那类靠人工评审。
 
 ⚠️ **为什么用 AST 而不是 import**（历史原因，**现状已变**）：``scripts/mutation_harness.py``
 原先在**模块级**调 ``sys.stdout.reconfigure(...)`` ⇒ pytest 捕获期的 ``sys.stdout``
@@ -118,10 +124,16 @@ def test_every_anchor_hits_exactly_once():
 
 
 def test_every_replacement_actually_changes_the_target():
-    """替换必须**真的改变内容**——replacement 是 anchor 的超集就等于「什么都没改」。
+    """替换必须**真的改变内容**（**字节级**不等）——replacement 是 anchor 的超集就等于「什么都没改」。
 
     同款教训：批次五 M15 首版写成「在锚点上方插一行注释」⇒ 实测报 SURVIVED
     （量具没量到目标却给出了「存活」结论）。这类空变异必须在这里被挡住。
+
+    ⚠️ **判据的射程（2026-10-24 收窄措辞）**：本判据只管**字节级不等**
+    （``mutated != src``）⇒ 它**挡不住「字节变了但语义没变」**的形态——
+    例如「在锚点上方插一行注释」「把常量改成等值表达式」：**语义空变异不在本判据射程**，
+    靠**人工评审**发现（本仓的 M15 首版事故正是靠人工发现的）。
+    ⇒ 本用例**不是**「语义等价性」的判据，别把它当那种东西引用。
     """
     problems: list[str] = []
     for mid, rel, anchor, repl, _case in MUTATIONS:
@@ -129,6 +141,37 @@ def test_every_replacement_actually_changes_the_target():
         mutated = src.replace(anchor, repl, 1)
         if mutated == src:
             problems.append(f"{mid}: 变异未改变内容（replacement 是 anchor 的超集）")
+    assert not problems, "\n".join(problems)
+
+
+def test_every_python_target_stays_parseable_after_the_mutation():
+    """**.py 目标**被这条变异改过之后，**仍能 ``ast.parse``**（⇒ 语法没崩）。
+
+    为什么需要这条（V3-6：docstring 声称在守、实际无此用例）
+    -------------------------------------------------------
+    本文件的 docstring 一直写着「.py 目标变异后仍可解析」是它守的性质之一，
+    但**没有任何一条用例真的做过这件事** ⇒ 声称与实测分离（AGENTS 方法论 §三.2）。
+
+    ⇒ 形态：**每条**变异都取目标文件源码 → ``src.replace(anchor, repl, 1)`` →
+    ``ast.parse`` ⇒ 语法错会当场抛 ``SyntaxError``（**不吞**、不跳过）。
+
+    ⚠️ **只对 ``.py`` 目标生效**：前端目标（``.tsx``）不是 Python ⇒ 语法检查不适用
+    （前端那条由 vitest 用例自己判）。⇒ 但「``.py`` 目标一条都没有」时本用例会**空跑**
+    ⇒ 显式断言非空（防「守卫的执行域被悄悄缩小」）。
+    """
+    py_entries = [m for m in MUTATIONS if m[1].endswith(".py")]
+    assert py_entries, (
+        "本仓的硬编码变异里一条 .py 目标都没有 ⇒ 本用例的执行域为空（恒真）"
+    )
+
+    problems: list[str] = []
+    for mid, rel, anchor, repl, _case in py_entries:
+        src = _target_path(rel).read_text(encoding="utf-8")
+        mutated = src.replace(anchor, repl, 1)
+        try:
+            ast.parse(mutated)
+        except SyntaxError as exc:
+            problems.append(f"{mid}: 变异后 {rel} **解析失败**：{exc}")
     assert not problems, "\n".join(problems)
 
 

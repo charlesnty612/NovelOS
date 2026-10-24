@@ -1,16 +1,44 @@
 """测试侧异步化适配：轮询 helper + 自动注入 helper 到被破坏的测试文件。
 
-被破坏测试文件的特征：POST /plan|write|review|commit|resume 后续断言
+被破坏测试文件的特征：POST /plan|write|review|commit 后续断言
 ``status == "COMPLETED" / "PAUSED"``。本模块把这类断言改写为「轮询等终态 +
 重读 DB 拿真实 status」。
 
 使用方式：python tests/apply_async_patch.py
+
+⚠️ **幂等守卫（2026-10-24 新增）**：第 5 步「POST 后自动插一条 wait」在**每次运行**
+都会再插一遍，而「同一 run 连等多次」的第 2、3 次等待恒立即返回（第 1 次已等到终态）
+⇒ 重复运行会在被改造的文件里叠加出成片的冗余调用。实测
+``tests/workflow/test_chapter_pipelines.py`` 曾因此叠到 **62 条**「相邻同 run 同
+expected」的恒等重复等待（52 条是同参数的「终态」等待三连，另 10 条是
+``r2 = await _wait_run_terminal(app, r2["run_id"], ...)`` 的同义改写形）。
+⇒ 第 5 步现在带幂等守卫：**插入前先看该 POST 块之后是否已经在等同一个 run**，是则
+跳过插入（详见 ``_already_waits_same_run``）。
 """
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
+
+
+def _imports_wait_helper(text: str) -> bool:
+    """模块是否从别处 import 了 ``_wait_run_terminal``（含多行括号 import 块）。
+
+    用 AST 而不是正则：``from x import (\\n  a,\\n  _wait_run_terminal,\\n)`` 这种
+    多行 import 块用正则要跨行匹配，极易漏判 ⇒ 漏判的代价是**注入第二份同名
+    helper**（后者遮蔽前者，静默改口径）。
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if any(alias.name == "_wait_run_terminal" for alias in node.names):
+                return True
+    return False
 
 # 需要注入到测试文件顶部的 helper 代码
 HELPER_PY = '''
@@ -78,6 +106,12 @@ def patch_file(path: Path) -> bool:
 
     # 检查 helper 定义是否存在（不是引用）
     has_helper_def = bool(re.search(r"^async def _wait_run_terminal\(", text, re.MULTILINE))
+    # ⚠️ 2026-10-24：拆分后的文件可能**从别的模块 import** 该 helper
+    # （如 tests/workflow/test_chapter_pipelines_auto_revise.py 从 .test_chapter_pipelines
+    # import _wait_run_terminal）⇒ 已有 import 时不得再注入一份本地定义，
+    # 否则同模块里会出现两份同名 helper（后者遮蔽前者，静默改口径）。
+    if not has_helper_def:
+        has_helper_def = _imports_wait_helper(text)
 
     # 1) 注入 helper：找到**模块顶层** import 块的最后一行，插入**到下一个空行之后**（不破坏 def）
     if not has_helper_def:
@@ -192,15 +226,53 @@ def patch_file(path: Path) -> bool:
     # 匹配模式：r = await _request(app, "POST", f".../plan|write|review|commit", json=DICT)
     #           assert r.status_code == 201, r.text
     # 插在下一行（assert 后）。DICT 可以含逗号。
+    #
+    # ⚠️ 幂等守卫（2026-10-24）：本步骤**每次运行都会再插一遍**，而「同一 run 连等
+    # 多次」的第 2、3 次等待恒立即返回 ⇒ 重复运行会在被改造的文件里叠加成片的冗余
+    # 调用（实测 test_chapter_pipelines.py 曾叠到 62+ 条恒等重复等待）。⇒ 插入前先
+    # 问一句「这个 POST 返回的 run，是不是已经有人在等了」，是则跳过。
+    # 判定口径是「**同一个 run**」而非「expected 逐字相同」：两次等待等的是同一个
+    # run，第二次不构成任何额外保证，只会制造冗余；反之，等**别的** run 不算数，
+    # 仍要插入。
+    def _already_waits_same_run(match) -> bool:
+        """该 POST 块之后是否已经在等「这个 POST 返回的那个 run」。
+
+        向后看第一条「有意义的」行——跳过空行、``#`` 注释行、以及 ``X = r.json()``
+        这类取 run_id 的绑定行——若它是针对同一 run 的 ``_wait_run_terminal`` 调用，
+        返回 True（⇒ 不再插入）。
+        """
+        bound: set[str] = set()
+        for line in match.string[match.end():].splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            bind = re.match(r"^([A-Za-z_]\w*)\s*=\s*r\.json\(\)(?:\[\"run_id\"\])?\s*$", stripped)
+            if bind:
+                bound.add(bind.group(1))
+                continue
+            call = re.match(
+                r"^(?:([A-Za-z_]\w*)\s*=\s*)?await _wait_run_terminal\(\s*app,\s*(.+?)\s*,",
+                stripped,
+            )
+            if not call:
+                return False
+            run_expr = call.group(2)
+            return run_expr == 'r.json()["run_id"]' or run_expr in bound
+        return False
+
     def _insert_wait_after_post(match):
         indent = match.group(1)
         url = match.group(2)
-        return (
+        block = (
             f'{indent}r = await _request(\n'
             f'{indent}    app, "POST", f"{url}",\n'
             f'{indent}    json={match.group(3)},\n'
             f'{indent})\n'
             f'{indent}assert r.status_code == 201, r.text\n'
+        )
+        if _already_waits_same_run(match):
+            return block
+        return block + (
             f'{indent}await _wait_run_terminal(app, r.json()["run_id"], expected=("COMPLETED", "PAUSED", "FAILED"))\n'
         )
 
@@ -229,6 +301,9 @@ if __name__ == "__main__":
         "tests/workflow/test_chapter_commit_observer_split.py",
         "tests/workflow/test_chapter_commit_observer_split_o3.py",
         "tests/workflow/test_chapter_pipelines.py",
+        # 2026-10-24 从 test_chapter_pipelines.py 拆出；helper 从前者 import
+        # （⇒ 第 1 步不会重复注入，见 _imports_wait_helper）。
+        "tests/workflow/test_chapter_pipelines_auto_revise.py",
         "tests/workflow/test_chapter_plan_preserve_word_count.py",
         "tests/workflow/test_chapter_review_critic.py",
         "tests/workflow/test_chapter_write_revise_mode.py",

@@ -1,7 +1,7 @@
 # tests（测试套件）
 
 > 职责：NovelOS 后端的 pytest 套件，按 PRD §70 四级目录组织（unit / integration / workflow / evals），另有 `api/` 集成层与 `unit/` 子域（quality / simulation）。
-> 状态：现行规模——`python -m pytest -n 4 -q` 全量 **3578 passed / 1 skipped / 1 xfail**（3580 collected；2026-10-19 批次十二实测，指纹 `5663ac14…`/612 文件跑测前后逐位一致；**`--ignore` 已撤销**——它曾挂的理由「`test_m1_lock.py` 单跑会硬杀整个进程树」经实测证伪：该现象**从未成立**（原记录把「我复现不出来」当成了「我还没找到真因」）。顺此查出并修掉一个**真缺陷**（`os.kill(pid,0)` 在 Windows 非稳定探测 ⇒ M1 单实例锁静默失效），并重写了两条本来都是空壳的 cmd_run 用例。该文件现已进入全量并行验证。V3.9.0 基线为 2059 / 2，52f639f）；前端 vitest **755** 用例 / 56 文件（`apps/web`，`npm run test`）。
+> 状态：现行规模——`python -m pytest -n 4 -q` 全量 **4379 passed / 1 skipped / 1 xfailed**（4381 collected；2026-10-24 批次三十三之二后实测，指纹 `5663ac14…`/612 文件跑测前后逐位一致；**`--ignore` 已撤销**——它曾挂的理由「`test_m1_lock.py` 单跑会硬杀整个进程树」经实测证伪：该现象**从未成立**（原记录把「我复现不出来」当成了「我还没找到真因」）。顺此查出并修掉一个**真缺陷**（`os.kill(pid,0)` 在 Windows 非稳定探测 ⇒ M1 单实例锁静默失效），并重写了两条本来都是空壳的 cmd_run 用例。该文件现已进入全量并行验证。V3.9.0 基线为 2059 / 2，52f639f）；前端 vitest **755** 用例 / 56 文件（`apps/web`，`npm run test`）。
 
 ## 职责与边界
 

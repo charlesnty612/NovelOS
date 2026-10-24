@@ -55,7 +55,11 @@ async def _make_project(app, name: str = "reopen 项目") -> str:
 
 
 def _insert_chapter(db_path: str, pid: str, *, status: str = "COMMITTED") -> str:
-    """直插 COMMITTED 章（绕开状态机，测试聚焦 reopen 端点本身）。"""
+    """直插 COMMITTED 章（绕开状态机，测试聚焦 reopen 端点本身）。
+
+    ⚠️ 与 ``tests/unit/_shared._insert_chapter`` **同名但默认值相反**（那边默认
+    ``status='PLANNED'`` / ``title='t'``）⇒ 属**有意差异**，收敛时**禁止静默统一**。
+    """
     cid = new_id("ch")
     conn = get_connection(db_path)
     try:

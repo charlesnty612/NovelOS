@@ -55,6 +55,13 @@ def _evidence(chapter_id: str) -> dict:
 
 
 def _make_meta(delta_id: str, chapter_id: str, prev_version: int) -> dict:
+    """构造 observer state-delta 负载。
+
+    ⚠️ ``created_at`` 固定为 **2026-08-24**：与 ``tests/_shared_common.py``
+    （原 ``tests/api/_shared.py`` 与 ``tests/integration/_shared.py``）的
+    **2026-08-23** **日期有意错开**（排序测试用）⇒ 同名收敛时须**显式参数化**
+    日期，**禁止静默统一**（两者本就不是逐字副本，是有意差异）。
+    """
     return {
         "delta_id": delta_id,
         "delta_version": 1,

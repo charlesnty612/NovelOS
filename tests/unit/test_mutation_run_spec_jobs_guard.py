@@ -31,6 +31,11 @@ E. **目标文件缺失 ⇒ 记 INVALID 而不是整轮崩**（F-8）。
 ``discover_specs`` / ``load_spec`` / ``run_one`` 全部替换成替身 ⇒ **零源码改动、
 零 pytest 子进程** ⇒ 可与其它测试并发。**代价**：本组用例不覆盖「并发真的会不会造假
 CAUGHT」——那件事由对抗审查的隔离副本实验负责；本组只保证**约束不会被悄悄删掉**。
+
+⚠️ **替身会挡掉两个洞 ⇒ 补了「真身」用例（G 节，V2-1 / V2-3）**：
+替身一上，``discover_specs`` 的**覆盖面**与主循环的**执行次数**就没人守了 ⇒
+G 节用**真** ``discover_specs``（**只读**，不改源码、不起 pytest 子进程）
+与**记调用次数**的替身把这两条补上。
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN_SPEC = ROOT / "tests" / "mutation_specs" / "run_spec.py"
+SPEC_DIR = ROOT / "tests" / "mutation_specs"
 
 FAKE_SPEC = "fake_spec_for_jobs_guard.py"
 FAKE_ENTRY = (
@@ -53,6 +59,15 @@ FAKE_ENTRY = (
     "anchor text\n",
     "replacement text\n",
     "tests/unit/test_example_target.py",
+)
+#: 第二条假条目（用来让「执行次数 == entry 数」这条断言**有区分度**：
+#: 一条 entry 时「执行 0 次」与「执行 1 次」也能分辨，但两条更贴近真实批次形状）。
+FAKE_ENTRY_2 = (
+    "FAKE-2",
+    "packages/core/other_target.py",
+    "other anchor\n",
+    "other replacement\n",
+    "tests/unit/test_other_target.py",
 )
 
 
@@ -69,7 +84,13 @@ def runner():
     return mod
 
 
-def _run_main(runner, monkeypatch, argv: list[str]) -> tuple[int, str]:
+def _run_main(
+    runner,
+    monkeypatch,
+    argv: list[str],
+    calls: list[str] | None = None,
+    entries: tuple[tuple, ...] = (FAKE_ENTRY,),
+) -> tuple[int, str]:
     """用替身跑一次 ``main``，返回 ``(退出码, stdout)``。
 
     替身三件套：``discover_specs`` 不读真实规格、``load_spec`` 给一条假条目、
@@ -77,14 +98,21 @@ def _run_main(runner, monkeypatch, argv: list[str]) -> tuple[int, str]:
 
     ⚠️ ``discover_specs`` 的替身必须返回**带 ``.name`` 的对象**（执行器会打印
     ``[p.name for p in spec_files]``）⇒ 这里用 ``pathlib.Path``。
+
+    ⚠️ ``calls``：``run_one`` 替身**记录每次调用的条目 id** ⇒ 用来判「主循环
+    是不是**真的**把本批 entry 跑完了」（V2-3：空执行全仓无看守）。
     """
     monkeypatch.setattr(runner, "discover_specs", lambda: [Path(FAKE_SPEC)])
-    monkeypatch.setattr(runner, "load_spec", lambda _sf: [FAKE_ENTRY])
-    monkeypatch.setattr(
-        runner, "run_one", lambda mid, rel, anchor, replacement, test_file, **kw: (
+    monkeypatch.setattr(runner, "load_spec", lambda _sf: list(entries))
+
+    def _fake_run_one(mid, rel, anchor, replacement, test_file, **kw):
+        if calls is not None:
+            calls.append(mid)
+        return (
             f"[CAUGHT]   {mid}: FAILED tests/unit/test_example_target.py::test_fake"
         )
-    )
+
+    monkeypatch.setattr(runner, "run_one", _fake_run_one)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = runner.main(argv)
@@ -320,3 +348,74 @@ def test_help_states_the_exit3_rule_has_no_bypass(runner):
         runner.main(["--help"])
     out = buf.getvalue()
     assert "所有非用法错误的结束路径" in out, "--help 没写明 exit 3 覆盖所有结束路径"
+
+
+# ---------------------------------------------------------------------------
+# G. 全仓真身看守（V2-1 / V2-3）：替身挡住的洞，得有**真身**用例兜底
+# ---------------------------------------------------------------------------
+#
+# 本组其余用例把 ``discover_specs`` / ``load_spec`` / ``run_one`` **整体替身**掉
+# ⇒ 那两个洞「全仓无真身看守」：
+#
+# - **V2-1**：`discover_specs` 退回前缀规则（如 ``glob("g*.py")``）⇒ ``--all``
+#   只跑一小部分规格，却照样打印「突变存活: 无」+ exit 0
+#   （2026-10-15 订正过的真实事故：120/175 条）；
+# - **V2-3**：主循环**空执行**（发现了、组装了，却一次都没调 ``run_one``）
+#   ⇒ 输出照样是「突变存活: 无」+ exit 0。
+
+
+def _expected_spec_files() -> list[Path]:
+    """目录里**全部**规格文件（**动态推导**，不硬编码条数）。
+
+    口径与「什么算一个规格文件」对齐：
+    - ``*.py``（**不是**任何前缀规则）⇒ 前缀规则退步时本集合与实测分叉；
+    - 排除执行器自身与辅助脚本（``run_spec.py`` / ``validate_specs.py``）；
+    - 排除下划线开头的私有模块；
+    - 要求文件里含 ``MUTATIONS`` 字面量（不含它的 ``.py`` 是辅助模块，不是规格）。
+    """
+    out: list[Path] = []
+    for p in sorted(SPEC_DIR.glob("*.py")):
+        if p.name in {"run_spec.py", "validate_specs.py"} or p.name.startswith("_"):
+            continue
+        if "MUTATIONS" not in p.read_text(encoding="utf-8"):
+            continue
+        out.append(p)
+    return out
+
+
+def test_real_discover_specs_finds_every_spec_file(runner):
+    """真 ``discover_specs`` 必须发现**全部**规格文件（不是靠一条前缀规则去猜）。
+
+    ⇒ 判别点：发现逻辑的**覆盖面**。glob 退回 ``"g*.py"`` 之类 ⇒ 本条必红。
+    """
+    found = sorted(runner.discover_specs())
+    expected = _expected_spec_files()
+    assert found, "discover_specs 一个规格都没发现（目录空？路径写错了？）"
+    assert found == expected, (
+        "discover_specs 的发现集合与「目录里全部规格文件」**不相等** ⇒ "
+        "覆盖面被缩小了（量具少测了却照样报告「突变存活: 无」+ exit 0）：\n"
+        f"少发现={sorted(p.name for p in set(expected) - set(found))}\n"
+        f"多发现={sorted(p.name for p in set(found) - set(expected))}\n"
+        f"（实测 {len(found)} / 期望 {len(expected)}）"
+    )
+
+
+def test_main_actually_executes_every_discovered_entry(runner, monkeypatch):
+    """主循环必须**真的执行**每一条 entry（不是发现了却空跑）。
+
+    ⇒ 判别点：``run_one`` 的**调用次数**。空执行 ⇒ 次数为 0 ⇒ 本条必红
+    （原先替身不记次数 ⇒ 这条洞全仓无看守）。
+    """
+    entries = (FAKE_ENTRY, FAKE_ENTRY_2)
+    calls: list[str] = []
+    rc, out = _run_main(runner, monkeypatch, ["--all"], calls=calls, entries=entries)
+    assert rc == 0, out
+    assert len(calls) == len(entries), (
+        f"主循环执行了 {len(calls)} 次，期望 {len(entries)} 次"
+        f"（实测执行了 {calls}）⇒ 主循环空执行/漏执行，"
+        "而输出仍是「突变存活: 无」+ exit 0"
+    )
+    assert calls, "本批 entry 数 ≥1 ⇒ 执行次数必须 ≥1（防空执行恒真）"
+    assert sorted(calls) == sorted(e[0] for e in entries), (
+        f"执行的条目 id 与本批 entry 不符：{calls}"
+    )
