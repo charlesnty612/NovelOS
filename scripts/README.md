@@ -44,7 +44,7 @@
 | delta 源锚定阈值校准 | `delta_anchoring_calibrate.py`（只读 `mode=ro` 打开；实测 `DELTA_BIGRAM_COVERAGE_MIN` 的 bigram 覆盖率分布 + ≤20 条低覆盖样本供人工判别「真捏造」还是「正常概括」；不写库） |
 | revise 保真阈值校准 | `revise_fidelity_calibrate.py`（只读 `mode=ro` 打开；从 `workflow_runs.checkpoint_json` 还原历史 revise 轮次实测 `REVISE_MIN_PRESERVED_RATIO` 的 `preserved_ratio` 分布，另出相邻 drafts 版本对照与 ≤20 条低比值抽样；不写库） |
 | 章节量产 | `produce_chapters.py`（见下文专节） |
-| 凭据 / 仓库防护 | `check_content_repo_guard.py`（**只读**巡检：模式一 = 内容仓 push 防护；模式二 `secrets` = 凭据收敛 D-18，库内明文 api_key → `secrets.json` + 清理悬空条目，**两个动作各自独立**、`--apply` 是写权限总闸。⚠️ 2026-10-23 晚按「>1500 行要拆」拆成 **门面 644 行 + 实现 `scripts/_guard_secrets.py` 1040 行**；`scripts/` 不是包 ⇒ 门面把**本目录**塞进 `sys.path` 后 `import _guard_secrets` ⇒ **CLI 形状不变**）、`check_orphan_relationships.py`（**只读**诊断孤儿 `relationships` 行——端点 FK 已被迁移 0022 摘掉 ⇒ `PRAGMA foreign_key_check` **查不出来**） |
+| 凭据 / 仓库防护 | `check_content_repo_guard.py`（**只读**巡检：模式一 = 内容仓 push 防护；模式二 `secrets` = 凭据收敛 D-18，库内明文 api_key → `secrets.json` + 清理悬空条目，**两个动作各自独立**、`--apply` 是写权限总闸。⚠️ 2026-10-23 晚按「>1500 行要拆」拆成 **门面 863 行 + 实现 `scripts/_guard_secrets.py` 1040 行**（行数随脚本变动，以实测为准：`(Get-Content scripts\check_content_repo_guard.py).Count` ＝ **总行数**；`Get-Content … | Measure-Object -Line` 只计**非空行**（本门面 770），两者不等）；`scripts/` 不是包 ⇒ 门面把**本目录**塞进 `sys.path` 后 `import _guard_secrets` ⇒ **CLI 形状不变**）、`check_orphan_relationships.py`（**只读**诊断孤儿 `relationships` 行——端点 FK 已被迁移 0022 摘掉 ⇒ `PRAGMA foreign_key_check` **查不出来**） |
 | 备份恢复 | `restore_db.py`（从**加密备份**恢复主库：原子替换 + 恢复后校验 + 残留 `-wal`/`-shm` 检出——手工拼 openssl 曾实测出「恢复静默失效而 `integrity_check` 仍报 ok」） |
 | 性能实测 | `measure_cache_key_perf.py`（装配缓存键的命中/未命中耗时 + 键构造/查缓存/装配三段开销；**只用临时库 + 合成夹具**，传活库路径直接拒绝并非 0 退出） |
 | 共用模块（非 CLI） | `guard_repo_write_path.py`（**写盘守卫**：软件仓内只允许写 `data/` 与 `tmp/`；痕迹仓根解析）、`_codegen_check.py`（codegen 产物漂移校验共用件：换行归一 + 首个差异摘要 + 产物比对） |
@@ -479,12 +479,25 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 
 ### 退出码语义
 
-| 码 | 含义 |
-|---|---|
-| `0` | 合规 / 写入完成 |
-| `1` | 不合规（内容仓仍能被误推 / 校验不通过 / **`secrets` 里有值畸形条目**——空串或非字符串 ⇒ 运行期解析不出来） |
-| `2` | **巡检自身出错 / 不可判**：读不到表、**归属无据**（secrets 的可用键与库内**实体身份**`profile_id`/`connection_id` 零交集 ⇒ `--db` 可能指错了库；**provider 级 / env 级键不携带项目身份，不算归属证据**）、待写路径被守卫拒绝、坏 `secrets.json`（**结构非法**：顶层或 `api_keys` 段不是对象） |
-| `3` | 痕迹仓不可用（`--write-docs` 且拿不到痕迹仓 ⇒ 明确失败，不回落软件仓） |
+`check_content_repo_guard.py` 有**两个模式**，**同码不同义**——务必按模式读。
+下表以 `scripts/check_content_repo_guard.py` **当前实现**为准（2026-10-25 实测复算）。
+
+| 码 | 模式一：内容仓 push 防护（默认） | 模式二：`secrets` 凭据收敛 |
+|---|---|---|
+| `0` | **有技术屏障、不能被误推**（`verdict="no"`）：各远端的 push URL 都已禁用（`no_push` 等禁用形态），或存在 pre-push 钩子 | 合规 / 写入完成 |
+| `1` | **不合规、能被误推**（`verdict="yes"`、`can_be_pushed=true`）：**任一**远端的 push URL 可推、且无 pre-push 钩子屏障 | 不合规（内容仓仍能被误推 / 校验不通过 / **`secrets` 里有值畸形条目**——空串或非字符串 ⇒ 运行期解析不出来） |
+| `2` | **不可判定**（`verdict="unknown"`、`can_be_pushed=null`）：① 内容仓路径不存在或不是目录 ② git 不可用 ③ 目标目录不是 git 工作树 ④ **内容仓没有任何远端**（含 `git remote -v` 失败） | **巡检自身出错 / 不可判**：读不到表、**归属无据**（secrets 的可用键与库内**实体身份**`profile_id`/`connection_id` 零交集 ⇒ `--db` 可能指错了库；**provider 级 / env 级键不携带项目身份，不算归属证据**）、待写路径被守卫拒绝、坏 `secrets.json`（**结构非法**：顶层或 `api_keys` 段不是对象） |
+| `3` | **无**：当前实现不返回此码 | **无**：当前实现不返回此码——「痕迹仓不可用」是**旧 CLI 形状**的口径（现行实现已无 `--write-docs` / `--artifacts-dir` flag） |
+
+⚠️ **push 模式的 UNKNOWN 档（2026-10-25 A/C1 批引入，别再按旧文档读）**：
+「**没有远端 ⇒ 不可判定 ⇒ exit 2**」——旧实现只认 `origin`、且把「读不到」折叠成「没有」，
+会给从未评估过的对象发满分（**假绿**）；现在**无远端**与**`git remote -v` 失败**都走 `exit 2`，
+且文本输出里**不出现**「推不出去」。
+⚠️ **push 模式的 JSON 口径**：`push_disabled` 在**无远端**时为 `null`（不可判，**不是** `true`），
+有远端时为 bool（各远端的 push URL 都禁用时才是 `true`）；`verdict` ∈ `yes`/`no`/`unknown`，
+`can_be_pushed` ∈ `true`/`false`/`null`。
+⚠️ **pre-push 钩子的屏障判定有已知缺陷（BUG-09，major，修复批处理中）**：当前实现**只按钩子文件「存在且非空」**判它是不是屏障（`scripts/check_content_repo_guard.py:341-354` 采集、`:422-425` 参与 `can_be_pushed`）⇒ **钩子文件非空，push 模式就判 `0`**；该判定**不看钩子的实际退出码** ⇒ 一个**非空但放行型**的钩子（实际 rc=0、push 照放）同样被当成屏障，门禁结论与钩子实际行为**相反**。⇒ **`0` 在有钩子时只表示「脚本按当前口径判为有屏障」，不构成「实际不可推」的保证**；修复批（按钩子**实际 rc** 判屏障）落地后再按新口径读。
+⚠️ **修复落地前的可靠做法**：**不要把「有钩子」当作唯一屏障**——钩子被删除 / 绕过、或钩子存在但放行，都会失守 ⇒ 同时把 push URL 置为禁用值（`no_push` 等）才是可依赖的屏障。
 
 ⚠️ **CLI 行为变更（2026-10-23 晚 · 对抗审查 B 第三轮批）**：
 ① **归属闸门改用实体级身份**（`profile_id` / `connection_id`）⇒ **别名型键（provider 级 / env 级）不再能伪造归属**；
@@ -501,6 +514,11 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 ⚠️ 改退出码会让已验过的 CI 判据失效，故**必须单列留痕**（CHANGELOG 已单列）。
 
 ### 逃逸口（默认全关）
+
+⚠️ **（2026-10-25 复算）下列三个 flag 属旧 CLI 形状，当前 `check_content_repo_guard.py` 实现里已不存在**
+（现行 flag 只有 `--content-dir` / `--db` / `--secrets-file` / `--apply` / `--migrate` /
+`--prune-dangling` / `--force-all-dangling` / `--json`）⇒ **本段暂留作历史口径，待下一批清理**，
+勿据此传参。
 
 1. `--artifacts-dir <path>`（推荐）或 `NOVELOS_ARTIFACTS_DIR` env ⇒ 指定痕迹仓根；
 2. `--allow-software-repo-out` ⇒ 明确接受落软件仓的风险（打 `[警告]`）；
@@ -525,3 +543,28 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 - `tests/unit/test_mutation_run_spec_jobs_guard.py`（**19 例**：突变执行器**并发档位**的硬约束——
   并发退出码恒为 3（**所有非用法错误的结束路径**都经统一出口，**含「改动集为空」与「只读预检」两条早退**）、
   汇总写明档位、默认串行、目标文件缺失记 `[INVALID]`）。
+
+## pre-push 禁推哨兵（`.githooks/pre-push`）
+
+本仓自带一个 **pre-push 钩子**（`.githooks/pre-push`，**入库带可执行位 `100755`**），
+用于**默认拒绝向任何 remote push**（分支 / tag / 删除 / `--force` / `--mirror` / `--dry-run` 一律拦）：
+
+- **默认拒绝**：退出码 **1**，并打印被拒的 ref 列表与
+  「本仓禁止 push；确需放行请设 `NOVELOS_ALLOW_PUSH=1` 重新执行」；
+- **显式放行**：仅当环境变量 `NOVELOS_ALLOW_PUSH=1` 时放行，并打印醒目警告
+  `WARNING: ALLOW PUSH — 本次 push 未经任何护栏（NOVELOS_ALLOW_PUSH=1）`；
+- 钩子**只做「拦 / 放」判定**：不改被推内容、不读任何凭据、不依赖仓外脚本。
+
+⚠️ **R1 条件：每台机器首次克隆后必做一次，否则哨兵不生效**：
+
+```sh
+git config core.hooksPath .githooks
+```
+
+该配置**只存在于本机 `.git/config`**——**git 没有可入库的仓库级配置位** ⇒
+**新克隆 / 换机环境默认没有任何护栏**，必须**手动执行一次**上面这条命令。
+（`core.hooksPath` 不随仓库分发；`core.filemode=false` 时 POSIX 侧靠**入库的可执行位**（`100755`）才能执行。）
+
+证据：`门禁证据\NovelOS\pre-push-hook-审查-2026-10-25.md`（七条判据全过·有条件通过）、
+`pre-push-negative.out`（默认拒推，rc=1）、`pre-push-positive.out`（放行，rc=0 且含警告行）。
+
