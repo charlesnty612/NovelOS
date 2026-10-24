@@ -342,6 +342,13 @@ class CapabilityBindingOut(BaseModel):
     profile_ids: list[str] = Field(description="按 fallback 优先序；未绑定时为空数组")
     profiles: list[BindingProfileOut] = Field(description="按 profile_ids 顺序解析；缺失项跳过")
     legacy_available: bool = Field(description="model_configs 中该 capability 有 enabled 行（迁移引导用）")
+    thinking_override: Optional[str] = Field(
+        description=(
+            "环节级思考档覆盖（迁移 0036）：null=跟随档案；否则为 8 档枚举之一"
+            "（default/off/on/adaptive/low/medium/high/max）。"
+            "运行期对该环节候选链每个档案的 params 应用对应 thinking/reasoning_effort 翻译。"
+        )
+    )
     updated_at: Optional[str] = Field(description="未绑定时为 null（不是省略）")
 
 

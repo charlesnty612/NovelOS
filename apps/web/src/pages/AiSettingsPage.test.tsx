@@ -114,6 +114,7 @@ const bindingsFixture: CapabilityBinding[] = [
     profile_ids: ['mpf_001'],
     profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
     legacy_available: false,
+    thinking_override: null,
   },
   {
     capability: 'world_building',
@@ -122,6 +123,7 @@ const bindingsFixture: CapabilityBinding[] = [
     profile_ids: ['mpf_001'],
     profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
     legacy_available: false,
+    thinking_override: null,
   },
   {
     capability: 'character_design',
@@ -130,6 +132,7 @@ const bindingsFixture: CapabilityBinding[] = [
     profile_ids: ['mpf_001'],
     profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
     legacy_available: false,
+    thinking_override: null,
   },
   {
     capability: 'volume_outline',
@@ -138,6 +141,7 @@ const bindingsFixture: CapabilityBinding[] = [
     profile_ids: ['mpf_001'],
     profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
     legacy_available: false,
+    thinking_override: null,
   },
   {
     capability: 'creative_writing',
@@ -146,6 +150,7 @@ const bindingsFixture: CapabilityBinding[] = [
     profile_ids: [],
     profiles: [],
     legacy_available: true,
+    thinking_override: null,
   },
   {
     capability: 'reasoning',
@@ -154,6 +159,7 @@ const bindingsFixture: CapabilityBinding[] = [
     profile_ids: ['mpf_001'],
     profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
     legacy_available: false,
+    thinking_override: null,
   },
   {
     // V3.9.3：observer 拆为独立 capability，AI 设置页能单独分配模型。
@@ -163,6 +169,7 @@ const bindingsFixture: CapabilityBinding[] = [
     profile_ids: ['mpf_001'],
     profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
     legacy_available: false,
+    thinking_override: null,
   },
   {
     capability: 'light',
@@ -171,6 +178,7 @@ const bindingsFixture: CapabilityBinding[] = [
     profile_ids: [],
     profiles: [],
     legacy_available: false,
+    thinking_override: null,
   },
 ];
 
@@ -338,6 +346,7 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
       profile_ids: ['mpf_001'],
       profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
       legacy_available: false,
+      thinking_override: null,
     });
 
     renderPage();
@@ -455,6 +464,7 @@ describe('AiSettingsPage · 模型档案 + 环节绑定', () => {
         { profile_id: 'mpf_002', name: 'plain', model: 'gpt-4o-mini' },
       ],
       legacy_available: false,
+      thinking_override: null,
     });
 
     renderPage();
@@ -1084,6 +1094,7 @@ const chainBindingsFixture: CapabilityBinding[] = [
       { profile_id: 'mpf_002', name: 'backup-writer', model: 'gpt-4o-mini' },
     ],
     legacy_available: false,
+    thinking_override: null,
   },
   {
     capability: 'premise_design',
@@ -1092,6 +1103,7 @@ const chainBindingsFixture: CapabilityBinding[] = [
     profile_ids: ['mpf_001'],
     profiles: [{ profile_id: 'mpf_001', name: 'default-reasoning', model: 'gpt-4o-mini' }],
     legacy_available: false,
+    thinking_override: null,
   },
 ];
 

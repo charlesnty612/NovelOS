@@ -179,6 +179,7 @@ export function setupProjectInitMocks(api: ProjectInitMockApis): void {
     profile_ids: ids,
     profiles: ids.map((id) => ({ profile_id: id, name: id, model: id })),
     legacy_available: false,
+    thinking_override: null,
   }));
   vi.mocked(capabilityBindingsApi.unbind).mockResolvedValue(undefined as never);
   // 默认 init-status：失败（默认 fallback 行为：全部默认勾选且不强制禁用），

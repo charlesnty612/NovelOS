@@ -166,6 +166,11 @@ def test_apply_migrations_creates_43_tables_total(tmp_path: Path):
     #   （JSON 覆盖表：协议 → 该网关此协议的 base_url）；**不增表**（业务表 42 / 总表 43）；
     # - **不回填**：存量连接 NULL ⇒ 无覆盖，绑定态全部走 base_url（存量零行为突变）。
     assert "0035_connection_protocol_base_urls.sql" in result["applied"]
+    # 环节级思考档覆盖（2026-10-24）：0036_capability_thinking_override.sql
+    # - 仅 ALTER TABLE capability_bindings 加 thinking_override TEXT 可空列
+    #   （NULL=跟随档案，8 档枚举见 effective.THINKING_MODES）；**不增表**（业务表 42 / 总表 43）；
+    # - **不回填**：此前不存在环节级强度概念，无可回填的历史值。
+    assert "0036_capability_thinking_override.sql" in result["applied"]
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +220,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0033_model_connections.sql",
         "0034_commits_draft_version.sql",
         "0035_connection_protocol_base_urls.sql",
+        "0036_capability_thinking_override.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)

@@ -5,8 +5,10 @@
 端点：
 - ``GET /capability-bindings`` ——列出全部 binding（含未绑定环节），每项含 ``label`` /
   ``agents`` / ``profile_ids`` / ``profiles`` / ``legacy_available`` / ``updated_at``。
-- ``PUT /capability-bindings/{capability}`` ——upsert：body ``{profile_ids: [...]}``，
-  至少 1 个、须都存在且 enabled=1；未知 capability → 404；profile 不存在或禁用 → 422。
+- ``PUT /capability-bindings/{capability}`` ——upsert：body ``{profile_ids: [...],
+  thinking_override?: str|null}``，至少 1 个、须都存在且 enabled=1；
+  thinking_override 键缺席=保留现值 / null=清除 / 字符串须在 8 档枚举内（违规 422）；
+  未知 capability → 404；profile 不存在或禁用 → 422。
 - ``DELETE /capability-bindings/{capability}`` ——解除 binding（回落旧 model_configs 行为）。
 
 设计要点：
@@ -24,6 +26,7 @@ from fastapi import APIRouter, HTTPException, Request
 from packages.core.logging_config import get_logger
 from packages.core.model_router import BindingService
 from packages.core.model_router.bindings import (
+    UNSET_THINKING_OVERRIDE,
     InvalidBindingError,
     UnknownCapabilityError,
 )
@@ -56,11 +59,15 @@ def list_capability_bindings(request: Request) -> list[dict]:
 
 @router.put("/capability-bindings/{capability}", response_model=CapabilityBindingOut)
 def upsert_capability_binding(capability: str, payload: dict, request: Request) -> dict:
-    """upsert 一个 binding。body: ``{profile_ids: [...]}``。
+    """upsert 一个 binding。body: ``{profile_ids: [...], thinking_override?: str|null}``。
 
     - ``profile_ids`` 非空；
     - 所有 profile_id 必须存在且 ``enabled=1``（失效的 profile 不允许出现在 binding 里——
       否则 candidate 链会跳过它，违反「binding 显式声明」的语义）；
+    - ``thinking_override``（环节级思考档覆盖，迁移 0036）三种形态：
+      **body 不带该键** → 保留 DB 现值（只改候选链不会意外清掉已设强度）；
+      显式 ``null`` → 清除覆盖（回到「跟随档案」）；字符串 → 必须在 8 档枚举
+      （``effective.THINKING_MODES``）内，违规 → 422；
     - 未知 capability → 404；
     - 校验失败 → 422（detail 含具体原因）。
     """
@@ -69,6 +76,11 @@ def upsert_capability_binding(capability: str, payload: dict, request: Request) 
         raise HTTPException(status_code=422, detail="profile_ids must be a non-empty list")
     if not all(isinstance(x, str) and x for x in profile_ids):
         raise HTTPException(status_code=422, detail="profile_ids must be list of strings")
+    # 键缺席（保留现值）与显式 null（清除）必须区分——用哨兵，不用默认 None。
+    if "thinking_override" in payload:
+        thinking_override: object = payload["thinking_override"]
+    else:
+        thinking_override = UNSET_THINKING_OVERRIDE
     # 去重保持顺序
     seen: set[str] = set()
     deduped: list[str] = []
@@ -80,7 +92,7 @@ def upsert_capability_binding(capability: str, payload: dict, request: Request) 
     settings = request.app.state.settings
     svc = BindingService(settings.db_path)
     try:
-        svc.upsert(capability, deduped)
+        svc.upsert(capability, deduped, thinking_override=thinking_override)
     except UnknownCapabilityError as exc:
         raise HTTPException(
             status_code=404, detail=f"capability {exc.args[0]!r} not found"

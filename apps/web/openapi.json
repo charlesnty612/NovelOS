@@ -658,7 +658,7 @@
           "capability_bindings"
         ],
         "summary": "Upsert Capability Binding",
-        "description": "upsert 一个 binding。body: ``{profile_ids: [...]}``。\n\n- ``profile_ids`` 非空；\n- 所有 profile_id 必须存在且 ``enabled=1``（失效的 profile 不允许出现在 binding 里——\n  否则 candidate 链会跳过它，违反「binding 显式声明」的语义）；\n- 未知 capability → 404；\n- 校验失败 → 422（detail 含具体原因）。",
+        "description": "upsert 一个 binding。body: ``{profile_ids: [...], thinking_override?: str|null}``。\n\n- ``profile_ids`` 非空；\n- 所有 profile_id 必须存在且 ``enabled=1``（失效的 profile 不允许出现在 binding 里——\n  否则 candidate 链会跳过它，违反「binding 显式声明」的语义）；\n- ``thinking_override``（环节级思考档覆盖，迁移 0036）三种形态：\n  **body 不带该键** → 保留 DB 现值（只改候选链不会意外清掉已设强度）；\n  显式 ``null`` → 清除覆盖（回到「跟随档案」）；字符串 → 必须在 8 档枚举\n  （``effective.THINKING_MODES``）内，违规 → 422；\n- 未知 capability → 404；\n- 校验失败 → 422（detail 含具体原因）。",
         "operationId": "upsert_capability_binding_api_capability_bindings__capability__put",
         "parameters": [
           {
@@ -9314,6 +9314,18 @@
             "title": "Legacy Available",
             "description": "model_configs 中该 capability 有 enabled 行（迁移引导用）"
           },
+          "thinking_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thinking Override",
+            "description": "环节级思考档覆盖（迁移 0036）：null=跟随档案；否则为 8 档枚举之一（default/off/on/adaptive/low/medium/high/max）。运行期对该环节候选链每个档案的 params 应用对应 thinking/reasoning_effort 翻译。"
+          },
           "updated_at": {
             "anyOf": [
               {
@@ -9336,6 +9348,7 @@
           "profile_ids",
           "profiles",
           "legacy_available",
+          "thinking_override",
           "updated_at"
         ],
         "title": "CapabilityBindingOut",

@@ -249,3 +249,116 @@ def test_delete_unknown_capability_returns_404(tmp_path: Path):
             assert r.status_code == 404, r.text
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 4. thinking_override（环节级思考档覆盖，迁移 0036）
+# ---------------------------------------------------------------------------
+
+
+async def _put_binding(app, capability: str, payload: dict) -> httpx.Response:
+    return await _request(app, "PUT", f"/api/capability-bindings/{capability}", json=payload)
+
+
+def test_put_thinking_override_roundtrip_and_none_clears(tmp_path: Path):
+    """PUT 写 override → GET 返回同值；显式 null 清除回「跟随档案」。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _create_profile(app)
+
+            r = await _put_binding(
+                app, "reasoning", {"profile_ids": [pid], "thinking_override": "low"}
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["thinking_override"] == "low"
+
+            r = await _request(app, "GET", "/api/capability-bindings")
+            by_cap = {i["capability"]: i for i in r.json()}
+            assert by_cap["reasoning"]["thinking_override"] == "low"
+
+            # 显式 null = 清除（不是「保持」）
+            r = await _put_binding(
+                app, "reasoning", {"profile_ids": [pid], "thinking_override": None}
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["thinking_override"] is None
+
+    asyncio.run(run())
+
+
+def test_put_thinking_override_absent_key_keeps_current_value(tmp_path: Path):
+    """PUT body 不带 thinking_override 键 ⇒ 保留 DB 现值（只改链不清强度）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _create_profile(app)
+            pid2 = await _create_profile(app, name="p2", model="m2")
+
+            r = await _put_binding(
+                app, "light", {"profile_ids": [pid], "thinking_override": "high"}
+            )
+            assert r.status_code == 200, r.text
+
+            # 只改候选链：不带 thinking_override 键
+            r = await _put_binding(app, "light", {"profile_ids": [pid2]})
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["profile_ids"] == [pid2]
+            assert data["thinking_override"] == "high"  # 现值被保留
+
+    asyncio.run(run())
+
+
+def test_put_thinking_override_invalid_value_returns_422(tmp_path: Path):
+    """值域外（不在 8 档枚举）→ 422，且 DB 不被写入。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _create_profile(app)
+            for bad in ("turbo", "LOW", "", "enabled"):
+                r = await _put_binding(
+                    app, "reasoning", {"profile_ids": [pid], "thinking_override": bad}
+                )
+                assert r.status_code == 422, (bad, r.text)
+                assert "8 档枚举" in r.json()["detail"], bad
+
+            r = await _request(app, "GET", "/api/capability-bindings")
+            by_cap = {i["capability"]: i for i in r.json()}
+            assert by_cap["reasoning"]["thinking_override"] is None  # 脏值未落库
+
+    asyncio.run(run())
+
+
+def test_put_thinking_override_wrong_type_returns_422(tmp_path: Path):
+    """非字符串非 null（如数字/对象）→ 422。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _create_profile(app)
+            for bad in (3, {"type": "enabled"}, ["low"]):
+                r = await _put_binding(
+                    app, "reasoning", {"profile_ids": [pid], "thinking_override": bad}
+                )
+                assert r.status_code == 422, (bad, r.text)
+
+    asyncio.run(run())
+
+
+def test_get_unbound_capability_thinking_override_is_null(tmp_path: Path):
+    """未绑定环节 GET：thinking_override 为 null（不是省略）。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            r = await _request(app, "GET", "/api/capability-bindings")
+            assert r.status_code == 200, r.text
+            for item in r.json():
+                assert item["thinking_override"] is None
+                assert "thinking_override" in item  # 键恒在，与 updated_at 同款语义
+
+    asyncio.run(run())

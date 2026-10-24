@@ -105,6 +105,8 @@ EXPECTED_BINDING_KEYS = frozenset(
         "profile_ids",
         "profiles",
         "legacy_available",
+        # 2026-10-24（迁移 0036）：环节级思考档覆盖；null=跟随档案（可空但键恒在）
+        "thinking_override",
         "updated_at",
     }
 )
@@ -564,6 +566,9 @@ def test_capability_binding_delete_returns_capability_and_deleted(tmp_path: Path
     ("model_name", "field"),
     [
         ("CapabilityBindingOut", "updated_at"),
+        # 2026-10-24（迁移 0036）：thinking_override 同为「可空但键恒在」——
+        # null = 跟随档案，键不许省略
+        ("CapabilityBindingOut", "thinking_override"),
         ("ProfileTestResult", "status_code"),
         ("ConfigTestResult", "status_code"),
     ],

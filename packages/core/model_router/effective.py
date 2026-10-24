@@ -60,6 +60,7 @@ provider」完全相同的档案归到一条连接。分组键**必须**用生�
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -71,6 +72,8 @@ __all__ = [
     "SENSITIVE_HEADER_NAMES",
     "HEADER_PLACEHOLDERS",
     "PROTOCOL_IDS",
+    "THINKING_MODES",
+    "apply_thinking_override",
     "EffectiveConfig",
     "HeaderContext",
     "parse_params",
@@ -143,6 +146,64 @@ HEADER_PLACEHOLDERS: frozenset[str] = frozenset({"run_id", "session_id"})
 其它形如 ``{{xxx}}`` 的占位符在**写时**被拒（422），不许静默发出字面量
 ——上游收到 ``x-opencode-session: {{session_id}}`` 会 400 或静默错路由。
 """
+
+
+# ---------------------------------------------------------------------------
+# 环节级思考档覆盖（2026-10-24「按环节覆盖模型强度」）
+# ---------------------------------------------------------------------------
+
+THINKING_MODES: frozenset[str] = frozenset(
+    {"default", "off", "on", "adaptive", "low", "medium", "high", "max"}
+)
+"""思考档 8 档枚举（**后端唯一权威**；``capability_bindings.thinking_override``
+的合法值域，NULL = 跟随档案）。
+
+⚠️ 与前端 ``apps/web/src/pages/AiSettingsThinkingOptions.ts`` 的
+``THINKING_OPTIONS`` / ``inferThinkingMode`` **对称**——两端映射必须同步改，
+改任何一侧先 grep 另一侧的 ``applyThinkingToParams`` / ``apply_thinking_override``。
+"""
+
+_THINKING_TYPE_BY_MODE: dict[str, str] = {
+    "off": "disabled",
+    "on": "enabled",
+    "adaptive": "adaptive",
+}
+"""``thinking.type`` 三档：off→disabled / on→enabled / adaptive→adaptive。"""
+
+_EFFORT_MODES: frozenset[str] = frozenset({"low", "medium", "high", "max"})
+"""走 ``reasoning_effort`` 的四档（与 thinking 键互斥，写入时删对方）。"""
+
+
+def apply_thinking_override(params: dict[str, Any], mode: str) -> dict[str, Any]:
+    """把环节级思考档翻译进 params（**返回新 dict，不改入参**）。
+
+    映射规则（与前端 ``applyThinkingToParams`` / ``inferThinkingMode`` 对称）：
+
+    - ``low/medium/high/max`` ⇒ ``params['reasoning_effort'] = '<值>'``，
+      同时**删除** ``params['thinking']``（两键打架时上游行为未定义，必须互斥）；
+    - ``off/on/adaptive`` ⇒ ``params['thinking'] = {'type': disabled/enabled/adaptive}``，
+      同时**删除** ``params['reasoning_effort']``；
+    - ``default`` ⇒ 两个键都删（跟随端点默认行为）；
+    - 其它值 ⇒ :class:`ValueError`（坏配置显式失败，不许静默当「跟随档案」）。
+
+    应用点：``router._candidates`` 的 binding 分支——对候选链**每个**档案的
+    params 深拷贝后应用（环节覆盖优先于档案值；不改库）。
+    """
+    if mode not in THINKING_MODES:
+        raise ValueError(
+            f"thinking_override {mode!r} 不在 8 档枚举内（合法值：{sorted(THINKING_MODES)}）"
+        )
+    out = copy.deepcopy(params)
+    if mode in _EFFORT_MODES:
+        out.pop("thinking", None)
+        out["reasoning_effort"] = mode
+    elif mode in _THINKING_TYPE_BY_MODE:
+        out.pop("reasoning_effort", None)
+        out["thinking"] = {"type": _THINKING_TYPE_BY_MODE[mode]}
+    else:  # "default"：两键都删，跟随端点
+        out.pop("thinking", None)
+        out.pop("reasoning_effort", None)
+    return out
 
 
 # ---------------------------------------------------------------------------

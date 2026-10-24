@@ -29,7 +29,12 @@ from typing import Any
 from packages.core.db import get_connection
 from packages.core.logging_config import get_logger
 
-from .effective import RESERVED_PARAM_KEYS, resolve_effective
+from .effective import (
+    RESERVED_PARAM_KEYS,
+    apply_thinking_override,
+    parse_params,
+    resolve_effective,
+)
 from .exceptions import (
     AggregateProviderError,
     ModelNotConfiguredError,
@@ -165,6 +170,17 @@ class ModelRouter:
            ``enabled=1`` 的行；缺失或 ``enabled=0`` 跳过。
         2. 无 binding → 直接查 ``model_configs`` 中 ``capability`` 匹配 ``enabled=1``
            的全部行（按 rowid ASC），与 V3.6 旧行为等价。
+
+        **环节级思考档覆盖**（2026-10-24，迁移 0036）：binding 行的
+        ``thinking_override`` 非空时，对该环节候选链**每个**候选的 ``params_json``
+        应用 :func:`effective.apply_thinking_override` 翻译（按候选自己的 params
+        深拷贝后覆盖，**不改库**）——即「环节覆盖优先于档案值」；fallback 链上
+        每个候选都被同一覆盖（后备档案也按环节强度跑）。
+        ``thinking_override`` 为 NULL（存量行）⇒ params 原样逐字，零行为突变。
+
+        ⚠️ 边界：:meth:`call_with_fallback` 的 ``profile_id=`` 单次 run 级覆盖路径
+        **不走本方法**（调用方显式锁定档案，绕过 binding）⇒ 该路径不应用环节覆盖
+        ——显式指定档案语义优先于环节配置，属预期。
         """
         if not capability:
             return []
@@ -172,7 +188,8 @@ class ModelRouter:
         conn = get_connection(self.db_path)
         try:
             binding_row = conn.execute(
-                "SELECT profile_ids FROM capability_bindings WHERE capability = ?",
+                "SELECT profile_ids, thinking_override FROM capability_bindings "
+                "WHERE capability = ?",
                 (capability,),
             ).fetchone()
         finally:
@@ -186,6 +203,7 @@ class ModelRouter:
             profile_ids = [str(x) for x in raw if x]
             if not profile_ids:
                 return []
+            override = binding_row["thinking_override"] or None
             # 保留 binding 顺序：逐个查；missing/enabled=0 跳过
             conn = get_connection(self.db_path)
             try:
@@ -212,6 +230,22 @@ class ModelRouter:
                     })
             finally:
                 conn.close()
+            if override:
+                # 环节覆盖：候选链每个候选的 params 深拷贝后翻译再放回（不改库）。
+                # 脏 override（不在 8 档枚举）→ ValueError 显式失败（写时已拦，
+                # 这里只兜 DB 直改的脏行——坏配置不该被静默当「跟随档案」）。
+                out = [
+                    {
+                        **row,
+                        "params_json": json.dumps(
+                            apply_thinking_override(
+                                parse_params(row.get("params_json")), override
+                            ),
+                            ensure_ascii=False,
+                        ),
+                    }
+                    for row in out
+                ]
             return self._filter_disabled_connections(out)
 
         # 无 binding → 回落 model_configs（旧行为）

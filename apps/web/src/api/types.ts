@@ -1490,10 +1490,21 @@ export interface CapabilityBinding {
   profiles: CapabilityBindingProfile[];
   /** 后端提示：旧版 model_configs 链是否仍可兜底（解绑时附小字提示）。 */
   legacy_available: boolean;
+  /**
+   * 环节级思考档覆盖（迁移 0036）：null = 跟随档案；否则为 8 档枚举之一
+   * （default/off/on/adaptive/low/medium/high/max；映射规则与后端
+   * effective.apply_thinking_override / 前端 AiSettingsThinkingOptions 对称）。
+   */
+  thinking_override: string | null;
 }
 
 export interface CapabilityBindPayload {
   profile_ids: string[];
+  /**
+   * 环节级思考档覆盖。**键缺席 = 保留现值**（只改候选链不清强度）；
+   * 显式 null = 清除覆盖（跟随档案）；字符串须在 8 档枚举内（违规后端 422）。
+   */
+  thinking_override?: string | null;
 }
 
 // ---------------------------------------------------------------------------

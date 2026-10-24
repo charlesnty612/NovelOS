@@ -13,16 +13,34 @@
 // 契约：A 链可见（名字取 binding.profiles，缺失退化为 id）｜B 链可移除（链空 ⇒
 //   unbind，不能 bind：后端 PUT 对空 profile_ids 返 422）｜C 下拉改选 = 设为首选 +
 //   其余成员按原相对顺序保留。契约 D（409 文案）在 AiSettingsBindingMeta.ts。
+// 契约 E（2026-10-24 环节级强度覆盖）：每行「强度」下拉直接设该环节的思考档
+//   （thinking_override）；「跟随档案」= null = 用首选档案自己的思考档。
+//   选项按**首选档案的 provider + base_url** 收窄（与档案表单同一份
+//   getThinkingOptions，勿复制）；未绑定的环节下拉禁用。
+//   PUT 语义：改强度带 thinking_override（null=清除）；改链不带该键（保留现值）。
 // =============================================================================
 
 import { useEffect, useMemo, useState } from 'react';
 import { ApiError } from '../api/client';
-import { capabilityBindingsApi, modelProfilesApi } from '../api/endpoints';
-import type { CapabilityBinding, ModelProfile } from '../api/types';
+import {
+  capabilityBindingsApi,
+  connectionsApi,
+  modelProfilesApi,
+} from '../api/endpoints';
+import type {
+  CapabilityBinding,
+  ModelConnectionOut,
+  ModelProfile,
+} from '../api/types';
 import { ErrorBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
 import { Loading } from '../components/Loading';
 import { useApiCall } from '../hooks/useApiCall';
+import {
+  THINKING_BADGE_LABEL,
+  getThinkingOptions,
+  type ThinkingMode,
+} from './AiSettingsThinkingOptions';
 import { BINDING_LABELS_FALLBACK } from './AiSettingsBindingMeta';
 
 type SaveState =
@@ -34,6 +52,29 @@ type SaveState =
 /** 两个候选链是否逐位相同（顺序敏感：顺序即 fallback 序）。 */
 function sameChain(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+/**
+ * 解出首选档案的「协议 + 端点地址」，供 getThinkingOptions 收窄强度下拉。
+ * base_url 优先取档案自定义态的 params.base_url；绑定连接的档案其地址归连接
+ * （连接是唯一权威）⇒ 回退该连接的 base_url。都拿不到 ⇒ 空串（getThinkingOptions
+ * 对未知端点退回全量 8 档——选项偏多好过选项缺失）。
+ */
+export function resolveProfileEndpoint(
+  profile: ModelProfile | undefined,
+  connections: ModelConnectionOut[],
+): { provider: string; baseUrl: string } {
+  if (!profile) return { provider: '', baseUrl: '' };
+  const params = (profile.params ?? {}) as Record<string, unknown>;
+  const ownBaseUrl =
+    typeof params['base_url'] === 'string' ? String(params['base_url']) : '';
+  const conn = profile.connection_id
+    ? connections.find((c) => c.connection_id === profile.connection_id)
+    : undefined;
+  return {
+    provider: profile.provider ?? '',
+    baseUrl: ownBaseUrl || conn?.base_url || '',
+  };
 }
 
 export function CapabilityBindingsPanel({
@@ -52,6 +93,12 @@ export function CapabilityBindingsPanel({
   // profiles 用于下拉选项：enabled=1 的档案集合
   const profiles = useApiCall<ModelProfile[]>(
     () => modelProfilesApi.list(),
+    [],
+  );
+  // connections 用于强度下拉的端点收窄：绑定连接的档案，其 base_url 归连接
+  // （连接是唯一权威），档案 params 里没有 ⇒ 必须有连接表才能算出首选档案的 host。
+  const connections = useApiCall<ModelConnectionOut[]>(
+    () => connectionsApi.list(),
     [],
   );
 
@@ -167,16 +214,55 @@ export function CapabilityBindingsPanel({
     await commitChain(capability, current.filter((pid) => pid !== profileId));
   };
 
+  /**
+   * E：改环节强度覆盖。
+   * - value 非空 ⇒ PUT 带 thinking_override=<value>（8 档枚举，后端校验值域）；
+   * - value 为空串（「跟随档案」）⇒ PUT 带 thinking_override=null（显式清除，
+   *   不是「不带键」——那会被后端解释为保留现值）；
+   * - 不改候选链；未绑定环节的入口已禁用（防御：链空直接返回）。
+   */
+  const handleThinkingChange = async (
+    capability: string,
+    value: string,
+  ): Promise<void> => {
+    const chain = currentChainOf(capability);
+    if (chain.length === 0) return;
+    setSaveMap((m) => ({ ...m, [capability]: { kind: 'saving' } }));
+    try {
+      await capabilityBindingsApi.bind(
+        capability,
+        chain,
+        value === '' ? null : value,
+      );
+      setSaveMap((m) => ({ ...m, [capability]: { kind: 'saved' } }));
+      void list.reload();
+    } catch (e: unknown) {
+      const msg = e instanceof ApiError ? `${e.status} ${e.detail}` : String(e);
+      setSaveMap((m) => ({
+        ...m,
+        [capability]: { kind: 'error', message: msg },
+      }));
+    }
+  };
+
+  const connectionById = useMemo(() => {
+    const map: Record<string, ModelConnectionOut> = {};
+    for (const c of connections.data ?? []) map[c.connection_id] = c;
+    return map;
+  }, [connections.data]);
+
   return (
     <div className="panel" data-testid="capability-bindings-panel">
       <div className="panel__title">环节分配</div>
       <div className="muted small" style={{ marginBottom: 6 }}>
         把模型档案指派到 8 个生产环节（题材定位、正文写作、状态提取等）；解绑表示该环节改用旧版默认配置。
         每个环节是一条**有序候选链**：第 1 位是首选，失败时按顺序退到后备位；点成员上的「移除」可把它摘出这条链。
+        「强度」是环节级思考档覆盖——环节强度覆盖档案的思考档，同一档案可给不同环节配不同强度。
       </div>
 
       <ErrorBanner>{list.error}</ErrorBanner>
       <ErrorBanner>{profiles.error}</ErrorBanner>
+      <ErrorBanner>{connections.error}</ErrorBanner>
 
       {list.loading ? (
         <Loading />
@@ -194,9 +280,11 @@ export function CapabilityBindingsPanel({
               chain={currentChainOf(b.capability)}
               profiles={enabledProfiles}
               profileById={profileById}
+              connectionById={connectionById}
               state={saveMap[b.capability] ?? { kind: 'idle' }}
               onChange={(id) => void handleChange(b.capability, id)}
               onRemove={(id) => void handleRemove(b.capability, id)}
+              onThinkingChange={(v) => void handleThinkingChange(b.capability, v)}
             />
           ))}
         </div>
@@ -210,17 +298,21 @@ function CapabilityBindingRow({
   chain,
   profiles,
   profileById,
+  connectionById,
   state,
   onChange,
   onRemove,
+  onThinkingChange,
 }: {
   binding: CapabilityBinding;
   chain: string[];
   profiles: ModelProfile[];
   profileById: Record<string, ModelProfile>;
+  connectionById: Record<string, ModelConnectionOut>;
   state: SaveState;
   onChange: (profileId: string) => void;
   onRemove: (profileId: string) => void;
+  onThinkingChange: (value: string) => void;
 }) {
   // 首选 = 链的第 1 位；首选被移除后这里自动变成新的顺位（或空串）。
   const selected = chain[0] ?? '';
@@ -231,6 +323,17 @@ function CapabilityBindingRow({
     BINDING_LABELS_FALLBACK[binding.capability] ||
     binding.capability;
   const busy = state.kind === 'saving';
+  // 强度下拉：按首选档案的 provider + base_url 收窄（与档案表单同一份规则）。
+  const { provider, baseUrl } = resolveProfileEndpoint(
+    selected ? profileById[selected] : undefined,
+    Object.values(connectionById),
+  );
+  const thinkingOptions = selected ? getThinkingOptions(provider, baseUrl) : [];
+  // 受控值：服务端 thinking_override；null/'' =「跟随档案」。
+  const overrideValue = binding.thinking_override ?? '';
+  // 首选档案不在档案列表（已删除）时收窄规则算不出 ⇒ 仍给出全量选项 + 保持现值可选。
+  const currentOverrideInList =
+    overrideValue === '' || thinkingOptions.some((o) => o.value === overrideValue);
   return (
     <div
       className="kv-list__row"
@@ -257,6 +360,28 @@ function CapabilityBindingRow({
             </option>
           ))}
         </select>
+        <select
+          value={overrideValue}
+          onChange={(e) => onThinkingChange(e.target.value)}
+          disabled={busy || isUnbound}
+          title={
+            isUnbound
+              ? '先绑定模型档案，才能设置环节强度'
+              : '环节强度覆盖该环节候选链所有档案的思考档'
+          }
+          data-testid={`cap-binding-thinking-select-${binding.capability}`}
+        >
+          <option value="">跟随档案</option>
+          {thinkingOptions.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+          {!currentOverrideInList && overrideValue !== '' ? (
+            <option value={overrideValue}>{overrideValue}（当前值）</option>
+          ) : null}
+        </select>
+        <ThinkingOverrideBadge value={binding.thinking_override} capability={binding.capability} />
         <SaveIndicator state={state} />
       </span>
       {showLegacyHint ? (
@@ -304,6 +429,38 @@ function CapabilityBindingRow({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * 环节强度徽标：有覆盖时显示档位短标签（复用档案卡 THINKING_BADGE_LABEL 风格）；
+ * 「跟随档案」显灰（字段存在但不覆盖——比完全不渲染更诚实，用户能看到入口）。
+ */
+function ThinkingOverrideBadge({
+  value,
+  capability,
+}: {
+  value: string | null;
+  capability: string;
+}) {
+  if (!value) {
+    return (
+      <span
+        className="muted small"
+        data-testid={`cap-binding-thinking-badge-${capability}`}
+      >
+        跟随档案
+      </span>
+    );
+  }
+  const mode = value as ThinkingMode;
+  return (
+    <span
+      className="badge badge--info"
+      data-testid={`cap-binding-thinking-badge-${capability}`}
+    >
+      强度·{THINKING_BADGE_LABEL[mode] ?? value}
+    </span>
   );
 }
 

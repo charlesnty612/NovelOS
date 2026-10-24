@@ -619,9 +619,15 @@ export const connectionsApi = {
 // PUT 单项绑定、DELETE 单项解绑。错误码：422 至少 1 个、档案存在 + enabled 才能保存（由后端校验）。
 export const capabilityBindingsApi = {
   list: () => api.get<CapabilityBinding[]>('/capability-bindings'),
-  bind: (capability: string, profileIds: string[]) =>
+  /**
+   * 绑定候选链；第三参 `thinkingOverride` 可选（环节级思考档覆盖）：
+   * 传 undefined = body 不带该键 = 保留服务端现值；
+   * 传 null = 清除覆盖（跟随档案）；传 8 档枚举字符串 = 设置覆盖。
+   */
+  bind: (capability: string, profileIds: string[], thinkingOverride?: string | null) =>
     api.put<CapabilityBinding>(`/capability-bindings/${capability}`, {
       profile_ids: profileIds,
+      ...(thinkingOverride === undefined ? {} : { thinking_override: thinkingOverride }),
     }),
   unbind: (capability: string) =>
     api.delete<void>(`/capability-bindings/${capability}`),

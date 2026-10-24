@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Added（2026-10-24 · 环节级强度覆盖：同一档案给不同环节配不同思考档）
+
+> **来源**：用户报「AI 设置·环节分配——可根据不同的环节来选择模型的强度」。此前强度（思考档）是档案级属性，
+> 想按环节调强度必须为同一模型建 N 个档案分别绑定。
+
+- **迁移 0036**：`capability_bindings` 加可空列 `thinking_override`（NULL=跟随档案；统一 8 档封闭集 ThinkingMode，后端唯一权威在 `effective.py::THINKING_MODES`）。
+- **运行时**：`router._candidates` 对候选链**每个**候选应用覆盖（深拷贝 params，不改库）——翻译单点 `apply_thinking_override`：low/medium/high/max→`reasoning_effort`（删 thinking 键）；off/on/adaptive→`thinking.type`（删 reasoning_effort）；default→两键都删。与前端 `inferThinkingMode` 映射对称，两端文件互相注明同步义务。边界：单次 run 级 `profile_id` 覆盖路径不应用环节覆盖（显式指定语义优先，docstring 留痕）。
+- **API**：bindings PUT/GET 加 `thinking_override`——**键缺席=保留现值**（只改候选链不清强度）、显式 null=清除、值域 8 枚举外 422。
+- **前端**：环节分配每行加「强度」下拉（「跟随档案」+ 按首选档案 provider/端点收窄的档位；未绑定禁用）+ 徽标；THINKING_OPTIONS/inferThinkingMode 抽共享单点 `AiSettingsThinkingOptions.ts`（档案表单与环节面板共用，未复制第二份）——顺带 `AiSettingsPage.tsx` 1464→**1348 行**（回标 1500 内）。
+- **归组正交性（方案偏差留痕，Lead 裁决接受）**：实测 `group_profiles_by_connection` 分组键=(provider, base_url, api_key_env, api_key)，语义是「档案↔连接物理归并」，强度覆盖在环节表不流经该函数——原方案「纳入归组键」的前提不成立，未改归组，改为新增正交不变量测试钉住「override 读写不改变归组输出」。
+- **判别**：后端新增 18 例（三态覆盖逐字/后备链全覆盖/不改库/API 往返与 422/迁移/归组正交）+ 定向 237 绿；前端新增 9 例 + vitest 全量 **876 绿**；突变档② 19 条全 CAUGHT；全量 pytest **4441 / 0 failed**；指纹前后一致。
+
 ### Fixed（2026-10-24 · outline-batch 伪 plan_json：大纲层章直接写正文报错的定位与修复）
 
 - **症状（用户报）**：outline-batch 续规划建的章进详情页点「写正文」报 `has empty plan_json; run chapter-plan first`。

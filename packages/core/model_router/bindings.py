@@ -22,11 +22,16 @@ from pathlib import Path
 from typing import Any
 
 from packages.core.db import get_connection
+from packages.core.model_router.effective import THINKING_MODES
 from packages.core.model_router.router import CAPABILITY_LABELS
 
 from .profiles import ProfileService
 
-__all__ = ["BindingService"]
+__all__ = ["BindingService", "UNSET_THINKING_OVERRIDE"]
+
+# 「thinking_override 键缺席」的哨兵：与显式 None（清除覆盖）区分。
+# PUT body 不带 thinking_override 键 ⇒ 保留 DB 现值；显式 null ⇒ 清除。
+UNSET_THINKING_OVERRIDE = object()
 
 
 class BindingService:
@@ -49,11 +54,15 @@ class BindingService:
 
     # ------------------------------------------------------------------ get
     def get(self, capability: str) -> dict | None:
-        """按 capability 取一条；不存在 → None。返回 ``{capability, profile_ids, updated_at}``。"""
+        """按 capability 取一条；不存在 → None。
+
+        返回 ``{capability, profile_ids, thinking_override, updated_at}``；
+        ``thinking_override`` 为 None 表示「跟随档案」（迁移 0036 存量行/未设置）。
+        """
         conn = get_connection(self.db_path)
         try:
             row = conn.execute(
-                "SELECT capability, profile_ids, updated_at "
+                "SELECT capability, profile_ids, thinking_override, updated_at "
                 "FROM capability_bindings WHERE capability = ?",
                 (capability,),
             ).fetchone()
@@ -68,6 +77,7 @@ class BindingService:
         return {
             "capability": row["capability"],
             "profile_ids": [str(x) for x in pids if x],
+            "thinking_override": row["thinking_override"],
             "updated_at": row["updated_at"],
         }
 
@@ -75,16 +85,18 @@ class BindingService:
     def list_with_profiles(self) -> list[dict]:
         """列出全部 binding（与 CAPABILITY_LABELS 取并集——含未绑定的环节）。
 
-        每项返回 ``{capability, label, agents, profile_ids, profiles, legacy_available, updated_at}``。
+        每项返回 ``{capability, label, agents, profile_ids, profiles,
+        legacy_available, thinking_override, updated_at}``。
         ``profiles`` 是按 ``profile_ids`` 顺序解析的档案详情列表（缺失跳过）。
         ``legacy_available`` 表示 ``model_configs`` 中该 capability 是否有 enabled 行
-        （前端用于引导迁移到 binding）。
+        （前端用于引导迁移到 binding）。``thinking_override`` 为 None = 跟随档案。
         """
         capabilities = list(CAPABILITY_LABELS.keys())
         conn = get_connection(self.db_path)
         try:
             rows = conn.execute(
-                "SELECT capability, profile_ids, updated_at FROM capability_bindings"
+                "SELECT capability, profile_ids, thinking_override, updated_at "
+                "FROM capability_bindings"
             ).fetchall()
         finally:
             conn.close()
@@ -96,6 +108,7 @@ class BindingService:
                 pids = []
             by_cap[r["capability"]] = {
                 "profile_ids": [str(x) for x in pids if x],
+                "thinking_override": r["thinking_override"],
                 "updated_at": r["updated_at"],
             }
 
@@ -116,16 +129,43 @@ class BindingService:
                 "profile_ids": pids,
                 "profiles": profiles,
                 "legacy_available": self.legacy_available(cap),
+                "thinking_override": binding["thinking_override"] if binding else None,
                 "updated_at": binding["updated_at"] if binding else None,
             })
         return out
 
     # ---------------------------------------------------------------- upsert
-    def upsert(self, capability: str, profile_ids: list[str]) -> dict:
-        """写入或更新 binding；自动校验 profile_ids 全部存在且 enabled=1。"""
+    def upsert(
+        self,
+        capability: str,
+        profile_ids: list[str],
+        thinking_override: Any = UNSET_THINKING_OVERRIDE,
+    ) -> dict:
+        """写入或更新 binding；自动校验 profile_ids 全部存在且 enabled=1。
+
+        ``thinking_override``（环节级思考档覆盖，迁移 0036）三种入参语义：
+
+        - :data:`UNSET_THINKING_OVERRIDE`（**键缺席**）→ 保留 DB 现值（行不存在则
+          None）——调用方只改候选链时不会意外清掉已设的强度；
+        - ``None`` → 清除覆盖（回到「跟随档案」）；
+        - ``str`` → 必须在 :data:`effective.THINKING_MODES` 8 档枚举内，
+          否则 :class:`InvalidBindingError`（路由层映射 422）。
+        """
         # 校验 capability 已知
         if capability not in CAPABILITY_LABELS:
             raise UnknownCapabilityError(capability)
+        # 校验 thinking_override 值域（8 枚举或 None；缺席 = 保留现值）
+        if thinking_override is UNSET_THINKING_OVERRIDE:
+            current = self.get(capability)
+            eff_override = current["thinking_override"] if current else None
+        elif thinking_override is None:
+            eff_override = None
+        elif isinstance(thinking_override, str) and thinking_override in THINKING_MODES:
+            eff_override = thinking_override
+        else:
+            raise InvalidBindingError(
+                f"thinking_override 必须是 8 档枚举之一或 null，收到: {thinking_override!r}"
+            )
         # 校验 profile_ids 非空
         if not profile_ids:
             raise InvalidBindingError("profile_ids must be non-empty")
@@ -152,13 +192,14 @@ class BindingService:
         try:
             conn.execute(
                 """
-                INSERT INTO capability_bindings (capability, profile_ids, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO capability_bindings (capability, profile_ids, thinking_override, updated_at)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(capability) DO UPDATE SET
                     profile_ids = excluded.profile_ids,
+                    thinking_override = excluded.thinking_override,
                     updated_at  = excluded.updated_at
                 """,
-                (capability, ids_json, ts),
+                (capability, ids_json, eff_override, ts),
             )
             conn.commit()
         finally:

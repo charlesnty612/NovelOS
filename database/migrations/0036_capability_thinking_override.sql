@@ -1,0 +1,42 @@
+-- =============================================================================
+-- NovelOS Database Migration 0036: 环节级思考档覆盖（capability thinking override）
+--   - capability_bindings 加可空列 thinking_override TEXT
+--
+-- 目标（2026-10-24「按环节覆盖模型强度」）：
+--   思考档（thinking / reasoning_effort）此前是**档案级**属性——想「同一模型在
+--   不同环节用不同强度」必须为每个环节复制一份档案。本迁移给
+--   ``capability_bindings``（环节 → 候选链）加一个**环节级**覆盖列：
+--
+--       thinking_override NULL          = 跟随档案（档案 params 里的思考键原样生效）
+--       thinking_override 'low'...'max' = 对该环节候选链**每个档案**应用
+--                                          params['reasoning_effort'] = '<值>'，
+--                                          并删除 params['thinking']（两键互斥）
+--       thinking_override 'off'/'on'/'adaptive'
+--                                       = params['thinking'] = {'type': 'disabled'
+--                                         | 'enabled' | 'adaptive'}，
+--                                         并删除 params['reasoning_effort']
+--
+--   8 档枚举与映射规则与前端 THINKING_OPTIONS / inferThinkingMode（AiSettingsPage）
+--   **对称**；后端翻译单点见 packages/core/model_router/effective.py::
+--   apply_thinking_override——**两端映射必须同步改**。
+--
+-- 设计要点：
+--   - **只加不改**：可空列，NULL = 存量语义（跟随档案）⇒ 存量行零行为突变。
+--   - **不回填**：此前不存在环节级强度概念，无可回填的历史值。
+--   - **TEXT 而非 CHECK**：值域校验走写时 422（BindingService.upsert →
+--     InvalidBindingError）；读路径对脏值按 apply_thinking_override 的 ValueError
+--     上抛为**显式失败**（坏配置不该被静默当「跟随档案」吞掉）。
+--   - 应用点在路由候选装配（router._candidates 的 binding 分支）：**不改库**，
+--     对每个候选行的 params 深拷贝后翻译再放回行 dict——fallback 链上每个候选
+--     都被同一覆盖。
+--
+-- 迁移幂等：ADD COLUMN 无 IF NOT EXISTS —— 迁移 runner 按文件粒度幂等记录
+--   （packages/core/db.py::apply_migrations），第二次跑不会重放本文件。
+-- =============================================================================
+
+ALTER TABLE capability_bindings
+    ADD COLUMN thinking_override TEXT;
+
+-- =============================================================================
+-- 迁移结束 (0036)
+-- =============================================================================

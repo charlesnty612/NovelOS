@@ -121,6 +121,8 @@ EXPECTED_BINDING_KEYS = frozenset(
         "profile_ids",
         "profiles",
         "legacy_available",
+        # 2026-10-24（迁移 0036）：环节级思考档覆盖；null=跟随档案（可空但键恒在）
+        "thinking_override",
         "updated_at",
     }
 )

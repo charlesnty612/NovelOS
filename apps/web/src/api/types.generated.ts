@@ -437,6 +437,8 @@ export interface CapabilityBindingOut {
   profiles: Array<BindingProfileOut>;
   /** model_configs 中该 capability 有 enabled 行（迁移引导用） */
   legacy_available: boolean;
+  /** 环节级思考档覆盖（迁移 0036）：null=跟随档案；否则为 8 档枚举之一（default/off/on/adaptive/low/medium/high/max）。运行期对该环节候选链每个档案的 params 应用对应 thinking/reasoning_effort 翻译。 */
+  thinking_override: string | null;
   /** 未绑定时为 null（不是省略） */
   updated_at: string | null;
 }
