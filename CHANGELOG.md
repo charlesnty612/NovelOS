@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-25 · A 批 C1 · 内容仓 push 守卫：远端识别与「不可判定」口径）
+
+> **来源**：OS审查 提出 MAJOR——`scripts/check_content_repo_guard.py` 旧实现只认 `origin` 远端，远端名不叫 `origin` 时 `push_url` 读成 `None` ⇒ 被当成「push URL 已禁用」⇒ 判「不能被误推」**exit 0 假绿**（把「读不到」折叠成「没有」，给从未评估的对象发满分）；Chief 裁定直接修，收进 C1 批次（同一文件、同一函数，不新开批）。
+> **验收**：定向红绿两段齐备——红段（撤掉远端扫描修复）`-rA` 输出 `FF.` = **2 failed / 1 passed**，**FAILED 非 ERROR**；绿段全文件定向 **63 passed**（exit 0）。全量回归由唯一跑者排，本条不含全量数字。
+
+- **远端识别（`scripts/check_content_repo_guard.py:201-264`）**：新增 `RemoteInfo` 数据类（`name`/`fetch_url`/`push_url`，只读采集的事实）；`_parse_remote_v`（origin-only）换成 `_parse_remotes_v` ⇒ 采集**全部**远端；`_pick_display_urls`（`:245-262`）只管**展示优先级**（origin 优先、缺项回退），**不作判据**。判据口径：任一远端的 push URL 是可推 scheme ⇒ 判「不安全」（exit 1）。
+- **退出码语义（push 模式）**：**四种不可判定一律 exit 2**，且各自的 `reason` 互不相同、都含被检查路径——① 内容仓路径不存在或不是目录 ② git 不可用 ③ 目标目录不是 git 工作树 ④ **内容仓没有任何远端 ⇒ `verdict="unknown"`**（不再算「安全」，文案禁止出现「推不出去」）。可判定时：任一远端可推 ⇒ exit 1；全部远端 push URL 已禁用或存在 pre-push 钩子 ⇒ exit 0。
+- **JSON 字段语义**：`push_disabled` 在**无远端时为 `null`**（不可判定，**不报 `true`**），**有远端时为 `bool`**（全部远端 push URL 已禁用 ⇒ `true`；任一远端可推 ⇒ `false`）。同批新增 `remotes`（逐远端 name/fetch_url/push_url）、`remote_count`、`pushable_remotes`（可推远端名列表）。⚠️ 契约变更：旧消费方按 `push_disabled === true` 判安全的，须同步处理 `null`。
+- **判别用例**（`tests/unit/test_check_content_repo_guard.py:1534-1586`）：远端名非 `origin` 且带真 URL ⇒ exit 1 且依据点名该远端；无任何远端 ⇒ exit 2 / UNKNOWN / 文案不含「推不出去」；`origin` + `no-push://` ⇒ 沿用现状 exit 0（不回归）。
+- **已知假绿：混合场景下 URL 含空格的远端被整条丢弃 ⇒ exit 0。D 批必修，期限 04:00。**
+- **未修 / 排期**：`scripts/README.md:486` 退出码表未写「无远端 ⇒ UNKNOWN / exit 2」（不在 C1 写域，排后续文档批）；`scripts/_guard_secrets.py`（P0-02）本批未动。
+
 ### Fixed（2026-10-24 晚 · 审查修复批 · 4 条 critical——事后对抗审查抓出、Lead 亲验后修复）
 
 > **来源**：四批已提交改动（批次三十四 / 协议下放 / outline-batch / 强度覆盖）补做的四路只读对抗审查。

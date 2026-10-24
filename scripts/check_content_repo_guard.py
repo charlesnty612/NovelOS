@@ -80,6 +80,8 @@ __all__ = [
     "EXIT_UNSAFE",
     "GuardState",
     "KeySlot",
+    "RC_GIT_UNAVAILABLE",
+    "RemoteInfo",
     "SecretsState",
     "collect_secrets_state",
     "decide_secrets",
@@ -98,7 +100,14 @@ EXIT_UNSAFE = 1
 """不合规：无技术屏障，能被误推。"""
 
 EXIT_ERROR = 2
-"""巡检自身出错（不是 git 仓库 / git 不可用 / 不可判）。"""
+"""巡检自身出错（路径不可用 / 不是 git 工作树 / git 不可用 / 不可判）。"""
+
+RC_GIT_UNAVAILABLE = 127
+"""``_run_git`` 的**伪**退出码：git 根本没跑起来（cwd 不可用 / git 缺失）。
+
+真实 git 的失败码是 128（``not a git repository``）；用 127 把「跑起来了但失败」
+与「压根没跑」分开 ⇒ 消息才能区分「不是 git 工作树」与「路径不可用」。
+"""
 
 #: 「push 已禁用」的哨兵值（大小写不敏感；**精确值**形态）。
 DISABLED_PUSH_SENTINELS: frozenset[str] = frozenset(
@@ -132,16 +141,41 @@ def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
 
     刻意**不**用 ``check=True``：巡检要区分「命令失败」与「命令成功但输出为空」
     （例如没有上游时 ``rev-list @{u}..HEAD`` 必然失败）。
+
+    ⚠️ **cwd 不可用必须先自查**（C1）：Windows 上 ``subprocess`` 拿一个不存在 /
+    不是目录的路径当 ``cwd``，``CreateProcess`` 直接抛
+    ``NotADirectoryError: [WinError 267]``（POSIX 上是 ``FileNotFoundError``）
+    ⇒ 脚本以**裸 traceback** 收场、退出码 1 ⇒ 巡检「爆炸」而不是给出可判别的错误。
+    ⇒ 先判「存在且是目录」再启动子进程，把「路径不可用」变成**正常返回值**
+    （:data:`RC_GIT_UNAVAILABLE` + 含被检查路径的 stderr）。
     """
-    proc = subprocess.run(  # noqa: S603 —— 固定 git + 只读子命令
-        ["git", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        usable = cwd.is_dir()
+    except OSError as exc:  # 权限不足 / 坏路径：连 stat 都炸
+        return (
+            RC_GIT_UNAVAILABLE,
+            "",
+            f"内容仓路径不可用（{type(exc).__name__}: {exc}）：{cwd}",
+        )
+    if not usable:
+        return RC_GIT_UNAVAILABLE, "", f"内容仓路径不可用（不存在或不是目录）：{cwd}"
+
+    try:
+        proc = subprocess.run(  # noqa: S603 —— 固定 git + 只读子命令
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as exc:  # git 可执行文件缺失 / 无执行权限
+        return (
+            RC_GIT_UNAVAILABLE,
+            "",
+            f"无法执行 git（{type(exc).__name__}: {exc}）：{cwd}",
+        )
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -150,7 +184,11 @@ class GuardState:
     """巡检采集到的事实（**不含结论**；结论由 :func:`decide` 推导）。"""
 
     content_dir: str
+    path_available: bool = True
+    git_available: bool = True
     is_git_repo: bool = False
+    remotes: list[RemoteInfo] = field(default_factory=list)
+    remote_list_error: str | None = None
     fetch_url: str | None = None
     push_url: str | None = None
     pre_push_hook_path: str | None = None
@@ -160,13 +198,28 @@ class GuardState:
     notes: list[str] = field(default_factory=list)
 
 
-def _parse_remote_v(text: str) -> tuple[str | None, str | None]:
-    """解析 ``git remote -v`` → ``(fetch_url, push_url)``。
+@dataclass
+class RemoteInfo:
+    """一个远端的 fetch / push 端点（**只读采集的事实**）。"""
 
-    形态：``<name>\\t<url> (fetch)`` / ``<name>\\t<url> (push)``；``origin`` 优先。
+    name: str
+    fetch_url: str | None = None
+    push_url: str | None = None
+
+
+def _parse_remotes_v(text: str) -> list[RemoteInfo]:
+    """解析 ``git remote -v`` → **全部**远端的 ``[RemoteInfo]``。
+
+    形态：``<name>\\t<url> (fetch)`` / ``<name>\\t<url> (push)``。
+
+    ⚠️ **必须扫全部远端**（MAJOR · OS审查 2026-10-25）：旧实现只认 ``origin``
+    （``name != "origin" → continue``）⇒ 远端名不叫 origin 时 ``push_url`` 读成
+    ``None`` ⇒ 被 :func:`_is_disabled_push_url` 判成「push URL 已禁用」⇒
+    判「不能被误推」exit 0 —— **假绿**（把「读不到」折叠成「没有」，给从未评估的
+    对象发满分）。⇒ 这里返回**列表**（``origin`` 不作唯一识别，只作展示优先级）。
     """
-    fetch: str | None = None
-    push: str | None = None
+    order: list[str] = []
+    by_name: dict[str, RemoteInfo] = {}
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -175,12 +228,31 @@ def _parse_remote_v(text: str) -> tuple[str | None, str | None]:
         if len(parts) < 3:
             continue
         name, url, kind = parts[0], parts[1], parts[2]
-        if name != "origin":
+        if kind not in ("(fetch)", "(push)"):
             continue
+        info = by_name.get(name)
+        if info is None:
+            info = RemoteInfo(name=name)
+            by_name[name] = info
+            order.append(name)
         if kind == "(fetch)":
-            fetch = url
-        elif kind == "(push)":
-            push = url
+            info.fetch_url = url
+        else:
+            info.push_url = url
+    return [by_name[n] for n in order]
+
+
+def _pick_display_urls(remotes: list[RemoteInfo]) -> tuple[str | None, str | None]:
+    """展示用 ``(fetch_url, push_url)``：``origin`` 优先，缺项回退到任一有 URL 的远端。
+
+    ⚠️ 展示优先级**不是**判据：判据是「扫全部远端」（见 :func:`decide`）。
+    """
+    if not remotes:
+        return None, None
+    origin = next((r for r in remotes if r.name == "origin"), None)
+    order = ([origin] if origin is not None else []) + [r for r in remotes if r is not origin]
+    fetch = next((r.fetch_url for r in order if r.fetch_url), None)
+    push = next((r.push_url for r in order if r.push_url), None)
     return fetch, push
 
 
@@ -209,14 +281,40 @@ def collect_state(content_dir: Path) -> GuardState:
     """采集内容仓的 push 防护状态（**只读**）。"""
     state = GuardState(content_dir=str(content_dir))
 
-    rc, out, _err = _run_git(["rev-parse", "--is-inside-work-tree"], content_dir)
+    # ⚠️ C1：路径可用性**单独判**（不靠 _run_git 吞掉）——「路径不存在 / 不是目录」
+    # 与「目录存在但不是 git 工作树」是两种**不同**的不可判原因，消息必须能区分。
+    try:
+        path_exists = content_dir.exists()
+        path_is_dir = content_dir.is_dir() if path_exists else False
+    except OSError:  # 权限不足等：当作不可用，绝不外抛成 traceback
+        path_exists = path_is_dir = False
+    if not path_is_dir:
+        state.path_available = False
+        if path_exists:
+            state.notes.append(f"内容仓路径不是目录：{content_dir}")
+        else:
+            state.notes.append(f"内容仓路径不存在：{content_dir}")
+        return state
+
+    rc, out, err = _run_git(["rev-parse", "--is-inside-work-tree"], content_dir)
+    if rc == RC_GIT_UNAVAILABLE:
+        state.git_available = False
+        state.notes.append(f"git 不可用（无法巡检）：{content_dir}")
+        if err.strip():
+            state.notes.append(f"git 诊断：{err.strip()}")
+        return state
     if rc != 0 or out.strip() != "true":
-        state.notes.append(f"不是 git 仓库（或 git 不可用）：{content_dir}")
+        state.notes.append(f"不是 git 工作树：{content_dir}")
         return state
     state.is_git_repo = True
 
-    _rc, remote_out, _err = _run_git(["remote", "-v"], content_dir)
-    state.fetch_url, state.push_url = _parse_remote_v(remote_out)
+    rc_remote, remote_out, remote_err = _run_git(["remote", "-v"], content_dir)
+    state.remotes = _parse_remotes_v(remote_out)
+    if rc_remote != 0:
+        state.remote_list_error = (
+            f"无法列出远端（git remote -v 失败：{remote_err.strip() or '无输出'}）：{content_dir}"
+        )
+    state.fetch_url, state.push_url = _pick_display_urls(state.remotes)
 
     # hooks 路径：尊重 core.hooksPath；相对路径按仓库根解析。
     _rc, hook_out, _err = _run_git(["rev-parse", "--git-path", "hooks"], content_dir)
@@ -255,27 +353,62 @@ def collect_state(content_dir: Path) -> GuardState:
 def decide(state: GuardState) -> dict:
     """由采集到的事实推导结论（**纯函数**）。"""
     if not state.is_git_repo:
+        # ⚠️ C1：三种不可判原因**必须给出不同**的消息，且都含**被检查的路径**
+        # （否则 CI/机器消费方分不清「没这个目录」与「目录在但不是 git 仓」）。
+        if not state.path_available:
+            reason = f"内容仓路径不存在或不是目录（无法巡检）：{state.content_dir}"
+        elif not state.git_available:
+            reason = f"git 不可用（无法巡检）：{state.content_dir}"
+        else:
+            reason = f"目标目录不是 git 工作树（无法巡检）：{state.content_dir}"
         return {
             "can_be_pushed": None,
             "verdict": "unknown",
             "exit_code": EXIT_ERROR,
-            "reason": "目标目录不是 git 仓库（无法巡检）",
+            # ⚠️ C1：verdict 的**形状必须处处一致**（下面两个键不能只在「可判」分支
+            # 才有）——JSON 输出无条件读 ``barriers`` / ``warnings`` ⇒ 不可判时缺键
+            # ⇒ ``KeyError`` traceback（不可判分支自己又炸一次）。
+            "barriers": [],
+            "warnings": [],
+            "reason": reason,
         }
 
-    push_disabled = _is_disabled_push_url(state.push_url)
+    # ⚠️ MAJOR（OS审查 2026-10-25 · Chief 裁定直接修）：**没有远端 ⇒ 不可判定**，
+    # 不许算绿。旧实现只认 ``origin`` ⇒ 远端名不叫 origin 时 ``push_url=None``
+    # ⇒ 被当成「push URL 已禁用」⇒ 判「不能被误推」exit 0 —— **假绿**
+    # （把「读不到」折叠成「没有」，给从未评估的对象发满分）。
+    if not state.remotes:
+        reason = state.remote_list_error or (
+            f"内容仓没有任何远端（不可判定 push 是否被禁用）：{state.content_dir}"
+        )
+        return {
+            "can_be_pushed": None,
+            "verdict": "unknown",
+            "exit_code": EXIT_ERROR,
+            "barriers": [],
+            "warnings": [],
+            "reason": reason,
+        }
+
+    # ⚠️ 扫**全部**远端：任一远端的 push URL 可推 ⇒ 不安全
+    # （``origin`` 只作展示优先级，**不作**唯一识别）。
+    pushable = [r for r in state.remotes if not _is_disabled_push_url(r.push_url)]
+    push_disabled = not pushable
+
     barriers: list[str] = []
     if push_disabled:
         barriers.append("push URL 已禁用")
     if state.pre_push_hook_present:
         barriers.append("存在 pre-push 钩子")
 
-    can_be_pushed = not push_disabled and not state.pre_push_hook_present
+    can_be_pushed = bool(pushable) and not state.pre_push_hook_present
 
     reason_bits: list[str] = []
     if push_disabled:
-        reason_bits.append("push URL 已禁用")
+        reason_bits.append(f"全部 {len(state.remotes)} 个远端的 push URL 已禁用")
     else:
-        reason_bits.append(f"push URL 仍指向远端（{state.push_url}）")
+        detail = "、".join(f"{r.name}={r.push_url}" for r in pushable)
+        reason_bits.append(f"push 仍可推到远端：{detail}")
     if state.pre_push_hook_present:
         reason_bits.append("有 pre-push 钩子拦截")
     else:
@@ -284,15 +417,16 @@ def decide(state: GuardState) -> dict:
         reason_bits.append(f"本地领先上游 {state.ahead_count} 个提交")
 
     warnings: list[str] = []
-    if not push_disabled and state.pre_push_hook_present:
+    if pushable and state.pre_push_hook_present:
         warnings.append(
             "当前唯一的屏障是 pre-push 钩子——钩子被删除 / 绕过即失守；"
             "建议同时把 push URL 置为禁用值（no_push）"
         )
-    if not push_disabled and state.push_url and "github.com" in state.push_url.lower():
-        warnings.append(
-            "push 目标含 github.com——一次误 push 即发布全书（不可撤回）"
-        )
+    for r in pushable:
+        if r.push_url and "github.com" in r.push_url.lower():
+            warnings.append(
+                f"远端 {r.name} 的 push 目标含 github.com——一次误 push 即发布全书（不可撤回）"
+            )
 
     return {
         "can_be_pushed": can_be_pushed,
@@ -306,11 +440,22 @@ def decide(state: GuardState) -> dict:
 
 def render_text(state: GuardState, verdict: dict) -> str:
     """人读形态。"""
+    # ⚠️ **没有任何远端时禁止出现「推不出去」**：那句话是在给「安全」下结论，
+    # 而「没有远端」是**不可判定**（不是「安全」）——文案不许把不可判说成安全。
+    if state.remotes:
+        push_display = state.push_url or "（无 ⇒ 推不出去）"
+        remote_display = " | ".join(
+            f"{r.name}={r.push_url or r.fetch_url or '（无 URL）'}" for r in state.remotes
+        )
+    else:
+        push_display = "（无远端 ⇒ 不可判定）"
+        remote_display = "（无远端 ⇒ 不可判定）"
     lines = [
         "===== 内容仓 push 防护巡检（只读）=====",
         f"  内容仓: {state.content_dir}",
+        f"  远端: {remote_display}",
         f"  fetch URL: {state.fetch_url or '（无）'}",
-        f"  push  URL: {state.push_url or '（无 ⇒ 推不出去）'}",
+        f"  push  URL: {push_display}",
         f"  pre-push 钩子: {state.pre_push_hook_path or '（无）'}",
         f"  上游: {state.upstream or '（无）'}",
         f"  本地领先远端: {state.ahead_count if state.ahead_count is not None else 0} 个提交",
@@ -345,7 +490,8 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "退出码：0 = 合规 / 1 = 不合规 / 2 = 巡检出错\n"
+            "退出码：0 = 合规 / 1 = 不合规 / 2 = 巡检出错"
+            "（路径不存在或不是目录 / 不是 git 工作树 / git 不可用 / 不可判）\n"
             "模式：push（默认，内容仓 push 防护）| secrets（凭据收敛）"
         ),
     )
@@ -419,16 +565,47 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _run_push_mode(args: argparse.Namespace) -> int:
     content_dir = Path(args.content_dir)
-    state = collect_state(content_dir)
+    try:
+        state = collect_state(content_dir)
+    except OSError as exc:
+        # ⚠️ CLI 边界的最后一道保险（C1）：巡检**不得**以 Python traceback 收场。
+        print(
+            f"ERROR: 巡检内容仓失败（{type(exc).__name__}: {exc}）：{content_dir}",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     verdict = decide(state)
+    if verdict["verdict"] == "unknown":
+        # 不可判 ⇒ 错误消息走 stderr（人读文本与 JSON 的 stdout 都不污染），含路径。
+        print(f"ERROR: {verdict['reason']}", file=sys.stderr)
 
     if args.as_json:
         payload = {
             "content_dir": state.content_dir,
+            # ⚠️ C1：机器消费方据此区分「路径不可用」/「git 不可用」/「不是 git 工作树」
+            # （``reason`` 里已含被检查路径）。
+            "path_available": state.path_available,
+            "git_available": state.git_available,
             "is_git_repo": state.is_git_repo,
             "fetch_url": state.fetch_url,
             "push_url": state.push_url,
-            "push_disabled": _is_disabled_push_url(state.push_url),
+            # ⚠️ MAJOR：``push_disabled`` 的口径从「origin 的 push URL」改成
+            # **全部远端**（任一远端可推 ⇒ False）；**没有远端**时是 ``None``
+            # （不可判定），**不许**报 ``true``（＝安全）——旧口径在这里给从未
+            # 评估过的对象发过满分。
+            "push_disabled": (
+                all(_is_disabled_push_url(r.push_url) for r in state.remotes)
+                if state.remotes
+                else None
+            ),
+            "remotes": [
+                {"name": r.name, "fetch_url": r.fetch_url, "push_url": r.push_url}
+                for r in state.remotes
+            ],
+            "remote_count": len(state.remotes),
+            "pushable_remotes": [
+                r.name for r in state.remotes if not _is_disabled_push_url(r.push_url)
+            ],
             "pre_push_hook_present": state.pre_push_hook_present,
             "pre_push_hook_path": state.pre_push_hook_path,
             "upstream": state.upstream,
@@ -633,6 +810,26 @@ def _run_secrets_mode(args: argparse.Namespace) -> int:
     return int(verdict["exit_code"])
 
 
+def _configure_stdio_encoding() -> None:
+    """把 stdout / stderr 固定成 UTF-8（**只在脚本入口调用**）。
+
+    ⚠️ **为什么必须**：Windows 上 stdout 被**重定向**（管道 / CI 日志 / 采集器）时，
+    编码取 locale 编码（本机 cp936）⇒ 输出里的 ``⇒`` / ``✅`` 等非 GBK 字符会抛
+    ``UnicodeEncodeError`` ⇒ 脚本以 **traceback** 收场（正是 C1 要消灭的形态，且
+    真实控制台因 PEP 528 本来就是 UTF-8 ⇒ 平时看不出来，一进 CI 就炸）。
+    ⇒ 入口统一 reconfig 成 ``utf-8`` + ``errors="replace"``：管道 / 日志里是正确的
+    UTF-8；真实控制台行为不变（本来就是 utf-8）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # 被替换成不支持 reconfigure 的对象（罕见）
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # 流已关闭 / 不支持改编码
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.mode == "secrets":
@@ -641,4 +838,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    _configure_stdio_encoding()
     raise SystemExit(main())

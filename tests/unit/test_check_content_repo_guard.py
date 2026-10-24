@@ -21,6 +21,8 @@ from __future__ import annotations
 import importlib
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1404,3 +1406,181 @@ def test_force_all_dangling_allows_cleaning_when_known_set_is_disjoint(
     assert code == 0, f"显式确认后应放行（退出码 0），实际 {code}\n{out}"
     data = json.loads(secrets.read_text(encoding="utf-8"))
     assert data["api_keys"] == {}, "确认后照常清理"
+
+
+# ---------------------------------------------------------------------------
+# C1：内容仓路径不可用 ⇒ 可判别的错误（**不得**裸 traceback）
+#
+# ⚠️ 这三条**真起子进程 / 真 git**（不用 ``_FakeGit``）：C1 修的是「CLI 在环境不对
+# 时爆炸」⇒ 只有**进程边界**能证明「没有 traceback」；新加的「路径前置自查」也必须
+# 用**真实目录**验证它没把「正常仓」一起挡掉（否则就是另一种假绿）。
+# 子进程只跑 push 模式 ⇒ 不碰 secrets、不碰真实内容仓（全程在 ``tmp_path`` 里）。
+# ---------------------------------------------------------------------------
+
+
+def _run_cli(*argv: str) -> subprocess.CompletedProcess[str]:
+    """在仓库根起一个**子进程**跑脚本（进程边界 ⇒ 能看见真实退出码与 traceback）。"""
+    return subprocess.run(  # noqa: S603 —— 固定被测脚本 + 只读巡检
+        [sys.executable, str(SCRIPT), *argv],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def _git(argv: list[str], cwd: Path) -> None:
+    """在临时目录里跑 git（仅用于**造一个真仓**，不碰任何项目仓）。"""
+    proc = subprocess.run(  # noqa: S603 —— 固定 git + 测试内临时仓
+        ["git", *argv],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert proc.returncode == 0, f"造夹具失败 git {argv}：{proc.stderr}"
+
+
+def test_missing_content_dir_exits_2_with_path_and_no_traceback(tmp_path) -> None:
+    """C1-branch1：内容仓路径**不存在** ⇒ 退出码 2 + 消息含被检查路径 + 零 traceback。
+
+    改前基线：``NotADirectoryError: [WinError 267]`` + 裸 traceback + 退出码 1。
+    """
+    missing = tmp_path / "no_such_content_repo"
+    assert not missing.exists()
+
+    proc = _run_cli("--content-dir", str(missing))
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 2, (
+        f"路径不存在 ⇒ 巡检出错退出码 2，实际 {proc.returncode}\n{combined}"
+    )
+    assert str(missing) in combined, "错误消息必须含被检查的路径"
+    assert "不存在" in combined, "必须说清是「路径不存在」，不能只说「不是 git 仓库」"
+    assert "Traceback" not in combined
+    assert "NotADirectoryError" not in combined
+
+
+def test_existing_non_git_dir_exits_2_with_path(tmp_path, monkeypatch) -> None:
+    """C1-branch2：目录**存在但非 git 工作树** ⇒ 退出码 2 + 消息含路径。"""
+    plain = tmp_path / "plain_dir"
+    plain.mkdir()
+    # 宿主上 %TEMP% 万一落在某个 git 仓内 ⇒ 禁止 git 向上越界发现，保证「非 git」确定。
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+
+    proc = _run_cli("--content-dir", str(plain))
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 2, f"非 git 工作树 ⇒ 退出码 2，实际 {proc.returncode}\n{combined}"
+    assert "不是 git 工作树" in combined
+    assert str(plain) in combined
+    assert "Traceback" not in combined
+
+
+def test_real_git_repo_with_disabled_push_passes(tmp_path) -> None:
+    """C1-branch3：**真** git 仓 + push URL 已禁用 ⇒ 正常通过（退出码 0）。
+
+    反向不变量：新加的路径前置自查**不得**把正常仓误判成「路径不可用」。
+    """
+    repo = tmp_path / "content_repo"
+    repo.mkdir()
+    _git(["init", "-q", str(repo)], cwd=tmp_path)
+    _git(["remote", "add", "origin", "no_push"], cwd=repo)
+
+    proc = _run_cli("--content-dir", str(repo))
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"正常仓 + push 已禁用 ⇒ 退出码 0，实际 {proc.returncode}\n{combined}"
+    assert "不能被误推" in proc.stdout
+    assert "push URL 已禁用" in proc.stdout
+    assert "Traceback" not in combined
+
+
+def test_missing_content_dir_json_mode_is_valid_json_without_traceback(tmp_path) -> None:
+    """``--json`` 模式在路径不可用时也必须给出**合法 JSON**（不得 KeyError traceback）。
+
+    ⚠️ 这条钉的是另一个真缺陷：不可判分支的 verdict **缺** ``barriers`` 键 ⇒ JSON
+    输出无条件读它 ⇒ ``KeyError`` ⇒ 不可判分支自己又炸一次。
+    """
+    missing = tmp_path / "no_such_content_repo"
+
+    proc = _run_cli("--content-dir", str(missing), "--json")
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 2, f"路径不存在 ⇒ 退出码 2，实际 {proc.returncode}\n{combined}"
+    payload = json.loads(proc.stdout)  # stdout 必须是**合法** JSON
+    assert payload["verdict"] == "unknown"
+    assert payload["path_available"] is False
+    assert payload["content_dir"] == str(missing)
+    assert str(missing) in payload["reason"]
+    assert "Traceback" not in combined
+
+
+# ---------------------------------------------------------------------------
+# MAJOR（OS审查 2026-10-25 · Chief 裁定直接修）：远端识别
+#
+# ⚠️ 旧实现只认 ``origin``（``_parse_remote_v`` 里 ``name != "origin" → continue``）
+# ⇒ 远端名不叫 origin 时 ``push_url`` 读成 ``None`` ⇒ 被当成「push URL 已禁用」
+# ⇒ 判「不能被误推」exit 0 —— **假绿**（把「读不到」折叠成「没有」）。
+# ⇒ 改：① 扫**全部**远端（origin 只作展示优先级）；② **没有远端 ⇒ UNKNOWN + 非零
+# 退出码**，文案禁止出现「推不出去」；③ 三条用例各钉一个分支。
+# ---------------------------------------------------------------------------
+
+
+def test_non_origin_remote_with_real_url_is_unsafe(tmp_path) -> None:
+    """分支①：远端名**非** ``origin`` 且带真 URL ⇒ 能被误推（exit 1）。
+
+    改前基线：``push_url`` 读成 ``None`` ⇒ 判「不能被误推」**exit 0（假绿）**。
+    """
+    repo = tmp_path / "content_repo_nonorigin"
+    repo.mkdir()
+    _git(["init", "-q", str(repo)], cwd=tmp_path)
+    url = "https://github.com/charlesnty612/NovelOS-Content.git"
+    _git(["remote", "add", "content", url], cwd=repo)
+
+    proc = _run_cli("--content-dir", str(repo))
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 1, (
+        f"非 origin 远端带真 URL ⇒ 能被误推（exit 1），实际 {proc.returncode}\n{combined}"
+    )
+    assert "能被误推" in proc.stdout
+    assert f"content={url}" in proc.stdout, "依据必须点名**哪个远端**可推"
+    assert "Traceback" not in combined
+
+
+def test_repo_without_any_remote_is_unknown_not_green(tmp_path) -> None:
+    """分支②：**没有任何远端** ⇒ 不可判定（UNKNOWN）+ 非零退出码，且文案不得说「推不出去」。
+
+    改前基线：``push_url=None`` ⇒ 判「push URL 已禁用」⇒ **exit 0（假绿）**。
+    """
+    repo = tmp_path / "content_repo_noremote"
+    repo.mkdir()
+    _git(["init", "-q", str(repo)], cwd=tmp_path)
+
+    proc = _run_cli("--content-dir", str(repo))
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 2, f"无远端 ⇒ 不可判定（exit 2），实际 {proc.returncode}\n{combined}"
+    assert "无法判定" in proc.stdout
+    assert "推不出去" not in combined, "无远端是**不可判定**，文案禁止把它说成「推不出去」"
+    assert "Traceback" not in combined
+
+
+def test_origin_with_no_push_scheme_still_passes(tmp_path) -> None:
+    """分支③：``origin`` + ``no-push://`` ⇒ 沿用现状通过（exit 0，不回归）。"""
+    repo = tmp_path / "content_repo_origin_disabled"
+    repo.mkdir()
+    _git(["init", "-q", str(repo)], cwd=tmp_path)
+    _git(["remote", "add", "origin", "no-push://novelos-content-push-disabled"], cwd=repo)
+
+    proc = _run_cli("--content-dir", str(repo))
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"origin + no-push:// ⇒ 退出码 0，实际 {proc.returncode}\n{combined}"
+    assert "不能被误推" in proc.stdout
+    assert "Traceback" not in combined
