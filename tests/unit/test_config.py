@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -138,3 +139,38 @@ def test_bug59_启动路径显式注入env且不覆盖显式配置(
     config_mod.ensure_env_defaults()
     assert os.environ["NOVELOS_DATA_DIR"] == str(tmp_path)
     assert os.environ["NOVELOS_DB_PATH"] == str(Path(tmp_path) / Settings.DEFAULT_DB_NAME)
+
+
+def test_bug59_缺env落默认时必打WARNING(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """★ BUG-59 判别④：走兜底落点时**必须出声**（WARNING），不许一声不响。
+
+    - 缺 env ⇒ 落仓外默认 ⇒ 必须打 WARNING 写明「未注入 ⇒ 已落仓外默认 <路径>」；
+    - 已注入 env ⇒ **不**打这条 WARNING（不误报）。
+    """
+    monkeypatch.delenv("NOVELOS_DATA_DIR", raising=False)
+    monkeypatch.delenv("NOVELOS_DB_PATH", raising=False)
+    with caplog.at_level(logging.WARNING, logger="packages.core.config"):
+        Settings.load()
+    hits = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "未注入" in r.getMessage()
+        and "仓外默认" in r.getMessage()
+    ]
+    assert hits, f"缺 env 未打 WARNING（兜底落点静默）⇒ caplog={caplog.records}"
+    assert hits[0].levelno == logging.WARNING
+    assert str(Settings.default_data_dir()) in hits[0].getMessage()
+    # 已注入 env ⇒ 不再打这条 WARNING（不误报）
+    caplog.clear()
+    monkeypatch.setenv("NOVELOS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("NOVELOS_DB_PATH", str(tmp_path / Settings.DEFAULT_DB_NAME))
+    with caplog.at_level(logging.WARNING, logger="packages.core.config"):
+        Settings.load()
+    assert not [r for r in caplog.records if "仓外默认" in r.getMessage()], (
+        "已注入 env 却仍报兜底落点"
+    )

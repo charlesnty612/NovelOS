@@ -6,9 +6,16 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
+
+
+#: 模块级 logger。★ **不用** ``logging_config.get_logger``：那会在 import 期
+#: 配置根 logger（改级别＋换 handler）⇒ 污染进程日志配置；这里只用 stdlib
+#: ⇒ 未配置 logging 时 WARNING 仍由 ``logging.lastResort`` 打到 stderr（可见）。
+log = logging.getLogger(__name__)
 
 
 def _env(name: str, default: str) -> str:
@@ -32,6 +39,12 @@ class Settings:
     ⇒ 现在**只有一个真源**：``data_dir`` 决定数据根，``db_path`` **恒定由
     ``data_dir`` 推导**（除非显式传入或显式给 ``NOVELOS_DB_PATH``）⇒
     「data_dir 与 db_path 归一」＝ 二者**不可能**再分叉。
+
+    ⚠️ **潜在隐患·不在本批**（2026-10-25 登记）：``__init__`` 的**构造器默认**
+    在 ``data_dir=None`` 时仍是**相对** ``./data`` ⇒ 裸 ``Settings()`` 或
+    ``Settings(db_path=…)`` 的数据根相对 ⇒ ＋ ``ensure_data_dir()`` 会在 CWD
+    建出 ``./data``；当前**无生产调用点**（生产一律走 ``load()`` 或显式传参）
+    ⇒ 留待后续批次裁（本批只封 ``load()`` 路径）。
     """
 
     data_dir: Path
@@ -164,6 +177,15 @@ def resolve_data_paths() -> tuple[Path, Path]:
     if not data_dir and not db_path:
         data_dir = str(Settings.default_data_dir())
         db_path = str(Settings.default_db_path())
+        # ★ 兜底落点**必须出声**（2026-10-25 口径）：缺 env ⇒ 落仓外默认，
+        #   但**不许一声不响** ⇒ 运维必须知道自己在用兜底落点。
+        log.warning(
+            "未注入 NOVELOS_DATA_DIR / NOVELOS_DB_PATH ⇒ 已落仓外默认："
+            "data_dir=%s ／ db_path=%s（如需指定请显式注入 env；"
+            "此为兜底落点，绝不指向仓内 ./data）",
+            data_dir,
+            db_path,
+        )
     elif not db_path:
         db_path = str(Path(data_dir) / Settings.DEFAULT_DB_NAME)
     elif not data_dir:
@@ -181,6 +203,11 @@ def ensure_env_defaults() -> None:
     ⇒ 启动路径必须**显式注入**，库落点才是确定的。三处调用：
     ``packages/core/api/main.py`` 的 ``create_app()``（含模块级 ``app = create_app()``）
     与 ``__main__``、``scripts/serve.py`` 的 ``main()``。
+
+    ★ **有意不注入**的三处（2026-10-25 口径）：``scripts/migrate.py:43``／
+    ``scripts/produce_chapters.py:1350``／``scripts/measure_cache_key_perf.py:461``
+    ⇒ 它们是 CLI／诊断工具，缺 env 时落**仓外默认****正是期望行为**（不注入、
+    不抛异常），并由 ``resolve_data_paths()`` 打 WARNING 告知兜底落点。
     """
     data_dir, db_path = resolve_data_paths()
     if not os.environ.get("NOVELOS_DATA_DIR"):
