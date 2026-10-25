@@ -716,10 +716,11 @@ def _run_push_mode(args: argparse.Namespace) -> int:
 def _secrets_verdict(state) -> dict:
     """凭据模式的判定 + **CLI 退出码**（0 合规 / 1 不合规 / 2 不可判）。"""
     verdict = decide_secrets(state)
-    if verdict.get("blocked"):
-        verdict["exit_code"] = EXIT_ERROR
-    else:
-        verdict["exit_code"] = EXIT_OK if verdict["ok"] else EXIT_UNSAFE
+    # ⚠️ BUG-17：``exit_code`` **单一赋值点**（旧实现两分支各赋一次 ⇒ 维护上两份赋值点）。
+    exit_code = (
+        EXIT_ERROR if verdict.get("blocked") else (EXIT_OK if verdict["ok"] else EXIT_UNSAFE)
+    )
+    verdict["exit_code"] = exit_code
     return verdict
 
 

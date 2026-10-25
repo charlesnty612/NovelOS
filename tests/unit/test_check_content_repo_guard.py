@@ -1731,3 +1731,12 @@ def test_remote_list_failure_is_unknown_exit_2(mod, monkeypatch, tmp_path, capsy
     assert code == 2, f"remote -v 失败 ⇒ 不可判 ⇒ 必须 exit 2，实际 {code}\n{combined}"
     assert "远端" in combined, f"必须说明是远端列表读取失败：{combined}"
     assert "Traceback" not in combined
+
+
+def test_bug17_secrets_verdict_has_exactly_one_exit_code_assignment(mod) -> None:
+    """★ BUG-17 判别（源码守卫）：``_secrets_verdict`` 里 ``exit_code`` 赋值**恰好 1 处**。"""
+    import inspect
+    import re
+    src = inspect.getsource(mod._secrets_verdict)
+    n = len(re.findall(r'\["exit_code"\]\s*=', src))
+    assert n == 1, f"_secrets_verdict 里 exit_code 赋值应恰好 1 处，实得 {n} 处：\n{src}"
