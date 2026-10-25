@@ -1,4 +1,4 @@
-"""``tests/conftest.py`` 三道守卫的判别用例（B1 密钥隔离 / B2 basetemp 硬失败 / B3 出网机制）。
+"""``tests/conftest.py`` 四道守卫的判别用例（B1 密钥隔离 / B2 basetemp 硬失败 / B3 出网机制 / B4 DB 沙箱）。
 
 判别原则（AGENTS §一.5「门禁自证会 FAIL」）：
 
@@ -526,3 +526,92 @@ def test_mock_transport_survives_socket_guard(monkeypatch: pytest.MonkeyPatch) -
         resp = client.get("https://api.example.com/v1/models")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# B4：DB 沙箱（BUG-26 · ``tests/conftest.py:227`` 的 autouse ``_isolate_repo_db``）
+#
+# 判别目标：把 ``tests/conftest.py:227`` 的 ``autouse=True`` 撤掉 ⇒ 本组三条必须**全红**
+# （**FAILED**，非 ERROR）。闸不在位时 ``get_settings()`` 按 CWD 解析出**仓内** ``./data``
+# （``packages/core/config.py:59`` ＋ ``:85-87``）⇒ 漏写 ``tmp_path`` 的用例会建库到生产
+# 真库 ``data/novelos.db`` ⇒ 守卫若无人看管，本组必须能变红。
+#
+# ⚠️ 本组三条**只读**：只比对路径，绝不建库、绝不写仓内 ``data/``（真库一个字节都不动）。
+# ⚠️ 相对路径按 CWD 解析 ⇒ 判「仓内/仓外」前**必须**先按 CWD 展开（否则假绿）。
+# ---------------------------------------------------------------------------
+
+
+def test_db_sandbox_redirects_settings_outside_repo() -> None:
+    """★B4 判别：测试进程里 ``get_settings()`` 的**数据根与库路径必须落仓外**。
+
+    - 闸在位时（``tests/conftest.py:255-257`` 注入 ``NOVELOS_DATA_DIR`` ＋
+      ``NOVELOS_DB_PATH``）⇒ 两者都是**绝对路径**且指向仓外沙箱。
+    - 闸不在位时 ``data_dir`` 是**相对**的 ``Path(".") / "data"``
+      （``packages/core/config.py:59`` ＋ ``:91``）⇒ **相对路径按 CWD 解析**
+      （``config.py:85-87``）⇒ 判定前必须按 CWD 展开，否则「看着像仓外」会假绿。
+    """
+    from packages.core import config as config_mod
+
+    settings = config_mod.get_settings()
+    data_dir = Path(str(settings.data_dir))
+    db_path = Path(str(settings.db_path))
+    resolved_data = data_dir.resolve() if data_dir.is_absolute() else (Path.cwd() / data_dir).resolve()
+    resolved_db = db_path.resolve() if db_path.is_absolute() else (Path.cwd() / db_path).resolve()
+    assert not guards.is_inside_repo(resolved_data), (
+        f"数据根落仓内 ⇒ B4 守卫没生效（撤 autouse 后此处必红）：{resolved_data}"
+    )
+    assert not guards.is_inside_repo(resolved_db), (
+        f"库路径落仓内 ⇒ B4 守卫没生效（撤 autouse 后此处必红）：{resolved_db}"
+    )
+
+
+def test_db_sandbox_injects_data_env_vars() -> None:
+    """★B4 判别：两个沙箱环境变量必须**已注入**，且都落仓外。
+
+    ⚠️ 一律写成 ``assert 名字 in os.environ``（不直接下标取）⇒ 闸不在位时呈现为
+    **FAILED**（AssertionError）而不是 **ERROR**（KeyError）⇒ 不撞
+    ``AGENTS.md:418`` 的 INVALID 坑。
+    """
+    from packages.core.config import Settings
+
+    assert "NOVELOS_DATA_DIR" in os.environ, "NOVELOS_DATA_DIR 未注入 ⇒ B4 守卫（autouse）没生效"
+    assert "NOVELOS_DB_PATH" in os.environ, "NOVELOS_DB_PATH 未注入 ⇒ B4 守卫（autouse）没生效"
+    data_env = Path(os.environ["NOVELOS_DATA_DIR"])
+    db_env = Path(os.environ["NOVELOS_DB_PATH"])
+    assert not guards.is_inside_repo(data_env), f"沙箱数据根落仓内：{data_env}"
+    assert not guards.is_inside_repo(db_env), f"沙箱库路径落仓内：{db_env}"
+    assert db_env.name == Settings.DEFAULT_DB_NAME, (
+        f"库文件名与生产默认名不一致（真源：config.py:47）：{db_env.name}"
+    )
+
+
+def test_db_sandbox_registers_sandbox_and_keeps_repo_db_untouched() -> None:
+    """★B4 判别：守卫必须**登记**沙箱家，且有效库路径必须**落在该沙箱内**。
+
+    - ``guards.DB_SANDBOX_PATH``（``tests/conftest.py:255``）是守卫自报的家 ⇒
+      闸不在位时它恒为 ``None`` ⇒ 本条必红。
+    - 有效库路径的**父目录必须就是沙箱目录** ⇒ 证明重定向真把库落到了沙箱，
+      而不只是「改了环境变量」。
+    - 仓内生产真库 ``data/novelos.db`` **一个字节都不动** ⇒ 这里只做**路径比对**，
+      绝不建库、绝不写文件。
+    """
+    from packages.core import config as config_mod
+
+    sandbox = guards.DB_SANDBOX_PATH
+    assert sandbox is not None, "B4 守卫未登记 DB_SANDBOX_PATH ⇒ autouse fixture 没有生效"
+    sandbox_path = Path(str(sandbox))
+    assert not guards.is_inside_repo(sandbox_path), f"沙箱根落仓内：{sandbox_path}"
+
+    settings = config_mod.get_settings()
+    raw_db = Path(str(settings.db_path))
+    assert raw_db.parent == sandbox_path, (
+        f"有效库路径的父目录不是沙箱目录（{raw_db}，沙箱 {sandbox_path}）"
+    )
+    resolved_db = raw_db.resolve()
+    repo_data = (REPO_ROOT / "data").resolve()
+    assert not resolved_db.is_relative_to(repo_data), (
+        f"有效库路径落在仓内 data/ 下 ⇒ 会写生产真库：{resolved_db}"
+    )
+    assert resolved_db != (repo_data / config_mod.Settings.DEFAULT_DB_NAME), (
+        f"有效库路径竟指向仓内生产真库：{resolved_db}"
+    )
