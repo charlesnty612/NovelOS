@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import os
@@ -42,25 +43,24 @@ PROVENANCE = {
     "copied_at": "2026-10-25 16:41（Get-Date 实测，robocopy 完成时刻）",
     "excluded": ".git / .venv / data / tmp / node_modules / __pycache__ / .pytest_cache / "
                 "secrets.json* / *.db / *.db-wal / *.db-shm",
-    "tested_bytes_sha256": {
-        "packages/core/db.py": "FD2209C8951777BF54B74729DD5CD8AEE4BC3220EB83EE22AB30A48B884B7197",
-        "scripts/restore_db.py": "AA67EC1AA9FDAF16BA2DEE12F7711B45C52317873C2946EE34FD43756019C1AB",
-        "scripts/m1_long_run.py": "164B62CA43AC385E5755FE996C868CE7880F78DD0618D9CE568B55B14D25B269",
-        "scripts/ai_tone_calibrate.py": "302067C7FEC8C68704FBBE7C719BB189432AE72E7C5055B70D359AAB77FAF9CF",
-        "scripts/m2_judge.py": "1F09DCA05A27368BA0D43FEDEEADEDC3FD33AFCF67BA0EFB0AB71AA98025B00C",
-        "scripts/normalize_chapters.py": "AD913883F91EF4A7A8226BC5B62A66BA60B02D26FF49E6211BC9D8FC60E6CA25",
-        "scripts/outline_check.py": "CF70A0ED8216DB8272A6273DCE3308F4A725749FB6359998BC31675A6382E452",
-        "scripts/m1_report.py": "E47545B52991AF7FDF568C5BA698E5A04E7B6955AC865350B6C39097CEBB0D70",
-        "scripts/inspect_stalled_runs.py": "5AEE5AB4D39F4A9441AE44E7162590BCED9130E7478BD26309B21A4EE29D094E",
-        "scripts/check_orphan_relationships.py": "8787DEB7B4A8ECDC4CADF0C6651FB93EDCC05692D2C8416EFFA91F224C909598",
-        "scripts/check_state_sync.py": "082AECF5196364429EEEFA8F49F18C531157C8515DC624FE458A6AFD927550F7",
-        "scripts/delta_anchoring_calibrate.py": "A85A129A9E6EFE1E3F60D9AB3564D4DE9AD8AACEFC4FE98D9081B249194DAF55",
-        "scripts/readability_audit.py": "BEF8B01AD7A257EFEC7B360FBB2736EB11CF90B2D00DA4A311CE53706D4AEBA6",
-        "scripts/revise_fidelity_calibrate.py": "D2FA18A1207C74C01E3600C715161B2EE12E1DACDEEFA12DAF74A8FD1CA3B1B4",
-        "scripts/backup_db.py": "FE96A9E63C3641FFAEC0E162D56AEB4EC2D05C8A0F5C32E024242E86BF9D3CEF",
-        "tests/unit/quality/test_ai_ending_summary_paragraph.py": "A8829A3B29634A7666FFE7BC33E0D24C3D6BC91DF268FC0E9989A5062CB8EA1E",
-    },
-}
+    "tested_files": [
+        "packages/core/db.py",
+        "scripts/restore_db.py",
+        "scripts/m1_long_run.py",
+        "scripts/ai_tone_calibrate.py",
+        "scripts/m2_judge.py",
+        "scripts/normalize_chapters.py",
+        "scripts/outline_check.py",
+        "scripts/m1_report.py",
+        "scripts/inspect_stalled_runs.py",
+        "scripts/check_orphan_relationships.py",
+        "scripts/check_state_sync.py",
+        "scripts/delta_anchoring_calibrate.py",
+        "scripts/readability_audit.py",
+        "scripts/revise_fidelity_calibrate.py",
+        "scripts/backup_db.py",
+        "tests/unit/quality/test_ai_ending_summary_paragraph.py",
+    ],}
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -116,22 +116,79 @@ def _repo_bad_dir() -> Path:
     d = REPO_ROOT / "not_data"
     return d / "evil.db"
 
+def _main_body_src(src: str) -> str | None:
+    """★ B-1：返回 ``main()`` 的源码文本切片（★ 判据须在 ``main()`` 内比较）。
+
+    闸调用在 ``main()``、连接在 **helper** 时，用**全文件**字符位置比较会误判
+    （★ 逐文件复算：11 个入口中 **10 个**误判 ⇒ 落仓后全量回归必集体假红，
+    ★ 而运行时次序本来正确）⇒ 判据必须限定在 ``main()`` 函数体内。
+    """
+    tree = ast.parse(src)
+    node = None
+    for item in tree.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "main":
+            node = item
+            break
+    if node is None:
+        for item in ast.walk(tree):
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "main":
+                node = item
+                break
+    if node is None:
+        return None
+    return ast.get_source_segment(src, node) or ""
+
+
+def _expected_sha_from_env() -> dict[str, str]:
+    """★ FG-R1-2：从环境变量 ``NOVELOS_R1_EXPECTED_SHA`` 读「路径=哈希」登记表。
+
+    格式：每行一条 ``<相对路径>=<64 位 SHA256>``（★ ``#`` 开头为注释、空行忽略）。
+    ★ **未设置 ⇒ 返回空字典** ⇒ 调用方只打印实际值、**不判红**（★ 防脆断言埋雷）。
+    """
+    raw = os.environ.get("NOVELOS_R1_EXPECTED_SHA", "")
+    table: dict[str, str] = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        rel, _, digest = line.partition("=")
+        rel = rel.strip().replace("\\", "/")
+        digest = digest.strip().upper()
+        if rel and digest:
+            table[rel] = digest
+    return table
+
+
 
 # --------------------------------------------------------------------------- DoD⑧
 def test_00_副本来源与被测字节SHA_可报且自校验():
-    """副本来源 ＋ 被测字节 SHA256：**重算比对**（副本被改动 ⇒ 本用例必红）。"""
+    """副本来源 ＋ 被测字节 SHA256。
+
+    ★ FG-R1-2 修法（★ `OS审查` 批复审脆断言 FG-R1-2 ＋ PM 裁定）：
+      **不再硬编码** 16 个被测文件的 SHA256 ⇒ 任何后续落码改动都不会让本用例变红。
+      · 环境变量 ``NOVELOS_R1_EXPECTED_SHA``（★ 每行 ``<路径>=<64 位 SHA256>``）
+        **存在** ⇒ 逐条**重算比对并断言**（★ 跑批窗口由 PM 给该 env 时才做强校验）；
+      · **不存在** ⇒ 只**打印**实际值、**不判红**。
+    """
     print("\n[PROVENANCE] " + repr(PROVENANCE["copy_source"]))
     print("[PROVENANCE] src_repo=" + PROVENANCE["src_repo"])
     print("[PROVENANCE] copy_root=" + PROVENANCE["copy_root"])
     print("[PROVENANCE] copied_at=" + PROVENANCE["copied_at"])
     print("[PROVENANCE] excluded=" + PROVENANCE["excluded"])
-    for rel, want in PROVENANCE["tested_bytes_sha256"].items():
+    for rel in PROVENANCE["tested_files"]:
         p = REPO_ROOT / rel
         assert p.is_file(), f"被测文件缺失：{rel}"
+        print(f"[TESTED-BYTES] {rel}  sha256={_sha(p)}")
+    expected = _expected_sha_from_env()
+    if not expected:
+        print("[TESTED-BYTES] NOVELOS_R1_EXPECTED_SHA 未设置 ⇒ 只打印实际值，不判红")
+        return
+    for rel, want in expected.items():
+        p = REPO_ROOT / rel
+        assert p.is_file(), f"env 登记的被测文件缺失：{rel}"
         got = _sha(p)
-        print(f"[TESTED-BYTES] {rel}  sha256={got}")
-        assert got == want, f"被测字节与登记值不一致：{rel}\n  登记={want}\n  实测={got}"
-
+        assert got == want, f"被测字节与 env 登记值不一致：{rel}\n  env登记={want}\n  实测={got}"
+        print(f"[TESTED-BYTES-ASSERTED] {rel}  sha256={got}")
 
 # --------------------------------------------------------------------------- C-01 库落点闸
 def test_C01_库落点闸_仓内非data_拒绝且零副作用():
@@ -474,7 +531,19 @@ def test_入口闸_仓内非data落点必拒且零副作用(cid, mod_name, argv_
 
 
 def test_入口闸_11个文件源码均含闸且在连接之前():
-    """静态判别：11 个入口文件**都**含闸调用，且闸排在连接语句**之前**。"""
+    """静态判别：11 个入口文件**都**含闸调用，且闸排在连接语句**之前**。
+
+    ★ B-1 修判据（★ `OS审查` 批复审阻断项 B-1 ＋ PM 裁定）：
+      **旧判据**（＝全文件字符位置）＝ ``gi = src.index("check_db_path(")``／
+      ``ci = src.find("sqlite3.connect(")``／``assert ci == -1 or gi < ci``
+      ⇒ 闸在 ``main()``、连接在 **helper** 时**误判**（★ 逐文件复算：11 个中
+      **10 个**不满足 ⇒ 该文件落仓内后**全量回归必集体假红**；★ 运行时次序本来正确）。
+      **新判据**＝**在 ``main()`` 函数体文本切片内**比较：
+      ① ``main()`` 内须含 ``check_db_path(``（★ 闸在入口）；
+      ② ``main()`` 内**有** connect ⇒ 闸位置须在 connect **之前**；
+      ③ ``main()`` 内**无** connect（★ 连接全在 helper，由 ``main()`` 在闸之后调用）
+         ⇒ 只断言 ①、**不比较位置**。
+    """
     files = [
         "ai_tone_calibrate", "m2_judge", "normalize_chapters", "outline_check", "m1_report",
         "inspect_stalled_runs", "check_orphan_relationships", "check_state_sync",
@@ -484,10 +553,13 @@ def test_入口闸_11个文件源码均含闸且在连接之前():
         src = (REPO_ROOT / "scripts" / f"{name}.py").read_text(encoding="utf-8")
         assert "check_db_path(" in src, f"{name} 缺库落点闸调用"
         assert "RepoLocalDbPathError" in src, f"{name} 缺闸异常处理"
-        gi = src.index("check_db_path(")
-        ci = src.find("sqlite3.connect(")
-        assert ci == -1 or gi < ci, f"{name}：闸必须排在连接语句之前"
-
+        main_src = _main_body_src(src)
+        assert main_src is not None, f"{name} 找不到 main() 定义（判据须在 main() 内比较）"
+        gi = main_src.find("check_db_path(")
+        assert gi != -1, f"{name}：main() 内缺库落点闸调用"
+        ci = main_src.find("sqlite3.connect(")
+        if ci != -1:
+            assert gi < ci, f"{name}：main() 内闸必须排在连接语句之前"
 
 # --------------------------------------------------------------------------- C-05 / C-17
 def test_C05_backup_db_源库落点闸_拒且零副作用(tmp_path, capsys):
