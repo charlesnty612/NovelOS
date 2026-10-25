@@ -589,6 +589,24 @@ def main() -> int:
             "[ABORT] --confirm 不得为空：必须显式确认「本次会改副本源码」。\n"
             "       正确用法：--confirm（任意非空值）"
         )
+    # ── A-1（Chief 2026-10-25 批文 · PM-196-A1-code）─────────────────────
+    # 缺陷：``--root`` 空串/纯空白**未被拒** ⇒ ``pathlib.Path("")`` ＝ ``Path(".")``
+    #       ⇒ ``resolve()`` ＝ **当前工作目录（CWD）** ⇒ 目标根＝CWD（未必是仓外副本）
+    #       ⇒ 会在**那棵树**上做突变改写（伤数据，必须由代码拒）。
+    # 同源形态：``--root=.`` 经 ``Path(".").resolve()`` 同样落到 CWD ⇒ 一并拒。
+    if not str(args.root).strip():
+        raise SystemExit(
+            "[ABORT] --root 不得为空或纯空白：空值会被解析成当前工作目录（CWD），"
+            "可能对任意树做突变改写。\n"
+            "       正确用法：--root <仓外副本根>（必须是显式的仓外副本目录）"
+        )
+    if _same_dir(pathlib.Path(args.root).expanduser().resolve(), pathlib.Path.cwd().resolve()):
+        raise SystemExit(
+            "[ABORT] 目标根不得等于当前工作目录（CWD）："
+            f"{pathlib.Path(args.root).expanduser().resolve()}\n"
+            "       目标根必须显式给**仓外副本根**；等于 CWD 会让突变改写落到当前树。\n"
+            "       正确用法：--root <仓外副本根> --confirm"
+        )
     target_root = assert_target_root_allowed(pathlib.Path(args.root))
 
     survived: list[str] = []

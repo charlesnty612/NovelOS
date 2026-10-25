@@ -235,3 +235,39 @@ def test_both_scripts_expose_the_same_judgment_api():
     ):
         assert getattr(mutation_harness, name) == value
         assert getattr(mutation_probe, name) == value
+
+
+# ── A-1（Chief 2026-10-25 批文 · PM-196-A1-code）────────────────────────────────
+# 缺陷：``--root`` 空串/纯空白**未被拒** ⇒ ``pathlib.Path("")`` ＝ ``Path(".")``
+#       ⇒ ``resolve()`` ＝ **CWD** ⇒ 目标根＝CWD（未必是仓外副本）
+#       ⇒ 会在**那棵树**上做突变改写 ⇒ 伤数据，必须由代码拒。
+# 同源形态：``--root=.`` 经 ``Path(".").resolve()`` 同样落到 CWD。
+#
+# 判别设计（改前必红 / 改后必绿）：
+# - 四形态（``--root=``／纯空白／``--root=.``／缺 ``--root``）必须**被代码拒**；
+# - 拒绝路径必须**零子进程**（``_run`` spy 未被调用）＋**零文件改动**（tmp_path 内文件集不变）；
+# - ⚠️ 必须把 CWD 切到**仓外**（``tmp_path``）⇒ 否则 ``--root=.`` 会被「活树内」判据挡住，
+#   本组变成恒绿（判别力为零）。
+@pytest.mark.parametrize(
+    "argv_tail",
+    [
+        pytest.param(["--root=", "--confirm"], id="root-empty"),
+        pytest.param(["--root=   ", "--confirm"], id="root-blank"),
+        pytest.param(["--root=.", "--confirm"], id="root-dot"),
+        pytest.param(["--confirm"], id="root-missing"),
+    ],
+)
+def test_a1_root_forms_are_rejected_by_code(monkeypatch, tmp_path, argv_tail):
+    """A-1 判别：四形态必须抛 ``SystemExit`` 且退出码非 0（改前**不抛** ⇒ 本用例必红）。"""
+    launched = []
+    monkeypatch.setattr(mutation_harness, "_run", lambda *a, **k: launched.append((a, k)))
+    monkeypatch.chdir(tmp_path)
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    monkeypatch.setattr("sys.argv", ["mutation_harness.py", *argv_tail])
+    with pytest.raises(SystemExit) as exc:
+        mutation_harness.main()
+    code = exc.value.code
+    assert code != 0, f"拒绝路径的退出码必须非 0，实得 {code!r}"
+    assert not launched, f"拒绝路径**零子进程**，但起过 {launched!r}"
+    after = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    assert after == before, "拒绝路径**零文件改动**"
