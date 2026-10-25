@@ -426,14 +426,18 @@ def decide(state: GuardState) -> dict:
         # （否则 CI/机器消费方分不清「没这个目录」与「目录在但不是 git 仓」）。
         if not state.path_available:
             reason = f"内容仓路径不存在或不是目录（无法巡检）：{state.content_dir}"
+            reason_code = "content_dir_unavailable"
         elif not state.git_available:
             reason = f"git 不可用（无法巡检）：{state.content_dir}"
+            reason_code = "git_unavailable"
         else:
             reason = f"目标目录不是 git 工作树（无法巡检）：{state.content_dir}"
+            reason_code = "not_git_repo"
         return {
             "can_be_pushed": None,
             "verdict": "unknown",
             "exit_code": EXIT_ERROR,
+            "reason_code": reason_code,
             # ⚠️ C1：verdict 的**形状必须处处一致**（下面两个键不能只在「可判」分支
             # 才有）——JSON 输出无条件读 ``barriers`` / ``warnings`` ⇒ 不可判时缺键
             # ⇒ ``KeyError`` traceback（不可判分支自己又炸一次）。
@@ -447,6 +451,8 @@ def decide(state: GuardState) -> dict:
     # ⇒ 被当成「push URL 已禁用」⇒ 判「不能被误推」exit 0 —— **假绿**
     # （把「读不到」折叠成「没有」，给从未评估的对象发满分）。
     if not state.remotes:
+        # ⚠️ BUG-15：两类「不可判」必须可区分（``remote -v`` 失败 vs 压根没有远端）。
+        reason_code = "remote_list_error" if state.remote_list_error else "no_remote"
         reason = state.remote_list_error or (
             f"内容仓没有任何远端（不可判定 push 是否被禁用）：{state.content_dir}"
         )
@@ -454,6 +460,7 @@ def decide(state: GuardState) -> dict:
             "can_be_pushed": None,
             "verdict": "unknown",
             "exit_code": EXIT_ERROR,
+            "reason_code": reason_code,
             "barriers": [],
             "warnings": [],
             "reason": reason,
@@ -510,6 +517,8 @@ def decide(state: GuardState) -> dict:
         "can_be_pushed": can_be_pushed,
         "verdict": "yes" if can_be_pushed else "no",
         "exit_code": EXIT_UNSAFE if can_be_pushed else EXIT_OK,
+        # ⚠️ BUG-15：verdict 的形状必须处处一致 ⇒ 可判段也带 reason_code。
+        "reason_code": "decidable",
         "barriers": barriers,
         "reason": "；".join(reason_bits),
         "warnings": warnings,
@@ -703,6 +712,7 @@ def _run_push_mode(args: argparse.Namespace) -> int:
             "verdict": verdict["verdict"],
             "barriers": verdict["barriers"],
             "reason": verdict["reason"],
+            "reason_code": verdict.get("reason_code"),
             "warnings": verdict.get("warnings") or [],
             "notes": state.notes,
         }

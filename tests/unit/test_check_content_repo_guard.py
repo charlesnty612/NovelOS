@@ -1740,3 +1740,24 @@ def test_bug17_secrets_verdict_has_exactly_one_exit_code_assignment(mod) -> None
     src = inspect.getsource(mod._secrets_verdict)
     n = len(re.findall(r'\["exit_code"\]\s*=', src))
     assert n == 1, f"_secrets_verdict 里 exit_code 赋值应恰好 1 处，实得 {n} 处：\n{src}"
+
+
+def test_bug15_unknown_verdicts_carry_distinct_reason_codes(mod) -> None:
+    """★ BUG-15 判别：两类「不可判」的 ``reason_code`` 必须可区分，退出码仍 2（断言式 ⇒ 改前 FAILED 非 ERROR）。"""
+    s_err = mod.GuardState(content_dir="synthetic-content")
+    s_err.is_git_repo = True
+    s_err.remote_list_error = "无法列出远端（git remote -v 失败）"
+    s_none = mod.GuardState(content_dir="synthetic-content")
+    s_none.is_git_repo = True
+    v_err, v_none = mod.decide(s_err), mod.decide(s_none)
+    for v in (v_err, v_none):
+        assert "reason_code" in v, f"unknown verdict 缺 reason_code：{v}"
+        assert v["verdict"] == "unknown" and v["exit_code"] == mod.EXIT_ERROR == 2
+    assert v_err["reason_code"] != v_none["reason_code"], (
+        f"两类不可判必须可区分：{v_err['reason_code']} vs {v_none['reason_code']}"
+    )
+    s_ok = mod.GuardState(content_dir="synthetic-content")
+    s_ok.is_git_repo = True
+    s_ok.remotes = [mod.RemoteInfo(name="origin", fetch_url="u", push_url="u")]
+    v_ok = mod.decide(s_ok)
+    assert "reason_code" in v_ok, f"可判段也必须带 reason_code（形状处处一致）：{v_ok}"
