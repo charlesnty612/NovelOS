@@ -57,6 +57,7 @@ from packages.core.quality.ai_patterns import (
     scan_ai_patterns,
 )
 from packages.core.quality.wordcount import visible_chars
+from packages.core.db import check_db_path
 
 from . import _human_baseline_gate as gate
 
@@ -101,6 +102,10 @@ def _generated_chapters() -> list[tuple[str, str]]:
     """生成侧：dev 库全库 × 每章最新草稿（取数口径照 ``scripts/ai_tone_calibrate.py``）。"""
     if not _DEV_DB.exists():  # pragma: no cover - 环境前提缺失
         pytest.skip(f"dev 库不存在：{_DEV_DB}")
+    # 库落点闸（C-17 · BUG-59）：``_DEV_DB`` ＝ 仓内真库 ``data/novelos.db``
+    # ⇒ 落点必须过库族闸。★ **只读 SELECT 也过闸** —— 防后续把它改成写路径，
+    #   或把落点挪到仓内非 ``data/`` 处。
+    check_db_path(_DEV_DB)
     conn = sqlite3.connect(str(_DEV_DB))
     try:
         rows = conn.execute(

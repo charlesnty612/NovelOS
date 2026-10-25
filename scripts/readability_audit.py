@@ -267,6 +267,20 @@ class _Tee:
         self._file.close()
 
 
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from packages.core.db import (  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/readability_audit.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.db import (  # type: ignore[no-redef]  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=DEFAULT_DB)
@@ -274,6 +288,14 @@ def main() -> None:
     ap.add_argument("--samples", type=int, default=5, help="抽样条数；0 = 不抽样")
     ap.add_argument("--out", default=None, help="stdout 的 UTF-8 副本路径")
     args = ap.parse_args()
+
+    # 库落点闸（C-15 · BUG-59）：仓内**仅**允许 ``data/`` 子树（不放 ``tmp/``）
+    # ⇒ 拒绝 ⇒ 退出码 2（EXIT_DB_PATH_REJECTED）且**零副作用**（未打开库、未建库）。
+    try:
+        check_db_path(args.db)
+    except RepoLocalDbPathError as exc:
+        print(f"[拒绝库落点] {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_DB_PATH_REJECTED) from None
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")

@@ -38,6 +38,20 @@ def _names(conn: sqlite3.Connection, project_id: str, role: str) -> list[str]:
         return []
 
 
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from packages.core.db import (  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/outline_check.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.db import (  # type: ignore[no-redef]  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="data/novelos.db")
@@ -46,6 +60,14 @@ def main() -> None:
     ap.add_argument("--protagonist", action="append", default=[])
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    # 库落点闸（C-09 · BUG-59）：仓内**仅**允许 ``data/`` 子树（不放 ``tmp/``）
+    # ⇒ 拒绝 ⇒ 退出码 2（EXIT_DB_PATH_REJECTED）且**零副作用**（未打开库、未建库）。
+    try:
+        check_db_path(args.db)
+    except RepoLocalDbPathError as exc:
+        print(f"[拒绝库落点] {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_DB_PATH_REJECTED) from None
 
     conn = sqlite3.connect(args.db)
     rows = conn.execute(

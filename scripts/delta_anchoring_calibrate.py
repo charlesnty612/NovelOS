@@ -68,11 +68,33 @@ def _quantile(sorted_vals: list[float], q: float) -> float:
     return sorted_vals[lo] * (1 - frac) + sorted_vals[hi] * frac
 
 
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from packages.core.db import (  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/delta_anchoring_calibrate.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.db import (  # type: ignore[no-redef]  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="delta 源锚定阈值校准（只读）")
     parser.add_argument("--db", type=Path, default=_DEFAULT_DB, help="dev 库路径")
     parser.add_argument("--samples", type=int, default=20, help="低覆盖样本条数上限")
     args = parser.parse_args()
+
+    # 库落点闸（C-14 · BUG-59）：仓内**仅**允许 ``data/`` 子树（不放 ``tmp/``）
+    # ⇒ 拒绝 ⇒ 退出码 2（EXIT_DB_PATH_REJECTED）且**零副作用**（未打开库、未建库）。
+    try:
+        check_db_path(args.db)
+    except RepoLocalDbPathError as exc:
+        print(f"[拒绝库落点] {exc}", file=sys.stderr)
+        return EXIT_DB_PATH_REJECTED
 
     if not args.db.exists():
         print(f"ERROR: db not found: {args.db}", file=sys.stderr)

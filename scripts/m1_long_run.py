@@ -80,6 +80,7 @@ import os
 import socket
 import sqlite3
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +92,11 @@ import httpx
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+from packages.core.db import (  # noqa: E402
+    EXIT_DB_PATH_REJECTED,
+    RepoLocalDbPathError,
+    check_db_path,
+)
 from packages.core.quality.wordcount import (  # noqa: E402
     classify_prose_length,
     visible_chars,
@@ -1424,7 +1430,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--data-dir",
-        default=os.environ.get("M1_RUN_DATA_DIR", "data/m1_run"),
+        # B4：默认落点**改仓外**（原 ``data/m1_run`` 落在软件仓内 ⇒ 跑批产物进版本库
+        # 风险；``data/`` 虽是现闸允许子树，但闸不拦 ⇒ 须由默认落点自己躲开）。
+default=os.environ.get("M1_RUN_DATA_DIR", str(Path(tempfile.gettempdir()) / "novelos_m1_run")),
         help="进度文件 / 章节明细所在目录（默认 data/m1_run）",
     )
     p.add_argument(
@@ -1469,6 +1477,17 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # 库落点闸（C-04）：``--db``（服务库，直查指标用）与 ``--data-dir`` 承载的库
+    # （``<data-dir>/novelos.db``）都过闸 ⇒ 仓内**仅**允许 ``data/`` 子树。
+    try:
+        if getattr(args, "db", ""):
+            check_db_path(args.db)
+        check_db_path(Path(args.data_dir).resolve() / "novelos.db")
+    except RepoLocalDbPathError as exc:
+        print(f"[拒绝库落点] {exc}", file=sys.stderr)
+        return EXIT_DB_PATH_REJECTED
+
     return args.func(args)
 
 

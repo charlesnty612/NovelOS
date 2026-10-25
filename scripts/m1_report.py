@@ -857,6 +857,20 @@ def build_report(
     return "\n".join(parts), diag
 
 
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from packages.core.db import (  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/m1_report.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.db import (  # type: ignore[no-redef]  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="M1 长跑一致性衰减观测报告 —— 数据分析",
@@ -896,6 +910,16 @@ def main() -> int:
 
     data_dir = Path(args.data_dir).resolve()
     db_path = Path(args.db).resolve() if args.db else None
+
+    # 库落点闸（C-10 · BUG-59）：仓内**仅**允许 ``data/`` 子树（不放 ``tmp/``）
+    # ⇒ 拒绝 ⇒ 退出码 2（EXIT_DB_PATH_REJECTED）且**零副作用**（未打开库、未建库）。
+    # ⚠️ ``--db`` 缺省 None ⇒ 未给就不判（无库落点）。
+    if db_path is not None:
+        try:
+            check_db_path(db_path)
+        except RepoLocalDbPathError as exc:
+            _err(f"[拒绝库落点] {exc}")
+            return EXIT_DB_PATH_REJECTED
 
     # 落盘路径解析（台账 C-3 + D-19 + 对抗审查 B1）：
     # 显式 --out > --write-docs（痕迹仓） > 系统临时目录。

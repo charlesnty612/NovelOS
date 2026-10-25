@@ -68,6 +68,12 @@ from scripts.backup_db import (  # noqa: E402
     find_openssl,
 )
 
+# 库落点闸（BUG-59 / 落码批 C-02、C-03）：从 ``packages.core.db`` 取**唯一实现点**
+# ⇒ 库落点判定只实现一次，**不与** ``scripts/guard_repo_write_path.py`` 的**写落点**闸
+# 混用：后者管「产物写哪」（含 ``tmp/``），本闸管「库落哪」（**仅** ``data/``）。
+# ⚠️ 本 import 必须在**仓根入 sys.path 之后**（否则直接 `python scripts/restore_db.py` ⇒ ImportError）。
+from packages.core.db import RepoLocalDbPathError, check_db_path  # noqa: E402
+
 #: 表数核对**默认关闭**（``--expect-tables`` 不给就不核对）。
 #:
 #: ⚠️ **刻意不写死张数**（2026-10-23 对抗审查 T3-4）：``packages/core/db.py::count_tables``
@@ -222,8 +228,23 @@ def snapshot(src: Path, dest: Path) -> bool:
     return True
 
 
-def rollback(snapshot_path: Path | None, target: Path) -> None:
-    """把替换前的快照放回目标（失败也只警告，不掩盖主错误）。"""
+def rollback(snapshot_path: Path | None, target: Path, *, confirm: bool = False) -> None:
+    """把替换前的快照放回目标（失败也只警告，不掩盖主错误）。
+
+    ⚠️ **确认闸**（S-2 ①）：破坏性动作（用快照覆盖目标库）**必须**显式
+    ``confirm=True``；默认 ``False`` ⇒ **拒绝且零副作用**（不 replace、不删 sidecar）。
+
+    ★ 两种语义的区分（S-2 ④）：
+    - **用户主动回滚** = 外部直接调用本函数 ⇒ 须显式 ``confirm=True``；
+    - **失败自动回滚** = :func:`restore` 内部在替换失败/校验不过时的补偿动作 ⇒
+      由 :func:`restore` 在**同一次调用内**显式传 ``confirm=True``（三处自调用，
+      **显式传参、不是隐式豁免**）。
+    ⇒ 闸**只有 ``confirm`` 一个信号**（不引入 env／全局开关／外部可传的绕过通道）；
+      「主动 vs 自动」的区分体现在**调用点**与**判别用例**上。
+    """
+    if not confirm:
+        _err("[拒绝]   回滚未确认（confirm=False）⇒ 目标库保持当前状态（零副作用）")
+        return
     if snapshot_path is None or not snapshot_path.exists():
         _err("[回滚]   无快照可回滚 ⇒ 目标库保持当前状态")
         return
@@ -247,8 +268,17 @@ def restore(
     target: Path,
     key_file: Path,
     expect_tables: int | None = DEFAULT_EXPECT_TABLES,
+    *,
+    confirm: bool = False,
 ) -> int:
-    """执行恢复；返回退出码（``EXIT_OK`` = 成功）。"""
+    """执行恢复；返回退出码（``EXIT_OK`` = 成功）。
+
+    ⚠️ **确认闸**（S-2 ①）：破坏性动作（整库替换）**必须**显式 ``confirm=True``；
+    默认 ``False`` ⇒ **拒绝且零副作用**（不解密、不拍快照、不替换、不删 sidecar）。
+    """
+    if not confirm:
+        _err("[拒绝]   恢复未确认（confirm=False）⇒ 目标库未改动（零副作用）")
+        return EXIT_USAGE
     if not enc.is_file():
         _err(f"[ABORT] 密文不存在：{enc}")
         return EXIT_USAGE
@@ -355,7 +385,10 @@ def restore(
         except OSError as exc:
             _err(f"[ABORT] 原子替换失败：{exc} ⇒ **目标库未改动**")
             if snapshot_path is not None:
-                rollback(snapshot_path, target)
+                # 失败自动回滚：**显式**传 confirm=True（S-2 ③；不是隐式豁免）。
+                # ⚠️ 此处 ``os.replace`` **未成功** ⇒ 目标库仍是旧库；回滚仍属破坏性
+                # 覆盖 ⇒ 必须显式授权，否则这条错误路径会留下「目标被快照覆盖」。
+                rollback(snapshot_path, target, confirm=True)
             return EXIT_USAGE
 
         # ⑥ 恢复后校验 —— 不过 ⇒ 回滚
@@ -365,14 +398,18 @@ def restore(
             verdict = f"无法打开：{exc}"
         if verdict != "ok":
             _err(f"[ABORT] 恢复后完整性校验未通过（{verdict}）⇒ 回滚旧库")
-            rollback(snapshot_path, target)
+            # 失败自动回滚：**显式**传 confirm=True（S-2 ③）——此处 ``os.replace``
+            # **已成功**（目标已是新库）⇒ 若闸拒绝回滚，目标会停在坏的新库上。
+            rollback(snapshot_path, target, confirm=True)
             return EXIT_INTEGRITY_FAILED
         tables = count_tables(target)
         if expect_tables is not None and tables != expect_tables:
             _err(
                 f"[ABORT] 恢复后表数不符：{tables} 张（期望 {expect_tables} 张）⇒ 回滚旧库"
             )
-            rollback(snapshot_path, target)
+            # 失败自动回滚：**显式**传 confirm=True（S-2 ③）——同上，``os.replace``
+            # **已成功** ⇒ 回滚必须能执行，目标才能回到旧库。
+            rollback(snapshot_path, target, confirm=True)
             return EXIT_TABLE_COUNT_MISMATCH
 
         remove_sidecars(target)
@@ -413,18 +450,33 @@ def main(argv: list[str] | None = None) -> int:
              "不符退 5）——⚠️ 刻意不写死张数：表数随迁移漂移"
              "（见 packages/core/db.py::count_tables 的 A-009）",
     )
+    ap.add_argument(
+        "--yes",
+        action="store_true",
+        help="确认执行破坏性恢复（映射到库层 confirm=True；**缺省 False** ⇒ 拒绝且零副作用）",
+    )
     args = ap.parse_args(argv)
 
     enc = Path(args.enc).expanduser()
     target = Path(args.out).expanduser()
     key_file = Path(args.key_file).expanduser()
+
+    # 库落点闸（C-02 ``--out`` 目标库 / C-03 ``--enc`` 备份源）：仓内**仅**允许
+    # ``data/`` 子树 ⇒ 拒绝 ⇒ 退出码 2（用法/前置条件错误），**零副作用**。
+    try:
+        check_db_path(target)
+        check_db_path(enc)
+    except RepoLocalDbPathError as exc:
+        _err(f"[拒绝库落点] {exc}")
+        return EXIT_USAGE
     print(f"[密文]   {enc}")
     print(f"[目标]   {target}")
     print(f"[密钥]   {key_file}")
     print(f"[期望表数] {args.expect_tables if args.expect_tables is not None else '（不核对）'}")
     if target.exists():
         print("[提示]   目标已存在，将被**覆盖**（替换前拍快照，失败可回滚）")
-    return restore(enc, target, key_file, args.expect_tables)
+    # ``--yes`` 映射到库层 ``confirm``（S-2 ②）：缺省 False ⇒ 库层拒绝且零副作用。
+    return restore(enc, target, key_file, args.expect_tables, confirm=args.yes)
 
 
 if __name__ == "__main__":

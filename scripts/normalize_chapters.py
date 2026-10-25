@@ -123,6 +123,20 @@ def _open_db(db_path: Path, *, read_only: bool) -> sqlite3.Connection:
     return conn
 
 
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from packages.core.db import (  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/normalize_chapters.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.db import (  # type: ignore[no-redef]  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="data/novelos.db")
@@ -138,6 +152,14 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     db_path = Path(args.db)
+
+    # 库落点闸（C-08 · BUG-59）：仓内**仅**允许 ``data/`` 子树（不放 ``tmp/``）
+    # ⇒ 拒绝 ⇒ 退出码 2（EXIT_DB_PATH_REJECTED）且**零副作用**（未打开库、未建库）。
+    try:
+        check_db_path(db_path)
+    except RepoLocalDbPathError as exc:
+        print(f"[拒绝库落点] {exc}", file=sys.stderr)
+        return EXIT_DB_PATH_REJECTED
     # 前置守卫：sqlite3.connect 对不存在的路径会**静默创建空库**——dry-run 必须先拦。
     if not db_path.is_file():
         print(f"ERROR: 数据库不存在或不是文件: {db_path}", file=sys.stderr)

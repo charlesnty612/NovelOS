@@ -98,6 +98,14 @@ except ImportError:  # pragma: no cover —— 直接 `python scripts/backup_db.
         is_inside_repo,
     )
 
+# 库落点闸（BUG-59 / 落码批 C-05）：与 ``packages.core.db`` 的**唯一实现点**同源
+# （此处只管**源库**落点；产物落点已由上面的 ``check_write_path`` 单独管）。
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from packages.core.db import RepoLocalDbPathError, check_db_path  # noqa: E402
+except ImportError:  # pragma: no cover —— 直接 `python scripts/backup_db.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.db import RepoLocalDbPathError, check_db_path  # type: ignore[no-redef]  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / "data" / "novelos.db"
 
@@ -463,6 +471,12 @@ def main(argv: list[str] | None = None) -> int:
     # 源库校验**先于** --list（F-6）：此前 --list 在 is_file() 之前返回 ⇒ 源路径
     # 打错也打印「未执行任何写入」并 exit 0，预检看不出问题。
     src = Path(args.db).expanduser()
+    # 库落点闸（C-05）：源库落点仓内**仅**允许 ``data/`` 子树 ⇒ 拒绝 ⇒ 零副作用
+    # （未拍快照、未复制、未写任何文件）。
+    try:
+        check_db_path(src)
+    except RepoLocalDbPathError as exc:
+        _abort(f"[拒绝库落点] {exc}", code=EXIT_WRITE_PATH_REJECTED)
     if not src.is_file():
         raise SystemExit(f"[ABORT] 源库不存在：{src}")
     out_dir = resolve_out_dir(args.out)

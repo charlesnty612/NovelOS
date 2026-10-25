@@ -122,6 +122,11 @@ def _restore_args(enc: Path, target: Path, key: Path, *extra: str) -> list[str]:
         str(target),
         "--key-file",
         str(key),
+        # ★ 授权破坏性恢复（库层 ``confirm`` 默认 False ⇒ CLI 须显式 ``--yes``；
+        #   落码批 S-2 ②「``--yes`` 可选、缺省 False、映射到库层形参」）。
+        #   11 处 ``restore_db.main(...)`` 共用本 helper ⇒ **单点**加此实参即等价于逐处追加，
+        #   **既有断言一字未改**（失败原因仍是原来的「解密失败/密钥/表数/占用」⇒ 判别力不丢）。
+        "--yes",
         *extra,
     ]
 
@@ -356,6 +361,8 @@ def test_cli_exit_code_is_zero_on_success_and_nonzero_on_failure(tmp_path: Path)
             str(key),
             "--expect-tables",
             "2",
+            # ★ 同上：CLI 破坏性恢复须显式 ``--yes``（库层 confirm 默认 False）。
+            "--yes",
         ],
         capture_output=True,
         text=True,
@@ -380,6 +387,8 @@ def test_cli_exit_code_is_zero_on_success_and_nonzero_on_failure(tmp_path: Path)
             str(key),
             "--expect-tables",
             "2",
+            # ★ 同上：CLI 破坏性恢复须显式 ``--yes``（库层 confirm 默认 False）。
+            "--yes",
         ],
         capture_output=True,
         text=True,
@@ -488,6 +497,8 @@ def test_cli_exits_2_when_target_is_locked_by_another_process(tmp_path: Path):
                 str(key),
                 "--expect-tables",
                 "2",
+                # ★ 同上：CLI 破坏性恢复须显式 ``--yes``（库层 confirm 默认 False）。
+                "--yes",
             ],
             capture_output=True,
             text=True,

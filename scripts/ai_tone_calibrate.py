@@ -243,6 +243,20 @@ def _beat_repeat_samples(
         print("    （无命中）")
 
 
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from packages.core.db import (  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/ai_tone_calibrate.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.db import (  # type: ignore[no-redef]  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=DEFAULT_DB)
@@ -258,6 +272,14 @@ def main() -> None:
         help="生成侧取全库所有项目的最新草稿（时点矛盾等稀有事件算子复算必用）",
     )
     args = ap.parse_args()
+
+    # 库落点闸（C-06 · BUG-59）：仓内**仅**允许 ``data/`` 子树（不放 ``tmp/``）
+    # ⇒ 拒绝 ⇒ 退出码 2（EXIT_DB_PATH_REJECTED）且**零副作用**（未打开库、未建库）。
+    try:
+        check_db_path(args.db)
+    except RepoLocalDbPathError as exc:
+        print(f"[拒绝库落点] {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_DB_PATH_REJECTED) from None
 
     if args.ai_dir:
         ai_items = _file_texts(args.ai_dir)

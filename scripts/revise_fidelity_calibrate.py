@@ -140,11 +140,33 @@ def _adjacent_pairs(conn: sqlite3.Connection) -> list[tuple[float, str, int, int
     return out
 
 
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from packages.core.db import (  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/revise_fidelity_calibrate.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.db import (  # type: ignore[no-redef]  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--db", type=Path, default=_DEFAULT_DB, help="dev 库路径（只读）")
     ap.add_argument("--samples", type=int, default=20, help="低比值抽样条数上限")
     args = ap.parse_args()
+
+    # 库落点闸（C-16 · BUG-59）：仓内**仅**允许 ``data/`` 子树（不放 ``tmp/``）
+    # ⇒ 拒绝 ⇒ 退出码 2（EXIT_DB_PATH_REJECTED）且**零副作用**（未打开库、未建库）。
+    try:
+        check_db_path(args.db)
+    except RepoLocalDbPathError as exc:
+        print(f"[拒绝库落点] {exc}", file=sys.stderr)
+        return EXIT_DB_PATH_REJECTED
 
     conn = _connect_ro(args.db)
     try:

@@ -903,6 +903,20 @@ def resolve_artifacts_landing(
     )
 
 
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from packages.core.db import (  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/inspect_stalled_runs.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.db import (  # type: ignore[no-redef]  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="只读巡检卡死（PAUSED/RUNNING/PENDING）workflow run（不实现任何取消/删除）",
@@ -936,6 +950,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="保留开关：取消/删除由主会话另行决策，本工具不实现")
     parser.add_argument("--confirmed-by", default=None, help="配合 --apply 的裁决留痕字段（本工具不使用）")
     args = parser.parse_args(argv)
+
+    # 库落点闸（C-11 · BUG-59）：仓内**仅**允许 ``data/`` 子树（不放 ``tmp/``）
+    # ⇒ 拒绝 ⇒ 退出码 2（EXIT_DB_PATH_REJECTED）且**零副作用**（未打开库、未建库）。
+    try:
+        check_db_path(args.db)
+    except RepoLocalDbPathError as exc:
+        print(f"[拒绝库落点] {exc}", file=sys.stderr)
+        return EXIT_DB_PATH_REJECTED
 
     # 落点判定**先于**读库（落点不合法就别白读一遍；DB 也不必打开）
     # ⚠️ F-6（2026-10-23 对抗审查）：``--export`` 与 ``--write-docs`` **同时**给出时，

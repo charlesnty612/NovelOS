@@ -20,7 +20,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
+import sys
 from pathlib import Path
 
 log = logging.getLogger("novelos.db")
@@ -39,6 +41,94 @@ _TABLE_COUNT_QUERY = (
     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
     "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'chapter_fts%'"
 )
+
+
+# ---------------------------------------------------------------------------
+# 库落点闸（BUG-59 / 落码批 C-01）
+# ---------------------------------------------------------------------------
+#: 软件仓根（本文件位于 ``<repo>/packages/core/db.py`` → ``parents[2]``）。
+#: ⚠️ 与 ``packages/core/db.py`` 的迁移目录锚点**同一个**仓根口径（不随 CWD 漂移）。
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: 仓内**允许**的库落点子树（口径①：**仅** ``data/``；**不放** ``tmp/``——
+#: ``tmp/`` 虽被 ``.gitignore`` 盖住，但实测仓内存在过 247 件 ⇒ 放行会削弱闸的判别力）。
+ALLOWED_REPO_DB_SUBDIRS: tuple[str, ...] = ("data",)
+
+#: 库族四件套（判定对象）。⚠️ 实际判定按**所在目录**（四件套同目录 ⇒ 同判）
+#: ⇒ 比「按后缀枚举」更严：``.sqlite`` / ``.db3`` 之类**换后缀绕过**面同样被堵。
+DB_FAMILY_SUFFIXES: tuple[str, ...] = (".db", ".db-wal", ".db-shm", ".db-journal")
+
+#: 环境变量**只作传播，永不兜底放行**（口径②）：
+#: - 置 ``0`` / ``off`` / ``false`` / ``no`` / 空串 ⇒ **收紧**：连调用点显式
+#:   ``allow_repo_local=True`` 也拒绝（总闸）；
+#: - 置其它真值 ⇒ **不放宽**（仍须调用点显式传 True）；
+#: ⇒ **任何取值下 env 都不能单独让仓内库落点通过**（判别用例须清空该 env 再跑）。
+ENV_ALLOW_REPO_LOCAL_DB = "NOVELOS_ALLOW_REPO_LOCAL_DB"
+
+#: 库落点被拒的退出码（与既有写落点闸的 ``EXIT_WRITE_PATH_REJECTED`` 同值域、语义独立）。
+EXIT_DB_PATH_REJECTED = 2
+
+
+class RepoLocalDbPathError(RuntimeError):
+    """库落点被闸拒绝（仓内非允许子树）。**抛出前无任何副作用**。"""
+
+
+def _env_forbids_repo_local() -> bool:
+    """env 是否处于「收紧」取值（只收紧、不放宽）。"""
+    raw = os.environ.get(ENV_ALLOW_REPO_LOCAL_DB)
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"0", "off", "false", "no", ""}
+
+
+def check_db_path(db_path: Path | str, *, allow_repo_local: bool = False) -> Path:
+    """库落点闸：仓内**仅**允许 ``data/`` 子树；仓外一律放行。返回规范化后的绝对路径。
+
+    判定口径（口径① ＋ 判别力）：
+
+    - 路径先 ``Path.resolve()`` 规范化（消掉 ``..`` / 别名 / 符号链接）；
+    - 落在软件仓**外** ⇒ 放行（系统临时目录、痕迹仓等）；
+    - 落在软件仓**内** ⇒ 必须位于 ``data/`` 子树（``parts[0]`` **精确匹配**，
+      **禁子串包含** ⇒ 否则 ``data2/``、``not_data/`` 会被误放行）；
+    - 判定按**所在目录** ⇒ 库族四件套（``.db`` / ``.db-wal`` / ``.db-shm`` /
+      ``.db-journal``）同目录同判，无换后缀绕过面。
+
+    ``allow_repo_local=True`` ＝ **调用点显式授权**（默认 False）；环境变量
+    ``NOVELOS_ALLOW_REPO_LOCAL_DB`` **只收紧不放宽**（见 :data:`ENV_ALLOW_REPO_LOCAL_DB`）。
+
+    拒绝时抛 :class:`RepoLocalDbPathError`，**零副作用**（不建连接、不建库、
+    不建 ``-wal``/``-shm``、不删任何文件）。
+    """
+    target = Path(db_path).expanduser().resolve()
+    try:
+        rel = target.relative_to(_REPO_ROOT)
+    except ValueError:
+        return target  # 仓外 ⇒ 放行
+    parts = rel.parts
+    if parts and parts[0] in ALLOWED_REPO_DB_SUBDIRS:
+        return target
+    shown = rel if parts else Path(".")
+    if _env_forbids_repo_local():
+        raise RepoLocalDbPathError(
+            f"拒绝库落点：{target}（相对仓库根 {shown}）；"
+            f"环境变量 {ENV_ALLOW_REPO_LOCAL_DB} 处于收紧取值 ⇒ 即使调用点显式授权也拒绝"
+        )
+    if allow_repo_local:
+        return target
+    raise RepoLocalDbPathError(
+        f"拒绝库落点：{target}（相对仓库根 {shown}）；"
+        f"软件仓内只允许 {'、'.join(f'{d}/' for d in ALLOWED_REPO_DB_SUBDIRS)} 子树"
+        "（库族四件套同目录同判）"
+    )
+
+
+def require_db_path(db_path: Path | str, *, allow_repo_local: bool = False) -> Path:
+    """库落点闸（脚本入口用）：不合法 ⇒ 诊断到 stderr 并 ``raise SystemExit(2)``。"""
+    try:
+        return check_db_path(db_path, allow_repo_local=allow_repo_local)
+    except RepoLocalDbPathError as exc:
+        print(f"[拒绝库落点] {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_DB_PATH_REJECTED) from None
 
 # ---------------------------------------------------------------------------
 # 「结构缺失」判别式（2026-10-16 批次十 · 清欠账时提为共享单点）
@@ -85,8 +175,15 @@ def is_missing_schema_error(exc: sqlite3.OperationalError) -> bool:
     return any(marker in msg for marker in _MISSING_SCHEMA_MARKERS)
 
 
-def get_connection(db_path: Path | str) -> sqlite3.Connection:
-    """开启外键 PRAGMA 与 WAL 日志模式的连接；row_factory 设为 Row 便于查询。"""
+def get_connection(db_path: Path | str, *, allow_repo_local: bool = False) -> sqlite3.Connection:
+    """开启外键 PRAGMA 与 WAL 日志模式的连接；row_factory 设为 Row 便于查询。
+
+    ⚠️ **库落点闸**（BUG-59 / 落码批 C-01）：**先**过闸、**后**连接 ⇒ 仓内非
+    ``data/`` 落点**拒绝且零副作用**（不建库、不建 ``-wal``/``-shm``、不删任何文件）。
+    ``allow_repo_local=True`` 是**调用点显式授权**（默认 False）；环境变量
+    ``NOVELOS_ALLOW_REPO_LOCAL_DB`` **只收紧不放宽**（见 :func:`check_db_path`）。
+    """
+    check_db_path(db_path, allow_repo_local=allow_repo_local)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")

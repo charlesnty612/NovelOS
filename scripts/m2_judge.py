@@ -736,6 +736,20 @@ def resolve_out_dir(
     )
 
 
+try:  # 正常路径：仓库根在 sys.path（包导入 / pytest pythonpath=["."]）
+    from packages.core.db import (  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+except ImportError:  # pragma: no cover —— 直接 `python scripts/m2_judge.py` 时
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packages.core.db import (  # type: ignore[no-redef]  # noqa: E402
+        EXIT_DB_PATH_REJECTED,
+        RepoLocalDbPathError,
+        check_db_path,
+    )
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="M2 章质量评审探针 —— 真实 LLM 四维量化评分",
@@ -816,6 +830,18 @@ def main() -> int:
         help=f"落库请求超时（秒，默认 {DEFAULT_PERSIST_TIMEOUT_S}）",
     )
     args = parser.parse_args()
+
+    # 库落点闸（C-07 · BUG-59）：仓内**仅**允许 ``data/`` 子树（不放 ``tmp/``）
+    # ⇒ 拒绝 ⇒ 退出码 2（EXIT_DB_PATH_REJECTED）且**零副作用**（未打开库、未建库）。
+    # ⚠️ 位置：**先于**痕迹仓判定与任何 LLM 调用（落点不合法就别往下走）。
+    # ⚠️ ``getattr`` 兜底：既有测试用 ``SimpleNamespace`` 顶替 ``parse_args`` 返回值。
+    try:
+        db_arg = getattr(args, "db", None)
+        if db_arg:
+            check_db_path(db_arg)
+    except RepoLocalDbPathError as exc:
+        print(f"[拒绝库落点] {exc}", file=sys.stderr)
+        return EXIT_DB_PATH_REJECTED
 
     # 落点判定**先于**任何 LLM 调用（痕迹仓不可用就别烧额度）
     # ⚠️ ``getattr`` 兜底：既有测试 ``tests/unit/test_m2_judge_persist.py`` 用
