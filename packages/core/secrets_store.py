@@ -206,19 +206,9 @@ def resolve_profile_api_key(
     return None
 
 
-def has_api_key(
-    profile_id: str | None,
-    provider: str | None,
-    env_names: list[str] | None,
-    params_api_key: str | None,
-) -> bool:
-    """``has_api_key`` 派生（含文件来源）——``True`` 当且仅当 :func:`resolve_profile_api_key` 非空。"""
-    return resolve_profile_api_key(profile_id, provider, env_names, params_api_key) is not None
-
 
 __all__ = [
     "load_api_keys",
     "resolve_profile_api_key",
-    "has_api_key",
     "reset_cache",
 ]
