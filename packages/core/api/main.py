@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from packages.core.api.routers import discover_routers
-from packages.core.config import Settings, get_settings
+from packages.core.config import Settings, ensure_env_defaults, get_settings
 from packages.core.db import apply_migrations, default_migrations_dir
 from packages.core.logging_config import configure_logging, get_logger
 
@@ -200,6 +200,8 @@ class HealthResponse(BaseModel):
 def create_app(settings: Settings | None = None) -> FastAPI:
     """构造 FastAPI 应用。"""
     if settings is None:
+        # ★ BUG-59（复查修③）：启动路径**显式注入** env（缺 env ⇒ 仓外绝对默认）
+        ensure_env_defaults()
         settings = get_settings()
     configure_logging(settings.log_level)
 
@@ -330,7 +332,9 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    from packages.core.config import get_settings
+    from packages.core.config import ensure_env_defaults, get_settings
+
+    ensure_env_defaults()  # ★ BUG-59（复查修③）
     _settings = get_settings()
     uvicorn.run(
         "packages.core.api.main:app",
