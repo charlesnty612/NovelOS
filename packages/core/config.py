@@ -43,7 +43,8 @@ class Settings:
     ⚠️ **潜在隐患·不在本批**（2026-10-25 登记）：``__init__`` 的**构造器默认**
     在 ``data_dir=None`` 时仍是**相对** ``./data`` ⇒ 裸 ``Settings()`` 或
     ``Settings(db_path=…)`` 的数据根相对 ⇒ ＋ ``ensure_data_dir()`` 会在 CWD
-    建出 ``./data``；当前**无生产调用点**（生产一律走 ``load()`` 或显式传参）
+    建出 ``./data``；★ **唯一现存调用点＝``tests/unit/test_config.py:15`` 的
+    ``Settings()``**（生产零调用点：一律走 ``load()`` 或显式传参）
     ⇒ 留待后续批次裁（本批只封 ``load()`` 路径）。
     """
 
