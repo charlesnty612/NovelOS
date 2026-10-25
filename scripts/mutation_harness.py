@@ -6,7 +6,7 @@
 ----
 改 ``MUTATIONS`` 表（编号 / 目标文件 / 锚点 / 变异 / 定向用例），然后::
 
-    .venv/Scripts/python.exe scripts/mutation_harness.py
+    .venv/Scripts/python.exe scripts/mutation_harness.py --root <仓外副本根> --confirm
 
 退出码非 0 = 有突变存活或脚本自身中止——**不要**把它当成「大致通过」。
 
@@ -39,6 +39,7 @@ AGENTS 坑区已经记了两条同族事故：
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import itertools
 import os
@@ -69,6 +70,50 @@ WEB = ROOT / "apps" / "web"
 # 「非零退出码」上完全同形。
 PY = str(ROOT / ".venv" / "Scripts" / "python.exe")
 VITEST = WEB / "node_modules" / ".bin" / ("vitest.cmd" if sys.platform == "win32" else "vitest")
+
+#: 软件仓**活树**根（硬拒目标）。突变验证**只许在仓外副本**上做。
+LIVE_REPO_ROOT = pathlib.Path(r"D:\zcodeproject\NovelOS")
+
+
+def _same_dir(a: pathlib.Path, b: pathlib.Path) -> bool:
+    """两个路径是否指向同一目录（按底层身份比，绕开 junction / 别名拼写）。"""
+    try:
+        return os.path.samefile(str(a), str(b))
+    except OSError:
+        return False
+
+
+def assert_target_root_allowed(target: pathlib.Path) -> pathlib.Path:
+    """目标根必须是**显式仓外副本**；指向软件仓活树（含其子目录/父目录）⇒ 硬拒。
+
+    ⚠️ BUG-28（2026-10-25 · Chief 06:23 裁「一类设计缺陷」）：本脚本过去**不解析任何参数**
+    ⇒ ``--help`` 会直接跑 21 条硬编码突变**改写活树源码**（今晚 04:41 事故的直接成因：
+    活树两次出现瞬时脏文件，根因就是它）。
+
+    ⇒ 现在的两条硬约束：
+    ① **参数必须显式给** ``--root``（argparse 负责：``--help`` / ``-h`` / 无参 / 未知参数
+       一律**只打印用法并退出**——不触碰任何文件、不起任何子进程）；
+    ② 目标根指向**活树**（``D:\\zcodeproject\\NovelOS``）或其子目录 ⇒ **直接拒绝运行**。
+
+    ⚠️ 判定用**同一套归一化**（``resolve()`` ＋ 底层身份 ``samefile``）⇒
+    ``D:\\zcodeproject\\.\\NovelOS``、``\\\\?\\D:\\...``、junction 别名等写法都判成同一棵树。
+    """
+    root = pathlib.Path(target).expanduser().resolve()
+    live = LIVE_REPO_ROOT.resolve() if LIVE_REPO_ROOT.exists() else LIVE_REPO_ROOT
+    inside_live = (root == live) or (live in root.parents) or (root in live.parents)
+    if inside_live or _same_dir(root, live):
+        raise SystemExit(
+            "[ABORT] 拒绝在软件仓（活树）内改写源码："
+            f"{root}\n"
+            f"       活树＝{live}。\n"
+            "       本脚本只允许对**仓外副本**做突变验证（活树内任何参数形式都禁跑）。\n"
+            "       正确用法：\n"
+            "           1) 把仓库复制到仓外副本根；\n"
+            "           2) python scripts/mutation_harness.py --root <仓外副本根> --confirm"
+        )
+    if not root.is_dir():
+        raise SystemExit(f"[ABORT] 目标根不存在或不是目录：{root}")
+    return root
 
 
 class LaunchFailure(RuntimeError):
@@ -408,8 +453,11 @@ def sha(p: pathlib.Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def run_web(test_file: str) -> tuple[bool, str]:
-    code, out = _run([str(VITEST), "run", test_file], WEB)
+def run_web(test_file: str, root: pathlib.Path | None = None) -> tuple[bool, str]:
+    base = (root or ROOT).resolve()
+    web = base / "apps" / "web"
+    vitest = web / "node_modules" / ".bin" / ("vitest.cmd" if sys.platform == "win32" else "vitest")
+    code, out = _run([str(vitest), "run", test_file], web)
     _assert_tests_ran(out, "vitest", code)
     return code == 0, out
 
@@ -435,12 +483,20 @@ def _basetemp_for(mid: str) -> pathlib.Path:
     return _BASETEMP_ROOT / f"{safe}-{os.getpid()}-{next(_basetemp_counter)}"
 
 
-def run_py(test_file: str, mid: str = "") -> tuple[bool, str]:
-    """跑一次 pytest 子进程（**自带唯一 basetemp**）⇒ 返回 ``(是否全绿, 输出)``。"""
+def run_py(test_file: str, mid: str = "", root: pathlib.Path | None = None) -> tuple[bool, str]:
+    """跑一次 pytest 子进程（**自带唯一 basetemp**）⇒ 返回 ``(是否全绿, 输出)``。
+
+    ⚠️ 解释器与 cwd 都取**目标副本**（``root``）⇒ 突变与用例都在副本内发生，
+    活树零接触（BUG-28 的根本解：变异只在仓外副本跑）。
+    """
+    base = (root or ROOT).resolve()
+    py = base / ".venv" / "Scripts" / "python.exe"
+    if not py.exists():
+        py = pathlib.Path(PY)
     basetemp = _basetemp_for(mid or test_file)
     try:
         code, out = _run(
-            [PY, "-m", "pytest", test_file, "-q", f"--basetemp={basetemp}"], ROOT
+            [str(py), "-m", "pytest", test_file, "-q", f"--basetemp={basetemp}"], base
         )
         _assert_tests_ran(out, "pytest", code)
         return code == 0, out
@@ -483,11 +539,73 @@ def summary_line(out: str) -> str:
 def main() -> int:
     # ⚠️ stdout 重配必须在**函数内**（模块级会让 import 即崩，见模块顶部注释）。
     _reconfigure_stdio()
+
+    # ⚠️ BUG-28：参数**必须显式解析**。argparse 的三条行为正好覆盖硬约束：
+    #   --help / -h  ⇒ 打印用法后 exit 0（不碰文件、不起子进程）
+    #   无参           ⇒ 打印用法（缺 --root/--confirm）后 exit 2（**不会**跑突变）
+    #   未知参数       ⇒ 打印用法 + 错误后 exit 2（**不会**跑突变）
+    #
+    # ⚠️ PM 07:33 返修（判据②「缺显式确认参数」）：在 `--root` 必填之外，
+    # **再加一道必填的显式确认参数** `--confirm` ⇒ 构成**第三层闸门**：
+    #   ① `--root` 必填      ⇒ 目标根必须显式给
+    #   ② `--confirm` 必填   ⇒ 必须**显式确认**「我知道这会改副本源码」
+    #   ③ 活树硬拒           ⇒ 目标根指向软件仓活树一律拒绝运行
+    # ⇒ 缺 `--confirm` ⇒ argparse 打印用法（含所需参数）后 **exit 2**、
+    #   **不触碰任何文件、不起任何子进程**（在进入突变循环之前就结束）。
+    ap = argparse.ArgumentParser(
+        prog="mutation_harness.py",
+        description=(
+            "突变验证骨架：改一处 → 跑定向用例 → 记结果 → 按 SHA256 还原。\n"
+            "目标根必须显式给 --root（仓外副本）；指向软件仓活树一律拒绝运行。\n"
+            "还必须显式给 --confirm 确认「本次会改副本源码」——缺任一参数都只打印用法并退出。"
+        ),
+        epilog=(
+            "示例（先复制到仓外副本，再对副本跑）：\n"
+            "    xcopy /E /I D:\\zcodeproject\\NovelOS D:\\zcodeproject\\.osdev_mut_<ts>\n"
+            "    python scripts/mutation_harness.py --root D:\\zcodeproject\\.osdev_mut_<ts> --confirm"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument(
+        "--root",
+        required=True,
+        help="目标**仓外副本**根目录（指向软件仓活树 D:\\zcodeproject\\NovelOS 一律拒绝）",
+    )
+    ap.add_argument(
+        "--confirm",
+        required=True,
+        nargs="?",
+        const="1",
+        metavar="CONFIRM",
+        help=(
+            "显式确认开关：必须给（`--confirm` 或 `--confirm=<任意值>`）。\n"
+            "缺它 ⇒ 拒绝执行（打印用法后 exit 2），**不触碰任何文件、不起任何子进程**。"
+        ),
+    )
+    args = ap.parse_args()
+    # 显式确认参数非空校验（argparse 只管「给了没有」；给了空串同样不算确认）
+    if not str(args.confirm).strip():
+        raise SystemExit(
+            "[ABORT] --confirm 不得为空：必须显式确认「本次会改副本源码」。\n"
+            "       正确用法：--confirm（任意非空值）"
+        )
+    target_root = assert_target_root_allowed(pathlib.Path(args.root))
+
     survived: list[str] = []
     aborted: list[str] = []
     print("=" * 78)
+    print(f"目标副本根: {target_root}")
     for mid, rel, anchor, replacement, test_file in MUTATIONS:
-        path = pathlib.Path(rel)
+        path = (target_root / rel).resolve()
+        # ⚠️ 二次防线：目标文件必须在副本根内（防 ``..`` / junction 越界）。
+        if not path.is_relative_to(target_root):
+            print(f"[ABORT] {mid}: 目标文件不在副本根内：{rel}")
+            aborted.append(mid)
+            continue
+        if not path.is_file():
+            print(f"[ABORT] {mid}: 副本内找不到目标文件：{rel}")
+            aborted.append(mid)
+            continue
         original = path.read_text(encoding="utf-8")
         before = sha(path)
 
@@ -510,7 +628,9 @@ def main() -> int:
 
             try:
                 ok, out = (
-                    run_py(test_file, mid) if test_file.startswith("tests/") else run_web(test_file)
+                    run_py(test_file, mid, target_root)
+                    if test_file.startswith("tests/")
+                    else run_web(test_file, target_root)
                 )
             except LaunchFailure as exc:
                 # 启动失败 ≠ 用例红。记成「本次无效」并中止该条，

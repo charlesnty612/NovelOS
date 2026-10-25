@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -193,6 +194,8 @@ class GuardState:
     push_url: str | None = None
     pre_push_hook_path: str | None = None
     pre_push_hook_present: bool = False
+    pre_push_hook_blocks: bool = False
+    pre_push_hook_evidence: str | None = None
     upstream: str | None = None
     ahead_count: int | None = None
     notes: list[str] = field(default_factory=list)
@@ -298,6 +301,45 @@ def _is_disabled_push_url(url: str | None) -> bool:
     return any(lowered.startswith(prefix) for prefix in DISABLED_PUSH_PREFIXES)
 
 
+#: 钩子文本里出现这些形态 ⇒ 存在**非零退出**路径 ⇒ 该钩子具备拦截能力。
+#: ⚠️ 宁可漏判（把「真拦」判成「不拦」⇒ 结论更响）也**不可**反判
+#: （把「不拦」判成「拦」⇒ 假绿 ⇒ 误判「安全」）。
+_HOOK_BLOCKING_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("exit <非零常量>", re.compile(r"\bexit\s+([1-9]\d*)\b")),
+    ("exit <变量>", re.compile(r"\bexit\s+\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")),
+    ("非零退出码返回", re.compile(r"\breturn\s+([1-9]\d*)\b")),
+)
+
+
+def classify_pre_push_hook(hook_path: Path) -> tuple[bool, str]:
+    """判定 pre-push 钩子**是否具备拦截能力** ⇒ ``(是否拦截, 证据)``。
+
+    ⚠️ **不执行钩子**（只读静态判定）：守卫脚本绝不能因为「试一下」而跑用户仓里的
+    可执行内容（那本身就是一次不受控副作用）。
+
+    ⚠️ BUG-09（2026-10-25 · 假绿）：旧实现只判「钩子存在且非空」⇒ 屏障成立 ⇒
+    ``can_be_pushed=False`` ⇒ 判「不能被误推」= **判安全**。
+    但一个**放行型**钩子（非空、却从不返回非零）根本不拦 push
+    ⇒ **不得算屏障** ⇒ 放行型钩子必须判「能被误推」（不安全）。
+
+    判据：钩子文本里**存在非零退出路径**（``exit 1`` / ``exit $RC`` / ``return 1`` …）
+    ⇒ **拦截型**（构成屏障）；找不到 ⇒ **放行型**（不构成屏障）。
+    """
+    try:
+        text = hook_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return False, f"钩子读取失败（{exc}）⇒ 不可判定 ⇒ **不构成屏障**（保守：不判安全）"
+    lines = text.splitlines()
+    for label, pat in _HOOK_BLOCKING_PATTERNS:
+        for idx, ln in enumerate(lines, 1):
+            if pat.search(ln):
+                return True, f"{label} 命中（{hook_path.name}:{idx}）：{ln.strip()[:120]}"
+    return False, (
+        f"未发现任何非零退出路径（exit/return 非零）⇒ **放行型** ⇒ 不构成屏障"
+        f"（{hook_path.name}，共 {len(lines)} 行）"
+    )
+
+
 def collect_state(content_dir: Path) -> GuardState:
     """采集内容仓的 push 防护状态（**只读**）。"""
     state = GuardState(content_dir=str(content_dir))
@@ -348,6 +390,12 @@ def collect_state(content_dir: Path) -> GuardState:
         if candidate.is_file() and candidate.stat().st_size > 0:
             state.pre_push_hook_present = True
             state.pre_push_hook_path = str(candidate)
+            # ⚠️ BUG-09：非空**不等于**拦截 ⇒ 另判「是否具备拦截能力」。
+            blocks, evidence = classify_pre_push_hook(candidate)
+            state.pre_push_hook_blocks = blocks
+            state.pre_push_hook_evidence = evidence
+            if not blocks:
+                state.notes.append(f"pre-push 钩子存在但**不构成屏障**：{evidence}")
         elif candidate.is_file():
             state.notes.append(
                 f"pre-push 钩子存在但为空（{candidate}）——不构成屏障"
@@ -419,10 +467,12 @@ def decide(state: GuardState) -> dict:
     barriers: list[str] = []
     if push_disabled:
         barriers.append("push URL 已禁用")
-    if state.pre_push_hook_present:
-        barriers.append("存在 pre-push 钩子")
+    # ⚠️ BUG-09：只有**具备拦截能力**的钩子（存在非零退出路径）才算屏障。
+    # 放行型钩子（非空但从不返回非零）不拦 push ⇒ 不得计入屏障 ⇒ 不得判「安全」。
+    if state.pre_push_hook_blocks:
+        barriers.append("存在 pre-push 钩子（拦截型）")
 
-    can_be_pushed = bool(pushable) and not state.pre_push_hook_present
+    can_be_pushed = bool(pushable) and not state.pre_push_hook_blocks
 
     reason_bits: list[str] = []
     if push_disabled:
@@ -430,18 +480,25 @@ def decide(state: GuardState) -> dict:
     else:
         detail = "、".join(f"{r.name}={r.push_url}" for r in pushable)
         reason_bits.append(f"push 仍可推到远端：{detail}")
-    if state.pre_push_hook_present:
+    if state.pre_push_hook_blocks:
         reason_bits.append("有 pre-push 钩子拦截")
+    elif state.pre_push_hook_present:
+        reason_bits.append("pre-push 钩子存在但为**放行型**（无任何非零退出路径）⇒ 它不拦 push")
     else:
         reason_bits.append("无 pre-push 钩子拦截")
     if state.ahead_count:
         reason_bits.append(f"本地领先上游 {state.ahead_count} 个提交")
 
     warnings: list[str] = []
-    if pushable and state.pre_push_hook_present:
+    if pushable and state.pre_push_hook_blocks:
         warnings.append(
             "当前唯一的屏障是 pre-push 钩子——钩子被删除 / 绕过即失守；"
             "建议同时把 push URL 置为禁用值（no_push）"
+        )
+    if pushable and state.pre_push_hook_present and not state.pre_push_hook_blocks:
+        warnings.append(
+            "pre-push 钩子存在但**不构成屏障**（放行型：无任何非零退出路径）——"
+            "push 不会被它拦住；建议把 push URL 置为禁用值（no_push）等真正的屏障"
         )
     for r in pushable:
         if r.push_url and "github.com" in r.push_url.lower():
@@ -478,6 +535,15 @@ def render_text(state: GuardState, verdict: dict) -> str:
         f"  fetch URL: {state.fetch_url or '（无）'}",
         f"  push  URL: {push_display}",
         f"  pre-push 钩子: {state.pre_push_hook_path or '（无）'}",
+        (
+            "  钩子判定: 拦截型（存在非零退出路径）"
+            if state.pre_push_hook_blocks
+            else (
+                "  钩子判定: **放行型，不构成屏障**"
+                if state.pre_push_hook_present
+                else "  钩子判定: （无钩子）"
+            )
+        ),
         f"  上游: {state.upstream or '（无）'}",
         f"  本地领先远端: {state.ahead_count if state.ahead_count is not None else 0} 个提交",
         "",
@@ -629,6 +695,8 @@ def _run_push_mode(args: argparse.Namespace) -> int:
             ],
             "pre_push_hook_present": state.pre_push_hook_present,
             "pre_push_hook_path": state.pre_push_hook_path,
+            "pre_push_hook_blocks": state.pre_push_hook_blocks,
+            "pre_push_hook_evidence": state.pre_push_hook_evidence,
             "upstream": state.upstream,
             "ahead_count": state.ahead_count,
             "can_be_pushed": verdict["can_be_pushed"],
