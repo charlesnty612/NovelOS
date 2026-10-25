@@ -118,7 +118,7 @@ def test_bug58_b4_五处连接均先开foreign_keys(monkeypatch: pytest.MonkeyPa
     assert len(conns) == 5, f"应有 5 处连接，实得 {len(conns)}"
     for i, log in enumerate(conns, 1):
         assert log, f"第 {i} 处连接没有执行任何语句"
-        assert log[0].strip().upper().startswith("PRAGMA FOREIGN_KEYS"), (
-            f"第 {i} 处连接的第一条语句不是 PRAGMA foreign_keys = ON ⇒ "
+        assert log[0].strip().upper().replace(" ", "") == "PRAGMAFOREIGN_KEYS=ON", (
+            f"第 {i} 处连接的第一条语句必须等价于 PRAGMA foreign_keys = ON ⇒ "
             f"外键约束静默不生效：{log[0]!r}"
         )
