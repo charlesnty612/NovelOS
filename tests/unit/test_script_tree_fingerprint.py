@@ -296,3 +296,20 @@ def test_cli_prints_count_then_sha256(tmp_path):
     assert len(data["sha256"]) == 64
     assert all(c in "0123456789abcdef" for c in data["sha256"])
     assert tuple(data["roots"]) == tuple(DEFAULT_ROOTS)
+
+
+def test_compute_v2_is_a_versioned_content_anchor(tmp_path):
+    """★ BUG-31／BUG-57 判别（守卫式 ⇒ 改前 FAILED 非 ERROR）：版本标识＋披露＋内容锚。"""
+    import importlib
+    mod = importlib.import_module("scripts.tree_fingerprint")
+    assert hasattr(mod, "compute_v2"), "compute_v2 未落地（BUG-31／BUG-57）"
+    assert all(f in (mod.compute_v2.__doc__ or "") for f in ("含 mtime", "跨机不可比", "只假绿不假红")), "缺披露"
+    base = _tree(tmp_path)
+    v2 = mod.compute_v2(DEFAULT_ROOTS, base=base)
+    assert v2.get("version") == "v2" and "version" not in compute(DEFAULT_ROOTS, base=base), "版本标识缺失"
+    t = base / "packages" / "core" / "a.py"
+    os.utime(t, (FIXED_MTIME + 100, FIXED_MTIME + 100))
+    assert mod.compute_v2(DEFAULT_ROOTS, base=base)["sha256"] == v2["sha256"], "v2 含 mtime ⇒ 跨机不可比"
+    t.write_bytes(b"x = 9\n")
+    os.utime(t, (FIXED_MTIME, FIXED_MTIME))
+    assert mod.compute_v2(DEFAULT_ROOTS, base=base)["sha256"] != v2["sha256"], "v2 锚不含内容"

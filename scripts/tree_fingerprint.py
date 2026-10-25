@@ -135,6 +135,18 @@ def compute(roots: tuple[str, ...] = DEFAULT_ROOTS, base: Path | None = None) ->
     return {"count": len(rows), "sha256": digest}
 
 
+def compute_v2(roots: tuple[str, ...] = DEFAULT_ROOTS, base: Path | None = None) -> dict:
+    """v2 口径：**内容**锚 ``{相对路径}|{内容SHA256}`` ＋ 版本标识 ``version="v2"``。
+    ⚠️ 披露：旧 ``compute()`` 的行**含 mtime** ⇒ **跨机不可比**；就内容变化而言**只假绿不假红**
+    （等长改内容＋还原 mtime ⇒ 锚不变 ⇒ 漏检），就树身份而言会**假红**（只改 mtime ⇒ 锚变）⇒ 只信 v2。
+    """
+    base = base or repo_root()
+    files = iter_source_files(roots, base)
+    rows = sorted(f"{p.relative_to(base).as_posix()}|{hashlib.sha256(p.read_bytes()).hexdigest()}" for p in files)
+    digest = hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+    return {"count": len(rows), "sha256": digest, "version": "v2"}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="取源码树指纹（闸门前后各一次，逐位一致才算数）"
