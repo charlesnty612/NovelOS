@@ -615,3 +615,17 @@ def test_db_sandbox_registers_sandbox_and_keeps_repo_db_untouched() -> None:
     assert resolved_db != (repo_data / config_mod.Settings.DEFAULT_DB_NAME), (
         f"有效库路径竟指向仓内生产真库：{resolved_db}"
     )
+
+
+def test_bug16_dead_code_removed() -> None:
+    """BUG-16 判别：``secrets_store.has_api_key`` 全仓零调用点 ⇒ 清理后不得再导出/存在；
+    ``wordcount._ERROR_RATIO`` 按 ``wordcount.py:35-41`` 纪律**必须保留**，且 :37 注释已订正。
+    """
+    from packages.core import secrets_store
+    from packages.core.quality import wordcount
+
+    assert "has_api_key" not in secrets_store.__all__, "BUG-16 未清理：仍导出 has_api_key"
+    assert not hasattr(secrets_store, "has_api_key"), "BUG-16 未清理：仍定义 has_api_key"
+    assert hasattr(wordcount, "_ERROR_RATIO"), "wordcount._ERROR_RATIO 按 :35-41 纪律必须保留"
+    src = (Path(REPO_ROOT) / "packages" / "core" / "quality" / "wordcount.py").read_text(encoding="utf-8")
+    assert "全仓 grep 只有本行定义" not in src, "wordcount.py:37 注释未订正"
