@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,8 @@ def test_env_var_override(monkeypatch: pytest.MonkeyPatch):
         s = config_mod.get_settings()
     finally:
         reset_settings()
-    assert str(s.data_dir).replace("\\", "/") == "/tmp/env-data"
+    # ★ BUG-59（复查修②）：data_dir 一律绝对化 ⇒ 相对形态按 CWD 解析成绝对（Windows 补盘符）
+    assert Path(s.data_dir) == Path("/tmp/env-data").resolve()
     assert s.log_level == "DEBUG"
     assert s.api_port == 9999
 
@@ -66,3 +68,73 @@ def test_reset_clears_singleton():
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# BUG-59（critical · 复查修①②③）：落点一律绝对、缺 env 落仓外默认、启动路径显式注入
+# ---------------------------------------------------------------------------
+
+
+def _repo_root() -> Path:
+    """仓根（本文件 ``tests/unit/test_config.py`` 上溯三级）。"""
+    return Path(__file__).resolve().parents[2]
+
+
+def test_bug59_缺env落仓外绝对路径(monkeypatch: pytest.MonkeyPatch):
+    """★ BUG-59 判别①：缺 ``NOVELOS_*`` ⇒ 落点**绝对**且**仓外**（且不抛异常）。
+
+    - 旧行为：静默落 ``./data/novelos.db``（CWD 相对 ⇒ CWD＝仓根时正是生产真库处）；
+    - 旧修法（``d4d9fb5``）：此处 ``raise RuntimeError`` ⇒ 抛点落在 pytest
+      **collection 期** ⇒ ``tests/api/test_module_switch.py`` 整块 ERROR
+      ⇒ 改为**仓外绝对默认**（``~/.novelos/data``）。
+    """
+    monkeypatch.delenv("NOVELOS_DATA_DIR", raising=False)
+    monkeypatch.delenv("NOVELOS_DB_PATH", raising=False)
+    s = Settings.load()
+    assert s.data_dir.is_absolute(), f"数据根必须绝对化，实得 {s.data_dir}"
+    assert s.db_path.is_absolute(), f"库路径必须绝对化，实得 {s.db_path}"
+    assert s.db_path.parent == s.data_dir
+    assert s.data_dir == Settings.default_data_dir()
+    # 默认落点必须在**仓外**（仓内 ``data/`` ＝ 生产真库所在处）
+    assert _repo_root() not in s.data_dir.parents
+    assert _repo_root() not in s.db_path.parents
+
+
+def test_bug59_相对env也绝对化且数据根绝对(monkeypatch: pytest.MonkeyPatch):
+    """★ BUG-59 判别②：只给**相对形态**的 ``NOVELOS_DB_PATH`` ⇒ 两个落点**都绝对**。
+
+    - 旧行为：``data_dir`` 落相对 ``./data`` ⇒ ``ensure_data_dir()`` 在 CWD 建 ``./data``；
+    - 本条补上 ``data_dir.is_absolute()`` 断言（旧用例只断言 ``db_path`` ⇒ 判别力有缺口）。
+    """
+    monkeypatch.delenv("NOVELOS_DATA_DIR", raising=False)
+    monkeypatch.setenv("NOVELOS_DB_PATH", "rel-data/rel.db")
+    s = Settings.load()
+    assert s.db_path.is_absolute(), f"库路径必须绝对化，实得 {s.db_path}"
+    assert s.data_dir.is_absolute(), f"数据根必须绝对化，实得 {s.data_dir}"
+    assert s.data_dir == s.db_path.parent
+    assert s.data_dir == (Path.cwd() / "rel-data").resolve()
+
+
+def test_bug59_启动路径显式注入env且不覆盖显式配置(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """★ BUG-59 判别③：启动路径必须**显式注入** env（``ensure_env_defaults``）。
+
+    - 缺 env ⇒ 注入**仓外绝对**落点；
+    - 已显式给 ⇒ **不覆盖**（运维配置优先）；只给 data_dir ⇒ 库路径按归一推导。
+    """
+    monkeypatch.delenv("NOVELOS_DATA_DIR", raising=False)
+    monkeypatch.delenv("NOVELOS_DB_PATH", raising=False)
+    config_mod.ensure_env_defaults()
+    assert os.environ["NOVELOS_DATA_DIR"] == str(Settings.default_data_dir())
+    assert os.environ["NOVELOS_DB_PATH"] == str(Settings.default_db_path())
+    assert Path(os.environ["NOVELOS_DATA_DIR"]).is_absolute()
+    # 幂等：重复注入不改变已注入的值
+    config_mod.ensure_env_defaults()
+    assert os.environ["NOVELOS_DATA_DIR"] == str(Settings.default_data_dir())
+    # 运维显式配置不被覆盖
+    monkeypatch.setenv("NOVELOS_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("NOVELOS_DB_PATH", raising=False)
+    config_mod.ensure_env_defaults()
+    assert os.environ["NOVELOS_DATA_DIR"] == str(tmp_path)
+    assert os.environ["NOVELOS_DB_PATH"] == str(Path(tmp_path) / Settings.DEFAULT_DB_NAME)

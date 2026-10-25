@@ -183,8 +183,8 @@ def get_connection(db_path: Path | str, *, allow_repo_local: bool = False) -> sq
     ``allow_repo_local=True`` 是**调用点显式授权**（默认 False）；环境变量
     ``NOVELOS_ALLOW_REPO_LOCAL_DB`` **只收紧不放宽**（见 :func:`check_db_path`）。
     """
-    check_db_path(db_path, allow_repo_local=allow_repo_local)
-    conn = sqlite3.connect(str(db_path))
+    resolved = check_db_path(db_path, allow_repo_local=allow_repo_local)
+    conn = sqlite3.connect(str(resolved))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     # WAL 模式：读写并发更高；对测试库（tmp_path）同样适用。

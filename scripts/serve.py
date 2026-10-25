@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import uvicorn  # noqa: E402
 
-from packages.core.config import get_settings  # noqa: E402
+from packages.core.config import ensure_env_defaults, get_settings  # noqa: E402
 
 
 def _ensure_provider_key() -> None:
@@ -30,6 +30,7 @@ def _ensure_provider_key() -> None:
 
 def main() -> int:
     _ensure_provider_key()
+    ensure_env_defaults()  # ★ BUG-59（复查修③）：启动路径**显式注入** env
     settings = get_settings()
     uvicorn.run(
         "packages.core.api.main:app",
