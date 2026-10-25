@@ -61,6 +61,20 @@ from .structured_output import extract_json, strip_observer_violations, validate
 
 log = get_logger("novelos.agent_runtime.runner")
 
+
+def _debug_dir() -> Path:
+    """调试产物落点：默认**仓外绝对**（``~/.novelos/debug``）。
+
+    ⚠️ BUG-58-B1（2026-10-25）：旧实现默认 ``"data"``（**CWD 相对**）⇒ CWD＝仓根时
+    调试产物落**仓内** ``data/observer_payload_debug.json``（脏仓内 ＋ 与真库同目录）
+    ⇒ 改为**用户主目录**下的绝对落点（``~/.novelos`` 是本仓既有约定）。
+    显式给了 ``NOVELOS_DEBUG_DIR`` ⇒ 用它（相对形态按 CWD 解析成绝对）。
+    """
+    raw = os.environ.get("NOVELOS_DEBUG_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return (Path.home() / ".novelos" / "debug").expanduser().resolve()
+
 _ID_KEY_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*_id$")
 _RETRY_HINT = "\n\n[System note] 上次输出无法解析/不合规：{err}。请只输出合法 JSON，不要附加解释。"
 # P1 合并调用（director_planner）的补充提示：该 agent 一次调用承载双契约，实测失败形态
@@ -396,7 +410,7 @@ def run_agent(
             {"role": "user", "content": user_payload_text},
         ]
         if os.environ.get("NOVELOS_DEBUG_OBSERVER_PAYLOAD") == "1" and agent_name == "observer":
-            debug_dir = Path(os.environ.get("NOVELOS_DEBUG_DIR", "data"))
+            debug_dir = _debug_dir()
             debug_dir.mkdir(parents=True, exist_ok=True)
             (debug_dir / "observer_payload_debug.json").write_text(
                 json.dumps({"body_bytes": len(json.dumps(messages, ensure_ascii=False).encode("utf-8")),
