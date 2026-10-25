@@ -1,6 +1,6 @@
 """workflows 主链端点的 ``response_model`` 契约测试（2026-10-15 批次（六）·G4）。
 
-覆盖 control / runs / revise 三个子模块的 11 个高频端点（见 ``EXPECTED_*`` 常量与
+覆盖 control / runs / revise 三个子模块的 12 个高频端点（见 ``EXPECTED_*`` 常量与
 ``COVERED_ENDPOINTS``）。
 
 建模前**先量再建**
@@ -8,10 +8,10 @@
 `response_model` 会**过滤**未声明字段：少声明一个，响应就静默少一个，而用 ``>=``
 断言的测试照样全绿。所以字段形状不是照源码读出来的，而是用**临时库 + mock provider**
 跑通端点后 dump 实际键集得出的（2026-10-15 实测，方法：ASGITransport + 合成夹具，
-下面 `_harvest` 一次跑完全部 11 个端点并把响应体收上来）。实测要点：
+下面 `_harvest` 一次跑完全部 12 个端点并把响应体收上来）。实测要点：
 
-* 起跑 6 个端点（plan/write/review/commit/gate-revise/resume）**逐字同形 3 键**：
-  ``run_id / status / current_node``，且 ``status`` 恒 ``"RUNNING"``；
+* 起跑 7 个端点（plan/write/review/commit/gate-revise/outline-batch/resume）**逐字同形
+  3 键**：``run_id / status / current_node``，且 ``status`` 恒 ``"RUNNING"``；
 * ``POST /projects/init`` **4 键**（多 ``project_id``，且可为 null），**PAUSED 时 5 键**；
 * ``POST /runs/{id}/cancel`` **恒 2 键**——不为了凑字段硬造 ``current_node``；
 * ``GET /runs/{id}`` **13 键**；PAUSED 时 **15 键**（多 ``pause_payload`` /
@@ -163,6 +163,7 @@ COVERED_ENDPOINTS = {
     ("/api/projects/{project_id}/chapters/{chapter_id}/gate-revise", "post"),
     ("/api/runs/{run_id}/resume", "post"),
     ("/api/runs/{run_id}/cancel", "post"),
+    ("/api/projects/{project_id}/outline-batch", "post"),
     ("/api/projects/{project_id}/init-status", "get"),
     ("/api/runs/{run_id}", "get"),
     ("/api/chapters/{chapter_id}/context-preview", "get"),
@@ -571,6 +572,42 @@ async def _harvest(tmp_path: Path) -> dict:
         assert r.status_code == 201, r.text
         out["project_init_paused"] = r.json()
 
+        # --- POST /api/projects/{pid}/outline-batch：**异步**起跑，响应恒 3 键 +
+        #     status="RUNNING"（受理语义；后台线程可能已经跑完，真终态由轮询拿）。
+        #     用**独立项目**跑：它会往库里插章，插进上面的项目会与既有章节号打架。
+        r = await req("POST", "/api/projects", json={"name": "outline-batch 契约"})
+        assert r.status_code == 201, r.text
+        pid_ob = r.json()["project_id"]
+        r = await req(
+            "POST",
+            f"/api/projects/{pid_ob}/outline-batch",
+            json={
+                "chapter_count": 1,
+                "mock_providers": {
+                    "outline_batch_planner": [
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "prompt_version": "outline_batch_planner:v1",
+                                "chapter_seeds": [
+                                    {
+                                        "number": 1,
+                                        "title": "契约探针章",
+                                        "synopsis": "契约探针章的梗概：主角推门而入，只为确认门后无人。",
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    ]
+                },
+            },
+        )
+        assert r.status_code == 201, r.text
+        out["outline_batch"] = r.json()
+        # 等后台线程走完（不留悬挂线程去写已回收的临时库）
+        await _wait_run_terminal(app, out["outline_batch"]["run_id"])
+
     return out
 
 
@@ -641,8 +678,8 @@ def test_list_runs_endpoint_is_now_modelled(tmp_path: Path):
 
 
 def test_start_endpoints_keys_match_hardcoded_expectation(harvested: dict):
-    """6 个起跑/恢复端点逐字同形 3 键。"""
-    for tag in ("plan", "write", "review", "commit", "gate_revise", "resume"):
+    """7 个起跑/恢复端点逐字同形 3 键。"""
+    for tag in ("plan", "write", "review", "commit", "gate_revise", "outline_batch", "resume"):
         body = harvested[tag]
         assert set(body) == EXPECTED_START_KEYS, (
             f"{tag} 键不符：多={set(body) - EXPECTED_START_KEYS} "
@@ -654,10 +691,11 @@ def test_start_endpoints_status_is_running(harvested: dict):
     """``status`` 当前恒 RUNNING。
 
     模型里把它声明成 ``str`` 而不是 ``Literal["RUNNING"]``（理由见 models.py 的注释：
-    ``project-init`` 已经是同步启动，同族端点将来可能改回同步），代价是 OpenAPI 不
-    表达这个取值——所以在这里把该不变量钉住。
+    **同族的 project-init 端点是同步启动**、实测会返回 PAUSED/COMPLETED，且它用另一个
+    模型 ``ProjectInitStarted``），代价是 OpenAPI 不表达这个取值——所以在这里把该
+    不变量钉住。
     """
-    for tag in ("plan", "write", "review", "commit", "gate_revise", "resume"):
+    for tag in ("plan", "write", "review", "commit", "gate_revise", "outline_batch", "resume"):
         assert harvested[tag]["status"] == "RUNNING", f"{tag} 的 status 变了：{harvested[tag]}"
         assert harvested[tag]["current_node"] is None, f"{tag} 的 current_node 不再恒 null"
 

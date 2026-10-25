@@ -5,6 +5,38 @@
 
 ## [Unreleased]
 
+### Fixed（2026-10-25 · 交接收尾批 · 基线三失败 + 审查遗留 11 项清偿 + 交接测试债 5 项 + 7 组对抗审查返工闭环）
+
+> **来源**：项目经外部团队（OS PM/Chief 体系）中途接手后停摆，本地 master 停在 `85b516c`（三支已审分支已并、领先远端 6 提交未推）且**从未跑过全量**。本批起手基线全量实测 **4540 passed / 3 failed**，连同 2026-10-24 批登记的 11 项遗留、外部台账 5 项测试债（BUG-62/63/64/65/66）一并清偿；流程按「coder 实现 → code-reviewer 对抗审查 → 返工复验」闭环（7 组审查抓出 1 项阻断级 + 多项 major，全部返工并经突变探针复验 CAUGHT）。
+> **裁决**：保留本地 master `85b516c` 不回退（三支修复 diff 经 Lead 亲读零缺陷；所谓「BUG-15-17 不过」只是对方流程缺落盘证据件，不构成代码缺陷）。外部台账中的 BUG-61（不可判 known-remainder）与 CRIT-01（证据链事故，仓外层面）不在本批范围；BUG-56 复核已闭合（AGENTS.md 唯一调用点已带 `--confirm`）；上轮 N3/N4 措辞类 minor 因审查报告未落盘细节不可考，**放弃并登记**。
+
+**基线三失败（外部团队 2026-10-25 批次遗留的真回归，定性后修复）**
+- `measure_cache_key_perf.py` 合成夹具库落仓内 `tmp/` 被 R1 库落点闸（仓内只允许 data/）拒绝 ⇒ `test_cache_key_perf` 2 例红。修：夹具改落仓外 `tempfile.mkdtemp` 专属目录 + `finally` 自清理（库族四件套，顺带补上原先章数轴从不清理的漏洞）+ 仓内 `--db` 一律拒绝（rc=3 零 traceback）。判别：`--keep-db` 正反一对（目录留存/消失）+ 默认 both 派生模式清理用例。
+- `test_ai_ending_summary_paragraph` 登记型绊线被**合法新内容**触发（`prj_8ef9d095c208` 第 26 章末段「这一刻」，真实写作项目 2026-10-25 新增；内容层零接触——未动任何库内容）。按测试自身协议只读重测两条分布（人类 19 章 0 命中；生成 139 章/367750 字，末段命中 1、全章合计 4）⇒ 断言改等值快照 + 失败消息保留「须重测」指引；`ai_patterns.py` 规则描述的「从不触发（死规则）」失实口径同步订正；**证据表 `detector_evidence.json` 同步再登记**（语料 `dev_db_97ch→dev_db_139ch`、hits 0→1、`known_dead_rules` 改「不再是死规则」、`description_numbers` 补 139/4 登记、`HUMAN_BASELINE.md` §8 语料行同步——数字看守 `test_detector_evidence` 全绿）。
+
+**审查遗留 11 项（2026-10-24 批登记，本批全数清偿）**
+1. **promote 返回值 off-by-one**：bump 前置到物化之前 + 响应取推进后真值（修前实测：非空分支低 1、空分支低 2）；branch_snapshots 与 story_states 两读路径在非空 promote 时点归一（docstring 如实收窄：只在此时点成立）；补「bump == 最后一次重放 +1」机器看守（摘 bump 必红，探针 CAUGHT）；BranchesPanel 确认无 ±补偿零改动。**契约变更留痕**：非空响应 state_version=旧值+1、空分支=项目最新版本。
+2. **协议池未命中静默错配**：回退且连接主协议≠档案协议 ⇒ `log.warning`（profile_id/双协议/池键/回退地址）；主协议一致静默；池为空/池键空白同告警（探针实测五边界）。
+3. **拉取模型按档案协议/池取址**：`/model-profiles/available-models` 连接路径新增 `_resolve_probe_protocol`（protocol > provider > 连接主协议，冲突 422）；连接 `/test` 端点加 `?protocol=`，**不带协议时也走 `pool[主协议] or base_url`**（与运行期 `resolve_effective` 同口径）；协议→models 路径抽单一来源表（anthropic 恒 `/v1/models`、ollama `/api/tags`）；顺带修连接无 api_key 时 `profile_id` UnboundLocalError 500（补 3 例，含 secrets 解析链正反一对，断言零凭据值）。
+4. **思考档收窄「协议优先短路」**：前端 `getThinkingOptions` 改「协议 ∧ host 交集」语义（MiniMax/Kimi 供应商专属档不再被协议判定吞掉）；**应用层取址同修**——两处调用方按档案协议查 `protocol_base_urls` 再喂收窄函数（「MiniMax 走 anthropic 池地址」复合 case 有面板级判别用例）。
+5. **强度覆盖对异协议后备链**：`_candidates` per-candidate 相容（判定单点 `effective.thinking_override_compatible`：effort 族/thinking.type 族，未登记协议不判定⇒相容、存量零突变），不相容候选跳过覆盖 + warning ⇒ 后备链不再整链 400。
+6. **前后端 8 档映射机器看守**：新建 `scripts/check_thinking_modes_consistency.py`（静态解析两侧清单；**防注释劫持/函数内同名赋值劫持**——去注释预处理 + 只认模块级赋值 + 多候选不一致 exit 2；解析失败恒 exit 2 不假绿）+ 13 例判别（含「后端多一档」set-equality 专属方向）；AGENTS.md 命令区已登记。
+7. **run 列表跨项目可见**：API 层按 `workflow_runs.project_id` 过滤（chapter 反查回落；NULL 行保持全可见并钉测试——「判不出来⇒不排除」）；**project-init「新建项目」建项后回写归属**（消除「每建一本新书 run 永久泄进所有项目列表」的活跃缺陷，挂点在 persist 建项分支、复用引擎注入的 ctx run_id、幂等只填空；探针 CAUGHT）；数据层 `list_runs` docstring 补跨项目警告。
+8. **outline_batch_planner capability 登记**：三份名册全同步（router `AGENT_CAPABILITY` + `CAPABILITY_LABELS` + `agent_runtime/prompts.py:_AGENT_TO_CAPABILITY`——审查抓出第三份漏同步致仓内 2 例红，返工转绿）+「prompts 名册 ⊆ capability 名册」派生守卫 + 三名册全等守卫（均从真实来源推导）。
+9. **归组正交恒真断言**：改为「两个只在思考参数上不同的档案必须归同组」+ 组键字段集合断言（原断言纯函数自比零判别力；归组键注入思考参数必红，探针 CAUGHT）。
+10. **bindings upsert 并发丢更新**：改单语句 `INSERT ... ON CONFLICT` + `CASE WHEN` 保留 thinking_override 原值（键缺席=保留现值三态语义逐条保留），无读改写窗口；并发判别用例用补丁 get 制造交错，旧实现实测必红、新实现绿；用例 docstring 如实订正（新实现仍调 get 但只为取返回值）。
+11. **outline-batch POST 异步化**：`start_with_nodes_async`，201 立返（`status="RUNNING"` 受理语义，docstring 登记可能过期真值）；`project_level_guard` BEGIN IMMEDIATE 原子性逐字保留（并发 8 POST 恰 1 个 201 + `_QueryAlignProxy` 窗口放大版用例仍绿）；删除异步下构造上不可达的 run disappeared 500 分支；`WorkflowStartAccepted` 端点清单/契约看守 tag 同步补 outline-batch（七端点）。
+
+**交接测试债（外部台账 BUG-62/63/64/65/66）**：BUG-65 B4 用例全局 patch 改模块级 fake + 逐函数计数断言（验值承重保留）；BUG-63② conftest 守护结构化 + **极性绑定**（注释侧肯定式谎称「仍被引用/有消费方」⇒ 必红）+ 恢复旧子串判据为附加断言；BUG-63③ secrets_store docstring「从未→当前」订正；BUG-64 三处启动调用点 AST 源码守卫（跳过嵌套函数）+ main.py import 期写 env 边界注释；BUG-62 config.py 口径注释落生产码 + 正面断言（WARNING 产生点归属三断言，空操作变异必红）；BUG 编号口径统一。
+
+**文档批**：BUG-20 README 逃逸口段按 argparse 实测重写（9 flag 表 + 点名式跨脚本引用，顺带订正脚本计数 37→39）；providerOptions.ts 架构口径订正（连接仍持主协议=地址池缺省平面；复用点补第 3 处及首项顺序警示）；`--apply` 等价「迁移+执行」语义补注。
+
+**收尾连带**：lint 存量 9 处清零（外部团队遗留 I001×3 / E501×5 / F401×1）；突变规格 `L10-MC-02B` 锚点随 `effective.py` 池取址重写对齐（预检 86 条 0 问题）；codegen 产物两次 regen 后逐位一致。
+
+**已知遗留（登记不修，后续批）**：available-models 侧显式 `models_url` 仅 openai 平面生效而 `/test` 全协议生效（两侧分叉，存量）；`/test` 探 anthropic 仍用 Bearer（真实端点要 x-api-key，存量）；协议→族矩阵（前端 `PROTOCOL_SCOPED_MODES` ↔ 后端 `PROTOCOL_THINKING_FAMILIES`）两份手抄无机器看守；档案自身 params 的协议表达保护缺口（本轮只护环节覆盖路径）；前端 `poolBaseUrlForProtocol` 未做 `rstrip("/")` 归一（不影响 host 提取）；promote 空分支不物化 main 属 R-1 既有设计（本批只修响应契约，物化与否维持原状）。
+
+- **验收**：最终树全量 pytest **4616 passed / 0 failed**（-n 20 仓外 basetemp；闸门前后树指纹逐位一致 `13c9cac3…`）；vitest **899 全绿**（66 文件）；tsc / build 过；ruff 0；突变预检 86 条 0 问题；codegen 产物逐位一致；`detector_evidence_check` 看守 exit 0。
+
 ### Fixed（2026-10-25 · D 批 · 内容仓 push 守卫：远端 URL 含空格被整条丢弃的假绿）
 
 > **来源**：OS审查 门禁发现 → OS项目经理 独立复现并定级 **major**（裁决件 `门禁证据\NovelOS\A批-major裁决-空格URL假绿-2026-10-25.md`）→ 排 D 批修复。**缺陷形状与 C1 同型**：把「读不到」折叠成「没有」，给从未评估的对象发满分。
@@ -40,7 +72,7 @@
 - **协议下放 C2 apply_grouping 静默改写协议（critical，实测复现）**：归组写 `provider=连接主协议` ⇒ 同形状改写。修复：归组只写 connection_id 不写 provider。判别：`test_apply_grouping_keeps_profile_provider`（改前红）。连带核查确认全仓无第三处静默改写。
 - **顺带 M-1**：ChaptersPage 轮询失败后双按钮永久禁用——接 usePoll 的 error 通道，失败即清 runId 恢复按钮 + 错误横幅（错误快照进 batchNotice 防目标切换清空闪烁）。判别用例 g（撤恢复必红，探针 CAUGHT）。
 - **验收**：全量 pytest **4450 / 0 failed**（-n 20 仓外 basetemp）；vitest **877 全绿**；tsc/build 过；ruff 0；三处判别力突变探针全 CAUGHT 且源码 SHA 逐位还原；codegen 已 regen（0037 加列连带 WorkflowRun 契约 + 三份硬编码键清单同步）。
-- **遗留（major/minor 排期，未修）**：promote 返回值 off-by-one、池未命中错配静默、拉取模型不按档案协议取址、思考档收窄协议∧host、强度覆盖对异协议后备链相容性、前后端 8 档映射机器看守、run 列表跨项目可见、outline_batch_planner capability 登记、归组正交恒真断言修正等——见审查报告待入册。
+- **遗留（major/minor 排期，未修）**：promote 返回值 off-by-one、池未命中错配静默、拉取模型不按档案协议取址、思考档收窄协议∧host、强度覆盖对异协议后备链相容性、前后端 8 档映射机器看守、run 列表跨项目可见、outline_batch_planner capability 登记、归组正交恒真断言修正等——✅ **2026-10-25 交接收尾批已全数清偿**（见该批条目；N3/N4 措辞类因审查报告未落盘细节不可考，登记放弃）。
 
 ### Added（2026-10-24 · 环节级强度覆盖：同一档案给不同环节配不同思考档）
 

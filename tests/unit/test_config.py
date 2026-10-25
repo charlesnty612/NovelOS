@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 from pathlib import Path
@@ -173,4 +174,142 @@ def test_bug59_缺env落默认时必打WARNING(
         Settings.load()
     assert not [r for r in caplog.records if "仓外默认" in r.getMessage()], (
         "已注入 env 却仍报兜底落点"
+    )
+
+
+def test_bug62_显式注入env不告警且落点取注入值(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """★ BUG-62②：**正面**断言「env 已显式注入」这一支。
+
+    既有用例只做了**反向**断言（已注入 env ⇒ 不得再打兜底 WARNING）⇒
+    「不告警」被钉住了，但**「解析路径确实用注入值」**这一半没人钉
+    ⇒ 「不告警」可能是因为「压根没走解析」。
+
+    本条补齐正面断言：显式注入 env ⇒
+    ① ``packages.core.config`` **一条 WARNING 都不打**；
+    ② 解析出来的数据根／库路径**就是注入值**（不是仓外默认落点）。
+    """
+    data_dir = tmp_path / "explicit-data"
+    db_file = data_dir / Settings.DEFAULT_DB_NAME
+    monkeypatch.setenv("NOVELOS_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("NOVELOS_DB_PATH", str(db_file))
+
+    with caplog.at_level(logging.WARNING, logger="packages.core.config"):
+        s = Settings.load()
+
+    config_warnings = [
+        r for r in caplog.records if r.name == "packages.core.config" and r.levelno >= logging.WARNING
+    ]
+    assert not config_warnings, (
+        f"env 已显式注入却仍打出 WARNING：{[r.getMessage() for r in config_warnings]}"
+    )
+    assert not [r for r in caplog.records if "仓外默认" in r.getMessage()], (
+        "env 已显式注入却仍报兜底落点"
+    )
+    # ★ 正面：落点必须取**注入值**（⇒ 「不告警」不是因为没走解析）
+    assert Path(s.data_dir) == data_dir.resolve(), f"数据根未取注入值：{s.data_dir}"
+    assert Path(s.db_path) == db_file.resolve(), f"库路径未取注入值：{s.db_path}"
+    assert Path(s.data_dir) != Settings.default_data_dir(), "数据根竟落在仓外默认落点"
+
+
+def _ensure_env_defaults_call_chain() -> set[str]:
+    """从 ``packages/core/config.py`` 的 AST 推出 ``ensure_env_defaults`` 直接调用的函数名。
+
+    ⇒ 「那条 WARNING 属于 ensure_env_defaults 的调用链」这条断言**跟着代码走**
+    （不把被调函数名写死在测试里 ⇒ 生产码改名即自动跟随，不产生假红）。
+    """
+    config_py = Path(__file__).resolve().parents[2] / "packages" / "core" / "config.py"
+    tree = ast.parse(config_py.read_text(encoding="utf-8"))
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "ensure_env_defaults"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    return {"ensure_env_defaults", *called}
+
+
+def test_bug62_注入后全链只打一条WARNING(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """★ BUG-62③ 判别：``ensure_env_defaults`` → ``get_settings`` 全链**只打一条** WARNING。
+
+    实测链路：``ensure_env_defaults`` 首调 ``resolve_data_paths()`` 时 env 尚未注入
+    ⇒ 打一条兜底 WARNING ⇒ **随即注入 env** ⇒ ``get_settings()`` 再调
+    ``resolve_data_paths()`` 时「两个 env 都缺」的条件**已不成立** ⇒ 不再打
+    ⇒ 全链恰好**一条**（不是两条）。
+
+    ⚠️ **只钉计数不够**（本轮补的判别力缺口）：``ensure_env_defaults`` 改成**空操作**时，
+    那条 WARNING 会挪到 ``get_settings()`` 阶段再打一次 ⇒ **计数仍是 1** ⇒ 旧断言照绿。
+    ⇒ 本条补**归属**断言（三条，缺一不可）：
+    ① **阶段归属**：第一阶段（``ensure_env_defaults`` 之后、``get_settings`` 之前）
+       就**已经**有那条 WARNING ⇒ 它产自 ``ensure_env_defaults`` 的调用链，
+       而不是第二阶段补打的那一条；
+    ② **产出点归属**：那条 WARNING 的 ``funcName`` 落在 ``ensure_env_defaults`` 的
+       **直接被调函数集合**里（集合由 ``packages/core/config.py`` 的 AST **现推**，
+       不写死函数名），且产出模块／文件落在 ``packages/core/config.py``；
+    ③ **干活证据**：调用后 ``os.environ`` 里**确实有**注入键（且取仓外默认值）。
+
+    ⚠️ Python 3.12 的 ``LogRecord`` **没有** ``moduleName`` 属性（stdlib 只有
+    ``module``＝产出文件名去后缀）⇒ 这里用 ``record.module``。
+    """
+    monkeypatch.delenv("NOVELOS_DATA_DIR", raising=False)
+    monkeypatch.delenv("NOVELOS_DB_PATH", raising=False)
+    reset_settings()
+    try:
+        with caplog.at_level(logging.WARNING, logger="packages.core.config"):
+            config_mod.ensure_env_defaults()
+            # ① 阶段归属：第一阶段就应打出那条 WARNING（ensure_env_defaults 自己的那一条）
+            phase1 = [
+                r
+                for r in caplog.records
+                if r.name == "packages.core.config" and "仓外默认" in r.getMessage()
+            ]
+            assert len(phase1) == 1, (
+                f"ensure_env_defaults 阶段应恰好打一条兜底 WARNING（必须是 ensure_env_defaults "
+                f"自己打的那一条），实得 {len(phase1)} 条：{[r.getMessage() for r in phase1]}"
+            )
+            # ③ 干活证据：env 已被注入（⇒ ensure_env_defaults 不是空操作）
+            assert os.environ.get("NOVELOS_DATA_DIR"), (
+                "ensure_env_defaults 之后 os.environ 里没有 NOVELOS_DATA_DIR ⇒ 注入没发生"
+            )
+            assert os.environ.get("NOVELOS_DB_PATH"), (
+                "ensure_env_defaults 之后 os.environ 里没有 NOVELOS_DB_PATH ⇒ 注入没发生"
+            )
+            assert os.environ["NOVELOS_DATA_DIR"] == str(Settings.default_data_dir())
+            assert os.environ["NOVELOS_DB_PATH"] == str(Settings.default_db_path())
+            config_mod.get_settings()
+    finally:
+        # 归还单例：让后续用例按（monkeypatch 还原后的）沙箱 env 重新加载。
+        reset_settings()
+
+    hits = [
+        r
+        for r in caplog.records
+        if r.name == "packages.core.config" and "仓外默认" in r.getMessage()
+    ]
+    assert len(hits) == 1, (
+        f"注入前缺 env ⇒ 全链应恰好打一条兜底 WARNING，实得 {len(hits)} 条："
+        f"{[r.getMessage() for r in hits]}"
+    )
+
+    # ② 产出点归属：产出函数在 ensure_env_defaults 的调用链内，且产出文件就是 config.py
+    rec = hits[0]
+    chain = _ensure_env_defaults_call_chain()
+    assert rec.funcName in chain, (
+        f"那条 WARNING 的产出函数 {rec.funcName!r} 不在 ensure_env_defaults 的调用链内："
+        f"{sorted(chain)}"
+    )
+    assert rec.module == "config", f"产出模块应为 config，实为 {rec.module!r}"
+    assert Path(rec.pathname).parts[-3:] == ("packages", "core", "config.py"), (
+        f"产出文件应为 packages/core/config.py，实为 {rec.pathname!r}"
     )

@@ -3,7 +3,7 @@
   "table_id": "novelos.detector_evidence",
   "generated_for": "人工维护的检测器效果证据表（human-maintained evidence table）。**不是自动生成的产物**——没有任何脚本会写这个文件；它的内容靠人手维护，由 scripts/detector_evidence_check.py **只读**地与代码里的实际值比对。",
   "generated_by": "packages/core/quality/detector_evidence.json（人工维护，无生成器）",
-  "last_reviewed": "2026-10-23",
+  "last_reviewed": "2026-10-25",
   "maintainer_contract": [
     "① 改任何检测器的阈值 / 词表 / 正则 / severity ⇒ **必须**同时改本表对应条目，否则 scripts/detector_evidence_check.py 退出码 1（漂移）并在输出里点名。",
     "② 本表**不复制**「定阈依据」的论证正文，只存 `basis_ref`（权威出处指针）+ 一句 `basis_summary`（人写摘要）。复制论证正文等于制造第二份要同步的文本——那正是本表要治的病。",
@@ -39,13 +39,13 @@
       "in_version_control": false,
       "reproducible_by": "本机"
     },
-    "dev_db_97ch": {
+    "dev_db_139ch": {
       "label": "dev 库全库各章最新版（生成侧）",
       "kind": "generated",
-      "chapters": 97,
-      "visible_chars": 276500,
+      "chapters": 139,
+      "visible_chars": 367750,
       "location": "data/novelos.db（dev 库，只读）",
-      "collected_on": "2026-10-15",
+      "collected_on": "2026-10-25",
       "in_version_control": false,
       "reproducible_by": "本机"
     },
@@ -373,7 +373,7 @@
       "severity": "warning",
       "deprecated": false,
       "evidence_status": "measured",
-      "threshold_summary": "**无阈值**（二元判定）：末段含 12 条短语任一条即 warning。实测两侧皆 0 ⇒ 分位数为 0，「人类侧上沿 < warn < 生成侧上沿」无解 ⇒ 任何非零阈值都是凭空造的数。",
+      "threshold_summary": "**无阈值**（二元判定）：末段含 12 条短语任一条即 warning。人类侧 0 命中 / 生成侧末段单点命中（2026-10-25 首例）⇒ 单观测点算不出分位，「人类侧上沿 < warn < 生成侧上沿」无解 ⇒ 任何非零阈值都是凭空造的数。",
       "human_side": {
         "corpus": "houfu_human_19ch",
         "hits": 0,
@@ -398,18 +398,18 @@
         }
       },
       "generated_side": {
-        "corpus": "dev_db_97ch",
-        "hits": 0,
-        "rate_per_1k": 0.0,
-        "chapters_with_hits": 0,
-        "chapters_total": 97,
-        "note": "97 章合计只出现 1 次（「这一刻」，且不在末段）⇒ 被正确口径拒之。段切分口径 2026-10-15 由「按空行」收敛到「\\n+」（旧口径在人类一行一段语料上把整章当末段扫，末段均值 2030 字；收敛后 41 字）。"
+        "corpus": "dev_db_139ch",
+        "hits": 1,
+        "rate_per_1k": 0.0027,
+        "chapters_with_hits": 1,
+        "chapters_total": 139,
+        "note": "139 章 12 条套话全章合计 4 次（全为「这一刻」，分布在 627f#ch4 / 627f#ch6 / c208#ch26 / fe5e#ch11），其中仅 1 次落在末段（c208#ch26，2026-10-25 重测新出现的合法写作内容 ⇒ 首例末段命中，不再是死规则）。段切分口径 2026-10-15 由「按空行」收敛到「\\n+」（旧口径在人类一行一段语料上把整章当末段扫，末段均值 2030 字；收敛后 41 字）。"
       },
       "separation": null,
       "source": {
-        "collected_on": "2026-10-15",
+        "collected_on": "2026-10-15 ~ 2026-10-25",
         "recompute_entry": "scripts/ai_tone_calibrate.py",
-        "basis_ref": "packages/core/quality/ai_patterns.py:173-186, 330-371"
+        "basis_ref": "packages/core/quality/ai_patterns.py:177-190, 361-386"
       },
       "code_refs": [],
       "word_lists": [
@@ -425,7 +425,7 @@
       "regexes": [],
       "known_false_positives": [],
       "known_dead_rules": [
-        "**真实语料上从不触发（死规则）**：人类 19 章 + 生成侧 97 章合计 0 命中。阳性对照证明算子本身能匹配，故 0 是「真没有」不是「测不到」。若将来任一语料出现命中，须同时重测两条分布再谈定阈值，不得只改阈值。"
+        "**不再是死规则（2026-10-25 重测）**：人类 19 章仍 0 命中；生成侧 139 章出现首例末段命中（c208#ch26）。单观测点不足以作分位 ⇒ 维持无阈值二元判定。若任一语料再出现命中，须同时重测两条分布再谈定阈值，不得只改阈值。"
       ],
       "conflicts": [],
       "probes": [
@@ -463,12 +463,17 @@
           "value": 12.0,
           "in_description": "12"
         },
-        {
-          "kind": "table_field",
-          "path": "generated_side.chapters_total",
-          "value": 97.0,
-          "in_description": "97"
-        },
+ {
+  "kind": "table_field",
+  "path": "generated_side.chapters_total",
+  "value": 139.0,
+  "in_description": "139"
+ },
+ {
+  "kind": "table_text",
+  "value": 4.0,
+  "in_description": "4"
+ },
         {
           "kind": "table_text",
           "value": 1.0,

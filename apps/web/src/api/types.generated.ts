@@ -331,7 +331,7 @@ export interface BranchPromoteResponse {
   commit_id?: string | null;
   /** 空分支时为 null（键恒在） */
   delta_id?: string | null;
-  /** ⚠️ 空分支时是 base_state_version，不是新版本 */
+  /** promote 提交后该项目的最新 story_states.state_version（无快照行时=分支 base_state_version） */
   state_version: number;
   /** ⚠️ 空分支=源分支；非空=main 分支 */
   branch_id?: string | null;
@@ -2221,7 +2221,7 @@ export interface WorkflowRunSummary {
 export interface WorkflowStartAccepted {
   /** 新建 run 的主键；真终态需轮询 GET /api/runs/{run_id} */
   run_id: string;
-  /** 启动后恒为 RUNNING（同步化的 project-init 除外） */
+  /** 启动后恒为 RUNNING（本模型覆盖的端点全是异步起跑：plan/write/review/commit/gate-revise/outline-batch/resume；同步起跑的 project-init 用 ProjectInitStarted，status 可为 PAUSED/COMPLETED） */
   status: string;
   /** 恒为 null：异步启动返回时还没有节点在跑；给前端留位置 */
   current_node: string | null;

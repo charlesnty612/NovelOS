@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-
 #: 模块级 logger。★ **不用** ``logging_config.get_logger``：那会在 import 期
 #: 配置根 logger（改级别＋换 handler）⇒ 污染进程日志配置；这里只用 stdlib
 #: ⇒ 未配置 logging 时 WARNING 仍由 ``logging.lastResort`` 打到 stderr（可见）。
@@ -210,6 +209,7 @@ def ensure_env_defaults() -> None:
     ⇒ 它们是 CLI／诊断工具，缺 env 时落**仓外默认****正是期望行为**（不注入、
     不抛异常），并由 ``resolve_data_paths()`` 打 WARNING 告知兜底落点。
     """
+    # BUG-62：全链只打一条 WARNING：首调 resolve_data_paths 时 env 未注入打一条→随即注入 env→get_settings 再调不再打。
     data_dir, db_path = resolve_data_paths()
     if not os.environ.get("NOVELOS_DATA_DIR"):
         os.environ["NOVELOS_DATA_DIR"] = str(data_dir)

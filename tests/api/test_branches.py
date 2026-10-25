@@ -68,6 +68,23 @@ async def _make_chapter(app, pid: str, number: int = 1, title: str = "第一章"
     return r.json()["chapter_id"]
 
 
+def _max_state_version(db_path: Path, pid: str) -> int:
+    """直查 DB：该项目的最新 ``story_states.state_version``（**真实值**，非推算）。
+
+    ⚠️ 判别口径（2026-10-24 promote 响应版本修复）：断言打在**真实值**上，
+    不写死「+1」——写死就等于把「差一版」这个缺陷重新编进测试。
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT MAX(state_version) AS sv FROM story_states WHERE project_id = ?",
+            (pid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row[0] or 0)
+
+
 
 
 
@@ -248,10 +265,14 @@ def test_branch_isolation_and_promote(tmp_path: Path):
             promote_result = r.json()
             assert promote_result["promoted_from"] == bid_a
             assert promote_result["promoted_commits"] == 1
-            # promote 产生 main 上的 commit（branch=main）：每个被重放的分支 commit
-            # 在 main 上 +1 ⇒ state_version = promote 前 main 版本 + 被重放条数
-            assert promote_result["state_version"] == (
-                main_v_before_promote + promote_result["promoted_commits"]
+            # ⚠️ 2026-10-24（promote 响应版本修复）：响应的 state_version 必须是
+            # **promote 提交后 DB 里的最新版本**（重放 N 条各 +1，promote 自身
+            # 因分支 ACTIVE→MERGED 再 +1）⇒ 断言打在**直查 DB 的真实值**上，
+            # 不写死「+1」（写死 = 把「差一版」重新编进测试）。
+            db_max_after_promote = _max_state_version(tmp_path / "novelos.db", pid)
+            assert promote_result["state_version"] == db_max_after_promote, (
+                f"promote 响应 state_version={promote_result['state_version']} "
+                f"≠ DB 最新 {db_max_after_promote}"
             )
             assert promote_result["branch_id"] is not None  # = main branch_id
 
@@ -265,9 +286,10 @@ def test_branch_isolation_and_promote(tmp_path: Path):
             r = await _request(app, "GET", f"/api/projects/{pid}/state")
             assert r.status_code == 200
             main_after = r.json()
-            # ⚠️ 2026-10-24（R-1）：promote 把分支状态改掉（ACTIVE→MERGED）⇒
-            # 合并**自身**再推一次 main 版本（内容不变）⇒ 比被重放的那一版 +1
-            assert main_after["state_version"] == promote_result["state_version"] + 1
+            # ⚠️ 2026-10-24（promote 响应版本修复）：响应即「promote 提交后的最新
+            # 版本」⇒ 主线读路径（``GET /state``）与 promote 响应**必须一致**
+            # （修前恒差 1：响应少算了 promote 自身的版本推进）。
+            assert main_after["state_version"] == promote_result["state_version"]
             char_after = next(c for c in main_after["characters"] if c["character_id"] == cid)
             assert char_after["current_state"]["location"] == "Cave"
             assert "event_branch_a" in main_after["recent_events"]
@@ -698,8 +720,15 @@ def test_promote_replay_resolves_hook_in_branch_order(tmp_path: Path):
             assert r.status_code == 201, r.text
             result = r.json()
             assert result["promoted_commits"] == 2
-            # 每个被重放的分支 commit 在 main 上 +1
-            assert result["state_version"] == main_v_before_promote + result["promoted_commits"]
+            # ⚠️ 2026-10-24（promote 响应版本修复）：响应 = promote 提交后 DB 里的
+            # 最新版本 ⇒ 断言打在**直查 DB 的真实值**上（不写死「+1」）。
+            db_max_after_promote = _max_state_version(tmp_path / "novelos.db", pid)
+            assert result["state_version"] == db_max_after_promote, (
+                f"promote 响应 state_version={result['state_version']} "
+                f"≠ DB 最新 {db_max_after_promote}"
+            )
+            # 不变量：promote 必然把 main 的版本往前推（重放 +1 自身 +1）
+            assert result["state_version"] > main_v_before_promote
             assert len(result["replayed_delta_ids"]) == 2
             # 重放产生新 delta_id，不复用原 delta_id
             assert "dlt_bh1" not in result["replayed_delta_ids"]
@@ -709,9 +738,9 @@ def test_promote_replay_resolves_hook_in_branch_order(tmp_path: Path):
             r = await _request(app, "GET", f"/api/projects/{pid}/state")
             assert r.status_code == 200
             main_state = r.json()
-            # ⚠️ 2026-10-24（R-1）：promote 自身（ACTIVE→MERGED）再推一次 main 版本
-            # （内容不变）⇒ 比被重放的那一版 +1
-            assert main_state["state_version"] == result["state_version"] + 1
+            # ⚠️ 2026-10-24（promote 响应版本修复）：响应即最新版本 ⇒ 主线读路径
+            # 与 promote 响应**必须一致**（修前恒差 1）。
+            assert main_state["state_version"] == result["state_version"]
             h1_in_state = next((h for h in main_state["hooks"] if h["hook_id"] == "h1"), None)
             assert h1_in_state is not None
             assert h1_in_state["status"] == "RESOLVED"

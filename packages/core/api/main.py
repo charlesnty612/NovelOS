@@ -201,6 +201,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """构造 FastAPI 应用。"""
     if settings is None:
         # ★ BUG-59（复查修③）：启动路径**显式注入** env（缺 env ⇒ 仓外绝对默认）
+        # ⚠️ BUG-64③ 边界说明：模块级 ``app = create_app()`` ⇒ **import 本模块即写
+        #   ``os.environ``**（进程级副作用）。这是**已知设计**（启动路径必须显式注入，
+        #   见 BUG-59）⇒ pytest 进程内无害：注入的是**仓外绝对默认**（测试进程里由
+        #   conftest 的 B4 沙箱守卫用 monkeypatch 覆盖成仓外沙箱），既不建目录、
+        #   也不碰仓内生产真库 ``data/novelos.db``。
         ensure_env_defaults()
         settings = get_settings()
     configure_logging(settings.log_level)

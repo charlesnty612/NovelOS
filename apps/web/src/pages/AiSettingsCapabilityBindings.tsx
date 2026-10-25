@@ -55,10 +55,40 @@ function sameChain(a: string[], b: string[]): boolean {
 }
 
 /**
+ * 从连接的**协议地址池**取某个协议的地址（与后端 resolve_effective 同口径）。
+ *
+ * ⚠️ 后端单点：`packages/core/model_router/effective.py::resolve_effective`
+ * ——绑定态的生效地址 = ``pool[档案协议] or 连接.base_url``（池里没有该协议 ⇒
+ * 回退连接主地址 + ``protocol_pool_miss`` 告警）。
+ * ⇒ 前端取址必须**先查池**，否则「同一网关下不同协议走不同平面」的复合场景
+ * （MiniMax 走 anthropic 平面）会按**连接主地址**收窄思考档下拉 ⇒ 判错。
+ *
+ * 键 = **档案协议**（= 档案的 provider；协议是模型级属性，连接的 provider 列
+ * 只是「主协议」兜底）。值形状 = 协议 → base_url 的字符串映射；脏值（非字符串）
+ * 一律当作「池里没有该协议」（与后端 ``_parse_protocol_pool`` 同口径）。
+ */
+export function poolBaseUrlForProtocol(
+  conn: ModelConnectionOut | null | undefined,
+  protocol: string,
+): string {
+  if (!conn || !protocol) return '';
+  const pool = conn.protocol_base_urls;
+  if (!pool || typeof pool !== 'object') return '';
+  const raw = (pool as Record<string, unknown>)[protocol];
+  return typeof raw === 'string' ? raw : '';
+}
+
+/**
  * 解出首选档案的「协议 + 端点地址」，供 getThinkingOptions 收窄强度下拉。
- * base_url 优先取档案自定义态的 params.base_url；绑定连接的档案其地址归连接
- * （连接是唯一权威）⇒ 回退该连接的 base_url。都拿不到 ⇒ 空串（getThinkingOptions
- * 对未知端点退回全量 8 档——选项偏多好过选项缺失）。
+ *
+ * 地址取值顺序（与后端 ``resolve_effective`` 同口径）：
+ * 1. **协议地址池**：档案绑定了连接 ⇒ 先按**档案协议**查该连接的
+ *    ``protocol_base_urls``（命中即用）；
+ * 2. 档案自定义态的 ``params.base_url``；
+ * 3. 该连接的 ``base_url``（主地址，池未命中时的回退）。
+ *
+ * 都拿不到 ⇒ 空串（getThinkingOptions 对未知端点退回全量 8 档——选项偏多好过
+ * 选项缺失）。
  */
 export function resolveProfileEndpoint(
   profile: ModelProfile | undefined,
@@ -71,9 +101,10 @@ export function resolveProfileEndpoint(
   const conn = profile.connection_id
     ? connections.find((c) => c.connection_id === profile.connection_id)
     : undefined;
+  const protocol = profile.provider ?? '';
   return {
-    provider: profile.provider ?? '',
-    baseUrl: ownBaseUrl || conn?.base_url || '',
+    provider: protocol,
+    baseUrl: poolBaseUrlForProtocol(conn, protocol) || ownBaseUrl || conn?.base_url || '',
   };
 }
 

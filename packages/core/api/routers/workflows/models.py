@@ -14,7 +14,7 @@
 出来（方法与实测结论记在 `tests/api/test_workflow_run_response_contract.py` 的
 模块 docstring 里）。实测要点：
 
-1. **起跑类端点（plan/write/review/commit/gate-revise/resume）恒 3 键**：
+1. **起跑类端点（plan/write/review/commit/gate-revise/outline-batch/resume）恒 3 键**：
    `run_id` / `status` / `current_node`；`status` 恒 `"RUNNING"`（异步化后 HTTP
    立即返回，真终态由 `GET /runs/{id}` 轮询拿）。
 2. **`POST /projects/init` 是 4 键 + 1 条件键**：多一个 `project_id`，且它**可以
@@ -90,14 +90,18 @@ class WorkflowStartAccepted(BaseModel):
     """章节级起跑端点的统一 201/200 响应。
 
     覆盖 ``POST .../plan`` / ``.../write`` / ``.../review`` / ``.../commit`` /
-    ``.../gate-revise`` 与 ``POST /runs/{run_id}/resume`` —— 实测**六个端点逐字同形**
+    ``.../gate-revise`` / ``POST /projects/{project_id}/outline-batch`` 与
+    ``POST /runs/{run_id}/resume`` —— 实测**七个端点逐字同形 3 键**
     （都是同一批 dict 字面量的再包装），故共用一个模型而不是各建一个。
 
-    ⚠️ ``status`` 声明为 ``str`` 而非 ``Literal["RUNNING"]``：实测当前**恒**为
-    ``"RUNNING"``（``_start_workflow_core`` 与 ``resume_run`` 都硬编码该值，启动失败
-    一律 raise 400/409/422 而非返回），但 ``project-init`` 已经是**同步**启动、
-    同一族端点将来也可能改回同步。把「当前取值」写进类型等于宣称一个实现细节是
-    契约；本批改为在测试里钉住该不变量（``test_start_endpoints_status_is_running``）。
+    ⚠️ ``status`` 声明为 ``str`` 而非 ``Literal["RUNNING"]``：本模型覆盖的端点
+    实测当前**恒**为 ``"RUNNING"``（``_start_workflow_core`` / ``resume_run`` /
+    ``_start_outline_batch`` 都硬编码该值，启动失败一律 raise 400/409/422 而非
+    返回）。但**同族的 project-init 端点（``POST /projects/init``）是同步启动**，
+    实测会返回 ``"PAUSED"`` / ``"COMPLETED"``（它用另一个模型
+    :class:`ProjectInitStarted`）⇒ 「起跑类端点的 status 恒 RUNNING」**不是**本仓
+    的家族不变量。把「当前取值」写进类型等于宣称一个实现细节是契约；本批改为在
+    测试里钉住该不变量（``test_start_endpoints_status_is_running``）。
 
     ``current_node`` 必填可空、不给默认值：实测该键**恒在**、值恒 ``null``（异步启动
     时还没有节点在跑）。给了默认值就生成成可选键，前端会误以为它可能缺席。
@@ -106,7 +110,13 @@ class WorkflowStartAccepted(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     run_id: str = Field(description="新建 run 的主键；真终态需轮询 GET /api/runs/{run_id}")
-    status: str = Field(description="启动后恒为 RUNNING（同步化的 project-init 除外）")
+    status: str = Field(
+        description=(
+            "启动后恒为 RUNNING（本模型覆盖的端点全是异步起跑：plan/write/review/"
+            "commit/gate-revise/outline-batch/resume；同步起跑的 project-init 用 "
+            "ProjectInitStarted，status 可为 PAUSED/COMPLETED）"
+        )
+    )
     current_node: Optional[str] = Field(
         description="恒为 null：异步启动返回时还没有节点在跑；给前端留位置",
     )

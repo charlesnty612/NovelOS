@@ -8,10 +8,13 @@
    - ``off`` ⇒ thinking.type='disabled' 且无 reasoning_effort；
    - NULL ⇒ 档案 params 原样逐字（存量零行为突变）。
 3. fallback 链上**每个**候选都被同一覆盖（后备档案也覆盖）。
-4. 归组正交不变量：thinking_override 是 binding 级属性，不流经
-   ``group_profiles_by_connection``（连接归组键只含连接层属性
-   provider/base_url/api_key_env/生效 key）——同一档案行在归组中的归属与
-   override 无关（override 读写不改变归组输出）。
+4. 归组正交不变量：归组键只含**连接层**属性（provider/base_url/api_key_env/
+   生效 key）⇒ **不含思考参数**（档案的 thinking / reasoning_effort），
+   也不含思考强度覆盖（``capability_bindings.thinking_override``，环节级）。
+   ⚠️ 2026-10-25 重写：此前是**零判别力**（同一批行读两遍比对——归组函数是
+   纯函数 ⇒ 前后输入逐字相同 ⇒ 相等恒真）。现版本：临时库建**两个只在思考
+   参数上不同**的档案 + 同一连接 ⇒ 断言它们被归到**同一组**（归组键若误吞
+   思考参数必红）。
 5. 迁移：列存在 + NULL 兼容（存量行读出 None）。
 """
 
@@ -53,14 +56,16 @@ def _insert_profile(
     model: str = "m",
     params_json: str = "{}",
     enabled: int = 1,
+    connection_id: str | None = None,
 ) -> str:
     conn = get_connection(db_path)
     try:
         conn.execute(
             "INSERT INTO model_profiles "
-            "(profile_id, name, provider, model, params_json, enabled, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
-            (profile_id, name, provider, model, params_json, enabled),
+            "(profile_id, name, provider, model, params_json, enabled, created_at, updated_at, "
+            "connection_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)",
+            (profile_id, name, provider, model, params_json, enabled, connection_id),
         )
         conn.commit()
     finally:
@@ -243,46 +248,128 @@ def test_override_applies_to_every_candidate_in_fallback_chain(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 4. 归组正交不变量（读归组实现后的确认结论）
+# 4. 归组正交不变量（真实库版本 —— 2026-10-25 修正恒真断言）
 # ---------------------------------------------------------------------------
 
 
-def test_connection_grouping_is_orthogonal_to_thinking_override(tmp_path: Path):
-    """连接归组键只含连接层属性，override 不流经归组函数。
+def _read_profile_rows(db_path: str, profile_ids: list[str]) -> list[dict]:
+    """从**库里**读回档案行（dict），供归组函数消费。
 
-    确认结论（2026-10-24）：``group_profiles_by_connection`` 的语义是「哪些
-    **档案**可共用一条**连接**」，键 = (provider, 归一化 base_url, api_key_env,
-    生效 api_key)——全部是连接层属性。thinking_override 存在
-    ``capability_bindings`` 表上（环节级），不在档案行上，根本不流经该函数；
-    归组动作（apply-grouping）只写 connection_id，不动 params 的思考键。
-    ⇒ 「同档案不同强度被归并成一组」在该归组语境下不构成危害路径，
-    本测试钉住的是这个正交不变量：override 读写不改变归组输出。
+    ⚠️ 归组函数 ``group_profiles_by_connection`` **只吃传入的行、不读库** ⇒
+    「写 override 前后各跑一次」若仍在内存里造行 ⇒ 前后两次输入**逐字相同**
+    ⇒ 相等是恒真的（本次修正的正是这一点）。
+    """
+    conn = get_connection(db_path)
+    try:
+        out: list[dict] = []
+        for pid in profile_ids:
+            row = conn.execute(
+                "SELECT * FROM model_profiles WHERE profile_id = ?", (pid,)
+            ).fetchone()
+            assert row is not None, f"档案 {pid} 不存在"
+            out.append({k: row[k] for k in row.keys()})
+        return out
+    finally:
+        conn.close()
+
+
+def test_connection_grouping_ignores_thinking_parameters(tmp_path: Path):
+    """★归组键**不含思考参数**：两个只在思考参数上不同的档案必须归到**同一组**。
+
+    语义（Lead 2026-10-24 裁决）：``group_profiles_by_connection`` 的语义是
+    「哪些**档案**可共用一条**连接**」，键 = (provider, 归一化 base_url,
+    api_key_env, 生效 api_key)——全部是**连接层**属性。思考参数是**模型级**
+    属性（档案的 ``params_json`` 里的 ``thinking`` / ``reasoning_effort``），
+    思考强度覆盖是**环节级**属性（``capability_bindings.thinking_override``）
+    ⇒ 三者都不该进入归组键。
+
+    ⚠️ **2026-10-25 重写（原实现零判别力）**：原用例是「同一批档案行读两遍
+    分组比对」——归组函数是**纯函数**（只吃传入的行、不读库、不看
+    ``capability_bindings``）⇒ 前后两次输入逐字相同 ⇒ 相等恒真 ⇒
+    无论归组键怎么改，用例都绿。
+
+    现版本的**判别点**：临时库建**两个只在思考参数上不同**的档案
+    （A 的 params 含 ``thinking.type=enabled``；B 的 params 含
+    ``reasoning_effort=max``；**其余字段逐字同**）+ 绑**同一条连接**
+    ⇒ 断言它们被归到**同一组**。
+    ⇒ 归组键若误吞思考参数 ⇒ 两个档案分成两组 ⇒ 本用例必红。
+
+    另附断言：组键字段集合不含任何思考相关键（防止「键里混进 thinking」但
+    恰好没造成分组差异的弱化形态）。
     """
     db = _fresh_db(tmp_path)
-    pid = _insert_profile(
-        db,
-        profile_id="mprof_group_case",
-        provider="openai",
-        params_json=json.dumps({"base_url": "https://api.example.com/v1"}),
-    )
-    rows_before = [{"profile_id": pid, "provider": "openai",
-                    "params_json": json.dumps({"base_url": "https://api.example.com/v1"})}]
-    groups_before = group_profiles_by_connection(rows_before)
+    # 真实连接（两个档案绑**同一条**连接）
+    conn = get_connection(db)
+    try:
+        conn.execute(
+            "INSERT INTO model_connections (connection_id, name, provider, base_url, "
+            "params_json, enabled, created_at, updated_at) "
+            "VALUES ('mconn_group', '归组用例', 'openai', ?, '{}', 1, "
+            "datetime('now'), datetime('now'))",
+            ("https://api.example.com/v1",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
-    # 给 binding 设 override 后，档案行本身不变 ⇒ 归组输出也不变
-    _upsert_binding(db, "reasoning", [pid], thinking_override="high")
+    # 两个档案：**只有思考参数不同**，其余（provider / model / base_url /
+    # api_key_env / api_key）逐字相同 ⇒ 归组键的四个维度必然全等。
+    base_params = {
+        "base_url": "https://api.example.com/v1",
+        "api_key_env": "NOVELOS_TEST_KEY",
+        "api_key": "test-placeholder-key",
+    }
+    params_a = {**base_params, "thinking": {"type": "enabled"}}
+    params_b = {**base_params, "reasoning_effort": "max"}
+    pid_a = _insert_profile(
+        db,
+        profile_id="mprof_think_a",
+        provider="openai",
+        model="m",
+        params_json=json.dumps(params_a),
+        connection_id="mconn_group",
+    )
+    pid_b = _insert_profile(
+        db,
+        profile_id="mprof_think_b",
+        provider="openai",
+        model="m",
+        params_json=json.dumps(params_b),
+        connection_id="mconn_group",
+    )
+
+    # 夹具自检：两者确实**只在思考参数上不同**（否则「同组」是平凡的）。
+    assert params_a != params_b
+    differing = {k for k in set(params_a) | set(params_b) if params_a.get(k) != params_b.get(k)}
+    assert differing == {"thinking", "reasoning_effort"}, differing
+
+    rows = _read_profile_rows(db, [pid_a, pid_b])
+    # secrets={} ⇒ 生效 key 只来自 params（不读本机 secrets.json ⇒ 夹具自足）
+    groups = group_profiles_by_connection(rows, secrets={})
+
+    # ★判别点：两个档案必须落在**同一组**（归组键不含思考参数）
+    assert len(groups) == 1, f"思考参数不应影响归组，却分成了 {len(groups)} 组：{groups}"
+    assert sorted(groups[0]["profile_ids"]) == sorted([pid_a, pid_b])
+
+    # 组键只含连接层属性 —— 不含任何思考相关字段
+    assert set(groups[0]["group_key"]) == {
+        "provider",
+        "base_url",
+        "api_key_env",
+        "api_key_set",
+    }
+
+    # 环节级覆盖写在 capability_bindings 表上（不在档案行上）⇒ 归组不受其影响，
+    # 且**档案行本身不被改写**（思考参数逐字保持）。
+    _upsert_binding(db, "reasoning", [pid_a, pid_b], thinking_override="high")
     from packages.core.model_router.bindings import BindingService
 
     assert BindingService(db).get("reasoning")["thinking_override"] == "high"
-    profile_row = {
-        "profile_id": pid,
-        "provider": "openai",
-        "params_json": json.dumps({"base_url": "https://api.example.com/v1"}),
-    }
-    assert group_profiles_by_connection([profile_row]) == groups_before
-    # 同一档案行（不管几个环节几种 override）在归组中就是一行、一组
-    assert len(groups_before) == 1
-    assert groups_before[0]["profile_ids"] == [pid]
+
+    after_rows = _read_profile_rows(db, [pid_a, pid_b])
+    assert json.loads(after_rows[0]["params_json"]) == params_a
+    assert json.loads(after_rows[1]["params_json"]) == params_b
+    assert group_profiles_by_connection(after_rows, secrets={}) == groups
 
 
 # ---------------------------------------------------------------------------

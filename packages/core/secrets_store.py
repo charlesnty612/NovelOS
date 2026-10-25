@@ -5,7 +5,10 @@
   之外的密钥统一收敛到仓库根 ``secrets.json``，避免明文入 DB / 落备份包。
 - 提供 :func:`load_api_keys` 与 :func:`resolve_profile_api_key` 两个收口函数，
   所有需要 API key 的代码路径（含 ``model_router.providers.resolve_api_key`` /
-  ``model_router.security._mask_params`` 的 ``has_api_key`` 派生）一律从这里解析。
+  ``model_router.security._mask_params`` 的 ``has_api_key`` **派生布尔字段**——
+  即 ``_mask_params`` 返回的 ``(masked_params, has_api_key)`` 元组第二项，
+  **不是**本模块里某个叫 ``has_api_key`` 的函数：本模块**当前不导出**同名函数
+  （BUG-16 已删净））一律从这里解析。
 
 文件结构（推荐）::
 

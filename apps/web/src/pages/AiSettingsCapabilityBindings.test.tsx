@@ -68,6 +68,33 @@ const profileBound: ModelProfile = {
   connection_id: 'mcn_001',
 };
 
+/**
+ * 多协议网关连接（2026-10-25 M4 应用层取址）：
+ * 主地址是 **openai 兼容平面**，协议地址池里另有 **anthropic 平面**（MiniMax 域）。
+ * ⇒ 档案协议 = anthropic 时，生效地址必须是**池里的 anthropic 地址**，
+ * 而不是连接主地址（后端 resolve_effective 同口径）。
+ */
+const connWithPool: ModelConnectionOut = {
+  ...connFixture,
+  connection_id: 'mcn_pool',
+  name: 'opencode-pool',
+  base_url: 'https://opencode.example.com/openai/v1',
+  protocol_base_urls: {
+    anthropic: 'https://api.minimax.chat/anthropic',
+  },
+};
+
+/** 绑定到多协议连接、协议 = anthropic 的档案（复合场景的判别主体）。 */
+const profilePoolAnthropic: ModelProfile = {
+  profile_id: 'mpf_pool_anthropic',
+  name: 'minimax-claude',
+  provider: 'anthropic',
+  model: 'minimax-m2',
+  params: {},
+  enabled: 1,
+  connection_id: 'mcn_pool',
+};
+
 function binding(
   capability: string,
   overrides: Partial<CapabilityBinding> = {},
@@ -195,6 +222,36 @@ describe('CapabilityBindingsPanel 强度覆盖', () => {
       await screen.findByText(/环节强度覆盖档案的思考档/),
     ).toBeTruthy();
   });
+
+  it('★复合场景：档案协议 anthropic 命中连接池的 MiniMax 地址 ⇒ 下拉按**池地址**收窄（不含 on）', async () => {
+    // 判别点：多协议网关连接上，档案协议 = anthropic ⇒ 生效地址 = 池里的
+    // anthropic 平面（api.minimax.chat）⇒ host 侧 MiniMax 档位与协议侧
+    // anthropic 档位取交集 ⇒ **不含 on**（on 是 anthropic 独有但 MiniMax 不支持）。
+    // 若前端按连接主地址（openai 平面）收窄 ⇒ host 侧无约束 ⇒ 会留下 on ⇒ 本用例红。
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([profilePoolAnthropic]);
+    vi.mocked(connectionsApi.list).mockResolvedValue([connWithPool]);
+    vi.mocked(capabilityBindingsApi.list).mockResolvedValue([
+      binding('reasoning', {
+        label: '推理规划',
+        profile_ids: ['mpf_pool_anthropic'],
+        profiles: [
+          {
+            profile_id: 'mpf_pool_anthropic',
+            name: 'minimax-claude',
+            model: 'minimax-m2',
+          },
+        ],
+      }),
+    ]);
+    render(<CapabilityBindingsPanel />);
+    const select = (await screen.findByTestId(
+      'cap-binding-thinking-select-reasoning',
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(select.options.length).toBeGreaterThan(0));
+    const values = Array.from(select.options).map((o) => o.value);
+    expect(values).toContain('adaptive'); // MiniMax 档位（池地址命中才收窄得到）
+    expect(values).not.toContain('on'); // 池地址命中 ⇒ MiniMax 与 anthropic 交集 ⇒ 无 on
+  });
 });
 
 describe('resolveProfileEndpoint（强度收窄的端点解析）', () => {
@@ -216,6 +273,51 @@ describe('resolveProfileEndpoint（强度收窄的端点解析）', () => {
     expect(resolveProfileEndpoint(undefined, [connFixture])).toEqual({
       provider: '',
       baseUrl: '',
+    });
+  });
+
+  it('★协议地址池命中：档案协议 = anthropic ⇒ 取**池里的 anthropic 地址**（不是连接主地址）', () => {
+    // 后端 resolve_effective 同口径：生效地址 = pool[档案协议] or 连接.base_url。
+    // 撤掉「先查池」⇒ 这里会返回连接主地址（openai 平面）⇒ 用例红。
+    expect(resolveProfileEndpoint(profilePoolAnthropic, [connWithPool])).toEqual({
+      provider: 'anthropic',
+      baseUrl: 'https://api.minimax.chat/anthropic',
+    });
+  });
+
+  it('协议地址池未命中该协议 ⇒ 回退连接主地址（与后端回退一致）', () => {
+    // 档案协议 = openai_compatible ⇒ 池里没有 ⇒ 回退连接主地址。
+    expect(
+      resolveProfileEndpoint(
+        { ...profilePoolAnthropic, provider: 'openai_compatible' },
+        [connWithPool],
+      ),
+    ).toEqual({
+      provider: 'openai_compatible',
+      baseUrl: 'https://opencode.example.com/openai/v1',
+    });
+  });
+
+  it('池里该协议的值是脏值（非字符串）⇒ 当作未命中，回退连接主地址', () => {
+    const dirtyConn: ModelConnectionOut = {
+      ...connWithPool,
+      protocol_base_urls: { anthropic: 123 } as unknown as Record<string, unknown>,
+    };
+    expect(resolveProfileEndpoint(profilePoolAnthropic, [dirtyConn])).toEqual({
+      provider: 'anthropic',
+      baseUrl: 'https://opencode.example.com/openai/v1',
+    });
+  });
+
+  it('未绑定连接（无 connection_id）⇒ 不查池，取档案自身 params.base_url', () => {
+    expect(
+      resolveProfileEndpoint(
+        { ...profileCustom, provider: 'anthropic' },
+        [connWithPool],
+      ),
+    ).toEqual({
+      provider: 'anthropic',
+      baseUrl: 'https://api.openai.com/v1',
     });
   });
 });

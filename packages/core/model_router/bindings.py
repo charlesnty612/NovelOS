@@ -33,6 +33,27 @@ __all__ = ["BindingService", "UNSET_THINKING_OVERRIDE"]
 # PUT body 不带 thinking_override 键 ⇒ 保留 DB 现值；显式 null ⇒ 清除。
 UNSET_THINKING_OVERRIDE = object()
 
+# ``capability_bindings`` 的**单语句** upsert（2026-10-24 M10）。
+#
+# - 末位参数 ``keep=1``（``thinking_override`` 键缺席）⇒ ``ON CONFLICT DO UPDATE``
+#   **不碰** ``thinking_override`` 列 ⇒ 保留 DB 现值；**不做「读出来再写回去」**
+#   （那正是并发丢更新的窗口来源）。
+# - ``keep=0`` ⇒ 用本次传入值覆盖（含显式 null = 清除覆盖）。
+#
+# ⚠️ 依赖的 SQLite 语义（写错了会静默改坏数据，故写在这里）：
+#   ``ON CONFLICT DO UPDATE SET`` 里的**非限定列名**指的是**原行**的值，
+#   ``excluded.`` 前缀才是「本次将被插入的新值」⇒
+#   ``CASE WHEN ? = 1 THEN thinking_override`` 即「保留原值」。
+#   无冲突（INSERT）时取 VALUES 里的值 ⇒ 新行的覆盖值为 NULL（跟随档案）。
+_UPSERT_BINDING_SQL = """
+    INSERT INTO capability_bindings (capability, profile_ids, thinking_override, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(capability) DO UPDATE SET
+        profile_ids = excluded.profile_ids,
+        thinking_override = CASE WHEN ? = 1 THEN thinking_override ELSE excluded.thinking_override END,
+        updated_at  = excluded.updated_at
+"""
+
 
 class BindingService:
     """``capability_bindings`` 表 CRUD（V3.7 起独立 service；router 仅做参数校验）。"""
@@ -150,18 +171,30 @@ class BindingService:
         - ``None`` → 清除覆盖（回到「跟随档案」）；
         - ``str`` → 必须在 :data:`effective.THINKING_MODES` 8 档枚举内，
           否则 :class:`InvalidBindingError`（路由层映射 422）。
+
+        ⚠️ **单语句 upsert，不做读改写**（2026-10-24 M10）：「保留现值」由 SQL 的
+        ``ON CONFLICT DO UPDATE`` 子句**不碰该列**来表达（``keep=1``），
+        **不再「先 SELECT 读出现值、再把合并结果整行写回」**。
+        旧写法在「读」与「写」之间留了窗口：两次并发 PUT（同一 capability，
+        其一带 ``thinking_override``、另一带不带）里，后写的那次会把先写者
+        刚设的覆盖值换成**读到的过期值**（丢更新，且无任何报错）。
+        现在这一步「读」根本不存在 ⇒ 无窗口 ⇒ 语义与单线程逐字相同。
         """
         # 校验 capability 已知
         if capability not in CAPABILITY_LABELS:
             raise UnknownCapabilityError(capability)
         # 校验 thinking_override 值域（8 枚举或 None；缺席 = 保留现值）
         if thinking_override is UNSET_THINKING_OVERRIDE:
-            current = self.get(capability)
-            eff_override = current["thinking_override"] if current else None
+            # 键缺席 ⇒ 保留 DB 现值：**不在 Python 侧读**（读改写窗口的来源）；
+            # INSERT 分支传 NULL ⇒ 行不存在时仍是「跟随档案」（与旧行为一致）。
+            eff_override: str | None = None
+            keep = 1
         elif thinking_override is None:
             eff_override = None
+            keep = 0
         elif isinstance(thinking_override, str) and thinking_override in THINKING_MODES:
             eff_override = thinking_override
+            keep = 0
         else:
             raise InvalidBindingError(
                 f"thinking_override 必须是 8 档枚举之一或 null，收到: {thinking_override!r}"
@@ -190,17 +223,7 @@ class BindingService:
         ids_json = self._dump_ids(profile_ids)
         conn = get_connection(self.db_path)
         try:
-            conn.execute(
-                """
-                INSERT INTO capability_bindings (capability, profile_ids, thinking_override, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(capability) DO UPDATE SET
-                    profile_ids = excluded.profile_ids,
-                    thinking_override = excluded.thinking_override,
-                    updated_at  = excluded.updated_at
-                """,
-                (capability, ids_json, eff_override, ts),
-            )
+            conn.execute(_UPSERT_BINDING_SQL, (capability, ids_json, eff_override, ts, keep))
             conn.commit()
         finally:
             conn.close()

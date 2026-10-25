@@ -38,8 +38,10 @@
 
 * ``promote`` 的 ``branch_id``：空分支时 = **被 promote 的源分支**；非空时 = **main 分支**
   （源分支 id 在 ``promoted_from``）。实测两者不是同一个值。
-* ``promote`` 的 ``state_version``：空分支时 = ``branches.base_state_version``（**没产生新版本**）；
-  非空时 = 最后一次重放落在 main 上的版本。
+* ``promote`` 的 ``state_version``：**统一** = promote 提交后 DB 里的最新
+  ``story_states.state_version``（2026-10-24 修复；修前空分支 = 分支的
+  ``base_state_version``、非空 = 最后一次重放落在 main 上的那一版 ⇒ 两者都比
+  DB 真值低）。唯一例外：项目尚无快照行 ⇒ 报分支的 ``base_state_version``。
 
 禁自指断言（本轮最大的坑）
 ------------------------
@@ -187,6 +189,23 @@ def _client(app):
 async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
     async with _client(app) as c:
         return await c.request(method, path, **kwargs)
+
+
+def _max_state_version(db_path: Path, pid: str) -> int:
+    """直查 DB：该项目的最新 ``story_states.state_version``（**真实值**，非推算）。
+
+    ⚠️ 判别口径（2026-10-24 promote 响应版本修复）：断言打在**真实值**上，
+    不写死「+1」——写死就等于把「差一版」这个缺陷重新编进测试。
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT MAX(state_version) AS sv FROM story_states WHERE project_id = ?",
+            (pid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row[0] or 0)
 
 
 
@@ -443,7 +462,7 @@ async def test_promote_empty_branch_keeps_null_keys(tmp_path: Path):
 
     这一条同时钉住「不能加 ``response_model_exclude_none``」——加了这两个键就消失。
     """
-    app, pid, _char, _chap, base = await _seeded(tmp_path)
+    app, pid, _char, _chap, _base = await _seeded(tmp_path)
     bid = (await _request(app, "POST", f"/api/projects/{pid}/branches", json={"name": "alt"})).json()[
         "branch_id"
     ]
@@ -460,8 +479,14 @@ async def test_promote_empty_branch_keeps_null_keys(tmp_path: Path):
         assert body[key] is None
     # ⚠️ 同名不同义：空分支时 branch_id 就是**被 promote 的源分支**
     assert body["branch_id"] == bid
-    # ⚠️ 同名不同义：空分支时 state_version 是 base，**没有产生新版本**
-    assert body["state_version"] == base
+    # ⚠️ 2026-10-24（promote 响应版本修复）：``state_version`` 统一为
+    # **promote 提交后 DB 里的最新版本**——空分支**也会**推进（分支
+    # ACTIVE→MERGED 改了 branches 表 ⇒ 该表进 director 装配 payload ⇒ 必须推
+    # version）⇒ 断言打在**直查 DB 的真实值**上，不写死「base + N」。
+    db_max = _max_state_version(tmp_path / "novelos.db", pid)
+    assert body["state_version"] == db_max, (
+        f"promote 响应 state_version={body['state_version']} ≠ DB 最新 {db_max}"
+    )
     assert body["promoted_commits"] == 0
     assert body["replayed_delta_ids"] == []
     assert body["status"] == "MERGED"

@@ -47,8 +47,8 @@ MUTATIONS = [
     (
         "L10-MC-02B",
         "packages/core/model_router/effective.py",
-        '''        base_url = _norm_base_url(pool.get(eff_provider)) or conn_base''',
-        '''        base_url = conn_base''',
+        '''        pooled_base = _norm_base_url(pool.get(profile_protocol)) or None''',
+        '''        pooled_base = None''',
         "tests/unit/test_model_connections.py",
     ),
     (

@@ -897,6 +897,51 @@ def _fallback_chapter_seeds(
 # ---------------------------------------------------------------------------
 
 
+def _claim_run_ownership(db_path: Any, run_id: str | None, project_id: str) -> None:
+    """把项目归属回写进 run 行的 0037 归属列（``workflow_runs.project_id``）。
+
+    为什么必须回写（F-1，2026-10-25）
+    ---------------------------------
+    project-init「**新建项目**」模式下，run 行是在项目**还不存在**时插进去的
+    （引擎 ``_insert_run_row`` 按**起跑时已知的** project_id 写归属列 ⇒ 此路径
+    该列恒为 NULL）。项目是本节点才建出来的。
+
+    不回写的后果（结构性，不是「历史遗留」）：``GET /projects/{pid}/runs`` 的
+    项目级 run（``chapter_id IS NULL``）走数据层 SQL 的「``OR chapter_id IS
+    NULL``」那一支 ⇒ **每个**项目的列表都会收到这条 run；而它的
+    ``checkpoint_json`` 里还带着 brief / Story Bible 内容 ⇒ 每建一本新书，
+    那条 run 就永久出现在所有项目的运行记录里。
+
+    口径
+    ----
+    - **只填空、不覆盖**（``AND project_id IS NULL``）：已有归属的行不被改写
+      （挂载模式的 run 行在起跑时已由引擎写入归属）⇒ 幂等、可重复调用。
+    - ``run_id`` 缺失（无 run 上下文的直接调用）⇒ **跳过**，不是错误：没有
+      run 行可写。
+    - 写失败**不吞**：写不进去 ⇒ 这条 run 就是无主 run（正是本函数要消灭的
+      形状）⇒ 直接上抛让节点失败，好过静默留下一条跨项目可见的 run。
+    - 与项目行创建**不在同一事务**（``project_svc.create`` 自己提交）：中间有
+      一个极小的窗口，崩溃会留下一条 NULL 归属行 ⇒ 落进「判不出来 ⇒ 不排除」
+      那一档（可见性代价有登记，见
+      ``packages/core/api/routers/workflows/runs.py::_run_visible_in_project``）。
+
+    判别：``tests/workflow/test_project_init.py::
+    test_project_init_new_project_claims_run_ownership``（撤掉本函数 ⇒ run 行
+    的 project_id 仍为 NULL ⇒ 必红）。
+    """
+    if not run_id:
+        return
+    conn = get_connection(str(db_path))
+    try:
+        conn.execute(
+            "UPDATE workflow_runs SET project_id = ? WHERE run_id = ? AND project_id IS NULL",
+            (project_id, run_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _upsert_volume(db_path: Any, project_id: str, payload: VolumeCreate) -> dict:
     """按 (project_id, number) upsert 卷。
 
@@ -1013,6 +1058,12 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
             )
         )
         project_id = project["project_id"]
+
+    # 1b) run 归属回写（F-1，2026-10-25）：新建项目模式下 run 行起跑时归属恒为
+    # NULL（项目此刻还不存在）⇒ 建项成功后必须回写，否则这条 run 永久出现在
+    # 所有项目的运行记录里。挂载模式下该列已由引擎写入 ⇒ 本调用是幂等空操作。
+    # 详见 :func:`_claim_run_ownership` 的口径说明。
+    _claim_run_ownership(db_path, ctx.get("run_id"), project_id)
 
     # 2) characters —— 按 (project_id, name) 已存在则更新 AI 可管内容字段
     #    （name/role/core_json），保留 id 与 created_at 不变；不存在则新建。

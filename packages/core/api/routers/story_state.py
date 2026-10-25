@@ -403,6 +403,13 @@ def promote_branch(project_id: str, branch_id: str, payload: dict, request: Requ
       用 ``_exclude_none`` 会把它们**抹掉**（键从有变无）。
 
     ``exclude_unset`` 只看「生产方有没有给这个键」，两个需求同时满足。
+
+    ⚠️ **2026-10-24（响应版本修复）**：``state_version`` = **promote 提交后 DB 里的
+    最新 ``story_states.state_version``**（= ``branches.promote_branch`` 里
+    ``bump_project_state_version`` 的返回值）。修前它取的是「最后一次重放落在
+    main 上的那一版」，**比 DB 真值低 1**（少算 promote 自身的版本推进：分支
+    ``ACTIVE→MERGED`` 改了 ``branches`` 表 ⇒ 该表进 director 装配 payload ⇒
+    必须推 version）⇒ 前端展示的版本号失真。**前端不需要任何 +/- 补偿。**
     """
     _ensure_project(request, project_id)
     chapter_id = (payload or {}).get("chapter_id") if isinstance(payload, dict) else None

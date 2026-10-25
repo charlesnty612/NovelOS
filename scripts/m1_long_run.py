@@ -502,7 +502,7 @@ def _aggregate_ai_logs(db_path: str, run_ids: list[str]) -> dict[str, Any]:
     placeholders = ",".join("?" * len(run_ids))
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")  # ★ BUG-58-B4：同 get_connection 口径；须在首个 execute 前（详见 tests/unit/test_bug58_b1_b4.py）
+    conn.execute("PRAGMA foreign_keys = ON")  # ★ BUG-58-B4：同 get_connection 口径；须在首个 execute 前
     try:
         rows = conn.execute(
             f"SELECT token_usage_json, latency_ms, retry_count FROM ai_call_logs WHERE run_id IN ({placeholders})",
@@ -546,7 +546,7 @@ def _latest_quality(db_path: str, chapter_id: str) -> dict[str, Any]:
     """取最新 quality_reports 行（按 created_at DESC LIMIT 1）。"""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")  # ★ BUG-58-B4：同 get_connection 口径；须在首个 execute 前（详见 tests/unit/test_bug58_b1_b4.py）
+    conn.execute("PRAGMA foreign_keys = ON")  # ★ BUG-58-B4：同 get_connection 口径；须在首个 execute 前
     try:
         row = conn.execute(
             """
@@ -593,7 +593,7 @@ def _story_state(db_path: str, project_id: str) -> dict[str, Any]:
     """取当前快照的 state_version + snapshot_json 字节数；service 暴露 GET /api/projects/{pid}/state。"""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")  # ★ BUG-58-B4：同 get_connection 口径；须在首个 execute 前（详见 tests/unit/test_bug58_b1_b4.py）
+    conn.execute("PRAGMA foreign_keys = ON")  # ★ BUG-58-B4：同 get_connection 口径；须在首个 execute 前
     try:
         row = conn.execute(
             """
@@ -615,7 +615,7 @@ def _latest_prose_chars(db_path: str, chapter_id: str) -> int:
     """取该章最新 draft.content，去空白后字符数。"""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")  # ★ BUG-58-B4：同 get_connection 口径；须在首个 execute 前（详见 tests/unit/test_bug58_b1_b4.py）
+    conn.execute("PRAGMA foreign_keys = ON")  # ★ BUG-58-B4：同 get_connection 口径；须在首个 execute 前
     try:
         row = conn.execute(
             "SELECT content FROM drafts WHERE chapter_id = ? ORDER BY created_at DESC LIMIT 1",
@@ -639,7 +639,7 @@ def _latest_prose_word_stats(
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")  # ★ BUG-58-B4：同 get_connection 口径；须在首个 execute 前（详见 tests/unit/test_bug58_b1_b4.py）
+    conn.execute("PRAGMA foreign_keys = ON")  # ★ BUG-58-B4：同 get_connection 口径；须在首个 execute 前
     try:
         row = conn.execute(
             "SELECT content FROM drafts WHERE chapter_id = ? ORDER BY created_at DESC LIMIT 1",

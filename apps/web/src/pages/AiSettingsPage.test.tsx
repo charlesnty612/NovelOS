@@ -981,6 +981,39 @@ describe('AiSettingsPage · 模型连接（连接层）', () => {
     expect(payload.connection_id).toBe('mcn_001');
   });
 
+  it('连接态「拉取模型」带上**档案所选协议**（后端据此从协议地址池取该协议的平面地址）', async () => {
+    // 2026-10-24 协议下放：连接态拉模型必须带**档案协议**——
+    // 不带时后端只会按连接主协议/主地址拉 ⇒ 档案选了别的协议就拉到错误地址。
+    vi.mocked(modelProfilesApi.fetchAvailableModels).mockResolvedValue({
+      models: ['claude-sonnet-4'],
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('new-model-profile'));
+    fireEvent.click(await screen.findByTestId('profile-mode-connection'));
+
+    const sel = (await screen.findByTestId('profile-connection')) as HTMLSelectElement;
+    fireEvent.change(sel, { target: { value: 'mcn_001' } });
+
+    // 接口类型改成 anthropic（≠ 连接主协议 openai_compatible）
+    const providerSel = (await screen.findByTestId(
+      'profile-provider',
+    )) as HTMLSelectElement;
+    fireEvent.change(providerSel, { target: { value: 'anthropic' } });
+
+    fireEvent.click(screen.getByTestId('profile-fetch-models'));
+
+    await waitFor(() => {
+      expect(modelProfilesApi.fetchAvailableModels).toHaveBeenCalledTimes(1);
+    });
+    const payload = vi.mocked(modelProfilesApi.fetchAvailableModels).mock
+      .calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.connection_id).toBe('mcn_001');
+    // 判别点：**协议必须带上**（撤掉这一行 ⇒ 本用例必红）
+    expect(payload.provider).toBe('anthropic');
+  });
+
   it('编辑存量档案（connection_id=null）：默认落在「自定义配置」态，提交**不含** connection_id 键', async () => {
     vi.mocked(modelProfilesApi.list).mockResolvedValue([baseProfile]);
     vi.mocked(modelProfilesApi.update).mockResolvedValue(baseProfile);
@@ -1053,6 +1086,47 @@ describe('AiSettingsPage · 模型连接（连接层）', () => {
       (o) => (o as HTMLOptionElement).value,
     );
     expect(values).toEqual(['default', 'off', 'adaptive']);
+  });
+
+  it('★连接态 + 协议地址池：档案协议 anthropic ⇒ 按**池里的 anthropic 地址**收窄（不含 on）', async () => {
+    // 2026-10-25 M4 应用层取址：连接态的思考档收窄必须与后端 resolve_effective
+    // 同口径（pool[档案协议] or 连接.base_url）。
+    // 复合场景：网关主地址 = openai 平面（host 无 host 侧约束），档案协议 =
+    // anthropic，池里 anthropic 平面 = MiniMax 域 ⇒ 交集档位 = default/off/adaptive
+    // （**不含 on**：on 是 anthropic 协议独有、但 MiniMax 端点不支持）。
+    // 若前端按连接主地址收窄 ⇒ host 侧无约束 ⇒ 会留下 on ⇒ 本用例红。
+    const pooledConn: ModelConnectionOut = {
+      ...connFixture,
+      connection_id: 'mcn_pool',
+      name: 'opencode-pool',
+      base_url: 'https://opencode.ai/inference/go/v1',
+      protocol_base_urls: {
+        anthropic: 'https://api.minimax.chat/anthropic',
+      },
+    };
+    vi.mocked(connectionsApi.list).mockResolvedValue([connFixture, pooledConn]);
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('new-model-profile'));
+    fireEvent.click(await screen.findByTestId('profile-mode-connection'));
+    const sel = (await screen.findByTestId('profile-connection')) as HTMLSelectElement;
+    fireEvent.change(sel, { target: { value: 'mcn_pool' } });
+
+    // 档案协议选 anthropic（≠ 连接主协议 openai_compatible）
+    const providerSel = (await screen.findByTestId(
+      'profile-provider',
+    )) as HTMLSelectElement;
+    fireEvent.change(providerSel, { target: { value: 'anthropic' } });
+
+    const thinking = (await screen.findByTestId(
+      'profile-thinking-select',
+    )) as HTMLSelectElement;
+    const values = Array.from(thinking.querySelectorAll('option')).map(
+      (o) => (o as HTMLOptionElement).value,
+    );
+    expect(values).toContain('adaptive'); // 池地址命中 ⇒ MiniMax 档位生效
+    expect(values).not.toContain('on'); // 池地址命中 ⇒ 与 anthropic 协议取交集 ⇒ 无 on
   });
 
   it('自定义配置态行为不变：地址 / 密钥输入框仍在，provider 可选', async () => {

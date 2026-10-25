@@ -9,7 +9,9 @@
 - ``GET /model-connections/{id}`` ——按主键取单条（404 不存在）。
 - ``PATCH /model-connections/{id}`` ——部分更新。
 - ``DELETE /model-connections/{id}`` ——删除（204）；若被任何档案引用 → 409。
-- ``POST /model-connections/{id}/test`` ——探测可达性。
+- ``POST /model-connections/{id}/test`` ——探测可达性（可选 ``?protocol=``：
+  按连接的协议地址池取址，可单独探测多协议网关的某个协议面；**不传时也查池**，
+  取 ``pool[连接主协议] or 连接.base_url``，与档案级 ``available-models`` 同口径）。
 
 **为什么要有连接层**（用户裁决 2026-10-21）：
 「同一厂商，想分配不同模型承担不同职责，需要要重新完全新建。」
@@ -51,6 +53,9 @@ from packages.core.model_router.effective import (
     CONNECTION_ONLY_PARAMS,
     PROTOCOL_IDS,
     SENSITIVE_HEADER_NAMES,
+    # 协议地址池的解析口径必须与运行期 resolve_effective **逐字一致** ⇒ 复用
+    # effective 的单点（跨模块引用私有名是刻意的：复制一份必然漂移）。
+    _parse_protocol_pool,
     parse_params,
     validate_headers,
 )
@@ -193,6 +198,102 @@ def _validate_protocol_base_urls(value: Any) -> dict[str, str]:
             )
         cleaned[k] = v.strip()
     return cleaned
+
+
+def validate_protocol_or_422(protocol: Any, *, field: str = "protocol") -> str | None:
+    """协议值校验：``None`` 放行；非 :data:`PROTOCOL_IDS` 四协议之一 ⇒ **422**。
+
+    ⚠️ **未知协议必须显式失败**：协议决定「取哪个平面的地址」，
+    静默兜底（回落主协议 / 主地址）会让探针打到**错误的协议面**——
+    那正是本模块要修的那类错址，且用户看不到任何提示。
+
+    ``field`` 只用于报错文案（指明是哪个入参键写错了）。
+    """
+    if protocol is None:
+        return None
+    return require_protocol_or_422(protocol, field=field)
+
+
+def require_protocol_or_422(protocol: Any, *, field: str = "protocol") -> str:
+    """协议值校验（**None 也不放行**）：非 :data:`PROTOCOL_IDS` 四协议之一 ⇒ **422**。
+
+    与 :func:`validate_protocol_or_422` 分成两个函数，而不是让调用方写
+    ``validate_protocol_or_422(x) or ""``：
+
+    - ``or ""`` 是**不可达的死代码**（``x`` 非 None 时校验必返 str 或抛 422），
+      却把「这里保证拿到 str」这件事藏进了一个恒真的表达式里；
+    - 本函数把该保证写进**类型**（返回 ``str``）⇒ 调用方不需要再补断言。
+
+    错误文案与放行规则**逐字复用** :func:`validate_protocol_or_422`（单点）。
+    """
+    if not isinstance(protocol, str) or protocol not in PROTOCOL_IDS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{field} 必须是四协议之一（{sorted(PROTOCOL_IDS)}），收到 {protocol!r}"
+            ),
+        )
+    return protocol
+
+
+def resolve_protocol_base_url(
+    connection_row: dict[str, Any], protocol: str | None
+) -> str | None:
+    """**协议地址池取址**（绑定态生效 base_url 的唯一口径）。
+
+    与 :func:`packages.core.model_router.effective.resolve_effective` **逐字一致**：
+    ``pool[protocol] or 连接.base_url``——
+
+    - 协议是**档案级属性**（2026-10-24 裁决）：同一条多协议网关连接上，
+      不同协议的模型各取各的地址（openai 平面 / anthropic 平面）；
+    - 池里没有该协议（或池为空 / 脏 JSON）⇒ 回退连接主 base_url。
+
+    ⚠️ **池的解析复用 effective 的单点**（``_parse_protocol_pool``）：脏值等价于
+    「无覆盖」，绝不因脏数据让探针 500（与读路径口径一致）。
+    """
+    pool = _parse_protocol_pool(connection_row.get("protocol_base_urls"))
+    base = pool.get(protocol or "") or connection_row.get("base_url") or ""
+    return base.rstrip("/") or None
+
+
+# 协议 → 模型列表端点的**路径后缀**（**单一来源**）。
+# 连接级探测（``POST /model-connections/{id}/test``）与档案级拉模型
+# （``POST /model-profiles/available-models``）共用这一张表 ⇒ 同一协议在两处
+# 打到**同一个端点**。
+# ⚠️ 2026-10-24 审查修复 M5：此前两处各拼各的 ⇒ anthropic 在 /test 侧拼
+# ``{地址}/models``，而 anthropic 平面的真实端点是 ``{地址}/v1/models``
+# （available-models 侧拼的就是后者）⇒ 同一协议两处打不同地址。
+PROTOCOL_MODELS_PATHS: dict[str, str] = {
+    "openai_compatible": "/models",
+    "anthropic": "/v1/models",
+    "ollama": "/api/tags",
+    "mock": "/models",
+}
+"""协议 → 模型列表端点路径后缀。
+
+键与 :data:`packages.core.model_router.effective.PROTOCOL_IDS` 同一词汇表
+（``mock`` 不发网，只占位避免表里缺键）；未知协议 ⇒ ``/models`` 兜底。
+"""
+
+
+def models_path_for_protocol(protocol: str | None) -> str:
+    """按协议返回模型列表端点的路径后缀（**单一来源**）。"""
+    return PROTOCOL_MODELS_PATHS.get(protocol or "", "/models")
+
+
+def build_models_url(
+    base_url: str | None, protocol: str | None, models_url: str | None = None
+) -> str:
+    """拼模型列表端点 URL：**显式 ``models_url`` 恒优先** > ``{base}{协议路径}``。
+
+    ``base_url`` 为空且没有显式 ``models_url`` ⇒ 返回空串（调用方据此 422）。
+    """
+    if models_url:
+        return models_url
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return ""
+    return f"{base}{models_path_for_protocol(protocol)}"
 
 
 # ---------------------------------------------------------------------------
@@ -422,13 +523,29 @@ def delete_model_connection(connection_id: str, request: Request):
     response_model=ConnectionTestResult,
     response_model_exclude_unset=True,
 )
-def test_model_connection(connection_id: str, request: Request) -> dict:
+def test_model_connection(
+    connection_id: str, request: Request, protocol: str | None = None
+) -> dict:
     """探测连接的可达性。
 
-    打 ``GET {models_url}``（缺省 ``{base_url}/models``）。
+    打 ``GET {models_url}``：显式配置的 ``models_url`` **恒优先**；缺省则按
+    ``{base}{协议路径}`` 拼（anthropic ⇒ ``/v1/models``、ollama ⇒ ``/api/tags``、
+    其余 ⇒ ``/models``，路径表与档案级 ``available-models`` 共用同一张表）。
     ⚠️ **不降级到 chat 探测**（连接层没有 model 概念）⇒ 端点 404/405/501 时
     如实报「该端点不提供模型列表」并给出可执行指引，**不假成功**。
     （档案侧的 ``/test`` 有 model，可以降级到极小 chat 请求探测。）
+
+    **可选协议参数**（2026-10-24 协议下放）：``?protocol=anthropic`` ⇒ base_url
+    按连接的**协议地址池**取（``pool[protocol] or 连接.base_url``，与运行期
+    :func:`packages.core.model_router.effective.resolve_effective` 同口径）
+    ⇒ 可单独探测多协议网关的某个协议面。
+    ⚠️ 未知协议 ⇒ **422**（静默回落到主协议 = 打到错误的协议面）。
+
+    ⚠️ **不传 ``protocol`` 时也查池**（2026-10-24 审查修复 M4）：取址口径 =
+    ``pool[连接主协议] or 连接.base_url`` ⇒ 与 ``available-models`` 侧
+    「不传协议 ⇒ 连接主协议的平面地址」**同口径**。
+    旧行为直接用连接 ``base_url``、从不查池 ⇒ 同一条连接在两处打**不同地址**
+    （池里有主协议条目时）。
     """
     settings = request.app.state.settings
     svc = ConnectionService(settings.db_path)
@@ -445,9 +562,15 @@ def test_model_connection(connection_id: str, request: Request) -> dict:
             ),
         )
 
+    protocol = validate_protocol_or_422(protocol)
     params = parse_params(row.get("params_json"))
-    base_url = (row.get("base_url") or "").rstrip("/")
-    models_url = params.get("models_url") or (f"{base_url}/models" if base_url else "")
+    # ⚠️ 取址口径与运行期 resolve_effective **逐字一致**：pool[协议] or 连接.base_url。
+    #    不传 protocol ⇒ 用**连接主协议**去查池（不是「跳过池、直接用 base_url」）。
+    effective_protocol = protocol or (row.get("provider") or None)
+    base_url = resolve_protocol_base_url(row, effective_protocol) or ""
+    models_url = build_models_url(
+        base_url, effective_protocol, params.get("models_url")
+    )
     if not models_url:
         raise HTTPException(
             status_code=422,

@@ -486,12 +486,16 @@ def _start_outline_batch(
 ) -> dict[str, Any]:
     """启动 outline-batch workflow（批量续规划下一批章节）。
 
-    项目级端点（无 chapter），形态照 :func:`_start_project_init`：
+    项目级端点（无 chapter），形态照 :func:`_start_workflow_core`：
     - 校验项目存在（404）；
     - 校验 model_profile_id 存在（400，缺省跳过）；
     - 项目级并发防护：**引擎侧原子守卫**——同项目已有 RUNNING/PENDING 的
       outline-batch run → 409（persist 会插章，双跑会插出重复章号）；
-    - 同步 start_with_nodes（与 project-init 一致），返回 run 行三键。
+    - **异步起跑**（M11 修复，2026-10-24）：``start_with_nodes_async`` 插完
+      run 行即返回，三个节点（assemble→planner→persist）在后台线程推进 ⇒
+      HTTP 不再挂着等 LLM（真实 LLM 时原本会挂数分钟）。响应恒为
+      ``status="RUNNING"``，真终态由前端轮询 ``GET /runs/{run_id}`` 拿
+      （前端 ChaptersPage 已按 run_id 轮询，形态兼容）。
     """
     settings = request.app.state.settings
     db_path = settings.db_path
@@ -537,7 +541,13 @@ def _start_outline_batch(
 
     engine = _engine(request)
     try:
-        run_id = engine.start_with_nodes(
+        # 异步起跑（M11 修复，2026-10-24）：与章节级起跑（_start_workflow_core）
+        # 同一形态——插 run 行后立刻返回，节点在后台线程推进。
+        # ⚠️ **守卫原子性不受影响**：project_level_guard 的「守卫 SELECT + run
+        # INSERT」在 ``engine._insert_run_row`` 的 **BEGIN IMMEDIATE 同一事务**
+        # 内完成，而该函数在**调用线程**里执行（后台线程只跑节点）⇒ 409 语义与
+        # 同步版逐字一致（同项目第二个 POST 必被拦）。
+        run_id = engine.start_with_nodes_async(
             "outline-batch",
             workflow["nodes"],
             project_id=project_id,
@@ -554,13 +564,13 @@ def _start_outline_batch(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    run = get_run(db_path, run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run disappeared after start")
+    # 异步化后：run 行已落库（status=RUNNING），节点在后台线程推进 ⇒ HTTP 恒返回
+    # RUNNING（与 _start_workflow_core / resume_run 同一形状）。真终态由前端轮询
+    # GET /runs/{run_id} 拿。
     return {
         "run_id": run_id,
-        "status": run["status"],
-        "current_node": run.get("current_node"),
+        "status": "RUNNING",
+        "current_node": None,
     }
 
 
@@ -574,7 +584,17 @@ def start_outline_batch(
     body: OutlineBatchRequest,
     request: Request,
 ) -> dict[str, Any]:
-    """outline-batch：基于已写内容批量规划下一批章节并建为 PLANNED 章。"""
+    """outline-batch：基于已写内容批量规划下一批章节并建为 PLANNED 章。
+
+    **异步起跑**（M11 修复，2026-10-24）：201 响应在 run 行落库后立即返回
+    （``status="RUNNING"``），三个节点在后台线程推进 ⇒ HTTP 不挂在 LLM 上。
+    真终态（COMPLETED / FAILED）由客户端轮询 ``GET /api/runs/{run_id}`` 取。
+
+    ⚠️ 响应里的 ``status="RUNNING"`` 是**受理语义**（"已受理并起跑"），**不代表
+    该 run 在任何时刻的真值**——后台线程可能在响应序列化之前就已经跑完（快项目
+    常见），此时真终态已是 COMPLETED / FAILED。**判成败必须轮询
+    ``GET /api/runs/{run_id}``**，别拿这个字段当终态。
+    """
     return _start_outline_batch(request=request, project_id=project_id, body=body)
 
 

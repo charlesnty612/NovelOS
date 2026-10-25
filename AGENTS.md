@@ -258,6 +258,7 @@ python -m pytest -n 20 -q            # 全量（**按核数取 `min(核数/2, 20
 .venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --changed --precheck   # **每批收尾档①（仍必跑）**：只读预检本批改动命中的突变（锚点==1 / 目标与测试文件存在 / replacement 真变了）——实测 **0.2 秒**，顺带挡住「锚点写错 / 目标文件不存在」；**不临时改源码** ⇒ 无并发风险
 .venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all --changed             # **每批收尾档②（改为可选）**：增量突变（典型 20~40 条 × ~2s ≈ **1~3 分钟**）——⚠️ 会**临时改源码** ⇒ **禁与任何读/写源码的操作并发**，含 git add/commit；**新规格不再强制新增**（见 §三 第 7 条）⇒ 本档按需跑
 .venv/Scripts/python.exe tests/mutation_specs/run_spec.py --all                      # **发版前档③（2026-10-23 晚已降级为非阻塞）**：全量（**476 条**；**串行** ≈ 53min）——**只在发版/周期性跑，不进提交路径**；失败**拦发版不拦提交**，日常用档② `--changed`。⚠️ **`--jobs N` 并发档位已降级为「降噪参考」**：会造假 CAUGHT / 判定不可复现 / 归因错配 ⇒ **退出码恒为 3**（除非显式 `--accept-concurrent`）⇒ **不得作为闸门结论**
+.venv/Scripts/python.exe scripts/check_thinking_modes_consistency.py   # 思考档 8 档前后端一致性看守（2026-10-25 建；pytest 侧 tests/unit/test_check_thinking_modes_consistency.py 同看守；改 THINKING_MODES / THINKING_OPTIONS 任一侧必须同改另一侧，脚本静态解析、解析失败 exit 2 不假绿）
 cd apps/web && npx tsc -b && npx vitest run && npm run build
 python scripts/export_openapi.py && python scripts/gen_frontend_types.py   # schema 漂移后 regen（必须用项目 .venv 解释器跑；系统 python 因 editable 元数据缺失会把 version 读成 `dev`，误判为 schema 漂移——2026-09-27 dev-b 实证）
 python scripts/smoke_e2e.py          # 端到端（临时库+独立端口，自动清理）

@@ -45,54 +45,97 @@ export function hostOf(baseUrl: string): string {
 }
 
 /**
- * 按 provider + base_url 收窄思考模式下拉（V3.8）。
+ * 按 **协议 ∧ host** 收窄思考模式下拉（V3.8；2026-10-25 修「协议优先短路」）。
  * 没有「协议层的端点能力查询接口」，因此我们自己维护端点 → 推荐档位映射。
+ *
+ * ⚠️ **为什么是 ∧ 而不是「先协议后 host」**：两者是**独立**的约束，缺一不可——
+ *
+ * - **host 约束（供应商专属档）**：`max`（Kimi）、`adaptive`（MiniMax M 系）这类
+ *   档位**只有 host 能判出来**（协议层没有这个信息）。此前实现是
+ *   「协议命中 anthropic / ollama / mock ⇒ **提前 return 全量**」⇒ host 判定
+ *   根本没机会跑 ⇒ MiniMax 的 anthropic 兼容端点会显示出 Kimi / DeepSeek 都不
+ *   支持的档位（且全程无提示）。
+ * - **协议约束（参数族可表达性）**：Anthropic Messages API 对**未知请求体字段
+ *   直接 400** ⇒ ``reasoning_effort`` 族（low/medium/high/max）在 anthropic
+ *   协议上不可表达 ⇒ 不该出现在 anthropic 档案的下拉里（后端
+ *   ``effective.thinking_override_compatible`` 同口径：不相容 ⇒ 该候选跳过覆盖）。
+ *
+ * ⇒ 结果 = 两侧约束的**交集**；只有一侧有约束时取那侧；两侧都没有 ⇒ 全量 8 档。
  *
  * 返回的顺序就是下拉展示顺序；与 ``THINKING_OPTIONS`` 的相对顺序保持一致。
  */
-export function getThinkingOptions(
-  provider: string,
-  baseUrl: string,
-): { value: ThinkingMode; label: string; hint?: string }[] {
-  const host = hostOf(baseUrl);
-  const isProvider = (p: string) => provider === p;
-  // Provider 自带（不依赖 host）—— Ollama / Anthropic / Mock 一律退回全量。
-  if (isProvider('anthropic') || isProvider('ollama') || isProvider('mock')) {
-    return THINKING_OPTIONS;
-  }
+
+/** 协议可表达的思考档（协议侧约束；未登记的协议 = 无约束）。 */
+const PROTOCOL_SCOPED_MODES: Record<string, ThinkingMode[]> = {
+  // Anthropic 只认 thinking.type 族（off/on/adaptive）；reasoning_effort 族 ⇒ 400。
+  anthropic: ['default', 'off', 'on', 'adaptive'],
+};
+
+/** OpenAI 官方档位（host 命中 api.openai.com，或遗留 provider==='openai' 兜底）。 */
+const OPENAI_MODES: ThinkingMode[] = [
+  'default',
+  'off',
+  'low',
+  'medium',
+  'high',
+];
+
+/**
+ * host 侧的供应商专属档位；未识别 ⇒ 返回 null（host 侧无约束）。
+ * host 需同时命中 kimi.com 与 Moonshot 官方域（api.moonshot.ai / api.moonshot.cn）。
+ */
+function hostScopedModes(host: string): ThinkingMode[] | null {
   // MiniMax M 系：仅 default / off / adaptive。
   if (host.includes('minimax')) {
-    return THINKING_OPTIONS.filter((o) =>
-      ['default', 'off', 'adaptive'].includes(o.value),
-    );
+    return ['default', 'off', 'adaptive'];
   }
   // DeepSeek：default / off / low / medium / high
   if (host.includes('deepseek')) {
-    return THINKING_OPTIONS.filter((o) =>
-      ['default', 'off', 'low', 'medium', 'high'].includes(o.value),
-    );
+    return ['default', 'off', 'low', 'medium', 'high'];
   }
   // Kimi：default / off / low / high / max（不含 on/adaptive）。
-  // host 需同时命中 kimi.com 与 Moonshot 官方域（api.moonshot.ai / api.moonshot.cn）。
   if (
     host.includes('kimi.com') ||
     host.includes('moonshot.ai') ||
     host.includes('moonshot.cn')
   ) {
-    return THINKING_OPTIONS.filter((o) =>
-      ['default', 'off', 'low', 'high', 'max'].includes(o.value),
-    );
+    return ['default', 'off', 'low', 'high', 'max'];
   }
-  // OpenAI：仅当 host 含 ``api.openai.com`` 或独立 ``provider==='openai'`` 时收窄。
+  // OpenAI：host 含 ``api.openai.com``。
   // ``provider==='openai_compatible'`` 不一定指向 OpenAI 官方（如用户指向私有端点），
   // 因此只有 host 命中时才走 OpenAI 档位；其余代理类端点一律退回全量。
-  if (isProvider('openai') || host.includes('api.openai.com')) {
-    return THINKING_OPTIONS.filter((o) =>
-      ['default', 'off', 'low', 'medium', 'high'].includes(o.value),
-    );
+  if (host.includes('api.openai.com')) {
+    return OPENAI_MODES;
   }
-  // 未知端点：全量
-  return THINKING_OPTIONS;
+  return null;
+}
+
+export function getThinkingOptions(
+  provider: string,
+  baseUrl: string,
+): { value: ThinkingMode; label: string; hint?: string }[] {
+  const host = hostOf(baseUrl);
+  const hostModes = hostScopedModes(host);
+  const protocolModes = PROTOCOL_SCOPED_MODES[provider] ?? null;
+
+  // 协议 ∧ host：两侧都有 ⇒ 交集；只有一侧 ⇒ 那侧；两侧都没有 ⇒ null（全量）。
+  let allowed: ThinkingMode[] | null = null;
+  if (protocolModes && hostModes) {
+    allowed = protocolModes.filter((m) => hostModes.includes(m));
+  } else if (protocolModes) {
+    allowed = protocolModes;
+  } else if (hostModes) {
+    allowed = hostModes;
+  } else if (provider === 'openai') {
+    // 遗留口径：provider 值恰好是 'openai'（协议清单之外的旧写法）且 host 未识别
+    // ⇒ 按 OpenAI 官方档位收窄。⚠️ 只在 **host 未识别**时生效——否则会与 host
+    // 侧判定打架（provider='openai' + Kimi host 时 host 更具体，见 hostScopedModes）。
+    allowed = OPENAI_MODES;
+  }
+
+  if (!allowed) return THINKING_OPTIONS;
+  const allowSet = new Set<ThinkingMode>(allowed);
+  return THINKING_OPTIONS.filter((o) => allowSet.has(o.value));
 }
 
 /**

@@ -1,6 +1,8 @@
 """Workflow runs 查询辅助（Sprint 4-A + V1.5 越层整改）。
 
 - :func:`list_runs(db_path, project_id)` → 列出某项目的所有 workflow_runs（按 started_at DESC）。
+  ⚠️ **不按项目过滤项目级 run**（``chapter_id IS NULL`` 的行跨项目返回）⇒ 调用方
+  须自行按 ``workflow_runs.project_id`` 过滤（详见该函数 docstring）。
 - :func:`get_run(db_path, run_id)` → 单 run + 节点明细（input/output/prompt_version/latency/error）。
 - :func:`get_workflow_name_for_run(db_path, run_id)` → 反查 run 对应的 workflow 名
   （JOIN workflow_runs + workflows）；被 workflows router 的 resume 端点调用。
@@ -37,7 +39,15 @@ def _get_connection(db_path: str | Path):
 
 
 def list_runs(db_path: str | Path, project_id: str) -> list[dict]:
-    """返回 project 下全部 workflow_runs（按 started_at DESC），不含节点明细。"""
+    """返回 project 下全部 workflow_runs（按 started_at DESC），不含节点明细。
+
+    ⚠️ **本函数不按项目过滤项目级 run**：SQL 的「``OR wr.chapter_id IS NULL``」
+    那一支会把**所有**项目的项目级 run（project-init / outline-batch 等无 chapter
+    的 run）一并返回——``project_id`` 参数只约束「带 chapter 的那支」。
+    ⇒ **调用方须自行按 ``workflow_runs.project_id`` 过滤**
+    （API 层的做法见
+    ``packages/core/api/routers/workflows/runs.py::_filter_runs_by_project``）。
+    """
     conn = _get_connection(db_path)
     try:
         # 通过 chapter→project 反查

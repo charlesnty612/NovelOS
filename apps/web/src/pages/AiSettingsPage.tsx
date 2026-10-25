@@ -27,7 +27,7 @@ import { PROVIDER_OPTIONS, PROVIDER_SHORT_LABEL } from '../components/providerOp
 import { useApiCall } from '../hooks/useApiCall';
 import { formatDateTime } from '../utils/format';
 import { ApiError } from '../api/client';
-import { CapabilityBindingsPanel } from './AiSettingsCapabilityBindings';
+import { CapabilityBindingsPanel, poolBaseUrlForProtocol } from './AiSettingsCapabilityBindings';
 import { BINDING_LABELS_FALLBACK, describeProfileInUse } from './AiSettingsBindingMeta';
 import {
   THINKING_BADGE_LABEL,
@@ -759,8 +759,14 @@ function ModelProfileFormModal({
   // 协议以**档案自己的选择**为准（两种模式同源，2026-10-24 协议下放后不再
   // 跟随连接派生）；地址仍按模式取（连接态取连接主地址）。
   const effectiveProvider = provider;
+  // 连接态的地址取法与后端 resolve_effective **同口径**：先按**档案协议**查连接
+  // 的协议地址池（pool[档案协议]），池里没有该协议 ⇒ 回退连接主地址。
+  // ⚠️ 漏查池 ⇒ 「同一网关下不同协议走不同平面」的复合场景（MiniMax 走
+  // anthropic 平面）会按**连接主地址**收窄思考档下拉 ⇒ 判错（档位缺失/多出）。
   const effectiveBaseUrl = isConnectionMode
-    ? (selectedConnection?.base_url ?? '')
+    ? (poolBaseUrlForProtocol(selectedConnection, effectiveProvider) ||
+       selectedConnection?.base_url ||
+       '')
     : params.baseUrl;
 
   const isMock = effectiveProvider === 'mock';
@@ -784,13 +790,29 @@ function ModelProfileFormModal({
     ? connectionId !== ''
     : isMock || (isAnthropic || isOllama) || baseUrlFilledForFetch;
 
+  // 探针要带的协议（= 档案声明的协议）。
+  // ⚠️ 只发**已知协议**（PROVIDER_OPTIONS 是前端协议清单的单点）：档案的 provider
+  //   列写时无枚举约束（存量可能是自由字符串），把未知值发过去后端会 422
+  //   ⇒ 这类行按旧口径走（连接主协议），存量零回归。
+  const probeProtocol = PROVIDER_OPTIONS.some((o) => o.value === provider)
+    ? provider
+    : undefined;
+
   const handleFetchModels = async () => {
     setErr(null);
     setFetchHint(null);
     setFetchingModels(true);
     try {
       const resp = isConnectionMode
-        ? await modelProfilesApi.fetchAvailableModels({ connection_id: connectionId })
+        ? await modelProfilesApi.fetchAvailableModels({
+            connection_id: connectionId,
+            // 协议是**档案级属性**（2026-10-24 协议下放）：连接态拉模型必须带上
+            // 档案当前声明的协议 —— 后端据此从连接的「协议地址池」取**该协议的
+            // 平面地址**（pool[协议] or 连接.base_url），与运行期生效口径一致；
+            // 不带则回退连接主协议（存量行为不变）。
+            // ⚠️ 这里的 provider 就是档案表单的「接口类型」字段（= 协议）。
+            provider: probeProtocol,
+          })
         : await modelProfilesApi.fetchAvailableModels({
             provider,
             ...(params.baseUrl.trim() ? { base_url: params.baseUrl.trim() } : {}),

@@ -51,6 +51,13 @@ async def _make_project(app, name: str = "批量续规划 API 测试书") -> str
     return r.json()["project_id"]
 
 
+async def _list_run_ids(app, project_id: str) -> set[str]:
+    """列出该项目的 run_id 集合（M7 用例用）。"""
+    r = await _request(app, "GET", f"/api/projects/{project_id}/runs")
+    assert r.status_code == 200, r.text
+    return {row["run_id"] for row in r.json()}
+
+
 def _planner_script(start: int, count: int) -> list[str]:
     seeds = [
         {
@@ -363,5 +370,61 @@ def test_outline_batch_api_cross_project_not_blocked_and_detail_scoped(tmp_path:
                 conn.close()
             assert b_numbers == [1, 2, 3], b_numbers
             assert a_rows["n"] == 0, "A 的起跑应全部被守卫拦截，不得建章"
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# M7（2026-10-24）：项目级 run 的**列表可见性**按项目隔离
+# ---------------------------------------------------------------------------
+
+
+def test_outline_batch_run_is_scoped_to_its_project_end_to_end(tmp_path: Path):
+    """⭐ M7 端到端：真实起跑路径产出的项目级 run 只出现在**本项目**的 run 列表里。
+
+    直插行的版本在 ``tests/api/test_run_list_project_scope.py``；本用例走**真实
+    链路**（POST outline-batch ⇒ 引擎写 0037 归属列 ⇒ GET /projects/{pid}/runs），
+    证明归属列在生产路径上确实被写入 —— 否则列表过滤会退化成「全可见」。
+
+    判别力：撤掉列表端的归属过滤 ⇒ A 的列表里会出现 B 的 run_id ⇒ 必红。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid_a = await _make_project(app, "列表隔离测试·A")
+            pid_b = await _make_project(app, "列表隔离测试·B")
+
+            run_ids = {}
+            for pid in (pid_a, pid_b):
+                r = await _request(
+                    app,
+                    "POST",
+                    f"/api/projects/{pid}/outline-batch",
+                    json={
+                        "chapter_count": 2,
+                        "mock_providers": {
+                            "outline_batch_planner": _planner_script(1, 2)
+                        },
+                    },
+                )
+                assert r.status_code == 201, r.text
+                run_ids[pid] = r.json()["run_id"]
+
+            listed_a = await _list_run_ids(app, pid_a)
+            listed_b = await _list_run_ids(app, pid_b)
+
+            assert run_ids[pid_a] in listed_a, "A 的 run 必须出现在 A 的列表里"
+            assert run_ids[pid_b] not in listed_a, (
+                "A 的 run 列表不得含 B 的项目级 run（M7 跨项目可见缺陷）"
+            )
+            assert run_ids[pid_b] in listed_b, "B 的 run 必须出现在 B 的列表里"
+            assert run_ids[pid_a] not in listed_b, (
+                "B 的 run 列表不得含 A 的项目级 run（M7 跨项目可见缺陷）"
+            )
+
+            # 等两个 run 走到终态（避免测试进程结束时后台线程仍在写库）
+            for pid in (pid_a, pid_b):
+                await _wait_run_terminal(app, run_ids[pid])
 
     asyncio.run(run())

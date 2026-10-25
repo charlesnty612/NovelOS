@@ -6,8 +6,9 @@
 （AGENTS 坑区「自指断言恒真」的同族：断言一个环境相关常量，机器一变就红）。
 ⇒ 本文件只断言**可判定的机制事实**：
 
-1. 脚本**默认不写仓库 ``data/``**（临时库落在仓库 ``tmp/`` 或系统临时目录）；
-2. 显式传入**活库路径** ⇒ 拒绝并返回**非 0 退出码**；
+1. 脚本**默认不写仓库 ``data/``**、也**不写仓库 ``tmp/``**（临时库落在**仓外**
+   系统临时目录）；
+2. 显式传入**活库路径 / 仓内路径** ⇒ 拒绝并返回**非 0 退出码**；
 3. 合成夹具确实造出 N 章、且**章号连续**（1..N）；
 4. **命中与未命中两条路径都跑通**，且两者返回的 payload **内容不同**
    —— 这是防「脚本其实每次都 miss 却报告成 hit」的自指断言；
@@ -15,18 +16,29 @@
 6. ``--db`` 的父路径**不可用**（不存在 / 是普通文件）⇒ 统一报错 + **退出码 2**
    + **零 traceback**（F-4：早先判据 ``exists()`` 对「父路径是文件」也为真 ⇒
    放行 ⇒ 建库时抛未捕获的 ``sqlite3.OperationalError`` ⇒ 栈甩到用户脸上）。
+7. **专属临时目录的生死是「正反一对」**：默认模式（``--assembly both`` ⇒ **父进程
+   派生子进程**；删除责任只在父进程）跑完目录**必须消失**；带 ``--keep-db`` 时目录
+   **必须留存**（只有前者时，把收尾改成无条件 rmtree 一样绿 ⇒ 测不到那个开关）。
 
 判别力说明
 ----------
 第 4 条用**两条独立证据**（探针的 ``hit`` 标志 + payload 内容差异），
 任何「只记 hit 不记 miss」或「只查存在不查值」的弱写法都过不了。
+
+⚠️ **第 1 条的历史（2026-10-25 修复）**：默认落点原是**仓内** ``<仓库根>/tmp/``
+⇒ 被库落点闸（``packages/core/db.py::check_db_path``：仓内只允许 ``data/`` 子树）
+拒绝 ⇒ 脚本 rc=1 + 裸栈。⇒ 默认落点改为**仓外**系统临时目录；本条的断言随之
+**收紧**（旧写法「仓库 tmp/ 或系统临时目录」二选一 ⇒ 现在**只允许仓外**，且
+**仓内 ``tmp/`` 零残留**）。
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -34,6 +46,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "measure_cache_key_perf.py"
 DATA_DIR = REPO_ROOT / "data"
+#: 仓内 ``tmp/``——**曾经**是脚本的默认临时库落点（2026-10-25 起不再允许）。
+REPO_TMP_DIR = REPO_ROOT / "tmp"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
@@ -81,8 +95,17 @@ def _load_fixture_module():
 
 
 def test_default_run_uses_temp_db_and_never_touches_data_dir(tmp_path: Path) -> None:
-    """默认跑一遍（无 ``--db``）：临时库必须在 ``tmp/`` 或系统临时目录，``data/`` 零变化。"""
-    before = _snapshot(DATA_DIR)
+    """默认跑一遍（无 ``--db``）：临时库必须落在**仓外**系统临时目录。
+
+    ⚠️ **仓内不是临时位的合法落点**（2026-10-25 修复）：库落点闸
+    ``packages/core/db.py::check_db_path`` 只允许仓内 ``data/`` 子树 ⇒ 原先的
+    仓内 ``tmp/`` 默认落点被核心层拒绝（脚本 rc=1 + 裸栈）。
+
+    断言三头并查（落点 + ``data/`` 零变化 + **仓内 ``tmp/`` 零残留**）：
+    只查落点不够——脚本完全可能「落点在仓外、同时在仓内 ``tmp/`` 留垃圾」。
+    """
+    before_data = _snapshot(DATA_DIR)
+    before_tmp = _snapshot(REPO_TMP_DIR)
 
     proc = _run_script("--chapters", "4", "--iterations", "2", "--warmup", "1",
                        "--assembly", "director", "--no-ablation")
@@ -90,17 +113,113 @@ def test_default_run_uses_temp_db_and_never_touches_data_dir(tmp_path: Path) -> 
     payload = json.loads(proc.stdout)
 
     db_path = Path(payload["results"][0]["db_path"]).resolve()
-    tmp_root = (REPO_ROOT / "tmp").resolve()
-    import tempfile
-
     temp_root = Path(tempfile.gettempdir()).resolve()
-    assert tmp_root in db_path.parents or temp_root in db_path.parents, (
-        f"默认临时库必须落在仓库 tmp/ 或系统临时目录，实际：{db_path}"
+    assert temp_root in db_path.parents, (
+        f"默认临时库必须落在仓外系统临时目录，实际：{db_path}"
+    )
+    assert REPO_ROOT.resolve() not in db_path.parents, (
+        f"默认路径不得落在软件仓内（库落点闸只允许仓内 data/ 子树），实际：{db_path}"
     )
     assert DATA_DIR.resolve() not in db_path.parents, f"默认路径不得指向 data/：{db_path}"
 
-    after = _snapshot(DATA_DIR)
-    assert after == before, "脚本运行期间 data/ 目录发生了变化（禁写活库）"
+    assert _snapshot(DATA_DIR) == before_data, "脚本运行期间 data/ 目录发生了变化（禁写活库）"
+    assert _snapshot(REPO_TMP_DIR) == before_tmp, "脚本运行期间仓内 tmp/ 目录发生了变化（应零残留）"
+
+    # 专属临时目录跑完必须**整体消失**（``--keep-db`` 除外）⇒ 不留垃圾。
+    # 判别力：撤掉收尾的 ``shutil.rmtree`` ⇒ 本断言必红（目录仍在）。
+    work_dir = db_path.parent
+    assert not work_dir.exists(), (
+        f"临时库专属目录跑完必须清空（不留垃圾），实际仍在：{work_dir}"
+    )
+
+
+def test_dedicated_temp_dir_is_removed_under_default_both_assembly() -> None:
+    """默认装配模式（``--assembly both`` ⇒ 父进程派生子进程）下，目录**跑完必须消失**。
+
+    ⚠️ **为什么要单独一条**：既有「专属临时目录跑完必须消失」断言**只在
+    ``--assembly director`` 下跑**——而默认参数就是 ``both``（父进程派生子进程各测
+    一个装配器）⇒ 只测 director 等于**没测默认路径**。
+
+    ⚠️ **形态差异（本模式的要害）**：专属目录由**父进程**创建
+    （``_default_base_db`` ⇒ ``tempfile.mkdtemp``）；子进程拿到的是**目录内**的
+    ``--db`` 路径（``owned_dir`` 为 None ⇒ **子进程自己不清**）⇒ 目录的删除责任
+    **只在父进程**（``main()`` 的 ``finally``）⇒ 父进程收尾漏了就残留（子进程跑过
+    也没用）。
+
+    判别力：撤掉父进程 ``finally`` 里的 ``shutil.rmtree(owned_dir, ...)``
+    ⇒ 本用例必红（目录仍在）。
+    """
+    proc = _run_script(
+        "--chapters", "2", "--iterations", "1", "--warmup", "0", "--no-ablation",
+    )
+    assert proc.returncode == 0, (
+        f"脚本失败：\nstdout={proc.stdout[-2000:]}\nstderr={proc.stderr[-2000:]}"
+    )
+    payload = json.loads(proc.stdout)
+    db_path = Path(payload["results"][0]["db_path"]).resolve()
+    work_dir = db_path.parent
+    assert work_dir.name.startswith("novelos_cache_key_perf_"), (
+        f"默认落点应是脚本自建的专属目录，实际：{work_dir}"
+    )
+    assert not work_dir.exists(), (
+        f"默认装配模式下专属临时目录跑完必须清空（不留垃圾），实际仍在：{work_dir}"
+    )
+
+
+def test_keep_db_preserves_the_dedicated_temp_dir() -> None:
+    """``--keep-db`` ⇒ 专属临时目录**必须留存**（与「跑完必须消失」构成正反一对）。
+
+    ⚠️ **为什么要正反一对**：只有「必须消失」那条时，把收尾改成**无条件** rmtree
+    也一样绿 ⇒ 该条**测不到**「``--keep-db`` 这个开关有没有真的起作用」。
+    ⇒ 本条钉住反面：不带 ``--keep-db`` 时目录消失、带了就**留存**。
+
+    判别力：撤掉 ``main()`` 收尾的 ``not args.keep_db`` 那个条件（无条件 rmtree）
+    ⇒ 本用例必红（目录被删）。
+    """
+    proc = _run_script(
+        "--chapters", "2", "--iterations", "1", "--warmup", "0",
+        "--assembly", "director", "--no-ablation", "--keep-db",
+    )
+    assert proc.returncode == 0, (
+        f"脚本失败：\nstdout={proc.stdout[-2000:]}\nstderr={proc.stderr[-2000:]}"
+    )
+    payload = json.loads(proc.stdout)
+    db_path = Path(payload["results"][0]["db_path"]).resolve()
+    work_dir = db_path.parent
+    assert work_dir.name.startswith("novelos_cache_key_perf_"), (
+        f"--keep-db 保留的应是脚本自建的专属目录，实际：{work_dir}"
+    )
+    assert work_dir.exists(), (
+        f"--keep-db 必须保留专属临时目录（留给人工查），实际已被删除：{work_dir}"
+    )
+    assert db_path.exists(), f"--keep-db 必须保留临时库本体：{db_path}"
+    # 收尾：``--keep-db`` 的语义就是「留给人工查」，测试自己不留垃圾。
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def test_repo_local_db_path_is_refused_cleanly() -> None:
+    """``--db`` 指向**仓内非 ``data/``** ⇒ 干净拒绝（退出码 3 + 零 traceback）。
+
+    与库落点闸（``packages/core/db.py::check_db_path``：**仓内只允许 ``data/``
+    子树**）同口径。脚本层提前拦 ⇒ 不把核心层的 ``RepoLocalDbPathError`` 裸栈
+    甩给用户（与本文件 F-4/F-6「零 traceback」纪律一致）。
+
+    ⚠️ 反向不变量由 :func:`test_default_run_uses_temp_db_and_never_touches_data_dir`
+    守住（默认落点确实在仓外）——两条合起来才防「一刀切拒掉一切」。
+    """
+    target = REPO_TMP_DIR / "repo_local_probe.db"
+    before_tmp = _snapshot(REPO_TMP_DIR)
+    proc = _run_script("--db", str(target), "--chapters", "2", "--iterations", "1",
+                       "--warmup", "0")
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, (
+        f"仓内临时库路径必须被拒绝，实际退出码 {proc.returncode}\n{combined[-2000:]}"
+    )
+    assert "Traceback" not in combined, f"不得把 traceback 甩给用户：\n{combined[-2000:]}"
+    assert "拒绝" in proc.stderr, f"stderr 应说明拒绝原因：{proc.stderr[-500:]}"
+    assert not target.exists(), "被拒绝的路径不得被创建"
+    assert _snapshot(REPO_TMP_DIR) == before_tmp, "仓内 tmp/ 不得留下任何临时库残留"
 
 
 def test_explicit_tmp_db_path_is_honoured(tmp_path: Path) -> None:

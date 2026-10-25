@@ -1,7 +1,7 @@
 # scripts（运维脚本）
 
-> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 **37 个 `scripts/*.py` = 35 个 CLI 入口 + 2 个共用模块**：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke、卷纲体检与开卷、章节量产、凭据收敛、备份恢复、缓存键性能实测等），CLI 入口均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
-> 状态：现行 `scripts/*.py` 共 **37** 个（2026-10-23 实测 `ls scripts/*.py` + 逐个判是否含 `main()`/`__main__`）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
+> 职责：NovelOS 后端的本地运维 / 工具 CLI（现行 **39 个 `scripts/*.py` = 36 个 CLI 入口 + 3 个共用模块**：迁移、开发服务器、内容同步、备份维护、评估回归、schema 导出、长跑与 smoke、卷纲体检与开卷、章节量产、凭据收敛、备份恢复、缓存键性能实测等），CLI 入口均可通过 `python scripts/<name>.py` 直接运行（脚本内部自动 `sys.path.insert(0, REPO_ROOT)`）。
+> 状态：现行 `scripts/*.py` 共 **39** 个（2026-10-25 实测 `ls scripts/*.py` + 逐个判是否含 `main()`/`__main__`：含 `__main__` 的 **36** 个 = CLI 入口，不含的 **3** 个 = 共用模块 `_codegen_check.py` / `_guard_secrets.py` / `guard_repo_write_path.py`）；migrate.py / serve.py 为最小起点，其余见本文件后续分节。
 
 ## 职责与边界
 
@@ -24,7 +24,7 @@
 | `scripts/migrate.py` | `scripts/migrate.py:16` | `main() -> int` | 执行 SQLite 迁移并打印 `applied / skipped / tables / db` |
 | `scripts/serve.py` | `scripts/serve.py:31` | `main() -> int` | 启动 uvicorn，host/port 取自 `Settings` |
 
-### 脚本总览（现行 35 个 CLI 入口 + 2 个共用模块）
+### 脚本总览（现行 36 个 CLI 入口 + 3 个共用模块）
 
 | 类别 | 脚本 |
 |---|---|
@@ -35,7 +35,7 @@
 | 评估 / 长跑探针 | `eval_regression.py`、`m1_long_run.py`、`m1_report.py`、`m2_judge.py`、`real_llm_e2e.py`、`ai_pattern_recall.py`（AI 味算子召回率脚手架） |
 | Schema / 前端类型 | `export_openapi.py`、`gen_frontend_types.py` |
 | 端到端 / 冒烟 | `smoke_e2e.py` |
-| 一致性核查 | `check_state_sync.py`、`detector_evidence_check.py`（检测器证据表 vs 代码实际值，只读比对，退出码 0/1/2） |
+| 一致性核查 | `check_state_sync.py`、`detector_evidence_check.py`（检测器证据表 vs 代码实际值，只读比对，退出码 0/1/2）、`check_thinking_modes_consistency.py`（**思考档前后端清单一致性**：后端 `THINKING_MODES` vs 前端 `THINKING_OPTIONS`，只读静态解析，退出码 0/1/2；⚠️ **只校验「两侧逐字相等」，不约束档数**——8 档封闭集由 `tests/unit/test_capability_thinking_override.py` 钉住） |
 | 人类基线代理 | `human_baseline_synthetic.py`（**自造语料**校准器，**不是**人类基线；只证明算子活着，不得用它改阈值） |
 | 闸门 / 突变 | `tree_fingerprint.py`（源码树指纹，闸门前后各跑一次）、`mutation_harness.py`（21 条硬编码突变，前置脚本）、`mutation_probe.py`（**通用探针**：临时改一处 → 跑定向测试 → 报「红了哪几条」→ 逐字节还原；带「执行器在飞即拒绝」的闸） |
 | 卡死 run 巡检 | `inspect_stalled_runs.py`（PAUSED/RUNNING/PENDING 逐条 + 审批实质内容摘要，只读；`--apply` 故意不实现，见下文专节） |
@@ -47,7 +47,7 @@
 | 凭据 / 仓库防护 | `check_content_repo_guard.py`（**只读**巡检：模式一 = 内容仓 push 防护；模式二 `secrets` = 凭据收敛 D-18，库内明文 api_key → `secrets.json` + 清理悬空条目，**两个动作各自独立**、`--apply` 是写权限总闸。⚠️ 2026-10-23 晚按「>1500 行要拆」拆成 **门面 863 行 + 实现 `scripts/_guard_secrets.py` 1040 行**（行数随脚本变动，以实测为准：`(Get-Content scripts\check_content_repo_guard.py).Count` ＝ **总行数**；`Get-Content … | Measure-Object -Line` 只计**非空行**（本门面 770），两者不等）；`scripts/` 不是包 ⇒ 门面把**本目录**塞进 `sys.path` 后 `import _guard_secrets` ⇒ **CLI 形状不变**）、`check_orphan_relationships.py`（**只读**诊断孤儿 `relationships` 行——端点 FK 已被迁移 0022 摘掉 ⇒ `PRAGMA foreign_key_check` **查不出来**） |
 | 备份恢复 | `restore_db.py`（从**加密备份**恢复主库：原子替换 + 恢复后校验 + 残留 `-wal`/`-shm` 检出——手工拼 openssl 曾实测出「恢复静默失效而 `integrity_check` 仍报 ok」） |
 | 性能实测 | `measure_cache_key_perf.py`（装配缓存键的命中/未命中耗时 + 键构造/查缓存/装配三段开销；**只用临时库 + 合成夹具**，传活库路径直接拒绝并非 0 退出） |
-| 共用模块（非 CLI） | `guard_repo_write_path.py`（**写盘守卫**：软件仓内只允许写 `data/` 与 `tmp/`；痕迹仓根解析）、`_codegen_check.py`（codegen 产物漂移校验共用件：换行归一 + 首个差异摘要 + 产物比对） |
+| 共用模块（非 CLI） | `guard_repo_write_path.py`（**写盘守卫**：软件仓内只允许写 `data/` 与 `tmp/`；痕迹仓根解析）、`_codegen_check.py`（codegen 产物漂移校验共用件：换行归一 + 首个差异摘要 + 产物比对）、`_guard_secrets.py`（`check_content_repo_guard.py` 的 `secrets` 模式**实现件**：门面把本目录塞进 `sys.path` 后 `import _guard_secrets` ⇒ **CLI 形状不变**；本身不含 `__main__` ⇒ 不是 CLI 入口） |
 
 ### `scripts/migrate.py` 输出格式
 
@@ -473,6 +473,14 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 
 ⚠️ **`--apply` 不是新 flag**（既有），但它在 `secrets` 模式里的**角色变了**：那里它是**写权限总闸**
 ——无 `--apply` ⇒ **零写入**（两个动作各自默认 dry-run）；**单独 `--apply` = 迁移**（向后兼容）。
+⚠️ **「单独 `--apply`」的确切语义 = 「迁移 + 执行」**（不是「只迁移」）——
+判据见 `scripts/check_content_repo_guard.py:795-796`：
+`want_prune = bool(args.prune_dangling)` /
+`want_migrate = bool(args.migrate) or (bool(args.apply) and not want_prune)`
+⇒ 只给 `--apply`（不给 `--migrate` / `--prune-dangling`）⇒ `want_prune=False`、
+`want_migrate=True` ⇒ **隐含迁移**且迁移**真的写入**（`apply=True` 透传给迁移动作）。
+⇒ **连带**：给了 `--prune-dangling` 时 `not want_prune` 为假 ⇒ `--apply --prune-dangling`
+**只 prune、不 migrate**（两个动作互斥，不是叠加）。
 
 ⚠️ **`--out` / `--export` 与 `--write-docs` 同时给出 ⇒ 两份副本都落**（并打告警）。
 此前 `--out` 会**静默吞掉** `--write-docs` ⇒ 痕迹仓副本没落且**零告警** ⇒ 用户以为两份都落了。
@@ -515,14 +523,32 @@ python scripts/inspect_stalled_runs.py --export <path>/stalled_runs_<date>.json
 
 ### 逃逸口（默认全关）
 
-⚠️ **（2026-10-25 复算）下列三个 flag 属旧 CLI 形状，当前 `check_content_repo_guard.py` 实现里已不存在**
-（现行 flag 只有 `--content-dir` / `--db` / `--secrets-file` / `--apply` / `--migrate` /
-`--prune-dangling` / `--force-all-dangling` / `--json`）⇒ **本段暂留作历史口径，待下一批清理**，
-勿据此传参。
+**本节口径 = `check_content_repo_guard.py` 现行 CLI**（口径同上文退出码表：**2026-10-25 实测复算**，
+逐条对照 `scripts/check_content_repo_guard.py::_build_parser` 的 `add_argument`）——
+**共 8 个 flag + 1 个可选位置参数**，下表逐条一一对应；**本脚本不认表外的 flag**，多传会被 argparse 拒（退出码 2）。
 
-1. `--artifacts-dir <path>`（推荐）或 `NOVELOS_ARTIFACTS_DIR` env ⇒ 指定痕迹仓根；
-2. `--allow-software-repo-out` ⇒ 明确接受落软件仓的风险（打 `[警告]`）；
-3. `--allow-software-repo-key` ⇒ 仅 `backup_db.py`：允许**密钥**落软件仓（独立口）。
+| 参数 | 一句话用途 |
+|---|---|
+| `mode`（位置参数，可选，默认 `push`） | 巡检模式：`push` = 内容仓 push 防护（默认）｜`secrets` = 凭据收敛（D-18） |
+| `--content-dir <path>` | 内容仓根目录（默认 `D:/zcodeproject/NovelOS-Content`） |
+| `--db <path>` | 运行库路径（`secrets` 模式用；默认 `<仓库根>/data/novelos.db`） |
+| `--secrets-file <path>` | `secrets.json` 路径（`secrets` 模式用；默认 `$NOVELOS_SECRETS_FILE` 或仓库根 `secrets.json`） |
+| `--apply` | **写权限总闸**：让**本次请求的**写动作真的执行（默认全是 dry-run：只报「将要做什么」，不写文件、不改库）。⚠️ **单独给出（不给 `--migrate` / `--prune-dangling`）⇒ 等价「迁移 + 执行」**（隐含迁移且真写入），判据见 `scripts/check_content_repo_guard.py:795-796`（`want_migrate = migrate or (apply and not prune)`）⇒ **给了 `--prune-dangling` 时只 prune、不 migrate**（互斥非叠加） |
+| `--migrate` | `secrets` 模式：请求「凭据迁移」动作（把库内明文 api_key 搬进 `secrets.json` 并清空库内明文）——默认 dry-run |
+| `--prune-dangling` | `secrets` 模式：请求「清理悬空条目」动作（删掉 `secrets.json` 里对不上任何档案/连接/provider 的死密钥）——默认 dry-run，⚠️ **只动 `secrets.json`，不动库内明文** |
+| `--force-all-dangling` | **归属确认**：显式声明「`--db` 指向的就是**本项目**的运行库」⇒ 归属闸门一律放行；默认**拒绝**（退出码 2、零落盘、零备份）——「全部键都死」与「`--db` 指到了别的项目的库」在数据上**不可区分**，后者会**一次清空整个凭据库**却仍报「合规」 |
+| `--json` | 机器可读输出（JSON） |
+
+⚠️ **四个「放行口」默认全关**：无 `--apply` ⇒ **零写入**（`--migrate` / `--prune-dangling` 各自默认 dry-run）｜
+`--force-all-dangling` 默认**拒绝**（归属无据 ⇒ 不可判 ⇒ 退出码 2、零落盘）⇒
+**不带这四个 flag 时，本脚本只巡检、不写任何文件、不改库**。
+⚠️ **其它脚本的同类逃生口**（把产物写回软件仓 / 允许密钥落软件仓 / 指定痕迹仓根等）见上文
+《新增 flag 清单》表——**该表中属于其它脚本的 4 个**（`--allow-software-repo-out` /
+`--allow-software-repo-key` / `--write-docs` / `--artifacts-dir`）**不属本脚本**，
+传给本脚本会被 argparse 拒（退出码 2）。
+⚠️ **同表里属于本脚本的 3 个**（`--migrate` / `--prune-dangling` /
+`--force-all-dangling`）**不在此列**——它们的用途见**本节（逃逸口）下表**，
+别按「别的脚本的 flag」去读（传了是合法的，但语义要按下表读）。
 
 ### 测试
 

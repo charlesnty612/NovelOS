@@ -1674,7 +1674,7 @@
     "/api/model-connections/{connection_id}/test": {
       "post": {
         "summary": "Test Model Connection",
-        "description": "探测连接的可达性。\n\n打 ``GET {models_url}``（缺省 ``{base_url}/models``）。\n⚠️ **不降级到 chat 探测**（连接层没有 model 概念）⇒ 端点 404/405/501 时\n如实报「该端点不提供模型列表」并给出可执行指引，**不假成功**。\n（档案侧的 ``/test`` 有 model，可以降级到极小 chat 请求探测。）",
+        "description": "探测连接的可达性。\n\n打 ``GET {models_url}``：显式配置的 ``models_url`` **恒优先**；缺省则按\n``{base}{协议路径}`` 拼（anthropic ⇒ ``/v1/models``、ollama ⇒ ``/api/tags``、\n其余 ⇒ ``/models``，路径表与档案级 ``available-models`` 共用同一张表）。\n⚠️ **不降级到 chat 探测**（连接层没有 model 概念）⇒ 端点 404/405/501 时\n如实报「该端点不提供模型列表」并给出可执行指引，**不假成功**。\n（档案侧的 ``/test`` 有 model，可以降级到极小 chat 请求探测。）\n\n**可选协议参数**（2026-10-24 协议下放）：``?protocol=anthropic`` ⇒ base_url\n按连接的**协议地址池**取（``pool[protocol] or 连接.base_url``，与运行期\n:func:`packages.core.model_router.effective.resolve_effective` 同口径）\n⇒ 可单独探测多协议网关的某个协议面。\n⚠️ 未知协议 ⇒ **422**（静默回落到主协议 = 打到错误的协议面）。\n\n⚠️ **不传 ``protocol`` 时也查池**（2026-10-24 审查修复 M4）：取址口径 =\n``pool[连接主协议] or 连接.base_url`` ⇒ 与 ``available-models`` 侧\n「不传协议 ⇒ 连接主协议的平面地址」**同口径**。\n旧行为直接用连接 ``base_url``、从不查池 ⇒ 同一条连接在两处打**不同地址**\n（池里有主协议条目时）。",
         "operationId": "test_model_connection_api_model_connections__connection_id__test_post",
         "parameters": [
           {
@@ -1684,6 +1684,22 @@
             "schema": {
               "type": "string",
               "title": "Connection Id"
+            }
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Protocol"
             }
           }
         ],
@@ -3430,7 +3446,7 @@
           "model_profiles"
         ],
         "summary": "List Available Models",
-        "description": "按 ``provider / base_url / api_key / profile_id`` 调用各家模型列表接口。\n\n用途：模型档案编辑表单「拉取模型」按钮的支撑端点。后端代理请求以\n避免浏览器跨域、CORS 与密文外带；前端只看到列表不接触 key。\n\n请求体（所有键均可选除 ``provider``）：\n- ``provider`` (str, 必填) —— ``mock / openai_compatible / anthropic / ollama`` 等。\n- ``base_url`` (str, 可选) —— 若空，按 provider 选用官方默认；OpenAI 兼容 / 自建\n  端点必须提供。\n- ``api_key`` (str, 可选) —— 明文直接用；缺省走 ``resolve_api_key``：先查档案\n  ``profile_id``、再 ``provider`` 默认 env（``NOVELOS_API_KEY_<PROVIDER>``）。\n- ``profile_id`` (str, 可选) —— 已有档案 ID；用于上面提到的解析优先级。\n- ``connection_id`` (str, 可选) —— **连接路径**（2026-10-21 批次十五）：\n  provider / base_url / api_key / headers / models_url **全部取自该连接**；\n  给了连接时 ``provider`` 不再必填。\n\n⚠️ **不传 ``connection_id`` 时的行为与改造前逐字相同**（inline 路径保留）。\n\n错误处理：\n- ``400`` —— 必填缺失 / 该 provider 必须有 key 但解析不到；detail 仅文案不含 key。\n- ``502`` —— 拉取失败（超时、非 2xx、解析坏 JSON）。detail 仅文案不含 key。\n\n响应：\n- ``{\"models\": [\"id1\", \"id2\", ...]}`` —— 排序去重后的字符串数组。",
+        "description": "按 ``provider / base_url / api_key / profile_id`` 调用各家模型列表接口。\n\n用途：模型档案编辑表单「拉取模型」按钮的支撑端点。后端代理请求以\n避免浏览器跨域、CORS 与密文外带；前端只看到列表不接触 key。\n\n请求体（所有键均可选除 ``provider``）：\n- ``provider`` (str, 必填) —— ``mock / openai_compatible / anthropic / ollama`` 等。\n- ``base_url`` (str, 可选) —— 若空，按 provider 选用官方默认；OpenAI 兼容 / 自建\n  端点必须提供。\n- ``api_key`` (str, 可选) —— 明文直接用；缺省走 ``resolve_api_key``：先查档案\n  ``profile_id``、再 ``provider`` 默认 env（``NOVELOS_API_KEY_<PROVIDER>``）。\n- ``profile_id`` (str, 可选) —— 已有档案 ID；用于上面提到的解析优先级。\n- ``connection_id`` (str, 可选) —— **连接路径**（2026-10-21 批次十五）：\n  base_url / api_key / headers / models_url **取自该连接**；\n  给了连接时 ``provider`` 不再必填。\n\n**协议（= 档案协议）在连接路径下由请求方给出**（2026-10-24 协议下放）：\n\n- ``provider`` —— 档案声明的协议（前端档案表单的「接口类型」字段）。\n  **缺省回退连接的主协议**（存量行为不变）。\n- ``protocol`` —— ``provider`` 的显式别名（同义；同传且不一致 ⇒ 422）。\n  ⚠️ 仅在 ``connection_id`` 路径下有意义（inline 路径的协议就是 ``provider``）。\n- 取址口径与运行期 :func:`effective.resolve_effective` **逐字一致**：\n  ``pool[协议] or 连接.base_url`` ⇒ 档案声明的协议与连接主协议不同时，\n  拉模型打到的是**该协议自己的平面地址**（协议地址池），不是连接主地址。\n\n⚠️ **不传 ``connection_id`` 时的行为与改造前逐字相同**（inline 路径保留）。\n\n错误处理：\n- ``400`` —— 必填缺失 / 该 provider 必须有 key 但解析不到；detail 仅文案不含 key。\n- ``422`` —— 协议名非法 / ``protocol`` 与 ``provider`` 冲突 / 连接不存在。\n- ``502`` —— 拉取失败（超时、非 2xx、解析坏 JSON）。detail 仅文案不含 key。\n\n响应：\n- ``{\"models\": [\"id1\", \"id2\", ...]}`` —— 排序去重后的字符串数组。",
         "operationId": "list_available_models_api_model_profiles_available_models_post",
         "requestBody": {
           "content": {
@@ -6014,7 +6030,7 @@
           "story_state"
         ],
         "summary": "Promote Branch",
-        "description": "把分支全部 commits 合并为单个 delta，在 main 上提交（state-delta-v0.md §6.3）。\n\n⚠️ 这里带的是 ``response_model_exclude_unset=True``，**不是** ``_exclude_none``——\n两者解决的是相反的问题，都不能互换（详见 ``story_state/models.py`` 里\n``BranchPromoteResponse`` 的 docstring 与 ``_drop_if_none`` 的 docstring）：\n\n* 本端点有**两个形状**（空分支 7 键 / 非空分支 8 键），三个键在其中一侧**缺席**。\n  不带 ``exclude_unset`` 时 Pydantic 会拿默认值把缺席的键**补成 ``null``**——\n  实测空分支响应因此从 7 键变成 9 键（凭空多出 ``promoted_from`` / ``snapshot_ref``），\n  那是**加 response_model 本身引入的契约变更**。\n* 而 ``commit_id`` / ``delta_id`` 在空分支形状里是**值为 null 的真键**。\n  用 ``_exclude_none`` 会把它们**抹掉**（键从有变无）。\n\n``exclude_unset`` 只看「生产方有没有给这个键」，两个需求同时满足。",
+        "description": "把分支全部 commits 合并为单个 delta，在 main 上提交（state-delta-v0.md §6.3）。\n\n⚠️ 这里带的是 ``response_model_exclude_unset=True``，**不是** ``_exclude_none``——\n两者解决的是相反的问题，都不能互换（详见 ``story_state/models.py`` 里\n``BranchPromoteResponse`` 的 docstring 与 ``_drop_if_none`` 的 docstring）：\n\n* 本端点有**两个形状**（空分支 7 键 / 非空分支 8 键），三个键在其中一侧**缺席**。\n  不带 ``exclude_unset`` 时 Pydantic 会拿默认值把缺席的键**补成 ``null``**——\n  实测空分支响应因此从 7 键变成 9 键（凭空多出 ``promoted_from`` / ``snapshot_ref``），\n  那是**加 response_model 本身引入的契约变更**。\n* 而 ``commit_id`` / ``delta_id`` 在空分支形状里是**值为 null 的真键**。\n  用 ``_exclude_none`` 会把它们**抹掉**（键从有变无）。\n\n``exclude_unset`` 只看「生产方有没有给这个键」，两个需求同时满足。\n\n⚠️ **2026-10-24（响应版本修复）**：``state_version`` = **promote 提交后 DB 里的\n最新 ``story_states.state_version``**（= ``branches.promote_branch`` 里\n``bump_project_state_version`` 的返回值）。修前它取的是「最后一次重放落在\nmain 上的那一版」，**比 DB 真值低 1**（少算 promote 自身的版本推进：分支\n``ACTIVE→MERGED`` 改了 ``branches`` 表 ⇒ 该表进 director 装配 payload ⇒\n必须推 version）⇒ 前端展示的版本号失真。**前端不需要任何 +/- 补偿。**",
         "operationId": "promote_branch_api_projects__project_id__branches__branch_id__promote_post",
         "parameters": [
           {
@@ -6479,7 +6495,7 @@
           "workflows"
         ],
         "summary": "Start Outline Batch",
-        "description": "outline-batch：基于已写内容批量规划下一批章节并建为 PLANNED 章。",
+        "description": "outline-batch：基于已写内容批量规划下一批章节并建为 PLANNED 章。\n\n**异步起跑**（M11 修复，2026-10-24）：201 响应在 run 行落库后立即返回\n（``status=\"RUNNING\"``），三个节点在后台线程推进 ⇒ HTTP 不挂在 LLM 上。\n真终态（COMPLETED / FAILED）由客户端轮询 ``GET /api/runs/{run_id}`` 取。\n\n⚠️ 响应里的 ``status=\"RUNNING\"`` 是**受理语义**（\"已受理并起跑\"），**不代表\n该 run 在任何时刻的真值**——后台线程可能在响应序列化之前就已经跑完（快项目\n常见），此时真终态已是 COMPLETED / FAILED。**判成败必须轮询\n``GET /api/runs/{run_id}``**，别拿这个字段当终态。",
         "operationId": "start_outline_batch_api_projects__project_id__outline_batch_post",
         "parameters": [
           {
@@ -6998,7 +7014,7 @@
           "workflows"
         ],
         "summary": "List Runs Endpoint",
-        "description": "列 project 下的 run（每行 13 键，实测）。\n\n``response_model`` 只在**数组的 items** 上生效——``list[dict]`` 在 OpenAPI 里\n是匿名 object，前端拿到的仍是 ``Record<string, unknown>``。加了\n``list[WorkflowRunSummary]`` 后 items 才有具名 ``$ref``。\n\n⚠️ **刻意不加** ``response_model_exclude_none`` / ``exclude_unset``：本端点\n**没有条件键**——``chapter_id`` / ``error`` / ``ended_at`` / ``label`` 都是\n「键恒在、值可为 null」，任一开关都会把它们抹掉，把 13 键砍成更少，等于改契约。\n判别：``tests/api/test_state_list_response_contract.py::test_list_endpoints_declare_no_exclude_switches``",
+        "description": "列 project 下的 run（每行 13 键，实测）。\n\n``response_model`` 只在**数组的 items** 上生效——``list[dict]`` 在 OpenAPI 里\n是匿名 object，前端拿到的仍是 ``Record<string, unknown>``。加了\n``list[WorkflowRunSummary]`` 后 items 才有具名 ``$ref``。\n\n⚠️ **刻意不加** ``response_model_exclude_none`` / ``exclude_unset``：本端点\n**没有条件键**——``chapter_id`` / ``error`` / ``ended_at`` / ``label`` 都是\n「键恒在、值可为 null」，任一开关都会把它们抹掉，把 13 键砍成更少，等于改契约。\n判别：``tests/api/test_state_list_response_contract.py::test_list_endpoints_declare_no_exclude_switches``\n\n⚠️ **项目隔离（M7，2026-10-24）**：本端点只列**本项目**的 run。\n项目级 run（project-init / outline-batch，无 chapter）的归属取 0037 的\n``workflow_runs.project_id`` 列；归属列为空的行保持**全项目可见**\n（**判不出来 ⇒ 不排除**，口径与成因见 :func:`_run_visible_in_project`）。\n判别：``tests/api/test_run_list_project_scope.py``",
         "operationId": "list_runs_endpoint_api_projects__project_id__runs_get",
         "parameters": [
           {
@@ -8981,7 +8997,7 @@
           "state_version": {
             "type": "integer",
             "title": "State Version",
-            "description": "⚠️ 空分支时是 base_state_version，不是新版本"
+            "description": "promote 提交后该项目的最新 story_states.state_version（无快照行时=分支 base_state_version）"
           },
           "branch_id": {
             "anyOf": [
@@ -9052,7 +9068,7 @@
           "replayed_delta_ids"
         ],
         "title": "BranchPromoteResponse",
-        "description": "``POST /projects/{pid}/branches/{bid}/promote`` 的 201 响应——**同一端点两个形状**。\n\n实测（临时库 + 合成夹具）::\n\n    空分支（7 键）    {branch_id, status, promoted_commits, commit_id,\n                      state_version, delta_id, replayed_delta_ids}\n    非空分支（8 键）  {commit_id, delta_id, state_version, promoted_from,\n                      promoted_commits, branch_id, replayed_delta_ids,\n                      snapshot_ref}\n\n两处语义分叉，**前端必须知道**，否则一定读错：\n\n1. ``branch_id`` 在两个形状里**指的不是同一个东西**：空分支时它就是**被 promote\n   的那个分支**；非空时它是 **main 的 branch_id**（被 promote 的分支 id 在\n   ``promoted_from``）。实测两者不同值。\n2. ``state_version`` 在两个形状里也不是同一个东西：空分支时是\n   ``branches.base_state_version``（**没有产生新版本**），非空时是最后一次重放\n   落在 main 上的版本。\n\n取并集建模，故有三个键在某一形状里**缺席**（``status`` 只在空分支、\n``promoted_from`` / ``snapshot_ref`` 只在非空分支）——这正是它们带默认值的原因。\n``commit_id`` / ``delta_id`` 在两个形状里都出现，但空分支时**值为 null**。\n\n⚠️ **「缺席」与「值为 null」是两回事，补默认值会把前者变成后者。**\n本模型带默认值 ⇒ 不给 ``response_model_exclude_unset=True`` 的话，Pydantic 会把\n缺席的键补成 ``null``：实测空分支响应从 7 键变成 9 键（凭空多出\n``promoted_from`` / ``snapshot_ref``）——**这是加 response_model 本身引入的契约变更**。\n⇒ 端点上带了 ``response_model_exclude_unset=True``（只看「生产方给没给这个键」）。\n⇒ 但**不能**改用 ``response_model_exclude_none=True``：那会把 ``commit_id`` /\n``delta_id`` 这两个「键在、值为 null」的键抹掉，把「有键」改成「无键」。\n\n另：这三个缺席键带默认值 ⇒ OpenAPI 的 ``required`` 里**没有**它们（也就没有\n``commit_id`` / ``delta_id`` / ``branch_id``）。这是 schema 对「可能缺席」的\n保守声明，与实测并不矛盾——宁可少承诺，不要让前端把可选键当必填。"
+        "description": "``POST /projects/{pid}/branches/{bid}/promote`` 的 201 响应——**同一端点两个形状**。\n\n实测（临时库 + 合成夹具）::\n\n    空分支（7 键）    {branch_id, status, promoted_commits, commit_id,\n                      state_version, delta_id, replayed_delta_ids}\n    非空分支（8 键）  {commit_id, delta_id, state_version, promoted_from,\n                      promoted_commits, branch_id, replayed_delta_ids,\n                      snapshot_ref}\n\n两处语义分叉，**前端必须知道**，否则一定读错：\n\n1. ``branch_id`` 在两个形状里**指的不是同一个东西**：空分支时它就是**被 promote\n   的那个分支**；非空时它是 **main 的 branch_id**（被 promote 的分支 id 在\n   ``promoted_from``）。实测两者不同值。\n2. ``state_version`` 在两个形状里**曾经**不是同一个东西（空分支 = 分支的\n   ``base_state_version``；非空 = 最后一次重放落在 main 上的那一版）⇒\n   **两者都比 promote 提交后 DB 里的最新版本低**（空分支低「建分支 + 合并」\n   两次推进之和；非空低 1——少算 promote 自身的版本推进）。\n\n   ⚠️ **2026-10-24 已修**：两个形状统一为「**promote 提交后该项目的最新\n   ``story_states.state_version``**」（= ``branches.promote_branch`` 里\n   ``bump_project_state_version`` 的返回值）。唯一例外：项目尚无快照行\n   （从未 commit）⇒ 推进函数**不造行**⇒ 此时报分支的 ``base_state_version``。\n   ⇒ 前端展示该值 = 展示「main 当前版本」，**不需要任何 +/- 补偿**。\n\n取并集建模，故有三个键在某一形状里**缺席**（``status`` 只在空分支、\n``promoted_from`` / ``snapshot_ref`` 只在非空分支）——这正是它们带默认值的原因。\n``commit_id`` / ``delta_id`` 在两个形状里都出现，但空分支时**值为 null**。\n\n⚠️ **「缺席」与「值为 null」是两回事，补默认值会把前者变成后者。**\n本模型带默认值 ⇒ 不给 ``response_model_exclude_unset=True`` 的话，Pydantic 会把\n缺席的键补成 ``null``：实测空分支响应从 7 键变成 9 键（凭空多出\n``promoted_from`` / ``snapshot_ref``）——**这是加 response_model 本身引入的契约变更**。\n⇒ 端点上带了 ``response_model_exclude_unset=True``（只看「生产方给没给这个键」）。\n⇒ 但**不能**改用 ``response_model_exclude_none=True``：那会把 ``commit_id`` /\n``delta_id`` 这两个「键在、值为 null」的键抹掉，把「有键」改成「无键」。\n\n另：这三个缺席键带默认值 ⇒ OpenAPI 的 ``required`` 里**没有**它们（也就没有\n``commit_id`` / ``delta_id`` / ``branch_id``）。这是 schema 对「可能缺席」的\n保守声明，与实测并不矛盾——宁可少承诺，不要让前端把可选键当必填。"
       },
       "BranchSummary": {
         "properties": {
@@ -16561,7 +16577,7 @@
           "status": {
             "type": "string",
             "title": "Status",
-            "description": "启动后恒为 RUNNING（同步化的 project-init 除外）"
+            "description": "启动后恒为 RUNNING（本模型覆盖的端点全是异步起跑：plan/write/review/commit/gate-revise/outline-batch/resume；同步起跑的 project-init 用 ProjectInitStarted，status 可为 PAUSED/COMPLETED）"
           },
           "current_node": {
             "anyOf": [
@@ -16584,7 +16600,7 @@
           "current_node"
         ],
         "title": "WorkflowStartAccepted",
-        "description": "章节级起跑端点的统一 201/200 响应。\n\n覆盖 ``POST .../plan`` / ``.../write`` / ``.../review`` / ``.../commit`` /\n``.../gate-revise`` 与 ``POST /runs/{run_id}/resume`` —— 实测**六个端点逐字同形**\n（都是同一批 dict 字面量的再包装），故共用一个模型而不是各建一个。\n\n⚠️ ``status`` 声明为 ``str`` 而非 ``Literal[\"RUNNING\"]``：实测当前**恒**为\n``\"RUNNING\"``（``_start_workflow_core`` 与 ``resume_run`` 都硬编码该值，启动失败\n一律 raise 400/409/422 而非返回），但 ``project-init`` 已经是**同步**启动、\n同一族端点将来也可能改回同步。把「当前取值」写进类型等于宣称一个实现细节是\n契约；本批改为在测试里钉住该不变量（``test_start_endpoints_status_is_running``）。\n\n``current_node`` 必填可空、不给默认值：实测该键**恒在**、值恒 ``null``（异步启动\n时还没有节点在跑）。给了默认值就生成成可选键，前端会误以为它可能缺席。"
+        "description": "章节级起跑端点的统一 201/200 响应。\n\n覆盖 ``POST .../plan`` / ``.../write`` / ``.../review`` / ``.../commit`` /\n``.../gate-revise`` / ``POST /projects/{project_id}/outline-batch`` 与\n``POST /runs/{run_id}/resume`` —— 实测**七个端点逐字同形 3 键**\n（都是同一批 dict 字面量的再包装），故共用一个模型而不是各建一个。\n\n⚠️ ``status`` 声明为 ``str`` 而非 ``Literal[\"RUNNING\"]``：本模型覆盖的端点\n实测当前**恒**为 ``\"RUNNING\"``（``_start_workflow_core`` / ``resume_run`` /\n``_start_outline_batch`` 都硬编码该值，启动失败一律 raise 400/409/422 而非\n返回）。但**同族的 project-init 端点（``POST /projects/init``）是同步启动**，\n实测会返回 ``\"PAUSED\"`` / ``\"COMPLETED\"``（它用另一个模型\n:class:`ProjectInitStarted`）⇒ 「起跑类端点的 status 恒 RUNNING」**不是**本仓\n的家族不变量。把「当前取值」写进类型等于宣称一个实现细节是契约；本批改为在\n测试里钉住该不变量（``test_start_endpoints_status_is_running``）。\n\n``current_node`` 必填可空、不给默认值：实测该键**恒在**、值恒 ``null``（异步启动\n时还没有节点在跑）。给了默认值就生成成可选键，前端会误以为它可能缺席。"
       },
       "WorldEntityOut": {
         "properties": {

@@ -11,6 +11,7 @@ V4.0 模块化重构 V2：自 ``packages/core/api/routers/workflows.py`` 按端�
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -286,6 +287,80 @@ def _compute_run_label(
     return zh
 
 
+def _run_visible_in_project(
+    run: dict[str, Any],
+    *,
+    chapter_service: ChapterService,
+    project_id: str,
+) -> bool:
+    """单个 run 是否属于 ``project_id``（M7 修复的**判定单点**）。
+
+    判定口径（按权威性从高到低）：
+
+    1. **归属列** ``workflow_runs.project_id``（0037 迁移）——引擎写 run 行时带出，
+       0037 再用 ``json_extract(checkpoint_json, '$.project_id')`` 回填存量 ⇒
+       非空即**权威归属**，直接比字符串。
+    2. **回落 chapter→project 反查**——归属列为空但 run 带 chapter_id 时
+       （0037 前的存量行）：按章归属判，与既有可见性一致。
+    3. **无从归属 ⇒ 保持全可见**——归属列为空**且**无 chapter_id（adhoc 裸 run /
+       checkpoint 里没有 project_id 因而回填不出的存量行）：**判不出来** ⇒
+       不排除（见下方「NULL 归属行的语义」）。
+
+    ⚠️ **NULL 归属行的语义（结构性事实，不是「历史遗留」）**：归属列为空**不等于**
+    「这条 run 属于所有项目」，而是**判不出来** ⇒ 不排除。产生 NULL 的路径有两条，
+    必须分开说：
+
+    * **project-init「新建项目」模式**——run 行是在项目**还不存在**时插进去的
+      （引擎按起跑时已知的 project_id 写归属列 ⇒ 该路径**建项时恒为 NULL**）；
+      **2026-10-25 起在建项成功后回写归属**（见
+      ``packages/workflows/project_init/pipeline.py::_claim_run_ownership``）
+      ⇒ **新建路径不再产生 NULL 归属行**。
+    * **真正判不出来的存量行**（0037 的回填依据是 ``checkpoint_json`` 顶层
+      ``project_id``；checkpoint 为 ``{}`` 或无该键就回填不出——dev 库实测 2 条，
+      2026-10-24 只读查询）⇒ **保持全可见**（跨项目可见的代价被显式登记在此，
+      而不是藏在 SQL 的 ``OR chapter_id IS NULL`` 里）。
+
+    ⇒ **两条路径的可见性后果相同**（「不可判 ⇒ 不排除」），但**成因不同**：
+    前者已被回写堵住，后者是判不出来的既有事实。
+
+    判别：``tests/api/test_run_list_project_scope.py``（A 的列表不得含 B 的
+    项目级 run；撤掉过滤 ⇒ 必红）。
+    """
+    owner = run.get("project_id")
+    if owner is not None:
+        return owner == project_id
+    chapter_id = run.get("chapter_id")
+    if chapter_id is None:
+        return True  # 无从归属 ⇒ 保持全可见（口径见上）
+    return chapter_service.get_project_id(chapter_id) == project_id
+
+
+def _filter_runs_by_project(
+    db_path: str | Path,
+    project_id: str,
+    runs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """按项目归属过滤 run 列表（M7 修复，2026-10-24）。
+
+    **为什么数据层不拦**：``workflow_runtime.runs.list_runs`` 的 SQL 口径是
+    「chapter→project 反查 **OR** ``chapter_id IS NULL``」——后半句让**每个**
+    项目的项目级 run（project-init / outline-batch 等无 chapter 的 run）出现在
+    **所有**项目的列表里。0037 落地归属列后，这里按归属列收口。
+
+    带 chapter 的 run 仍由数据层的 chapter 反查负责（其归属列与章归属一致），
+    本函数对「归属列为空的老行」再兜一次 chapter 反查，两侧口径一致 ⇒
+    **有 chapter 的 run 可见性零变化**（既有测试全绿）。
+    """
+    chapter_service = ChapterService(db_path)
+    return [
+        run
+        for run in runs
+        if _run_visible_in_project(
+            run, chapter_service=chapter_service, project_id=project_id
+        )
+    ]
+
+
 @router.get("/projects/{project_id}/runs", response_model=list[WorkflowRunSummary])
 def list_runs_endpoint(project_id: str, request: Request) -> list[dict[str, Any]]:
     """列 project 下的 run（每行 13 键，实测）。
@@ -298,10 +373,22 @@ def list_runs_endpoint(project_id: str, request: Request) -> list[dict[str, Any]
     **没有条件键**——``chapter_id`` / ``error`` / ``ended_at`` / ``label`` 都是
     「键恒在、值可为 null」，任一开关都会把它们抹掉，把 13 键砍成更少，等于改契约。
     判别：``tests/api/test_state_list_response_contract.py::test_list_endpoints_declare_no_exclude_switches``
+
+    ⚠️ **项目隔离（M7，2026-10-24）**：本端点只列**本项目**的 run。
+    项目级 run（project-init / outline-batch，无 chapter）的归属取 0037 的
+    ``workflow_runs.project_id`` 列；归属列为空的行保持**全项目可见**
+    （**判不出来 ⇒ 不排除**，口径与成因见 :func:`_run_visible_in_project`）。
+    判别：``tests/api/test_run_list_project_scope.py``
     """
     settings = request.app.state.settings
     db_path = settings.db_path
     runs = list_runs(db_path, project_id)
+    # M7（2026-10-24）：按项目归属过滤——数据层 SQL 的「OR chapter_id IS NULL」
+    # 会把**所有**项目的项目级 run（project-init / outline-batch 等）泄进每个
+    # 项目的列表。口径见 :func:`_run_visible_in_project`（含「归属判不出来 ⇒
+    # 不排除」的语义登记）。过滤放在补 workflow_name / label **之前**，
+    # 免得为看不见的行白跑反查查询。
+    runs = _filter_runs_by_project(db_path, project_id, runs)
     # 恢复挂起的初始化：每行附加 workflow_name（get_workflow_name_for_run 反查）；
     # 一行一次查询可接受，list 端点不在热路径上。其余字段保持不变。
     # 同时附加人类可读 label（推导版，不改 DB）。

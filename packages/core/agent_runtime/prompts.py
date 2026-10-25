@@ -65,6 +65,10 @@ _AGENT_TO_CAPABILITY: dict[str, str] = {
     "world_builder": "world_building",          # V3.7 project-init
     "character_designer": "character_design",   # V3.7 project-init
     "volume_outliner": "volume_outline",        # V3.7 project-init
+    # outline-batch 工作流的 planner agent（2026-10-25 登记）：与
+    # model_router.AGENT_CAPABILITY 逐字一致（两份名册必须全等，见
+    # tests/unit/test_capability_registry.py 的名册全等断言）。
+    "outline_batch_planner": "reasoning",
     # 其它 agent 默认 reasoning（Sprint 3 MVP 不细化）
 }
 

@@ -21,8 +21,18 @@
   * 物化时机：
     - ``create_branch`` 创建成功后 → 物化 base_state_version 处的 main 快照
       （state_version=base_state_version）作为「初始空基线」。
-    - ``promote_branch`` 全部重放成功后 → main 分支物化新基线
+    - ``promote_branch`` **非空**分支全部重放成功后 → main 分支物化新基线
       （state_version=新 main latest version）。
+      ⚠️ 2026-10-24：promote 自身的版本推进（分支 ``ACTIVE→MERGED`` 改了
+      ``branches`` 表 ⇒ 该表进 director 装配 payload ⇒ 必须推 version）**排在
+      物化之前** ⇒ 物化点 = 推进后的最新版本。
+      ⚠️ **这不是模块级不变量**：「``branch_snapshots`` 与 ``story_states`` 两条读
+      路径的顶层 ``state_version`` 一致」**仅在「非空 promote 成功完成的那一刻」成立**；
+      此后任何**只推版本**的写（建分支 ``create_branch`` 的 bump、空分支 promote 的
+      bump）都会让两路**再次分叉**（分支快照物化点不动、``story_states`` 又 +1）。
+      ⚠️ **空分支 promote 从不物化 main**（``promote_branch`` 的空分支分支**提前
+      返回**、不落 ``branch_snapshots``）⇒ 那条路径上连「物化点」都不存在。
+      （修前口径：**非空路径**两条恒差 1；**空分支从未物化** main。）
   * 读路径（``branch_current_state``）：先查 ``branch_snapshots`` 最近物化（按
     state_version DESC LIMIT 1）；若存在 → 从该物化点开始增量重放本分支
     「state_version > 物化点」的 commits；找不到物化 → 兜底全量重放
@@ -450,6 +460,15 @@ def promote_branch(
     重放产生的 main delta_id）/ ``promoted_from`` / ``promoted_commits`` /
     ``branch_id``（main.branch_id）/ ``replayed_delta_ids``（本次重放
     在 main 上产生的新 delta_id 列表，便于测试断言）。
+
+    ⚠️ **``state_version`` = promote 提交后 DB 里的最新版本**（2026-10-24 修复）。
+    修前返回的是「最后一次重放落在 main 上的那一版」，**比 DB 真值低 1**——
+    少算了 promote 自身那次版本推进（分支 ``ACTIVE→MERGED`` 改了
+    ``branches`` 表 ⇒ 该表进 director 装配 payload ⇒ 必须推
+    ``story_states.state_version``）。实测（临时库）：修前响应 3 / DB MAX 4。
+    ⇒ 现在取 :func:`bump_project_state_version` 的返回值（它就是刚落库那一版）。
+    空分支（无 commit）同理：推进成功 ⇒ 报推进后的版本；项目尚无快照行
+    （bump **不推进**）⇒ 回退到 ``branches.base_state_version``。
     """
 
     from packages.core.db import get_connection
@@ -498,14 +517,23 @@ def promote_branch(
             )
             # 2026-10-24（R-1）：分支状态进 director payload（``plot_graph_excerpt``
             # 只取 ACTIVE 未解决分支）⇒ 合并后必须推 state_version（同事务）。
-            bump_project_state_version(conn, project_id)
+            # ⚠️ 2026-10-24（promote 响应版本修复）：**响应的 state_version 必须是
+            # promote 提交后 DB 里的最新版本** ⇒ 取 bump 的返回值（推进成功时它
+            # 就是刚落库的那一版）。项目尚无快照行 ⇒ bump **不推进**（返回 None，
+            # 与既有边界一致）⇒ 回退到分支的 ``base_state_version``（此时 DB 里
+            # 本来就没有任何版本可言）。
+            promoted_version = bump_project_state_version(conn, project_id)
             conn.commit()
             return {
                 "branch_id": branch_id,
                 "status": "MERGED",
                 "promoted_commits": 0,
                 "commit_id": None,
-                "state_version": int(row["base_state_version"] or 0),
+                "state_version": int(
+                    promoted_version
+                    if promoted_version is not None
+                    else (row["base_state_version"] or 0)
+                ),
                 "delta_id": None,
                 "replayed_delta_ids": [],
             }
@@ -582,12 +610,27 @@ def promote_branch(
         raise
 
     # 全部成功 → UPDATE branches.status='MERGED' + V2.0 Wave B 物化 main 新基线
+    promoted_version: int | None = None
     conn = get_connection(service_self.db_path)
     try:
         conn.execute(
             "UPDATE branches SET status = 'MERGED' WHERE branch_id = ?",
             (branch_id,),
         )
+        # 2026-10-24（R-1）：分支状态进 director payload（``plot_graph_excerpt`` 只取
+        # ACTIVE 未解决分支）⇒ 合并后必须推 state_version（同事务、同一连接）。
+        # ⚠️ 与上面按序重放的 commit 各自的版本推进**互不覆盖**：重放已经把 main 推到
+        # 新版本，这里再 +1 落一行**内容不变**的新快照（版本推进 ≠ 改 Canonical State）。
+        #
+        # ⚠️ 2026-10-24（promote 响应版本修复）：**推进放在物化之前**——
+        #   ① 响应的 ``state_version`` 取本函数的返回值 = promote 提交后 DB 里的
+        #      最新版本（修前响应取的是**重放最后一条**的版本，比 DB 真值低 1：
+        #      少算了这次自身的推进）；
+        #   ② 物化点 = 物化那一刻 main 的最新版本 ⇒ ``branch_snapshots`` 与
+        #      ``story_states`` 两条读路径的顶层 ``state_version`` 一致
+        #      （修前物化在推进之前 ⇒ 两条读路径恒差 1）。
+        # 事务结构不变：同连接、同事务、末尾一次 commit（无部分提交窗口）。
+        promoted_version = bump_project_state_version(conn, project_id)
         # V2.0 Wave B 物化：promote 完成后，main 分支持有新 latest version 的快照；
         # 把 main 分行的 (branch_id, state_version=latest, snapshot) 写入 branch_snapshots。
         # 这样 promote 之后从 main 视角读取分支当前状态可走「最新物化 + 0 增量」快路径
@@ -612,11 +655,6 @@ def promote_branch(
                 snapshot_json=main_snap,
                 created_at=now_iso(),
             )
-        # 2026-10-24（R-1）：分支状态进 director payload（``plot_graph_excerpt`` 只取
-        # ACTIVE 未解决分支）⇒ 合并后必须推 state_version（同事务、同一连接）。
-        # ⚠️ 与上面按序重放的 commit 各自的版本推进**互不覆盖**：重放已经把 main 推到
-        # 新版本，这里再 +1 落一行**内容不变**的新快照（版本推进 ≠ 改 Canonical State）。
-        bump_project_state_version(conn, project_id)
         conn.commit()
     finally:
         conn.close()
@@ -636,7 +674,12 @@ def promote_branch(
     return {
         "commit_id": last["commit_id"],
         "delta_id": last["delta_id"],
-        "state_version": last["state_version"],
+        # ⚠️ 2026-10-24（promote 响应版本修复）：取**推进之后**的版本（= promote
+        # 提交后 DB 里的最新版本）。``promoted_version`` 为 None ⇒ 项目无快照行
+        # （bump 不推进）⇒ 回退到最后一次重放落在 main 上的那一版。
+        "state_version": int(
+            promoted_version if promoted_version is not None else last["state_version"]
+        ),
         "promoted_from": branch_id,
         "promoted_commits": len(replayed),
         "branch_id": main_branch_id,

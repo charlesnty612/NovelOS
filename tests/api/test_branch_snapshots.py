@@ -111,6 +111,23 @@ def _conn(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _max_state_version(db_path: Path, pid: str) -> int:
+    """直查 DB：该项目的最新 ``story_states.state_version``（**真实值**，非推算）。
+
+    ⚠️ 判别口径（2026-10-24 promote 响应版本修复）：断言打在**真实值**上，
+    不写死「+1」——写死就等于把「差一版」这个缺陷重新编进测试。
+    """
+    conn = _conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT MAX(state_version) AS sv FROM story_states WHERE project_id = ?",
+            (pid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row["sv"] or 0)
+
+
 # ============================================================================
 # 1. 分支创建后物化行存在
 # ============================================================================
@@ -269,9 +286,11 @@ def test_promote_materializes_main_snapshot_and_state_consistent(tmp_path: Path)
     - GET /state?branch_id=<main> 返回的结果与 GET /state 一致（数值对比）。
 
     ⚠️ 2026-10-24（R-1）：分支写操作（建分支 / 合并）会推进 ``story_states.state_version``。
-    promote 的顺序是「按序重放 → 物化 main 快照 → **再推一次版本**（内容不变）」，
-    ⇒ ``story_states`` 最新版比 ``branch_snapshots`` 物化版 **+1**，
-    两条读路径的**内容**逐字节一致、**顶层 state_version** 相差 1（本用例显式钉住）。
+    ⚠️ 2026-10-24（promote 响应版本修复）：promote 的顺序改为
+    「按序重放 → **推版本**（内容不变）→ 物化 main 快照」，且**响应里的
+    ``state_version`` = promote 提交后 DB 里的最新版本** ⇒ ``story_states`` 最新版
+    与 ``branch_snapshots`` 物化版 **版本相同**、内容逐字节一致（修前两条读路径
+    的顶层 ``state_version`` 恒差 1）。
     """
     app = _create_app(tmp_path)
 
@@ -333,8 +352,14 @@ def test_promote_materializes_main_snapshot_and_state_consistent(tmp_path: Path)
             )
             assert r.status_code == 201, r.text
             new_main_version = r.json()["state_version"]
-            # 被重放的 1 个分支 commit 在 main 上 +1
-            assert new_main_version == main_v_before_promote + 1
+            # 被重放的 1 个分支 commit 在 main 上 +1，promote 自身再 +1 ⇒ 响应
+            # 必须等于 **promote 提交后 DB 里的最新版本**（断言打在真实值上）。
+            db_max_after_promote = _max_state_version(tmp_path / "novelos.db", pid)
+            assert new_main_version == db_max_after_promote, (
+                f"promote 响应 state_version={new_main_version} ≠ DB 最新 {db_max_after_promote}"
+            )
+            # 不变量：promote 必然把 main 的版本往前推（重放 +1 自身 +1）
+            assert new_main_version > main_v_before_promote
 
             # 取 main 分支 ID
             r = await _request(app, "GET", f"/api/projects/{pid}/branches")
@@ -363,27 +388,21 @@ def test_promote_materializes_main_snapshot_and_state_consistent(tmp_path: Path)
             assert r_branch.status_code == 200
             main_via_branch_snapshot = r_branch.json()
 
-            assert main_via_story_states["state_version"] == new_main_version + 1
+            # ⚠️ 2026-10-24（promote 响应版本修复）：promote 自身的版本推进
+            # （分支 ACTIVE→MERGED）排在**物化之前** ⇒ ``story_states`` 最新版与
+            # ``branch_snapshots`` 物化版**版本相同**（修前两条读路径恒差 1），
+            # 两条读路径**整体逐字节一致**（含顶层 state_version）。
+            assert main_via_story_states["state_version"] == new_main_version
             assert main_via_branch_snapshot["state_version"] == new_main_version
-            # ⚠️ 2026-10-24（R-1）：promote 自身（分支 ACTIVE→MERGED）**在物化之后**
-            # 再推一次 main 版本（内容不变）⇒ story_states 最新版比物化版 +1，
-            # branch_snapshots 侧仍是物化时那一版。
-            # ⇒ 两条读路径**只允许 state_version 不同**，其余内容必须逐字节一致。
             differing = {
                 key
                 for key in set(main_via_story_states) | set(main_via_branch_snapshot)
                 if main_via_story_states.get(key) != main_via_branch_snapshot.get(key)
             }
-            assert differing == {"state_version"}, (
-                f"两条读路径只允许 state_version 不同，实际差异键：{sorted(differing)}"
+            assert differing == set(), (
+                f"两条读路径应逐字节一致（含 state_version），实际差异键：{sorted(differing)}"
             )
-            stripped_states = {
-                k: v for k, v in main_via_story_states.items() if k != "state_version"
-            }
-            stripped_branch = {
-                k: v for k, v in main_via_branch_snapshot.items() if k != "state_version"
-            }
-            assert _sorted_json(stripped_states) == _sorted_json(stripped_branch), (
+            assert _sorted_json(main_via_story_states) == _sorted_json(main_via_branch_snapshot), (
                 "promote 后 main 状态：story_states 路径 vs branch_snapshots 路径内容不一致"
             )
 

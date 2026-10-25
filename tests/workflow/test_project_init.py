@@ -2551,3 +2551,73 @@ def test_upsert_volume_updates_existing_arc_summary_on_reinit(tmp_path: Path):
             assert row["volume_id"] == first["volume_id"]
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# F-1（2026-10-25）：project-init「新建项目」必须回写 run 归属
+# ---------------------------------------------------------------------------
+#
+# 缺陷形状：project-init「新建项目」模式下 run 行是在**项目还不存在**时插入的
+# （引擎按起跑时已知的 project_id 写 0037 归属列 ⇒ 该列恒为 NULL），
+# 而项目是 persist_all 节点才建出来的 ⇒ 不回写 ⇒ 这条 run 永久出现在**每个**
+# 项目的运行记录里（checkpoint 还带着 brief / Story Bible 内容）。
+#
+# 判别力（两条断言各自独立，撤掉 ``_claim_run_ownership`` 两条都红）：
+#   ① 真实 DB 列断言：``workflow_runs.project_id`` == 新建的项目 id；
+#   ② 他项目的 run 列表里**不得**出现这条 run。
+
+
+def test_project_init_new_project_claims_run_ownership(tmp_path: Path):
+    """新建项目后 run 行必须回写归属（0037 列），且跨项目不可见。"""
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            await _sync_prompts(app)
+
+            # 他项目：用来验证「这条 run 不得出现在别的项目的列表里」
+            other_pid = await _make_project(app, "他项目·归属隔离")
+
+            r = await _request(
+                app,
+                "POST",
+                "/api/projects/init",
+                json={
+                    "brief": {"genre": "玄幻", "logline": "少年叶尘偶得星辰古卷"},
+                    "chapter_seed_count": 3,
+                    "mock_providers": _mock_providers(3),
+                },
+            )
+            assert r.status_code == 201, r.text
+            run_id = r.json()["run_id"]
+            run_data = await _wait_run_terminal(app, run_id, expected=("COMPLETED",))
+            pid = (run_data.get("checkpoint_json") or {}).get("project_id")
+            assert pid and pid.startswith("prj_"), f"新建项目应落 project_id；实得 {pid!r}"
+
+            # ① 真实 DB 列断言：run 行的归属 == 新建的项目 id
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT project_id FROM workflow_runs WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            assert row is not None, "run 行应存在"
+            assert row["project_id"] == pid, (
+                "project-init 新建项目后必须回写 run 归属（workflow_runs.project_id）；"
+                f"实得 {row['project_id']!r}，期望 {pid!r}"
+            )
+
+            # ② 跨项目可见性：本项目列表含它，他项目列表不含它
+            async def _list_run_ids(project_id: str) -> set[str]:
+                rr = await _request(app, "GET", f"/api/projects/{project_id}/runs")
+                assert rr.status_code == 200, rr.text
+                return {row_["run_id"] for row_ in rr.json()}
+
+            assert run_id in await _list_run_ids(pid), "本项目的列表必须含自己的 run"
+            assert run_id not in await _list_run_ids(other_pid), (
+                "他项目的 run 列表不得含本项目的 project-init run（F-1 跨项目可见缺陷）"
+            )
+
+    asyncio.run(run())

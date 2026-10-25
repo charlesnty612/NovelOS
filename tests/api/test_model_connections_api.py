@@ -14,6 +14,9 @@
 6. 归组：分组预览 + 应用（生效密钥不一致 ⇒ 422，归组**不改密钥**）。
 7. 协议地址池（``protocol_base_urls``）：合法落库往返 / 非法键 422 / PATCH 清空；
    预设 opencode_go 自带双协议地址池（逐字断言）。
+8. 连接级探测（``POST /model-connections/{id}/test``）的取址口径（2026-10-24 审查
+   修复 M4/M5）：**不传协议也查池**（``pool[连接主协议] or 连接.base_url``）、
+   协议路径后缀按协议取（anthropic ⇒ ``/v1/models``）、**显式 ``models_url`` 恒优先**。
 """
 
 from __future__ import annotations
@@ -902,3 +905,158 @@ def test_apply_grouping_keeps_profile_provider(tmp_path: Path, monkeypatch):
         conn.close()
     assert row["connection_id"] == conn_id
     assert row["provider"] == "anthropic"
+
+
+# ---------------------------------------------------------------------------
+# 2c. 连接级探测端点按协议地址池取址（2026-10-24 协议下放 · M3）
+# ---------------------------------------------------------------------------
+
+
+def _record_probe_urls(monkeypatch) -> list[str]:
+    """替换 ``httpx.Client``，记录连接级探测**真实请求的 URL**。"""
+    calls: list[str] = []
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):  # noqa: ANN002
+            return False
+
+        def get(self, url, headers=None, timeout=None):  # noqa: ANN001, ANN002
+            calls.append(url)
+            import httpx
+
+            return httpx.Response(200, json={"data": [{"id": "m-1"}]})
+
+    import packages.core.api.routers.connections as conn_mod
+
+    monkeypatch.setattr(conn_mod.httpx, "Client", _FakeClient)
+    return calls
+
+
+def _test_connection(app, connection_id: str, query: str = ""):
+    import asyncio
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            return await _request(
+                app, "POST", f"/api/model-connections/{connection_id}/test{query}"
+            )
+
+    return asyncio.run(run())
+
+
+def test_connection_probe_uses_protocol_pool_address(tmp_path: Path, monkeypatch):
+    """★``?protocol=anthropic`` ⇒ 探测打到**池里 anthropic 的地址**（不是连接主地址）。
+
+    ⚠️ 2026-10-24 审查修复 M5：anthropic 平面的模型列表端点是 ``{地址}/v1/models``
+    （不是 ``/models``）⇒ 断言里钉的是**带 /v1/models 的完整 URL**。
+    该路径后缀与档案级 ``available-models`` 共用同一张表（单一来源）。
+    """
+    app = _create_app(tmp_path)
+    created = _post_connection(app, protocol_base_urls=dict(_POOL)).json()
+    calls = _record_probe_urls(monkeypatch)
+
+    r = _test_connection(app, created["connection_id"], "?protocol=anthropic")
+    assert r.status_code == 200, r.text
+    assert calls == ["https://opencode.ai/inference/go/anthropic/v1/models"]
+    assert "/v1/models" in calls[0]
+    assert "openai/v1" not in calls[0]
+
+
+def test_connection_probe_without_protocol_uses_main_address(tmp_path: Path, monkeypatch):
+    """不带协议 ⇒ 连接主协议的地址（本例池里主协议条目与 base_url 同值 ⇒ 同结果）。
+
+    存量行为不回归；「池里主协议条目 ≠ base_url」时的**判别**用例见下一条。
+    """
+    app = _create_app(tmp_path)
+    created = _post_connection(app, protocol_base_urls=dict(_POOL)).json()
+    calls = _record_probe_urls(monkeypatch)
+
+    r = _test_connection(app, created["connection_id"])
+    assert r.status_code == 200, r.text
+    assert calls == ["https://opencode.ai/inference/go/openai/v1/models"]
+
+
+def test_connection_probe_without_protocol_uses_main_protocol_pool_address(
+    tmp_path: Path, monkeypatch
+):
+    """★不带 ``?protocol=`` ⇒ 连接**主协议在池里的地址**（不是连接 base_url）。
+
+    判别点：池里主协议的地址与连接 ``base_url`` **故意不同** ⇒
+    旧行为（只用 ``base_url``、从不查池）打连接主地址；新行为（与档案级
+    ``available-models`` 同口径：``pool[协议] or 连接.base_url``）打池里主协议地址。
+    """
+    app = _create_app(tmp_path)
+    created = _post_connection(
+        app,
+        base_url="https://gw.test/main",
+        protocol_base_urls={"openai_compatible": "https://gw.test/openai/v1"},
+    ).json()
+    calls = _record_probe_urls(monkeypatch)
+
+    r = _test_connection(app, created["connection_id"])
+    assert r.status_code == 200, r.text
+    assert calls == ["https://gw.test/openai/v1/models"]
+    assert "gw.test/main" not in calls[0]
+
+
+def test_connection_probe_anthropic_main_protocol_uses_v1_models_path(
+    tmp_path: Path, monkeypatch
+):
+    """★连接**主协议就是 anthropic** ⇒ 探测 URL 必须含 ``/v1/models``。
+
+    anthropic 平面的真实模型列表端点是 ``{地址}/v1/models`` ⇒ 拼成 ``/models``
+    就是**打到不存在的路径**（404 ⇒ 用户以为连接坏了）。
+    """
+    app = _create_app(tmp_path)
+    created = _post_connection(
+        app,
+        provider="anthropic",
+        base_url="https://gw.test/anthropic-plane",
+        protocol_base_urls={"anthropic": "https://gw.test/anthropic-plane"},
+    ).json()
+    calls = _record_probe_urls(monkeypatch)
+
+    r = _test_connection(app, created["connection_id"])
+    assert r.status_code == 200, r.text
+    assert calls == ["https://gw.test/anthropic-plane/v1/models"]
+    assert "/v1/models" in calls[0]
+
+
+def test_connection_probe_explicit_models_url_wins_over_protocol_path(
+    tmp_path: Path, monkeypatch
+):
+    """★显式配置的 ``models_url`` **恒优先**（协议路径后缀不得覆盖它）。
+
+    连接级 ``models_url`` 是用户显式填的「模型列表地址」（部分网关不在
+    ``{base}/models`` 上）⇒ 它必须压过协议默认路径。
+    """
+    app = _create_app(tmp_path)
+    created = _post_connection(
+        app,
+        params={
+            "api_key": _SECRET,
+            "models_url": "https://gw.test/custom/list",
+        },
+        protocol_base_urls=dict(_POOL),
+    ).json()
+    calls = _record_probe_urls(monkeypatch)
+
+    r = _test_connection(app, created["connection_id"], "?protocol=anthropic")
+    assert r.status_code == 200, r.text
+    assert calls == ["https://gw.test/custom/list"]
+
+
+def test_connection_probe_unknown_protocol_returns_422(tmp_path: Path):
+    """未知协议 ⇒ 422（不静默回落主协议 = 打到错误协议面）。"""
+    app = _create_app(tmp_path)
+    created = _post_connection(app, protocol_base_urls=dict(_POOL)).json()
+
+    r = _test_connection(app, created["connection_id"], "?protocol=responses")
+    assert r.status_code == 422, r.text
+    assert "协议" in r.text

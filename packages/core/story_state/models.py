@@ -194,9 +194,16 @@ class BranchPromoteResponse(BaseModel):
     1. ``branch_id`` 在两个形状里**指的不是同一个东西**：空分支时它就是**被 promote
        的那个分支**；非空时它是 **main 的 branch_id**（被 promote 的分支 id 在
        ``promoted_from``）。实测两者不同值。
-    2. ``state_version`` 在两个形状里也不是同一个东西：空分支时是
-       ``branches.base_state_version``（**没有产生新版本**），非空时是最后一次重放
-       落在 main 上的版本。
+    2. ``state_version`` 在两个形状里**曾经**不是同一个东西（空分支 = 分支的
+       ``base_state_version``；非空 = 最后一次重放落在 main 上的那一版）⇒
+       **两者都比 promote 提交后 DB 里的最新版本低**（空分支低「建分支 + 合并」
+       两次推进之和；非空低 1——少算 promote 自身的版本推进）。
+
+       ⚠️ **2026-10-24 已修**：两个形状统一为「**promote 提交后该项目的最新
+       ``story_states.state_version``**」（= ``branches.promote_branch`` 里
+       ``bump_project_state_version`` 的返回值）。唯一例外：项目尚无快照行
+       （从未 commit）⇒ 推进函数**不造行**⇒ 此时报分支的 ``base_state_version``。
+       ⇒ 前端展示该值 = 展示「main 当前版本」，**不需要任何 +/- 补偿**。
 
     取并集建模，故有三个键在某一形状里**缺席**（``status`` 只在空分支、
     ``promoted_from`` / ``snapshot_ref`` 只在非空分支）——这正是它们带默认值的原因。
@@ -219,7 +226,12 @@ class BranchPromoteResponse(BaseModel):
 
     commit_id: Optional[str] = Field(default=None, description="空分支时为 null（键恒在）")
     delta_id: Optional[str] = Field(default=None, description="空分支时为 null（键恒在）")
-    state_version: int = Field(description="⚠️ 空分支时是 base_state_version，不是新版本")
+    state_version: int = Field(
+        description=(
+            "promote 提交后该项目的最新 story_states.state_version"
+            "（无快照行时=分支 base_state_version）"
+        )
+    )
     branch_id: Optional[str] = Field(default=None, description="⚠️ 空分支=源分支；非空=main 分支")
     promoted_commits: int
     replayed_delta_ids: list[str] = Field(description="本次在 main 上重放出的新 delta_id 列表")

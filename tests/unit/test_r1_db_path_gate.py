@@ -426,7 +426,6 @@ def test_S2_两个签名都带confirm且默认False():
 
 def test_S2_cli_yes可选且默认False():
     """S-2 ②：CLI ``--yes`` **可选**、缺省 False、映射到库层形参。"""
-    from scripts import restore_db
 
     src = (REPO_ROOT / "scripts" / "restore_db.py").read_text(encoding="utf-8")
     assert '"--yes"' in src and 'action="store_true"' in src

@@ -66,6 +66,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from packages.core.logging_config import get_logger
+
 __all__ = [
     "RESERVED_PARAM_KEYS",
     "CONNECTION_ONLY_PARAMS",
@@ -73,7 +75,10 @@ __all__ = [
     "HEADER_PLACEHOLDERS",
     "PROTOCOL_IDS",
     "THINKING_MODES",
+    "THINKING_PARAM_FAMILY",
+    "PROTOCOL_THINKING_FAMILIES",
     "apply_thinking_override",
+    "thinking_override_compatible",
     "EffectiveConfig",
     "HeaderContext",
     "parse_params",
@@ -84,6 +89,14 @@ __all__ = [
     "resolve_effective",
     "group_profiles_by_connection",
 ]
+
+log = get_logger("novelos.model_router")
+"""本模块 logger（与 ``router.py`` 同名 ⇒ 同一 logger 实例）。
+
+用途：**协议-地址错配的可见化**（见 :func:`resolve_effective` 的绑定态取址）。
+此前该错配是**完全静默**的——池未命中 ⇒ 回退连接主地址 ⇒ 请求打到**另一个协议
+平面**的地址上，全程零日志。
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +187,18 @@ _EFFORT_MODES: frozenset[str] = frozenset({"low", "medium", "high", "max"})
 """走 ``reasoning_effort`` 的四档（与 thinking 键互斥，写入时删对方）。"""
 
 
+def _validate_thinking_mode(mode: str) -> None:
+    """校验思考档在 8 档枚举内；不在 ⇒ :class:`ValueError`。
+
+    **唯一**的校验入口（:func:`apply_thinking_override` 与
+    :func:`thinking_override_compatible` 共用）⇒ 报错文案不会两处漂移。
+    """
+    if mode not in THINKING_MODES:
+        raise ValueError(
+            f"thinking_override {mode!r} 不在 8 档枚举内（合法值：{sorted(THINKING_MODES)}）"
+        )
+
+
 def apply_thinking_override(params: dict[str, Any], mode: str) -> dict[str, Any]:
     """把环节级思考档翻译进 params（**返回新 dict，不改入参**）。
 
@@ -188,11 +213,12 @@ def apply_thinking_override(params: dict[str, Any], mode: str) -> dict[str, Any]
 
     应用点：``router._candidates`` 的 binding 分支——对候选链**每个**档案的
     params 深拷贝后应用（环节覆盖优先于档案值；不改库）。
+
+    ⚠️ 本函数**不做协议相容性判定**（它只管「档位 ⇒ 参数写法」）；
+    「这个协议能不能表达这一族参数」由 :func:`thinking_override_compatible`
+    判定（调用点：``router._candidates``，per-candidate）。
     """
-    if mode not in THINKING_MODES:
-        raise ValueError(
-            f"thinking_override {mode!r} 不在 8 档枚举内（合法值：{sorted(THINKING_MODES)}）"
-        )
+    _validate_thinking_mode(mode)
     out = copy.deepcopy(params)
     if mode in _EFFORT_MODES:
         out.pop("thinking", None)
@@ -204,6 +230,71 @@ def apply_thinking_override(params: dict[str, Any], mode: str) -> dict[str, Any]
         out.pop("thinking", None)
         out.pop("reasoning_effort", None)
     return out
+
+
+# ---------------------------------------------------------------------------
+# 思考档 × 协议 的相容矩阵（2026-10-25「异协议后备链」修复）
+# ---------------------------------------------------------------------------
+
+THINKING_PARAM_FAMILY: dict[str, str] = {
+    "default": "none",
+    "off": "thinking_type",
+    "on": "thinking_type",
+    "adaptive": "thinking_type",
+    "low": "reasoning_effort",
+    "medium": "reasoning_effort",
+    "high": "reasoning_effort",
+    "max": "reasoning_effort",
+}
+"""思考档 → **参数族**（映射族的唯一权威名册）。
+
+两族对应两种上游请求体写法：
+
+- ``reasoning_effort`` 族（low/medium/high/max）—— OpenAI 风格的 ``reasoning_effort`` 字段；
+- ``thinking_type`` 族（off/on/adaptive）—— Anthropic 风格的 ``thinking.type`` 字段。
+
+``default`` 无族（跟随端点）⇒ 对任何协议都相容。
+
+⚠️ 档位 → 族的映射必须与 :func:`apply_thinking_override` 的分支**同步**
+（一个写进哪个键 ⇒ 归哪个族）；前端 ``AiSettingsThinkingOptions.ts`` 的
+协议收窄表与之对称。
+"""
+
+PROTOCOL_THINKING_FAMILIES: dict[str, frozenset[str]] = {
+    "anthropic": frozenset({"thinking_type"}),
+    "openai_compatible": frozenset({"reasoning_effort", "thinking_type"}),
+    "ollama": frozenset({"reasoning_effort", "thinking_type"}),
+    "mock": frozenset({"reasoning_effort", "thinking_type"}),
+}
+"""协议 → **可表达的参数族**（相容矩阵）。
+
+⚠️ 只有 ``anthropic`` 受限：Anthropic Messages API 对**未知请求体字段直接 400**
+（``unexpected keyword argument``）⇒ ``reasoning_effort`` 族在 anthropic 协议上
+**不可表达**。其余协议对多余字段宽容（OpenAI 兼容层 / Ollama 忽略未知字段；
+mock 根本不发请求）⇒ 两族都算可表达，**存量行为不变**。
+
+⚠️ **不在表内的协议值不判定**（按两族都可表达处理）：宁可少一道拦截，
+也不要把用户的覆盖静默吞掉——「判不出来」不等于「不相容」。
+"""
+
+def thinking_override_compatible(mode: str, protocol: str | None) -> bool:
+    """该协议能否表达该思考档的参数族（**per-candidate** 相容性判定）。
+
+    - ``default``（无族）⇒ 恒相容；
+    - 协议在 :data:`PROTOCOL_THINKING_FAMILIES` 内 ⇒ 按族判定；
+    - 协议不在表内（未知 / 脏行）⇒ **不判定 ⇒ 相容**。
+
+    ⚠️ 非法档位 ⇒ :class:`ValueError`（与 :func:`apply_thinking_override` 同口径：
+    坏配置显式失败，不许静默当「跟随档案」）。
+    """
+    _validate_thinking_mode(mode)
+    family = THINKING_PARAM_FAMILY[mode]
+    if family == "none":
+        return True
+    allowed = PROTOCOL_THINKING_FAMILIES.get((protocol or "").strip().lower())
+    if allowed is None:
+        return True  # 未知协议 ⇒ 不可判 ⇒ 不拦截
+    return family in allowed
 
 
 # ---------------------------------------------------------------------------
@@ -409,11 +500,18 @@ def resolve_effective(
     - **已绑定连接** ⇒ **provider 取档案自身的**（协议是模型级属性；2026-10-24 裁决——
       连接不再选协议）；base_url 按**档案的协议**从连接的协议地址池取
       （``pool[档案.provider]``），池里没有该协议（或池为空）⇒ 回退连接主 base_url；
-      api_key / headers / models_url **取自连接**；档案 params 里的同名保留键
-      **被忽略**（防「一列两用」）；档案的**非**保留键（temperature / thinking …）
-      仍然生效。
+      ⚠️ **回退且连接主协议 ≠ 档案协议 ⇒ log.warning**（协议-地址错配，
+      见下方「协议-地址错配」段）；api_key / headers / models_url **取自连接**；
+      档案 params 里的同名保留键 **被忽略**（防「一列两用」）；档案的**非**保留键
+      （temperature / thinking …）仍然生效。
     - **悬空 connection_id**（指向不存在的连接）⇒ 抛 :class:`ValueError`
       ——**不静默回落**到档案自己的 base_url（那会掩盖配置错误）。
+
+    **协议-地址错配**（2026-10-25 修复）：协议地址池未命中而回退到连接主
+    base_url 时，主地址服务的是**连接的主协议**平面；主协议与档案协议不同 ⇒
+    打到的是**另一个协议的端点**（表现为上游 404 / 400，仓内零线索）。
+    ⇒ 回退**且**主协议 ≠ 档案协议 ⇒ ``log.warning``（带 profile_id / 档案协议 /
+    连接主协议 / 池键集合 / 回退地址）；主协议一致 ⇒ 回退是安全的 ⇒ **静默**。
     """
     from packages.core.model_router.providers import resolve_api_key
 
@@ -436,7 +534,29 @@ def resolve_effective(
         # （如 opencode Go：openai_compatible 走 /openai/v1，anthropic 走 /anthropic）。
         pool = _parse_protocol_pool((connection_row or {}).get("protocol_base_urls"))
         conn_base = _norm_base_url((connection_row or {}).get("base_url")) or None
-        base_url = _norm_base_url(pool.get(eff_provider)) or conn_base
+        profile_protocol = str(eff_provider or "").strip()
+        pooled_base = _norm_base_url(pool.get(profile_protocol)) or None
+        if pooled_base:
+            base_url = pooled_base
+        else:
+            # ⚠️ **协议-地址错配的可见化**（2026-10-25 修复：此前完全静默）。
+            # 池里没有档案协议 ⇒ 回退连接主 base_url；而连接主 base_url 服务的是
+            # **连接的主协议**平面 ⇒ 若主协议 ≠ 档案协议，这个地址**根本不是该档案
+            # 该协议的端点**（opencode Go 上 anthropic 档案打到 /openai/v1 平面）。
+            # 此前这条路径零日志 ⇒ 表现为「上游 404 / 400，仓内查不到原因」。
+            # ⇒ 主协议一致 ⇒ 回退是安全的 ⇒ **静默**；不一致 ⇒ log.warning。
+            base_url = conn_base
+            conn_protocol = str((connection_row or {}).get("provider") or "").strip()
+            if conn_protocol != profile_protocol:
+                log.warning(
+                    "model_router.protocol_pool_miss profile_id=%s profile_protocol=%s "
+                    "connection_protocol=%s pool_protocols=%s fallback_base_url=%s",
+                    profile_row.get("profile_id") or profile_row.get("config_id"),
+                    profile_protocol,
+                    conn_protocol,
+                    sorted(pool.keys()),
+                    conn_base,
+                )
         headers = render_headers(
             conn_params.get("headers"),
             HeaderContext(run_id=run_id, connection_id=connection_id),

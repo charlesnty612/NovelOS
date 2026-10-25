@@ -11,9 +11,13 @@
 
 口径与边界（**先读再看**）
 --------------------------
-* **绝不碰活库**：默认在仓库 ``tmp/``（已 gitignore）或系统 ``%TEMP%`` 下建临时库；
+* **绝不碰活库**：默认在**系统 ``%TEMP%`` 下的专属子目录**里建临时库
+  （**仓外** —— 库落点闸 ``packages/core/db.py::check_db_path`` 只允许仓内
+  ``data/`` 子树 ⇒ 仓内 ``tmp/`` **不是**合法临时落点，2026-10-25 修复）；
   显式传入活库路径（仓库 ``data/`` 下、或 ``NOVELOS_DB_PATH`` / 配置指向的运行库）
   ⇒ **拒绝并以非 0 退出码退出**（:data:`EXIT_LIVE_DB_REFUSED`）。
+* **仓内一律拒绝**：``--db`` 指向软件仓内（``data/`` 除外）⇒ 同样以退出码 3
+  干净拒绝（脚本层提前拦 ⇒ 不把核心层的 ``RepoLocalDbPathError`` 裸栈甩给用户）。
 * **只造合成夹具**：章节号 / 状态 / 标题 / 大纲 / 正文全部是程序生成的假文本，
   **不含任何真实小说内容**，也不从既有库里拷贝。
 * **不发 LLM 调用**：只跑纯装配（``build_director_input`` / ``build_writer_input``），
@@ -26,11 +30,11 @@
 
     python scripts/measure_cache_key_perf.py                       # 默认 12/24/48 章
     python scripts/measure_cache_key_perf.py --chapters 6 --iterations 5
-    python scripts/measure_cache_key_perf.py --db tmp/perf.db      # 指定临时库基路径
+    python scripts/measure_cache_key_perf.py --db %TEMP%/perf.db   # 指定临时库基路径
     python scripts/measure_cache_key_perf.py --json out.json       # 落原始结果
 
 退出码：0 正常；2 参数 / 父目录不合法（``--db`` 的父目录不存在或不是目录）；
-3 拒绝执行（活库路径 / 位置不合法）。
+3 拒绝执行（活库路径 / 内容仓 / 痕迹仓 / 仓库 ``data/`` / 仓内其它位置）。
 """
 
 from __future__ import annotations
@@ -39,9 +43,11 @@ import argparse
 import json
 import math
 import os
+import shutil
 import sqlite3
 import statistics
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -476,7 +482,16 @@ def _forbidden_roots() -> list[Path]:
 
 
 def assert_not_live_db(db_path: Path) -> None:
-    """拒绝把测量指向活库 / 内容仓 / 仓库 ``data/``。违反 ⇒ 抛 :class:`SystemExit`。"""
+    """拒绝把测量指向活库 / 内容仓 / 痕迹仓 / 仓库 ``data/`` / 仓内其它位置。
+
+    违反 ⇒ 抛 :class:`SystemExit`（退出码 :data:`EXIT_LIVE_DB_REFUSED` = 3）。
+
+    ⚠ **仓内一律拒绝**（2026-10-25）：库落点闸
+    ``packages/core/db.py::check_db_path`` 只允许**仓内** ``data/`` 子树 ⇒ 指向仓内
+    ``tmp/`` 的「临时库」会被核心层拒绝（抛 ``RepoLocalDbPathError`` ⇒ 裸栈甩给
+    用户，看着像「跑挂了」而不是「路径不合法」）。⇒ 脚本层提前拦，给出统一退出码
+    3 + 明确原因（与本文件 F-4/F-6「零 traceback」纪律一致）。
+    """
     resolved = db_path.expanduser().resolve()
     live = _live_db_paths()
     if resolved in live:
@@ -491,6 +506,40 @@ def assert_not_live_db(db_path: Path) -> None:
                 f"（内容仓 / 痕迹仓 / 仓库 data/）——本脚本只允许临时库。", file=sys.stderr,
             )
             raise SystemExit(EXIT_LIVE_DB_REFUSED)
+    # 仓内其余位置（``tmp/``、``docs/``、仓根 …）：data/ 已被上面的禁写目录分支
+    # 更具体地拦下 ⇒ 走到这里说明是「仓内但不是 data/」⇒ 核心层库落点闸必拒。
+    try:
+        rel = resolved.relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        return  # 仓外 ⇒ 放行
+    print(
+        f"[拒绝] {resolved} 位于软件仓内（相对仓库根 {rel}）——临时库必须落在**仓外**"
+        "（系统 %TEMP%）；库落点闸（packages/core/db.py::check_db_path）"
+        "只允许仓内 data/ 子树。",
+        file=sys.stderr,
+    )
+    raise SystemExit(EXIT_LIVE_DB_REFUSED)
+
+
+def _cleanup_db_files(db_paths: list[Path]) -> None:
+    """删掉临时库族四件套（``.db`` / ``-wal`` / ``-shm`` / ``-journal``）。
+
+    收尾自清理用：临时库落在**仓外**系统临时目录，跑完必须清掉 ⇒ 不留垃圾。
+    删不掉（Windows 上文件仍被占用等）⇒ **吞掉**：清理失败不应把一次成功的
+    测量变成失败退出码。
+    """
+    for db_path in db_paths:
+        for stale in (
+            db_path,
+            Path(str(db_path) + "-wal"),
+            Path(str(db_path) + "-shm"),
+            Path(str(db_path) + "-journal"),
+        ):
+            try:
+                if stale.exists():
+                    stale.unlink()
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -998,9 +1047,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "临时库**基路径**（每个规模派生 <stem>_ch<N><suffix>）。"
-            "必须是临时位置；指向活库 / 仓库 data/ / 内容仓 ⇒ 拒绝并退出码 3。"
+            "必须是**仓外**临时位置；指向活库 / 仓库 data/ / 仓内其它位置 / "
+            "内容仓 ⇒ 拒绝并退出码 3。"
             "父目录必须**已存在且是目录**（不存在或是普通文件 ⇒ 退出码 2）。"
-            "默认：仓库 tmp/ 下自动命名。"
+            "默认：系统 %TEMP% 下的专属子目录（自动命名、跑完自动清空）。"
         ),
     )
     p.add_argument(
@@ -1038,14 +1088,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _default_base_db() -> Path:
-    tmp_dir = REPO_ROOT / "tmp"
-    try:
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        return tmp_dir / f"cache_key_perf_{os.getpid()}_{int(time.time())}.db"
-    except OSError:
-        import tempfile
+    """默认临时库基路径：**仓外**系统临时目录下的专属子目录。
 
-        return Path(tempfile.gettempdir()) / f"cache_key_perf_{os.getpid()}_{int(time.time())}.db"
+    ⚠ **2026-10-25 修复（库落点闸）**：原实现落**仓内** ``<仓库根>/tmp/`` ⇒ 被
+    ``packages/core/db.py::check_db_path`` 拒绝（仓内只允许 ``data/`` 子树）⇒
+    脚本 rc=1 + 裸栈。**仓内不是临时位的合法落点** ⇒ 改用
+    ``tempfile.mkdtemp`` 在系统 ``%TEMP%`` 下开一个**专属子目录**：库文件、
+    ``-wal``/``-shm``、``both`` 模式子进程派生库全部落在其中（收尾一次性清空）。
+
+    子目录**逐次唯一** ⇒ 并发跑两轮不会互相踩；父进程收尾整体删除（``--keep-db``
+    除外，见 :func:`main`）。
+    """
+    work_dir = Path(tempfile.mkdtemp(prefix="novelos_cache_key_perf_"))
+    return work_dir / f"cache_key_perf_{os.getpid()}_{int(time.time())}.db"
 
 
 #: 子进程标记（both 模式下由父进程设置，避免无限递归）。
@@ -1162,7 +1217,19 @@ def main(argv: list[str] | None = None) -> int:
         print("[错误] --iterations ≥ 1 且 --warmup ≥ 0", file=sys.stderr)
         return 2
 
+    # ⚠ 默认落点 = **仓外**系统临时目录下的专属子目录（见 ``_default_base_db``）
+    #    ⇒ 该目录由本进程创建 ⇒ 收尾时整体清掉（``--keep-db`` 除外 ⇒ 保留供人工查）。
     base = Path(args.db) if args.db else _default_base_db()
+    owned_dir = None if args.db else base.parent
+    try:
+        return _run_measurement(args, scales, base)
+    finally:
+        if owned_dir is not None and not args.keep_db:
+            shutil.rmtree(owned_dir, ignore_errors=True)
+
+
+def _run_measurement(args: argparse.Namespace, scales: list[int], base: Path) -> int:
+    """跑一次测量：建临时库 + 合成夹具 ⇒ 测装配缓存键性能 ⇒ 收尾清库。"""
     assert_not_live_db(base)  # SystemExit ⇒ 退出码 3
     # ⚠️ **父目录不可用 ⇒ 明确报错**（对抗审查 F-6 / F-4，2026-10-23）：
     # 早先直接往下建库 ⇒ 抛未捕获的 ``sqlite3.OperationalError: unable to open
@@ -1196,9 +1263,7 @@ def main(argv: list[str] | None = None) -> int:
         for n_ent in ent_list:
             db_path = base.parent / f"{base.stem}_ent{n_ent}{base.suffix or '.db'}"
             assert_not_live_db(db_path)
-            for stale in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")):
-                if stale.exists():
-                    stale.unlink()
+            _cleanup_db_files([db_path])
             print(f"[夹具] 建实体规模临时库 {db_path}（{n_ent} 角色 / {args.entity_chapters} 章）…",
                   file=sys.stderr)
             fx = build_synthetic_fixture(
@@ -1222,10 +1287,7 @@ def main(argv: list[str] | None = None) -> int:
                 entry["entities"] = entity_cases[i][1]["n_entities"]
                 entity_results.append(entry)
         if not args.keep_db:
-            for db_path, _fx in entity_cases:
-                for stale in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")):
-                    if stale.exists():
-                        stale.unlink()
+            _cleanup_db_files([db_path for db_path, _fx in entity_cases])
         payload = {
             "env": {
                 "python": sys.version.split()[0],
@@ -1250,9 +1312,7 @@ def main(argv: list[str] | None = None) -> int:
     for n in scales:
         db_path = base.parent / f"{base.stem}_ch{n}{base.suffix or '.db'}"
         assert_not_live_db(db_path)
-        for stale in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")):
-            if stale.exists():
-                stale.unlink()
+        _cleanup_db_files([db_path])
         print(f"[夹具] 建临时库 {db_path}（{n} 章合成数据）…", file=sys.stderr)
         cases.append((db_path, build_synthetic_fixture(db_path, n)))
 
@@ -1292,9 +1352,7 @@ def main(argv: list[str] | None = None) -> int:
         for n_ent in ent_list:
             db_path = base.parent / f"{base.stem}_ent{n_ent}{base.suffix or '.db'}"
             assert_not_live_db(db_path)
-            for stale in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")):
-                if stale.exists():
-                    stale.unlink()
+            _cleanup_db_files([db_path])
             print(f"[夹具] 建实体规模临时库 {db_path}（{n_ent} 角色 / {args.entity_chapters} 章）…",
                   file=sys.stderr)
             fx = build_synthetic_fixture(
@@ -1318,10 +1376,7 @@ def main(argv: list[str] | None = None) -> int:
                 entry["entities"] = entity_cases[i][1]["n_entities"]
                 entity_results.append(entry)
         if not args.keep_db:
-            for db_path, _fx in entity_cases:
-                for stale in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")):
-                    if stale.exists():
-                        stale.unlink()
+            _cleanup_db_files([db_path for db_path, _fx in entity_cases])
 
     payload = {
         "env": {
@@ -1341,6 +1396,11 @@ def main(argv: list[str] | None = None) -> int:
         "entity_scale_results": entity_results,
     }
     _emit(payload, args)
+    # ---- 收尾：清掉章数轴的临时库族四件套（``--keep-db`` 除外）⇒ 不留垃圾 ----
+    # ⚠ 2026-10-25：临时库已改落**仓外**系统临时目录 ⇒ 跑完必须清掉。
+    #   （原先落仓内 ``tmp/`` 且**从不清理** ⇒ 仓内每跑一次留一批 ``.db``。）
+    if not args.keep_db:
+        _cleanup_db_files([db_path for db_path, _fx in cases])
     return EXIT_OK
 
 

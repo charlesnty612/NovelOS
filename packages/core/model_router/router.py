@@ -2,8 +2,12 @@
 
 职责：
 - 按 capability 查询 ``model_configs`` 表，命中第一条 ``enabled=1`` 行。
-- 按 ``provider`` 字段分发到 :class:`MockProvider` / :class:`OpenAICompatibleProvider` /
-  :class:`AnthropicProvider` / :class:`OllamaProvider`。
+- 按**协议**分发到 :class:`MockProvider` / :class:`OpenAICompatibleProvider` /
+  :class:`AnthropicProvider` / :class:`OllamaProvider`。⚠️ **协议取自模型档案**
+  （``model_profiles.provider`` 列 = 协议，模型级属性，2026-10-24 裁决「协议下放
+  档案层」）；**连接不再选协议**——连接只是厂商网关（地址池 + key + headers），
+  它的 ``provider`` 列降级为「主协议」（仅给档案协议列为空的脏行兜底）。
+  绑定态解析的单点见 :func:`packages.core.model_router.effective.resolve_effective`。
 - 失败转移链：:meth:`ModelRouter.call_with_fallback` 按 rowid 顺序逐个尝试，全失败抛
   :class:`AggregateProviderError`。
 
@@ -13,11 +17,15 @@
   - director → ``reasoning``，observer → ``observer``（V3.9.3 起独立环节）
   - writer → ``creative_writing``
 - ``resolve(capability)`` 无命中 → :class:`ModelNotConfiguredError`，detail 注明 capability。
-- ``get_provider(config_row)`` 按 provider 字段工厂化；mock 不传脚本（每次回显空 JSON），
+- ``get_provider(config_row)`` 按**档案的协议**字段工厂化；mock 不传脚本（每次回显空 JSON），
   实际测试 / 手工触发时由 ``runner`` 注入 ``mock_script`` 直接构造 MockProvider，
   此处的 mock 仅作为「最小兜底」。
-- Anthropic / Ollama 的 ``base_url`` 可省略（分别用官方默认 / 本地默认），其余 provider
-  仍要求 ``params_json.base_url`` 必填（沿用 Sprint 3 行为）。
+- ``base_url`` 的来源分两种：**未绑定连接** ⇒ 取档案 ``params_json.base_url``
+  （Anthropic / Ollama 可省略，分别用官方默认 / 本地默认；其余协议必填，沿用
+  Sprint 3 行为）；**已绑定连接** ⇒ 取连接的协议地址池
+  （``pool[档案协议] or 连接.base_url``），**档案自己的 ``params_json.base_url``
+  被忽略**（连接是地址的唯一权威）⇒ 绑定态档案不再受「``params_json.base_url``
+  必填」约束。
 """
 
 from __future__ import annotations
@@ -34,6 +42,7 @@ from .effective import (
     apply_thinking_override,
     parse_params,
     resolve_effective,
+    thinking_override_compatible,
 )
 from .exceptions import (
     AggregateProviderError,
@@ -75,6 +84,11 @@ AGENT_CAPABILITY: dict[str, str] = {
     "world_builder": "world_building",
     "character_designer": "character_design",
     "volume_outliner": "volume_outline",
+    # outline-batch 工作流的 planner agent（2026-10-25 登记）：此前**未登记**
+    # ⇒ ``capability_for`` 默认回退 reasoning（语义上恰好一致，但那是**隐式**的
+    # ——「没登记」与「登记成 reasoning」在行为上无法区分，页面展示/分配也就没有
+    # 它的位置）。显式登记 ⇒ 与既有语义逐位一致，且名册可被机器看守。
+    "outline_batch_planner": "reasoning",
 }
 """Agent 名 → capability 名（对齐 agent-contracts §7）。
 
@@ -124,6 +138,9 @@ CAPABILITY_LABELS: dict[str, dict[str, object]] = {
         "director", "arbiter",
         "deconstructor_chapter", "deconstructor_aggregate",
         "deep_reviewer",
+        # outline-batch 的批量大纲 planner（2026-10-25 登记；与 AGENT_CAPABILITY
+        # 同侧的映射一一对应，漏一处就会出现「页面不展示 / 映射查不到」的分叉）。
+        "outline_batch_planner",
     ]},
     # V3.9.3：observer 拆为独立环节；不再列在 reasoning 组。原因：chapter_commit
     # observer 双腿此前硬编码 capability_override="light"，让 observer 实际跑
@@ -177,6 +194,12 @@ class ModelRouter:
         深拷贝后覆盖，**不改库**）——即「环节覆盖优先于档案值」；fallback 链上
         每个候选都被同一覆盖（后备档案也按环节强度跑）。
         ``thinking_override`` 为 NULL（存量行）⇒ params 原样逐字，零行为突变。
+
+        ⚠️ **覆盖是 per-candidate 的**（2026-10-25 修复）：候选链允许异协议后备
+        （首选 openai_compatible + 后备 anthropic）；某候选的协议若**无法表达**
+        该档的参数族（anthropic 收 ``reasoning_effort`` ⇒ 上游 400 ⇒ 整链全灭）
+        ⇒ 该候选**跳过覆盖**（保留档案自身参数）+ ``log.warning``，
+        其余候选照常应用。判定单点：:func:`effective.thinking_override_compatible`。
 
         ⚠️ 边界：:meth:`call_with_fallback` 的 ``profile_id=`` 单次 run 级覆盖路径
         **不走本方法**（调用方显式锁定档案，绕过 binding）⇒ 该路径不应用环节覆盖
@@ -232,18 +255,14 @@ class ModelRouter:
                 conn.close()
             if override:
                 # 环节覆盖：候选链每个候选的 params 深拷贝后翻译再放回（不改库）。
-                # 脏 override（不在 8 档枚举）→ ValueError 显式失败（写时已拦，
-                # 这里只兜 DB 直改的脏行——坏配置不该被静默当「跟随档案」）。
+                # ⚠️ 2026-10-25：**per-candidate 相容性**——异协议后备候选不能收到
+                #    它那个协议**无法表达**的参数族（anthropic 协议收到
+                #    ``reasoning_effort`` ⇒ 上游 400 ⇒ 整条后备链全灭）。
+                #    不相容 ⇒ 该候选**跳过覆盖**（保留档案自身参数）+ log.warning。
+                #    脏 override（不在 8 档枚举）→ ValueError 显式失败（写时已拦，
+                #    这里只兜 DB 直改的脏行——坏配置不该被静默当「跟随档案」）。
                 out = [
-                    {
-                        **row,
-                        "params_json": json.dumps(
-                            apply_thinking_override(
-                                parse_params(row.get("params_json")), override
-                            ),
-                            ensure_ascii=False,
-                        ),
-                    }
+                    self._apply_thinking_override(row, capability, override)
                     for row in out
                 ]
             return self._filter_disabled_connections(out)
@@ -263,6 +282,44 @@ class ModelRouter:
         finally:
             conn.close()
         return [dict(r) for r in rows]
+
+    # -------------------------------------------------------------- _apply_thinking_override
+    def _apply_thinking_override(
+        self,
+        row: dict[str, Any],
+        capability: str,
+        override: str,
+    ) -> dict[str, Any]:
+        """把环节级思考档覆盖应用到**单个**候选（**per-candidate 相容性**）。
+
+        - 该候选的协议**能表达**该档的参数族 ⇒ 深拷贝 params 后翻译（不改库）；
+        - **不能表达** ⇒ **跳过覆盖**（原样返回，保留档案自身参数）+
+          ``log.warning``（capability / 候选 profile_id / 协议 / 被跳过的档）。
+
+        为什么必须 per-candidate（2026-10-25 修复）：候选链允许**异协议后备**
+        （首选 Kimi(openai_compatible) + 后备 Claude(anthropic) 是常见配法）。
+        此前覆盖**无差别**应用 ⇒ 后备候选收到 ``reasoning_effort`` ⇒ Anthropic
+        Messages API 对未知请求体字段直接 400 ⇒ **整条链全灭**（首选成功也会被
+        后备的 400 拖成失败）。
+
+        ⚠️ 非法档位 ⇒ :class:`ValueError`（相容性判定内部即校验，坏配置显式失败）。
+        """
+        protocol = (row.get("provider") or "").strip().lower()
+        if not thinking_override_compatible(override, protocol):
+            log.warning(
+                "model_router.thinking_override.skipped capability=%s profile_id=%s "
+                "protocol=%s mode=%s reason=protocol_cannot_express_param_family",
+                capability,
+                row.get("config_id"),
+                protocol,
+                override,
+            )
+            return row
+        params = apply_thinking_override(parse_params(row.get("params_json")), override)
+        return {
+            **row,
+            "params_json": json.dumps(params, ensure_ascii=False),
+        }
 
     # -------------------------------------------------------------- resolve
     def resolve(self, capability: str) -> dict[str, Any]:
@@ -328,8 +385,9 @@ class ModelRouter:
 
         - 档案**未绑定连接** ⇒ 与改造前逐字相同（provider / base_url / api_key
           全部取自档案的 ``params_json``）。
-        - 档案**已绑定连接** ⇒ provider / base_url / api_key / headers /
-          models_url **全部取自连接**（档案的同名键被忽略）。
+        - 档案**已绑定连接** ⇒ **provider 取档案自身的**（协议是模型级属性，
+          2026-10-24 协议下放；连接的 ``provider`` 列只是「主协议」兜底）；
+          base_url / api_key / headers / models_url **取自连接**（档案的同名键被忽略）。
         - ``"mock"`` → :class:`MockProvider`（``scripted`` 透传；默认 None，回显空 JSON）。
         - ``"anthropic"`` → :class:`AnthropicProvider`（``base_url`` 可省，默认官方）。
         - ``"ollama"`` → :class:`OllamaProvider`（``base_url`` 可省，默认本地）。

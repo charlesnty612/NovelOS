@@ -13,8 +13,11 @@
 """
 from __future__ import annotations
 
+import ast
 import json
+import math
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -619,7 +622,12 @@ def test_db_sandbox_registers_sandbox_and_keeps_repo_db_untouched() -> None:
 
 def test_bug16_dead_code_removed() -> None:
     """BUG-16 判别：``secrets_store.has_api_key`` 全仓零调用点 ⇒ 清理后不得再导出/存在；
-    ``wordcount._ERROR_RATIO`` 按 ``wordcount.py:35-42`` 纪律**必须保留**，且 :37 注释已订正。
+    ``wordcount._ERROR_RATIO`` 按 ``wordcount.py:35-42`` 纪律**必须保留**。
+
+    ⚠️ 注释**说的是不是实话**由另一条用例判定
+    （``test_bug63_wordcount_error_ratio_comment_says_the_truth``）——
+    旧判据是「裸子串否定」（只挡一句旧文案）⇒ 换成别的不实文案照样绿 ⇒ 已改结构化守护
+    （旧裸子串判据已作为**附加**断言恢复在那条用例里 ⇒ 两层判据并存）。
     """
     from packages.core import secrets_store
     from packages.core.quality import wordcount
@@ -627,5 +635,343 @@ def test_bug16_dead_code_removed() -> None:
     assert "has_api_key" not in secrets_store.__all__, "BUG-16 未清理：仍导出 has_api_key"
     assert not hasattr(secrets_store, "has_api_key"), "BUG-16 未清理：仍定义 has_api_key"
     assert hasattr(wordcount, "_ERROR_RATIO"), "wordcount._ERROR_RATIO 按 :35-42 纪律必须保留"
-    src = (Path(REPO_ROOT) / "packages" / "core" / "quality" / "wordcount.py").read_text(encoding="utf-8")
-    assert "全仓 grep 只有本行定义" not in src, "wordcount.py:37 注释未订正"
+
+
+# ---------------------------------------------------------------------------
+# BUG-63②：``wordcount.py`` 里 ``_ERROR_RATIO`` 注释的**结构化**守护
+#
+# ⚠️ 旧判据是「裸子串否定」（只挡「全仓 grep 只有本行定义」这一句旧文案）⇒
+#    后人把注释换成**另一种不实文案**时依然绿 ⇒ 守卫形同虚设。
+# ⇒ 现在改成**结构化守护**：把注释里的**可核查断言**（百分数归属、「对齐」说法的
+#    否定上下文、「仓内代码零调用点」）逐条与**代码事实**对撞
+#    ⇒ 换成任何一种不实文案都必红（判据与具体文案**解耦**）。
+#
+# ★ **零读取点纪律**：``_ERROR_RATIO`` **保留但不得被引用** —— 新增任何读取点
+#   （哪怕只是一次取值／``getattr``）**必须先改本登记**（改口径或改纪律），
+#   否则「仓内代码零调用点」这句注释会**当场变假**（⇒ 结构化守护必红）。
+# ---------------------------------------------------------------------------
+
+_WORDCOUNT_PATH = REPO_ROOT / "packages" / "core" / "quality" / "wordcount.py"
+
+#: 百分数的**归属关键字**（就近归属：数字前**最近**的那个关键字决定它的含义）。
+_NUM_OWNERS: tuple[tuple[str, str], ...] = (
+    ("band 外缘偏离", "band"),  # band 外缘偏离的百分数
+    ("本值", "error"),  # 本常量（_ERROR_RATIO）的百分数
+)
+
+#: 「对齐」这类**可能为假**的说法，只允许出现在**被否定**的上下文里
+#: （否定的措辞必须在「对齐」二字的**近邻**（±60 字）内 ⇒ 不许拿别处的
+#: 一句「不成立」来给一句无保留的「对齐」兜底）。
+_NEGATION_MARKS = (
+    "不符",
+    "不成立",
+    "并非",
+    "不是",
+    "不等于",
+    "不对齐",
+    "有误",
+    "原注释",
+    "旧注释",
+    "订正",
+    "已订正",
+)
+
+
+def _comment_block_above(path: Path, assign_prefix: str) -> list[str]:
+    """取 ``<assign_prefix> = ...`` 赋值行**紧邻上方**的连续注释行（已剥掉 ``#``）。"""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    idx = next(
+        (i for i, line in enumerate(lines) if line.strip().startswith(assign_prefix)),
+        None,
+    )
+    assert idx is not None, f"{path.name} 里找不到 `{assign_prefix} = ...` 赋值行"
+    block: list[str] = []
+    for line in reversed(lines[:idx]):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            block.append(stripped.lstrip("#").strip())
+            continue
+        break
+    return list(reversed(block))
+
+
+def _percent_values(text: str) -> list[tuple[float, int]]:
+    """抽出 ``(百分数值, 位置)``：``15%``／``15 %`` → 15.0；``0.15`` → 15.0（分数同义）。"""
+    found: list[tuple[float, int]] = []
+    for m in re.finditer(r"(?<![\d.])(\d+(?:\.\d+)?)\s*%", text):
+        found.append((float(m.group(1)), m.start()))
+    for m in re.finditer(r"(?<![\d.])0\.(\d+)(?![\d]*%)", text):
+        found.append((float("0." + m.group(1)) * 100.0, m.start()))
+    return sorted(found, key=lambda item: item[1])
+
+
+def _owner_for(text: str, pos: int) -> str | None:
+    """数字 ``pos`` 之前**最近**的归属关键字（``band`` / ``error``）；没有则 ``None``。"""
+    best: tuple[int, str] | None = None
+    for keyword, owner in _NUM_OWNERS:
+        at = text.rfind(keyword, 0, pos)
+        if at >= 0 and (best is None or at > best[0]):
+            best = (at, owner)
+    return best[1] if best else None
+
+
+def _identifier_references(roots: list[Path], name: str) -> list[str]:
+    """列出 ``roots`` 下 ``.py`` 里**读取**该标识符的位置（``file:lineno``）。
+
+    只认 **Load** 语境（赋值/定义不算引用）⇒ 「零调用点」这类断言才是真的；
+    ``from … import <name>`` 也算引用（它是把名字带进本模块的真用法）。
+    """
+    found: list[str] = []
+    for root in roots:
+        for path in sorted(root.rglob("*.py")):
+            try:
+                src = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):  # pragma: no cover - 非文本文件
+                continue
+            if name not in src:
+                continue
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:  # pragma: no cover - 非本仓源码
+                continue
+            rel = path.relative_to(REPO_ROOT)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load):
+                    found.append(f"{rel}:{node.lineno}")
+                elif isinstance(node, ast.Attribute) and node.attr == name:
+                    found.append(f"{rel}:{node.lineno}")
+                elif isinstance(node, ast.ImportFrom) and any(a.name == name for a in node.names):
+                    found.append(f"{rel}:{node.lineno}")
+    return found
+
+
+# ---------------------------------------------------------------------------
+# 存在性断言的**极性抽取**（供 BUG-63② 结构化守护用）
+#
+# ⚠️ 为什么要有这一层：只校验「代码侧事实（refs 为空）」时，注释侧**作出相反断言**
+#   （如谎称「仍被多处代码引用」「有消费方」「存在调用点」）一律放行
+#   ⇒ 守卫只钉住了「读侧」，没钉住「写侧」。
+# ⇒ 这里把注释里的**存在性句子**抽出来并判**极性**（肯定式 / 否定式），
+#   再与代码事实对撞 ⇒ 谎称与事实**极性相反**时必红。
+# ---------------------------------------------------------------------------
+
+#: 「存在性」断言的**主语**（引用／消费方／调用点／读取点）。
+_EXISTENCE_SUBJECTS: tuple[str, ...] = ("引用", "消费方", "调用点", "读取点")
+
+#: **文档侧**语境的标志（README／文字引用…）⇒ 文档引用**不是代码读取点**，
+#: 不在判别面（残余边界，写在用例 docstring 里）。
+_DOC_SCOPE_MARKS: tuple[str, ...] = ("README", "文字", "文档", "章节", "§", "spec")
+
+#: **代码侧**语境的标志（出现即认为这句在谈**代码**的引用／消费方／调用点）。
+_CODE_SCOPE_MARKS: tuple[str, ...] = ("代码", "仓内", "调用点", "读取点", "消费方")
+
+#: 否定式措辞（零调用点／不再被引用／无消费方）。
+_NEGATIVE_POLARITY: tuple[str, ...] = ("不再", "零", "无", "未")
+
+#: 肯定式措辞（有／仍被／存在／被引用）。
+_AFFIRMATIVE_POLARITY: tuple[str, ...] = ("仍被", "仍", "存在", "有", "被")
+
+#: 否定式写法**归一化**（⇒ 归一后否定词里不再夹带肯定词，
+#: 否则「没有消费方」会被「有」误判成肯定式 ⇒ 假红）。
+_CLAUSE_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
+    ("不再存在", "不再"),
+    ("不再被", "不再"),
+    ("不再有", "不再"),
+    ("没有被", "无"),
+    ("没被", "无"),
+    ("未被", "无"),
+    ("不被", "无"),
+    ("没有", "无"),
+)
+
+#: 主语**之后**也允许看一眼的近邻窗口（字）。
+_POLARITY_LOOKAHEAD = 12
+
+
+def _polarity_at(clause: str, pos: int) -> bool | None:
+    """主语 ``pos`` 处的存在性极性。
+
+    ⇒ ``True`` = 肯定式（有／仍被／存在）／``False`` = 否定式（零／不再被／无）
+    ／``None`` = **判不出**（主语前后都没有极性措辞 ⇒ 该句跳过）。
+
+    判据：主语**之前最近**的那个极性措辞（与本文件 ``_owner_for`` 同一口径：
+    就近归属）；主语前判不出时才看主语**之后**的近邻窗口。
+    """
+    head = clause[:pos]
+    neg = max((head.rfind(mark) for mark in _NEGATIVE_POLARITY), default=-1)
+    aff = max((head.rfind(mark) for mark in _AFFIRMATIVE_POLARITY), default=-1)
+    if neg < 0 and aff < 0:
+        tail = clause[pos : pos + _POLARITY_LOOKAHEAD]
+        neg_tail = min(
+            (tail.find(mark) for mark in _NEGATIVE_POLARITY if tail.find(mark) >= 0),
+            default=-1,
+        )
+        aff_tail = min(
+            (tail.find(mark) for mark in _AFFIRMATIVE_POLARITY if tail.find(mark) >= 0),
+            default=-1,
+        )
+        if neg_tail < 0 and aff_tail < 0:
+            return None
+        return aff_tail >= 0 and (neg_tail < 0 or aff_tail < neg_tail)
+    if neg < 0:
+        return True
+    if aff < 0:
+        return False
+    return aff > neg
+
+
+def _existence_claims(text: str) -> list[tuple[str, bool]]:
+    """抽出注释里的**存在性断言句** ⇒ ``[(子句, 是否肯定式), ...]``。
+
+    - **切句**：按换行与 ``；。，、`` 切（中文标点即天然的子句边界）；
+    - **主语**：子句里出现「引用／消费方／调用点／读取点」；
+    - **文档侧跳过**：子句只谈文档（README／文字…）⇒ 不在判别面；
+    - **极性**：见 :func:`_polarity_at`（判不出 ⇒ 该句跳过）。
+    """
+    claims: list[tuple[str, bool]] = []
+    for raw in re.split(r"[\n；。，、]", text):
+        clause = raw.strip()
+        if not clause:
+            continue
+        if not any(subject in clause for subject in _EXISTENCE_SUBJECTS):
+            continue
+        # 文档侧（README／文字…）且**不**谈代码 ⇒ 不在判别面。
+        if any(mark in clause for mark in _DOC_SCOPE_MARKS) and not any(
+            mark in clause for mark in _CODE_SCOPE_MARKS
+        ):
+            continue
+        normalized = clause
+        for old, new in _CLAUSE_NORMALIZATIONS:
+            normalized = normalized.replace(old, new)
+        for subject in _EXISTENCE_SUBJECTS:
+            pos = normalized.find(subject)
+            if pos < 0:
+                continue
+            polarity = _polarity_at(normalized, pos)
+            if polarity is None:
+                continue
+            claims.append((clause, polarity))
+            break  # 每个子句只登记**第一个**主语（避免同句多主语重复登记）
+    return claims
+
+
+def test_bug63_wordcount_error_ratio_comment_says_the_truth() -> None:
+    """★ BUG-63② 判别：``wordcount.py`` 里 ``_ERROR_RATIO`` 的注释**必须说的是实话**。
+
+    旧判据是「裸子串否定」（只挡一句旧文案）⇒ 后人换成**另一种不实文案**照样绿。
+    现在按**代码事实**逐条对撞（判据与文案**解耦**）：
+
+    1. 注释里出现的**每个百分数**必须落在两个真值之一（band 外缘偏离 % ／ 本常量 %）；
+    2. 每个百分数的**归属**必须正确：``band 外缘偏离`` 上下文 ⇒ band %；
+       ``本值`` 上下文 ⇒ 本常量 % ⇒「band 外缘偏离 = 30%」这类不实文案必红；
+    3. 两个真值**都必须出现**（注释必须写明这条关系）；
+    4. 「对齐」只允许出现在**被否定**的上下文里（不许出现无保留的「与 band 外缘对齐」）；
+    5. 代码侧事实：``_ERROR_RATIO == 0.30``、band 外缘偏离 **恒等于** ``_WARNING_RATIO``、
+       且 ``_ERROR_RATIO`` 在 ``packages/`` ＋ ``scripts/`` 内**零**读取点
+       （注释里那句「仓内代码零调用点」必须为真）；
+    6. ★ **存在性断言的极性绑定**（本轮补的判别力缺口）：注释里
+       「引用／消费方／调用点」类句子按**极性**与代码事实对撞 ——
+       **肯定式**（有／仍被／存在）而实际零读取点 ⇒ **必红**；
+       **否定式**（零调用点／不再被引用／无消费方）而实际有读取点 ⇒ **必红**；
+       ⇒ 「仍被多处代码引用」「有消费方」「存在调用点」这类**换个说法的谎称**
+       不再是判别盲区（此前只校验代码侧事实 ⇒ 注释侧说反话一律放行）；
+    7. ★ **附加旧子串判据**（本轮恢复）：已知不实文案「全仓 grep 只有本行定义」
+       不许再出现在源码里（它讲的是「全仓」这一**存在性**，但主语不是
+       「引用／消费方／调用点」⇒ 第 6 条覆盖不到 ⇒ 需单列一条）。
+
+    ⚠️ **残余边界**（如实登记，不假装覆盖全）：
+    ① **非存在性类**的不实文案**不在判别面**（例：把「经验值（未经语料校准）」
+       改成「实测分位校准」——本守卫**不会**因此变红）；
+    ② **文档侧**引用（README／文字引用）不是代码读取点 ⇒ 不在判别面；
+    ③ 主语前后都判不出极性的句子**跳过**；
+    ④ 百分比／归属／「对齐」三类断言各有自己的判别面（见上面 1~4 条）；
+    ⑤ 注释里**必须**至少有一条存在性陈述（否则「仓内代码零调用点」这条纪律被整段
+       删掉 ⇒ 第 6 条会**静默失效** ⇒ 本守卫直接红，不让判别面被悄悄缩小）。
+    """
+    from packages.core.quality import wordcount
+
+    # —— 代码侧事实 ——
+    error_pct = float(wordcount._ERROR_RATIO) * 100.0
+    warn_pct = float(wordcount._WARNING_RATIO) * 100.0
+    cfg = wordcount.resolve_band_config(None)
+    band_dev_pct = (float(cfg["high_ratio"]) - 1.0) * 100.0
+    assert math.isclose(band_dev_pct, warn_pct), (
+        f"band 外缘偏离实为 {band_dev_pct}%（由 high_ratio 推导）"
+        f"⇒ 与 _WARNING_RATIO（{warn_pct}%）不符"
+    )
+    assert not math.isclose(error_pct, band_dev_pct), (
+        f"_ERROR_RATIO（{error_pct}%）竟与 band 外缘偏离（{band_dev_pct}%）相等"
+        f"⇒ 注释里「与 band 外缘对齐」的说法会变真"
+    )
+
+    # —— 代码侧：零读取点（极性绑定的**事实基准**）——
+    refs = _identifier_references(
+        [REPO_ROOT / "packages", REPO_ROOT / "scripts"], "_ERROR_RATIO"
+    )
+
+    # —— 注释侧：逐条对撞 ——
+    block = _comment_block_above(_WORDCOUNT_PATH, "_ERROR_RATIO")
+    assert block, "wordcount.py 里 _ERROR_RATIO 上方没有注释块 ⇒ 纪律注释被删"
+    text = " ".join(block)
+
+    values = _percent_values(text)
+    assert values, "注释里没有任何百分数 ⇒ 没写明「本值 / band 外缘偏离各是多少」"
+    for value, pos in values:
+        assert math.isclose(value, error_pct) or math.isclose(value, band_dev_pct), (
+            f"注释里的百分数 {value}% 不是任何真值（本常量 {error_pct}% / "
+            f"band 外缘偏离 {band_dev_pct}%）⇒ 不实文案"
+        )
+        owner = _owner_for(text, pos)
+        if owner == "band":
+            assert math.isclose(value, band_dev_pct), (
+                f"band 外缘偏离实为 {band_dev_pct}%（由 _WARNING_RATIO 推导）"
+                f"⇒ 注释写成 {value}% 不实"
+            )
+        elif owner == "error":
+            assert math.isclose(value, error_pct), (
+                f"_ERROR_RATIO 实为 {error_pct}% ⇒ 注释写成 {value}% 不实"
+            )
+    assert any(math.isclose(v, error_pct) for v, _ in values), (
+        f"注释必须写明本常量的百分数（{error_pct}%）"
+    )
+    assert any(math.isclose(v, band_dev_pct) for v, _ in values), (
+        f"注释必须写明 band 外缘偏离的百分数（{band_dev_pct}%）"
+    )
+
+    for match in re.finditer("对齐", text):
+        window = text[max(0, match.start() - 60) : match.end() + 60]
+        assert any(mark in window for mark in _NEGATION_MARKS), (
+            f"「对齐」必须写在被否定的上下文里（否则等于宣称本常量与 band 外缘偏离相等）：{window!r}"
+        )
+
+    # —— 注释里那句「仓内代码零调用点」必须为真 ——
+    assert not refs, (
+        f"_ERROR_RATIO 在仓内代码出现读取点（注释称零调用点）：{refs}"
+    )
+
+    # —— 注释侧：存在性断言的**极性绑定** ——
+    # 肯定式谎称（「仍被多处代码引用」「有消费方」「存在调用点」）而事实是零读取点 ⇒ 必红；
+    # 否定式（「零调用点」「不再被引用」「无消费方」）而事实有读取点 ⇒ 必红。
+    claims = _existence_claims("\n".join(block))
+    assert claims, (
+        "注释里**找不到**任何「引用／消费方／调用点」类的存在性陈述"
+        "（⇒ 「仓内代码零调用点」这条纪律被整段删掉了？⇒ 极性绑定会**静默失效**）"
+    )
+    for clause, affirmative in claims:
+        if affirmative:
+            assert refs, (
+                f"注释里出现**肯定式**存在断言（称有引用／消费方／调用点），"
+                f"但代码事实是**零读取点** ⇒ 谎称：{clause!r}"
+            )
+        else:
+            assert not refs, (
+                f"注释里出现**否定式**存在断言（称零调用点／不再被引用），"
+                f"但代码事实**有**读取点 ⇒ 谎称：{clause!r} ⇒ 读取点={refs}"
+            )
+
+    # —— 附加：旧子串判据（已知不实文案不许再出现）——
+    src = _WORDCOUNT_PATH.read_text(encoding="utf-8")
+    assert "全仓 grep 只有本行定义" not in src, (
+        "wordcount.py 的注释又写回「全仓 grep 只有本行定义」这句不实文案"
+        "（README §13.2 仍有文字引用 ⇒ 「全仓只有本行」不成立）"
+    )

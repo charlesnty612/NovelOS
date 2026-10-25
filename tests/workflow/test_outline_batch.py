@@ -34,8 +34,8 @@ from packages.core.ids import new_id, now_iso
 from packages.core.workflow_registry import get_workflow
 from packages.core.workflow_runtime import engine as _engine_module
 from packages.core.workflow_runtime.engine import WorkflowEngine, WorkflowRunConflict
-from packages.workflows.outline_batch import pipeline as _pipeline_module
 from packages.core.workflow_runtime.runs import get_run
+from packages.workflows.outline_batch import pipeline as _pipeline_module
 
 from ._shared import _make_engine
 

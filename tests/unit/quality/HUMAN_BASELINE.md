@@ -199,7 +199,7 @@ python scripts/readability_audit.py
 |---|---|---|---|---|---|
 | `houfu_human_19ch` | human | 19 | 内容仓 `NovelOS-Content` 的 `reference-books/` | `false` | `本机` |
 | `dev_db_92ch` | generated | 92 | 本机 dev 库 `data/novelos.db` | `false` | `本机` |
-| `dev_db_97ch` | generated | 97 | 同上 | `false` | `本机` |
+| `dev_db_139ch` | generated | 139 | 同上 | `false` | `本机` |
 | `book01_48ch` | generated | 48 | 同上 | `false` | `本机` |
 | `book01_short_para_48ch` | generated | 48 | 同上 | `false` | `本机` |
 | `book01_arc_48ch` | generated | 48 | 同上 | `false` | `本机` |

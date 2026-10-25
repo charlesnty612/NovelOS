@@ -61,18 +61,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# 库落点闸（BUG-59 / 落码批 C-02、C-03）：从 ``packages.core.db`` 取**唯一实现点**
+# ⇒ 库落点判定只实现一次，**不与** ``scripts/guard_repo_write_path.py`` 的**写落点**闸
+# 混用：后者管「产物写哪」（含 ``tmp/``），本闸管「库落哪」（**仅** ``data/``）。
+# ⚠️ 本 import 必须在**仓根入 sys.path 之后**（否则直接 `python scripts/restore_db.py` ⇒ ImportError）。
+from packages.core.db import RepoLocalDbPathError, check_db_path  # noqa: E402
 from scripts.backup_db import (  # noqa: E402
     CIPHER,
     DEFAULT_KEY_FILE,
     PBKDF2_ITER,
     find_openssl,
 )
-
-# 库落点闸（BUG-59 / 落码批 C-02、C-03）：从 ``packages.core.db`` 取**唯一实现点**
-# ⇒ 库落点判定只实现一次，**不与** ``scripts/guard_repo_write_path.py`` 的**写落点**闸
-# 混用：后者管「产物写哪」（含 ``tmp/``），本闸管「库落哪」（**仅** ``data/``）。
-# ⚠️ 本 import 必须在**仓根入 sys.path 之后**（否则直接 `python scripts/restore_db.py` ⇒ ImportError）。
-from packages.core.db import RepoLocalDbPathError, check_db_path  # noqa: E402
 
 #: 表数核对**默认关闭**（``--expect-tables`` 不给就不核对）。
 #:

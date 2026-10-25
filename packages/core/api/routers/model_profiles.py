@@ -32,9 +32,17 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 
+from packages.core.api.routers.connections import (
+    models_path_for_protocol,
+    require_protocol_or_422,
+    resolve_protocol_base_url,
+)
 from packages.core.logging_config import get_logger
 from packages.core.model_router import ConnectionService, ModelRouter, ProfileService, ProviderError
-from packages.core.model_router.effective import group_profiles_by_connection, parse_params
+from packages.core.model_router.effective import (
+    group_profiles_by_connection,
+    parse_params,
+)
 from packages.core.model_router.models import (
     AvailableModelsOut,
     ModelProfileOut,
@@ -105,6 +113,36 @@ def _extract_ids_ollama(data: object) -> list[str]:
 def _dedup_sorted(ids: list[str]) -> list[str]:
     """排序去重（保持稳定插入序以稳定输出，但用户体验上看到有序列表更直接）。"""
     return sorted({i for i in ids if isinstance(i, str) and i})
+
+
+def _resolve_probe_protocol(payload: dict, *, default: str) -> str:
+    """探针协议（= **档案声明的协议**）解析。
+
+    优先级：显式 ``protocol`` > 请求体 ``provider`` > ``default``（连接主协议）。
+
+    - 两个键**同义**（都表示「这个模型用哪套协议」）；同传且不一致 ⇒ **422**
+      （不静默择一——择一等于替用户改协议）。
+    - 值必须是 :data:`PROTOCOL_IDS` 四协议之一 ⇒ 否则 **422**：协议决定「取哪个
+      平面的地址」，未知协议静默兜底会打到**错误的协议面**（正是本端点要修的错址）。
+    """
+    candidates: list[str] = []
+    for name in ("protocol", "provider"):
+        raw = payload.get(name)
+        if raw is None:
+            continue
+        # raw 非 None ⇒ 校验必返 str 或抛 422（``require_protocol_or_422`` 的返回
+        # 类型就是 str；此前写 ``... or ""`` 是**不可达的死代码**，还把「这里保证
+        # 拿到 str」这件事藏进了恒真的表达式里）。
+        candidates.append(require_protocol_or_422(raw, field=name))
+    if len(candidates) == 2 and candidates[0] != candidates[1]:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"protocol 与 provider 同义（都表示档案协议），不能给不同的值："
+                f"{candidates[0]!r} vs {candidates[1]!r}"
+            ),
+        )
+    return candidates[0] if candidates else default
 
 
 router = APIRouter(tags=["model_profiles"])
@@ -681,21 +719,37 @@ def list_available_models(payload: dict, request: Request) -> dict:
       ``profile_id``、再 ``provider`` 默认 env（``NOVELOS_API_KEY_<PROVIDER>``）。
     - ``profile_id`` (str, 可选) —— 已有档案 ID；用于上面提到的解析优先级。
     - ``connection_id`` (str, 可选) —— **连接路径**（2026-10-21 批次十五）：
-      provider / base_url / api_key / headers / models_url **全部取自该连接**；
+      base_url / api_key / headers / models_url **取自该连接**；
       给了连接时 ``provider`` 不再必填。
+
+    **协议（= 档案协议）在连接路径下由请求方给出**（2026-10-24 协议下放）：
+
+    - ``provider`` —— 档案声明的协议（前端档案表单的「接口类型」字段）。
+      **缺省回退连接的主协议**（存量行为不变）。
+    - ``protocol`` —— ``provider`` 的显式别名（同义；同传且不一致 ⇒ 422）。
+      ⚠️ 仅在 ``connection_id`` 路径下有意义（inline 路径的协议就是 ``provider``）。
+    - 取址口径与运行期 :func:`effective.resolve_effective` **逐字一致**：
+      ``pool[协议] or 连接.base_url`` ⇒ 档案声明的协议与连接主协议不同时，
+      拉模型打到的是**该协议自己的平面地址**（协议地址池），不是连接主地址。
 
     ⚠️ **不传 ``connection_id`` 时的行为与改造前逐字相同**（inline 路径保留）。
 
     错误处理：
     - ``400`` —— 必填缺失 / 该 provider 必须有 key 但解析不到；detail 仅文案不含 key。
+    - ``422`` —— 协议名非法 / ``protocol`` 与 ``provider`` 冲突 / 连接不存在。
     - ``502`` —— 拉取失败（超时、非 2xx、解析坏 JSON）。detail 仅文案不含 key。
 
     响应：
     - ``{"models": ["id1", "id2", ...]}`` —— 排序去重后的字符串数组。
     """
-    # ---- 连接路径（2026-10-21 批次十五）：一切取自连接 ----
+    # ---- 连接路径（2026-10-21 批次十五）：地址/密钥/头取自连接 ----
     conn_models_url: str | None = None
     conn_headers: dict[str, str] = {}
+    conn_id: str | None = None
+    # ⚠️ 必须在分支外初始化：inline 分支才赋值 profile_id，而下面的密钥解析
+    #    两条路径共用它 ⇒ 只在 inline 分支初始化会让**连接路径**在
+    #    「连接 params 里没有 api_key」时抛 UnboundLocalError（500）。
+    profile_id: str | None = None
     raw_connection_id = payload.get("connection_id")
     if raw_connection_id is not None:
         if not isinstance(raw_connection_id, str) or not raw_connection_id.strip():
@@ -703,14 +757,18 @@ def list_available_models(payload: dict, request: Request) -> dict:
                 status_code=422, detail="connection_id must be a non-empty string"
             )
         settings = request.app.state.settings
-        conn_row = ConnectionService(settings.db_path).get(raw_connection_id.strip())
+        conn_id = raw_connection_id.strip()
+        conn_row = ConnectionService(settings.db_path).get(conn_id)
         if conn_row is None:
             raise HTTPException(
                 status_code=422, detail=f"model_connection {raw_connection_id!r} not found"
             )
         conn_params = parse_params(conn_row.get("params_json"))
-        provider = conn_row["provider"]
-        base_url = (conn_row.get("base_url") or "").rstrip("/") or None
+        # 协议是**档案级属性**（2026-10-24 裁决）：请求方给出档案协议，
+        # 缺省回退连接主协议（存量行为不变）。
+        provider = _resolve_probe_protocol(payload, default=conn_row["provider"])
+        # 协议地址池取址：pool[协议] or 连接.base_url（与 resolve_effective 同口径）
+        base_url = resolve_protocol_base_url(conn_row, provider)
         inline_api_key = conn_params.get("api_key")
         if isinstance(inline_api_key, str) and inline_api_key == "***":
             inline_api_key = None
@@ -721,6 +779,13 @@ def list_available_models(payload: dict, request: Request) -> dict:
                 k: v for k, v in raw_conn_headers.items() if isinstance(v, str)
             }
     else:
+        if "protocol" in payload:
+            # inline 路径的协议就是 ``provider``；``protocol`` 只在连接路径下有意义
+            # ⇒ 显式拒绝，不静默忽略（"收下即忘" 与 "表里有值" 同级缺陷）。
+            raise HTTPException(
+                status_code=422,
+                detail="protocol 仅在 connection_id 路径下有意义（inline 路径请用 provider）",
+            )
         provider = payload.get("provider")
         if not (isinstance(provider, str) and provider):
             raise HTTPException(status_code=422, detail="provider required")
@@ -739,7 +804,6 @@ def list_available_models(payload: dict, request: Request) -> dict:
                 inline_api_key = None
 
         raw_profile_id = payload.get("profile_id")
-        profile_id: str | None = None
         if isinstance(raw_profile_id, str) and raw_profile_id.strip():
             profile_id = raw_profile_id.strip()
 
@@ -750,7 +814,8 @@ def list_available_models(payload: dict, request: Request) -> dict:
     # ---- ollama：无需 key；缺 base_url 用本地默认 ----
     if provider == "ollama":
         target_base = base_url or OllamaProvider.DEFAULT_BASE_URL
-        url = f"{target_base.rstrip('/')}/api/tags"
+        # 路径后缀取自**单一来源**（连接级 /test 同一张表）⇒ 两处打到同一端点。
+        url = f"{target_base.rstrip('/')}{models_path_for_protocol('ollama')}"
         try:
             resp = httpx.get(url, headers=conn_headers or None, timeout=_FETCH_LIST_TIMEOUT_S)
         except httpx.HTTPError as exc:
@@ -779,6 +844,10 @@ def list_available_models(payload: dict, request: Request) -> dict:
             provider,
             None,
             profile_id=profile_id,
+            # 连接路径：解析链与**运行期一致**（绑定态查 secrets[connection_id]，
+            # 不查档案级条目）——否则「密钥只存在 secrets.json 里」的连接，
+            # 探针会报「需先配置密钥」而运行期其实能跑（探针与运行期口径分叉）。
+            connection_id=conn_id,
         )
 
     # ---- anthropic：必须 key（/v1/models 走鉴权） ----
@@ -789,7 +858,10 @@ def list_available_models(payload: dict, request: Request) -> dict:
                 detail="拉取模型列表失败：需先配置 Anthropic 密钥",
             )
         target_base = base_url or AnthropicProvider.DEFAULT_BASE_URL
-        url = f"{target_base.rstrip('/')}/v1/models"
+        # ⚠️ 2026-10-24 审查修复 M5：路径后缀取自**单一来源**
+        # （``connections.models_path_for_protocol``）⇒ anthropic 平面恒为
+        # ``{地址}/v1/models``（真实端点），与连接级 /test 打同一个地址。
+        url = f"{target_base.rstrip('/')}{models_path_for_protocol('anthropic')}"
         headers = {
             "x-api-key": api_key,
             "anthropic-version": AnthropicProvider.ANTHROPIC_VERSION,
@@ -824,7 +896,8 @@ def list_available_models(payload: dict, request: Request) -> dict:
         )
     # ⚠️ 2026-10-21 批次十五：``models_url`` 覆盖默认的 ``{base_url}/models``
     #    （opencode 的模型列表**不在** {base_url}/models 上 ⇒ 不配就打错 URL）。
-    url = conn_models_url or f"{base_url.rstrip('/')}/models"
+    #    路径后缀取自**单一来源**（连接级 /test 同一张表）。
+    url = conn_models_url or f"{base_url.rstrip('/')}{models_path_for_protocol(provider)}"
     headers: dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
