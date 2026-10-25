@@ -1,6 +1,6 @@
 """NovelOS 测试全局守卫（pytest conftest）。
 
-本文件是**测试基础设施**（不属产品代码），落地三道守卫：
+本文件是**测试基础设施**（不属产品代码），落地四道守卫：
 
 1. **basetemp 硬失败（B2）**：``--basetemp`` 指向**仓内** ⇒ 直接 ``UsageError``；
    未显式指定 ⇒ 统一落到系统 Temp 下的**本次运行唯一**目录（仓外、可写、跑完清理）。
@@ -21,7 +21,20 @@
    ``httpx.MockTransport`` 不开 socket ⇒ mock 链路不受影响。
    ⚠️ 本批**不**把封网挂成 autouse（波及面过大），留待 B3 单独一批启用。
 
-三道守卫的判别用例在 ``tests/unit/test_conftest_guards.py``。
+4. **DB 沙箱（B4，2026-10-25 · OS开发 W1 批 · BUG-26）**：把 ``Settings`` 的
+   **数据根与库路径**重定向到**仓外临时目录** ⇒ 用例**漏写** ``tmp_path``
+   也**不会**写到生产真库 ``data/novelos.db``。
+   依据：``packages/core/config.py`` 的 ``data_dir`` 默认是**相对路径**
+   ``./data``（按 CWD 解析）⇒ 测试进程的 CWD 通常是仓根 ⇒ 漏写 ``tmp_path``
+   的用例会把库建在**仓内** ``data/``（生产真库所在处）。
+   ⚠️ 本守卫**不改** ``packages/`` 生产代码的行为分支，只在**测试层**注入
+   ``NOVELOS_DATA_DIR`` ＋ ``NOVELOS_DB_PATH`` 两个环境变量并**重置单例**；
+   ⚠️ 用例若**自己**显式 ``setenv``（如 ``test_migrate_cli.py``）⇒ 它的显式值
+   **优先**（monkeypatch 作用域内），守卫不夺权 ⇒ 既有隔离语义不受影响。
+   ⚠️ 仓内真库 ``data/novelos.db`` **一个字不动**（只改「测试进程读到的路径」，
+   不动文件本身）。
+
+四道守卫的判别用例在 ``tests/unit/test_conftest_guards.py``。
 """
 from __future__ import annotations
 
@@ -191,6 +204,64 @@ def _isolate_repo_secrets(
         yield
     finally:
         secrets_store.reset_cache()
+
+
+# ---------------------------------------------------------------------------
+# B4：DB 沙箱（BUG-26）
+# ---------------------------------------------------------------------------
+
+
+#: 会话级「假数据根」：仓外临时目录（DB 沙箱落点）。
+DB_SANDBOX_PATH: Path | None = None
+
+#: DB 沙箱里库文件名（与 ``Settings.DEFAULT_DB_NAME`` 同名，便于断言）。
+DB_SANDBOX_DB_NAME = "novelos.db"
+
+
+@pytest.fixture(scope="session")
+def _db_sandbox(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """会话级「假数据根」：仓外临时目录，测试进程内的库一律落这里。"""
+    return tmp_path_factory.mktemp("novelos_db_sandbox")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_repo_db(
+    _db_sandbox: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """B4 守卫：把 ``Settings`` 的数据根与库路径重定向到**仓外沙箱**。
+
+    - **为什么需要**（BUG-26）：``packages/core/config.py`` 的 ``data_dir`` 默认是
+      **相对路径** ``./data``（按 CWD 解析）⇒ 测试进程的 CWD 通常是仓根 ⇒
+      **漏写** ``tmp_path`` 的用例会建库在**仓内** ``data/``（＝生产真库所在处）。
+    - **怎么做**：注入 ``NOVELOS_DATA_DIR`` ＋ ``NOVELOS_DB_PATH`` **两个**变量
+      （前者定数据根、后者定库文件 ⇒ 与 BUG-14 的「归一」同源），
+      并 ``reset_settings()`` 清掉**单例缓存** ⇒ 下一��� ``get_settings()``
+      读到的是沙箱路径。
+      ⚠️ **必须重置单例**：`get_settings()` 是全局单例（``config.py:97``），
+      第一次访问后就缓存 ⇒ 不重置则沙箱注入**对已缓存的实例无效**。
+    - **不夺权**：本守卫用 ``monkeypatch.setenv``（**函数级**作用域）⇒
+      用例自己 ``setenv("NOVELOS_DATA_DIR", ...)``（如 ``test_migrate_cli.py``）
+      时，**用例的值在用例作用域内优先** ⇒ 既有隔离语义**不受影响**；
+      用例结束后 monkeypatch 自动还原 ⇒ 守卫的值在下一个用例重新生效。
+    - ⚠️ **fixture 只许做事、不许断言**（审查 2026-10-24）：断言写在
+      ``tests/unit/test_conftest_guards.py`` 的具体用例里。
+    - ⚠️ **不动真库**：本守卫只改「测试进程读到的路径」，仓内
+      ``data/novelos.db`` **一个字节都不动**（铁律：只封路径，不动文件）。
+    """
+    global DB_SANDBOX_PATH
+    from packages.core import config as config_mod
+
+    DB_SANDBOX_PATH = _db_sandbox
+    monkeypatch.setenv("NOVELOS_DATA_DIR", str(_db_sandbox))
+    monkeypatch.setenv("NOVELOS_DB_PATH", str(_db_sandbox / DB_SANDBOX_DB_NAME))
+    # 清单例 ⇒ 让本用例内的 get_settings() 重新按（已注入的）环境变量加载。
+    config_mod.reset_settings()
+    try:
+        yield
+    finally:
+        # 归还单例：让后续用例重新加载（避免沙箱路径漏给下一个用例）。
+        config_mod.reset_settings()
 
 
 # ---------------------------------------------------------------------------

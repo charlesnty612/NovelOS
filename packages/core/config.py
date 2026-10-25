@@ -22,6 +22,16 @@ class Settings:
     """运行时配置。
 
     设计为显式字段 + 类方法 ``load``，以便测试可注入临时目录。
+
+    ⚠️ BUG-14 受限面归一（2026-10-25 · OS开发 W1 批）：``data_dir`` 与 ``db_path``
+    的默认值**原本分写两处**（``__init__`` 的 ``data_dir="./data"`` ＋ 推导式的
+    ``db_path = data_dir/"novelos.db"``），而 ``load()`` 又按环境变量各读一次
+    ⇒ **「数据根」与「库文件」两个概念在两处各自表述**，任何一处被单独改动
+    就会出现「``data_dir`` 指 A、``db_path`` 指 B」的错配。
+
+    ⇒ 现在**只有一个真源**：``data_dir`` 决定数据根，``db_path`` **恒定由
+    ``data_dir`` 推导**（除非显式传入或显式给 ``NOVELOS_DB_PATH``）⇒
+    「data_dir 与 db_path 归一」＝ 二者**不可能**再分叉。
     """
 
     data_dir: Path
@@ -31,18 +41,25 @@ class Settings:
     api_port: int
     disabled_modules: list[str]
 
+    #: 数据根的**唯一**默认名（``data_dir`` 与 ``db_path`` 共用此真源）。
+    DEFAULT_DATA_DIR_NAME: str = "data"
+    #: 库文件名（``db_path`` 由 ``data_dir`` ＋ 此名推导）。
+    DEFAULT_DB_NAME: str = "novelos.db"
+
     def __init__(
         self,
-        data_dir: Path | str = "./data",
+        data_dir: Path | str | None = None,
         db_path: Path | str | None = None,
         log_level: str = "INFO",
         api_host: str = "127.0.0.1",
         api_port: int = 18081,
         disabled_modules: list[str] | None = None,
     ) -> None:
-        self.data_dir = Path(data_dir)
+        # ⚠️ 默认值取**类属性真源**（不再写字面量）⇒ data_dir 与 db_path 同源。
+        self.data_dir = Path(data_dir) if data_dir is not None else Path(".") / self.DEFAULT_DATA_DIR_NAME
         if db_path is None:
-            db_path = self.data_dir / "novelos.db"
+            # ⚠️ 归一关键：db_path **恒**由 data_dir 推导 ⇒ 两者不可能分叉。
+            db_path = self.data_dir / self.DEFAULT_DB_NAME
         self.db_path = Path(db_path)
         self.log_level = log_level
         self.api_host = api_host
@@ -56,11 +73,23 @@ class Settings:
         端口优先级（V2.0 Wave C 任务三 统一收敛）：
         - ``NOVELOS_PORT``（通用便捷变量） > ``NOVELOS_API_PORT``（旧精细变量）> 默认 18081。
         旧精细变量保留兼容：仅设置 ``NOVELOS_API_PORT`` 时仍按其值生效（基线测试断言）。
-        默认 18081 由 ``main.py`` 的 ``__main__`` 入口 + ``Settings.api_port`` 共同承载；
+        默认 18081 由 ``main.py`` 的 ``__main__`` 入口 ＋ ``Settings.api_port`` 共同承载；
         任何位置调 ``Settings.load()`` 均得到同一默认值。
+
+        ⚠️ BUG-14 受限面归一（2026-10-25 · OS开发 W1 批）：
+        - ``data_dir`` 的默认 **不再写死字面量** ``"./data"``，改由
+          ``DEFAULT_DATA_DIR_NAME`` 真源推导 ⇒ 与 ``__init__`` 同一真源。
+        - ``db_path`` **只有**在 ``NOVELOS_DB_PATH`` **显式给且非空**时才独立取值；
+          否则**恒**由 ``data_dir`` 推导 ⇒ 「data_dir 指 A、db_path 指 B」的错配
+          在结构上不再可能。
+        - ⚠️ **相对路径按 CWD 解析**（``Path("./data")``）⇒ 测试进程里若未注入
+          沙箱，``get_settings()`` 会指向**仓内** ``./data``（＝生产真库所在处）。
+          这是 BUG-26 的根因侧 ⇒ 沙箱由 ``tests/conftest.py`` 的 autouse fixture
+          注入（``NOVELOS_DATA_DIR`` ＋ ``NOVELOS_DB_PATH`` 双写 ＋ 单例重置），
+          **不在本文件**做「测试专用」分支（生产代码不认测试）。
         """
-        data_dir = _env("NOVELOS_DATA_DIR", "./data")
-        db_path = _env("NOVELOS_DB_PATH", "")  # 空则按 data_dir 推导
+        data_dir = _env("NOVELOS_DATA_DIR", "") or str(Path(".") / cls.DEFAULT_DATA_DIR_NAME)
+        db_path = _env("NOVELOS_DB_PATH", "")  # 空 ⇒ 由 data_dir 推导（归一）
         log_level = _env("NOVELOS_LOG_LEVEL", "INFO")
         api_host = _env("NOVELOS_API_HOST", "127.0.0.1")
         # 端口优先级：NOVELOS_PORT > NOVELOS_API_PORT > 18081
