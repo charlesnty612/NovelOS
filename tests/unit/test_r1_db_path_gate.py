@@ -489,8 +489,8 @@ def test_C04_m1_long_run_db落点闸_拒且零副作用(tmp_path, capsys):
 _SCRIPT_CASES = [
     ("C06", "ai_tone_calibrate", ["--db"], []),
     ("C07", "m2_judge", ["--db"], []),
-    ("C08", "normalize_chapters", ["--db", "--project", "p1"], []),
-    ("C09", "outline_check", ["--db", "--project", "p1"], []),
+    ("C08", "normalize_chapters", ["--project", "p1", "--db"], []),
+    ("C09", "outline_check", ["--project", "p1", "--db"], []),
     ("C10", "m1_report", ["--db"], []),
     ("C11", "inspect_stalled_runs", ["--db"], []),
     ("C12", "check_orphan_relationships", ["--db"], []),
