@@ -32,7 +32,9 @@ from packages.core.context_engine.builders_common.common import resolve_chapter_
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.workflow_registry import get_workflow
+from packages.core.workflow_runtime import engine as _engine_module
 from packages.core.workflow_runtime.engine import WorkflowEngine, WorkflowRunConflict
+from packages.workflows.outline_batch import pipeline as _pipeline_module
 from packages.core.workflow_runtime.runs import get_run
 
 from ._shared import _make_engine
@@ -317,7 +319,82 @@ def test_outline_batch_synopsis_reaches_planner_outline_as_chapter_goal(tmp_path
         assert outline["title"] == row["title"]
 
 
-def test_outline_batch_concurrent_starts_same_project_single_winner(tmp_path: Path):
+class _FrozenRows:
+    """冻结的查询结果（对齐用）：先取快照，再放行，调用方拿到的永远是同一份。"""
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchmany(self, size: int = 1):
+        out, self._rows = self._rows[:size], self._rows[size:]
+        return out
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _QueryAlignProxy:
+    """把某个特定 SELECT 的**读取时刻**对齐到两线程会合点（并发窗口放大）。
+
+    机制：代理 ``get_connection`` 返回的连接 ⇒ 在命中目标 SQL 时**先取结果快照**，
+    再在 ``Barrier(2)`` 上会合（超时放行）⇒
+
+    - 两个线程的该次读取**发生在同一逻辑时刻**（谁都看不到对方尚未落库的数据）；
+    - 只有一个线程到达时（守卫生效 ⇒ 写锁把两次读取串行化）⇒ 会合超时放行，
+      语义不变。
+
+    ⚠️ **只读不改生产代码**：代理只在用例内经 ``monkeypatch`` 生效，
+    ``packages/core/workflow_runtime/engine.py`` 与
+    ``packages/workflows/outline_batch/pipeline.py`` 一字不动。
+    """
+
+    def __init__(self, match, timeout: float = 0.8):
+        self._match = match
+        self._timeout = timeout
+        self.barrier = threading.Barrier(2)
+        self.arrivals: list[str] = []
+        self._local = threading.local()
+
+    def wrap(self, conn):
+        proxy = self
+
+        class _ConnectionProxy:
+            def __init__(self, real):
+                object.__setattr__(self, "_real", real)
+
+            def execute(self, sql, *args, **kwargs):
+                real = object.__getattribute__(self, "_real")
+                cur = real.execute(sql, *args, **kwargs)
+                flat = " ".join(sql.split())
+                if proxy._match(flat) and not getattr(proxy._local, "seen", False):
+                    proxy._local.seen = True
+                    proxy.arrivals.append(threading.current_thread().name)
+                    rows = cur.fetchall()
+                    try:
+                        proxy.barrier.wait(timeout=proxy._timeout)
+                    except threading.BrokenBarrierError:
+                        pass
+                    return _FrozenRows(rows)
+                return cur
+
+            def __getattr__(self, name):
+                return getattr(object.__getattribute__(self, "_real"), name)
+
+            def __setattr__(self, name, value):
+                setattr(object.__getattribute__(self, "_real"), name, value)
+
+        return _ConnectionProxy(conn)
+
+
+def test_outline_batch_concurrent_starts_same_project_single_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """C-2 引擎级并发守卫：同项目两线程同时 start（project_level_guard=True）
     ⇒ 不产生重复章号（内容级断言）。
 
@@ -325,8 +402,29 @@ def test_outline_batch_concurrent_starts_same_project_single_winner(tmp_path: Pa
     - 若首 run 在后者守卫 SELECT 前已 COMPLETED（串行合法，窗口极小但理论存在）：
       两个都成功——此时章号必须连续不重复（第二次 start_number 顺延）；
     - **守卫失效的反事实**（无 BEGIN IMMEDIATE / 无 project_id 过滤）：两线程
-      同时读到「无活跃 run」⇒ 各自从 start_number=1 插章 ⇒ chapters.number
-      重复 ⇒ 本用例红（chapters 无 (project_id, number) 唯一索引，重复可发生）。
+      同时读到「无活跃 run」⇒ 两个 run 真并发 ⇒ 两种可观测症状，任一即本用例红：
+      ① 两 run 并发写同一库撞 SQLite 单写者（``database is locked``）；
+      ② 或各自从 start_number=1 插章 ⇒ chapters.number 重复
+      （chapters 无 (project_id, number) 唯一索引，重复可发生）。
+
+    ★ **加固（BUG-21 flake 子项 · 误绿 5/12 ≈ 42%）**：原实现有两个**检出缺口**，
+    本批只补缺口、**不改断言语义**、**不新增判红规则**（合法窗口原样保留）：
+
+    1. **mock 脚本原先按「谁先 append 到 results」选** ⇒ 两个线程在
+       ``start_with_nodes`` 调用前**同时**求值（``results`` 都还是空的）⇒
+       两线程常拿到同一支 ``(1, 2)``；而 pipeline 按库里 ``max(number)+1`` 算
+       ``start_number`` ⇒ 另一支的契约校验炸（``expected [3, 4], got [1, 2]``）
+       ⇒ **用例因契约失败而红，与守卫是否生效无关** ⇒ 绿灯不可信。
+       改法：两线程统一用 ``[script(1,2), script(3,4)]``（runner 列表模式：第 1 次
+       取 [0]、重试取 [1]）⇒ 无论算出哪个 ``start_number`` 都能命中 ⇒ 契约不再炸。
+    2. **并发窗口放大**（两个对齐点，测试侧代理 ``get_connection``，不改生产代码）：
+       ① **守卫 SELECT**（``engine.py:525-537``）⇒ 撤掉写锁时「两线程同时读到
+       『无活跃 run』」**必然**发生（原先靠运气，12 次里只有 7 次撞上）；
+       ② **章号读取**（``pipeline.py:96-102`` 的 chapters 查询）⇒ 两个并发 run
+       算出的 ``start_number`` **必然相同** ⇒ 重复章号（守卫失效的既定症状）
+       由**既有断言**（``len(numbers) == len(set(numbers))``）判红。
+       守卫生效时写锁把两次守卫 SELECT 串行化 ⇒ 只有一个线程到达会合点 ⇒ 超时
+       放行 ⇒ 原有语义不变。
     """
     engine = _make_engine(tmp_path)
     PromptRegistry(engine.db_path).sync_from_docs(_PROMPTS_DIR)
@@ -334,9 +432,36 @@ def test_outline_batch_concurrent_starts_same_project_single_winner(tmp_path: Pa
     workflow = get_workflow("outline-batch")
     assert workflow is not None
 
+    # 对齐点①：守卫 SELECT（engine 模块的 get_connection）
+    guard_align = _QueryAlignProxy(
+        lambda flat: flat.startswith("SELECT")
+        and "FROM workflow_runs" in flat
+        and "wf.name = ?" in flat
+    )
+    monkeypatch.setattr(
+        _engine_module,
+        "get_connection",
+        lambda db_path: guard_align.wrap(get_connection(db_path)),
+    )
+    # 对齐点②：章号读取（outline_batch pipeline 模块的 get_connection）
+    number_align = _QueryAlignProxy(
+        lambda flat: flat.startswith("SELECT")
+        and "FROM chapters WHERE project_id = ?" in flat
+        and "number" in flat
+    )
+    monkeypatch.setattr(
+        _pipeline_module,
+        "get_connection",
+        lambda db_path: number_align.wrap(get_connection(db_path)),
+    )
+
     barrier = threading.Barrier(2)
     results: list[str] = []
     conflicts: list[WorkflowRunConflict] = []
+    errors: list[BaseException] = []
+    # 两线程同一份脚本队列：runner 列表模式（第 1 次取 [0]、契约失败重试取 [1]）
+    # ⇒ 无论 pipeline 算出 start_number=1 还是 3，总有一支命中 ⇒ 契约永不再炸。
+    planner_scripts = [_planner_script(1, 2)[0], _planner_script(3, 2)[0]]
 
     def _start() -> None:
         barrier.wait()
@@ -352,15 +477,17 @@ def test_outline_batch_concurrent_starts_same_project_single_winner(tmp_path: Pa
                     "project_id": pid,
                     "chapter_count": 2,
                 },
-                mock_providers={
-                    "outline_batch_planner": _planner_script(1, 2)
-                    if not results
-                    else _planner_script(3, 2)
-                },
+                mock_providers={"outline_batch_planner": list(planner_scripts)},
             )
             results.append(run_id)
         except WorkflowRunConflict as exc:  # 守卫生效路径
             conflicts.append(exc)
+        except Exception as exc:
+            # ★ 守卫失效时两 run 真并发 ⇒ SQLite 单写者 ⇒ 另一线程可能拿到
+            #   ``database is locked``。**捕获并记下来**（不吞）：若让它逃出线程，
+            #   pytest 会记成 PytestUnhandledThreadExceptionWarning（带 Traceback）
+            #   ⇒ 红段就不是「内容级 FAIL」而是「崩溃红」。这里转成断言失败。
+            errors.append(exc)
 
     threads = [threading.Thread(target=_start) for _ in range(2)]
     for t in threads:
@@ -368,6 +495,11 @@ def test_outline_batch_concurrent_starts_same_project_single_winner(tmp_path: Pa
     for t in threads:
         t.join(timeout=60)
     assert not any(t.is_alive() for t in threads)
+    # ★ 守卫失效的并发写冲突（不是「崩了」，是「守卫没兜住」）⇒ 判红。
+    assert not errors, (
+        f"并发期间出现未预期异常（守卫失效 ⇒ 两 run 真并发写同一库）："
+        f"{[repr(e) for e in errors]}"
+    )
 
     # 内容级硬断言：DB 里该项目的章号集合无重复（守卫存在的意义）。
     conn = get_connection(engine.db_path)
