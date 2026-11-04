@@ -613,7 +613,13 @@ def test_is_inside_repo_agrees_with_relative_in_repo_across_shapes(guard) -> Non
         ("仓根本身", REPO_ROOT, True),
         ("仓外路径", _outside_sentinel(), False),
         ("扩展长度前缀变体", "\\\\?\\" + str(REPO_ROOT / "docs" / "x.md"), True),
-        ("大小写变体", str(REPO_ROOT).swapcase() + "\\docs\\x.md", True),
+        # ⚠️ 2026-11-04：尾巴必须用**本平台**的分隔符 —— `\` 在 POSIX 上是普通字符，
+        # `"/a/b" + "\docs\x.md"` 会拼成**一个畸形分量**（不是子路径）⇒ 判仓外
+        # （2026-10-25 起 CI backend job 恒红的最后一条根因）。
+        # 期望值两边都是 True：大小写折叠是**无条件**的（`normalize_for_compare`
+        # 一律 lower）⇒ 变体归一后与仓根同形 ⇒ 判仓内。POSIX 上这**偏严**
+        #（变体其实是另一个目录）⇒ 方向是「误拒」而非「误放」⇒ 可接受。
+        ("大小写变体", str(REPO_ROOT).swapcase() + os.sep + "docs" + os.sep + "x.md", True),
     ]
     alias = _admin_share_alias(REPO_ROOT)
     if alias is not None:
