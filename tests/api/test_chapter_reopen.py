@@ -54,11 +54,17 @@ async def _make_project(app, name: str = "reopen 项目") -> str:
     return r.json()["project_id"]
 
 
-def _insert_chapter(db_path: str, pid: str, *, status: str = "COMMITTED") -> str:
+def _insert_chapter(
+    db_path: str, pid: str, *, status: str = "COMMITTED", number: int = 1
+) -> str:
     """直插 COMMITTED 章（绕开状态机，测试聚焦 reopen 端点本身）。
 
     ⚠️ 与 ``tests/unit/_shared._insert_chapter`` **同名但默认值相反**（那边默认
     ``status='PLANNED'`` / ``title='t'``）⇒ 属**有意差异**，收敛时**禁止静默统一**。
+
+    ``number``（批次三十六补）：0038 给 ``chapters(project_id, number)`` 建了 UNIQUE
+    索引 ⇒ 同项目插第二行必须给不同章号（原实现在 INSERT 之后再 UPDATE 改号，
+    唯一索引下 INSERT 本身就会先撞）。
     """
     cid = new_id("ch")
     conn = get_connection(db_path)
@@ -68,9 +74,9 @@ def _insert_chapter(db_path: str, pid: str, *, status: str = "COMMITTED") -> str
             INSERT INTO chapters
                 (chapter_id, project_id, number, title, plan_json,
                  status, visibility, who_knows, created_at, updated_at)
-            VALUES (?, ?, 1, 'C1', '{}', ?, 'VISIBLE', NULL, ?, ?)
+            VALUES (?, ?, ?, 'C1', '{}', ?, 'VISIBLE', NULL, ?, ?)
             """,
-            (cid, pid, status, now_iso(), now_iso()),
+            (cid, pid, number, status, now_iso(), now_iso()),
         )
         conn.commit()
     finally:
@@ -228,14 +234,9 @@ def test_patch_other_fields_unaffected_with_active_run(tmp_path: Path):
             assert r.status_code == 200, r.text
             assert r.json()["title"] == "新标题"
 
-            # PENDING run 同口径
-            cid2 = _insert_chapter(db_path, pid, status="DRAFTED")
-            conn = get_connection(db_path)
-            try:
-                conn.execute("UPDATE chapters SET number = 2 WHERE chapter_id = ?", (cid2,))
-                conn.commit()
-            finally:
-                conn.close()
+            # PENDING run 同口径（章号必须不同：0038 的 UNIQUE(project_id, number)
+            # 让「先插 1 再 UPDATE 成 2」的旧写法在 INSERT 一步就撞索引）
+            cid2 = _insert_chapter(db_path, pid, status="DRAFTED", number=2)
             _insert_workflow_run(db_path, cid2, "PENDING")
             r2 = await _request(
                 app, "PATCH", f"/api/chapters/{cid2}", json={"title": "另一标题"},

@@ -43,7 +43,13 @@ class StartWorkflowRequest(BaseModel):
     target_word_count: int | None = Field(default=None, ge=100, le=100_000)
     mock_providers: dict[str, list[str]] | None = None
     # Sprint 6 下半：chapter_commit pipeline 的 quality_gate 节点拦截模式
-    # （"enforce" 阻断 / "report" 不阻断）；任务书拍板默认 report；
+    # （"enforce" 阻断 / "report" 不阻断）。
+    # ⚠️ **代码默认是 ``enforce``，不是 ``report``**（C-37 注释订正，批次三十六）：
+    # 唯一解析点 ``chapter_commit/gate.py::_quality_gate_mode`` 的兜底为
+    # ``os.environ.get("NOVELOS_QUALITY_GATE", "enforce")``。原注释写「任务书拍板默认
+    # report」——那是**历史分歧**（任务书的意图 vs 落地实现），按仓纪律「注释与代码冲突
+    # 以代码为准」只订正注释、**不改行为**（本字段缺省时仍是 enforce；改默认值会改变
+    # 所有既有项目的提交门禁，属行为变更，须单独裁决议题）。
     # 显式注入便于测试覆盖两种模式。
     quality_gate_mode: str | None = None
     # V3 P0-1：chapter-review critic 采样模式（off / sample / always）。

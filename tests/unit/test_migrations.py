@@ -176,6 +176,11 @@ def test_apply_migrations_creates_43_tables_total(tmp_path: Path):
     #   json_extract(checkpoint_json,'$.project_id') 回填存量行；**不增表**
     #   （业务表 42 / 总表 43）；outline-batch 项目级原子并发守卫的归属列。
     assert "0037_workflow_runs_project_id.sql" in result["applied"]
+    # 章号唯一约束（2026-10-24 · C-28）：0038_chapters_project_number_unique.sql
+    # - 先对存量重号做**确定序重编号**（同 project_id 同 number 组内 created_at,rowid
+    #   首行保留，其余改到 max(number)+1...），再建 UNIQUE INDEX；**不增表**
+    #   （业务表 42 / 总表 43）
+    assert "0038_chapters_project_number_unique.sql" in result["applied"]
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +232,7 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0035_connection_protocol_base_urls.sql",
         "0036_capability_thinking_override.sql",
         "0037_workflow_runs_project_id.sql",
+        "0038_chapters_project_number_unique.sql",
     ]
 
     second = apply_migrations(db_path, MIGRATIONS_DIR)
@@ -291,6 +297,8 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
     assert "0035_connection_protocol_base_urls.sql" in second["skipped"]
     # run 归属列：0037 也应被幂等跳过（同 0035，靠 _migrations 文件粒度追踪）
     assert "0037_workflow_runs_project_id.sql" in second["skipped"]
+    # 章号唯一约束：0038 也应被幂等跳过
+    assert "0038_chapters_project_number_unique.sql" in second["skipped"]
     assert second["tables"] == first["tables"]
 
 
@@ -316,8 +324,9 @@ def test_apply_migrations_is_idempotent(tmp_path: Path):
         "0031_project_fast_mode.sql",
         "0035_connection_protocol_base_urls.sql",
         "0037_workflow_runs_project_id.sql",
+        "0038_chapters_project_number_unique.sql",
     ],
-    ids=["0023", "0024", "0025", "0026", "0027", "0029", "0030", "0031", "0035", "0037"],
+    ids=["0023", "0024", "0025", "0026", "0027", "0029", "0030", "0031", "0035", "0037", "0038"],
 )
 def test_single_migration_is_idempotent(tmp_path: Path, migration_file: str) -> None:
     """单条迁移跑两遍不炸（幂等靠 ``_migrations`` 的**文件粒度**追踪）。
@@ -2018,3 +2027,103 @@ def test_0031_fast_mode_roundtrips_1_and_0(tmp_path: Path):
     assert rows["prj_fm_on"] == 1
     assert rows["prj_fm_off"] == 0, "显式关闭必须落 0 而不是 NULL（否则与「未设置」同形）"
     assert rows["prj_fm_on"] is not None
+
+
+# ---------------------------------------------------------------------------
+# 2c. 0038：chapters(project_id, number) 唯一约束 + 存量重号防御
+# ---------------------------------------------------------------------------
+
+
+def test_0038_chapters_project_number_unique_renumbers_legacy_duplicates(
+    tmp_path: Path,
+):
+    """C-28：存量重号必须先被**确定序重编号**，否则 UNIQUE INDEX 建不出来。
+
+    构造（0038 之前的库）：
+    - 同项目 A：number=1 两行（created_at 分别 t1 / t2）+ 既有 number=5 一行；
+    - 项目 B：number=1 一行（不同项目同号**合法**）。
+
+    期望（跑完整迁移链后）：
+    - 迁移成功（若直接建唯一索引会 UNIQUE constraint failed ⇒ 本用例红在迁移抛错）；
+    - 首行（created_at 更早的 ch_a_keep）保留 number=1；
+    - 重号行被改到 ``max(5)+1 = 6``（新号不撞既有号）；
+    - 项目 B 的 number=1 不受影响（分组键含 project_id）；
+    - 重编号**不碰内容列**（title 逐字保留）；
+    - 唯一索引真的生效：同 project 同 number 再插一行 ⇒ IntegrityError。
+    """
+    db_path = _fresh_db(tmp_path)
+    # 模拟 0038 之前的库：拷全部迁移但排除 0038
+    migrations_dir = tmp_path / "mig_pre_0038"
+    migrations_dir.mkdir()
+    for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if sql_file.name.startswith("0038"):
+            continue
+        (migrations_dir / sql_file.name).write_text(
+            sql_file.read_text(encoding="utf-8"), encoding="utf-8",
+        )
+    apply_migrations(db_path, migrations_dir)
+
+    conn = get_connection(db_path)
+    try:
+        for pid in ("prj_dup_a", "prj_dup_b"):
+            conn.execute(
+                "INSERT INTO projects (project_id, name, status, created_at, updated_at) "
+                "VALUES (?, 'p', 'ACTIVE', 't', 't')",
+                (pid,),
+            )
+        conn.executemany(
+            "INSERT INTO chapters (chapter_id, project_id, number, title, status, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, 'PLANNED', ?, ?)",
+            [
+                # A：同号两行（首行是 created_at 更早的 ch_a_keep）
+                ("ch_a_keep", "prj_dup_a", 1, "保留原名", "t1", "t1"),
+                ("ch_a_dup", "prj_dup_a", 1, "重号标题不得改", "t2", "t2"),
+                # A：既有最大号 5（重号行必须排到它后面）
+                ("ch_a_five", "prj_dup_a", 5, "第五章", "t3", "t3"),
+                # B：不同项目同号 1，合法
+                ("ch_b_one", "prj_dup_b", 1, "B 第一章", "t1", "t1"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 跑完整迁移链（含 0038）
+    apply_migrations(db_path, MIGRATIONS_DIR)
+
+    conn = get_connection(db_path)
+    try:
+        rows = {
+            r["chapter_id"]: dict(r)
+            for r in conn.execute(
+                "SELECT chapter_id, project_id, number, title FROM chapters"
+            ).fetchall()
+        }
+        indexes = {
+            r["name"]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'chapters'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert "idx_chapters_project_number_unique" in indexes, indexes
+    assert rows["ch_a_keep"]["number"] == 1, "组内首行（created_at 更早）必须保留原号"
+    assert rows["ch_a_dup"]["number"] == 6, "重号行应改到该项目 max(number)+1"
+    assert rows["ch_a_dup"]["title"] == "重号标题不得改", "只改 number，内容列逐字保留"
+    assert rows["ch_a_five"]["number"] == 5, "既有号不得被重编号波及"
+    assert rows["ch_b_one"]["number"] == 1, "不同项目同号合法，分组键必须含 project_id"
+
+    # 唯一索引生效：同 project 同 number 再插一行 ⇒ IntegrityError
+    conn = get_connection(db_path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO chapters (chapter_id, project_id, number, title, status, "
+                "created_at, updated_at) "
+                "VALUES ('ch_a_new', 'prj_dup_a', 1, '撞号', 'PLANNED', 't9', 't9')"
+            )
+        conn.rollback()
+    finally:
+        conn.close()

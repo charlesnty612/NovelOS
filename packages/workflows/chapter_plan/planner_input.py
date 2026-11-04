@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
 
-from packages.core.agent_runtime.prompts import active_prompt_label
+from packages.core.agent_runtime.prompts import PromptRegistry, active_prompt_label
 from packages.core.context_engine import build_director_input
 from packages.core.context_engine.builders_common import (
     _GENRE_PACK_CONSUMER_PLANNER,
@@ -38,6 +40,40 @@ from packages.core.quality.wordcount import DEFAULT_TARGET_WORD_COUNT
 # 装配行为与旧实现零差异。
 # v2（2026-09-15）：输入契约新增 chapter.outline（策展大纲槽）+ 规则 0「大纲优先」。
 DIRECTOR_PLANNER_PROMPT_VERSION = "director_planner:v2"
+
+_log = logging.getLogger(__name__)
+
+
+def aligned_active_prompt_label(
+    db_path: str | Path, agent_name: str, *, fallback: str,
+) -> str:
+    """取**与 runner 自愈后同源**的 ACTIVE 提示词标签（C-21 / C-26，批次三十六）。
+
+    为什么需要（缺陷形状）：
+    ``payload["prompt_version"]`` 在 ``build_ctx`` / ``assemble`` 阶段算，而
+    ``run_agent`` 的提示词自愈（``PromptRegistry.ensure_agent_prompt_current``）
+    发生在**更晚**的调用时刻 ⇒ DB 镜像落后于仓内源码时，模型实际收到 v4、
+    payload 却声明 v2（模型回声也给 v2），而 ``ai_call_logs.prompt_version`` 记 v4
+    ——同一 run 三个面分叉，且**没有任何一处会报错**（与 2026-09-16 writer
+    「硬编码标签漂移」同形）。
+
+    做法：在**调用前**用与 runner **同一个开关**（``NOVELOS_PROMPT_SYNC``）先做一次
+    自愈，再重算标签 ⇒ 随后的 ``run_agent`` 自愈变成空操作，三个面同源。
+    自愈失败只记 warning、不阻断（与 runner 的容错口径一致）；开关关闭时**不推进**，
+    只按当前 ACTIVE 取值（用户明确要求「运行时别跟着仓内提示词变」）。
+
+    注意：本函数只解决「标签/装配声明」的时序，不改提示词内容，也不缓存。
+    """
+    if os.environ.get("NOVELOS_PROMPT_SYNC", "on").strip().lower() != "off":
+        try:
+            PromptRegistry(db_path).ensure_agent_prompt_current(agent_name)
+        except Exception as exc:  # noqa: BLE001 —— 自愈失败绝不阻断装配
+            _log.warning(
+                "prompt self-heal failed for %s before assembly (non-fatal): %s",
+                agent_name, exc,
+            )
+    return active_prompt_label(db_path, agent_name, fallback=fallback)
+
 
 # scene_planner 输入契约的本地默认文风（项目未配置 style_constraints 时使用；
 # 原 chapter_write 局部常量，P1 上移到本模块供两条链共用，取值逐字不变）。
@@ -308,6 +344,7 @@ def build_director_planner_input(
 __all__ = [
     "DIRECTOR_PLANNER_PROMPT_VERSION",
     "SCENE_PLANNER_DEFAULT_STYLE",
+    "aligned_active_prompt_label",
     "build_director_planner_input",
     "collect_planner_context",
     "load_project_style_constraints",

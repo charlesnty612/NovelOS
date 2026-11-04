@@ -112,6 +112,44 @@ def _check_active_run_for_chapter(
     return {"run_id": row["run_id"], "status": row["status"]}
 
 
+#: ``chapter-plan`` 允许的**启动前**章节状态（与前端
+#: ``apps/web/src/utils/chapterState.ts::EXPECTED_STATUS.plan = ['PLANNED']`` 逐字对齐）。
+#: 为什么需要服务端闸门（C-8，批次三十六）：``chapter-plan`` 此前**两头都没有校验**——
+#: write/commit 有节点级/API 级状态校验，plan 则完全没有 ⇒ API 直调可对 COMMITTED
+#: 章节重写 ``plan_json``（顺带覆盖 ``revision_note`` / ``gate_blocked`` 等派生标记）。
+_PLAN_ALLOWED_STATUSES: frozenset[str] = frozenset({"PLANNED"})
+
+
+def _guard_plan_chapter_status(db_path: str, workflow_name: str, chapter_id: str) -> None:
+    """章节状态闸门（仅 ``chapter-plan`` 生效）：非 ``PLANNED`` ⇒ 409。
+
+    形态照 commit 的 API 级守卫（:func:`_guard_commit_draft_freshness`）：
+    **在起 run 之前**拒绝，错误消息带「当前状态 + 允许状态」——作者据此知道该点哪个
+    动作（如 REVIEWED 应先回退/重开，而不是重生成计划）。
+
+    为什么在服务端而不是只靠前端：前端 ``EXPECTED_STATUS`` 只是 UI 可用性判断，
+    API 直调（脚本 / 其他客户端）完全绕过它；而 plan 的落库面会**覆盖**
+    ``plan_json``（含 ``revision_note`` / ``gate_blocked``）⇒ 对已定稿章节重跑是数据损坏。
+
+    只放行 ``PLANNED`` 而不是「PLANNED + 空 plan 的其他状态」：状态机是唯一权威，
+    空 plan 的 DRAFTED/REVIEWED 章该走什么动作由作者决定，服务端不替它猜。
+    """
+    if workflow_name != "chapter-plan":
+        return
+    chapter = ChapterService(db_path).get(chapter_id)
+    status = (chapter or {}).get("status")
+    if status in _PLAN_ALLOWED_STATUSES:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"chapter {chapter_id!r} status={status!r}，"
+            f"chapter-plan 仅允许状态 {sorted(_PLAN_ALLOWED_STATUSES)}；"
+            f"已写/已定稿章节不可重生成计划（会覆盖 plan_json）"
+        ),
+    )
+
+
 def _latest_completed_review_end(db_path: str, chapter_id: str) -> str | None:
     """返回指定 chapter 最近一次 COMPLETED 状态 chapter-review run 的 ended_at（ISO 字符串）。
 
@@ -243,6 +281,11 @@ def _start_workflow_core(
             ),
         )
 
+    # 章节状态闸门（C-8，批次三十六）：chapter-plan 仅放行 PLANNED。
+    # 位置刻意在「活跃 run 检查」之后——并发的活跃 run 是更前置的冲突（409 语义不同），
+    # 且此时章节行必然存在（上面的 check_chapter_in_project 已 404 兜底）。
+    _guard_plan_chapter_status(db_path, workflow_name, chapter_id)
+
     # plan 不依赖 story_state；write/commit/review 需要 init_genesis（如尚未）
     if workflow_name in ("chapter-write", "chapter-commit", "chapter-review"):
         _init_genesis_if_needed(db_path, project_id, chapter_id)
@@ -276,7 +319,13 @@ def _start_workflow_core(
     # chapter-write 全新重写：仅 chapter-write 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。
     if body.fresh_write:
         initial_ctx["fresh_write"] = True
-    # chapter-review 指定草稿版本：仅 chapter-review 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。
+    # chapter-review 指定草稿版本。**真实读者有两个**（C-36 注释订正，批次三十六）：
+    #   ① ``chapter_review`` 节点——「本次审哪一版」；
+    #   ② **``chapter_commit`` 的 ``quality_gate`` 节点**（``chapter_commit/gate.py``
+    #      的 ``_reviewed_draft_version``）——「门禁量哪一版」。
+    # ②的优先级是「显式（本字段）> 最近一次 review 的被审版本 > 最新版」，裁决见
+    # 2026-10-23 B4（「审过 v5、改出 v6、commit 定稿 v6」事故的修法）。
+    # 原注释写「仅 chapter-review 读取」，按「注释与代码冲突以代码为准」订正。
     if body.draft_version is not None:
         initial_ctx["draft_version"] = body.draft_version
     # V1.3 deep_review 二审 AI 开关：仅 chapter-review 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。

@@ -28,7 +28,8 @@
 - ``persist`` (State) —— 复用**同一个**契约校验函数终检（写库前最后闸门，与
   runner 重试共用单点实现，不算两份逻辑）后逐条 INSERT INTO chapters
   （建章 SQL 形态参照 project_init pipeline 的建章段：status='PLANNED'、
-  visibility/who_knows 缺省、volume_id 可空），单事务提交；
+  visibility/who_knows 缺省、**volume_id 取项目第一卷**——C-27，批次三十六；
+  项目无卷时保持 NULL，见 ``_persist_node`` 注释），单事务提交；
   ``plan_json`` **不写**（走 DDL ``DEFAULT '{}'``，即「计划未生成」的空 plan）：
   该列是 chapter-plan 的**生成槽**——write 的 ``load_plan`` 校验
   ``plan_json.chapter_goal`` 非空，大纲层章在此塞 synopsis 会造出「收下了却
@@ -57,9 +58,15 @@ from packages.core.agent_runtime.structured_output import (
     AgentOutputError,
     validate_outline_batch_planner,
 )
+from packages.core.context_engine.builders_common.ledger import (
+    _DEBT_OPEN_STATUSES,
+    _HOOK_OPEN_STATUSES,
+)
 from packages.core.db import get_connection
 from packages.core.ids import new_id, now_iso
 from packages.core.workflow_runtime.engine import WorkflowNode
+from packages.domain.volume.service import VolumeService
+from packages.workflows.chapter_plan.planner_input import aligned_active_prompt_label
 
 _log = logging.getLogger(__name__)
 
@@ -72,10 +79,11 @@ MAX_CHAPTER_COUNT = 50
 #: 装配给 planner 的「已有章节列表」截断窗（防 prompt 爆炸；更早章节只有摘要链口径）。
 RECENT_CHAPTER_WINDOW = 10
 
-# 与 builders_common/ledger.py 的口径一致（hooks 五态 / debts 四态的「未闭环」子集）；
-# 独立声明避免 context_engine → workflows 的依赖方向问题（core 机制层不 import 业务包）。
-_HOOK_OPEN_STATUSES = ("OPEN", "ACTIVE", "ESCALATED")
-_DEBT_OPEN_STATUSES = ("open", "acknowledged")
+# hook / debt 的「未闭环」状态集**直接 import 单点**（C-24，批次三十六）：
+# 此前这里有一份本地 tuple 副本，与 ``builders_common/ledger.py`` 的 frozenset
+# 各写一遍（docstring 自认副本）——两侧任一改口径就会静默分叉（装配给 outline 的
+# 未闭环清单与 director/writer 看到的不是同一批）。workflows → core 是合法方向
+# （core 不得 import workflows，反向允许）。
 
 
 def _assemble_node(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -108,22 +116,26 @@ def _assemble_node(ctx: dict[str, Any]) -> dict[str, Any]:
         ).fetchall():
             summary_by_no[int(row["chapter_no"])] = row["summary"] or ""
 
-        placeholders_hooks = ",".join("?" for _ in _HOOK_OPEN_STATUSES)
+        # frozenset 的迭代序不保证（字符串哈希每进程随机）⇒ 建占位符与绑参数
+        # **必须用同一个排序后的元组**，否则两者可能错位（值绑到错误的 ? 上）。
+        hook_statuses = tuple(sorted(_HOOK_OPEN_STATUSES))
+        placeholders_hooks = ",".join("?" for _ in hook_statuses)
         hook_rows = conn.execute(
             "SELECT h.hook_id, h.name, h.importance, c.number AS introduced_no "
             "FROM hooks h LEFT JOIN chapters c ON c.chapter_id = h.introduced_chapter_id "
             f"WHERE h.project_id = ? AND h.status IN ({placeholders_hooks}) "
             "ORDER BY c.number ASC, h.created_at ASC",
-            (project_id, *_HOOK_OPEN_STATUSES),
+            (project_id, *hook_statuses),
         ).fetchall()
 
-        placeholders_debts = ",".join("?" for _ in _DEBT_OPEN_STATUSES)
+        debt_statuses = tuple(sorted(_DEBT_OPEN_STATUSES))
+        placeholders_debts = ",".join("?" for _ in debt_statuses)
         debt_rows = conn.execute(
             "SELECT d.debt_id, d.description, d.severity, c.number AS created_no "
             "FROM narrative_debts d LEFT JOIN chapters c ON c.chapter_id = d.created_chapter_id "
             f"WHERE d.project_id = ? AND d.status IN ({placeholders_debts}) "
             "ORDER BY c.number ASC, d.created_at ASC",
-            (project_id, *_DEBT_OPEN_STATUSES),
+            (project_id, *debt_statuses),
         ).fetchall()
     finally:
         conn.close()
@@ -139,7 +151,13 @@ def _assemble_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
     payload: dict[str, Any] = {
         "agent": PLANNER_AGENT,
-        "prompt_version": PLANNER_PROMPT_VERSION_FALLBACK,
+        # C-26（批次三十六）：原为硬编码 ``PLANNER_PROMPT_VERSION_FALLBACK``，而落库侧
+        # （:func:`_persist_node`）用 ``active_prompt_label`` 现算 ⇒ 升版后「发给模型的
+        # 声明」与「落库记录」分叉。改为现算，且经 ``aligned_active_prompt_label``
+        # 先做与 runner 同开关的自愈（否则仍可能比 run_agent 内部推进晚一版）。
+        "prompt_version": aligned_active_prompt_label(
+            db_path, PLANNER_AGENT, fallback=PLANNER_PROMPT_VERSION_FALLBACK,
+        ),
         "project": {
             "name": proj["name"] or "",
             "genre": proj["genre"] or "",
@@ -224,6 +242,15 @@ def _persist_node(ctx: dict[str, Any]) -> dict[str, Any]:
         db_path, PLANNER_AGENT, fallback=PLANNER_PROMPT_VERSION_FALLBACK,
     )
 
+    # C-27（批次三十六）：新章挂到项目**第一卷**（``volumes.number`` 最小）。
+    # 复用 ``VolumeService.list`` 的既定排序（number ASC, volume_id ASC）——不另写
+    # 一套「哪卷是第一卷」的判定。此前这里硬编码 ``volume_id: None`` ⇒ 这批章不进
+    # 卷视图、也不进卷域装配（``volume_scope`` 缓存维度恒为未挂卷哨兵）。
+    # 项目无卷 ⇒ 保持 NULL + 注释留痕：``volume_scope`` 对「未挂卷」本就有哨兵语义
+    # （批次二十四已处理），**不是脏命中**，所以无卷时不必造一个空卷。
+    volumes = VolumeService(db_path).list(project_id)
+    first_volume_id = volumes[0]["volume_id"] if volumes else None
+
     conn = get_connection(db_path)
     created_chapter_ids: list[str] = []
     try:
@@ -275,7 +302,7 @@ def _persist_node(ctx: dict[str, Any]) -> dict[str, Any]:
                     "who_knows": None,
                     "created_at": now,
                     "updated_at": now,
-                    "volume_id": None,
+                    "volume_id": first_volume_id,
                 },
             )
             created_chapter_ids.append(chapter_id)

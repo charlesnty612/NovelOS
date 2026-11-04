@@ -35,6 +35,7 @@ from packages.domain.project.service import bump_project_state_version
 
 from .planner_input import (
     DIRECTOR_PLANNER_PROMPT_VERSION,
+    aligned_active_prompt_label,
     build_director_planner_input,
 )
 from .scene_plan_store import clear_scene_plan, save_scene_plan
@@ -89,6 +90,15 @@ def _director_planner_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     run_id = ctx["run_id"]
     payload = ctx["director_planner_input"]
+    # C-21（批次三十六）：payload 的 prompt_version 是 build_ctx 阶段算的，而
+    # runner 的提示词自愈在 run_agent 内部**更晚**发生 ⇒ 可能落后一版（模型收到 v4、
+    # payload 声明 v2 ⇒ 模型回声也写 v2，而 ai_call_logs 记 v4：同一 run 三面分叉）。
+    # 在调用前用同一开关（NOVELOS_PROMPT_SYNC）对齐 ACTIVE 并**重填该键**——
+    # 与 save_plan 的「落库前重算」同一哲学（那里的重算发生在 run 之后，此处必须
+    # 发生在 run **之前**，因为它要送进模型）。
+    payload["prompt_version"] = aligned_active_prompt_label(
+        db_path, "director_planner", fallback=DIRECTOR_PLANNER_PROMPT_VERSION,
+    )
     mocks = ctx.get("mock_providers") or {}
     mock_script = mocks.get("director_planner")
     if mock_script is None:
@@ -122,10 +132,12 @@ def _director_planner_node(ctx: dict[str, Any]) -> dict[str, Any]:
 def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
     """State：把导演段写入 chapters.plan_json + scene_plan 落 chapter_scene_plans。
 
-    保字数契约：若章节当前 plan_json 已含 ``expected_word_count``（>0），
-    重生成时继承该值，避免误点「生成计划」覆盖掉已规划的单章字数。
-    兜底默认取 ``quality.wordcount.DEFAULT_TARGET_WORD_COUNT``（3000，全仓单源；
-    与 project-init 的 DEFAULT_CHAPTER_WORD_COUNT 同口径）。
+    字数契约（C-18，批次三十六 定序）：
+    ``ctx["target_word_count"]``（请求体显式）> director 输出 > 原 plan 继承 >
+    题材包 ``pacing.chapter_words.target`` > ``quality.wordcount.DEFAULT_TARGET_WORD_COUNT``。
+    显式值最高优先级 = 作者本次意图（见下方落点注释）；ctx 缺该键时原优先级逐位不变。
+    重生成时继承原 ``plan_json.expected_word_count``（>0）是防呆 B：避免误点
+    「生成计划」覆盖掉已规划的单章字数。
 
     scene_plan 同 run 落库（P1）：与 plan_json 的 UPDATE **同一事务**（同连接，不另开——
     AGENTS.md 坑区「事务内另开连接写库」）。本轮输出无 scene_plan 时**删除**旧行：
@@ -174,8 +186,22 @@ def _save_plan_node(ctx: dict[str, Any]) -> dict[str, Any]:
     )
 
     director_word_count = director_output.get("expected_word_count")
-    if isinstance(director_word_count, (int, float)) and director_word_count > 0:
-        expected_word_count: int = int(director_word_count)
+    # 字数优先级（C-18，批次三十六）：**请求体显式 target 最高**。
+    # 显式 > director 输出 > plan 继承 > 题材包 > 全仓默认 3000。
+    # 为什么显式最高：``POST /plan`` 的 ``target_word_count`` 是作者本次的明确意图
+    # （与 gate-revise「显式 > 人审 > 最新」同哲学）；此前该值被收进 ctx 却**没人消费**
+    # （只用于喂 prompt 的装配输入），作者传 2500 仍可能被 director 回吐的 3000 覆盖
+    # ——「收下即忘」的典型形态（AGENTS 硬规则 9 配套纪律）。
+    # ``ctx.get(...) is None`` 时**逐位维持**原优先级（存量调用零行为突变）。
+    explicit_target = ctx.get("target_word_count")
+    if (
+        isinstance(explicit_target, (int, float))
+        and not isinstance(explicit_target, bool)
+        and explicit_target > 0
+    ):
+        expected_word_count: int = int(explicit_target)
+    elif isinstance(director_word_count, (int, float)) and director_word_count > 0:
+        expected_word_count = int(director_word_count)
     elif inherit_expected is not None:
         expected_word_count = inherit_expected
     else:

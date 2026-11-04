@@ -607,7 +607,11 @@ def test_end_to_end_director_payload_has_all_sprint14_keys(tmp_path: Path):
     db_path = _fresh_db(tmp_path)
     pid = _insert_project(db_path)
     cur_cid = _insert_chapter(db_path, pid, number=8)
-    hcid = _insert_chapter(db_path, pid, number=7)
+    # 2026-10-24 批次三十六（连带修正）：原为 hcid=7 / prev_cid=7 两章同号——0038
+    # 给 ``chapters(project_id, number)`` 建了 UNIQUE 索引后该夹具会 IntegrityError。
+    # 伏笔引入章号本用例不断言 ⇒ 改成 6，保持 prev 章号 7（下方
+    # ``previous_chapter_tail.chapter_no == 7`` 与摘要 key 7 的断言语义不变）。
+    hcid = _insert_chapter(db_path, pid, number=6)
     prev_cid = _insert_chapter(db_path, pid, number=7)  # for prev tail
     _insert_draft(db_path, prev_cid, "前章正文" * 200)
     _insert_summary(db_path, pid, hcid, 7, "第 7 章概要")
