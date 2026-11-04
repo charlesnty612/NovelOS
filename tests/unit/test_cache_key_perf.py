@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -82,6 +83,26 @@ def _snapshot(path: Path) -> dict[str, tuple[int, int]] | None:
     return out
 
 
+def _live_db_state(path: Path) -> tuple[int, str] | None:
+    """活库**主库文件**的状态：(size, sha256)；文件不存在返回 None。
+
+    ⚠️ **为什么不再比对整个 ``data/`` 目录**（2026-11-04 修）：
+    整目录快照把断言打在**全局可变状态**上 ⇒ 同机任何并发写 ``data/`` 的进程
+    都会让它假红 —— 本轮实测踩到过：
+      · ``scripts/smoke_e2e.py`` 往 ``data/`` 写 ``smoke_e2e_*.log``；
+      · API 服务（``packages/core/api/version_check.py``）写 ``data/.last_seen_commit``；
+      · 只读巡检（``check_state_sync``）刷新 ``novelos.db-wal`` / ``-shm`` 的 mtime。
+    ⇒ 这些都与「本脚本是否写了活库」**无关** ⇒ 首轮全量曾因此假红
+    （4615/1failed，run2 复跑即绿）—— 典型的「量具缺陷被当成被测物的性质」。
+
+    ⇒ 改为**只盯活库主库文件这一个真源**（内容寻址 ⇒ 其它进程碰不到就一定不变）。
+    """
+    if not path.exists():
+        return None
+    data = path.read_bytes()
+    return len(data), hashlib.sha256(data).hexdigest()
+
+
 def _load_fixture_module():
     """导入测量脚本模块（脚本顶层不执行任何动作，只有 ``__main__`` 才跑）。"""
     import measure_cache_key_perf as perf
@@ -104,7 +125,7 @@ def test_default_run_uses_temp_db_and_never_touches_data_dir(tmp_path: Path) -> 
     断言三头并查（落点 + ``data/`` 零变化 + **仓内 ``tmp/`` 零残留**）：
     只查落点不够——脚本完全可能「落点在仓外、同时在仓内 ``tmp/`` 留垃圾」。
     """
-    before_data = _snapshot(DATA_DIR)
+    before_db = _live_db_state(DATA_DIR / "novelos.db")
     before_tmp = _snapshot(REPO_TMP_DIR)
 
     proc = _run_script("--chapters", "4", "--iterations", "2", "--warmup", "1",
@@ -122,7 +143,11 @@ def test_default_run_uses_temp_db_and_never_touches_data_dir(tmp_path: Path) -> 
     )
     assert DATA_DIR.resolve() not in db_path.parents, f"默认路径不得指向 data/：{db_path}"
 
-    assert _snapshot(DATA_DIR) == before_data, "脚本运行期间 data/ 目录发生了变化（禁写活库）"
+    # ⚠️ 只盯**活库主库文件**（内容寻址）—— 不再整目录快照 data/
+    # （同机并发写 data/ 的进程会让整目录快照假红，详见 _live_db_state 的说明）
+    assert _live_db_state(DATA_DIR / "novelos.db") == before_db, (
+        "脚本运行期间活库主库文件发生了变化（禁写活库）"
+    )
     assert _snapshot(REPO_TMP_DIR) == before_tmp, "脚本运行期间仓内 tmp/ 目录发生了变化（应零残留）"
 
     # 专属临时目录跑完必须**整体消失**（``--keep-db`` 除外）⇒ 不留垃圾。
