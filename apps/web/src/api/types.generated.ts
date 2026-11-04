@@ -797,25 +797,6 @@ export interface DebtUpdate {
   who_knows?: Array<string> | null;
 }
 
-export interface DeconstructStartResponse {
-  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
-  run_id: string;
-  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
-  status: string;
-  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
-  current_node?: string | null;
-  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
-  project_id: string;
-  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
-  book_title: string;
-  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
-  canon_id?: string | null;
-  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
-  extracts_count?: number | null;
-  /** ``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。 */
-  error?: string | null;
-}
-
 export interface DeliveryChapter {
   /** 一章的交付判定行。 */
   chapter_id: string;

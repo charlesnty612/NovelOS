@@ -4279,7 +4279,7 @@
           "quality"
         ],
         "summary": "List Project Quality",
-        "description": "列出该项目全部 quality report；按 ``created_at`` 降序。\n\n**列表行与单体行同形**（2026-10-15 批次（六）L4 实测）：``list_reports`` 与\n``latest_report`` 走的是同一个 ``SELECT * FROM quality_reports`` ＋ 同一个\n:func:`_attach_judge` ⇒ 11 键恒在、逐键同名。⇒ **复用** ``QualityReportResponse``\n而不是新立一个模型（同一份事实源；新立一份必然与它漂移）。\n\n⚠️ 但这是**实测结论，不是先验**：``GET /commits`` 列表行 12 键而\n``POST /commits`` 响应 4 键的先例就在同一批里。改 ``list_reports`` 的 SELECT\n或 ``_attach_judge`` 的弹键逻辑时，本条的同形前提即失效，必须重新量。\n\n⚠️ 残余边界（Literal 打在**存量落库数据**上）：``issues_json[]`` 走\n``QualityReportIssue`` 的 ``severity / category / gate`` 三个 Literal。一份被\n手工改脏的 ``issues_json``（比如 ``category`` 写成表外值）会让本端点 **500**，\n而不是「少报一个字段」。该风险随 ``QualityReportIssue`` 共存，单体端点\n（``GET /chapters/{cid}/quality``）同样承担，非本端点独有。",
+        "description": "列出该项目全部 quality report；按 ``created_at`` 降序。\n\n**列表行与单体行同形**（2026-10-15 批次（六）L4 实测）：``list_reports`` 与\n``latest_report`` 走的是同一个 ``SELECT * FROM quality_reports`` ＋ 同一个\n:func:`_attach_judge` ⇒ 11 键恒在、逐键同名。⇒ **复用** ``QualityReportResponse``\n而不是新立一个模型（同一份事实源；新立一份必然与它漂移）。\n\n⚠️ 但这是**实测结论，不是先验**：``GET /commits`` 列表行 12 键而\n``POST /commits`` 响应 4 键的先例就在同一批里。改 ``list_reports`` 的 SELECT\n或 ``_attach_judge`` 的弹键逻辑时，本条的同形前提即失效，必须重新量。\n\n⚠️ **残余边界（2026-11-05 批次三十六 C-31 已处置 Literal 面）**：\n``issues_json[]`` 走 ``QualityReportIssue`` 的 ``severity / category / gate``\n三个 Literal。此前一份被手工改脏的 ``issues_json``（值写成表外值）会让本端点\n**500**，而不是「少报一个字段」。现由 :meth:`QualityService._row_to_dict` 的\n读路径兜底（``service._sanitize_issue_literals``）：表外值降级为安全默认\n（severity→``warning`` / category→``style`` / gate→``auto``）并留 ``log.warning``，\n该行其余字段与其它干净行**原样返回**。\n**仍未兜底的残余**：元素**缺必填键**（``rule_id`` / ``message``）或元素不是对象时，\n前者仍会让响应模型校验失败（非 dict 元素已被丢弃）——那属于「结构缺失」而非\n「取值越界」，不在本次降级面内（不发明值）。",
         "operationId": "list_project_quality_api_projects__project_id__quality_get",
         "parameters": [
           {
@@ -4336,7 +4336,7 @@
           "quality"
         ],
         "summary": "Evaluate Chapter Quality",
-        "description": "现场对 chapter 触发一次 Quality 评估并落库，返回 report。\n\n- chapter 不存在 → 404；\n- 调用 :class:`StoryStateService.get_current_state` 拿 snapshot_pre（与 chapter_commit\n  pipeline 的 quality_gate 节点保持同一口径）；\n- 复用 :func:`build_quality_context` + :class:`QualityEngine`；\n- 落库后返回 report dict（与 GET 端点**同 schema**，故共用\n  ``QualityReportResponse``）。",
+        "description": "现场对 chapter 触发一次 Quality 评估并落库，返回 report。\n\n- chapter 不存在 → 404；\n- 调用 :class:`StoryStateService.get_current_state` 拿 snapshot_pre（与 chapter_commit\n  pipeline 的 quality_gate 节点保持同一口径）；\n- 复用 :func:`build_quality_context` + :class:`QualityEngine`；\n- 落库后返回 report dict（与 GET 端点**同 schema**，故共用\n  ``QualityReportResponse``）。\n\n**``draft_version``（可选 query 参数，2026-11-05 批次三十六 C-42）**：指定「本次\n评估量哪一版草稿」；不传（默认）⇒ 评当前最新一版，**行为逐字不变**。透传给\n``build_quality_context`` 的既有形参，沿用批次三十五的 fail-closed 语义：\n指定的版本**不存在** ⇒ 判「不可检」（201 + ``overall=0`` + 阻断级\n``scoring_missing_subscore``，message 以「正文读不到」开头），**不是**量空正文。",
         "operationId": "evaluate_chapter_quality_api_chapters__chapter_id__quality_evaluate_post",
         "parameters": [
           {
@@ -4346,6 +4346,22 @@
             "schema": {
               "type": "string",
               "title": "Chapter Id"
+            }
+          },
+          {
+            "name": "draft_version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Draft Version"
             }
           }
         ],
@@ -4451,7 +4467,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeconstructStartResponse"
+                  "$ref": "#/components/schemas/WorkflowStartAccepted"
                 }
               }
             }
@@ -4504,7 +4520,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeconstructStartResponse"
+                  "$ref": "#/components/schemas/WorkflowStartAccepted"
                 }
               }
             }
@@ -6030,7 +6046,7 @@
           "story_state"
         ],
         "summary": "Promote Branch",
-        "description": "把分支全部 commits 合并为单个 delta，在 main 上提交（state-delta-v0.md §6.3）。\n\n⚠️ 这里带的是 ``response_model_exclude_unset=True``，**不是** ``_exclude_none``——\n两者解决的是相反的问题，都不能互换（详见 ``story_state/models.py`` 里\n``BranchPromoteResponse`` 的 docstring 与 ``_drop_if_none`` 的 docstring）：\n\n* 本端点有**两个形状**（空分支 7 键 / 非空分支 8 键），三个键在其中一侧**缺席**。\n  不带 ``exclude_unset`` 时 Pydantic 会拿默认值把缺席的键**补成 ``null``**——\n  实测空分支响应因此从 7 键变成 9 键（凭空多出 ``promoted_from`` / ``snapshot_ref``），\n  那是**加 response_model 本身引入的契约变更**。\n* 而 ``commit_id`` / ``delta_id`` 在空分支形状里是**值为 null 的真键**。\n  用 ``_exclude_none`` 会把它们**抹掉**（键从有变无）。\n\n``exclude_unset`` 只看「生产方有没有给这个键」，两个需求同时满足。\n\n⚠️ **2026-10-24（响应版本修复）**：``state_version`` = **promote 提交后 DB 里的\n最新 ``story_states.state_version``**（= ``branches.promote_branch`` 里\n``bump_project_state_version`` 的返回值）。修前它取的是「最后一次重放落在\nmain 上的那一版」，**比 DB 真值低 1**（少算 promote 自身的版本推进：分支\n``ACTIVE→MERGED`` 改了 ``branches`` 表 ⇒ 该表进 director 装配 payload ⇒\n必须推 version）⇒ 前端展示的版本号失真。**前端不需要任何 +/- 补偿。**",
+        "description": "把分支全部 commits 合并为单个 delta，在 main 上提交（state-delta-v0.md §6.3）。\n\n⚠️ 这里带的是 ``response_model_exclude_unset=True``，**不是** ``_exclude_none``——\n两者解决的是相反的问题，都不能互换（详见 ``story_state/models.py`` 里\n``BranchPromoteResponse`` 的 docstring 与 ``_drop_if_none`` 的 docstring）：\n\n* 本端点有**两个形状**（空分支 7 键 / 非空分支 8 键），三个键在其中一侧**缺席**。\n  不带 ``exclude_unset`` 时 Pydantic 会拿默认值把缺席的键**补成 ``null``**——\n  实测空分支响应因此从 7 键变成 9 键（凭空多出 ``promoted_from`` / ``snapshot_ref``），\n  那是**加 response_model 本身引入的契约变更**。\n* 而 ``commit_id`` / ``delta_id`` 在空分支形状里是**值为 null 的真键**。\n  用 ``_exclude_none`` 会把它们**抹掉**（键从有变无）。\n\n``exclude_unset`` 只看「生产方有没有给这个键」，两个需求同时满足。\n\n**HIGH 风险审批（2026-10-23 C-2 修复）**：请求体可带可选\n``author_approval: {\"approved\": true, \"approver\": \"...\"}``。分支重放的\ndelta 含 HIGH 风险（``risk_level=HIGH`` / 角色 ``facet=definition`` /\n世界 ``world_kind=rule``）且未获批 ⇒ **重放开始前**返回 409：\n\n``detail = {\"error\": \"approval_required\", \"message\": str,\n\"high_risk_change_ids\": [...]}``\n\n前端据此弹确认框，用户确认后把 ``author_approval`` 带同 ``branch_id`` 重发。\n预检前置保证失败时**不产生任何 main commit**（不会留下半 promote）。\n\n⚠️ **2026-10-24（响应版本修复）**：``state_version`` = **promote 提交后 DB 里的\n最新 ``story_states.state_version``**（= ``branches.promote_branch`` 里\n``bump_project_state_version`` 的返回值）。修前它取的是「最后一次重放落在\nmain 上的那一版」，**比 DB 真值低 1**（少算 promote 自身的版本推进：分支\n``ACTIVE→MERGED`` 改了 ``branches`` 表 ⇒ 该表进 director 装配 payload ⇒\n必须推 version）⇒ 前端展示的版本号失真。**前端不需要任何 +/- 补偿。**",
         "operationId": "promote_branch_api_projects__project_id__branches__branch_id__promote_post",
         "parameters": [
           {
@@ -10839,79 +10855,6 @@
         "type": "object",
         "title": "DebtUpdate",
         "description": "部分更新 Debt 请求体——所有字段均可选。"
-      },
-      "DeconstructStartResponse": {
-        "properties": {
-          "run_id": {
-            "type": "string",
-            "title": "Run Id"
-          },
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
-          "current_node": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Current Node"
-          },
-          "project_id": {
-            "type": "string",
-            "title": "Project Id"
-          },
-          "book_title": {
-            "type": "string",
-            "title": "Book Title"
-          },
-          "canon_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Canon Id"
-          },
-          "extracts_count": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Extracts Count"
-          },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
-          }
-        },
-        "type": "object",
-        "required": [
-          "run_id",
-          "status",
-          "project_id",
-          "book_title"
-        ],
-        "title": "DeconstructStartResponse",
-        "description": "``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。\n\n两条端点都汇到 ``_start_deconstruct_internal``，返回同一个 dict。\n\n⚠️ **本模型引入了一处行为变更**：原实现的三个条件键是「命中才写、否则整个键缺席」；\n声明成 ``Optional`` + 默认 ``None`` 后，它们**恒在**，未命中时为 ``null``。\n\n- 为什么接受：OpenAPI / 前端 codegen 需要一个**稳定**的键集。条件键在\n  TypeScript 里会逼出 ``canon_id?: string`` 与一堆 ``&&`` 判空，而「缺席」在\n  JSON Schema 里根本没有对应表达——这正是本批次要消灭的「前端手写契约」。\n- 代价：存量前端若用 ``\"canon_id\" in body`` 判存在，语义从「已 COMPLETED 且有\n  canon」变成「恒真」。**改判据请改成 ``body.canon_id != null``。**\n  （本仓唯一前端调用方是拆书面板，未用 in 判据；见\n  ``tests/api/test_reveal_and_judge_response_contract.py`` 同批口径。）\n\n不设 ``extra=\"allow\"``：这三个条件键是全部的分支，超出的键只可能是 bug。"
       },
       "DeliveryChapter": {
         "properties": {
