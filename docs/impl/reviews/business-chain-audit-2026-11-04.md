@@ -45,6 +45,17 @@
 
 ### A-1　CI backend job 自 2026-10-25 起一直红，根因是 Windows-only 语义的守卫测试
 
+> **⚠️ 订正（2026-11-04 批次三十五 · 先验判断被推翻，必须留痕）**：本条标题写「根因是 Windows-only 语义的守卫测试」，
+> **该判断只对了一半**：CI 红灯的**直接触发**确是那两条用例（其构造的 `/home/runner/work/novelos/novelos`
+> 在 Linux 上不存在），但**真根因在生产代码**——`scripts/guard_repo_write_path.py::_relative_normalized`
+> 拼前缀时**硬编码 `"\\"`**，而 `normalize_for_compare` 走 `os.path.normpath`（Windows 产 `\`、POSIX 保留 `/`）
+> ⇒ **POSIX 上仓内子路径一律判仓外** ⇒ 守卫在 Linux/macOS 上**形同虚设**（B2 basetemp 守卫 + 8 个生产脚本的
+> `check_write_path` 写盘点同时失效）。
+> ⇒ **「把用例标 skip」只能让红灯消失，门还是没装上** ⇒ 本批按**治本**处置（改判定口径为成对 `PathFlavor` +
+> 平台化测试 + POSIX 反向用例），**不是**「让 CI 变绿」。
+> 详见 CHANGELOG `## [Unreleased]` 的「批次三十五」段与 AGENTS §五新增的两条坑。
+> 下列「附带判定」段落的事实（POSIX 上仓内子路径依赖身份核）**成立且是本条缺陷面的准确描述**。
+
 - **位置**：`tests/unit/test_conftest_guards.py:200-212`（`test_lowercase_drive_letter_variant_is_still_inside_repo`）与 `:214-230`（`test_repo_internal_basetemp_with_lowercase_drive_letter_is_rejected`）；判定实现 `scripts/guard_repo_write_path.py:202-218`（`_relative_normalized`）、`:233-250`（`_relative_by_identity`）
 - **证据（实测）**：CI run `40208499569`，head `d79a7bb71f5e4f6fb6115e5720a0137e8ec6d9be`，`conclusion=failure`；4 个 job 中 `backend (pytest + ruff)` 的 **Pytest 步骤失败**（Ruff check 成功），`windows` / `web` / `e2e smoke` 三个 job 全绿。失败日志：CI 工作目录实测为 `/home/runner/work/NovelOS/NovelOS`（**大小写原样保留**），而测试用 `str(REPO_ROOT).replace("NovelOS", "novelos")` 构造出 `/home/runner/work/novelos/novelos` ⇒ **该目录在 Linux（大小写敏感）上不存在** ⇒ `_relative_by_identity` 的 `(st_dev, st_ino)` 身份核必然失败 ⇒ `is_inside_repo` 判"仓外" ⇒ `assert ... is True` 得 `False`。日志另见 `/home/runner/work/novelos/novelos/.b1_probe_lower\`（**尾随反斜杠** = `_relative_normalized` 里 `prefix = n_root + "\\"` 硬编码 Windows 分隔符在 POSIX 上混进比较串）。连带 **22 个 `ERROR at setup`**（`FileNotFoundError: .../novelos/novelos/.b1_probe_lower`）。本地 Windows 绿（`D:\zcodeproject\NovelOS` → `D:\zcodeproject\novelos` 是**同一个物理目录**）。
 - **失败场景**：每次 push 到 `master` ⇒ backend job 恒红 ⇒ **红灯成为噪声 ⇒ 真红被淹没**（这正是 AGENTS 坑区"CI 红了没人看"的**活实例**，且已挂了 10 天）。

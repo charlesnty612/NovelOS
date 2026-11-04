@@ -5,6 +5,61 @@
 
 ## [Unreleased]
 
+### Fixed（2026-11-04 · 批次三十五 · 业务链审计落地：A 档 6 条 + 写盘守卫跨平台治本 + CI 红了 10 天的根因）
+
+> **来源**：用户指令「ultracode 查一下业务链有没有问题」⇒ 多 agent 工作流只读审计（被叫停在测绘阶段）
+> ⇒ 产出两样东西：① **基线全绿**（后端 4616/0 failed、前端 899 全绿、smoke PASS、codegen 零漂移）⇒ **业务链本身没塌**；
+> ② 一条**红了 10 天没人看的 CI**（run `40208499569`，head `d79a7bb`，2026-10-25 起 **14 连红**）。
+> 审计报告落盘 `docs/impl/reviews/business-chain-audit-2026-11-04.md`（提交 `b7d4b77`）。
+> **用户裁决（2026-11-04）**：① 守卫走**治本**（改判定口径 + 测试平台化 + POSIX 反向用例，**不是**只让 CI 变绿）；
+> ② 范围 = **A 档 6 条**（Lead 亲验）+ 守卫 POSIX 化；**B 档约 60 条候选本轮不修**（先补审计缺口）。
+> **零真实 LLM 调用、零内容仓接触、活库业务数据零改动**；全量回归走**仓外 basetemp**。
+> **提交拆分**：批 1 守卫（`650902c` + `b1ef157`）先单独推并**先验 CI 绿**（run `41845200317` 四 job 全绿），之后各批的红灯才有意义。
+
+**批 1 · 写盘守卫跨平台口径（治本）——CI 红了 10 天的真根因**
+- **缺陷**：`scripts/guard_repo_write_path.py::_relative_normalized` 拼前缀时**硬编码 `"\\"`**，而 `normalize_for_compare` 走 `os.path.normpath`（**Windows 产 `\`、POSIX 保留 `/`**）⇒ POSIX 上 `startswith(prefix)` **恒为假** ⇒ 仓内**子路径**只能靠身份核兜底 ⇒ 而身份核对**尚不存在**的路径必然失败（`os.stat` 抛 OSError）⇒ **`check_write_path` 在非 Windows 上把仓内路径判成仓外 ⇒ 放行写入**。
+  ⚠️ **仓根本身仍判「仓内」**（走 `n_target == n_root` 分支 + `lower()` 无条件折叠）⇒ **看起来守卫在工作、子路径全盲**。
+  ⇒ 受害面：B2 basetemp 守卫（`tests/conftest.py`）+ 8 个生产脚本的 `check_write_path` 写盘点（`backup_db` / `db_maintenance` / `eval_regression` / `m1_report` / `inspect_stalled_runs` / `human_baseline_synthetic` / `m2_judge` / `real_llm_e2e`）。
+- **修法**：口径**显式化为成对对象** `PathFlavor(normpath, sep)`（`WINDOWS_FLAVOR` = `ntpath`+`\`、`POSIX_FLAVOR` = `posixpath`+`/`），抽出**纯函数** `_relative_from_normalized(n_target, n_root, sep)`（只做字符串比较，不碰 `os.path`）⇒ **Windows 行为逐位不变**、POSIX 修好，且 **POSIX 整条判定本地可验**（此前只有 CI 能当 Linux 判官 ⇒ 量具盲区）。⚠️ **不得**把 POSIX 上合法的 `\` 归一成 `/`（文件名允许含反斜杠）⇒ 分隔符只作**追加的分隔符**，路径分量逐字保留。
+- **判别**：`tests/unit/test_scripts_write_guard.py::test_relative_normalized_posix_flavor_finds_repo_internal_subpath` + `test_relative_from_normalized_uses_the_separator_it_is_given`；Windows 侧逐位不变由「现有 28/61 条断言全绿 + 用例数不变」保证。
+- **测试平台化**：`skipif` 判据统一用 `sys.platform == "win32"`（**全仓 tests/ 下零处 `os.name` / `platform.system()`**）；标 skip 的**同一个提交**把两个文件加进 `.github/workflows/ci.yml` 的 `windows (OS-specific paths)` job（该 job 的命令是**写死的文件清单**，不是路径过滤 ⇒ 不加就是「零覆盖」）。
+- **⚠️ 先验判断被推翻（留痕）**：审计报告 A-1 原写「根因是 Windows-only 语义的守卫测试」⇒ **只对了一半**——CI 红灯的直接触发确是那两条用例，但**真根因在生产代码** ⇒ **「把用例标 skip」只会让红灯消失，门还是没装上** ⇒ 审计报告已加订正横幅。
+
+**批 2 · 前端「生成计划」的按次模型覆盖静默失效（键名分叉）**
+- **缺陷**：`apps/web/src/pages/ChapterDetailPage.tsx` 的 `capabilityByAction` 把 plan 映射到 `'reasoning'`，而 chapter-plan 的**唯一** AI 节点是 `director_planner`、后端按 `capability_for("director_planner")` 取键 ⇒ `router.py::AGENT_CAPABILITY` 登记它是 **`'creative_writing'`** ⇒ 键对不上 ⇒ `.get()` 返回 None ⇒ **回落到默认档案**（用户下拉选了档案、界面也显示「已选」，实际调用的还是默认模型，零告警）。同形第二处：`review: 'light'` 只覆盖 `critic`、**覆盖不到 `deep_reviewer`（`'reasoning'`）**。
+- **修法**：`capabilityByAction` 值类型 `string` → `string[]`，plan 改 `'creative_writing'`，review 改 `['light','reasoning']`（同一档案覆盖 critic + deep_reviewer），commit 保持 `'observer'`；payload 构造改 `Object.fromEntries(capabilities.map(cap => [cap, profileId]))`。顺手订正 `apps/web/src/api/types.ts` 里「commit 不消耗 LLM、不透传」的注释（**与实现相反**）。
+- **判别**：前端 `ChapterDetailPage.test.tsx` 新增用例断言 plan 的 payload **含 `creative_writing` 键、不含 `reasoning` 键**，review 的 payload **同时含 `light` + `reasoning`**（此前 `wf-model-select-plan` / `-review` 在测试文件里 **0 命中** ⇒ 这两条映射**零覆盖**）。
+
+**批 3 · 前端 `Commit` 是「幽灵形状」（7 键 vs 后端 13 键）**
+- **缺陷**：前端手写 `Commit{commit_id,project_id,version,parent_version,message,author,created_at}` 声明 `GET /projects/{id}/commits`，而后端返 `CommitListItem`（**13 键**）⇒ 那 5 个字段在 `commits` 表里**根本没有对应列** ⇒ 运行时恒 `undefined` ⇒ 界面渲染「vundefined」/「Invalid Date」；且 `parent_version == null` **恒真** ⇒ **diff 请求永不发**。⚠️ **测试也抄了错误形状**（`StateHistoryPanel.test.tsx` 的夹具用的正是手写 7 键）⇒ 绿灯掩盖缺陷（AGENTS 坑区「夹具抄形状」族）。
+- **修法**：手写 `Commit` **删掉**，改用 codegen 生成的 `CommitListItem`（`types.generated.ts` 已存在）；消费点字段读法逐个改正（`version`→`resulting_state_version`、`parent_version`→`previous_state_version`、时间→`timestamp`、`message`/`author` 后端没有 ⇒ 显式占位）；夹具重写为**后端真实 13 键形状**（不许再抄实现）。
+- **顺带发现**：`queries.py` 是 `ORDER BY resulting_state_version ASC` ⇒ `commits[0]` 是**最早**那条 ⇒ `ProjectOverviewPage.tsx` 的「最新 v{commits[0].version}」取到的是**最旧**一条 ⇒ 一并修。
+- **新守卫（第二道防线）**：`tests/api/test_frontend_types_contract.py` 既有看守只覆盖「手写名 ∩ OpenAPI schema 名」⇒ **不同名的同义形状完全看不见** ⇒ 新增 `GHOST_SHAPE_DEBT`（存量 **24** 条，**只许递减**）：前端**用作端点响应类型**的手写名，若既不在 OpenAPI schema 里、也不是从生成类型重导出 ⇒ 必须登记 ⇒ **新增即红**；另配「退债须显式删条目」与「清单非平凡」两条看守（后者当场抓出首版正则漏掉数组类型 `CommitListItem[]` 与泛型实例化 `Record<string, unknown>` ⇒ 判别面从 25 订正为 **24**）。
+
+**批 4 · `commit_delta` 与章节置 `COMMITTED` 不在同一事务**
+- **缺陷**：`packages/workflows/chapter_commit/commit.py` 调 `svc.commit_delta(...)`（**内部自带事务**）之后，**另开一条连接**执行 `UPDATE chapters SET status='COMMITTED' WHERE chapter_id=?`（**无 `WHERE status` 条件**）⇒ 两写之间崩溃 ⇒ `story_states` 已推进、章状态未变；重跑以新的 `previous_state_version` 再提交 ⇒ `state_version` 再 +1；**并发改稿**（`create_draft` 把章降回 `DRAFTED`）会被无条件盖回 `COMMITTED`。
+- **修法**：`commit_delta` 新增 `chapter_status_after` / `chapter_status_expect` 两个形参，把章状态 UPDATE **移进同一事务**（提交点之前、同一 conn）⇒ 要么都变、要么都不变；`chapter_status_expect` 做**乐观锁**（不匹配 ⇒ `StateConflictError` ⇒ 整事务回滚）。
+  ⚠️ **WHERE 条件不能简单写 `status='REVIEWED'`**：`ALLOWED_NEXT["DRAFTED"]` 不含 `COMMITTED`，但**快通道允许 DRAFTED→COMMITTED** ⇒ 加了会把快通道挡掉 ⇒ 条件按**观测到的实际状态**给出（`expect = 实测 status`）而非白名单。
+- **判别**：`tests/unit/test_commit_transaction_atomicity.py` **4 例**（正常推进 / 乐观锁拒绝后状态·版本·提交数**三者均不变** / 并发改稿端到端保护 / 「省略新参数 ⇒ 章状态不动」反向不变量）+ 突变规格 `tests/mutation_specs/l13_commit_atomicity.py` **2 条**（`COMMIT-ATOMIC-1` 把 UPDATE 写成 `chapter_status_expect`；`COMMIT-ATOMIC-2` 把 `if chapter_status_expect is not None:` 改成 `if False:`）⇒ **2/2 CAUGHT**（命中 AGENTS §三.7 第①条「门禁」⇒ 补突变规格）。
+
+**批 5 · 质量门「量空正文放行」改硬停（fail-closed）**
+- **缺陷**：`packages/core/quality/service.py` 把 `resolve_draft` 的 `None` 一律归入「该章确实没有草稿」⇒ **「显式 `draft_version` 指向不存在的草稿」与「本章本来没草稿」被折叠成同一个值 `draft=""`** ⇒ `score_style("")=100` / `score_pacing("")=100`（**无空正文守卫**）⇒ `should_block` 为假 ⇒ **质量门量空正文并放行**。评审侧同场景 **raise ValueError**（`chapter_review/pipeline.py` 用 `if version:` 把两种 `None` 分开）⇒ **同一请求体字段两侧态度相反**。
+- **修法**：质量侧照评审侧做法——**显式版本给出但解析不到 ⇒ 判「不可检」**（`draft_unavailable`）⇒ 子分 0 + 可见阻断级 issue + 门禁硬停（`should_block` 恒真）；连带「不可检时报告仍记**被指定的**那一版」（`reviewed_version` 不再退化成 None ⇒ 否则报告标签指向「取最新」补全的版本 ⇒ 与实际被量的东西不对应）。
+- **判别**：`tests/unit/quality/test_draft_unavailable_fail_closed.py` 新增 **3 例**（显式缺失版本 ⇒ 不可检而非空稿；门禁必拦；显式存在的版本照常评估）+ 突变规格 `tests/mutation_specs/l26_draft_version_unavailable.py` **2 条**（`DRAFT-VERSION-1` 撤掉「显式缺失 ⇒ 不可检」判定 / `DRAFT-VERSION-2` 撤掉「不可检时记被指定版本」）⇒ **2/2 CAUGHT**（⚠️ 只钉 ① 时 ② 能全绿、只钉 ② 时 ① 能全绿 ⇒ **两条缺一不可**）。
+- **行为变更留痕**：这是**门禁行为变更**（阻断 > 放行，fail-closed 方向）。
+
+**批 6 · 文档基线回填 + 量具脆弱**
+- `AGENTS.md` §六 OpenAPI 行：`98 paths / 136 schemas` → 实测 **111 paths / 147 schemas**（codegen 本身零漂移，是**文档没跟**）。
+- `tests/unit/test_cache_key_perf.py`：那条「脚本运行期间 `data/` 目录零变化」的断言对**整个共享目录做逐文件快照** ⇒ 同机并发跑 `smoke_e2e.py`（写 `data/smoke_e2e_*.log`）、API 服务（写 `data/.last_seen_commit`）、只读巡检（刷新 `-wal`/`-shm` 的 mtime）**全都会让它假红** ⇒ **首轮全量实测 4615/1failed、run2 复跑即绿**（⇒ 量具缺陷伪装成被测物的性质）⇒ 改为**只盯活库主库文件的内容寻址**（size + sha256）。
+- 审计报告 A-1 加订正横幅（见批 1 末）。
+
+**批 7 · 闸门与留痕**
+- **验收**：全量 pytest **4630 passed / 1 skipped / 2 xfailed / 0 failed**（**210.77s**，`-n 20`，**仓外 basetemp**，不带任何 `--ignore`）⇒ 较 4616 基线 **+14**（**账对得上**：批 4 的 4 + 批 5 的 3 + 批 3 守卫新增的 5 + 批 1 的 POSIX 用例 2）；树指纹 **803 文件 / `73fab0bbe94960fe7830416c1e7b8448670b60b0c5927c0a6c66409af3df15b7`** 跑测前后**逐位一致**；`ruff` **All checks passed!**；`npx tsc -b --force` **零错**、`npx vitest run` **901 passed / 66 文件**（较 899 **+2** = 批 2 的按次覆盖用例）、`npm run build` **通过**（`index-CZx8uRgw.js` 497.16 kB / gzip 155.86 kB）；`export_openapi` + `gen_frontend_types` ⇒ **111 paths / 147 schemas**、**零漂移**（regen 后 git 无变化）；突变只读预检 **88 规格文件 / 484 条 / 0 问题**（⚠️ **全量突变本批未跑** ⇒ 档③已降级为发版前非阻塞 ⇒ **不声称全捕获**；本批新增 4 条规格**逐条实跑 4/4 CAUGHT**）；`scripts/smoke_e2e.py` **PASS**（`tables=42` + plan→write→review PAUSED→resume→commit 四步链路完好 + observer 内容在场 + 挂卷后重装配 `tail before/after=1/0` + **SYNC OK**）；`check_state_sync --db data/novelos.db` **SYNC OK**（5 个无快照项目按设计不计漂移）；残留清点三项（`*.mutbak*` **0** / 生产源码 `MUTATION-` 标记 **0** / `git status` 仅本批预期改动）。
+- **CI**：run `41845200317`（head `237a27b` = 批 1~3）**四 job 全绿**（backend / e2e smoke / windows / web）⇒ **批 1 的 Linux 侧修复实测生效**（此前 `41841876788` 仍红，剩最后一条断言 ⇒ `b1ef157` 补齐）。
+- **AGENTS.md 坑区新增 6 条**：① 分隔符口径写死成 Windows ⇒ POSIX 子路径全盲；② 平台专属语义标 `skipif` 后 windows job 不跑该文件 ⇒ 零覆盖；③ 按次模型覆盖的键名由前端手写 ⇒ 与后端名册分叉 ⇒ 静默失效；④ 手写响应类型与生成类型**不同名** ⇒ 双源看守看不见 ⇒ 幽灵形状；⑤ 断言打在共享全局可变状态（整目录快照）⇒ 并发写就假红；⑥ CI 连红 10 天没人看 ⇒ 红的是**产品缺陷**、测试是对的。
+
+**本轮明确不做（登记，不修）**：B 档约 60 条候选（`gate.py` 取 review 版本不筛 `wr.status`；delta 残留无清理路径；deconstruct run 归属 NULL + 无并发守卫；content_sync 备份包可无鉴权导入；`_latest_review_report_draft_version` 读库失败吞成 None；前端 `ALLOWED_NEXT` 缺两条（**实测是死导出，零 import ⇒ 无实际影响，降级 minor**）；前端 `ModelCapability`/`CapabilityKey` 缺 `'observer'`；`WorkflowStartArgs` 的 `author_intent`/`target_word_count` **声明了但无任何赋值点**）；第 9 条链测绘（story_state / versioning / **装配缓存** ⇒ 硬规则 2「缓存键漏维度」本轮零覆盖）；8 维度横切 + 对抗验证层；提示词与文档过期项。**真实上游模型行为、opencode / Command-Code 端点一律未验证**（§一 硬约束 2）。
+
 ### Fixed（2026-10-25 · 交接收尾批 · 基线三失败 + 审查遗留 11 项清偿 + 交接测试债 5 项 + 7 组对抗审查返工闭环）
 
 > **来源**：项目经外部团队（OS PM/Chief 体系）中途接手后停摆，本地 master 停在 `85b516c`（三支已审分支已并、领先远端 6 提交未推）且**从未跑过全量**。本批起手基线全量实测 **4540 passed / 3 failed**，连同 2026-10-24 批登记的 11 项遗留、外部台账 5 项测试债（BUG-62/63/64/65/66）一并清偿；流程按「coder 实现 → code-reviewer 对抗审查 → 返工复验」闭环（7 组审查抓出 1 项阻断级 + 多项 major，全部返工并经突变探针复验 CAUGHT）。
@@ -31,11 +86,11 @@
 
 **文档批**：BUG-20 README 逃逸口段按 argparse 实测重写（9 flag 表 + 点名式跨脚本引用，顺带订正脚本计数 37→39）；providerOptions.ts 架构口径订正（连接仍持主协议=地址池缺省平面；复用点补第 3 处及首项顺序警示）；`--apply` 等价「迁移+执行」语义补注。
 
-**收尾连带**：lint 存量 9 处清零（外部团队遗留 I001×3 / E501×5 / F401×1）；突变规格 `L10-MC-02B` 锚点随 `effective.py` 池取址重写对齐（预检 86 条 0 问题）；codegen 产物两次 regen 后逐位一致。
+**收尾连带**：lint 存量 9 处清零（外部团队遗留 I001×3 / E501×5 / F401×1）；突变规格 `L10-MC-02B` 锚点随 `effective.py` 池取址重写对齐（只读预检 **86 个规格文件 / 480 条** / 0 问题 —— **双口径**：文件数 / 条目数，2026-11-04 批次三十五订正，此前只写「86 条」把文件数当条目数）；codegen 产物两次 regen 后逐位一致。
 
 **已知遗留（登记不修，后续批）**：available-models 侧显式 `models_url` 仅 openai 平面生效而 `/test` 全协议生效（两侧分叉，存量）；`/test` 探 anthropic 仍用 Bearer（真实端点要 x-api-key，存量）；协议→族矩阵（前端 `PROTOCOL_SCOPED_MODES` ↔ 后端 `PROTOCOL_THINKING_FAMILIES`）两份手抄无机器看守；档案自身 params 的协议表达保护缺口（本轮只护环节覆盖路径）；前端 `poolBaseUrlForProtocol` 未做 `rstrip("/")` 归一（不影响 host 提取）；promote 空分支不物化 main 属 R-1 既有设计（本批只修响应契约，物化与否维持原状）。
 
-- **验收**：最终树全量 pytest **4616 passed / 0 failed**（-n 20 仓外 basetemp；闸门前后树指纹逐位一致 `13c9cac3…`）；vitest **899 全绿**（66 文件）；tsc / build 过；ruff 0；突变预检 86 条 0 问题；codegen 产物逐位一致；`detector_evidence_check` 看守 exit 0。
+- **验收**：最终树全量 pytest **4616 passed / 0 failed**（-n 20 仓外 basetemp；闸门前后树指纹逐位一致 `13c9cac3…`）；vitest **899 全绿**（66 文件）；tsc / build 过；ruff 0；突变只读预检 **86 个规格文件 / 480 条** / 0 问题（**双口径**，2026-11-04 批次三十五订正）；codegen 产物逐位一致；`detector_evidence_check` 看守 exit 0。
 
 ### Fixed（2026-10-25 · D 批 · 内容仓 push 守卫：远端 URL 含空格被整条丢弃的假绿）
 
