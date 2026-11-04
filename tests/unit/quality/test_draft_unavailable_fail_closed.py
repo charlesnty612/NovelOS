@@ -509,3 +509,82 @@ def test_api_evaluate_returns_an_explicit_error_not_a_perfect_report(tmp_path: P
         for i in unavailable
     )
 
+
+
+# ---------------------------------------------------------------------------
+# 2c) 「显式指定的版本不存在」也必须判**不可检**（2026-11-04 · 批次三十五 批 5）
+# ---------------------------------------------------------------------------
+#
+# ⚠️ **第三种「拿不到正文」**（此前被折叠进了第二种）：
+#   ① 读库失败            ⇒ DraftResolutionError ⇒ 不可检（已修，2026-10-23 C-1）
+#   ② 本章确实没有草稿    ⇒ None ⇒ 空正文 + 满分（**既有行为，逐字不变**）
+#   ③ **显式指定的版本不存在** ⇒ None ⇒ 此前也被当成 ② ⇒ **质量门量空正文并放行**
+#
+# ③ 与 ② 在数据上都是「resolve_draft 返回 None」⇒ 必须靠「**有没有指定版本**」区分
+# （评审侧 `chapter_review/pipeline.py` 就是用 `if version:` 分开的 ⇒ 两侧态度相反）。
+# ⇒ ③ 判**不可检**（fail-closed）：门禁硬停，而不是给一个从未被评估的章发通行证。
+
+
+def test_explicit_missing_draft_version_is_unavailable_not_empty_draft(tmp_path: Path):
+    """显式指定了一个**不存在**的版本 ⇒ 不可检（0 分 + 可见 issue），**不是**空正文满分。"""
+    db_path = _db(tmp_path)
+    pid = _project(db_path)
+    cid = _chapter(db_path, pid)
+    _draft(db_path, cid, 1, "第一章正文。")
+
+    ctx = build_quality_context(
+        db_path,
+        project_id=pid,
+        chapter_id=cid,
+        delta=_full_delta(cid),
+        snapshot_pre={},
+        draft_version=999,  # ← 不存在的版本
+    )
+    assert ctx.draft == DRAFT_UNAVAILABLE
+    # ⚠️ 报告仍记**被指定的**那一版（不是 None、也不是「取最新」）
+    # ⇒ 否则 save_report 会兜底读「最新版本」补全 ⇒ 标签指向的版本与被量的不对应。
+    assert ctx.draft_version == 999
+    report = QualityEngine().evaluate(ctx)
+    assert report.style == 0
+    assert report.pacing == 0
+    assert UNAVAILABLE_RULE_ID in _rule_ids(report)
+
+
+def test_gate_blocks_when_explicit_draft_version_is_missing(tmp_path: Path):
+    """端到端：显式版本不存在 ⇒ 门禁**硬停**（不可检），不量空正文放行。"""
+    db_path = _db(tmp_path)
+    pid = _project(db_path)
+    cid = _chapter(db_path, pid)
+    _draft(db_path, cid, 1, "第一章正文。")
+
+    ctx = _gate_ctx(db_path, pid, cid, "enforce")
+    ctx["draft_version"] = 999
+    with pytest.raises(ValueError) as exc:
+        _quality_gate_node(ctx)
+    assert "不可检" in str(exc.value)
+
+
+def test_explicit_existing_draft_version_is_evaluated_normally(tmp_path: Path):
+    """反向不变量：显式版本**存在** ⇒ 正常评估那一版（防过度收紧）。
+
+    ⚠️ 2026-10-23 已登记过一次同族事故：`_human_baseline_gate` 恒 skip 而 CI 报绿
+    ⇒ 「没跑」与「跑过且通过」在退出码上完全同形 ⇒ **反向不变量必须成对**。
+    """
+    db_path = _db(tmp_path)
+    pid = _project(db_path)
+    cid = _chapter(db_path, pid)
+    _draft(db_path, cid, 1, "第一章正文。")
+    _draft(db_path, cid, 2, "第二章正文。")
+
+    ctx = build_quality_context(
+        db_path,
+        project_id=pid,
+        chapter_id=cid,
+        delta=_full_delta(cid),
+        snapshot_pre={},
+        draft_version=1,
+    )
+    assert ctx.draft != DRAFT_UNAVAILABLE
+    assert ctx.draft_version == 1
+    report = QualityEngine().evaluate(ctx)
+    assert UNAVAILABLE_RULE_ID not in _rule_ids(report)

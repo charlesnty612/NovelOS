@@ -829,6 +829,11 @@ def build_quality_context(
       ⇒ 报告**不是满分**、门禁**拦下**；
     - 该章确实没有草稿 ⇒ ``ctx.draft`` = ``""`` ⇒ **既有行为逐字不变**
       （空正文、style/pacing = 100、0 issue）。
+    - ⚠️ **显式指定了 ``draft_version`` 但该版本不存在** ⇒ 同上判为
+      :data:`~packages.core.quality.scoring.DRAFT_UNAVAILABLE`（**不可检**，硬停）。
+      此前它与「该章没有草稿」被**折叠成同一个值** ⇒ 门禁「量空正文」并**放行**
+      （2026-11-04 修）。**未指定 ``draft_version`` 且本章无草稿** ⇒ 仍是
+      ``""``（逐字不变）。
     """
     # ── 读草稿（三处读点：Q8 字符统计 / 正文 / 跨章正文）────────────────────
     # 任一处读失败 ⇒ 整个 ctx 标记为「不可检」，**绝不**退化成「空正文」。
@@ -864,16 +869,39 @@ def build_quality_context(
         resolved = None
         draft_unavailable = True
 
+    # ⚠️ 2026-11-04：显式指定了版本但**解析不到** ⇒ 这是「**不可检**」，
+    # 不是「该章确实没有草稿」。此前两种 None 被**折叠成同一个值**（draft=""）
+    # ⇒ score_style("")/score_pacing("") 都给 **100** ⇒ 质量门「量空正文」并**放行**。
+    # 而评审侧对同一情形是 raise ValueError（chapter_review/pipeline.py:386-389
+    # 用 `if version:` 把两种 None 分开）⇒ **同一请求体字段两侧态度相反**。
+    # ⇒ 按 draft_resolver.py:14-16 的既有契约（「不存在 → None，**调用方决定**语义」）
+    #   在这里把两者分开：**显式版本不存在 ⇒ 不可检 ⇒ 硬停**（fail-closed）。
+    if resolved is None and draft_version is not None and not draft_unavailable:
+        log.error(
+            "指定草稿版本不存在（本次评估不可检）：chapter_id=%s draft_version=%s",
+            chapter_id,
+            draft_version,
+        )
+        draft_unavailable = True
+
     draft = (
         DRAFT_UNAVAILABLE
         if draft_unavailable
         else ((resolved or {}).get("content") or "")
     )
-    reviewed_version = (
-        None
-        if draft_unavailable
-        else (int(resolved["version"]) if resolved is not None else None)
-    )
+    if draft_unavailable:
+        # ⚠️ 不可检时仍记**被指定的**那一版（不是 None、也不是「取最新」）：
+        # 否则 save_report 会兜底读「最新版本」补全 ⇒ 报告标签指向的版本
+        # 与实际被量的东西不对应（AGENTS 坑区「测量对象 ≠ 被审对象」）。
+        reviewed_version = (
+            int(draft_version)
+            if isinstance(draft_version, int)
+            and not isinstance(draft_version, bool)
+            and draft_version > 0
+            else None
+        )
+    else:
+        reviewed_version = int(resolved["version"]) if resolved is not None else None
     reference_texts = load_reference_texts(db_path, project_id)
     payoff_history = compute_payoff_history(db_path, project_id, limit=5)
     chapter_number = _read_chapter_number(db_path, chapter_id)
