@@ -955,3 +955,117 @@ def test_submit_delta_missing_chapter_id_returns_422(tmp_path: Path):
             assert "chapter_id" in str(detail["errors"])
 
     asyncio.run(run())
+
+
+def test_promote_high_risk_requires_author_approval(tmp_path: Path):
+    """C-2：含 HIGH 风险 delta 的分支 promote 需 ``author_approval``（409 → 重发成功）。
+
+    前端契约（据此接线）：
+    - ``POST /api/projects/{project_id}/branches/{branch_id}/promote``
+    - body 可选 ``{"author_approval": {"approved": true, "approver": "user:..."}}``
+    - 未获批 ⇒ **409**，``detail = {"error": "approval_required", "message": ...,
+      "high_risk_change_ids": [...]}``；失败时**不产生任何 main commit**（可安全重发）。
+    """
+    app = _create_app(tmp_path)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            pid = await _make_project(app)
+            cid = await _make_character(app, pid)
+            chap = await _make_chapter(app, pid)
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/state/init", json={"chapter_id": chap}
+            )
+            assert r.status_code == 201, r.text
+
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/branches", json={"name": "high-risk"}
+            )
+            assert r.status_code == 201, r.text
+            bid = r.json()["branch_id"]
+            base_version = r.json()["base_state_version"]
+
+            def _delta(delta_id: str, prev: int, *, high: bool) -> dict:
+                return {
+                    **_make_meta(delta_id, chap, prev),
+                    "character_changes": [
+                        {
+                            "change_id": f"{delta_id}_cc",
+                            "op": "update",
+                            "target_id": cid,
+                            "character_id": cid,
+                            "facet": "definition" if high else "state",
+                            "field": "core.personality" if high else "state.location",
+                            "before": "calm" if high else "Unknown",
+                            "after": "reckless" if high else "Cave",
+                            "confidence": 0.9,
+                            "evidence": _evidence(chap),
+                            "risk_level": "HIGH" if high else "LOW",
+                        }
+                    ],
+                    "world_changes": [], "relationship_changes": [], "new_events": [],
+                    "resolved_hooks": [], "new_hooks": [], "debt_changes": [],
+                }
+
+            # 先 LOW 后 HIGH：若预检缺失，LOW 会先重放出一条 main commit（半 promote）。
+            for delta_id, prev, high in (
+                ("dlt_ui_risk_low", base_version, False),
+                ("dlt_ui_risk_high", base_version + 1, True),
+            ):
+                r = await _request(
+                    app, "POST", f"/api/projects/{pid}/deltas",
+                    json={**_delta(delta_id, prev, high=high), "branch_id": bid},
+                )
+                assert r.status_code == 201, r.text
+                r = await _request(
+                    app, "POST", f"/api/projects/{pid}/commits",
+                    json={
+                        "delta_id": delta_id,
+                        "author_approval": {"approver": "user:branch", "approved": True},
+                        "workflow_run_id": f"wfr_{delta_id}",
+                        "branch_id": bid,
+                    },
+                )
+                assert r.status_code == 201, r.text
+
+            def _main_commit_count() -> int:
+                conn = sqlite3.connect(str(tmp_path / "novelos.db"))
+                try:
+                    return int(
+                        conn.execute(
+                            """
+                            SELECT COUNT(*) FROM commits c
+                            JOIN branches b ON b.branch_id = c.branch_id
+                            WHERE c.project_id = ? AND b.name = 'main'
+                            """,
+                            (pid,),
+                        ).fetchone()[0]
+                    )
+                finally:
+                    conn.close()
+
+            # genesis 本身在 main 上落 1 条 commit ⇒ 基线取 promote 之前。
+            main_commits_baseline = _main_commit_count()
+
+            # ① 未带审批 ⇒ 409 approval_required（detail 形状即前端契约）
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/branches/{bid}/promote", json={}
+            )
+            assert r.status_code == 409, r.text
+            detail = r.json()["detail"]
+            assert detail["error"] == "approval_required"
+            assert detail["high_risk_change_ids"] == ["dlt_ui_risk_high_cc"]
+            assert _main_commit_count() == main_commits_baseline, (
+                "预检失败必须零新增 main commit（可安全重发）"
+            )
+
+            # ② 带审批重发 ⇒ 201（HIGH delta 的 approved 被并进重放 ap）
+            r = await _request(
+                app, "POST", f"/api/projects/{pid}/branches/{bid}/promote",
+                json={"author_approval": {"approved": True, "approver": "user:ui"}},
+            )
+            assert r.status_code == 201, r.text
+            assert r.json()["promoted_commits"] == 2
+            assert _main_commit_count() == main_commits_baseline + 2
+
+    asyncio.run(run())

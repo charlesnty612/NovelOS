@@ -56,7 +56,14 @@ from typing import Any
 from packages.core.ids import new_id, now_iso
 
 from .applier import apply_delta
-from .exceptions import BranchClosed, BranchNotFound, StateConflictError, StateNotFoundError
+from .deltas import high_risk_change_ids
+from .exceptions import (
+    ApprovalRequiredError,
+    BranchClosed,
+    BranchNotFound,
+    StateConflictError,
+    StateNotFoundError,
+)
 from .snapshot import build_initial_state
 from .snapshots import _parse_required_json, latest_snapshot_version
 from .versioning import bump_project_state_version
@@ -420,6 +427,7 @@ def promote_branch(
     branch_id: str,
     *,
     chapter_id: str | None = None,
+    author_approval: dict | None = None,
 ) -> dict:
     """把分支 commits 按序重放到 main（Sprint 7 审查 P0 修订）。
 
@@ -443,6 +451,17 @@ def promote_branch(
        - ``submit_delta`` 校验，通过后 ``commit_delta(branch_id=None)``
          走 main 路径；``author_approval['promoted_from']`` + ``source_commit_id``
          注入 ``validation_json`` 便于审计。
+    3.5. **HIGH 风险前置审批（2026-10-23 C-2 修复）**：在**任何重放开始之前**
+       遍历待重放 delta（:func:`packages.core.story_state.deltas.high_risk_change_ids`），
+       收集全部 HIGH ``change_id``；非空且 ``author_approval`` 未带
+       ``approved=True`` ⇒ 立刻抛 :class:`ApprovalRequiredError`（带**完整**清单）。
+       ⚠️ **必须前置**：下面的重放是逐条独立提交，中途失败会留下「已重放一半」的
+       main commits（见步骤 4 的既有语义）⇒ 若把审批校验留给 ``commit_delta``，
+       非 HIGH 的前几条会先落 main，才在 HIGH 那条炸掉。前置预检消灭这个半成局面。
+       获批时把 ``approved=True`` 并进每个重放 delta 的 ``author_approval``
+       （审批人取 ``author_approval['approver']``，缺省沿用
+       ``system:promote:<branch_id>``），``commits.author_approval_json`` 因此如实
+       记录是谁批的（不再可能是「没批过却 status=approved」）。
     4. 全部成功后 ``UPDATE branches SET status='MERGED'``；中途失败：
        已成功重放的 main commits 保留（与正常 commit 一致的事务语义），
        branch 保持 ``ACTIVE``，错误向上抛（router 按异常类型映射到
@@ -546,6 +565,26 @@ def promote_branch(
     finally:
         conn.close()
 
+    # ── HIGH 风险前置审批（2026-10-23 C-2 修复）─────────────────────────────
+    # **在任何重放之前**收集全部 HIGH change_id；未获批 ⇒ 直接抛，**零 main commit**。
+    # ⚠️ 不能把这道校验留给 commit_delta：重放逐条独立提交，非 HIGH 的前几条会先落
+    # main，直到 HIGH 那条才抛 ⇒ 留下「已重放一半」的半 promote（见步骤 4 语义）。
+    approved = isinstance(author_approval, dict) and author_approval.get("approved") is True
+    high_risk_ids: list[str] = []
+    _seen_high: set[str] = set()
+    for _source_commit_id, _source_chapter_id, source_delta_id in ordered:
+        payload = load_branch_commit_payload(service_self, source_delta_id)
+        for change_id in high_risk_change_ids(payload):
+            if change_id not in _seen_high:
+                _seen_high.add(change_id)
+                high_risk_ids.append(change_id)
+    if high_risk_ids and not approved:
+        raise ApprovalRequiredError(
+            f"分支 {branch_id!r} 的重放 delta 含 HIGH 风险 change "
+            f"{len(high_risk_ids)} 条，需 author_approval.approved=true 才能 promote",
+            high_risk_change_ids=high_risk_ids,
+        )
+
     # 按序重放：每次 main commit +1，不复用原 delta 行（避免 PK 冲突与
     # 跨分支溯源混乱）；中途失败保留已重放的 main commits，错误向上抛。
     replayed: list[dict] = []  # [{delta_id, commit_id, state_version, source_commit_id}, ...]
@@ -586,11 +625,18 @@ def promote_branch(
                     delta_id=submit_result["delta_id"],
                 )
             ap: dict = {
-                "approver": f"system:promote:{branch_id}",
+                "approver": (
+                    (author_approval or {}).get("approver") if approved else None
+                )
+                or f"system:promote:{branch_id}",
                 "notes": f"replay from branch {branch_id} (source_commit={source_commit_id})",
                 "promoted_from": branch_id,
                 "source_commit_id": source_commit_id,
             }
+            if approved:
+                # C-2：HIGH 风险 delta 重放必须显式带审批，否则 commit_delta 的门禁
+                # 恒拒（此前这里没带 ⇒ 含 HIGH 的分支 promote **永远 409**）。
+                ap["approved"] = True
             commit_result = service_self.commit_delta(
                 submit_result["delta_id"],
                 ap,

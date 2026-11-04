@@ -404,6 +404,17 @@ def promote_branch(project_id: str, branch_id: str, payload: dict, request: Requ
 
     ``exclude_unset`` 只看「生产方有没有给这个键」，两个需求同时满足。
 
+    **HIGH 风险审批（2026-10-23 C-2 修复）**：请求体可带可选
+    ``author_approval: {"approved": true, "approver": "..."}``。分支重放的
+    delta 含 HIGH 风险（``risk_level=HIGH`` / 角色 ``facet=definition`` /
+    世界 ``world_kind=rule``）且未获批 ⇒ **重放开始前**返回 409：
+
+    ``detail = {"error": "approval_required", "message": str,
+    "high_risk_change_ids": [...]}``
+
+    前端据此弹确认框，用户确认后把 ``author_approval`` 带同 ``branch_id`` 重发。
+    预检前置保证失败时**不产生任何 main commit**（不会留下半 promote）。
+
     ⚠️ **2026-10-24（响应版本修复）**：``state_version`` = **promote 提交后 DB 里的
     最新 ``story_states.state_version``**（= ``branches.promote_branch`` 里
     ``bump_project_state_version`` 的返回值）。修前它取的是「最后一次重放落在
@@ -413,6 +424,14 @@ def promote_branch(project_id: str, branch_id: str, payload: dict, request: Requ
     """
     _ensure_project(request, project_id)
     chapter_id = (payload or {}).get("chapter_id") if isinstance(payload, dict) else None
+    author_approval = (
+        (payload or {}).get("author_approval") if isinstance(payload, dict) else None
+    )
+    if author_approval is not None and not isinstance(author_approval, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="author_approval must be an object",
+        )
     # ``branches.promote_branch`` 里 ``replay_chapter_id = chapter_id or source_chapter_id``
     # —— **参数优先于** commit 自带的 chapter_id，所以传错能真的写出一条指向
     # 别的项目的章的重放 delta。缺省（None）是合法输入（走 commit 自带的兜底），
@@ -420,7 +439,12 @@ def promote_branch(project_id: str, branch_id: str, payload: dict, request: Requ
     if chapter_id is not None:
         _ensure_chapter_in_project(request, project_id, chapter_id)
     try:
-        return _service(request).promote_branch(project_id, branch_id, chapter_id=chapter_id)
+        return _service(request).promote_branch(
+            project_id,
+            branch_id,
+            chapter_id=chapter_id,
+            author_approval=author_approval,
+        )
     except BranchNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except BranchClosed as exc:

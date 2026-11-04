@@ -43,6 +43,7 @@ from __future__ import annotations
 import re
 from typing import Any, Final
 
+from packages.core.db import get_connection
 from packages.core.genre.target_words import resolve_target_word_count
 from packages.core.logging_config import get_logger
 from packages.core.quality.service import QualityService
@@ -233,13 +234,25 @@ def _length_evidence_map(
     out: dict[str, LengthEvidence] = {}
     versions: dict[str, int | None] = {}
     unavailable: dict[str, str] = {}
+    # 2026-10-23 C-30：逐章读草稿**复用同一条连接**（此前每章各开一条；连接成本
+    # 3.6ms/条远高于查询本身，批次二十三同款收敛）。打开失败与「resolve_draft 自己
+    # 打开失败」语义一致：逐章记不可检原因（**不是**整源失败）。
+    try:
+        conn = get_connection(db_path)
+    except Exception as exc:  # noqa: BLE001 —— 打不开库 = 故障（逐章留痕）
+        reason = f"正文读不到（草稿表不可用）：无法打开数据库 {db_path}：{exc}"
+        for chapter in chapters:
+            chapter_id = str(chapter.get("chapter_id") or "")
+            if chapter_id:
+                unavailable[chapter_id] = reason
+        return out, versions, unavailable, None
     try:
         for chapter in chapters:
             chapter_id = str(chapter.get("chapter_id") or "")
             if not chapter_id:
                 continue
             try:
-                draft = resolve_draft(db_path, chapter_id)
+                draft = resolve_draft(db_path, chapter_id, conn=conn)
             except DraftResolutionError as exc:
                 # 正文**读不到**（草稿表不可用 / 查询异常）——**不是**「该章没有草稿」。
                 reason = f"正文读不到（草稿表不可用）：{exc}"
@@ -268,6 +281,8 @@ def _length_evidence_map(
     except Exception as exc:  # noqa: BLE001 —— 同上，字数量不出来就报「未评估」
         log.warning("delivery: length measurement failed: %s", exc)
         return {}, {}, unavailable, f"字数测量失败：{exc}"
+    finally:
+        conn.close()
     return out, versions, unavailable, None
 
 

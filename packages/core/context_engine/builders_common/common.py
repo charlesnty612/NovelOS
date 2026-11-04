@@ -956,7 +956,7 @@ _PEEK_CHAPTER_SQL = """
               FROM projects pj2
               LEFT JOIN genre_packs gp ON gp.pack_id = pj2.genre_pack_id
              WHERE pj2.project_id = COALESCE(?, ch.project_id))      AS genre_pack_ref,
-           (SELECT group_concat(sk.skill_id || ':' || sk.version, '|')
+           (SELECT group_concat(sk.skill_id || ':' || sk.version || ':' || hex(sk.name), '|')
               FROM project_skills ps
               JOIN skills sk ON sk.skill_id = ps.skill_id
              WHERE ps.project_id = COALESCE(?, ch.project_id))       AS skills_ref,
@@ -1162,9 +1162,13 @@ def _try_project_skills_ref(conn: sqlite3.Connection, project_id: str) -> str | 
     """单连接读项目绑定 skill 指纹串；表缺失 / 未绑定 → None。
 
     串形态与 :data:`_PEEK_CHAPTER_SQL` 内联子查询**逐字一致**
-    （``group_concat(skill_id || ':' || version, '|')``）——缓存键的 skill 维度在
-    两个路径（主 SQL / 降级逐项读）必须同形，否则降级路径会把键维度写成另一种
-    形状导致脏命中（硬规则 2）。
+    （``group_concat(skill_id || ':' || version || ':' || hex(name), '|')``）——缓存键
+    的 skill 维度在两个路径（主 SQL / 降级逐项读）必须同形，否则降级路径会把键维度
+    写成另一种形状导致脏命中（硬规则 2）。
+
+    ⚠️ ``name`` 必须经 ``hex()`` 编码（2026-10-23 C-14）：``skills.name`` 是自由文本、
+    可含 ``:`` / ``|``，直接拼会让分隔符切分歧义；``skill_id`` 的字符集被限死（不含
+    分隔符），故 ``id:version:hex(name)`` 三段式无歧义。
 
     ⚠️ 顺序**不重要**：指纹函数内部按 ``skill_id`` 排序（见
     :func:`packages.core.context_engine.cache._fingerprint_skills`）⇒ 两条路径的
@@ -1173,7 +1177,7 @@ def _try_project_skills_ref(conn: sqlite3.Connection, project_id: str) -> str | 
     try:
         row = conn.execute(
             """
-            SELECT group_concat(sk.skill_id || ':' || sk.version, '|') AS skills_ref
+            SELECT group_concat(sk.skill_id || ':' || sk.version || ':' || hex(sk.name), '|') AS skills_ref
             FROM project_skills ps
             JOIN skills sk ON sk.skill_id = ps.skill_id
             WHERE ps.project_id = ?

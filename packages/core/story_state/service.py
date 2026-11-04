@@ -117,8 +117,21 @@ class StoryStateService:
     def list_branches(self, project_id: str) -> list[dict]:
         return branches.list_branches(self, project_id)
 
-    def promote_branch(self, project_id: str, branch_id: str, *, chapter_id: str | None = None) -> dict:
-        return branches.promote_branch(self, project_id, branch_id, chapter_id=chapter_id)
+    def promote_branch(
+        self,
+        project_id: str,
+        branch_id: str,
+        *,
+        chapter_id: str | None = None,
+        author_approval: dict | None = None,
+    ) -> dict:
+        return branches.promote_branch(
+            self,
+            project_id,
+            branch_id,
+            chapter_id=chapter_id,
+            author_approval=author_approval,
+        )
 
 
 __all__ = ["StoryStateService"]

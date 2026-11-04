@@ -897,12 +897,16 @@ def _fingerprint_writing_bible(writing_bible: Any) -> str:
 def _fingerprint_skills(skills_ref: Any) -> str:
     """计算项目绑定 skill 集合的稳定指纹（sha256 前 16 字符）。
 
-    口径（设计钉死）：``sha256(json.dumps([{"skill_id": sid, "version": ver} for ...
-    按 skill_id 排序], sort_keys=True, ensure_ascii=False))[:16]``。
+    口径（设计钉死）：``sha256(json.dumps([{"skill_id": sid, "version": ver,
+    "name": name} for ... 按 skill_id 排序], sort_keys=True, ensure_ascii=False))[:16]``。
 
     - **必须含 version**：payload 变更 ⇒ version 自增（PUT 改 payload 时）⇒ 只按 id
       算会脏命中（改了 skill 的 instructions 却命中改之前的旧装配）。这与
       ``genre_pack_ref``（``<pack_id>@<version>``）同款纪律。
+    - **必须含 name（2026-10-23 C-14 修复）**：``SkillService.update`` **只改 name
+      不碰 payload ⇒ version 不自增**，而注入块（``skill.consumers.skill_block``）
+      在 payload 未带 name 时回退用 ``skills.name`` ⇒ 只按 ``id:version`` 算会脏命中
+      （装配里仍是改名前的 skill 名）。
     - 未绑定（``None`` / 空串 / 空集合）→ ``"__none__"``（与 ``genre_pack_ref`` 的
       未绑定占位**同形**，便于肉眼核对键形态）。
     - **顺序无关**：内部按 ``skill_id`` 排序 ⇒ 两条读取路径（主 JOIN 的
@@ -915,10 +919,14 @@ def _fingerprint_skills(skills_ref: Any) -> str:
     - 串形态非法（``skills_ref`` 不是 str）→ ``_FINGERPRINT_UNCACHED``（调用方据此
       跳过缓存；绝不静默降级成某个稳定值——那正是脏命中）。
 
-    输入串形态：``"<skill_id>:<version>|<skill_id>:<version>"``（由 peek 的
-    ``group_concat(skill_id || ':' || version, '|')`` 产生）。``skill_id`` 的字符集
-    被 :class:`packages.core.skill.model.SkillCreate` 限死（不含 ``:`` / ``|``），
-    故切分无歧义。
+    输入串形态（主 JOIN 与降级路径**逐字同形**）：
+    ``"<skill_id>:<version>:<hex(name)>|<skill_id>:<version>:<hex(name)>"``
+    （由 peek 的
+    ``group_concat(skill_id || ':' || version || ':' || hex(name), '|')`` 产生）。
+    ``skill_id`` 的字符集被 :class:`packages.core.skill.model.SkillCreate` 限死
+    （不含 ``:`` / ``|``）；``name`` 是自由文本（可含 ``:`` / ``|``）⇒ **必须经
+    ``hex()`` 编码**后再拼，否则分隔符切分有歧义（旧两段式 ``id:version`` 仍被
+    接受，``name`` 视为空串，仅为兼容直接调用本函数的旧形态）。
     """
     if skills_ref is None or skills_ref == "":
         return _SKILL_FINGERPRINT_NONE
@@ -929,10 +937,22 @@ def _fingerprint_skills(skills_ref: Any) -> str:
         for part in skills_ref.split("|"):
             if not part:
                 continue
-            skill_id, _, version = part.rpartition(":")
+            bits = part.split(":")
+            if len(bits) == 2:
+                # 兼容旧两段式（name 维度引入前产生的串 / 直接调用方）。
+                skill_id, version_raw = bits
+                name = ""
+            elif len(bits) == 3:
+                skill_id, version_raw, name_hex = bits
+                name = bytes.fromhex(name_hex).decode("utf-8")
+            else:
+                # 形态歧义（未编码的 ':' 混进 name）⇒ 不可判，宁可跳缓存。
+                return _FINGERPRINT_UNCACHED
             if not skill_id:
                 continue
-            entries.append({"skill_id": skill_id, "version": int(version)})
+            entries.append(
+                {"skill_id": skill_id, "version": int(version_raw), "name": name}
+            )
         if not entries:
             return _SKILL_FINGERPRINT_NONE
         entries.sort(key=lambda e: e["skill_id"])

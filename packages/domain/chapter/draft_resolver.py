@@ -90,12 +90,19 @@ def resolve_draft(
     db_path: str | Path,
     chapter_id: str,
     draft_version: int | None = None,
+    *,
+    conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any] | None:
     """解析「被审 / 待核草稿」行。
 
     参数：
         db_path / chapter_id：目标章。
         draft_version：被审版本；``None`` → 最新一版（:data:`LATEST_DRAFT_ORDER`）。
+        conn（2026-10-23 C-30 新增，可选）：**调用方已持有的连接**。给了它 ⇒ 本函数
+            复用该连接、**不负责关闭**（只读查询，不 commit / rollback）；不给 ⇒
+            维持原行为（自己建连、用完必关）。消费方是「逐章批量读草稿」的场景
+            （如 ``delivery.evidence``），避免每章各开一条连接（V3.9 2A / 批次二十三
+            同款优化：连接成本 3.6ms 远高于查询成本）。
 
     返回：完整 ``drafts`` 行 dict（``draft_id`` / ``chapter_id`` / ``version`` /
     ``content`` / ``created_by`` / ``prompt_version`` / ``model_id`` / ``created_at``，
@@ -112,10 +119,12 @@ def resolve_draft(
     ``row["version"]`` 即本次解析到的版本——调用方回报「我在量哪一版」时必须用它，
     不要另行再查一次（两次查询之间作者可能又改稿出新版本，标签与正文就会分叉）。
     """
-    try:
-        conn = get_connection(db_path)
-    except Exception as exc:  # noqa: BLE001 —— 打不开库 = **故障**，不是「无草稿」
-        raise DraftResolutionError(f"无法打开数据库 {db_path}：{exc}") from exc
+    owns_conn = conn is None
+    if owns_conn:
+        try:
+            conn = get_connection(db_path)
+        except Exception as exc:  # noqa: BLE001 —— 打不开库 = **故障**，不是「无草稿」
+            raise DraftResolutionError(f"无法打开数据库 {db_path}：{exc}") from exc
     try:
         try:
             if draft_version is None:
@@ -140,5 +149,7 @@ def resolve_draft(
                 f"读取草稿失败（chapter_id={chapter_id!r}）：{exc}"
             ) from exc
     finally:
-        conn.close()
+        # 调用方传入的连接由调用方关闭（本函数不持有其生命周期）。
+        if owns_conn:
+            conn.close()
     return dict(row) if row is not None else None

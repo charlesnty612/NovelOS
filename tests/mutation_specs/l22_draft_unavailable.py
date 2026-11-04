@@ -54,10 +54,10 @@ MUTATIONS = [
     (
         "DRAFT-UNAVAILABLE-2",
         "packages/domain/chapter/draft_resolver.py",
-        "    except Exception as exc:  # noqa: BLE001 —— 打不开库 = **故障**，不是「无草稿」\n"
-        "        raise DraftResolutionError(f\"无法打开数据库 {db_path}：{exc}\") from exc\n",
-        "    except Exception:  # noqa: BLE001 —— 打不开库 → 读侧全容错，视为无草稿\n"
-        "        return None\n",
+        "        except Exception as exc:  # noqa: BLE001 —— 打不开库 = **故障**，不是「无草稿」\n"
+        "            raise DraftResolutionError(f\"无法打开数据库 {db_path}：{exc}\") from exc\n",
+        "        except Exception:  # noqa: BLE001 —— 打不开库 → 读侧全容错，视为无草稿\n"
+        "            return None\n",
         "tests/unit/quality/test_draft_unavailable_fail_closed.py",
     ),
     (

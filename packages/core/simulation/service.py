@@ -6,7 +6,8 @@
 
 公共方法：
 - :meth:`SimulationService.simulate` —— 主入口；返回 :class:`SimulationResult`。
-- :meth:`SimulationService.list_simulations` —— 列历史推演（``branches.name LIKE 'sim-%'``）。
+- :meth:`SimulationService.list_simulations` —— 列历史推演（``branches`` 归属本项目
+  且 ``status='ARCHIVED'`` 或旧式 ``name LIKE 'sim-%'``）。
 - :meth:`SimulationService.get_simulation` —— 重放某次推演的 diff（从分支 commits 推导）。
 
 设计要点：
@@ -375,14 +376,24 @@ class SimulationService:
     # -------------------------------------------------------------- list / get
 
     def list_simulations(self, project_id: str) -> list[dict]:
-        """列历史推演（按 created_at DESC）。"""
+        """列历史推演（按 created_at DESC）。
+
+        ⚠️ **不能只按 ``name LIKE 'sim-%'`` 判别（2026-10-23 C-29 修复）**：``simulate``
+        接受自定义 ``name`` ⇒ 自定义名的推演在旧实现里**列表看不到**。本仓没有独立的
+        ``simulations`` 表（推演 = ``branches`` 行），归属列是 ``branches.project_id``
+        （``NOT NULL``）；但 project_id 不足以区分推演与普通特性分支 ⇒ 判别使用
+        **推演的唯一状态标记**：``_archive_branch`` 是 simulation 的独占写路径，推演
+        分支**必被归档为 ARCHIVED**，而普通分支只会 ACTIVE / MERGED。
+        ``OR name LIKE 'sim-%'`` 保留旧式命名兼容（进程崩溃遗留的 ACTIVE 推演分支）。
+        """
         conn = get_connection(self.db_path)
         try:
             rows = conn.execute(
                 """
                 SELECT branch_id, name, base_state_version, status, created_at
                 FROM branches
-                WHERE project_id = ? AND name LIKE 'sim-%'
+                WHERE project_id = ?
+                  AND (status = 'ARCHIVED' OR name LIKE 'sim-%')
                 ORDER BY created_at DESC
                 """,
                 (project_id,),
@@ -409,8 +420,13 @@ class SimulationService:
         Sprint 11 审查修：base_state 走 ``branches.base_state_version`` 处的快照（与
         ``simulate`` 当时取的 base 严格一致），而非 main 当前最新——避免 main 在推演后
         又有新 commit 造成 replay diff 漂移；缺失该版本快照时退化为 ``get_current_state``
-        与 ``simulate`` 当初行为对齐（main 当前）。找不到对应 branch（不属于该项目或
-        非 sim-* 命名）→ 返回 None。
+        与 ``simulate`` 当初行为对齐（main 当前）。找不到对应 branch（不属于该项目 /
+        既不是已归档的推演分支、也没有旧式 ``sim-*`` 命名）→ 返回 None。
+
+        ⚠️ **自定义 name 的推演必须可重放（2026-10-23 C-29 修复）**：判别条件与
+        :meth:`list_simulations` 逐字同形（``status='ARCHIVED' OR name LIKE 'sim-%'``），
+        否则同一批推演「列表能看到、点进去 404」。普通特性分支是 ACTIVE / MERGED
+        （不会被 ``_archive_branch`` 碰）⇒ 仍然返回 None。
         """
         conn = get_connection(self.db_path)
         try:
@@ -418,7 +434,8 @@ class SimulationService:
                 """
                 SELECT branch_id, name, base_state_version, status, created_at
                 FROM branches
-                WHERE project_id = ? AND branch_id = ? AND name LIKE 'sim-%'
+                WHERE project_id = ? AND branch_id = ?
+                  AND (status = 'ARCHIVED' OR name LIKE 'sim-%')
                 """,
                 (project_id, simulation_id),
             ).fetchone()
