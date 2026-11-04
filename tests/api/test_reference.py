@@ -41,6 +41,67 @@ async def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
         return await client.request(method, path, **kwargs)
 
 
+async def _wait_run_terminal(
+    app, run_id: str, *, timeout: float = 90.0
+) -> dict:
+    """轮询 ``GET /api/runs/{run_id}`` 直到终态（C-23 异步起跑后必须用它）。
+
+    deconstruct 自批次三十六起是**受理语义**（201 恒 RUNNING），真终态只能轮询。
+    同时兼作「不留悬挂 daemon 线程去写已回收临时库」的收尾。
+    """
+    import time
+
+    terminal = {"COMPLETED", "FAILED", "PAUSED", "CANCELLED"}
+    deadline = time.monotonic() + timeout
+    last: dict | None = None
+    while time.monotonic() < deadline:
+        r = await _request(app, "GET", f"/api/runs/{run_id}")
+        if r.status_code == 200:
+            last = r.json()
+            if last["status"] in terminal:
+                return last
+        await asyncio.sleep(0.1)
+    raise AssertionError(
+        f"run {run_id} 未在 {timeout}s 内到终态（最后 status={last and last.get('status')}）"
+    )
+
+
+async def _start_deconstruct_and_get_canon_id(
+    app,
+    pid: str,
+    *,
+    book_title: str,
+    mock_providers: dict,
+) -> str:
+    """POST /deconstruct（受理语义）→ 等终态 → 从列表取 canon_id。"""
+    r = await _request(
+        app,
+        "POST",
+        f"/api/projects/{pid}/deconstruct",
+        json={
+            "book_title": book_title,
+            "text": _SAMPLE_BOOK_TEXT,
+            "reader_profile": "male_fantasy",
+            "mock_providers": mock_providers,
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    # 受理语义 + 3 键硬契约（批次三十六 C-23）
+    assert set(body) == {"run_id", "status", "current_node"}, body
+    assert body["status"] == "RUNNING", body
+    assert body["current_node"] is None, body
+
+    run = await _wait_run_terminal(app, body["run_id"])
+    assert run["status"] == "COMPLETED", run.get("error")
+
+    r = await _request(app, "GET", f"/api/projects/{pid}/canons")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    assert len(rows) == 1, rows
+    return rows[0]["canon_id"]
+
+
 async def _make_project(app, name: str = "参照测试项目") -> str:
     r = await _request(app, "POST", "/api/projects", json={"name": name})
     assert r.status_code == 201, r.text
@@ -246,25 +307,15 @@ def test_list_canons_returns_summary_after_deconstruct(tmp_path: Path):
             await _sync_prompts(app)
             pid = await _make_project(app)
 
-            r = await _request(
+            canon_id = await _start_deconstruct_and_get_canon_id(
                 app,
-                "POST",
-                f"/api/projects/{pid}/deconstruct",
-                json={
-                    "book_title": "API 测试参照书",
-                    "text": _SAMPLE_BOOK_TEXT,
-                    "reader_profile": "male_fantasy",
-                    "mock_providers": {
-                        "deconstructor_chapter": _chapter_extract_mock(),
-                        "deconstructor_aggregate": _aggregate_mock(),
-                    },
+                pid,
+                book_title="API 测试参照书",
+                mock_providers={
+                    "deconstructor_chapter": _chapter_extract_mock(),
+                    "deconstructor_aggregate": _aggregate_mock(),
                 },
             )
-            assert r.status_code == 201, r.text
-            body = r.json()
-            assert body["status"] == "COMPLETED", body
-            assert "canon_id" in body
-            canon_id = body["canon_id"]
 
             r = await _request(app, "GET", f"/api/projects/{pid}/canons")
             assert r.status_code == 200
@@ -292,22 +343,15 @@ def test_get_canon_returns_full_payload(tmp_path: Path):
             await _sync_prompts(app)
             pid = await _make_project(app)
 
-            r = await _request(
+            canon_id = await _start_deconstruct_and_get_canon_id(
                 app,
-                "POST",
-                f"/api/projects/{pid}/deconstruct",
-                json={
-                    "book_title": "Detail 测试",
-                    "text": _SAMPLE_BOOK_TEXT,
-                    "reader_profile": "male_fantasy",
-                    "mock_providers": {
-                        "deconstructor_chapter": _chapter_extract_mock(),
-                        "deconstructor_aggregate": _aggregate_mock(),
-                    },
+                pid,
+                book_title="Detail 测试",
+                mock_providers={
+                    "deconstructor_chapter": _chapter_extract_mock(),
+                    "deconstructor_aggregate": _aggregate_mock(),
                 },
             )
-            assert r.status_code == 201, r.text
-            canon_id = r.json()["canon_id"]
 
             r = await _request(app, "GET", f"/api/canons/{canon_id}")
             assert r.status_code == 200
@@ -344,22 +388,15 @@ def test_delete_canon_cascades_to_extracts(tmp_path: Path):
             await _sync_prompts(app)
             pid = await _make_project(app)
 
-            r = await _request(
+            canon_id = await _start_deconstruct_and_get_canon_id(
                 app,
-                "POST",
-                f"/api/projects/{pid}/deconstruct",
-                json={
-                    "book_title": "Cascade 测试",
-                    "text": _SAMPLE_BOOK_TEXT,
-                    "reader_profile": "male_fantasy",
-                    "mock_providers": {
-                        "deconstructor_chapter": _chapter_extract_mock(),
-                        "deconstructor_aggregate": _aggregate_mock(),
-                    },
+                pid,
+                book_title="Cascade 测试",
+                mock_providers={
+                    "deconstructor_chapter": _chapter_extract_mock(),
+                    "deconstructor_aggregate": _aggregate_mock(),
                 },
             )
-            assert r.status_code == 201, r.text
-            canon_id = r.json()["canon_id"]
 
             # 断言 3 行 extracts 存在
             conn = get_connection(app.state.settings.db_path)
@@ -447,22 +484,15 @@ def test_to_style_sample_creates_card_from_canon(tmp_path: Path):
             await _sync_prompts(app)
             pid = await _make_project(app)
 
-            r = await _request(
+            canon_id = await _start_deconstruct_and_get_canon_id(
                 app,
-                "POST",
-                f"/api/projects/{pid}/deconstruct",
-                json={
-                    "book_title": "API 测试参照书",
-                    "text": _SAMPLE_BOOK_TEXT,
-                    "reader_profile": "male_fantasy",
-                    "mock_providers": {
-                        "deconstructor_chapter": _chapter_extract_mock(),
-                        "deconstructor_aggregate": _aggregate_mock(),
-                    },
+                pid,
+                book_title="API 测试参照书",
+                mock_providers={
+                    "deconstructor_chapter": _chapter_extract_mock(),
+                    "deconstructor_aggregate": _aggregate_mock(),
                 },
             )
-            assert r.status_code == 201, r.text
-            canon_id = r.json()["canon_id"]
 
             # 合成风格卡
             r = await _request(
@@ -519,22 +549,15 @@ def test_to_style_sample_rejects_duplicate(tmp_path: Path):
             await _sync_prompts(app)
             pid = await _make_project(app)
 
-            r = await _request(
+            canon_id = await _start_deconstruct_and_get_canon_id(
                 app,
-                "POST",
-                f"/api/projects/{pid}/deconstruct",
-                json={
-                    "book_title": "Dup 测试",
-                    "text": _SAMPLE_BOOK_TEXT,
-                    "reader_profile": "male_fantasy",
-                    "mock_providers": {
-                        "deconstructor_chapter": _chapter_extract_mock(),
-                        "deconstructor_aggregate": _aggregate_mock(),
-                    },
+                pid,
+                book_title="Dup 测试",
+                mock_providers={
+                    "deconstructor_chapter": _chapter_extract_mock(),
+                    "deconstructor_aggregate": _aggregate_mock(),
                 },
             )
-            assert r.status_code == 201, r.text
-            canon_id = r.json()["canon_id"]
 
             r = await _request(
                 app, "POST",
@@ -779,19 +802,26 @@ def test_upload_txt_utf8_deconstructs(tmp_path: Path):
             )
             # 上传端点不走 mock；model_config 注入后走生产路径，由 workflow 引擎实际
             # 跑 mock_providers 调度（本环境未注入模型 api_key 真实路径）。
-            # 这里只断言：
-            #   1) 端点成功启动 run (201)
-            #   2) status 是合法 workflow 状态字
-            #   3) project_id 回写
-            #   4) book_title 与提交一致
-            #   5) 落库 reference_canons 至少 0 条（取决于 mock 是否生成 canon_json）
-            # 实际 canon 落库由 deconstruct 内部决定，本测试不强制断言成功。
+            # C-23（批次三十六）后是**异步受理语义**：201 恒 3 键 + RUNNING，
+            # 真终态轮询 GET /runs/{run_id} 取；C-10 要求 run 行归属列 = 发起项目。
             assert r.status_code == 201, r.text
             body = r.json()
-            assert body["project_id"] == pid
-            assert body["book_title"] == "UTF-8 上传测试"
-            assert body["status"] in {"COMPLETED", "FAILED", "RUNNING", "PENDING"}
-            assert "run_id" in body
+            assert set(body) == {"run_id", "status", "current_node"}, body
+            assert body["status"] == "RUNNING", body
+            assert body["current_node"] is None, body
+
+            await _wait_run_terminal(app, body["run_id"])
+
+            conn = _gc(app.state.settings.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT project_id, chapter_id FROM workflow_runs WHERE run_id = ?",
+                    (body["run_id"],),
+                ).fetchone()
+            finally:
+                conn.close()
+            assert row["project_id"] == pid, dict(row)
+            assert row["chapter_id"] is None, dict(row)
 
     asyncio.run(run())
 
@@ -924,9 +954,22 @@ def test_upload_gbk_form_title_repaired_end_to_end(tmp_path: Path):
                 },
             )
             assert r.status_code == 201, r.text
-            body_json = r.json()
-            assert body_json["book_title"] == "乱码测试书", body_json
-            # run 成败无所谓（无真实模型），书名修复发生在启动 workflow 之前
+            accepted = r.json()
+            assert set(accepted) == {"run_id", "status", "current_node"}, accepted
+
+            # 异步受理后 book_title 不在响应体里；它随 initial_ctx 落进 run 的
+            # checkpoint（``checkpoint_exclude`` 只排除 text）。等终态后再读，
+            # 这样既验证「书名修复发生在启动前」，又不留悬挂 daemon 线程。
+            await _wait_run_terminal(app, accepted["run_id"])
+            conn = get_connection(app.state.settings.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT checkpoint_json FROM workflow_runs WHERE run_id = ?",
+                    (accepted["run_id"],),
+                ).fetchone()
+            finally:
+                conn.close()
+            assert json.loads(row["checkpoint_json"])["book_title"] == "乱码测试书"
 
     asyncio.run(run())
 

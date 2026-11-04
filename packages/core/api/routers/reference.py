@@ -19,9 +19,12 @@
 - V1.5 起，路由层不再直接写 SQL——所有引用数据访问走
   :class:`packages.domain.reference.ReferenceService`；路由仅做参数校验 + 调用 +
   错误映射。
-- POST deconstruct：复用 :class:`WorkflowEngine.start_with_nodes` 模式（与 workflows.py 对齐），
-  通过 :func:`packages.core.workflow_registry.get_workflow` 取节点；run 同步执行到底
-  （deconstruct 不挂 Human 节点）；失败 → run FAILED，路由仍返回 201（含 status 字段便于前端诊断）。
+- POST deconstruct：复用 :class:`WorkflowEngine.start_with_nodes_async` 模式（与
+  outline-batch / 章节级起跑对齐），通过 :func:`packages.core.workflow_registry.get_workflow`
+  取节点；**异步起跑**（201 只在 run 行落库后立即返回，节点在后台线程推进），
+  真终态由客户端轮询 ``GET /api/runs/{run_id}`` 取。run 归属项目由引擎写入
+  ``workflow_runs.project_id``（0037），并带**项目级原子并发守卫**（同项目已有
+  活跃 deconstruct-book run → 409）。
 - list 摘要：从 canon_json 解析 logline + spine 长度 + rhythm 章节数；canon_json 完整 JSON 不展开。
 - DELETE：单事务级联删 canon_extracts + reference_canons；FK ON DELETE CASCADE 启用则更稳，
   本实现显式事务删除便于审计。
@@ -39,18 +42,17 @@ from xml.etree import ElementTree as ET
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 
+from packages.core.api.routers.workflows.models import WorkflowStartAccepted
 from packages.core.db import get_connection
 from packages.core.logging_config import get_logger
-from packages.core.model_router import ModelNotConfiguredError, ModelRouter
+from packages.core.model_router import ModelRouter
 from packages.core.workflow_registry import get_workflow
-from packages.core.workflow_runtime.engine import WorkflowEngine
-from packages.core.workflow_runtime.runs import get_run
+from packages.core.workflow_runtime.engine import WorkflowEngine, WorkflowRunConflict
 from packages.domain.project.service import ProjectService
 from packages.domain.reference import ReferenceService
 from packages.domain.reference.models import (
     CanonDetailOut,
     CanonSummaryOut,
-    DeconstructStartResponse,
     StyleSampleOut,
 )
 
@@ -371,7 +373,7 @@ class DeconstructRequest:
 @router.post(
     "/projects/{project_id}/deconstruct",
     status_code=status.HTTP_201_CREATED,
-    response_model=DeconstructStartResponse,
+    response_model=WorkflowStartAccepted,
 )
 def start_deconstruct(
     project_id: str,
@@ -431,8 +433,15 @@ def _start_deconstruct_internal(
 
     - 输入已校验（``book_title`` / ``text`` 非空且不超过 ``_MAX_DECONSTRUCT_TEXT_LEN``，
       ``mock_providers`` 类型已 normalize）。
-    - mock 路径（``mock_providers`` 非 None）跳过 ModelRouter capability 检查。
-    - 同步执行到底（deconstruct-book 不挂 Human 节点），返回与 POST /deconstruct 同构响应。
+    - mock 路径（``mock_providers`` 非 None）跳过 ModelRouter capability 检查；
+      生产路径仍在**起跑前**同步预检查，未配置可用模型 ⇒ 422。
+    - **异步起跑**（C-23，批次三十六）：``start_with_nodes_async`` 插完 run 行即返回，
+      节点在后台线程推进 ⇒ HTTP 不再挂着等 LLM / 逐章串行 ``run_agent``。
+      响应恒为 ``status="RUNNING"`` 的**受理语义**，真终态由客户端轮询
+      ``GET /api/runs/{run_id}`` 取（与 outline-batch / 章节级起跑同款）。
+    - **项目归属 + 项目级原子并发守卫**（C-9 / C-10，批次三十六）：run 行写入
+      ``project_id``（0037 归属列），并按同项目活跃 run 拦截（409）。两条都在
+      ``engine._insert_run_row`` 的同一 ``BEGIN IMMEDIATE`` 事务内完成。
     """
     workflow = get_workflow("deconstruct-book")
     if workflow is None:
@@ -445,6 +454,8 @@ def _start_deconstruct_internal(
     # mock 路径（请求体带 ``mock_providers``）不依赖 model_config，跳过此检查；
     # 生产路径（无 mock_providers）必须预检查 capability 是否可用，
     # 在启动 run 之前就 422 拒绝，避免启动一个注定 FAILED 的 run + 兜底 ai_call_logs。
+    # ⚠️ 异步化后这仍是**唯一**能在 HTTP 层给出 422 的模型可用性闸门：
+    # provider 解析失败发生在后台线程，只会落成 run FAILED（受理语义如此）。
     if not mock_providers:
         router = ModelRouter(_db_path(request))
         for cap in _DECONSTRUCT_REQUIRED_CAPABILITIES:
@@ -468,46 +479,31 @@ def _start_deconstruct_internal(
         initial_ctx["mock_providers"] = mock_providers
 
     try:
-        run_id = _engine(request).start_with_nodes(
+        run_id = _engine(request).start_with_nodes_async(
             "deconstruct-book",
             workflow["nodes"],
             chapter_id=None,
+            project_id=project_id,
+            project_level_guard=True,
             initial_ctx=initial_ctx,
             mock_providers=mock_providers,
             checkpoint_exclude=["text"],
         )
+    except WorkflowRunConflict as exc:
+        # 同项目已有 RUNNING/PENDING 的 deconstruct-book run（项目级原子守卫）。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # P1-4：未配置可用模型时（deconstructor_* 走 ModelRouter.resolve），从 500 兜成 422
-    # 让前端明确「未配置模型」而非不可恢复的服务错误。
-    except ModelNotConfiguredError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    run = get_run(_db_path(request), run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run disappeared after start")
-
-    out: dict[str, Any] = {
+    # 异步化后：run 行已落库（status=RUNNING），节点在后台线程推进 ⇒ HTTP 恒返回
+    # RUNNING。真终态由前端轮询 GET /runs/{run_id} 拿（canon_id / error 都在那里）。
+    return {
         "run_id": run_id,
-        "status": run["status"],
-        "current_node": run.get("current_node"),
-        "project_id": project_id,
-        "book_title": book_title,
+        "status": "RUNNING",
+        "current_node": None,
     }
-    # 如 COMPLETED，把 canon_id + extracts_count 提取出来便于前端
-    if run["status"] == "COMPLETED":
-        ckpt = run.get("checkpoint_json") or {}
-        persist = ckpt.get("T4_persist") if isinstance(ckpt, dict) else None
-        if isinstance(persist, dict):
-            if "canon_id" in persist:
-                out["canon_id"] = persist["canon_id"]
-            if "extracts_count" in persist:
-                out["extracts_count"] = persist["extracts_count"]
-    if run["status"] == "FAILED":
-        out["error"] = run.get("error")
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +514,7 @@ def _start_deconstruct_internal(
 @router.post(
     "/projects/{project_id}/deconstruct-upload",
     status_code=status.HTTP_201_CREATED,
-    response_model=DeconstructStartResponse,
+    response_model=WorkflowStartAccepted,
 )
 def start_deconstruct_upload(
     project_id: str,

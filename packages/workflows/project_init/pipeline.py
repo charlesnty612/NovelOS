@@ -1216,15 +1216,50 @@ def _persist_all_node(ctx: dict[str, Any]) -> dict[str, Any]:
         )
         conn = get_connection(str(db_path))
         try:
-            # 收集待删 chapter_id（精确到本 volume）
+            # C-1：预检与 DELETE **同一事务**。显式 BEGIN IMMEDIATE 让写锁在
+            # SELECT 之前就持有（默认 isolation_level="" 下 SELECT 不进事务，
+            # 预检读到的状态可能与随后的 DELETE 之间被并发提交改写）。
+            conn.execute("BEGIN IMMEDIATE")
+            # 收集待删 chapter_id（精确到本 volume）。
+            # C-1（批次三十六，2026-11-04）：**fail-closed 预检**。
+            # 原实现按卷 DELETE 全部章节、无任何状态过滤 ⇒ 「作者写了草稿但还没
+            # 提交」的章连同 drafts 与 outline_json 策展槽一起静默消失（已提交章
+            # 虽被 commits.chapter_id 的 FK 挡住、数据无损，但得到的是裸
+            # IntegrityError 报错，不可读）。现在只允许重建 status='PLANNED' 且
+            # 没有任何 drafts 行的章；其余一律在**任何 DELETE 之前**拒绝，
+            # 单事务回滚 ⇒ 零删除。
             old_rows = conn.execute(
-                "SELECT chapter_id FROM chapters WHERE volume_id = ?",
+                "SELECT chapter_id, number, status FROM chapters WHERE volume_id = ?",
                 (volume_id,),
             ).fetchall()
             old_chapter_ids = [r["chapter_id"] for r in old_rows]
 
             if old_chapter_ids:
                 placeholders = ",".join("?" for _ in old_chapter_ids)
+                drafted_ids = {
+                    r["chapter_id"]
+                    for r in conn.execute(
+                        f"SELECT DISTINCT chapter_id FROM drafts "
+                        f"WHERE chapter_id IN ({placeholders})",
+                        old_chapter_ids,
+                    ).fetchall()
+                }
+                blockers = [
+                    f"第{r['number']}章（status={r['status']}，"
+                    f"{'有草稿' if r['chapter_id'] in drafted_ids else '无草稿'}）"
+                    for r in old_rows
+                    if r["status"] != "PLANNED" or r["chapter_id"] in drafted_ids
+                ]
+                if blockers:
+                    raise ValueError(
+                        "init rebuild blocked: 本卷存在无法安全重建的章节"
+                        f"（共 {len(blockers)} 章）：" + "、".join(blockers)
+                        + "。重跑初始化会按卷整体重建章节，只允许删除 "
+                        "status='PLANNED' 且没有任何草稿的章；"
+                        "重跑初始化前请先处理这些章（提交/删除草稿，"
+                        "或把它们移出本卷）。"
+                    )
+
                 # drafts 子记录先清（FK ON DELETE CASCADE 也兜底，显式写兼容迁移顺序）
                 conn.execute(
                     f"DELETE FROM drafts WHERE chapter_id IN ({placeholders})",

@@ -10,7 +10,8 @@
 跑通端点后 dump 实际键集得出的（2026-10-15 实测，方法：ASGITransport + 合成夹具，
 下面 `_harvest` 一次跑完全部 12 个端点并把响应体收上来）。实测要点：
 
-* 起跑 7 个端点（plan/write/review/commit/gate-revise/outline-batch/resume）**逐字同形
+* 起跑 8 个端点（plan/write/review/commit/gate-revise/outline-batch/resume/
+  deconstruct）**逐字同形
   3 键**：``run_id / status / current_node``，且 ``status`` 恒 ``"RUNNING"``；
 * ``POST /projects/init`` **4 键**（多 ``project_id``，且可为 null），**PAUSED 时 5 键**；
 * ``POST /runs/{id}/cancel`` **恒 2 键**——不为了凑字段硬造 ``current_node``；
@@ -164,6 +165,8 @@ COVERED_ENDPOINTS = {
     ("/api/runs/{run_id}/resume", "post"),
     ("/api/runs/{run_id}/cancel", "post"),
     ("/api/projects/{project_id}/outline-batch", "post"),
+    # 批次三十六 C-23：deconstruct 改异步受理后并入 WorkflowStartAccepted 家族。
+    ("/api/projects/{project_id}/deconstruct", "post"),
     ("/api/projects/{project_id}/init-status", "get"),
     ("/api/runs/{run_id}", "get"),
     ("/api/chapters/{chapter_id}/context-preview", "get"),
@@ -608,6 +611,26 @@ async def _harvest(tmp_path: Path) -> dict:
         # 等后台线程走完（不留悬挂线程去写已回收的临时库）
         await _wait_run_terminal(app, out["outline_batch"]["run_id"])
 
+        # --- POST /api/projects/{pid}/deconstruct：批次三十六 C-23 起是**异步受理**，
+        #     与上面的起跑类端点同形 3 键（status 恒 RUNNING）。用独立项目 + 一段
+        #     没有「第N章」标题的文本 ⇒ T1 立即失败（零模型调用、零网络），只量
+        #     201 响应形状；mock_providers 非空字典用于跳过 capability 预检查。
+        r = await req("POST", "/api/projects", json={"name": "deconstruct 契约"})
+        assert r.status_code == 201, r.text
+        pid_dc = r.json()["project_id"]
+        r = await req(
+            "POST",
+            f"/api/projects/{pid_dc}/deconstruct",
+            json={
+                "book_title": "契约拆书",
+                "text": "没有章节标题的正文",
+                "mock_providers": {"deconstructor_chapter": []},
+            },
+        )
+        assert r.status_code == 201, r.text
+        out["deconstruct"] = r.json()
+        await _wait_run_terminal(app, out["deconstruct"]["run_id"])
+
     return out
 
 
@@ -678,8 +701,11 @@ def test_list_runs_endpoint_is_now_modelled(tmp_path: Path):
 
 
 def test_start_endpoints_keys_match_hardcoded_expectation(harvested: dict):
-    """7 个起跑/恢复端点逐字同形 3 键。"""
-    for tag in ("plan", "write", "review", "commit", "gate_revise", "outline_batch", "resume"):
+    """8 个起跑/恢复端点逐字同形 3 键。"""
+    for tag in (
+        "plan", "write", "review", "commit", "gate_revise", "outline_batch",
+        "resume", "deconstruct",
+    ):
         body = harvested[tag]
         assert set(body) == EXPECTED_START_KEYS, (
             f"{tag} 键不符：多={set(body) - EXPECTED_START_KEYS} "
@@ -695,7 +721,10 @@ def test_start_endpoints_status_is_running(harvested: dict):
     模型 ``ProjectInitStarted``），代价是 OpenAPI 不表达这个取值——所以在这里把该
     不变量钉住。
     """
-    for tag in ("plan", "write", "review", "commit", "gate_revise", "outline_batch", "resume"):
+    for tag in (
+        "plan", "write", "review", "commit", "gate_revise", "outline_batch",
+        "resume", "deconstruct",
+    ):
         assert harvested[tag]["status"] == "RUNNING", f"{tag} 的 status 变了：{harvested[tag]}"
         assert harvested[tag]["current_node"] is None, f"{tag} 的 current_node 不再恒 null"
 

@@ -113,14 +113,10 @@ EXPECTED_STYLE_SAMPLE_KEYS = frozenset(
     {"sample_id", "project_id", "title", "content", "created_at", "updated_at"}
 )
 
-# deconstruct 响应：5 个恒在键（``_start_deconstruct_internal`` 的 out 字面量前半）
-# ＋ 3 个条件键（COMPLETED 出前两个、FAILED 出 error）。
-EXPECTED_DECONSTRUCT_ALWAYS_KEYS = frozenset(
-    {"run_id", "status", "current_node", "project_id", "book_title"}
-)
-EXPECTED_DECONSTRUCT_CONDITIONAL_KEYS = frozenset(
-    {"canon_id", "extracts_count", "error"}
-)
+# deconstruct 启动端点（批次三十六 C-23）：改为**异步受理语义**，与
+# ``WorkflowStartAccepted`` 同形 3 键（run_id / status / current_node）。
+# 旧的 5 恒在键 + 3 条件键（DeconstructStartResponse）已随同步起跑一起退役。
+EXPECTED_DECONSTRUCT_ACCEPTED_KEYS = frozenset({"run_id", "status", "current_node"})
 
 
 # ---------------------------------------------------------------------------
@@ -769,92 +765,63 @@ def test_to_style_sample_returns_the_six_sample_columns(tmp_path: Path):
 
 @pytest.fixture
 def fake_deconstruct_engine(monkeypatch):
-    """⚠️ 假 engine：工作流**不执行**、零 LLM 调用、零 DB 写入（只量响应装配）。
+    """⚠️ 假 engine：工作流**不执行**、零 LLM 调用、零 DB 写入（只量响应装配 + 起跑接线）。
 
-    本组**禁止**真跑 deconstruct / deconstruct-upload（会触发拆书工作流）。
-    这里替换 ``WorkflowEngine.start_with_nodes`` 与 ``get_run``，让端点走完整的
-    HTTP 栈 + ``response_model`` 序列化，但工作流一个节点都不执行。
+    批次三十六（C-23）起 deconstruct 走 ``start_with_nodes_async``（受理语义）：
+    端点只负责插 run 行后返回 3 键，不再 ``get_run`` 装配终态字段 ⇒ 本夹具替换
+    ``WorkflowEngine`` 并记录调用 kwargs（用于验证 ``project_id`` 与
+    ``project_level_guard`` 两条 C-9/C-10 接线）。
     """
     import packages.core.api.routers.reference as ref
 
-    state = {"status": "COMPLETED"}
+    calls: dict = {}
 
     class _FakeEngine:
         def __init__(self, db_path):  # noqa: ARG002
             pass
 
-        def start_with_nodes(self, *args, **kwargs):  # noqa: ARG002
-            # 本方法**替代**真引擎：只回一个 run_id，工作流一个节点都不执行。
+        def start_with_nodes_async(self, *args, **kwargs):
+            # 替代真引擎：只回一个 run_id，工作流一个节点都不执行。
+            calls["args"] = args
+            calls["kwargs"] = kwargs
             return "run_g7_probe"
 
-    def _fake_get_run(db_path, run_id):  # noqa: ARG001
-        return {
-            "run_id": run_id,
-            "status": state["status"],
-            "current_node": "T4_persist" if state["status"] == "RUNNING" else None,
-            "checkpoint_json": {
-                "T4_persist": {"canon_id": "can_from_run", "extracts_count": 3}
-            },
-            "error": "boom" if state["status"] == "FAILED" else None,
-        }
-
     monkeypatch.setattr(ref, "WorkflowEngine", _FakeEngine)
-    monkeypatch.setattr(ref, "get_run", _fake_get_run)
-    return state
+    return calls
 
 
-def test_deconstruct_response_keys_per_status(fake_deconstruct_engine, tmp_path: Path):
-    """实测结论：5 键恒在 ＋ 3 条件键。
+def test_deconstruct_start_is_async_accepted_with_three_keys(
+    fake_deconstruct_engine, tmp_path: Path
+):
+    """批次三十六 C-23：端点返回**受理语义** 3 键，且带上项目归属与项目级守卫。
 
-    ⚠️ **本批次唯一改变线上 JSON 形状的地方**：条件键从「命中才写」变成「恒在、
-    未命中为 null」。理由与代价写在 ``DeconstructStartResponse`` 的 docstring 里；
-    本用例把**新语义**钉住——若有人把条件键改回「命中才写」，本条必红。
-
-    判别点：断言对象是 ``EXPECTED_DECONSTRUCT_*`` 常量，不是模型字段集。
+    判别点（三条各自独立）：
+    1. 响应键集 == ``EXPECTED_DECONSTRUCT_ACCEPTED_KEYS``（不是旧 8 键形状）；
+    2. ``status == "RUNNING"`` / ``current_node is None``（异步受理，不是终态回声）；
+    3. 起跑 kwargs 带 ``project_id=<发起项目>`` + ``project_level_guard=True``
+       （C-9 并发守卫 / C-10 归属列）——撤任一 ⇒ 本条必红。
     """
     app = create_test_app(tmp_path)
     pid = _project(app)
 
-    # COMPLETED：canon_id / extracts_count 有值，error 为 null
-    fake_deconstruct_engine["status"] = "COMPLETED"
+    # 只打纯文本端点：上传端点复用同一个 ``_start_deconstruct_internal`` ⇒
+    # 起跑接线同一条（上传端点的文件解析/校验分支由 test_reference.py 覆盖）。
     r = _request(
-        app, "POST", f"/api/projects/{pid}/deconstruct",
+        app,
+        "POST",
+        f"/api/projects/{pid}/deconstruct",
         json={"book_title": "书", "text": "正文", "mock_providers": {"m": {}}},
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    assert set(body) == set(EXPECTED_DECONSTRUCT_ALWAYS_KEYS) | set(
-        EXPECTED_DECONSTRUCT_CONDITIONAL_KEYS
-    ), sorted(body)
-    assert body["status"] == "COMPLETED"
-    assert body["canon_id"] == "can_from_run" and body["extracts_count"] == 3
-    assert body["error"] is None and body["current_node"] is None
+    assert set(body) == set(EXPECTED_DECONSTRUCT_ACCEPTED_KEYS), sorted(body)
+    assert body["run_id"] == "run_g7_probe"
+    assert body["status"] == "RUNNING", body
+    assert body["current_node"] is None, body
 
-    # FAILED：只有 error 有值
-    fake_deconstruct_engine["status"] = "FAILED"
-    r = _request(
-        app, "POST", f"/api/projects/{pid}/deconstruct",
-        json={"book_title": "书", "text": "正文", "mock_providers": {"m": {}}},
-    )
-    body = r.json()
-    assert set(body) == set(EXPECTED_DECONSTRUCT_ALWAYS_KEYS) | set(
-        EXPECTED_DECONSTRUCT_CONDITIONAL_KEYS
-    ), sorted(body)
-    assert body["error"] == "boom"
-    assert body["canon_id"] is None and body["extracts_count"] is None
-
-    # RUNNING：三者皆 null
-    fake_deconstruct_engine["status"] = "RUNNING"
-    r = _request(
-        app, "POST", f"/api/projects/{pid}/deconstruct",
-        json={"book_title": "书", "text": "正文", "mock_providers": {"m": {}}},
-    )
-    body = r.json()
-    assert set(body) == set(EXPECTED_DECONSTRUCT_ALWAYS_KEYS) | set(
-        EXPECTED_DECONSTRUCT_CONDITIONAL_KEYS
-    ), sorted(body)
-    assert body["current_node"] == "T4_persist"
-    assert (body["canon_id"], body["extracts_count"], body["error"]) == (None, None, None)
+    kwargs = fake_deconstruct_engine["kwargs"]
+    assert kwargs["project_id"] == pid, kwargs
+    assert kwargs["project_level_guard"] is True, kwargs
 
 
 def test_deconstruct_validation_errors_still_422(tmp_path: Path):
@@ -892,29 +859,25 @@ def test_deconstruct_upload_rejects_unsupported_extension(tmp_path: Path):
 
 
 def test_deconstruct_both_endpoints_share_one_declared_schema(tmp_path: Path):
-    """两条端点共用同一个 ``$ref``（单一事实源），且必填集与常量基准一致。
+    """两条端点共用 ``WorkflowStartAccepted`` 同一个 ``$ref``（单一事实源）。
 
-    ``DeconstructStartResponse`` **不开** ``extra="allow"`` ⇒ 这里断言
-    ``properties`` 就是完整的声明面，不存在「响应有、schema 没有」的缝。
+    批次三十六 C-23：同步结果模型 ``DeconstructStartResponse`` 退役，两条端点
+    与 outline-batch / 章节级起跑同用 3 键受理模型。判别：把任一端点的
+    ``response_model`` 换掉/撤掉 ⇒ ``$ref`` 不再指向它 ⇒ 必红。
     """
-    from packages.domain.reference.models import DeconstructStartResponse
+    from packages.core.api.routers.workflows.models import WorkflowStartAccepted
 
-    expected = set(EXPECTED_DECONSTRUCT_ALWAYS_KEYS) | set(
-        EXPECTED_DECONSTRUCT_CONDITIONAL_KEYS
-    )
-    assert set(DeconstructStartResponse.model_fields) == expected, (
-        f"多={set(DeconstructStartResponse.model_fields) - expected} "
-        f"少={expected - set(DeconstructStartResponse.model_fields)}"
+    expected = set(EXPECTED_DECONSTRUCT_ACCEPTED_KEYS)
+    assert set(WorkflowStartAccepted.model_fields) == expected, (
+        f"多={set(WorkflowStartAccepted.model_fields) - expected} "
+        f"少={expected - set(WorkflowStartAccepted.model_fields)}"
     )
 
     app = create_test_app(tmp_path)
     schema = app.openapi()
     assert set(
-        schema["components"]["schemas"]["DeconstructStartResponse"]["properties"]
+        schema["components"]["schemas"]["WorkflowStartAccepted"]["properties"]
     ) == expected
-    assert set(
-        schema["components"]["schemas"]["DeconstructStartResponse"]["required"]
-    ) == set(EXPECTED_DECONSTRUCT_ALWAYS_KEYS) - {"current_node"}
 
     for path, method in (
         ("/api/projects/{project_id}/deconstruct", "post"),
@@ -923,7 +886,7 @@ def test_deconstruct_both_endpoints_share_one_declared_schema(tmp_path: Path):
         ref = schema["paths"][path][method]["responses"]["201"]["content"][
             "application/json"
         ]["schema"]["$ref"]
-        assert ref.endswith("/DeconstructStartResponse"), f"{path} → {ref}"
+        assert ref.endswith("/WorkflowStartAccepted"), f"{path} → {ref}"
 
 
 def test_genre_and_quality_endpoints_keep_their_404_semantics(tmp_path: Path):
