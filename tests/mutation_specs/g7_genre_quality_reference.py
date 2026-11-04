@@ -18,10 +18,12 @@
 
 分组（按失效方向排——三类的「变异存活」含义完全不同）：
 
-- **A 组 · 少声明一个字段**（M06/M10/M11/M15/M17）：模型少了字段 ⇒
+- **A 组 · 少声明一个字段**（M06/M10/M15/M17）：模型少了字段 ⇒
   ``set(Model.model_fields) == EXPECTED_*`` 与 OpenAPI ``properties`` 两条断言必红。
   ⚠️ 本组的**响应键集断言抓不到**（``extra="allow"`` 下少声明的键照样出现在响应里），
   这正是 AGENTS.md 坑区「断言了结果 ≠ 判别了机制」的 M20 形状。
+  ⚠️ 原 M11（DeconstructStartResponse 少声明 error）随批次三十六 C-23 删除——
+  该模型已退役（端点改异步受理），条目随之移除。
 - **B 组 · 去掉 response_model**（M01~M05 / M12~M14 / M16）：端点不再声明契约 ⇒
   OpenAPI 里该 path 的 ``$ref`` 消失，**接线断言**必红。
   ⚠️ 只断言「schema 里存在这个模型」抓不到（模型被别的端点引用着）。
@@ -50,13 +52,6 @@ MUTATIONS = [
         '    # 默认 "auto" 同时承担「2026-09-18 前的存量 issue 无此键」的兼容职责。\n'
         '    gate: Gate = "auto"',
         "    # ⚠️ MUTATION-G7-M10：删掉 gate 声明",
-        TEST_FILE,
-    ),
-    (
-        "G7-M11",  # DeconstructStartResponse 少声明 error
-        "packages/domain/reference/models.py",
-        "    # 仅 FAILED 时带出（run.error）\n    error: Optional[str] = None",
-        "    # ⚠️ MUTATION-G7-M11：删掉 error 声明",
         TEST_FILE,
     ),
     (
@@ -111,22 +106,22 @@ MUTATIONS = [
         TEST_FILE,
     ),
     (
-        "G7-M12",  # POST .../deconstruct 不声明 response_model
+        "G7-M12",  # POST .../deconstruct 不声明 response_model（批次三十六 C-23 起指 WorkflowStartAccepted）
         "packages/core/api/routers/reference.py",
         '    "/projects/{project_id}/deconstruct",\n'
         "    status_code=status.HTTP_201_CREATED,\n"
-        "    response_model=DeconstructStartResponse,\n",
+        "    response_model=WorkflowStartAccepted,\n",
         '    "/projects/{project_id}/deconstruct",\n'
         "    status_code=status.HTTP_201_CREATED,\n"
         "    # ⚠️ MUTATION-G7-M12：删掉 response_model\n",
         TEST_FILE,
     ),
     (
-        "G7-M13",  # POST .../deconstruct-upload 不声明 response_model
+        "G7-M13",  # POST .../deconstruct-upload 不声明 response_model（同上）
         "packages/core/api/routers/reference.py",
         '    "/projects/{project_id}/deconstruct-upload",\n'
         "    status_code=status.HTTP_201_CREATED,\n"
-        "    response_model=DeconstructStartResponse,\n",
+        "    response_model=WorkflowStartAccepted,\n",
         '    "/projects/{project_id}/deconstruct-upload",\n'
         "    status_code=status.HTTP_201_CREATED,\n"
         "    # ⚠️ MUTATION-G7-M13：删掉 response_model\n",

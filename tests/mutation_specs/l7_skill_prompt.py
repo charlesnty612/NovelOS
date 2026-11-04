@@ -10,10 +10,12 @@
 
 两条突变各钉一个失效方向
 ------------------------
-* **SKILL-PROMPT-1** 把 ``writer-v5.md`` 的顶层 ``skills`` 键改名成 ``skill``
+* **SKILL-PROMPT-1** 把 ``writer-v6.md`` 的顶层 ``skills`` 键改名成 ``skill``
   （改字节但**不改行为**的一类弱变异：JSON 仍合法、提示词仍「有声明」，只是声明
   的是另一个键）⇒ payload 的 ``skills`` 段与提示词声明**对不上** ⇒
   ``test_latest_prompt_of_every_skill_consumer_declares_skills_segment`` 必红。
+  ⚠️ 原目标 ``writer-v5.md``：批次三十六 C-16 把 writer 提示词升到 v6、守卫读
+  「最新版」⇒ 改 v5 变成**腐化规格**（锚点仍在、永不红）⇒ 目标随升版改指 v6。
 * **SKILL-PROMPT-2** 同款改 ``critic-v2.md`` ⇒ 评审侧的声明守卫必红。
 
 ⚠️ 为什么是「改名」而不是「删块」：改名保留 JSON 合法性 ⇒ 突变**确实跑起来了**
@@ -30,7 +32,7 @@
 MUTATIONS = [
     (
         "SKILL-PROMPT-1",
-        "docs/agents/prompts/writer-v5.md",
+        "docs/agents/prompts/writer-v6.md",
         '  "skills": {\n    "items": [\n',
         '  "skill": {\n    "items": [\n',
         "tests/unit/test_skill_prompt_contract.py",

@@ -5,8 +5,11 @@
 供 OpenAPI 声明与前端 codegen。
 
 覆盖端点：
-- ``POST /projects/{pid}/deconstruct``            → :class:`DeconstructStartResponse`
-- ``POST /projects/{pid}/deconstruct-upload``     → :class:`DeconstructStartResponse`
+- ``POST /projects/{pid}/deconstruct``            → ``WorkflowStartAccepted``
+  （``packages.core.api.routers.workflows.models``；批次三十六 C-23 改异步受理，
+  旧的同步出参模型 ``DeconstructStartResponse`` 退役删除——两条端点不再同步返回结果，
+  真终态轮询 ``GET /runs/{run_id}``）
+- ``POST /projects/{pid}/deconstruct-upload``     → 同上
 - ``GET  /canons/{canon_id}``                     → :class:`CanonDetailOut`
 - ``GET  /projects/{pid}/canons``                 → :class:`CanonSummaryOut`
 - ``POST /projects/{pid}/canons/{cid}/to-style-sample`` → :class:`StyleSampleOut`
@@ -14,16 +17,12 @@
 （``GET /projects/{pid}/canons`` 曾一度「刻意不建模」，理由是它不在当时的端点清单内；
 2026-10-15 批次（六）· L4 补上，模型见 :class:`CanonSummaryOut`。）
 
-字段形状经实测（临时库 + 合成夹具）。三条关键事实写在各模型的 docstring 里，
-其中第 3 条是**有意引入的行为变更**，调用方须知：
+字段形状经实测（临时库 + 合成夹具）。两条关键事实写在各模型的 docstring 里：
 
-1. ``deconstruct`` 的响应**是条件键**：`canon_id` / ``extracts_count`` 只在
-   ``status == "COMPLETED"`` 时出现，``error`` 只在 ``FAILED`` 时出现，
-   其余状态（RUNNING / PAUSED / …）三者皆无。
-2. canon / extract 的 JSON 列是**存什么吐什么**，不做 schema 校验 ⇒ 用宽松类型。
-3. 声明 ``response_model`` 后，``deconstruct`` 的三个条件键**从「可能缺席」变成
-   「恒在，未命中时为 null」**。这是本批次唯一改变了线上 JSON 形状的地方，
-   理由与代价见 :class:`DeconstructStartResponse`。
+1. canon / extract 的 JSON 列是**存什么吐什么**，不做 schema 校验 ⇒ 用宽松类型。
+2. （历史）``deconstruct`` 曾声明 ``response_model=DeconstructStartResponse``，把三个
+   条件键从「可能缺席」变成「恒在，未命中时为 null」——该行为随异步受理一起退役；
+   此处仅留痕，防止有人按旧记忆给 canon 模型加条件键。
 """
 
 from __future__ import annotations
@@ -36,43 +35,8 @@ __all__ = [
     "CanonDetailOut",
     "CanonExtractOut",
     "CanonSummaryOut",
-    "DeconstructStartResponse",
     "StyleSampleOut",
 ]
-
-
-class DeconstructStartResponse(BaseModel):
-    """``POST .../deconstruct`` 与 ``POST .../deconstruct-upload`` 的出参（两端点同构）。
-
-    两条端点都汇到 ``_start_deconstruct_internal``，返回同一个 dict。
-
-    ⚠️ **本模型引入了一处行为变更**：原实现的三个条件键是「命中才写、否则整个键缺席」；
-    声明成 ``Optional`` + 默认 ``None`` 后，它们**恒在**，未命中时为 ``null``。
-
-    - 为什么接受：OpenAPI / 前端 codegen 需要一个**稳定**的键集。条件键在
-      TypeScript 里会逼出 ``canon_id?: string`` 与一堆 ``&&`` 判空，而「缺席」在
-      JSON Schema 里根本没有对应表达——这正是本批次要消灭的「前端手写契约」。
-    - 代价：存量前端若用 ``"canon_id" in body`` 判存在，语义从「已 COMPLETED 且有
-      canon」变成「恒真」。**改判据请改成 ``body.canon_id != null``。**
-      （本仓唯一前端调用方是拆书面板，未用 in 判据；见
-      ``tests/api/test_reveal_and_judge_response_contract.py`` 同批口径。）
-
-    不设 ``extra="allow"``：这三个条件键是全部的分支，超出的键只可能是 bug。
-    """
-
-    run_id: str
-    # workflow_runs.status 的取值（PENDING/RUNNING/PAUSED/COMPLETED/FAILED/CANCELLED）。
-    # 刻意**不**用 Literal：新增状态不该让这条端点 500。
-    status: str
-    current_node: Optional[str] = None
-    project_id: str
-    book_title: str
-    # ↓↓↓ 仅 COMPLETED 时由 T4_persist 带出
-    canon_id: Optional[str] = None
-    extracts_count: Optional[int] = None
-    # ↑↑↑
-    # 仅 FAILED 时带出（run.error）
-    error: Optional[str] = None
 
 
 class CanonExtractOut(BaseModel):
