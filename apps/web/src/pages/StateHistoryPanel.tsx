@@ -15,7 +15,7 @@
 import { useCallback, useState } from 'react';
 import { ApiError } from '../api/client';
 import { commitsApi, storyStateApi, type StateDiffResponse } from '../api/endpoints';
-import type { Commit } from '../api/types';
+import type { CommitListItem } from '../api/types';
 import { ErrorBanner } from '../components/ErrorBanner';
 import { ReadableJson } from '../components/ReadableJson';
 
@@ -50,13 +50,24 @@ function readApprovalDemand(e: unknown): string[] | null {
     : [];
 }
 
+/**
+ * 从 `author_approval_json`（生成类型是 `Record<string, unknown>`）取字符串字段。
+ *
+ * ⚠️ 必须先判型再渲染：直接 `{c.author_approval_json?.notes || '—'}` 会因
+ * `unknown` 类型报错（TS2322），且后端写的是字符串、类型却不知道。
+ */
+function approvalText(raw: Record<string, unknown> | null | undefined, key: string): string {
+  const v = raw?.[key];
+  return typeof v === 'string' ? v : '';
+}
+
 export function StateHistoryPanel({
   projectId,
   commits,
   onChanged,
 }: {
   projectId: string;
-  commits: Commit[];
+  commits: CommitListItem[];
   onChanged: () => void | Promise<void>;
 }) {
   const [diffFor, setDiffFor] = useState<number | null>(null);
@@ -67,17 +78,27 @@ export function StateHistoryPanel({
   const [busy, setBusy] = useState(false);
 
   const showDiff = useCallback(
-    async (c: Commit) => {
+    async (c: CommitListItem) => {
       setDiffErr(null);
       setDiff(null);
-      setDiffFor(c.version);
+      setDiffFor(c.resulting_state_version);
       // 与上一版比；首版没有上一版可比。
-      if (c.parent_version == null) {
+      // ⚠️ 2026-11-04：后端 `commits` 表**没有** `version` / `parent_version` 列，
+      // 只有 `previous_state_version` / `resulting_state_version`；且**首版（genesis）
+      // 的 previous 是 0**（不是 null）⇒ 判据必须是 `=== 0`，不能是 `== null`
+      // （用 null 判会恒假 ⇒ 首版也去取 diff ⇒ 取不到）。
+      if (c.previous_state_version === 0) {
         setDiffErr('这是第一个 commit，没有上一版可比。');
         return;
       }
       try {
-        setDiff(await storyStateApi.diff(projectId, c.parent_version, c.version));
+        setDiff(
+          await storyStateApi.diff(
+            projectId,
+            c.previous_state_version,
+            c.resulting_state_version,
+          ),
+        );
       } catch (e: unknown) {
         setDiffErr(e instanceof Error ? e.message : '取 diff 失败');
       }
@@ -98,7 +119,7 @@ export function StateHistoryPanel({
         if (ids !== null) {
           // 第一次就要求批准 ⇒ 把清单摆出来，等作者点头；**不自动重发**。
           const c = commits.find((x) => x.commit_id === commitId);
-          setDemand({ commitId, version: c?.version ?? 0, highRiskChangeIds: ids });
+          setDemand({ commitId, version: c?.resulting_state_version ?? 0, highRiskChangeIds: ids });
         } else {
           setErr(e instanceof Error ? e.message : '回滚失败');
         }
@@ -140,12 +161,21 @@ export function StateHistoryPanel({
           <tbody>
             {commits.map((c) => (
               <tr key={c.commit_id} data-testid="state-history-row">
-                <td className="muted small">v{c.version}</td>
+                <td className="muted small">v{c.resulting_state_version}</td>
                 <td>
-                  {c.message || '—'}
-                  {c.author ? <span className="muted small">（{c.author}）</span> : null}
+                  {/* ⚠️ 后端 `commits` 表**没有** message / author 两列
+                      ⇒ 此前的前端手写类型声明了它们 ⇒ 运行时恒 undefined
+                      ⇒ 「说明」列永远渲染 '—'、作者括号永远不出现（巧合正确，
+                      但那是**幽灵字段**，不是数据）。⇒ 改用**真实存在**的
+                      `author_approval_json`（审批人 + 备注）。 */}
+                  {approvalText(c.author_approval_json, 'notes') || '—'}
+                  {approvalText(c.author_approval_json, 'approver') ? (
+                    <span className="muted small">
+                      （{approvalText(c.author_approval_json, 'approver')}）
+                    </span>
+                  ) : null}
                 </td>
-                <td className="muted small">{new Date(c.created_at).toLocaleString()}</td>
+                <td className="muted small">{new Date(c.timestamp).toLocaleString()}</td>
                 <td className="right">
                   <button
                     className="btn btn--sm"

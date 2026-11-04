@@ -12,7 +12,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ApiError } from '../api/client';
 import { commitsApi, storyStateApi } from '../api/endpoints';
-import type { Commit } from '../api/types';
+import type { CommitListItem } from '../api/types';
 import { StateHistoryPanel } from './StateHistoryPanel';
 
 vi.mock('../api/endpoints', async () => {
@@ -29,14 +29,37 @@ vi.mock('../api/endpoints', async () => {
 const rollback = commitsApi.rollback as unknown as ReturnType<typeof vi.fn>;
 const diff = storyStateApi.diff as unknown as ReturnType<typeof vi.fn>;
 
-const commit = (version: number, parent: number | null): Commit => ({
-  commit_id: `cm_${version}`,
+/**
+ * 造一条**后端真实形状**的 commit 行（`CommitListItem`，13 键）。
+ *
+ * ⚠️ 2026-11-04：此前这个夹具用的是**前端手写类型**的 7 键形状
+ * （version / parent_version / message / author / created_at）——而 `commits` 表
+ * **根本没有这五列** ⇒ **夹具把缺陷抄进了断言** ⇒ 绿灯掩盖了三个真缺陷：
+ * 渲染「vundefined」、渲染「Invalid Date」、`parent_version == null` 恒真
+ * ⇒ **diff 请求永不发**（AGENTS 坑区「夹具从被测代码的实际输出里抄形状」族）。
+ * ⇒ 夹具必须**独立于实现**地取自后端契约（`CommitListItem` + `commits` 表 DDL）。
+ *
+ * ⚠️ `previous_state_version === 0` 表示**首版**（genesis：previous=0 / resulting=1）
+ * —— 后端 genesis 的 previous 是 **0**、不是 null ⇒ 判据不能用 `== null`。
+ */
+const commit = (resulting: number, previous: number): CommitListItem => ({
+  commit_id: `cm_${resulting}`,
   project_id: 'p1',
-  version,
-  parent_version: parent,
-  message: `第 ${version} 次提交`,
-  author: 'human',
-  created_at: '2026-10-01T08:00:00Z',
+  branch_id: 'br_main',
+  chapter_id: 'ch_001',
+  previous_state_version: previous,
+  resulting_state_version: resulting,
+  delta_id: `dlt_${resulting}`,
+  validation_json: { ok: true },
+  author_approval_json: {
+    approved: true,
+    approver: 'human',
+    notes: `第 ${resulting} 次提交`,
+  },
+  timestamp: '2026-10-01T08:00:00Z',
+  workflow_run_id: 'wfr_001',
+  rollback_of: null,
+  draft_version: 1,
 });
 
 describe('StateHistoryPanel', () => {
@@ -55,7 +78,7 @@ describe('StateHistoryPanel', () => {
     render(
       <StateHistoryPanel
         projectId="p1"
-        commits={[commit(2, 1), commit(1, null)]}
+        commits={[commit(2, 1), commit(1, 0)]}
         onChanged={() => {}}
       />,
     );
@@ -73,7 +96,7 @@ describe('StateHistoryPanel', () => {
 
   it('首个 commit 没有上一版 ⇒ 说明而不是空白面板', async () => {
     render(
-      <StateHistoryPanel projectId="p1" commits={[commit(1, null)]} onChanged={() => {}} />,
+      <StateHistoryPanel projectId="p1" commits={[commit(1, 0)]} onChanged={() => {}} />,
     );
     await userEvent.click(screen.getByTestId('state-diff-btn'));
     expect(await screen.findByText(/没有上一版可比/)).toBeInTheDocument();

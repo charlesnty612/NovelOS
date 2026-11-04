@@ -12,7 +12,7 @@ import {
   styleSamplesApi,
 } from '../api/endpoints';
 import type {
-  Commit,
+  CommitListItem,
   HealthResponse,
   Project,
   StyleSample,
@@ -56,7 +56,7 @@ const baseSnapshot = {
   events: { evt_1: { event_id: 'evt_1' }, evt_2: { event_id: 'evt_2' } },
   recent_events: [{ event_id: 'evt_2' }],
 };
-const baseCommits: Commit[] = [];
+const baseCommits: CommitListItem[] = [];
 const baseStyles: StyleSample[] = [];
 
 function renderPage(pid = 'prj_001') {

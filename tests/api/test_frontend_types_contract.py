@@ -58,6 +58,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TYPES_TS = REPO_ROOT / "apps/web/src/api/types.ts"
 GENERATED_TS = REPO_ROOT / "apps/web/src/api/types.generated.ts"
+ENDPOINTS_TS = REPO_ROOT / "apps/web/src/api/endpoints.ts"
 OPENAPI_JSON = REPO_ROOT / "apps/web/openapi.json"
 
 #: 存量双源债（35 笔，2026-10-21 实测）→ 登记理由。
@@ -153,6 +154,100 @@ def _handwritten_body(name: str) -> str:
 def _shadowing() -> set[str]:
     """双源集合：手写声明名 ∩ OpenAPI schema 名。"""
     return _handwritten_names() & _openapi_schema_names()
+
+
+# ---------------------------------------------------------------------------
+# 「不同名」的幽灵形状（2026-11-04 新增的第二道防线）
+# ---------------------------------------------------------------------------
+#
+# ⚠️ **既有那条双源看守看不见的形状**：`_shadowing()` 抓的是「手写声明名 ∩ OpenAPI
+# schema 名」——**同名**。但前端还可以**另起一个本地名**手写一份（`Commit` vs 后端的
+# `CommitListItem`）⇒ **既不在 OpenAPI 里、也不是重导出** ⇒ 上面的看守**完全看不见**
+# ⇒ 而运行时字段对不上 ⇒ 界面渲染「vundefined」/「Invalid Date」，
+# 且 `parent_version == null` 恒真 ⇒ **diff 请求永不发**（2026-11-04 实测）。
+#
+# ⇒ 本节把「**前端用作端点响应类型**、且在 OpenAPI 里没有同名 schema、也不是从生成
+# 类型重导出」的名字**显式列出来**（GHOST_SHAPE_DEBT）⇒ 新增即红、减少要显式删条目。
+
+#: 端点里所有 ``api.<verb><T>`` 的 ``T`` —— **都是响应类型**（body 参数是 ``unknown``，
+#: 见 ``apps/web/src/api/client.ts`` 的 ``post<T>(path, body?: unknown, …)``）。
+#: ⚠️ 负向断言 ``(?![A-Za-z0-9_<])`` 必须有：否则 ``api.get<Record<string, unknown>>``
+#: 会把泛型实例化的**外层名**（``Record``）当成响应类型 ⇒ 名单里混进假条目。
+#: 数组形态 ``api.get<T[]>`` 则**要**收（``[`` 不在排除集里）。
+_ENDPOINT_RESPONSE_RE = re.compile(
+    r"api\.(?:get|post|put|patch|delete)<([A-Za-z_]\w*)(?![A-Za-z0-9_<])"
+)
+
+
+def _endpoint_response_types() -> set[str]:
+    """前端各端点声明的**响应类型**名。"""
+    text = ENDPOINTS_TS.read_text(encoding="utf-8")
+    return set(_ENDPOINT_RESPONSE_RE.findall(text))
+
+
+def _reexported_local_names() -> set[str]:
+    """从 ``types.generated.ts`` 重导出的**本地名**（含 ``X as Y`` 的 Y）。"""
+    return set(_reexport_pairs())
+
+
+def _ghost_shape_candidates() -> set[str]:
+    """无背书的响应类型名：既非 OpenAPI schema、也非生成类型重导出。
+
+    ⇒ 这些名字**每一个都是潜在的幽灵形状**（前端字段集可能与后端实际返回对不上）。
+    """
+    schemas = _openapi_schema_names()
+    reexports = _reexported_local_names()
+    return {
+        name
+        for name in _endpoint_response_types()
+        if name != "void" and name not in schemas and name not in reexports
+    }
+
+
+#: 「不同名幽灵形状」存量债（2026-11-04 实测 24 条）→ 登记理由。
+#:
+#: **只许递减**：把某个名字改成从生成类型重导出（或改用后端的 schema 名）之后，
+#: **删掉**这里对应项（删条目是唯一退债方式）。
+_GHOST_SHAPE_REASON = (
+    "前端另起本地名手写了一份响应类型，而后端 OpenAPI 里只有**另一个名字**的 schema"
+    "⇒ 既有双源看守（手写名 ∩ schema 名）看不见它 ⇒ 运行时字段可能对不上"
+    "（2026-11-04 实测：Commit→CommitListItem 导致界面渲染 vundefined / Invalid Date、"
+    "diff 请求永不发）。⇒ 统一改成从 types.generated.ts 重导出是正解"
+)
+GHOST_SHAPE_DEBT: dict[str, str] = {
+    name: _GHOST_SHAPE_REASON
+    for name in (
+        "Agent",
+        "Branch",
+        "BranchPromoteResult",
+        "CanonDetail",
+        "CanonSummary",
+        "CapabilityBinding",
+        "ContextPreviewResponse",
+        "ContinueAdoptResponse",
+        "FetchAvailableModelsResponse",
+        "GenreBinding",
+        "InitStatusResponse",
+        "ModelConfig",
+        "ModelConfigTestResult",
+        "ModelProfileTestResult",
+        "ProjectInitResponse",
+        "PromptVersion",
+        "QualityReport",
+        "Relationship",
+        "StateDeltaRow",
+        "SyncPromptsResult",
+        "TimelineEvent",
+        "WorkflowRun",
+        "WorkflowStartResponse",
+        "WorldEntity",
+    )
+}
+
+#: 清单长度上限的**硬编码历史值**（2026-11-04 实测 24 条）——独立于清单本身的锚点。
+#:
+#: ⚠️ 同 ``_DEBT_CAP_HISTORICAL`` 的理由：断言对象不能是「上限常量自身」（自指）。
+_GHOST_SHAPE_CAP_HISTORICAL = 24
 
 
 # ---------------------------------------------------------------------------
@@ -269,4 +364,64 @@ def test_drifted_fields_are_visible_on_effective_surface() -> None:
     assert not missing, (
         f"有效面上缺字段：{missing} —— 后端 OpenAPI 里确有它们（2026-10-21 漂移修复），"
         "删掉等于把「前端看不见后端字段」的缺陷放回来"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 「不同名」的幽灵形状（2026-11-04）
+# ---------------------------------------------------------------------------
+
+
+def test_no_new_unbacked_response_type() -> None:
+    """前端用作**响应类型**的手写名，若既不在 OpenAPI schema 里、也不是重导出
+    ⇒ 它是「不同名的幽灵形状」候选 ⇒ 必须登记在 GHOST_SHAPE_DEBT。
+
+    ⚠️ 这条看守补的是既有双源看守的**盲区**（后者只抓「同名」）：
+    2026-11-04 实测的 `Commit`（前端手写 7 键 / 后端 `CommitListItem` 13 键）就是
+    「不同名」⇒ 既有看守完全看不见 ⇒ 界面渲染「vundefined」/「Invalid Date」，
+    且 `parent_version == null` 恒真 ⇒ **diff 请求永不发**。
+    """
+    new_ghosts = sorted(_ghost_shape_candidates() - set(GHOST_SHAPE_DEBT))
+    assert not new_ghosts, (
+        f"发现新增的「无背书响应类型」：{new_ghosts} —— "
+        "前端拿它当端点响应类型，而后端 OpenAPI 里没有同名 schema、它也不是从 "
+        "types.generated.ts 重导出 ⇒ 运行时字段可能对不上（幽灵形状）。"
+        "正解：改成从 types.generated.ts 重导出；确实只能手写则登记到 "
+        "GHOST_SHAPE_DEBT 并写明理由"
+    )
+
+
+def test_ghost_shape_debt_has_no_stale_entries() -> None:
+    """清单里每一项都必须**仍是**无背书的响应类型（改成重导出后必须删条目）。"""
+    stale = sorted(set(GHOST_SHAPE_DEBT) - _ghost_shape_candidates())
+    assert not stale, (
+        f"清单里有 {len(stale)} 条已不再是「无背书响应类型」：{stale} —— "
+        "说明它们已被改成重导出/已删除，请从 GHOST_SHAPE_DEBT 删除对应项（退债必须显式）"
+    )
+
+
+def test_ghost_shape_debt_entries_have_reasons() -> None:
+    """每条登记都必须写非空理由（空理由让复核者停止追问，等于没登记）。"""
+    empty = sorted(name for name, reason in GHOST_SHAPE_DEBT.items() if not reason.strip())
+    assert not empty, f"GHOST_SHAPE_DEBT 里有条目没写理由：{empty}"
+
+
+def test_ghost_shape_cap_must_not_exceed_historical_value() -> None:
+    """上限本身不得被放宽——断言对象是**硬编码历史值**，不是清单长度（自指断言）。"""
+    assert len(GHOST_SHAPE_DEBT) <= _GHOST_SHAPE_CAP_HISTORICAL, (
+        f"「不同名幽灵形状」清单从 {_GHOST_SHAPE_CAP_HISTORICAL} 涨到 "
+        f"{len(GHOST_SHAPE_DEBT)} 条 ⇒ 不得把上限当常量放宽来消警；"
+        "正解是把该类型改成从 types.generated.ts 重导出（或登记理由并说明为何不能改）"
+    )
+
+
+def test_endpoint_response_types_are_non_trivial() -> None:
+    """看守的读数不得为空（读不到端点 ⇒ 上面几条会**假绿**）。"""
+    used = _endpoint_response_types()
+    assert len(used) >= 30, (
+        f"只解析到 {len(used)} 个端点响应类型（预期 ≥30）⇒ 解析口径失效，"
+        "上面的幽灵形状看守会假绿"
+    )
+    assert "CommitListItem" in used, (
+        "commits 端点应当声明生成类型 CommitListItem ⇒ 它不在解析结果里 ⇒ 解析口径失效"
     )

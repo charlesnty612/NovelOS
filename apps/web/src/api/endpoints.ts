@@ -21,7 +21,7 @@ import type {
   CharacterCreatePayload,
   CharacterState,
   CharacterUpdatePayload,
-  Commit,
+  CommitListItem,
   ConnectionCreatePayload,
   ConnectionPresetOut,
   ConnectionTestResult,
@@ -339,7 +339,12 @@ export interface StateDiffResponse {
 }
 
 export const commitsApi = {
-  list: (pid: string) => api.get<Commit[]>(`/projects/${pid}/commits`),
+  // ⚠️ 2026-11-04：返回类型必须是**生成类型** `CommitListItem`（13 键）——
+  // 此前是手写 `Commit`（7 键：version/parent_version/message/author/created_at），
+  // 而 `commits` 表**根本没有这五列** ⇒ 运行时恒 undefined ⇒ 界面渲染
+  // 「vundefined」/「Invalid Date」，且 `parent_version == null` 恒真
+  // ⇒ diff 请求永不发。⇒ 手写副本已删（见 `types.ts`）。
+  list: (pid: string) => api.get<CommitListItem[]>(`/projects/${pid}/commits`),
   /**
    * 回滚某个 commit（`POST /commits/{cid}/rollback`）。
    *

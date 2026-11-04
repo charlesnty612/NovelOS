@@ -25,7 +25,7 @@ import {
 import type {
   Branch,
   Chapter,
-  Commit,
+  CommitListItem,
   HealthResponse,
   Project,
   SnapshotResponse,
@@ -53,7 +53,7 @@ export function ProjectOverviewPage() {
     () => storyStateApi.getCurrent(projectId),
     [projectId],
   );
-  const { data: commits, error: commitErr } = useApiCall<Commit[]>(
+  const { data: commits, error: commitErr } = useApiCall<CommitListItem[]>(
     () => commitsApi.list(projectId),
     [projectId],
   );
@@ -218,7 +218,14 @@ export function ProjectOverviewPage() {
           {commits ? (
             <div className="muted small" style={{ marginTop: 4 }}>
               共 {commits.length} 次提交
-              {commits[0] ? `；最新 v${commits[0].version}` : ''}
+              {/* ⚠️ 2026-11-04：后端 `list_commits` 是
+                  `ORDER BY resulting_state_version ASC` ⇒ **commits[0] 是最早那条**
+                  ⇒ 此前这里显示的「最新」取的是**最旧**的一条；且字段名
+                  `version` 后端没有 ⇒ 渲染「vundefined」。⇒ 改取**末条** +
+                  真实字段 `resulting_state_version`。 */}
+              {commits.length > 0
+                ? `；最新 v${commits[commits.length - 1].resulting_state_version}`
+                : ''}
             </div>
           ) : null}
         </div>

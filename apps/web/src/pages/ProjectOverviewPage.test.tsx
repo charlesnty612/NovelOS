@@ -16,7 +16,7 @@ import {
 } from '../api/endpoints';
 import type {
   Chapter,
-  Commit,
+  CommitListItem,
   HealthResponse,
   Project,
   StyleSample,
@@ -69,7 +69,7 @@ const baseSnapshot = {
   events: { evt_1: { event_id: 'evt_1' }, evt_2: { event_id: 'evt_2' } },
   recent_events: [{ event_id: 'evt_2' }],
 };
-const baseCommits: Commit[] = [];
+const baseCommits: CommitListItem[] = [];
 const baseChapters: Chapter[] = [
   { chapter_id: 'ch_1', project_id: 'prj_001', number: 1, title: '一', plan_json: {}, status: 'COMMITTED', visibility: 'public', who_knows: null, created_at: '', updated_at: '' },
   { chapter_id: 'ch_2', project_id: 'prj_001', number: 2, title: '二', plan_json: {}, status: 'DRAFTED', visibility: 'public', who_knows: null, created_at: '', updated_at: '' },
