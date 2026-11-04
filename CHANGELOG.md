@@ -101,7 +101,11 @@ C-43 横幅提示改按 `workflow_name`；C-44 pause_payload 解析收敛单点�
   `ruff` clean；`npx tsc -b --force` 零错、`npx vitest run` **942 全绿**、`npm run build` 通过；
   precheck **93 文件 / 492 条 / 0 问题**（484 + 9 新增 − 1 删除，账对得上）；`smoke_e2e.py` PASS
   （tables=42 + 十步全链 + 挂卷重装配 + SYNC OK）；残留三项（`.mutbak*` 0 / 生产源码标记 0 / `git status`
-  净）。
+  净）。**CI run `41895647485`（head `841f4c6` = 本批代码终点）四 job 全绿**
+  （backend pytest+ruff / e2e smoke / web build+vitest / windows OS-specific）⇒ 本批 4749 例**在 Linux 上亦全绿**。
+  ⚠️ 推送踩坑留痕：直连 IP 可达性逐分钟漂移（`curloptResolve` 重试 3 次才推上）⇒ 用户指认本机 VPN
+  代理端口 `127.0.0.1:7897` ⇒ 已固化为全局默认 `http.https://github.com/.proxy`（只对 github.com 生效；
+  AGENTS §四连通性行留痕含撤销命令）；pre-push 护栏照旧要 `NOVELOS_ALLOW_PUSH=1`。
 
 **登记不修 / 残余（如实登记）**：C-25（`chapter_summaries` 两读者口径各自正确）、C-35（活跃 run/新鲜稿 SQL
 刻意复制——注释声明的架构决定）；C-1 残余（被拦截 run 仍可能更新卷 title/arc_summary）；C-14 后续裁决
