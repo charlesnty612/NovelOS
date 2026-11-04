@@ -287,6 +287,65 @@ def test_quality_list_survives_wrong_shaped_scores_json(tmp_path: Path):
     assert r.json()[0]["scores_json"] == {}, r.json()[0]
 
 
+def test_quality_list_survives_unparseable_issues_json(tmp_path: Path):
+    """``issues_json`` 是**未解析文本**（语法就坏）⇒ 降级 ``[]``，干净行不陪葬。
+
+    ⚠️ 判别力注记（2026-11-05 批次三十六收尾，L0-QJSON2 存活诊断）：上面两条
+    「形状脏」用例在 C-31（``_sanitize_issue_literals``）落地后**不再判别解码层**——
+    形状脏即使漏过 ``_decode_json_field`` 也会被 sanitize 收走（``not isinstance(
+    raw, list) ⇒ return []``）⇒ 突变 L0-QJSON2（撤解码兜底改裸 ``json.loads``）
+    实测存活。本条补「语法就坏」形态：裸 ``json.loads`` 在这里**必抛** ⇒
+    端点 500 ⇒ 突变必红（解码兜底重新被钉住）。
+    """
+    app = _app(tmp_path)
+    pid = _project(app)
+    ch = new_id("ch")
+    _exec(
+        app,
+        "INSERT INTO chapters (chapter_id, project_id, number, title, plan_json,"
+        " status, visibility, who_knows, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (ch, pid, 1, "C", "{}", "PLANNED", "VISIBLE", None,
+         "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+    )
+    clean_issues = json.dumps(
+        [{
+            "rule_id": "W-LEN",
+            "severity": "warning",
+            "category": "pacing",
+            "gate": "auto",
+            "message": "字数欠带",
+        }],
+        ensure_ascii=False,
+    )
+    _seed_report(app, pid, ch, scores=json.dumps({"pacing": 80}), issues=clean_issues, overall=80)
+    _seed_report(app, pid, ch, scores=json.dumps({"pacing": 70}), issues='{"broken"', overall=70)
+
+    r = _get(app, f"/api/projects/{pid}/quality")
+    assert r.status_code == 200, f"一行语法坏的 issues_json 让整个列表 500：{r.text[:200]}"
+    rows = {x["overall"]: x for x in r.json()}
+    assert rows[70]["issues_json"] == [], rows  # 脏行退空
+    assert rows[80]["issues_json"] != [], rows  # 干净行不陪葬
+
+
+def test_quality_list_survives_unparseable_scores_json(tmp_path: Path):
+    """``scores_json`` 是**未解析文本** ⇒ 降级 ``{}``（与 issues_json 同形态对齐）。"""
+    app = _app(tmp_path)
+    pid = _project(app)
+    ch = new_id("ch")
+    _exec(
+        app,
+        "INSERT INTO chapters (chapter_id, project_id, number, title, plan_json,"
+        " status, visibility, who_knows, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (ch, pid, 1, "C", "{}", "PLANNED", "VISIBLE", None,
+         "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+    )
+    _seed_report(app, pid, ch, scores='{"pacing":', issues="[]", overall=60)
+
+    r = _get(app, f"/api/projects/{pid}/quality")
+    assert r.status_code == 200, f"一行语法坏的 scores_json 让整个列表 500：{r.text[:200]}"
+    assert r.json()[0]["scores_json"] == {}, r.json()[0]
+
+
 # ---------------------------------------------------------------------------
 # world entities (locations / factions / world_rules).data_json
 # ---------------------------------------------------------------------------
