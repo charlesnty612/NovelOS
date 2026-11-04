@@ -357,6 +357,8 @@ def commit_delta(
     *,
     branch_id: str | None = None,
     draft_version: int | None = None,
+    chapter_status_after: str | None = None,
+    chapter_status_expect: str | None = None,
     _inverse_cleanup: dict | None = None,
     _rollback_of: str | None = None,
     _skip_approval: bool = False,
@@ -394,6 +396,19 @@ def commit_delta(
         - 同步 mutate 当前 state（new_state 副本）：剔除 recent_events / events / hooks[]。
 
     ``_inverse_cleanup`` 是私有入参（仅 rollback_commit 使用）。
+
+    ``chapter_status_after`` / ``chapter_status_expect``（2026-11-04 新增）：
+    把「章节状态推进」放进**本次 commit 的同一事务**。
+    - ``chapter_status_after=None``（默认）：不改章节状态 ⇒ **逐位不变**
+      （其余四个调用方：手工提交端点 / What-if 模拟 / 分支 promote / rollback）。
+    - 给了目标状态：事务内执行 ``UPDATE chapters SET status=…``；若同时给了
+      ``chapter_status_expect``，则**先在事务内读当前状态**核对 ⇒ 不一致就抛
+      :class:`StateConflictError` 并回滚 ⇒ **要么都变、要么都不变**。
+    - ⚠️ 为什么要放进事务：此前 chapter-commit 节点在 commit_delta **之后**另开
+      一条连接改状态 ⇒ 两个事务 ⇒ 中间崩溃 ⇒ ``story_states`` 已推进而章状态未变
+      （重跑再 +1 版本）；且那条 UPDATE **无 status 条件** ⇒ 并发改稿被盖回 COMMITTED。
+    - ⚠️ 期望状态由**调用方**给（常规 REVIEWED / 快通道 DRAFTED）——本层不猜
+      状态机（快通道的 DRAFTED→COMMITTED 不在 ``ALLOWED_NEXT`` 里，是有意的特例）。
 
     ``draft_version``（2026-10-23 新增，迁移 0034）：**本次 commit 所定的那一版
     草稿**的 ``drafts.version``（= 质量门实际量过、且被放行的那一版）。
@@ -802,6 +817,40 @@ def commit_delta(
             "UPDATE state_deltas SET status = 'applied' WHERE delta_id = ?",
             (delta_id,),
         )
+
+        # 9.5) 章节状态：与本次 commit **同一事务**（2026-11-04）
+        #
+        # ⚠️ 此前 chapter-commit 节点在 commit_delta **之后**另开一条连接改
+        # ``chapters.status`` ⇒ **两个事务** ⇒ 中间崩溃 ⇒ ``story_states`` 已推进、
+        # ``commits`` 行已落，而章状态未变；重跑 commit 会以新的 previous_state_version
+        # 再提交一次 ⇒ ``state_version`` 再 +1。且那条 UPDATE **无 status 条件**
+        # ⇒ 并发改稿（create_draft 把章降回 DRAFTED）会被盖回 COMMITTED。
+        # ⇒ 移进本事务，并用「期望的当前状态」做**事务内乐观锁**：状态被并发改过
+        # ⇒ 抛冲突 ⇒ 整个事务回滚 ⇒ **要么都变、要么都不变**。
+        #
+        # ⚠️ ``chapter_status_expect`` 为 None ⇒ 不做乐观锁（调用方自己保证）。
+        # ⚠️ 本参数**默认 None** ⇒ 其余四个调用方（手工提交端点 / 模拟 / 分支 promote /
+        # rollback）行为**逐位不变**。
+        if chapter_status_after is not None:
+            target_chapter_id = delta_row["chapter_id"]
+            if chapter_status_expect is not None:
+                cur_row = conn.execute(
+                    "SELECT status FROM chapters WHERE chapter_id = ?",
+                    (target_chapter_id,),
+                ).fetchone()
+                current_status = cur_row["status"] if cur_row is not None else None
+                if current_status != chapter_status_expect:
+                    conn.rollback()
+                    conn.close()
+                    raise StateConflictError(
+                        f"chapter {target_chapter_id!r} status={current_status!r}，"
+                        f"提交时期望 {chapter_status_expect!r} ⇒ 状态已被改动，本次提交已回滚",
+                        delta_id=delta_id,
+                    )
+            conn.execute(
+                "UPDATE chapters SET status = ?, updated_at = ? WHERE chapter_id = ?",
+                (chapter_status_after, now, target_chapter_id),
+            )
 
         conn.commit()
     finally:

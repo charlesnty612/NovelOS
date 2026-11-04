@@ -352,6 +352,8 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
         cur = conn.execute("SELECT status FROM chapters WHERE chapter_id = ?", (chapter_id,)).fetchone()
         if cur is None:
             raise ValueError(f"chapter {chapter_id!r} not found")
+        # 本次读到的章节状态（2026-11-04）：传给 commit_delta 做**事务内乐观锁**。
+        observed_status = cur["status"]
         # 状态机：默认必须先 REVIEWED 才能 COMMITTED；DRAFTED 直接 commit 拒绝。
         #
         # 快通道（2026-10-14，`ctx["fast_mode"]`，由 projects.fast_mode 驱动）：
@@ -424,19 +426,17 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "notes": notes,
     }
     commit_result = svc.commit_delta(
-        delta_id, author_approval, run_id, draft_version=_reviewed_draft_version_of(ctx)
+        delta_id, author_approval, run_id, draft_version=_reviewed_draft_version_of(ctx),
+        # ⚠️ 2026-11-04：章节状态与本次 commit **同一事务**。
+        # 此前是 commit_delta 之后**另开一条连接**改 ⇒ 两个事务 ⇒ 中间崩溃 ⇒
+        # story_states 已推进、commits 行已落，而章状态未变；重跑 commit 会以新的
+        # previous_state_version 再提交一次 ⇒ state_version 再 +1。且那条 UPDATE
+        # **无 status 条件** ⇒ 并发改稿（create_draft 把章降回 DRAFTED）会被盖回 COMMITTED。
+        # ⇒ 移进 commit_delta 的事务，并带上「本次读到的状态」做事务内乐观锁：
+        #    状态被并发改过 ⇒ 抛 StateConflictError ⇒ 整个事务回滚 ⇒ 要么都变要么都不变。
+        chapter_status_after="COMMITTED",
+        chapter_status_expect=observed_status,
     )
-
-    # chapters.status REVIEWED→COMMITTED
-    conn = get_connection(db_path)
-    try:
-        conn.execute(
-            "UPDATE chapters SET status = 'COMMITTED', updated_at = ? WHERE chapter_id = ?",
-            (now_iso(), chapter_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
 
     # V2.0 Wave C P1-1：commit 成功后显式失效本章装配缓存（兜底）。
     # 正常情况下 state_version 已推进，缓存键自然失效；此处对"plan_json

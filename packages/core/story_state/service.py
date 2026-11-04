@@ -92,6 +92,8 @@ class StoryStateService:
         *,
         branch_id: str | None = None,
         draft_version: int | None = None,
+        chapter_status_after: str | None = None,
+        chapter_status_expect: str | None = None,
         _inverse_cleanup: dict | None = None,
         _rollback_of: str | None = None,
         _skip_approval: bool = False,
@@ -99,6 +101,8 @@ class StoryStateService:
         return commits.commit_delta(
             self, delta_id, author_approval, workflow_run_id,
             branch_id=branch_id, draft_version=draft_version,
+            chapter_status_after=chapter_status_after,
+            chapter_status_expect=chapter_status_expect,
             _inverse_cleanup=_inverse_cleanup,
             _rollback_of=_rollback_of, _skip_approval=_skip_approval,
         )
