@@ -5,6 +5,110 @@
 
 ## [Unreleased]
 
+### Fixed（2026-11-05 · 批次三十六 · B 档 45 条全面修复 + 4 个功能缺口：43 修 + 2 登记 + promote 审批出路 + 前端四入口）
+
+> **来源**：批次三十五收尾后，B 档 57 条候选由专项会话逐条实证完毕（报告
+> `docs/impl/reviews/b-tier-verify-2026-11-04.md`，**确认 45 / 推翻 12 / 不可判 0**，探针 6 支可复跑）；
+> 中危 4 条（C-1~C-4）由 Lead 在规划期**亲验成立**（`engine.py` UPDATE 无状态条件 / `_dump_json`
+> 无兜底 / `project_init` DELETE 无状态过滤 / `commits.py:494` × `branches.py` 不带 `approved`）。
+> **用户裁决（2026-11-05）**：45 条**全收**（含 C-41/C-45 两个功能缺口）；**批 10 收尾与全部批完成后的
+> review 由 Lead 亲自做、发现问题亲自改**。
+> **执行形态**：批 0（报告合并）→ 波 1（7 名文件路径互斥成员并行：引擎 / 路由+runtime / 门禁 / write /
+> plan+outline / story_state / init+deconstruct）→ codegen regen → 前端成员（批 8+9）→ **批 10 收尾（Lead 串行）**。
+> **零真实 LLM 调用、零内容仓接触、活库业务数据零改动**；13 个提交（`90c6b19`…`e18c769`）逐批独立可回滚。
+
+**批 1 · 工作流引擎域**（`fe123b5`）：**C-3**（中危）resume TOCTOU ⇒ `_mark_run_running` 加
+`AND status='PAUSED'` + rowcount 判 0 抛 `WorkflowRunConflict`（与 0017 索引冲突正交）；**C-4**（中危）
+节点产出不可序列化 ⇒ run 永久 RUNNING ⇒ `_dump_json_safe` 单点（repr 截断兜底 + 错误传播契约）4 落点
+全接，失败 ⇒ 节点 FAILED + run 显式终态；C-7 找不到 `current_node` ⇒ 拒 resume（⚠️ `current_node IS NULL`
+保持旧行为 + WARNING——兼容两个既有竞态用例，有意收窄）；C-34 未注册 exclude ⇒ warning；C-13 delta 残留
+⇒ 终态 FAILED/CANCELLED（按**实际终态**判定，含 PAUSED→CANCELLED 竞态分支）时遗留 proposed/validated
+置 `superseded`（复用既有闭集取值，不 DELETE；启动自愈路径同补）。突变规格 `l27` 3 条。
+
+**批 2 · 模型路由 + agent_runtime**（`553609c`）：**C-6** 档案级 `timeout_s` 对 anthropic/ollama 静默忽略
+（构造器默认 60s 吞配置；opencode 网关的 Claude/MiniMax/Qwen 系全走 anthropic ⇒ 全量受害）⇒ 三协议统一
+生效；C-32 `call_with_fallback` 的 `except Exception` 收窄为显式可转移族 `(OSError, httpx.HTTPError)` +
+ProviderError ⇒ 编程错误直接上抛；C-33 删 `resolve_effective` 死形参 `provider` 与 `upstream_params` 死字段
+（grep/AST 双证零生产消费）；C-12 `_upsert_prompt` 未变分支补 `conn.commit()` ⇒ role/config_json 刷新不再被
+隐式回滚；C-11 `_VALIDATORS` 补 `summarizer`（summary 硬必填；key_facts/self_report 在场才校验——不强制，
+避免误伤存量 mock）+ 未知 `expected` 改 warning。
+
+**批 3 · 评审/提交门禁**（`c09a148`）：**C-5** `_latest_review_report_draft_version` 加
+`AND wr.status='COMPLETED'`（快通道下门禁不再量旧版本、导出不再按 `commits.draft_version` 指旧稿；
+与 2026-10-23 B4 优先级裁决不冲突——那条定优先级、本条定候选资格）；**C-31** 脏 `issues_json` 的 Literal
+表外值 ⇒ 列表 500 ⇒ `_sanitize_issue_literals` 读路径逐条降级（合法集从 `issues.py` Literal `get_args`
+派生；放 service——三条出参路径唯一汇合点）；C-38 不可检报告跳过「取最新」补全；**C-42** evaluate 端点加
+可选 query `draft_version`（不存在 ⇒ 201 + 不可检硬停，批次三十五语义）。
+
+**批 4 · chapter_write + writer 装配**（`c696b39`）：C-15 测量路径按内容剥 REVISION-CHECKLIST 尾块
+（不看 mode；连带修一条**靠该测量 bug 才成立**的 e2e 夹具——MockProvider 列表不跨调用推进）；C-17
+`length.py` 两处裸 except 补 warning；C-19 `_condense_node` payload 假标签（condense/condense:v1，仓内无此
+提示词）⇒ 真值 polisher + ACTIVE 现算；C-20 drafts 溯源按**被采纳 attempt 的 call_id** 精确回查（fail-soft
+回退）；**C-16** writer 死字段（硬规则 9 反向族）⇒ 提示词**升版 v6**（v5 本体未动）：删 `last_scene_excerpt`/
+`retrieved_memory` 死声明、如实补 `recalled_passages`、E-WRT-10 改锚（⚠️ v6 效果未验证——零真实 LLM，
+按仓惯例登记）。
+
+**批 5 · plan / outline_batch / workflows API**（`351ed11`）：**C-8** `start_plan` 服务端状态闸门
+（chapter-plan 只放行 PLANNED，对齐前端契约；其余 409）⇒ API 直调不能再对 COMMITTED 章重写 plan_json
+连带覆盖门禁键；C-18 请求体显式 `target_word_count` 为 plan 落库字数最高优先（显式 > director > 继承 >
+题材包 > 默认）；C-21/C-26 抽单点 `aligned_active_prompt_label`（先自愈再取 ACTIVE）供 planner 与
+outline_batch 共用；C-24 未闭环状态集副本改 import 单点（frozenset 显式 sorted 再拼占位符）；C-27 建章挂
+项目第一卷；**C-28 迁移 0038**：`chapters(project_id,number)` 唯一索引（存量重号按 `(created_at,rowid)`
+确定序重编号再建索引——防 dev 库存量重号让迁移失败）；C-36/C-37 两处失准注释订正（零行为）。连带：
+0038 暴露的同号夹具 2 处（`test_sprint14_summaries` / `test_chapter_reopen`）+ 全仓 AST 扫描同形态仅此 2 处。
+
+**批 6 · story_state**（`65f5791`）：**C-2**（中危）分支含 HIGH 风险 delta ⇒ promote 永远 409 且无出路 ⇒
+`promote_branch` 加 `author_approval` + **重放前置预检**（先收集全部 HIGH id，未批 ⇒ 任何重放前抛
+`ApprovalRequiredError`——消灭「中途失败留半 promote」面）⇒ 获批把 `approved=True` 并进重放审计、approver
+如实落库；router 加可选 body 字段；C-14 skills 指纹加 `name` 维度（`id:version:hex(name)`，主 peek 与降级
+SQL **逐字同形**——硬规则 2；实证边界：真受害面 = payload 无 name 的存量/导入记录）；C-29 自定义名推演
+出口改 `project_id + (ARCHIVED OR sim-%)`（ARCHIVED 唯一写路径已 grep 确认）；C-30 delivery evidence
+单连接复用（`resolve_draft` 加可选 `conn=`，默认 None 兼容）。突变规格 `l31` 2 条。
+
+**批 7 · init / deconstruct**（`dfb8e1e`）：**C-1**（中危）重跑按卷重建无状态过滤 ⇒ DELETE 前显式预检
+（同事务 + `BEGIN IMMEDIATE` 保原子）：只允许删 `status='PLANNED'` 且无 drafts 的章，其余逐章列出 ⇒ run
+FAILED 零删除（不给 force 旗标；残余：被拦截 run 仍可能已更新卷 title/arc_summary——零删除非零写，登记）；
+C-9/C-10 拆书补 `project_id=` + `project_level_guard=True`（归属发起项目 + 同项目并发 409）；C-23 两端点改
+异步受理（照 outline-batch 先例；端点清单契约 7→8；删除异步下不可达的 422 分支）。
+
+**批 8+9 · 前端**（`36bbb3f`）：C-22 后端 `plan_json` 改 **read-modify-write 保留合并**
+（`revision_note`/`gate_blocked`/`suggested_hashes` 未显式提供时由 DB 现值保留；显式带含 null ⇒ 请求体为准；
+Lead 亲补仓内判别用例 5 例断言 DB 落库真值）+ 前端 UX 兜底；C-39 文案如实；C-40 前端 `ALLOWED_NEXT` 对齐
+后端（真缺的是 REVIEWED→DRAFTED、COMMITTED→REVIEWED 两条边）；C-42 `qualityApi.evaluate` 加版本入参；
+C-43 横幅提示改按 `workflow_name`；C-44 pause_payload 解析收敛单点（对齐服务端 current_node 优先级）；
+批 7 配套拆书异步接线（受理语义 + 轮询 + `DeconstructStartResponse` 退役）；批 6 配套 promote 审批接线
+（409 `approval_required` ⇒ 确认框列 `high_risk_change_ids` ⇒ 带 `author_approval` 重发）；
+**C-41** 策展大纲 UI（`ChapterOutlineSection` 独立组件防「一列两用」）；**C-45①** 按次字数+铁律共享输入
+（与 gateRevise 共用，空/非法不下发）；**C-45②** 伏笔逾期阈值项目入口（只在值变化时下发）；**C-45③**
+`SkillsPanel`（8 端点消费、覆盖式有序绑定整链提交、409 先解绑提示、创建/编辑 Modal）。
+
+**批 10 · 收尾（Lead 串行，全程亲自）**：
+- **死模型/规格同步**（`6e8587f`）：`DeconstructStartResponse` 随异步受理退役删除；g7 的 M11 删除、
+  M12/M13 改指 `WorkflowStartAccepted`；l7 的 SKILL-PROMPT-1 目标随升版改指 `writer-v6.md`
+  （否则成「锚点仍在、永不红」的腐化规格）。
+- **突变档②**：`run_spec --all --changed --changed-since 4751528` **串行**，命中 **37 个规格文件**；
+  唯一存活 `L0-QJSON2` ⇒ **三段诊断**（C-31 新防线 `_sanitize_issue_literals` 把形状脏也收走 ⇒ 旧断言
+  判别域被吞——「断言按结果写 ⇒ 被别的检查兜住」族第 2 次；quality 侧从未有「语法就坏」用例 ⇒ 解码兜底
+  在该形态无看守）⇒ 补 2 条「未解析文本 ⇒ 200 + 脏行退空 + 干净行不陪葬」用例（`a339559`）⇒ l0 全规格
+  复跑 **CAUGHT、0 存活**。
+- **全量回归 7 例红逐例定谳**（`e18c769`）：① codegen 漂移 ×5 = 批 8+9 改 `WorkflowStartAccepted`
+  **docstring 进了 schema description** ⇒ regen（111 paths / 146 schemas）；② 架构看守 ×1 = 批 2 docstring
+  写了字面 `packages.workflows.…` ⇒ 撞 `test_no_core_to_workflows_dep` 的**文本级 grep** ⇒ 改述零行为；
+  ③ volumes 夹具 ×1 = `INSERT OR IGNORE` + 固定 number=1 在 0038 唯一索引下**静默跳过** ⇒ delta FK 悬空
+  ⇒ number 改 `max+1`（0038 连带夹具第 3 种形态）。
+- **验收**：全量 pytest **4746 passed / 1 skipped / 2 xfailed / 0 failed**（217.31s，`-n 20`，仓外
+  basetemp；较批次三十五基线 4630 **+116**）；树指纹 **823 文件 / `bde74f45…`** 跑测前后**逐位一致**；
+  `ruff` clean；`npx tsc -b --force` 零错、`npx vitest run` **942 全绿**、`npm run build` 通过；
+  precheck **93 文件 / 492 条 / 0 问题**（484 + 9 新增 − 1 删除，账对得上）；`smoke_e2e.py` PASS
+  （tables=42 + 十步全链 + 挂卷重装配 + SYNC OK）；残留三项（`.mutbak*` 0 / 生产源码标记 0 / `git status`
+  净）。
+
+**登记不修 / 残余（如实登记）**：C-25（`chapter_summaries` 两读者口径各自正确）、C-35（活跃 run/新鲜稿 SQL
+刻意复制——注释声明的架构决定）；C-1 残余（被拦截 run 仍可能更新卷 title/arc_summary）；C-14 后续裁决
+（skill 行名 vs payload 名谁权威）；C-29 的 ARCHIVED 是代理判据（未来出现非推演归档写路径需回头改）；
+C-22 UX 兜底会把作者手动删掉的门禁键合回（清除须走专用入口）；C-42 未加 `ge=1`（0/负数走不可检硬停而非
+422，fail-closed 方向）；writer-v6 / C-8 / C-18 的**模型行为效果未验证**（零真实 LLM）。
+
 ### Fixed（2026-11-04 · 批次三十五 · 业务链审计落地：A 档 6 条 + 写盘守卫跨平台治本 + CI 红了 10 天的根因）
 
 > **来源**：用户指令「ultracode 查一下业务链有没有问题」⇒ 多 agent 工作流只读审计（被叫停在测绘阶段）
