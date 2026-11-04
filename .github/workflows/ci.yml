@@ -141,7 +141,18 @@ jobs:
         run: python -c "import xdist; print('pytest-xdist', xdist.__version__)"
       - name: Windows-only tests (skipped on Linux CI)
         # 这两个文件在 ubuntu 上整片 `skipif(not WIN)` / 走不到 → 只有这里真跑。
-        run: python -m pytest tests/unit/test_pid_alive_windows_probe.py tests/unit/test_m1_lock.py -q
+        # ⚠️ 2026-11-04：追加 `test_conftest_guards.py` 与 `test_scripts_write_guard.py`
+        # —— 这两个文件里各有一条**携带 Windows-only 语义**的用例（``\\?\`` 扩展长度
+        # 前缀 / `\` 分隔符的 `..` 折叠）。它们在 ubuntu 的 backend job 上**恒红**
+        # （2026-10-25 起 backend job 红了 10 天没人看）⇒ 改成 win32-only 之后，
+        # **必须由本 job 真跑**，否则「标了 skip」就等于「零覆盖」。
+        run: >-
+          python -m pytest
+          tests/unit/test_pid_alive_windows_probe.py
+          tests/unit/test_m1_lock.py
+          tests/unit/test_conftest_guards.py
+          tests/unit/test_scripts_write_guard.py
+          -q
       - name: Parallel path smoke (xdist + temp dirs on Windows)
         # backend job 的 pytest **不带 `-n`**（串行）⇒ 并行路径在 CI 上零覆盖。
         # 这里跑一小片带 `-n 4`：覆盖 xdist worker 的临时目录/文件句柄/进程语义差异。

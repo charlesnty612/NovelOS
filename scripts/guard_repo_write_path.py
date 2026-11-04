@@ -49,9 +49,12 @@ AGENTS.md 硬规则 5「软件 / 内容 / **痕迹**三仓分离」此前对**�
 
 from __future__ import annotations
 
+import ntpath
 import os
+import posixpath
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 #: 软件仓根（本模块所在 ``scripts/`` 的上一级）。
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -187,31 +190,88 @@ def _trim_components(rest: str) -> list[str]:
     return comps
 
 
-def normalize_for_compare(path: Path | str) -> str:
-    """把路径归一为**可用于仓内外比较**的字符串（Windows 口径，小写）。
+@dataclass(frozen=True)
+class PathFlavor:
+    """**路径口径**：归一函数 + 分隔符（两者必须同款）。
+
+    ⚠️ 为什么必须成对（2026-11-04，CI 红了 10 天的根因之一）：
+    ``ntpath.normpath`` 恒产 ``\\``、``posixpath.normpath`` 恒产 ``/``
+    ⇒ 归一产出的分隔符是**平台属性** ⇒ 比较时必须用**同一个平台**的分隔符。
+    原实现把分隔符**硬编码成 ``"\\"``** ⇒ POSIX 上 ``startswith(prefix)`` 恒为假
+    ⇒ 仓内**子路径**只能靠身份核兜底 ⇒ 而身份核对**尚不存在**的路径必然失败
+    ⇒ ``check_write_path`` 在非 Windows 上把仓内路径判成仓外 ⇒ **放行写入**。
+
+    ⚠️ 抽成对象而不是就地写 ``os.sep``：``os.sep`` 是**平台常量** ⇒ 在 Windows 上
+    本地无法区分「用对了分隔符」与「碰巧同款」⇒ **量具盲区**。⇒ 口径**显式可注入**
+    ⇒ POSIX 整条链路**可在任意平台直接单测**（本仓 CI 跑 Linux、本地是 Windows
+    ⇒ 平台差异必须能本地验，不能只靠 CI）。
+    """
+
+    normpath: Callable[[str], str]
+    sep: str
+
+
+#: Windows 口径（``ntpath.normpath`` 恒产 ``\\``）。
+WINDOWS_FLAVOR = PathFlavor(ntpath.normpath, "\\")
+#: POSIX 口径（``posixpath.normpath`` 恒产 ``/``）。
+POSIX_FLAVOR = PathFlavor(posixpath.normpath, "/")
+#: 本平台口径（与 ``os.path`` 逐位等价：Windows 上 ``os.path`` 即 ``ntpath``）。
+DEFAULT_FLAVOR = WINDOWS_FLAVOR if os.name == "nt" else POSIX_FLAVOR
+
+
+def normalize_for_compare(
+    path: Path | str, *, flavor: PathFlavor = DEFAULT_FLAVOR
+) -> str:
+    """把路径归一为**可用于仓内外比较**的字符串（小写）。
 
     判据来源：Windows 打开文件时的真实路径解析规则（扩展长度前缀会被接受、
     分量尾随空格/点会被裁掉、路径比较**不区分大小写**）。
+
+    ⚠️ 口径**跨平台统一按 Windows 规则**（大小写折叠 + 裁尾随空格/点）——
+    这样同一份代码在 Windows / POSIX 上判**一致**，且方向**偏严**
+    （把 ``/Foo`` 与 ``/foo`` 视作同一个 ⇒ 在 POSIX 上会误判「仓内」⇒ 拒写）
+    ⇒ 宁可误拒、不可漏放。
+
+    ⚠️ 分隔符**不在本函数归一**：``normpath`` 在 Windows 上产出 ``\\``、
+    在 POSIX 上保留 ``/`` ⇒ 比较时必须用**与产出同款**的分隔符
+    （见 :func:`_relative_from_normalized`）。**不要**在这里把 ``\\`` 换成 ``/``：
+    POSIX 上文件名**允许含反斜杠** ⇒ 归一会把两个不同路径折叠成同一个。
     """
     raw = _strip_extended_prefix(str(path))
-    raw = os.path.normpath(raw)
+    raw = flavor.normpath(raw)
     raw = _trim_win_trailing(raw)
     return raw.lower()
 
 
-def _relative_normalized(target: Path | str, root: Path | str) -> str | None:
+def _relative_from_normalized(n_target: str, n_root: str, sep: str) -> str | None:
+    """**已归一**的两个字符串之间的相对路径（正斜杠）；不在 ``root`` 之下 ⇒ ``None``。
+
+    ``root`` 本身 ⇒ ``"."``。
+
+    ⚠️ **纯字符串函数**（不碰 ``os.path``）⇒ POSIX 口径**可在任意平台直接单测**
+    ——本仓的 CI 跑在 Linux 上，而 Windows 上只能靠这个纯函数验 POSIX 行为。
+
+    ⚠️ ``sep`` 必须与 :func:`normalize_for_compare` **产出**的分隔符同款
+    （见 :class:`PathFlavor`）。
+    """
+    if n_target == n_root:
+        return "."
+    prefix = n_root if n_root.endswith(sep) else n_root + sep
+    if n_target.startswith(prefix):
+        return n_target[len(prefix):].replace(sep, "/")
+    return None
+
+
+def _relative_normalized(
+    target: Path | str, root: Path | str, *, flavor: PathFlavor = DEFAULT_FLAVOR
+) -> str | None:
     """规范化后的相对路径（正斜杠）；不在 ``root`` 之下 ⇒ ``None``。
 
     ``root`` 本身 ⇒ ``"."``。
     """
-    n_root = normalize_for_compare(root)
-    n_target = normalize_for_compare(target)
-    if n_target == n_root:
-        return "."
-    prefix = n_root if n_root.endswith("\\") else n_root + "\\"
-    if n_target.startswith(prefix):
-        return n_target[len(prefix):].replace("\\", "/")
-    return None
+    n_root = normalize_for_compare(root, flavor=flavor)
+    n_target = normalize_for_compare(target, flavor=flavor)
+    return _relative_from_normalized(n_target, n_root, flavor.sep)
 
 
 def _same_location(a: Path, b: Path) -> bool:
@@ -388,15 +448,20 @@ __all__ = [
     "ARTIFACTS_ENV_VAR",
     "ARTIFACTS_EVALUATION_RELPATH",
     "ARTIFACTS_RUNS_RELPATH",
+    "DEFAULT_FLAVOR",
     "EXIT_ARTIFACTS_UNAVAILABLE",
     "EXIT_WRITE_PATH_REJECTED",
+    "POSIX_FLAVOR",
     "REPO_ROOT",
+    "WINDOWS_FLAVOR",
     "ArtifactsResolution",
     "ArtifactsUnavailableError",
+    "PathFlavor",
     "RepoWritePathError",
     "check_write_path",
     "format_artifacts_unavailable",
     "is_inside_repo",
+    "normalize_for_compare",
     "relative_in_repo",
     "resolve_artifacts_root",
 ]

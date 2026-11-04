@@ -57,6 +57,16 @@ ISR_SCRIPT = SCRIPTS_DIR / "inspect_stalled_runs.py"
 EXIT_WRITE_PATH_REJECTED = 2
 EXIT_ARTIFACTS_UNAVAILABLE = 3
 
+#: 本平台是不是 Windows（**全仓 tests/ 下只用 ``sys.platform``**，不用 ``os.name`` /
+#: ``platform.system()``；见 ``tests/unit/test_pid_alive_windows_probe.py`` 的同款惯例）。
+#:
+#: ⚠️ 为什么需要它：本文件有三条用例携带 **Windows-only 语义**（``\\?\`` 扩展长度前缀、
+#: ``\`` 分隔符、盘符），而**本仓 CI 的 backend job 跑在 Linux 上** ⇒ 它们在 CI 上
+#: 必红（2026-10-25 起 backend job 恒红，红了 10 天没人看）。⇒ Windows 形状的用例
+#: 显式标 win32-only，**并由 CI 的 ``windows (OS-specific paths)`` job 真跑**
+#: （该 job 的命令清单必须含本文件 —— 否则「标了 skip」就等于「零覆盖」）。
+WIN = sys.platform == "win32"
+
 
 @pytest.fixture()
 def guard():
@@ -255,6 +265,13 @@ def test_guard_is_inside_repo_helper(guard) -> None:
 # 两条**同时**成立 ⇒ 撤掉规范化（退回旧的 ``relative_to`` 判定）时**必红**。
 
 
+@pytest.mark.skipif(
+    not WIN,
+    reason=(
+        "``\\\\?\\`` 扩展长度前缀是 **Windows 设备路径形态**；POSIX 上它只是一个"
+        "普通目录名 ⇒ 本用例的「前置证据」（该写法真落进仓内）在 POSIX 上不成立"
+    ),
+)
 def test_guard_rejects_extended_length_prefix_path_inside_repo(
     guard, tmp_path: Path, monkeypatch
 ) -> None:
@@ -265,6 +282,10 @@ def test_guard_rejects_extended_length_prefix_path_inside_repo(
     - 而 ``Path.resolve()`` **不剥扩展长度前缀** ⇒ 旧判定（``relative_to``）因前缀
       不同而抛 ``ValueError`` ⇒ 被判成「仓外」⇒ **守卫放行**（= 绕过）。
     ⇒ 守卫必须按**规范化后**的路径判定。
+
+    ⚠️ **Windows-only**：扩展长度前缀是 Win32 设备路径形态；POSIX 上 ``\\\\?\\`` 只是
+    一个普通目录名 ⇒ 「该写法真落进仓内」的前置证据在 POSIX 上**不成立**
+    ⇒ 本条在 POSIX 上标 skipif，并由 CI 的 windows job 真跑（见 ``WIN`` 常量注释）。
     """
     fake_repo = tmp_path / "fake_repo"
     (fake_repo / "docs").mkdir(parents=True)
@@ -427,10 +448,122 @@ def test_normalize_for_compare_folds_case(guard) -> None:
 
 
 def test_normalize_for_compare_folds_dotdot(guard) -> None:
-    """``..`` 必须折叠（否则 ``D:\\repo\\a\\..\\b`` 与 ``D:\\repo\\b`` 是两条路径）。"""
-    folded = guard.normalize_for_compare("D:\\repo\\a\\..\\b")
-    assert folded == "d:\\repo\\b"
-    assert folded == guard.normalize_for_compare("D:\\repo\\b")
+    """``..`` 必须折叠（否则 ``<repo>\\a\\..\\b`` 与 ``<repo>\\b`` 是两条路径）。
+
+    ⚠️ **形状按平台取**：``os.path.normpath`` 在 Windows 上认 ``\\`` 作分隔符、在
+    POSIX 上只认 ``/`` ⇒ POSIX 上 ``D:\\repo\\a\\..\\b`` 是**一个**普通分量（``..``
+    不是路径分量）⇒ 折叠不发生 ⇒ 那条断言携带 **Windows-only 语义**
+    （2026-10-25 起 CI 的 backend job 恒红的一条根因）。
+    ⇒ 这里改用**本平台**的路径形状，断言的**意图**（``..`` 必须折叠）跨平台不变。
+    """
+    if WIN:
+        raw = "D:\\repo\\a\\..\\b"
+        expect = "d:\\repo\\b"
+    else:
+        raw = "/repo/a/../b"
+        expect = "/repo/b"
+    folded = guard.normalize_for_compare(raw)
+    assert folded == expect
+    assert folded == guard.normalize_for_compare(expect)
+
+
+def test_relative_from_normalized_uses_the_separator_it_is_given(guard) -> None:
+    """``_relative_from_normalized`` 必须按**给定**的分隔符比较（纯字符串函数）。
+
+    ⚠️ 2026-11-04（CI 红了 10 天的根因之一）：本仓 CI 的 backend job 跑在 **Linux**
+    上，而本地是 Windows ⇒ **POSIX 口径没法用生产路径在本地验**。⇒ 把「已归一字符串
+    → 相对路径」这段**纯字符串比较**抽成独立函数后，POSIX 口径**可在任何平台直接单测**
+    ⇒ 不必依赖 CI 才能发现平台差异。
+
+    ⚠️ 缺陷形状：原先分隔符**硬编码成 ``"\\"``**（Windows 形态）⇒ POSIX 上
+    ``startswith(prefix)`` **恒为假** ⇒ 仓内**子路径**只能靠身份核兜底
+    ⇒ 而身份核对**尚不存在**的路径必然失败（``os.stat`` 抛 OSError）
+    ⇒ ``check_write_path`` 在非 Windows 上把仓内路径判成仓外 ⇒ **放行写入**。
+    """
+    n_root = "/home/runner/work/novelos/novelos"
+    # POSIX 口径：仓内子路径必须判仓内（**路径尚不存在**也必须判仓内 —— 写盘前的常态）
+    assert (
+        guard._relative_from_normalized(
+            "/home/runner/work/novelos/novelos/.b1_probe_lower", n_root, "/"
+        )
+        == ".b1_probe_lower"
+    )
+    # POSIX 口径：仓外路径必须判仓外
+    assert (
+        guard._relative_from_normalized("/home/runner/work/other/x.db", n_root, "/")
+        is None
+    )
+    # 仓根本身
+    assert guard._relative_from_normalized(n_root, n_root, "/") == "."
+    # Windows 形态：分隔符给 ``\\`` 时与旧实现逐位等价
+    assert (
+        guard._relative_from_normalized("d:\\repo\\docs\\x.md", "d:\\repo", "\\")
+        == "docs/x.md"
+    )
+    # ⚠️ 钉住「口径不是碰巧对」：给错分隔符 ⇒ 必须判仓外（旧实现在 POSIX 上就是这个）
+    assert (
+        guard._relative_from_normalized(
+            "/home/runner/work/novelos/novelos/x.db", n_root, "\\"
+        )
+        is None
+    )
+
+
+def test_relative_normalized_posix_flavor_finds_repo_internal_subpath(guard) -> None:
+    """生产函数 ``_relative_normalized`` 在 **POSIX 口径**下必须认出仓内子路径。
+
+    ⚠️ **这条是「CI 红了 10 天」那条缺陷的直接看守**（2026-11-04）：缺陷在
+    ``_relative_normalized`` 拼前缀时把分隔符**硬编码成 ``"\\"``** ⇒ POSIX 上
+    ``startswith(prefix)`` 恒为假 ⇒ 仓内**子路径**判仓外 ⇒
+    ``check_write_path`` 放行仓内写入（B2 basetemp 守卫与 D-19 写盘禁令同时失效）。
+
+    ⚠️ **为什么要注入 flavor**：本仓 CI 的 backend job 跑 Linux、本地是 Windows
+    ⇒ ``os.path.normpath`` 与 ``os.sep`` 都是**平台常量** ⇒ 不注入的话
+    「用对了分隔符」与「碰巧同款」在本地**无法区分**（量具盲区）。
+    ⇒ 口径**显式可注入** ⇒ POSIX 整条判定**本地可验**，不必只靠 CI。
+    """
+    root = "/home/runner/work/NovelOS/NovelOS"
+    # ⚠️ 默认口径必须与**本平台**一致（否则生产路径会用错分隔符）
+    assert guard.DEFAULT_FLAVOR.sep == os.sep, (
+        f"默认口径的分隔符与本平台不符：{guard.DEFAULT_FLAVOR.sep!r} != {os.sep!r}"
+    )
+    assert guard.DEFAULT_FLAVOR.normpath is os.path.normpath, (
+        "默认口径的归一函数必须与 os.path.normpath 逐位同一个"
+    )
+    # 仓内子路径（尚不存在）⇒ 必须判仓内
+    assert (
+        guard._relative_normalized(
+            "/home/runner/work/NovelOS/NovelOS/docs/x.db", root, flavor=guard.POSIX_FLAVOR
+        )
+        == "docs/x.db"
+    )
+    # 仓外路径 ⇒ 必须判仓外
+    assert (
+        guard._relative_normalized(
+            "/home/runner/work/other/x.db", root, flavor=guard.POSIX_FLAVOR
+        )
+        is None
+    )
+    # 仓根本身 ⇒ "."
+    assert (
+        guard._relative_normalized(root, root, flavor=guard.POSIX_FLAVOR) == "."
+    )
+    # ⚠️ 旧缺陷形态：分隔符写死成 ``\\`` ⇒ POSIX 上仓内子路径判仓外（这条钉住「别再退回去」）
+    assert (
+        guard._relative_normalized(
+            "/home/runner/work/NovelOS/NovelOS/docs/x.db",
+            root,
+            flavor=guard.PathFlavor(normpath=guard.posixpath.normpath, sep="\\"),
+        )
+        is None
+    )
+    # Windows 口径下同一条路径**同样**判仓内（平台一致 ⇒ 两个 job 的行为不打架）
+    assert (
+        guard._relative_normalized(
+            "D:\\repo\\docs\\x.db", "D:\\repo", flavor=guard.WINDOWS_FLAVOR
+        )
+        == "docs/x.db"
+    )
 
 
 def test_normalize_for_compare_keeps_unc_root_shape(guard) -> None:
@@ -741,13 +874,31 @@ def test_escape_hatch_allows_writing_into_software_repo(tmp_path: Path) -> None:
 
 
 def test_default_run_does_not_write_into_software_repo(tmp_path: Path) -> None:
-    """默认（无 ``--write-docs``）跑一次 ⇒ 软件仓内零新增文件（报告落系统临时目录）。"""
+    """默认（无 ``--write-docs``）跑一次 ⇒ 软件仓内零新增文件（报告落系统临时目录）。
+
+    ⚠️ **痕迹仓显式指定**（2026-11-04）：原先不传 ``--artifacts-dir`` ⇒ 痕迹仓靠
+    「同级目录 ``NovelOS-Artifacts``」解析 ⇒ **新克隆 / CI 上必然拿不到**
+    （痕迹仓按硬规则 5 **不推 GitHub**）⇒ 脚本报「拒绝建基线」并退出码 3
+    ⇒ 这条用例在 CI 上恒红（2026-10-25 起 backend job 红的一条根因）。
+    ⇒ 改为**显式**给一个临时痕迹仓 ⇒ 跨平台同形，且不依赖本机是否装了痕迹仓
+    （原来本机有真痕迹仓 ⇒ 走「与真基线比对」；现在走「无基线 → 建基线 → PASS」
+    ⇒ 本用例的**意图**（默认落点不在软件仓）跨平台不变，副作用更确定）。
+    """
     eval_base = REPO_ROOT / "docs" / "evaluation"
     before_repo = _snapshot(eval_base)
 
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "docs" / "evaluation" / "baseline").mkdir(parents=True)
     proc = _run_script(
         EVAL_SCRIPT,
-        ["--run-id", "run_default_landing", "--golden-dir", str(tmp_path / "empty_golden")],
+        [
+            "--run-id",
+            "run_default_landing",
+            "--golden-dir",
+            str(tmp_path / "empty_golden"),
+            "--artifacts-dir",
+            str(artifacts),
+        ],
     )
 
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"

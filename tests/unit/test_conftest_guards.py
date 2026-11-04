@@ -202,6 +202,18 @@ def test_lowercase_drive_letter_variant_is_still_inside_repo() -> None:
 
     委托后的判定走生产侧规范化（``relative_in_repo``）⇒ 大小写变体不得成为绕过
     （Windows 上两者是**同一个物理目录**）。判据：**必须判 True**。
+
+    ⚠️ **2026-11-04（CI 红了 10 天的根因）**：本条在 Linux CI 上**红过**
+    （``assert ... is True` at :210），真因**不是**本用例的前提错，而是生产侧
+    ``scripts/guard_repo_write_path.py::_relative_normalized`` 把分隔符
+    **硬编码成 Windows 的 ``"\\"``** ⇒ POSIX 上 ``startswith(prefix)`` 恒为假
+    ⇒ 仓内**子路径**只能靠身份核兜底 ⇒ 而身份核对**尚不存在**的路径必然失败
+    ⇒ 判成「仓外」。⇒ 已修（分隔符改用 ``os.sep``）。
+
+    ⚠️ **平台语义（修后仍是本判据，且跨平台一致）**：大小写折叠是**无条件**的
+    （``normalize_for_compare`` 一律 ``lower()``）⇒ POSIX 上大小写变体与真路径
+    **归一后同形** ⇒ 判**仓内**。在 POSIX 上这**偏严**（变体其实是另一个目录）
+    ⇒ 方向是「误拒」而非「误放」⇒ **可接受**：守卫宁可误拒、不可漏放。
     """
     lowered = Path(str(REPO_ROOT).replace("NovelOS", "novelos"))
     assert guards.is_inside_repo(lowered) is True, (
