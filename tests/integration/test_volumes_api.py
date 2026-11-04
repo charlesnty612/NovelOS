@@ -73,15 +73,23 @@ def _seed_snapshot(app, pid: str, snap: dict) -> int:
             (branch_id, pid, now_iso()),
         )
         # 2) chapter
+        # ⚠️ number 取「该项目现有最大章号 +1」（批次三十六收尾修）：0038 给
+        # chapters(project_id, number) 建了 UNIQUE 索引，固定 number=1 在「CRUD 用例
+        # 已经建过 1 号章」的库里会被 ``INSERT OR IGNORE`` **静默跳过** ⇒ 下面的
+        # state_deltas 引用一个不存在的 chapter_id ⇒ FK 失败。
         chapter_id = new_id("ch")
+        nxt = conn.execute(
+            "SELECT COALESCE(MAX(number), 0) + 1 AS nxt FROM chapters WHERE project_id = ?",
+            (pid,),
+        ).fetchone()["nxt"]
         conn.execute(
             """
             INSERT OR IGNORE INTO chapters
                 (chapter_id, project_id, number, title, plan_json,
                  status, visibility, who_knows, created_at, updated_at)
-            VALUES (?, ?, 1, '_seed', '{}', 'PLANNED', 'VISIBLE', NULL, ?, ?)
+            VALUES (?, ?, ?, '_seed', '{}', 'PLANNED', 'VISIBLE', NULL, ?, ?)
             """,
-            (chapter_id, pid, now_iso(), now_iso()),
+            (chapter_id, pid, nxt, now_iso(), now_iso()),
         )
         # 3) delta
         delta_id = new_id("dlt")

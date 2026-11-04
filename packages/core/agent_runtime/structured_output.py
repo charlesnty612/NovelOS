@@ -846,7 +846,7 @@ _SUMMARIZER_SELF_REPORT_KEYS = ("chars", "truncated", "sources_used")
 def _validate_summarizer(payload: dict[str, Any]) -> None:
     """Summarizer 契约（``docs/agents/prompts/summarizer-v1.md`` §6）。
 
-    消费方 :func:`packages.workflows.chapter_commit.summary._resolve_summary_out`
+    消费方（workflows 层 ``chapter_commit/summary.py`` 的 ``_resolve_summary_out``）
     **只读** ``summary``（要求非空字符串；超 200 字由消费方截断并标 degraded），
     所以 ``summary`` 是硬必填。
 
