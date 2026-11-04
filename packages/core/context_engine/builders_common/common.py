@@ -1166,7 +1166,7 @@ def _try_project_skills_ref(conn: sqlite3.Connection, project_id: str) -> str | 
     的 skill 维度在两个路径（主 SQL / 降级逐项读）必须同形，否则降级路径会把键维度
     写成另一种形状导致脏命中（硬规则 2）。
 
-    ⚠️ ``name`` 必须经 ``hex()`` 编码（2026-10-23 C-14）：``skills.name`` 是自由文本、
+    ⚠️ ``name`` 必须经 ``hex()`` 编码（2026-11-05 批次三十六 C-14）：``skills.name`` 是自由文本、
     可含 ``:`` / ``|``，直接拼会让分隔符切分歧义；``skill_id`` 的字符集被限死（不含
     分隔符），故 ``id:version:hex(name)`` 三段式无歧义。
 

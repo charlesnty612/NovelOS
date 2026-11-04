@@ -903,7 +903,7 @@ def _fingerprint_skills(skills_ref: Any) -> str:
     - **必须含 version**：payload 变更 ⇒ version 自增（PUT 改 payload 时）⇒ 只按 id
       算会脏命中（改了 skill 的 instructions 却命中改之前的旧装配）。这与
       ``genre_pack_ref``（``<pack_id>@<version>``）同款纪律。
-    - **必须含 name（2026-10-23 C-14 修复）**：``SkillService.update`` **只改 name
+    - **必须含 name（2026-11-05 批次三十六 C-14 修复）**：``SkillService.update`` **只改 name
       不碰 payload ⇒ version 不自增**，而注入块（``skill.consumers.skill_block``）
       在 payload 未带 name 时回退用 ``skills.name`` ⇒ 只按 ``id:version`` 算会脏命中
       （装配里仍是改名前的 skill 名）。

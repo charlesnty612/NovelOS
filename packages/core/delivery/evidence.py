@@ -234,7 +234,7 @@ def _length_evidence_map(
     out: dict[str, LengthEvidence] = {}
     versions: dict[str, int | None] = {}
     unavailable: dict[str, str] = {}
-    # 2026-10-23 C-30：逐章读草稿**复用同一条连接**（此前每章各开一条；连接成本
+    # 2026-11-05 批次三十六 C-30：逐章读草稿**复用同一条连接**（此前每章各开一条；连接成本
     # 3.6ms/条远高于查询本身，批次二十三同款收敛）。打开失败与「resolve_draft 自己
     # 打开失败」语义一致：逐章记不可检原因（**不是**整源失败）。
     try:

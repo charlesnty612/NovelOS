@@ -98,7 +98,7 @@ def resolve_draft(
     参数：
         db_path / chapter_id：目标章。
         draft_version：被审版本；``None`` → 最新一版（:data:`LATEST_DRAFT_ORDER`）。
-        conn（2026-10-23 C-30 新增，可选）：**调用方已持有的连接**。给了它 ⇒ 本函数
+        conn（2026-11-05 批次三十六 C-30 新增，可选）：**调用方已持有的连接**。给了它 ⇒ 本函数
             复用该连接、**不负责关闭**（只读查询，不 commit / rollback）；不给 ⇒
             维持原行为（自己建连、用完必关）。消费方是「逐章批量读草稿」的场景
             （如 ``delivery.evidence``），避免每章各开一条连接（V3.9 2A / 批次二十三
