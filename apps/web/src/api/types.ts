@@ -254,16 +254,6 @@ export interface TimelineEvent {
   created_at: string;
 }
 
-export interface Commit {
-  commit_id: string;
-  project_id: string;
-  version: number;
-  parent_version: number | null;
-  message: string;
-  author: string | null;
-  created_at: string;
-}
-
 export interface HealthResponse {
   status: string;
   version?: string;
@@ -463,9 +453,17 @@ export interface WorkflowStartPayload {
   target_word_count?: number | null;
   mock_providers?: Record<string, string[]> | null;
   /**
-   * 按次选择模型档案：key 为 capability（reasoning / creative_writing / light 等），
+   * 按次选择模型档案：key 为 capability（creative_writing / light / reasoning / observer），
    * value 为 model_profiles.profile_id。未指定 capability 时后端走 capability_bindings 默认绑定。
-   * 仅 plan/write/review 三个动作支持（commit 由 Observer 节点不消耗 LLM，不透传）。
+   *
+   * ⚠️ 键名必须与后端 `AGENT_CAPABILITY`（`packages/core/model_router/router.py`）
+   * **逐字一致**——后端按 `capability_for(<agent>)` 取键 ⇒ 键名对不上就**静默失效**
+   * （回落到默认档案，零告警）。2026-11-04 修：plan 原先发 `reasoning`，而
+   * chapter-plan 的唯一 AI 节点是 `director_planner`（capability = `creative_writing`）
+   * ⇒ 下拉选档案**不生效**。
+   *
+   * ⚠️ commit **也支持**：走 `observer` 键（后端 `chapter_commit/observer.py` 确实读它）。
+   * （此前本注释写「commit 由 Observer 节点不消耗 LLM，不透传」——**与实现相反**，已订正。）
    */
   model_overrides?: Record<string, string> | null;
   /**
@@ -1852,6 +1850,7 @@ export type {
   ArcRevealCounts,
   ArcView,
   ArcVolumeRow,
+  CommitListItem,
   ConnectionTestResult,
   ConnectionPresetOut,
   ListDiff as SnapshotListDiff,

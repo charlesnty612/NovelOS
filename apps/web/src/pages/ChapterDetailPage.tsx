@@ -330,13 +330,28 @@ export function ChapterDetailPage() {
         // 按次模型档案选择：plan/write/review → 对应 capability；commit 走 observer
         // 覆盖键（observer agent 是 LLM 调用，V3.9.3 拆为独立 capability；summarizer
         // 走 light 绑定，不受 commit 覆盖键影响）。
-        const capabilityByAction: Record<WorkflowAction, string> = {
-          plan: 'reasoning',
-          write: 'creative_writing',
-          review: 'light',
-          commit: 'observer',
+        //
+        // ⚠️ 2026-11-04 修：**键名必须与后端 `AGENT_CAPABILITY` 逐字一致**
+        //（`packages/core/model_router/router.py`，17 个 agent 的唯一权威名册）。
+        // 后端按 `capability_for(<agent>)` 去 `model_overrides` 里取档案 id ⇒
+        // 键名对不上 ⇒ **取不到 ⇒ 静默回落到默认档案、零告警**。
+        //   · chapter-plan 的唯一 AI 节点是 `director_planner`，其 capability 是
+        //     **`creative_writing`**（不是 `reasoning`）⇒ 此前 plan 的下拉选档案
+        //     **静默失效**（前端发 `reasoning`，后端要 `creative_writing`）。
+        //   · chapter-review 有**两个** AI agent：`critic`（`light`）与
+        //     `deep_reviewer`（`reasoning`）⇒ 只发 `light` 时**深审不跟随所选档案**
+        //     （一半跟随、一半不跟随）⇒ 两个键一起发。
+        //   · chapter-write 的 `writer` / `scene_planner` / `polisher` 同属
+        //     `creative_writing` ⇒ 一个键即可。
+        //   · chapter-commit 的 `observer` 属 `observer`；`summarizer` 属 `light`
+        //     （刻意不受 commit 覆盖键影响，见 `pipeline_common.py`）。
+        const capabilityByAction: Record<WorkflowAction, string[]> = {
+          plan: ['creative_writing'],
+          write: ['creative_writing'],
+          review: ['light', 'reasoning'],
+          commit: ['observer'],
         };
-        const capability = capabilityByAction[action];
+        const capabilities = capabilityByAction[action];
         const profileId = (payload?.model_profile_id ?? '').trim();
         // 从入参 payload 中剥离临时字段 model_profile_id / fresh_write，避免下发给后端；
         // author_intent / target_word_count 等业务字段透传给后端。fresh_write 在下方按
@@ -349,7 +364,7 @@ export function ChapterDetailPage() {
           ...basePayload
         } = payload ?? {};
         void _omit;
-        const hasOverride = !!capability && !!profileId;
+        const hasOverride = capabilities.length > 0 && !!profileId;
         // 写作模式：仅 write 动作支持；其他动作剥离后丢弃。
         const wantsFreshWrite = action === 'write' && rawFreshWrite === true;
         // 深度二审开关：仅 review 动作支持；其他动作剥离后丢弃。
@@ -373,7 +388,10 @@ export function ChapterDetailPage() {
             : hasOverride
             ? {
                 ...basePayload,
-                model_overrides: { [capability]: profileId },
+                // 一次 run 可能覆盖**多个** capability（review 的 critic + deep_reviewer）
+                model_overrides: Object.fromEntries(
+                  capabilities.map((cap) => [cap, profileId]),
+                ),
                 ...extraFlags,
               }
             : ({

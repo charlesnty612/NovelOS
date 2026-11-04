@@ -1168,6 +1168,89 @@ describe('ChapterDetailPage - 按次模型档案选择', () => {
     // 未选档案 → 不带 model_overrides；payload 为 undefined（保持向后兼容）
     expect(call[2]).toBeUndefined();
   });
+
+  // ⚠️ 2026-11-04 修：plan / review 两条覆盖键此前**零测试覆盖**
+  // （`wf-model-select-plan` / `wf-model-select-review` 在本文件里 0 命中）
+  // ⇒ 键名与后端 `AGENT_CAPABILITY` 分叉时，**前端测试全绿而后端静默失效**。
+
+  it('g) 生成计划：payload 带 model_overrides={creative_writing: <id>}（不是 reasoning）', async () => {
+    // 回归：plan 原先发 `reasoning`，而 chapter-plan 的唯一 AI 节点是
+    // `director_planner`（后端 `AGENT_CAPABILITY` 登记为 `creative_writing`）
+    // ⇒ 后端按 `capability_for("director_planner")` 取键 ⇒ 取不到
+    // ⇒ 下拉里选了档案也**静默失效**（回落到默认档案、零告警）。
+    const creativeId = 'mp_creative_77';
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'PLANNED' }));
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([
+      buildProfile({ profile_id: creativeId, name: '创意写作-乙', provider: 'openai', model: 'gpt-x' }),
+    ]);
+    vi.mocked(workflowsApi.startPlan).mockResolvedValue({
+      run_id: 'wfr_plan_override',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-header')).toBeInTheDocument();
+    });
+    const select = await waitFor(() => screen.getByTestId('wf-model-select-plan'));
+    fireEvent.change(select, { target: { value: creativeId } });
+
+    const planBtn = screen.getByTestId('wf-btn-plan');
+    expect(planBtn).not.toBeDisabled();
+    fireEvent.click(planBtn);
+
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.startPlan)).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(workflowsApi.startPlan).mock.calls[0];
+    expect(call[2]).toEqual({ model_overrides: { creative_writing: creativeId } });
+    // 关键反例：旧键 `reasoning` 必须**不出现**（后端取不到 ⇒ 静默失效）
+    expect(
+      (call[2] as Record<string, unknown>)['model_overrides'],
+    ).not.toHaveProperty('reasoning');
+  });
+
+  it('h) 审校：payload 同时带 light 与 reasoning 两个覆盖键（critic + deep_reviewer）', async () => {
+    // 回归：review 原先只发 `light` ⇒ 覆盖得到 critic，但**覆盖不到 deep_reviewer**
+    //（后端 `capability_for("deep_reviewer")` == "reasoning"）
+    // ⇒ 「一半跟随、一半不跟随」。⇒ 一次 run 选一个档案 ⇒ 两个键一起发。
+    const reviewerId = 'mp_review_88';
+    vi.mocked(chaptersApi.get).mockResolvedValue(baseChapter({ status: 'DRAFTED' }));
+    vi.mocked(modelProfilesApi.list).mockResolvedValue([
+      buildProfile({ profile_id: reviewerId, name: '评审-丙', provider: 'openai', model: 'gpt-x' }),
+    ]);
+    vi.mocked(workflowsApi.startReview).mockResolvedValue({
+      run_id: 'wfr_review_override',
+      status: 'PENDING',
+      current_node: null,
+      pause_payload: null,
+    });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chapter-header')).toBeInTheDocument();
+    });
+    const select = await waitFor(() => screen.getByTestId('wf-model-select-review'));
+    fireEvent.change(select, { target: { value: reviewerId } });
+
+    const reviewBtn = screen.getByTestId('wf-btn-review');
+    expect(reviewBtn).not.toBeDisabled();
+    fireEvent.click(reviewBtn);
+
+    await waitFor(() => {
+      expect(vi.mocked(workflowsApi.startReview)).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(workflowsApi.startReview).mock.calls[0];
+    // review 的 payload 还带 draft_version ⇒ 只断言 model_overrides 子对象
+    expect((call[2] as Record<string, unknown>)['model_overrides']).toEqual({
+      light: reviewerId,
+      reasoning: reviewerId,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
