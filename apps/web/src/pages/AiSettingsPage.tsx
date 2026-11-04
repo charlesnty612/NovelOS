@@ -21,6 +21,7 @@ import { ErrorBanner, InfoBanner } from '../components/ErrorBanner';
 import { EmptyState } from '../components/EmptyState';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ConnectionsPanel } from '../components/ConnectionsPanel';
+import { SkillsPanel } from '../components/SkillsPanel';
 import { Loading } from '../components/Loading';
 import { Modal } from '../components/Modal';
 import { PROVIDER_OPTIONS, PROVIDER_SHORT_LABEL } from '../components/providerOptions';
@@ -62,12 +63,14 @@ export function AiSettingsPage() {
       </InfoBanner>
 
       {/* ⚠️ `.panel-grid` 是两列网格（index.css:728-737），1100px 以下自动折成单列。
-          四个面板按 2×2 排布 ⇒ 无需改 CSS，窄屏折行由既有 media query 兜住。 */}
+          面板按 2 列排布 ⇒ 无需改 CSS，窄屏折行由既有 media query 兜住。
+          C-45③（2026-11-05）：第 5 个面板 = 技能（全局技能 + 本项目有序绑定）。 */}
       <div className="panel-grid">
         <ConnectionsPanel />
         <ModelProfilesPanel onBindingsChanged={() => setBindingsVersion((v) => v + 1)} />
         <CapabilityBindingsPanel bindingsVersion={bindingsVersion} />
         <AgentsPanel />
+        {pid ? <SkillsPanel projectId={pid} /> : null}
       </div>
     </div>
   );

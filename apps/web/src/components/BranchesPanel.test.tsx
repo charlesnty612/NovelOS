@@ -237,6 +237,81 @@ describe('BranchesPanel (V1.5 / Sprint 17)', () => {
     ).toHaveTextContent(/branch_closed/);
   });
 
+  it('promote 409 approval_required ⇒ 弹确认框列出高风险 id；确认后带 author_approval 重发', async () => {
+    vi.mocked(branchesApi.promote)
+      .mockRejectedValueOnce(
+        new ApiError(
+          409,
+          JSON.stringify({
+            error: 'approval_required',
+            message: 'promote 包含高风险变更，需要 author_approval',
+            high_risk_change_ids: ['dlt_high_1', 'dlt_high_2'],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce({
+        commit_id: 'cmt_approved',
+        state_version: 9,
+        delta_id: 'dl_approved',
+        promoted_from: 'br_exp1',
+        promoted_commits: 2,
+        branch_id: 'br_exp1',
+        replayed_delta_ids: ['dl_a', 'dl_b'],
+      });
+    vi.mocked(branchesApi.list).mockResolvedValue(baseBranches);
+
+    render(<BranchesPanel projectId="prj_1" initialBranches={baseBranches} />);
+    fireEvent.click(screen.getByTestId('branches-promote-br_exp1'));
+
+    // 第一次请求不带审批，且错误**没有**被渲染成普通失败横幅。
+    await waitFor(() => {
+      expect(branchesApi.promote).toHaveBeenCalledWith('prj_1', 'br_exp1', {});
+    });
+    const dialog = await waitFor(() =>
+      screen.getByTestId('branches-approval-confirm'),
+    );
+    expect(dialog).toHaveTextContent('dlt_high_1');
+    expect(dialog).toHaveTextContent('dlt_high_2');
+    expect(
+      screen.queryByTestId('branches-promote-error-br_exp1'),
+    ).not.toBeInTheDocument();
+
+    // 确认 ⇒ 同一 branch、带 author_approval（approver=user:ui）重发。
+    fireEvent.click(screen.getByTestId('branches-approval-confirm-confirm'));
+    await waitFor(() => expect(branchesApi.promote).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(branchesApi.promote).mock.calls[1]).toEqual([
+      'prj_1',
+      'br_exp1',
+      {
+        author_approval: { approved: true, approver: 'user:ui' },
+      },
+    ]);
+    await waitFor(() => {
+      expect(
+        screen.getByTestId('branches-promote-result-br_exp1'),
+      ).toHaveTextContent(/已 promote/);
+    });
+  });
+
+  it('promote 409 其它错误（branch_closed）仍按普通失败展示，不伪造审批出路', async () => {
+    vi.mocked(branchesApi.promote).mockRejectedValue(
+      new ApiError(
+        409,
+        JSON.stringify({ error: 'branch_closed', message: 'branch is MERGED' }),
+      ),
+    );
+
+    render(<BranchesPanel projectId="prj_1" initialBranches={baseBranches} />);
+    fireEvent.click(screen.getByTestId('branches-promote-br_exp1'));
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId('branches-promote-error-br_exp1'),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('branches-approval-confirm')).not.toBeInTheDocument();
+  });
+
   it('toggle: expand shows state panel; collapse hides it', async () => {
     vi.mocked(storyStateApi.getBranchState).mockResolvedValue({
       state_version: 6,

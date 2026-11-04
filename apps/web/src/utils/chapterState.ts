@@ -4,8 +4,8 @@
 // 状态机白名单（后端给死）：
 //   PLANNED   -> {PLANNED, DRAFTED}
 //   DRAFTED   -> {PLANNED, DRAFTED, REVIEWED}
-//   REVIEWED  -> {PLANNED, REVIEWED, COMMITTED}
-//   COMMITTED -> {PLANNED, COMMITTED, RELEASED}
+//   REVIEWED  -> {PLANNED, DRAFTED, REVIEWED, COMMITTED}
+//   COMMITTED -> {PLANNED, COMMITTED, RELEASED, REVIEWED}
 //   RELEASED  -> {PLANNED, RELEASED}
 //
 // 前端只关心四个工作流按钮的可用性：
@@ -285,11 +285,42 @@ export const EXPECTED_STATUS: Record<WorkflowAction, ChapterStatus[]> = {
 /** 状态机完整白名单（与后端 ALLOWED_NEXT 对齐），便于 UI 验证或调试展示 */
 export const ALLOWED_NEXT: Record<ChapterStatus, ChapterStatus[]> = {
   PLANNED: ['PLANNED', 'DRAFTED'],
+  // REVIEWED→DRAFTED：批准后改稿（新草稿使旧批准失效，强制重审）
   DRAFTED: ['PLANNED', 'DRAFTED', 'REVIEWED'],
-  REVIEWED: ['PLANNED', 'REVIEWED', 'COMMITTED'],
-  COMMITTED: ['PLANNED', 'COMMITTED', 'RELEASED'],
+  // COMMITTED→REVIEWED：重开返修专用边（后端 reopen 端点；通用 PATCH 会拦）
+  REVIEWED: ['PLANNED', 'DRAFTED', 'REVIEWED', 'COMMITTED'],
+  COMMITTED: ['PLANNED', 'COMMITTED', 'RELEASED', 'REVIEWED'],
   RELEASED: ['PLANNED', 'RELEASED'],
 };
+
+/**
+ * C-45①（2026-11-05）：把「按次字数 + 铁律」输入转成请求体字段。
+ *
+ * **单一入口**：pipeline 四个按钮与「按门禁建议改稿」共用同一份口径——
+ * 空串 / 非法值 / ≤0 ⇒ **不下发该键**（不是发 null；null 与「缺席」在后端语义不同）。
+ * 铁律 trim 后为空同样不下发。
+ */
+export interface RunInputFields {
+  target_word_count?: number;
+  author_intent?: string;
+}
+
+export function buildRunInputFields(
+  rawTargetWordCount: string,
+  rawAuthorIntent: string,
+): RunInputFields {
+  const fields: RunInputFields = {};
+  const raw = rawTargetWordCount.trim();
+  if (raw !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) {
+      fields.target_word_count = Math.floor(n);
+    }
+  }
+  const intent = rawAuthorIntent.trim();
+  if (intent !== '') fields.author_intent = intent;
+  return fields;
+}
 
 /**
  * 判断一个 workflow run 是否属于指定章节。

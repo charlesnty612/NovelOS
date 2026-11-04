@@ -70,6 +70,7 @@ vi.mock('../api/endpoints', () => ({
     startWrite: vi.fn(),
     startReview: vi.fn(),
     startCommit: vi.fn(),
+    gateRevise: vi.fn(),
     resume: vi.fn(),
     resumeInit: vi.fn(),
     cancelRun: vi.fn(),
@@ -3162,6 +3163,41 @@ describe('G2 — quality_gate confirm 档的显式接受出口', () => {
       expect(screen.getByText(/必须写明为何接受这些命中/)).toBeInTheDocument(),
     );
     expect(workflowsApi.startCommit).not.toHaveBeenCalled();
+  });
+
+  // C-45①：gateRevise 与流水线按钮共用同一份「按次字数 + 铁律」。
+  it('gate-revise 带上页面的按次字数与铁律（同一份值，不是各写一份）', async () => {
+    vi.mocked(workflowsApi.gateRevise).mockReset();
+    vi.mocked(chaptersApi.get).mockResolvedValue(chapterWithGate('block', ['R_A']));
+    vi.mocked(workflowsApi.gateRevise).mockResolvedValue(planResponse('wfr_revise_001'));
+
+    renderPage();
+    await waitFor(() => screen.getByTestId('gate-revise-btn'));
+    await userEvent.type(
+      screen.getByTestId('wf-target-word-count'),
+      '2200',
+    );
+    await userEvent.type(screen.getByTestId('wf-author-intent'), '铁律：禁写番外');
+    fireEvent.click(screen.getByTestId('gate-revise-btn'));
+
+    await waitFor(() => expect(workflowsApi.gateRevise).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(workflowsApi.gateRevise).mock.calls[0][2]).toEqual({
+      target_word_count: 2200,
+      author_intent: '铁律：禁写番外',
+    });
+  });
+
+  it('gate-revise 未填时**不带**这两个键（不是发 null）', async () => {
+    vi.mocked(workflowsApi.gateRevise).mockReset();
+    vi.mocked(chaptersApi.get).mockResolvedValue(chapterWithGate('block', ['R_A']));
+    vi.mocked(workflowsApi.gateRevise).mockResolvedValue(planResponse('wfr_revise_002'));
+
+    renderPage();
+    await waitFor(() => screen.getByTestId('gate-revise-btn'));
+    fireEvent.click(screen.getByTestId('gate-revise-btn'));
+
+    await waitFor(() => expect(workflowsApi.gateRevise).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(workflowsApi.gateRevise).mock.calls[0][2]).toEqual({});
   });
 
   // ---- 反向用例：硬停不可覆盖，给「接受」按钮就是假出路 ----

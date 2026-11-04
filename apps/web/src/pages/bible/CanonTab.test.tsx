@@ -17,10 +17,14 @@ vi.mock('../../api/endpoints', () => {
       deleteCanon: vi.fn(),
       writeToStyleSample: vi.fn(),
     },
+    // 批 7：拆书改为异步受理 ⇒ 组件轮询 GET /runs/{id} 拿真终态。
+    workflowsApi: {
+      get: vi.fn(),
+    },
   };
 });
 
-import { referenceApi } from '../../api/endpoints';
+import { referenceApi, workflowsApi } from '../../api/endpoints';
 import { CanonTab } from './CanonTab';
 
 const SAMPLE_CANON_LIST = [
@@ -81,6 +85,21 @@ describe('CanonTab (冒烟)', () => {
     (referenceApi.getCanon as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
       SAMPLE_CANON_DETAIL,
     );
+    // 默认：受理后的 run 立刻到 COMPLETED（组件第一轮轮询即完成，测试无需等 2s）。
+    (workflowsApi.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      run_id: 'wfr_001',
+      workflow_id: 'wf_opaque_001',
+      workflow_name: 'deconstruct-book',
+      chapter_id: null,
+      status: 'COMPLETED',
+      current_node: null,
+      checkpoint_json: {},
+      error: null,
+      retry_count: 0,
+      started_at: '2026-11-05T10:00:00+00:00',
+      ended_at: '2026-11-05T10:01:00+00:00',
+      nodes: [],
+    });
   });
 
   it('挂载后渲染：拆书表单 + 列表 + 选中后的详情', async () => {
@@ -198,15 +217,16 @@ describe('CanonTab (冒烟)', () => {
     ).toHaveTextContent('已写入文风样例面板');
   });
 
-  it('点击「开始拆书」触发 referenceApi.deconstruct', async () => {
+  it('点击「开始拆书」触发 referenceApi.deconstruct；RUNNING 是被受理而不是错误', async () => {
     (referenceApi.deconstruct as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       run_id: 'wfr_001',
-      status: 'COMPLETED',
+      status: 'RUNNING',
       current_node: null,
-      project_id: 'p1',
-      book_title: '新书',
-      canon_id: 'can_002',
     });
+    // 让轮询停在「运行中」：用一个永不 resolve 的 promise（测试只验受理态）。
+    (workflowsApi.get as unknown as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Promise(() => {}),
+    );
     render(<CanonTab projectId="p1" />);
     await userEvent.type(screen.getByTestId('deconstruct-book-title'), '新书');
     await userEvent.type(screen.getByTestId('deconstruct-text'), '第一章 ...');
@@ -218,17 +238,54 @@ describe('CanonTab (冒烟)', () => {
         reader_profile: 'male_fantasy',
       });
     });
+    // 受理提示出现（RUNNING 不得被渲染成「拆书未完成」错误）
+    await waitFor(() => {
+      expect(screen.getByTestId('deconstruct-accepted')).toHaveTextContent(
+        '已受理拆书任务（run wfr_001）',
+      );
+    });
+    expect(screen.getByTestId('deconstruct-accepted')).toHaveTextContent(
+      '当前状态：RUNNING',
+    );
+    expect(screen.queryByText(/拆书未完成/)).not.toBeInTheDocument();
+  });
+
+  it('受理后轮询到 COMPLETED ⇒ 刷新列表并给出完成提示', async () => {
+    (referenceApi.deconstruct as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      run_id: 'wfr_002',
+      status: 'RUNNING',
+      current_node: null,
+    });
+    (workflowsApi.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      run_id: 'wfr_002',
+      workflow_id: 'wf_opaque_002',
+      workflow_name: 'deconstruct-book',
+      chapter_id: null,
+      status: 'COMPLETED',
+      current_node: null,
+      checkpoint_json: {},
+      error: null,
+      retry_count: 0,
+      started_at: '2026-11-05T10:00:00+00:00',
+      ended_at: '2026-11-05T10:01:00+00:00',
+      nodes: [],
+    });
+    render(<CanonTab projectId="p1" />);
+    await userEvent.type(screen.getByTestId('deconstruct-book-title'), '新书');
+    await userEvent.type(screen.getByTestId('deconstruct-text'), '第一章 ...');
+    await userEvent.click(screen.getByTestId('deconstruct-submit'));
+    await waitFor(() => {
+      expect(screen.getByTestId('deconstruct-notice')).toHaveTextContent('拆书完成');
+    });
+    expect(workflowsApi.get).toHaveBeenCalledWith('wfr_002');
   });
 
   // V3.x 文件上传：选择 .txt 文件后提交，调用 uploadDeconstruct（不走 deconstruct）。
   it('选择 .txt 文件后提交：调 referenceApi.uploadDeconstruct，传 File + 表单字段', async () => {
     (referenceApi.uploadDeconstruct as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       run_id: 'wfr_upload_001',
-      status: 'COMPLETED',
+      status: 'RUNNING',
       current_node: null,
-      project_id: 'p1',
-      book_title: '上传书',
-      canon_id: 'can_upload_001',
     });
     render(<CanonTab projectId="p1" />);
 

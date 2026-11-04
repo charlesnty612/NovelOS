@@ -125,7 +125,10 @@ export function useChapterRunOrchestration(
   });
 
   const detailRun = detail.data;
-  const pausePayload = extractPausePayload(detailRun?.checkpoint_json) ?? undefined;
+  // C-44：把 `current_node` 一并传入，让前端取 payload 的优先级与服务端
+  // `_extract_pause_payload` 逐字一致（current_node 优先，其余插入序兜底）。
+  const pausePayload =
+    extractPausePayload(detailRun?.checkpoint_json, detailRun?.current_node) ?? undefined;
 
   // V1.4：从选中 run 的 checkpoint_json 中提取 quality_gate 节点暴露字段（参照系消费
   // + 改稿引导）。无 quality_gate 节点时为 null；QualityPanel 按空态处理。

@@ -66,6 +66,16 @@ describe('ChapterDeliveryActions（D1：RELEASED 接线）', () => {
     expect(screen.queryByTestId('release-btn')).not.toBeInTheDocument();
   });
 
+  it('RELEASED ⇒ 撤销文案如实说「回到 PLANNED」（C-39，避免承诺成回到已提交待处理）', () => {
+    render(<ChapterDeliveryActions chapter={chapter('RELEASED')} busy={false} onChanged={() => {}} />);
+    const btn = screen.getByTestId('unrelease-btn');
+    expect(btn).toHaveAttribute('title', expect.stringContaining('PLANNED'));
+    // 可见说明也要说清后果（title 只在悬浮时才看得到）
+    expect(screen.getByTestId('delivery-section')).toHaveTextContent(
+      '撤销后章节状态回到 PLANNED',
+    );
+  });
+
   it('点「标记已发布」⇒ PATCH 带 status=RELEASED，并回调重拉', async () => {
     const onChanged = vi.fn();
     render(

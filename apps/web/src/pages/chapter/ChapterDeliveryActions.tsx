@@ -64,7 +64,7 @@ export function ChapterDeliveryActions({
       </div>
       <div className="muted small cdp-banner__line">
         {released
-          ? '这是作者手工维护的交付标记：用于记录这一章已经投放到平台。'
+          ? '这是作者手工维护的交付标记：用于记录这一章已经投放到平台。撤销后章节状态回到 PLANNED，需重新走审校 / 提交流程（提交历史不撤销）。'
           : '若本章已经投放到平台，可在此标记「已发布」，便于统计哪些章已交付。'}
         <br />
         <b>本标记不改变任何质量判定</b>——交付判定与签约自检把「已提交」与「已发布」
@@ -87,7 +87,7 @@ export function ChapterDeliveryActions({
             className="btn"
             data-testid="unrelease-btn"
             disabled={busy || pending}
-            title="撤销「已发布」标记（章节回到已提交待处理）"
+            title="撤销「已发布」标记（章节状态回到 PLANNED，需重新走审校 / 提交流程）"
             onClick={() => void move('PLANNED')}
           >
             {pending ? '处理中…' : '撤销发布标记'}

@@ -409,6 +409,13 @@ function ProjectFormModal({
   // 写作圣经（迁移 0029，2026-10-15 补 UI 入口）：初值取项目 writing_bible；
   // null/undefined 归一为空串（空白 ≡ 无圣经，后端两侧都落 NULL，口径一致）。
   const [writingBible, setWritingBible] = useState(initial?.writing_bible ?? '');
+  // C-45②（2026-11-05）：伏笔逾期阈值（0008 迁移，列 NOT NULL DEFAULT 30）。
+  // 初值 = 项目当前值；新建 / 后端缺省时按 30 显示。下发规则「值变化才发」：
+  // 保持默认不写库（新建场景让 DDL 默认生效；编辑场景绝不把 30 覆盖掉别的值）。
+  const initialOverdueChapters = initial?.foreshadow_overdue_chapters ?? 30;
+  const [overdueChapters, setOverdueChapters] = useState<string>(
+    String(initialOverdueChapters),
+  );
   const [bandLowRatio, setBandLowRatio] = useState<string>(
     initBand?.low_ratio != null ? String(initBand.low_ratio) : '',
   );
@@ -451,6 +458,18 @@ function ProjectFormModal({
       setErr('字数带覆盖必须是数字');
       return;
     }
+    // C-45②：伏笔逾期阈值——≥1 的整数；留空 = 不下发（保持原值 / DDL 默认）。
+    // ⚠️ 绝不发 null：列是 NOT NULL，PATCH 写 NULL 会撞约束（500）。
+    const overdueRaw = overdueChapters.trim();
+    let overdueValue: number | null = null;
+    if (overdueRaw !== '') {
+      const n = Number(overdueRaw);
+      if (!Number.isInteger(n) || n < 1) {
+        setErr('伏笔逾期阈值必须是 ≥1 的整数');
+        return;
+      }
+      overdueValue = n;
+    }
     // V3.7：word_band payload 构建
     // - 三键全空 → 提交时省略 word_band 键（保留后端原值；创建场景无覆盖）
     // - 任一非空 → 提交 dict（后端走 resolve_band_config 校验）
@@ -478,6 +497,10 @@ function ProjectFormModal({
       if (hr !== null) band.high_ratio = hr;
       if (fl !== null) band.floor = fl;
       payload.word_band = band;
+    }
+    // C-45②：只在**值变化**时下发（作者没动过 30 就不写库）。
+    if (overdueValue !== null && overdueValue !== initialOverdueChapters) {
+      payload.foreshadow_overdue_chapters = overdueValue;
     }
     // 快通道（2026-10-14 项目级 projects.fast_mode；2026-10-15 修复关闭语义；
     // 2026-10-23 返工：能写显式关 + 按有效值判定）。
@@ -596,6 +619,23 @@ function ProjectFormModal({
             data-testid="project-writing-bible"
           />
         </details>
+        {/* C-45②：伏笔逾期阈值。它是**装配输入**（open_foreshadow_list 的 overdue
+            判定），改它会推 state_version；因此只在值变化时下发，避免无谓失效。 */}
+        <div className="form-row">
+          <label>伏笔逾期阈值（章）</label>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={overdueChapters}
+            onChange={(e) => setOverdueChapters(e.target.value)}
+            data-testid="project-foreshadow-overdue"
+          />
+          <p className="muted small" style={{ margin: '6px 0 0' }}>
+            超过 N 章仍未兑现的伏笔会在装配时标记 overdue（默认 30）。
+            留空 = 保持当前值；需为 ≥1 的整数。
+          </p>
+        </div>
         <div className="form-grid">
           <div className="form-row">
             <label>类型</label>

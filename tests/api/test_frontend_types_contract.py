@@ -76,7 +76,7 @@ HANDWRITTEN_DEBT: dict[str, str] = {
         "AiCallLogDetail", "AiCallLogSummary", "BackupMetadata", "BackupPackage",
         "Chapter", "Character", "CharacterState", "ContextPreviewItem",
         "ContextPreviewLayer", "ContinueResponse", "ContinueVariant", "Debt",
-        "DeconstructStartResponse", "DeliveryChapter", "DeliveryEvidenceSource",
+        "DeliveryChapter", "DeliveryEvidenceSource",
         "DeliveryIssue", "DeliveryLength", "DeliveryQuality", "DeliveryReason",
         "DeliveryRollUp", "DeliverySigning", "DeliverySigningItem",
         "DeliveryVerdictResponse", "Draft", "GenrePack", "GenrePackSummary",

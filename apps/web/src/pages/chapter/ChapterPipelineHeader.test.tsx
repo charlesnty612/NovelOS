@@ -54,6 +54,10 @@ function renderHeader(over: Partial<Props> = {}) {
     autoCommit: false,
     onAutoCommitChange: vi.fn(),
     unreviewedDraft: null,
+    targetWordCount: '',
+    onTargetWordCountChange: vi.fn(),
+    authorIntent: '',
+    onAuthorIntentChange: vi.fn(),
     ...over,
   };
   const utils = render(<ChapterPipelineHeader {...props} />);
@@ -80,6 +84,8 @@ function renderHarness(over: Partial<Props> = {}) {
     const [fastMode, setFastMode] = useState(over.fastMode ?? false);
     const [autoCommit, setAutoCommit] = useState(over.autoCommit ?? false);
     const [deepReview, setDeepReview] = useState(over.deepReview ?? false);
+    const [wordCount, setWordCount] = useState(over.targetWordCount ?? '');
+    const [intent, setIntent] = useState(over.authorIntent ?? '');
     return (
       <ChapterPipelineHeader
         {...(over as Props)}
@@ -109,6 +115,16 @@ function renderHarness(over: Partial<Props> = {}) {
           over.onAutoCommitChange?.(v);
         }}
         unreviewedDraft={over.unreviewedDraft ?? null}
+        targetWordCount={wordCount}
+        onTargetWordCountChange={(v) => {
+          setWordCount(v);
+          over.onTargetWordCountChange?.(v);
+        }}
+        authorIntent={intent}
+        onAuthorIntentChange={(v) => {
+          setIntent(v);
+          over.onAuthorIntentChange?.(v);
+        }}
       />
     );
   }
@@ -239,5 +255,35 @@ describe('ChapterPipelineHeader', () => {
     await waitFor(() => expect(chaptersApi.update).toHaveBeenCalledTimes(1));
     expect(vi.mocked(chaptersApi.update).mock.calls[0][1]).toEqual({ title: '新标题' });
     await waitFor(() => expect(onTitleSaved).toHaveBeenCalledTimes(1));
+  });
+
+  // ---------------------------------------------------------------------------
+  // C-45①：按次字数 + 铁律（共享输入行）
+  // ---------------------------------------------------------------------------
+  it('填写字数 + 铁律 ⇒ onStart 载荷带上真实值（plan 与 write 都会带）', async () => {
+    const user = userEvent.setup();
+    const { onStart } = renderHarness();
+    await user.type(screen.getByTestId('wf-target-word-count'), '1800');
+    await user.type(screen.getByTestId('wf-author-intent'), '  铁律：第三人称  ');
+    await user.click(screen.getByTestId('wf-btn-plan'));
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(startPayload(onStart).target_word_count).toBe(1800);
+    expect(startPayload(onStart).author_intent).toBe('铁律：第三人称');
+  });
+
+  it('未填写 ⇒ 载荷**不含**这两个键（不是发 null）', async () => {
+    const user = userEvent.setup();
+    const { onStart } = renderHarness();
+    await user.click(screen.getByTestId('wf-btn-plan'));
+    const payload = startPayload(onStart);
+    expect('target_word_count' in payload).toBe(false);
+    expect('author_intent' in payload).toBe(false);
+  });
+
+  it('非法字数（0 / 负数 / 非数字）⇒ 不下发 target_word_count', async () => {
+    const user = userEvent.setup();
+    const { onStart } = renderHarness({ targetWordCount: '0' });
+    await user.click(screen.getByTestId('wf-btn-plan'));
+    expect('target_word_count' in startPayload(onStart)).toBe(false);
   });
 });

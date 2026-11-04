@@ -1,9 +1,12 @@
 // Story Bible 第五个 Tab：参照系（Sprint 11 下半）。
 // 顶部「拆书」表单 + 中部 canon 列表 + 底部选中 canon 的详情抽屉（report_md 渲染 + canon_json 字段摘要）。
 //
-// 设计要点：
-// - POST /projects/{pid}/deconstruct 是同步长任务（无 Human 节点），无需轮询；
-//   完成后直接刷新列表。
+// 设计要点（批 7 / 2026-11-05 改）：
+// - POST /projects/{pid}/deconstruct 与上传端点都是**异步受理**：201 返回
+//   `WorkflowStartAccepted` 三键（run_id / status='RUNNING' / current_node=null）。
+//   `status === 'RUNNING'` 是**成功受理**，不是错误；真终态须轮询 GET /runs/{id}。
+//   本 Tab 受理后立刻清空表单，并在后台轮询到终态；COMPLETED 时刷新列表并自动选中
+//   新增的 canon，FAILED/CANCELLED 时展示错误（带 run id）。
 // - 删除走 DELETE /canons/{id}（204）→ 刷新列表。
 // - report_md 用本地轻量 Markdown 渲染（utils/format.ts parseReportMarkdown）：
 //   仅识别 `# / ## / ###` 标题与 `- ` 列表项，不引第三方 markdown 库（避免 XSS 与体积膨胀）。
@@ -11,15 +14,16 @@
 //   全文走 ReadableJson 人读视图 + 原始 JSON 折叠块，避免主面板被超长 canon 撑爆。
 
 import { useEffect, useRef, useState } from 'react';
-import { referenceApi } from '../../api/endpoints';
+import { referenceApi, workflowsApi } from '../../api/endpoints';
 import type {
   CanonDetail,
   CanonSummary,
-  DeconstructStartResponse,
+  DeconstructPayload,
   ReaderProfile,
+  WorkflowStartAccepted,
 } from '../../api/types';
 import { EmptyState } from '../../components/EmptyState';
-import { ErrorBanner } from '../../components/ErrorBanner';
+import { ErrorBanner, InfoBanner } from '../../components/ErrorBanner';
 import { ReadableJson, RawJsonDetails } from '../../components/ReadableJson';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Loading } from '../../components/Loading';
@@ -38,6 +42,11 @@ const READER_PROFILE_OPTIONS: { value: ReaderProfile; label: string }[] = [
   { value: 'general', label: '通用 general' },
 ];
 
+const DECONSTRUCT_POLL_INTERVAL_MS = 2000;
+const DECONSTRUCT_POLL_MAX_ATTEMPTS = 150;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 // ---------------------------------------------------------------------------
 // 面板组件
 // ---------------------------------------------------------------------------
@@ -54,6 +63,20 @@ export function CanonTab({ projectId }: CanonTabProps) {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // 受理态（批 7）：非 null ⇒ 后台拆书中；展示 run_id 与最近一次轮询到的状态。
+  const [accepted, setAccepted] = useState<{
+    runId: string;
+    status: string;
+  } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  // 轮询取消令牌：卸载 / 重新提交时自增，旧循环看到令牌变化即退出（防 setState 到已卸载组件）。
+  const pollTokenRef = useRef(0);
+  useEffect(
+    () => () => {
+      pollTokenRef.current += 1;
+    },
+    [],
+  );
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CanonDetail | null>(null);
@@ -62,14 +85,16 @@ export function CanonTab({ projectId }: CanonTabProps) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailErr, setDetailErr] = useState<string | null>(null);
 
-  const reloadList = async () => {
+  const reloadList = async (): Promise<CanonSummary[]> => {
     setLoading(true);
     setErr(null);
     try {
       const rows = await referenceApi.listCanons(projectId);
       setList(rows);
+      return rows;
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : '加载参照系列表失败');
+      return [];
     } finally {
       setLoading(false);
     }
@@ -79,6 +104,54 @@ export function CanonTab({ projectId }: CanonTabProps) {
     void reloadList();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
+
+  // 拆书是异步受理（批 7）：201 只表示「已受理」，真终态要轮询单 run 端点。
+  // 150 次 × 2s ≈ 5 分钟；超时不报错成「失败」，只提示去运行记录看（防止把
+  // 「还在跑」谎报成「失败了」）。
+  const pollDeconstructRun = async (
+    runId: string,
+    token: number,
+    beforeIds: Set<string>,
+  ): Promise<void> => {
+    for (let attempt = 0; attempt < DECONSTRUCT_POLL_MAX_ATTEMPTS; attempt++) {
+      if (pollTokenRef.current !== token) return;
+      try {
+        const run = await workflowsApi.get(runId);
+        if (pollTokenRef.current !== token) return;
+        setAccepted((prev) =>
+          prev && prev.runId === runId ? { ...prev, status: run.status } : prev,
+        );
+        if (run.status === 'COMPLETED') {
+          setAccepted(null);
+          const rows = await reloadList();
+          if (pollTokenRef.current !== token) return;
+          const added = rows.find((r) => !beforeIds.has(r.canon_id));
+          if (added) setSelectedId(added.canon_id);
+          setNotice(`拆书完成：${added ? `新增参照系「${added.title}」` : '可在列表查看结果'}`);
+          return;
+        }
+        if (run.status === 'FAILED' || run.status === 'CANCELLED') {
+          setAccepted(null);
+          setErr(
+            `拆书任务 ${runId} ${run.status === 'FAILED' ? '失败' : '已取消'}` +
+              `${run.error ? `：${run.error}` : ''}`,
+          );
+          return;
+        }
+      } catch (e: unknown) {
+        if (pollTokenRef.current !== token) return;
+        // 网络/接口抖动只记一次，继续下一轮；连续失败由 maxAttempts 兜底。
+        setAccepted((prev) =>
+          prev && prev.runId === runId
+            ? { ...prev, status: `轮询失败（${e instanceof Error ? e.message : '未知错误'}）` }
+            : prev,
+        );
+      }
+      await sleep(DECONSTRUCT_POLL_INTERVAL_MS);
+    }
+    if (pollTokenRef.current !== token) return;
+    setNotice(`拆书仍在后台运行（run ${runId}）——请稍后到「运行记录」查看结果。`);
+  };
 
   const handleDeconstruct = async () => {
     if (!bookTitle.trim()) {
@@ -92,31 +165,36 @@ export function CanonTab({ projectId }: CanonTabProps) {
     }
     setSubmitting(true);
     setErr(null);
+    setNotice(null);
+    setAccepted(null);
+    const beforeIds = new Set(list.map((c) => c.canon_id));
     try {
-      let resp: DeconstructStartResponse;
+      let resp: WorkflowStartAccepted;
       if (uploadFile) {
         resp = await referenceApi.uploadDeconstruct(projectId, uploadFile, {
           book_title: bookTitle.trim(),
           reader_profile: readerProfile,
         });
       } else {
-        resp = await referenceApi.deconstruct(projectId, {
+        const payload: DeconstructPayload = {
           book_title: bookTitle.trim(),
           text: text,
           reader_profile: readerProfile,
-        });
+        };
+        resp = await referenceApi.deconstruct(projectId, payload);
       }
-      if (resp.status !== 'COMPLETED') {
-        setErr(`拆书未完成（status=${resp.status}）${resp.error ? `：${resp.error}` : ''}`);
-      } else {
-        // 成功：清空表单，刷新列表，自动选中新 canon
-        setBookTitle('');
-        setText('');
-        setUploadFile(null);
-        if (fileInputRef.current) fileInputRef.current.value = '';
-        await reloadList();
-        if (resp.canon_id) setSelectedId(resp.canon_id);
-      }
+      // ⚠️ 受理语义：status='RUNNING' 是**成功**（后端异步受理的恒定值），
+      // 不是「拆书没完成」。只有 4xx 才会走到 catch。
+      const runId = resp.run_id;
+      setAccepted({ runId, status: resp.status });
+      setNotice('已受理，后台拆书中…');
+      // 表单立即清空：任务已受理，继续留着输入框会让作者误以为还能改这次任务。
+      setBookTitle('');
+      setText('');
+      setUploadFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      const token = ++pollTokenRef.current;
+      void pollDeconstructRun(runId, token, beforeIds);
     } catch (e: unknown) {
       setErr(formatApiError(e));
     } finally {
@@ -179,6 +257,26 @@ export function CanonTab({ projectId }: CanonTabProps) {
       </div>
 
       <ErrorBanner>{err}</ErrorBanner>
+
+      {/* 批 7：拆书是异步受理。受理后展示 run_id + 轮询到的状态；
+          RUNNING 绝不能渲染成错误（它正是成功受理的响应值）。 */}
+      {accepted ? (
+        <InfoBanner>
+          <span data-testid="deconstruct-accepted">
+            已受理拆书任务（run {accepted.runId}），后台拆书中…当前状态：{accepted.status}
+          </span>
+        </InfoBanner>
+      ) : null}
+      {notice ? (
+        <div
+          className="alert alert--info"
+          role="status"
+          aria-live="polite"
+          data-testid="deconstruct-notice"
+        >
+          {notice}
+        </div>
+      ) : null}
 
       {/* ----------------- 顶部：拆书表单 ----------------- */}
       <div className="card" style={{ marginBottom: 16 }} data-testid="deconstruct-form">

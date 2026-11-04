@@ -9,6 +9,7 @@ import type {
   SnapshotResponse,
 } from '../api/types';
 import { ErrorBanner, InfoBanner } from './ErrorBanner';
+import { ConfirmDialog } from './ConfirmDialog';
 import { EmptyState } from './EmptyState';
 import { formatDateTime, formatJson } from '../utils/format';
 import { countSnapshot } from '../utils/snapshotCounts';
@@ -16,6 +17,37 @@ import { countSnapshot } from '../utils/snapshotCounts';
 interface Props {
   projectId: string;
   initialBranches: Branch[];
+}
+
+/** 后端 promote 的 HIGH 风险审批 409 载荷（`detail` 对象被 client 层序列化成字符串）。 */
+interface PromoteApprovalRequired {
+  message: string;
+  highRiskChangeIds: string[];
+}
+
+/**
+ * 从 `ApiError.detail` 里解析 `approval_required`。
+ *
+ * ⚠️ `client.ts` 对**对象型** detail 走 `JSON.stringify`（`formatValidationDetail`
+ * 只处理数组）⇒ 这里拿到的是 JSON 串，不是对象。解析失败一律返回 null，
+ * 由调用方按普通 409 展示（**不吞错误、不伪造审批出路**）。
+ */
+function parseApprovalRequired(detail: string): PromoteApprovalRequired | null {
+  try {
+    const parsed: unknown = JSON.parse(detail);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const o = parsed as Record<string, unknown>;
+    if (o['error'] !== 'approval_required') return null;
+    const ids = Array.isArray(o['high_risk_change_ids'])
+      ? o['high_risk_change_ids'].map((v) => String(v))
+      : [];
+    return {
+      message: typeof o['message'] === 'string' ? o['message'] : '需要人工批准高风险变更',
+      highRiskChangeIds: ids,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -46,6 +78,15 @@ export function BranchesPanel({ projectId, initialBranches }: Props) {
   const [busy, setBusy] = useState(false);
   const [promoteMsg, setPromoteMsg] = useState<Record<string, string>>({});
   const [promoteErr, setPromoteErr] = useState<Record<string, string>>({});
+  // HIGH 风险审批出路（批 6 / 2026-11-05）：promote 预检失败不产生任何 main commit，
+  // 后端以 409 `approval_required` 给出 high_risk_change_ids。UI 弹确认框，
+  // 用户确认后把 `author_approval` 带同一 branch 重发。
+  const [approvalPrompt, setApprovalPrompt] = useState<{
+    branchId: string;
+    branchName: string;
+    message: string;
+    highRiskChangeIds: string[];
+  } | null>(null);
 
   const reload = useCallback(async () => {
     setError(null);
@@ -134,12 +175,22 @@ export function BranchesPanel({ projectId, initialBranches }: Props) {
   }, [name, projectId, reload]);
 
   const handlePromote = useCallback(
-    async (bid: string, branchName: string) => {
+    async (bid: string, branchName: string, opts?: { approved?: boolean }) => {
       setPromoteMsg((m) => ({ ...m, [bid]: '' }));
       setPromoteErr((e) => ({ ...e, [bid]: '' }));
       setBusy(true);
       try {
-        const result = await branchesApi.promote(projectId, bid, {});
+        const payload = opts?.approved
+          ? {
+              author_approval: {
+                approved: true,
+                // 审计留痕用（后端原样落 commits.author_approval_json）——
+                // 必须能看出是 UI 上的人工确认，而不是 workflow 的 system:* 预置批准。
+                approver: 'user:ui',
+              },
+            }
+          : {};
+        const result = await branchesApi.promote(projectId, bid, payload);
         setPromoteMsg((m) => ({
           ...m,
           [bid]: `已 promote「${branchName}」：重放 ${result.promoted_commits} 条 delta → main 当前 v${result.state_version}`,
@@ -147,11 +198,18 @@ export function BranchesPanel({ projectId, initialBranches }: Props) {
         await reload();
       } catch (e: unknown) {
         if (e instanceof ApiError) {
-          // 409 分支已 MERGED/DISCARDED、乐观锁冲突、promote_conflict、approval_required 等
-          setPromoteErr((prev) => ({
-            ...prev,
-            [bid]: `${e.status}: ${e.detail}`,
-          }));
+          const approval = e.status === 409 ? parseApprovalRequired(e.detail) : null;
+          if (approval && !opts?.approved) {
+            // 预检拒绝 ⇒ 此时**没有** main commit 产生；确认后重发同一请求。
+            setApprovalPrompt({ branchId: bid, branchName, ...approval });
+          } else {
+            // 409 分支已 MERGED/DISCARDED、乐观锁冲突、promote_conflict、
+            // 或「已批准但后端仍拒」等：照旧展示，不伪造第二条出路。
+            setPromoteErr((prev) => ({
+              ...prev,
+              [bid]: `${e.status}: ${e.detail}`,
+            }));
+          }
         } else if (e instanceof Error) {
           setPromoteErr((prev) => ({ ...prev, [bid]: e.message }));
         } else {
@@ -299,6 +357,35 @@ export function BranchesPanel({ projectId, initialBranches }: Props) {
           </span>
         </div>
       </div>
+
+      {/* HIGH 风险审批（批 6）：只有在收到 409 approval_required 时出现。
+          确认后带 `author_approval` 重发同一 branch 的 promote——
+          预检失败时后端**没有**产生任何 main commit，所以这是一次「批准后重试」，
+          不是「回滚后重做」。 */}
+      {approvalPrompt ? (
+        <ConfirmDialog
+          open={true}
+          title="需要批准高风险变更"
+          body={
+            `promote「${approvalPrompt.branchName}」包含 ${approvalPrompt.highRiskChangeIds.length} 项高风险变更，` +
+            `需人工批准后才会重放到 main。\n\n${approvalPrompt.message}\n\n` +
+            `高风险变更：${approvalPrompt.highRiskChangeIds.join('、') || '（未提供 id）'}\n\n` +
+            '批准后会以 `user:ui` 记入提交审计。'
+          }
+          confirmText="批准并 promote"
+          testId="branches-approval-confirm"
+          onCancel={() => setApprovalPrompt(null)}
+          onConfirm={() => {
+            const pending = approvalPrompt;
+            setApprovalPrompt(null);
+            if (pending) {
+              void handlePromote(pending.branchId, pending.branchName, {
+                approved: true,
+              });
+            }
+          }}
+        />
+      ) : null}
     </div>
   );
 }

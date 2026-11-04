@@ -48,10 +48,15 @@ import type {
   WorkflowStartArgs,
 } from './chapter/ChapterPipelineHeader';
 import { ChapterRunPanel } from './chapter/ChapterRunPanel';
-import { findUnreviewedDraft, pickBannerDetail } from '../utils/chapterState';
+import {
+  buildRunInputFields,
+  findUnreviewedDraft,
+  pickBannerDetail,
+} from '../utils/chapterState';
 import { ChapterRunBanner } from './chapter/ChapterRunBanner';
 import { ChapterDraftsSection } from './chapter/ChapterDraftsSection';
 import { ChapterPlanSection } from './chapter/ChapterPlanSection';
+import { ChapterOutlineSection } from './chapter/ChapterOutlineSection';
 import { ChapterDangerZone } from './chapter/ChapterDangerZone';
 import { useApiCall } from '../hooks/useApiCall';
 import { useChapterRunOrchestration } from '../hooks/useChapterRunOrchestration';
@@ -238,6 +243,12 @@ export function ChapterDetailPage() {
   // 默认不勾；勾选时 review 请求体带 deep_review:true，pause_payload 会
   // 多一个 deep_review_report 分栏。开启后审校约 +1 分钟。
   const [deepReview, setDeepReview] = useState(false);
+
+  // C-45①：按次字数 / 铁律。**提到页面层**（不是 header 内部 state）——
+  // 同一份值要同时给 pipeline 的四个按钮与「按门禁建议改稿」用；
+  // 空串 = 不下发该键。
+  const [runTargetWordCount, setRunTargetWordCount] = useState('');
+  const [runAuthorIntent, setRunAuthorIntent] = useState('');
 
   // 快通道（项目级 projects.fast_mode，迁移 0031）：写完直接提交，跳过人工闸门。
   //
@@ -537,7 +548,14 @@ export function ChapterDetailPage() {
     setSubmitting(true);
     setGateRevising(true);
     try {
-      const resp = await workflowsApi.gateRevise(projectId, chapterId);
+      // C-45①：与流水线按钮**同一份**按次字数 / 铁律（口径单点在
+      // chapterState.buildRunInputFields）。此前这里不带 payload ⇒ 一键改稿
+      // 会退回服务端默认字数并丢掉作者本次写的铁律。
+      const resp = await workflowsApi.gateRevise(
+        projectId,
+        chapterId,
+        buildRunInputFields(runTargetWordCount, runAuthorIntent),
+      );
       setSelectedRunId(resp.run_id);
       await Promise.all([chapterCall.reload(), runsReload(), draftsCall.reload()]);
     } catch (e: unknown) {
@@ -546,7 +564,16 @@ export function ChapterDetailPage() {
       setGateRevising(false);
       setSubmitting(false);
     }
-  }, [projectId, chapterId, chapterCall, draftsCall, runsReload, setSelectedRunId]);
+  }, [
+    projectId,
+    chapterId,
+    runTargetWordCount,
+    runAuthorIntent,
+    chapterCall,
+    draftsCall,
+    runsReload,
+    setSelectedRunId,
+  ]);
 
   // ---- confirm 档的显式接受（2026-10-15 补 UI 入口）----
   // 后端 P0-1：enforce 模式下 confirm 档 issue（如 trigram 重复）不许静默通过，
@@ -656,6 +683,10 @@ export function ChapterDetailPage() {
           autoCommit={autoCommit}
           onAutoCommitChange={setAutoCommit}
           unreviewedDraft={unreviewedDraft}
+          targetWordCount={runTargetWordCount}
+          onTargetWordCountChange={setRunTargetWordCount}
+          authorIntent={runAuthorIntent}
+          onAuthorIntentChange={setRunAuthorIntent}
         />
       ) : chapterCall.loading ? (
         <Loading text="加载章节中…" />
@@ -988,6 +1019,12 @@ export function ChapterDetailPage() {
               data-testid="cdp-section-plan"
             >
               <ChapterPlanSection chapter={chapter} onUpdated={() => chapterCall.reload()} />
+              {/* C-41：策展大纲与生成计划**并排但独立**（各自绑定 outline_json /
+                  plan_json，状态不共享——一列不得两用）。 */}
+              <ChapterOutlineSection
+                chapter={chapter}
+                onUpdated={() => chapterCall.reload()}
+              />
             </div>
           ) : null}
 

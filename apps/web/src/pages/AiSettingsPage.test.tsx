@@ -48,6 +48,17 @@ vi.mock('../api/endpoints', async () => {
       remove: vi.fn(),
       test: vi.fn(),
     },
+    // C-45③：SkillsPanel 会拉全局技能 + 本项目绑定；默认空列表，避免走真实 fetch。
+    skillsApi: {
+      list: vi.fn(async () => []),
+      get: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      listBound: vi.fn(async () => []),
+      bind: vi.fn(),
+      unbind: vi.fn(),
+    },
   };
 });
 

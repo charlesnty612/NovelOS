@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ALLOWED_NEXT,
   EXPECTED_STATUS,
+  buildRunInputFields,
   countHighRiskChanges,
   getButtonAvailability,
   getPipelineStepStates,
@@ -28,18 +29,20 @@ describe('ALLOWED_NEXT (与后端 packages/domain/chapter/models.py 对齐)', ()
       'REVIEWED',
     ]);
   });
-  it('REVIEWED 可到 PLANNED / REVIEWED / COMMITTED', () => {
+  it('REVIEWED 可到 PLANNED / DRAFTED / REVIEWED / COMMITTED（批准后改稿回 DRAFTED）', () => {
     expect(ALLOWED_NEXT.REVIEWED.slice().sort()).toEqual([
       'COMMITTED',
+      'DRAFTED',
       'PLANNED',
       'REVIEWED',
     ]);
   });
-  it('COMMITTED 可到 PLANNED / COMMITTED / RELEASED', () => {
+  it('COMMITTED 可到 PLANNED / COMMITTED / RELEASED / REVIEWED（重开返修）', () => {
     expect(ALLOWED_NEXT.COMMITTED.slice().sort()).toEqual([
       'COMMITTED',
       'PLANNED',
       'RELEASED',
+      'REVIEWED',
     ]);
   });
   it('RELEASED 可到 PLANNED / RELEASED', () => {
@@ -827,5 +830,35 @@ describe('pickBannerDetail（横幅该显示哪一份 run）', () => {
   it('run_id 不同但 workflow_name 相同 ⇒ 仍按 activeRun（身份看 run_id，不看名字）', () => {
     const sameNameOtherRun = { ...listRow, run_id: 'wfr_C' };
     expect(pickBannerDetail(pollDetail, sameNameOtherRun)?.run_id).toBe('wfr_C');
+  });
+});
+
+describe('buildRunInputFields（C-45①：按次字数 + 铁律）', () => {
+  it('有值 ⇒ 下发真实值（字数取整，铁律 trim）', () => {
+    expect(buildRunInputFields('1800', '  铁律A  ')).toEqual({
+      target_word_count: 1800,
+      author_intent: '铁律A',
+    });
+  });
+
+  it('小数会被向下取整（后端要整数）', () => {
+    expect(buildRunInputFields('1800.9', '')).toEqual({
+      target_word_count: 1800,
+    });
+  });
+
+  it('空串 / 空白 ⇒ 不含对应键（不是 null）', () => {
+    expect(buildRunInputFields('', '   ')).toEqual({});
+  });
+
+  it('非法 / ≤0 字数 ⇒ 不含 target_word_count（不把 0 当有效目标）', () => {
+    expect(buildRunInputFields('0', '')).toEqual({});
+    expect(buildRunInputFields('-5', '')).toEqual({});
+    expect(buildRunInputFields('abc', '')).toEqual({});
+  });
+
+  it('只填其一时只下发那一个键', () => {
+    expect(buildRunInputFields('', '铁律B')).toEqual({ author_intent: '铁律B' });
+    expect(buildRunInputFields('2000', '')).toEqual({ target_word_count: 2000 });
   });
 });

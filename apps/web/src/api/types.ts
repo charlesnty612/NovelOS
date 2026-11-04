@@ -46,6 +46,13 @@ export interface Project {
    * `author_intent` 死参数事故同款形状：后端有、装配在用、作者够不着。
    */
   writing_bible?: string | null;
+  /**
+   * 伏笔逾期阈值（迁移 0008，INTEGER NOT NULL DEFAULT 30, CHECK > 0）。
+   * 超过 N 章仍未兑现的伏笔在装配时标记 overdue。
+   * 后端 `Project` 响应里该键**恒在**（DDL NOT NULL）；本手写副本补上它以让
+   * 项目表单能读到当前值（C-45②，2026-11-05）。
+   */
+  foreshadow_overdue_chapters?: number;
 }
 
 export interface ProjectCreatePayload {
@@ -69,6 +76,11 @@ export interface ProjectCreatePayload {
    * - 非空串 → 去首尾空白后原样存
    */
   writing_bible?: string | null;
+  /**
+   * 伏笔逾期阈值（C-45②）：正整数，缺省 = 后端 DDL 默认 30。
+   * **不要发 null**（列是 NOT NULL；PATCH 显式 null 会写 NULL 撞约束）。
+   */
+  foreshadow_overdue_chapters?: number | null;
 }
 
 export interface ProjectUpdatePayload {
@@ -96,6 +108,11 @@ export interface ProjectUpdatePayload {
    * 字段未提供（undefined）→ 后端保留原值；显式 null / 空白串 → 清除。
    */
   writing_bible?: string | null;
+  /**
+   * 伏笔逾期阈值（C-45②）：正整数（后端 `Field(ge=1)`）。
+   * 未提供 → 保留原值；**不要发 null**（列 NOT NULL，会撞约束）。
+   */
+  foreshadow_overdue_chapters?: number | null;
 }
 
 // --- V1.4 Sprint 16 / MVP：项目备份 / 恢复 -----------------------------------
@@ -350,6 +367,13 @@ export interface ChapterCreatePayload {
 export interface ChapterUpdatePayload {
   title?: string | null;
   plan_json?: Record<string, unknown> | null;
+  /**
+   * 策展大纲槽（迁移 0028）。与 `plan_json` **一列不得两用**：
+   * - 缺省（undefined）⇒ 后端保留原值；
+   * - 显式 `null` ⇒ 清空（写 DB NULL，= 未策展）；
+   * - 对象 ⇒ 整体写入该槽（不触碰 plan_json）。
+   */
+  outline_json?: Record<string, unknown> | null;
   status?: ChapterStatus | null;
 }
 
@@ -956,7 +980,9 @@ export interface QualityGateCheckpoint {
 //   对齐 packages/core/api/routers/reference.py + reference_canons / canon_extracts 表。
 //   - CanonSummary：list 端点返回的轻量摘要（GET /projects/{pid}/canons）。
 //   - CanonDetail ：GET /canons/{canon_id} 全文 + report_md + extracts。
-//   - DeconstructStartResponse：POST /projects/{pid}/deconstruct 同步返回（含 canon_id）。
+//   - DeconstructStartResponse：**已移除**。批 7（2026-11-05）后端改为异步受理，
+//     `POST /projects/{pid}/deconstruct`（含上传端点）返回 `WorkflowStartAccepted`
+//     三键 `{run_id,status,current_node}`，真终态轮询 `GET /api/runs/{run_id}`。
 //   - ExtractEntry：canon_extracts 行的解包结构。
 // ---------------------------------------------------------------------------
 
@@ -999,17 +1025,6 @@ export interface CanonDetail {
   report_md: string;
   created_at: string;
   extracts: ExtractEntry[];
-}
-
-export interface DeconstructStartResponse {
-  run_id: string;
-  status: 'COMPLETED' | 'FAILED' | 'PAUSED' | 'RUNNING' | 'PENDING' | 'CANCELLED';
-  current_node: string | null;
-  project_id: string;
-  book_title: string;
-  canon_id?: string;
-  extracts_count?: number;
-  error?: string;
 }
 
 export interface DeconstructPayload {
@@ -1864,6 +1879,12 @@ export type {
   RevealPolicyUpdateIn as RevealPolicyUpdate,
   SimulationResult,
   SimulationSummary,
+  Skill,
+  SkillBindRequest,
+  SkillCreate,
+  SkillSummary,
+  SkillUnbindRequest,
+  SkillUpdate,
   StateDiff,
 } from './types.generated';
 

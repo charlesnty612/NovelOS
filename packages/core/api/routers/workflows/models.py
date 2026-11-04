@@ -90,9 +90,11 @@ class WorkflowStartAccepted(BaseModel):
     """章节级起跑端点的统一 201/200 响应。
 
     覆盖 ``POST .../plan`` / ``.../write`` / ``.../review`` / ``.../commit`` /
-    ``.../gate-revise`` / ``POST /projects/{project_id}/outline-batch`` 与
-    ``POST /runs/{run_id}/resume`` —— 实测**七个端点逐字同形 3 键**
+    ``.../gate-revise`` / ``POST /projects/{project_id}/outline-batch`` /
+    ``POST /projects/{project_id}/deconstruct`` 与
+    ``POST /runs/{run_id}/resume`` —— 实测**八个端点逐字同形 3 键**
     （都是同一批 dict 字面量的再包装），故共用一个模型而不是各建一个。
+    （拆书的上传端点 ``/deconstruct-upload`` 复用同一模型。）
 
     ⚠️ ``status`` 声明为 ``str`` 而非 ``Literal["RUNNING"]``：本模型覆盖的端点
     实测当前**恒**为 ``"RUNNING"``（``_start_workflow_core`` / ``resume_run`` /

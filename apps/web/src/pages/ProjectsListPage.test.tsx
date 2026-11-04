@@ -546,4 +546,92 @@ describe('ProjectsListPage - 写作圣经（writing_bible）', () => {
     const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
     expect(payload.writing_bible).toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // C-45②：伏笔逾期阈值（只在值变化时下发）
+  // -------------------------------------------------------------------------
+  it('新建：改了阈值 ⇒ create 下发 foreshadow_overdue_chapters', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByTestId('new-project-btn'));
+    await user.type(await screen.findByTestId('project-name'), '新书');
+    const overdue = screen.getByTestId('project-foreshadow-overdue') as HTMLInputElement;
+    expect(overdue.value).toBe('30'); // 默认值
+    fireEvent.change(overdue, { target: { value: '45' } });
+    await user.click(screen.getByTestId('project-save'));
+
+    await waitFor(() => expect(projectsApi.create).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(projectsApi.create).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.foreshadow_overdue_chapters).toBe(45);
+  });
+
+  it('新建：保持默认 30 ⇒ 不下发该键（让 DDL 默认生效）', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByTestId('new-project-btn'));
+    await user.type(await screen.findByTestId('project-name'), '新书');
+    await user.click(screen.getByTestId('project-save'));
+
+    await waitFor(() => expect(projectsApi.create).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(projectsApi.create).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect('foreshadow_overdue_chapters' in payload).toBe(false);
+  });
+
+  it('编辑：未改动阈值 ⇒ update 不带该键（不覆盖原值）', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      baseProject({ project_id: 'prj_001', name: '书', foreshadow_overdue_chapters: 20 }),
+    ]);
+    const user = userEvent.setup();
+    renderPage();
+    const card = await waitFor(() => screen.getByTestId('project-card-prj_001'));
+    await user.click(card.querySelector('button.btn--sm') as HTMLButtonElement);
+    const overdue = (await screen.findByTestId(
+      'project-foreshadow-overdue',
+    )) as HTMLInputElement;
+    expect(overdue.value).toBe('20'); // 初值来自项目当前值
+    await user.click(screen.getByTestId('project-save'));
+
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect('foreshadow_overdue_chapters' in payload).toBe(false);
+  });
+
+  it('编辑：改阈值 ⇒ update 带新值', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      baseProject({ project_id: 'prj_001', name: '书', foreshadow_overdue_chapters: 20 }),
+    ]);
+    const user = userEvent.setup();
+    renderPage();
+    const card = await waitFor(() => screen.getByTestId('project-card-prj_001'));
+    await user.click(card.querySelector('button.btn--sm') as HTMLButtonElement);
+    const overdue = (await screen.findByTestId(
+      'project-foreshadow-overdue',
+    )) as HTMLInputElement;
+    fireEvent.change(overdue, { target: { value: '50' } });
+    await user.click(screen.getByTestId('project-save'));
+
+    await waitFor(() => expect(projectsApi.update).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(projectsApi.update).mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect(payload.foreshadow_overdue_chapters).toBe(50);
+  });
+
+  it('非法阈值（0 / 小数 / 空）⇒ 就地报错，不发请求', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByTestId('new-project-btn'));
+    await user.type(await screen.findByTestId('project-name'), '新书');
+    fireEvent.change(screen.getByTestId('project-foreshadow-overdue'), {
+      target: { value: '0' },
+    });
+    // HTML `min=1` 会让浏览器在 submit 事件前拦截（jsdom 同样实现约束校验）⇒
+    // 这里直接派发 submit 事件，验证**我们自己的**校验分支（而不是浏览器原生提示）。
+    fireEvent.submit(
+      screen.getByTestId('project-name').closest('form') as HTMLFormElement,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/伏笔逾期阈值必须是 ≥1 的整数/)).toBeInTheDocument(),
+    );
+    expect(projectsApi.create).not.toHaveBeenCalled();
+  });
 });

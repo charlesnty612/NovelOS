@@ -34,4 +34,39 @@ describe('extractPausePayload', () => {
       }),
     ).toBeNull();
   });
+
+  // C-44（2026-11-05）：优先级必须与服务端 `_extract_pause_payload` 一致。
+  describe('current_node 优先（对齐服务端）', () => {
+    it('多个节点都有 payload 时，取 current_node 那个（不是插入序第一个）', () => {
+      const oldPayload = { stage: 'chapter-plan', message: '旧节点' };
+      const currentPayload = { stage: 'chapter-review', message: '当前节点' };
+      const ckpt = {
+        // 插入序在前的旧节点
+        plan: { __pause_payload__: oldPayload },
+        author_review: { __pause_payload__: currentPayload },
+      };
+      expect(extractPausePayload(ckpt, 'author_review')).toEqual(currentPayload);
+      // 不传 current_node 时仍是服务端的降级口径：插入序第一个
+      expect(extractPausePayload(ckpt)).toEqual(oldPayload);
+    });
+
+    it('current_node 指向的节点没有 payload ⇒ 继续走顶层 / 插入序兜底', () => {
+      const payload = { stage: 'chapter-review', message: '兜底' };
+      const ckpt = {
+        plan: { finished_at: 'x' },
+        author_review: { __pause_payload__: payload },
+      };
+      expect(extractPausePayload(ckpt, 'plan')).toEqual(payload);
+    });
+
+    it('顶层兼容排在 current_node 之后（权威来源不被防御兼容遮蔽）', () => {
+      const top = { stage: 'top', message: '顶层' };
+      const node = { stage: 'node', message: '节点' };
+      const ckpt = {
+        __pause_payload__: top,
+        author_review: { __pause_payload__: node },
+      };
+      expect(extractPausePayload(ckpt, 'author_review')).toEqual(node);
+    });
+  });
 });

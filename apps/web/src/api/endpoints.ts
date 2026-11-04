@@ -36,7 +36,6 @@ import type {
   DebtUpdatePayload,
   DeliveryVerdictResponse,
   DeconstructPayload,
-  DeconstructStartResponse,
   Draft,
   DraftCreatePayload,
   FetchAvailableModelsPayload,
@@ -82,6 +81,11 @@ import type {
   SigningCheckResult,
   SimulationResult,
   SimulationSummary,
+  Skill,
+  SkillBindRequest,
+  SkillCreate,
+  SkillSummary,
+  SkillUpdate,
   SnapshotResponse,
   StyleSample,
   StyleSampleCreatePayload,
@@ -653,6 +657,32 @@ export const agentsApi = {
   sync: () => api.post<SyncPromptsResult>('/agents/sync', {}),
 };
 
+// -------------------------------------------------------------- skills
+// 对应 packages/core/api/routers/skill.py（内部消费外部 skill）：
+//   POST/GET   /skills                         —— 创建（201）/ 列表摘要（?name= 精确过滤）
+//   GET/PUT/DELETE /skills/{id}                —— 全文 / 更新（提供 payload 时 version+1）/ 删除
+//   GET        /projects/{pid}/skills          —— 项目当前绑定（**有序**，ord ASC）
+//   POST       /projects/{pid}/skills/bind     —— 绑定（**覆盖式有序**，列表顺序即注入顺序）
+//   POST       /projects/{pid}/skills/unbind   —— 解绑（幂等）
+//
+// ⚠️ 绑定是**覆盖式**：任何顺序调整都必须以**完整有序 skill_ids 数组**一次提交 bind，
+// 不能「只加一个 / 只删一个」——那会把其余成员静默解绑。
+// 删除仍被绑定的 skill ⇒ 409（先解绑再删）。
+export const skillsApi = {
+  list: (name?: string) =>
+    api.get<SkillSummary[]>('/skills', name ? { name } : undefined),
+  get: (skillId: string) => api.get<Skill>(`/skills/${skillId}`),
+  create: (payload: SkillCreate) => api.post<Skill>('/skills', payload),
+  update: (skillId: string, payload: SkillUpdate) =>
+    api.put<Skill>(`/skills/${skillId}`, payload),
+  remove: (skillId: string) => api.delete<void>(`/skills/${skillId}`),
+  listBound: (pid: string) => api.get<Skill[]>(`/projects/${pid}/skills`),
+  bind: (pid: string, payload: SkillBindRequest) =>
+    api.post<Skill[]>(`/projects/${pid}/skills/bind`, payload),
+  unbind: (pid: string, payload: { skill_id: string }) =>
+    api.post<Skill[]>(`/projects/${pid}/skills/unbind`, payload),
+};
+
 // -------------------------------------------------------------- quality
 // 对应 packages/core/api/routers/quality.py：
 //   GET /chapters/{cid}/quality           —— 最新一份；404 表示该 chapter 还没有 report
@@ -660,8 +690,24 @@ export const agentsApi = {
 //   GET /projects/{pid}/quality           —— 项目全部 quality_reports（created_at DESC）
 export const qualityApi = {
   latest: (cid: string) => api.get<QualityReport>(`/chapters/${cid}/quality`),
-  evaluate: (cid: string) =>
-    api.post<QualityReport>(`/chapters/${cid}/quality/evaluate`, {}),
+  /**
+   * 现场评估并落库（201）。
+   *
+   * ``draftVersion`` 对应后端 **query 参数** ``draft_version``（integer | null）：
+   * 缺省 ⇒ 评最新版；指定版本 ⇒ 评该版（后端对不存在的版本返回
+   * 201 + overall=0 + 阻断级 issue ``scoring_missing_subscore``，不是 500）。
+   *
+   * ⚠️ 调用方**手头没有明确版本时不要瞎传**：不传即维持既有「评最新」语义。
+   * 目前唯一调用方 ``QualityPanel`` 的入口是「评估本章质量」，没有版本上下文，
+   * 故保持不传。
+   */
+  evaluate: (cid: string, draftVersion?: number | null) => {
+    const suffix =
+      draftVersion == null
+        ? ''
+        : `?draft_version=${encodeURIComponent(String(draftVersion))}`;
+    return api.post<QualityReport>(`/chapters/${cid}/quality/evaluate${suffix}`, {});
+  },
   listByProject: (pid: string) =>
     api.get<QualityReport[]>(`/projects/${pid}/quality`),
 
@@ -709,7 +755,7 @@ export const debtsApi = {
 
 // -------------------------------------------------------------- reference canon
 // 对应 packages/core/api/routers/reference.py：
-//   POST   /projects/{pid}/deconstruct         —— 启动拆书（同步执行到底，返回完整 status）
+//   POST   /projects/{pid}/deconstruct         —— 启动拆书（**异步受理**，201 三键）
 //   POST   /projects/{pid}/deconstruct-upload  —— 上传 .txt/.epub 启动拆书（multipart/form-data）
 //   GET    /projects/{pid}/canons              —— 列表 active canon 摘要
 //   GET    /canons/{canon_id}                  —— 全文 + report_md + extracts
@@ -717,23 +763,26 @@ export const debtsApi = {
 //   POST   /projects/{pid}/canons/{canon_id}/to-style-sample
 //                                           —— 合成文风样例卡并落入 author_style_samples
 //
-// 设计要点：
-// - deconstruct 是同步长任务（无 Human 节点），无需轮询；返回 canon_id 时直接刷新列表。
-// - 失败 / FAILED：响应含 error 字段；前端展示 ErrorBanner。
+// 设计要点（批 7 / 2026-11-05 起）：
+// - 两个拆书端点都是**异步受理**（`WorkflowStartAccepted`，201，status 恒 RUNNING）。
+//   受理 ≠ 完成：真终态须轮询 `GET /api/runs/{run_id}`（调用方 CanonTab 已接轮询）。
+//   ⚠️ 不要把 `status === 'RUNNING'` 当错误——它正是成功的受理响应。
+// - 启动失败（项目不存在 / 已有活动 deconstruct run / 参数非法）一律 4xx raise，
+//   不会返回 FAILED 状态。
 // - to-style-sample：服务端按 style_params/techniques 合成风格卡；同标题二次写入 → 409。
 // - uploadDeconstruct 走原生 fetch + FormData：client.ts 默认
 //   Content-Type: application/json + JSON.stringify(body) 不兼容 multipart；
 //   这里直接构造 FormData，浏览器自动设置 boundary，credentials 与 api.* 同源策略对齐。
 export const referenceApi = {
   deconstruct: (pid: string, payload: DeconstructPayload) =>
-    api.post<DeconstructStartResponse>(`/projects/${pid}/deconstruct`, payload),
+    api.post<WorkflowStartAccepted>(`/projects/${pid}/deconstruct`, payload),
   // 上传 .txt / .epub 文件启动拆书；服务端按扩展名分发：txt utf-8→gb18030、epub stdlib 解析。
   // bookTitle / readerProfile 可省略；epub 时服务端会从 dc:title 兜底。
   uploadDeconstruct: async (
     pid: string,
     file: File,
     options?: { book_title?: string; reader_profile?: ReaderProfile },
-  ): Promise<DeconstructStartResponse> => {
+  ): Promise<WorkflowStartAccepted> => {
     const fd = new FormData();
     fd.append('file', file);
     if (options?.book_title) fd.append('book_title', options.book_title);
@@ -772,7 +821,7 @@ export const referenceApi = {
       }
       throw new ApiError(resp.status, detail);
     }
-    return (await resp.json()) as DeconstructStartResponse;
+    return (await resp.json()) as WorkflowStartAccepted;
   },
   listCanons: (pid: string) =>
     api.get<CanonSummary[]>(`/projects/${pid}/canons`),
@@ -947,7 +996,16 @@ export const branchesApi = {
   promote: (
     pid: string,
     branchId: string,
-    payload: { chapter_id?: string | null } = {},
+    payload: {
+      chapter_id?: string | null;
+      /**
+       * HIGH 风险审批（批 6，后端 `promote_branch` 契约）：
+       * 预检失败 ⇒ 409 `approval_required`（detail 含 high_risk_change_ids），
+       * 前端确认后带 `{approved: true, approver}` 重发同一请求。
+       * 预检在重放**之前** ⇒ 失败时不产生任何 main commit。
+       */
+      author_approval?: { approved: boolean; approver?: string } | null;
+    } = {},
   ) => api.post<BranchPromoteResult>(
     `/projects/${pid}/branches/${branchId}/promote`,
     payload,

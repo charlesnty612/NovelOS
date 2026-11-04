@@ -130,6 +130,56 @@ class ChapterService:
     def _dump_json(value: dict | None) -> str:
         return json.dumps(value or {}, ensure_ascii=False)
 
+    #: ``plan_json`` 里由**后端**写入、前端编辑面通常看不到的门禁键。
+    #:
+    #: C-22（2026-11-05）：``PATCH /chapters/{id}`` 的 ``plan_json`` 曾是整体替换 ⇒
+    #: 作者在「章节计划」里改一个字，就会把 ``gate_blocked``（阻断原因与 rule_ids）、
+    #: ``revision_note``（门禁改稿建议）、``suggested_hashes``（评审驳回的建议）
+    #: 一并静默清掉。这三个键的**写方全在后端**，所以只要请求体没显式提到它们，
+    #: 一律保留 DB 现值。
+    _PLAN_JSON_GATE_KEYS: tuple[str, ...] = (
+        "revision_note",
+        "gate_blocked",
+        "suggested_hashes",
+    )
+
+    def _merge_plan_json(
+        self, conn: sqlite3.Connection, chapter_id: str, incoming: dict | None
+    ) -> str:
+        """把请求体的 ``plan_json`` 与 DB 现值做**保留合并**，返回待写 JSON 串。
+
+        - 请求体覆盖普通键（其余不在请求体里的普通键**仍然丢弃**，保持「整体替换」
+          的可预期语义）。
+        - ``_PLAN_JSON_GATE_KEYS`` 中**请求体未显式出现**的键，从 DB 现值补回。
+        - 请求体显式给出（含显式 ``null``）⇒ 以请求体为准，不补。
+        - 无现存行 / 现值不是 dict / JSON 损坏 ⇒ 视为空 plan（与
+          ``update_revision_note`` 的降级口径一致）。
+        """
+        merged: dict = dict(incoming or {})
+        missing = [k for k in self._PLAN_JSON_GATE_KEYS if k not in merged]
+        if not missing:
+            return self._dump_json(merged)
+
+        row = conn.execute(
+            "SELECT plan_json FROM chapters WHERE chapter_id = ?", (chapter_id,)
+        ).fetchone()
+        if row is None:
+            return self._dump_json(merged)
+
+        raw = row["plan_json"]
+        if not raw:
+            return self._dump_json(merged)
+        try:
+            current = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            current = None
+        if not isinstance(current, dict):
+            return self._dump_json(merged)
+        for key in missing:
+            if key in current:
+                merged[key] = current[key]
+        return self._dump_json(merged)
+
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
         d = dict(row)
@@ -227,7 +277,12 @@ class ChapterService:
         """部分更新。
 
         - 不存在 → None（router 转 404）。
-        - ``plan_json`` 提供时整体替换为该 dict。
+        - ``plan_json`` 提供时**保留合并**（C-22，2026-11-05）：请求体内的键覆盖现值，
+          但 ``revision_note`` / ``gate_blocked`` / ``suggested_hashes`` 三个**门禁键**
+          在请求体未显式提供时由 DB 现值保留。
+          理由：此前是「整体替换」——前端编辑计划文本时手头只有 plan_json 的可见部分，
+          PATCH 会把后端写下的门禁标记（阻断原因 / 改稿建议 / 建议哈希）静默清掉。
+          请求体**显式**带这三个键时以请求体为准（含显式置 ``null``）。
         - ``status`` 提供时校验状态机白名单，非法跳变 → ``ChapterTransitionError``。
         """
         fields = payload.model_dump(exclude_unset=True)
@@ -249,34 +304,37 @@ class ChapterService:
             if target == "REVIEWED" and current["status"] == "COMMITTED":
                 raise ChapterTransitionError(current["status"], target)
 
-        # 处理 plan_json 序列化
-        if "plan_json" in fields:
-            fields["plan_json"] = self._dump_json(fields["plan_json"])
-        # outline_json：None（显式清空）→ 写 NULL；dict → JSON 串
-        if "outline_json" in fields:
-            fields["outline_json"] = (
-                None if fields["outline_json"] is None
-                else self._dump_json(fields["outline_json"])
-            )
-
-        fields["updated_at"] = now_iso()
-
-        # 2026-10-23（M-1 / D-7）：改了 ``title`` ⇒ 同事务内推
-        # ``story_states.state_version``（装配缓存失效主线）——``chapters.title`` 进
-        # director payload 的 ``chapter.title`` 段，而本写路径**只 commit()、不推
-        # version** ⇒ 缺该推进时「改标题后重跑同一章」会命中旧装配（planner 被告知
-        # 旧标题，零告警）。
-        # ⚠️ **刻意只对 title 推**：``plan_json`` / ``outline_json`` 各有独立键维度
-        # （``plan_fp`` / ``outline_fp``）⇒ 推它们是重复失效；而 ``status`` 是高频
-        # 状态机迁移（每章若干次）⇒ 对它推 version = 每次都重装（过度失效）。
-        push_state_version = "title" in fields
-
-        set_clause = ", ".join(f"{k} = :{k}" for k in fields)
-        params: dict = dict(fields)
-        params["chapter_id"] = chapter_id
-
         conn = get_connection(self.db_path)
         try:
+            # 处理 plan_json（read-modify-write 保留门禁键；同一连接内读，避免
+            # 「读到旧值 / 写到新连接」的中间态）。
+            if "plan_json" in fields:
+                fields["plan_json"] = self._merge_plan_json(
+                    conn, chapter_id, fields["plan_json"]
+                )
+            # outline_json：None（显式清空）→ 写 NULL；dict → JSON 串
+            if "outline_json" in fields:
+                fields["outline_json"] = (
+                    None if fields["outline_json"] is None
+                    else self._dump_json(fields["outline_json"])
+                )
+
+            fields["updated_at"] = now_iso()
+
+            # 2026-10-23（M-1 / D-7）：改了 ``title`` ⇒ 同事务内推
+            # ``story_states.state_version``（装配缓存失效主线）——``chapters.title`` 进
+            # director payload 的 ``chapter.title`` 段，而本写路径**只 commit()、不推
+            # version** ⇒ 缺该推进时「改标题后重跑同一章」会命中旧装配（planner 被告知
+            # 旧标题，零告警）。
+            # ⚠️ **刻意只对 title 推**：``plan_json`` / ``outline_json`` 各有独立键维度
+            # （``plan_fp`` / ``outline_fp``）⇒ 推它们是重复失效；而 ``status`` 是高频
+            # 状态机迁移（每章若干次）⇒ 对它推 version = 每次都重装（过度失效）。
+            push_state_version = "title" in fields
+
+            set_clause = ", ".join(f"{k} = :{k}" for k in fields)
+            params: dict = dict(fields)
+            params["chapter_id"] = chapter_id
+
             cur = conn.execute(
                 f"UPDATE chapters SET {set_clause} WHERE chapter_id = :chapter_id",
                 params,

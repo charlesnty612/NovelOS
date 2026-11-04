@@ -11,6 +11,7 @@ import { ChapterStatusBadge } from '../../components/ChapterStatusBadge';
 import { ErrorBanner } from '../../components/ErrorBanner';
 import { useApiCall } from '../../hooks/useApiCall';
 import {
+  buildRunInputFields,
   getButtonAvailability,
   getPipelineStepStates,
   type UnreviewedDraft,
@@ -61,6 +62,10 @@ export function ChapterPipelineHeader({
   autoCommit,
   onAutoCommitChange,
   unreviewedDraft,
+  targetWordCount,
+  onTargetWordCountChange,
+  authorIntent,
+  onAuthorIntentChange,
 }: {
   chapter: Chapter;
   activeRunStatus: 'PENDING' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | null;
@@ -104,6 +109,15 @@ export function ChapterPipelineHeader({
    * `_guard_commit_draft_freshness`（start_commit 里、早于快通道解析执行）。
    */
   unreviewedDraft: UnreviewedDraft | null;
+  /**
+   * C-45①（2026-11-05）：按次字数与铁律。**值由页面持有**——同一份值还要给
+   * 「按门禁建议改稿」（gateRevise）用，若留在本组件内部页面读不到。
+   * 空串 = 不下发（后端沿用默认 / 该章最近一次 run 的 ctx）。
+   */
+  targetWordCount: string;
+  onTargetWordCountChange: (v: string) => void;
+  authorIntent: string;
+  onAuthorIntentChange: (v: string) => void;
 }) {
   const activeRunInfo =
     activeRunStatus === 'RUNNING' || activeRunStatus === 'PENDING'
@@ -204,6 +218,10 @@ export function ChapterPipelineHeader({
   const stepOrder: WorkflowAction[] = ['plan', 'write', 'review', 'commit'];
   const buttonByAction = new Map(buttons.map((b) => [b.action, b] as const));
 
+  // C-45①：按次字数 / 铁律 → 请求体字段（口径单点在 chapterState.buildRunInputFields，
+  // 与页面里 gateRevise 的构造共用；空串不下发该键）。
+  const runInputFields = buildRunInputFields(targetWordCount, authorIntent);
+
   return (
     <div className="panel" data-testid="chapter-header">
       <div className="cdp-header__top">
@@ -300,6 +318,35 @@ export function ChapterPipelineHeader({
             <ErrorBanner>{fastModeError}</ErrorBanner>
           </div>
         ) : null}
+
+        {/* C-45①：按次字数 + 铁律。放在流水线**之前**（对四个动作都生效，
+            不是某一步的选项）；值由页面持有并同时给 gateRevise 使用。 */}
+        <div className="wf-run-inputs" data-testid="wf-run-inputs">
+          <div className="form-row">
+            <label>本章目标字数（可空）</label>
+            <input
+              type="number"
+              min={1}
+              value={targetWordCount}
+              placeholder="留空 = 用默认 / 沿用上次"
+              onChange={(e) => onTargetWordCountChange(e.target.value)}
+              disabled={submitting}
+              data-testid="wf-target-word-count"
+            />
+          </div>
+          <div className="form-row">
+            <label>铁律 author_intent（可空，多行）</label>
+            <textarea
+              rows={2}
+              value={authorIntent}
+              placeholder="本次运行的硬性约束（会与项目写作圣经拼接，冲突时以本次为准）"
+              onChange={(e) => onAuthorIntentChange(e.target.value)}
+              disabled={submitting}
+              data-testid="wf-author-intent"
+            />
+          </div>
+        </div>
+
         <div className="wf-pipeline" data-testid="wf-pipeline">
           {stepOrder.map((action, idx) => {
             const b = buttonByAction.get(action)!;
@@ -341,6 +388,7 @@ export function ChapterPipelineHeader({
                   data-testid={`wf-btn-${b.action}`}
                   onClick={() =>
                     void onStart(b.action, {
+                      ...runInputFields,
                       model_profile_id: selectedProfile[b.action] || null,
                       fresh_write: b.action === 'write' ? writeMode === 'fresh' : undefined,
                       // 「审校」专属：勾选深度二审时透传给页面，未勾选时透传 undefined

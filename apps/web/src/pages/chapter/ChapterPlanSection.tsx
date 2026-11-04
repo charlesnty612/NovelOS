@@ -33,9 +33,22 @@ export function ChapterPlanSection({
       setErr(parsed.error);
       return;
     }
+    // C-22（2026-11-05）前端 UX 兜底：把后端写下的门禁键合回待提交对象。
+    // 后端 `ChapterService.update` 已做保留合并（真正的事实源），这里只是让
+    // 「用户在 textarea 里没看到某键就把它一起删掉」时不至于在**本地状态**上
+    // 制造一个假象；显式出现在文本里的值仍以用户输入为准。
+    const GATE_KEYS = ['revision_note', 'gate_blocked', 'suggested_hashes'] as const;
+    const merged: Record<string, unknown> = { ...parsed.value };
+    const current =
+      chapter.plan_json && typeof chapter.plan_json === 'object'
+        ? (chapter.plan_json as Record<string, unknown>)
+        : {};
+    for (const key of GATE_KEYS) {
+      if (!(key in merged) && key in current) merged[key] = current[key];
+    }
     setSubmitting(true);
     try {
-      await chaptersApi.update(chapter.chapter_id, { plan_json: parsed.value });
+      await chaptersApi.update(chapter.chapter_id, { plan_json: merged });
       setEditing(false);
       onUpdated();
     } catch (e: unknown) {

@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { normalizeConnection, normalizeProfile, referenceApi } from './endpoints';
+import { normalizeConnection, normalizeProfile, qualityApi, referenceApi } from './endpoints';
 import { ApiError } from './client';
 import type { ModelConnectionOut, ModelProfile } from './types';
 
@@ -167,5 +167,49 @@ describe('referenceApi.uploadDeconstruct (网络层失败)', () => {
     const ae = caught as ApiError;
     expect(ae.status).toBe(400);
     expect(ae.detail).toContain('utf-8');
+  });
+});
+// C-42（2026-11-05）：evaluate 的 draft_version 是**query 参数**（不是 body）。
+// 手头有明确版本时透传；没有则维持「评最新」（URL 不带该 query）。
+describe('qualityApi.evaluate（C-42 draft_version query）', () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function mockOkFetch() {
+    // Response 的 body 只能读一次 ⇒ 每次调用生成一个新的 Response。
+    const spy = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ report_id: 'qr_1' }), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    globalThis.fetch = spy as unknown as typeof fetch;
+    return spy;
+  }
+
+  it('传版本 ⇒ URL 带 ?draft_version=N', async () => {
+    const spy = mockOkFetch();
+    await qualityApi.evaluate('ch_1', 7);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [url, init] = spy.mock.calls[0];
+    expect(String(url)).toContain('/api/chapters/ch_1/quality/evaluate?draft_version=7');
+    expect((init as RequestInit).method).toBe('POST');
+  });
+
+  it('不传 / 传 null ⇒ URL 不带 draft_version（评最新版）', async () => {
+    const spy = mockOkFetch();
+    await qualityApi.evaluate('ch_1');
+    await qualityApi.evaluate('ch_2', null);
+    const urls = spy.mock.calls.map((c) => String(c[0]));
+    expect(urls[0]).toContain('/api/chapters/ch_1/quality/evaluate');
+    expect(urls[0]).not.toContain('draft_version');
+    expect(urls[1]).not.toContain('draft_version');
   });
 });

@@ -96,15 +96,23 @@ export function ChapterRunBanner({
   // tick 引用进来避免 lint 警告，也保证下次 render 时 elapsedSec 会重新算
   void tick;
 
+  // C-43（2026-11-05）：**必须按 `workflow_name` 判断**。
+  // `workflow_id` 是不透明的 `wf_<hex>`（`new_id('wf')` 每次不同，dev 库实证
+  // chapter-review = `wf_0a10d0d159c9`）⇒ 拿它比对 `'chapter-write'` 恒不命中，
+  // 横幅的专属提示永远落到最后那条兜底文案。
+  // `workflow_name` 由 router 层 list/get 附加；老数据缺席时退回 workflow_id，
+  // 此时仍是不透明串 ⇒ 落到兜底文案（不谎报成某个具体动作）。
+  const workflowKind = detail.workflow_name ?? detail.workflow_id;
+
   const hintText = (() => {
     if (detail.status === 'PENDING') return '正在排队启动（约需 1-3 分钟，请勿关闭）';
-    if (detail.workflow_id === 'chapter-write')
+    if (workflowKind === 'chapter-write')
       return '正在生成正文草稿（约需 1-3 分钟，请勿关闭）';
-    if (detail.workflow_id === 'chapter-plan')
+    if (workflowKind === 'chapter-plan')
       return '正在生成章节计划（约需 1-3 分钟，请勿关闭）';
-    if (detail.workflow_id === 'chapter-review')
+    if (workflowKind === 'chapter-review')
       return '正在执行审校（约需 1-3 分钟，请勿关闭）';
-    if (detail.workflow_id === 'chapter-commit')
+    if (workflowKind === 'chapter-commit')
       return '正在提交章节（约需 1-3 分钟，请勿关闭）';
     return '正在执行（约需 1-3 分钟，请勿关闭）';
   })();
