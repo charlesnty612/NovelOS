@@ -44,6 +44,7 @@ from packages.core.model_router.providers import (
     OllamaProvider,
     OpenAICompatibleProvider,
 )
+from packages.core.model_router.router import ModelRouter
 
 _BASE = "https://api.example.test/v1"
 
@@ -167,7 +168,6 @@ def test_unbound_profile_keeps_legacy_behaviour(db_path: str):
     assert eff.base_url == _BASE
     assert eff.api_key == "sk-plain"
     assert eff.timeout_s == 42
-    assert eff.upstream_params == {"temperature": 0.3}
     assert eff.headers == {}
 
 
@@ -196,15 +196,43 @@ def test_bound_profile_takes_everything_from_connection(db_path: str):
 
 
 def test_bound_profile_keeps_non_reserved_params(db_path: str):
-    """档案的**非**保留键（temperature / thinking）绑定连接后仍生效。"""
+    """档案的**非**保留键（temperature / thinking）绑定连接后仍进入上游请求参数。
+
+    C-33（2026-11-05）：``EffectiveConfig.upstream_params`` 是**死字段**（生产路径
+    零消费，仅既有测试断言它）已删除。真正把非保留键送进 provider 的是
+    ``call_with_fallback`` 的 extras 计算 ⇒ 断言改在**消费方**（不再断言死字段）。
+    """
     _insert_connection(db_path, params={"api_key": "sk-conn"})
     _insert_profile(
         db_path,
         params={"base_url": _BASE, "temperature": 0.7, "thinking": {"type": "enabled"}},
         connection_id="mconn_x",
     )
-    eff = resolve_effective(_profile_row(db_path), _connection_row(db_path))
-    assert eff.upstream_params == {"temperature": 0.7, "thinking": {"type": "enabled"}}
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO capability_bindings (capability, profile_ids, updated_at) "
+            "VALUES (?, ?, 't')",
+            ("reasoning", json.dumps(["mprof_a"])),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    captured: dict = {}
+
+    class _CaptureProvider:
+        name = "openai_compatible"
+
+        def complete(self, messages, params=None):
+            captured["params"] = params
+            return {"text": "{}", "usage": {"prompt": 0, "completion": 0, "total": 0}}
+
+    router = ModelRouter(db_path)
+    router.get_provider = lambda row, **kwargs: _CaptureProvider()  # type: ignore[assignment]
+    router.call_with_fallback("reasoning", [{"role": "user", "content": "hi"}])
+
+    assert captured["params"] == {"temperature": 0.7, "thinking": {"type": "enabled"}}
 
 
 def test_profile_provider_wins_over_connection_under_binding(db_path: str):

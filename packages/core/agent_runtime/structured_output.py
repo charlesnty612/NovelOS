@@ -25,6 +25,8 @@ r"""结构化输出提取（Sprint 3）。
     输入 ``mode == "revise"`` 时追加保真闸门（剥离 REVISION-CHECKLIST 尾块后实测
     ``preserved_ratio`` 低于阈值且 ``self_report.deviations`` 零申报 → 拒绝，
     见 :mod:`packages.core.agent_runtime.revision_fidelity`）。
+  - ``summarizer``：必须含非空字符串 ``summary``；``key_facts`` / ``self_report``
+    在场时校验形状（C-11：此前该档位没有校验器 ⇒ 任意形状都放行）。
   - ``None``：只要求合法 JSON。
 - 校验失败抛 :class:`AgentOutputError`，由 runner 捕获并重试 1 次（按 agent-contracts §6 重试原则）。
   **剥离策略** 是 observer 的特殊路径（不重试，仅剥离）；见 :func:`strip_observer_violations`。
@@ -33,6 +35,7 @@ r"""结构化输出提取（Sprint 3）。
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -45,6 +48,11 @@ from .revision_fidelity import (
     preserved_ratio,
     strip_revision_checklist_tail,
 )
+
+# stdlib logger（不经 logging_config.get_logger）：后者在 import 期会重配根 logger，
+# 让「纯解析模块」在 import 时产生日志配置副作用。未知 expected 的 warning 用
+# 本模块自己的 logger 即可（caplog 按 logger 名捕获）。
+log = logging.getLogger(__name__)
 
 # Observer 顶层白名单（7 数组）；其余视为越权
 OBSERVER_ALLOWED_KEYS: frozenset[str] = frozenset(
@@ -832,6 +840,75 @@ def _validate_deep_reviewer(payload: dict[str, Any]) -> None:
             )
 
 
+_SUMMARIZER_SELF_REPORT_KEYS = ("chars", "truncated", "sources_used")
+
+
+def _validate_summarizer(payload: dict[str, Any]) -> None:
+    """Summarizer 契约（``docs/agents/prompts/summarizer-v1.md`` §6）。
+
+    消费方 :func:`packages.workflows.chapter_commit.summary._resolve_summary_out`
+    **只读** ``summary``（要求非空字符串；超 200 字由消费方截断并标 degraded），
+    所以 ``summary`` 是硬必填。
+
+    ``key_facts`` / ``self_report`` 是 §6 声明给模型的**结构约束**，但存量 mock
+    与调用方只产 ``{"summary": ...}`` ⇒ 两键**在场时**才校验形状（不强制存在，
+    否则会改变既有合法产出的判定）。形状错误照样抛 :class:`AgentOutputError`
+    （走 runner 的 output-invalid 重试），不再只保证「合法 JSON」。
+
+    ⚠️ 期望形状取自提示词契约与消费方读取面，**不是**照抄某个实现的输出样本。
+    """
+    if "summary" not in payload:
+        raise AgentOutputError("summarizer output missing required field: 'summary'")
+    summary = payload["summary"]
+    if not isinstance(summary, str):
+        raise AgentOutputError(
+            f"summarizer summary must be a string, got {type(summary).__name__}"
+        )
+    if not summary.strip():
+        raise AgentOutputError("summarizer summary must be a non-empty string")
+
+    if "key_facts" in payload:
+        key_facts = payload["key_facts"]
+        if not isinstance(key_facts, list):
+            raise AgentOutputError(
+                f"summarizer key_facts must be a list, got {type(key_facts).__name__}"
+            )
+        for idx, fact in enumerate(key_facts):
+            if not isinstance(fact, str):
+                raise AgentOutputError(
+                    f"summarizer key_facts[{idx}] must be a string, "
+                    f"got {type(fact).__name__}"
+                )
+
+    if "self_report" in payload:
+        report = payload["self_report"]
+        if not isinstance(report, dict):
+            raise AgentOutputError(
+                f"summarizer self_report must be an object, got {type(report).__name__}"
+            )
+        for key in _SUMMARIZER_SELF_REPORT_KEYS:
+            if key not in report:
+                raise AgentOutputError(
+                    f"summarizer self_report missing required field: {key!r}"
+                )
+        chars = report["chars"]
+        if isinstance(chars, bool) or not isinstance(chars, int):
+            raise AgentOutputError(
+                f"summarizer self_report.chars must be an integer, "
+                f"got {type(chars).__name__}"
+            )
+        if not isinstance(report["truncated"], bool):
+            raise AgentOutputError(
+                f"summarizer self_report.truncated must be a boolean, "
+                f"got {type(report['truncated']).__name__}"
+            )
+        sources = report["sources_used"]
+        if not isinstance(sources, list) or any(not isinstance(s, str) for s in sources):
+            raise AgentOutputError(
+                "summarizer self_report.sources_used must be a list of strings"
+            )
+
+
 _VALIDATORS = {
     "observer": _validate_observer,
     "director": _validate_director,
@@ -844,6 +921,7 @@ _VALIDATORS = {
     "character_designer": _validate_character_designer,
     "volume_outliner": _validate_volume_outliner,
     "polisher": _validate_polisher,
+    "summarizer": _validate_summarizer,
 }
 
 
@@ -1047,7 +1125,14 @@ def validate_contract(
         return
     validator = _VALIDATORS.get(expected)
     if validator is None:
-        # 未知 expected → 当成 None 处理；调用方应只传已登记档位之一
+        # C-11（2026-11-05）：未知 expected 仍按 None 处理（不改变调用方行为），
+        # 但**不再静默**——「登记了档位名却没接校验器」与「压根没登记」在
+        # 行为上都等于「零形状校验」，日志是唯一能在产线上发现它的信号。
+        log.warning(
+            "structured_output.unknown_expected expected=%r "
+            "reason=no_validator_registered (contract check skipped)",
+            expected,
+        )
         return
     validator(payload)
 

@@ -454,12 +454,6 @@ class EffectiveConfig:
     headers: dict[str, str] = field(default_factory=dict)
     timeout_s: float | None = None
     models_url: str | None = None
-    upstream_params: dict[str, Any] = field(default_factory=dict)
-    """档案级、**要透传给上游请求体**的其余参数（temperature / thinking / …）。
-
-    已剔除 :data:`RESERVED_PARAM_KEYS`。
-    """
-
     connection_id: str | None = None
     bound: bool = False
     """True = 该档案绑定了连接（此时连接是 base_url（含协议地址池）/ api_key /
@@ -491,7 +485,6 @@ def resolve_effective(
     connection_row: dict[str, Any] | None = None,
     *,
     run_id: str | None = None,
-    provider: str | None = None,
 ) -> EffectiveConfig:
     """把「档案行 + 连接行」解成 :class:`EffectiveConfig`。
 
@@ -586,8 +579,6 @@ def resolve_effective(
         )
         timeout_s = profile_params.get("timeout_s")
 
-    upstream_params = {k: v for k, v in profile_params.items() if k not in RESERVED_PARAM_KEYS}
-
     return EffectiveConfig(
         provider=eff_provider or "",
         model=profile_row.get("model") or "",
@@ -596,7 +587,6 @@ def resolve_effective(
         headers=headers,
         timeout_s=timeout_s,
         models_url=models_url,
-        upstream_params=upstream_params,
         connection_id=connection_id,
         bound=bound,
     )

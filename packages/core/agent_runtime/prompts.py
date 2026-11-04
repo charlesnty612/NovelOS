@@ -382,6 +382,14 @@ class PromptRegistry:
                 # V3.9 检修：内容未变 → 完全跳过 UPDATE。此前无条件 UPDATE 会每次
                 # 启动把 updated_at 刷成当前时间、并把人工置为非 ACTIVE 的行强制改回
                 # ACTIVE，与「幂等 sync」语义相悖（updated_at 失去审计价值）。
+                #
+                # ⚠️ C-12（2026-11-05）：这里必须 commit —— 本方法开头的
+                # ``_upsert_agent`` 已经 UPDATE 了 agents.role / config_json /
+                # updated_at（V3.9.4「启动 sync 自动对齐 role」）。若在「prompt 内容
+                # 未变」这条最常走的路径上直接 return，``finally: conn.close()``
+                # 会**隐式回滚**那次 agent 刷新 ⇒ role 对齐只在「提示词内容恰好变了」
+                # 时才生效（实测：把 role 改脏后再 sync，内容未变分支跑完 DB 仍脏）。
+                conn.commit()
                 return ((agent_name, version_n), False)
             conn.execute(
                 "UPDATE prompts SET content = ?, updated_at = ?, status = 'ACTIVE' WHERE prompt_id = ?",

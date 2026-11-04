@@ -34,6 +34,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from packages.core.db import get_connection
 from packages.core.logging_config import get_logger
 
@@ -158,6 +160,51 @@ CAPABILITY_LABELS: dict[str, dict[str, object]] = {
 
 - ``label``：人类可读中文名（前端展示）；
 - ``agents``：归属该 capability 的 agent 名列表（从 :data:`AGENT_CAPABILITY` 反推）。
+"""
+
+
+# ---------------------------------------------------------------------------
+# 超时解析（档案级 ``timeout_s`` 对**所有**协议一致生效）
+# ---------------------------------------------------------------------------
+
+_OPENAI_DEFAULT_TIMEOUT_S = 240.0
+"""OpenAI 兼容 Provider 的构造默认超时（与 ``OpenAICompatibleProvider.__init__`` 一致）。
+
+⚠️ anthropic / ollama 的默认值（60.0）**不在此复制**：未配置 ``timeout_s`` 时
+不传 ``timeout`` 参数，交由各自构造器决定 ⇒ 默认值只有一个权威来源。
+"""
+
+
+def _resolve_profile_timeout(value: Any, *, config_id: Any) -> float | None:
+    """校验 ``params_json.timeout_s``：``None`` ⇒ ``None``（用 provider 默认），否则正数。
+
+    为什么要单点（C-6，2026-11-05）：此前只有 openai_compatible 分支读
+    ``eff.timeout_s``，anthropic / ollama 分支**静默忽略**档案配置 ⇒ 走 opencode
+    网关的 Claude / MiniMax / Qwen 系（都声明 anthropic 协议）超时恒为 60s，
+    ``timeout_s=123`` 这类配置零效果且零告警。
+    """
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError(
+            "params_json.timeout_s must be a positive number of seconds "
+            f"(config_id={config_id!r})"
+        )
+    return float(value)
+
+
+_RETRYABLE_FALLBACK_EXCEPTIONS: tuple[type[BaseException], ...] = (OSError, httpx.HTTPError)
+"""失败转移链**才继续尝试下一候选**的异常族（C-32，2026-11-05）。
+
+- :class:`ProviderError` 由调用点单独处理（要记 ``status_code``），同属可转移族；
+- 这里补的是「provider 可能漏出的底层网络/超时异常」（``httpx.HTTPError`` /
+  ``OSError``，含 ``TimeoutError``）——它们表示**这一候选这次没成功**，换一个
+  候选仍可能成功。
+
+**不在**本族里的异常（``TypeError`` / ``ValueError`` / ``KeyError`` /
+``AttributeError`` 等）是**编程错误或配置错误**：它们对所有候选同样成立，
+逐候选重试只会把「一处 bug」拖成「N 个候选全失败」并最后包进
+:class:`AggregateProviderError`，诊断信息反而更难定位 ⇒ 直接向上抛出。
 """
 
 
@@ -410,20 +457,31 @@ class ModelRouter:
         if extra_headers:
             headers.update(extra_headers)
 
+        # 档案级 timeout_s：三协议同口径（未配置 ⇒ None ⇒ 用各 provider 构造默认）。
+        timeout_s = _resolve_profile_timeout(
+            eff.timeout_s, config_id=config_row.get("config_id")
+        )
+
         if provider_name == "anthropic":
-            return AnthropicProvider(
-                base_url=eff.base_url,
-                api_key=eff.api_key,
-                model=eff.model,
-                extra_headers=headers,
-            )
+            kwargs: dict[str, Any] = {
+                "base_url": eff.base_url,
+                "api_key": eff.api_key,
+                "model": eff.model,
+                "extra_headers": headers,
+            }
+            if timeout_s is not None:
+                kwargs["timeout"] = timeout_s
+            return AnthropicProvider(**kwargs)
 
         if provider_name == "ollama":
-            return OllamaProvider(
-                base_url=eff.base_url,
-                model=eff.model,
-                extra_headers=headers,
-            )
+            kwargs = {
+                "base_url": eff.base_url,
+                "model": eff.model,
+                "extra_headers": headers,
+            }
+            if timeout_s is not None:
+                kwargs["timeout"] = timeout_s
+            return OllamaProvider(**kwargs)
 
         # 其它 → OpenAI 兼容（OpenAI / DeepSeek / 通义 等）
         if not eff.base_url:
@@ -431,9 +489,7 @@ class ModelRouter:
                 f"provider {provider_name!r} requires a base_url "
                 f"(config_id={config_row.get('config_id')})"
             )
-        timeout = eff.timeout_s if eff.timeout_s is not None else 240.0
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise ValueError("params_json.timeout_s must be a positive number of seconds")
+        timeout = timeout_s if timeout_s is not None else _OPENAI_DEFAULT_TIMEOUT_S
         return OpenAICompatibleProvider(
             base_url=eff.base_url,
             api_key=eff.api_key,
@@ -502,7 +558,11 @@ class ModelRouter:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """失败转移：按 rowid 顺序逐个尝试该 capability 的 enabled configs。
 
-        返回 ``(completion, used_config_row)``；任一 ProviderError 或网络异常则记 warn 并试下一个。
+        返回 ``(completion, used_config_row)``；任一 ProviderError 或网络 / 超时异常
+        （``OSError`` / ``httpx.HTTPError``）则记 warn 并试下一个候选。
+        **编程错误**（``TypeError`` / ``ValueError`` / ``KeyError`` / ``AttributeError``
+        等）**不进入失败转移**——它们对所有候选同样成立，直接向上抛出
+        （见 :data:`_RETRYABLE_FALLBACK_EXCEPTIONS` 的说明）。
         全部失败抛 :class:`AggregateProviderError`，携带各次错误的 ``(config_id, error_repr)``。
         无任何候选 → 抛 :class:`ModelNotConfiguredError`（与 ``resolve`` 行为一致）。
 
@@ -648,7 +708,7 @@ class ModelRouter:
                 attempts.append((cid, msg))
                 last_exc = exc
                 continue
-            except Exception as exc:  # noqa: BLE001 —— 网络/超时等非 ProviderError 也吞
+            except _RETRYABLE_FALLBACK_EXCEPTIONS as exc:
                 msg = f"unexpected error: {exc}"
                 log.warning(
                     "model_router.fallback.unexpected capability=%s "

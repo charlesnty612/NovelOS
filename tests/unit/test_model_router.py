@@ -1124,7 +1124,9 @@ def test_fallback_warnings_put_provider_error_and_unexpected_fields_in_message(
             self.calls += 1
             if self.calls == 1:
                 raise ProviderError("openai_compatible", "server boom", status_code=503)
-            raise RuntimeError("socket blew up")
+            # C-32：非 ProviderError 的**可转移**异常族 = OSError / httpx.HTTPError
+            # （编程错误不再被吞并进入 fallback；本用例只验 warning 字段）。
+            raise OSError("socket blew up")
 
     flaky = _FlakyProvider()
     monkeypatch.setattr(
