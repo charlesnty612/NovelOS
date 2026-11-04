@@ -340,7 +340,7 @@ def _positive_int(value: Any) -> int | None:
 
 
 def _latest_review_report_draft_version(db_path: str, chapter_id: str) -> int | None:
-    """从该章最近若干次 chapter-review run 的 checkpoint 里取**被审版本号**。
+    """从该章最近若干次**已完成**的 chapter-review run 的 checkpoint 里取**被审版本号**。
 
     取数形态：``checkpoint_json["author_review"]["__pause_payload__"]["review_report"]
     ["draft_version"]``——author_review 是 Human 节点，pause payload 里带着本次评审
@@ -352,6 +352,19 @@ def _latest_review_report_draft_version(db_path: str, chapter_id: str) -> int | 
     按 ``started_at`` 由新到旧取前 ``_REVIEWED_VERSION_LOOKBACK_RUNS`` 条，
     返回第一条可解析出正整数版本的记录；都没有 → ``None``（调用方退回「取最新」，
     与改造前行为一致）。读库 / JSON 解析失败一律跳过（门禁不因观测数据缺失而炸）。
+
+    ⚠️ **候选 run 的``status`` 必须是 ``COMPLETED``**（2026-11-05 批次三十六 C-5）：
+    同域另外两处（``routers/workflows/control.py::_latest_completed_review_end``、
+    ``chapter_commit/commit.py`` 的内层时序守卫）都筛 ``status='COMPLETED'``，唯此处
+    此前只按 ``started_at`` 取最新。后果（真实受害场景 = **快通道**）：章历史上有一条
+    更晚的 PAUSED / FAILED（驳回）review run ⇒ 快通道下 commit 照跑 ⇒ 门禁量了
+    **失败 run 量过的那一版**、``commits.draft_version`` 也记那一版 ⇒
+    **导出物按 ``commits.draft_version`` 取到旧稿**（``exporter/builder.py``）。
+    驳回的 run 手里那份版本号**不构成「作者审过这一版」的证据**。
+
+    ⚠️ 与 2026-10-23 对抗审查 A 的 B4 裁决（``draft_version`` 优先级
+    「显式 > 人审 > 最新」）**不冲突**：那条裁决定的是**优先级**，本条定的是
+    **候选 run 的资格**——先筛出「有效评审」，再在有效评审里取最近一次。
     """
     try:
         conn = get_connection(db_path)
@@ -367,6 +380,7 @@ def _latest_review_report_draft_version(db_path: str, chapter_id: str) -> int | 
             SELECT wr.checkpoint_json FROM workflow_runs wr
             JOIN workflows wf ON wf.workflow_id = wr.workflow_id
             WHERE wr.chapter_id = ? AND wf.name = 'chapter-review'
+              AND wr.status = 'COMPLETED'
             ORDER BY wr.started_at DESC
             LIMIT ?
             """,

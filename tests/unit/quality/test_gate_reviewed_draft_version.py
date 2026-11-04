@@ -93,8 +93,19 @@ def _draft(db_path: str, cid: str, version: int, content: str) -> None:
         conn.close()
 
 
-def _review_run(db_path: str, cid: str, *, draft_version: int, started_at: str) -> str:
-    """插一条 chapter-review run，其 checkpoint 带该次评审量过的版本（P1-1 口径）。"""
+def _review_run(
+    db_path: str,
+    cid: str,
+    *,
+    draft_version: int,
+    started_at: str,
+    status: str = "COMPLETED",
+) -> str:
+    """插一条 chapter-review run，其 checkpoint 带该次评审量过的版本（P1-1 口径）。
+
+    ``status`` 默认 ``COMPLETED``：批次三十六 C-5 起，只有**已完成**的评审 run 才有
+    资格提供「被审版本」（PAUSED / FAILED 的 run 不构成「作者审过这一版」的证据）。
+    """
     run_id, wf_id = new_id("wfr"), new_id("wf")
     now = now_iso()
     checkpoint = {
@@ -115,8 +126,16 @@ def _review_run(db_path: str, cid: str, *, draft_version: int, started_at: str) 
         conn.execute(
             "INSERT INTO workflow_runs (run_id, workflow_id, chapter_id, status, "
             "current_node, checkpoint_json, started_at, ended_at) "
-            "VALUES (?, ?, ?, 'PAUSED', 'author_review', ?, ?, ?)",
-            (run_id, wf_id, cid, json.dumps(checkpoint, ensure_ascii=False), started_at, started_at),
+            "VALUES (?, ?, ?, ?, 'author_review', ?, ?, ?)",
+            (
+                run_id,
+                wf_id,
+                cid,
+                status,
+                json.dumps(checkpoint, ensure_ascii=False),
+                started_at,
+                started_at,
+            ),
         )
         conn.commit()
     finally:
@@ -175,6 +194,50 @@ def test_newest_review_run_wins(tmp_path: Path):
     assert _reviewed_draft_version(db_path, cid, _ctx(db_path, pid, cid, "report")) == 1
 
 
+@pytest.mark.parametrize("status", ["FAILED", "PAUSED"])
+def test_non_completed_review_run_does_not_supply_the_version(
+    tmp_path: Path, status: str
+):
+    """C-5（批次三十六）：更晚的**未完成**评审 run 不得提供「被审版本」。
+
+    事故形状：最新草稿 v2、COMPLETED 评审量过 v2（较早）、更晚一条 FAILED（驳回）
+    / PAUSED 评审量过 v1。改造前只按 ``started_at`` 取最新 ⇒ 返回 **1**（失败 run 的
+    版本）⇒ 快通道下 commit 照跑 ⇒ ``commits.draft_version`` 记 v1 ⇒ 导出物取旧稿。
+
+    改后：候选 run 先筛 ``status='COMPLETED'`` ⇒ 返回 **2**（真实被审版本）。
+    """
+    db_path = _db(tmp_path)
+    pid, cid = _incident(db_path, with_review=False)
+    _review_run(
+        db_path, cid, draft_version=2, started_at="2026-11-05T09:00:00+08:00"
+    )
+    _review_run(
+        db_path,
+        cid,
+        draft_version=1,
+        started_at="2026-11-05T11:00:00+08:00",
+        status=status,
+    )
+    assert _reviewed_draft_version(db_path, cid, _ctx(db_path, pid, cid, "report")) == 2
+
+
+def test_only_non_completed_review_run_falls_back_to_latest(tmp_path: Path):
+    """C-5 反向不变量：**没有任何**已完成评审 ⇒ 退回「取最新」（``None``）。
+
+    别把「有一条失败的评审」当成「作者审过 v1」——那是同一形状的反向错误。
+    """
+    db_path = _db(tmp_path)
+    pid, cid = _incident(db_path, with_review=False)
+    _review_run(
+        db_path,
+        cid,
+        draft_version=1,
+        started_at="2026-11-05T11:00:00+08:00",
+        status="FAILED",
+    )
+    assert _reviewed_draft_version(db_path, cid, _ctx(db_path, pid, cid, "report")) is None
+
+
 def test_without_any_review_run_falls_back_to_latest(tmp_path: Path):
     """无评审记录（历史数据 / 直接构造 ctx 的调用方）⇒ ``None`` =「取最新」。
 
@@ -202,7 +265,7 @@ def test_malformed_checkpoint_is_skipped(tmp_path: Path):
             conn.execute(
                 "INSERT INTO workflow_runs (run_id, workflow_id, chapter_id, status, "
                 "current_node, checkpoint_json, started_at, ended_at) "
-                "VALUES (?, ?, ?, 'PAUSED', 'author_review', ?, ?, ?)",
+                "VALUES (?, ?, ?, 'COMPLETED', 'author_review', ?, ?, ?)",
                 (new_id("wfr"), wf_id, cid, checkpoint, now, now),
             )
         conn.commit()

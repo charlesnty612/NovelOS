@@ -159,11 +159,16 @@ def list_project_quality(
     ``POST /commits`` 响应 4 键的先例就在同一批里。改 ``list_reports`` 的 SELECT
     或 ``_attach_judge`` 的弹键逻辑时，本条的同形前提即失效，必须重新量。
 
-    ⚠️ 残余边界（Literal 打在**存量落库数据**上）：``issues_json[]`` 走
-    ``QualityReportIssue`` 的 ``severity / category / gate`` 三个 Literal。一份被
-    手工改脏的 ``issues_json``（比如 ``category`` 写成表外值）会让本端点 **500**，
-    而不是「少报一个字段」。该风险随 ``QualityReportIssue`` 共存，单体端点
-    （``GET /chapters/{cid}/quality``）同样承担，非本端点独有。
+    ⚠️ **残余边界（2026-11-05 批次三十六 C-31 已处置 Literal 面）**：
+    ``issues_json[]`` 走 ``QualityReportIssue`` 的 ``severity / category / gate``
+    三个 Literal。此前一份被手工改脏的 ``issues_json``（值写成表外值）会让本端点
+    **500**，而不是「少报一个字段」。现由 :meth:`QualityService._row_to_dict` 的
+    读路径兜底（``service._sanitize_issue_literals``）：表外值降级为安全默认
+    （severity→``warning`` / category→``style`` / gate→``auto``）并留 ``log.warning``，
+    该行其余字段与其它干净行**原样返回**。
+    **仍未兜底的残余**：元素**缺必填键**（``rule_id`` / ``message``）或元素不是对象时，
+    前者仍会让响应模型校验失败（非 dict 元素已被丢弃）——那属于「结构缺失」而非
+    「取值越界」，不在本次降级面内（不发明值）。
     """
     settings = request.app.state.settings
     from packages.domain.project.service import ProjectService
@@ -181,7 +186,11 @@ def list_project_quality(
     status_code=status.HTTP_201_CREATED,
     response_model=QualityReportResponse,
 )
-def evaluate_chapter_quality(chapter_id: str, request: Request) -> dict:
+def evaluate_chapter_quality(
+    chapter_id: str,
+    request: Request,
+    draft_version: int | None = None,
+) -> dict:
     """现场对 chapter 触发一次 Quality 评估并落库，返回 report。
 
     - chapter 不存在 → 404；
@@ -190,6 +199,12 @@ def evaluate_chapter_quality(chapter_id: str, request: Request) -> dict:
     - 复用 :func:`build_quality_context` + :class:`QualityEngine`；
     - 落库后返回 report dict（与 GET 端点**同 schema**，故共用
       ``QualityReportResponse``）。
+
+    **``draft_version``（可选 query 参数，2026-11-05 批次三十六 C-42）**：指定「本次
+    评估量哪一版草稿」；不传（默认）⇒ 评当前最新一版，**行为逐字不变**。透传给
+    ``build_quality_context`` 的既有形参，沿用批次三十五的 fail-closed 语义：
+    指定的版本**不存在** ⇒ 判「不可检」（201 + ``overall=0`` + 阻断级
+    ``scoring_missing_subscore``，message 以「正文读不到」开头），**不是**量空正文。
     """
     db_path = _db_path(request)
 
@@ -213,6 +228,7 @@ def evaluate_chapter_quality(chapter_id: str, request: Request) -> dict:
         delta={},
         snapshot_pre=snapshot_pre,
         run_id=run_id,
+        draft_version=draft_version,
     )
     try:
         report = QualityEngine().evaluate(quality_ctx)

@@ -35,11 +35,12 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from packages.core.db import get_connection
 from packages.core.ids import now_iso
 from packages.core.logging_config import get_logger
+from packages.core.quality import issues as _quality_issues
 from packages.core.quality.models import QualityContext, QualityReport
 from packages.core.quality.scoring import DRAFT_UNAVAILABLE
 from packages.core.story_state.write_helpers import (
@@ -70,6 +71,84 @@ __all__ = [
 # 对齐口径，但脚本侧还有 verdict/top_issues 等扩展字段，本服务仅校验最小集合）。
 JUDGE_REQUIRED_SCORE_KEYS: tuple[str, ...] = ("pacing", "style", "logic", "dialogue")
 
+#: ``issues_json[]`` 三个 Literal 字段的合法取值（**从单一事实源派生**，不手抄）。
+#: 2026-11-05 批次三十六 C-31：存量落库数据若被手工改脏（形状合法、Literal 表外），
+#: ``QualityReportResponse`` 的 ``response_model`` 校验会抛 ``ResponseValidationError``
+#: ⇒ **整个列表端点 500**。读路径按这里的取值逐条降级，让「一行脏数据」退化为
+#: 「该条该字段取安全默认」，而不是让干净行一起陪葬（同坑形：批次九的裸 ``json.loads``）。
+_ISSUE_SEVERITY_VALUES: frozenset[str] = frozenset(get_args(_quality_issues.Severity))
+_ISSUE_CATEGORY_VALUES: frozenset[str] = frozenset(get_args(_quality_issues.Category))
+_ISSUE_GATE_VALUES: frozenset[str] = frozenset(get_args(_quality_issues.Gate))
+
+#: Literal 字段越界时的安全默认值（``category`` 取引擎的既有回退类别 ``style``）。
+_ISSUE_LITERAL_FALLBACKS: tuple[tuple[str, frozenset[str], str], ...] = (
+    ("severity", _ISSUE_SEVERITY_VALUES, "warning"),
+    ("category", _ISSUE_CATEGORY_VALUES, "style"),
+    ("gate", _ISSUE_GATE_VALUES, "auto"),
+)
+
+
+def _sanitize_issue_literals(raw: Any, *, chapter_id: str | None = None) -> list[Any]:
+    """把 ``issues_json`` 里表外的 Literal 值降级为安全默认（读路径兜底）。
+
+    只处理**已在字典里出现**的 ``severity`` / ``category`` / ``gate``：
+    值不在合法集（含 ``null``）⇒ 换成安全默认并 ``log.warning``（可追溯）。
+    **缺席**的键原样保留——那属于「结构缺失」，由既有校验继续暴露，不在这里发明值。
+    非 dict 元素（手工把列表元素写成字符串等）直接丢弃并留痕。
+
+    为什么在 **service 读路径**而不是 router：``latest_report`` / ``list_reports``
+    是 GET 单体、GET 列表、POST evaluate 三条出参路径的**唯一汇合点**
+    （与批次九 ``decode_json_field`` 同一处置口径）——放在 router 会漏掉另一条。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[Any] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            log.warning(
+                "issues_json 元素形状非法（已丢弃该条）：chapter_id=%s index=%s type=%s",
+                chapter_id,
+                index,
+                type(item).__name__,
+            )
+            continue
+        fixed = dict(item)
+        for key, allowed, fallback in _ISSUE_LITERAL_FALLBACKS:
+            if key in fixed and fixed[key] not in allowed:
+                log.warning(
+                    "issues_json.%s 为表外值（降级为 %r）：chapter_id=%s index=%s value=%r",
+                    key,
+                    fallback,
+                    chapter_id,
+                    index,
+                    fixed[key],
+                )
+                fixed[key] = fallback
+        out.append(fixed)
+    return out
+
+
+def _report_marks_draft_unavailable(report: QualityReport) -> bool:
+    """该报告是否是「正文不可检」那一类（C-38：落库时不得补「最新版本」）。
+
+    可判定标记来自 ``scoring`` 侧**已登记**的契约（见
+    ``quality/scoring.py::_draft_unavailable_issue`` 的 docstring）：同一
+    ``rule_id``（``scoring_missing_subscore``）覆盖两类语义，客户端按 message 前缀
+    区分——本函数同样按该前缀判别，不新增第二套标记。
+
+    为什么必须区分：不可检时 ``reviewed_version`` 为 ``None``（没有显式版本可记），
+    若 ``save_report`` 仍走「取最新」兜底，报告标签会指向一个**从未被量过**的版本
+    （AGENTS 坑区「测量对象 ≠ 被审对象」）；保持 ``None`` 才是如实标注「未量到正文」。
+    正常路径（有正文、只是调用方没显式带版本）不受影响，兜底照旧。
+    """
+    for issue in report.issues:
+        if (
+            issue.rule_id == "scoring_missing_subscore"
+            and (issue.message or "").startswith("正文读不到")
+        ):
+            return True
+    return False
+
 
 class QualityService:
     """Quality 评估报告落库 + 检索。"""
@@ -97,6 +176,11 @@ class QualityService:
         if "issues_json" in d:
             d["issues_json"] = _decode_json_field(
                 d["issues_json"], fallback=[], allowed=(list,)
+            )
+            # 2026-11-05 批次三十六 C-31：形状合法但 Literal 表外（手工改库）⇒
+            # ``response_model`` 校验会 500。逐条降级为安全默认，干净行不受影响。
+            d["issues_json"] = _sanitize_issue_literals(
+                d["issues_json"], chapter_id=d.get("chapter_id")
             )
         # V3.1 P1-2：judge_json 解析；缺四维分列迁移前旧库无此列 → 字段缺失则跳过
         # （保留 None）。
@@ -130,8 +214,13 @@ class QualityService:
           经 ``build_quality_context`` → ``QualityEngine.evaluate`` 的正规路径已由
           ctx 带上「与正文同源的那一版」，不会走到这里——落库这一刻再查「最新版本」
           会在作者两次读取之间改稿时把标签指到另一份正文上。
+        - 2026-11-05 批次三十六 C-38：**「不可检」报告不补「最新」**。不可检时
+          ``report.draft_version is None``（没有显式版本可记）且正文根本没读到，
+          再补「当前最新版本」会让标签指向一份**从未被量过**的正文。保持 ``None``
+          即如实标注「未量到正文」；判别标记复用 ``scoring`` 侧已登记的
+          rule_id + message 前缀（见 :func:`_report_marks_draft_unavailable`）。
         """
-        if report.draft_version is None:
+        if report.draft_version is None and not _report_marks_draft_unavailable(report):
             report.draft_version = _read_latest_draft_version(self.db_path, chapter_id)
         dump = report.model_dump(by_alias=True)
         scores = {
