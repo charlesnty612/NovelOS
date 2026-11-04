@@ -110,6 +110,62 @@ def _dump_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+_UNSERIALIZABLE_REPR_LIMIT = 2000
+"""节点产出 / checkpoint 不可序列化时，``repr`` 兜底内容的截断上限（字符）。"""
+
+
+def _repr_truncated(value: Any) -> str:
+    """``repr(value)`` 的截断版；``repr`` 自身抛错时也给出可读替代。
+
+    ``repr`` 的返回值再做一次 ``backslashreplace`` 规范化——孤立代理字符
+    （surrogate）直接写进 SQLite 会抛 ``UnicodeEncodeError``，兜底路径本身
+    不能再抛。
+    """
+    try:
+        text = repr(value)
+    except Exception:  # noqa: BLE001 —— 兜底路径自身不得抛
+        text = f"<unreprable {type(value).__name__}>"
+    text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+    if len(text) > _UNSERIALIZABLE_REPR_LIMIT:
+        text = text[:_UNSERIALIZABLE_REPR_LIMIT] + f"...(truncated, {len(text)} chars)"
+    return text
+
+
+def _dump_json_safe(value: Any) -> tuple[str | None, str | None]:
+    """序列化 ``value``；不可序列化时返回 ``(repr 兜底 JSON, 错误描述)``。
+
+    返回 ``(json_text, error_text)``：
+    - ``error_text is None`` ⇒ 正常序列化；
+    - ``error_text`` 非空 ⇒ **调用方必须按失败处理**（节点标 FAILED / run 走终态），
+      不能把兜底内容当成节点成功产出（C-4：否则 run 永远 RUNNING）。
+
+    兜底 JSON 形如 ``{"__unserializable__": true, "repr": "...", "error": "..."}``，
+    保证落库不抛、审计可读。``None`` 输入按旧语义返回 ``(None, None)``。
+    """
+    if value is None:
+        return None, None
+    try:
+        return _dump_json(value), None
+    except (TypeError, ValueError, RecursionError) as exc:
+        snippet = _repr_truncated(value)
+        message = f"{type(exc).__name__}: {exc}; repr={snippet}"
+        fallback = _dump_json(
+            {
+                "__unserializable__": True,
+                "repr": snippet,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        return fallback, message
+
+
+def _merge_error(existing: str | None, extra: str | None) -> str | None:
+    """把 ``extra`` 追加到 ``existing``（分号分隔）；两者都空 → None。"""
+    if not extra:
+        return existing
+    return f"{existing}; {extra}" if existing else extra
+
+
 def _scrub_ctx_for_checkpoint(
     ctx: dict[str, Any], exclude: list[str] | None
 ) -> dict[str, Any]:
@@ -306,15 +362,29 @@ def _resolve_checkpoint_exclude(db_path: str | Path, run_id: str) -> list[str]:
     注册表是 core 侧 ``packages.core.workflow_registry``（业务流程包在自身 ``__init__``
     写入 builder）——core 模块不反向 import 业务流程包，依赖方向不变。
     反查不到 workflow / 未注册 / 未声明 → ``[]``。
+
+    C-34：**未注册 / 反查不到** 是「scrub 静默失效」，必须留 WARNING 可观测；
+    未声明清单（定义存在但没这个键）是合法常态，不警告。不阻断 resume。
     """
     from packages.core.workflow_registry import get_workflow
     from packages.core.workflow_runtime.runs import get_workflow_name_for_run
 
     name = get_workflow_name_for_run(db_path, run_id)
     if not name:
+        log.warning(
+            "checkpoint_exclude unresolved for run %s: workflow row not found; "
+            "resume will not scrub checkpoint keys",
+            run_id,
+        )
         return []
     definition = get_workflow(name)
     if not definition:
+        log.warning(
+            "checkpoint_exclude unresolved for run %s: workflow %r is not registered; "
+            "resume will not scrub checkpoint keys",
+            run_id,
+            name,
+        )
         return []
     return list(definition.get("checkpoint_exclude") or [])
 
@@ -814,6 +884,25 @@ class WorkflowEngine:
                 start_index = i + 1
                 break
 
+        # C-7（fail-closed）：checkpoint 里的 current_node 是一个「身份承诺」。节点改名 /
+        # 迁移后定义里找不到它时，旧实现静默 fallback 到 start_index=0 ⇒ 从第一个节点
+        # 重跑整条链（AI 节点重复烧调用、写节点重复落库），且零日志。这里显式拒绝
+        # resume（run 保持 PAUSED，调用方可修正节点定义后重试）。
+        # current_node 为 NULL 的 PAUSED run 是历史/损坏数据：没有可核对的节点身份，
+        # 保持旧行为但要留 WARNING（既有竞态用例以 nodes=[] 构造该形态）。
+        if current is not None and matched_index < 0:
+            raise ValueError(
+                f"workflow run {run['run_id']!r} checkpoint current_node={current!r} "
+                f"not found in the supplied node list "
+                f"(nodes={[n.node_id for n in nodes]!r}); refusing to resume from the beginning"
+            )
+        if current is None:
+            log.warning(
+                "resume run %s has no current_node in checkpoint; "
+                "falling back to start_index=0 (legacy/corrupt PAUSED row)",
+                run["run_id"],
+            )
+
         if regenerate and matched_index >= 0:
             start_index = matched_index
             # 在 ctx 写入标记：让 pipeline 的 _resolve_stage_input 知道
@@ -867,13 +956,30 @@ class WorkflowEngine:
                 latency = int((time.monotonic() - t0) * 1000)
                 payload = exc.payload if isinstance(exc.payload, dict) else {"payload": exc.payload}
                 ctx[node.node_id] = {"__pause_payload__": payload}
-                self._update_node_row(
+                dump_err = self._update_node_row(
                     node_run_id,
                     status="PENDING",
                     output=ctx[node.node_id],
                     latency_ms=latency,
                     error=None,
                 )
+                if dump_err is not None:
+                    # C-4：pause payload 也来自外部（Human 节点可返回任意对象）。
+                    # 兜底后节点行已被改判 FAILED；run 必须走终态，不能停在 PAUSED
+                    # 让一个无法恢复的 checkpoint 继续可 resume。
+                    self._finalize_run(
+                        run_id,
+                        status="FAILED",
+                        ctx=ctx,
+                        current_node=node.node_id,
+                        error=f"pause payload not JSON-serializable: {dump_err}",
+                    )
+                    log.error(
+                        "workflow run %s pause payload at node %s not JSON-serializable; "
+                        "finalized as FAILED",
+                        run_id, node.node_id,
+                    )
+                    return
                 self._finalize_run(run_id, status="PAUSED", ctx=ctx, current_node=node.node_id)
                 log.info("workflow run %s paused at node %s", run_id, node.node_id)
                 return
@@ -931,16 +1037,54 @@ class WorkflowEngine:
                 )
                 return
 
-            self._update_node_row(
+            dump_err = self._update_node_row(
                 node_run_id,
                 status="COMPLETED",
                 output=output,
                 latency_ms=latency,
                 error=None,
             )
+            if dump_err is not None:
+                # C-4：成功路径上 output_json 落盘失败 ⇒ 节点行已被 _update_node_row
+                # 改判 FAILED；run 必须显式收尾为 FAILED，否则永久 RUNNING。
+                self._finalize_run(
+                    run_id,
+                    status="FAILED",
+                    ctx=ctx,
+                    current_node=node.node_id,
+                    error=f"node {node.node_id} output not JSON-serializable: {dump_err}",
+                )
+                log.error(
+                    "workflow run %s node %s output not JSON-serializable; finalized as FAILED",
+                    run_id, node.node_id,
+                )
+                return
 
             # 每节点完成后写 checkpoint + 更新 current_node（崩溃可恢复）
-            self._update_run_checkpoint(run_id, ctx, current_node=node.node_id)
+            checkpoint_err = self._update_run_checkpoint(run_id, ctx, current_node=node.node_id)
+            if checkpoint_err is not None:
+                # C-4：ctx 里混入不可序列化值时 checkpoint 落不了盘 ⇒ 节点行改判
+                # FAILED（不保留「成功但无可恢复点」的假象）并显式收尾 run。
+                self._update_node_row(
+                    node_run_id,
+                    status="FAILED",
+                    output=None,
+                    latency_ms=latency,
+                    error=f"checkpoint not JSON-serializable: {checkpoint_err}",
+                )
+                self._finalize_run(
+                    run_id,
+                    status="FAILED",
+                    ctx=ctx,
+                    current_node=node.node_id,
+                    error=f"checkpoint not JSON-serializable: {checkpoint_err}",
+                )
+                log.error(
+                    "workflow run %s checkpoint after node %s not JSON-serializable; "
+                    "finalized as FAILED",
+                    run_id, node.node_id,
+                )
+                return
 
         # 全部节点完成 → COMPLETED（_finalize_run 不会覆盖 CANCELLED——status
         # 在终态集合里走 L665 同分支；防御性断言此时 run 必非终态）。
@@ -1024,7 +1168,27 @@ class WorkflowEngine:
         output: dict[str, Any] | None,
         latency_ms: int,
         error: str | None,
-    ) -> None:
+    ) -> str | None:
+        """更新节点行；返回**序列化失败描述**（成功为 ``None``）。
+
+        C-4：节点产出可能含不可 JSON 序列化对象（``object()`` / 自定义类型）。旧实现
+        在成功路径上让 ``json.dumps`` 的 ``TypeError`` 穿出 ``_run_nodes`` ⇒ run 行
+        永远 RUNNING、无终态 ⇒ 该章被活跃 run 守卫卡死。这里兜底为 ``repr`` 截断内容
+        落 ``output_json``，同时把节点行改判 **FAILED**（兜底内容不得伪装成成功产出），
+        并把错误描述返回给调用方以收尾 run。``error`` 列同样带上 repr 片段便于审计。
+        """
+        output_json: str | None = None
+        dump_err: str | None = None
+        if output is not None:
+            output_json, dump_err = _dump_json_safe(output)
+        if dump_err is not None:
+            status = "FAILED"
+            error = _merge_error(error, f"node output not JSON-serializable: {dump_err}")
+            log.error(
+                "workflow_run_nodes %s output is not JSON-serializable: %s",
+                node_run_id,
+                dump_err,
+            )
         conn = get_connection(self.db_path)
         try:
             conn.execute(
@@ -1033,11 +1197,12 @@ class WorkflowEngine:
                 SET status = ?, output_json = ?, latency_ms = ?, error = ?, ended_at = ?
                 WHERE node_run_id = ?
                 """,
-                (status, _dump_json(output) if output is not None else None, latency_ms, error, now_iso(), node_run_id),
+                (status, output_json, latency_ms, error, now_iso(), node_run_id),
             )
             conn.commit()
         finally:
             conn.close()
+        return dump_err
 
     def _update_run_checkpoint(
         self,
@@ -1045,13 +1210,24 @@ class WorkflowEngine:
         ctx: dict[str, Any],
         *,
         current_node: str,
-    ) -> None:
+    ) -> str | None:
+        """每节点完成后落 checkpoint；返回序列化失败描述（成功为 ``None``）。
+
+        C-4：``_cap_checkpoint_payload`` 只对「体积」兜底，序列化失败是原样返回；
+        旧实现随后的 ``_dump_json(capped)`` 会抛 ``TypeError`` ⇒ run 永久 RUNNING。
+        这里改为 ``repr`` 截断兜底落盘并返回错误，由 ``_run_nodes`` 收尾为 FAILED。
+        """
         scrubbed = _scrub_ctx_for_checkpoint(ctx, getattr(self, "_checkpoint_exclude", None))
         capped, truncated_n = _cap_checkpoint_payload(scrubbed)
         if truncated_n:
             log.debug(
                 "checkpoint capped for run %s: %d top-level values truncated",
                 run_id, truncated_n,
+            )
+        checkpoint_json, dump_err = _dump_json_safe(capped)
+        if dump_err is not None:
+            log.error(
+                "checkpoint for run %s is not JSON-serializable: %s", run_id, dump_err
             )
         conn = get_connection(self.db_path)
         try:
@@ -1061,11 +1237,12 @@ class WorkflowEngine:
                 SET checkpoint_json = ?, current_node = ?
                 WHERE run_id = ?
                 """,
-                (_dump_json(capped), current_node, run_id),
+                (checkpoint_json, current_node, run_id),
             )
             conn.commit()
         finally:
             conn.close()
+        return dump_err
 
     def _ensure_chapter_free_for_resume(self, run: dict[str, Any]) -> None:
         """resume 前置：同 chapter 是否已被别的 RUNNING/PENDING run 占用；占用 → 抛
@@ -1108,14 +1285,36 @@ class WorkflowEngine:
         UPDATE 被索引拒绝，``sqlite3.IntegrityError`` 外溢成 HTTP 500）。故此处把索引拒绝
         转为 :class:`WorkflowRunConflict`（409 语义），与 ``start_with_nodes`` 的 INSERT
         路径同口径；非该索引的 IntegrityError 原样抛出（不掩盖别的约束缺陷）。
+
+        C-3（TOCTOU）：UPDATE 带 ``AND status = 'PAUSED'``。resume 的 PAUSED 前置校验是
+        check-then-act——同一条 run 的两个并发 resume 都会读到 PAUSED，若 UPDATE 只按
+        run_id 匹配，二者会先后把它翻成 RUNNING 并双双进入 ``_run_nodes``（重复 AI 调用 /
+        重复写库）。带上状态条件后，第二条 UPDATE 的 ``rowcount == 0`` ⇒ 抛
+        :class:`WorkflowRunConflict`。该条件与唯一索引是**两条正交的冲突来源**，互不替代。
         """
         conn = get_connection(self.db_path)
         try:
             try:
-                conn.execute(
-                    "UPDATE workflow_runs SET status = 'RUNNING', ended_at = NULL WHERE run_id = ?",
+                cur = conn.execute(
+                    "UPDATE workflow_runs SET status = 'RUNNING', ended_at = NULL "
+                    "WHERE run_id = ? AND status = 'PAUSED'",
                     (run_id,),
                 )
+                if cur.rowcount == 0:
+                    # C-3 乐观守卫：状态已不是 PAUSED（并发 resume 已胜出 / run 已终态）。
+                    # 不改写、不覆盖，按冲突语义抛出；run 当前状态原样保留。
+                    row = conn.execute(
+                        "SELECT status FROM workflow_runs WHERE run_id = ?", (run_id,)
+                    ).fetchone()
+                    current = row["status"] if row is not None else None
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:  # pragma: no cover —— 连接已坏时仍给业务异常
+                        pass
+                    raise WorkflowRunConflict(
+                        f"workflow run {run_id!r} is not resumable: expected status "
+                        f"'PAUSED', found {current!r}; another resume may already be in progress"
+                    )
                 conn.commit()
             except sqlite3.IntegrityError as exc:
                 try:
@@ -1149,6 +1348,17 @@ class WorkflowEngine:
         current_node: str | None,
         error: str | None = None,
     ) -> None:
+        """把 run 收尾到 ``status``（COMPLETED / FAILED / CANCELLED / PAUSED）。
+
+        C-4：checkpoint 序列化必须由本方法自己兜底——它是失败收尾的最后一道，若它
+        自己因 ``json.dumps`` 抛错，run 就再也到不了终态。兜底内容（``repr`` 截断）
+        落 checkpoint 并把原因追加进 ``error``，不改变调用方要求的终态。
+
+        C-13：**实际写入的终态** ∈ {FAILED, CANCELLED} 时，把该 run 遗留的
+        ``proposed`` / ``validated`` state_delta 置为 ``superseded``（复用既有闭集取值，
+        不新增枚举、不 DELETE——保留审计与 FK 语义）。必须按实际终态判定：PAUSED
+        分支在取消竞态中会实际落成 CANCELLED，而形参仍是 PAUSED。
+        """
         scrubbed = _scrub_ctx_for_checkpoint(ctx or {}, getattr(self, "_checkpoint_exclude", None))
         # PAUSED 落盘不截断（人工审阅 resume 需要全量 ctx）；其余终态做软上限
         if status == "PAUSED":
@@ -1160,8 +1370,19 @@ class WorkflowEngine:
                 "final checkpoint capped for run %s (%s): %d values truncated",
                 run_id, status, truncated_n,
             )
+        checkpoint_json, checkpoint_dump_err = _dump_json_safe(capped)
+        if checkpoint_dump_err is not None:
+            log.error(
+                "final checkpoint for run %s (%s) is not JSON-serializable: %s",
+                run_id, status, checkpoint_dump_err,
+            )
+            error = _merge_error(
+                error, f"checkpoint not JSON-serializable: {checkpoint_dump_err}"
+            )
         conn = get_connection(self.db_path)
         try:
+            # 实际落库的终态（None = 本次未改写；PAUSED → CANCELLED 竞态兜底会改写）
+            actual_terminal: str | None = None
             if status == "CANCELLED":
                 # CANCELLED 收尾无守卫：cancel_run 已置 CANCELLED + ended_at，此处
                 # 幂等重写（status=CANCELLED / ended_at=now / checkpoint 落盘）无害。
@@ -1171,8 +1392,9 @@ class WorkflowEngine:
                     SET status = ?, ended_at = ?, checkpoint_json = ?, current_node = ?, error = ?
                     WHERE run_id = ?
                     """,
-                    (status, now_iso(), _dump_json(capped), current_node, error, run_id),
+                    (status, now_iso(), checkpoint_json, current_node, error, run_id),
                 )
+                actual_terminal = "CANCELLED"
             elif status in ("COMPLETED", "FAILED"):
                 # 守卫：WHERE status='RUNNING'。场景——节点 fn 完成（或抛异常）后
                 # _update_node_row / _update_run_checkpoint 之间的 5-20ms 窗口内，
@@ -1188,14 +1410,24 @@ class WorkflowEngine:
                     SET status = ?, ended_at = ?, checkpoint_json = ?, current_node = ?, error = ?
                     WHERE run_id = ? AND status = 'RUNNING'
                     """,
-                    (status, now_iso(), _dump_json(capped), current_node, error, run_id),
+                    (status, now_iso(), checkpoint_json, current_node, error, run_id),
                 )
                 if cur.rowcount == 0:
+                    row = conn.execute(
+                        "SELECT status FROM workflow_runs WHERE run_id = ?", (run_id,)
+                    ).fetchone()
+                    current = row["status"] if row is not None else None
+                    if current == "CANCELLED":
+                        # run 确实已被 cancel_run 收尾为 CANCELLED ⇒ delta 清理按
+                        # 实际终态走（C-13 的「别用形参」）。
+                        actual_terminal = "CANCELLED"
                     log.debug(
                         "_finalize_run skip: run %s status=%r (already not RUNNING); "
                         "likely cancelled during finalize window",
                         run_id, status,
                     )
+                else:
+                    actual_terminal = status
             else:  # PAUSED: 保留 ended_at = NULL（仍可 resume）
                 # 守卫：WHERE status='RUNNING'（M1）。场景——用户 cancel_run（200
                 # CANCELLED）之后 Human 节点才抛 PauseRequested（节点 fn 执行窗口内
@@ -1210,7 +1442,7 @@ class WorkflowEngine:
                     SET status = ?, checkpoint_json = ?, current_node = ?, error = ?
                     WHERE run_id = ? AND status = 'RUNNING'
                     """,
-                    (status, _dump_json(capped), current_node, error, run_id),
+                    (status, checkpoint_json, current_node, error, run_id),
                 )
                 if cur.rowcount == 0:
                     row = conn.execute(
@@ -1219,6 +1451,17 @@ class WorkflowEngine:
                     current = row["status"] if row is not None else None
                     if current == "CANCELLED":
                         cancelled_capped, _ = _cap_checkpoint_payload(scrubbed)
+                        cancelled_json, cancelled_err = _dump_json_safe(cancelled_capped)
+                        cancelled_error = error
+                        if cancelled_err is not None:
+                            log.error(
+                                "cancelled checkpoint for run %s is not JSON-serializable: %s",
+                                run_id, cancelled_err,
+                            )
+                            cancelled_error = _merge_error(
+                                error,
+                                f"checkpoint not JSON-serializable: {cancelled_err}",
+                            )
                         conn.execute(
                             """
                             UPDATE workflow_runs
@@ -1228,12 +1471,13 @@ class WorkflowEngine:
                             (
                                 "CANCELLED",
                                 now_iso(),
-                                _dump_json(cancelled_capped),
+                                cancelled_json,
                                 current_node,
-                                error,
+                                cancelled_error,
                                 run_id,
                             ),
                         )
+                        actual_terminal = "CANCELLED"
                         log.info(
                             "_finalize_run: run %s cancelled during pause window; "
                             "finalized as CANCELLED (current_node=%s)",
@@ -1262,6 +1506,22 @@ class WorkflowEngine:
                             "_finalize_run skip: run %s status=%r (not RUNNING); pause not applied",
                             run_id, current,
                         )
+            # C-13：失败 / 取消的 run 不再可能走 commit，遗留 delta 归 superseded。
+            # 与终态写在同一事务里（复用本连接），避免「run 已终态、delta 仍 proposed」。
+            if actual_terminal in ("FAILED", "CANCELLED"):
+                delta_cur = conn.execute(
+                    """
+                    UPDATE state_deltas
+                    SET status = 'superseded'
+                    WHERE workflow_run_id = ? AND status IN ('proposed', 'validated')
+                    """,
+                    (run_id,),
+                )
+                if delta_cur.rowcount:
+                    log.info(
+                        "_finalize_run: run %s terminal=%s; superseded %d stale state_deltas",
+                        run_id, actual_terminal, delta_cur.rowcount,
+                    )
             conn.commit()
         finally:
             conn.close()
@@ -1312,6 +1572,8 @@ def recover_interrupted_runs(
     - 该 run 下仍处于 ``RUNNING`` / ``PENDING`` 的节点行：``status='FAILED'``,
       ``error='interrupted by restart'``, ``ended_at=<UTC now ISO>``（已
       ``COMPLETED`` / ``FAILED`` / ``SKIPPED`` 的节点行保留原状，便于审计）。
+    - 该 run 遗留的 ``proposed`` / ``validated`` state_delta：``status='superseded'``
+      （C-13；run 已 FAILED 不可能再 commit，保留行不 DELETE）。
     - 孤儿节点清扫：run 已处于 ``FAILED`` / ``CANCELLED`` 终态（同受 instance_id 归属
       过滤）、但其下节点行仍为 ``RUNNING`` / ``PENDING`` 的僵尸节点，一并收尾为
       FAILED（口径同上）。这类残留通常源于历史 bug：run 收尾逻辑漏掉节点行；不处理
@@ -1363,6 +1625,23 @@ def recover_interrupted_runs(
                 """,
                 (now, *run_ids),
             )
+            # 3b) C-13：这些 run 已被收尾为 FAILED、不再可能走 chapter_commit ⇒
+            # 遗留的 proposed/validated delta 归 superseded（不 DELETE，保留审计/FK；
+            # applied / rejected / superseded 不动）。与上面同一连接同一事务。
+            delta_cur = conn.execute(
+                f"""
+                UPDATE state_deltas
+                SET status = 'superseded'
+                WHERE workflow_run_id IN ({placeholders})
+                  AND status IN ('proposed', 'validated')
+                """,
+                (*run_ids,),
+            )
+            if delta_cur.rowcount:
+                log.info(
+                    "recover_interrupted_runs: 收尾 %d 条遗留 pending state_deltas",
+                    delta_cur.rowcount,
+                )
 
         # 4) 孤儿节点清扫：run 已 FAILED/CANCELLED 终态、但节点行仍
         # RUNNING/PENDING 的僵尸节点一并收尾。典型产物是历史已 FAILED 但
