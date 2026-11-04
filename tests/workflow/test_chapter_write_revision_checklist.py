@@ -834,6 +834,28 @@ def test_revise_under_band_flip_records_audit_superseded(
                 ],
                 "observer": _observer_noop_script(),
             }
+            # ⚠️ 2026-11 批次三十六（C-15 连带）：``run_agent`` 每次调用都新建
+            # ``MockProvider``（``runner.py``），其 ``_call_count`` 随实例重置 ⇒ 列表形式的
+            # ``mock_providers["writer"]`` **不会按调用序推进**，两轮 writer 永远拿到第 0 条。
+            # 本用例要的是「第 1 轮 revise 欠带 → 第 2 轮 write 落带」，故在测试侧按调用序
+            # 把 writer 的 mock_script 换成单条脚本（不改生产代码）。
+            # 背景：C-15 之前 write 模式的**测量**会把尾块算进字数，于是两轮看似「第二轮更长」；
+            # 修好测量后两轮同长，等距会保留更早的一次（revise）⇒ 翻模不再发生。
+            import packages.workflows.chapter_write.pipeline as cw_pipeline
+
+            real_run_agent = cw_pipeline.run_agent
+            writer_scripts = list(mock_providers_v2["writer"])
+            seq = {"n": 0}
+
+            def _sequenced_run_agent(db_path, agent_name, payload, run_id, **kw):  # noqa: ANN001
+                if agent_name == "writer":
+                    idx = min(seq["n"], len(writer_scripts) - 1)
+                    seq["n"] += 1
+                    kw["mock_script"] = [writer_scripts[idx]]
+                return real_run_agent(db_path, agent_name, payload, run_id, **kw)
+
+            monkeypatch.setattr(cw_pipeline, "run_agent", _sequenced_run_agent)
+
             r = await _request(
                 app, "POST", f"/api/projects/{pid}/chapters/{cid}/write",
                 json={"mock_providers": mock_providers_v2},

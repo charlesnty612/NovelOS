@@ -185,14 +185,20 @@ def _measure_writer_attempt(
     """把一次 writer 产出折算为「离字数带多远」的尝试记录（确定性、零 LLM）。
 
     - ``status`` / ``visible_chars`` 走权威口径 :func:`classify_prose_length`
-      （与 length_check 同源）；revise 模式先剥离 ``---REVISION-CHECKLIST---`` 尾块
-      再量——该尾块不落库、不属正文，计入会把欠带误判为在带。
+      （与 length_check 同源）；**只要分隔行出现就剥离** ``---REVISION-CHECKLIST---``
+      尾块再量（不看 ``mode``）——该尾块不落库、不属正文，计入会把欠带误判为在带。
+      ⚠️ 2026-11 批次三十六 C-15：原条件写的是 ``mode == "revise"``，而**保存路径**
+      （``_writer_node`` 的 ``had_marker`` 分支）早已是「按内容剥」。write /
+      length-retry 轮若模型违约吐尾块，测量把它算进 ``visible_chars`` ⇒ 字数带误判，
+      与保存路径口径分叉。现两处同口径：分隔行出现即剥。
     - ``distance``：带内 = 0；欠带 = 距下限缺口；超带 = 距上限超出量。用于选优。
     - 返回值全部为 JSON 原生类型（进 ctx → checkpoint_json / run 节点产出）。
     """
     prose = out.get("prose") if isinstance(out, dict) else None
     prose = strip_think_blocks(prose) if isinstance(prose, str) else ""
-    if mode == "revise" and prose:
+    if prose and _REVISION_CHECKLIST_MARKER in prose:
+        # 与保存路径同口径：分隔行出现就剥（不看 mode）。无标记时不动 prose，
+        # 避免 rstrip 改变「无尾块文本逐字不变」这一既有契约。
         prose, _ = _parse_revision_checklist(prose)
     report = classify_prose_length(prose, target, **band_cfg)
     status = report["status"]

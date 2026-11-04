@@ -289,6 +289,48 @@ def _scene_planner_node(ctx: dict[str, Any]) -> dict[str, Any]:
         return ret_fb
 
 
+def _capture_ai_call_id(
+    db_path: str, run_id: str, node_run_id: Any,
+) -> str | None:
+    """best-effort 取「本节点刚刚写下的那条 ai_call_logs 行」的 ``call_id``。
+
+    2026-11 批次三十六 C-20：writer 节点可在同一 ``node_run_id`` 下调用 writer
+    多次（首写 + 欠带重写），而 ``_best_writer_attempt`` 采纳的可能是**较早**一次。
+    落 ``drafts.model_id / prompt_version`` 时若一律取
+    ``ORDER BY rowid DESC LIMIT 1``（最后一条），就会把「没被采纳的那次调用」的
+    模型 / 提示词版本记进审计面。
+
+    做法：每次 ``_call_writer`` 成功返回后立刻调用本函数——``run_agent`` 在返回前
+    已 commit 它的日志行，因此「此刻的最新一行」就是该次调用的行。把它与 attempt
+    按下标对齐，采纳时按 ``call_id`` 精确回查。
+
+    失败面全部 fail-soft（单测里 monkeypatch 了 ``run_agent`` ⇒ 无行 / 表缺 /
+    DB 故障 / 并发其它写入）：返回 ``None``，调用方回落原「最后一行」行为——
+    本函数只提升精度，不新增阻断。
+    """
+    if not run_id:
+        return None
+    try:
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT call_id FROM ai_call_logs "
+                "WHERE run_id = ? AND node_run_id = ? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (run_id, node_run_id),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 —— 精度增强，绝不阻断
+        _log.debug(
+            "chapter_write: ai_call_logs call_id capture failed "
+            "(run_id=%s node_run_id=%s err=%s); falling back to latest-row lookup",
+            run_id, node_run_id, exc,
+        )
+        return None
+    return row["call_id"] if row is not None else None
+
+
 def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     db_path = ctx["db_path"]
     run_id = ctx["run_id"]
@@ -362,6 +404,11 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
     out = _call_writer(payload)
+    # C-20：把「这次调用」的 ai_call_logs 行与「这次 attempt」按下标对齐
+    # （见 _capture_ai_call_id 的说明）。capture 失败 → None，回退最后一行口径。
+    call_ids: list[str | None] = [
+        _capture_ai_call_id(db_path, run_id, ctx.get("_current_node_run_id"))
+    ]
     outputs: list[Any] = [out]
     payloads: list[dict[str, Any]] = [payload]
     attempts: list[dict[str, Any]] = [
@@ -393,6 +440,9 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
             break
         if not isinstance(retry_out, dict):
             break
+        call_ids.append(
+            _capture_ai_call_id(db_path, run_id, ctx.get("_current_node_run_id"))
+        )
         payloads.append(retry_payload)
         outputs.append(retry_out)
         attempts.append(
@@ -513,16 +563,32 @@ def _writer_node(ctx: dict[str, Any]) -> dict[str, Any]:
     # 用于 drafts.model_id 记录真实 provider/model，避免列表页无法区分模型。
     # 2026-09-16 版本口径统一：同一次查询顺带取 prompt_version——它是**本 run 实际加载
     # 的提示词版本**（权威值，run_agent 落库时写入），供 save_draft 写 drafts 用。
+    #
+    # 2026-11 批次三十六 C-20：按**被采纳 attempt 的 call_id** 精确回查，而不是一律取
+    # 「最后一条」。窄窗口：节点中途 grow prompt self-heal 推进版本时，最后一次调用的
+    # prompt_version 与前一次不同；若采纳的是前一次，旧实现会把「没被采纳的那次」的
+    # 模型 / 版本记进 drafts 审计面。capture 缺失（mock / 表缺 / DB 故障）⇒ 保持原
+    # 「最后一行」行为，注释说明窗口。
+    accepted_call_id = (
+        call_ids[accepted] if 0 <= accepted < len(call_ids) else None
+    )
     writer_model_id: str | None = None
     writer_prompt_version: str | None = None
     conn = get_connection(db_path)
     try:
-        row = conn.execute(
-            "SELECT model_id, prompt_version FROM ai_call_logs "
-            "WHERE run_id = ? AND node_run_id = ? "
-            "ORDER BY rowid DESC LIMIT 1",
-            (run_id, ctx.get("_current_node_run_id")),
-        ).fetchone()
+        if accepted_call_id:
+            row = conn.execute(
+                "SELECT model_id, prompt_version FROM ai_call_logs "
+                "WHERE call_id = ?",
+                (accepted_call_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT model_id, prompt_version FROM ai_call_logs "
+                "WHERE run_id = ? AND node_run_id = ? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (run_id, ctx.get("_current_node_run_id")),
+            ).fetchone()
     except sqlite3.OperationalError as exc:
         # 收窄（2026-10-16 批次十）：上方注释主张的降级范围只有「mock 路径无
         # ai_call_logs 行 → None」——那是**查不到行**，不是 DB 故障。原裸 except 会把
@@ -894,9 +960,18 @@ def _condense_node(ctx: dict[str, Any]) -> dict[str, Any]:
         excess_pct = round(visible / target * 100, 1) if target > 0 else 0.0
         target_pct = round(target / visible * 100, 1) if visible > 0 else 0.0
 
+        # 2026-11 批次三十六 C-19：这两键必须与**实际调用**同源。
+        # 旧值 ``agent="condense"`` / ``prompt_version="condense:v1"`` 是假标签：
+        # 仓内根本没有 condense 提示词文件，而下面 run_agent 实际用的是 ``polisher``
+        # （capability_for('polisher')=creative_writing）。发给模型的元数据与实际
+        # 加载的提示词不一致，会让「模型照抄回声 / 溯源」两个口径同时失真。
+        # ⇒ agent 写死为 ``polisher``；prompt_version 按 ACTIVE 提示词现算
+        # （与 run_agent 落 ai_call_logs.prompt_version 同源，self-heal 后取到的也是真值）。
         payload: dict[str, Any] = {
-            "agent": "condense",
-            "prompt_version": "condense:v1",
+            "agent": "polisher",
+            "prompt_version": active_prompt_label(
+                db_path, "polisher", fallback="polisher:v1"
+            ),
             "draft_text": current_prose,
             "length_context": {
                 "visible_chars": visible,

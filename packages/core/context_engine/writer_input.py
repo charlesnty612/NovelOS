@@ -282,9 +282,19 @@ def _build_writer_input_uncached(
         "scene_plan": _inject_scene_word_budget(scene_plan, target_word_count),
         "character_state_excerpts": character_excerpts,
         "world_state_excerpts": world_excerpts,
+        # 2026-11 批次三十六 C-16：删掉两个**死字段**（硬规则 9 反向族：
+        # 契约承诺存在 ≠ 数据源存在）。
+        # - ``recent_prose.last_scene_excerpt``：恒为 ""，且**无正确数据源**——
+        #   正文整章一份落 ``drafts.content``，v5 已明拍板不保留 SCENE 边界标记，
+        #   无从切出「上一场戏结尾」；
+        # - ``retrieved_memory``：恒为 []，数据其实在手（``recalled_passages``），
+        #   但要伪造 ``memory_id/kind/relevance`` 并双份下发。
+        # 提示词侧同步升版 ``writer-v6.md`` 删除这两条声明、补 ``recalled_passages``
+        # 的如实声明（v5 未声明它 ⇒ 契约与实现此前已经错位）。
+        # 缓存键**不加维度**：payload 少两个恒空键，不影响任何现有键维度的语义；
+        # 而 ``prompt_label`` 升到 v6 本身会让缓存自然 miss。
         "recent_prose": {
             "last_chapter_excerpt": recent_prose_tail,
-            "last_scene_excerpt": "",
         },
         # Sprint 15 / V1.3：作者文风样例注入。空 list 时 writer 按空态处理。
         # 引导语作为顶层 instruction，与 sample 列表解耦，便于测试 / 未来 i18n。
@@ -293,8 +303,9 @@ def _build_writer_input_uncached(
             "samples": style_samples,
         },
         # V2.0 Wave C 任务一：FTS 召回片段。无索引 / 无命中时为空 list。
+        # 形状 ``[{chapter_id, chapter_no, snippet, rank}]``（retrieval.search）。
+        # writer-v6 起已如实写进提示词 §5（v5 时提示词未声明它，契约与实现错位）。
         "recalled_passages": recalled_passages,
-        "retrieved_memory": [],
     }
 
     # 2026-09-16 F-10 修复：author_intent 槽位。此前 writer 装配无此参数——write

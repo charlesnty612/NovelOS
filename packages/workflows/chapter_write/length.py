@@ -60,7 +60,15 @@ def _resolve_chapter_word_band(
             conn.close()
         if row is not None and row["project_id"]:
             chapter_project_id = row["project_id"]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # 读库失败 ⇒ 项目级字数带覆盖静默失效（回落默认带）。不阻断，但必须留痕
+        # （2026-11 批次三十六 C-17）：否则作者改了 word_band_json 却发现不生效，
+        # 而全链零告警。
+        _log.warning(
+            "chapter_write._resolve_chapter_word_band: chapter lookup failed "
+            "chapter_id=%s db=%s err=%s; falling back to default band",
+            chapter_id, db_path, exc,
+        )
         return chapter_project_id, resolve_band_config(None)
 
     if not chapter_project_id:
@@ -78,7 +86,14 @@ def _resolve_chapter_word_band(
                 band_row = None
         finally:
             conn2.close()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # 同上（C-17）：项目级字数带读取失败静默回落默认带会让「项目设置不生效」
+        # 无从排查 ⇒ 留痕不阻断。
+        _log.warning(
+            "chapter_write._resolve_chapter_word_band: project word_band lookup failed "
+            "chapter_id=%s project_id=%s db=%s err=%s; falling back to default band",
+            chapter_id, chapter_project_id, db_path, exc,
+        )
         band_row = None
 
     if band_row is None or not band_row["word_band_json"]:
