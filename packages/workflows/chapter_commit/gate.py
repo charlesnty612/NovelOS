@@ -46,6 +46,7 @@ from packages.core.workflow_runtime.engine import PauseRequested
 
 from .pipeline_common import (
     _build_revision_guidance,
+    high_risk_change_items,
 )
 
 _log = logging.getLogger(__name__)
@@ -708,9 +709,9 @@ def _high_risk_approval_node(ctx: dict[str, Any]) -> dict[str, Any]:
         "stage": "chapter-commit.high_risk_approval",
         "message": message,
         "delta_id": ctx.get("delta_id"),
-        "changes": {
-            "character_changes": ctx.get("observer_payload", {}).get("character_changes", []),
-            "world_changes": ctx.get("observer_payload", {}).get("world_changes", []),
-        },
+        # B-1（2026-11-08）：审批卡展示面 == 触发面。判定扫 7 个数组，展示也必须是
+        # 同样 7 个数组里**触发审批的那些条目**——只装 character/world 会让
+        # 「仅 new_events 有 HIGH」的提交看到一张空审批卡，只能盲批。
+        "changes": high_risk_change_items(ctx.get("observer_payload") or {}),
     }
     raise PauseRequested(payload)

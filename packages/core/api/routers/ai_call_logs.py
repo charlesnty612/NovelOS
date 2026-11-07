@@ -220,14 +220,17 @@ def list_ai_call_logs(
         params: list[Any] = []
         where: list[str] = []
         if project_id:
-            # workflow_runs 没有 project_id 列：通过 chapter_id 间接拿到
-            # (ai_call_logs → workflow_runs → chapters → projects)。
+            # B-2（2026-11-08）：0037 起 workflow_runs 已有 project_id 列。
+            # 原实现只 JOIN chapters，而项目级 run（project-init / outline-batch /
+            # deconstruct）的 chapter_id 为 NULL ⇒ INNER JOIN 把这些 run 名下的
+            # 全部 ai_call_logs 静默滤掉。改为「run 归属列为主 + chapters 反查兜底
+            # 历史 NULL 行」，并降为 LEFT JOIN（兜底分支对 NULL chapter 不成立）。
             sql += (
                 " JOIN workflow_runs r ON r.run_id = l.run_id"
-                " JOIN chapters ch ON ch.chapter_id = r.chapter_id"
+                " LEFT JOIN chapters ch ON ch.chapter_id = r.chapter_id"
             )
-            where.append("ch.project_id = ?")
-            params.append(project_id)
+            where.append("(r.project_id = ? OR ch.project_id = ?)")
+            params.extend([project_id, project_id])
         if node:
             where.append("l.node_run_id = ?")
             params.append(node)

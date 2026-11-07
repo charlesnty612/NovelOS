@@ -115,7 +115,17 @@ def _init_status_for_project(db_path: str, project_id: str) -> dict[str, Any]:
     volumes = VolumeService(db_path).list(project_id)
     chapters = ChapterService(db_path).list_by_project(project_id)
     has_real_volume = any((v.get("title") or "").strip() for v in volumes)
-    has_real_chapters = any((ch.get("plan_json") or {}).get("chapter_goal") for ch in chapters)
+    # B-3（2026-11-08）：outline-batch 刻意**只写 outline_json、不写 plan_json**
+    # （见 outline_batch/pipeline.py 的建章段）。原判据只看 plan_json ⇒ 它产出的章
+    # 被判为「空壳卷纲」⇒ 前端默认勾选重跑 project-init ⇒ 进入按卷重建，而重建
+    # 预检恰好放行「status='PLANNED' 且无草稿」的章 ⇒ 已生成的大纲被静默销毁。
+    # 判据改为两列任一有 chapter_goal（plan_json 管 chapter-plan，outline_json 管
+    # 初始化 / outline-batch）。
+    has_real_chapters = any(
+        (ch.get("plan_json") or {}).get("chapter_goal")
+        or (ch.get("outline_json") or {}).get("chapter_goal")
+        for ch in chapters
+    )
     outline_done = has_real_volume and has_real_chapters
     if outline_done:
         outline_detail = f"已有 {len(volumes)} 卷 / {len(chapters)} 章"

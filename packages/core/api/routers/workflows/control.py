@@ -505,9 +505,19 @@ def _start_project_init(
             # 0037（2026-10-24）：挂载模式写归属列；新建项目场景 body.project_id
             # 为 None ⇒ 列保持 NULL（项目在 persist 节点才创建），零行为突变。
             project_id=body.project_id,
+            # B-6（2026-11-08）：挂载模式补项目级原子并发守卫。persist 节点按
+            # volume_id 整体 DELETE 后重建，而两条 project-init 都能起跑时，
+            # 后一条会把前一条刚建的、恰好 status='PLANNED' 且无草稿的章全部删掉
+            # 重建（chapter_id 全换新，chapter_scene_plans 随 CASCADE 消失）。
+            # 新建项目场景没有 project_id 可守，且两条 run 各自建的是不同项目，
+            # 故只在挂载模式开启。
+            project_level_guard=body.project_id is not None,
             initial_ctx=initial_ctx,
             mock_providers=body.mock_providers,
         )
+    except WorkflowRunConflict as exc:
+        # 项目级守卫命中：同项目已有 RUNNING/PENDING 的 project-init run。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
     except ValueError as exc:

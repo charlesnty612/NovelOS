@@ -461,14 +461,25 @@ class ChapterService:
             conn.close()
         return [dict(r) for r in rows]
 
-    def create_draft(self, chapter_id: str, content: str) -> dict | None:
+    def create_draft(
+        self,
+        chapter_id: str,
+        content: str,
+        *,
+        created_by: str = "human",
+        prompt_version: str | None = None,
+        model_id: str | None = None,
+    ) -> dict | None:
         """在 chapter 下新增一份 draft（人工改稿入口）。
 
         - chapter 不存在 → ``None``（router 转 404，与 ``ChapterService.get`` 风格一致）。
         - chapter.status ∉ {DRAFTED, REVIEWED} → ``DraftStatusNotAllowed``（router 转 409）。
         - ``version`` = ``COALESCE(MAX(version), 0) + 1``，在 INSERT 同事务内执行，
           避免并发竞态下产生重复 version。
-        - ``created_by`` 固定 ``"human"``；``prompt_version`` / ``model_id`` 为 ``None``。
+        - ``created_by`` 缺省 ``"human"``（人工改稿）；AI 侧入口（continuation 采纳）
+          必须显式传 ``agent:*`` 出处 —— B-5（2026-11-08）：这类正文是模型产出的，
+          记成 human 会污染 Q8 人机占比与 q8-export。
+        - ``prompt_version`` / ``model_id`` 缺省 ``None``；AI 侧入口按实际调用填写。
         - ``draft_id`` 用 ``new_id("dr")``；``created_at`` 用 ``now_iso()``。
         - 若原 status 为 REVIEWED，INSERT 同事务内将 chapters.status 降级为 DRAFTED
           （与 ``continuation`` adopt 同款降级），确保未重新审校的改稿无法直接
@@ -526,9 +537,9 @@ class ChapterService:
                         "chapter_id": chapter_id,
                         "version": next_version,
                         "content": content,
-                        "created_by": "human",
-                        "prompt_version": None,
-                        "model_id": None,
+                        "created_by": created_by,
+                        "prompt_version": prompt_version,
+                        "model_id": model_id,
                         "created_at": now,
                     },
                 )
@@ -553,9 +564,9 @@ class ChapterService:
             "chapter_id": chapter_id,
             "version": next_version,
             "content": content,
-            "created_by": "human",
-            "prompt_version": None,
-            "model_id": None,
+            "created_by": created_by,
+            "prompt_version": prompt_version,
+            "model_id": model_id,
             "created_at": now,
         }
 

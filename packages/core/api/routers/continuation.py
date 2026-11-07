@@ -369,7 +369,16 @@ def adopt_continuation(
 
     # create_draft 内部已处理 DraftStatusNotAllowed / DraftVersionConflict；
     # 本接口前置 status 校验已保证 chapter 在白名单内，正常路径不会触发 409。
-    created = svc.create_draft(chapter_id, new_content)
+    # B-5（2026-11-08）：这里追加的是**模型产出的正文**，必须保留 AI 出处。
+    # 原实现走 create_draft 的缺省 ``created_by="human"`` ⇒ Q8 人机占比把模型字
+    # 算成人工产出，q8-export 同步被污染，且 model_id / prompt_version 恒 NULL。
+    # continuation 的 prompt 是内联串、不进 prompts 表 ⇒ prompt_version 保持 None
+    # （不硬编码标签），只标记出处族。
+    created = svc.create_draft(
+        chapter_id,
+        new_content,
+        created_by="agent:continuation",
+    )
     if created is None:
         # 防御性兜底：章节在校验后消失（并发删除）。
         raise HTTPException(status_code=404, detail=f"chapter {chapter_id!r} not found")

@@ -532,20 +532,49 @@ def _build_revision_guidance(report: _QualityReport, issues: list[Issue]) -> lis
     return guidance
 
 
+#: 参与 HIGH 风险审批判定的 7 个 change 数组（state-delta schema 的 delta 主体）。
+HIGH_RISK_ARRAY_KEYS: tuple[str, ...] = (
+    "character_changes",
+    "world_changes",
+    "relationship_changes",
+    "new_events",
+    "resolved_hooks",
+    "new_hooks",
+    "debt_changes",
+)
+
+
+def _is_high_risk_item(array_key: str, item: Any) -> bool:
+    """单条 change 是否触发人工审批。
+
+    判据逐字沿用原 ``_has_high_risk_change``：``risk_level == "HIGH"``，
+    另加两个结构性触发（character ``facet=definition`` / world ``world_kind=rule``）。
+    """
+    if not isinstance(item, dict):
+        return False
+    if item.get("risk_level") == "HIGH":
+        return True
+    if array_key == "character_changes":
+        return item.get("facet") == "definition"
+    if array_key == "world_changes":
+        return item.get("world_kind") == "rule"
+    return False
+
+
+def high_risk_change_items(observer_payload: dict[str, Any]) -> dict[str, list[Any]]:
+    """返回 7 个数组中**触发人工审批的条目**（B-1，2026-11-08）。
+
+    审批卡的展示面必须与触发面是同一个集合：原实现只把 ``character_changes`` /
+    ``world_changes`` 塞进 pause payload，而判定扫 7 个数组 ⇒ 仅在
+    ``new_events`` / ``resolved_hooks`` 等数组里出现 HIGH 时，作者看到的是
+    「没有任何变更」的审批卡，只能盲批。
+    """
+    return {
+        key: [it for it in (observer_payload.get(key) or []) if _is_high_risk_item(key, it)]
+        for key in HIGH_RISK_ARRAY_KEYS
+    }
+
+
 def _has_high_risk_change(observer_payload: dict[str, Any]) -> bool:
     """扫描 7 数组，risk_level=HIGH / character facet=definition / world_kind=rule 任一命中即 True。"""
-    for ch in observer_payload.get("character_changes") or []:
-        if isinstance(ch, dict) and (
-            ch.get("risk_level") == "HIGH" or ch.get("facet") == "definition"
-        ):
-            return True
-    for w in observer_payload.get("world_changes") or []:
-        if isinstance(w, dict) and (
-            w.get("risk_level") == "HIGH" or w.get("world_kind") == "rule"
-        ):
-            return True
-    for key in ("relationship_changes", "new_events", "resolved_hooks", "new_hooks", "debt_changes"):
-        for item in observer_payload.get(key) or []:
-            if isinstance(item, dict) and item.get("risk_level") == "HIGH":
-                return True
-    return False
+    return any(high_risk_change_items(observer_payload).values())

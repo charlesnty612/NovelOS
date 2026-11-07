@@ -636,6 +636,16 @@ def commit_delta(
         # 7) 逆路径清理（仅 rollback 触发）：与 write_through 同一事务。
         if _inverse_cleanup:
             apply_inverse_cleanup_to_state(new_state, _inverse_cleanup)
+            # B-4（2026-11-08）：章节摘要是「已发生剧情」的派生面。回滚后该章原剧情
+            # 不再成立，而 chapter_summaries 既无失效标记也无删除路径 ⇒ 被撤销剧情
+            # 的摘要会继续作为「近窗摘要」注入后续章的 director 装配
+            # （builders_common/summaries.py 只按 project/章号/卷过滤，不看 commit
+            # 是否仍有效）。同事务删除，与其余逆清理同生共死。
+            if delta_row["chapter_id"]:
+                conn.execute(
+                    "DELETE FROM chapter_summaries WHERE chapter_id = ?",
+                    (delta_row["chapter_id"],),
+                )
             # 领域表清理：先清 FK 引用（timeline_events → plot_events）再清主表。
             for eid in _inverse_cleanup.get("remove_event_ids") or []:
                 conn.execute("DELETE FROM timeline_events WHERE event_id = ?", (eid,))

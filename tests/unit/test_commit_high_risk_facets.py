@@ -394,3 +394,70 @@ def test_core_side_ignores_low_risk_state_and_location():
         world_changes=[_world_change()],
     )
     assert high_risk_change_ids(payload) == []
+
+
+# ---------------------------------------------------------------------------
+# L5 审批卡展示层：展示面必须 == 触发面（B-1，2026-11-08）
+# ---------------------------------------------------------------------------
+
+
+def test_pause_payload_carries_high_risk_items_from_all_seven_arrays():
+    """仅 ``new_events`` / ``resolved_hooks`` 含 HIGH 时，审批卡也必须看得到它们。
+
+    缺陷形状（B-1）：判定扫 7 个数组，而 pause payload 只装
+    ``character_changes`` / ``world_changes`` ⇒ 作者看到一张「没有任何变更」的
+    审批卡，只能盲批。本用例同时钉住「过滤」：LOW 风险的条目不该被塞进卡片。
+    """
+    from packages.core.workflow_runtime.engine import PauseRequested
+    from packages.workflows.chapter_commit.gate import _high_risk_approval_node
+
+    high_event = {"change_id": "ev_1", "risk_level": "HIGH"}
+    high_hook = {"change_id": "rh_1", "risk_level": "HIGH"}
+    low_char = _char_change()  # facet=state + LOW ⇒ 不触发
+    payload = _payload(
+        character_changes=[low_char],
+        new_events=[high_event],
+        resolved_hooks=[high_hook],
+    )
+    ctx = {
+        "needs_high_risk_approval": True,
+        "observer_payload": payload,
+    }
+
+    with pytest.raises(PauseRequested) as ei:
+        _high_risk_approval_node(ctx)
+    changes = ei.value.payload["changes"]
+
+    # 触发面 7 个数组全部在场（缺键会让前端读不到）
+    for key in (
+        "character_changes",
+        "world_changes",
+        "relationship_changes",
+        "new_events",
+        "resolved_hooks",
+        "new_hooks",
+        "debt_changes",
+    ):
+        assert key in changes, key
+    # 非 character/world 数组里的 HIGH 必须被展示出来（原实现这里是空）
+    assert changes["new_events"] == [high_event]
+    assert changes["resolved_hooks"] == [high_hook]
+    # 反向：不触发的条目不进卡片（卡片不是「原样复制 7 数组」）
+    assert changes["character_changes"] == []
+
+
+def test_pause_payload_keeps_structural_triggers_without_high_risk_level():
+    """无 ``risk_level=HIGH`` 的结构性触发（facet=definition / world_kind=rule）也要展示。"""
+    from packages.core.workflow_runtime.engine import PauseRequested
+    from packages.workflows.chapter_commit.gate import _high_risk_approval_node
+
+    definition = _char_change(facet="definition", risk_level="LOW")
+    rule = _world_change(world_kind="rule", risk_level="LOW")
+    payload = _payload(character_changes=[definition], world_changes=[rule])
+    ctx = {"needs_high_risk_approval": True, "observer_payload": payload}
+
+    with pytest.raises(PauseRequested) as ei:
+        _high_risk_approval_node(ctx)
+    changes = ei.value.payload["changes"]
+    assert changes["character_changes"] == [definition]
+    assert changes["world_changes"] == [rule]

@@ -5,7 +5,8 @@
 （坑区「预检与执行器并发 ⇒ validate_specs 报出假『锚点未命中』」，2026-10-16 批次八）。
 
 **本组守的机制**：``packages/workflows/chapter_commit/pipeline_common.py``
-``_has_high_risk_change`` 的**两条零区分子句**：
+``_has_high_risk_change`` 的**两条零区分子句**（2026-11-08 B-1 后这两条子句落在
+``_is_high_risk_item`` 里，``_has_high_risk_change`` 改为委托它 = 单一判据）：
 
     character facet == "definition"  |  world world_kind == "rule"
 
@@ -60,24 +61,24 @@ MUTATIONS = [
         # 撤掉 character facet=definition 子句 ⇒ 该夹具不再触发高风险判定
         "D9M1",
         "packages/workflows/chapter_commit/pipeline_common.py",
-        """        if isinstance(ch, dict) and (
-            ch.get("risk_level") == "HIGH" or ch.get("facet") == "definition"
-        ):""",
-        """        if isinstance(ch, dict) and (
-            ch.get("risk_level") == "HIGH"  # MUTATION-PROBE-D9M1 撤掉 facet=definition
-        ):""",
+        """    if array_key == "character_changes":
+        return item.get("facet") == "definition"
+    if array_key == "world_changes":
+        return item.get("world_kind") == "rule\"""",
+        """    if array_key == "character_changes":
+        return False  # MUTATION-PROBE-D9M1 撤掉 facet=definition
+    if array_key == "world_changes":
+        return item.get("world_kind") == "rule\"""",
         "tests/unit/test_commit_high_risk_facets.py",
     ),
     (
         # 撤掉 world world_kind=rule 子句 ⇒ 该夹具不再触发高风险判定
         "D9M2",
         "packages/workflows/chapter_commit/pipeline_common.py",
-        """        if isinstance(w, dict) and (
-            w.get("risk_level") == "HIGH" or w.get("world_kind") == "rule"
-        ):""",
-        """        if isinstance(w, dict) and (
-            w.get("risk_level") == "HIGH"  # MUTATION-PROBE-D9M2 撤掉 world_kind=rule
-        ):""",
+        """    if array_key == "world_changes":
+        return item.get("world_kind") == "rule\"""",
+        """    if array_key == "world_changes":
+        return False  # MUTATION-PROBE-D9M2 撤掉 world_kind=rule""",
         "tests/unit/test_commit_high_risk_facets.py",
     ),
 ]

@@ -5,6 +5,87 @@
 
 ## [Unreleased]
 
+### Fixed（2026-11-08 · 批次三十七 · 业务链/业务逻辑审计 + 7 项修复）
+
+> **来源**：用户指令「检查现有业务链/业务逻辑是否存在问题，比如设计过度等等」。
+> **方法**：6 条业务链测绘 × 8 个镜头发掘 × critical/major 三镜头对抗验证 × 完整性批评，
+> 共 **135 个只读审计 agent / 6243 次工具调用**（`Workflow` 编排）。
+> **零真实 LLM 调用、零内容仓接触、活库业务数据零改动。**
+> 报告：`docs/impl/reviews/business-chain-audit-2026-11-08.md`；方案：
+> `docs/impl/reviews/business-chain-audit-fixplan-2026-11-08.md`。
+> **口径**：去重后候选 **103** ⇒ 进对抗验证（critical/major）**40** ⇒ **确认 17 / 驳回 23 /
+> 未验证 63**（minor/info）。**驳回不是判错**——多条证据逐字属实但影响被夸大，或是有注释/测试/ADR
+> 背书的刻意设计；23 条驳回理由已逐条留档，防止下一轮重复提出。
+> **主会话亲验**：9 条 major 的代码事实**逐条亲读复核，全部成立**；agent 实测的频率数字
+> （32.4% HIGH / 450 次 timeline / 0 分支使用）未由主会话复算，报告中已逐一标注。
+
+**本轮 7 项修复（只做「事实清楚、改动面小、可加判别用例」的）**
+
+1. **B-1 · HIGH 审批卡只带 2/7 个 change 数组**（major）——判定扫 7 个数组
+   （`_has_high_risk_change`），而 pause payload 只装 `character_changes` / `world_changes`
+   ⇒ 仅在 `new_events` / `resolved_hooks` 等数组里出现 HIGH 时，作者看到一张「没有任何变更」的
+   审批卡，**只能盲批**。修法：新增单点 `_is_high_risk_item` + `high_risk_change_items`
+   （`pipeline_common.py`），**判定改为委托它**（触发面与展示面同一判据），payload 的 `changes`
+   改为 7 个数组中**触发审批的条目**。判别：`test_commit_high_risk_facets.py` 新增 2 例
+   （7 数组齐全 + LOW 条目不进卡片 + 结构性触发无 HIGH 也展示）。
+2. **B-2 · 按项目过滤 AI 调用日志丢项目级 run**（major）——注释「workflow_runs 没有 project_id 列」
+   在 **0037 迁移之后已过期**，实现仍 `JOIN chapters` ⇒ project-init / outline-batch / deconstruct
+   三类项目级 run（`chapter_id` NULL）名下的全部 `ai_call_logs` 被 INNER JOIN 静默滤掉。
+   修法：`LEFT JOIN` + 谓词 `(r.project_id = ? OR ch.project_id = ?)`（归属列为主、历史 NULL 行反查兜底）。
+   判别：`tests/api/test_ai_call_logs_project_filter.py` 3 例（项目级可见 / 章节级照旧 / 跨项目不串）。
+3. **B-3 · init-status 判 outline 只认 `plan_json`**（major）——`outline-batch` **刻意只写
+   `outline_json`、不写 `plan_json`** ⇒ 它产出的章被判「空壳卷纲」⇒ 前端默认勾选重跑 project-init
+   ⇒ 进入按卷重建，而重建预检恰好放行「`PLANNED` 且无草稿」的章 ⇒ **已生成的大纲被静默销毁**。
+   修法：判据改为两列任一有 `chapter_goal`。判别：`tests/unit/test_init_status_outline_json.py` 3 例。
+4. **B-4 · 回滚不清章节摘要**（major）——`chapter_summaries` 全仓只有写（commit 后 INSERT）与读
+   （近窗摘要按 project/章号/卷过滤，**不看 commit 是否仍有效**），rollback 既不删也不失效
+   ⇒ 被撤销剧情的摘要继续作为「已发生剧情」注入后续章 director 装配。修法：逆清理段同事务
+   `DELETE FROM chapter_summaries WHERE chapter_id = ?`。判别：
+   `tests/unit/test_rollback_clears_chapter_summaries.py` 2 例（本回滚章清空 / 别的章不受影响）。
+5. **B-5 · continuation 采纳记为 `human`**（major）——`create_draft` 契约写死
+   `created_by="human"` ⇒ 模型续写的字被算成人工产出，Q8 人机占比与 q8-export 污染，
+   `model_id` / `prompt_version` 恒 NULL。修法：`create_draft` 增加**可选**出处参数（缺省逐字不变），
+   continuation 传 `created_by="agent:continuation"`。判别：
+   `tests/unit/test_continuation_adopt_provenance.py` 2 例（含「该出处被 Q8 归 ai 桶」与
+   「不传参数的 `create_draft` 仍是 human」反向对照）。
+6. **B-6 · project-init 缺项目级原子并发守卫**（minor）——`outline-batch` 带
+   `project_level_guard=True`，`project-init` 没传 ⇒ 同项目可同时起两条初始化，persist 按卷
+   DELETE 后重建 ⇒ 后一条删掉前一条刚建的 `PLANNED` 章（`chapter_id` 全换新、
+   `chapter_scene_plans` 随 CASCADE 消失）。修法：挂载模式传守卫 + `WorkflowRunConflict` 映射 409；
+   **不改异步**（前端依赖同步起跑语义）。判别：
+   `tests/api/test_project_init_concurrency_guard.py`（冲突时 run 行数不增加 = 守卫在插行之前生效）。
+7. **B-7 · README 三处数字自相矛盾且全部过期**（Lead 自查）——同一份文件里一处写
+   `3800 passed / 3802 collected`、另一处写 `4379 / 4381`，实测 `4746 / 4749`；迁移数写
+   「34 个」实为 38；vitest 写 781 实为 942。修法：全部订正并补 0035~0038 迁移说明。
+   ⚠️ **全仓无任何测试读 README** ⇒ 这处漂移**没有机器看守**，已登记。
+
+**判别力验证（逐条串行，`scripts/mutation_probe.py`）**：7 条修复的 6 条代码改动各做一次
+「撤掉修复」突变 ⇒ **6/6 CAUGHT**，且每条红的都是**目标用例**（不是被别的检查兜住）：
+B-1 红 1 条、B-2 红 2 条、B-3 红 1 条、B-4 红 2 条、B-5 红 1 条、B-6 红 1 条。
+另因 B-1 重构了 `_has_high_risk_change` 的内部结构，**既有突变规格 `D9M1` / `D9M2` 的锚点失效**
+（预检报「锚点命中 0 次」）⇒ 已重指向 `_is_high_risk_item` 的新实现，重跑 **2/2 CAUGHT**
+（各红 4 条，含原 L1/L2/L3 用例）。这是「改一个模块会打断既有突变规格的锚点」的又一次实例。
+
+**登记不修（附理由，见方案 §二）**：M6 被审版本未统一到 observer/summarizer（跨 3 个装配点，
+建议与「删掉审校页版本选择器」二选一，需产品裁决）；M7 HIGH 风险每章必点（改判据 = 改审批语义，
+产品级）；M8 timeline 非单调误报 450 次（改评分口径 ⇒ `formula_hash` 变 + 三处文档 + 语料复校）；
+m1 乐观锁把 `state_version` 当内容版本；m2 章状态 UPDATE 补谓词；结构性重复（建章 3 份、
+最新稿 6 处、状态机 6 处）；死表/死字段（`evaluations` / `memories` / `scenes` 等，删除需迁移）；
+备份/恢复与交付面盲区（本轮未测绘）。
+
+**设计过度总评（报告 §四）**：本仓的「大」一半是**事故驱动的防御**（该留：每条约束背后都有一次
+真实事故），一半是**「先建起来再说」的半成品**（该砍：分支/仿真 0 使用、skill 15 项目 0 绑定、
+judge 161 报告 0 次、`model_configs` 前端零引用、3 张零 SQL 表）。砍的顺序 = 先砍半成品面
+（成本已付、收益为零）→ 再合并重复实现（降下一次事故概率）→ 最后才谈表达力。
+
+**验收**：pytest **4759 passed / 1 skipped / 2 xfailed / 0 failed**（242.96s，`-n 20`，仓外 basetemp），
+较批次三十六 4746 **+13**（账对得上：6 个新/扩测试文件 3+3+2+2+1+2）；
+树指纹 **828 文件 / `5543046b…`** 跑测前后**逐位一致**；`ruff` clean；
+`tsc -b --force` 零错、vitest **942 passed / 70 文件**；`export_openapi --check` 零漂移；
+`smoke_e2e.py` **PASS**（十步全链 + SYNC OK）；`check_state_sync` **SYNC OK**；
+突变只读预检 **93 文件 / 492 条 / 0 问题**；残留三项（`.mutbak` 0 / 生产源码 `MUTATION-` 标记 0 /
+`git status` 仅本批预期改动）。
+
 ### Fixed（2026-11-05 · 批次三十六 · B 档 45 条全面修复 + 4 个功能缺口：43 修 + 2 登记 + promote 审批出路 + 前端四入口）
 
 > **来源**：批次三十五收尾后，B 档 57 条候选由专项会话逐条实证完毕（报告
