@@ -5,6 +5,69 @@
 
 ## [Unreleased]
 
+### Changed（2026-11-08 · 批次三十八 第一批 · 重构基础设施 4 项：用例守恒闸门 / 断环 / 体量看守 / 审校查询单源）
+
+> **来源**：用户「考虑对项目进行重构」→ 8 个域并行设计 42 条提案 → **每条三镜头对抗审查**
+> （行为等价性 / 风险与遗漏 / 收益与时机）→ **9 条通过 / 33 条驳回** → 用户「执行第一批」。
+> 方案：`docs/impl/reviews/refactor-plan-2026-11-08.md`。
+> **零真实 LLM 调用、零内容仓接触、活库业务数据零改动。**
+
+**为什么只做 4 项**：42 条里 33 条被驳回，主因不是「想法不好」，而是**数量或口径的事实错误**、
+或**声称零行为变更但实际会变**——最诱人的几个（建章单点 / 最新稿单点 / 章状态单点 /
+缓存键单点 / engine 拆包 / chapter_review 拆包）全部在这一类里。本批只做**零行为变更**
+且能机械验收的部分。
+
+1. **INV · 用例清单守恒闸门**（`scripts/check_test_inventory.py` +
+   `tests/test_inventory_snapshot.json` + `tests/unit/test_test_inventory_conservation.py`，3 例）
+   ——「重构必须测试数零增减」此前**全靠手写记账**（`test_chapter_pipelines.py` 顶部
+   「拆分前 17 ⇒ 10 + 7 = 17」就是人数的）。口径定为**两层**（方案订正：不做逐 node-id
+   全量快照，摩擦过大）：总数 + 逐文件计数；任何变更必须 `--update --reason <理由>`，
+   理由进 `change_log`。AST 计数（不 import 测试模块 ⇒ 秒级），参数化多 node 不计
+   （参数化变更属显式改动）。判别：把一条用例改名 ⇒ 闸门当场红（已实测）。
+2. **R1-break-cycle · 断 control↔revise 模块级环**（新增 `workflows/start.py` +
+   `workflow_runtime/guards.py`）——`revise.py:46` 顶层 import `control._start_workflow`，
+   而 `control.py` 在 resume 的线程体内 import `revise._auto_revise_loop`，注释自陈
+   「control ↔ revise 存在模块级循环」⇒ **延迟 import 是在掩盖环，不是消除环**。
+   修法：启动实现迁到中性模块 `.start`，`revise` 改依赖 `.start`；活跃 run 守卫下沉到
+   `workflow_runtime/guards.py`（`routers/chapters.py` 不再反向 import 另一个 router 的私有符号）。
+   `control.py` 保留同名再导出（`_start_workflow` / `_start_workflow_core` /
+   `_guard_plan_chapter_status` / `_check_active_run_for_chapter`），既有 import 契约零改动。
+   判别：`tests/unit/test_workflows_router_import_cycle.py` 3 例（模块级 import 图 DFS 无环 +
+   `revise` 不得再 import `control` + 检测器自检）；回退实测红 2 条。
+3. **GOV-SIZE · 1500 行硬规则机器化**（`tests/unit/test_file_size_budget.py`，4 例）——
+   该规则写在 AGENTS §二 硬规则 1 里，但**此前没有任何看守**，两次「清零」后又长出超标文件，
+   且事后清单漏登了 `engine.py` 与 `project_init/pipeline.py`。实测存量超标 **4 个**：
+   `ChapterDetailPage.test.tsx` 3895 / `api/types.ts` 1912 / `workflow_runtime/engine.py` 1698 /
+   `project_init/pipeline.py` 1558（`*.generated.ts` 豁免）。看守含**只减债账**：
+   新增超标即红、债账文件变长即红、降到 1500 以内却不删条目也红。判别：给 `engine.py`
+   加一行 ⇒ 红（已实测）。
+4. **REF-04 · 审校新鲜度查询单源**（新增 `packages/domain/chapter/review_state.py`）——
+   「最近一次 COMPLETED chapter-review 的 `ended_at`」有 **3 份逐字相同**的 SQL
+   （`control` / `domain/chapter/service` / `chapter_commit/commit`，「阈值之后有没有更新草稿」
+   另有 2 份）。收敛为 `REVIEW_VALID_PREDICATE` + `last_review_ended_at(conn, ...)` +
+   `latest_draft_after(conn, ...)`（**conn 必传、不建连** —— 三处持有者不同）。
+   **明确不合并第 4 份**：`gate.py::_reviewed_draft_version` 按 `started_at DESC` 取多行再解
+   checkpoint，排序键/行数/产出全不同，合并会改变快通道下门禁取到的版本（历史事故）。
+   它只复用谓词常量，并新增护栏用例（构造 `started_at` 序与 `ended_at` 序**相反**的两条
+   review run ⇒ 断言取 `started_at` 更晚那条）。判别：结构单源断言（两段 SQL 文本只允许
+   出现在 `review_state.py`）+ 三调用点一致性 + gate 序护栏；两个突变各自 CAUGHT。
+
+**重构打断既有突变锚点（第二次实例，预检当场抓住）**：`l29_plan_state_gate.py` 的
+`B36-C8-GATE` 锚点随 `_guard_plan_chapter_status` 迁到 `start.py` ⇒ 改用新 target；
+`l28_gate_review_status.py` 的 `GATE-REVIEW-STATUS-1` 锚点随谓词提为常量而失配 ⇒ 改为
+「整段谓词引用 → 只保留 name 条件」并保留原语义（撤掉 status 过滤）。两条重指向后复跑
+**均 CAUGHT**（后者红 3 条）。
+
+**分层白名单同步**：`tests/unit/test_no_core_to_workflows_dep.py` 的
+`ALLOWED_CORE_TO_DOMAIN_IMPORTS` 新增 2 条（`control.py → domain.chapter.review_state`、
+`start.py → domain.chapter.service`）⇒ 44 → **46 条唯一 (文件, 模块) 对**（API 路由层 36 → 38）。
+
+**验收**：pytest **4772 passed / 1 skipped / 2 xfailed / 0 failed**（242.04s，`-n 20`，仓外 basetemp），
+较批次三十七 4759 **+13**（账对得上：INV 3 + 断环 3 + 体量 4 + 单源 3）；树指纹
+**836 文件 / `302a7efb…`** 跑测前后**逐位一致**；`ruff` clean；`export_openapi --check` 零漂移；
+`smoke_e2e.py` PASS + `check_state_sync` SYNC OK；突变只读预检 **93 文件 / 492 条 / 0 问题**。
+**零前端改动**（本批只动后端与测试）。
+
 ### Fixed（2026-11-08 · 批次三十七 · 业务链/业务逻辑审计 + 7 项修复）
 
 > **来源**：用户指令「检查现有业务链/业务逻辑是否存在问题，比如设计过度等等」。

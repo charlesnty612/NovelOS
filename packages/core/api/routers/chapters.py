@@ -15,8 +15,8 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from packages.core.api.routers.workflows.control import _check_active_run_for_chapter
 from packages.core.logging_config import get_logger
+from packages.core.workflow_runtime.guards import check_active_run_for_chapter
 from packages.domain.chapter.models import (
     Chapter,
     ChapterCreate,
@@ -239,7 +239,7 @@ def reopen_chapter(
     db_path = str(request.app.state.settings.db_path)
     # 活动 run 守卫（与 workflows start 同款）：同章有 RUNNING/PENDING run → 409，
     # 避免重开与在跑的生成/评审/提交并行修改章状态。
-    active = _check_active_run_for_chapter(db_path, chapter_id=chapter_id)
+    active = check_active_run_for_chapter(db_path, chapter_id=chapter_id)
     if active is not None:
         raise HTTPException(
             status_code=409,

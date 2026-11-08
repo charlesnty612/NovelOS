@@ -43,6 +43,7 @@ from packages.core.quality.scoring import DRAFT_UNAVAILABLE
 from packages.core.quality.service import QualityService, build_quality_context, capture_reference_consumption
 from packages.core.story_state.service import StoryStateService
 from packages.core.workflow_runtime.engine import PauseRequested
+from packages.domain.chapter.review_state import REVIEW_VALID_PREDICATE
 
 from .pipeline_common import (
     _build_revision_guidance,
@@ -376,12 +377,17 @@ def _latest_review_report_draft_version(db_path: str, chapter_id: str) -> int | 
         )
         return None
     try:
+        # ⚠️ REF-04（2026-11-08）：这里**只复用** review_state.REVIEW_VALID_PREDICATE
+        # （「有效评审」这个判据）。排序键（started_at）、行数（LIMIT N）与产出
+        # （逐条解 checkpoint 取 draft_version）是**另一套语义**，与
+        # review_state.last_review_ended_at 的 ended_at DESC / LIMIT 1 **不可合并**——
+        # 合并会改变快通道下门禁取到的版本（历史事故：导出物按 commits.draft_version
+        # 拿到旧稿）。判别：tests/unit/test_review_state_single_source.py 的护栏用例。
         rows = conn.execute(
-            """
+            f"""
             SELECT wr.checkpoint_json FROM workflow_runs wr
             JOIN workflows wf ON wf.workflow_id = wr.workflow_id
-            WHERE wr.chapter_id = ? AND wf.name = 'chapter-review'
-              AND wr.status = 'COMPLETED'
+            WHERE wr.chapter_id = ? AND {REVIEW_VALID_PREDICATE}
             ORDER BY wr.started_at DESC
             LIMIT ?
             """,

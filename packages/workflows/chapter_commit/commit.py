@@ -12,6 +12,7 @@ from packages.core.story_state.delta_anchoring import check_delta_source_anchori
 from packages.core.story_state.delta_repair import repair_delta
 from packages.core.story_state.service import StoryStateService
 from packages.core.story_state.validator import validate_delta
+from packages.domain.chapter.review_state import last_review_ended_at, latest_draft_after
 
 from .observer import (
     _call_observer,
@@ -378,26 +379,13 @@ def _commit_node(ctx: dict[str, Any]) -> dict[str, Any]:
         # 与 API 层 start_commit 的 _guard_commit_draft_freshness 同语义——API 层堵端点入口，
         # 此处堵绕过端点的 generic 启动路径（如 engine 直接 start_with_nodes 或未来新增的入口）。
         # 阈值/查询逻辑不复用 router 层（避免 workflow → API 层反向依赖），本文件内私有实现。
-        review_end_row = conn.execute(
-            """
-            SELECT wr.ended_at FROM workflow_runs wr
-            JOIN workflows wf ON wf.workflow_id = wr.workflow_id
-            WHERE wr.chapter_id = ?
-              AND wf.name = 'chapter-review'
-              AND wr.status = 'COMPLETED'
-            ORDER BY wr.ended_at DESC
-            LIMIT 1
-            """,
-            (chapter_id,),
-        ).fetchone()
-        if review_end_row is not None and review_end_row["ended_at"] is not None:
-            review_end = review_end_row["ended_at"]
-            latest_draft = conn.execute(
-                "SELECT version, created_at FROM drafts "
-                "WHERE chapter_id = ? AND created_at > ? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (chapter_id, review_end),
-            ).fetchone()
+        # REF-04（2026-11-08）：与 API 层 / 领域层共用同一份查询口径
+        # （domain/chapter/review_state.py）。此前这里内联了一份逐字相同的 SQL，
+        # 注释自陈「避免 workflow → API 反向依赖」——但 domain 层是合法依赖方向，
+        # 该理由不成立。
+        review_end = last_review_ended_at(conn, chapter_id)
+        if review_end is not None:
+            latest_draft = latest_draft_after(conn, chapter_id, review_end)
             if latest_draft is not None:
                 raise ValueError(
                     f"最新草稿 v{latest_draft['version']} 晚于最近一次审校完成时间"

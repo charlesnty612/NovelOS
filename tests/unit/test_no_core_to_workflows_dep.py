@@ -157,10 +157,11 @@ ALLOWED_DOMAIN_TO_DOMAIN_IMPORTS: frozenset[tuple[str, str]] = frozenset(
 #:   ② 新增导入必须**先登记**（否则门禁红）；
 #:   ③ 删掉导入也要**同步删登记**（否则 ``..._matches_actual_imports`` 红）。
 #:
-#: 规模：**47 条 import 语句** = 机制层 5 文件 8 条 + API 路由层 19 文件 39 条
+#: 规模：**49 条 import 语句** = 机制层 5 文件 8 条 + API 路由层 20 文件 41 条
+#: （2026-11-08 批次三十八 REF-04：control.py 新增 review_state 一条）
 #: （Lead 实测口径「8 条 import 语句 / 5 个文件」= 机制层那部分；API 路由层的
 #: 39 条由 Lead 的裁决「允许 API 路由层调领域服务」覆盖，同样逐条登记）。
-#: 去重后 = **44 条唯一 ``(文件, 模块)`` 对**（机制层 8 + API 路由层 36）——
+#: 去重后 = **45 条唯一 ``(文件, 模块)`` 对**（机制层 8 + API 路由层 37）——
 #: 同一文件里同一模块被 import 两次的（如 ``characters.py`` 的
 #: ``packages.domain.project.service``）在白名单里是**同一条**。
 ALLOWED_CORE_TO_DOMAIN_IMPORTS: frozenset[tuple[str, str]] = frozenset(
@@ -233,8 +234,14 @@ ALLOWED_CORE_TO_DOMAIN_IMPORTS: frozenset[tuple[str, str]] = frozenset(
         # workflows/common：run 详情要读章节。
         ("packages/core/api/routers/workflows/common.py", "packages.domain.chapter.service"),
         # workflows/control：run 控制（启动/暂停/恢复）要读章节 + 项目。
+        # REF-04（2026-11-08 批次三十八）：审校状态查询单点下沉到 domain
+        # （「最近一次 COMPLETED review」此前在 control / domain service / commit 各写一份）。
+        ("packages/core/api/routers/workflows/control.py", "packages.domain.chapter.review_state"),
         ("packages/core/api/routers/workflows/control.py", "packages.domain.chapter.service"),
         ("packages/core/api/routers/workflows/control.py", "packages.domain.project.service"),
+        # R1-break-cycle（2026-11-08 批次三十八）：启动实现迁到 start.py，
+        # 其中的 chapter-plan 状态闸门要读章节状态。
+        ("packages/core/api/routers/workflows/start.py", "packages.domain.chapter.service"),
         # workflows/runs：run 列表/详情要读章节 + 项目 + 分卷（+ 角色/世界的完成度统计）。
         ("packages/core/api/routers/workflows/runs.py", "packages.domain.chapter.service"),
         ("packages/core/api/routers/workflows/runs.py", "packages.domain.project.service"),
@@ -891,7 +898,8 @@ def test_layering_directions_are_clean() -> None:
       其余一律违规（逐条清单见 task-7 报告）。
 
     实测基线（2026-10-22）：前三条方向边均为 0；
-    第四条（2026-10-23 task-7）：44 条唯一 (文件, 模块) 已登记、0 条未登记。
+    第四条（2026-10-23 task-7）：44 条唯一 (文件, 模块) 已登记、0 条未登记；
+    2026-11-08 批次三十八增至 **46 条**（REF-04：control → review_state；R1：start.py → chapter.service）。
     """
     hits: list[str] = []
     for root_rel, forbidden, desc in LAYERING_DIRECTIONS:
@@ -1491,6 +1499,7 @@ def test_core_to_domain_allowlist_is_pinned() -> None:
             ("packages/core/api/routers/story_state.py", "packages.domain.project.service"),
             ("packages/core/api/routers/volumes.py", "packages.domain.volume"),
             ("packages/core/api/routers/workflows/common.py", "packages.domain.chapter.service"),
+            ("packages/core/api/routers/workflows/control.py", "packages.domain.chapter.review_state"),
             ("packages/core/api/routers/workflows/control.py", "packages.domain.chapter.service"),
             ("packages/core/api/routers/workflows/control.py", "packages.domain.project.service"),
             ("packages/core/api/routers/workflows/runs.py", "packages.domain.chapter.service"),
@@ -1498,6 +1507,7 @@ def test_core_to_domain_allowlist_is_pinned() -> None:
             ("packages/core/api/routers/workflows/runs.py", "packages.domain.project.service"),
             ("packages/core/api/routers/workflows/runs.py", "packages.domain.volume.service"),
             ("packages/core/api/routers/workflows/runs.py", "packages.domain.world.service"),
+            ("packages/core/api/routers/workflows/start.py", "packages.domain.chapter.service"),
             ("packages/core/api/routers/worlds.py", "packages.domain.world"),
             ("packages/core/api/routers/worlds.py", "packages.domain.world.models"),
         }

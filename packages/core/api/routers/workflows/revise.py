@@ -43,9 +43,9 @@ from .common import (
     _run_workflow_return_payload,
     log,
 )
-from .control import _start_workflow
 from .models import WorkflowStartAccepted
 from .repair_policy import RepairDecision, decide_repair, describe_exhaustion
+from .start import _start_workflow
 
 router = APIRouter(tags=["workflows"])
 

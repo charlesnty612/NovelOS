@@ -21,7 +21,7 @@
 MUTATIONS = [
     (
         "B36-C8-GATE",
-        "packages/core/api/routers/workflows/control.py",
+        "packages/core/api/routers/workflows/start.py",
         "    _guard_plan_chapter_status(db_path, workflow_name, chapter_id)\n",
         "    # MUTATION-B36-C8: 撤掉 chapter-plan 状态闸门\n",
         "tests/unit/test_b36_plan_outline.py",

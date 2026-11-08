@@ -50,6 +50,7 @@ from .models import (
     ChapterCreate,
     ChapterUpdate,
 )
+from .review_state import last_review_ended_at
 
 #: 本模块日志（2026-10-22 批次二十三：吞异常分诊 → B 类留痕；本层此前无 logger，
 #: 引入的是仓内既有唯一约定 ``packages.core.logging_config.get_logger``）。
@@ -411,25 +412,13 @@ class ChapterService:
         - 无 COMPLETED review run → ``None``（UI 视为「该章节从未审过，所有
           draft 都属于未审，与旧版行为一致」）。
         """
+        # REF-04（2026-11-08）：查询口径单点在 domain/chapter/review_state.py
+        # （本方法此前是「三份逐字相同 SQL」中的一份）。
         conn = get_connection(self.db_path)
         try:
-            row = conn.execute(
-                """
-                SELECT wr.ended_at FROM workflow_runs wr
-                JOIN workflows wf ON wf.workflow_id = wr.workflow_id
-                WHERE wr.chapter_id = ?
-                  AND wf.name = 'chapter-review'
-                  AND wr.status = 'COMPLETED'
-                ORDER BY wr.ended_at DESC
-                LIMIT 1
-                """,
-                (chapter_id,),
-            ).fetchone()
+            return last_review_ended_at(conn, chapter_id)
         finally:
             conn.close()
-        if row is None or row["ended_at"] is None:
-            return None
-        return row["ended_at"]
 
     # ============================================================== Sprint 5
     # drafts：人工改稿能力（task A1）。

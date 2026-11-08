@@ -9,8 +9,12 @@ V4.0 模块化重构 V2：自 ``packages/core/api/routers/workflows.py`` 按端�
 - ``POST /runs/{run_id}/cancel`` — 协作式取消 RUNNING run（含回路级取消标记）
 
 resume 对 chapter-review 的 rejected-for-revision 终态会在 daemon 线程内触发
-auto_revise 回路（``revise._auto_revise_loop``）。control ↔ revise 存在模块级循环
-（gate-revise 复用本模块 ``_start_workflow``），故该 import 延迟到线程体内。
+auto_revise 回路（``revise._auto_revise_loop``）。
+
+**2026-11-08 批次三十八 R1-break-cycle**：control ↔ revise 的模块级循环已断开——
+启动实现迁到同包的 :mod:`.start`，``revise`` 直接依赖 ``.start`` 而不再依赖本模块。
+本模块对 ``revise`` 的引用仍是**线程体内延迟 import**（保持原有调用时机与线程语义），
+但它现在是一条**单向边**，不再是环。
 """
 
 from __future__ import annotations
@@ -26,7 +30,14 @@ from packages.core.db import get_connection
 from packages.core.model_router.profiles import ProfileService
 from packages.core.workflow_registry import get_workflow
 from packages.core.workflow_runtime.engine import WorkflowEngine, WorkflowRunConflict
+from packages.core.workflow_runtime.guards import (
+    check_active_run_for_chapter,
+)
 from packages.core.workflow_runtime.runs import get_run, get_workflow_name_for_run
+from packages.domain.chapter.review_state import (
+    last_review_ended_at,
+    latest_draft_after,
+)
 from packages.domain.chapter.service import ChapterService
 
 from .common import (
@@ -36,9 +47,7 @@ from .common import (
     StartWorkflowRequest,
     _engine,
     _extract_pause_payload,
-    _init_genesis_if_needed,
     _mark_auto_revise_loops_cancelled_for_run,
-    check_chapter_in_project,
     log,
 )
 from .fast_mode import resolve_fast_mode
@@ -46,6 +55,11 @@ from .models import (
     ProjectInitStarted,
     RunCancelled,
     WorkflowStartAccepted,
+)
+from .start import (
+    _guard_plan_chapter_status,  # noqa: F401 —— 再导出（既有 import 契约）
+    _start_workflow,
+    _start_workflow_core,
 )
 
 router = APIRouter(tags=["workflows"])
@@ -68,85 +82,15 @@ def _check_active_run_for_chapter(
     chapter_id: str,
     exclude_run_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """同 chapter 下是否存在 RUNNING/PENDING 的活跃 run。
+    """同 chapter 下是否存在 RUNNING/PENDING 的活跃 run（**再导出**）。
 
-    用于 API 层的并发防护：
-    - ``_start_workflow``：启动新 workflow 前查同 chapter 是否有活跃 run；有则 409。
-    - ``resume_run``：resume 自身（PAUSED）前查同 chapter 是否还有**其他**RUNNING/PENDING
-      run；有则 409，避免两条 run 并行修改 chapter 状态/数据。
-
-    ``exclude_run_id``：resume 场景下传当前 run_id，把自身从判定里排除（自身已 RUNNING
-    之前不会 PAUSED，但保留参数对称便于复用）。
-
-    返回首个匹配的活跃 run 行 dict；无活跃 run → None。
+    2026-11-08 批次三十八 R1-break-cycle：实现已下沉到
+    ``packages/core/workflow_runtime/guards.py``。本别名保留既有 import 契约
+    （``workflows/__init__`` 的 re-export 与相关测试仍从这里取）；
+    ``routers/chapters.py`` 已改为直接依赖运行时层。
     """
-    conn = get_connection(db_path)
-    try:
-        if exclude_run_id:
-            row = conn.execute(
-                """
-                SELECT run_id, status FROM workflow_runs
-                WHERE chapter_id = ?
-                  AND run_id != ?
-                  AND status IN ('RUNNING', 'PENDING')
-                ORDER BY started_at DESC
-                LIMIT 1
-                """,
-                (chapter_id, exclude_run_id),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                """
-                SELECT run_id, status FROM workflow_runs
-                WHERE chapter_id = ?
-                  AND status IN ('RUNNING', 'PENDING')
-                ORDER BY started_at DESC
-                LIMIT 1
-                """,
-                (chapter_id,),
-            ).fetchone()
-    finally:
-        conn.close()
-    if row is None:
-        return None
-    return {"run_id": row["run_id"], "status": row["status"]}
-
-
-#: ``chapter-plan`` 允许的**启动前**章节状态（与前端
-#: ``apps/web/src/utils/chapterState.ts::EXPECTED_STATUS.plan = ['PLANNED']`` 逐字对齐）。
-#: 为什么需要服务端闸门（C-8，批次三十六）：``chapter-plan`` 此前**两头都没有校验**——
-#: write/commit 有节点级/API 级状态校验，plan 则完全没有 ⇒ API 直调可对 COMMITTED
-#: 章节重写 ``plan_json``（顺带覆盖 ``revision_note`` / ``gate_blocked`` 等派生标记）。
-_PLAN_ALLOWED_STATUSES: frozenset[str] = frozenset({"PLANNED"})
-
-
-def _guard_plan_chapter_status(db_path: str, workflow_name: str, chapter_id: str) -> None:
-    """章节状态闸门（仅 ``chapter-plan`` 生效）：非 ``PLANNED`` ⇒ 409。
-
-    形态照 commit 的 API 级守卫（:func:`_guard_commit_draft_freshness`）：
-    **在起 run 之前**拒绝，错误消息带「当前状态 + 允许状态」——作者据此知道该点哪个
-    动作（如 REVIEWED 应先回退/重开，而不是重生成计划）。
-
-    为什么在服务端而不是只靠前端：前端 ``EXPECTED_STATUS`` 只是 UI 可用性判断，
-    API 直调（脚本 / 其他客户端）完全绕过它；而 plan 的落库面会**覆盖**
-    ``plan_json``（含 ``revision_note`` / ``gate_blocked``）⇒ 对已定稿章节重跑是数据损坏。
-
-    只放行 ``PLANNED`` 而不是「PLANNED + 空 plan 的其他状态」：状态机是唯一权威，
-    空 plan 的 DRAFTED/REVIEWED 章该走什么动作由作者决定，服务端不替它猜。
-    """
-    if workflow_name != "chapter-plan":
-        return
-    chapter = ChapterService(db_path).get(chapter_id)
-    status = (chapter or {}).get("status")
-    if status in _PLAN_ALLOWED_STATUSES:
-        return
-    raise HTTPException(
-        status_code=409,
-        detail=(
-            f"chapter {chapter_id!r} status={status!r}，"
-            f"chapter-plan 仅允许状态 {sorted(_PLAN_ALLOWED_STATUSES)}；"
-            f"已写/已定稿章节不可重生成计划（会覆盖 plan_json）"
-        ),
+    return check_active_run_for_chapter(
+        db_path, chapter_id=chapter_id, exclude_run_id=exclude_run_id
     )
 
 
@@ -160,25 +104,12 @@ def _latest_completed_review_end(db_path: str, chapter_id: str) -> str | None:
     - 最近一次 COMPLETED review 的 ended_at（ISO 字符串，now_iso() 产物，可直接字符串比较）；
     - 无 COMPLETED review run → None（调用方视为「无需本守卫兜底，由既有 REVIEWED 校验兜底」）。
     """
+    # REF-04（2026-11-08）：查询口径单点在 domain/chapter/review_state.py。
     conn = get_connection(db_path)
     try:
-        row = conn.execute(
-            """
-            SELECT wr.ended_at FROM workflow_runs wr
-            JOIN workflows wf ON wf.workflow_id = wr.workflow_id
-            WHERE wr.chapter_id = ?
-              AND wf.name = 'chapter-review'
-              AND wr.status = 'COMPLETED'
-            ORDER BY wr.ended_at DESC
-            LIMIT 1
-            """,
-            (chapter_id,),
-        ).fetchone()
+        return last_review_ended_at(conn, chapter_id)
     finally:
         conn.close()
-    if row is None or row["ended_at"] is None:
-        return None
-    return row["ended_at"]
 
 
 def _latest_draft_after(db_path: str, chapter_id: str, threshold_iso: str) -> dict[str, Any] | None:
@@ -190,22 +121,12 @@ def _latest_draft_after(db_path: str, chapter_id: str, threshold_iso: str) -> di
     注意：``created_at`` 是 ISO 字符串（now_iso() 产物），可直接字典序比较；调用方需自行
     保证 threshold_iso 来自同一时间体系（workflow_runs.ended_at 写入路径一致）。
     """
+    # REF-04（2026-11-08）：查询口径单点在 domain/chapter/review_state.py。
     conn = get_connection(db_path)
     try:
-        row = conn.execute(
-            """
-            SELECT version, created_at FROM drafts
-            WHERE chapter_id = ? AND created_at > ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (chapter_id, threshold_iso),
-        ).fetchone()
+        return latest_draft_after(conn, chapter_id, threshold_iso)
     finally:
         conn.close()
-    if row is None:
-        return None
-    return {"version": int(row["version"]), "created_at": row["created_at"]}
 
 
 def _resolve_auto_revise_max(request_max: int | None) -> int:
@@ -221,190 +142,6 @@ def _resolve_auto_revise_max(request_max: int | None) -> int:
         return int(env)
     except (TypeError, ValueError):
         return 2
-
-
-def _start_workflow(
-    *,
-    workflow_name: str,
-    request: Request,
-    project_id: str,
-    chapter_id: str,
-    body: StartWorkflowRequest,
-) -> dict[str, Any]:
-    """从 HTTP Request 起步的薄封装：取 settings / engine 后交给 :func:`_start_workflow_core`。
-
-    拆出 core 是为了让快通道的守护线程能起 commit run——线程里没有 Request 对象，
-    只有 db_path 与 engine。**本函数保持原名与原签名**：`revise.py` 有
-    ``from .control import _start_workflow`` 的跨模块 import 契约，且
-    `tests/api/test_workflow_cancel.py` 在 `control._engine` 上打 monkeypatch——
-    故 engine 必须经模块级 ``_engine(request)`` 查找，不能内联 ``WorkflowEngine(...)``。
-    """
-    settings = request.app.state.settings
-    return _start_workflow_core(
-        workflow_name=workflow_name,
-        engine=_engine(request),
-        db_path=str(settings.db_path),
-        project_id=project_id,
-        chapter_id=chapter_id,
-        body=body,
-    )
-
-
-def _start_workflow_core(
-    *,
-    workflow_name: str,
-    engine: WorkflowEngine,
-    db_path: str,
-    project_id: str,
-    chapter_id: str,
-    body: StartWorkflowRequest,
-) -> dict[str, Any]:
-    """启动一个章节级 workflow run 的**唯一实现**（HTTP 与守护线程共用）。
-
-    ctx 组装只在这里做一次——快通道的 auto-commit 线程复用本函数而不是重拼 ctx，
-    否则两条路径会各自演化出不同的 ctx（坑区「两条路径拼同一件事」的形状）。
-    """
-    check_chapter_in_project(db_path, project_id, chapter_id)
-
-    # 并发防护：同 chapter 已有 RUNNING/PENDING run 时拒绝再启动。
-    # 原因：章节级工作流（write/review/commit）会并发改 chapter 行 + plan_json + story_state，
-    # 并行运行会产生数据竞态。前端 UX：用户先等当前 run 走到 PAUSED/COMPLETED/FAILED
-    # 再触发下一轮（前端 list 端点会过滤活跃行）。
-    active = _check_active_run_for_chapter(db_path, chapter_id=chapter_id)
-    if active is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"chapter {chapter_id!r} already has an active workflow run "
-                f"(run_id={active['run_id']!r}, status={active['status']!r}); "
-                f"wait for it to reach a terminal state before starting a new one"
-            ),
-        )
-
-    # 章节状态闸门（C-8，批次三十六）：chapter-plan 仅放行 PLANNED。
-    # 位置刻意在「活跃 run 检查」之后——并发的活跃 run 是更前置的冲突（409 语义不同），
-    # 且此时章节行必然存在（上面的 check_chapter_in_project 已 404 兜底）。
-    _guard_plan_chapter_status(db_path, workflow_name, chapter_id)
-
-    # plan 不依赖 story_state；write/commit/review 需要 init_genesis（如尚未）
-    if workflow_name in ("chapter-write", "chapter-commit", "chapter-review"):
-        _init_genesis_if_needed(db_path, project_id, chapter_id)
-
-    workflow = get_workflow(workflow_name)
-    if workflow is None:
-        raise HTTPException(status_code=500, detail=f"workflow {workflow_name!r} not registered")
-
-    initial_ctx: dict[str, Any] = {
-        "db_path": str(db_path),
-        "project_id": project_id,
-        "chapter_id": chapter_id,
-    }
-    if body.author_intent is not None:
-        initial_ctx["author_intent"] = body.author_intent
-    if body.expected_role is not None:
-        initial_ctx["expected_role"] = body.expected_role
-    if body.target_word_count is not None:
-        initial_ctx["target_word_count"] = body.target_word_count
-    if body.mock_providers:
-        initial_ctx["mock_providers"] = body.mock_providers
-    if body.quality_gate_mode is not None:
-        initial_ctx["quality_gate_mode"] = body.quality_gate_mode
-    # V3 P0-1：仅 chapter-review 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。
-    if body.critic_mode is not None:
-        initial_ctx["critic_mode"] = body.critic_mode
-    # 单次 run 级模型档案覆盖：仅当请求体显式提供（即使为空 dict）才塞 ctx；
-    # 缺省（None）保持 ctx 不出现该键，避免被下游误读为「空覆盖」。
-    if body.model_overrides is not None:
-        initial_ctx["model_overrides"] = body.model_overrides
-    # chapter-write 全新重写：仅 chapter-write 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。
-    if body.fresh_write:
-        initial_ctx["fresh_write"] = True
-    # chapter-review 指定草稿版本。**真实读者有两个**（C-36 注释订正，批次三十六）：
-    #   ① ``chapter_review`` 节点——「本次审哪一版」；
-    #   ② **``chapter_commit`` 的 ``quality_gate`` 节点**（``chapter_commit/gate.py``
-    #      的 ``_reviewed_draft_version``）——「门禁量哪一版」。
-    # ②的优先级是「显式（本字段）> 最近一次 review 的被审版本 > 最新版」，裁决见
-    # 2026-10-23 B4（「审过 v5、改出 v6、commit 定稿 v6」事故的修法）。
-    # 原注释写「仅 chapter-review 读取」，按「注释与代码冲突以代码为准」订正。
-    if body.draft_version is not None:
-        initial_ctx["draft_version"] = body.draft_version
-    # V1.3 deep_review 二审 AI 开关：仅 chapter-review 节点读取；其他 workflow 收到此字段会被 pipeline 忽略。
-    # 仅当显式 True 才塞 ctx（None/False 一律不塞，避免下游误读为「未指定」）。
-    if body.deep_review is True:
-        initial_ctx["deep_review"] = True
-    # P0-1（2026-09-18）：confirm 档规则的放行声明。仅 chapter-commit 的 quality_gate
-    # 节点读取（须覆盖本次全部 confirm rule_id 且 reason 非空，否则照样阻断）；
-    # 其他 workflow 收到此字段会被忽略。缺省 → 不塞 ctx（= 不声明）。
-    if body.gate_override is not None:
-        initial_ctx["gate_override"] = body.gate_override
-
-    # 快通道（2026-10-14）：本次运行是否跳过人工闸门。三档优先级在
-    # fast_mode.resolve_fast_mode 收口（请求体 > projects.fast_mode > env > 关）。
-    #
-    # **注入顺序必须在请求体字段之后**：fast 为真时要压过请求体的
-    # quality_gate_mode="enforce"（作者显式传 enforce 说明他这章想守门，
-    # 但项目开了快通道=整本书都要快，故 fast 胜出）。反向的逃生舱是请求体
-    # 显式传 fast_mode=false——那在 resolve 阶段就返回 False，不进本分支。
-    fast = resolve_fast_mode(
-        db_path=str(db_path),
-        project_id=project_id,
-        request_value=body.fast_mode,
-    )
-    if fast:
-        initial_ctx["fast_mode"] = True
-        # 门禁照算、报告照落库，只是不阻断（既有 report 语义，0 行为变更）。
-        # 只被 chapter-commit 的 quality_gate 节点读；review 里没有该节点。
-        initial_ctx["quality_gate_mode"] = "report"
-        # 预置批准：high_risk_approval 节点读到 approved=True 直接放行不 PAUSE。
-        # approver 标 "system:fast_mode"（**不是** "human"）——commit 节点会把
-        # 它写进 commits 表，标成 human 就是在审计里留一条假的审批人。
-        #
-        # ⚠️ **必须按 workflow_name 收口到 chapter-commit**（2026-10-15 修复）：
-        # `ctx["human_input"]` 在全仓有**两个**读者，它们语义不同——
-        #   - `chapter_commit/gate.py::_high_risk_approval_node`（预置「放行本闸门」）
-        #   - `chapter_review/pipeline.py::_author_review_node`（resume 时读「人已
-        #     做出的决议」，其 docstring 明写「本 fn 总是抛 PauseRequested」）
-        # 同一个键既当「已决」又当「预先放行」，一旦对 plan/write/review 也注入，
-        # 作者手动点「审校」就会**一句不问地自动批准**、章节直推 REVIEWED（实测
-        # 快通道开→COMPLETED/REVIEWED，关→PAUSED/DRAFTED）。
-        # 快通道的语义是「不跑 chapter-review」，不是「跑但自动批」——
-        # 所以 review 必须拿不到这个键。判别：
-        # `tests/api/test_fast_mode_review_gate.py::test_manual_review_still_pauses_under_fast_mode`
-        if workflow_name == "chapter-commit":
-            initial_ctx["human_input"] = {
-                "approved": True,
-                "approver": "system:fast_mode",
-            }
-
-    try:
-        run_id = engine.start_with_nodes_async(
-            workflow_name,
-            workflow["nodes"],
-            chapter_id=chapter_id,
-            # 0037（2026-10-24）：顺带写 run 归属列（chapter 级行为不变，
-            # 守卫仍走 0017 唯一索引 + 本函数的 chapter 级守卫）。
-            project_id=project_id,
-            initial_ctx=initial_ctx,
-            mock_providers=body.mock_providers,
-            checkpoint_exclude=workflow.get("checkpoint_exclude"),
-        )
-    except WorkflowRunConflict as exc:
-        # 0017 部分唯一索引兜底 TOCTOU：双 start 窄窗口第二个被 SQL 拒绝 → 409。
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except sqlite3.IntegrityError as exc:
-        raise HTTPException(status_code=422, detail=f"integrity error: {exc}") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    # 异步化后：start_with_nodes_async 立刻返回，run 行已落库（status=RUNNING）。
-    # 不再有「同步执行中第一个节点就 PauseRequested 立即置 PAUSED」的窗口；HTTP 响应
-    # 始终是 RUNNING。前端通过 GET /runs/{id} / list 端点轮询拿真实进度。
-    payload: dict[str, Any] = {
-        "run_id": run_id,
-        "status": "RUNNING",
-        "current_node": None,
-    }
-    return payload
 
 
 PROJECT_INIT_STAGES: tuple[str, ...] = ("premise", "world", "character", "outline")

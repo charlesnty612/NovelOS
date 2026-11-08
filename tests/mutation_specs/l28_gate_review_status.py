@@ -31,8 +31,10 @@ MUTATIONS = [
     (
         "GATE-REVIEW-STATUS-1",
         "packages/workflows/chapter_commit/gate.py",
-        """            WHERE wr.chapter_id = ? AND wf.name = 'chapter-review'
-              AND wr.status = 'COMPLETED'
+        # 2026-11-08 批次三十八 REF-04：谓词已提为 review_state.REVIEW_VALID_PREDICATE
+        # （wf.name + wr.status 合成一个常量），故锚点改为「整段谓词引用」，
+        # 突变改为只保留 name 条件 ⇒ 仍然是「撤掉 status 过滤」这一条语义。
+        """            WHERE wr.chapter_id = ? AND {REVIEW_VALID_PREDICATE}
             ORDER BY wr.started_at DESC""",
         """            WHERE wr.chapter_id = ? AND wf.name = 'chapter-review'
             ORDER BY wr.started_at DESC  -- MUTATION-PROBE-B36-C5: 撤掉 status 过滤""",
